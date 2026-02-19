@@ -13,6 +13,7 @@
     {
       checks.aarch64-darwin = {
         hello-world = pkgs.testers.nixosTest (import ./tests/hello-world.nix);
+        luks = pkgs.testers.nixosTest (import ./tests/luks.nix);
       };
     };
 }
