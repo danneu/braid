@@ -77,8 +77,8 @@ with subtest("Pool is healthy — 3 devices, no missing"):
     print(f"Pool after replacement:\n{fi_show}")
 
     # Replacement drive is in the pool
-    assert "btrnas-vde" in fi_show, (
-        f"Replacement mapper btrnas-vde missing from pool:\n{fi_show}"
+    assert "virtio-disk4" in fi_show, (
+        f"Replacement mapper virtio-disk4 missing from pool:\n{fi_show}"
     )
 
     # No more missing devices — the key assertion

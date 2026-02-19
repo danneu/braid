@@ -45,6 +45,16 @@ in
       pkgs.btrfs-progs
     ];
 
+    environment.etc."btrnas/config.json".text = builtins.toJSON {
+      disks = [
+        "/dev/disk/by-id/virtio-disk1"
+        "/dev/disk/by-id/virtio-disk2"
+        "/dev/disk/by-id/virtio-disk3"
+        "/dev/disk/by-id/virtio-disk4"
+      ];
+      mountPoint = "/mnt/storage";
+    };
+
     # Mount in initrd with degraded option. The x-systemd options prevent the
     # mount from starting until btrfs-device-scan completes. "degraded" allows
     # btrfs to mount with missing members (harmless when all present).
