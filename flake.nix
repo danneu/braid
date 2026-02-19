@@ -21,6 +21,7 @@
         btrfs-shrink = pkgs.testers.nixosTest (import ./tests/btrfs-shrink.nix);
         btrfs-degrade = pkgs.testers.nixosTest (import ./tests/btrfs-degrade.nix);
         samba = pkgs.testers.nixosTest (import ./tests/samba.nix);
+        remote-unlock = pkgs.testers.nixosTest (import ./tests/remote-unlock.nix);
       };
     };
 }
