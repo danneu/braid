@@ -1,7 +1,15 @@
 { config, lib, pkgs, ... }:
 let
   cfg = config.btrnas.daemon;
-  btrnasd = pkgs.callPackage ../../nix/btrnas-daemon.nix {};
+  btrnasd = pkgs.buildGoModule {
+    pname = "btrnasd";
+    version = "0.1.0";
+    src = ../../daemon;
+    vendorHash = null;
+    postInstall = ''
+      mv $out/bin/daemon $out/bin/btrnasd
+    '';
+  };
 in
 {
   options.btrnas.daemon = {

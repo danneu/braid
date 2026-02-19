@@ -36,7 +36,11 @@ in
     virtualisation.memorySize = 2048;
 
     environment.systemPackages = [
-      (import ../nix/btrnas-add-disk.nix { inherit pkgs; })
+      (pkgs.writeShellApplication {
+        name = "btrnas-add-disk";
+        runtimeInputs = [ pkgs.cryptsetup pkgs.btrfs-progs pkgs.util-linux pkgs.jq ];
+        text = builtins.readFile ../scripts/btrnas-add-disk.sh;
+      })
       pkgs.cryptsetup
       pkgs.btrfs-progs
     ];
