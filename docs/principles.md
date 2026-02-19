@@ -26,7 +26,11 @@ All persistent storage config uses `/dev/disk/by-id/` paths. Never `/dev/sdX`. M
 
 Auto-healing checksums, dynamic drive pooling, in-kernel (no out-of-tree modules). 50% space overhead is accepted. btrfs RAID5/6 is not production-ready. [Why →](decisions/btrfs-raid1.md)
 
-## 7. Test every design decision
+## 7. Sane defaults
+
+If a knowledgeable admin would always enable it, braid enables it by default. Defaults use `lib.mkDefault` so users override with normal NixOS config. Only wrap in a `braid.*` option when the mapping is non-obvious or one braid option controls many underlying options. [Why →](decisions/sane-defaults.md)
+
+## 8. Test every design decision
 
 NixOS VM tests validate behavior, not just command success. TDD: write failing tests first, confirm they fail for expected reasons, then implement.
 
