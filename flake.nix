@@ -11,6 +11,9 @@
       pkgs = nixpkgs.legacyPackages.aarch64-darwin;
     in
     {
+      packages.aarch64-darwin.playground =
+        (pkgs.testers.nixosTest (import ./vm/playground.nix)).driver;
+
       checks.aarch64-darwin = {
         hello-world = pkgs.testers.nixosTest (import ./tests/hello-world.nix);
         luks = pkgs.testers.nixosTest (import ./tests/luks.nix);
