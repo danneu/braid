@@ -44,6 +44,10 @@ Samba:
 - **Incremental growth** — start with 1 drive (no redundancy), add a second to convert to RAID1, add more whenever
 - **Simple stack** — LUKS + btrfs + Samba, three components total
 
+## User Stories
+
+See [`docs/1-user-stories.md`](docs/1-user-stories.md) — walks through the full experience from first disk to third, including `btrnas-add-disk` and the module's role.
+
 ## Key Tradeoffs
 
 - **50% space overhead** — RAID1 stores 2 copies of every chunk. 3x 12TB = ~18TB usable. Parity schemes (SnapRAID, ZFS raidz) would give ~24TB, but btrfs RAID5/6 is not production-ready.
