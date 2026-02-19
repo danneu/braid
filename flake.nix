@@ -25,6 +25,7 @@
         btrfs-degrade = pkgs.testers.nixosTest (import ./tests/3-btrfs-degrade.nix);
         samba = pkgs.testers.nixosTest (import ./tests/4-samba.nix);
         remote-unlock = pkgs.testers.nixosTest (import ./tests/4-remote-unlock.nix);
+        degraded-boot = pkgs.testers.nixosTest (import ./tests/4-degraded-boot.nix);
         btrnas-add-disk = pkgs.testers.nixosTest (import ./tests/5-btrnas-add-disk.nix);
       };
     };
