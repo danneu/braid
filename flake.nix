@@ -39,6 +39,7 @@
           braid-module-degraded-raid1 = pkgs.testers.nixosTest (import ./tests/braid-module/03-degraded-raid1.nix);
           braid-module-bad-config = pkgs.testers.nixosTest (import ./tests/braid-module/04-bad-config.nix);
           braid-module-single-disk-dead = pkgs.testers.nixosTest (import ./tests/braid-module/05-single-disk-dead.nix);
+          braid-module-remote-unlock = pkgs.testers.nixosTest (import ./tests/braid-module/06-remote-unlock.nix);
         };
     in
     {
