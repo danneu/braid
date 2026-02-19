@@ -32,6 +32,10 @@ Any change to behavior or invariants must update those docs. Code that contradic
 
 Decision docs must include an explicit status: `Draft`, `Active`, `Superseded`, or `Deprecated`.
 
+## User Guide
+
+[`README.md`](README.md) is the end-user guide. Keep it updated when adding features or changing behavior. Style: brief, cookbook-like — short descriptions with copy-paste examples. Not reference material.
+
 ## References
 
 - [User stories](docs/1-user-stories.md) — full UX walkthrough from first disk to third

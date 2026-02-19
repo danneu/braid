@@ -21,6 +21,22 @@ braid = {
 
 This creates LUKS devices for each disk, assembles them into a btrfs RAID1 pool, and mounts it. The system boots gracefully even if a drive is dead or missing.
 
+## What you get for free
+
+Braid enables these automatically when `braid.enable = true`:
+
+- **Monthly btrfs scrub** — detects and repairs bit rot before it can compound. Override or disable with normal NixOS config:
+
+  ```nix
+  # change to weekly
+  services.btrfs.autoScrub.interval = "weekly";
+
+  # or disable
+  services.btrfs.autoScrub.enable = false;
+  ```
+
+- **Resilient boot** — a dead or missing drive never blocks boot. The pool mounts in degraded mode and the system stays reachable via SSH.
+
 ## Samba
 
 Samba is not part of the braid module — NixOS already provides declarative Samba config. Reference `config.braid.mountPoint` to stay in sync:
