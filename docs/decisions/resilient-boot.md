@@ -32,7 +32,7 @@ Every layer has a specific resilience mechanism:
 | Scenario | What happens | User sees |
 |----------|-------------|-----------|
 | All drives healthy | Normal boot | Everything works |
-| One drive dead | 10s timeout, btrfs mounts degraded | Samba serves files, pool shows "missing" |
+| One drive dead | 10s timeout, btrfs mounts degraded | Pool accessible in degraded mode |
 | All drives dead / wrong config | 10s timeout, mount fails | System boots, SSH works, no /mnt/storage |
 
 ## Key discoveries

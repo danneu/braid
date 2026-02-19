@@ -16,9 +16,6 @@ Boot unlock:
   NAS powers on → initrd starts dropbear SSH + DHCP
   → ssh root@nas "cryptsetup-askpass" from MacBook
   → LUKS drives unlock → btrfs assembles → full boot continues
-
-Samba:
-  /mnt/storage → smb://nas/storage (LAN)
 ```
 
 ## The Stack
@@ -26,7 +23,6 @@ Samba:
 - **NixOS** — declarative, reproducible system configuration
 - **LUKS** — passphrase-based full disk encryption (keys never stored on disk), SSH remote unlock via dropbear in initrd
 - **btrfs RAID1** — checksumming filesystem with automatic self-healing from redundant copies; dynamic add/remove drives
-- **Samba** — SMB file sharing (macOS, Windows, Linux)
 
 ## Architecture Authority
 
@@ -75,5 +71,4 @@ Write failing tests first, confirm they fail for the expected reasons, then impl
 - [x] Remove a drive from btrfs RAID1 pool
 - [x] Start single-drive btrfs, convert to RAID1 after adding second drive
 - [x] SSH remote unlock (dropbear in initrd, unlock from client VM)
-- [x] Samba serves /mnt/storage, client VM mounts via SMB
 - [x] Survive a drive failure — pool stays accessible in degraded mode

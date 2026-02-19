@@ -23,7 +23,7 @@ The NAS needs checksumming (bit rot detection), self-healing (automatic repair f
 - **Rejected**: no auto-healing. SnapRAID syncs on a schedule (e.g., nightly). Bit rot between syncs is undetected. No checksumming on read. Drives are independent ext4 — good for recovery but no real-time protection.
 
 ### btrfs RAID1
-- Checksums every block on read, heals from the RAID1 copy automatically. Dynamic pool — `btrfs device add`/`remove` at any time with any size drive. In-kernel, first-class NixOS support. Simple stack: LUKS + btrfs + Samba.
+- Checksums every block on read, heals from the RAID1 copy automatically. Dynamic pool — `btrfs device add`/`remove` at any time with any size drive. In-kernel, first-class NixOS support. Simple stack: LUKS + btrfs.
 - **Accepted**.
 
 ## Decision

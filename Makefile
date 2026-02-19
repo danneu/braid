@@ -15,5 +15,5 @@ test-verbose: ## Run all NixOS VM tests (verbose, shows VM logs)
 test-one-verbose: ## Run a single test verbose (e.g. make test-one-verbose t=hello-world)
 	nix build .#checks.aarch64-darwin.$(t) -L
 
-playground: ## Boot interactive VM with btrfs + Samba (SMB on localhost:4450)
+playground: ## Boot interactive VM with btrfs + Samba playground
 	nix run .#playground

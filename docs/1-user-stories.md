@@ -18,11 +18,6 @@ Dan buys a NAS computer and installs NixOS on its internal SSD. He has one 12TB 
      disks = [
        "/dev/disk/by-id/ata-Toshiba_MN07_XXXX"
      ];
-     samba = {
-       enable = true;
-       user = "dan";
-       passwordFile = "/run/secrets/smb-password";
-     };
      remoteUnlock = {
        enable = true;
        sshPort = 2222;

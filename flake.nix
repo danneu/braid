@@ -1,5 +1,5 @@
 {
-  description = "btrnas — NixOS NAS with LUKS + btrfs RAID1 + Samba";
+  description = "btrnas — NixOS NAS with LUKS + btrfs RAID1";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
