@@ -1,6 +1,6 @@
-# Test: btrnas-add-disk
+# Test: braid-add-disk
 #
-# What: Runs the btrnas-add-disk script through its full lifecycle: first disk
+# What: Runs the braid-add-disk script through its full lifecycle: first disk
 # (creates pool), second disk (converts to RAID1), third disk (expands pool),
 # plus validation errors, crash recovery, and unmounted pool guard.
 #
@@ -11,7 +11,7 @@
 #
 # Dependencies: btrfs-grow1 (single -> RAID1 -> 3-drive works manually).
 {
-  name = "btrnas-add-disk";
+  name = "braid-add-disk";
 
   nodes.machine = { pkgs, ... }: {
     virtualisation.emptyDiskImages = [
@@ -24,15 +24,15 @@
 
     environment.systemPackages = [
       (pkgs.writeShellApplication {
-        name = "btrnas-add-disk";
+        name = "braid-add-disk";
         runtimeInputs = [ pkgs.cryptsetup pkgs.btrfs-progs pkgs.util-linux pkgs.jq ];
-        text = builtins.readFile ../scripts/btrnas-add-disk.sh;
+        text = builtins.readFile ../scripts/braid-add-disk.sh;
       })
       pkgs.cryptsetup
       pkgs.btrfs-progs
     ];
 
-    environment.etc."btrnas/config.json".text = builtins.toJSON {
+    environment.etc."braid/config.json".text = builtins.toJSON {
       disks = [
         "/dev/disk/by-id/virtio-disk1"
         "/dev/disk/by-id/virtio-disk2"
@@ -44,5 +44,5 @@
     };
   };
 
-  testScript = builtins.readFile ./btrnas-add-disk.py;
+  testScript = builtins.readFile ./braid-add-disk.py;
 }

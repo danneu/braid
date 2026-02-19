@@ -1,6 +1,6 @@
 # Test: daemon-hello-world
 #
-# What: Starts the btrnasd daemon and sends a ping over its Unix socket.
+# What: Starts the braidd daemon and sends a ping over its Unix socket.
 #
 # Why: Proves the end-to-end chain works: Go binary builds, systemd service
 # starts, socket accepts connections, NDJSON request/response round-trips.
@@ -11,8 +11,8 @@
   name = "daemon-hello-world";
 
   nodes.machine = { pkgs, ... }: {
-    imports = [ ../../modules/btrnas ];
-    btrnas.daemon.enable = true;
+    imports = [ ../../modules/braid ];
+    braid.daemon.enable = true;
     environment.systemPackages = [ pkgs.socat ];
   };
 

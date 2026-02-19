@@ -1,6 +1,6 @@
 # Principles
 
-Canonical invariants for btrnas. Each principle is authoritative — if code or config contradicts a principle, the code is wrong.
+Canonical invariants for braid. Each principle is authoritative — if code or config contradicts a principle, the code is wrong.
 
 ## 1. Resilient by default
 
@@ -8,11 +8,11 @@ Data drives never block boot. LUKS devices use `nofail` + bounded timeouts. btrf
 
 ## 2. Config-first workflow
 
-Declare the disk in `btrnas.disks` before formatting it. `nixos-rebuild switch` exports config and creates LUKS entries. `btrnas-add-disk` reads config, formats, and joins the pool. CLI tools refuse to operate on undeclared disks. [Why →](decisions/config-first-workflow.md)
+Declare the disk in `braid.disks` before formatting it. `nixos-rebuild switch` exports config and creates LUKS entries. `braid-add-disk` reads config, formats, and joins the pool. CLI tools refuse to operate on undeclared disks. [Why →](decisions/config-first-workflow.md)
 
 ## 3. nixos-rebuild never destroys data
 
-`nixos-rebuild switch` is declarative and idempotent — always safe to run. Only `btrnas-add-disk` performs destructive operations (LUKS format, btrfs create/add), and it requires explicit confirmation.
+`nixos-rebuild switch` is declarative and idempotent — always safe to run. Only `braid-add-disk` performs destructive operations (LUKS format, btrfs create/add), and it requires explicit confirmation.
 
 ## 4. Single passphrase
 

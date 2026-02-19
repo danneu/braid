@@ -9,9 +9,9 @@ import (
 )
 
 func main() {
-	socketPath := os.Getenv("BTRNAS_SOCKET")
+	socketPath := os.Getenv("BRAID_SOCKET")
 	if socketPath == "" {
-		socketPath = "/run/btrnas/daemon.sock"
+		socketPath = "/run/braid/daemon.sock"
 	}
 
 	// Remove stale socket file
@@ -19,17 +19,17 @@ func main() {
 
 	ln, err := net.Listen("unix", socketPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "btrnasd: listen: %v\n", err)
+		fmt.Fprintf(os.Stderr, "braid: listen: %v\n", err)
 		os.Exit(1)
 	}
 	defer ln.Close()
 
-	fmt.Fprintf(os.Stderr, "btrnasd: listening on %s\n", socketPath)
+	fmt.Fprintf(os.Stderr, "braid: listening on %s\n", socketPath)
 
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "btrnasd: accept: %v\n", err)
+			fmt.Fprintf(os.Stderr, "braid: accept: %v\n", err)
 			continue
 		}
 		go handleConn(conn)

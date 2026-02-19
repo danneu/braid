@@ -39,6 +39,6 @@ btrfs RAID1. The 50% space overhead is accepted as the cost of real-time auto-he
 
 ## See
 
-- `modules/btrnas/storage.nix` — btrfs mount configuration
+- `modules/braid/storage.nix` — btrfs mount configuration
 - `tests/2-btrfs-heal.nix` — validates auto-healing
 - `tests/3-btrfs-grow1.nix`, `tests/3-btrfs-shrink.nix` — validates dynamic pooling

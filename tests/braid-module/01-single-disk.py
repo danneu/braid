@@ -13,14 +13,14 @@ with subtest("btrfs single-disk pool is mounted"):
 
 with subtest("Runtime config file is generated"):
     import json
-    config_raw = machine.succeed("cat /etc/btrnas/config.json")
+    config_raw = machine.succeed("cat /etc/braid/config.json")
     config = json.loads(config_raw)
     assert config["mountPoint"] == "/mnt/storage", f"Expected /mnt/storage, got {config['mountPoint']}"
     assert config["disks"] == ["/dev/disk/by-id/virtio-disk1"], f"Unexpected disks: {config['disks']}"
 
 with subtest("Write and read round-trip"):
-    machine.succeed("echo 'hello btrnas' > /mnt/storage/test.txt")
+    machine.succeed("echo 'hello braid' > /mnt/storage/test.txt")
     content = machine.succeed("cat /mnt/storage/test.txt").strip()
-    assert content == "hello btrnas", f"Expected 'hello btrnas', got '{content}'"
+    assert content == "hello braid", f"Expected 'hello braid', got '{content}'"
 
 machine.shutdown()

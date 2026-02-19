@@ -20,18 +20,18 @@ Option 3. The NixOS config is the source of truth. The script is a one-shot exec
 
 ### Workflow
 
-1. Add disk to `btrnas.disks`
-2. `nixos-rebuild switch` — module exports `/etc/btrnas/config.json`, creates LUKS entries (which fail gracefully since disk isn't formatted yet)
-3. `sudo btrnas-add-disk /dev/disk/by-id/...` — reads config, verifies disk is declared, formats LUKS, creates/extends btrfs pool
+1. Add disk to `braid.disks`
+2. `nixos-rebuild switch` — module exports `/etc/braid/config.json`, creates LUKS entries (which fail gracefully since disk isn't formatted yet)
+3. `sudo braid-add-disk /dev/disk/by-id/...` — reads config, verifies disk is declared, formats LUKS, creates/extends btrfs pool
 4. Next reboot auto-unlocks
 
 ### Config export
 
-The module writes `/etc/btrnas/config.json` via `environment.etc`. This is the single Nix→runtime bridge. All CLI tools read it by default. The file is built at `nixos-rebuild` time and is read-only at runtime.
+The module writes `/etc/braid/config.json` via `environment.etc`. This is the single Nix→runtime bridge. All CLI tools read it by default. The file is built at `nixos-rebuild` time and is read-only at runtime.
 
 ### Config drift prevention
 
-The script refuses to format disks not listed in `btrnas.disks`. Error message tells the user exactly what to add and which commands to run. This ensures every formatted disk has a corresponding LUKS entry for boot-time unlock.
+The script refuses to format disks not listed in `braid.disks`. Error message tells the user exactly what to add and which commands to run. This ensures every formatted disk has a corresponding LUKS entry for boot-time unlock.
 
 ## Constraint
 
@@ -43,7 +43,7 @@ If NixOS ever gets a `formatDevice` option type that can safely express one-shot
 
 ## See
 
-- `modules/btrnas/options.nix` — `btrnas.disks` option definition
-- `modules/btrnas/storage.nix` — config export and LUKS entry generation
-- `scripts/btrnas-add-disk.sh` — reads config, validates, formats
+- `modules/braid/options.nix` — `braid.disks` option definition
+- `modules/braid/storage.nix` — config export and LUKS entry generation
+- `scripts/braid-add-disk.sh` — reads config, validates, formats
 - [archive/design-docs/1-nixos-best-practices.md](../../archive/design-docs/1-nixos-best-practices.md) — original best practices analysis

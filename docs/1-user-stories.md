@@ -11,9 +11,9 @@ Dan buys a NAS computer and installs NixOS on its internal SSD. He has one 12TB 
    $ ls /dev/disk/by-id/ata-*
    ```
 
-2. Add btrnas to the NixOS config with the disk:
+2. Add braid to the NixOS config with the disk:
    ```nix
-   btrnas = {
+   braid = {
      enable = true;
      disks = [
        "/dev/disk/by-id/ata-Toshiba_MN07_XXXX"
@@ -30,7 +30,7 @@ Dan buys a NAS computer and installs NixOS on its internal SSD. He has one 12TB 
 
 4. Format and add it to the pool:
    ```
-   $ sudo btrnas-add-disk /dev/disk/by-id/ata-Toshiba_MN07_XXXX
+   $ sudo braid-add-disk /dev/disk/by-id/ata-Toshiba_MN07_XXXX
 
    WARNING: This will PERMANENTLY ERASE all data on:
      /dev/disk/by-id/ata-Toshiba_MN07_XXXX (Toshiba MN07ACA12T, 12TB)
@@ -66,7 +66,7 @@ Dan buys a NAS computer and installs NixOS on its internal SSD. He has one 12TB 
 
 9. Add the new disk to the NixOS config:
    ```nix
-   btrnas = {
+   braid = {
      disks = [
        "/dev/disk/by-id/ata-Toshiba_MN07_XXXX"
        "/dev/disk/by-id/ata-Ironwolf_ST12_YYYY"
@@ -79,7 +79,7 @@ Dan buys a NAS computer and installs NixOS on its internal SSD. He has one 12TB 
 
 11. Format and add it to the pool:
     ```
-    $ sudo btrnas-add-disk /dev/disk/by-id/ata-Ironwolf_ST12_YYYY
+    $ sudo braid-add-disk /dev/disk/by-id/ata-Ironwolf_ST12_YYYY
 
     WARNING: This will PERMANENTLY ERASE all data on:
       /dev/disk/by-id/ata-Ironwolf_ST12_YYYY (Seagate IronWolf ST12000VN0008, 12TB)
@@ -98,7 +98,7 @@ Dan buys a NAS computer and installs NixOS on its internal SSD. He has one 12TB 
 
 ### Three months later: third drive on sale
 
-13. Same flow — plug in, add to config, rebuild, `btrnas-add-disk`. Pool grows to ~18TB usable with RAID1 across 3 drives.
+13. Same flow — plug in, add to config, rebuild, `braid-add-disk`. Pool grows to ~18TB usable with RAID1 across 3 drives.
 
 ## Design principles
 

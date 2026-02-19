@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# btrnas-add-disk — Format a disk with LUKS and add it to the btrnas pool.
-# Usage: sudo btrnas-add-disk /dev/disk/by-id/<device>
+# braid-add-disk — Format a disk with LUKS and add it to the braid pool.
+# Usage: sudo braid-add-disk /dev/disk/by-id/<device>
 
 # --- Read config ---
 
-CONFIG_FILE="/etc/btrnas/config.json"
+CONFIG_FILE="/etc/braid/config.json"
 if [[ "${1:-}" == "--config" ]]; then
   CONFIG_FILE="$2"; shift 2
 fi
 
 if [[ ! -f "$CONFIG_FILE" ]]; then
   echo "Error: $CONFIG_FILE not found."
-  echo "Is the btrnas module enabled? Check your NixOS config."
+  echo "Is the braid module enabled? Check your NixOS config."
   exit 1
 fi
 
@@ -38,7 +38,7 @@ if [[ $# -eq 0 ]]; then
   configured_disks=$(jq -r '.disks[]' "$CONFIG_FILE" 2>/dev/null || true)
 
   echo ""
-  echo "Configured disks (btrnas.disks):"
+  echo "Configured disks (braid.disks):"
   if [[ -n "$configured_disks" ]]; then
     while IFS= read -r d; do
       if [[ -b "$d" ]]; then
@@ -89,13 +89,13 @@ if [[ $# -eq 0 ]]; then
   fi
 
   echo ""
-  echo "Usage: btrnas-add-disk <disk>"
+  echo "Usage: braid-add-disk <disk>"
   exit 0
 fi
 
 if [[ $# -ne 1 ]]; then
-  echo "Usage: btrnas-add-disk <block-device>"
-  echo "Example: btrnas-add-disk /dev/disk/by-id/ata-Toshiba_MN07_XXXX"
+  echo "Usage: braid-add-disk <block-device>"
+  echo "Example: braid-add-disk /dev/disk/by-id/ata-Toshiba_MN07_XXXX"
   exit 1
 fi
 
@@ -114,15 +114,15 @@ if [[ ! -b "$disk" ]]; then
   exit 1
 fi
 
-# --- Config guard: disk must be in btrnas.disks ---
+# --- Config guard: disk must be in braid.disks ---
 
 if ! jq -e --arg disk "$disk" '.disks | index($disk)' "$CONFIG_FILE" >/dev/null 2>&1; then
   existing_disks=$(jq -r '.disks[]' "$CONFIG_FILE" 2>/dev/null || true)
-  echo "Error: $disk is not in btrnas.disks."
+  echo "Error: $disk is not in braid.disks."
   echo ""
   echo "Add it to your NixOS config:"
   echo ""
-  echo "  btrnas.disks = ["
+  echo "  braid.disks = ["
   if [[ -n "$existing_disks" ]]; then
     while IFS= read -r d; do
       echo "    \"$d\""
@@ -132,7 +132,7 @@ if ! jq -e --arg disk "$disk" '.disks | index($disk)' "$CONFIG_FILE" >/dev/null 
   echo "  ];"
   echo ""
   echo "Then run: sudo nixos-rebuild switch"
-  echo "Then run: sudo btrnas-add-disk $disk"
+  echo "Then run: sudo braid-add-disk $disk"
   exit 1
 fi
 
@@ -152,7 +152,7 @@ if cryptsetup isLuks "$disk" 2>/dev/null; then
     if mountpoint -q "$MOUNT_POINT" 2>/dev/null; then
       pool_devs=$(btrfs filesystem show "$MOUNT_POINT" 2>/dev/null || true)
       if echo "$pool_devs" | grep -q "/dev/mapper/$existing_mapper"; then
-        echo "Error: $disk is already in the btrnas pool (as /dev/mapper/$existing_mapper)."
+        echo "Error: $disk is already in the braid pool (as /dev/mapper/$existing_mapper)."
         exit 1
       fi
     fi
@@ -162,14 +162,14 @@ if cryptsetup isLuks "$disk" 2>/dev/null; then
   fi
 
   # Device is LUKS but not open — try to probe if passphrase is available
-  if [[ -z "${BTRNAS_PASSPHRASE:-}" ]]; then
+  if [[ -z "${BRAID_PASSPHRASE:-}" ]]; then
     echo "Error: $disk is already LUKS-formatted."
     echo "If you want to re-use it, wipe it first: wipefs -a $disk"
     exit 1
   fi
 
-  tmp_mapper="btrnas-probe-$$"
-  if ! echo -n "$BTRNAS_PASSPHRASE" | cryptsetup luksOpen --key-file=- "$disk" "$tmp_mapper" 2>/dev/null; then
+  tmp_mapper="braid-probe-$$"
+  if ! echo -n "$BRAID_PASSPHRASE" | cryptsetup luksOpen --key-file=- "$disk" "$tmp_mapper" 2>/dev/null; then
     echo "Error: $disk is LUKS-formatted but the passphrase doesn't match."
     echo "If you want to re-use it, wipe it first: wipefs -a $disk"
     exit 1
@@ -188,7 +188,7 @@ if cryptsetup isLuks "$disk" 2>/dev/null; then
     # LUKS but no filesystem inside — crash recovery case
     cryptsetup luksClose "$tmp_mapper"
     echo "Warning: $disk is LUKS-formatted but contains no filesystem."
-    echo "This may be from a previous interrupted btrnas-add-disk run."
+    echo "This may be from a previous interrupted braid-add-disk run."
     echo "The disk will be wiped and re-formatted."
     echo ""
     # Fall through to normal formatting path — wipefs first
@@ -219,8 +219,8 @@ else
     echo "Error: Found LUKS-encrypted devices on this system that are not unlocked:"
     echo "$other_luks"
     echo ""
-    echo "This likely means an existing btrnas pool exists but hasn't been unlocked yet."
-    echo "Unlock your existing pool first, then run btrnas-add-disk again."
+    echo "This likely means an existing braid pool exists but hasn't been unlocked yet."
+    echo "Unlock your existing pool first, then run braid-add-disk again."
     exit 1
   fi
 fi
@@ -263,8 +263,8 @@ fi
 
 passphrase=""
 
-if [[ -n "${BTRNAS_PASSPHRASE:-}" ]]; then
-  passphrase="$BTRNAS_PASSPHRASE"
+if [[ -n "${BRAID_PASSPHRASE:-}" ]]; then
+  passphrase="$BRAID_PASSPHRASE"
 elif $pool_exists; then
   # Prompt once, verify against existing LUKS device
   read -r -s -p "Enter LUKS passphrase (must match existing disks): " passphrase
@@ -307,10 +307,10 @@ fi
 
 # --- Step 6: LUKS format + open ---
 
-# Parse BTRNAS_LUKS_OPTS into array (shellcheck-clean)
+# Parse BRAID_LUKS_OPTS into array (shellcheck-clean)
 luks_extra_opts=()
-if [[ -n "${BTRNAS_LUKS_OPTS:-}" ]]; then
-  read -ra luks_extra_opts <<< "$BTRNAS_LUKS_OPTS"
+if [[ -n "${BRAID_LUKS_OPTS:-}" ]]; then
+  read -ra luks_extra_opts <<< "$BRAID_LUKS_OPTS"
 fi
 
 echo "Formatting $disk with LUKS..."

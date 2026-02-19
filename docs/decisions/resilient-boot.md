@@ -11,7 +11,7 @@ The OS lives on an internal SSD. Data drives are separate. Nothing about the dat
 ## Options considered
 
 1. **Hard dependencies** — LUKS required, mount required. Any failure blocks boot. Simple but means a dead drive = unreachable NAS.
-2. **Degraded toggle** — add an option like `btrnas.allowDegraded = true`. Default to hard failure, opt in to resilience. Adds complexity and a wrong default.
+2. **Degraded toggle** — add an option like `braid.allowDegraded = true`. Default to hard failure, opt in to resilience. Adds complexity and a wrong default.
 3. **Resilient by default** — `nofail`, `wants`, `degraded` everywhere. Zero cost when healthy, graceful in every failure case. No toggle.
 
 ## Decision
@@ -55,11 +55,11 @@ When btrfs has a missing member, udev may mark remaining devices as not ready (s
 
 ## Constraint
 
-This is not configurable. There is no `btrnas.resilient` option. Every btrnas deployment gets resilient boot.
+This is not configurable. There is no `braid.resilient` option. Every braid deployment gets resilient boot.
 
 ## See
 
-- `modules/btrnas/storage.nix` — LUKS, mount, and device-scan config
-- `tests/btrnas-module/` — module tests validate boot with all drives healthy
+- `modules/braid/storage.nix` — LUKS, mount, and device-scan config
+- `tests/braid-module/` — module tests validate boot with all drives healthy
 - `tests/4-degraded-boot.nix` — validates degraded boot with a bricked drive
 - [archive/plans/test-boot-degraded.md](../../archive/plans/test-boot-degraded.md) — original plan and research

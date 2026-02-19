@@ -33,8 +33,8 @@ with subtest("All three devices visible in the filesystem"):
         assert f"/dev/mapper/{name}" in fi_show, f"{name} not in btrfs fi show:\n{fi_show}"
 
 with subtest("Write and read back a file"):
-    machine.succeed("echo 'hello btrnas' > /mnt/storage/test.txt")
+    machine.succeed("echo 'hello braid' > /mnt/storage/test.txt")
     content = machine.succeed("cat /mnt/storage/test.txt").strip()
-    assert content == "hello btrnas", f"Expected 'hello btrnas', got '{content}'"
+    assert content == "hello braid", f"Expected 'hello braid', got '{content}'"
 
 machine.shutdown()

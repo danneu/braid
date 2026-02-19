@@ -1,6 +1,6 @@
-# Test: btrnas-module-bad-config
+# Test: braid-module-bad-config
 #
-# What: Enables the btrnas module with disk paths that don't exist. No virtual
+# What: Enables the braid module with disk paths that don't exist. No virtual
 # disks are attached. LUKS units wait for devices that never appear, timeout
 # after 10s, and fail. The mount also fails (no mapper devices). Boot completes
 # anyway thanks to nofail on both LUKS and mount.
@@ -11,15 +11,15 @@
 # neededForBoot + nofail doesn't let boot continue when the mount truly fails,
 # we need a different approach.
 #
-# Dependencies: btrnas-module-disabled (module loads without error).
+# Dependencies: braid-module-disabled (module loads without error).
 { lib, pkgs, ... }:
 {
-  name = "btrnas-module-bad-config";
+  name = "braid-module-bad-config";
 
   nodes.machine = { pkgs, ... }: {
-    imports = [ ../../modules/btrnas ];
+    imports = [ ../../modules/braid ];
 
-    btrnas = {
+    braid = {
       enable = true;
       disks = [
         "/dev/disk/by-id/phantom1"

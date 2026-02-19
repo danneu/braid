@@ -1,5 +1,5 @@
 {
-  description = "btrnas — NixOS NAS with LUKS + btrfs RAID1";
+  description = "braid — NixOS NAS with LUKS + btrfs RAID1";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
@@ -26,16 +26,16 @@
         samba = pkgs.testers.nixosTest (import ./tests/4-samba.nix);
         remote-unlock = pkgs.testers.nixosTest (import ./tests/4-remote-unlock.nix);
         degraded-boot = pkgs.testers.nixosTest (import ./tests/4-degraded-boot.nix);
-        btrnas-add-disk = pkgs.testers.nixosTest (import ./tests/5-btrnas-add-disk.nix);
+        braid-add-disk = pkgs.testers.nixosTest (import ./tests/5-braid-add-disk.nix);
         first-boot-single-disk = pkgs.testers.nixosTest (import ./tests/6-first-boot-single-disk.nix);
         replace-failed-disk = pkgs.testers.nixosTest (import ./tests/7-replace-failed-disk.nix);
         daemon-hello-world = pkgs.testers.nixosTest (import ./tests/daemon/00-hello-world.nix);
-        btrnas-module-disabled = pkgs.testers.nixosTest (import ./tests/btrnas-module/00-disabled.nix);
-        btrnas-module-single-disk = pkgs.testers.nixosTest (import ./tests/btrnas-module/01-single-disk.nix);
-        btrnas-module-raid1 = pkgs.testers.nixosTest (import ./tests/btrnas-module/02-raid1.nix);
-        btrnas-module-degraded-raid1 = pkgs.testers.nixosTest (import ./tests/btrnas-module/03-degraded-raid1.nix);
-        btrnas-module-bad-config = pkgs.testers.nixosTest (import ./tests/btrnas-module/04-bad-config.nix);
-        btrnas-module-single-disk-dead = pkgs.testers.nixosTest (import ./tests/btrnas-module/05-single-disk-dead.nix);
+        braid-module-disabled = pkgs.testers.nixosTest (import ./tests/braid-module/00-disabled.nix);
+        braid-module-single-disk = pkgs.testers.nixosTest (import ./tests/braid-module/01-single-disk.nix);
+        braid-module-raid1 = pkgs.testers.nixosTest (import ./tests/braid-module/02-raid1.nix);
+        braid-module-degraded-raid1 = pkgs.testers.nixosTest (import ./tests/braid-module/03-degraded-raid1.nix);
+        braid-module-bad-config = pkgs.testers.nixosTest (import ./tests/braid-module/04-bad-config.nix);
+        braid-module-single-disk-dead = pkgs.testers.nixosTest (import ./tests/braid-module/05-single-disk-dead.nix);
       };
     };
 }

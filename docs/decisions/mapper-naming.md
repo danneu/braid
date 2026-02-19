@@ -10,14 +10,14 @@ Each LUKS device needs a mapper name for `/dev/mapper/<name>`. The module create
 
 ## Options considered
 
-1. **`btrnas-` prefix** — e.g., `btrnas-ata-Toshiba_MN07_XXXX`. Clear provenance but longer, and the prefix adds nothing since btrfs finds devices by UUID internally.
+1. **`braid-` prefix** — e.g., `braid-ata-Toshiba_MN07_XXXX`. Clear provenance but longer, and the prefix adds nothing since btrfs finds devices by UUID internally.
 2. **by-id basename** — e.g., `ata-Toshiba_MN07_XXXX`. Both module and script derive it from the same `/dev/disk/by-id/` path via `builtins.baseNameOf` (Nix) or `basename` (bash). No coordination needed.
 
 ## Decision
 
-Option 2. Mapper name = `baseNameOf` of the by-id path. The original plan had a `btrnas-` prefix; it was dropped for simplicity.
+Option 2. Mapper name = `baseNameOf` of the by-id path. The original plan had a `braid-` prefix; it was dropped for simplicity.
 
-Both the module (`builtins.baseNameOf`) and the script (`basename "$disk"`) derive the mapper name from the same source — the `/dev/disk/by-id/` path declared in `btrnas.disks`. No mapping table or shared constant needed.
+Both the module (`builtins.baseNameOf`) and the script (`basename "$disk"`) derive the mapper name from the same source — the `/dev/disk/by-id/` path declared in `braid.disks`. No mapping table or shared constant needed.
 
 ## systemd unit escaping
 
@@ -34,6 +34,6 @@ Production mapper names (e.g., `ata-Toshiba_MN07_XXXX`) and VM names (e.g., `vir
 
 ## See
 
-- `modules/btrnas/storage.nix` — `cryptsetupUnit` helper and LUKS device generation
-- `scripts/btrnas-add-disk.sh` — `basename` derivation of mapper name
-- [archive/design-docs/2-btrnas-module.md](../../archive/design-docs/2-btrnas-module.md) — original module plan
+- `modules/braid/storage.nix` — `cryptsetupUnit` helper and LUKS device generation
+- `scripts/braid-add-disk.sh` — `basename` derivation of mapper name
+- [archive/design-docs/2-braid-module.md](../../archive/design-docs/2-braid-module.md) — original module plan

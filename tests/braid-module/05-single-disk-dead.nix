@@ -1,6 +1,6 @@
-# Test: btrnas-module-single-disk-dead
+# Test: braid-module-single-disk-dead
 #
-# What: Enables the btrnas module with a single disk. An initrd fixture formats
+# What: Enables the braid module with a single disk. An initrd fixture formats
 # it as LUKS + single-disk btrfs, then bricks the LUKS header. The module's
 # nofail defaults let the cryptsetup failure pass without cascading. The VM
 # boots to multi-user with no /mnt/storage (no RAID1 fallback).
@@ -9,8 +9,8 @@
 # one drive and no RAID1, a dead drive means total data loss — but the system
 # must still boot so the user can SSH in and fix the config or replace the drive.
 #
-# Dependencies: btrnas-module-single-disk (single-disk happy path),
-# btrnas-module-bad-config (nofail boot-continue works).
+# Dependencies: braid-module-single-disk (single-disk happy path),
+# braid-module-bad-config (nofail boot-continue works).
 { lib, pkgs, ... }:
 let
   passphrase = "testpassphrase";
@@ -23,12 +23,12 @@ let
     "systemd-cryptsetup@${builtins.replaceStrings ["-"] ["\\x2d"] name}.service";
 in
 {
-  name = "btrnas-module-single-disk-dead";
+  name = "braid-module-single-disk-dead";
 
   nodes.machine = { pkgs, ... }: {
-    imports = [ ../../modules/btrnas ];
+    imports = [ ../../modules/braid ];
 
-    btrnas = {
+    braid = {
       enable = true;
       disks = map (d: "/dev/disk/by-id/virtio-${d}") disks;
     };

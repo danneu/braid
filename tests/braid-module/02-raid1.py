@@ -16,7 +16,7 @@ with subtest("btrfs RAID1 pool is mounted"):
 
 with subtest("Runtime config file is generated"):
     import json
-    config_raw = machine.succeed("cat /etc/btrnas/config.json")
+    config_raw = machine.succeed("cat /etc/braid/config.json")
     config = json.loads(config_raw)
     assert config["mountPoint"] == "/mnt/storage", f"Expected /mnt/storage, got {config['mountPoint']}"
     expected_disks = [f"/dev/disk/by-id/virtio-disk{i}" for i in range(1, 4)]

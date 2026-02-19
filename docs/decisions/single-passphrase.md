@@ -12,7 +12,7 @@ Remote unlock via dropbear SSH prompts for a passphrase that unlocks all LUKS de
 
 1. **Shared keyfile on boot disk** — store a keyfile on the SSD, encrypt the SSD with a passphrase. Unlocking the SSD exposes the keyfile, which unlocks data drives. More complex boot chain, keyfile is at-rest on disk.
 2. **Same passphrase, no enforcement** — tell users to use the same passphrase. They'll forget or mistype. Boot breaks silently.
-3. **Same passphrase, enforced at format time** — `btrnas-add-disk` verifies the passphrase matches existing pool members before formatting. Catches mismatches immediately.
+3. **Same passphrase, enforced at format time** — `braid-add-disk` verifies the passphrase matches existing pool members before formatting. Catches mismatches immediately.
 
 ## Decision
 
@@ -29,9 +29,9 @@ The script reads which devices are in the btrfs pool (`btrfs fi show /mnt/storag
 
 ## Constraint
 
-No keyfiles. The passphrase is never written to disk. It exists only in memory during `btrnas-add-disk` execution and in the user's head.
+No keyfiles. The passphrase is never written to disk. It exists only in memory during `braid-add-disk` execution and in the user's head.
 
 ## See
 
-- `scripts/btrnas-add-disk.sh` — passphrase prompt and verification logic
-- `design-docs/1-btrnas-add-disk.md` — full script design
+- `scripts/braid-add-disk.sh` — passphrase prompt and verification logic
+- `design-docs/1-braid-add-disk.md` — full script design

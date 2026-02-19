@@ -2,20 +2,20 @@
 #
 # What: Server boots with 3 LUKS-encrypted drives as btrfs RAID1, but disk3 is
 # bricked (simulating drive death). The server boots degraded via initrd SSH
-# unlock, then btrnas-add-disk replaces the dead drive with a fresh disk4. The
+# unlock, then braid-add-disk replaces the dead drive with a fresh disk4. The
 # pool returns to healthy 3-drive RAID1 with all data intact.
 #
 # Why: This is the scariest real-world scenario — a drive dies, you boot
 # degraded, and you need to replace it without reinstalling. It crosses every
-# integration boundary: initrd SSH, degraded btrfs, and btrnas-add-disk. No
+# integration boundary: initrd SSH, degraded btrfs, and braid-add-disk. No
 # other test covers this full recovery cycle.
 #
-# Dependencies: degraded-boot (initrd SSH + degraded mount), btrnas-add-disk
+# Dependencies: degraded-boot (initrd SSH + degraded mount), braid-add-disk
 # (LUKS format + pool expansion).
 #
 # Changes from degraded-boot:
 # 1. A 4th virtual disk (disk4) as the replacement drive
-# 2. btrnas-add-disk + cryptsetup in environment.systemPackages
+# 2. braid-add-disk + cryptsetup in environment.systemPackages
 # 3. No Samba — this test focuses on the replacement cycle
 { lib, pkgs, ... }:
 let
@@ -37,15 +37,15 @@ in
 
     environment.systemPackages = [
       (pkgs.writeShellApplication {
-        name = "btrnas-add-disk";
+        name = "braid-add-disk";
         runtimeInputs = [ pkgs.cryptsetup pkgs.btrfs-progs pkgs.util-linux pkgs.jq ];
-        text = builtins.readFile ../scripts/btrnas-add-disk.sh;
+        text = builtins.readFile ../scripts/braid-add-disk.sh;
       })
       pkgs.cryptsetup
       pkgs.btrfs-progs
     ];
 
-    environment.etc."btrnas/config.json".text = builtins.toJSON {
+    environment.etc."braid/config.json".text = builtins.toJSON {
       disks = [
         "/dev/disk/by-id/virtio-disk1"
         "/dev/disk/by-id/virtio-disk2"

@@ -1,6 +1,6 @@
 { config, lib, pkgs, ... }:
 let
-  cfg = config.btrnas;
+  cfg = config.braid;
   diskAttrs = map (d: { name = builtins.baseNameOf d; device = d; }) cfg.disks;
   mapperNames = map (d: d.name) diskAttrs;
 
@@ -12,7 +12,7 @@ let
 in
 {
   config = lib.mkIf cfg.enable {
-    btrnas.daemon.enable = lib.mkDefault true;
+    braid.daemon.enable = lib.mkDefault true;
 
     boot.initrd = {
       supportedFilesystems = [ "btrfs" ];

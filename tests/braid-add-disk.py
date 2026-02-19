@@ -8,16 +8,16 @@ luks_opts = "--pbkdf pbkdf2 --pbkdf-force-iterations 1000"
 def add_disk(dev):
     return (
         f"echo 'erase this disk' | "
-        f"BTRNAS_PASSPHRASE='{passphrase}' "
-        f"BTRNAS_LUKS_OPTS='{luks_opts}' "
-        f"btrnas-add-disk {dev}"
+        f"BRAID_PASSPHRASE='{passphrase}' "
+        f"BRAID_LUKS_OPTS='{luks_opts}' "
+        f"braid-add-disk {dev}"
     )
 
 
 # --- Phase 0: No-args disk listing ---
 
 with subtest("No args lists configured and available disks"):
-    output = machine.succeed("btrnas-add-disk")
+    output = machine.succeed("braid-add-disk")
     assert "Configured disks" in output, f"Expected configured listing:\n{output}"
     assert "Available disks" in output, f"Expected available listing:\n{output}"
     # All 5 test disks should appear as configured
@@ -78,22 +78,22 @@ with subtest("All data survived third disk addition"):
 # --- Phase 4: Validation errors ---
 
 with subtest("No args lists only remaining disks"):
-    output = machine.succeed("btrnas-add-disk")
+    output = machine.succeed("braid-add-disk")
     # disk1-3 are in pool but still configured, disk4-5 should be configured too
     # The "Available disks" section should be empty or not show pool members
     assert "Configured disks" in output
 
 with subtest("Non-existent device fails"):
-    machine.fail("btrnas-add-disk /dev/disk/by-id/nonexistent")
+    machine.fail("braid-add-disk /dev/disk/by-id/nonexistent")
 
 with subtest("Non-by-id path rejected"):
-    machine.fail("btrnas-add-disk /dev/vdb")
+    machine.fail("braid-add-disk /dev/vdb")
 
 with subtest("Unconfigured disk rejected"):
     # Create a fake by-id symlink pointing to a real block device (disk5's underlying device)
     machine.succeed("ln -sf $(readlink -f /dev/disk/by-id/virtio-disk5) /dev/disk/by-id/virtio-fake")
     result = machine.fail(add_disk("/dev/disk/by-id/virtio-fake"))
-    assert "not in btrnas.disks" in result, f"Expected config guard:\n{result}"
+    assert "not in braid.disks" in result, f"Expected config guard:\n{result}"
 
 with subtest("Disk already in pool fails"):
     result = machine.fail(add_disk("/dev/disk/by-id/virtio-disk1"))
@@ -108,7 +108,7 @@ with subtest("Crash recovery — LUKS with no filesystem"):
         f"echo -n '{passphrase}' | cryptsetup luksFormat --batch-mode --key-file=- "
         f"{luks_opts} {dev}"
     )
-    # Run btrnas-add-disk — should detect recoverable state and re-format
+    # Run braid-add-disk — should detect recoverable state and re-format
     machine.succeed(add_disk(dev))
 
     # Verify it was added to the pool

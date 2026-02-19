@@ -40,10 +40,10 @@ responsible for updating their nix config to add/remove the drive.
 You could scan for USB block devices and check each one:
 
 1. `ls /dev/disk/by-id/usb-\*` — lists all USB storage devices
-2. Mount each one, look for a known filename like btrnas.key
-3. `cryptsetup luksOpen --test-passphrase --key-file=btrnas.key /dev/disk/by-id/ata-Toshiba_MN07_xxxx` — tests if the key actually works without opening the device
+2. Mount each one, look for a known filename like braid.key
+3. `cryptsetup luksOpen --test-passphrase --key-file=braid.key /dev/disk/by-id/ata-Toshiba_MN07_xxxx` — tests if the key actually works without opening the device
 
-So a btrnas-status command could show:
+So a braid-status command could show:
 
 ```
   Pool: /mnt/storage (mounted, healthy)
@@ -52,7 +52,7 @@ So a btrnas-status command could show:
     ata-Ironwolf_ST12_xxxx — 2 key slots active (0, 1)
   USB keys:
     usb-SanDisk_Ultra_xxxx — valid key found ✓
-    usb-Kingston_DT50_xxxx — no btrnas.key
+    usb-Kingston_DT50_xxxx — no braid.key
 ```
 
 The `--test-passphrase` flag is the key piece — it validates without actually unlocking anything.

@@ -1,7 +1,7 @@
 { lib, ... }:
 {
-  options.btrnas = {
-    enable = lib.mkEnableOption "btrnas encrypted storage";
+  options.braid = {
+    enable = lib.mkEnableOption "braid encrypted storage";
 
     disks = lib.mkOption {
       type = lib.types.nonEmptyListOf lib.types.str;

@@ -1,6 +1,6 @@
 # AGENTS.md
 
-## Project: btrnas
+## Project: braid
 
 A NixOS-based NAS with full disk encryption, auto-healing storage, and dynamic drive pooling.
 
@@ -35,7 +35,7 @@ Decision docs must include an explicit status: `Draft`, `Active`, `Superseded`, 
 ## References
 
 - [User stories](docs/1-user-stories.md) — full UX walkthrough from first disk to third
-- [Design: btrnas-add-disk](design-docs/1-btrnas-add-disk.md) — script design
+- [Design: braid-add-disk](design-docs/1-braid-add-disk.md) — script design
 - [Design: daemon](design-docs/3-daemon.md) — future TUI/daemon work
 
 ## Commands

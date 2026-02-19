@@ -62,15 +62,15 @@ luks_opts = "--pbkdf pbkdf2 --pbkdf-force-iterations 1000"
 def add_disk(dev):
     return (
         f"echo 'erase this disk' | "
-        f"BTRNAS_PASSPHRASE='{passphrase}' "
-        f"BTRNAS_LUKS_OPTS='{luks_opts}' "
-        f"btrnas-add-disk {dev}"
+        f"BRAID_PASSPHRASE='{passphrase}' "
+        f"BRAID_LUKS_OPTS='{luks_opts}' "
+        f"braid-add-disk {dev}"
     )
 
 
-with subtest("Replace dead disk3 with disk4 using btrnas-add-disk"):
+with subtest("Replace dead disk3 with disk4 using braid-add-disk"):
     result = server.succeed(add_disk("/dev/disk/by-id/virtio-disk4"))
-    print(f"btrnas-add-disk output:\n{result}")
+    print(f"braid-add-disk output:\n{result}")
 
 with subtest("Pool is healthy — 3 devices, no missing"):
     fi_show = server.succeed("btrfs fi show /mnt/storage")

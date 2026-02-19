@@ -1,6 +1,6 @@
-# Test: btrnas-module-disabled
+# Test: braid-module-disabled
 #
-# What: Imports the btrnas module with enable = false (the default) and no
+# What: Imports the braid module with enable = false (the default) and no
 # disks configured. The VM should boot to multi-user with no LUKS devices,
 # no btrfs mount, and no /mnt/storage.
 #
@@ -9,10 +9,10 @@
 #
 # Dependencies: hello-world (VM infra).
 {
-  name = "btrnas-module-disabled";
+  name = "braid-module-disabled";
 
   nodes.machine = { ... }: {
-    imports = [ ../../modules/btrnas ];
+    imports = [ ../../modules/braid ];
   };
 
   testScript = builtins.readFile ./00-disabled.py;

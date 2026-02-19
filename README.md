@@ -1,4 +1,4 @@
-# btrnas
+# braid
 
 NixOS module for encrypted NAS storage with auto-healing and dynamic drive pooling.
 
@@ -9,7 +9,7 @@ NixOS module for encrypted NAS storage with auto-healing and dynamic drive pooli
 ## Example
 
 ```nix
-btrnas = {
+braid = {
   enable = true;
   disks = [
     "/dev/disk/by-id/ata-Toshiba_MN07_XXXX"
@@ -23,7 +23,7 @@ This creates LUKS devices for each disk, assembles them into a btrfs RAID1 pool,
 
 ## Samba
 
-Samba is not part of the btrnas module — NixOS already provides declarative Samba config. Reference `config.btrnas.mountPoint` to stay in sync:
+Samba is not part of the braid module — NixOS already provides declarative Samba config. Reference `config.braid.mountPoint` to stay in sync:
 
 ```nix
 services.samba = {
@@ -31,13 +31,13 @@ services.samba = {
   openFirewall = true;
   settings = {
     videos = {
-      path = "${config.btrnas.mountPoint}/videos";
+      path = "${config.braid.mountPoint}/videos";
       "guest ok" = "yes";
       "read only" = "yes";
       browseable = "yes";
     };
     poetry = {
-      path = "${config.btrnas.mountPoint}/poetry";
+      path = "${config.braid.mountPoint}/poetry";
       "guest ok" = "no";
       "valid users" = "dan";
       browseable = "no";
@@ -46,7 +46,7 @@ services.samba = {
 };
 ```
 
-Change `btrnas.mountPoint` and Samba follows automatically — no extra module code needed, just a Nix expression referencing an existing option.
+Change `braid.mountPoint` and Samba follows automatically — no extra module code needed, just a Nix expression referencing an existing option.
 
 After rebuilding, create the Samba password (one-time):
 
