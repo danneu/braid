@@ -10,7 +10,7 @@ All existing tests (remote-unlock, degraded-boot, first-boot-single-disk) hand-w
 
 **`modules/btrnas/default.nix`** — entrypoint
 ```nix
-{ imports = [ ./options.nix ./storage.nix ./samba.nix ./remote-unlock.nix ]; }
+{ imports = [ ./options.nix ./storage.nix ./samba.nix ./remote-unlock.nix ./daemon.nix ./cli.nix ]; }
 ```
 
 **`modules/btrnas/options.nix`** — option schema
@@ -34,14 +34,19 @@ All existing tests (remote-unlock, degraded-boot, first-boot-single-disk) hand-w
 }
 ```
 
-`disks` uses `nonEmptyListOf` — Nix eval rejects `disks = []` at the type level when `enable = true`. No runtime assertion needed.
+`disks` uses `nonEmptyListOf` with no default — Nix eval rejects `disks = []` at the type level. When `enable = false` (the default), `disks` is never evaluated (everything is behind `mkIf cfg.enable`), so the missing default doesn't error.
 
 **`modules/btrnas/storage.nix`** — LUKS + btrfs mount + device-scan
 ```nix
 { config, lib, pkgs, ... }:
 let
   cfg = config.btrnas;
-  mapperNames = map builtins.baseNameOf cfg.disks;
+  diskAttrs = map (d: { name = builtins.baseNameOf d; device = d; }) cfg.disks;
+  mapperNames = map (d: d.name) diskAttrs;
+
+  # systemd-cryptsetup-generator escapes hyphens in mapper names
+  cryptsetupUnit = name:
+    "systemd-cryptsetup@${builtins.replaceStrings ["-"] ["\\x2d"] name}.service";
 in
 {
   config = lib.mkIf cfg.enable {
@@ -49,20 +54,23 @@ in
       supportedFilesystems = [ "btrfs" ];
       systemd.enable = true;
 
-      luks.devices = lib.genAttrs mapperNames (name: {
-        device = "/dev/disk/by-id/${name}";
-      });
+      luks.devices = builtins.listToAttrs (map (d: {
+        name = d.name;
+        value = {
+          device = d.device;
+          crypttabExtraOpts = [ "nofail" "x-systemd.device-timeout=10s" ];
+        };
+      }) diskAttrs);
 
       systemd.services.btrfs-device-scan = {
         description = "Scan for btrfs multi-device filesystems";
-        after = map (n: "systemd-cryptsetup@${n}.service") mapperNames;
-        requires = map (n: "systemd-cryptsetup@${n}.service") mapperNames;
+        after = map cryptsetupUnit mapperNames;
+        wants = map cryptsetupUnit mapperNames;
         before = [ "initrd-fs.target" ];
         wantedBy = [ "initrd-fs.target" ];
         unitConfig.DefaultDependencies = false;
         serviceConfig = { Type = "oneshot"; RemainAfterExit = true; };
-        path = [ pkgs.btrfs-progs ];
-        script = "btrfs device scan";
+        script = "${pkgs.btrfs-progs}/bin/btrfs device scan";
       };
     };
 
@@ -71,6 +79,8 @@ in
       fsType = "btrfs";
       neededForBoot = true;
       options = [
+        "degraded"
+        "nofail"
         "x-systemd.requires=btrfs-device-scan.service"
         "x-systemd.after=btrfs-device-scan.service"
       ];
@@ -80,8 +90,7 @@ in
     systemd.services.btrfs-device-scan = {
       description = "Scan for btrfs multi-device filesystems";
       serviceConfig = { Type = "oneshot"; RemainAfterExit = true; };
-      path = [ pkgs.btrfs-progs ];
-      script = "btrfs device scan";
+      script = "${pkgs.btrfs-progs}/bin/btrfs device scan";
     };
   };
 }

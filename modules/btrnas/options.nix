@@ -1,11 +1,10 @@
-{ config, lib, ... }:
+{ lib, ... }:
 {
   options.btrnas = {
     enable = lib.mkEnableOption "btrnas encrypted storage";
 
     disks = lib.mkOption {
-      type = lib.types.listOf lib.types.str;
-      default = [];
+      type = lib.types.nonEmptyListOf lib.types.str;
       description = "Disk paths (/dev/disk/by-id/...) for the LUKS + btrfs pool.";
     };
 
@@ -15,9 +14,4 @@
       description = "Where to mount the btrfs pool.";
     };
   };
-
-  config.assertions = [{
-    assertion = config.btrnas.enable -> config.btrnas.disks != [];
-    message = "btrnas.enable is true but btrnas.disks is empty. Add at least one disk.";
-  }];
 }

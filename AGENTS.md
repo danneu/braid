@@ -25,7 +25,6 @@ Boot unlock:
 
 Samba:
   /mnt/storage → smb://nas/storage (LAN)
-                → smb://nas.tailnet/storage (Tailscale)
 ```
 
 ## The Stack
@@ -110,13 +109,13 @@ Write failing tests first, confirm they fail for the expected reasons, then impl
 
 ## Test Plan
 
-- [ ] VM boots with virtual drives present (hello-world)
-- [ ] LUKS encrypt + unlock virtual drives
-- [ ] Create btrfs RAID1 across LUKS devices, mount it
-- [ ] btrfs detects and heals corrupted data (write bad bytes, read back correct)
-- [ ] Add a new drive to existing btrfs RAID1 pool
-- [ ] Remove a drive from btrfs RAID1 pool
-- [ ] Start single-drive btrfs, convert to RAID1 after adding second drive
-- [ ] SSH remote unlock (dropbear in initrd, unlock from client VM)
-- [ ] Samba serves /mnt/storage, client VM mounts via SMB
-- [ ] Survive a drive failure — pool stays accessible in degraded mode
+- [x] VM boots with virtual drives present (hello-world)
+- [x] LUKS encrypt + unlock virtual drives
+- [x] Create btrfs RAID1 across LUKS devices, mount it
+- [x] btrfs detects and heals corrupted data (write bad bytes, read back correct)
+- [x] Add a new drive to existing btrfs RAID1 pool
+- [x] Remove a drive from btrfs RAID1 pool
+- [x] Start single-drive btrfs, convert to RAID1 after adding second drive
+- [x] SSH remote unlock (dropbear in initrd, unlock from client VM)
+- [x] Samba serves /mnt/storage, client VM mounts via SMB
+- [x] Survive a drive failure — pool stays accessible in degraded mode

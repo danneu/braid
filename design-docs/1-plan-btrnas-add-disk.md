@@ -1,5 +1,7 @@
 # Plan: `btrnas-add-disk` script + tests
 
+> **Note:** This is the original plan. The implementation diverged in several places — mapper naming, runtimeInputs, no-args behavior, and output messages. See `design-docs/1-btrnas-add-disk.md` for the current design. Divergences are noted inline below.
+
 ## Context
 
 The repo has 10 passing VM tests proving every primitive works (LUKS, btrfs RAID1, grow, shrink, heal, degrade, remote-unlock, samba). No NixOS module or scripts exist yet. `btrnas-add-disk` is the first real deliverable — the one imperative command that orchestrates LUKS + btrfs for new disks. See `design-docs/1-btrnas-add-disk.md` for the full design.
@@ -63,7 +65,7 @@ Before assuming "first disk", guard against an existing-but-unmounted pool:
 
 ### Step 6: LUKS format + open
 
-- Mapper name: `btrnas-$(basename "$disk")`
+- Mapper name: `$(basename "$disk")` *(implementation uses by-id basename directly, not `btrnas-` prefix)*
 - Cleanup trap: `cryptsetup luksClose` on failure after `luksOpen`
 - `BTRNAS_LUKS_OPTS` injected via bash array (shellcheck-clean)
 
@@ -72,11 +74,11 @@ Before assuming "first disk", guard against an existing-but-unmounted pool:
 - Pool exists → `btrfs device add` + `btrfs balance start -dconvert=raid1 -mconvert=raid1`
 - No pool → `mkfs.btrfs -f`, `mkdir -p /mnt/storage`, `mount`
 
-### Step 8: Print next steps
+### Step 8: Print summary
 
-- by-id path to add to `btrnas.disks`
 - LUKS UUID
-- `sudo nixos-rebuild switch`
+- Pool status (device count, profile)
+- "This disk will auto-unlock on next reboot." *(config-first — disk is already in config)*
 
 ---
 
@@ -100,7 +102,7 @@ Before assuming "first disk", guard against an existing-but-unmounted pool:
 { pkgs }:
 pkgs.writeShellApplication {
   name = "btrnas-add-disk";
-  runtimeInputs = [ pkgs.cryptsetup pkgs.btrfs-progs pkgs.util-linux ];
+  runtimeInputs = [ pkgs.cryptsetup pkgs.btrfs-progs pkgs.util-linux pkgs.jq ];
   text = builtins.readFile ../scripts/btrnas-add-disk.sh;
 }
 ```
@@ -135,11 +137,11 @@ def add_disk(dev):
 ### Phase 3 — Third disk (add to RAID1)
 
 - `btrnas-add-disk /dev/disk/by-id/virtio-disk3`
-- Assert: all 3 mapper devices in pool (`btrnas-virtio-diskN`), all data intact
+- Assert: all 3 mapper devices in pool (`virtio-diskN`), all data intact
 
 ### Phase 4 — Validation errors
 
-- No args → `machine.fail("btrnas-add-disk")`
+- No args → `machine.succeed("btrnas-add-disk")` *(exits 0 with disk listing)*
 - Non-existent device → `machine.fail("btrnas-add-disk /dev/nonexistent")`
 - Disk already in pool → `machine.fail(add_disk("/dev/disk/by-id/virtio-disk1"))`, check "already" in output
 
