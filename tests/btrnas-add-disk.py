@@ -1,0 +1,128 @@
+start_all()
+machine.wait_for_unit("multi-user.target")
+
+passphrase = "testpassphrase"
+luks_opts = "--pbkdf pbkdf2 --pbkdf-force-iterations 1000"
+
+
+def add_disk(dev):
+    return (
+        f"echo 'erase this disk' | "
+        f"BTRNAS_PASSPHRASE='{passphrase}' "
+        f"BTRNAS_LUKS_OPTS='{luks_opts}' "
+        f"btrnas-add-disk {dev}"
+    )
+
+
+# --- Phase 1: First disk (no pool) ---
+
+with subtest("First disk creates single-drive pool"):
+    machine.succeed(add_disk("/dev/disk/by-id/virtio-disk1"))
+
+    # Pool is mounted
+    machine.succeed("mountpoint -q /mnt/storage")
+
+    # Single profile (only 1 drive)
+    df_output = machine.succeed("btrfs fi df /mnt/storage")
+    assert "Data, single" in df_output, f"Expected single profile:\n{df_output}"
+
+    # LUKS mapper exists with correct name
+    machine.succeed("test -e /dev/mapper/btrnas-vdb")
+
+    # Can write data
+    machine.succeed("echo 'day one data' > /mnt/storage/day1.txt")
+    machine.succeed("sync")
+
+# --- Phase 2: Second disk (convert to RAID1) ---
+
+with subtest("Second disk converts pool to RAID1"):
+    machine.succeed(add_disk("/dev/disk/by-id/virtio-disk2"))
+
+    df_output = machine.succeed("btrfs fi df /mnt/storage")
+    assert "Data, RAID1" in df_output, f"Expected RAID1:\n{df_output}"
+
+with subtest("Day 1 data survived RAID1 conversion"):
+    content = machine.succeed("cat /mnt/storage/day1.txt").strip()
+    assert content == "day one data", f"Expected 'day one data', got '{content}'"
+
+with subtest("Write more data on RAID1"):
+    machine.succeed("echo 'day two data' > /mnt/storage/day2.txt")
+    machine.succeed("sync")
+
+# --- Phase 3: Third disk (add to RAID1) ---
+
+with subtest("Third disk expands RAID1 pool"):
+    machine.succeed(add_disk("/dev/disk/by-id/virtio-disk3"))
+
+    # All 3 mapper devices in pool
+    fi_show = machine.succeed("btrfs fi show /mnt/storage")
+    for name in ["btrnas-vdb", "btrnas-vdc", "btrnas-vdd"]:
+        assert f"/dev/mapper/{name}" in fi_show, f"{name} missing:\n{fi_show}"
+
+with subtest("All data survived third disk addition"):
+    content1 = machine.succeed("cat /mnt/storage/day1.txt").strip()
+    content2 = machine.succeed("cat /mnt/storage/day2.txt").strip()
+    assert content1 == "day one data", f"Expected 'day one data', got '{content1}'"
+    assert content2 == "day two data", f"Expected 'day two data', got '{content2}'"
+
+# --- Phase 4: Validation errors ---
+
+with subtest("No args fails"):
+    machine.fail("btrnas-add-disk")
+
+with subtest("Non-existent device fails"):
+    machine.fail("btrnas-add-disk /dev/nonexistent")
+
+with subtest("Disk already in pool fails"):
+    result = machine.fail(add_disk("/dev/disk/by-id/virtio-disk1"))
+    assert "already" in result.lower(), f"Expected 'already' in output:\n{result}"
+
+# --- Phase 5: Crash recovery ---
+
+with subtest("Crash recovery — LUKS with no filesystem"):
+    # Format disk4 as LUKS manually (simulating crash between luksFormat and mkfs)
+    dev = "/dev/disk/by-id/virtio-disk4"
+    machine.succeed(
+        f"echo -n '{passphrase}' | cryptsetup luksFormat --batch-mode --key-file=- "
+        f"{luks_opts} {dev}"
+    )
+    # Run btrnas-add-disk — should detect recoverable state and re-format
+    machine.succeed(add_disk(dev))
+
+    # Verify it was added to the pool
+    fi_show = machine.succeed("btrfs fi show /mnt/storage")
+    assert "btrnas-vde" in fi_show, f"disk4 mapper missing:\n{fi_show}"
+
+# --- Phase 6: Unmounted pool guard ---
+
+with subtest("Unmounted pool guard — refuses when LUKS devices exist"):
+    # Unmount pool and close all LUKS devices
+    machine.succeed("umount /mnt/storage")
+    for mapper in ["btrnas-vdb", "btrnas-vdc", "btrnas-vdd", "btrnas-vde"]:
+        machine.succeed(f"cryptsetup luksClose {mapper}")
+
+    # Try to add disk5 — should refuse because other LUKS devices exist
+    result = machine.fail(add_disk("/dev/disk/by-id/virtio-disk5"))
+    assert "unlock" in result.lower(), f"Expected 'unlock' in output:\n{result}"
+
+with subtest("Pool intact after guard test"):
+    # Re-open LUKS devices and remount
+    for disk_id, mapper in [
+        ("virtio-disk1", "btrnas-vdb"),
+        ("virtio-disk2", "btrnas-vdc"),
+        ("virtio-disk3", "btrnas-vdd"),
+        ("virtio-disk4", "btrnas-vde"),
+    ]:
+        dev = f"/dev/disk/by-id/{disk_id}"
+        machine.succeed(
+            f"echo -n '{passphrase}' | cryptsetup luksOpen --key-file=- {dev} {mapper}"
+        )
+    machine.succeed("mount /dev/mapper/btrnas-vdb /mnt/storage")
+
+    # Verify data is intact
+    content1 = machine.succeed("cat /mnt/storage/day1.txt").strip()
+    content2 = machine.succeed("cat /mnt/storage/day2.txt").strip()
+    assert content1 == "day one data", f"Expected 'day one data', got '{content1}'"
+    assert content2 == "day two data", f"Expected 'day two data', got '{content2}'"
+
+machine.shutdown()
