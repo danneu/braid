@@ -105,10 +105,6 @@ Dan buys a NAS computer and installs NixOS on its internal SSD. He has one 12TB 
 
 13. Same flow — plug in, add to config, rebuild, `btrnas-add-disk`. Pool grows to ~18TB usable with RAID1 across 3 drives.
 
-## Design principles shown here
+## Design principles
 
-- **Config-first workflow:** the user adds the disk to their NixOS config, rebuilds, then formats with `btrnas-add-disk`. The module creates LUKS entries that fail gracefully until the disk is formatted.
-- **`nixos-rebuild switch` never formats or destroys data.** It is declarative and idempotent — "this is what my system looks like." Safe to run anytime.
-- **`btrnas-add-disk` is the only destructive action.** It is imperative and intentional, with a scary confirmation prompt. You run it once per new disk.
-- **The module handles:** LUKS unlock at boot, btrfs mount, Samba serving, remote SSH unlock.
-- **The user handles:** physical disk installation, adding the disk path to their NixOS config, running `btrnas-add-disk`.
+See [docs/principles.md](principles.md) for the canonical list of invariants behind this workflow.

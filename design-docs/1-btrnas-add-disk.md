@@ -12,7 +12,9 @@ $ sudo btrnas-add-disk /dev/disk/by-id/ata-Toshiba_MN07_XXXX
 
 ## Config-first workflow
 
-The NixOS config (`btrnas.disks`) is the single source of truth. The workflow is:
+See [docs/principles.md](../docs/principles.md) for the config-first principle and [docs/decisions/config-first-workflow.md](../docs/decisions/config-first-workflow.md) for detailed rationale.
+
+The workflow is:
 
 1. User plugs in a new disk
 2. Finds its by-id path: `ls /dev/disk/by-id/`
