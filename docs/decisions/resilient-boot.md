@@ -1,5 +1,7 @@
 # Decision: Resilient by Default
 
+Status: Active
+
 > Principle: [Resilient by default](../principles.md#1-resilient-by-default)
 
 ## Context

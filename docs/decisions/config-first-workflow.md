@@ -1,5 +1,7 @@
 # Decision: Config-First Workflow
 
+Status: Active
+
 > Principle: [Config-first workflow](../principles.md#2-config-first-workflow)
 
 ## Context

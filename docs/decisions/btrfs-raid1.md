@@ -1,5 +1,7 @@
 # Decision: btrfs RAID1
 
+Status: Active
+
 > Principle: [btrfs RAID1](../principles.md#6-btrfs-raid1)
 
 ## Context

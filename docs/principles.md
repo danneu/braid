@@ -20,7 +20,7 @@ All drives share one LUKS passphrase. Remote unlock depends on this — one pass
 
 ## 5. Stable identifiers
 
-All persistent storage config uses `/dev/disk/by-id/` paths. Never `/dev/sdX`. Kernel device names are unstable across reboots and hardware changes.
+All persistent storage config uses `/dev/disk/by-id/` paths. Never `/dev/sdX`. Mapper names are derived from by-id basenames so module and script stay deterministic. Kernel device names are unstable across reboots and hardware changes. [Why →](decisions/mapper-naming.md)
 
 ## 6. btrfs RAID1
 

@@ -34,6 +34,8 @@ Design principles and invariants live in [`docs/principles.md`](docs/principles.
 
 Any change to behavior or invariants must update those docs. Code that contradicts a principle is wrong — fix the code or update the principle with rationale.
 
+Decision docs must include an explicit status: `Draft`, `Active`, `Superseded`, or `Deprecated`.
+
 ## References
 
 - [User stories](docs/1-user-stories.md) — full UX walkthrough from first disk to third

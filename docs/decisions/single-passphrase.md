@@ -1,5 +1,7 @@
 # Decision: Single Passphrase
 
+Status: Active
+
 > Principle: [Single passphrase](../principles.md#4-single-passphrase)
 
 ## Context

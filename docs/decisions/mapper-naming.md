@@ -1,5 +1,9 @@
 # Decision: LUKS Mapper Naming
 
+Status: Active
+
+> Principle: [Stable identifiers](../principles.md#5-stable-identifiers)
+
 ## Context
 
 Each LUKS device needs a mapper name for `/dev/mapper/<name>`. The module creates LUKS entries at eval time; the script opens LUKS devices at runtime. They must agree on the name without explicit coordination.
