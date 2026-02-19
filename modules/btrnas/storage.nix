@@ -12,6 +12,8 @@ let
 in
 {
   config = lib.mkIf cfg.enable {
+    btrnas.daemon.enable = lib.mkDefault true;
+
     boot.initrd = {
       supportedFilesystems = [ "btrfs" ];
       systemd.enable = true;
