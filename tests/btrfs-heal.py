@@ -52,10 +52,22 @@ with subtest("btrfs scrub detects and repairs corruption"):
     scrub_status = machine.succeed("btrfs scrub status /mnt/storage")
     print(f"Scrub status:\n{scrub_status}")
 
-with subtest("File content is intact after healing"):
+with subtest("File content is intact after scrub healing"):
     # Drop caches again to ensure we read from disk
     machine.succeed("echo 3 > /proc/sys/vm/drop_caches")
     content = machine.succeed("cat /mnt/storage/precious.txt").strip()
     assert content == "important data", f"Post-heal: expected 'important data', got '{content}'"
+
+with subtest("Corrupt disk2 to test on-read auto-heal"):
+    # Pool is healthy after scrub repaired disk1. Now corrupt disk2
+    # to verify btrfs heals transparently on read — no scrub needed.
+    machine.succeed("umount /mnt/storage")
+    machine.succeed("dd if=/dev/urandom of=/dev/mapper/disk2 bs=4096 count=256 seek=1024 conv=notrunc")
+    machine.succeed("mount -o degraded /dev/mapper/disk1 /mnt/storage")
+
+with subtest("Read returns correct data without scrub (on-read auto-heal)"):
+    machine.succeed("echo 3 > /proc/sys/vm/drop_caches")
+    content = machine.succeed("cat /mnt/storage/precious.txt").strip()
+    assert content == "important data", f"On-read auto-heal: expected 'important data', got '{content}'"
 
 machine.shutdown()
