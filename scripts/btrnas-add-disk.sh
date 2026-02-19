@@ -216,6 +216,11 @@ if $pool_exists; then
   btrfs device add "/dev/mapper/$mapper_name" "$MOUNT_POINT"
   echo "Starting RAID1 balance (this may take a while on large pools)..."
   btrfs balance start -dconvert=raid1 -mconvert=raid1 "$MOUNT_POINT"
+  # Evict any dead devices left in the pool (e.g. replacing a failed drive)
+  if btrfs filesystem show "$MOUNT_POINT" 2>/dev/null | grep -qi "missing"; then
+    echo "Removing missing (dead) device from pool..."
+    btrfs device remove missing "$MOUNT_POINT"
+  fi
 else
   echo "Creating btrfs filesystem on /dev/mapper/$mapper_name..."
   mkfs.btrfs -f "/dev/mapper/$mapper_name"
