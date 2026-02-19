@@ -34,6 +34,10 @@ If a knowledgeable admin would always enable it, braid enables it by default. De
 
 NixOS VM tests validate behavior, not just command success. TDD: write failing tests first, confirm they fail for expected reasons, then implement.
 
+## 9. NixOS-native
+
+Braid only targets NixOS. No portability abstractions, no generic Linux fallbacks. Follow NixOS module conventions — same option types, patterns, and idioms as nixpkgs. When choosing between approaches, prefer what an upstream nixpkgs module would do. When in doubt, nixpkgs is the tiebreaker. [Why →](decisions/nix-native.md)
+
 ---
 
 Implementation workflow and conventions are in [AGENTS.md](../AGENTS.md).
