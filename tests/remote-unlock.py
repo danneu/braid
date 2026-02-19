@@ -34,8 +34,17 @@ with subtest("Server reaches full boot after remote unlock"):
     server.wait_for_unit("multi-user.target", timeout=120)
     server.succeed("systemctl is-active multi-user.target")
 
-with subtest("btrfs RAID1 pool is mounted"):
+with subtest("btrfs RAID1 pool is mounted via mount-btrfs-pool service"):
+    # Debug: show what devices exist and what the mount service did
+    print(server.succeed("ls -la /dev/mapper/ || true"))
+    print(server.succeed("journalctl -u mount-btrfs-pool.service --no-pager || true"))
+    print(server.succeed("btrfs device scan --all-devices 2>&1 || true"))
+    print(server.succeed("btrfs fi show 2>&1 || true"))
+    print(server.succeed("dmesg | grep -i btrfs || true"))
+
+    server.wait_for_unit("mount-btrfs-pool.service", timeout=30)
     server.succeed("mountpoint /mnt/storage")
+
     fi_show = server.succeed("btrfs fi show /mnt/storage")
     print(f"Pool after unlock:\n{fi_show}")
     for name in ["disk1", "disk2", "disk3"]:

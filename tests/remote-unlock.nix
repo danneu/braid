@@ -14,6 +14,13 @@
 # Pattern reference:
 # - nixpkgs/nixos/tests/systemd-initrd-networkd-ssh.nix
 # - nixpkgs/nixos/tests/systemd-initrd-luks-password.nix
+#
+# Design note: The btrfs pool is NOT mounted in initrd. btrfs RAID1 needs all
+# devices present to mount, but LUKS devices are unlocked sequentially via SSH.
+# If we used neededForBoot=true, systemd would try to mount as soon as the
+# first device appeared and fail. Instead, a stage-2 systemd service runs
+# `btrfs device scan` (needed because mkfs recorded the -fmt device paths)
+# and mounts the pool after all LUKS devices are available.
 { lib, pkgs, ... }:
 let
   passphrase = "testpassphrase";
@@ -31,12 +38,27 @@ in
     ];
     virtualisation.memorySize = 2048;
 
-    # Mount the btrfs RAID1 pool. Use virtualisation.fileSystems so it
-    # survives qemu-vm composition.
-    virtualisation.fileSystems."/mnt/storage" = {
-      device = "/dev/mapper/disk1";
-      fsType = "btrfs";
-      neededForBoot = true;
+    environment.systemPackages = [ pkgs.btrfs-progs ];
+
+    # Stage-2 service: after all LUKS devices are opened (in initrd) and
+    # switch-root completes, scan for btrfs devices and mount the pool.
+    # This replaces a declarative fileSystems entry because btrfs RAID1
+    # can't mount until all member devices are present, and we can't
+    # express "wait for all N LUKS devices" in a fileSystems entry.
+    systemd.services.mount-btrfs-pool = {
+      description = "Scan and mount btrfs RAID1 pool";
+      wantedBy = [ "multi-user.target" ];
+      after = [ "local-fs.target" ];
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+      };
+      path = [ pkgs.btrfs-progs pkgs.util-linux ];
+      script = ''
+        btrfs device scan
+        mkdir -p /mnt/storage
+        mount /dev/mapper/disk1 /mnt/storage
+      '';
     };
 
     boot.kernelParams = [
@@ -97,7 +119,9 @@ in
               fi
             done
 
-            # Open all temporarily for btrfs formatting
+            # Open with -fmt suffix to avoid triggering systemd device units.
+            # Using the real names would make /dev/mapper/disk1 appear,
+            # which could trigger dependent units prematurely.
             for disk in ${lib.concatStringsSep " " disks}; do
               echo -n '${passphrase}' | cryptsetup luksOpen --key-file=- "/dev/disk/by-id/virtio-$disk" "$disk-fmt"
             done
