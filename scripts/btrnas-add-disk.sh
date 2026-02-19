@@ -2,7 +2,20 @@
 # btrnas-add-disk — Format a disk with LUKS and add it to the btrnas pool.
 # Usage: sudo btrnas-add-disk /dev/disk/by-id/<device>
 
-MOUNT_POINT="/mnt/storage"
+# --- Read config ---
+
+CONFIG_FILE="/etc/btrnas/config.json"
+if [[ "${1:-}" == "--config" ]]; then
+  CONFIG_FILE="$2"; shift 2
+fi
+
+if [[ ! -f "$CONFIG_FILE" ]]; then
+  echo "Error: $CONFIG_FILE not found."
+  echo "Is the btrnas module enabled? Check your NixOS config."
+  exit 1
+fi
+
+MOUNT_POINT=$(jq -r '.mountPoint' "$CONFIG_FILE")
 
 # --- Step 1: Validate arguments ---
 
@@ -21,8 +34,25 @@ if [[ $# -eq 0 ]]; then
     pool_mappers=$(btrfs filesystem show "$MOUNT_POINT" 2>/dev/null | grep -oP '/dev/mapper/\S+' || true)
   fi
 
+  # Configured disks from config
+  configured_disks=$(jq -r '.disks[]' "$CONFIG_FILE" 2>/dev/null || true)
+
   echo ""
-  echo "Available disks (not in pool):"
+  echo "Configured disks (btrnas.disks):"
+  if [[ -n "$configured_disks" ]]; then
+    while IFS= read -r d; do
+      if [[ -b "$d" ]]; then
+        echo "  $d  (present)"
+      else
+        echo "  $d  (NOT FOUND)"
+      fi
+    done <<< "$configured_disks"
+  else
+    echo "  (none)"
+  fi
+
+  echo ""
+  echo "Available disks (not configured, not in pool):"
   echo ""
 
   found=false
@@ -37,8 +67,13 @@ if [[ $# -eq 0 ]]; then
     [[ "$base" == "$root_disk" ]] && continue
 
     # Skip if already open and in pool
-    mapper="btrnas-$base"
+    mapper=$(basename "$by_id")
     if [[ -n "$pool_mappers" ]] && echo "$pool_mappers" | grep -q "/dev/mapper/$mapper"; then
+      continue
+    fi
+
+    # Skip if in configured disks
+    if [[ -n "$configured_disks" ]] && echo "$configured_disks" | grep -qxF "$by_id"; then
       continue
     fi
 
@@ -66,14 +101,45 @@ fi
 
 disk="$1"
 
+# --- Require by-id paths ---
+
+if [[ "$disk" != /dev/disk/by-id/* ]]; then
+  echo "Error: Use a stable disk path (/dev/disk/by-id/...)"
+  echo "Find yours with: ls /dev/disk/by-id/"
+  exit 1
+fi
+
 if [[ ! -b "$disk" ]]; then
   echo "Error: $disk is not a block device"
   exit 1
 fi
 
-# Resolve the real device path for mapper naming
+# --- Config guard: disk must be in btrnas.disks ---
+
+if ! jq -e --arg disk "$disk" '.disks | index($disk)' "$CONFIG_FILE" >/dev/null 2>&1; then
+  existing_disks=$(jq -r '.disks[]' "$CONFIG_FILE" 2>/dev/null || true)
+  echo "Error: $disk is not in btrnas.disks."
+  echo ""
+  echo "Add it to your NixOS config:"
+  echo ""
+  echo "  btrnas.disks = ["
+  if [[ -n "$existing_disks" ]]; then
+    while IFS= read -r d; do
+      echo "    \"$d\""
+    done <<< "$existing_disks"
+  fi
+  echo "    \"$disk\"   # <- add this"
+  echo "  ];"
+  echo ""
+  echo "Then run: sudo nixos-rebuild switch"
+  echo "Then run: sudo btrnas-add-disk $disk"
+  exit 1
+fi
+
+# Resolve the real device path for safety checks (lsblk needs it)
 real_disk=$(readlink -f "$disk")
-mapper_name="btrnas-$(basename "$real_disk")"
+# Mapper name matches module: basename of the by-id path
+mapper_name=$(basename "$disk")
 
 # --- Step 2: Check disk state (safety guards) ---
 
@@ -283,7 +349,7 @@ fi
 # Clear the ERR trap — we succeeded
 trap - ERR
 
-# --- Step 8: Print next steps ---
+# --- Step 8: Print summary ---
 
 luks_uuid=$(cryptsetup luksUUID "$disk")
 device_count=$(btrfs filesystem show "$MOUNT_POINT" 2>/dev/null | grep -c "devid" || echo "?")
@@ -292,13 +358,7 @@ profile=$(btrfs filesystem df "$MOUNT_POINT" 2>/dev/null | head -1 || echo "unkn
 echo ""
 echo "Done."
 echo ""
-echo "Add this disk to your NixOS config:"
-echo ""
-echo "  btrnas.disks = ["
-echo "    \"$disk\"   # ← new"
-echo "  ];"
-echo ""
-echo "Then run: sudo nixos-rebuild switch"
-echo ""
 echo "LUKS UUID: $luks_uuid"
 echo "Pool status: $device_count device(s), $profile"
+echo ""
+echo "This disk will auto-unlock on next reboot."

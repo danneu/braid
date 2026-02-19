@@ -11,6 +11,13 @@ with subtest("btrfs single-disk pool is mounted"):
     df_output = machine.succeed("btrfs fi df /mnt/storage")
     assert "Data, single" in df_output, f"Expected single profile:\n{df_output}"
 
+with subtest("Runtime config file is generated"):
+    import json
+    config_raw = machine.succeed("cat /etc/btrnas/config.json")
+    config = json.loads(config_raw)
+    assert config["mountPoint"] == "/mnt/storage", f"Expected /mnt/storage, got {config['mountPoint']}"
+    assert config["disks"] == ["/dev/disk/by-id/virtio-disk1"], f"Unexpected disks: {config['disks']}"
+
 with subtest("Write and read round-trip"):
     machine.succeed("echo 'hello btrnas' > /mnt/storage/test.txt")
     content = machine.succeed("cat /mnt/storage/test.txt").strip()

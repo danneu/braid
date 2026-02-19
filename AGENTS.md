@@ -34,7 +34,6 @@ Samba:
 - **LUKS** — passphrase-based full disk encryption (keys never stored on disk), SSH remote unlock via dropbear in initrd
 - **btrfs RAID1** — checksumming filesystem with automatic self-healing from redundant copies; dynamic add/remove drives
 - **Samba** — SMB file sharing (macOS, Windows, Linux)
-- **Tailscale** — remote access over WireGuard
 
 ## Why btrfs RAID1
 
@@ -64,11 +63,21 @@ These are all no-ops when everything is healthy. Zero cost in the working case, 
 
 Three tiers of failure, all graceful:
 
-| Scenario | What happens | User sees |
-|---|---|---|
-| All drives healthy | Normal boot | Everything works |
-| One drive dead | Short timeout, btrfs mounts degraded | Samba serves files, pool shows "missing" |
-| All drives dead / wrong config | Short timeout, mount fails | System boots, SSH works, no /mnt/storage |
+| Scenario                       | What happens                         | User sees                                |
+| ------------------------------ | ------------------------------------ | ---------------------------------------- |
+| All drives healthy             | Normal boot                          | Everything works                         |
+| One drive dead                 | Short timeout, btrfs mounts degraded | Samba serves files, pool shows "missing" |
+| All drives dead / wrong config | Short timeout, mount fails           | System boots, SSH works, no /mnt/storage |
+
+## Design Principle: Module is Source of Truth
+
+The NixOS config (`btrnas.disks`) declares which disks belong to the pool. The module exports this to `/etc/btrnas/config.json` at build time so runtime tools can read it. The workflow is config-first:
+
+1. Add disk to `btrnas.disks`
+2. `nixos-rebuild switch` — config exported, LUKS entries created (nofail if disk isn't formatted yet)
+3. `btrnas-add-disk` — reads config, formats disk, adds to pool
+
+CLI tools refuse to operate on disks not in the config. This prevents config drift (disk formatted but not in NixOS config) and ensures boot-time unlock works automatically.
 
 ## Key Tradeoffs
 
@@ -80,11 +89,13 @@ Three tiers of failure, all graceful:
 
 - `make test` — Run all NixOS VM tests.
 - `make test-one t=<name>` — Run a single test by name (e.g. `make test-one t=hello-world`).
+- `make test-one-verbose t=<name>` — Run a single test with full VM logs.
 - `make test-verbose` — Run tests with full VM logs. Avoid unless debugging.
 
 ## Test Conventions
 
 Every test file must start with a block comment explaining:
+
 1. **What** is being tested
 2. **Why** this test exists and what it validates in the architecture
 3. **Dependencies** — what must already work for this test to be meaningful

@@ -9,7 +9,7 @@
 # isolation (luks, btrfs-raid1, grow, shrink, heal, degrade). This test proves
 # the script ties them together correctly.
 #
-# Dependencies: btrfs-grow1 (single → RAID1 → 3-drive works manually).
+# Dependencies: btrfs-grow1 (single -> RAID1 -> 3-drive works manually).
 {
   name = "btrnas-add-disk";
 
@@ -27,6 +27,17 @@
       pkgs.cryptsetup
       pkgs.btrfs-progs
     ];
+
+    environment.etc."btrnas/config.json".text = builtins.toJSON {
+      disks = [
+        "/dev/disk/by-id/virtio-disk1"
+        "/dev/disk/by-id/virtio-disk2"
+        "/dev/disk/by-id/virtio-disk3"
+        "/dev/disk/by-id/virtio-disk4"
+        "/dev/disk/by-id/virtio-disk5"
+      ];
+      mountPoint = "/mnt/storage";
+    };
   };
 
   testScript = builtins.readFile ./btrnas-add-disk.py;
