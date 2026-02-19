@@ -20,6 +20,7 @@
         btrfs-grow1 = pkgs.testers.nixosTest (import ./tests/btrfs-grow1.nix);
         btrfs-shrink = pkgs.testers.nixosTest (import ./tests/btrfs-shrink.nix);
         btrfs-degrade = pkgs.testers.nixosTest (import ./tests/btrfs-degrade.nix);
+        samba = pkgs.testers.nixosTest (import ./tests/samba.nix);
       };
     };
 }
