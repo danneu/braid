@@ -15,12 +15,39 @@
 # - nixpkgs/nixos/tests/systemd-initrd-networkd-ssh.nix
 # - nixpkgs/nixos/tests/systemd-initrd-luks-password.nix
 #
-# Design note: The btrfs pool is NOT mounted in initrd. btrfs RAID1 needs all
-# devices present to mount, but LUKS devices are unlocked sequentially via SSH.
-# If we used neededForBoot=true, systemd would try to mount as soon as the
-# first device appeared and fail. Instead, a stage-2 systemd service runs
-# `btrfs device scan` (needed because mkfs recorded the -fmt device paths)
-# and mounts the pool after all LUKS devices are available.
+# Hard-won design notes (each of these caused test failures):
+#
+# 1. The btrfs mount MUST happen in initrd (neededForBoot=true), not stage 2.
+#    LUKS mapper devices (/dev/mapper/disk*) don't survive switch-root unless
+#    something in initrd holds a reference to them. Without a neededForBoot
+#    mount, /dev/mapper/ is empty after switch-root.
+#
+# 2. btrfs RAID1 needs ALL member devices present to mount successfully.
+#    But LUKS devices are unlocked sequentially over SSH. If the mount unit
+#    triggers as soon as the first device appears (systemd's default behavior),
+#    btrfs fails with "failed to read chunk root" because the other devices
+#    aren't open yet. The mount uses x-systemd.requires/after to wait for a
+#    btrfs-device-scan service, which itself waits for all cryptsetup units.
+#
+# 3. The fixture MUST use -fmt suffix mapper names (disk1-fmt, not disk1).
+#    If the fixture opens devices with the real names, /dev/mapper/disk1
+#    appears and systemd immediately triggers the mount unit — before btrfs
+#    is even formatted. This causes a kernel panic via initrd-fs.target
+#    failure and panic-on-fail.
+#
+# 4. btrfs records device paths at mkfs time. Since the fixture used -fmt
+#    names, the btrfs superblock contains /dev/mapper/disk1-fmt paths. After
+#    the real cryptsetup units reopen devices as /dev/mapper/disk1, btrfs
+#    can't find them by path. `btrfs device scan` re-registers devices by
+#    UUID, solving this. NixOS's scripted initrd does this automatically via
+#    postDeviceCommands, but systemd-initrd has NO equivalent — you must add
+#    the scan service yourself.
+#
+# 5. x-systemd.requires persists across switch-root. If btrfs-device-scan
+#    only exists as an initrd service, systemd in stage 2 can't find it,
+#    considers the requirement unmet, and UNMOUNTS /mnt/storage. The service
+#    must exist in BOTH initrd (to gate the mount) and stage 2 (to satisfy
+#    the dependency after switch-root).
 { lib, pkgs, ... }:
 let
   passphrase = "testpassphrase";
@@ -40,25 +67,30 @@ in
 
     environment.systemPackages = [ pkgs.btrfs-progs ];
 
-    # Stage-2 service: after all LUKS devices are opened (in initrd) and
-    # switch-root completes, scan for btrfs devices and mount the pool.
-    # This replaces a declarative fileSystems entry because btrfs RAID1
-    # can't mount until all member devices are present, and we can't
-    # express "wait for all N LUKS devices" in a fileSystems entry.
-    systemd.services.mount-btrfs-pool = {
-      description = "Scan and mount btrfs RAID1 pool";
-      wantedBy = [ "multi-user.target" ];
-      after = [ "local-fs.target" ];
+    # Mount in initrd. The x-systemd options prevent the mount from starting
+    # until btrfs-device-scan completes, which itself waits for all 3
+    # cryptsetup units. This solves the "mount triggers on first device" race.
+    virtualisation.fileSystems."/mnt/storage" = {
+      device = "/dev/mapper/disk1";
+      fsType = "btrfs";
+      neededForBoot = true;
+      options = [
+        "x-systemd.requires=btrfs-device-scan.service"
+        "x-systemd.after=btrfs-device-scan.service"
+      ];
+    };
+
+    # Stage-2 copy of btrfs-device-scan. The x-systemd.requires on the mount
+    # persists across switch-root, so the service must also exist in stage 2
+    # or systemd will unmount /mnt/storage after switch-root.
+    systemd.services.btrfs-device-scan = {
+      description = "Scan for btrfs multi-device filesystems";
       serviceConfig = {
         Type = "oneshot";
         RemainAfterExit = true;
       };
-      path = [ pkgs.btrfs-progs pkgs.util-linux ];
-      script = ''
-        btrfs device scan
-        mkdir -p /mnt/storage
-        mount /dev/mapper/disk1 /mnt/storage
-      '';
+      path = [ pkgs.btrfs-progs ];
+      script = "btrfs device scan";
     };
 
     boot.kernelParams = [
@@ -119,8 +151,8 @@ in
               fi
             done
 
-            # Open with -fmt suffix to avoid triggering systemd device units.
-            # Using the real names would make /dev/mapper/disk1 appear,
+            # Open with -fmt suffix to avoid triggering systemd device/mount
+            # units. Using the real names would make /dev/mapper/disk1 appear,
             # which could trigger dependent units prematurely.
             for disk in ${lib.concatStringsSep " " disks}; do
               echo -n '${passphrase}' | cryptsetup luksOpen --key-file=- "/dev/disk/by-id/virtio-$disk" "$disk-fmt"
@@ -136,6 +168,26 @@ in
               cryptsetup luksClose "$disk-fmt"
             done
           '';
+        };
+
+        # After all LUKS devices are unlocked, scan for btrfs devices so
+        # the kernel learns the filesystem members at their new paths
+        # (/dev/mapper/disk* instead of the /dev/mapper/disk*-fmt paths
+        # recorded at mkfs time). The mount unit depends on this via
+        # x-systemd.requires/after options.
+        services.btrfs-device-scan = {
+          description = "Scan for btrfs multi-device filesystems";
+          after = map (d: "systemd-cryptsetup@${d}.service") disks;
+          requires = map (d: "systemd-cryptsetup@${d}.service") disks;
+          before = [ "initrd-fs.target" ];
+          wantedBy = [ "initrd-fs.target" ];
+          unitConfig.DefaultDependencies = false;
+          serviceConfig = {
+            Type = "oneshot";
+            RemainAfterExit = true;
+          };
+          path = [ pkgs.btrfs-progs ];
+          script = "btrfs device scan";
         };
       };
 
