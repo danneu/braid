@@ -1,24 +1,22 @@
-# Test: degraded-boot
+# Test: replace-failed-disk
 #
-# What: Server boots with 3 LUKS-encrypted drives pre-formatted as btrfs RAID1,
-# but disk3's LUKS header is zeroed (simulating drive death). The server boots
-# into initrd, client unlocks disk1 and disk2 over SSH, and the server continues
-# to full boot with btrfs mounted in degraded mode (2 of 3 drives). Then Samba
-# serves the degraded pool and a client reads/writes files over SMB.
+# What: Server boots with 3 LUKS-encrypted drives as btrfs RAID1, but disk3 is
+# bricked (simulating drive death). The server boots degraded via initrd SSH
+# unlock, then btrnas-add-disk replaces the dead drive with a fresh disk4. The
+# pool returns to healthy 3-drive RAID1 with all data intact.
 #
-# Why: When a drive dies in the RAID1 NAS, the system must not hang or require a
-# rebuild to boot. This test verifies that proactive configuration — nofail on
-# LUKS, degraded on btrfs mount, wants instead of requires on device-scan — lets
-# the system boot and serve data with N-1 drives, including over SMB.
+# Why: This is the scariest real-world scenario — a drive dies, you boot
+# degraded, and you need to replace it without reinstalling. It crosses every
+# integration boundary: initrd SSH, degraded btrfs, and btrnas-add-disk. No
+# other test covers this full recovery cycle.
 #
-# Dependencies: remote-unlock (same 2-machine initrd SSH pattern), samba.
+# Dependencies: degraded-boot (initrd SSH + degraded mount), btrnas-add-disk
+# (LUKS format + pool expansion).
 #
-# Changes from remote-unlock (4 targeted diffs):
-# 1. crypttabExtraOpts: nofail + x-systemd.device-timeout=10s on LUKS devices
-# 2. btrfs-device-scan: wants instead of requires on cryptsetup units
-# 3. Mount options: add "degraded" to allow mounting with missing members
-# 4. Fixture: write test data before bricking disk3's LUKS header
-# Plus Samba config (services.samba, users.users.nas, firewall, cifs-utils).
+# Changes from degraded-boot:
+# 1. A 4th virtual disk (disk4) as the replacement drive
+# 2. btrnas-add-disk + cryptsetup in environment.systemPackages
+# 3. No Samba — this test focuses on the replacement cycle
 { lib, pkgs, ... }:
 let
   passphrase = "testpassphrase";
@@ -26,17 +24,22 @@ let
   disks = [ "disk1" "disk2" "disk3" ];
 in
 {
-  name = "degraded-boot";
+  name = "replace-failed-disk";
 
   nodes.server = { config, pkgs, ... }: {
     virtualisation.emptyDiskImages = [
       { size = 256; driveConfig.deviceExtraOpts.serial = "disk1"; }
       { size = 256; driveConfig.deviceExtraOpts.serial = "disk2"; }
       { size = 256; driveConfig.deviceExtraOpts.serial = "disk3"; }
+      { size = 256; driveConfig.deviceExtraOpts.serial = "disk4"; }
     ];
     virtualisation.memorySize = 2048;
 
-    environment.systemPackages = [ pkgs.btrfs-progs ];
+    environment.systemPackages = [
+      (import ../nix/btrnas-add-disk.nix { inherit pkgs; })
+      pkgs.cryptsetup
+      pkgs.btrfs-progs
+    ];
 
     # Mount in initrd with degraded option. The x-systemd options prevent the
     # mount from starting until btrfs-device-scan completes. "degraded" allows
@@ -191,27 +194,6 @@ in
         };
       };
     };
-
-    # Samba: serve the degraded pool over SMB
-    services.samba = {
-      enable = true;
-      settings = {
-        storage = {
-          path = "/mnt/storage";
-          browseable = "yes";
-          "read only" = "no";
-          "guest ok" = "no";
-          "force user" = "nas";
-        };
-      };
-    };
-
-    users.users.nas = {
-      isNormalUser = true;
-      description = "Samba share user";
-    };
-
-    networking.firewall.allowedTCPPorts = [ 445 ];
   };
 
   nodes.client = { pkgs, ... }: {
@@ -219,8 +201,7 @@ in
       source = initrdSshFixtureDir + "/id_ed25519";
       mode = "0600";
     };
-    environment.systemPackages = [ pkgs.cifs-utils ];
   };
 
-  testScript = builtins.readFile ./degraded-boot.py;
+  testScript = builtins.readFile ./replace-failed-disk.py;
 }

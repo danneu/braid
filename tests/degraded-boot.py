@@ -73,5 +73,43 @@ with subtest("Journal shows disk3 cryptsetup failure"):
     # Accept either: journal has failure evidence, or the unit simply doesn't
     # exist in stage-2 journal (which itself proves it never succeeded)
 
+# Phase 2 — Samba on degraded pool
+
+smb_password = "smbTestPass123"
+
+with subtest("Set ownership on degraded pool"):
+    server.succeed("chown nas /mnt/storage")
+    server.succeed("chown nas /mnt/storage/survived.txt")
+
+with subtest("Set up Samba password and restart"):
+    server.succeed(f"(echo '{smb_password}'; echo '{smb_password}') | smbpasswd -a -s nas")
+    server.succeed("systemctl restart samba-smbd")
+    server.wait_for_unit("samba-smbd")
+    server.wait_for_open_port(445)
+
+with subtest("Client mounts SMB share from degraded pool"):
+    client.succeed("mkdir -p /mnt/nas")
+    client.succeed(f"mount -t cifs //server/storage /mnt/nas -o username=nas,password={smb_password},vers=3.0")
+    client.succeed("mountpoint /mnt/nas")
+
+with subtest("Client reads pre-existing data via SMB from degraded pool"):
+    content = client.succeed("cat /mnt/nas/survived.txt").strip()
+    assert content == "data written before drive death", (
+        f"Expected 'data written before drive death', got '{content}'"
+    )
+
+with subtest("Client writes new file via SMB to degraded pool"):
+    client.succeed("echo 'written via smb after drive death' > /mnt/nas/smb-new.txt")
+    content = client.succeed("cat /mnt/nas/smb-new.txt").strip()
+    assert content == "written via smb after drive death", (
+        f"Expected 'written via smb after drive death', got '{content}'"
+    )
+
+with subtest("SMB write landed on btrfs pool on server"):
+    content = server.succeed("cat /mnt/storage/smb-new.txt").strip()
+    assert content == "written via smb after drive death", (
+        f"Server expected 'written via smb after drive death', got '{content}'"
+    )
+
 server.shutdown()
 client.shutdown()
