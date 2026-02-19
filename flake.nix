@@ -29,6 +29,9 @@
         btrnas-add-disk = pkgs.testers.nixosTest (import ./tests/5-btrnas-add-disk.nix);
         first-boot-single-disk = pkgs.testers.nixosTest (import ./tests/6-first-boot-single-disk.nix);
         replace-failed-disk = pkgs.testers.nixosTest (import ./tests/7-replace-failed-disk.nix);
+        btrnas-module-disabled = pkgs.testers.nixosTest (import ./tests/btrnas-module/00-disabled.nix);
+        btrnas-module-single-disk = pkgs.testers.nixosTest (import ./tests/btrnas-module/01-single-disk.nix);
+        btrnas-module-raid1 = pkgs.testers.nixosTest (import ./tests/btrnas-module/02-raid1.nix);
       };
     };
 }

@@ -6,6 +6,58 @@ MOUNT_POINT="/mnt/storage"
 
 # --- Step 1: Validate arguments ---
 
+if [[ $# -eq 0 ]]; then
+  # Find root disk to exclude
+  root_dev=$(findmnt -n -o SOURCE / 2>/dev/null | head -1)
+  root_disk=""
+  if [[ -n "$root_dev" ]]; then
+    root_disk=$(lsblk -ndo PKNAME "$root_dev" 2>/dev/null || true)
+    [[ -z "$root_disk" ]] && root_disk=$(basename "$root_dev")
+  fi
+
+  # Collect pool member mapper paths to exclude
+  pool_mappers=""
+  if mountpoint -q "$MOUNT_POINT" 2>/dev/null; then
+    pool_mappers=$(btrfs filesystem show "$MOUNT_POINT" 2>/dev/null | grep -oP '/dev/mapper/\S+' || true)
+  fi
+
+  echo ""
+  echo "Available disks (not in pool):"
+  echo ""
+
+  found=false
+  for by_id in /dev/disk/by-id/*; do
+    [[ "$by_id" == *-part* ]] && continue
+    [[ ! -b "$by_id" ]] && continue
+
+    real=$(readlink -f "$by_id")
+    base=$(basename "$real")
+
+    # Skip root disk
+    [[ "$base" == "$root_disk" ]] && continue
+
+    # Skip if already open and in pool
+    mapper="btrnas-$base"
+    if [[ -n "$pool_mappers" ]] && echo "$pool_mappers" | grep -q "/dev/mapper/$mapper"; then
+      continue
+    fi
+
+    model=$(lsblk -ndo MODEL "$real" 2>/dev/null | xargs || true)
+    size=$(lsblk -ndo SIZE "$real" 2>/dev/null | xargs || true)
+
+    printf "  %-55s %-20s %s\n" "$by_id" "${model:-(unknown)}" "${size}"
+    found=true
+  done
+
+  if ! $found; then
+    echo "  (none found)"
+  fi
+
+  echo ""
+  echo "Usage: btrnas-add-disk <disk>"
+  exit 0
+fi
+
 if [[ $# -ne 1 ]]; then
   echo "Usage: btrnas-add-disk <block-device>"
   echo "Example: btrnas-add-disk /dev/disk/by-id/ata-Toshiba_MN07_XXXX"

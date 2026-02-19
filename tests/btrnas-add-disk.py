@@ -14,6 +14,15 @@ def add_disk(dev):
     )
 
 
+# --- Phase 0: No-args disk listing ---
+
+with subtest("No args lists all available disks"):
+    output = machine.succeed("btrnas-add-disk")
+    assert "Available disks" in output, f"Expected disk listing:\n{output}"
+    # All 5 test disks should appear (none in pool yet)
+    for i in range(1, 6):
+        assert f"virtio-disk{i}" in output, f"disk{i} missing from listing:\n{output}"
+
 # --- Phase 1: First disk (no pool) ---
 
 with subtest("First disk creates single-drive pool"):
@@ -67,8 +76,14 @@ with subtest("All data survived third disk addition"):
 
 # --- Phase 4: Validation errors ---
 
-with subtest("No args fails"):
-    machine.fail("btrnas-add-disk")
+with subtest("No args lists only remaining disks"):
+    output = machine.succeed("btrnas-add-disk")
+    assert "Available disks" in output
+    # disk1-3 are in pool, disk4-5 should still be listed
+    for i in [4, 5]:
+        assert f"virtio-disk{i}" in output, f"disk{i} should be available:\n{output}"
+    for i in [1, 2, 3]:
+        assert f"virtio-disk{i}" not in output, f"disk{i} should not be listed (in pool):\n{output}"
 
 with subtest("Non-existent device fails"):
     machine.fail("btrnas-add-disk /dev/nonexistent")
