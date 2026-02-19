@@ -61,6 +61,7 @@ in
         storePaths = [
           keyFile
           pkgs.cryptsetup
+          pkgs.btrfs-progs
           pkgs.util-linux
         ];
 
