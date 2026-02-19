@@ -27,6 +27,7 @@
         remote-unlock = pkgs.testers.nixosTest (import ./tests/4-remote-unlock.nix);
         degraded-boot = pkgs.testers.nixosTest (import ./tests/4-degraded-boot.nix);
         btrnas-add-disk = pkgs.testers.nixosTest (import ./tests/5-btrnas-add-disk.nix);
+        first-boot-single-disk = pkgs.testers.nixosTest (import ./tests/6-first-boot-single-disk.nix);
       };
     };
 }
