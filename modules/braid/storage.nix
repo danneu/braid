@@ -50,6 +50,12 @@ in
       ];
     };
 
+    services.btrfs.autoScrub = {
+      enable = lib.mkDefault true;
+      interval = lib.mkDefault "monthly";
+      fileSystems = [ cfg.mountPoint ];
+    };
+
     # Stage-2 copy: x-systemd.requires persists across switch-root
     systemd.services.btrfs-device-scan = {
       description = "Scan for btrfs multi-device filesystems";
