@@ -29,8 +29,7 @@ in
         wantedBy = [ "initrd-fs.target" ];
         unitConfig.DefaultDependencies = false;
         serviceConfig = { Type = "oneshot"; RemainAfterExit = true; };
-        path = [ pkgs.btrfs-progs ];
-        script = "btrfs device scan";
+        script = "${pkgs.btrfs-progs}/bin/btrfs device scan";
       };
     };
 
@@ -48,8 +47,7 @@ in
     systemd.services.btrfs-device-scan = {
       description = "Scan for btrfs multi-device filesystems";
       serviceConfig = { Type = "oneshot"; RemainAfterExit = true; };
-      path = [ pkgs.btrfs-progs ];
-      script = "btrfs device scan";
+      script = "${pkgs.btrfs-progs}/bin/btrfs device scan";
     };
   };
 }
