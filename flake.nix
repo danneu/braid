@@ -32,6 +32,9 @@
         btrnas-module-disabled = pkgs.testers.nixosTest (import ./tests/btrnas-module/00-disabled.nix);
         btrnas-module-single-disk = pkgs.testers.nixosTest (import ./tests/btrnas-module/01-single-disk.nix);
         btrnas-module-raid1 = pkgs.testers.nixosTest (import ./tests/btrnas-module/02-raid1.nix);
+        btrnas-module-degraded-raid1 = pkgs.testers.nixosTest (import ./tests/btrnas-module/03-degraded-raid1.nix);
+        btrnas-module-bad-config = pkgs.testers.nixosTest (import ./tests/btrnas-module/04-bad-config.nix);
+        btrnas-module-single-disk-dead = pkgs.testers.nixosTest (import ./tests/btrnas-module/05-single-disk-dead.nix);
       };
     };
 }

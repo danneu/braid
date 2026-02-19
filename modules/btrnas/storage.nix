@@ -18,13 +18,16 @@ in
 
       luks.devices = builtins.listToAttrs (map (d: {
         name = d.name;
-        value = { device = d.device; };
+        value = {
+          device = d.device;
+          crypttabExtraOpts = [ "nofail" "x-systemd.device-timeout=10s" ];
+        };
       }) diskAttrs);
 
       systemd.services.btrfs-device-scan = {
         description = "Scan for btrfs multi-device filesystems";
         after = map cryptsetupUnit mapperNames;
-        requires = map cryptsetupUnit mapperNames;
+        wants = map cryptsetupUnit mapperNames;
         before = [ "initrd-fs.target" ];
         wantedBy = [ "initrd-fs.target" ];
         unitConfig.DefaultDependencies = false;
@@ -38,6 +41,8 @@ in
       fsType = "btrfs";
       neededForBoot = true;
       options = [
+        "degraded"
+        "nofail"
         "x-systemd.requires=btrfs-device-scan.service"
         "x-systemd.after=btrfs-device-scan.service"
       ];

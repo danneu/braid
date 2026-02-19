@@ -1,17 +1,17 @@
-# Test: btrnas-module-raid1
+# Test: btrnas-module-degraded-raid1
 #
-# What: Enables the btrnas module with 3 disks. The module generates LUKS
-# device config for all 3, btrfs-device-scan services, and the mount unit.
-# An initrd fixture pre-formats the empty virtual drives as LUKS + btrfs
-# RAID1. KeyFiles auto-unlock LUKS (no SSH needed). The VM boots to
-# multi-user with /mnt/storage mounted as a RAID1 pool.
+# What: Enables the btrnas module with 3 disks. An initrd fixture formats all 3
+# as LUKS + btrfs RAID1, writes test data, then bricks disk3's LUKS header.
+# The module's nofail/wants/degraded defaults let disk3's cryptsetup fail
+# without cascading. The VM boots with the pool mounted degraded (2 of 3),
+# test data survives, and new writes work.
 #
-# Why: Validates the module's storage path with the production-like 3-disk
-# RAID1 configuration — all 3 LUKS devices mapped, btrfs-device-scan gating
-# the mount, and correct RAID1 profile on the pool.
+# Why: Validates the "one drive dead" tier of graceful failure using the module's
+# own defaults — no manual overrides needed. This is the most common failure
+# scenario: a single drive dies in a RAID1 pool.
 #
-# Dependencies: btrnas-module-single-disk (single-disk path works),
-# hello-world (VM infra).
+# Dependencies: btrnas-module-raid1 (happy-path RAID1 works),
+# btrnas-module-bad-config (nofail boot-continue works).
 { lib, pkgs, ... }:
 let
   passphrase = "testpassphrase";
@@ -24,7 +24,7 @@ let
     "systemd-cryptsetup@${builtins.replaceStrings ["-"] ["\\x2d"] name}.service";
 in
 {
-  name = "btrnas-module-raid1";
+  name = "btrnas-module-degraded-raid1";
 
   nodes.machine = { pkgs, ... }: {
     imports = [ ../../modules/btrnas ];
@@ -64,10 +64,9 @@ in
           pkgs.util-linux
         ];
 
-        # Fixture: format empty drives as LUKS + btrfs RAID1
-        # before the real cryptsetup units run.
+        # Fixture: format LUKS + btrfs RAID1, write test data, brick disk3
         services.prepare-luks-btrfs-fixture = {
-          description = "Prepare LUKS + btrfs RAID1 fixture";
+          description = "Prepare LUKS + btrfs RAID1 fixture with bricked disk3";
           requiredBy = map cryptsetupUnit mapperNames;
           before = [ "cryptsetup-pre.target" ]
             ++ map cryptsetupUnit mapperNames;
@@ -83,6 +82,7 @@ in
           script = ''
             set -eu
 
+            # Wait for all drives and LUKS-format them
             for disk in ${lib.concatStringsSep " " disks}; do
               dev="/dev/disk/by-id/virtio-$disk"
               i=0
@@ -99,25 +99,37 @@ in
               fi
             done
 
+            # Open with -fmt suffix to avoid triggering systemd units
             for disk in ${lib.concatStringsSep " " disks}; do
               echo -n '${passphrase}' | cryptsetup luksOpen --key-file=- \
                 "/dev/disk/by-id/virtio-$disk" "virtio-$disk-fmt"
             done
 
+            # Create btrfs RAID1 across all drives
             if ! btrfs filesystem show /dev/mapper/virtio-disk1-fmt >/dev/null 2>&1; then
               mkfs.btrfs -f -d raid1 -m raid1 \
                 ${lib.concatMapStringsSep " " (d: "/dev/mapper/virtio-${d}-fmt") disks}
             fi
 
+            # Mount and write test data before bricking disk3
+            mkdir -p /tmp/fixture-mount
+            mount /dev/mapper/virtio-disk1-fmt /tmp/fixture-mount
+            echo 'data written before drive death' > /tmp/fixture-mount/survived.txt
+            sync
+            umount /tmp/fixture-mount
+
+            # Close all — the real cryptsetup units will reopen them
             for disk in ${lib.concatStringsSep " " disks}; do
               cryptsetup luksClose "virtio-$disk-fmt"
             done
+
+            # Brick disk3 — zero the LUKS header so cryptsetup fails on it
+            dd if=/dev/zero of=/dev/disk/by-id/virtio-disk3 bs=1M count=10
           '';
         };
       };
 
       # Override module's luks.devices: add keyFile for auto-unlock in VM.
-      # mkVMOverride needed because qemu-vm.nix blanket-overrides luks.devices.
       luks.devices = lib.mkVMOverride (
         lib.genAttrs mapperNames (name: {
           device = "/dev/disk/by-id/virtio-${lib.removePrefix "virtio-" name}";
@@ -128,5 +140,5 @@ in
     };
   };
 
-  testScript = builtins.readFile ./02-raid1.py;
+  testScript = builtins.readFile ./03-degraded-raid1.py;
 }

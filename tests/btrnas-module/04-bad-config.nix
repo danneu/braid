@@ -1,0 +1,60 @@
+# Test: btrnas-module-bad-config
+#
+# What: Enables the btrnas module with disk paths that don't exist. No virtual
+# disks are attached. LUKS units wait for devices that never appear, timeout
+# after 10s, and fail. The mount also fails (no mapper devices). Boot completes
+# anyway thanks to nofail on both LUKS and mount.
+#
+# Why: Validates the "all drives dead / wrong config" tier of graceful failure.
+# The OS lives on an internal SSD — a misconfigured or missing data pool must
+# never prevent the system from booting. This is the critical gate test: if
+# neededForBoot + nofail doesn't let boot continue when the mount truly fails,
+# we need a different approach.
+#
+# Dependencies: btrnas-module-disabled (module loads without error).
+{ lib, pkgs, ... }:
+{
+  name = "btrnas-module-bad-config";
+
+  nodes.machine = { pkgs, ... }: {
+    imports = [ ../../modules/btrnas ];
+
+    btrnas = {
+      enable = true;
+      disks = [
+        "/dev/disk/by-id/phantom1"
+        "/dev/disk/by-id/phantom2"
+      ];
+    };
+
+    # No virtualisation.emptyDiskImages — the block devices never appear.
+    virtualisation.memorySize = 2048;
+
+    # Re-declare mount for VM compat (qemu-vm.nix clobbers fileSystems).
+    # Mirrors the module's mount settings exactly.
+    virtualisation.fileSystems."/mnt/storage" = {
+      device = "/dev/mapper/phantom1";
+      fsType = "btrfs";
+      neededForBoot = true;
+      options = [
+        "degraded"
+        "nofail"
+        "x-systemd.requires=btrfs-device-scan.service"
+        "x-systemd.after=btrfs-device-scan.service"
+      ];
+    };
+
+    boot.initrd = {
+      # Override module's luks.devices: must use mkVMOverride because
+      # qemu-vm.nix blanket-overrides luks.devices.
+      luks.devices = lib.mkVMOverride (
+        lib.genAttrs [ "phantom1" "phantom2" ] (name: {
+          device = "/dev/disk/by-id/${name}";
+          crypttabExtraOpts = [ "nofail" "x-systemd.device-timeout=10s" ];
+        })
+      );
+    };
+  };
+
+  testScript = builtins.readFile ./04-bad-config.py;
+}

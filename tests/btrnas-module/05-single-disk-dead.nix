@@ -1,22 +1,21 @@
-# Test: btrnas-module-raid1
+# Test: btrnas-module-single-disk-dead
 #
-# What: Enables the btrnas module with 3 disks. The module generates LUKS
-# device config for all 3, btrfs-device-scan services, and the mount unit.
-# An initrd fixture pre-formats the empty virtual drives as LUKS + btrfs
-# RAID1. KeyFiles auto-unlock LUKS (no SSH needed). The VM boots to
-# multi-user with /mnt/storage mounted as a RAID1 pool.
+# What: Enables the btrnas module with a single disk. An initrd fixture formats
+# it as LUKS + single-disk btrfs, then bricks the LUKS header. The module's
+# nofail defaults let the cryptsetup failure pass without cascading. The VM
+# boots to multi-user with no /mnt/storage (no RAID1 fallback).
 #
-# Why: Validates the module's storage path with the production-like 3-disk
-# RAID1 configuration — all 3 LUKS devices mapped, btrfs-device-scan gating
-# the mount, and correct RAID1 profile on the pool.
+# Why: Validates the "all drives dead" tier on the simplest config. With only
+# one drive and no RAID1, a dead drive means total data loss — but the system
+# must still boot so the user can SSH in and fix the config or replace the drive.
 #
-# Dependencies: btrnas-module-single-disk (single-disk path works),
-# hello-world (VM infra).
+# Dependencies: btrnas-module-single-disk (single-disk happy path),
+# btrnas-module-bad-config (nofail boot-continue works).
 { lib, pkgs, ... }:
 let
   passphrase = "testpassphrase";
   keyFile = pkgs.writeText "luks-test-key" passphrase;
-  disks = [ "disk1" "disk2" "disk3" ];
+  disks = [ "disk1" ];
   mapperNames = map (d: "virtio-${d}") disks;
 
   # systemd-cryptsetup-generator escapes hyphens in unit instance names.
@@ -24,7 +23,7 @@ let
     "systemd-cryptsetup@${builtins.replaceStrings ["-"] ["\\x2d"] name}.service";
 in
 {
-  name = "btrnas-module-raid1";
+  name = "btrnas-module-single-disk-dead";
 
   nodes.machine = { pkgs, ... }: {
     imports = [ ../../modules/btrnas ];
@@ -36,12 +35,8 @@ in
 
     virtualisation.emptyDiskImages = [
       { size = 256; driveConfig.deviceExtraOpts.serial = "disk1"; }
-      { size = 256; driveConfig.deviceExtraOpts.serial = "disk2"; }
-      { size = 256; driveConfig.deviceExtraOpts.serial = "disk3"; }
     ];
     virtualisation.memorySize = 2048;
-
-    environment.systemPackages = [ pkgs.btrfs-progs ];
 
     # Re-declare mount for VM compat (qemu-vm.nix clobbers fileSystems)
     virtualisation.fileSystems."/mnt/storage" = {
@@ -64,10 +59,9 @@ in
           pkgs.util-linux
         ];
 
-        # Fixture: format empty drives as LUKS + btrfs RAID1
-        # before the real cryptsetup units run.
+        # Fixture: format LUKS + btrfs, then brick the LUKS header
         services.prepare-luks-btrfs-fixture = {
-          description = "Prepare LUKS + btrfs RAID1 fixture";
+          description = "Prepare LUKS + btrfs fixture then brick disk";
           requiredBy = map cryptsetupUnit mapperNames;
           before = [ "cryptsetup-pre.target" ]
             ++ map cryptsetupUnit mapperNames;
@@ -83,41 +77,36 @@ in
           script = ''
             set -eu
 
-            for disk in ${lib.concatStringsSep " " disks}; do
-              dev="/dev/disk/by-id/virtio-$disk"
-              i=0
-              while [ "$i" -lt 100 ]; do
-                [ -b "$dev" ] && break
-                sleep 0.1
-                i=$((i + 1))
-              done
-              test -b "$dev"
-
-              if ! cryptsetup isLuks "$dev" 2>/dev/null; then
-                echo -n '${passphrase}' | cryptsetup luksFormat --batch-mode \
-                  --key-file=- --pbkdf pbkdf2 --pbkdf-force-iterations 1000 "$dev"
-              fi
+            dev="/dev/disk/by-id/virtio-disk1"
+            i=0
+            while [ "$i" -lt 100 ]; do
+              [ -b "$dev" ] && break
+              sleep 0.1
+              i=$((i + 1))
             done
+            test -b "$dev"
 
-            for disk in ${lib.concatStringsSep " " disks}; do
-              echo -n '${passphrase}' | cryptsetup luksOpen --key-file=- \
-                "/dev/disk/by-id/virtio-$disk" "virtio-$disk-fmt"
-            done
-
-            if ! btrfs filesystem show /dev/mapper/virtio-disk1-fmt >/dev/null 2>&1; then
-              mkfs.btrfs -f -d raid1 -m raid1 \
-                ${lib.concatMapStringsSep " " (d: "/dev/mapper/virtio-${d}-fmt") disks}
+            if ! cryptsetup isLuks "$dev" 2>/dev/null; then
+              echo -n '${passphrase}' | cryptsetup luksFormat --batch-mode \
+                --key-file=- --pbkdf pbkdf2 --pbkdf-force-iterations 1000 "$dev"
             fi
 
-            for disk in ${lib.concatStringsSep " " disks}; do
-              cryptsetup luksClose "virtio-$disk-fmt"
-            done
+            echo -n '${passphrase}' | cryptsetup luksOpen --key-file=- \
+              "$dev" "virtio-disk1-fmt"
+
+            if ! btrfs filesystem show /dev/mapper/virtio-disk1-fmt >/dev/null 2>&1; then
+              mkfs.btrfs -f /dev/mapper/virtio-disk1-fmt
+            fi
+
+            cryptsetup luksClose "virtio-disk1-fmt"
+
+            # Brick the disk — zero the LUKS header so cryptsetup fails
+            dd if=/dev/zero of=/dev/disk/by-id/virtio-disk1 bs=1M count=10
           '';
         };
       };
 
       # Override module's luks.devices: add keyFile for auto-unlock in VM.
-      # mkVMOverride needed because qemu-vm.nix blanket-overrides luks.devices.
       luks.devices = lib.mkVMOverride (
         lib.genAttrs mapperNames (name: {
           device = "/dev/disk/by-id/virtio-${lib.removePrefix "virtio-" name}";
@@ -128,5 +117,5 @@ in
     };
   };
 
-  testScript = builtins.readFile ./02-raid1.py;
+  testScript = builtins.readFile ./05-single-disk-dead.py;
 }

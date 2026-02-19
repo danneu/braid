@@ -47,6 +47,8 @@ in
       fsType = "btrfs";
       neededForBoot = true;
       options = [
+        "degraded"
+        "nofail"
         "x-systemd.requires=btrfs-device-scan.service"
         "x-systemd.after=btrfs-device-scan.service"
       ];
@@ -111,6 +113,7 @@ in
         lib.genAttrs mapperNames (name: {
           device = "/dev/disk/by-id/virtio-${lib.removePrefix "virtio-" name}";
           keyFile = "${keyFile}";
+          crypttabExtraOpts = [ "nofail" "x-systemd.device-timeout=10s" ];
         })
       );
     };

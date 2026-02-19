@@ -48,6 +48,28 @@ Samba:
 
 See [`docs/1-user-stories.md`](docs/1-user-stories.md) — walks through the full experience from first disk to third, including `btrnas-add-disk` and the module's role.
 
+## Design Principle: Resilient by Default
+
+The OS lives on an internal SSD. The data drives are separate. Nothing about the data drives — bad config, dead drive, unplugged cable — should ever prevent the system from booting. The data pool is an external resource, like a network mount. The module tries to bring it up, but if it's not there, the box is still a working Linux machine you can SSH into and fix. The module should never be the reason you can't reach your NAS.
+
+This means every module defaults to graceful failure, not hard failure:
+
+- **LUKS devices**: `nofail` + short timeout. A missing drive times out and boot continues.
+- **btrfs-device-scan**: `wants`, not `requires`. A failed cryptsetup doesn't cascade.
+- **Mount**: `nofail` + `degraded`. A failed mount doesn't block boot. A partial pool still serves files.
+- **Samba**: a broken share config shouldn't prevent boot.
+- **Remote unlock (dropbear)**: a broken SSH config shouldn't prevent boot.
+
+These are all no-ops when everything is healthy. Zero cost in the working case, graceful in every failure case. There is no `degraded` toggle or `nofail` option — resilience is the default, not an option.
+
+Three tiers of failure, all graceful:
+
+| Scenario | What happens | User sees |
+|---|---|---|
+| All drives healthy | Normal boot | Everything works |
+| One drive dead | Short timeout, btrfs mounts degraded | Samba serves files, pool shows "missing" |
+| All drives dead / wrong config | Short timeout, mount fails | System boots, SSH works, no /mnt/storage |
+
 ## Key Tradeoffs
 
 - **50% space overhead** — RAID1 stores 2 copies of every chunk. 3x 12TB = ~18TB usable. Parity schemes (SnapRAID, ZFS raidz) would give ~24TB, but btrfs RAID5/6 is not production-ready.
