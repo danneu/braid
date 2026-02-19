@@ -15,6 +15,7 @@
         hello-world = pkgs.testers.nixosTest (import ./tests/hello-world.nix);
         luks = pkgs.testers.nixosTest (import ./tests/luks.nix);
         btrfs-raid1 = pkgs.testers.nixosTest (import ./tests/btrfs-raid1.nix);
+        btrfs-heal = pkgs.testers.nixosTest (import ./tests/btrfs-heal.nix);
       };
     };
 }
