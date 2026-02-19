@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(nix log:*)"
+      "Bash(nix log:*)",
+      "Bash(grep:*)"
     ]
   }
 }
