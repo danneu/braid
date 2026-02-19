@@ -16,6 +16,7 @@
         luks = pkgs.testers.nixosTest (import ./tests/luks.nix);
         btrfs-raid1 = pkgs.testers.nixosTest (import ./tests/btrfs-raid1.nix);
         btrfs-heal = pkgs.testers.nixosTest (import ./tests/btrfs-heal.nix);
+        btrfs-grow = pkgs.testers.nixosTest (import ./tests/btrfs-grow.nix);
       };
     };
 }
