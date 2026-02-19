@@ -14,6 +14,30 @@ with subtest("Initrd SSH is up with pending ask-password requests"):
         timeout=120,
     )
 
+with subtest("Wrong passphrase is rejected and retry still works"):
+    # Wrong passphrase must fail with a cryptsetup error, not a transient SSH failure.
+    exit_code, stderr = client.execute(
+        f"{ssh_cmd}"
+        " \"echo -n wrongpassphrase | cryptsetup luksOpen --key-file=-"
+        " /dev/disk/by-id/virtio-disk1 disk1 2>&1\""
+    )
+    assert exit_code != 0, "Wrong passphrase should have failed"
+    assert "No key available" in stderr, (
+        f"Expected cryptsetup rejection, got: {stderr}"
+    )
+
+    # The device must not be open after a failed attempt.
+    exit_code, _ = client.execute(
+        f"{ssh_cmd} 'test -e /dev/mapper/disk1'"
+    )
+    assert exit_code != 0, "/dev/mapper/disk1 should not exist after wrong passphrase"
+
+    # Initrd is still waiting for passphrases — ask-password requests still present.
+    client.succeed(
+        f"{ssh_cmd}"
+        " 'ls /run/systemd/ask-password/ask.* >/dev/null'"
+    )
+
 with subtest("Unlock all 3 LUKS devices over SSH"):
     for name in ["disk1", "disk2", "disk3"]:
         client.succeed(
