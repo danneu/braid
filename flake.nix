@@ -18,6 +18,7 @@
         btrfs-heal = pkgs.testers.nixosTest (import ./tests/btrfs-heal.nix);
         btrfs-grow = pkgs.testers.nixosTest (import ./tests/btrfs-grow.nix);
         btrfs-grow1 = pkgs.testers.nixosTest (import ./tests/btrfs-grow1.nix);
+        btrfs-shrink = pkgs.testers.nixosTest (import ./tests/btrfs-shrink.nix);
       };
     };
 }
