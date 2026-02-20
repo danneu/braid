@@ -44,7 +44,8 @@ braid = {
 
 ```
 sudo nixos-rebuild switch
-sudo braid-add-disk /dev/disk/by-id/ata-Toshiba_MN07_XXXX
+sudo braid plan      # preview: LUKS format + btrfs create
+sudo braid apply     # execute it
 ```
 
 The pool is live immediately. No redundancy yet — data is available but unprotected until a second drive is added.

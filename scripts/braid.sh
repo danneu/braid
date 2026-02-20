@@ -181,16 +181,8 @@ compute_plan() {
   local mounted
   mounted=$(echo "$live_state" | jq -r '.mounted')
 
-  if [[ "$mounted" != "true" ]]; then
-    die "Pool is not mounted at $mount_point. Cannot compute plan."
-  fi
-
-  local missing_count
-  missing_count=$(echo "$live_state" | jq -r '.missing_count')
-
-  # Get pool mapper names
-  local pool_mappers
-  mapfile -t pool_mappers < <(echo "$live_state" | jq -r '.pool_devices[].mapper')
+  local missing_count=0
+  local pool_mappers=()
 
   # Get configured disk basenames
   local config_basenames=()
@@ -215,6 +207,11 @@ compute_plan() {
     echo "$c" > "$counter_file"
     echo "a${c}"
   }
+
+  if [[ "$mounted" == "true" ]]; then
+    missing_count=$(echo "$live_state" | jq -r '.missing_count')
+    mapfile -t pool_mappers < <(echo "$live_state" | jq -r '.pool_devices[].mapper')
+  fi
 
   # --- Disks to ADD: in config but not in pool ---
   local disks_to_add=()
@@ -251,43 +248,45 @@ compute_plan() {
     fi
   done
 
-  # --- Disks to REMOVE: in pool but not in config ---
+  # --- Disks to REMOVE: in pool but not in config (only when pool is mounted) ---
   local disks_to_remove=()
-  for pm in "${pool_mappers[@]}"; do
-    local in_config=false
-    for cb in "${config_basenames[@]}"; do
-      if [[ "$cb" == "$pm" ]]; then
-        in_config=true
-        break
+  if [[ "$mounted" == "true" ]]; then
+    for pm in "${pool_mappers[@]}"; do
+      local in_config=false
+      for cb in "${config_basenames[@]}"; do
+        if [[ "$cb" == "$pm" ]]; then
+          in_config=true
+          break
+        fi
+      done
+
+      if ! $in_config; then
+        disks_to_remove+=("$pm")
+        actions+=("$(jq -n \
+          --arg id "$(next_id)" \
+          --arg target "/dev/mapper/$pm" \
+          '{id: $id, type: "REMOVE_DISK_GRACEFUL", target: $target, preconditions: ["target_mapper_open", "target_in_pool"], status: "pending"}')")
+        actions+=("$(jq -n \
+          --arg id "$(next_id)" \
+          --arg target "$pm" \
+          '{id: $id, type: "CLOSE_LUKS_MAPPER", target: $target, preconditions: ["mapper_open"], status: "pending"}')")
       fi
     done
 
-    if ! $in_config; then
-      disks_to_remove+=("$pm")
+    # --- Missing device removal ---
+    if (( missing_count > 0 )); then
+      # If there are multiple missing devices, refuse (ambiguous)
+      if (( missing_count > 1 )); then
+        rm -f "$counter_file"
+        die "Multiple missing devices detected ($missing_count). Cannot determine which device to remove. Resolve manually: btrfs device remove missing $mount_point"
+      fi
+
+      # Single missing device — emit a REMOVE_DISK_MISSING action.
       actions+=("$(jq -n \
         --arg id "$(next_id)" \
-        --arg target "/dev/mapper/$pm" \
-        '{id: $id, type: "REMOVE_DISK_GRACEFUL", target: $target, preconditions: ["target_mapper_open", "target_in_pool"], status: "pending"}')")
-      actions+=("$(jq -n \
-        --arg id "$(next_id)" \
-        --arg target "$pm" \
-        '{id: $id, type: "CLOSE_LUKS_MAPPER", target: $target, preconditions: ["mapper_open"], status: "pending"}')")
+        --arg target "missing" \
+        '{id: $id, type: "REMOVE_DISK_MISSING", target: $target, preconditions: ["pool_has_missing"], status: "pending"}')")
     fi
-  done
-
-  # --- Missing device removal ---
-  if (( missing_count > 0 )); then
-    # If there are multiple missing devices, refuse (ambiguous)
-    if (( missing_count > 1 )); then
-      rm -f "$counter_file"
-      die "Multiple missing devices detected ($missing_count). Cannot determine which device to remove. Resolve manually: btrfs device remove missing $mount_point"
-    fi
-
-    # Single missing device — emit a REMOVE_DISK_MISSING action.
-    actions+=("$(jq -n \
-      --arg id "$(next_id)" \
-      --arg target "missing" \
-      '{id: $id, type: "REMOVE_DISK_MISSING", target: $target, preconditions: ["pool_has_missing"], status: "pending"}')")
   fi
 
   # --- BALANCE_TO_RAID1 if adding disks and pool will have 2+ devices ---

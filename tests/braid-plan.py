@@ -210,11 +210,19 @@ with subtest("Human output shows plan summary"):
     assert "Mount:" in output or "mount" in output.lower(), f"Missing mount:\n{output}"
     assert "REMOVE_DISK" in output, f"Missing action in human output:\n{output}"
 
-# --- Phase 9: Unmounted pool error ---
+# --- Phase 9: Bootstrap plan (unmounted pool) ---
 
-with subtest("Plan fails on unmounted pool"):
+with subtest("Bootstrap plan succeeds on unmounted pool"):
     machine.succeed("umount /mnt/storage")
     machine.succeed(write_config(["/dev/disk/by-id/virtio-disk1"]))
-    machine.fail(plan())
+    p = plan_json()
+    types = [a["type"] for a in p["actions"]]
+    assert "ADD_DISK_LUKS_FORMAT_OPEN" in types, f"Missing ADD_DISK_LUKS_FORMAT_OPEN:\n{types}"
+    assert "ADD_DISK_BTRFS_ADD" in types, f"Missing ADD_DISK_BTRFS_ADD:\n{types}"
+    # No remove actions when there's no pool
+    assert "REMOVE_DISK_GRACEFUL" not in types, f"Unexpected REMOVE_DISK_GRACEFUL:\n{types}"
+    assert "REMOVE_DISK_MISSING" not in types, f"Unexpected REMOVE_DISK_MISSING:\n{types}"
+    # No BALANCE_TO_RAID1 with single disk
+    assert "BALANCE_TO_RAID1" not in types, f"Unexpected BALANCE_TO_RAID1:\n{types}"
 
 machine.shutdown()
