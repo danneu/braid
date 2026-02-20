@@ -33,6 +33,15 @@ The module writes `/etc/braid/config.json` via `environment.etc`. This is the si
 
 The script refuses to format disks not listed in `braid.disks`. Error message tells the user exactly what to add and which commands to run. This ensures every formatted disk has a corresponding LUKS entry for boot-time unlock.
 
+## Symmetric guards
+
+Config-first applies to all pool operations, not just add. The guard works in both directions:
+
+- `braid-add-disk` refuses disks **not** in `braid.disks`
+- `braid-remove-disk` refuses disks **still** in `braid.disks`
+
+Remove workflow: remove disk from `braid.disks` → `nixos-rebuild switch` → `sudo braid-remove-disk /dev/disk/by-id/...`. See [disk-pool-management.md](disk-pool-management.md) for full spec.
+
 ## Constraint
 
 Two-step process (rebuild + run script) instead of a single rebuild. This is the minimum viable approach given that LUKS formatting is destructive.

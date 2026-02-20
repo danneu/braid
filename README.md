@@ -73,6 +73,10 @@ The pool converts to RAID1 automatically. Existing data rebalances in the backgr
 
 <!-- TODO: braid-remove-disk not yet implemented -->
 
+> **Not yet implemented.** See [`docs/decisions/disk-pool-management.md`](docs/decisions/disk-pool-management.md) for the design.
+
+Same config-first pattern — remove from config, rebuild, then run CLI:
+
 ```nix
 # remove from config
 braid.disks = [
@@ -90,9 +94,7 @@ Data migrates off the drive before it's detached. Requires enough free space on 
 
 ### Replace a failed drive
 
-<!-- TODO: braid-replace-disk not yet implemented -->
-
-If a drive dies, the pool stays mounted in degraded mode. Replace it:
+If a drive dies, the pool stays mounted in degraded mode. Replace it by swapping the dead disk for the replacement in config:
 
 ```nix
 braid.disks = [
@@ -107,14 +109,19 @@ sudo nixos-rebuild switch
 sudo braid-add-disk /dev/disk/by-id/ata-Seagate_NEW_ZZZZ
 ```
 
-The new drive joins the pool and the dead device is automatically evicted during rebalance.
+The new drive joins the pool and the dead device is automatically evicted during rebalance. This uses `braid-add-disk` (already implemented and tested).
+
+<!-- TODO: planned removal of a healthy disk uses braid-remove-disk (not yet implemented) -->
 
 ### Pool status
 
 <!-- TODO: braid-status not yet implemented -->
 
+> **Not yet implemented.** See [`docs/decisions/disk-pool-management.md`](docs/decisions/disk-pool-management.md) for the design.
+
 ```
-sudo braid-status
+sudo braid-status           # pool health summary
+sudo braid-status --verbose  # per-disk detail
 ```
 
 Shows drive health, pool usage, RAID profile, and last scrub result.
