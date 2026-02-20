@@ -76,6 +76,12 @@ Disk is LUKS formatted; device is not required to be opened or added to pool by 
 
 **Invariant:** never mutates system state.
 
+**Synopsis**
+
+```bash
+braid plan [--json] [--allow-remove-missing] [--config <path>]
+```
+
 **Planner behavior for config disk not in pool:**
 
 1. Device present and LUKS-openable: plan `OPEN_LUKS` + `ADD_DISK_BTRFS_ADD`.
@@ -109,7 +115,7 @@ braid apply [--resume] [--allow-remove-missing] [--config <path>]
 **Fresh apply flow:**
 
 1. Discover live state.
-2. Compute plan inline (UX remains `braid apply` one-shot).
+2. Compute plan inline with the same planner gates as `braid plan` (including `--allow-remove-missing` when provided).
 3. If plan is `blocked`, refuse and print actionable remediation.
 4. If plan has no mutation actions, exit success with no-op message.
 5. Persist checkpoint and execute actions.
@@ -366,9 +372,81 @@ Implementation is complete only when all are true:
 2. Add new disk to config.
 3. `nixos-rebuild switch`.
 4. `BRAID_PASSPHRASE=... braid init-disk /dev/disk/by-id/<new-disk>`
-5. `BRAID_PASSPHRASE=... braid apply`
-6. If missing-device eviction is required, run explicit confirmed path.
+5. `BRAID_PASSPHRASE=... BRAID_CONFIRM='remove missing device from pool' braid apply --allow-remove-missing`
 
 ---
 
 This proposal is the authoritative target behavior for implementation.
+
+## 14. Implementation Order (Mandatory)
+
+Follow this sequence exactly. Do not reorder steps. Do not skip tests between phases.
+
+### 14.1 Execution rules
+
+1. Implement one phase at a time.
+2. At the end of each phase, run only the listed tests for that phase first.
+3. Do not start the next phase until all phase tests pass.
+4. If a phase requires docs updates, include them in the same commit as behavior changes.
+5. If any behavior conflicts with this document, this document wins.
+
+### 14.2 Ordered phases
+
+1. **Phase 1: Add `init-disk` command skeleton and parser wiring**
+   - Files: `scripts/braid.sh`, `modules/braid/cli.nix` (if command exposure/runtime wiring needed)
+   - Deliverable: command exists with usage/help and argument parsing (`--force`, `--config`)
+   - Tests: new minimal command-dispatch test
+
+2. **Phase 2: Implement `init-disk` safety contract**
+   - Implement section 4.1 checks in order (declared-disk requirement, pool-membership refusal, isLuks refusal, force-confirmation, passphrase check, format)
+   - Deliverable: destructive path isolated to `init-disk` only
+   - Tests: section 11.1 (all)
+
+3. **Phase 3: Remove format action from plan/apply model**
+   - Delete planner emission and executor handling of `ADD_DISK_LUKS_FORMAT_OPEN`
+   - Add `OPEN_LUKS` action and handler
+   - Deliverable: no `luksFormat` reachable from `apply`
+   - Tests: section 11.2 items 1-4, section 11.3 item 4
+
+4. **Phase 4: Implement planner status model (`applicable` vs `blocked`)**
+   - Add plan `status`, `blocked_reasons[]`, warning codes
+   - Non-LUKS configured-present disk must produce blocked `INIT_REQUIRED`
+   - Deliverable: plan JSON + human output reflect new status/warnings model
+   - Tests: section 11.2 (all)
+
+5. **Phase 5: Implement missing-disk policy (`skip+warn` fresh apply)**
+   - Fresh apply skips absent configured disks and continues unrelated actions
+   - No destructive fallback from absence
+   - Deliverable: degraded-tolerant fresh reconciliation
+   - Tests: section 11.3 items 1 and 5, section 11.7 (all)
+
+6. **Phase 6: Implement explicit missing-device removal gate**
+   - Add `--allow-remove-missing` to both `braid plan` and `braid apply`
+   - Require `BRAID_CONFIRM='remove missing device from pool'` for missing-device eviction
+   - Emit `REMOVE_DISK_MISSING_EXPLICIT` only when gate is active
+   - Deliverable: explicit-only missing eviction behavior
+   - Tests: section 11.5 (all), plus plan preview with/without gate
+
+7. **Phase 7: Tighten resume semantics**
+   - On resume, fail if pending action target is absent (`RESUME_TARGET_MISSING`)
+   - Preserve checkpoint on failure
+   - Deliverable: strict in-flight action integrity
+   - Tests: section 11.4 (all)
+
+8. **Phase 8: Compatibility path for `braid-add-disk.sh`**
+   - Deprecate script and/or rewire as wrapper (`init-disk` + `apply`)
+   - Remove standalone hidden formatting logic
+   - Deliverable: no alternative implicit-format path
+   - Tests: section 11.6 (all)
+
+9. **Phase 9: Documentation synchronization**
+   - Update files in section 8
+   - Ensure README workflows match section 13 exactly
+   - Deliverable: docs and behavior aligned
+   - Tests: docs review + command examples sanity run
+
+10. **Phase 10: Final verification gate**
+    - Run full targeted suite from section 11
+    - Run grep/code audit for `luksFormat` reachability from apply path
+    - Confirm acceptance criteria section 12 all true
+    - Deliverable: release-ready implementation
