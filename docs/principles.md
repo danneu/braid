@@ -36,7 +36,7 @@ NixOS VM tests validate behavior, not just command success. TDD: write failing t
 
 ## 9. NixOS-native
 
-Braid only targets NixOS. No portability abstractions, no generic Linux fallbacks. Follow NixOS module conventions — same option types, patterns, and idioms as nixpkgs. When choosing between approaches, prefer what an upstream nixpkgs module would do. When in doubt, nixpkgs is the tiebreaker. [Why →](decisions/nix-native.md)
+Braid only targets NixOS. No portability abstractions, no generic Linux fallbacks. Follow NixOS module conventions — same option types, patterns, and idioms as nixpkgs. When in doubt, nixpkgs is the tiebreaker. [Why →](decisions/nix-native.md)
 
 ---
 
