@@ -76,9 +76,9 @@ Write failing tests first, confirm they fail for the expected reasons, then impl
 - [x] Start single-drive btrfs, convert to RAID1 after adding second drive
 - [x] SSH remote unlock (dropbear in initrd, unlock from client VM)
 - [x] Survive a drive failure — pool stays accessible in degraded mode
-- [ ] `braid-remove-disk` graceful remove (data migrates off, btrfs detach, LUKS close)
-- [ ] `braid-remove-disk` fallback remove-missing (device gone, `btrfs device remove missing`)
-- [ ] `braid-remove-disk` LUKS cleanup after btrfs remove
-- [ ] `braid-remove-disk` redundancy warning when dropping below 2 disks
-- [ ] `braid-status` summary output (drive count, RAID profile, capacity, health)
-- [ ] `braid-status --verbose` per-disk detail (model, serial, errors, LUKS UUID)
+- [x] `braid-remove-disk` graceful remove (data migrates off, btrfs detach, LUKS close)
+- [x] `braid-remove-disk` fallback remove-missing (device gone, `btrfs device remove missing`)
+- [x] `braid-remove-disk` LUKS cleanup after btrfs remove
+- [x] `braid-remove-disk` redundancy warning when dropping below 2 disks
+- [x] `braid-status` summary output (drive count, RAID profile, capacity, health)
+- [x] `braid-status --verbose` per-disk detail (model, serial, errors, LUKS UUID)

@@ -6,6 +6,16 @@ let
     runtimeInputs = [ pkgs.cryptsetup pkgs.btrfs-progs pkgs.util-linux pkgs.jq ];
     text = builtins.readFile ../../scripts/braid-add-disk.sh;
   };
+  braid-remove-disk = pkgs.writeShellApplication {
+    name = "braid-remove-disk";
+    runtimeInputs = [ pkgs.cryptsetup pkgs.btrfs-progs pkgs.util-linux pkgs.jq ];
+    text = builtins.readFile ../../scripts/braid-remove-disk.sh;
+  };
+  braid-status = pkgs.writeShellApplication {
+    name = "braid-status";
+    runtimeInputs = [ pkgs.cryptsetup pkgs.btrfs-progs pkgs.util-linux pkgs.jq ];
+    text = builtins.readFile ../../scripts/braid-status.sh;
+  };
 in
 {
   config = lib.mkIf cfg.enable {
@@ -16,6 +26,8 @@ in
 
     environment.systemPackages = [
       braid-add-disk
+      braid-remove-disk
+      braid-status
     ];
   };
 }

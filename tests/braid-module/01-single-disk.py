@@ -18,6 +18,11 @@ with subtest("Runtime config file is generated"):
     assert config["mountPoint"] == "/mnt/storage", f"Expected /mnt/storage, got {config['mountPoint']}"
     assert config["disks"] == ["/dev/disk/by-id/virtio-disk1"], f"Unexpected disks: {config['disks']}"
 
+with subtest("CLI tools are on PATH"):
+    machine.succeed("which braid-add-disk")
+    machine.succeed("which braid-remove-disk")
+    machine.succeed("which braid-status")
+
 with subtest("Write and read round-trip"):
     machine.succeed("echo 'hello braid' > /mnt/storage/test.txt")
     content = machine.succeed("cat /mnt/storage/test.txt").strip()
