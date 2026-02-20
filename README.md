@@ -23,15 +23,13 @@ This creates LUKS devices for each disk, assembles them into a btrfs RAID1 pool,
 
 ## Managing drives
 
-Every drive operation follows the same pattern: **declare it in config first, then run the CLI tool.**
+Every drive operation follows the same pattern: **edit config, rebuild, plan, apply.**
 
 ### Find your disks
 
 ```
 ls /dev/disk/by-id/ata-*
 ```
-
-Or run `braid-add-disk` with no arguments to see configured and available disks.
 
 ### Start with one disk
 
@@ -53,7 +51,7 @@ The pool is live immediately. No redundancy yet — data is available but unprot
 
 ### Add a drive
 
-Same pattern — declare, rebuild, format:
+Edit config, rebuild, preview, apply:
 
 ```nix
 braid.disks = [
@@ -64,17 +62,17 @@ braid.disks = [
 
 ```
 sudo nixos-rebuild switch
-sudo braid-add-disk /dev/disk/by-id/ata-Ironwolf_ST12_YYYY
+sudo braid plan      # preview what will happen
+sudo braid apply     # execute it
 ```
 
 The pool converts to RAID1 automatically. Existing data rebalances in the background. The pool stays online the entire time.
 
 ### Remove a drive
 
-Same config-first pattern — remove from config, rebuild, then run CLI:
+Same pattern — remove from config, rebuild, plan, apply:
 
 ```nix
-# remove from config
 braid.disks = [
   "/dev/disk/by-id/ata-Toshiba_MN07_XXXX"
   # removed: ata-Ironwolf_ST12_YYYY
@@ -83,10 +81,11 @@ braid.disks = [
 
 ```
 sudo nixos-rebuild switch
-sudo braid-remove-disk /dev/disk/by-id/ata-Ironwolf_ST12_YYYY
+sudo braid plan
+sudo braid apply
 ```
 
-Data migrates off the drive before it's detached. Requires enough free space on remaining drives.
+Data migrates off the drive before it's detached. Requires enough free space on remaining drives. If removing would leave a single disk (losing redundancy), `braid apply` requires explicit confirmation.
 
 ### Replace a failed drive
 
@@ -102,19 +101,41 @@ braid.disks = [
 
 ```
 sudo nixos-rebuild switch
-sudo braid-add-disk /dev/disk/by-id/ata-Seagate_NEW_ZZZZ
+sudo braid plan      # shows: add new disk, remove missing device
+sudo braid apply
 ```
 
-The new drive joins the pool and the dead device is automatically evicted during rebalance. This uses `braid-add-disk` (already implemented and tested). For planned removal of a healthy disk, use `braid-remove-disk`.
+The new drive joins the pool and the dead device is evicted. The plan shows exactly what will happen before any changes are made.
 
 ### Pool status
 
 ```
-sudo braid-status           # pool health summary
-sudo braid-status --verbose  # per-disk detail
+sudo braid status             # pool health summary
+sudo braid status --verbose   # per-disk detail
+sudo braid status --json      # machine-readable output
 ```
 
 Shows drive count, RAID profile, capacity, degraded/missing state, and last scrub result. With `--verbose`, adds per-disk detail: model, serial, LUKS UUID, and btrfs error counters.
+
+### Resume an interrupted apply
+
+If `braid apply` is interrupted (power loss, killed process), it saves a checkpoint. Resume where it left off:
+
+```
+sudo braid apply --resume
+```
+
+The checkpoint is validated against the current config — if the config changed since the interruption, resume is refused and you must start fresh.
+
+### Standalone scripts
+
+The original single-purpose scripts still work for backward compatibility:
+
+```
+sudo braid-add-disk /dev/disk/by-id/ata-...
+sudo braid-remove-disk /dev/disk/by-id/ata-...
+sudo braid-status [--verbose]
+```
 
 ## What you get for free
 

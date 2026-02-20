@@ -34,6 +34,9 @@
           replace-failed-disk = pkgs.testers.nixosTest (import ./tests/7-replace-failed-disk.nix);
           braid-status = pkgs.testers.nixosTest (import ./tests/8-braid-status.nix);
           braid-remove-disk = pkgs.testers.nixosTest (import ./tests/9-braid-remove-disk.nix);
+          braid-plan = pkgs.testers.nixosTest (import ./tests/10-braid-plan.nix);
+          braid-apply = pkgs.testers.nixosTest (import ./tests/11-braid-apply.nix);
+          braid-unified = pkgs.testers.nixosTest (import ./tests/12-braid-unified.nix);
           daemon-hello-world = pkgs.testers.nixosTest (import ./tests/daemon/00-hello-world.nix);
           braid-module-disabled = pkgs.testers.nixosTest (import ./tests/braid-module/00-disabled.nix);
           braid-module-single-disk = pkgs.testers.nixosTest (import ./tests/braid-module/01-single-disk.nix);

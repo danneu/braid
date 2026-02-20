@@ -77,28 +77,25 @@ Dan buys a NAS computer and installs NixOS on its internal SSD. He has one 12TB 
 
 10. `nixos-rebuild switch` — module now knows about both disks for unlock at boot.
 
-11. Format and add it to the pool:
+11. Preview and apply:
     ```
-    $ sudo braid-add-disk /dev/disk/by-id/ata-Ironwolf_ST12_YYYY
+    $ sudo braid plan
+    Plan ID: 2024-01-15T10:30:00Z-a1b2c3
+    Mount:   /mnt/storage
 
-    WARNING: This will PERMANENTLY ERASE all data on:
-      /dev/disk/by-id/ata-Ironwolf_ST12_YYYY (Seagate IronWolf ST12000VN0008, 12TB)
+    Actions:
+      ADD_DISK_LUKS_FORMAT_OPEN  /dev/disk/by-id/ata-Ironwolf_ST12_YYYY
+      ADD_DISK_BTRFS_ADD         /dev/disk/by-id/ata-Ironwolf_ST12_YYYY
+      BALANCE_TO_RAID1           /mnt/storage
 
-    It will be LUKS-encrypted and added to the btrfs pool at /mnt/storage.
-
-    Type 'erase this disk' to confirm: erase this disk
-
-    Formatting LUKS...
-    Adding to btrfs pool...
-    Converting to RAID1 (background)...
-    Done. This disk will auto-unlock on next reboot.
+    $ sudo braid apply
     ```
 
 12. Samba share never went down. Files still at `smb://nas/storage`. The Mac never noticed anything changed.
 
 ### Three months later: third drive on sale
 
-13. Same flow — plug in, add to config, rebuild, `braid-add-disk`. Pool grows to ~18TB usable with RAID1 across 3 drives.
+13. Same flow — plug in, add to config, rebuild, `braid plan`, `braid apply`. Pool grows to ~18TB usable with RAID1 across 3 drives.
 
 ## Design principles
 

@@ -82,3 +82,8 @@ Write failing tests first, confirm they fail for the expected reasons, then impl
 - [x] `braid-remove-disk` redundancy warning when dropping below 2 disks
 - [x] `braid-status` summary output (drive count, RAID profile, capacity, health)
 - [x] `braid-status --verbose` per-disk detail (model, serial, errors, LUKS UUID)
+- [x] `braid plan` no-op, add, remove, replace, ambiguity refusal, JSON schema
+- [x] `braid apply` add, remove, replace, checkpoint/resume, stale checkpoint refusal
+- [x] `braid apply` redundancy confirmation when dropping below 2 disks
+- [x] `braid status` human, `--json`, `--verbose` output
+- [x] Backward compatibility: standalone scripts (`braid-add-disk`, `braid-remove-disk`, `braid-status`) still work

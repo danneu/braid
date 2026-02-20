@@ -2,8 +2,8 @@
 
 ## Status
 
-Draft. This document defines the migration from script-per-operation workflows to
-a unified config-convergent workflow based on `braid plan` and `braid apply`.
+Complete. All phases implemented and tested. The unified `braid` CLI with `plan`,
+`apply`, and `status` subcommands is live alongside backward-compatible standalone scripts.
 
 ## Context
 
