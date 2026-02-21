@@ -3,7 +3,7 @@ let
   cfg = config.braid;
   braid-add-disk = pkgs.writeShellApplication {
     name = "braid-add-disk";
-    runtimeInputs = [ pkgs.cryptsetup pkgs.btrfs-progs pkgs.util-linux pkgs.jq ];
+    runtimeInputs = [ braid pkgs.cryptsetup pkgs.btrfs-progs pkgs.util-linux pkgs.jq ];
     text = builtins.readFile ../../scripts/braid-add-disk.sh;
   };
   braid-remove-disk = pkgs.writeShellApplication {

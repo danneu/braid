@@ -8,11 +8,11 @@ Data drives never block boot. LUKS devices use `nofail` + bounded timeouts. btrf
 
 ## 2. Config-first workflow
 
-Declare the disk in `braid.disks` before formatting it. `nixos-rebuild switch` exports config and creates LUKS entries. `braid-add-disk` reads config, formats, and joins the pool. CLI tools refuse to operate on undeclared disks. [Why →](decisions/config-first-workflow.md)
+Declare the disk in `braid.disks` before formatting it. `nixos-rebuild switch` exports config and creates LUKS entries. `braid init-disk` formats the disk with LUKS (explicit, one-shot). `braid apply` handles non-destructive reconciliation. CLI tools refuse to operate on undeclared disks. [Why →](decisions/config-first-workflow.md)
 
-## 3. nixos-rebuild never destroys data
+## 3. Safe-by-construction reconciliation
 
-`nixos-rebuild switch` is declarative and idempotent — always safe to run. Only `braid-add-disk` performs destructive operations (LUKS format, btrfs create/add), and it requires explicit confirmation.
+`nixos-rebuild switch` is declarative and idempotent — always safe to run. `braid apply` is safe to run repeatedly — it never performs destructive disk initialization. Only `braid init-disk` performs LUKS formatting, and it requires explicit operator intent. `cryptsetup luksFormat` is forbidden in the plan/apply code path. [Why →](decisions/safe-by-construction-reconciliation.md)
 
 ## 4. Single passphrase
 

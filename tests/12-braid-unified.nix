@@ -18,15 +18,17 @@
       { size = 256; driveConfig.deviceExtraOpts.serial = "disk3"; }
     ];
 
-    environment.systemPackages = [
-      (pkgs.writeShellApplication {
+    environment.systemPackages = let
+      braid-cli = pkgs.writeShellApplication {
         name = "braid";
         runtimeInputs = [ pkgs.cryptsetup pkgs.btrfs-progs pkgs.util-linux pkgs.jq pkgs.coreutils ];
         text = builtins.readFile ../scripts/braid.sh;
-      })
+      };
+    in [
+      braid-cli
       (pkgs.writeShellApplication {
         name = "braid-add-disk";
-        runtimeInputs = [ pkgs.cryptsetup pkgs.btrfs-progs pkgs.util-linux pkgs.jq ];
+        runtimeInputs = [ braid-cli pkgs.cryptsetup pkgs.btrfs-progs pkgs.util-linux pkgs.jq ];
         text = builtins.readFile ../scripts/braid-add-disk.sh;
       })
       (pkgs.writeShellApplication {

@@ -66,18 +66,19 @@ with subtest("No-op plan when config matches live state"):
     assert len(mutation_actions) == 0, f"Expected zero mutation actions:\n{p['actions']}"
     assert p["status"] == "applicable", f"Expected applicable:\n{p}"
 
-# --- Phase 2: Add plan (disk3 not yet LUKS — blocked) ---
+# --- Phase 2: Add plan (disk3 not yet LUKS — warning, plan still applicable) ---
 
-with subtest("Plan blocked for non-LUKS disk with INIT_REQUIRED"):
+with subtest("Plan warns about non-LUKS disk with INIT_REQUIRED"):
     machine.succeed(write_config([
         "/dev/disk/by-id/virtio-disk1",
         "/dev/disk/by-id/virtio-disk2",
         "/dev/disk/by-id/virtio-disk3",
     ]))
     p = plan_json()
-    assert p["status"] == "blocked", f"Expected blocked:\n{p}"
-    assert any(r["code"] == "INIT_REQUIRED" for r in p["blocked_reasons"]), (
-        f"Expected INIT_REQUIRED:\n{p['blocked_reasons']}"
+    # Plan should still be applicable — non-LUKS disks are skipped with warning
+    assert p["status"] == "applicable", f"Expected applicable:\n{p}"
+    assert any("INIT_REQUIRED" in w for w in p["warnings"]), (
+        f"Expected INIT_REQUIRED warning:\n{p['warnings']}"
     )
     # No OPEN_LUKS or format action for the non-LUKS disk
     types = [a["type"] for a in p["actions"]]
@@ -96,6 +97,27 @@ with subtest("Plan shows OPEN_LUKS after init-disk"):
     # Target should be the newly init'd disk
     open_action = [a for a in p["actions"] if a["type"] == "OPEN_LUKS"][0]
     assert "virtio-disk3" in open_action["target"], f"Wrong target:\n{open_action}"
+
+# --- Phase 2c: Absent disk => warning, plan applicable ---
+
+with subtest("Absent disk produces DISK_ABSENT_SKIPPED warning"):
+    # virtio-disk99 doesn't exist as a virtual disk
+    machine.succeed(write_config([
+        "/dev/disk/by-id/virtio-disk1",
+        "/dev/disk/by-id/virtio-disk2",
+        "/dev/disk/by-id/virtio-disk99",
+    ]))
+    p = plan_json()
+    assert p["status"] == "applicable", f"Expected applicable despite absent disk:\n{p}"
+    assert any("DISK_ABSENT_SKIPPED" in w for w in p["warnings"]), (
+        f"Expected DISK_ABSENT_SKIPPED warning:\n{p['warnings']}"
+    )
+    assert any("virtio-disk99" in w for w in p["warnings"]), (
+        f"Expected disk path in warning:\n{p['warnings']}"
+    )
+    # No actions for the absent disk
+    types = [a["type"] for a in p["actions"]]
+    assert "OPEN_LUKS" not in types, f"Unexpected OPEN_LUKS for absent disk:\n{types}"
 
 # --- Phase 3: Remove plan (graceful) ---
 

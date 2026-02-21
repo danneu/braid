@@ -96,9 +96,10 @@ with subtest("braid-status --verbose still works"):
     assert "devid" in output, f"Expected 'devid':\n{output}"
     assert "LUKS:" in output, f"Expected 'LUKS:':\n{output}"
 
-with subtest("braid-add-disk still works"):
-    # Verify the command exists and shows usage
-    machine.succeed("which braid-add-disk")
+with subtest("braid-add-disk shows deprecation warning"):
+    # Verify the command exists and prints deprecation
+    output = machine.succeed("braid-add-disk 2>&1 || true")
+    assert "deprecated" in output.lower(), f"Expected deprecation warning:\n{output}"
 
 with subtest("braid-remove-disk still works"):
     # Verify the command exists and shows usage

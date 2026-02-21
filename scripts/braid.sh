@@ -242,12 +242,8 @@ compute_plan() {
 
       # Device present — check if LUKS
       if ! cryptsetup isLuks "$by_id" 2>/dev/null; then
-        # Device present but not LUKS: blocked — needs init-disk first
-        blocked_reasons+=("$(jq -n \
-          --arg code "INIT_REQUIRED" \
-          --arg disk "$by_id" \
-          --arg message "Disk $by_id is not LUKS formatted. Run: braid init-disk $by_id" \
-          '{code: $code, disk: $disk, message: $message}')")
+        # Device present but not LUKS: needs init-disk first — skip with warning
+        warnings+=("INIT_REQUIRED: $by_id is not LUKS formatted. Run: braid init-disk $by_id")
         continue
       fi
 
@@ -338,12 +334,10 @@ compute_plan() {
   fi
 
   # --- Confirmation for explicit missing-device removal ---
-  local has_missing_removal=false
   for a_json in "${actions[@]}"; do
     local atype
     atype=$(echo "$a_json" | jq -r '.type')
     if [[ "$atype" == "REMOVE_DISK_MISSING_EXPLICIT" ]]; then
-      has_missing_removal=true
       local missing_action_id
       missing_action_id=$(echo "$a_json" | jq -r '.id')
       confirmations+=("$(jq -n \
@@ -353,21 +347,19 @@ compute_plan() {
     fi
   done
 
-  # --- Redundancy warning ---
-  if (( ${#disks_to_remove[@]} > 0 )) || { (( missing_count > 0 )) && $has_missing_removal; }; then
+  # --- Redundancy warning for graceful removes ---
+  # (Missing-device removal is already gated by its own confirmation phrase)
+  if (( ${#disks_to_remove[@]} > 0 )); then
     local total_with_missing
     total_with_missing=$(echo "$live_state" | jq -r '.total_devices')
     local remove_count=${#disks_to_remove[@]}
-    if [[ "$has_missing_removal" == "true" ]]; then
-      remove_count=$((remove_count + missing_count))
-    fi
     local after_remove=$((total_with_missing - remove_count + ${#disks_to_add[@]}))
     if (( after_remove < 2 )); then
       local remove_action_id=""
       for a_json in "${actions[@]}"; do
         local atype
         atype=$(echo "$a_json" | jq -r '.type')
-        if [[ "$atype" == "REMOVE_DISK_GRACEFUL" || "$atype" == "REMOVE_DISK_MISSING_EXPLICIT" ]]; then
+        if [[ "$atype" == "REMOVE_DISK_GRACEFUL" ]]; then
           remove_action_id=$(echo "$a_json" | jq -r '.id')
           break
         fi
@@ -800,13 +792,35 @@ action_btrfs_add() {
     mkdir -p "$mount_point"
     mount "$target" "$mount_point"
   else
-    echo "Adding $target to btrfs pool..."
-    btrfs device add "$target" "$mount_point"
+    # Check if device is already a pool member (returning missing device).
+    # If the mapper is already known to btrfs after a device scan, skip add.
+    btrfs device scan "$target" 2>/dev/null || true
+    local fi_show
+    fi_show=$(btrfs filesystem show "$mount_point" 2>/dev/null || true)
+    if echo "$fi_show" | grep -q "$target"; then
+      echo "Device $target is a returning pool member (was missing). Scan complete."
+    else
+      echo "Adding $target to btrfs pool..."
+      # Use -f to handle devices with stale btrfs metadata (e.g. previously evicted)
+      btrfs device add -f "$target" "$mount_point"
+    fi
   fi
 }
 
 action_balance_raid1() {
   local target="$1"  # mount point
+  # Check if already RAID1 — skip if so (handles returning-member case)
+  local current_profile
+  current_profile=$(btrfs filesystem df "$target" 2>/dev/null | awk '/^Data,/ {sub("^Data, *", ""); sub(":.*", ""); print}')
+  if [[ "$current_profile" == "RAID1" ]]; then
+    local fi_show
+    fi_show=$(btrfs filesystem show "$target" 2>/dev/null || true)
+    if ! echo "$fi_show" | grep -qi "missing"; then
+      echo "Pool is already RAID1 with no missing devices. Balance not needed."
+      return
+    fi
+  fi
+
   echo "Starting RAID1 balance (this may take a while on large pools)..."
   btrfs balance start -dconvert=raid1 -mconvert=raid1 "$target"
   # Evict any dead devices left in the pool
@@ -838,6 +852,21 @@ action_remove_graceful() {
 action_remove_missing() {
   local mount_point
   mount_point=$(config_mount_point)
+
+  # Check if we need to convert from RAID1 to single first
+  local fi_show
+  fi_show=$(btrfs filesystem show "$mount_point" 2>/dev/null || true)
+  local present_count
+  present_count=$(echo "$fi_show" | awk '/\/dev\/mapper\// {c++} END {print c+0}')
+  local total_devices
+  total_devices=$(echo "$fi_show" | awk '/Total devices/ {for(i=1;i<=NF;i++) if($i=="devices") {print $(i+1); exit}}')
+  local remaining=$((present_count))  # after removing missing, only present devices remain
+
+  if (( remaining < 2 )); then
+    echo "Converting pool to single profile before removing missing device..."
+    btrfs balance start -dconvert=single -mconvert=single -f "$mount_point"
+  fi
+
   echo "Removing missing device from btrfs pool..."
   btrfs device remove missing "$mount_point"
 }
@@ -941,6 +970,16 @@ cmd_apply() {
       exit 1
     fi
 
+    # Print warnings from plan
+    local warning_count
+    warning_count=$(echo "$plan_json" | jq '.warnings | length')
+    if (( warning_count > 0 )); then
+      echo "Warnings:"
+      echo "$plan_json" | jq -r '.warnings[]' | while IFS= read -r w; do
+        echo "  - $w"
+      done
+    fi
+
     # Check for no-op
     local mutation_count
     mutation_count=$(echo "$plan_json" | jq '[.actions[] | select(.type | startswith("VERIFY_") | not)] | length')
@@ -986,6 +1025,33 @@ cmd_apply() {
     if [[ "$action_status" == "completed" ]]; then
       echo "[$action_id] $action_type — already completed, skipping."
       continue
+    fi
+
+    # Resume safety: verify target device is present for device-targeting actions
+    if $resume; then
+      case "$action_type" in
+        OPEN_LUKS)
+          if [[ ! -b "$action_target" ]]; then
+            echo "Error: RESUME_TARGET_MISSING — device $action_target is absent for pending action $action_id ($action_type)." >&2
+            echo "Checkpoint preserved. Resolve device availability and retry with --resume." >&2
+            exit 1
+          fi
+          ;;
+        ADD_DISK_BTRFS_ADD)
+          if [[ ! -e "$action_target" ]]; then
+            echo "Error: RESUME_TARGET_MISSING — mapper $action_target is absent for pending action $action_id ($action_type)." >&2
+            echo "Checkpoint preserved. Resolve device availability and retry with --resume." >&2
+            exit 1
+          fi
+          ;;
+        REMOVE_DISK_GRACEFUL)
+          if [[ ! -e "$action_target" ]]; then
+            echo "Error: RESUME_TARGET_MISSING — mapper $action_target is absent for pending action $action_id ($action_type)." >&2
+            echo "Checkpoint preserved. Resolve device availability and retry with --resume." >&2
+            exit 1
+          fi
+          ;;
+      esac
     fi
 
     echo ""

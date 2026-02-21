@@ -48,12 +48,13 @@ def init_disk(by_id):
 
 # --- Phase 1: Plan with no pool (disk not yet init'd => blocked) ---
 
-with subtest("Plan blocked when disk not LUKS formatted"):
+with subtest("Plan warns when disk not LUKS formatted"):
     machine.succeed(write_config(["/dev/disk/by-id/virtio-disk1"]))
     p = plan_json()
-    assert p["status"] == "blocked", f"Expected blocked status:\n{p}"
-    assert any(r["code"] == "INIT_REQUIRED" for r in p["blocked_reasons"]), (
-        f"Expected INIT_REQUIRED:\n{p['blocked_reasons']}"
+    # Plan is applicable (no blocked_reasons) but warns about non-LUKS disk
+    assert p["status"] == "applicable", f"Expected applicable status:\n{p}"
+    assert any("INIT_REQUIRED" in w for w in p["warnings"]), (
+        f"Expected INIT_REQUIRED warning:\n{p['warnings']}"
     )
 
 # --- Phase 2: init-disk, then plan shows OPEN_LUKS ---

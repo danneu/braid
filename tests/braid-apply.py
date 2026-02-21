@@ -35,12 +35,11 @@ def plan_json():
     return json.loads(raw)
 
 
-def init_disk(by_id):
-    return (
-        f"BRAID_PASSPHRASE='{passphrase}' "
-        f"BRAID_LUKS_OPTS='{luks_opts}' "
-        f"braid init-disk --config /tmp/braid-config.json {by_id}"
-    )
+def init_disk(by_id, extra="", confirm=""):
+    env = f"BRAID_PASSPHRASE='{passphrase}' BRAID_LUKS_OPTS='{luks_opts}'"
+    if confirm:
+        env += f" BRAID_CONFIRM='{confirm}'"
+    return f"{env} braid init-disk --config /tmp/braid-config.json {by_id} {extra}"
 
 
 # --- Phase 0: Build initial 2-disk RAID1 pool with braid-add-disk ---
@@ -152,6 +151,136 @@ with subtest("Apply accepts remove-to-single with correct phrase"):
     devid_count = fi_show.count("devid")
     assert devid_count == 1, f"Expected 1 device:\n{fi_show}"
 
+# --- Phase 5b: Absent disk continues apply + warns (11.3.1) ---
+
+with subtest("Apply with absent configured disk continues other work"):
+    # Currently single disk (disk1). Add disk3 back + fake absent disk99.
+    machine.succeed(write_config([
+        "/dev/disk/by-id/virtio-disk1",
+        "/dev/disk/by-id/virtio-disk3",
+        "/dev/disk/by-id/virtio-disk99",
+    ]))
+    # disk3 is still LUKS from earlier. Apply should add disk3, warn about disk99.
+    output = machine.succeed(apply())
+    assert "DISK_ABSENT_SKIPPED" in output or "warning" in output.lower() or "skip" in output.lower(), (
+        f"Expected warning about absent disk:\n{output}"
+    )
+    fi_show = machine.succeed("btrfs fi show /mnt/storage")
+    assert "virtio-disk3" in fi_show, f"disk3 not added despite absent disk99:\n{fi_show}"
+
+with subtest("Data intact after apply with absent disk"):
+    content = machine.succeed("cat /mnt/storage/precious.txt").strip()
+    assert content == "important data", f"Data lost: '{content}'"
+
+# --- Phase 5c: Unplug/replug regression (11.7) ---
+
+with subtest("Unplug disk, apply warns, replug disk, apply reconciles"):
+    # Pool currently: disk1 + disk3, RAID1
+    machine.succeed("echo 'sentinel data 42' > /mnt/storage/sentinel.txt && sync")
+    sentinel_hash = machine.succeed("sha256sum /mnt/storage/sentinel.txt").strip().split()[0]
+
+    # "Unplug" disk3: close LUKS + hide the by-id device to simulate physical removal
+    machine.succeed("umount /mnt/storage")
+    machine.succeed("cryptsetup close virtio-disk3")
+    # Save the real device path before hiding
+    real_dev = machine.succeed("readlink -f /dev/disk/by-id/virtio-disk3").strip()
+    machine.succeed("mv /dev/disk/by-id/virtio-disk3 /dev/disk/by-id/virtio-disk3.hidden")
+    machine.succeed("mount -o degraded /dev/mapper/virtio-disk1 /mnt/storage")
+
+    # Apply with 2-disk config — disk3 absent, should warn only, no format
+    machine.succeed(write_config([
+        "/dev/disk/by-id/virtio-disk1",
+        "/dev/disk/by-id/virtio-disk3",
+    ]))
+    output = machine.succeed(apply())
+    # Should NOT have formatted anything
+    assert "luksFormat" not in output.lower(), f"Unexpected format:\n{output}"
+    # Should have absent-disk warning
+    assert "DISK_ABSENT_SKIPPED" in output, f"Expected DISK_ABSENT_SKIPPED warning:\n{output}"
+
+    # Sentinel file still intact
+    content = machine.succeed("cat /mnt/storage/sentinel.txt").strip()
+    assert "sentinel data 42" in content, f"Sentinel data changed:\n{content}"
+
+    # "Replug" — restore by-id symlink and reopen LUKS
+    machine.succeed("mv /dev/disk/by-id/virtio-disk3.hidden /dev/disk/by-id/virtio-disk3")
+    machine.succeed("umount /mnt/storage")
+    machine.succeed(
+        f"echo -n '{passphrase}' | cryptsetup luksOpen --key-file=- "
+        "/dev/disk/by-id/virtio-disk3 virtio-disk3"
+    )
+    machine.succeed("btrfs device scan")
+    machine.succeed("mount /dev/mapper/virtio-disk1 /mnt/storage")
+
+    # Apply again — should reconcile cleanly (no-op now)
+    output = machine.succeed(apply())
+
+    # Verify sentinel file hash unchanged
+    hash_after = machine.succeed("sha256sum /mnt/storage/sentinel.txt").strip().split()[0]
+    assert hash_after == sentinel_hash, (
+        f"Sentinel hash changed: {sentinel_hash} -> {hash_after}"
+    )
+
+# --- Phase 5d: Apply with present non-LUKS disk warns but continues (11.3.2) ---
+
+with subtest("Apply with present non-LUKS disk warns but proceeds"):
+    # disk4 exists but is not LUKS-formatted — apply should skip it with warning
+    machine.succeed(write_config([
+        "/dev/disk/by-id/virtio-disk1",
+        "/dev/disk/by-id/virtio-disk3",
+        "/dev/disk/by-id/virtio-disk4",
+    ]))
+    output = machine.succeed(apply())
+    assert "INIT_REQUIRED" in output, f"Expected INIT_REQUIRED warning:\n{output}"
+
+# --- Phase 5e: Explicit missing-device removal gate (11.5) ---
+
+with subtest("Setup: degraded pool for missing-device tests"):
+    # Pool: disk1 + disk3, RAID1. Kill disk3 to make it missing.
+    machine.succeed("umount /mnt/storage")
+    machine.succeed("cryptsetup close virtio-disk3")
+    machine.succeed("mount -o degraded /dev/mapper/virtio-disk1 /mnt/storage")
+    fi_show = machine.succeed("btrfs fi show /mnt/storage")
+    assert "missing" in fi_show.lower(), f"Expected missing:\n{fi_show}"
+    # Hide disk3 by-id to simulate physical removal
+    machine.succeed("mv /dev/disk/by-id/virtio-disk3 /dev/disk/by-id/virtio-disk3.hidden")
+
+with subtest("Missing-device removal refused without explicit intent"):
+    machine.succeed(write_config(["/dev/disk/by-id/virtio-disk1"]))
+    # Apply without --allow-remove-missing should NOT remove missing device
+    output = machine.succeed(apply())
+    # Should warn about degraded but not remove
+    fi_show = machine.succeed("btrfs fi show /mnt/storage")
+    assert "missing" in fi_show.lower(), f"Missing device was removed without gate:\n{fi_show}"
+
+with subtest("Missing-device removal refused without confirmation phrase"):
+    machine.fail(apply(extra="--allow-remove-missing"))
+
+with subtest("Explicit missing-device removal succeeds"):
+    machine.succeed(apply(
+        extra="--allow-remove-missing",
+        confirm="remove missing device from pool",
+    ))
+    fi_show = machine.succeed("btrfs fi show /mnt/storage")
+    assert "missing" not in fi_show.lower(), f"Missing device not cleared:\n{fi_show}"
+    devid_count = fi_show.count("devid")
+    assert devid_count == 1, f"Expected 1 device:\n{fi_show}"
+
+with subtest("Data intact after missing-device removal"):
+    content = machine.succeed("cat /mnt/storage/precious.txt").strip()
+    assert content == "important data", f"Data lost: '{content}'"
+
+with subtest("Setup: restore disk3 and rebuild 2-disk pool"):
+    machine.succeed("mv /dev/disk/by-id/virtio-disk3.hidden /dev/disk/by-id/virtio-disk3")
+    machine.succeed(write_config([
+        "/dev/disk/by-id/virtio-disk1",
+        "/dev/disk/by-id/virtio-disk3",
+    ]))
+    # disk3 was evicted, still has stale btrfs metadata. Re-init to wipe it.
+    machine.succeed(init_disk("/dev/disk/by-id/virtio-disk3", extra="--force", confirm="reformat this disk"))
+    machine.succeed(apply())
+    assert "RAID1" in machine.succeed("btrfs fi df /mnt/storage")
+
 # --- Phase 6: Interrupted apply + resume ---
 
 with subtest("Setup: rebuild 2-disk pool for resume test"):
@@ -209,6 +338,57 @@ with subtest("Stale checkpoint refuses resume"):
     machine.fail(apply("--resume"))
     # Clean up
     machine.succeed("rm /var/lib/braid/apply-state.json")
+
+# --- Phase 7b: Resume fails when pending action target is absent ---
+
+with subtest("Setup: remove disk4 from pool for resume-target-missing test"):
+    # Current pool: disk1 + disk3 + disk4. Remove disk4.
+    machine.succeed(write_config([
+        "/dev/disk/by-id/virtio-disk1",
+        "/dev/disk/by-id/virtio-disk3",
+    ]))
+    machine.succeed(apply())
+    # disk4 mapper should be closed
+    fi_show = machine.succeed("btrfs fi show /mnt/storage")
+    assert "virtio-disk4" not in fi_show, f"disk4 still in pool:\n{fi_show}"
+
+with subtest("Resume fails when target disk is absent (RESUME_TARGET_MISSING)"):
+    # Now add disk2 (LUKS-formatted from Phase 0 braid-add-disk setup)
+    machine.succeed(write_config([
+        "/dev/disk/by-id/virtio-disk1",
+        "/dev/disk/by-id/virtio-disk2",
+        "/dev/disk/by-id/virtio-disk3",
+    ]))
+    # disk2 LUKS is still closed from Phase 4's death simulation. Re-init it.
+    machine.succeed(init_disk("/dev/disk/by-id/virtio-disk2", extra="--force", confirm="reformat this disk"))
+    # Interrupt after first action to create checkpoint with pending OPEN_LUKS
+    cmd = (
+        f"BRAID_PASSPHRASE='{passphrase}' "
+        f"BRAID_LUKS_OPTS='{luks_opts}' "
+        f"BRAID_TEST_FAIL_AFTER_ACTION=a1 "
+        f"braid apply --config /tmp/braid-config.json"
+    )
+    machine.fail(cmd)
+    machine.succeed("test -f /var/lib/braid/apply-state.json")
+
+    # Check which action is pending — should be targeting disk2
+    checkpoint = json.loads(machine.succeed("cat /var/lib/braid/apply-state.json"))
+    pending = [a for a in checkpoint["actions"] if a["status"] == "pending"]
+    assert len(pending) > 0, f"Expected pending actions:\n{checkpoint}"
+
+    # Hide disk2 to simulate absence. Close its mapper first if opened.
+    machine.succeed("cryptsetup close virtio-disk2 || true")
+    machine.succeed("mv /dev/disk/by-id/virtio-disk2 /dev/disk/by-id/virtio-disk2.hidden")
+
+    # Resume should fail with RESUME_TARGET_MISSING
+    machine.fail(apply("--resume"))
+
+    # Checkpoint should be preserved (not deleted)
+    machine.succeed("test -f /var/lib/braid/apply-state.json")
+
+    # Cleanup
+    machine.succeed("mv /dev/disk/by-id/virtio-disk2.hidden /dev/disk/by-id/virtio-disk2")
+    machine.succeed("rm -f /var/lib/braid/apply-state.json")
 
 # --- Phase 8: apply never calls luksFormat ---
 

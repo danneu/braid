@@ -22,8 +22,9 @@ Option 3. The NixOS config is the source of truth. The script is a one-shot exec
 
 1. Add disk to `braid.disks`
 2. `nixos-rebuild switch` — module exports `/etc/braid/config.json`, creates LUKS entries (which fail gracefully since disk isn't formatted yet)
-3. `sudo braid-add-disk /dev/disk/by-id/...` — reads config, verifies disk is declared, formats LUKS, creates/extends btrfs pool
-4. Next reboot auto-unlocks
+3. `sudo braid init-disk /dev/disk/by-id/...` — reads config, verifies disk is declared, formats LUKS (explicit, one-shot)
+4. `sudo braid apply` — opens LUKS, adds to btrfs pool, balances to RAID1 if applicable
+5. Next reboot auto-unlocks
 
 ### Config export
 
@@ -37,10 +38,10 @@ The script refuses to format disks not listed in `braid.disks`. Error message te
 
 Config-first applies to all pool operations, not just add. The guard works in both directions:
 
-- `braid-add-disk` refuses disks **not** in `braid.disks`
-- `braid-remove-disk` refuses disks **still** in `braid.disks`
+- `braid init-disk` refuses disks **not** in `braid.disks`
+- `braid apply` removes disks from pool when they are **no longer** in `braid.disks`
 
-Remove workflow: remove disk from `braid.disks` → `nixos-rebuild switch` → `sudo braid-remove-disk /dev/disk/by-id/...`. See [disk-pool-management.md](disk-pool-management.md) for full spec.
+Remove workflow: remove disk from `braid.disks` → `nixos-rebuild switch` → `sudo braid apply`. See [disk-pool-management.md](disk-pool-management.md) for full spec.
 
 ## Constraint
 
@@ -54,5 +55,6 @@ If NixOS ever gets a `formatDevice` option type that can safely express one-shot
 
 - `modules/braid/options.nix` — `braid.disks` option definition
 - `modules/braid/storage.nix` — config export and LUKS entry generation
-- `scripts/braid-add-disk.sh` — reads config, validates, formats
+- `scripts/braid.sh` — unified CLI (`init-disk`, `plan`, `apply`, `status`)
+- `scripts/braid-add-disk.sh` — deprecated wrapper (calls `init-disk` + `apply`)
 - [archive/design-docs/1-nixos-best-practices.md](../../archive/design-docs/1-nixos-best-practices.md) — original best practices analysis
