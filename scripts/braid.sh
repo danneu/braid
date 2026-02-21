@@ -212,9 +212,28 @@ compute_plan() {
     echo "a${c}"
   }
 
+  local pool_backing=()
   if [[ "$mounted" == "true" ]]; then
     missing_count=$(echo "$live_state" | jq -r '.missing_count')
     mapfile -t pool_mappers < <(echo "$live_state" | jq -r '.pool_devices[].mapper')
+
+    # Resolve backing devices for pool mappers via sysfs.
+    # Boot-time LUKS may use short mapper names (e.g., "disk1") while braid config
+    # uses by-id basenames (e.g., "virtio-disk1"). Comparing underlying kernel
+    # device paths lets us detect that they refer to the same physical disk.
+    for pm in "${pool_mappers[@]}"; do
+      local backing=""
+      local dm_path dm_name slave
+      dm_path=$(readlink -f "/dev/mapper/$pm" 2>/dev/null || true)
+      dm_name=$(basename "$dm_path")
+      if [[ -d "/sys/block/$dm_name/slaves" ]]; then
+        slave=$(find "/sys/block/$dm_name/slaves" -maxdepth 1 -mindepth 1 -printf '%f\n' 2>/dev/null | head -1)
+        if [[ -n "$slave" ]]; then
+          backing=$(readlink -f "/dev/$slave")
+        fi
+      fi
+      pool_backing+=("$backing")
+    done
   fi
 
   # --- Disks to ADD: in config but not in pool ---
@@ -225,8 +244,16 @@ compute_plan() {
     local by_id="${config_disk_map[$i]}"
     local in_pool=false
 
-    for pm in "${pool_mappers[@]}"; do
+    for pi in "${!pool_mappers[@]}"; do
+      local pm="${pool_mappers[$pi]}"
       if [[ "$pm" == "$basename" ]]; then
+        in_pool=true
+        break
+      fi
+      # Different mapper name but same underlying device
+      local config_real
+      config_real=$(readlink -f "$by_id" 2>/dev/null || true)
+      if [[ -n "${pool_backing[$pi]:-}" && -n "$config_real" && "${pool_backing[$pi]}" == "$config_real" ]]; then
         in_pool=true
         break
       fi
@@ -271,10 +298,19 @@ compute_plan() {
   # --- Disks to REMOVE: in pool but not in config (only when pool is mounted) ---
   local disks_to_remove=()
   if [[ "$mounted" == "true" ]]; then
-    for pm in "${pool_mappers[@]}"; do
+    for pi in "${!pool_mappers[@]}"; do
+      local pm="${pool_mappers[$pi]}"
       local in_config=false
-      for cb in "${config_basenames[@]}"; do
+      for ci in "${!config_basenames[@]}"; do
+        local cb="${config_basenames[$ci]}"
         if [[ "$cb" == "$pm" ]]; then
+          in_config=true
+          break
+        fi
+        # Different mapper name but same underlying device
+        local config_real
+        config_real=$(readlink -f "${config_disk_map[$ci]}" 2>/dev/null || true)
+        if [[ -n "${pool_backing[$pi]:-}" && -n "$config_real" && "${pool_backing[$pi]}" == "$config_real" ]]; then
           in_config=true
           break
         fi
@@ -770,6 +806,23 @@ action_open_luks() {
 
   if ! cryptsetup isLuks "$target" 2>/dev/null; then
     die "Device $target is not LUKS formatted. Run: braid init-disk $target"
+  fi
+
+  # Already open with expected mapper name — idempotent skip
+  if [[ -e "/dev/mapper/$mapper_name" ]] && cryptsetup status "$mapper_name" >/dev/null 2>&1; then
+    echo "LUKS device $target already open as $mapper_name — skipping."
+    return 0
+  fi
+
+  # Device already mapped under a different name (e.g., boot-time LUKS with short names)
+  local real_dev
+  real_dev=$(readlink -f "$target")
+  local dev_basename
+  dev_basename=$(basename "$real_dev")
+  local holders_dir="/sys/block/$dev_basename/holders"
+  if [[ -d "$holders_dir" ]] && [[ -n "$(ls -A "$holders_dir" 2>/dev/null)" ]]; then
+    echo "Device $target already in use (mapped under different name) — skipping."
+    return 0
   fi
 
   echo "Opening LUKS device $target as $mapper_name..."
