@@ -32,6 +32,14 @@ def plan_json():
     return json.loads(raw)
 
 
+def init_disk(by_id):
+    return (
+        f"BRAID_PASSPHRASE='{passphrase}' "
+        f"BRAID_LUKS_OPTS='{luks_opts}' "
+        f"braid init-disk --config /tmp/braid-config.json {by_id}"
+    )
+
+
 # --- Phase 0: Build 2-disk RAID1 pool ---
 
 with subtest("Setup: build 2-disk RAID1 pool"):
@@ -56,23 +64,38 @@ with subtest("No-op plan when config matches live state"):
     p = plan_json()
     mutation_actions = [a for a in p["actions"] if not a["type"].startswith("VERIFY_")]
     assert len(mutation_actions) == 0, f"Expected zero mutation actions:\n{p['actions']}"
+    assert p["status"] == "applicable", f"Expected applicable:\n{p}"
 
-# --- Phase 2: Add plan ---
+# --- Phase 2: Add plan (disk3 not yet LUKS — blocked) ---
 
-with subtest("Plan shows add actions for unconfigured disk"):
+with subtest("Plan blocked for non-LUKS disk with INIT_REQUIRED"):
     machine.succeed(write_config([
         "/dev/disk/by-id/virtio-disk1",
         "/dev/disk/by-id/virtio-disk2",
         "/dev/disk/by-id/virtio-disk3",
     ]))
     p = plan_json()
+    assert p["status"] == "blocked", f"Expected blocked:\n{p}"
+    assert any(r["code"] == "INIT_REQUIRED" for r in p["blocked_reasons"]), (
+        f"Expected INIT_REQUIRED:\n{p['blocked_reasons']}"
+    )
+    # No OPEN_LUKS or format action for the non-LUKS disk
     types = [a["type"] for a in p["actions"]]
-    assert "ADD_DISK_LUKS_FORMAT_OPEN" in types, f"Missing ADD_DISK_LUKS_FORMAT_OPEN:\n{types}"
-    assert "ADD_DISK_BTRFS_ADD" in types, f"Missing ADD_DISK_BTRFS_ADD:\n{types}"
+    assert "OPEN_LUKS" not in types, f"Unexpected OPEN_LUKS for non-LUKS disk:\n{types}"
 
-    # Target should be the unconfigured disk
-    add_action = [a for a in p["actions"] if a["type"] == "ADD_DISK_LUKS_FORMAT_OPEN"][0]
-    assert "virtio-disk3" in add_action["target"], f"Wrong target:\n{add_action}"
+# --- Phase 2b: After init-disk, plan shows OPEN_LUKS ---
+
+with subtest("Plan shows OPEN_LUKS after init-disk"):
+    machine.succeed(init_disk("/dev/disk/by-id/virtio-disk3"))
+    p = plan_json()
+    types = [a["type"] for a in p["actions"]]
+    assert "OPEN_LUKS" in types, f"Missing OPEN_LUKS:\n{types}"
+    assert "ADD_DISK_BTRFS_ADD" in types, f"Missing ADD_DISK_BTRFS_ADD:\n{types}"
+    assert p["status"] == "applicable", f"Expected applicable:\n{p}"
+
+    # Target should be the newly init'd disk
+    open_action = [a for a in p["actions"] if a["type"] == "OPEN_LUKS"][0]
+    assert "virtio-disk3" in open_action["target"], f"Wrong target:\n{open_action}"
 
 # --- Phase 3: Remove plan (graceful) ---
 
@@ -104,15 +127,21 @@ with subtest("Setup: simulate disk2 death"):
     fi_show = machine.succeed("btrfs fi show /mnt/storage")
     assert "missing" in fi_show.lower(), f"Expected missing device:\n{fi_show}"
 
-with subtest("Plan shows add + missing-remove for replace scenario"):
+with subtest("Plan shows OPEN_LUKS + missing warning for replace scenario"):
+    # disk3 is already LUKS-formatted from earlier init-disk
     machine.succeed(write_config([
         "/dev/disk/by-id/virtio-disk1",
         "/dev/disk/by-id/virtio-disk3",
     ]))
     p = plan_json()
     types = [a["type"] for a in p["actions"]]
-    assert "REMOVE_DISK_MISSING" in types, f"Missing REMOVE_DISK_MISSING:\n{types}"
-    assert "ADD_DISK_LUKS_FORMAT_OPEN" in types, f"Missing ADD_DISK_LUKS_FORMAT_OPEN:\n{types}"
+    # Missing removal now requires explicit gate (Phase 6), so no REMOVE_DISK_MISSING
+    # Instead we expect a warning about the missing device
+    assert "OPEN_LUKS" in types, f"Missing OPEN_LUKS:\n{types}"
+    # Check for pool degraded warning
+    assert any("POOL_DEGRADED" in w or "missing" in w.lower() for w in p["warnings"]), (
+        f"Expected degraded warning:\n{p['warnings']}"
+    )
 
 # --- Phase 6: Ambiguity refusal ---
 
@@ -149,12 +178,16 @@ with subtest("Setup: kill two disks for ambiguity"):
     machine.succeed("cryptsetup luksClose virtio-disk4")
     machine.succeed("mount -o degraded /dev/mapper/virtio-disk1 /mnt/storage")
 
-with subtest("Multiple missing devices causes planner to refuse"):
+with subtest("Multiple missing devices warns about degraded pool"):
     machine.succeed(write_config([
         "/dev/disk/by-id/virtio-disk1",
         "/dev/disk/by-id/virtio-disk2",
     ]))
-    machine.fail(plan())
+    # With new design, multiple missing no longer causes die() — it warns
+    p = plan_json()
+    assert any("POOL_DEGRADED" in w or "missing" in w.lower() for w in p["warnings"]), (
+        f"Expected degraded warning:\n{p['warnings']}"
+    )
 
 # --- Phase 7: JSON schema validation ---
 
@@ -188,6 +221,8 @@ with subtest("JSON output has required schema fields"):
     assert "mount_point" in p, "Missing mount_point"
     assert "warnings" in p, "Missing warnings"
     assert "actions" in p, "Missing actions"
+    assert "status" in p, "Missing status"
+    assert "blocked_reasons" in p, "Missing blocked_reasons"
 
     for action in p["actions"]:
         assert "id" in action, f"Action missing id: {action}"
@@ -209,20 +244,36 @@ with subtest("Human output shows plan summary"):
     assert "Plan ID:" in output, f"Missing Plan ID:\n{output}"
     assert "Mount:" in output or "mount" in output.lower(), f"Missing mount:\n{output}"
     assert "REMOVE_DISK" in output, f"Missing action in human output:\n{output}"
+    assert "Status:" in output, f"Missing Status in human output:\n{output}"
 
-# --- Phase 9: Bootstrap plan (unmounted pool) ---
+# --- Phase 9: Bootstrap plan (unmounted pool, disk not yet init'd) ---
 
-with subtest("Bootstrap plan succeeds on unmounted pool"):
+with subtest("Bootstrap plan blocked for non-LUKS disk"):
     machine.succeed("umount /mnt/storage")
+    # Close all LUKS to simulate fresh state (but disk1 is still LUKS-formatted)
+    machine.succeed("cryptsetup luksClose virtio-disk1 || true")
+    machine.succeed("cryptsetup luksClose virtio-disk2 || true")
+    machine.succeed("cryptsetup luksClose virtio-disk3 || true")
+    machine.succeed("cryptsetup luksClose virtio-disk4 || true")
+    # disk1 is already LUKS-formatted, so plan should show OPEN_LUKS
     machine.succeed(write_config(["/dev/disk/by-id/virtio-disk1"]))
     p = plan_json()
     types = [a["type"] for a in p["actions"]]
-    assert "ADD_DISK_LUKS_FORMAT_OPEN" in types, f"Missing ADD_DISK_LUKS_FORMAT_OPEN:\n{types}"
+    assert "OPEN_LUKS" in types, f"Missing OPEN_LUKS:\n{types}"
     assert "ADD_DISK_BTRFS_ADD" in types, f"Missing ADD_DISK_BTRFS_ADD:\n{types}"
     # No remove actions when there's no pool
     assert "REMOVE_DISK_GRACEFUL" not in types, f"Unexpected REMOVE_DISK_GRACEFUL:\n{types}"
-    assert "REMOVE_DISK_MISSING" not in types, f"Unexpected REMOVE_DISK_MISSING:\n{types}"
     # No BALANCE_TO_RAID1 with single disk
     assert "BALANCE_TO_RAID1" not in types, f"Unexpected BALANCE_TO_RAID1:\n{types}"
+    assert p["status"] == "applicable", f"Expected applicable:\n{p}"
+
+# --- Phase 9b: No path emits ADD_DISK_LUKS_FORMAT_OPEN ---
+
+with subtest("No path emits ADD_DISK_LUKS_FORMAT_OPEN"):
+    p = plan_json()
+    types = [a["type"] for a in p["actions"]]
+    assert "ADD_DISK_LUKS_FORMAT_OPEN" not in types, (
+        f"ADD_DISK_LUKS_FORMAT_OPEN must never appear in plan:\n{types}"
+    )
 
 machine.shutdown()

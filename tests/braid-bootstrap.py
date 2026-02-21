@@ -1,11 +1,11 @@
 import json
 
-# Test: braid bootstrap (first-disk via plan/apply)
+# Test: braid bootstrap (first-disk via init-disk + plan/apply)
 #
 # Validates the full day-one workflow using the unified CLI:
-#   1. No pool exists → plan with 1 disk → apply → pool created
+#   1. No pool exists → init-disk → plan shows OPEN_LUKS + ADD → apply → pool created
 #   2. Pool healthy with 1 disk
-#   3. Add second disk → plan → apply → RAID1
+#   3. init-disk second disk → plan → apply → RAID1
 #   4. Data integrity throughout
 
 start_all()
@@ -38,22 +38,38 @@ def apply(extra=""):
     )
 
 
-# --- Phase 1: Plan with no pool ---
+def init_disk(by_id):
+    return (
+        f"BRAID_PASSPHRASE='{passphrase}' "
+        f"BRAID_LUKS_OPTS='{luks_opts}' "
+        f"braid init-disk --config /tmp/braid-config.json {by_id}"
+    )
 
-with subtest("Plan produces add actions when no pool exists"):
+
+# --- Phase 1: Plan with no pool (disk not yet init'd => blocked) ---
+
+with subtest("Plan blocked when disk not LUKS formatted"):
     machine.succeed(write_config(["/dev/disk/by-id/virtio-disk1"]))
     p = plan_json()
+    assert p["status"] == "blocked", f"Expected blocked status:\n{p}"
+    assert any(r["code"] == "INIT_REQUIRED" for r in p["blocked_reasons"]), (
+        f"Expected INIT_REQUIRED:\n{p['blocked_reasons']}"
+    )
+
+# --- Phase 2: init-disk, then plan shows OPEN_LUKS ---
+
+with subtest("After init-disk, plan produces OPEN_LUKS + ADD actions"):
+    machine.succeed(init_disk("/dev/disk/by-id/virtio-disk1"))
+    p = plan_json()
     types = [a["type"] for a in p["actions"]]
-    assert "ADD_DISK_LUKS_FORMAT_OPEN" in types, f"Missing ADD_DISK_LUKS_FORMAT_OPEN:\n{types}"
+    assert "OPEN_LUKS" in types, f"Missing OPEN_LUKS:\n{types}"
     assert "ADD_DISK_BTRFS_ADD" in types, f"Missing ADD_DISK_BTRFS_ADD:\n{types}"
     # Single disk — no RAID1 balance
     assert "BALANCE_TO_RAID1" not in types, f"Unexpected BALANCE_TO_RAID1:\n{types}"
-    # No remove actions
-    assert "REMOVE_DISK_GRACEFUL" not in types, f"Unexpected REMOVE_DISK_GRACEFUL:\n{types}"
-    assert "REMOVE_DISK_MISSING" not in types, f"Unexpected REMOVE_DISK_MISSING:\n{types}"
+    assert p["status"] == "applicable", f"Expected applicable status:\n{p}"
 
 
-# --- Phase 2: Apply creates pool from scratch ---
+# --- Phase 3: Apply creates pool from scratch ---
 
 with subtest("Apply creates single-disk pool"):
     machine.succeed(apply())
@@ -62,14 +78,14 @@ with subtest("Apply creates single-disk pool"):
     assert "/dev/mapper/virtio-disk1" in fi_show, f"disk1 not in pool:\n{fi_show}"
 
 
-# --- Phase 3: Status works on new pool ---
+# --- Phase 4: Status works on new pool ---
 
 with subtest("Status reports healthy single-disk pool"):
     output = machine.succeed("braid status --config /tmp/braid-config.json")
     assert "healthy" in output.lower(), f"Expected healthy status:\n{output}"
 
 
-# --- Phase 4: Write data for integrity check ---
+# --- Phase 5: Write data for integrity check ---
 
 with subtest("Write test data"):
     machine.succeed("echo 'bootstrap test data' > /mnt/storage/test.txt && sync")
@@ -77,25 +93,27 @@ with subtest("Write test data"):
     assert "bootstrap test data" in content, f"Data mismatch:\n{content}"
 
 
-# --- Phase 5: Plan to add second disk ---
+# --- Phase 6: Plan to add second disk ---
 
-with subtest("Plan shows add + RAID1 balance for second disk"):
+with subtest("Plan shows OPEN_LUKS + ADD + RAID1 balance for second disk"):
     machine.succeed(write_config([
         "/dev/disk/by-id/virtio-disk1",
         "/dev/disk/by-id/virtio-disk2",
     ]))
+    # init-disk disk2 first
+    machine.succeed(init_disk("/dev/disk/by-id/virtio-disk2"))
     p = plan_json()
     types = [a["type"] for a in p["actions"]]
-    assert "ADD_DISK_LUKS_FORMAT_OPEN" in types, f"Missing ADD_DISK_LUKS_FORMAT_OPEN:\n{types}"
+    assert "OPEN_LUKS" in types, f"Missing OPEN_LUKS:\n{types}"
     assert "ADD_DISK_BTRFS_ADD" in types, f"Missing ADD_DISK_BTRFS_ADD:\n{types}"
     assert "BALANCE_TO_RAID1" in types, f"Missing BALANCE_TO_RAID1:\n{types}"
 
     # Target should be disk2
-    add_action = [a for a in p["actions"] if a["type"] == "ADD_DISK_LUKS_FORMAT_OPEN"][0]
-    assert "virtio-disk2" in add_action["target"], f"Wrong target:\n{add_action}"
+    open_action = [a for a in p["actions"] if a["type"] == "OPEN_LUKS"][0]
+    assert "virtio-disk2" in open_action["target"], f"Wrong target:\n{open_action}"
 
 
-# --- Phase 6: Apply adds second disk and converts to RAID1 ---
+# --- Phase 7: Apply adds second disk and converts to RAID1 ---
 
 with subtest("Apply adds second disk and converts to RAID1"):
     machine.succeed(apply())
@@ -107,19 +125,20 @@ with subtest("Apply adds second disk and converts to RAID1"):
     assert "RAID1" in fi_df, f"Expected RAID1 profile:\n{fi_df}"
 
 
-# --- Phase 7: Data integrity after RAID1 conversion ---
+# --- Phase 8: Data integrity after RAID1 conversion ---
 
 with subtest("Data intact after RAID1 conversion"):
     content = machine.succeed("cat /mnt/storage/test.txt")
     assert "bootstrap test data" in content, f"Data lost after RAID1:\n{content}"
 
 
-# --- Phase 8: No-op plan after convergence ---
+# --- Phase 9: No-op plan after convergence ---
 
 with subtest("No-op plan after full convergence"):
     p = plan_json()
     mutation_actions = [a for a in p["actions"] if not a["type"].startswith("VERIFY_")]
     assert len(mutation_actions) == 0, f"Expected zero mutation actions:\n{p['actions']}"
+    assert p["status"] == "applicable", f"Expected applicable:\n{p}"
 
 
 machine.shutdown()

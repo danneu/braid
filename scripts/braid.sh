@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # braid — unified CLI for braid disk pool management.
 # Usage: braid <command> [options]
-#   braid plan [--json] [--config <path>]
-#   braid apply [--resume] [--config <path>]
+#   braid init-disk <by-id-path> [--force] [--config <path>]
+#   braid plan [--json] [--allow-remove-missing] [--config <path>]
+#   braid apply [--resume] [--allow-remove-missing] [--config <path>]
 #   braid status [--verbose] [--json] [--config <path>]
 
 set -euo pipefail
@@ -19,9 +20,10 @@ usage() {
   echo "Usage: braid <command> [options]"
   echo ""
   echo "Commands:"
-  echo "  plan     Preview what actions braid will take"
-  echo "  apply    Execute the plan"
-  echo "  status   Show pool health"
+  echo "  init-disk  Format a new disk with LUKS (explicit, one-shot)"
+  echo "  plan       Preview what actions braid will take"
+  echo "  apply      Execute the plan"
+  echo "  status     Show pool health"
   echo ""
   echo "Global options:"
   echo "  --config <path>   Config file (default: /etc/braid/config.json)"
@@ -172,9 +174,11 @@ generate_plan_id() {
 
 # Compute the diff between desired state (config) and live state.
 # Args: $1 = live_state JSON (from discover_live_state)
+#        $2 = "true" if --allow-remove-missing was passed (optional)
 # Outputs: plan JSON to stdout.
 compute_plan() {
   local live_state="$1"
+  local allow_remove_missing="${2:-false}"
   local mount_point
   mount_point=$(config_mount_point)
 
@@ -215,6 +219,7 @@ compute_plan() {
 
   # --- Disks to ADD: in config but not in pool ---
   local disks_to_add=()
+  local blocked_reasons=()
   for i in "${!config_basenames[@]}"; do
     local basename="${config_basenames[$i]}"
     local by_id="${config_disk_map[$i]}"
@@ -228,9 +233,28 @@ compute_plan() {
     done
 
     if ! $in_pool; then
+      # Check device presence
+      if [[ ! -b "$by_id" ]]; then
+        # Device absent: skip with warning
+        warnings+=("DISK_ABSENT_SKIPPED: $by_id not present; skipping add actions for this disk.")
+        continue
+      fi
+
+      # Device present — check if LUKS
+      if ! cryptsetup isLuks "$by_id" 2>/dev/null; then
+        # Device present but not LUKS: blocked — needs init-disk first
+        blocked_reasons+=("$(jq -n \
+          --arg code "INIT_REQUIRED" \
+          --arg disk "$by_id" \
+          --arg message "Disk $by_id is not LUKS formatted. Run: braid init-disk $by_id" \
+          '{code: $code, disk: $disk, message: $message}')")
+        continue
+      fi
+
+      # Device present and LUKS — plan open + add
       disks_to_add+=("$by_id")
 
-      # Check if LUKS is already formatted+open (crash recovery)
+      # Check if LUKS is already open (crash recovery)
       local is_open
       is_open=$(echo "$live_state" | jq -r --arg m "$basename" '.open_luks_mappers | index($m) != null')
 
@@ -238,7 +262,7 @@ compute_plan() {
         actions+=("$(jq -n \
           --arg id "$(next_id)" \
           --arg target "$by_id" \
-          '{id: $id, type: "ADD_DISK_LUKS_FORMAT_OPEN", target: $target, preconditions: ["device_present", "device_not_luks"], status: "pending"}')")
+          '{id: $id, type: "OPEN_LUKS", target: $target, preconditions: ["device_present", "device_is_luks"], status: "pending"}')")
       fi
 
       actions+=("$(jq -n \
@@ -273,26 +297,38 @@ compute_plan() {
       fi
     done
 
-    # --- Missing device removal ---
+    # --- Missing device handling ---
     if (( missing_count > 0 )); then
-      # If there are multiple missing devices, refuse (ambiguous)
-      if (( missing_count > 1 )); then
-        rm -f "$counter_file"
-        die "Multiple missing devices detected ($missing_count). Cannot determine which device to remove. Resolve manually: btrfs device remove missing $mount_point"
-      fi
+      warnings+=("POOL_DEGRADED_MISSING_DEVICES: pool has $missing_count missing device(s) at $mount_point.")
 
-      # Single missing device — emit a REMOVE_DISK_MISSING action.
-      actions+=("$(jq -n \
-        --arg id "$(next_id)" \
-        --arg target "missing" \
-        '{id: $id, type: "REMOVE_DISK_MISSING", target: $target, preconditions: ["pool_has_missing"], status: "pending"}')")
+      if [[ "$allow_remove_missing" == "true" ]]; then
+        if (( missing_count > 1 )); then
+          # Ambiguous: multiple missing — refuse even with explicit gate
+          blocked_reasons+=("$(jq -n \
+            --arg code "AMBIGUOUS_MISSING" \
+            --arg disk "multiple" \
+            --arg message "Multiple missing devices detected ($missing_count). Cannot determine which to remove. Resolve manually: btrfs device remove missing $mount_point" \
+            '{code: $code, disk: $disk, message: $message}')")
+        else
+          # Single missing + explicit gate — emit explicit removal action
+          actions+=("$(jq -n \
+            --arg id "$(next_id)" \
+            --arg target "missing" \
+            '{id: $id, type: "REMOVE_DISK_MISSING_EXPLICIT", target: $target, preconditions: ["pool_has_missing"], status: "pending"}')")
+        fi
+      fi
     fi
   fi
 
   # --- BALANCE_TO_RAID1 if adding disks and pool will have 2+ devices ---
   if (( ${#disks_to_add[@]} > 0 )); then
     local current_pool_size=${#pool_mappers[@]}
-    local after_add=$((current_pool_size + ${#disks_to_add[@]} - ${#disks_to_remove[@]} - missing_count))
+    # Only subtract missing_count if explicit removal is active
+    local missing_subtract=0
+    if [[ "$allow_remove_missing" == "true" ]] && (( missing_count == 1 )); then
+      missing_subtract=$missing_count
+    fi
+    local after_add=$((current_pool_size + ${#disks_to_add[@]} - ${#disks_to_remove[@]} - missing_subtract))
     if (( after_add >= 2 )); then
       actions+=("$(jq -n \
         --arg id "$(next_id)" \
@@ -301,17 +337,37 @@ compute_plan() {
     fi
   fi
 
+  # --- Confirmation for explicit missing-device removal ---
+  local has_missing_removal=false
+  for a_json in "${actions[@]}"; do
+    local atype
+    atype=$(echo "$a_json" | jq -r '.type')
+    if [[ "$atype" == "REMOVE_DISK_MISSING_EXPLICIT" ]]; then
+      has_missing_removal=true
+      local missing_action_id
+      missing_action_id=$(echo "$a_json" | jq -r '.id')
+      confirmations+=("$(jq -n \
+        --arg action_id "$missing_action_id" \
+        '{action_id: $action_id, phrase: "remove missing device from pool"}')")
+      break
+    fi
+  done
+
   # --- Redundancy warning ---
-  if (( ${#disks_to_remove[@]} > 0 || missing_count > 0 )); then
+  if (( ${#disks_to_remove[@]} > 0 )) || { (( missing_count > 0 )) && $has_missing_removal; }; then
     local total_with_missing
     total_with_missing=$(echo "$live_state" | jq -r '.total_devices')
-    local after_remove=$((total_with_missing - ${#disks_to_remove[@]} - missing_count + ${#disks_to_add[@]}))
+    local remove_count=${#disks_to_remove[@]}
+    if [[ "$has_missing_removal" == "true" ]]; then
+      remove_count=$((remove_count + missing_count))
+    fi
+    local after_remove=$((total_with_missing - remove_count + ${#disks_to_add[@]}))
     if (( after_remove < 2 )); then
       local remove_action_id=""
       for a_json in "${actions[@]}"; do
         local atype
         atype=$(echo "$a_json" | jq -r '.type')
-        if [[ "$atype" == "REMOVE_DISK_GRACEFUL" || "$atype" == "REMOVE_DISK_MISSING" ]]; then
+        if [[ "$atype" == "REMOVE_DISK_GRACEFUL" || "$atype" == "REMOVE_DISK_MISSING_EXPLICIT" ]]; then
           remove_action_id=$(echo "$a_json" | jq -r '.id')
           break
         fi
@@ -359,18 +415,35 @@ compute_plan() {
   done
   warnings_json+="]"
 
+  local blocked_reasons_json="["
+  for i in "${!blocked_reasons[@]}"; do
+    [[ $i -gt 0 ]] && blocked_reasons_json+=","
+    blocked_reasons_json+="${blocked_reasons[$i]}"
+  done
+  blocked_reasons_json+="]"
+
+  # Determine plan status: blocked if any blocked_reasons exist
+  local plan_status="applicable"
+  if (( ${#blocked_reasons[@]} > 0 )); then
+    plan_status="blocked"
+  fi
+
   jq -n \
     --argjson schema_version 1 \
     --arg plan_id "$plan_id" \
     --arg mount_point "$mount_point" \
+    --arg status "$plan_status" \
     --argjson warnings "$warnings_json" \
+    --argjson blocked_reasons "$blocked_reasons_json" \
     --argjson confirmations "$confirmations_json" \
     --argjson actions "$actions_json" \
     '{
       schema_version: $schema_version,
       plan_id: $plan_id,
       mount_point: $mount_point,
+      status: $status,
       warnings: $warnings,
+      blocked_reasons: $blocked_reasons,
       confirmations: $confirmations,
       actions: $actions
     }'
@@ -383,19 +456,32 @@ compute_plan() {
 format_plan_human() {
   local plan_json="$1"
 
-  local plan_id mount_point
+  local plan_id mount_point plan_status
   plan_id=$(echo "$plan_json" | jq -r '.plan_id')
   mount_point=$(echo "$plan_json" | jq -r '.mount_point')
+  plan_status=$(echo "$plan_json" | jq -r '.status')
 
   local mutation_count
   mutation_count=$(echo "$plan_json" | jq '[.actions[] | select(.type | startswith("VERIFY_") | not)] | length')
 
   echo "Plan ID: $plan_id"
   echo "Mount: $mount_point"
+  echo "Status: $plan_status"
   echo "Actions: $mutation_count"
   echo ""
 
-  if (( mutation_count == 0 )); then
+  # Blocked reasons
+  local blocked_count
+  blocked_count=$(echo "$plan_json" | jq '.blocked_reasons | length')
+  if (( blocked_count > 0 )); then
+    echo "BLOCKED — apply cannot proceed:"
+    echo "$plan_json" | jq -r '.blocked_reasons[].message' | while IFS= read -r msg; do
+      echo "  - $msg"
+    done
+    echo ""
+  fi
+
+  if (( mutation_count == 0 )) && (( blocked_count == 0 )); then
     echo "No actions required — pool matches config."
     echo ""
     return
@@ -409,7 +495,6 @@ format_plan_human() {
     target=$(echo "$line" | jq -r '.target')
     printf "[%d] %-30s target=%s\n" "$i" "$atype" "$target"
   done < <(echo "$plan_json" | jq -c '.actions[]')
-
   echo ""
 
   # Warnings
@@ -432,7 +517,159 @@ format_plan_human() {
     echo "Confirmations required: $confirm_count"
   fi
 
-  echo "Next step: run 'sudo braid apply'"
+  if [[ "$plan_status" == "blocked" ]]; then
+    echo "Resolve blocked reasons above before running apply."
+  else
+    echo "Next step: run 'sudo braid apply'"
+  fi
+}
+
+# ============================================================================
+# cmd_init_disk
+# ============================================================================
+
+cmd_init_disk() {
+  local force=false
+  local by_id=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --force) force=true; shift ;;
+      --config) CONFIG_FILE="$2"; shift 2 ;;
+      -h|--help)
+        echo "Usage: braid init-disk <by-id-path> [--force] [--config <path>]"
+        echo ""
+        echo "Format a new disk with LUKS encryption."
+        echo "This is a one-shot destructive operation — it will never be"
+        echo "called by 'braid plan' or 'braid apply'."
+        echo ""
+        echo "The disk must be declared in your braid config before init."
+        echo ""
+        echo "Options:"
+        echo "  --force    Re-format a disk that already has a LUKS header."
+        echo "             Requires BRAID_CONFIRM='reformat this disk'."
+        echo "  --config   Config file (default: /etc/braid/config.json)"
+        echo ""
+        echo "Environment:"
+        echo "  BRAID_PASSPHRASE   Required. Passphrase for LUKS encryption."
+        echo "  BRAID_LUKS_OPTS    Optional. Extra options for cryptsetup luksFormat."
+        echo "  BRAID_CONFIRM      Required with --force: 'reformat this disk'"
+        exit 0
+        ;;
+      -*)
+        die "Unknown option for init-disk: $1"
+        ;;
+      *)
+        if [[ -z "$by_id" ]]; then
+          by_id="$1"
+        else
+          die "Unexpected argument: $1"
+        fi
+        shift
+        ;;
+    esac
+  done
+
+  if [[ -z "$by_id" ]]; then
+    die "Usage: braid init-disk <by-id-path> [--force] [--config <path>]"
+  fi
+
+  config_read
+
+  # --- Step 1: Validate by-id path exists and resolves to a block device ---
+  if [[ ! -b "$by_id" ]]; then
+    die "Device not found or not a block device: $by_id"
+  fi
+
+  # --- Step 2: Validate disk is declared in config ---
+  local declared=false
+  while IFS= read -r disk; do
+    if [[ "$disk" == "$by_id" ]]; then
+      declared=true
+      break
+    fi
+  done < <(config_disks)
+
+  if ! $declared; then
+    die "Disk $by_id is not declared in config ($CONFIG_FILE). Add it to braid.disks first."
+  fi
+
+  # --- Step 3: Validate target is not currently part of mounted pool ---
+  local mapper_name
+  mapper_name=$(basename "$by_id")
+  local mount_point
+  mount_point=$(config_mount_point)
+
+  if mountpoint -q "$mount_point" 2>/dev/null; then
+    local fi_show
+    fi_show=$(btrfs filesystem show "$mount_point" 2>/dev/null || true)
+    if echo "$fi_show" | grep -q "/dev/mapper/$mapper_name"; then
+      die "Disk $by_id is currently part of the mounted pool at $mount_point. Remove it first."
+    fi
+  fi
+
+  # --- Step 4: Probe LUKS header ---
+  if cryptsetup isLuks "$by_id" 2>/dev/null; then
+    if ! $force; then
+      die "Disk $by_id already has a LUKS header. Use --force to re-format (destructive). Run: braid init-disk $by_id --force"
+    fi
+
+    # --force requires confirmation phrase
+    local confirm="${BRAID_CONFIRM:-}"
+    if [[ "$confirm" != "reformat this disk" ]]; then
+      die "--force requires BRAID_CONFIRM='reformat this disk'"
+    fi
+  fi
+
+  # --- Step 5: Require passphrase ---
+  local passphrase="${BRAID_PASSPHRASE:-}"
+  if [[ -z "$passphrase" ]]; then
+    die "BRAID_PASSPHRASE is required. Export it before running init-disk."
+  fi
+
+  # --- Step 6: Enforce single-passphrase invariant ---
+  # If pool already has members, verify the passphrase matches an existing member
+  local existing_member=""
+  while IFS= read -r disk; do
+    local dm
+    dm=$(basename "$disk")
+    if [[ -e "/dev/mapper/$dm" ]] && cryptsetup status "$dm" >/dev/null 2>&1; then
+      existing_member="$disk"
+      break
+    fi
+  done < <(config_disks)
+
+  if [[ -z "$existing_member" ]]; then
+    # No open members — check if any config disk has a LUKS header we can test against
+    while IFS= read -r disk; do
+      if [[ "$disk" == "$by_id" ]]; then
+        continue
+      fi
+      if [[ -b "$disk" ]] && cryptsetup isLuks "$disk" 2>/dev/null; then
+        existing_member="$disk"
+        break
+      fi
+    done < <(config_disks)
+  fi
+
+  if [[ -n "$existing_member" ]]; then
+    if ! echo -n "$passphrase" | cryptsetup open --test-passphrase --key-file=- "$existing_member" 2>/dev/null; then
+      die "Passphrase does not match existing pool member $existing_member. All disks must use the same passphrase."
+    fi
+  fi
+
+  # --- Step 7: Run cryptsetup luksFormat ---
+  local luks_extra_opts=()
+  if [[ -n "${BRAID_LUKS_OPTS:-}" ]]; then
+    read -ra luks_extra_opts <<< "$BRAID_LUKS_OPTS"
+  fi
+
+  echo "Formatting $by_id with LUKS..."
+  echo -n "$passphrase" | cryptsetup luksFormat --batch-mode --key-file=- "${luks_extra_opts[@]}" "$by_id"
+
+  # --- Step 8: Success ---
+  echo "LUKS format complete: $by_id"
+  echo "Next step: run 'braid apply' to open and add this disk to the pool."
 }
 
 # ============================================================================
@@ -441,10 +678,12 @@ format_plan_human() {
 
 cmd_plan() {
   local json_output=false
+  local allow_remove_missing=false
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --json) json_output=true; shift ;;
+      --allow-remove-missing) allow_remove_missing=true; shift ;;
       --config) CONFIG_FILE="$2"; shift 2 ;;
       *) die "Unknown option for plan: $1" ;;
     esac
@@ -456,7 +695,7 @@ cmd_plan() {
   live_state=$(discover_live_state)
 
   local plan
-  plan=$(compute_plan "$live_state")
+  plan=$(compute_plan "$live_state" "$allow_remove_missing")
 
   if $json_output; then
     echo "$plan" | jq .
@@ -523,26 +762,25 @@ checkpoint_finalize() {
 # Action handlers
 # ============================================================================
 
-action_luks_format_open() {
+action_open_luks() {
   local target="$1"  # by-id path
   local mapper_name
   mapper_name=$(basename "$target")
 
   local passphrase="${BRAID_PASSPHRASE:-}"
   if [[ -z "$passphrase" ]]; then
-    die "BRAID_PASSPHRASE is required for ADD operations."
+    die "BRAID_PASSPHRASE is required to open LUKS devices."
   fi
 
-  # Parse BRAID_LUKS_OPTS
-  local luks_extra_opts=()
-  if [[ -n "${BRAID_LUKS_OPTS:-}" ]]; then
-    read -ra luks_extra_opts <<< "$BRAID_LUKS_OPTS"
+  if [[ ! -b "$target" ]]; then
+    die "Device not found: $target"
   fi
 
-  echo "Formatting $target with LUKS..."
-  echo -n "$passphrase" | cryptsetup luksFormat --batch-mode --key-file=- "${luks_extra_opts[@]}" "$target"
+  if ! cryptsetup isLuks "$target" 2>/dev/null; then
+    die "Device $target is not LUKS formatted. Run: braid init-disk $target"
+  fi
 
-  echo "Opening LUKS device as $mapper_name..."
+  echo "Opening LUKS device $target as $mapper_name..."
   echo -n "$passphrase" | cryptsetup luksOpen --key-file=- "$target" "$mapper_name"
 }
 
@@ -552,8 +790,9 @@ action_btrfs_add() {
   mount_point=$(config_mount_point)
 
   # Check if this is the first disk (pool doesn't exist yet) or adding to existing
-  local pool_devs
-  pool_devs=$(btrfs filesystem show "$mount_point" 2>/dev/null | grep -c "devid" || echo "0")
+  local pool_devs=0
+  pool_devs=$(btrfs filesystem show "$mount_point" 2>/dev/null | grep -c "devid" || true)
+  pool_devs=${pool_devs:-0}
 
   if (( pool_devs == 0 )); then
     echo "Creating btrfs filesystem on $target..."
@@ -649,10 +888,12 @@ action_verify_diskset() {
 
 cmd_apply() {
   local resume=false
+  local allow_remove_missing=false
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --resume) resume=true; shift ;;
+      --allow-remove-missing) allow_remove_missing=true; shift ;;
       --config) CONFIG_FILE="$2"; shift 2 ;;
       *) die "Unknown option for apply: $1" ;;
     esac
@@ -687,7 +928,18 @@ cmd_apply() {
 
     local live_state
     live_state=$(discover_live_state)
-    plan_json=$(compute_plan "$live_state")
+    plan_json=$(compute_plan "$live_state" "$allow_remove_missing")
+
+    # Check for blocked plan
+    local plan_status
+    plan_status=$(echo "$plan_json" | jq -r '.status')
+    if [[ "$plan_status" == "blocked" ]]; then
+      echo "Apply blocked:" >&2
+      echo "$plan_json" | jq -r '.blocked_reasons[].message' | while IFS= read -r msg; do
+        echo "  - $msg" >&2
+      done
+      exit 1
+    fi
 
     # Check for no-op
     local mutation_count
@@ -701,15 +953,17 @@ cmd_apply() {
     local confirm_count
     confirm_count=$(echo "$plan_json" | jq '.confirmations | length')
     if (( confirm_count > 0 )); then
-      local confirm_phrase
-      confirm_phrase=$(echo "$plan_json" | jq -r '.confirmations[0].phrase')
       local provided="${BRAID_CONFIRM:-}"
-      if [[ -z "$provided" ]]; then
-        die "This operation requires confirmation. Set BRAID_CONFIRM='$confirm_phrase' or use interactive mode."
-      fi
-      if [[ "$provided" != "$confirm_phrase" ]]; then
-        die "Confirmation phrase doesn't match. Expected: '$confirm_phrase'"
-      fi
+      local required_phrases
+      mapfile -t required_phrases < <(echo "$plan_json" | jq -r '.confirmations[].phrase')
+      for phrase in "${required_phrases[@]}"; do
+        if [[ -z "$provided" ]]; then
+          die "This operation requires confirmation. Set BRAID_CONFIRM='$phrase'"
+        fi
+        if [[ "$provided" != "$phrase" ]]; then
+          die "Confirmation phrase doesn't match. Expected: '$phrase'"
+        fi
+      done
     fi
 
     # Write checkpoint
@@ -739,14 +993,15 @@ cmd_apply() {
     checkpoint_update_action "$action_id" "in_progress"
 
     case "$action_type" in
-      ADD_DISK_LUKS_FORMAT_OPEN) action_luks_format_open "$action_target" ;;
-      ADD_DISK_BTRFS_ADD)        action_btrfs_add "$action_target" ;;
-      BALANCE_TO_RAID1)          action_balance_raid1 "$action_target" ;;
-      REMOVE_DISK_GRACEFUL)      action_remove_graceful "$action_target" ;;
-      REMOVE_DISK_MISSING)       action_remove_missing ;;
-      CLOSE_LUKS_MAPPER)         action_close_luks "$action_target" ;;
-      VERIFY_POOL_HEALTH)        action_verify_health ;;
-      VERIFY_EXPECTED_DISK_SET)  action_verify_diskset ;;
+      OPEN_LUKS)                     action_open_luks "$action_target" ;;
+      ADD_DISK_BTRFS_ADD)            action_btrfs_add "$action_target" ;;
+      BALANCE_TO_RAID1)              action_balance_raid1 "$action_target" ;;
+      REMOVE_DISK_GRACEFUL)          action_remove_graceful "$action_target" ;;
+      REMOVE_DISK_MISSING)           action_remove_missing ;;
+      REMOVE_DISK_MISSING_EXPLICIT)  action_remove_missing ;;
+      CLOSE_LUKS_MAPPER)             action_close_luks "$action_target" ;;
+      VERIFY_POOL_HEALTH)            action_verify_health ;;
+      VERIFY_EXPECTED_DISK_SET)      action_verify_diskset ;;
       *) die "Unknown action type: $action_type" ;;
     esac
 
@@ -1025,7 +1280,7 @@ while [[ $# -gt 0 ]]; do
       CONFIG_FILE="$2"
       shift 2
       ;;
-    plan|apply|status)
+    init-disk|plan|apply|status)
       break
       ;;
     -h|--help|help)
@@ -1046,8 +1301,9 @@ SUBCOMMAND="$1"
 shift
 
 case "$SUBCOMMAND" in
-  plan)   cmd_plan "$@" ;;
-  apply)  cmd_apply "$@" ;;
-  status) cmd_status "$@" ;;
-  *)      die "Unknown command: $SUBCOMMAND. Run 'braid --help' for usage." ;;
+  init-disk) cmd_init_disk "$@" ;;
+  plan)      cmd_plan "$@" ;;
+  apply)     cmd_apply "$@" ;;
+  status)    cmd_status "$@" ;;
+  *)         die "Unknown command: $SUBCOMMAND. Run 'braid --help' for usage." ;;
 esac

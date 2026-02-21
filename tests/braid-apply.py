@@ -35,6 +35,14 @@ def plan_json():
     return json.loads(raw)
 
 
+def init_disk(by_id):
+    return (
+        f"BRAID_PASSPHRASE='{passphrase}' "
+        f"BRAID_LUKS_OPTS='{luks_opts}' "
+        f"braid init-disk --config /tmp/braid-config.json {by_id}"
+    )
+
+
 # --- Phase 0: Build initial 2-disk RAID1 pool with braid-add-disk ---
 
 with subtest("Setup: build 2-disk RAID1 pool"):
@@ -54,7 +62,7 @@ with subtest("No-op apply when config matches live state"):
         f"Expected no-op message:\n{output}"
     )
 
-# --- Phase 2: Apply add-disk ---
+# --- Phase 2: Apply add-disk (using init-disk first) ---
 
 with subtest("Apply adds disk3 to pool"):
     machine.succeed(write_config([
@@ -62,6 +70,8 @@ with subtest("Apply adds disk3 to pool"):
         "/dev/disk/by-id/virtio-disk2",
         "/dev/disk/by-id/virtio-disk3",
     ]))
+    # Must init-disk before apply can open it
+    machine.succeed(init_disk("/dev/disk/by-id/virtio-disk3"))
     output = machine.succeed(apply())
     print(f"Apply output:\n{output}")
 
@@ -100,7 +110,7 @@ with subtest("Data intact after apply remove"):
     content = machine.succeed("cat /mnt/storage/precious.txt").strip()
     assert content == "important data", f"Data lost: '{content}'"
 
-# --- Phase 4: Apply replace (add + missing-remove) ---
+# --- Phase 4: Apply replace (add + missing-remove with explicit gate) ---
 
 with subtest("Setup: simulate disk2 death"):
     machine.succeed("umount /mnt/storage")
@@ -112,7 +122,14 @@ with subtest("Apply replaces dead disk2 with disk3"):
         "/dev/disk/by-id/virtio-disk1",
         "/dev/disk/by-id/virtio-disk3",
     ]))
-    machine.succeed(apply())
+    # disk3 already LUKS-formatted from Phase 2 init-disk, but was closed after remove
+    # Need to re-init since it was wiped? No — it's still LUKS formatted, just closed.
+    # The apply will OPEN_LUKS + ADD it.
+    # But we also need to remove the missing device — requires explicit gate
+    machine.succeed(apply(
+        extra="--allow-remove-missing",
+        confirm="remove missing device from pool",
+    ))
 
     fi_show = machine.succeed("btrfs fi show /mnt/storage")
     assert "virtio-disk3" in fi_show, f"disk3 not in pool:\n{fi_show}"
@@ -142,6 +159,7 @@ with subtest("Setup: rebuild 2-disk pool for resume test"):
         "/dev/disk/by-id/virtio-disk1",
         "/dev/disk/by-id/virtio-disk3",
     ]))
+    # disk3 is still LUKS, just removed from pool. Re-add.
     machine.succeed(apply())
     fi_show = machine.succeed("btrfs fi show /mnt/storage")
     assert "RAID1" in machine.succeed("btrfs fi df /mnt/storage")
@@ -152,6 +170,8 @@ with subtest("Interrupted apply leaves checkpoint"):
         "/dev/disk/by-id/virtio-disk3",
         "/dev/disk/by-id/virtio-disk4",
     ]))
+    # init-disk disk4 first
+    machine.succeed(init_disk("/dev/disk/by-id/virtio-disk4"))
     # Use BRAID_TEST_FAIL_AFTER_ACTION to simulate interruption after first action
     cmd = (
         f"BRAID_PASSPHRASE='{passphrase}' "
@@ -189,5 +209,18 @@ with subtest("Stale checkpoint refuses resume"):
     machine.fail(apply("--resume"))
     # Clean up
     machine.succeed("rm /var/lib/braid/apply-state.json")
+
+# --- Phase 8: apply never calls luksFormat ---
+
+with subtest("Apply never contains luksFormat"):
+    # Verify by checking the braid script source
+    output = machine.succeed("which braid")
+    braid_path = output.strip()
+    script = machine.succeed(f"cat {braid_path}")
+    # The apply executor should not reference luksFormat
+    # (init-disk has it, but the executor dispatch table should not)
+    assert "action_luks_format_open" not in script, (
+        "action_luks_format_open still referenced in braid script"
+    )
 
 machine.shutdown()
