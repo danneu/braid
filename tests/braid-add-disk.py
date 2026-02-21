@@ -16,10 +16,11 @@ def add_disk(dev):
 
 # --- Phase 0: No-args disk listing ---
 
-with subtest("No args lists configured and available disks"):
+with subtest("No args lists configured disks and preferred workflow"):
     output = machine.succeed("braid-add-disk")
     assert "Configured disks" in output, f"Expected configured listing:\n{output}"
-    assert "Available disks" in output, f"Expected available listing:\n{output}"
+    assert "Preferred workflow" in output, f"Expected preferred workflow:\n{output}"
+    assert "braid init-disk" in output, f"Expected init-disk in workflow:\n{output}"
     # All 5 test disks should appear as configured
     for i in range(1, 6):
         assert f"virtio-disk{i}" in output, f"disk{i} missing from listing:\n{output}"

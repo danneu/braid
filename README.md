@@ -44,15 +44,15 @@ braid = {
 
 ```
 sudo nixos-rebuild switch
-sudo braid plan      # preview: LUKS format + btrfs create
-sudo braid apply     # execute it
+sudo braid init-disk /dev/disk/by-id/ata-Toshiba_MN07_XXXX   # LUKS format (one-shot)
+sudo braid apply                                              # open + create pool
 ```
 
 The pool is live immediately. No redundancy yet — data is available but unprotected until a second drive is added.
 
 ### Add a drive
 
-Edit config, rebuild, preview, apply:
+Edit config, rebuild, init the new disk, apply:
 
 ```nix
 braid.disks = [
@@ -63,8 +63,8 @@ braid.disks = [
 
 ```
 sudo nixos-rebuild switch
-sudo braid plan      # preview what will happen
-sudo braid apply     # execute it
+sudo braid init-disk /dev/disk/by-id/ata-Ironwolf_ST12_YYYY   # LUKS format new disk
+sudo braid apply                                               # open + add to pool + RAID1
 ```
 
 The pool converts to RAID1 automatically. Existing data rebalances in the background. The pool stays online the entire time.
@@ -102,11 +102,12 @@ braid.disks = [
 
 ```
 sudo nixos-rebuild switch
-sudo braid plan      # shows: add new disk, remove missing device
-sudo braid apply
+sudo braid init-disk /dev/disk/by-id/ata-Seagate_NEW_ZZZZ     # LUKS format replacement
+sudo braid plan --allow-remove-missing                         # preview: add + evict missing
+sudo BRAID_CONFIRM='remove missing device from pool' braid apply --allow-remove-missing
 ```
 
-The new drive joins the pool and the dead device is evicted. The plan shows exactly what will happen before any changes are made.
+The new drive joins the pool and the dead device is evicted. Missing-device removal requires explicit intent to prevent accidental eviction of temporarily absent disks.
 
 ### Pool status
 
@@ -128,12 +129,22 @@ sudo braid apply --resume
 
 The checkpoint is validated against the current config — if the config changed since the interruption, resume is refused and you must start fresh.
 
-### Standalone scripts
+### Temporarily absent disk
 
-The original single-purpose scripts still work for backward compatibility:
+If a configured disk is temporarily disconnected, `braid apply` skips it with a warning and continues other safe operations:
 
 ```
-sudo braid-add-disk /dev/disk/by-id/ata-...
+sudo braid apply     # warns about absent disk, proceeds with others
+# reconnect disk
+sudo braid apply     # reconciles the returned disk
+```
+
+### Standalone scripts (deprecated)
+
+The original `braid-add-disk` still works but prints a deprecation warning. It calls `braid init-disk` + `braid apply` internally:
+
+```
+sudo braid-add-disk /dev/disk/by-id/ata-...     # deprecated, use init-disk + apply
 sudo braid-remove-disk /dev/disk/by-id/ata-...
 sudo braid-status [--verbose]
 ```

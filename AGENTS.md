@@ -82,8 +82,12 @@ Write failing tests first, confirm they fail for the expected reasons, then impl
 - [x] `braid-remove-disk` redundancy warning when dropping below 2 disks
 - [x] `braid-status` summary output (drive count, RAID profile, capacity, health)
 - [x] `braid-status --verbose` per-disk detail (model, serial, errors, LUKS UUID)
-- [x] `braid plan` no-op, add, remove, replace, ambiguity refusal, JSON schema
+- [x] `braid init-disk` safety contract (declared-disk, pool-membership refusal, LUKS probe, force gate, passphrase check)
+- [x] `braid plan` no-op, add, remove, replace, absent disk, JSON schema with status/warnings/blocked_reasons
 - [x] `braid apply` add, remove, replace, checkpoint/resume, stale checkpoint refusal
+- [x] `braid apply` safe-by-construction: no `luksFormat` reachable from apply path
 - [x] `braid apply` redundancy confirmation when dropping below 2 disks
+- [x] `braid apply` explicit missing-device removal gate (`--allow-remove-missing` + `BRAID_CONFIRM`)
+- [x] `braid apply` absent disk skip+warn, unplug/replug regression
 - [x] `braid status` human, `--json`, `--verbose` output
-- [x] Backward compatibility: standalone scripts (`braid-add-disk`, `braid-remove-disk`, `braid-status`) still work
+- [x] Backward compatibility: standalone scripts (`braid-add-disk` deprecated wrapper, `braid-remove-disk`, `braid-status`) still work

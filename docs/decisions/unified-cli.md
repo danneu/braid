@@ -24,11 +24,24 @@ Option 3. Bash+jq for phases 1-3. Re-evaluate language choice only after plan/ap
 
 Single script `scripts/braid.sh` with subcommand dispatcher:
 
-- `braid plan [--json] [--config <path>]` — read-only diff: desired state (config) vs live state (LUKS/btrfs/mounts). Outputs action list.
-- `braid apply [--resume] [--config <path>]` — executes plan with checkpoint persistence. `--resume` continues from `/var/lib/braid/apply-state.json`.
+- `braid init-disk <by-id> [--force] [--config <path>]` — destructive one-shot: LUKS format a declared disk. Requires explicit operator intent. Never called from `apply`.
+- `braid plan [--json] [--allow-remove-missing] [--config <path>]` — read-only diff: desired state (config) vs live state (LUKS/btrfs/mounts). Outputs action list with status (`applicable`/`blocked`), warnings, and blocked reasons.
+- `braid apply [--resume] [--allow-remove-missing] [--config <path>]` — executes plan with checkpoint persistence. `--resume` continues from `/var/lib/braid/apply-state.json`. Never performs `luksFormat`.
 - `braid status [--verbose] [--json] [--config <path>]` — pool health summary (replaces `braid-status`).
 
 Packaged via `pkgs.writeShellApplication` in `cli.nix`, same as existing scripts.
+
+### Hard boundary
+
+`cryptsetup luksFormat` is forbidden in the `plan` and `apply` code paths. Only `init-disk` may invoke `luksFormat`. See [safe-by-construction-reconciliation.md](safe-by-construction-reconciliation.md).
+
+### Plan status model
+
+Plan JSON includes:
+- `status`: `applicable` (can be executed) or `blocked` (requires operator action first)
+- `blocked_reasons[]`: list of reasons the plan cannot proceed (e.g., `INIT_REQUIRED`)
+- `warnings[]`: non-blocking issues (e.g., `DISK_ABSENT_SKIPPED`, `INIT_REQUIRED`, `POOL_DEGRADED`)
+- `confirmations[]`: actions requiring explicit operator confirmation (e.g., redundancy loss)
 
 ### Plan/apply state machine
 
@@ -38,14 +51,15 @@ Packaged via `pkgs.writeShellApplication` in `cli.nix`, same as existing scripts
 4. On success: checkpoint moves to `/var/lib/braid/history/<plan_id>.json`, active file removed
 5. On failure: checkpoint stays for `--resume`
 6. `--resume` verifies config hash matches before continuing
+7. On resume, absent action targets fail with `RESUME_TARGET_MISSING` (strict in-flight integrity)
 
 ### Action types
 
-- `ADD_DISK_LUKS_FORMAT_OPEN` — LUKS format + open
+- `OPEN_LUKS` — open existing LUKS device (non-destructive)
 - `ADD_DISK_BTRFS_ADD` — add mapper to btrfs pool
 - `BALANCE_TO_RAID1` — convert pool to RAID1 profile
 - `REMOVE_DISK_GRACEFUL` — btrfs device remove (data migrates)
-- `REMOVE_DISK_MISSING` — btrfs device remove missing
+- `REMOVE_DISK_MISSING_EXPLICIT` — btrfs device remove missing (requires `--allow-remove-missing` + `BRAID_CONFIRM`)
 - `CLOSE_LUKS_MAPPER` — cryptsetup close
 - `VERIFY_POOL_HEALTH` — confirm pool state matches expectations
 - `VERIFY_EXPECTED_DISK_SET` — confirm pool members match config
@@ -57,7 +71,7 @@ History: `/var/lib/braid/history/<plan_id>.json` (last 20 retained)
 
 ### Backward compatibility
 
-Existing scripts remain installed and functional during transition. No wrapper changes needed — the old scripts work independently.
+`braid-add-disk` is deprecated and rewired as a thin wrapper that calls `braid init-disk` + `braid apply`. It prints a deprecation warning. No private formatting logic remains in the standalone script. `braid-remove-disk` and `braid-status` remain as standalone scripts.
 
 ## Constraint
 
@@ -65,6 +79,8 @@ Two commands (`plan` then `apply`) instead of one. This is intentional — deter
 
 ## See
 
-- `plans/disk-migration-system.md` — full migration plan with edge cases
 - `docs/decisions/config-first-workflow.md` — config-first principle this builds on
+- `docs/decisions/safe-by-construction-reconciliation.md` — destructive boundary principle
 - `docs/decisions/disk-pool-management.md` — existing pool management spec
+- `scripts/braid.sh` — unified CLI implementation
+- `scripts/braid-add-disk.sh` — deprecated wrapper
