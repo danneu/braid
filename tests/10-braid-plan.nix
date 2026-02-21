@@ -6,16 +6,16 @@
 # Why: The planner is the core of the unified CLI. It must correctly classify every
 # desired-vs-live state diff and refuse ambiguous cases.
 #
-# Dependencies: braid-add-disk (builds the test pool).
+# Dependencies: braid init-disk + braid apply (builds the test pool).
 {
   name = "braid-plan";
 
   nodes.machine = { pkgs, ... }: {
     virtualisation.emptyDiskImages = [
-      { size = 256; driveConfig.deviceExtraOpts.serial = "disk1"; }
-      { size = 256; driveConfig.deviceExtraOpts.serial = "disk2"; }
-      { size = 256; driveConfig.deviceExtraOpts.serial = "disk3"; }
-      { size = 256; driveConfig.deviceExtraOpts.serial = "disk4"; }
+      { size = 1024; driveConfig.deviceExtraOpts.serial = "disk1"; }
+      { size = 1024; driveConfig.deviceExtraOpts.serial = "disk2"; }
+      { size = 1024; driveConfig.deviceExtraOpts.serial = "disk3"; }
+      { size = 1024; driveConfig.deviceExtraOpts.serial = "disk4"; }
     ];
 
     environment.systemPackages = let
@@ -26,11 +26,6 @@
       };
     in [
       braid-cli
-      (pkgs.writeShellApplication {
-        name = "braid-add-disk";
-        runtimeInputs = [ braid-cli pkgs.cryptsetup pkgs.btrfs-progs pkgs.util-linux pkgs.jq ];
-        text = builtins.readFile ../scripts/braid-add-disk.sh;
-      })
       pkgs.cryptsetup
       pkgs.btrfs-progs
       pkgs.jq

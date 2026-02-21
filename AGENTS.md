@@ -39,7 +39,7 @@ Decision docs must include an explicit status: `Draft`, `Active`, `Superseded`, 
 ## References
 
 - [User stories](docs/1-user-stories.md) — full UX walkthrough from first disk to third
-- [Design: braid-add-disk](design-docs/1-braid-add-disk.md) — script design
+- [Design: braid-add-disk](design-docs/1-braid-add-disk.md) — script design (historical, replaced by unified CLI)
 - [Design: daemon](design-docs/3-daemon.md) — future TUI/daemon work
 
 ## Commands
@@ -90,4 +90,3 @@ Write failing tests first, confirm they fail for the expected reasons, then impl
 - [x] `braid apply` explicit missing-device removal gate (`--allow-remove-missing` + `BRAID_CONFIRM`)
 - [x] `braid apply` absent disk skip+warn, unplug/replug regression
 - [x] `braid status` human, `--json`, `--verbose` output
-- [x] Backward compatibility: standalone scripts (`braid-add-disk` deprecated wrapper, `braid-remove-disk`, `braid-status`) still work

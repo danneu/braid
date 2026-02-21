@@ -2,20 +2,20 @@
 #
 # What: Server boots with 3 LUKS-encrypted drives as btrfs RAID1, but disk3 is
 # bricked (simulating drive death). The server boots degraded via initrd SSH
-# unlock, then braid-add-disk replaces the dead drive with a fresh disk4. The
-# pool returns to healthy 3-drive RAID1 with all data intact.
+# unlock, then `braid init-disk` + `braid apply` replaces the dead drive with a
+# fresh disk4. The pool returns to healthy 3-drive RAID1 with all data intact.
 #
 # Why: This is the scariest real-world scenario — a drive dies, you boot
 # degraded, and you need to replace it without reinstalling. It crosses every
-# integration boundary: initrd SSH, degraded btrfs, and braid-add-disk. No
+# integration boundary: initrd SSH, degraded btrfs, and the unified CLI. No
 # other test covers this full recovery cycle.
 #
-# Dependencies: degraded-boot (initrd SSH + degraded mount), braid-add-disk
-# (LUKS format + pool expansion).
+# Dependencies: degraded-boot (initrd SSH + degraded mount), braid init-disk
+# + braid apply (LUKS format + pool expansion).
 #
 # Changes from degraded-boot:
 # 1. A 4th virtual disk (disk4) as the replacement drive
-# 2. braid-add-disk + cryptsetup in environment.systemPackages
+# 2. braid CLI + cryptsetup in environment.systemPackages
 # 3. No Samba — this test focuses on the replacement cycle
 { lib, pkgs, ... }:
 let
@@ -43,11 +43,6 @@ in
       };
     in [
       braid-cli
-      (pkgs.writeShellApplication {
-        name = "braid-add-disk";
-        runtimeInputs = [ braid-cli pkgs.cryptsetup pkgs.btrfs-progs pkgs.util-linux pkgs.jq ];
-        text = builtins.readFile ../scripts/braid-add-disk.sh;
-      })
       pkgs.cryptsetup
       pkgs.btrfs-progs
     ];

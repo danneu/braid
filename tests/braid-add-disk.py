@@ -5,30 +5,30 @@ passphrase = "testpassphrase"
 luks_opts = "--pbkdf pbkdf2 --pbkdf-force-iterations 1000"
 
 
-def add_disk(dev):
+def init_disk(dev, force=False):
+    force_flag = "--force" if force else ""
+    confirm = "BRAID_CONFIRM='reformat this disk' " if force else ""
     return (
-        f"echo 'erase this disk' | "
+        f"{confirm}"
         f"BRAID_PASSPHRASE='{passphrase}' "
         f"BRAID_LUKS_OPTS='{luks_opts}' "
-        f"braid-add-disk {dev}"
+        f"braid init-disk {force_flag} {dev}"
     )
 
 
-# --- Phase 0: No-args disk listing ---
+def apply_cmd(config=None, extra="", confirm=""):
+    config_flag = f"--config {config}" if config else ""
+    env = f"BRAID_PASSPHRASE='{passphrase}'"
+    if confirm:
+        env += f" BRAID_CONFIRM='{confirm}'"
+    return f"{env} braid apply {config_flag} {extra}"
 
-with subtest("No args lists configured disks and preferred workflow"):
-    output = machine.succeed("braid-add-disk")
-    assert "Configured disks" in output, f"Expected configured listing:\n{output}"
-    assert "Preferred workflow" in output, f"Expected preferred workflow:\n{output}"
-    assert "braid init-disk" in output, f"Expected init-disk in workflow:\n{output}"
-    # All 5 test disks should appear as configured
-    for i in range(1, 6):
-        assert f"virtio-disk{i}" in output, f"disk{i} missing from listing:\n{output}"
 
 # --- Phase 1: First disk (no pool) ---
 
 with subtest("First disk creates single-drive pool"):
-    machine.succeed(add_disk("/dev/disk/by-id/virtio-disk1"))
+    machine.succeed(init_disk("/dev/disk/by-id/virtio-disk1"))
+    machine.succeed(apply_cmd())
 
     # Pool is mounted
     machine.succeed("mountpoint -q /mnt/storage")
@@ -47,7 +47,8 @@ with subtest("First disk creates single-drive pool"):
 # --- Phase 2: Second disk (convert to RAID1) ---
 
 with subtest("Second disk converts pool to RAID1"):
-    machine.succeed(add_disk("/dev/disk/by-id/virtio-disk2"))
+    machine.succeed(init_disk("/dev/disk/by-id/virtio-disk2"))
+    machine.succeed(apply_cmd())
 
     df_output = machine.succeed("btrfs fi df /mnt/storage")
     assert "Data, RAID1" in df_output, f"Expected RAID1:\n{df_output}"
@@ -63,7 +64,8 @@ with subtest("Write more data on RAID1"):
 # --- Phase 3: Third disk (add to RAID1) ---
 
 with subtest("Third disk expands RAID1 pool"):
-    machine.succeed(add_disk("/dev/disk/by-id/virtio-disk3"))
+    machine.succeed(init_disk("/dev/disk/by-id/virtio-disk3"))
+    machine.succeed(apply_cmd())
 
     # All 3 mapper devices in pool
     fi_show = machine.succeed("btrfs fi show /mnt/storage")
@@ -78,27 +80,23 @@ with subtest("All data survived third disk addition"):
 
 # --- Phase 4: Validation errors ---
 
-with subtest("No args lists only remaining disks"):
-    output = machine.succeed("braid-add-disk")
-    # disk1-3 are in pool but still configured, disk4-5 should be configured too
-    # The "Available disks" section should be empty or not show pool members
-    assert "Configured disks" in output
-
-with subtest("Non-existent device fails"):
-    machine.fail("braid-add-disk /dev/disk/by-id/nonexistent")
+with subtest("Non-existent device fails init-disk"):
+    machine.fail(init_disk("/dev/disk/by-id/nonexistent"))
 
 with subtest("Non-by-id path rejected"):
-    machine.fail("braid-add-disk /dev/vdb")
+    machine.fail(init_disk("/dev/vdb"))
 
 with subtest("Unconfigured disk rejected"):
     # Create a fake by-id symlink pointing to a real block device (disk5's underlying device)
     machine.succeed("ln -sf $(readlink -f /dev/disk/by-id/virtio-disk5) /dev/disk/by-id/virtio-fake")
-    result = machine.fail(add_disk("/dev/disk/by-id/virtio-fake"))
-    assert "not in braid.disks" in result, f"Expected config guard:\n{result}"
+    result = machine.fail(init_disk("/dev/disk/by-id/virtio-fake") + " 2>&1")
+    assert "not declared" in result.lower() or "braid.disks" in result, f"Expected config guard:\n{result}"
 
-with subtest("Disk already in pool fails"):
-    result = machine.fail(add_disk("/dev/disk/by-id/virtio-disk1"))
-    assert "already" in result.lower(), f"Expected 'already' in output:\n{result}"
+with subtest("Disk already in pool fails init-disk"):
+    result = machine.fail(init_disk("/dev/disk/by-id/virtio-disk1") + " 2>&1")
+    assert "currently part of" in result.lower() or "already" in result.lower(), (
+        f"Expected pool membership guard:\n{result}"
+    )
 
 # --- Phase 5: Crash recovery ---
 
@@ -109,43 +107,29 @@ with subtest("Crash recovery — LUKS with no filesystem"):
         f"echo -n '{passphrase}' | cryptsetup luksFormat --batch-mode --key-file=- "
         f"{luks_opts} {dev}"
     )
-    # Run braid-add-disk — should detect recoverable state and re-format
-    machine.succeed(add_disk(dev))
+    # Run init-disk with --force (already LUKS), then apply
+    machine.succeed(init_disk(dev, force=True))
+    machine.succeed(apply_cmd())
 
     # Verify it was added to the pool
     fi_show = machine.succeed("btrfs fi show /mnt/storage")
     assert "virtio-disk4" in fi_show, f"disk4 mapper missing:\n{fi_show}"
 
-# --- Phase 6: Unmounted pool guard ---
+# --- Phase 6: Fifth disk expands pool ---
 
-with subtest("Unmounted pool guard — refuses when LUKS devices exist"):
-    # Unmount pool and close all LUKS devices
-    machine.succeed("umount /mnt/storage")
-    for mapper in ["virtio-disk1", "virtio-disk2", "virtio-disk3", "virtio-disk4"]:
-        machine.succeed(f"cryptsetup luksClose {mapper}")
+with subtest("Fifth disk expands pool"):
+    machine.succeed(init_disk("/dev/disk/by-id/virtio-disk5"))
+    machine.succeed(apply_cmd())
 
-    # Try to add disk5 — should refuse because other LUKS devices exist
-    result = machine.fail(add_disk("/dev/disk/by-id/virtio-disk5"))
-    assert "unlock" in result.lower(), f"Expected 'unlock' in output:\n{result}"
+    fi_show = machine.succeed("btrfs fi show /mnt/storage")
+    assert "virtio-disk5" in fi_show, f"disk5 missing:\n{fi_show}"
+    devid_count = fi_show.count("devid")
+    assert devid_count == 5, f"Expected 5 devices, got {devid_count}:\n{fi_show}"
 
-with subtest("Pool intact after guard test"):
-    # Re-open LUKS devices and remount
-    for disk_id in ["virtio-disk1", "virtio-disk2", "virtio-disk3", "virtio-disk4"]:
-        dev = f"/dev/disk/by-id/{disk_id}"
-        machine.succeed(
-            f"echo -n '{passphrase}' | cryptsetup luksOpen --key-file=- {dev} {disk_id}"
-        )
-    machine.succeed("mount /dev/mapper/virtio-disk1 /mnt/storage")
-
-    # Verify data is intact
+with subtest("All data survived fifth disk addition"):
     content1 = machine.succeed("cat /mnt/storage/day1.txt").strip()
     content2 = machine.succeed("cat /mnt/storage/day2.txt").strip()
     assert content1 == "day one data", f"Expected 'day one data', got '{content1}'"
     assert content2 == "day two data", f"Expected 'day two data', got '{content2}'"
-
-with subtest("Completion message shows auto-unlock"):
-    output = machine.succeed(add_disk("/dev/disk/by-id/virtio-disk5"))
-    assert "auto-unlock" in output.lower(), f"Expected auto-unlock message:\n{output}"
-    assert "Add this disk to your NixOS config" not in output, f"Old message still present:\n{output}"
 
 machine.shutdown()

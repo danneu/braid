@@ -1,22 +1,22 @@
-# Test: braid-status
+# Test: braid status
 #
-# What: Runs braid-status in summary and verbose modes against a healthy
+# What: Runs `braid status` in summary and verbose modes against a healthy
 # 3-disk RAID1 pool, then simulates a drive failure and verifies degraded
 # output. Also tests error on unmounted pool.
 #
-# Why: braid-status is the operator's primary diagnostic tool. It reads
+# Why: `braid status` is the operator's primary diagnostic tool. It reads
 # live btrfs/LUKS state, so it must be tested in a real VM with real
 # filesystems to validate parsing of actual command output.
 #
-# Dependencies: braid-add-disk (pool creation).
+# Dependencies: braid init-disk + braid apply (pool creation).
 {
   name = "braid-status";
 
   nodes.machine = { pkgs, ... }: {
     virtualisation.emptyDiskImages = [
-      { size = 256; driveConfig.deviceExtraOpts.serial = "disk1"; }
-      { size = 256; driveConfig.deviceExtraOpts.serial = "disk2"; }
-      { size = 256; driveConfig.deviceExtraOpts.serial = "disk3"; }
+      { size = 1024; driveConfig.deviceExtraOpts.serial = "disk1"; }
+      { size = 1024; driveConfig.deviceExtraOpts.serial = "disk2"; }
+      { size = 1024; driveConfig.deviceExtraOpts.serial = "disk3"; }
     ];
 
     environment.systemPackages = let
@@ -27,16 +27,6 @@
       };
     in [
       braid-cli
-      (pkgs.writeShellApplication {
-        name = "braid-add-disk";
-        runtimeInputs = [ braid-cli pkgs.cryptsetup pkgs.btrfs-progs pkgs.util-linux pkgs.jq ];
-        text = builtins.readFile ../scripts/braid-add-disk.sh;
-      })
-      (pkgs.writeShellApplication {
-        name = "braid-status";
-        runtimeInputs = [ pkgs.cryptsetup pkgs.btrfs-progs pkgs.util-linux pkgs.jq ];
-        text = builtins.readFile ../scripts/braid-status.sh;
-      })
       pkgs.cryptsetup
       pkgs.btrfs-progs
     ];

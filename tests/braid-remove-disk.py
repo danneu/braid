@@ -7,13 +7,20 @@ passphrase = "testpassphrase"
 luks_opts = "--pbkdf pbkdf2 --pbkdf-force-iterations 1000"
 
 
-def add_disk(dev):
+def init_disk(dev, force=False):
+    force_flag = "--force" if force else ""
+    confirm = "BRAID_CONFIRM='reformat this disk' " if force else ""
     return (
-        f"echo 'erase this disk' | "
+        f"{confirm}"
         f"BRAID_PASSPHRASE='{passphrase}' "
         f"BRAID_LUKS_OPTS='{luks_opts}' "
-        f"braid-add-disk {dev}"
+        f"braid init-disk {force_flag} {dev}"
     )
+
+
+def apply_cmd(config=None):
+    config_flag = f"--config {config}" if config else ""
+    return f"BRAID_PASSPHRASE='{passphrase}' braid apply {config_flag}"
 
 
 def write_config(disk_list):
@@ -29,10 +36,11 @@ def remove_disk(dev, phrase="remove this disk"):
 
 # --- Phase 0: Build 3-drive RAID1 pool ---
 
-with subtest("Setup: build 3-drive pool with braid-add-disk"):
-    machine.succeed(add_disk("/dev/disk/by-id/virtio-disk1"))
-    machine.succeed(add_disk("/dev/disk/by-id/virtio-disk2"))
-    machine.succeed(add_disk("/dev/disk/by-id/virtio-disk3"))
+with subtest("Setup: build 3-drive pool with init-disk + apply"):
+    machine.succeed(init_disk("/dev/disk/by-id/virtio-disk1"))
+    machine.succeed(init_disk("/dev/disk/by-id/virtio-disk2"))
+    machine.succeed(init_disk("/dev/disk/by-id/virtio-disk3"))
+    machine.succeed(apply_cmd())
 
     fi_show = machine.succeed("btrfs fi show /mnt/storage")
     for name in ["virtio-disk1", "virtio-disk2", "virtio-disk3"]:
@@ -118,8 +126,21 @@ with subtest("Data intact after redundancy removal"):
 # --- Phase 5: Rebuild pool for Tier 2 test ---
 
 with subtest("Rebuild pool: re-add disk2 and disk3"):
-    machine.succeed(add_disk("/dev/disk/by-id/virtio-disk2"))
-    machine.succeed(add_disk("/dev/disk/by-id/virtio-disk3"))
+    # Sequential: add one disk at a time to avoid ENOSPC during balance
+    machine.succeed(init_disk("/dev/disk/by-id/virtio-disk2", force=True))
+    machine.succeed(write_config([
+        "/dev/disk/by-id/virtio-disk1",
+        "/dev/disk/by-id/virtio-disk2",
+    ]))
+    machine.succeed(apply_cmd(config="/tmp/braid-config.json"))
+
+    machine.succeed(init_disk("/dev/disk/by-id/virtio-disk3", force=True))
+    machine.succeed(write_config([
+        "/dev/disk/by-id/virtio-disk1",
+        "/dev/disk/by-id/virtio-disk2",
+        "/dev/disk/by-id/virtio-disk3",
+    ]))
+    machine.succeed(apply_cmd(config="/tmp/braid-config.json"))
 
     fi_show = machine.succeed("btrfs fi show /mnt/storage")
     for name in ["virtio-disk1", "virtio-disk2", "virtio-disk3"]:

@@ -3,18 +3,18 @@
 # What: Runs braid-remove-disk through its lifecycle: graceful remove, remove-missing,
 # LUKS cleanup, redundancy warning, and validation errors.
 #
-# Why: Symmetric counterpart to braid-add-disk. Must handle both happy path (disk
-# present, data migrates off) and failure path (disk gone, remove missing).
+# Why: Symmetric counterpart to braid init-disk + apply. Must handle both happy path
+# (disk present, data migrates off) and failure path (disk gone, remove missing).
 #
-# Dependencies: braid-add-disk (builds the test pool).
+# Dependencies: braid init-disk + braid apply (builds the test pool).
 {
   name = "braid-remove-disk";
 
   nodes.machine = { pkgs, ... }: {
     virtualisation.emptyDiskImages = [
-      { size = 256; driveConfig.deviceExtraOpts.serial = "disk1"; }
-      { size = 256; driveConfig.deviceExtraOpts.serial = "disk2"; }
-      { size = 256; driveConfig.deviceExtraOpts.serial = "disk3"; }
+      { size = 1024; driveConfig.deviceExtraOpts.serial = "disk1"; }
+      { size = 1024; driveConfig.deviceExtraOpts.serial = "disk2"; }
+      { size = 1024; driveConfig.deviceExtraOpts.serial = "disk3"; }
     ];
 
     environment.systemPackages = let
@@ -25,11 +25,6 @@
       };
     in [
       braid-cli
-      (pkgs.writeShellApplication {
-        name = "braid-add-disk";
-        runtimeInputs = [ braid-cli pkgs.cryptsetup pkgs.btrfs-progs pkgs.util-linux pkgs.jq ];
-        text = builtins.readFile ../scripts/braid-add-disk.sh;
-      })
       (pkgs.writeShellApplication {
         name = "braid-remove-disk";
         runtimeInputs = [ pkgs.cryptsetup pkgs.btrfs-progs pkgs.util-linux pkgs.jq ];

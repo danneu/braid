@@ -6,16 +6,16 @@
 # Why: The apply engine executes destructive operations. It must checkpoint correctly,
 # resume safely, and refuse stale state.
 #
-# Dependencies: braid plan (Phase 1), braid-add-disk (pool setup).
+# Dependencies: braid plan (Phase 1), braid init-disk + braid apply (pool setup).
 {
   name = "braid-apply";
 
   nodes.machine = { pkgs, ... }: {
     virtualisation.emptyDiskImages = [
-      { size = 256; driveConfig.deviceExtraOpts.serial = "disk1"; }
-      { size = 256; driveConfig.deviceExtraOpts.serial = "disk2"; }
-      { size = 256; driveConfig.deviceExtraOpts.serial = "disk3"; }
-      { size = 256; driveConfig.deviceExtraOpts.serial = "disk4"; }
+      { size = 1024; driveConfig.deviceExtraOpts.serial = "disk1"; }
+      { size = 1024; driveConfig.deviceExtraOpts.serial = "disk2"; }
+      { size = 1024; driveConfig.deviceExtraOpts.serial = "disk3"; }
+      { size = 1024; driveConfig.deviceExtraOpts.serial = "disk4"; }
     ];
 
     environment.systemPackages = let
@@ -26,11 +26,6 @@
       };
     in [
       braid-cli
-      (pkgs.writeShellApplication {
-        name = "braid-add-disk";
-        runtimeInputs = [ braid-cli pkgs.cryptsetup pkgs.btrfs-progs pkgs.util-linux pkgs.jq ];
-        text = builtins.readFile ../scripts/braid-add-disk.sh;
-      })
       pkgs.cryptsetup
       pkgs.btrfs-progs
       pkgs.jq

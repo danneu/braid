@@ -59,18 +59,31 @@ passphrase = "testpassphrase"
 luks_opts = "--pbkdf pbkdf2 --pbkdf-force-iterations 1000"
 
 
-def add_disk(dev):
+def init_disk(dev, force=False):
+    force_flag = "--force" if force else ""
+    confirm = "BRAID_CONFIRM='reformat this disk' " if force else ""
     return (
-        f"echo 'erase this disk' | "
+        f"{confirm}"
         f"BRAID_PASSPHRASE='{passphrase}' "
         f"BRAID_LUKS_OPTS='{luks_opts}' "
-        f"braid-add-disk {dev}"
+        f"braid init-disk {force_flag} {dev}"
     )
 
 
-with subtest("Replace dead disk3 with disk4 using braid-add-disk"):
-    result = server.succeed(add_disk("/dev/disk/by-id/virtio-disk4"))
-    print(f"braid-add-disk output:\n{result}")
+def apply_cmd(extra="", confirm=""):
+    env = f"BRAID_PASSPHRASE='{passphrase}'"
+    if confirm:
+        env += f" BRAID_CONFIRM='{confirm}'"
+    return f"{env} braid apply {extra}"
+
+
+with subtest("Replace dead disk3 with disk4 using init-disk + apply"):
+    server.succeed(init_disk("/dev/disk/by-id/virtio-disk4"))
+    result = server.succeed(apply_cmd(
+        extra="--allow-remove-missing",
+        confirm="remove missing device from pool",
+    ))
+    print(f"braid apply output:\n{result}")
 
 with subtest("Pool is healthy — 3 devices, no missing"):
     fi_show = server.succeed("btrfs fi show /mnt/storage")

@@ -7,14 +7,24 @@ passphrase = "testpassphrase"
 luks_opts = "--pbkdf pbkdf2 --pbkdf-force-iterations 1000"
 
 
-def add_disk(dev, config=None):
+def init_disk(dev, force=False, config=None):
+    force_flag = "--force" if force else ""
+    confirm = "BRAID_CONFIRM='reformat this disk' " if force else ""
     config_flag = f"--config {config}" if config else ""
     return (
-        f"echo 'erase this disk' | "
+        f"{confirm}"
         f"BRAID_PASSPHRASE='{passphrase}' "
         f"BRAID_LUKS_OPTS='{luks_opts}' "
-        f"braid-add-disk {config_flag} {dev}"
+        f"braid init-disk {force_flag} {config_flag} {dev}"
     )
+
+
+def apply_cmd(config=None, extra="", confirm=""):
+    config_flag = f"--config {config}" if config else ""
+    env = f"BRAID_PASSPHRASE='{passphrase}'"
+    if confirm:
+        env += f" BRAID_CONFIRM='{confirm}'"
+    return f"{env} braid apply {config_flag} {extra}"
 
 
 def write_config(disk_list, mount="/mnt/storage"):
@@ -32,19 +42,12 @@ def plan_json():
     return json.loads(raw)
 
 
-def init_disk(by_id):
-    return (
-        f"BRAID_PASSPHRASE='{passphrase}' "
-        f"BRAID_LUKS_OPTS='{luks_opts}' "
-        f"braid init-disk --config /tmp/braid-config.json {by_id}"
-    )
-
-
 # --- Phase 0: Build 2-disk RAID1 pool ---
 
 with subtest("Setup: build 2-disk RAID1 pool"):
-    machine.succeed(add_disk("/dev/disk/by-id/virtio-disk1"))
-    machine.succeed(add_disk("/dev/disk/by-id/virtio-disk2"))
+    machine.succeed(init_disk("/dev/disk/by-id/virtio-disk1"))
+    machine.succeed(init_disk("/dev/disk/by-id/virtio-disk2"))
+    machine.succeed(apply_cmd())
     machine.succeed("echo 'test data' > /mnt/storage/file.txt && sync")
 
     fi_show = machine.succeed("btrfs fi show /mnt/storage")
@@ -87,7 +90,7 @@ with subtest("Plan warns about non-LUKS disk with INIT_REQUIRED"):
 # --- Phase 2b: After init-disk, plan shows OPEN_LUKS ---
 
 with subtest("Plan shows OPEN_LUKS after init-disk"):
-    machine.succeed(init_disk("/dev/disk/by-id/virtio-disk3"))
+    machine.succeed(init_disk("/dev/disk/by-id/virtio-disk3", config="/tmp/braid-config.json"))
     p = plan_json()
     types = [a["type"] for a in p["actions"]]
     assert "OPEN_LUKS" in types, f"Missing OPEN_LUKS:\n{types}"
@@ -186,8 +189,8 @@ with subtest("Setup: rebuild pool for ambiguity test"):
         "/dev/disk/by-id/virtio-disk3",
         "/dev/disk/by-id/virtio-disk4",
     ]))
-    machine.succeed(add_disk("/dev/disk/by-id/virtio-disk3", "/tmp/braid-config.json"))
-    machine.succeed(add_disk("/dev/disk/by-id/virtio-disk4", "/tmp/braid-config.json"))
+    machine.succeed(init_disk("/dev/disk/by-id/virtio-disk4", config="/tmp/braid-config.json"))
+    machine.succeed(apply_cmd(config="/tmp/braid-config.json"))
 
     fi_show = machine.succeed("btrfs fi show /mnt/storage")
     for name in ["virtio-disk1", "virtio-disk2", "virtio-disk3", "virtio-disk4"]:

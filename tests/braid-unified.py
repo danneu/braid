@@ -7,21 +7,28 @@ passphrase = "testpassphrase"
 luks_opts = "--pbkdf pbkdf2 --pbkdf-force-iterations 1000"
 
 
-def add_disk(dev):
+def init_disk(dev, force=False):
+    force_flag = "--force" if force else ""
+    confirm = "BRAID_CONFIRM='reformat this disk' " if force else ""
     return (
-        f"echo 'erase this disk' | "
+        f"{confirm}"
         f"BRAID_PASSPHRASE='{passphrase}' "
         f"BRAID_LUKS_OPTS='{luks_opts}' "
-        f"braid-add-disk {dev}"
+        f"braid init-disk {force_flag} {dev}"
     )
+
+
+def apply_cmd():
+    return f"BRAID_PASSPHRASE='{passphrase}' braid apply"
 
 
 # --- Phase 0: Build 3-disk RAID1 pool ---
 
 with subtest("Setup: build 3-disk RAID1 pool"):
-    machine.succeed(add_disk("/dev/disk/by-id/virtio-disk1"))
-    machine.succeed(add_disk("/dev/disk/by-id/virtio-disk2"))
-    machine.succeed(add_disk("/dev/disk/by-id/virtio-disk3"))
+    machine.succeed(init_disk("/dev/disk/by-id/virtio-disk1"))
+    machine.succeed(init_disk("/dev/disk/by-id/virtio-disk2"))
+    machine.succeed(init_disk("/dev/disk/by-id/virtio-disk3"))
+    machine.succeed(apply_cmd())
     machine.succeed("echo 'test data' > /mnt/storage/file.txt && sync")
 
     fi_df = machine.succeed("btrfs fi df /mnt/storage")
@@ -84,22 +91,7 @@ with subtest("braid status --json --verbose includes disk details"):
         assert disk["status"] == "present", f"Disk not present: {disk}"
         assert "errors" in disk, f"Disk missing errors: {disk}"
 
-# --- Phase 5: Backward compatibility ---
-
-with subtest("braid-status still works"):
-    output = machine.succeed("braid-status")
-    assert "healthy" in output, f"Expected 'healthy':\n{output}"
-    assert "RAID1" in output, f"Expected 'RAID1':\n{output}"
-
-with subtest("braid-status --verbose still works"):
-    output = machine.succeed("braid-status --verbose")
-    assert "devid" in output, f"Expected 'devid':\n{output}"
-    assert "LUKS:" in output, f"Expected 'LUKS:':\n{output}"
-
-with subtest("braid-add-disk shows deprecation warning"):
-    # Verify the command exists and prints deprecation
-    output = machine.succeed("braid-add-disk 2>&1 || true")
-    assert "deprecated" in output.lower(), f"Expected deprecation warning:\n{output}"
+# --- Phase 5: Standalone scripts ---
 
 with subtest("braid-remove-disk still works"):
     # Verify the command exists and shows usage

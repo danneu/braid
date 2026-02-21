@@ -1,21 +1,20 @@
 # Test: braid unified CLI
 #
 # What: Exercises `braid status` (human, --json, --verbose), and verifies
-# backward compatibility of standalone scripts (braid-add-disk, braid-remove-disk,
-# braid-status).
+# that standalone scripts (braid-remove-disk) still work.
 #
-# Why: The unified CLI must produce identical results to the standalone scripts
-# and add JSON output for automation.
+# Why: The unified CLI must produce correct results and the remaining
+# standalone scripts must continue to function.
 #
-# Dependencies: braid plan/apply (Phases 1-2), braid-add-disk (pool setup).
+# Dependencies: braid init-disk + braid apply (pool setup).
 {
   name = "braid-unified";
 
   nodes.machine = { pkgs, ... }: {
     virtualisation.emptyDiskImages = [
-      { size = 256; driveConfig.deviceExtraOpts.serial = "disk1"; }
-      { size = 256; driveConfig.deviceExtraOpts.serial = "disk2"; }
-      { size = 256; driveConfig.deviceExtraOpts.serial = "disk3"; }
+      { size = 1024; driveConfig.deviceExtraOpts.serial = "disk1"; }
+      { size = 1024; driveConfig.deviceExtraOpts.serial = "disk2"; }
+      { size = 1024; driveConfig.deviceExtraOpts.serial = "disk3"; }
     ];
 
     environment.systemPackages = let
@@ -27,19 +26,9 @@
     in [
       braid-cli
       (pkgs.writeShellApplication {
-        name = "braid-add-disk";
-        runtimeInputs = [ braid-cli pkgs.cryptsetup pkgs.btrfs-progs pkgs.util-linux pkgs.jq ];
-        text = builtins.readFile ../scripts/braid-add-disk.sh;
-      })
-      (pkgs.writeShellApplication {
         name = "braid-remove-disk";
         runtimeInputs = [ pkgs.cryptsetup pkgs.btrfs-progs pkgs.util-linux pkgs.jq ];
         text = builtins.readFile ../scripts/braid-remove-disk.sh;
-      })
-      (pkgs.writeShellApplication {
-        name = "braid-status";
-        runtimeInputs = [ pkgs.cryptsetup pkgs.btrfs-progs pkgs.util-linux pkgs.jq ];
-        text = builtins.readFile ../scripts/braid-status.sh;
       })
       pkgs.cryptsetup
       pkgs.btrfs-progs

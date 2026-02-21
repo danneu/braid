@@ -7,16 +7,6 @@ passphrase = "testpassphrase"
 luks_opts = "--pbkdf pbkdf2 --pbkdf-force-iterations 1000"
 
 
-def add_disk(dev, config=None):
-    config_flag = f"--config {config}" if config else ""
-    return (
-        f"echo 'erase this disk' | "
-        f"BRAID_PASSPHRASE='{passphrase}' "
-        f"BRAID_LUKS_OPTS='{luks_opts}' "
-        f"braid-add-disk {config_flag} {dev}"
-    )
-
-
 def write_config(disk_list, mount="/mnt/storage"):
     config = json.dumps({"disks": disk_list, "mountPoint": mount})
     escaped = config.replace("'", "'\\''")
@@ -42,11 +32,16 @@ def init_disk(by_id, extra="", confirm=""):
     return f"{env} braid init-disk --config /tmp/braid-config.json {by_id} {extra}"
 
 
-# --- Phase 0: Build initial 2-disk RAID1 pool with braid-add-disk ---
+# --- Phase 0: Build initial 2-disk RAID1 pool ---
 
 with subtest("Setup: build 2-disk RAID1 pool"):
-    machine.succeed(add_disk("/dev/disk/by-id/virtio-disk1"))
-    machine.succeed(add_disk("/dev/disk/by-id/virtio-disk2"))
+    machine.succeed(write_config([
+        "/dev/disk/by-id/virtio-disk1",
+        "/dev/disk/by-id/virtio-disk2",
+    ]))
+    machine.succeed(init_disk("/dev/disk/by-id/virtio-disk1"))
+    machine.succeed(init_disk("/dev/disk/by-id/virtio-disk2"))
+    machine.succeed(apply())
     machine.succeed("echo 'important data' > /mnt/storage/precious.txt && sync")
 
 # --- Phase 1: No-op apply ---
@@ -122,7 +117,6 @@ with subtest("Apply replaces dead disk2 with disk3"):
         "/dev/disk/by-id/virtio-disk3",
     ]))
     # disk3 already LUKS-formatted from Phase 2 init-disk, but was closed after remove
-    # Need to re-init since it was wiped? No — it's still LUKS formatted, just closed.
     # The apply will OPEN_LUKS + ADD it.
     # But we also need to remove the missing device — requires explicit gate
     machine.succeed(apply(
@@ -353,7 +347,7 @@ with subtest("Setup: remove disk4 from pool for resume-target-missing test"):
     assert "virtio-disk4" not in fi_show, f"disk4 still in pool:\n{fi_show}"
 
 with subtest("Resume fails when target disk is absent (RESUME_TARGET_MISSING)"):
-    # Now add disk2 (LUKS-formatted from Phase 0 braid-add-disk setup)
+    # Now add disk2 (needs re-init)
     machine.succeed(write_config([
         "/dev/disk/by-id/virtio-disk1",
         "/dev/disk/by-id/virtio-disk2",
