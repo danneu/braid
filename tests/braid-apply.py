@@ -68,6 +68,9 @@ with subtest("Apply adds disk3 to pool"):
     machine.succeed(init_disk("/dev/disk/by-id/virtio-disk3"))
     output = machine.succeed(apply())
     print(f"Apply output:\n{output}")
+    assert "Applied" in output and "skipped" in output, (
+        f"Expected footer with Applied/skipped:\n{output}"
+    )
 
     fi_show = machine.succeed("btrfs fi show /mnt/storage")
     assert "virtio-disk3" in fi_show, f"disk3 not in pool:\n{fi_show}"
@@ -158,6 +161,9 @@ with subtest("Apply with absent configured disk continues other work"):
     output = machine.succeed(apply())
     assert "DISK_ABSENT_SKIPPED" in output or "warning" in output.lower() or "skip" in output.lower(), (
         f"Expected warning about absent disk:\n{output}"
+    )
+    assert "Applied" in output and "skipped" in output, (
+        f"Expected footer with Applied/skipped:\n{output}"
     )
     fi_show = machine.succeed("btrfs fi show /mnt/storage")
     assert "virtio-disk3" in fi_show, f"disk3 not added despite absent disk99:\n{fi_show}"

@@ -83,6 +83,8 @@ with subtest("Plan warns about non-LUKS disk with INIT_REQUIRED"):
     assert any("INIT_REQUIRED" in w for w in p["warnings"]), (
         f"Expected INIT_REQUIRED warning:\n{p['warnings']}"
     )
+    assert p["warning_count"] == 1, f"Expected warning_count 1: {p['warning_count']}"
+    assert p["summary"]["skipped_total"] == 1, f"Expected skipped_total 1: {p['summary']['skipped_total']}"
     # No OPEN_LUKS or format action for the non-LUKS disk
     types = [a["type"] for a in p["actions"]]
     assert "OPEN_LUKS" not in types, f"Unexpected OPEN_LUKS for non-LUKS disk:\n{types}"
@@ -118,6 +120,8 @@ with subtest("Absent disk produces DISK_ABSENT_SKIPPED warning"):
     assert any("virtio-disk99" in w for w in p["warnings"]), (
         f"Expected disk path in warning:\n{p['warnings']}"
     )
+    assert p["warning_count"] >= 1, f"Expected warning_count >= 1: {p['warning_count']}"
+    assert p["summary"]["skipped_total"] >= 1, f"Expected skipped_total >= 1: {p['summary']['skipped_total']}"
     # No actions for the absent disk
     types = [a["type"] for a in p["actions"]]
     assert "OPEN_LUKS" not in types, f"Unexpected OPEN_LUKS for absent disk:\n{types}"
@@ -249,6 +253,29 @@ with subtest("JSON output has required schema fields"):
     assert "status" in p, "Missing status"
     assert "blocked_reasons" in p, "Missing blocked_reasons"
 
+    # warning_count and summary fields
+    assert "warning_count" in p, "Missing warning_count"
+    assert isinstance(p["warning_count"], int), f"warning_count not int: {type(p['warning_count'])}"
+    assert "summary" in p, "Missing summary"
+    s = p["summary"]
+    for f in ["actions_total", "actions_mutation", "actions_verify",
+              "warnings_total", "blocked_total", "skipped_total"]:
+        assert f in s, f"Missing summary.{f}"
+        assert isinstance(s[f], int), f"summary.{f} not int: {type(s[f])}"
+    # Consistency checks
+    assert s["actions_total"] == s["actions_mutation"] + s["actions_verify"], (
+        f"actions_total mismatch: {s['actions_total']} != {s['actions_mutation']} + {s['actions_verify']}"
+    )
+    assert s["warnings_total"] == len(p["warnings"]), (
+        f"warnings_total mismatch: {s['warnings_total']} != {len(p['warnings'])}"
+    )
+    assert s["warnings_total"] == p["warning_count"], (
+        f"warnings_total != warning_count: {s['warnings_total']} != {p['warning_count']}"
+    )
+    assert s["blocked_total"] == len(p["blocked_reasons"]), (
+        f"blocked_total mismatch: {s['blocked_total']} != {len(p['blocked_reasons'])}"
+    )
+
     for action in p["actions"]:
         assert "id" in action, f"Action missing id: {action}"
         assert "type" in action, f"Action missing type: {action}"
@@ -270,6 +297,19 @@ with subtest("Human output shows plan summary"):
     assert "Mount:" in output or "mount" in output.lower(), f"Missing mount:\n{output}"
     assert "REMOVE_DISK" in output, f"Missing action in human output:\n{output}"
     assert "Status:" in output, f"Missing Status in human output:\n{output}"
+
+with subtest("Human output shows 'applicable with warnings' when warnings exist"):
+    # Include an absent disk to trigger a warning
+    machine.succeed(write_config([
+        "/dev/disk/by-id/virtio-disk1",
+        "/dev/disk/by-id/virtio-disk2",
+        "/dev/disk/by-id/virtio-disk3",
+        "/dev/disk/by-id/virtio-disk99",
+    ]))
+    output = machine.succeed(plan())
+    assert "applicable with warnings" in output, (
+        f"Expected 'applicable with warnings' in output:\n{output}"
+    )
 
 # --- Phase 9: Bootstrap plan (unmounted pool, disk not yet init'd) ---
 

@@ -456,24 +456,65 @@ compute_plan() {
     plan_status="blocked"
   fi
 
+  # Compute summary counts
+  local actions_total=${#actions[@]}
+  local actions_mutation=0
+  local actions_verify=0
+  for a_json in "${actions[@]}"; do
+    local atype
+    atype=$(echo "$a_json" | jq -r '.type')
+    case "$atype" in
+      VERIFY_*) actions_verify=$((actions_verify + 1)) ;;
+      *) actions_mutation=$((actions_mutation + 1)) ;;
+    esac
+  done
+
+  local warnings_total=${#warnings[@]}
+  local blocked_total=${#blocked_reasons[@]}
+
+  # skipped_total: warning codes representing skipped work
+  # (DISK_ABSENT_SKIPPED, INIT_REQUIRED — NOT POOL_DEGRADED_MISSING_DEVICES)
+  local skipped_total=0
+  for w in "${warnings[@]}"; do
+    case "$w" in
+      DISK_ABSENT_SKIPPED:*|INIT_REQUIRED:*) skipped_total=$((skipped_total + 1)) ;;
+    esac
+  done
+
   jq -n \
     --argjson schema_version 1 \
     --arg plan_id "$plan_id" \
     --arg mount_point "$mount_point" \
     --arg status "$plan_status" \
+    --argjson warning_count "$warnings_total" \
     --argjson warnings "$warnings_json" \
     --argjson blocked_reasons "$blocked_reasons_json" \
     --argjson confirmations "$confirmations_json" \
     --argjson actions "$actions_json" \
+    --argjson actions_total "$actions_total" \
+    --argjson actions_mutation "$actions_mutation" \
+    --argjson actions_verify "$actions_verify" \
+    --argjson warnings_total "$warnings_total" \
+    --argjson blocked_total "$blocked_total" \
+    --argjson skipped_total "$skipped_total" \
     '{
       schema_version: $schema_version,
       plan_id: $plan_id,
       mount_point: $mount_point,
       status: $status,
+      warning_count: $warning_count,
       warnings: $warnings,
       blocked_reasons: $blocked_reasons,
       confirmations: $confirmations,
-      actions: $actions
+      actions: $actions,
+      summary: {
+        actions_total: $actions_total,
+        actions_mutation: $actions_mutation,
+        actions_verify: $actions_verify,
+        warnings_total: $warnings_total,
+        blocked_total: $blocked_total,
+        skipped_total: $skipped_total
+      }
     }'
 }
 
@@ -492,9 +533,16 @@ format_plan_human() {
   local mutation_count
   mutation_count=$(echo "$plan_json" | jq '[.actions[] | select(.type | startswith("VERIFY_") | not)] | length')
 
+  local wc
+  wc=$(echo "$plan_json" | jq '.warning_count // (.warnings | length)')
+  local status_display="$plan_status"
+  if [[ "$plan_status" == "applicable" ]] && (( wc > 0 )); then
+    status_display="applicable with warnings"
+  fi
+
   echo "Plan ID: $plan_id"
   echo "Mount: $mount_point"
-  echo "Status: $plan_status"
+  echo "Status: $status_display"
   echo "Actions: $mutation_count"
   echo ""
 
@@ -1132,8 +1180,15 @@ cmd_apply() {
     fi
   done
 
+  # applied: count actually completed mutation actions from checkpoint (execution state)
+  local applied
+  applied=$(jq '[.actions[] | select(.status == "completed" and (.type | startswith("VERIFY_") | not))] | length' "$CHECKPOINT_FILE")
+  # skipped: count from plan_json (plan-level metadata, static during execution)
+  local skipped
+  skipped=$(echo "$plan_json" | jq '[.warnings[] | select(startswith("DISK_ABSENT_SKIPPED:") or startswith("INIT_REQUIRED:"))] | length')
+
   echo ""
-  echo "Apply complete."
+  echo "Applied $applied actions, skipped $skipped with warnings, blocked 0"
   checkpoint_finalize
 }
 
