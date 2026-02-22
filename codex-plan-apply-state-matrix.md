@@ -1,6 +1,6 @@
 # Braid Plan/Apply State Matrix
 
-This matrix is behavior-complete for current `braid plan` and `braid apply` logic by grouping infinitely many concrete disk combinations into behavior-equivalent state classes.
+This matrix documents the **current implementation** in `scripts/braid.sh` — what the code actually does today, not a spec for how it should work. It is behavior-complete for current `braid plan` and `braid apply` logic by grouping infinitely many concrete disk combinations into behavior-equivalent state classes.
 
 ## Planner + Apply Matrix
 
