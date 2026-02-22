@@ -31,6 +31,9 @@ This matrix is behavior-complete for current `braid plan` and `braid apply` logi
 | 23 | Any state where UUID for a pool mapper cannot be determined | any | Hard error (`die`) before usable plan | Apply fails before execution | Fail-closed identity model. |
 | 24 | Any state where configured disk is present+LUKS but UUID cannot be read | any | Hard error in planner | Apply fails | Also fail-closed. |
 | 25 | Any fresh apply run with blocked plan | any | Plan shows blocked reasons | Apply exits non-zero, no actions executed | Apply never executes blocked plans. |
+| 26 | Config file `/etc/braid/config.json` missing | any | Hard error (`die`) before plan starts | Apply fails before execution | Most basic precondition failure. |
+| 27 | Pool mounted, config swaps disk A for disk B (A in pool not in config, B in config not in pool) | none | `REMOVE_DISK_GRACEFUL`+`CLOSE_LUKS_MAPPER` for A, `OPEN_LUKS`+`ADD_DISK_BTRFS_ADD` for B, maybe `BALANCE_TO_RAID1` | Executes remove then add in plan order | Replace — emergent from add + remove in same plan. |
+| 28 | Pool mounted degraded (`missing_count=1`), config has new disk to add | none | Warning `POOL_DEGRADED_MISSING_DEVICES`, `OPEN_LUKS`+`ADD_DISK_BTRFS_ADD` for new disk, `BALANCE_TO_RAID1` if count warrants | Adds disk, balances; missing device stays unless `--allow-remove-missing` | Grow pool while degraded — missing is not a blocker for adds. |
 
 ## Apply-Specific Runtime States
 
@@ -44,6 +47,27 @@ This matrix is behavior-complete for current `braid plan` and `braid apply` logi
 | A6 | Fresh apply, required confirmations missing/partial | Fails with required phrase message | All required phrases must be present. |
 | A7 | Fresh apply, multiple confirmations required | Accepts semicolon-separated `BRAID_CONFIRM` with whitespace trimmed | Multi-confirm behavior. |
 
+## Apply Action Handler Runtime Behaviors
+
+These are runtime behaviors within individual action handlers that are not visible at the planner level but affect what actually happens during `braid apply`.
+
+| # | Handler | Runtime State | Behavior | Comment |
+|---|---------|---------------|----------|---------|
+| H1 | `action_btrfs_add` | Target device already recognized by btrfs (returning member) | `btrfs device scan` finds device already in pool; handler prints "returning pool member" and skips the add | Handles reconnected disks without re-adding. Distinct from LUKS-already-open (#8). |
+| H2 | `action_open_luks` | Target LUKS UUID already mapped under a different mapper name | Scans all `/dev/mapper/*` entries; finds matching UUID; skips open | Alias-safe idempotency at execution time (row #9). |
+| H3 | `action_balance_raid1` | Pool already RAID1 with no missing devices | Skips balance entirely | Idempotent — safe to include in plan even when not strictly needed. |
+| H4 | `action_balance_raid1` | After balancing, btrfs still reports "missing" device | Auto-evicts the dead device with `btrfs device remove missing` | Cleans up stale missing entries left after data redistribution. |
+| H5 | `action_remove_graceful` | Removal would leave <2 present devices | Converts pool data profile from RAID1 to single before removing device | Profile conversion is prerequisite — btrfs refuses RAID1 remove below 2 devices. |
+| H6 | `action_remove_missing` | Removal would leave <2 present devices | Same as H5: converts to single profile first | Same prerequisite as graceful remove. |
+| H7 | `action_close_luks` | Mapper does not exist or already closed | Best-effort close; failure is non-fatal | Tolerates races or already-cleaned-up state. |
+
+## Verify Action Semantics
+
+| Action | What it checks | Failure behavior |
+|--------|---------------|-----------------|
+| `VERIFY_POOL_HEALTH` | Mount point is mounted; counts missing devices | `die` if pool is not mounted (hard fail); warns if missing devices remain (non-fatal) |
+| `VERIFY_EXPECTED_DISK_SET` | Each config disk's LUKS UUID is present in pool's btrfs device list | Warns per unmatched config disk; does not fail apply |
+
 ## Confirmation Phrase Matrix
 
 | Situation | Required phrase(s) |
@@ -55,10 +79,12 @@ This matrix is behavior-complete for current `braid plan` and `braid apply` logi
 
 ## Coverage Notes
 
-This includes all state classes currently represented in planner/apply logic and test themes: bootstrap, add/remove/replace, absent/non-LUKS skip, missing-device gate, ambiguity gate, checkpoint/resume, and multi-confirmation.
+This includes all state classes currently represented in planner/apply logic and test themes: bootstrap, add/remove/replace, absent/non-LUKS skip, missing-device gate, ambiguity gate, checkpoint/resume, multi-confirmation, handler-level idempotency, and verify semantics.
 
 Potential extra edge tests to add later:
 
 1. Configured disk present+LUKS but UUID probe failure (explicit fail-closed test).
 2. Pool mapper UUID probe failure in `discover_live_state`.
 3. Mixed case requiring all three confirmations in one plan: missing-device + ambiguous + redundancy.
+4. Returning-member detection: disconnect a disk, remove from config, apply (removes it), re-add to config, apply — `action_btrfs_add` should detect the returning member via `btrfs device scan`.
+5. Balance idempotency: run apply twice on an already-RAID1 pool with no changes — balance handler should skip.
