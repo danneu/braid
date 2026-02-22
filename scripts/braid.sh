@@ -996,11 +996,6 @@ action_balance_raid1() {
 
   echo "Starting RAID1 balance (this may take a while on large pools)..."
   btrfs balance start -dconvert=raid1 -mconvert=raid1 "$target"
-  # Evict any dead devices left in the pool
-  if btrfs filesystem show "$target" 2>/dev/null | grep -qi "missing"; then
-    echo "Removing missing (dead) device from pool..."
-    btrfs device remove missing "$target"
-  fi
 }
 
 action_remove_graceful() {
@@ -1279,7 +1274,6 @@ cmd_apply() {
       ADD_DISK_BTRFS_ADD)            action_btrfs_add "$action_target" ;;
       BALANCE_TO_RAID1)              action_balance_raid1 "$action_target" ;;
       REMOVE_DISK_GRACEFUL)          action_remove_graceful "$action_target" ;;
-      REMOVE_DISK_MISSING)           action_remove_missing ;;
       REMOVE_DISK_MISSING_EXPLICIT)  action_remove_missing ;;
       CLOSE_LUKS_MAPPER)             action_close_luks "$action_target" ;;
       VERIFY_POOL_HEALTH)            action_verify_health ;;

@@ -491,4 +491,48 @@ with subtest("Apply never contains luksFormat"):
         "action_luks_format_open still referenced in braid script"
     )
 
+# --- Phase 9: Balance must not silently evict missing devices ---
+# Tests that action_balance_raid1's post-balance cleanup does NOT bypass the
+# --allow-remove-missing safety gate. When adding a disk to a degraded pool,
+# balance should redistribute data but NOT evict the missing device without
+# explicit operator intent.
+
+with subtest("Setup: ensure clean 2-disk RAID1 for balance-eviction test"):
+    # Clean up stale mappers from earlier phases
+    machine.succeed("cryptsetup close virtio-disk2 || true")
+    machine.succeed("cryptsetup close virtio-disk4 || true")
+    machine.succeed(write_config([
+        "/dev/disk/by-id/virtio-disk1",
+        "/dev/disk/by-id/virtio-disk3",
+    ]))
+    machine.succeed(apply())
+    assert "RAID1" in machine.succeed("btrfs fi df /mnt/storage")
+
+with subtest("Setup: degrade pool by killing disk3"):
+    machine.succeed("umount /mnt/storage")
+    machine.succeed("cryptsetup close virtio-disk3")
+    machine.succeed("mv /dev/disk/by-id/virtio-disk3 /dev/disk/by-id/virtio-disk3.hidden")
+    machine.succeed("mount -o degraded /dev/mapper/virtio-disk1 /mnt/storage")
+    fi_show = machine.succeed("btrfs fi show /mnt/storage")
+    assert "missing" in fi_show.lower(), f"Expected degraded pool:\n{fi_show}"
+
+with subtest("Balance must not evict missing device without --allow-remove-missing"):
+    # Add disk4 to degraded pool. Planner will emit BALANCE_TO_RAID1 (2+ devices).
+    # Balance should redistribute data but NOT silently evict the missing device —
+    # that requires explicit --allow-remove-missing + confirmation phrase.
+    machine.succeed(write_config([
+        "/dev/disk/by-id/virtio-disk1",
+        "/dev/disk/by-id/virtio-disk4",
+    ]))
+    output = machine.succeed(apply())
+
+    fi_show = machine.succeed("btrfs fi show /mnt/storage")
+    assert "virtio-disk4" in fi_show, f"disk4 not added:\n{fi_show}"
+
+    # Key assertion: missing device must still be in pool
+    assert "missing" in fi_show.lower(), (
+        f"Missing device was silently evicted by balance without --allow-remove-missing! "
+        f"This violates the explicit missing-device removal gate.\n{fi_show}"
+    )
+
 machine.shutdown()
