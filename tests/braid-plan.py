@@ -219,6 +219,11 @@ with subtest("Plan shows OPEN_LUKS + missing warning for replace scenario"):
     assert any("POOL_DEGRADED" in w or "missing" in w.lower() for w in p["warnings"]), (
         f"Expected degraded warning:\n{p['warnings']}"
     )
+    # Degraded warning should suggest how to evict the missing device
+    degraded_warnings = [w for w in p["warnings"] if "POOL_DEGRADED" in w]
+    assert any("--allow-remove-missing" in w for w in degraded_warnings), (
+        f"Expected --allow-remove-missing hint in degraded warning:\n{degraded_warnings}"
+    )
 
 # --- Phase 6: Ambiguity refusal ---
 

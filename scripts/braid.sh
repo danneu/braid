@@ -376,7 +376,7 @@ compute_plan() {
 
     # --- Missing device handling ---
     if (( missing_count > 0 )); then
-      warnings+=("POOL_DEGRADED_MISSING_DEVICES: pool has $missing_count missing device(s) at $mount_point.")
+      warnings+=("POOL_DEGRADED_MISSING_DEVICES: pool has $missing_count missing device(s) at $mount_point. To evict, run: braid apply --allow-remove-missing   (requires BRAID_CONFIRM='remove missing device from pool')")
 
       if [[ "$allow_remove_missing" == "true" ]]; then
         if (( missing_count > 1 )); then
@@ -1323,15 +1323,21 @@ cmd_status() {
   local mount_point
   mount_point=$(config_mount_point)
 
-  # Validate pool is mounted
-  if ! mountpoint -q "$mount_point" 2>/dev/null; then
-    die "$mount_point is not mounted."
-  fi
-
+  # If pool is not mounted (or not btrfs), report that as status instead of dying
   local mount_type
   mount_type=$(findmnt -n -o FSTYPE "$mount_point" 2>/dev/null || true)
-  if [[ "$mount_type" != "btrfs" ]]; then
-    die "$mount_point is not a btrfs filesystem."
+  if ! mountpoint -q "$mount_point" 2>/dev/null || [[ "$mount_type" != "btrfs" ]]; then
+    if $json_output; then
+      jq -n \
+        --argjson schema_version 1 \
+        --arg mount_point "$mount_point" \
+        --arg status "not mounted" \
+        '{schema_version: $schema_version, mount_point: $mount_point, status: $status}'
+    else
+      echo "Pool:     $mount_point"
+      echo "Status:   not mounted"
+    fi
+    return
   fi
 
   # Gather btrfs data

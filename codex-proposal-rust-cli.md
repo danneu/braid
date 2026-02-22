@@ -127,15 +127,11 @@ No API supports invalid transitions.
    - target missing on resume
    - confirmation gates
 
-### VM Tests (reduced but essential)
-Keep only true integration boundaries:
-1. remote unlock and degraded boot
-2. first-disk bootstrap
-3. failed-disk replacement
-4. one checkpoint/resume end-to-end path
+### VM Tests (full behavior coverage retained)
+Retain the full VM behavior suite to protect architecture invariants and safety contracts, while adding fast Rust tests as an additional layer.
 
 ## CLI UX Compatibility
-1. Preserve existing flags and output semantics where practical.
+1. Preserve existing flags and output semantics.
 2. Preserve warning/error codes used by tests.
 3. Keep `--json` schemas stable (version if changes are needed).
 

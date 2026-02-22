@@ -99,8 +99,15 @@ with subtest("braid-remove-disk still works"):
 
 # --- Phase 6: Error cases ---
 
-with subtest("braid status fails on unmounted pool"):
+with subtest("braid status reports not mounted on unmounted pool"):
     machine.succeed("umount /mnt/storage")
-    machine.fail("braid status")
+    output = machine.succeed("braid status")
+    assert "not mounted" in output.lower(), f"Expected 'not mounted' in output:\n{output}"
+
+    json_output = machine.succeed("braid status --json")
+    s = json.loads(json_output)
+    assert s["status"] == "not mounted", f"Expected status 'not mounted':\n{s}"
+    assert s["schema_version"] == 1, f"Expected schema_version 1:\n{s}"
+    assert "mount_point" in s, f"Expected mount_point in JSON:\n{s}"
 
 machine.shutdown()
