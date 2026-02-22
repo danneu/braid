@@ -109,6 +109,15 @@ sudo BRAID_CONFIRM='remove missing device from pool' braid apply --allow-remove-
 
 The new drive joins the pool and the dead device is evicted. Missing-device removal requires explicit intent to prevent accidental eviction of temporarily absent disks.
 
+If any configured disk is physically absent when you run `plan` or `apply` with removal actions, you'll see an `IDENTITY_AMBIGUOUS_ABSENT_DISK` block. Add `--allow-remove-ambiguous` and `BRAID_CONFIRM='remove despite ambiguous identity'` to proceed.
+
+When an operation triggers multiple confirmations (e.g., ambiguous identity + redundancy loss), separate the phrases with semicolons:
+
+```
+sudo BRAID_CONFIRM='remove despite ambiguous identity;remove this disk without redundancy' \
+  braid apply --allow-remove-ambiguous
+```
+
 ### Pool status
 
 ```

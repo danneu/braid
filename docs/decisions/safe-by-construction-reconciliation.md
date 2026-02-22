@@ -41,6 +41,8 @@ Absent configured disks are skipped with a `DISK_ABSENT_SKIPPED` warning. The pl
 
 Missing pool devices (devices in btrfs but not in config) require explicit operator intent to evict: `--allow-remove-missing` flag plus `BRAID_CONFIRM='remove missing device from pool'` environment variable. This prevents accidental eviction of temporarily absent disks.
 
+Device identity is established by LUKS UUID, not by path or mapper name. When a config disk is absent, its UUID is unknowable, creating identity ambiguity for removal decisions. If the planner wants to remove a pool device but cannot verify it doesn't match an absent config disk, the plan is blocked with `IDENTITY_AMBIGUOUS_ABSENT_DISK`. The operator can override with `--allow-remove-ambiguous` plus `BRAID_CONFIRM='remove despite ambiguous identity'`.
+
 ### Resume strictness
 
 Fresh `apply` is tolerant of absent disks (skip + warn). But checkpointed in-flight actions are strict: if a pending action's target becomes absent during `--resume`, the apply fails with `RESUME_TARGET_MISSING`. The checkpoint is preserved for retry after the target is restored.

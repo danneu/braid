@@ -233,6 +233,94 @@ with subtest("Apply with present non-LUKS disk warns but proceeds"):
     output = machine.succeed(apply())
     assert "INIT_REQUIRED" in output, f"Expected INIT_REQUIRED warning:\n{output}"
 
+# --- Phase 5d2: Identity ambiguity gate (--allow-remove-ambiguous) ---
+
+with subtest("Setup: build 3-disk pool for ambiguity test"):
+    # Pool: disk1 + disk3, add disk4 so we have 3 disks (avoids redundancy confirmation)
+    machine.succeed(write_config([
+        "/dev/disk/by-id/virtio-disk1",
+        "/dev/disk/by-id/virtio-disk3",
+        "/dev/disk/by-id/virtio-disk4",
+    ]))
+    machine.succeed(init_disk("/dev/disk/by-id/virtio-disk4"))
+    machine.succeed(apply())
+    fi_show = machine.succeed("btrfs fi show /mnt/storage")
+    assert "virtio-disk4" in fi_show, f"disk4 not in pool:\n{fi_show}"
+
+with subtest("Apply without --allow-remove-ambiguous is blocked when ambiguous"):
+    # Pool: disk1 + disk3 + disk4. Config: [disk1, disk3, disk99_absent].
+    # disk99 absent → UUID unknowable → disk4 in pool but not in config →
+    # can't prove disk4 != disk99 → block removal.
+    machine.succeed(write_config([
+        "/dev/disk/by-id/virtio-disk1",
+        "/dev/disk/by-id/virtio-disk3",
+        "/dev/disk/by-id/virtio-disk99",
+    ]))
+    # Apply should fail due to blocked plan (IDENTITY_AMBIGUOUS_ABSENT_DISK)
+    machine.fail(apply())
+    # Verify via plan --json that it's actually blocked for the right reason
+    raw = machine.succeed("braid plan --json --config /tmp/braid-config.json")
+    p = json.loads(raw)
+    assert p["status"] == "blocked", f"Expected blocked plan:\n{p}"
+    assert any("IDENTITY_AMBIGUOUS_ABSENT_DISK" in r["code"] for r in p["blocked_reasons"]), (
+        f"Expected IDENTITY_AMBIGUOUS_ABSENT_DISK:\n{p['blocked_reasons']}"
+    )
+
+with subtest("Apply with --allow-remove-ambiguous succeeds"):
+    # Same config — now with override flag + confirmation phrase
+    output = machine.succeed(apply(
+        extra="--allow-remove-ambiguous",
+        confirm="remove despite ambiguous identity",
+    ))
+    assert "Applied" in output, f"Expected successful apply:\n{output}"
+    fi_show = machine.succeed("btrfs fi show /mnt/storage")
+    # disk4 should be removed since it wasn't in the 3-disk config
+    assert "virtio-disk4" not in fi_show, f"disk4 still in pool:\n{fi_show}"
+
+with subtest("Data intact after ambiguous removal"):
+    content = machine.succeed("cat /mnt/storage/precious.txt").strip()
+    assert content == "important data", f"Data lost: '{content}'"
+
+# --- Phase 5d3: Combined ambiguity + redundancy confirmation ---
+# Pool state: [disk1, disk3] (disk4 was removed in 5d2)
+
+with subtest("Apply with partial confirmation fails"):
+    # Config: [disk1, disk99_absent]. Pool: [disk1, disk3].
+    # Needs both phrases — providing only one should fail.
+    machine.succeed(write_config([
+        "/dev/disk/by-id/virtio-disk1",
+        "/dev/disk/by-id/virtio-disk99",
+    ]))
+    machine.fail(apply(
+        extra="--allow-remove-ambiguous",
+        confirm="remove despite ambiguous identity",
+    ))
+
+with subtest("Apply with semicolon-separated multi-confirmation succeeds"):
+    output = machine.succeed(apply(
+        extra="--allow-remove-ambiguous",
+        confirm="remove despite ambiguous identity;remove this disk without redundancy",
+    ))
+    assert "Applied" in output, f"Expected successful apply:\n{output}"
+    fi_show = machine.succeed("btrfs fi show /mnt/storage")
+    assert "virtio-disk3" not in fi_show, f"disk3 still in pool:\n{fi_show}"
+    devid_count = fi_show.count("devid")
+    assert devid_count == 1, f"Expected 1 device:\n{fi_show}"
+
+with subtest("Data intact after combined confirmation removal"):
+    content = machine.succeed("cat /mnt/storage/precious.txt").strip()
+    assert content == "important data", f"Data lost: '{content}'"
+
+with subtest("Setup: rebuild 2-disk pool after combined confirmation test"):
+    # Pool: disk1 only. Re-add disk3 for Phase 5e.
+    machine.succeed(write_config([
+        "/dev/disk/by-id/virtio-disk1",
+        "/dev/disk/by-id/virtio-disk3",
+    ]))
+    machine.succeed(apply())
+    fi_show = machine.succeed("btrfs fi show /mnt/storage")
+    assert "virtio-disk3" in fi_show, f"disk3 not in pool:\n{fi_show}"
+
 # --- Phase 5e: Explicit missing-device removal gate (11.5) ---
 
 with subtest("Setup: degraded pool for missing-device tests"):
@@ -299,8 +387,8 @@ with subtest("Interrupted apply leaves checkpoint"):
         "/dev/disk/by-id/virtio-disk3",
         "/dev/disk/by-id/virtio-disk4",
     ]))
-    # init-disk disk4 first
-    machine.succeed(init_disk("/dev/disk/by-id/virtio-disk4"))
+    # init-disk disk4 (--force needed: disk4 has LUKS header from ambiguity test)
+    machine.succeed(init_disk("/dev/disk/by-id/virtio-disk4", extra="--force", confirm="reformat this disk"))
     # Use BRAID_TEST_FAIL_AFTER_ACTION to simulate interruption after first action
     cmd = (
         f"BRAID_PASSPHRASE='{passphrase}' "

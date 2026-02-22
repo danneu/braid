@@ -126,6 +126,54 @@ with subtest("Absent disk produces DISK_ABSENT_SKIPPED warning"):
     types = [a["type"] for a in p["actions"]]
     assert "OPEN_LUKS" not in types, f"Unexpected OPEN_LUKS for absent disk:\n{types}"
 
+# --- Phase 2d: Absent config disk blocks removal (IDENTITY_AMBIGUOUS_ABSENT_DISK) ---
+
+with subtest("Absent config disk blocks removal when pool has unmatched device"):
+    # Config: [disk1, disk99_absent]. Pool: [disk1, disk2].
+    # disk99 is absent, disk2 is in pool but not in config.
+    # Planner can't prove disk2 != disk99, so must block.
+    machine.succeed(write_config([
+        "/dev/disk/by-id/virtio-disk1",
+        "/dev/disk/by-id/virtio-disk99",
+    ]))
+    p = plan_json()
+    assert p["status"] == "blocked", f"Expected blocked:\n{p}"
+    assert any("IDENTITY_AMBIGUOUS_ABSENT_DISK" in r["code"] for r in p["blocked_reasons"]), (
+        f"Expected IDENTITY_AMBIGUOUS_ABSENT_DISK:\n{p['blocked_reasons']}"
+    )
+
+with subtest("--allow-remove-ambiguous unblocks plan with confirmation"):
+    raw = machine.succeed(
+        "braid plan --json --allow-remove-ambiguous --config /tmp/braid-config.json"
+    )
+    p = json.loads(raw)
+    assert p["status"] == "applicable", f"Expected applicable with override:\n{p}"
+    phrases = [c["phrase"] for c in p.get("confirmations", [])]
+    assert "remove despite ambiguous identity" in phrases, (
+        f"Expected ambiguous identity confirmation:\n{phrases}"
+    )
+
+# --- Phase 2e: Ambiguous removal + redundancy loss produces both confirmations ---
+
+with subtest("Ambiguous removal to single disk produces both confirmations"):
+    # Config: [disk1, disk99_absent]. Pool: [disk1, disk2].
+    # disk99 absent + disk2 removed → ambiguous identity confirmation
+    # 2→1 disk → redundancy loss confirmation
+    # Both phrases must appear in the same plan.
+    raw = machine.succeed(
+        "braid plan --json --allow-remove-ambiguous --config /tmp/braid-config.json"
+    )
+    p = json.loads(raw)
+    assert p["status"] == "applicable", f"Expected applicable:\n{p}"
+    phrases = [c["phrase"] for c in p.get("confirmations", [])]
+    assert "remove despite ambiguous identity" in phrases, (
+        f"Missing ambiguous confirmation:\n{phrases}"
+    )
+    assert "remove this disk without redundancy" in phrases, (
+        f"Missing redundancy confirmation:\n{phrases}"
+    )
+    assert len(phrases) == 2, f"Expected exactly 2 confirmations:\n{phrases}"
+
 # --- Phase 3: Remove plan (graceful) ---
 
 with subtest("Plan shows remove actions for disk in pool but not config"):
@@ -299,11 +347,12 @@ with subtest("Human output shows plan summary"):
     assert "Status:" in output, f"Missing Status in human output:\n{output}"
 
 with subtest("Human output shows 'applicable with warnings' when warnings exist"):
-    # Include an absent disk to trigger a warning
+    # Include all pool disks + an absent disk to trigger a warning without removal
     machine.succeed(write_config([
         "/dev/disk/by-id/virtio-disk1",
         "/dev/disk/by-id/virtio-disk2",
         "/dev/disk/by-id/virtio-disk3",
+        "/dev/disk/by-id/virtio-disk4",
         "/dev/disk/by-id/virtio-disk99",
     ]))
     output = machine.succeed(plan())

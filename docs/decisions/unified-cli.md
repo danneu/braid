@@ -25,8 +25,8 @@ Option 3. Bash+jq for phases 1-3. Re-evaluate language choice only after plan/ap
 Single script `scripts/braid.sh` with subcommand dispatcher:
 
 - `braid init-disk <by-id> [--force] [--config <path>]` — destructive one-shot: LUKS format a declared disk. Requires explicit operator intent. Never called from `apply`.
-- `braid plan [--json] [--allow-remove-missing] [--config <path>]` — read-only diff: desired state (config) vs live state (LUKS/btrfs/mounts). Outputs action list with status (`applicable`/`blocked`), warnings, and blocked reasons.
-- `braid apply [--resume] [--allow-remove-missing] [--config <path>]` — executes plan with checkpoint persistence. `--resume` continues from `/var/lib/braid/apply-state.json`. Never performs `luksFormat`.
+- `braid plan [--json] [--allow-remove-missing] [--allow-remove-ambiguous] [--config <path>]` — read-only diff: desired state (config) vs live state (LUKS/btrfs/mounts). Outputs action list with status (`applicable`/`blocked`), warnings, and blocked reasons.
+- `braid apply [--resume] [--allow-remove-missing] [--allow-remove-ambiguous] [--config <path>]` — executes plan with checkpoint persistence. `--resume` continues from `/var/lib/braid/apply-state.json`. Never performs `luksFormat`.
 - `braid status [--verbose] [--json] [--config <path>]` — pool health summary (replaces `braid-status`).
 
 Packaged via `pkgs.writeShellApplication` in `cli.nix`, same as existing scripts.
@@ -39,9 +39,9 @@ Packaged via `pkgs.writeShellApplication` in `cli.nix`, same as existing scripts
 
 Plan JSON includes:
 - `status`: `applicable` (can be executed) or `blocked` (requires operator action first)
-- `blocked_reasons[]`: list of reasons the plan cannot proceed (e.g., `INIT_REQUIRED`)
+- `blocked_reasons[]`: list of reasons the plan cannot proceed (e.g., `INIT_REQUIRED`, `IDENTITY_AMBIGUOUS_ABSENT_DISK`)
 - `warnings[]`: non-blocking issues (e.g., `DISK_ABSENT_SKIPPED`, `INIT_REQUIRED`, `POOL_DEGRADED`)
-- `confirmations[]`: actions requiring explicit operator confirmation (e.g., redundancy loss)
+- `confirmations[]`: actions requiring explicit operator confirmation (e.g., redundancy loss). When multiple confirmations are required, provide all phrases semicolon-separated in `BRAID_CONFIRM` (e.g., `BRAID_CONFIRM='phrase one;phrase two'`). Whitespace around semicolons is trimmed.
 
 ### Plan/apply state machine
 

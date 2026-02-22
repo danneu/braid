@@ -2,8 +2,8 @@
 # braid — unified CLI for braid disk pool management.
 # Usage: braid <command> [options]
 #   braid init-disk <by-id-path> [--force] [--config <path>]
-#   braid plan [--json] [--allow-remove-missing] [--config <path>]
-#   braid apply [--resume] [--allow-remove-missing] [--config <path>]
+#   braid plan [--json] [--allow-remove-missing] [--allow-remove-ambiguous] [--config <path>]
+#   braid apply [--resume] [--allow-remove-missing] [--allow-remove-ambiguous] [--config <path>]
 #   braid status [--verbose] [--json] [--config <path>]
 
 set -euo pipefail
@@ -48,14 +48,22 @@ config_hash() {
   sha256sum "$CONFIG_FILE" | awk '{print "sha256:" $1}'
 }
 
-# Resolve /dev/disk/by-id/X to its real device path, or empty string if absent.
-resolve_by_id() {
-  local by_id="$1"
-  if [[ -b "$by_id" ]]; then
-    readlink -f "$by_id"
-  else
-    echo ""
+# Get the backing device for a dm-crypt mapper (e.g., "virtio-disk1" → "/dev/vda").
+get_mapper_backing_device() {
+  local mapper_name="$1"
+  cryptsetup status "$mapper_name" 2>/dev/null | awk '/device:/ {print $2}'
+}
+
+# Get LUKS UUID from a block device path or mapper name.
+# Returns empty string if UUID is unavailable (device absent, not LUKS, etc.)
+get_luks_uuid() {
+  local input="$1"
+  local device="$input"
+  if [[ "$input" != /dev/* ]]; then
+    device=$(get_mapper_backing_device "$input")
+    [[ -z "$device" ]] && { echo ""; return; }
   fi
+  cryptsetup luksUUID "$device" 2>/dev/null || echo ""
 }
 
 format_bytes() {
@@ -104,18 +112,23 @@ discover_live_state() {
     mapfile -t mappers < <(echo "$fi_show" | awk '/\/dev\/mapper\// {print $NF}' | sed 's|.*/||')
     mapfile -t devids < <(echo "$fi_show" | awk '/\/dev\/mapper\// {for(i=1;i<=NF;i++) if($i=="devid") {print $(i+1); break}}')
 
-    # Build pool devices JSON array
+    # Build pool devices JSON array with LUKS UUIDs
     pool_json="["
     for i in "${!mappers[@]}"; do
       local mapper="${mappers[$i]}"
       local devid="${devids[$i]}"
-      local by_id="/dev/disk/by-id/$mapper"
+      local backing_dev
+      backing_dev=$(get_mapper_backing_device "$mapper")
+      [[ -z "$backing_dev" ]] && die "Pool device $mapper: cannot determine backing device."
+      local luks_uuid
+      luks_uuid=$(cryptsetup luksUUID "$backing_dev" 2>/dev/null || true)
+      [[ -z "$luks_uuid" ]] && die "Pool device $mapper: LUKS UUID unavailable (backing: ${backing_dev:-unknown}). Cannot reconcile identity."
       [[ $i -gt 0 ]] && pool_json+=","
       pool_json+=$(jq -n \
         --arg mapper "$mapper" \
-        --arg by_id "$by_id" \
+        --arg luks_uuid "$luks_uuid" \
         --arg devid "$devid" \
-        '{mapper: $mapper, by_id: $by_id, devid: $devid}')
+        '{mapper: $mapper, luks_uuid: $luks_uuid, devid: $devid}')
     done
     pool_json+="]"
 
@@ -175,10 +188,12 @@ generate_plan_id() {
 # Compute the diff between desired state (config) and live state.
 # Args: $1 = live_state JSON (from discover_live_state)
 #        $2 = "true" if --allow-remove-missing was passed (optional)
+#        $3 = "true" if --allow-remove-ambiguous was passed (optional)
 # Outputs: plan JSON to stdout.
 compute_plan() {
   local live_state="$1"
   local allow_remove_missing="${2:-false}"
+  local allow_remove_ambiguous="${3:-false}"
   local mount_point
   mount_point=$(config_mount_point)
 
@@ -212,29 +227,34 @@ compute_plan() {
     echo "a${c}"
   }
 
-  local pool_backing=()
+  local pool_uuids=()
   if [[ "$mounted" == "true" ]]; then
     missing_count=$(echo "$live_state" | jq -r '.missing_count')
     mapfile -t pool_mappers < <(echo "$live_state" | jq -r '.pool_devices[].mapper')
-
-    # Resolve backing devices for pool mappers via sysfs.
-    # Boot-time LUKS may use short mapper names (e.g., "disk1") while braid config
-    # uses by-id basenames (e.g., "virtio-disk1"). Comparing underlying kernel
-    # device paths lets us detect that they refer to the same physical disk.
-    for pm in "${pool_mappers[@]}"; do
-      local backing=""
-      local dm_path dm_name slave
-      dm_path=$(readlink -f "/dev/mapper/$pm" 2>/dev/null || true)
-      dm_name=$(basename "$dm_path")
-      if [[ -d "/sys/block/$dm_name/slaves" ]]; then
-        slave=$(find "/sys/block/$dm_name/slaves" -maxdepth 1 -mindepth 1 -printf '%f\n' 2>/dev/null | head -1)
-        if [[ -n "$slave" ]]; then
-          backing=$(readlink -f "/dev/$slave")
-        fi
-      fi
-      pool_backing+=("$backing")
-    done
+    mapfile -t pool_uuids < <(echo "$live_state" | jq -r '.pool_devices[].luks_uuid')
   fi
+
+  # Pre-compute config UUIDs and absence flags
+  local config_uuids=()
+  local config_absent=()
+  for i in "${!config_basenames[@]}"; do
+    local by_id="${config_disk_map[$i]}"
+    if [[ ! -b "$by_id" ]]; then
+      # Device absent — UUID unknowable
+      config_uuids+=("")
+      config_absent+=(true)
+    elif ! cryptsetup isLuks "$by_id" 2>/dev/null; then
+      # Device present but not LUKS — skip matching (will be caught by INIT_REQUIRED)
+      config_uuids+=("")
+      config_absent+=(false)
+    else
+      local uuid
+      uuid=$(get_luks_uuid "$by_id")
+      [[ -z "$uuid" ]] && die "Config disk $by_id: present and LUKS but UUID unavailable. Cannot reconcile identity."
+      config_uuids+=("$uuid")
+      config_absent+=(false)
+    fi
+  done
 
   # --- Disks to ADD: in config but not in pool ---
   local disks_to_add=()
@@ -245,15 +265,8 @@ compute_plan() {
     local in_pool=false
 
     for pi in "${!pool_mappers[@]}"; do
-      local pm="${pool_mappers[$pi]}"
-      if [[ "$pm" == "$basename" ]]; then
-        in_pool=true
-        break
-      fi
-      # Different mapper name but same underlying device
-      local config_real
-      config_real=$(readlink -f "$by_id" 2>/dev/null || true)
-      if [[ -n "${pool_backing[$pi]:-}" && -n "$config_real" && "${pool_backing[$pi]}" == "$config_real" ]]; then
+      # Match by LUKS UUID (handles different mapper names for same physical disk)
+      if [[ -n "${config_uuids[$i]}" && "${config_uuids[$i]}" == "${pool_uuids[$pi]}" ]]; then
         in_pool=true
         break
       fi
@@ -302,15 +315,8 @@ compute_plan() {
       local pm="${pool_mappers[$pi]}"
       local in_config=false
       for ci in "${!config_basenames[@]}"; do
-        local cb="${config_basenames[$ci]}"
-        if [[ "$cb" == "$pm" ]]; then
-          in_config=true
-          break
-        fi
-        # Different mapper name but same underlying device
-        local config_real
-        config_real=$(readlink -f "${config_disk_map[$ci]}" 2>/dev/null || true)
-        if [[ -n "${pool_backing[$pi]:-}" && -n "$config_real" && "${pool_backing[$pi]}" == "$config_real" ]]; then
+        # Match by LUKS UUID (handles different mapper names for same physical disk)
+        if [[ -n "${config_uuids[$ci]}" && "${config_uuids[$ci]}" == "${pool_uuids[$pi]}" ]]; then
           in_config=true
           break
         fi
@@ -328,6 +334,45 @@ compute_plan() {
           '{id: $id, type: "CLOSE_LUKS_MAPPER", target: $target, preconditions: ["mapper_open"], status: "pending"}')")
       fi
     done
+
+    # --- Identity ambiguity check: absent config disk + pending removals ---
+    # When a config disk is absent, its UUID is unknowable. If we're about to
+    # remove pool devices, we can't prove they don't belong to the absent disk.
+    if (( ${#disks_to_remove[@]} > 0 )); then
+      local has_absent=false
+      local absent_disks=()
+      for ci in "${!config_absent[@]}"; do
+        if [[ "${config_absent[$ci]}" == "true" ]]; then
+          has_absent=true
+          absent_disks+=("${config_disk_map[$ci]}")
+        fi
+      done
+      if $has_absent; then
+        if [[ "$allow_remove_ambiguous" == "true" ]]; then
+          # Override: emit confirmation requirement instead of blocking
+          local first_remove_id=""
+          for a_json in "${actions[@]}"; do
+            local atype
+            atype=$(echo "$a_json" | jq -r '.type')
+            if [[ "$atype" == "REMOVE_DISK_GRACEFUL" ]]; then
+              first_remove_id=$(echo "$a_json" | jq -r '.id')
+              break
+            fi
+          done
+          confirmations+=("$(jq -n \
+            --arg action_id "$first_remove_id" \
+            '{action_id: $action_id, phrase: "remove despite ambiguous identity"}')")
+        else
+          for absent_disk in "${absent_disks[@]}"; do
+            blocked_reasons+=("$(jq -n \
+              --arg code "IDENTITY_AMBIGUOUS_ABSENT_DISK" \
+              --arg disk "$absent_disk" \
+              --arg message "Cannot verify identity of pool devices for removal: config disk $absent_disk is absent (UUID unavailable). Plug in all disks or use --allow-remove-ambiguous." \
+              '{code: $code, disk: $disk, message: $message}')")
+          done
+        fi
+      fi
+    fi
 
     # --- Missing device handling ---
     if (( missing_count > 0 )); then
@@ -677,11 +722,25 @@ cmd_init_disk() {
   mount_point=$(config_mount_point)
 
   if mountpoint -q "$mount_point" 2>/dev/null; then
-    local fi_show
-    fi_show=$(btrfs filesystem show "$mount_point" 2>/dev/null || true)
-    if echo "$fi_show" | grep -q "/dev/mapper/$mapper_name"; then
-      die "Disk $by_id is currently part of the mounted pool at $mount_point. Remove it first."
+    # If target is LUKS-formatted, check pool membership by UUID
+    if cryptsetup isLuks "$by_id" 2>/dev/null; then
+      local target_uuid
+      target_uuid=$(get_luks_uuid "$by_id")
+      if [[ -n "$target_uuid" ]]; then
+        local fi_show
+        fi_show=$(btrfs filesystem show "$mount_point" 2>/dev/null || true)
+        local pm
+        while IFS= read -r pm; do
+          [[ -z "$pm" ]] && continue
+          local pm_uuid
+          pm_uuid=$(get_luks_uuid "$pm")
+          if [[ -n "$pm_uuid" && "$pm_uuid" == "$target_uuid" ]]; then
+            die "Disk $by_id is currently part of the mounted pool at $mount_point. Remove it first."
+          fi
+        done < <(echo "$fi_show" | awk '/\/dev\/mapper\// {print $NF}' | sed 's|.*/||')
+      fi
     fi
+    # If not LUKS, it can't be a pool member — skip the check
   fi
 
   # --- Step 4: Probe LUKS header ---
@@ -755,11 +814,13 @@ cmd_init_disk() {
 cmd_plan() {
   local json_output=false
   local allow_remove_missing=false
+  local allow_remove_ambiguous=false
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --json) json_output=true; shift ;;
       --allow-remove-missing) allow_remove_missing=true; shift ;;
+      --allow-remove-ambiguous) allow_remove_ambiguous=true; shift ;;
       --config) CONFIG_FILE="$2"; shift 2 ;;
       *) die "Unknown option for plan: $1" ;;
     esac
@@ -771,7 +832,7 @@ cmd_plan() {
   live_state=$(discover_live_state)
 
   local plan
-  plan=$(compute_plan "$live_state" "$allow_remove_missing")
+  plan=$(compute_plan "$live_state" "$allow_remove_missing" "$allow_remove_ambiguous")
 
   if $json_output; then
     echo "$plan" | jq .
@@ -863,15 +924,26 @@ action_open_luks() {
   fi
 
   # Device already mapped under a different name (e.g., boot-time LUKS with short names)
-  local real_dev
-  real_dev=$(readlink -f "$target")
-  local dev_basename
-  dev_basename=$(basename "$real_dev")
-  local holders_dir="/sys/block/$dev_basename/holders"
-  if [[ -d "$holders_dir" ]] && [[ -n "$(ls -A "$holders_dir" 2>/dev/null)" ]]; then
-    echo "Device $target already in use (mapped under different name) — skipping."
-    return 0
-  fi
+  local target_uuid
+  target_uuid=$(get_luks_uuid "$target")
+  [[ -z "$target_uuid" ]] && die "Device $target: LUKS UUID unavailable. Cannot verify identity."
+  local existing_mapper
+  for existing_mapper in /dev/mapper/*; do
+    [[ -e "$existing_mapper" ]] || continue
+    local em_name
+    em_name=$(basename "$existing_mapper")
+    # Skip the control device and our expected mapper name
+    [[ "$em_name" == "control" ]] && continue
+    [[ "$em_name" == "$mapper_name" ]] && continue
+    if cryptsetup status "$em_name" >/dev/null 2>&1; then
+      local em_uuid
+      em_uuid=$(get_luks_uuid "$em_name")
+      if [[ -n "$em_uuid" && "$em_uuid" == "$target_uuid" ]]; then
+        echo "Device $target already mapped as $em_name (same LUKS UUID) — skipping."
+        return 0
+      fi
+    fi
+  done
 
   echo "Opening LUKS device $target as $mapper_name..."
   echo -n "$passphrase" | cryptsetup luksOpen --key-file=- "$target" "$mapper_name"
@@ -1001,11 +1073,41 @@ action_verify_diskset() {
   local fi_show
   fi_show=$(btrfs filesystem show "$mount_point")
 
-  # Check that every configured disk is in the pool
+  # Build pool UUID set from active mappers
+  local pool_mapper_uuids=()
+  local pm
+  while IFS= read -r pm; do
+    [[ -z "$pm" ]] && continue
+    local pm_uuid
+    pm_uuid=$(get_luks_uuid "$pm")
+    [[ -n "$pm_uuid" ]] && pool_mapper_uuids+=("$pm_uuid")
+  done < <(echo "$fi_show" | awk '/\/dev\/mapper\// {print $NF}' | sed 's|.*/||')
+
+  # Check that every configured disk is in the pool (by UUID)
   while IFS= read -r disk; do
-    local mapper
-    mapper=$(basename "$disk")
-    if ! echo "$fi_show" | grep -q "/dev/mapper/$mapper"; then
+    if [[ ! -b "$disk" ]]; then
+      echo "Warning: configured disk $disk is absent — cannot verify pool membership."
+      continue
+    fi
+    if ! cryptsetup isLuks "$disk" 2>/dev/null; then
+      echo "Warning: configured disk $disk is not LUKS — cannot verify pool membership."
+      continue
+    fi
+    local disk_uuid
+    disk_uuid=$(get_luks_uuid "$disk")
+    if [[ -z "$disk_uuid" ]]; then
+      echo "Warning: configured disk $disk: UUID unavailable — cannot verify pool membership."
+      continue
+    fi
+    local found=false
+    local pu
+    for pu in "${pool_mapper_uuids[@]}"; do
+      if [[ "$pu" == "$disk_uuid" ]]; then
+        found=true
+        break
+      fi
+    done
+    if ! $found; then
       echo "Warning: configured disk $disk is not in pool."
     fi
   done < <(config_disks)
@@ -1019,11 +1121,13 @@ action_verify_diskset() {
 cmd_apply() {
   local resume=false
   local allow_remove_missing=false
+  local allow_remove_ambiguous=false
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --resume) resume=true; shift ;;
       --allow-remove-missing) allow_remove_missing=true; shift ;;
+      --allow-remove-ambiguous) allow_remove_ambiguous=true; shift ;;
       --config) CONFIG_FILE="$2"; shift 2 ;;
       *) die "Unknown option for apply: $1" ;;
     esac
@@ -1058,7 +1162,7 @@ cmd_apply() {
 
     local live_state
     live_state=$(discover_live_state)
-    plan_json=$(compute_plan "$live_state" "$allow_remove_missing")
+    plan_json=$(compute_plan "$live_state" "$allow_remove_missing" "$allow_remove_ambiguous")
 
     # Check for blocked plan
     local plan_status
@@ -1089,19 +1193,30 @@ cmd_apply() {
       return
     fi
 
-    # Check confirmations
+    # Check confirmations (semicolon-separated BRAID_CONFIRM supports multiple phrases)
     local confirm_count
     confirm_count=$(echo "$plan_json" | jq '.confirmations | length')
     if (( confirm_count > 0 )); then
       local provided="${BRAID_CONFIRM:-}"
+      local provided_phrases=()
+      IFS=';' read -ra raw_phrases <<< "$provided"
+      for rp in "${raw_phrases[@]}"; do
+        local trimmed
+        trimmed=$(echo "$rp" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        [[ -n "$trimmed" ]] && provided_phrases+=("$trimmed")
+      done
       local required_phrases
       mapfile -t required_phrases < <(echo "$plan_json" | jq -r '.confirmations[].phrase')
       for phrase in "${required_phrases[@]}"; do
-        if [[ -z "$provided" ]]; then
+        local matched=false
+        for pp in "${provided_phrases[@]}"; do
+          if [[ "$pp" == "$phrase" ]]; then
+            matched=true
+            break
+          fi
+        done
+        if ! $matched; then
           die "This operation requires confirmation. Set BRAID_CONFIRM='$phrase'"
-        fi
-        if [[ "$provided" != "$phrase" ]]; then
-          die "Confirmation phrase doesn't match. Expected: '$phrase'"
         fi
       done
     fi
@@ -1338,16 +1453,30 @@ cmd_status() {
   mapfile -t present_mappers < <(echo "$fi_show" | awk '/\/dev\/mapper\// {print $NF}' | sed 's|.*/||')
   mapfile -t present_devids < <(echo "$fi_show" | awk '/\/dev\/mapper\// {for(i=1;i<=NF;i++) if($i=="devid") {print $(i+1); break}}')
 
+  # Collect UUIDs for present pool mappers
+  local present_uuids=()
+  for i in "${!present_mappers[@]}"; do
+    local mapper="${present_mappers[$i]}"
+    local mapper_uuid
+    mapper_uuid=$(get_luks_uuid "$mapper")
+    present_uuids+=("$mapper_uuid")
+  done
+
   for i in "${!present_mappers[@]}"; do
     local mapper="${present_mappers[$i]}"
     local devid="${present_devids[$i]}"
+    local mapper_uuid="${present_uuids[$i]}"
 
-    # Find by-id path from config
+    # Find by-id path from config using UUID matching
     local by_id=""
     while IFS= read -r d; do
-      if [[ "$(basename "$d")" == "$mapper" ]]; then
-        by_id="$d"
-        break
+      if [[ -b "$d" ]] && cryptsetup isLuks "$d" 2>/dev/null; then
+        local config_uuid
+        config_uuid=$(get_luks_uuid "$d")
+        if [[ -n "$config_uuid" && -n "$mapper_uuid" && "$config_uuid" == "$mapper_uuid" ]]; then
+          by_id="$d"
+          break
+        fi
       fi
     done < <(config_disks)
 
@@ -1364,9 +1493,7 @@ cmd_status() {
         echo "    Model:   ${model:-(unknown)}"
         echo "    Serial:  ${serial:-(unknown)}"
       fi
-      local luks_uuid
-      luks_uuid=$(cryptsetup luksUUID "$by_id" 2>/dev/null || true)
-      echo "    LUKS:    ${luks_uuid:-(unknown)}"
+      echo "    LUKS:    ${mapper_uuid:-(unknown)}"
     else
       echo "    Device:  /dev/mapper/$mapper  (not in config)"
     fi
@@ -1380,18 +1507,32 @@ cmd_status() {
     echo ""
   done
 
-  # Missing disks
+  # Missing disks — config disks whose UUID doesn't match any present pool mapper
   if (( missing_count > 0 )); then
     while IFS= read -r d; do
       local disk_basename
       disk_basename=$(basename "$d")
       local found=false
-      for mapper in "${present_mappers[@]}"; do
-        if [[ "$mapper" == "$disk_basename" ]]; then
-          found=true
-          break
+      if [[ -b "$d" ]] && cryptsetup isLuks "$d" 2>/dev/null; then
+        local disk_uuid
+        disk_uuid=$(get_luks_uuid "$d")
+        if [[ -n "$disk_uuid" ]]; then
+          for pu in "${present_uuids[@]}"; do
+            if [[ "$pu" == "$disk_uuid" ]]; then
+              found=true
+              break
+            fi
+          done
         fi
-      done
+      else
+        # Device absent — can't match by UUID, check by basename fallback for display only
+        for mapper in "${present_mappers[@]}"; do
+          if [[ "$mapper" == "$disk_basename" ]]; then
+            found=true
+            break
+          fi
+        done
+      fi
       if ! $found; then
         echo "  $disk_basename      MISSING"
         echo "    Device:  $d  (not found)"
@@ -1419,7 +1560,22 @@ status_disks_json() {
   for i in "${!present_mappers[@]}"; do
     local mapper="${present_mappers[$i]}"
     local devid="${present_devids[$i]}"
-    local by_id="/dev/disk/by-id/$mapper"
+    local luks_uuid
+    luks_uuid=$(get_luks_uuid "$mapper")
+
+    # Find by-id path from config using UUID matching
+    local by_id=""
+    while IFS= read -r d; do
+      if [[ -b "$d" ]] && cryptsetup isLuks "$d" 2>/dev/null; then
+        local config_uuid
+        config_uuid=$(get_luks_uuid "$d")
+        if [[ -n "$config_uuid" && -n "$luks_uuid" && "$config_uuid" == "$luks_uuid" ]]; then
+          by_id="$d"
+          break
+        fi
+      fi
+    done < <(config_disks)
+    [[ -z "$by_id" ]] && by_id="/dev/disk/by-id/$mapper"
 
     local read_errs write_errs corrupt_errs
     read_errs=$(echo "$dev_stats" | awk -v m="$mapper" 'index($0, "[/dev/mapper/"m"].read_io_errs") {print $NF}')
@@ -1431,12 +1587,13 @@ status_disks_json() {
     result+=$(jq -n \
       --arg mapper "$mapper" \
       --arg by_id "$by_id" \
+      --arg luks_uuid "${luks_uuid:-}" \
       --arg devid "$devid" \
       --arg status "present" \
       --argjson read_errs "${read_errs:-0}" \
       --argjson write_errs "${write_errs:-0}" \
       --argjson corrupt_errs "${corrupt_errs:-0}" \
-      '{mapper: $mapper, by_id: $by_id, devid: $devid, status: $status, errors: {read: $read_errs, write: $write_errs, corruption: $corrupt_errs}}')
+      '{mapper: $mapper, by_id: $by_id, luks_uuid: $luks_uuid, devid: $devid, status: $status, errors: {read: $read_errs, write: $write_errs, corruption: $corrupt_errs}}')
   done
 
   result+="]"

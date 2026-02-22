@@ -22,10 +22,59 @@ Rust workspace with:
    - Planner and invariant checks (pure functions)
 2. `braid-probe`
    - Reads live system state from tools/sysfs
+   - Owns device identity reconciliation (see below)
 3. `braid-exec`
    - Executes actions and checkpoint lifecycle
 4. `braid-cli`
    - User-facing command binary (`clap`)
+
+## Device Identity Model
+
+### The problem
+Three layers use different identifiers for the same physical disk:
+- **Config**: `/dev/disk/by-id/ata-Toshiba_MN07_XXXX` (human-readable, hardware-stable)
+- **LUKS**: `/dev/mapper/ata-Toshiba_MN07_XXXX` (ephemeral, chosen at open time)
+- **btrfs**: reports whatever `/dev/mapper/*` path it was given
+
+No single tool spans all three. btrfs has no knowledge of LUKS; LUKS has no knowledge of btrfs. The current bash script reconciles these with ~40 lines of sysfs/slaves path resolution, comparing resolved `/dev/sdX` paths from both sides.
+
+### Canonical join key: LUKS UUID
+Path-based matching is alias-brittle — it depends on both sides resolving to the same kernel device name at the same moment. LUKS UUID is strictly better: written at format time, never changes, independent of kernel enumeration order, SATA port, or USB topology.
+
+Probe chain from btrfs side:
+```
+btrfs filesystem show → /dev/mapper/foo
+cryptsetup status foo → device: /dev/sdX
+cryptsetup luksUUID /dev/sdX → a1b2c3d4-...
+```
+
+Probe chain from config side:
+```
+readlink -f /dev/disk/by-id/foo → /dev/sdX
+cryptsetup luksUUID /dev/sdX → a1b2c3d4-...
+```
+
+Same UUID on both sides. Match on that.
+
+### Core type in `braid-probe`
+```rust
+struct DeviceIdentity {
+    by_id: ByIdPath,          // from config — user-facing
+    luks_uuid: LuksUuid,      // canonical join key
+    mapper: MapperName,       // ephemeral, from cryptsetup
+    btrfs_devid: Option<u64>, // present if device is in pool
+}
+```
+
+Reconciliation becomes: probe both sides, join on `luks_uuid`, done.
+
+### Design decisions
+1. **`/dev/disk/by-id/` remains the config identifier.** Human-readable, self-documenting, follows NixOS conventions. Every major storage guide (ZFS, Arch Wiki) recommends by-id for config.
+2. **`/dev/mapper/*` is execution-only.** Never persisted as a stable reference.
+3. **Reconciliation is unavoidable but centralized.** All identity resolution lives in `braid-probe`; no other crate does path or UUID lookups.
+4. **Tactical simplifications:**
+   - Use `cryptsetup status <mapper>` to get backing device (replaces sysfs/slaves walk).
+   - Use `lsblk -J -o NAME,TYPE,PKNAME,SERIAL,MODEL,UUID` for bulk device tree queries (replaces per-device lsblk calls in status).
 
 ## Command Contracts (Must Preserve)
 1. `init-disk` is the only destructive formatting path.
@@ -65,7 +114,10 @@ No API supports invalid transitions.
 1. Planner unit tests:
    - add/remove/replace/no-op
    - missing-device gate behavior
-   - mapper alias identity (`disk1` vs `virtio-disk1`)
+2. Device identity tests:
+   - UUID-based join resolves correctly when mapper name differs from by-id basename
+   - Handles closed LUKS devices (no mapper yet, UUID still retrievable from raw device)
+   - Handles missing devices (UUID probe fails gracefully)
 2. Property tests:
    - no destructive apply actions
    - blocked plans are non-executable
