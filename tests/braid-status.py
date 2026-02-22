@@ -1,3 +1,5 @@
+import json
+
 start_all()
 machine.wait_for_unit("multi-user.target")
 
@@ -102,9 +104,14 @@ with subtest("Degraded verbose"):
 
 # --- Phase 4: Error cases ---
 
-with subtest("Error on unmounted pool"):
+with subtest("Status reports not mounted on unmounted pool"):
     machine.succeed("umount /mnt/storage")
-    result = machine.fail("braid status 2>&1")
+    result = machine.succeed("braid status")
     assert "not mounted" in result.lower(), f"Expected 'not mounted':\n{result}"
+
+    json_output = machine.succeed("braid status --json")
+    s = json.loads(json_output)
+    assert s["status"] == "not mounted", f"Expected status 'not mounted':\n{s}"
+    assert s["schema_version"] == 1, f"Expected schema_version 1:\n{s}"
 
 machine.shutdown()
