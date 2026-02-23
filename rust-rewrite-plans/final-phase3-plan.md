@@ -68,7 +68,7 @@ pub struct PlanFlags {
 **Warning and blocked-reason codes as enums** — used internally for compile-time safety, serialized as strings for JSON output:
 
 ```rust
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum WarningCode {
     DiskAbsentSkipped,
@@ -76,7 +76,7 @@ pub enum WarningCode {
     PoolDegradedMissingDevices,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum BlockedReasonCode {
     IdentityAmbiguousAbsentDisk,
@@ -91,7 +91,7 @@ Update `Warning.code` from `String` to `WarningCode`, `BlockedReason.code` from 
 **Plan status as an enum** — not a raw string:
 
 ```rust
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PlanStatus {
     Applicable,
@@ -103,7 +103,7 @@ pub enum PlanStatus {
 **JSON output wrapper types:**
 
 ```rust
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlanSummary {
     pub actions_total: usize,
     pub actions_mutation: usize,
@@ -113,7 +113,7 @@ pub struct PlanSummary {
     pub skipped_total: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlanReport {
     pub schema_version: u32,
     pub plan_id: String,
@@ -284,7 +284,7 @@ All Phase 1 + Phase 2 + Phase 3 tests must pass.
 - **Planner is pure logic** — no I/O, no CommandRunner. Takes typed inputs, returns PlanOutcome. Probe.rs (the I/O glue) is deferred to Phase 3.5.
 - **Input types defined in `types.rs`** — `PoolState`, `ConfigDisk`, etc. are shared contracts used by both probe (later) and plan.
 - **`ConfigDiskState::PresentLuks` includes `mapper_open`** — allows planner to skip OPEN_LUKS for crash recovery (bash line 295).
-- **Action ordering matches bash** — adds → removes → missing removal → balance → verify.
+- **Action ordering follows canonical Rust contract** — adds → removes → missing removal → balance → verify (if mutations exist). Diverges from bash on verify-always; see "verify only on mutation" decision.
 - **Verify actions only on mutation** — no-op plans produce zero actions. Health checks belong in `braid status`, not hidden in no-op plans. Simpler model: "actions are work to perform."
 - **`PlanReport` wraps `PlanOutcome`** — adds schema_version, mount_point, summary for JSON output. `skipped_total` computed from warning codes.
 - **`PlanStatus` enum** — `Applicable`, `ApplicableWithWarnings`, `Blocked`. Serializes to `snake_case`. No raw strings for status.
