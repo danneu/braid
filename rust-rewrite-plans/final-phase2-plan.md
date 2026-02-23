@@ -11,10 +11,11 @@ The hard rule from 5-plan.md: **parse.rs owns ALL parsing. Domain modules only s
 - `cli/Cargo.toml` — add `regex = "1"`
 - `cli/src/cmd.rs` — remove `CmdOutput` enum + 3 placeholder structs, add 4 new `CmdRequest` variants
 - `cli/src/parse/mod.rs` — re-exports, `ParseError`
-- `cli/src/parse/types.rs` — all 10 typed output structs
+- `cli/src/parse/types.rs` — all 10 typed output structs (numeric bytes, typed wrappers — no re-parsing by domain code)
 - `cli/src/parse/json.rs` — 3 JSON parsers + tests
 - `cli/src/parse/text.rs` — 7 text parsers + tests
 - `cli/src/lib.rs` — `pub mod parse` stays (now a directory module)
+- `cli/tests/fixtures/phase2/` — all parser test fixtures as files (reusable in Phase 3/3.5)
 
 ## Steps
 
@@ -85,7 +86,8 @@ pub struct BtrfsDfOutput { pub entries: Vec<BtrfsDfEntry> }
 
 ```rust
 // btrfs filesystem show
-pub struct BtrfsShowDevice { pub devid: u64, pub size: String, pub path: String }
+pub struct BtrfsShowDevice { pub devid: u64, pub size_bytes: Option<u64>, pub path: String }
+// size_bytes: parsed from human-readable "1.00GiB" to bytes; None if parse fails (non-critical field)
 pub struct BtrfsFilesystemShowOutput { pub total_devices: u64, pub devices: Vec<BtrfsShowDevice>, pub has_missing: bool }
 
 // cryptsetup status
@@ -98,7 +100,9 @@ pub struct CryptsetupLuksUuidOutput { pub uuid: LuksUuid }  // uses uuid::Uuid::
 pub struct BtrfsFilesystemUsageOutput { pub device_size_bytes: u64, pub used_bytes: u64, pub free_estimated_bytes: u64 }
 
 // btrfs scrub status
-pub enum ScrubState { Never, Completed { started_at: String }, Unknown }
+/// Typed wrapper so domain code doesn't re-parse the raw timestamp string.
+pub struct ScrubTimestamp(pub String);
+pub enum ScrubState { Never, Completed { started_at: ScrubTimestamp }, Unknown }
 pub struct BtrfsScrubStatusOutput { pub state: ScrubState }
 
 // btrfs device stats
@@ -147,27 +151,50 @@ Each takes `&RawCommandOutput`, returns `Result<TypedStruct, ParseError>`.
 6. `parse_btrfs_device_stats` — regex: group `[/dev/mapper/X].field_name  N` lines by device
 7. `parse_btrfs_filesystem_show` — regex: "Total devices N", `devid\s+(\d+).*path\s+(.+)` lines, "missing" detection
 
-### 7. Inline tests for every parser
+### 7. Tests for every parser + fixture files
 
 Each parser gets at minimum:
-- **Valid input test** — hand-crafted fixture matching real tool output
+- **Valid input test** — fixture matching real tool output
 - **Malformed input test** — garbage/missing fields → `ParseError`
 - **Exit-code edge case** — where applicable (cryptsetup status, findmnt, luksUUID)
 
-Fixtures as `const &str` in `#[cfg(test)]` blocks, co-located with the parser.
+**Fixtures live in `cli/tests/fixtures/phase2/`** as files (not inline consts). Reusable in Phase 3/3.5 golden tests and VM validation. Tests load them with `include_str!` or a helper.
+
+```
+cli/tests/fixtures/phase2/
+  lsblk-2disk.json
+  lsblk-bad.json
+  findmnt-btrfs.json
+  findmnt-empty.json
+  btrfs-df-raid1.json
+  btrfs-df-single.json
+  btrfs-df-bad.json
+  btrfs-show-3disk.txt
+  btrfs-show-degraded.txt
+  btrfs-show-bad.txt
+  cryptsetup-status-active.txt
+  cryptsetup-status-inactive.stderr
+  cryptsetup-luks-uuid.txt
+  btrfs-usage-raw.txt
+  btrfs-usage-bad.txt
+  btrfs-scrub-never.txt
+  btrfs-scrub-completed.txt
+  btrfs-device-stats-2disk.txt
+  btrfs-device-stats-errors.txt
+```
 
 | Parser | Valid fixtures | Malformed/edge fixtures |
 |--------|---------------|------------------------|
-| `parse_lsblk_json` | 2-disk tree with children | missing `blockdevices` key |
-| `parse_findmnt_json` | mounted btrfs; not mounted (exit 1, expected stderr) | unexpected stderr on exit 1 |
-| `parse_btrfs_df_json` | RAID1 profile; single profile | missing Data entry; wrong top-level key |
-| `parse_btrfs_filesystem_show` | 3-disk healthy; 1-missing degraded | no "Total devices" line |
-| `parse_cryptsetup_status` | active device; inactive (expected stderr); inactive (unexpected stderr → error) | active but no "device:" line |
-| `parse_cryptsetup_luks_uuid` | valid UUID | non-UUID string; exit!=0 |
-| `parse_btrfs_filesystem_usage` | normal usage output | missing "Device size:" |
-| `parse_btrfs_scrub_status` | never scrubbed; has been scrubbed | empty output |
-| `parse_btrfs_device_stats` | 2 devices zero errors; nonzero errors | empty |
-| `parse_lsblk_field` | model string; empty | (too simple) |
+| `parse_lsblk_json` | `lsblk-2disk.json` | `lsblk-bad.json` |
+| `parse_findmnt_json` | `findmnt-btrfs.json`; `findmnt-empty.json` (not mounted) | unexpected stderr on exit 1 |
+| `parse_btrfs_df_json` | `btrfs-df-raid1.json`; `btrfs-df-single.json` | `btrfs-df-bad.json` |
+| `parse_btrfs_filesystem_show` | `btrfs-show-3disk.txt`; `btrfs-show-degraded.txt` | `btrfs-show-bad.txt` |
+| `parse_cryptsetup_status` | `cryptsetup-status-active.txt`; inactive (expected stderr) | unexpected stderr → error |
+| `parse_cryptsetup_luks_uuid` | `cryptsetup-luks-uuid.txt` | non-UUID string; exit!=0 |
+| `parse_btrfs_filesystem_usage` | `btrfs-usage-raw.txt` | `btrfs-usage-bad.txt` |
+| `parse_btrfs_scrub_status` | `btrfs-scrub-never.txt`; `btrfs-scrub-completed.txt` | empty output |
+| `parse_btrfs_device_stats` | `btrfs-device-stats-2disk.txt`; `btrfs-device-stats-errors.txt` | empty |
+| `parse_lsblk_field` | inline (too simple for a file) | inline |
 
 ### 8. Capture `btrfs --format json filesystem df` fixture
 
@@ -190,3 +217,5 @@ All Phase 1 tests + new parser tests must pass.
 - **Non-zero exit ≠ automatic benign** — only treat as benign when stderr matches expected patterns; unexpected stderr → `CommandFailed`
 - **btrfs df JSON shape validated in Phase 2** fixture tests, not deferred to Phase 3.5
 - **regex added** — for btrfs show/stats text parsing
+- **Fixtures in `cli/tests/fixtures/phase2/`** — file-based, not inline consts. Reusable in Phase 3/3.5 golden tests + VM validation. Provenance-friendly.
+- **Numeric bytes everywhere** — `BtrfsShowDevice.size_bytes: Option<u64>` (parsed from human-readable), no raw strings for sizes. `ScrubTimestamp` newtype wrapper for scrub datetime so domain code never re-parses.
