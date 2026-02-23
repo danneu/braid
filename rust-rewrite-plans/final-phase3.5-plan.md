@@ -12,7 +12,7 @@ Phase 3 (pure planner logic) is complete: `compute_plan()` takes typed inputs an
 - `cli/src/lib.rs` — add `pub mod probe`
 - `cli/src/main.rs` — wire `plan` subcommand: config → probe → compute_plan → output
 - `tests/15-braid-plan-rust.nix` — **NEW** — NixOS VM test config
-- `tests/braid-plan-rust.py` — **NEW** — VM test script (12 subtests)
+- `tests/braid-plan-rust.py` — **NEW** — VM test script (13 subtests)
 - `flake.nix` — register `braid-plan-rust` in checksFor
 
 ## Steps
@@ -92,7 +92,9 @@ pub enum ProbeError {
 1. `FindmntJson` → if empty filesystems → `PoolState { mounted: false, ... }`
 2. If mounted, **validate fstype is "btrfs"** → if not, return `Err(ProbeError::NotBtrfs { mount_point, fstype })`. Hard fail.
 3. `BtrfsFilesystemShow` → get device list + total_devices + has_missing
-4. For each btrfs device `/dev/mapper/{name}`:
+4. For each btrfs device path:
+   - **Guard:** require path starts with `/dev/mapper/`. If not → `Err(ProbeError::PoolDevice { mapper: path, detail: "not a /dev/mapper/ path" })`. Hard fail — braid only manages LUKS-on-btrfs pools; a non-mapper device in the pool is an assumption violation.
+   - Extract `name` from `/dev/mapper/{name}`.
    - `CryptsetupStatus { mapper: name }` → **must be active with a device field**. If `is_active: false` or `device: None` → `Err(ProbeError::PoolDevice { mapper, detail: "not active" })`. Hard fail — a mounted btrfs pool device that isn't an active LUKS mapper is an inconsistency we can't reason about.
    - `CryptsetupLuksUuid { device: underlying }` → get UUID. Failure here is a hard error (pool device should always be LUKS).
    - Build `PoolDevice { mapper, luks_uuid, devid }`
@@ -100,7 +102,7 @@ pub enum ProbeError {
 
 **No new CmdRequest variants needed.** `CryptsetupLuksUuid` failure serves as the "not LUKS" signal (probe_config_disk only; probe_pool treats it as hard error).
 
-**Unit tests (~12):**
+**Unit tests (~13):**
 
 | Test | Scenario |
 |---|---|
@@ -115,6 +117,7 @@ pub enum ProbeError {
 | `probe_pool_mounted_2disk` | 2 devices, trace LUKS UUIDs, correct mapper/uuid/devid |
 | `probe_pool_mounted_with_missing` | total_devices=3, 2 present → `missing_count: 1` (saturating_sub) |
 | `probe_pool_mapper_not_active` | cryptsetup status returns inactive for pool device → `ProbeError::PoolDevice` |
+| `probe_pool_non_mapper_device` | btrfs show returns `/dev/sda1` (not `/dev/mapper/...`) → `ProbeError::PoolDevice` |
 | `probe_pool_missing_count_saturates` | total_devices=0, 1 present device (parser bug) → `missing_count: 0` (not underflow) |
 
 ### 4. Wire plan subcommand in main.rs
@@ -151,7 +154,7 @@ Update `lib.rs` to add `pub mod probe;`.
 
 Rust binary built inside test .nix via `pkgs.rustPlatform.buildRustPackage { src = ../cli; ... }`.
 
-**`tests/braid-plan-rust.py`** — 12 subtests:
+**`tests/braid-plan-rust.py`** — 13 subtests:
 
 | # | Subtest | Validates |
 |---|---------|-----------|
