@@ -81,7 +81,7 @@ pub enum ProbeError {
 2. `runner.run(CryptsetupLuksUuid { device })`:
    - `Err(CmdError::Failed)` → **propagate as ProbeError** (process spawn failure, binary missing — real I/O error)
    - `Ok(raw)` with `parse` returning `ParseError::CommandFailed` (non-zero exit) → **benign: `PresentNotLuks`**
-   - `Ok(raw)` with `parse` returning `ParseError::InvalidText`/`InvalidJson` → **propagate as ProbeError** (unexpected output from a successful command is not benign)
+   - `Ok(raw)` with `parse` returning `ParseError::InvalidText` → **propagate as ProbeError** (unexpected output from a successful command is not benign)
    - `Ok(raw)` with `parse` returning `Ok(uuid)` → have UUID, continue
 3. `mapper_name_for_by_id(by_id_path)` → derive mapper name, `fs.exists("/dev/mapper/{name}")` → `mapper_open`
 4. Return `PresentLuks { uuid, mapper_open }`
