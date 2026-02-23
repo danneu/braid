@@ -1,13 +1,11 @@
-Capture these from a nixos-25.11 VM with LUKS + btrfs set up:
+Golden-file fixtures captured from a nixos-25.11 VM.
+
+To populate (or refresh) these fixtures:
 
 ```
-lsblk --json --bytes --output NAME,TYPE,SIZE,MODEL,SERIAL,UUID
-btrfs --format json filesystem df <mount>
-btrfs filesystem show <mount>
-btrfs filesystem usage --raw <mount>
-btrfs device stats <mount>
-btrfs scrub status <mount>
-cryptsetup status <mapper>
-cryptsetup luksUUID <device>
-findmnt --json --output TARGET,SOURCE,FSTYPE --mountpoint <mount>
+make capture-fixtures
 ```
+
+This boots a VM, sets up LUKS + btrfs RAID1, captures tool output,
+and copies the results here. The `golden_nixos_25_11` cargo tests
+then parse these fixtures to verify the parsers handle real output.
