@@ -341,4 +341,77 @@ with subtest("Apply never calls luksFormat"):
             f"ActionType contains FORMAT — safety invariant violated: {a}"
         )
 
+# --- Subtest 20: Existing-but-unmounted pool must NOT trigger mkfs ---
+# Bug: probe_pool returns total_devices=0 when unmounted, so
+# is_bootstrap = !pool.mounted && pool.total_devices == 0 is true even
+# for an existing pool. This causes mkfs.btrfs to wipe the filesystem.
+
+with subtest("Setup: ensure clean 2-disk RAID1 for bootstrap-safety test"):
+    # Clean up any stale state from previous subtests
+    machine.succeed("rm -f /var/lib/braid/apply-state.json")
+    machine.succeed("cryptsetup close virtio-disk3 || true")
+    machine.succeed("cryptsetup close virtio-disk4 || true")
+    machine.succeed(write_config([
+        "/dev/disk/by-id/virtio-disk1",
+        "/dev/disk/by-id/virtio-disk2",
+    ]))
+    # Re-init disk2 in case it was wiped by earlier subtests
+    machine.succeed(init_disk("/dev/disk/by-id/virtio-disk2", extra="--force", confirm="reformat this disk"))
+    machine.succeed(rust_apply())
+    fi_show = machine.succeed("btrfs fi show /mnt/storage")
+    assert "virtio-disk1" in fi_show, f"disk1 not in pool:\n{fi_show}"
+    assert "virtio-disk2" in fi_show, f"disk2 not in pool:\n{fi_show}"
+    assert "RAID1" in machine.succeed("btrfs fi df /mnt/storage")
+    # Write sentinel data
+    machine.succeed("echo 'do not destroy me' > /mnt/storage/sentinel.txt && sync")
+
+with subtest("Existing-but-unmounted pool must not be treated as bootstrap"):
+    # Capture the filesystem UUID before unmounting
+    fi_show = machine.succeed("btrfs fi show /mnt/storage")
+    import re
+    uuid_match = re.search(r'uuid:\s+(\S+)', fi_show)
+    assert uuid_match, f"Could not find UUID in btrfs fi show output:\n{fi_show}"
+    original_uuid = uuid_match.group(1)
+    print(f"Original fs UUID: {original_uuid}")
+
+    # Unmount and close all mappers — pool exists on disk but is fully offline
+    machine.succeed("umount /mnt/storage")
+    machine.succeed("cryptsetup close virtio-disk1")
+    machine.succeed("cryptsetup close virtio-disk2")
+
+    # Now add disk3 to force a mutation so apply actually runs actions
+    machine.succeed(write_config([
+        "/dev/disk/by-id/virtio-disk1",
+        "/dev/disk/by-id/virtio-disk2",
+        "/dev/disk/by-id/virtio-disk3",
+    ]))
+    machine.succeed(init_disk("/dev/disk/by-id/virtio-disk3"))
+
+    # Run apply — this must NOT create a new filesystem
+    output = machine.succeed(rust_apply())
+    print(f"Apply output:\n{output}")
+
+    # Key assertion 1: must NOT have run mkfs (bootstrap path)
+    assert "bootstrap" not in output.lower(), (
+        f"Apply incorrectly treated existing-but-unmounted pool as bootstrap!\n{output}"
+    )
+
+    # Verify pool is mounted and accessible
+    machine.succeed("mountpoint -q /mnt/storage")
+
+    # Key assertion 2: sentinel data must be intact
+    content = machine.succeed("cat /mnt/storage/sentinel.txt").strip()
+    assert content == "do not destroy me", (
+        f"Sentinel data destroyed — mkfs likely wiped filesystem! Got: '{content}'"
+    )
+
+    # Key assertion 3: filesystem UUID unchanged (mkfs would create a new one)
+    fi_show_after = machine.succeed("btrfs fi show /mnt/storage")
+    uuid_match_after = re.search(r'uuid:\s+(\S+)', fi_show_after)
+    assert uuid_match_after, f"Could not find UUID after apply:\n{fi_show_after}"
+    assert uuid_match_after.group(1) == original_uuid, (
+        f"Filesystem UUID changed from {original_uuid} to {uuid_match_after.group(1)} — "
+        f"mkfs likely destroyed and recreated filesystem!"
+    )
+
 machine.shutdown()

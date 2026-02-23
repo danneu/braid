@@ -200,7 +200,15 @@ fn execute_open_luks<R: CommandRunner>(
         action_type: "OPEN_LUKS".into(),
         detail: "BRAID_PASSPHRASE not set".into(),
     })?;
+    execute_open_luks_with(runner, fs, target, &passphrase)
+}
 
+fn execute_open_luks_with<R: CommandRunner>(
+    runner: &R,
+    fs: &dyn Filesystem,
+    target: &str,
+    passphrase: &str,
+) -> Result<(), ApplyError> {
     if !fs.exists(target) {
         return Err(ApplyError::ActionFailed {
             action_id: String::new(),
@@ -712,28 +720,72 @@ fn validate_resume_targets(
     fs: &dyn Filesystem,
     actions: &[Action],
 ) -> Result<(), ApplyError> {
+    // Build lookup table: action id -> &Action
+    let by_id: std::collections::HashMap<&str, &Action> = actions
+        .iter()
+        .map(|a| (a.id.as_str(), a))
+        .collect();
+
     for action in actions {
         if action.status == ActionStatus::Completed {
             continue;
         }
 
-        // Only check action types that reference a physical device or mapper
-        let needs_target = matches!(
-            action.action_type,
-            ActionType::OpenLuks
-                | ActionType::AddDiskBtrfsAdd
-                | ActionType::RemoveDiskGraceful
-        );
-
-        if needs_target && !fs.exists(&action.target) {
-            return Err(ApplyError::ResumeTargetMissing {
-                action_id: action.id.clone(),
-                target: action.target.clone(),
-            });
+        match action.action_type {
+            ActionType::OpenLuks => {
+                // Strict: physical device must exist now.
+                if !fs.exists(&action.target) {
+                    return Err(ApplyError::ResumeTargetMissing {
+                        action_id: action.id.clone(),
+                        target: action.target.clone(),
+                    });
+                }
+            }
+            ActionType::AddDiskBtrfsAdd | ActionType::RemoveDiskGraceful => {
+                // Mapper may not exist yet if preceding OPEN_LUKS is still pending.
+                if !fs.exists(&action.target) {
+                    let can_recover = action.target.starts_with("/dev/mapper/")
+                        && has_pending_open_for_mapper(action, &by_id);
+                    if !can_recover {
+                        return Err(ApplyError::ResumeTargetMissing {
+                            action_id: action.id.clone(),
+                            target: action.target.clone(),
+                        });
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
     Ok(())
+}
+
+/// Check whether `add_action` has a pending/in-progress OPEN_LUKS precondition
+/// that will create the mapper `add_action.target`.
+fn has_pending_open_for_mapper(
+    add_action: &Action,
+    by_id: &std::collections::HashMap<&str, &Action>,
+) -> bool {
+    for precond_id in &add_action.preconditions {
+        let Some(precond) = by_id.get(precond_id.as_str()) else {
+            continue;
+        };
+        if precond.action_type != ActionType::OpenLuks {
+            continue;
+        }
+        if !matches!(precond.status, ActionStatus::Pending | ActionStatus::InProgress) {
+            continue;
+        }
+        // Derive the mapper path that OPEN_LUKS will create from its by-id target.
+        if let Some(mn) = mapper_name_for_by_id(&ByIdPath(precond.target.clone())) {
+            let expected_mapper = format!("/dev/mapper/{}", mn.0);
+            if expected_mapper == add_action.target {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 // ---------------------------------------------------------------------------
@@ -1112,6 +1164,36 @@ mod tests {
         assert!(matches!(err, ApplyError::ResumeTargetMissing { .. }));
     }
 
+    /// Bug: ADD_DISK_BTRFS_ADD targets /dev/mapper/<name> which doesn't exist
+    /// until the preceding OPEN_LUKS runs. Resume should not reject this case.
+    #[test]
+    fn validate_resume_targets_allows_mapper_behind_pending_open() {
+        // Only the by-id device exists; mapper is not yet open.
+        let fs = MockFs::new(&["/dev/disk/by-id/disk-2"]);
+        let actions = vec![
+            Action {
+                id: "a1".to_owned(),
+                action_type: ActionType::OpenLuks,
+                target: "/dev/disk/by-id/disk-2".to_owned(),
+                preconditions: vec![],
+                status: ActionStatus::Pending,
+            },
+            Action {
+                id: "a2".to_owned(),
+                action_type: ActionType::AddDiskBtrfsAdd,
+                target: "/dev/mapper/disk-2".to_owned(),
+                preconditions: vec!["a1".to_owned()],
+                status: ActionStatus::Pending,
+            },
+        ];
+        // Should succeed: mapper will be created by preceding OPEN_LUKS.
+        let result = validate_resume_targets(&fs, &actions);
+        assert!(
+            result.is_ok(),
+            "resume should allow mapper-missing when OPEN_LUKS precondition is pending: {result:?}"
+        );
+    }
+
     #[test]
     fn open_luks_skips_when_mapper_exists() {
         let runner = MockRunner::default()
@@ -1122,9 +1204,7 @@ mod tests {
                 ok_raw("cryptsetup isLuks", ""),
             );
         let fs = MockFs::new(&["/dev/disk/by-id/disk-1", "/dev/mapper/disk-1"]);
-        // Use unique env var per test to avoid races
-        std::env::set_var("BRAID_PASSPHRASE", "testpass");
-        let result = execute_open_luks(&runner, &fs, "/dev/disk/by-id/disk-1");
+        let result = execute_open_luks_with(&runner, &fs, "/dev/disk/by-id/disk-1", "testpass");
         assert!(result.is_ok());
     }
 
@@ -1146,8 +1226,7 @@ mod tests {
                 ok_raw("cryptsetup luksOpen", ""),
             );
         let fs = MockFs::new(&["/dev/disk/by-id/disk-1"]);
-        std::env::set_var("BRAID_PASSPHRASE", "secret123");
-        let result = execute_open_luks(&runner, &fs, "/dev/disk/by-id/disk-1");
+        let result = execute_open_luks_with(&runner, &fs, "/dev/disk/by-id/disk-1", "secret123");
         assert!(result.is_ok());
     }
 
