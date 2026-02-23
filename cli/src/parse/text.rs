@@ -550,6 +550,29 @@ mod tests {
         assert_eq!(out.devices[1].read_io_errs, 0);
     }
 
+    /// Unknown fields from future btrfs-progs versions are silently ignored.
+    /// Known fields still parse correctly. See cli/docs/command-capabilities.md.
+    #[test]
+    fn device_stats_ignores_unknown_fields_parses_known() {
+        let raw = RawCommandOutput {
+            cmd: "btrfs device stats".into(),
+            stdout: "[/dev/mapper/braid-vda].write_io_errs    0\n\
+                     [/dev/mapper/braid-vda].read_io_errs     2\n\
+                     [/dev/mapper/braid-vda].flush_io_errs    0\n\
+                     [/dev/mapper/braid-vda].corruption_errs  0\n\
+                     [/dev/mapper/braid-vda].generation_errs  0\n\
+                     [/dev/mapper/braid-vda].discard_errs     7\n"
+                .into(),
+            stderr: String::new(),
+            exit_status: 0,
+        };
+        let out = parse_btrfs_device_stats(&raw).unwrap();
+        assert_eq!(out.devices.len(), 1);
+        assert_eq!(out.devices[0].read_io_errs, 2);
+        assert_eq!(out.devices[0].write_io_errs, 0);
+        // discard_errs (unknown) is silently dropped — not in DeviceErrorStats
+    }
+
     #[test]
     fn device_stats_empty_output_gives_no_devices() {
         let raw = RawCommandOutput {
