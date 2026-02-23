@@ -1,4 +1,11 @@
 use clap::{Args, Parser, Subcommand};
+use std::path::Path;
+
+use braid_cli::cmd::RealRunner;
+use braid_cli::config::config_read;
+use braid_cli::plan::{compute_plan, format_plan_human, to_plan_report};
+use braid_cli::probe::{probe_config_disk, probe_pool, RealFilesystem};
+use braid_cli::types::PlanFlags;
 
 #[derive(Debug, Parser)]
 #[command(name = "braid")]
@@ -57,11 +64,63 @@ struct StatusArgs {
 fn main() {
     let cli = Cli::parse();
 
-    let _config_path = cli.config;
+    let config_path = cli.config;
 
     match cli.command {
         Commands::InitDisk(_) => println!("not yet implemented"),
-        Commands::Plan(_) => println!("not yet implemented"),
+        Commands::Plan(args) => {
+            let config = match config_read(Path::new(&config_path)) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                }
+            };
+
+            let runner = RealRunner;
+            let fs = RealFilesystem;
+
+            let config_disks: Vec<_> = match config
+                .disks
+                .iter()
+                .map(|d| probe_config_disk(&runner, &fs, d))
+                .collect::<Result<Vec<_>, _>>()
+            {
+                Ok(disks) => disks,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                }
+            };
+
+            let pool = match probe_pool(&runner, &config.mount_point) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                }
+            };
+
+            let flags = PlanFlags {
+                allow_remove_missing: args.allow_remove_missing,
+                allow_remove_ambiguous: args.allow_remove_ambiguous,
+            };
+
+            let outcome = compute_plan(&config, &config_disks, &pool, &flags);
+            let report = to_plan_report(&outcome, &config);
+
+            if args.json {
+                match serde_json::to_string_pretty(&report) {
+                    Ok(json) => println!("{json}"),
+                    Err(e) => {
+                        eprintln!("error: failed to serialize plan: {e}");
+                        std::process::exit(1);
+                    }
+                }
+            } else {
+                print!("{}", format_plan_human(&report));
+            }
+        }
         Commands::Apply(_) => println!("not yet implemented"),
         Commands::Status(_) => println!("not yet implemented"),
     }

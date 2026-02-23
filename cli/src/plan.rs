@@ -196,7 +196,7 @@ pub fn compute_plan(
         warnings.push(Warning {
             code: WarningCode::PoolDegradedMissingDevices,
             message: format!(
-                "pool is degraded: {} missing device(s)",
+                "pool is degraded: {} missing device(s). To evict, run: braid apply --allow-remove-missing",
                 pool.missing_count
             ),
         });
@@ -460,9 +460,9 @@ fn mapper_path(name: &str) -> String {
     format!("/dev/mapper/{}", name)
 }
 
-const BY_ID_PREFIX: &str = "/dev/disk/by-id/";
+pub(crate) const BY_ID_PREFIX: &str = "/dev/disk/by-id/";
 
-fn mapper_name_for_by_id(path: &ByIdPath) -> Option<MapperName> {
+pub(crate) fn mapper_name_for_by_id(path: &ByIdPath) -> Option<MapperName> {
     let basename = path.0.strip_prefix(BY_ID_PREFIX)?;
 
     if !is_valid_mapper_basename(basename) {

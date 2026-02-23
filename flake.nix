@@ -60,6 +60,7 @@
           braid-unified = pkgs.testers.nixosTest (import ./tests/12-braid-unified.nix);
           braid-bootstrap = pkgs.testers.nixosTest (import ./tests/13-braid-bootstrap.nix);
           braid-init-disk = pkgs.testers.nixosTest (import ./tests/14-braid-init-disk.nix);
+          braid-plan-rust = pkgs.testers.nixosTest (import ./tests/15-braid-plan-rust.nix);
           daemon-hello-world = pkgs.testers.nixosTest (import ./tests/daemon/00-hello-world.nix);
           braid-module-disabled = pkgs.testers.nixosTest (import ./tests/braid-module/00-disabled.nix);
           braid-module-single-disk = pkgs.testers.nixosTest (import ./tests/braid-module/01-single-disk.nix);

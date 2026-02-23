@@ -42,12 +42,63 @@ pub trait CommandRunner {
 
 pub struct RealRunner;
 
+impl RealRunner {
+    fn exec(cmd: &str, args: &[&str]) -> Result<RawCommandOutput, CmdError> {
+        let cmd_str = format!("{} {}", cmd, args.join(" "));
+        let output = std::process::Command::new(cmd)
+            .args(args)
+            .output()
+            .map_err(|e| CmdError::Failed(format!("{cmd_str}: {e}")))?;
+
+        let exit_status = output.status.code().unwrap_or(-1);
+
+        Ok(RawCommandOutput {
+            cmd: cmd_str,
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            exit_status,
+        })
+    }
+}
+
 impl CommandRunner for RealRunner {
     fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
-        // Implement in Phase 3.
-        Err(CmdError::Failed(format!(
-            "RealRunner not implemented for request: {request:?}"
-        )))
+        match request {
+            CmdRequest::LsblkJson => {
+                RealRunner::exec("lsblk", &["--json", "--bytes", "--output", "NAME,TYPE,SIZE,MODEL,SERIAL,UUID"])
+            }
+            CmdRequest::FindmntJson { mount_point } => {
+                RealRunner::exec("findmnt", &["--json", "--output", "TARGET,SOURCE,FSTYPE", "-T", mount_point])
+            }
+            CmdRequest::BtrfsFilesystemShow { mount_point } => {
+                RealRunner::exec("btrfs", &["filesystem", "show", mount_point])
+            }
+            CmdRequest::CryptsetupStatus { mapper } => {
+                RealRunner::exec("cryptsetup", &["status", mapper])
+            }
+            CmdRequest::CryptsetupLuksUuid { device } => {
+                RealRunner::exec("cryptsetup", &["luksUUID", device])
+            }
+            CmdRequest::BtrfsFilesystemDfJson { mount_point } => {
+                RealRunner::exec("btrfs", &["--format", "json", "filesystem", "df", mount_point])
+            }
+            CmdRequest::BtrfsFilesystemUsageRaw { mount_point } => {
+                RealRunner::exec("btrfs", &["filesystem", "usage", "--raw", mount_point])
+            }
+            CmdRequest::BtrfsScrubStatus { mount_point } => {
+                RealRunner::exec("btrfs", &["scrub", "status", mount_point])
+            }
+            CmdRequest::BtrfsDeviceStats { mount_point } => {
+                RealRunner::exec("btrfs", &["device", "stats", mount_point])
+            }
+            CmdRequest::LsblkField { device, field } => {
+                let field_name = match field {
+                    LsblkFieldKind::Model => "MODEL",
+                    LsblkFieldKind::Serial => "SERIAL",
+                };
+                RealRunner::exec("lsblk", &["-ndo", field_name, device])
+            }
+        }
     }
 }
 
