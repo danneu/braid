@@ -235,6 +235,34 @@ tool-versions = pkgs.testers.nixosTest (import ./tests/17-tool-versions.nix {
 
 ## Phase 6: Parser hardening (selective)
 
+### Parser module layout migration (by command, not by format)
+
+Refactor parser modules from `parse/json.rs` + `parse/text.rs` into one module per CLI command contract. This is a structure-only migration first (no behavior change), followed by hardening.
+
+Target layout:
+- `cli/src/parse/lsblk.rs`
+- `cli/src/parse/findmnt.rs`
+- `cli/src/parse/cryptsetup_status.rs`
+- `cli/src/parse/cryptsetup_luks_uuid.rs`
+- `cli/src/parse/btrfs_filesystem_show.rs`
+- `cli/src/parse/btrfs_filesystem_df.rs`
+- `cli/src/parse/btrfs_filesystem_usage.rs`
+- `cli/src/parse/btrfs_device_stats.rs`
+- `cli/src/parse/btrfs_scrub_status.rs`
+- shared helpers/errors in `cli/src/parse/common.rs` and `cli/src/parse/mod.rs`
+
+Why this migration:
+- Command contracts become explicit and reviewable (one file == one tool output contract).
+- Fixture organization maps naturally to parser ownership.
+- Version drift audits become cheaper: changed command output maps directly to one module.
+- Reduces mixed concerns and accidental coupling in format-bucket files (`text.rs`/`json.rs`).
+
+Execution notes:
+- Step 1: Move code/tests with identical behavior (pure file/module reorg).
+- Step 2: Repoint imports from `parse::json/text::*` to command modules.
+- Step 3: Run `cargo test` to confirm zero behavior deltas.
+- Step 4: Apply hardening changes (deny/leniency policies, typed classifications) on top.
+
 ### Selective `deny_unknown_fields`
 
 Apply `#[serde(deny_unknown_fields)]` only to JSON structs where the schema is contract-critical AND where new fields would indicate a tool version change we need to investigate. Document the policy per parser.
