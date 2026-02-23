@@ -1,6 +1,6 @@
 SYSTEM := $(shell nix eval --impure --expr builtins.currentSystem --raw)
 
-.PHONY: help test test-one test-verbose test-one-verbose playground test-rust
+.PHONY: help test test-one test-verbose test-one-verbose playground test-rust capture-fixtures
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "}; {printf "  %-15s %s\n", $$1, $$2}'
@@ -19,6 +19,11 @@ test-one-verbose: ## Run a single test verbose (e.g. make test-one-verbose t=hel
 
 test-rust: ## Run Rust unit tests
 	cd cli && cargo test
+
+capture-fixtures: ## Capture tool output fixtures from nixos VM into cli/tests/fixtures/nixos-25.11/
+	nix build .#checks.$(SYSTEM).capture-tool-fixtures -L
+	cp result/fixtures/* cli/tests/fixtures/nixos-25.11/
+	@echo "Fixtures written to cli/tests/fixtures/nixos-25.11/"
 
 playground: ## Boot interactive VM with btrfs + Samba playground
 	nix run .#playground
