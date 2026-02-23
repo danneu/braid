@@ -18,7 +18,14 @@
     braid.disks = [ "/dev/disk/by-id/dummy" ];
     braid.rustPackage = braid-cli-unwrapped;
 
-    environment.systemPackages = [ braid-rust ];
+    environment.systemPackages = [
+      braid-rust
+      pkgs.btrfs-progs
+      pkgs.cryptsetup
+      pkgs.util-linux
+      pkgs.jq
+      pkgs.coreutils
+    ];
 
     # Nix-evaluated expected versions — single source of truth
     environment.etc."braid/expected-versions.json".text = builtins.toJSON {

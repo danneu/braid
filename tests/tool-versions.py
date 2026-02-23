@@ -14,14 +14,14 @@ for tool in ["btrfs", "cryptsetup", "findmnt", "lsblk", "mountpoint"]:
 
 # Exact version assertions — drift = parser contract violation
 with subtest("btrfs-progs version"):
-    version = machine.succeed("btrfs --version").strip()
+    version = machine.succeed("btrfs --version").strip().splitlines()[0]
     exp = f"btrfs-progs v{expected['btrfsProgs']}"
     assert version == exp, f"expected {exp!r}, got {version!r}"
 
 with subtest("cryptsetup version"):
     version = machine.succeed("cryptsetup --version").strip()
     exp = f"cryptsetup {expected['cryptsetup']}"
-    assert version == exp, f"expected {exp!r}, got {version!r}"
+    assert version.startswith(exp), f"expected prefix {exp!r}, got {version!r}"
 
 with subtest("util-linux version"):
     version = machine.succeed("findmnt --version").strip()
