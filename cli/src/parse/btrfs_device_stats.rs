@@ -10,6 +10,8 @@ use crate::cmd::RawCommandOutput;
 use super::types::{BtrfsDeviceStatsOutput, DeviceErrorStats};
 use super::ParseError;
 
+// Parses: "[/dev/mapper/braid-vda].write_io_errs    0"
+//      → ("/dev/mapper/braid-vda", "write_io_errs", "0")
 fn parse_stats_line(input: &str) -> IResult<&str, (&str, &str, &str)> {
     let (input, _) = char('[')(input)?;
     let (input, device) = take_till1(|c| c == ']')(input)?;

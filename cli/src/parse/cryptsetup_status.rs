@@ -1,5 +1,5 @@
 use nom::{
-    bytes::complete::{tag, take_till1},
+    bytes::complete::{tag, take_until},
     character::complete::{not_line_ending, space0},
     combinator::eof,
     IResult,
@@ -10,6 +10,7 @@ use crate::cmd::RawCommandOutput;
 use super::types::CryptsetupStatusOutput;
 use super::ParseError;
 
+// Parses: "  device:  /dev/vda"  →  "/dev/vda"
 fn parse_device_line(input: &str) -> IResult<&str, &str> {
     let (input, _) = space0(input)?;
     let (input, _) = tag("device:")(input)?;
@@ -18,9 +19,10 @@ fn parse_device_line(input: &str) -> IResult<&str, &str> {
     Ok((input, value.trim()))
 }
 
+// Parses: "Device braid-vda is not active."
+//     or: "/dev/mapper/disk-1 is not active."
 fn parse_inactive_message(input: &str) -> IResult<&str, ()> {
-    let (input, _) = tag("Device ")(input)?;
-    let (input, _) = take_till1(|c: char| c.is_ascii_whitespace())(input)?;
+    let (input, _) = take_until(" is not active.")(input)?;
     let (input, _) = tag(" is not active.")(input)?;
     let (input, _) = space0(input)?;
     let (input, _) = eof(input)?;

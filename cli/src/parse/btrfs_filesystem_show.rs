@@ -43,6 +43,7 @@ pub fn classify_btrfs_probe(raw: &RawCommandOutput) -> DeviceBtrfsProbe {
 // nom parsers
 // ---------------------------------------------------------------------------
 
+// Parses: "\tTotal devices 3 FS bytes used 1.00GiB"  →  3
 fn parse_total_devices(input: &str) -> IResult<&str, u64> {
     let (input, _) = take_until("Total devices")(input)?;
     let (input, _) = tag("Total devices")(input)?;
@@ -51,6 +52,8 @@ fn parse_total_devices(input: &str) -> IResult<&str, u64> {
     Ok((input, count))
 }
 
+// Parses: "\tdevid    1 size 10.00GiB used 2.00GiB path /dev/mapper/braid-vda"
+//      → (1, "/dev/mapper/braid-vda")
 fn parse_devid_line(input: &str) -> IResult<&str, (u64, &str)> {
     let (input, _) = space0(input)?;
     let (input, _) = tag("devid")(input)?;
@@ -63,6 +66,7 @@ fn parse_devid_line(input: &str) -> IResult<&str, (u64, &str)> {
     Ok((input, (devid, path.trim())))
 }
 
+// Parses: "\t*** Some devices missing"
 fn parse_missing_sentinel(input: &str) -> IResult<&str, ()> {
     let (input, _) = space0(input)?;
     let (input, _) = tag("*** Some devices missing")(input)?;
