@@ -349,14 +349,11 @@ with subtest("Apply never calls luksFormat"):
 with subtest("Setup: ensure clean 2-disk RAID1 for bootstrap-safety test"):
     # Clean up any stale state from previous subtests
     machine.succeed("rm -f /var/lib/braid/apply-state.json")
-    machine.succeed("cryptsetup close virtio-disk3 || true")
-    machine.succeed("cryptsetup close virtio-disk4 || true")
+    # After earlier subtests the pool has disk1+disk2+disk3. Shrink to 2-disk.
     machine.succeed(write_config([
         "/dev/disk/by-id/virtio-disk1",
         "/dev/disk/by-id/virtio-disk2",
     ]))
-    # Re-init disk2 in case it was wiped by earlier subtests
-    machine.succeed(init_disk("/dev/disk/by-id/virtio-disk2", extra="--force", confirm="reformat this disk"))
     machine.succeed(rust_apply())
     fi_show = machine.succeed("btrfs fi show /mnt/storage")
     assert "virtio-disk1" in fi_show, f"disk1 not in pool:\n{fi_show}"
@@ -379,13 +376,14 @@ with subtest("Existing-but-unmounted pool must not be treated as bootstrap"):
     machine.succeed("cryptsetup close virtio-disk1")
     machine.succeed("cryptsetup close virtio-disk2")
 
-    # Now add disk3 to force a mutation so apply actually runs actions
+    # Now add disk3 to force a mutation so apply actually runs actions.
+    # disk3 still has its LUKS header from earlier subtests.
+    machine.succeed("cryptsetup close virtio-disk3 || true")
     machine.succeed(write_config([
         "/dev/disk/by-id/virtio-disk1",
         "/dev/disk/by-id/virtio-disk2",
         "/dev/disk/by-id/virtio-disk3",
     ]))
-    machine.succeed(init_disk("/dev/disk/by-id/virtio-disk3"))
 
     # Run apply — this must NOT create a new filesystem
     output = machine.succeed(rust_apply())
