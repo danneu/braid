@@ -10,7 +10,8 @@ Probe/identity modules (the I/O glue that *produces* planner inputs from real co
 
 ## Files to modify
 
-- `cli/src/types.rs` — add planner input types (`PoolState`, `PoolDevice`, `ConfigDisk`, `ConfigDiskState`, `PlanFlags`), add `PlanSummary` + `PlanReport` for JSON output, add `WarningCode` constants
+- `cli/Cargo.toml` — add `time = { version = "0.3", features = ["formatting", "macros"] }`
+- `cli/src/types.rs` — add planner input types (`PoolState`, `PoolDevice`, `ConfigDisk`, `ConfigDiskState`, `PlanFlags`), add `PlanStatus` enum, `PlanSummary` + `PlanReport` for JSON output, add `WarningCode` + `BlockedReasonCode` enums
 - `cli/src/plan.rs` — **NEW** — `compute_plan()`, `generate_plan_id()`, `to_plan_report()`, `format_plan_human()`
 - `cli/src/lib.rs` — add `pub mod plan`
 
@@ -62,9 +63,42 @@ pub struct PlanFlags {
 }
 ```
 
-### 2. Add JSON output types to `types.rs`
+### 2. Add enums, JSON output types to `types.rs`
 
-Wrap `PlanOutcome` into a richer envelope for `braid plan --json`:
+**Warning and blocked-reason codes as enums** — used internally for compile-time safety, serialized as strings for JSON output:
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum WarningCode {
+    DiskAbsentSkipped,
+    InitRequired,
+    PoolDegradedMissingDevices,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum BlockedReasonCode {
+    IdentityAmbiguousAbsentDisk,
+    AmbiguousMissing,
+}
+```
+
+Update `Warning.code` from `String` to `WarningCode`, `BlockedReason.code` from `String` to `BlockedReasonCode`. This replaces string constants with exhaustive enum matching across all 21 tests.
+
+**Plan status as an enum** — not a raw string:
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanStatus {
+    Applicable,
+    ApplicableWithWarnings,
+    Blocked,
+}
+```
+
+**JSON output wrapper types:**
 
 ```rust
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -82,7 +116,7 @@ pub struct PlanReport {
     pub schema_version: u32,
     pub plan_id: String,
     pub mount_point: String,
-    pub status: String,
+    pub status: PlanStatus,
     pub warning_count: usize,
     pub warnings: Vec<Warning>,
     pub blocked_reasons: Vec<BlockedReason>,
@@ -137,8 +171,8 @@ pub fn compute_plan(
    - `REMOVE_DISK_MISSING_EXPLICIT` present → confirmation `"remove missing device from pool"`
    - Graceful removals AND future pool size < 2 → confirmation `"remove this disk without redundancy"`
 
-7. **Verify actions** (always, if any mutation actions exist):
-   Append `VERIFY_POOL_HEALTH` + `VERIFY_EXPECTED_DISK_SET`
+7. **Verify actions** (only when mutation actions exist):
+   Append `VERIFY_POOL_HEALTH` + `VERIFY_EXPECTED_DISK_SET`. No-op plans produce zero actions.
 
 8. **Assemble:**
    - `blocked_reasons` non-empty → `PlanOutcome::Blocked`
@@ -158,8 +192,9 @@ pub fn compute_plan(
 pub fn generate_plan_id() -> String
 ```
 
-Format: `{ISO8601_UTC}-{6_hex_chars}` matching bash.
-Use `std::time::SystemTime` for timestamp, `sha2` + `uuid::Uuid::new_v4()` for the random hash component. Both crates are already dependencies.
+Format: `{ISO8601_UTC}-{6_hex_chars}` matching bash (e.g. `2026-02-23T14:30:45Z-a1b2c3`).
+
+Add `time = { version = "0.3", features = ["formatting", "macros"] }` to `Cargo.toml`. Use `time::OffsetDateTime::now_utc()` with `format_description!("[year]-[month]-[day]T[hour]:[minute]:[second]Z")` for the ISO 8601 timestamp. Use `sha2` + `uuid::Uuid::new_v4()` for the 6-char random hash suffix. Regenerate `Cargo.lock`.
 
 ### 5. `to_plan_report()` in plan.rs
 
@@ -205,7 +240,7 @@ fn config_disk_not_luks(path: &str) -> ConfigDisk { ... }
 
 | # | Test name | Scenario | Key assertions |
 |---|-----------|----------|----------------|
-| 1 | `plan_noop` | Config matches pool | `Applicable`, 0 mutation actions, only verify actions |
+| 1 | `plan_noop` | Config matches pool | `Applicable`, 0 actions total (no-op = empty actions list) |
 | 2 | `plan_add_single_disk` | 1 new LUKS disk, 2-disk pool | `Applicable`, OPEN_LUKS + ADD_DISK_BTRFS_ADD + BALANCE_TO_RAID1 |
 | 3 | `plan_add_skip_open_when_mapper_open` | New disk with `mapper_open: true` | No OPEN_LUKS, only ADD_DISK_BTRFS_ADD |
 | 4 | `plan_remove_single_disk` | Pool has disk not in config | `Applicable`, REMOVE_DISK_GRACEFUL + CLOSE_LUKS_MAPPER |
@@ -223,9 +258,10 @@ fn config_disk_not_luks(path: &str) -> ConfigDisk { ... }
 | 16 | `plan_bootstrap_two_disks` | Pool not mounted, 2 config disks | `Applicable`, adds for both + BALANCE_TO_RAID1 |
 | 17 | `plan_no_format_action_exists` | Any scenario | Property: no action has type matching format (enforced by ActionType enum having no format variant) |
 | 18 | `plan_blocked_not_convertible` | Blocked plan | `ApplicablePlan::try_from()` returns Err (already tested in types.rs, but confirm integration) |
-| 19 | `plan_report_json_schema` | Any applicable plan | `to_plan_report()` produces correct `schema_version`, `summary` counts, `status` string |
+| 19 | `plan_report_json_schema` | Any applicable plan | `to_plan_report()` produces correct `schema_version`, `summary` counts, `status` is `PlanStatus::Applicable` |
 | 20 | `plan_report_skipped_total` | Absent + init-required warnings | `summary.skipped_total` counts both DISK_ABSENT_SKIPPED and INIT_REQUIRED |
-| 21 | `plan_human_output_format` | Applicable with warnings | `format_plan_human()` contains "Plan ID:", "Status: applicable with warnings", action lines |
+| 21 | `plan_human_output_format` | Applicable with warnings | `format_plan_human()` contains "Plan ID:", "Status: applicable_with_warnings", action lines |
+| 22 | `plan_noop_no_verify_actions` | No-op plan | Zero actions total — verify actions not appended when no mutations |
 
 ### 8. Update `lib.rs`
 
@@ -245,8 +281,10 @@ All Phase 1 + Phase 2 + Phase 3 tests must pass.
 - **Input types defined in `types.rs`** — `PoolState`, `ConfigDisk`, etc. are shared contracts used by both probe (later) and plan.
 - **`ConfigDiskState::PresentLuks` includes `mapper_open`** — allows planner to skip OPEN_LUKS for crash recovery (bash line 295).
 - **Action ordering matches bash** — adds → removes → missing removal → balance → verify.
+- **Verify actions only on mutation** — no-op plans produce zero actions. Health checks belong in `braid status`, not hidden in no-op plans. Simpler model: "actions are work to perform."
 - **`PlanReport` wraps `PlanOutcome`** — adds schema_version, mount_point, summary for JSON output. `skipped_total` computed from warning codes.
+- **`PlanStatus` enum** — `Applicable`, `ApplicableWithWarnings`, `Blocked`. Serializes to `snake_case`. No raw strings for status.
+- **Warning/blocked codes are enums** — `WarningCode` and `BlockedReasonCode` with `#[serde(rename_all = "SCREAMING_SNAKE_CASE")]`. Compile-time exhaustive matching across all tests; serialized as strings in JSON output.
 - **No separate `identity.rs` module** — UUID matching is simple enough to inline in the planner (~5 lines). Can extract later if complexity grows.
-- **`generate_plan_id()` uses existing deps** — `sha2` + `uuid::Uuid::new_v4()` for the hash, `SystemTime` for timestamp. No new dependencies.
-- **Warning codes are string constants** — e.g. `pub const WARN_DISK_ABSENT: &str = "DISK_ABSENT_SKIPPED"`. Compile-time typo protection without an enum (keeps serde simple).
-- **21 tests** — one per scenario + JSON schema + human output format. All construct inputs by hand (no mocking needed).
+- **`time` crate for timestamps** — `time = { version = "0.3", features = ["formatting", "macros"] }` added to Cargo.toml. Provides clean ISO 8601 UTC formatting for `generate_plan_id()`. `sha2` + `uuid::Uuid::new_v4()` for the 6-char hash suffix.
+- **22 tests** — one per scenario + JSON schema + human output + explicit noop-has-no-actions. All construct inputs by hand (no mocking needed).
