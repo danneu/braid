@@ -1,3 +1,15 @@
+//! Parser boundary for raw CLI command output.
+//!
+//! Text parser guidelines:
+//! - Prefer structured command output (JSON) when available.
+//! - Use parser combinators (`nom`) for real grammars: repeated records,
+//!   alternatives, and strict line formats (for example: `btrfs device stats`,
+//!   `btrfs filesystem show`, `cryptsetup status`).
+//! - Keep simple keyed extraction for trivial outputs (single fields, UUIDs, or
+//!   a few labeled lines).
+//! - Do not use free-form `str::contains` for command-output classification in
+//!   domain code; keep text interpretation in `parse/*` and return typed enums.
+//!
 pub mod btrfs_device_stats;
 pub mod btrfs_filesystem_df;
 pub mod btrfs_filesystem_show;

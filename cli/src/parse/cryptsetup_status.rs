@@ -1,7 +1,31 @@
+use nom::{
+    bytes::complete::{tag, take_till1},
+    character::complete::{not_line_ending, space0},
+    combinator::eof,
+    IResult,
+};
+
 use crate::cmd::RawCommandOutput;
 
 use super::types::CryptsetupStatusOutput;
 use super::ParseError;
+
+fn parse_device_line(input: &str) -> IResult<&str, &str> {
+    let (input, _) = space0(input)?;
+    let (input, _) = tag("device:")(input)?;
+    let (input, _) = space0(input)?;
+    let (input, value) = not_line_ending(input)?;
+    Ok((input, value.trim()))
+}
+
+fn parse_inactive_message(input: &str) -> IResult<&str, ()> {
+    let (input, _) = tag("Device ")(input)?;
+    let (input, _) = take_till1(|c: char| c.is_ascii_whitespace())(input)?;
+    let (input, _) = tag(" is not active.")(input)?;
+    let (input, _) = space0(input)?;
+    let (input, _) = eof(input)?;
+    Ok((input, ()))
+}
 
 pub fn parse_cryptsetup_status(
     raw: &RawCommandOutput,
@@ -9,8 +33,8 @@ pub fn parse_cryptsetup_status(
     if raw.exit_status != 0 {
         let stderr = raw.stderr.trim();
         // Non-zero exit is expected when device is not active.
-        // Benign if stderr is empty or contains expected "not active" pattern.
-        if stderr.is_empty() || stderr.contains("is not active") {
+        // Benign if stderr is empty or matches structured "not active" message.
+        if stderr.is_empty() || parse_inactive_message(stderr).is_ok() {
             return Ok(CryptsetupStatusOutput {
                 is_active: false,
                 device: None,
@@ -27,12 +51,7 @@ pub fn parse_cryptsetup_status(
     let device = raw
         .stdout
         .lines()
-        .find_map(|line| {
-            let trimmed = line.trim();
-            trimmed
-                .strip_prefix("device:")
-                .map(|v| v.trim().to_owned())
-        })
+        .find_map(|line| parse_device_line(line.trim()).ok().map(|(_, v)| v.to_owned()))
         .ok_or_else(|| ParseError::MissingField {
             cmd: raw.cmd.clone(),
             field: "device".into(),

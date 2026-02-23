@@ -1,4 +1,8 @@
-use regex::Regex;
+use nom::{
+    bytes::complete::{tag, take_until},
+    character::complete::{not_line_ending, space0, space1, u64 as parse_u64},
+    IResult,
+};
 
 use crate::cmd::RawCommandOutput;
 
@@ -35,6 +39,36 @@ pub fn classify_btrfs_probe(raw: &RawCommandOutput) -> DeviceBtrfsProbe {
     }
 }
 
+// ---------------------------------------------------------------------------
+// nom parsers
+// ---------------------------------------------------------------------------
+
+fn parse_total_devices(input: &str) -> IResult<&str, u64> {
+    let (input, _) = take_until("Total devices")(input)?;
+    let (input, _) = tag("Total devices")(input)?;
+    let (input, _) = space1(input)?;
+    let (input, count) = parse_u64(input)?;
+    Ok((input, count))
+}
+
+fn parse_devid_line(input: &str) -> IResult<&str, (u64, &str)> {
+    let (input, _) = space0(input)?;
+    let (input, _) = tag("devid")(input)?;
+    let (input, _) = space1(input)?;
+    let (input, devid) = parse_u64(input)?;
+    let (input, _) = take_until("path ")(input)?;
+    let (input, _) = tag("path")(input)?;
+    let (input, _) = space1(input)?;
+    let (input, path) = not_line_ending(input)?;
+    Ok((input, (devid, path.trim())))
+}
+
+fn parse_missing_sentinel(input: &str) -> IResult<&str, ()> {
+    let (input, _) = space0(input)?;
+    let (input, _) = tag("*** Some devices missing")(input)?;
+    Ok((input, ()))
+}
+
 pub fn parse_btrfs_filesystem_show(
     raw: &RawCommandOutput,
 ) -> Result<BtrfsFilesystemShowOutput, ParseError> {
@@ -46,14 +80,11 @@ pub fn parse_btrfs_filesystem_show(
         });
     }
 
-    let total_re = Regex::new(r"Total devices\s+(\d+)").unwrap();
-    let devid_re = Regex::new(r"devid\s+(\d+)\s+.*path\s+(.+)").unwrap();
-
     let stdout = &raw.stdout;
 
-    let total_devices = total_re
-        .captures(stdout)
-        .and_then(|c| c[1].parse::<u64>().ok())
+    let total_devices = stdout
+        .lines()
+        .find_map(|line| parse_total_devices(line).ok().map(|(_, c)| c))
         .ok_or_else(|| ParseError::MissingField {
             cmd: raw.cmd.clone(),
             field: "Total devices".into(),
@@ -64,22 +95,25 @@ pub fn parse_btrfs_filesystem_show(
     // These are synthetic — the device is gone. Only real present devices
     // are included; non-mapper real paths (e.g. /dev/sda1) are kept so
     // probe_pool can hard-fail on the invariant violation.
-    let devices: Vec<BtrfsShowDevice> = devid_re
-        .captures_iter(stdout)
-        .filter_map(|c| {
-            let path = c[2].trim();
-            if path.ends_with(" MISSING") {
-                None
-            } else {
-                Some(BtrfsShowDevice {
-                    devid: c[1].parse().unwrap(),
-                    path: path.to_owned(),
-                })
-            }
+    let devices: Vec<BtrfsShowDevice> = stdout
+        .lines()
+        .filter_map(|line| {
+            parse_devid_line(line).ok().and_then(|(_, (devid, path))| {
+                if path.ends_with(" MISSING") {
+                    None
+                } else {
+                    Some(BtrfsShowDevice {
+                        devid,
+                        path: path.to_owned(),
+                    })
+                }
+            })
         })
         .collect();
 
-    let has_missing = stdout.contains("Some devices missing");
+    let has_missing = stdout
+        .lines()
+        .any(|line| parse_missing_sentinel(line).is_ok());
 
     Ok(BtrfsFilesystemShowOutput {
         total_devices,

@@ -1,5 +1,3 @@
-import os
-
 # Set up LUKS + btrfs RAID1 on two virtual disks, then capture every command
 # output that the Rust parsers consume. Each output is written to /tmp/fixtures/
 # and copied out via copy_from_vm for use as golden-file test fixtures.

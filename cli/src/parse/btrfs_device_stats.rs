@@ -1,9 +1,26 @@
-use regex::Regex;
+use nom::{
+    bytes::complete::take_till1,
+    character::complete::{char, digit1, space1},
+    combinator::eof,
+    IResult,
+};
 
 use crate::cmd::RawCommandOutput;
 
 use super::types::{BtrfsDeviceStatsOutput, DeviceErrorStats};
 use super::ParseError;
+
+fn parse_stats_line(input: &str) -> IResult<&str, (&str, &str, &str)> {
+    let (input, _) = char('[')(input)?;
+    let (input, device) = take_till1(|c| c == ']')(input)?;
+    let (input, _) = char(']')(input)?;
+    let (input, _) = char('.')(input)?;
+    let (input, field) = take_till1(|c: char| c.is_ascii_whitespace())(input)?;
+    let (input, _) = space1(input)?;
+    let (input, value) = digit1(input)?;
+    let (input, _) = eof(input)?;
+    Ok((input, (device, field, value)))
+}
 
 pub fn parse_btrfs_device_stats(
     raw: &RawCommandOutput,
@@ -16,8 +33,6 @@ pub fn parse_btrfs_device_stats(
         });
     }
 
-    let re = Regex::new(r"^\[([^\]]+)\]\.(\S+)\s+(\d+)$").unwrap();
-
     // Collect stats keyed by device path, preserving order
     let mut device_order: Vec<String> = Vec::new();
     let mut stats_map: std::collections::HashMap<String, DeviceErrorStats> =
@@ -28,14 +43,14 @@ pub fn parse_btrfs_device_stats(
         if trimmed.is_empty() {
             continue;
         }
-        let caps = re.captures(trimmed).ok_or_else(|| ParseError::InvalidText {
-            cmd: raw.cmd.clone(),
-            detail: format!("unexpected device stats line: {trimmed:?}"),
-        })?;
+        let (_, (device, field_name, value_str)) =
+            parse_stats_line(trimmed).map_err(|_| ParseError::InvalidText {
+                cmd: raw.cmd.clone(),
+                detail: format!("unexpected device stats line: {trimmed:?}"),
+            })?;
 
-        let device_path = caps[1].to_owned();
-        let field_name = &caps[2];
-        let value: u64 = caps[3].parse().map_err(|_| ParseError::InvalidText {
+        let device_path = device.to_owned();
+        let value: u64 = value_str.parse().map_err(|_| ParseError::InvalidText {
             cmd: raw.cmd.clone(),
             detail: format!("non-numeric stat value in: {trimmed:?}"),
         })?;
