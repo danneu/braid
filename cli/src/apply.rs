@@ -1,5 +1,7 @@
 use crate::cmd::{CmdRequest, CommandRunner};
 use crate::config::{config_hash, config_read_raw, Config};
+use crate::parse::btrfs_filesystem_show::{classify_btrfs_probe, DeviceBtrfsProbe};
+use crate::parse::mount::{classify_mount_error, MountOutcome};
 use crate::parse::{parse_btrfs_filesystem_show, parse_cryptsetup_luks_uuid};
 use crate::plan::{compute_plan, mapper_name_for_by_id, to_plan_report};
 use crate::probe::{probe_config_disk, probe_pool, Filesystem};
@@ -324,22 +326,25 @@ fn execute_btrfs_add<R: CommandRunner>(
                         // Pool mounted successfully. Done.
                     }
                     Ok(out) => {
-                        if is_deferable_missing_member_mount_error(&out.stderr) {
-                            // Multi-device pool with not all members open yet.
-                            // Safe to defer — a later ADD will retry once more
-                            // mappers are available. The key: we did NOT mkfs.
-                            println!(
-                                "  mount deferred (missing members), will retry after more devices open"
-                            );
-                        } else {
-                            return Err(ApplyError::ActionFailed {
-                                action_id: String::new(),
-                                action_type: "ADD_DISK_BTRFS_ADD".into(),
-                                detail: format!(
-                                    "mount existing pool failed (exit {}): {}",
-                                    out.exit_status, out.stderr
-                                ),
-                            });
+                        match classify_mount_error(&out.stderr) {
+                            MountOutcome::MissingMembersDeferred => {
+                                // Multi-device pool with not all members open yet.
+                                // Safe to defer — a later ADD will retry once more
+                                // mappers are available. The key: we did NOT mkfs.
+                                println!(
+                                    "  mount deferred (missing members), will retry after more devices open"
+                                );
+                            }
+                            MountOutcome::HardError(_) => {
+                                return Err(ApplyError::ActionFailed {
+                                    action_id: String::new(),
+                                    action_type: "ADD_DISK_BTRFS_ADD".into(),
+                                    detail: format!(
+                                        "mount existing pool failed (exit {}): {}",
+                                        out.exit_status, out.stderr
+                                    ),
+                                });
+                            }
                         }
                     }
                     Err(e) => {
@@ -708,25 +713,6 @@ fn execute_verify_diskset<R: CommandRunner>(
 // Helpers
 // ---------------------------------------------------------------------------
 
-enum DeviceBtrfsProbe {
-    HasBtrfs,
-    NoBtrfs,
-    Unknown(String),
-}
-
-/// Classify a mount error as deferrable (missing pool members) vs hard failure.
-/// Only explicit degraded-member signals are deferrable — "no such file or
-/// directory" is a real missing-path error and must fail hard.
-fn is_deferable_missing_member_mount_error(stderr: &str) -> bool {
-    let s = stderr.to_lowercase();
-    // Direct btrfs error messages about absent pool members:
-    s.contains("missing") || s.contains("devid")
-    // Kernel VFS error: btrfs open_ctree fails → mount reports
-    // "fsconfig() failed: No such file or directory" + "dmesg(1) may have more info".
-    // Require both signals to avoid matching plain path-not-found errors.
-    || (s.contains("fsconfig") && s.contains("dmesg"))
-}
-
 /// Check if a device has btrfs metadata by reading its superblock directly.
 /// `btrfs filesystem show <device>` reads the on-disk superblock without
 /// needing the pool to be mounted or all members present.
@@ -735,25 +721,7 @@ fn probe_device_has_btrfs<R: CommandRunner>(runner: &R, device: &str) -> DeviceB
         mount_point: device.to_owned(), // show accepts device path too
     });
     match result {
-        Ok(ref out) if out.exit_status == 0 => {
-            // Successful parse = btrfs superblock found.
-            DeviceBtrfsProbe::HasBtrfs
-        }
-        Ok(ref out) => {
-            let combined = format!("{} {}", out.stdout, out.stderr).to_lowercase();
-            if combined.contains("not a valid btrfs filesystem")
-                || combined.contains("no valid btrfs found")
-                || combined.contains("no btrfs")
-            {
-                DeviceBtrfsProbe::NoBtrfs
-            } else {
-                DeviceBtrfsProbe::Unknown(format!(
-                    "btrfs filesystem show exit {}: {}",
-                    out.exit_status,
-                    out.stderr.trim()
-                ))
-            }
-        }
+        Ok(ref out) => classify_btrfs_probe(out),
         Err(e) => DeviceBtrfsProbe::Unknown(format!("command error: {e}")),
     }
 }

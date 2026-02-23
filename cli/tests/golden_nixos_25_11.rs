@@ -44,7 +44,7 @@ golden_test!(
     golden_lsblk_json,
     "lsblk-2disk.json",
     "lsblk",
-    parse::json::parse_lsblk_json,
+    parse::lsblk::parse_lsblk_json,
     |out: parse::types::LsblkOutput| {
         assert_eq!(out.blockdevices.len(), 2, "expected 2 blockdevices");
         // Each disk should have a crypt child (LUKS)
@@ -60,7 +60,7 @@ golden_test!(
     golden_findmnt_json,
     "findmnt-btrfs.json",
     "findmnt",
-    parse::json::parse_findmnt_json,
+    parse::findmnt::parse_findmnt_json,
     |out: parse::types::FindmntOutput| {
         assert_eq!(out.filesystems.len(), 1, "expected 1 filesystem");
         assert_eq!(out.filesystems[0].target, "/mnt/storage");
@@ -72,7 +72,7 @@ golden_test!(
     golden_btrfs_df_json,
     "btrfs-df-raid1.json",
     "btrfs filesystem df",
-    parse::json::parse_btrfs_df_json,
+    parse::btrfs_filesystem_df::parse_btrfs_df_json,
     |out: parse::types::BtrfsDfOutput| {
         assert!(!out.entries.is_empty(), "expected at least one df entry");
         // RAID1 setup should have Data with RAID1 profile
@@ -88,7 +88,7 @@ golden_test!(
     golden_btrfs_show,
     "btrfs-show-2disk.txt",
     "btrfs filesystem show",
-    parse::text::parse_btrfs_filesystem_show,
+    parse::btrfs_filesystem_show::parse_btrfs_filesystem_show,
     |out: parse::types::BtrfsFilesystemShowOutput| {
         assert_eq!(out.total_devices, 2);
         assert_eq!(out.devices.len(), 2);
@@ -100,7 +100,7 @@ golden_test!(
     golden_btrfs_usage,
     "btrfs-usage-raw.txt",
     "btrfs filesystem usage",
-    parse::text::parse_btrfs_filesystem_usage,
+    parse::btrfs_filesystem_usage::parse_btrfs_filesystem_usage,
     |out: parse::types::BtrfsFilesystemUsageOutput| {
         assert!(out.device_size_bytes > 0, "device_size should be positive");
         assert!(out.used_bytes > 0, "used should be positive (we wrote test data)");
@@ -111,7 +111,7 @@ golden_test!(
     golden_btrfs_device_stats,
     "btrfs-device-stats-2disk.txt",
     "btrfs device stats",
-    parse::text::parse_btrfs_device_stats,
+    parse::btrfs_device_stats::parse_btrfs_device_stats,
     |out: parse::types::BtrfsDeviceStatsOutput| {
         assert_eq!(out.devices.len(), 2, "expected stats for 2 devices");
         // Fresh pool — no errors expected
@@ -127,7 +127,7 @@ golden_test!(
     golden_btrfs_scrub_never,
     "btrfs-scrub-never.txt",
     "btrfs scrub status",
-    parse::text::parse_btrfs_scrub_status,
+    parse::btrfs_scrub_status::parse_btrfs_scrub_status,
     |out: parse::types::BtrfsScrubStatusOutput| {
         assert_eq!(out.state, parse::types::ScrubState::Never);
     }
@@ -137,7 +137,7 @@ golden_test!(
     golden_btrfs_scrub_completed,
     "btrfs-scrub-completed.txt",
     "btrfs scrub status",
-    parse::text::parse_btrfs_scrub_status,
+    parse::btrfs_scrub_status::parse_btrfs_scrub_status,
     |out: parse::types::BtrfsScrubStatusOutput| {
         assert!(
             matches!(out.state, parse::types::ScrubState::Completed { .. }),
@@ -150,7 +150,7 @@ golden_test!(
     golden_cryptsetup_status,
     "cryptsetup-status-active.txt",
     "cryptsetup status",
-    parse::text::parse_cryptsetup_status,
+    parse::cryptsetup_status::parse_cryptsetup_status,
     |out: parse::types::CryptsetupStatusOutput| {
         assert!(out.is_active);
         assert!(out.device.is_some(), "active status should have a device");
@@ -161,7 +161,7 @@ golden_test!(
     golden_cryptsetup_luks_uuid,
     "cryptsetup-luks-uuid.txt",
     "cryptsetup luksUUID",
-    parse::text::parse_cryptsetup_luks_uuid,
+    parse::cryptsetup_luks_uuid::parse_cryptsetup_luks_uuid,
     |out: parse::types::CryptsetupLuksUuidOutput| {
         // UUID should be valid (parser already validates via uuid crate)
         assert!(!out.uuid.0.is_empty());
