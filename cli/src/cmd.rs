@@ -1,4 +1,3 @@
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -9,6 +8,12 @@ pub struct RawCommandOutput {
     pub exit_status: i32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LsblkFieldKind {
+    Model,
+    Serial,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CmdRequest {
     LsblkJson,
@@ -17,31 +22,10 @@ pub enum CmdRequest {
     BtrfsFilesystemShow { mount_point: String },
     CryptsetupStatus { mapper: String },
     CryptsetupLuksUuid { device: String },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LsblkJson {
-    pub blockdevices: serde_json::Value,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FindmntJson {
-    pub filesystems: serde_json::Value,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BtrfsDfJson {
-    pub filesystem_df: serde_json::Value,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CmdOutput {
-    Lsblk(LsblkJson),
-    Findmnt(FindmntJson),
-    BtrfsDf(BtrfsDfJson),
-    BtrfsShowRaw(String),
-    CryptsetupStatusRaw(String),
-    CryptsetupLuksUuidRaw(String),
+    BtrfsFilesystemUsageRaw { mount_point: String },
+    BtrfsScrubStatus { mount_point: String },
+    BtrfsDeviceStats { mount_point: String },
+    LsblkField { device: String, field: LsblkFieldKind },
 }
 
 #[derive(Debug, Error)]
@@ -60,7 +44,7 @@ pub struct RealRunner;
 
 impl CommandRunner for RealRunner {
     fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
-        // Implement in Phase 2.
+        // Implement in Phase 3.
         Err(CmdError::Failed(format!(
             "RealRunner not implemented for request: {request:?}"
         )))
@@ -128,8 +112,21 @@ mod tests {
             CmdRequest::CryptsetupLuksUuid {
                 device: "/dev/vda".to_owned(),
             },
+            CmdRequest::BtrfsFilesystemUsageRaw {
+                mount_point: "/mnt/storage".to_owned(),
+            },
+            CmdRequest::BtrfsScrubStatus {
+                mount_point: "/mnt/storage".to_owned(),
+            },
+            CmdRequest::BtrfsDeviceStats {
+                mount_point: "/mnt/storage".to_owned(),
+            },
+            CmdRequest::LsblkField {
+                device: "/dev/vda".to_owned(),
+                field: LsblkFieldKind::Model,
+            },
         ];
 
-        assert_eq!(all.len(), 6);
+        assert_eq!(all.len(), 10);
     }
 }

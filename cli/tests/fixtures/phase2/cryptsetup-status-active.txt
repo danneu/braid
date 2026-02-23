@@ -1,0 +1,10 @@
+/dev/mapper/braid-vda is active and is in use.
+  type:    LUKS2
+  cipher:  aes-xts-plain64
+  keysize: 512 bits
+  key location: keyring
+  device:  /dev/vda
+  sector size:  512
+  offset:  32768 sectors
+  size:    20938752 sectors
+  mode:    read/write

@@ -1,0 +1,22 @@
+{
+  "filesystem-df": [
+    {
+      "bg_type": "Data",
+      "bg_profile": "RAID1",
+      "bg_used": 4294967296,
+      "bg_total": 5368709120
+    },
+    {
+      "bg_type": "Metadata",
+      "bg_profile": "RAID1",
+      "bg_used": 268435456,
+      "bg_total": 536870912
+    },
+    {
+      "bg_type": "System",
+      "bg_profile": "RAID1",
+      "bg_used": 16384,
+      "bg_total": 8388608
+    }
+  ]
+}

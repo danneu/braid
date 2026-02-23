@@ -1,0 +1,10 @@
+[/dev/mapper/braid-vda].write_io_errs    0
+[/dev/mapper/braid-vda].read_io_errs     0
+[/dev/mapper/braid-vda].flush_io_errs    0
+[/dev/mapper/braid-vda].corruption_errs  0
+[/dev/mapper/braid-vda].generation_errs  0
+[/dev/mapper/braid-vdb].write_io_errs    0
+[/dev/mapper/braid-vdb].read_io_errs     0
+[/dev/mapper/braid-vdb].flush_io_errs    0
+[/dev/mapper/braid-vdb].corruption_errs  0
+[/dev/mapper/braid-vdb].generation_errs  0

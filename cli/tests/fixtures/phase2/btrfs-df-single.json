@@ -1,0 +1,22 @@
+{
+  "filesystem-df": [
+    {
+      "bg_type": "Data",
+      "bg_profile": "single",
+      "bg_used": 2147483648,
+      "bg_total": 4294967296
+    },
+    {
+      "bg_type": "Metadata",
+      "bg_profile": "DUP",
+      "bg_used": 134217728,
+      "bg_total": 268435456
+    },
+    {
+      "bg_type": "System",
+      "bg_profile": "DUP",
+      "bg_used": 16384,
+      "bg_total": 8388608
+    }
+  ]
+}
