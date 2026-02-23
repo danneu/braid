@@ -249,6 +249,26 @@ Apply `#[serde(deny_unknown_fields)]` only to JSON structs where the schema is c
 
 For text parsers, no structural changes — the existing patterns (regex + strip_prefix) are already appropriately strict or lenient based on the output format.
 
+### Move string matching to parser boundary
+
+Replace remaining domain-layer `string.contains(...)` checks with typed parser results. Domain logic (`apply.rs`, `probe.rs`, `plan.rs`) should branch only on enums/structs, never raw stderr/stdout fragments.
+
+Scope:
+- `cli/src/apply.rs`: mount error classification (`is_deferable_missing_member_mount_error`)
+- `cli/src/apply.rs`: btrfs-superblock probe classification (`probe_device_has_btrfs`)
+
+Implementation direction:
+- Add parser-level functions/enums in `cli/src/parse/*` for:
+  - mount outcome classification (`Mounted`, `MissingMembersDeferred`, `HardError`)
+  - btrfs probe classification (`HasBtrfs`, `NoBtrfs`, `ProbeError`)
+- Keep all tolerant text matching inside parser modules with fixture-backed tests.
+- Keep fail-hard default for unknown text variants.
+
+Acceptance criteria:
+- No raw command-output substring checks outside `cli/src/parse/*` (except tests).
+- New parser classification tests cover currently observed message variants.
+- Existing apply/probe behavior remains the same on known-good fixtures.
+
 ### Golden-file fixtures from nixos-25.11
 
 **New directory**: `cli/tests/fixtures/nixos-25.11/`
