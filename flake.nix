@@ -74,5 +74,20 @@
       packages = forAllSystems packagesFor;
 
       checks = forAllSystems checksFor;
+
+      devShells = forAllSystems (system:
+        let
+          pkgs = nixpkgs.legacyPackages.${system};
+        in
+        {
+          default = pkgs.mkShell {
+            buildInputs = with pkgs; [
+              cargo
+              rustc
+              rustfmt
+              clippy
+            ];
+          };
+        });
     };
 }
