@@ -43,10 +43,9 @@ pub fn config_read(path: &Path) -> Result<Config, ConfigError> {
 }
 
 pub fn config_hash(raw: &str) -> String {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    raw.hash(&mut h);
-    format!("hash:{:x}", h.finish())
+    use sha2::{Digest, Sha256};
+    let hash = Sha256::digest(raw.as_bytes());
+    format!("sha256:{:x}", hash)
 }
 
 fn validate(cfg: &Config) -> Result<(), ConfigError> {
@@ -71,6 +70,15 @@ mod tests {
         let cfg: Config = serde_json::from_str(raw).expect("config should parse");
         assert_eq!(cfg.disks.len(), 1);
         assert_eq!(cfg.mount_point, "/mnt/storage");
+    }
+
+    #[test]
+    fn config_hash_uses_sha256_prefix() {
+        let h = config_hash("anything");
+        assert!(h.starts_with("sha256:"), "expected sha256: prefix, got: {h}");
+        let hex = &h["sha256:".len()..];
+        assert_eq!(hex.len(), 64, "expected 64 hex chars, got {}", hex.len());
+        assert!(hex.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     #[test]
