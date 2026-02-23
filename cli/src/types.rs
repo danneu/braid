@@ -118,6 +118,7 @@ pub enum WarningCode {
 pub enum BlockedReasonCode {
     IdentityAmbiguousAbsentDisk,
     AmbiguousMissing,
+    InvalidByIdPath,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

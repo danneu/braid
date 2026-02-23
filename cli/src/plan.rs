@@ -83,8 +83,22 @@ pub fn compute_plan(
                     continue;
                 }
 
+                let mn = match mapper_name_for_by_id(&cd.by_id_path) {
+                    Some(name) => name,
+                    None => {
+                        blocked_reasons.push(BlockedReason {
+                            code: BlockedReasonCode::InvalidByIdPath,
+                            disk: Some(cd.by_id_path.0.clone()),
+                            message: format!(
+                                "{} has no valid basename for mapper name",
+                                cd.by_id_path
+                            ),
+                        });
+                        continue;
+                    }
+                };
+
                 disks_to_add_count += 1;
-                let mn = mapper_name_for_uuid(uuid);
 
                 let mut open_id = None;
                 if !mapper_open {
@@ -102,7 +116,7 @@ pub fn compute_plan(
                 actions.push(make_action(
                     &mut counter,
                     ActionType::AddDiskBtrfsAdd,
-                    mapper_path(&mn),
+                    mapper_path(&mn.0),
                     preconditions,
                 ));
             }
@@ -446,8 +460,13 @@ fn mapper_path(name: &str) -> String {
     format!("/dev/mapper/{}", name)
 }
 
-fn mapper_name_for_uuid(uuid: &LuksUuid) -> String {
-    format!("luks-{}", uuid.0)
+fn mapper_name_for_by_id(path: &ByIdPath) -> Option<MapperName> {
+    let basename = path.0.rsplit('/').next().unwrap_or("");
+    if basename.is_empty() {
+        None
+    } else {
+        Some(MapperName(basename.to_owned()))
+    }
 }
 
 fn action_type_str(at: &ActionType) -> &'static str {
@@ -487,12 +506,12 @@ mod tests {
             mounted: true,
             devices: vec![
                 PoolDevice {
-                    mapper: MapperName("luks-uuid-1".into()),
+                    mapper: MapperName("disk-1".into()),
                     luks_uuid: LuksUuid("uuid-1".into()),
                     devid: 1,
                 },
                 PoolDevice {
-                    mapper: MapperName("luks-uuid-2".into()),
+                    mapper: MapperName("disk-2".into()),
                     luks_uuid: LuksUuid("uuid-2".into()),
                     devid: 2,
                 },
@@ -507,17 +526,17 @@ mod tests {
             mounted: true,
             devices: vec![
                 PoolDevice {
-                    mapper: MapperName("luks-uuid-1".into()),
+                    mapper: MapperName("disk-1".into()),
                     luks_uuid: LuksUuid("uuid-1".into()),
                     devid: 1,
                 },
                 PoolDevice {
-                    mapper: MapperName("luks-uuid-2".into()),
+                    mapper: MapperName("disk-2".into()),
                     luks_uuid: LuksUuid("uuid-2".into()),
                     devid: 2,
                 },
                 PoolDevice {
-                    mapper: MapperName("luks-uuid-3".into()),
+                    mapper: MapperName("disk-3".into()),
                     luks_uuid: LuksUuid("uuid-3".into()),
                     devid: 3,
                 },
@@ -597,6 +616,16 @@ mod tests {
         }
     }
 
+    fn action_targets(outcome: &PlanOutcome) -> Vec<(&ActionType, &str)> {
+        match outcome {
+            PlanOutcome::Applicable { actions, .. } => actions
+                .iter()
+                .map(|a| (&a.action_type, a.target.as_str()))
+                .collect(),
+            PlanOutcome::Blocked { .. } => vec![],
+        }
+    }
+
     fn confirmation_phrases(outcome: &PlanOutcome) -> Vec<&str> {
         match outcome {
             PlanOutcome::Applicable {
@@ -648,6 +677,10 @@ mod tests {
                 &ActionType::VerifyExpectedDiskSet,
             ]
         );
+        // Add target uses by-id basename, not UUID.
+        let targets = action_targets(&outcome);
+        assert_eq!(targets[0], (&ActionType::OpenLuks, "/dev/disk/by-id/disk-3"));
+        assert_eq!(targets[1], (&ActionType::AddDiskBtrfsAdd, "/dev/mapper/disk-3"));
     }
 
     #[test]
@@ -690,6 +723,10 @@ mod tests {
                 &ActionType::VerifyExpectedDiskSet,
             ]
         );
+        // Remove target uses pool device's mapper name.
+        let targets = action_targets(&outcome);
+        assert_eq!(targets[0], (&ActionType::RemoveDiskGraceful, "/dev/mapper/disk-3"));
+        assert_eq!(targets[1], (&ActionType::CloseLuksMapper, "/dev/mapper/disk-3"));
     }
 
     #[test]
@@ -829,12 +866,12 @@ mod tests {
             mounted: true,
             devices: vec![
                 PoolDevice {
-                    mapper: MapperName("luks-uuid-1".into()),
+                    mapper: MapperName("disk-1".into()),
                     luks_uuid: LuksUuid("uuid-1".into()),
                     devid: 1,
                 },
                 PoolDevice {
-                    mapper: MapperName("luks-uuid-2".into()),
+                    mapper: MapperName("disk-2".into()),
                     luks_uuid: LuksUuid("uuid-2".into()),
                     devid: 2,
                 },
@@ -864,12 +901,12 @@ mod tests {
             mounted: true,
             devices: vec![
                 PoolDevice {
-                    mapper: MapperName("luks-uuid-1".into()),
+                    mapper: MapperName("disk-1".into()),
                     luks_uuid: LuksUuid("uuid-1".into()),
                     devid: 1,
                 },
                 PoolDevice {
-                    mapper: MapperName("luks-uuid-2".into()),
+                    mapper: MapperName("disk-2".into()),
                     luks_uuid: LuksUuid("uuid-2".into()),
                     devid: 2,
                 },
@@ -986,18 +1023,18 @@ mod tests {
         let outcome = compute_plan(&config, &disks, &pool, &PlanFlags::default());
 
         assert!(matches!(outcome, PlanOutcome::Applicable { .. }));
-        let types = action_types(&outcome);
+        let targets = action_targets(&outcome);
         // Two OPEN_LUKS + two ADD + BALANCE + two VERIFY.
         assert_eq!(
-            types,
+            targets,
             vec![
-                &ActionType::OpenLuks,
-                &ActionType::AddDiskBtrfsAdd,
-                &ActionType::OpenLuks,
-                &ActionType::AddDiskBtrfsAdd,
-                &ActionType::BalanceToRaid1,
-                &ActionType::VerifyPoolHealth,
-                &ActionType::VerifyExpectedDiskSet,
+                (&ActionType::OpenLuks, "/dev/disk/by-id/disk-1"),
+                (&ActionType::AddDiskBtrfsAdd, "/dev/mapper/disk-1"),
+                (&ActionType::OpenLuks, "/dev/disk/by-id/disk-2"),
+                (&ActionType::AddDiskBtrfsAdd, "/dev/mapper/disk-2"),
+                (&ActionType::BalanceToRaid1, "/mnt/storage"),
+                (&ActionType::VerifyPoolHealth, "/mnt/storage"),
+                (&ActionType::VerifyExpectedDiskSet, "/mnt/storage"),
             ]
         );
     }
@@ -1103,6 +1140,37 @@ mod tests {
         assert!(human.contains("Actions: 0"));
         assert!(human.contains("Warnings:"));
         assert!(human.contains("is absent, skipping"));
+    }
+
+    #[test]
+    fn plan_invalid_by_id_path_blocks() {
+        let config = test_config();
+        let pool = pool_unmounted();
+        // Empty path, trailing slash, bare slash — all yield empty basename.
+        for bad_path in &["", "/", "/dev/disk/by-id/"] {
+            let disks = vec![ConfigDisk {
+                by_id_path: ByIdPath(bad_path.to_string()),
+                state: ConfigDiskState::PresentLuks {
+                    uuid: LuksUuid("uuid-bad".into()),
+                    mapper_open: false,
+                },
+            }];
+
+            let outcome = compute_plan(&config, &disks, &pool, &PlanFlags::default());
+
+            assert!(
+                matches!(outcome, PlanOutcome::Blocked { .. }),
+                "expected Blocked for path {:?}, got {:?}",
+                bad_path,
+                outcome
+            );
+            assert_eq!(
+                blocked_codes(&outcome),
+                vec![BlockedReasonCode::InvalidByIdPath],
+                "wrong blocked code for path {:?}",
+                bad_path,
+            );
+        }
     }
 
     #[test]
