@@ -1,5 +1,6 @@
 use nom::{
-    bytes::complete::{tag, take_until},
+    branch::alt,
+    bytes::complete::{tag, take_till1},
     character::complete::{not_line_ending, space0},
     combinator::eof,
     IResult,
@@ -19,11 +20,13 @@ fn parse_device_line(input: &str) -> IResult<&str, &str> {
     Ok((input, value.trim()))
 }
 
-// Parses: "Device braid-vda is not active."
-//     or: "/dev/mapper/disk-1 is not active."
+// Parses inactive status lines from real-world cryptsetup output variants:
+// - "/dev/mapper/braid-vdb is inactive."
+// - "Device braid-vdb is not active."
 fn parse_inactive_message(input: &str) -> IResult<&str, ()> {
-    let (input, _) = take_until(" is not active.")(input)?;
-    let (input, _) = tag(" is not active.")(input)?;
+    let (input, _) = alt((tag("Device "), tag("/dev/mapper/")))(input)?;
+    let (input, _) = take_till1(|c: char| c.is_ascii_whitespace())(input)?;
+    let (input, _) = alt((tag(" is inactive."), tag(" is not active.")))(input)?;
     let (input, _) = space0(input)?;
     let (input, _) = eof(input)?;
     Ok((input, ()))
@@ -32,6 +35,15 @@ fn parse_inactive_message(input: &str) -> IResult<&str, ()> {
 pub fn parse_cryptsetup_status(
     raw: &RawCommandOutput,
 ) -> Result<CryptsetupStatusOutput, ParseError> {
+    if parse_inactive_message(raw.stdout.trim()).is_ok()
+        || parse_inactive_message(raw.stderr.trim()).is_ok()
+    {
+        return Ok(CryptsetupStatusOutput {
+            is_active: false,
+            device: None,
+        });
+    }
+
     if raw.exit_status != 0 {
         let stderr = raw.stderr.trim();
         // Non-zero exit is expected when device is not active.
@@ -71,7 +83,7 @@ mod tests {
 
     fn fixture(name: &str) -> String {
         let path = format!(
-            "{}/tests/fixtures/phase2/{name}",
+            "{}/tests/fixtures/nixos-25.11/{name}",
             env!("CARGO_MANIFEST_DIR")
         );
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("fixture {name}: {e}"))
@@ -87,14 +99,14 @@ mod tests {
         };
         let out = parse_cryptsetup_status(&raw).unwrap();
         assert!(out.is_active);
-        assert_eq!(out.device.as_deref(), Some("/dev/vda"));
+        assert_eq!(out.device.as_deref(), Some("/dev/vdb"));
     }
 
     #[test]
     fn cryptsetup_status_inactive_on_expected_stderr() {
         let raw = RawCommandOutput {
             cmd: "cryptsetup status".into(),
-            stdout: String::new(),
+            stdout: fixture("cryptsetup-status-inactive.stdout"),
             stderr: fixture("cryptsetup-status-inactive.stderr"),
             exit_status: 4,
         };
