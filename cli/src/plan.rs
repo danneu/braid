@@ -460,13 +460,14 @@ fn mapper_path(name: &str) -> String {
     format!("/dev/mapper/{}", name)
 }
 
+const BY_ID_PREFIX: &str = "/dev/disk/by-id/";
+
 fn mapper_name_for_by_id(path: &ByIdPath) -> Option<MapperName> {
-    let basename = path.0.rsplit('/').next().unwrap_or("");
-    if basename.is_empty() {
-        None
-    } else {
-        Some(MapperName(basename.to_owned()))
+    let basename = path.0.strip_prefix(BY_ID_PREFIX)?;
+    if basename.is_empty() || basename.contains('/') || basename == "." || basename == ".." {
+        return None;
     }
+    Some(MapperName(basename.to_owned()))
 }
 
 fn action_type_str(at: &ActionType) -> &'static str {
@@ -1146,8 +1147,18 @@ mod tests {
     fn plan_invalid_by_id_path_blocks() {
         let config = test_config();
         let pool = pool_unmounted();
-        // Empty path, trailing slash, bare slash — all yield empty basename.
-        for bad_path in &["", "/", "/dev/disk/by-id/"] {
+        let bad_paths = &[
+            "",                          // empty
+            "/",                         // bare slash
+            "/dev/disk/by-id/",          // prefix but empty basename
+            "/dev/sda",                  // wrong prefix
+            "disk-1",                    // relative, no prefix
+            "/tmp/foo",                  // arbitrary absolute path
+            "/dev/disk/by-id/.",         // dot
+            "/dev/disk/by-id/..",        // dotdot
+            "/dev/disk/by-id/a/b",       // embedded slash
+        ];
+        for bad_path in bad_paths {
             let disks = vec![ConfigDisk {
                 by_id_path: ByIdPath(bad_path.to_string()),
                 state: ConfigDiskState::PresentLuks {
