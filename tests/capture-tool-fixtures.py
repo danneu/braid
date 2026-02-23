@@ -75,14 +75,6 @@ machine.succeed(
     f" > {FIXTURE_DIR}/cryptsetup-status-active.txt"
 )
 
-# 7b. cryptsetup status (inactive stderr/stdout)
-machine.succeed("cryptsetup close braid-vdb")
-machine.succeed(
-    f"cryptsetup status braid-vdb"
-    f" > {FIXTURE_DIR}/cryptsetup-status-inactive.stdout"
-    f" 2> {FIXTURE_DIR}/cryptsetup-status-inactive.stderr || true"
-)
-
 # 8. cryptsetup luksUUID (text)
 machine.succeed(
     f"cryptsetup luksUUID /dev/vdb"
@@ -100,6 +92,16 @@ machine.succeed(f"btrfs scrub start -B {MOUNT}")
 machine.succeed(
     f"btrfs scrub status {MOUNT}"
     f" > {FIXTURE_DIR}/btrfs-scrub-completed.txt"
+)
+
+# 11. cryptsetup status (inactive stderr/stdout)
+# Must unmount before closing mapper; otherwise cryptsetup reports "still in use".
+machine.succeed(f"umount {MOUNT}")
+machine.succeed("cryptsetup close braid-vdb")
+machine.succeed(
+    f"cryptsetup status braid-vdb"
+    f" > {FIXTURE_DIR}/cryptsetup-status-inactive.stdout"
+    f" 2> {FIXTURE_DIR}/cryptsetup-status-inactive.stderr || true"
 )
 
 # --- Copy fixtures out of the VM ---
