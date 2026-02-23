@@ -1,0 +1,29 @@
+Overall:
+    Device size:		        1040187392
+    Device allocated:		         254935040
+    Device unallocated:		         785252352
+    Device missing:		                 0
+    Device slack:		                 0
+    Used:			          33914880
+    Free (estimated):		         442957824	(min: 442957824)
+    Free (statfs, df):		         441909248
+    Data ratio:			              2.00
+    Metadata ratio:		              2.00
+    Global reserve:		           5767168	(used: 0)
+    Multiple profiles:		                no
+
+Data,RAID1: Size:67108864, Used:16777216 (25.00%)
+   /dev/mapper/braid-vdb	  67108864
+   /dev/dm-1	  67108864
+
+Metadata,RAID1: Size:51970048, Used:163840 (0.32%)
+   /dev/mapper/braid-vdb	  51970048
+   /dev/dm-1	  51970048
+
+System,RAID1: Size:8388608, Used:16384 (0.20%)
+   /dev/mapper/braid-vdb	   8388608
+   /dev/dm-1	   8388608
+
+Unallocated:
+   /dev/mapper/braid-vdb	 392626176
+   /dev/dm-1	 392626176

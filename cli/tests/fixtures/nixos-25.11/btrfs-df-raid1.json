@@ -1,0 +1,31 @@
+{
+  "__header": {
+    "version": "1"
+  },
+  "filesystem-df": [
+    {
+      "bg-type": "Data",
+      "bg-profile": "RAID1",
+      "total": 67108864,
+      "used": 16777216
+    },
+    {
+      "bg-type": "System",
+      "bg-profile": "RAID1",
+      "total": 8388608,
+      "used": 16384
+    },
+    {
+      "bg-type": "Metadata",
+      "bg-profile": "RAID1",
+      "total": 51970048,
+      "used": 163840
+    },
+    {
+      "bg-type": "GlobalReserve",
+      "bg-profile": "single",
+      "total": 5767168,
+      "used": 0
+    }
+  ]
+}
