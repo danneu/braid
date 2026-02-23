@@ -84,7 +84,9 @@ pub enum BlockedReasonCode {
 }
 ```
 
-Update `Warning.code` from `String` to `WarningCode`, `BlockedReason.code` from `String` to `BlockedReasonCode`. This replaces string constants with exhaustive enum matching across all 21 tests.
+Update `Warning.code` from `String` to `WarningCode`, `BlockedReason.code` from `String` to `BlockedReasonCode`. This replaces string constants with exhaustive enum matching across all tests.
+
+**Migration impact:** `Warning` and `BlockedReason` in `types.rs` currently use `code: String`. Changing to enum types will require updating existing Phase 1 test code in `types.rs` that constructs `BlockedReason { code: "X".to_owned(), .. }` — these become `BlockedReason { code: BlockedReasonCode::..., .. }`. No Phase 2 parser code uses these types, so parse tests are unaffected.
 
 **Plan status as an enum** — not a raw string:
 
@@ -189,20 +191,23 @@ pub fn compute_plan(
 ### 4. `generate_plan_id()` in plan.rs
 
 ```rust
-pub fn generate_plan_id() -> String
+pub fn generate_plan_id() -> String              // public API — calls now_utc + new_v4
+fn build_plan_id(now: OffsetDateTime, nonce: &str) -> String  // testable internal
 ```
 
 Format: `{ISO8601_UTC}-{6_hex_chars}` matching bash (e.g. `2026-02-23T14:30:45Z-a1b2c3`).
 
-Add `time = { version = "0.3", features = ["formatting", "macros"] }` to `Cargo.toml`. Use `time::OffsetDateTime::now_utc()` with `format_description!("[year]-[month]-[day]T[hour]:[minute]:[second]Z")` for the ISO 8601 timestamp. Use `sha2` + `uuid::Uuid::new_v4()` for the 6-char random hash suffix. Regenerate `Cargo.lock`.
+`build_plan_id` is the deterministic core: formats timestamp, sha256-hashes `"{ts}-{nonce}"`, takes first 6 hex chars. `generate_plan_id` wraps it with real clock + `Uuid::new_v4()`. Tests call `build_plan_id` directly with fixed inputs to assert exact format without flakiness.
+
+Add `time = { version = "0.3", features = ["formatting", "macros"] }` to `Cargo.toml`. Regenerate `Cargo.lock`.
 
 ### 5. `to_plan_report()` in plan.rs
 
 ```rust
-pub fn to_plan_report(outcome: &PlanOutcome, mount_point: &str) -> PlanReport
+pub fn to_plan_report(outcome: &PlanOutcome, config: &Config) -> PlanReport
 ```
 
-Converts `PlanOutcome` → `PlanReport` with computed `summary`. `skipped_total` derived from warning codes (`DISK_ABSENT_SKIPPED`, `INIT_REQUIRED`).
+Takes `&Config` instead of `mount_point: &str` — single source of truth, avoids mismatched paths. Converts `PlanOutcome` → `PlanReport` with computed `summary`. `skipped_total` derived from warning codes (`DiskAbsentSkipped`, `InitRequired`).
 
 ### 6. `format_plan_human()` in plan.rs
 
@@ -223,7 +228,7 @@ Actions: 2
 Warnings: none
 ```
 
-Key: status shows `"applicable with warnings"` when applicable + warnings > 0.
+Key: human output prints `"applicable with warnings"` (spaces, readable). JSON serializes as `"applicable_with_warnings"` (snake_case from serde).
 
 ### 7. Tests — one per scenario
 
@@ -240,7 +245,7 @@ fn config_disk_not_luks(path: &str) -> ConfigDisk { ... }
 
 | # | Test name | Scenario | Key assertions |
 |---|-----------|----------|----------------|
-| 1 | `plan_noop` | Config matches pool | `Applicable`, 0 actions total (no-op = empty actions list) |
+| 1 | `plan_noop` | Config matches pool | `Applicable`, 0 actions total (verify not appended without mutations) |
 | 2 | `plan_add_single_disk` | 1 new LUKS disk, 2-disk pool | `Applicable`, OPEN_LUKS + ADD_DISK_BTRFS_ADD + BALANCE_TO_RAID1 |
 | 3 | `plan_add_skip_open_when_mapper_open` | New disk with `mapper_open: true` | No OPEN_LUKS, only ADD_DISK_BTRFS_ADD |
 | 4 | `plan_remove_single_disk` | Pool has disk not in config | `Applicable`, REMOVE_DISK_GRACEFUL + CLOSE_LUKS_MAPPER |
@@ -260,8 +265,7 @@ fn config_disk_not_luks(path: &str) -> ConfigDisk { ... }
 | 18 | `plan_blocked_not_convertible` | Blocked plan | `ApplicablePlan::try_from()` returns Err (already tested in types.rs, but confirm integration) |
 | 19 | `plan_report_json_schema` | Any applicable plan | `to_plan_report()` produces correct `schema_version`, `summary` counts, `status` is `PlanStatus::Applicable` |
 | 20 | `plan_report_skipped_total` | Absent + init-required warnings | `summary.skipped_total` counts both DISK_ABSENT_SKIPPED and INIT_REQUIRED |
-| 21 | `plan_human_output_format` | Applicable with warnings | `format_plan_human()` contains "Plan ID:", "Status: applicable_with_warnings", action lines |
-| 22 | `plan_noop_no_verify_actions` | No-op plan | Zero actions total — verify actions not appended when no mutations |
+| 21 | `plan_human_output_format` | Applicable with warnings | `format_plan_human()` contains "Plan ID:", "Status: applicable with warnings" (human-readable spaces), action lines |
 
 ### 8. Update `lib.rs`
 
@@ -287,4 +291,4 @@ All Phase 1 + Phase 2 + Phase 3 tests must pass.
 - **Warning/blocked codes are enums** — `WarningCode` and `BlockedReasonCode` with `#[serde(rename_all = "SCREAMING_SNAKE_CASE")]`. Compile-time exhaustive matching across all tests; serialized as strings in JSON output.
 - **No separate `identity.rs` module** — UUID matching is simple enough to inline in the planner (~5 lines). Can extract later if complexity grows.
 - **`time` crate for timestamps** — `time = { version = "0.3", features = ["formatting", "macros"] }` added to Cargo.toml. Provides clean ISO 8601 UTC formatting for `generate_plan_id()`. `sha2` + `uuid::Uuid::new_v4()` for the 6-char hash suffix.
-- **22 tests** — one per scenario + JSON schema + human output + explicit noop-has-no-actions. All construct inputs by hand (no mocking needed).
+- **21 tests** — one per scenario + JSON schema + human output. All construct inputs by hand (no mocking needed).
