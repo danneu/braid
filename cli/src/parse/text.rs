@@ -79,7 +79,7 @@ pub fn parse_cryptsetup_status(
         });
     }
 
-    // Extract "device:" line value
+    // Extract "device:" line value — required when active
     let device = raw
         .stdout
         .lines()
@@ -88,11 +88,15 @@ pub fn parse_cryptsetup_status(
             trimmed
                 .strip_prefix("device:")
                 .map(|v| v.trim().to_owned())
-        });
+        })
+        .ok_or_else(|| ParseError::MissingField {
+            cmd: raw.cmd.clone(),
+            field: "device".into(),
+        })?;
 
     Ok(CryptsetupStatusOutput {
         is_active: true,
-        device,
+        device: Some(device),
     })
 }
 
@@ -430,6 +434,18 @@ mod tests {
         };
         let err = parse_cryptsetup_status(&raw).unwrap_err();
         assert!(matches!(err, ParseError::CommandFailed { .. }));
+    }
+
+    #[test]
+    fn cryptsetup_status_errors_when_active_but_no_device_line() {
+        let raw = RawCommandOutput {
+            cmd: "cryptsetup status".into(),
+            stdout: "/dev/mapper/braid-vda is active and is in use.\n  type:    LUKS2\n".into(),
+            stderr: String::new(),
+            exit_status: 0,
+        };
+        let err = parse_cryptsetup_status(&raw).unwrap_err();
+        assert!(matches!(err, ParseError::MissingField { .. }));
     }
 
     // --- parse_btrfs_scrub_status ---

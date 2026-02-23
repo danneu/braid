@@ -92,18 +92,12 @@ pub fn parse_lsblk_json(raw: &RawCommandOutput) -> Result<LsblkOutput, ParseErro
 }
 
 pub fn parse_findmnt_json(raw: &RawCommandOutput) -> Result<FindmntOutput, ParseError> {
-    // findmnt exits non-zero when mount point is not found — benign if stderr is
-    // empty or contains expected patterns.
+    // findmnt exits non-zero when mount point is not found — benign ONLY if
+    // stderr is empty (no unexpected error message). Any stderr content on
+    // non-zero exit is treated as a real failure.
     if raw.exit_status != 0 {
         let stderr = raw.stderr.trim();
         if stderr.is_empty() {
-            return Ok(FindmntOutput {
-                filesystems: vec![],
-            });
-        }
-        // Some versions of findmnt don't output to stderr at all on missing mount,
-        // others print nothing. If stdout is also empty, treat as not-found.
-        if raw.stdout.trim().is_empty() {
             return Ok(FindmntOutput {
                 filesystems: vec![],
             });
@@ -250,8 +244,8 @@ mod tests {
     fn findmnt_errors_on_unexpected_stderr() {
         let raw = RawCommandOutput {
             cmd: "findmnt".into(),
-            stdout: "some output".into(),
-            stderr: "unexpected error".into(),
+            stdout: String::new(),
+            stderr: "findmnt: unknown filesystem type 'zfs'".into(),
             exit_status: 1,
         };
         let err = parse_findmnt_json(&raw).unwrap_err();
