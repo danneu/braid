@@ -13,6 +13,27 @@
         "x86_64-linux"
       ];
 
+      packagesFor = system:
+        let
+          pkgs = nixpkgs.legacyPackages.${system};
+        in
+        {
+          braid-rust = pkgs.rustPlatform.buildRustPackage {
+            pname = "braid-cli";
+            version = "0.1.0";
+            src = ./cli;
+            cargoLock.lockFile = ./cli/Cargo.lock;
+          };
+        }
+        // (
+          if system == "aarch64-darwin" then
+            {
+              playground = (pkgs.testers.nixosTest (import ./vm/playground.nix)).driver;
+            }
+          else
+            { }
+        );
+
       checksFor = system:
         let
           pkgs = nixpkgs.legacyPackages.${system};
@@ -50,8 +71,7 @@
         };
     in
     {
-      packages.aarch64-darwin.playground =
-        (nixpkgs.legacyPackages.aarch64-darwin.testers.nixosTest (import ./vm/playground.nix)).driver;
+      packages = forAllSystems packagesFor;
 
       checks = forAllSystems checksFor;
     };

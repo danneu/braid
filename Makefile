@@ -1,6 +1,6 @@
 SYSTEM := $(shell nix eval --impure --expr builtins.currentSystem --raw)
 
-.PHONY: help test test-one test-verbose test-one-verbose playground
+.PHONY: help test test-one test-verbose test-one-verbose playground test-rust
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "}; {printf "  %-15s %s\n", $$1, $$2}'
@@ -16,6 +16,9 @@ test-verbose: ## Run all NixOS VM tests (verbose, shows VM logs)
 
 test-one-verbose: ## Run a single test verbose (e.g. make test-one-verbose t=hello-world)
 	nix build .#checks.$(SYSTEM).$(t) -L
+
+test-rust: ## Run Rust unit tests
+	cd cli && cargo test
 
 playground: ## Boot interactive VM with btrfs + Samba playground
 	nix run .#playground
