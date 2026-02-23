@@ -1,3 +1,4 @@
+pub mod apply;
 pub mod cmd;
 pub mod config;
 pub mod parse;

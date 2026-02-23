@@ -1,6 +1,7 @@
 use clap::{Args, Parser, Subcommand};
 use std::path::Path;
 
+use braid_cli::apply::{cmd_apply, ApplyFlags};
 use braid_cli::cmd::RealRunner;
 use braid_cli::config::config_read;
 use braid_cli::plan::{compute_plan, format_plan_human, to_plan_report};
@@ -121,7 +122,17 @@ fn main() {
                 print!("{}", format_plan_human(&report));
             }
         }
-        Commands::Apply(_) => println!("not yet implemented"),
+        Commands::Apply(args) => {
+            let flags = ApplyFlags {
+                resume: args.resume,
+                allow_remove_missing: args.allow_remove_missing,
+                allow_remove_ambiguous: args.allow_remove_ambiguous,
+            };
+            if let Err(e) = cmd_apply(Path::new(&config_path), &flags) {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        }
         Commands::Status(_) => println!("not yet implemented"),
     }
 }

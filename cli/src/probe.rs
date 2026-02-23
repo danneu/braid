@@ -41,7 +41,7 @@ pub enum ProbeError {
 // probe_config_disk
 // ---------------------------------------------------------------------------
 
-pub fn probe_config_disk<R: CommandRunner, F: Filesystem>(
+pub fn probe_config_disk<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
     by_id_path: &ByIdPath,

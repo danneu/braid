@@ -26,6 +26,19 @@ pub enum CmdRequest {
     BtrfsScrubStatus { mount_point: String },
     BtrfsDeviceStats { mount_point: String },
     LsblkField { device: String, field: LsblkFieldKind },
+    // Mutation commands for apply
+    CryptsetupLuksOpen { device: String, mapper: String },
+    CryptsetupIsLuks { device: String },
+    CryptsetupClose { mapper: String },
+    BtrfsDeviceAdd { device: String, mount_point: String },
+    BtrfsDeviceRemove { device: String, mount_point: String },
+    BtrfsDeviceRemoveMissing { mount_point: String },
+    BtrfsDeviceScan { device: String },
+    BtrfsBalanceRaid1 { mount_point: String },
+    BtrfsBalanceSingle { mount_point: String },
+    MkfsBtrfs { device: String },
+    Mount { device: String, mount_point: String },
+    MountpointCheck { path: String },
 }
 
 #[derive(Debug, Error)]
@@ -38,6 +51,11 @@ pub enum CmdError {
 
 pub trait CommandRunner {
     fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError>;
+    fn run_with_stdin(
+        &self,
+        request: &CmdRequest,
+        stdin: &[u8],
+    ) -> Result<RawCommandOutput, CmdError>;
 }
 
 pub struct RealRunner;
@@ -48,6 +66,39 @@ impl RealRunner {
         let output = std::process::Command::new(cmd)
             .args(args)
             .output()
+            .map_err(|e| CmdError::Failed(format!("{cmd_str}: {e}")))?;
+
+        let exit_status = output.status.code().unwrap_or(-1);
+
+        Ok(RawCommandOutput {
+            cmd: cmd_str,
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            exit_status,
+        })
+    }
+
+    fn exec_with_stdin(cmd: &str, args: &[&str], stdin_bytes: &[u8]) -> Result<RawCommandOutput, CmdError> {
+        use std::io::Write;
+        use std::process::Stdio;
+
+        let cmd_str = format!("{} {}", cmd, args.join(" "));
+        let mut child = std::process::Command::new(cmd)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| CmdError::Failed(format!("{cmd_str}: {e}")))?;
+
+        if let Some(mut stdin_handle) = child.stdin.take() {
+            stdin_handle
+                .write_all(stdin_bytes)
+                .map_err(|e| CmdError::Failed(format!("{cmd_str}: write stdin: {e}")))?;
+        }
+
+        let output = child
+            .wait_with_output()
             .map_err(|e| CmdError::Failed(format!("{cmd_str}: {e}")))?;
 
         let exit_status = output.status.code().unwrap_or(-1);
@@ -98,6 +149,66 @@ impl CommandRunner for RealRunner {
                 };
                 RealRunner::exec("lsblk", &["-ndo", field_name, device])
             }
+            CmdRequest::CryptsetupLuksOpen { device, mapper } => {
+                // Passphrase must be piped via run_with_stdin, not here.
+                // Calling run() for luksOpen is an error — return a failure.
+                Err(CmdError::Failed(format!(
+                    "CryptsetupLuksOpen must use run_with_stdin (device={device}, mapper={mapper})"
+                )))
+            }
+            CmdRequest::CryptsetupIsLuks { device } => {
+                RealRunner::exec("cryptsetup", &["isLuks", device])
+            }
+            CmdRequest::CryptsetupClose { mapper } => {
+                RealRunner::exec("cryptsetup", &["close", mapper])
+            }
+            CmdRequest::BtrfsDeviceAdd { device, mount_point } => {
+                RealRunner::exec("btrfs", &["device", "add", "-f", device, mount_point])
+            }
+            CmdRequest::BtrfsDeviceRemove { device, mount_point } => {
+                RealRunner::exec("btrfs", &["device", "remove", device, mount_point])
+            }
+            CmdRequest::BtrfsDeviceRemoveMissing { mount_point } => {
+                RealRunner::exec("btrfs", &["device", "remove", "missing", mount_point])
+            }
+            CmdRequest::BtrfsDeviceScan { device } => {
+                RealRunner::exec("btrfs", &["device", "scan", device])
+            }
+            CmdRequest::BtrfsBalanceRaid1 { mount_point } => {
+                RealRunner::exec("btrfs", &["balance", "start", "-dconvert=raid1", "-mconvert=raid1", mount_point])
+            }
+            CmdRequest::BtrfsBalanceSingle { mount_point } => {
+                RealRunner::exec("btrfs", &["balance", "start", "-dconvert=single", "-mconvert=single", "-f", mount_point])
+            }
+            CmdRequest::MkfsBtrfs { device } => {
+                RealRunner::exec("mkfs.btrfs", &["-f", device])
+            }
+            CmdRequest::Mount { device, mount_point } => {
+                RealRunner::exec("mount", &[device, mount_point])
+            }
+            CmdRequest::MountpointCheck { path } => {
+                RealRunner::exec("mountpoint", &["-q", path])
+            }
+        }
+    }
+
+    fn run_with_stdin(
+        &self,
+        request: &CmdRequest,
+        stdin: &[u8],
+    ) -> Result<RawCommandOutput, CmdError> {
+        match request {
+            CmdRequest::CryptsetupLuksOpen { device, mapper } => {
+                RealRunner::exec_with_stdin(
+                    "cryptsetup",
+                    &["luksOpen", "--key-file=-", device, mapper],
+                    stdin,
+                )
+            }
+            _ => {
+                // For non-stdin commands, delegate to run() and ignore stdin.
+                self.run(request)
+            }
         }
     }
 }
@@ -105,11 +216,24 @@ impl CommandRunner for RealRunner {
 #[derive(Default)]
 pub struct MockRunner {
     outputs: std::collections::HashMap<String, RawCommandOutput>,
+    stdin_expectations: std::collections::HashMap<String, Vec<u8>>,
 }
 
 impl MockRunner {
     pub fn with_output(mut self, request: CmdRequest, output: RawCommandOutput) -> Self {
         self.outputs.insert(format!("{request:?}"), output);
+        self
+    }
+
+    pub fn with_output_stdin(
+        mut self,
+        request: CmdRequest,
+        expected_stdin: Vec<u8>,
+        output: RawCommandOutput,
+    ) -> Self {
+        let key = format!("{request:?}");
+        self.outputs.insert(key.clone(), output);
+        self.stdin_expectations.insert(key, expected_stdin);
         self
     }
 }
@@ -120,6 +244,21 @@ impl CommandRunner for MockRunner {
             .get(&format!("{request:?}"))
             .cloned()
             .ok_or(CmdError::MissingMock)
+    }
+
+    fn run_with_stdin(
+        &self,
+        request: &CmdRequest,
+        stdin: &[u8],
+    ) -> Result<RawCommandOutput, CmdError> {
+        let key = format!("{request:?}");
+        if let Some(expected) = self.stdin_expectations.get(&key) {
+            assert_eq!(
+                stdin, expected.as_slice(),
+                "stdin mismatch for {key}"
+            );
+        }
+        self.outputs.get(&key).cloned().ok_or(CmdError::MissingMock)
     }
 }
 
@@ -176,8 +315,49 @@ mod tests {
                 device: "/dev/vda".to_owned(),
                 field: LsblkFieldKind::Model,
             },
+            // Mutation commands
+            CmdRequest::CryptsetupLuksOpen {
+                device: "/dev/vda".to_owned(),
+                mapper: "disk1".to_owned(),
+            },
+            CmdRequest::CryptsetupIsLuks {
+                device: "/dev/vda".to_owned(),
+            },
+            CmdRequest::CryptsetupClose {
+                mapper: "disk1".to_owned(),
+            },
+            CmdRequest::BtrfsDeviceAdd {
+                device: "/dev/mapper/disk1".to_owned(),
+                mount_point: "/mnt/storage".to_owned(),
+            },
+            CmdRequest::BtrfsDeviceRemove {
+                device: "/dev/mapper/disk1".to_owned(),
+                mount_point: "/mnt/storage".to_owned(),
+            },
+            CmdRequest::BtrfsDeviceRemoveMissing {
+                mount_point: "/mnt/storage".to_owned(),
+            },
+            CmdRequest::BtrfsDeviceScan {
+                device: "/dev/mapper/disk1".to_owned(),
+            },
+            CmdRequest::BtrfsBalanceRaid1 {
+                mount_point: "/mnt/storage".to_owned(),
+            },
+            CmdRequest::BtrfsBalanceSingle {
+                mount_point: "/mnt/storage".to_owned(),
+            },
+            CmdRequest::MkfsBtrfs {
+                device: "/dev/mapper/disk1".to_owned(),
+            },
+            CmdRequest::Mount {
+                device: "/dev/mapper/disk1".to_owned(),
+                mount_point: "/mnt/storage".to_owned(),
+            },
+            CmdRequest::MountpointCheck {
+                path: "/mnt/storage".to_owned(),
+            },
         ];
 
-        assert_eq!(all.len(), 10);
+        assert_eq!(all.len(), 22);
     }
 }
