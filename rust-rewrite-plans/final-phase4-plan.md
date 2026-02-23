@@ -45,7 +45,9 @@ pub trait CommandRunner {
 }
 ```
 
-`RealRunner::run_with_stdin` uses `Stdio::piped()` and writes the passphrase bytes to the child's stdin. This keeps secrets out of `Debug`/error output and mock recording. `MockRunner` implements `run_with_stdin` by ignoring stdin and looking up the request as usual.
+`RealRunner::run_with_stdin` uses `Stdio::piped()` and writes the passphrase bytes to the child's stdin. This keeps secrets out of `Debug`/error output and mock recording.
+
+`MockRunner` implements `run_with_stdin` with optional stdin assertion: `with_output_stdin(request, expected_stdin, output)` records the expected stdin bytes alongside the request. When `run_with_stdin` is called, if expected stdin was registered, it asserts the actual bytes match. This enables a unit test that verifies `execute_open_luks` actually passes the passphrase to `run_with_stdin` (not silently dropping it). For tests that don't care about stdin, `with_output` continues to work and `run_with_stdin` falls back to ignoring stdin.
 
 **Critical:** All mutation commands still return `Ok(RawCommandOutput)` for non-zero exits. Callers decide what non-zero means.
 
@@ -94,7 +96,7 @@ pub struct Checkpoint {
 }
 ```
 
-`is_bootstrap` is persisted so resume knows whether mkfs is permitted. Computed once at plan time from `!pool.mounted`.
+`is_bootstrap` is persisted so resume knows whether mkfs is permitted. Computed once at plan time from `!pool.mounted && pool.total_devices == 0`.
 
 **`ApplyError` enum:**
 ```rust
@@ -163,14 +165,14 @@ All handlers are generic over the runner: `fn execute_X<R: CommandRunner>(runner
 
 **Idempotency in `execute_open_luks`** (critical for resume): Before opening, iterate `/dev/mapper/*` entries, check if any has the same LUKS UUID as the target device. If found, skip. This prevents double-open errors on resume.
 
-**Safe bootstrap detection in `execute_btrfs_add`**: The `is_bootstrap` flag is computed by the orchestrator BEFORE execution starts, based on positive proof from the probe layer: `pool.mounted == false`. It is NOT inferred from a command failure at execution time.
+**Safe bootstrap detection in `execute_btrfs_add`**: The `is_bootstrap` flag is computed by the orchestrator BEFORE execution starts, based on positive proof from the probe layer: `!pool.mounted && pool.total_devices == 0`. Both conditions required — an existing-but-unmounted pool (mounted=false, total_devices>0) does NOT qualify. The flag is persisted in the checkpoint for resume.
 
-The orchestrator sets `is_bootstrap = !pool.mounted` once during planning. This flag is passed to `execute_btrfs_add`. Inside the handler:
-1. If `is_bootstrap` is true AND `mountpoint -q` confirms not mounted → `mkfs.btrfs -f` + `mount` + `mkdir -p`.
+The orchestrator sets `is_bootstrap = !pool.mounted && pool.total_devices == 0` once during planning. This flag is passed to `execute_btrfs_add`. Inside the handler:
+1. If `is_bootstrap` is true AND `mountpoint -q` confirms not mounted → `mkfs.btrfs -f` + `mkdir -p` + `mount`.
 2. If `is_bootstrap` is true BUT `mountpoint -q` says mounted (race/resume) → treat as existing pool, `btrfs device add -f`.
 3. If `is_bootstrap` is false → always `btrfs device add -f`.
 
-This means `mkfs.btrfs` is ONLY reachable when: (a) the probe layer confirmed the pool was unmounted at plan time, AND (b) the pool is still unmounted at execution time. A transient `btrfs filesystem show` failure cannot trigger mkfs.
+This means `mkfs.btrfs` is ONLY reachable when: (a) probe confirmed the pool was unmounted AND had zero known devices at plan time, AND (b) the pool is still unmounted at execution time. Neither transient command failures nor existing-but-offline pools can trigger mkfs.
 
 #### 3e. Action dispatch
 
@@ -296,7 +298,7 @@ Add `pub mod apply;`.
 
 ### 6. NixOS VM test
 
-**`tests/16-braid-apply-rust.nix`** — 4 virtual disks. Both bash `braid` (for init-disk setup) and Rust `braid-rust` (for apply validation). Same pattern as `15-braid-plan-rust.nix`.
+**`tests/16-braid-apply-rust.nix`** — 4 virtual disks. Takes `{ braid-rust }:` argument (same pattern as updated `15-braid-plan-rust.nix`). Both bash `braid` (for init-disk) and Rust `braid-rust` (for apply) in `environment.systemPackages`.
 
 **`tests/braid-apply-rust.py`** — Subtests matching the bash test coverage:
 
@@ -328,12 +330,14 @@ Note: bootstrap (mkfs.btrfs for first disk) is the one legitimate mkfs path. The
 ### 7. Register test in flake.nix
 
 ```nix
-braid-apply-rust = pkgs.testers.nixosTest (import ./tests/16-braid-apply-rust.nix);
+braid-apply-rust = pkgs.testers.nixosTest (import ./tests/16-braid-apply-rust.nix {
+  braid-rust = braid-rust-test;
+});
 ```
 
 ## Safety invariants
 
-1. **No luksFormat in apply path.** `ActionType` enum has no format variant. `mkfs.btrfs` only runs inside `execute_btrfs_add` under positive bootstrap proof: probe confirmed `pool.mounted == false` at plan time AND `mountpoint -q` confirms still unmounted at execution time. A transient command failure cannot trigger mkfs.
+1. **No luksFormat in apply path.** `ActionType` enum has no format variant. `mkfs.btrfs` only runs inside `execute_btrfs_add` under positive bootstrap proof: probe confirmed `!pool.mounted && pool.total_devices == 0` at plan time AND `mountpoint -q` confirms still unmounted at execution time. Existing-but-offline pools and transient command failures cannot trigger mkfs.
 
 2. **Config hash staleness.** On `--resume`, checkpoint's `config_hash` must match `config_hash(current_raw_config)`. Any config edit between interrupt and resume → hard reject.
 
@@ -350,7 +354,7 @@ braid-apply-rust = pkgs.testers.nixosTest (import ./tests/16-braid-apply-rust.ni
 - **Mutation commands as CmdRequest variants** — keeps all command construction in `cmd.rs`, testable via `MockRunner`.
 - **Passphrase via `run_with_stdin`, not in enum** — `CommandRunner` trait gains `run_with_stdin(&self, request, stdin_bytes)`. Keeps secrets out of `Debug`/error/mock surfaces.
 - **Generic executor over `R: CommandRunner`** — all execute handlers accept `&R` / `&dyn Filesystem`, fully unit-testable with `MockRunner` + `MockFs` without VM.
-- **Bootstrap flag from probe, not from command failure** — `is_bootstrap` is computed once from `pool.mounted == false` (positive proof), passed into `execute_btrfs_add`. Never inferred from transient failures.
+- **Bootstrap flag from probe, not from command failure** — `is_bootstrap` requires `!pool.mounted && pool.total_devices == 0` (positive proof of empty pool), persisted in checkpoint, passed into `execute_btrfs_add`. Never inferred from transient failures or existing-but-offline pools.
 - **Checkpoint is a superset of PlanReport** — adds `config_hash`, `created_at`, `updated_at`, `last_completed_action_id`. Actions are the same `Vec<Action>` with status updated in place.
 - **BRAID_TEST_FAIL_AFTER_ACTION** — test hook for simulating interruption. Checked after each action completion. Same mechanism as bash.
 - **Verify actions warn, don't fail** — `execute_verify_health` and `execute_verify_diskset` print warnings but return `Ok`. Matches bash behavior.
