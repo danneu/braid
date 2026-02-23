@@ -38,6 +38,10 @@ NixOS VM tests validate behavior, not just command success. TDD: write failing t
 
 Braid only targets NixOS. No portability abstractions, no generic Linux fallbacks. Follow NixOS module conventions — same option types, patterns, and idioms as nixpkgs. When in doubt, nixpkgs is the tiebreaker. [Why →](decisions/nix-native.md)
 
+## 10. Pinned toolchain
+
+Runtime tool versions are pinned to a specific NixOS stable release via the flake input. Both shell and Rust wrappers execute with an explicit PATH containing only module-controlled packages. Parsers assume the output format of the pinned version. Upgrading tools requires updating golden-file fixtures and parser tests. [Why →](decisions/toolchain-pinning.md)
+
 ---
 
 Implementation workflow and conventions are in [AGENTS.md](../AGENTS.md).

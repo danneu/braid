@@ -51,13 +51,17 @@ struct RawFindmntEntry {
     fstype: String,
 }
 
+// deny_unknown_fields: btrfs filesystem df --format json outputs its full schema;
+// new fields signal a tool version change that needs parser investigation.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawBtrfsDfOutput {
     #[serde(rename = "filesystem-df")]
     filesystem_df: Vec<RawBtrfsDfEntry>,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawBtrfsDfEntry {
     bg_type: String,
     bg_profile: String,

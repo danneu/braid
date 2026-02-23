@@ -2,7 +2,7 @@
   description = "braid — NixOS NAS with LUKS + btrfs RAID1";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
     crane.url = "github:ipetkov/crane";
   };
 
@@ -27,17 +27,31 @@
           };
           commonArgs = { inherit src; pname = "braid-cli"; version = "0.1.0"; };
           cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+          braid-cli-unwrapped = craneLib.buildPackage (commonArgs // { inherit cargoArtifacts; });
+          toolPath = pkgs.lib.makeBinPath [
+            pkgs.cryptsetup pkgs.btrfs-progs pkgs.util-linux pkgs.jq pkgs.coreutils
+          ];
         in {
-          braid-rust = craneLib.buildPackage (commonArgs // { inherit cargoArtifacts; });
+          # Unwrapped: bin/braid (raw crane output)
+          inherit braid-cli-unwrapped;
+
+          # Wrapped: bin/braid-rust, with pinned tool PATH
+          braid-rust = pkgs.runCommand "braid-rust" { nativeBuildInputs = [ pkgs.makeWrapper ]; } ''
+            mkdir -p $out/bin
+            makeWrapper ${braid-cli-unwrapped}/bin/braid $out/bin/braid-rust \
+              --prefix PATH : ${toolPath}
+          '';
         };
 
       packagesFor = system:
         let
           pkgs = nixpkgs.legacyPackages.${system};
+          isLinux = builtins.match ".*-linux" system != null;
         in
         {
-          inherit (craneFor system) braid-rust;
+          inherit (craneFor system) braid-cli-unwrapped;
         }
+        // (if isLinux then { inherit (craneFor system) braid-rust; } else {})
         // (
           if system == "aarch64-darwin" then
             {
@@ -52,11 +66,7 @@
           pkgs = nixpkgs.legacyPackages.${system};
           # VM tests run Linux — build the binary for the right platform
           linuxSystem = builtins.replaceStrings ["-darwin"] ["-linux"] system;
-          braid-rust-test = (craneFor linuxSystem).braid-rust.overrideAttrs (old: {
-            postInstall = (old.postInstall or "") + ''
-              mv $out/bin/braid $out/bin/braid-rust
-            '';
-          });
+          linuxCrane = craneFor linuxSystem;
         in
         {
           hello-world = pkgs.testers.nixosTest (import ./tests/0-hello-world.nix);
@@ -81,10 +91,14 @@
           braid-bootstrap = pkgs.testers.nixosTest (import ./tests/13-braid-bootstrap.nix);
           braid-init-disk = pkgs.testers.nixosTest (import ./tests/14-braid-init-disk.nix);
           braid-plan-rust = pkgs.testers.nixosTest (import ./tests/15-braid-plan-rust.nix {
-            braid-rust = braid-rust-test;
+            braid-rust = linuxCrane.braid-rust;
           });
           braid-apply-rust = pkgs.testers.nixosTest (import ./tests/16-braid-apply-rust.nix {
-            braid-rust = braid-rust-test;
+            braid-rust = linuxCrane.braid-rust;
+          });
+          tool-versions = pkgs.testers.nixosTest (import ./tests/17-tool-versions.nix {
+            braid-rust = linuxCrane.braid-rust;
+            braid-cli-unwrapped = linuxCrane.braid-cli-unwrapped;
           });
           daemon-hello-world = pkgs.testers.nixosTest (import ./tests/daemon/00-hello-world.nix);
           braid-module-disabled = pkgs.testers.nixosTest (import ./tests/braid-module/00-disabled.nix);
