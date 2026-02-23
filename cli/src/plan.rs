@@ -464,10 +464,20 @@ const BY_ID_PREFIX: &str = "/dev/disk/by-id/";
 
 fn mapper_name_for_by_id(path: &ByIdPath) -> Option<MapperName> {
     let basename = path.0.strip_prefix(BY_ID_PREFIX)?;
-    if basename.is_empty() || basename.contains('/') || basename == "." || basename == ".." {
+
+    if !is_valid_mapper_basename(basename) {
         return None;
     }
+
     Some(MapperName(basename.to_owned()))
+}
+
+fn is_valid_mapper_basename(s: &str) -> bool {
+    !s.is_empty()
+        && s != "."
+        && s != ".."
+        && !s.contains('/')
+        && !s.chars().any(|c| c.is_whitespace() || c.is_ascii_control())
 }
 
 fn action_type_str(at: &ActionType) -> &'static str {
@@ -1157,6 +1167,15 @@ mod tests {
             "/dev/disk/by-id/.",         // dot
             "/dev/disk/by-id/..",        // dotdot
             "/dev/disk/by-id/a/b",       // embedded slash
+            "/dev/disk/by-id//",         // empty basename via double slash
+            "/dev/disk/by-id/ ",         // whitespace-only basename
+            "/dev/disk/by-id/\t",        // tab-only basename
+            "/dev/disk/by-id/\n",        // newline-only basename
+            "/dev/disk/by-id/../disk-1", // parent traversal segment
+            "/dev/disk/by-id/./disk-1",  // current-dir traversal segment
+            "/DEV/disk/by-id/disk-1",    // case mismatch in prefix
+            " /dev/disk/by-id/disk-1",   // leading space
+            "/dev/disk/by-id/disk-1 ",   // trailing space
         ];
         for bad_path in bad_paths {
             let disks = vec![ConfigDisk {
