@@ -68,7 +68,7 @@ impl CommandRunner for RealRunner {
                 RealRunner::exec("lsblk", &["--json", "--bytes", "--output", "NAME,TYPE,SIZE,MODEL,SERIAL,UUID"])
             }
             CmdRequest::FindmntJson { mount_point } => {
-                RealRunner::exec("findmnt", &["--json", "--output", "TARGET,SOURCE,FSTYPE", "-T", mount_point])
+                RealRunner::exec("findmnt", &["--json", "--output", "TARGET,SOURCE,FSTYPE", "--mountpoint", mount_point])
             }
             CmdRequest::BtrfsFilesystemShow { mount_point } => {
                 RealRunner::exec("btrfs", &["filesystem", "show", mount_point])

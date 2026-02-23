@@ -11,7 +11,7 @@ use braid_cli::types::PlanFlags;
 #[command(name = "braid")]
 #[command(about = "braid Rust CLI", long_about = None)]
 struct Cli {
-    #[arg(long, default_value = "/etc/braid/config.json")]
+    #[arg(long, global = true, default_value = "/etc/braid/config.json")]
     config: String,
 
     #[command(subcommand)]

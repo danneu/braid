@@ -290,11 +290,23 @@ pub fn parse_btrfs_filesystem_show(
             field: "Total devices".into(),
         })?;
 
+    // Filter out missing-device placeholders. btrfs-progs prints:
+    //   devid  2 size 0 used 0 path /dev/mapper/disk-2 MISSING
+    // These are synthetic — the device is gone. Only real present devices
+    // are included; non-mapper real paths (e.g. /dev/sda1) are kept so
+    // probe_pool can hard-fail on the invariant violation.
     let devices: Vec<BtrfsShowDevice> = devid_re
         .captures_iter(stdout)
-        .map(|c| BtrfsShowDevice {
-            devid: c[1].parse().unwrap(),
-            path: c[2].trim().to_owned(),
+        .filter_map(|c| {
+            let path = c[2].trim();
+            if path.ends_with(" MISSING") {
+                None
+            } else {
+                Some(BtrfsShowDevice {
+                    devid: c[1].parse().unwrap(),
+                    path: path.to_owned(),
+                })
+            }
         })
         .collect();
 
@@ -615,6 +627,24 @@ mod tests {
         let out = parse_btrfs_filesystem_show(&raw).unwrap();
         assert_eq!(out.total_devices, 2);
         assert_eq!(out.devices.len(), 1); // only 1 device listed, other is missing
+        assert!(out.has_missing);
+    }
+
+    /// btrfs-progs prints `path /dev/mapper/X MISSING` for gone devices.
+    /// Parser excludes the placeholder; total_devices and has_missing are authoritative.
+    #[test]
+    fn btrfs_show_excludes_missing_sentinel_device() {
+        let raw = RawCommandOutput {
+            cmd: "btrfs filesystem show".into(),
+            stdout: fixture("btrfs-show-degraded-missing-line.txt"),
+            stderr: String::new(),
+            exit_status: 0,
+        };
+        let out = parse_btrfs_filesystem_show(&raw).unwrap();
+        assert_eq!(out.total_devices, 2);
+        assert_eq!(out.devices.len(), 1, "MISSING sentinel device must be excluded");
+        assert_eq!(out.devices[0].devid, 1);
+        assert_eq!(out.devices[0].path, "/dev/mapper/braid-vda");
         assert!(out.has_missing);
     }
 

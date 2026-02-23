@@ -93,16 +93,26 @@ pub fn probe_pool<R: CommandRunner>(
     })?;
     let findmnt = crate::parse::parse_findmnt_json(&findmnt_raw)?;
 
-    if findmnt.filesystems.is_empty() {
-        return Ok(PoolState {
-            mounted: false,
-            devices: vec![],
-            missing_count: 0,
-            total_devices: 0,
-        });
-    }
+    // Defensive: only consider entries whose target exactly matches mount_point.
+    // With --mountpoint this should always hold, but guards against fallback to
+    // parent-fs results (e.g. findmnt returning "/" when /mnt/storage is unmounted).
+    let exact = findmnt
+        .filesystems
+        .iter()
+        .find(|e| e.target == mount_point);
 
-    let entry = &findmnt.filesystems[0];
+    let entry = match exact {
+        None => {
+            return Ok(PoolState {
+                mounted: false,
+                devices: vec![],
+                missing_count: 0,
+                total_devices: 0,
+            });
+        }
+        Some(e) => e,
+    };
+
     if entry.fstype != "btrfs" {
         return Err(ProbeError::NotBtrfs {
             mount_point: mount_point.to_owned(),
@@ -404,6 +414,26 @@ mod tests {
         assert_eq!(result.missing_count, 0);
     }
 
+    /// findmnt returns "/" (parent fs) when /mnt/storage is unmounted.
+    /// Target mismatch → treat as unmounted, not NotBtrfs.
+    #[test]
+    fn probe_pool_unmounted_target_mismatch() {
+        let runner = MockRunner::default().with_output(
+            CmdRequest::FindmntJson {
+                mount_point: "/mnt/storage".into(),
+            },
+            ok_raw(
+                "findmnt --json --output TARGET,SOURCE,FSTYPE --mountpoint /mnt/storage",
+                r#"{"filesystems": [{"target":"/","source":"/dev/sda1","fstype":"ext4"}]}"#,
+            ),
+        );
+
+        let result = probe_pool(&runner, "/mnt/storage").unwrap();
+        assert!(!result.mounted);
+        assert!(result.devices.is_empty());
+        assert_eq!(result.missing_count, 0);
+    }
+
     #[test]
     fn probe_pool_mounted_not_btrfs() {
         let runner = MockRunner::default().with_output(
@@ -526,6 +556,51 @@ mod tests {
         assert_eq!(result.devices.len(), 2);
         assert_eq!(result.missing_count, 1);
         assert_eq!(result.total_devices, 3);
+    }
+
+    /// Degraded pool where btrfs-progs emits `path /dev/mapper/X MISSING`.
+    /// Parser strips the sentinel; probe only sees present devices.
+    #[test]
+    fn probe_pool_degraded_missing_sentinel() {
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::FindmntJson {
+                    mount_point: "/mnt/storage".into(),
+                },
+                findmnt_btrfs(),
+            )
+            .with_output(
+                CmdRequest::BtrfsFilesystemShow {
+                    mount_point: "/mnt/storage".into(),
+                },
+                ok_raw(
+                    "btrfs filesystem show /mnt/storage",
+                    "Label: none  uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
+                     \tTotal devices 2 FS bytes used 1.00GiB\n\
+                     \tdevid    1 size 10.00GiB used 2.00GiB path /dev/mapper/disk-1\n\
+                     \tdevid    2 size 0 used 0 path /dev/mapper/disk-2 MISSING\n\
+                     \t*** Some devices missing\n",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "disk-1".into(),
+                },
+                cryptsetup_status_active("disk-1", "/dev/vda"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vda".into(),
+                },
+                cryptsetup_uuid_ok("/dev/vda", "11111111-1111-1111-1111-111111111111"),
+            );
+
+        let result = probe_pool(&runner, "/mnt/storage").unwrap();
+        assert!(result.mounted);
+        assert_eq!(result.devices.len(), 1, "MISSING device must be excluded");
+        assert_eq!(result.missing_count, 1);
+        assert_eq!(result.total_devices, 2);
+        assert_eq!(result.devices[0].mapper, MapperName("disk-1".into()));
     }
 
     #[test]
