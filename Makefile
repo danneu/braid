@@ -22,7 +22,8 @@ test-rust: ## Run Rust unit tests
 
 capture-fixtures: ## Capture tool output fixtures from nixos VM into cli/tests/fixtures/nixos-25.11/
 	nix build .#checks.$(SYSTEM).capture-tool-fixtures -L
-	cp result/fixtures/* cli/tests/fixtures/nixos-25.11/
+	chmod u+w cli/tests/fixtures/nixos-25.11/* 2>/dev/null || true
+	cp -f result/fixtures/* cli/tests/fixtures/nixos-25.11/
 	@echo "Fixtures written to cli/tests/fixtures/nixos-25.11/"
 
 playground: ## Boot interactive VM with btrfs + Samba playground
