@@ -75,6 +75,14 @@ machine.succeed(
     f" > {FIXTURE_DIR}/cryptsetup-status-active.txt"
 )
 
+# 7b. cryptsetup status (inactive stderr/stdout)
+machine.succeed("cryptsetup close braid-vdb")
+machine.succeed(
+    f"cryptsetup status braid-vdb"
+    f" > {FIXTURE_DIR}/cryptsetup-status-inactive.stdout"
+    f" 2> {FIXTURE_DIR}/cryptsetup-status-inactive.stderr || true"
+)
+
 # 8. cryptsetup luksUUID (text)
 machine.succeed(
     f"cryptsetup luksUUID /dev/vdb"
