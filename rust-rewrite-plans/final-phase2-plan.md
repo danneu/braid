@@ -86,8 +86,9 @@ pub struct BtrfsDfOutput { pub entries: Vec<BtrfsDfEntry> }
 
 ```rust
 // btrfs filesystem show
-pub struct BtrfsShowDevice { pub devid: u64, pub size_bytes: Option<u64>, pub path: String }
-// size_bytes: parsed from human-readable "1.00GiB" to bytes; None if parse fails (non-critical field)
+// Only devid + path are authoritative. Capacity comes from `btrfs filesystem usage --raw`.
+// Size field from show output is intentionally not parsed — it's human-formatted and unused by domain code.
+pub struct BtrfsShowDevice { pub devid: u64, pub path: String }
 pub struct BtrfsFilesystemShowOutput { pub total_devices: u64, pub devices: Vec<BtrfsShowDevice>, pub has_missing: bool }
 
 // cryptsetup status
@@ -218,4 +219,4 @@ All Phase 1 tests + new parser tests must pass.
 - **btrfs df JSON shape validated in Phase 2** fixture tests, not deferred to Phase 3.5
 - **regex added** — for btrfs show/stats text parsing
 - **Fixtures in `cli/tests/fixtures/phase2/`** — file-based, not inline consts. Reusable in Phase 3/3.5 golden tests + VM validation. Provenance-friendly.
-- **Numeric bytes everywhere** — `BtrfsShowDevice.size_bytes: Option<u64>` (parsed from human-readable), no raw strings for sizes. `ScrubTimestamp` newtype wrapper for scrub datetime so domain code never re-parses.
+- **No non-authoritative fields** — `BtrfsShowDevice` has only `devid` + `path` (capacity comes from `btrfs filesystem usage --raw`). `ScrubTimestamp` newtype wrapper for scrub datetime so domain code never re-parses.
