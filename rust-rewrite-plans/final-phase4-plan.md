@@ -23,7 +23,7 @@ New variants needed for apply's action handlers:
 
 | Variant | Command | Notes |
 |---|---|---|
-| `CryptsetupLuksOpen { device, mapper, passphrase }` | `echo -n {passphrase} \| cryptsetup luksOpen --key-file=- {device} {mapper}` | Pipe passphrase via stdin |
+| `CryptsetupLuksOpen { device, mapper }` | `cryptsetup luksOpen --key-file=- {device} {mapper}` | Passphrase piped via stdin — NOT in the enum |
 | `CryptsetupIsLuks { device }` | `cryptsetup isLuks {device}` | Exit 0 = LUKS, non-zero = not |
 | `CryptsetupClose { mapper }` | `cryptsetup close {mapper}` | |
 | `BtrfsDeviceAdd { device, mount_point }` | `btrfs device add -f {device} {mount_point}` | `-f` handles stale metadata |
@@ -36,7 +36,16 @@ New variants needed for apply's action handlers:
 | `Mount { device, mount_point }` | `mount {device} {mount_point}` | After mkfs for bootstrap |
 | `MountpointCheck { path }` | `mountpoint -q {path}` | For verify_health |
 
-`RealRunner` dispatch: `CryptsetupLuksOpen` is special — it needs stdin piping. Use `Command::new("sh").args(["-c", "echo -n ... | cryptsetup ..."])` or use `Command.stdin(Stdio::piped())` and write passphrase to stdin. Prefer the latter (no shell injection risk).
+**Security: passphrase stays out of CmdRequest.** `CryptsetupLuksOpen` contains only `device` and `mapper`. The passphrase is passed separately to a dedicated `run_with_stdin` method on `CommandRunner`:
+
+```rust
+pub trait CommandRunner {
+    fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError>;
+    fn run_with_stdin(&self, request: &CmdRequest, stdin: &[u8]) -> Result<RawCommandOutput, CmdError>;
+}
+```
+
+`RealRunner::run_with_stdin` uses `Stdio::piped()` and writes the passphrase bytes to the child's stdin. This keeps secrets out of `Debug`/error output and mock recording. `MockRunner` implements `run_with_stdin` by ignoring stdin and looking up the request as usual.
 
 **Critical:** All mutation commands still return `Ok(RawCommandOutput)` for non-zero exits. Callers decide what non-zero means.
 
@@ -78,11 +87,14 @@ pub struct Checkpoint {
     pub created_at: String,
     pub updated_at: String,
     pub last_completed_action_id: String,
+    pub is_bootstrap: bool,
     pub actions: Vec<Action>,
     pub warnings: Vec<Warning>,
     pub confirmations: Vec<Confirmation>,
 }
 ```
+
+`is_bootstrap` is persisted so resume knows whether mkfs is permitted. Computed once at plan time from `!pool.mounted`.
 
 **`ApplyError` enum:**
 ```rust
@@ -134,37 +146,45 @@ fn check_confirmations(confirmations: &[Confirmation]) -> Result<(), ApplyError>
 
 #### 3d. Action executor — one handler per ActionType
 
-Each handler is a function: `fn execute_X(runner, fs, target, config) -> Result<(), ApplyError>`.
+All handlers are generic over the runner: `fn execute_X<R: CommandRunner>(runner: &R, fs: &dyn Filesystem, target, config) -> Result<(), ApplyError>`. This makes apply logic fully unit-testable with `MockRunner` + `MockFs`.
 
 **Handlers and their logic (matching bash semantics exactly):**
 
 | Handler | Logic |
 |---|---|
-| `execute_open_luks(target)` | Read `BRAID_PASSPHRASE` env. Check device exists (`fs.exists`). Check `isLuks`. Idempotent: if mapper already open with same UUID, skip. Otherwise `cryptsetupLuksOpen`. |
-| `execute_btrfs_add(target, mount_point)` | Check pool exists (`btrfs filesystem show`). If 0 devices: `mkfs.btrfs` + `mount`. Otherwise: `btrfs device scan` + check if returning member; if not in pool, `btrfs device add -f`. |
-| `execute_balance_raid1(mount_point)` | Check if already RAID1 with no missing → skip. Otherwise `btrfs balance start -dconvert=raid1 -mconvert=raid1`. |
-| `execute_remove_graceful(target, mount_point)` | Count current devices. If remaining < 2: convert to single first (`btrfs balance start -dconvert=single -mconvert=single -f`). Then `btrfs device remove`. |
-| `execute_remove_missing(mount_point)` | Count present devices. If remaining < 2: convert to single first. Then `btrfs device remove missing`. |
-| `execute_close_luks(target)` | `cryptsetup close`. Non-fatal on failure (warn, don't error). |
-| `execute_verify_health(mount_point)` | Check mounted (`mountpoint -q`). `btrfs filesystem show` — warn if missing, don't fail. |
-| `execute_verify_diskset(config, mount_point)` | For each config disk: check present, check LUKS, check UUID in pool. Warn on mismatches, don't fail. |
+| `execute_open_luks(runner, fs, target)` | Read `BRAID_PASSPHRASE` env. Check device exists (`fs.exists`). Check `isLuks`. Idempotent: if mapper already open with same UUID, skip. Otherwise `runner.run_with_stdin(CryptsetupLuksOpen{..}, passphrase)`. |
+| `execute_btrfs_add(runner, fs, target, mount_point, is_bootstrap)` | If `is_bootstrap` and pool not mounted: `mkfs.btrfs` + `mount`. Otherwise: `btrfs device scan` + check if returning member; if not in pool, `btrfs device add -f`. |
+| `execute_balance_raid1(runner, mount_point)` | Check if already RAID1 with no missing → skip. Otherwise `btrfs balance start -dconvert=raid1 -mconvert=raid1`. |
+| `execute_remove_graceful(runner, target, mount_point)` | Count current devices. If remaining < 2: convert to single first (`btrfs balance start -dconvert=single -mconvert=single -f`). Then `btrfs device remove`. |
+| `execute_remove_missing(runner, mount_point)` | Count present devices. If remaining < 2: convert to single first. Then `btrfs device remove missing`. |
+| `execute_close_luks(runner, target)` | `cryptsetup close`. Non-fatal on failure (warn, don't error). |
+| `execute_verify_health(runner, mount_point)` | Check mounted (`mountpoint -q`). `btrfs filesystem show` — warn if missing, don't fail. |
+| `execute_verify_diskset(runner, config, mount_point)` | For each config disk: check present, check LUKS, check UUID in pool. Warn on mismatches, don't fail. |
 
 **Idempotency in `execute_open_luks`** (critical for resume): Before opening, iterate `/dev/mapper/*` entries, check if any has the same LUKS UUID as the target device. If found, skip. This prevents double-open errors on resume.
 
-**`execute_btrfs_add` first-disk detection**: Run `btrfs filesystem show {mount_point}`. If it fails or returns 0 `devid` lines → first disk → `mkfs.btrfs -f {device}` then `mount`. Otherwise → `btrfs device add -f`. This is the ONLY code path that calls `mkfs.btrfs`, and only when the pool has zero devices (bootstrap).
+**Safe bootstrap detection in `execute_btrfs_add`**: The `is_bootstrap` flag is computed by the orchestrator BEFORE execution starts, based on positive proof from the probe layer: `pool.mounted == false`. It is NOT inferred from a command failure at execution time.
+
+The orchestrator sets `is_bootstrap = !pool.mounted` once during planning. This flag is passed to `execute_btrfs_add`. Inside the handler:
+1. If `is_bootstrap` is true AND `mountpoint -q` confirms not mounted → `mkfs.btrfs -f` + `mount` + `mkdir -p`.
+2. If `is_bootstrap` is true BUT `mountpoint -q` says mounted (race/resume) → treat as existing pool, `btrfs device add -f`.
+3. If `is_bootstrap` is false → always `btrfs device add -f`.
+
+This means `mkfs.btrfs` is ONLY reachable when: (a) the probe layer confirmed the pool was unmounted at plan time, AND (b) the pool is still unmounted at execution time. A transient `btrfs filesystem show` failure cannot trigger mkfs.
 
 #### 3e. Action dispatch
 
 ```rust
-fn execute_action(
-    runner: &RealRunner,
-    fs: &RealFilesystem,
+fn execute_action<R: CommandRunner>(
+    runner: &R,
+    fs: &dyn Filesystem,
     action: &Action,
     config: &Config,
+    is_bootstrap: bool,
 ) -> Result<(), ApplyError>
 ```
 
-Match on `action.action_type`, dispatch to the corresponding handler. The target is `action.target`.
+Match on `action.action_type`, dispatch to the corresponding handler. The target is `action.target`. `is_bootstrap` is passed through to `execute_btrfs_add`.
 
 #### 3f. Resume target validation
 
@@ -203,8 +223,11 @@ pub fn cmd_apply(
 **Resume flow:**
 1. Check checkpoint exists → error if not
 2. `config_read_raw` → compute hash → compare with `checkpoint.config_hash` → stale error if different
-3. `validate_resume_targets`
-4. Execute loop (shared with fresh)
+3. `check_confirmations` (same gate as fresh — re-validated from checkpoint's `confirmations[]`)
+4. `validate_resume_targets`
+5. Execute loop (shared with fresh)
+
+**Why re-check confirmations on resume:** The checkpoint stores the plan's `confirmations[]` but NOT whether they were satisfied. Re-validating `BRAID_CONFIRM` on resume ensures the operator explicitly consents each time they invoke apply. Without this, a user who interrupts and resumes could bypass a confirmation gate they never saw.
 
 **Execute loop (shared):**
 ```rust
@@ -310,20 +333,24 @@ braid-apply-rust = pkgs.testers.nixosTest (import ./tests/16-braid-apply-rust.ni
 
 ## Safety invariants
 
-1. **No luksFormat in apply path.** `ActionType` enum has no format variant. `mkfs.btrfs` only runs inside `execute_btrfs_add` when pool has 0 devices (fresh bootstrap). The `MkfsBtrfs` CmdRequest is only reachable from that one code path.
+1. **No luksFormat in apply path.** `ActionType` enum has no format variant. `mkfs.btrfs` only runs inside `execute_btrfs_add` under positive bootstrap proof: probe confirmed `pool.mounted == false` at plan time AND `mountpoint -q` confirms still unmounted at execution time. A transient command failure cannot trigger mkfs.
 
 2. **Config hash staleness.** On `--resume`, checkpoint's `config_hash` must match `config_hash(current_raw_config)`. Any config edit between interrupt and resume → hard reject.
 
-3. **Confirmation gates before execution.** All phrases from `confirmations[]` must be provided in `BRAID_CONFIRM` before any action runs. No partial execution without full confirmation.
+3. **Confirmation gates on every invocation.** `check_confirmations` runs on BOTH fresh and resume paths. All phrases from `confirmations[]` must be provided in `BRAID_CONFIRM` before any action runs. Checkpoint stores the required phrases but NOT confirmation state — the operator must consent each time.
 
-4. **Atomic checkpoint writes.** Write `.tmp` + rename. No partial JSON on crash.
+4. **Passphrase never in CmdRequest.** `CryptsetupLuksOpen` enum variant contains only `device` and `mapper`. Passphrase is passed via `run_with_stdin` to avoid accidental logging via `Debug`, error messages, or mock recording.
 
-5. **Resume idempotency.** `execute_open_luks` checks if already open (by UUID). `execute_btrfs_add` checks if device already in pool. Completed actions are skipped.
+5. **Atomic checkpoint writes.** Write `.tmp` + rename. No partial JSON on crash.
+
+6. **Resume idempotency.** `execute_open_luks` checks if already open (by UUID). `execute_btrfs_add` checks if device already in pool. Completed actions are skipped.
 
 ## Key decisions
 
 - **Mutation commands as CmdRequest variants** — keeps all command construction in `cmd.rs`, testable via `MockRunner`.
-- **`CryptsetupLuksOpen` uses stdin pipe** — no shell injection risk from passphrase.
+- **Passphrase via `run_with_stdin`, not in enum** — `CommandRunner` trait gains `run_with_stdin(&self, request, stdin_bytes)`. Keeps secrets out of `Debug`/error/mock surfaces.
+- **Generic executor over `R: CommandRunner`** — all execute handlers accept `&R` / `&dyn Filesystem`, fully unit-testable with `MockRunner` + `MockFs` without VM.
+- **Bootstrap flag from probe, not from command failure** — `is_bootstrap` is computed once from `pool.mounted == false` (positive proof), passed into `execute_btrfs_add`. Never inferred from transient failures.
 - **Checkpoint is a superset of PlanReport** — adds `config_hash`, `created_at`, `updated_at`, `last_completed_action_id`. Actions are the same `Vec<Action>` with status updated in place.
 - **BRAID_TEST_FAIL_AFTER_ACTION** — test hook for simulating interruption. Checked after each action completion. Same mechanism as bash.
 - **Verify actions warn, don't fail** — `execute_verify_health` and `execute_verify_diskset` print warnings but return `Ok`. Matches bash behavior.
