@@ -133,6 +133,20 @@ fn main() {
                 std::process::exit(1);
             }
         }
-        Commands::Status(_) => println!("not yet implemented"),
+        Commands::Status(args) => {
+            let config = match config_read(Path::new(&config_path)) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                }
+            };
+            let runner = RealRunner;
+            let fs = RealFilesystem;
+            if let Err(e) = braid_cli::status::cmd_status(&runner, &fs, &config, args.verbose, args.json) {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        }
     }
 }

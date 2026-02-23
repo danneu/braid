@@ -96,6 +96,9 @@
           braid-apply-rust = pkgs.testers.nixosTest (import ./tests/16-braid-apply-rust.nix {
             braid-rust = linuxCrane.braid-rust;
           });
+          braid-status-rust = pkgs.testers.nixosTest (import ./tests/18-braid-status-rust.nix {
+            braid-rust = linuxCrane.braid-rust;
+          });
           tool-versions = pkgs.testers.nixosTest (import ./tests/17-tool-versions.nix {
             braid-rust = linuxCrane.braid-rust;
             braid-cli-unwrapped = linuxCrane.braid-cli-unwrapped;
