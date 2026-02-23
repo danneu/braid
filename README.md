@@ -208,3 +208,37 @@ sudo smbpasswd -a dan
 ```
 
 Then from macOS: Finder → Cmd+K → `smb://nas/videos`.
+
+## Development
+
+Braid is developed test-first with NixOS VM tests.
+
+Typical loop:
+
+```bash
+# run one test while iterating
+make test-one t=braid-plan-rust
+
+# run full suite before finishing
+make test
+```
+
+Rust CLI code lives in `cli/`. Build it directly with:
+
+```bash
+nix build .#braid-rust
+```
+
+### Crane build caching
+
+`braid-rust` is built with Crane. Crane splits dependency compilation (`buildDepsOnly`) from the final crate build, so dependency artifacts are reused across normal Rust code edits.
+
+Quick check:
+
+```bash
+nix build .#braid-rust
+touch cli/src/main.rs
+nix build .#braid-rust
+```
+
+The second build should be much faster because Cargo dependencies come from cache.

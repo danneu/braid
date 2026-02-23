@@ -10,6 +10,7 @@
 #
 # Dependencies: bash braid (init-disk, apply) for pool setup; Rust braid-rust
 # binary for plan validation.
+{ braid-rust }:
 {
   name = "braid-plan-rust";
 
@@ -18,16 +19,6 @@
       name = "braid";
       runtimeInputs = [ pkgs.cryptsetup pkgs.btrfs-progs pkgs.util-linux pkgs.jq pkgs.coreutils ];
       text = builtins.readFile ../scripts/braid.sh;
-    };
-
-    braid-rust = pkgs.rustPlatform.buildRustPackage {
-      pname = "braid-cli";
-      version = "0.1.0";
-      src = ../cli;
-      cargoLock.lockFile = ../cli/Cargo.lock;
-      postInstall = ''
-        mv $out/bin/braid $out/bin/braid-rust
-      '';
     };
   in {
     virtualisation.emptyDiskImages = [

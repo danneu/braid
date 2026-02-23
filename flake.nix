@@ -3,27 +3,40 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+    crane.url = "github:ipetkov/crane";
   };
 
   outputs =
-    { self, nixpkgs }:
+    { self, nixpkgs, crane }:
     let
       forAllSystems = nixpkgs.lib.genAttrs [
         "aarch64-darwin"
         "x86_64-linux"
       ];
 
+      craneFor = system:
+        let
+          pkgs = nixpkgs.legacyPackages.${system};
+          craneLib = crane.mkLib pkgs;
+          # cleanCargoSource strips test fixtures (.json/.txt) — include them
+          src = pkgs.lib.cleanSourceWith {
+            src = ./cli;
+            filter = path: type:
+              (craneLib.filterCargoSources path type)
+              || (builtins.match ".*tests/fixtures/.*" path != null);
+          };
+          commonArgs = { inherit src; pname = "braid-cli"; version = "0.1.0"; };
+          cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+        in {
+          braid-rust = craneLib.buildPackage (commonArgs // { inherit cargoArtifacts; });
+        };
+
       packagesFor = system:
         let
           pkgs = nixpkgs.legacyPackages.${system};
         in
         {
-          braid-rust = pkgs.rustPlatform.buildRustPackage {
-            pname = "braid-cli";
-            version = "0.1.0";
-            src = ./cli;
-            cargoLock.lockFile = ./cli/Cargo.lock;
-          };
+          inherit (craneFor system) braid-rust;
         }
         // (
           if system == "aarch64-darwin" then
@@ -37,6 +50,13 @@
       checksFor = system:
         let
           pkgs = nixpkgs.legacyPackages.${system};
+          # VM tests run Linux — build the binary for the right platform
+          linuxSystem = builtins.replaceStrings ["-darwin"] ["-linux"] system;
+          braid-rust-test = (craneFor linuxSystem).braid-rust.overrideAttrs (old: {
+            postInstall = (old.postInstall or "") + ''
+              mv $out/bin/braid $out/bin/braid-rust
+            '';
+          });
         in
         {
           hello-world = pkgs.testers.nixosTest (import ./tests/0-hello-world.nix);
@@ -60,7 +80,9 @@
           braid-unified = pkgs.testers.nixosTest (import ./tests/12-braid-unified.nix);
           braid-bootstrap = pkgs.testers.nixosTest (import ./tests/13-braid-bootstrap.nix);
           braid-init-disk = pkgs.testers.nixosTest (import ./tests/14-braid-init-disk.nix);
-          braid-plan-rust = pkgs.testers.nixosTest (import ./tests/15-braid-plan-rust.nix);
+          braid-plan-rust = pkgs.testers.nixosTest (import ./tests/15-braid-plan-rust.nix {
+            braid-rust = braid-rust-test;
+          });
           daemon-hello-world = pkgs.testers.nixosTest (import ./tests/daemon/00-hello-world.nix);
           braid-module-disabled = pkgs.testers.nixosTest (import ./tests/braid-module/00-disabled.nix);
           braid-module-single-disk = pkgs.testers.nixosTest (import ./tests/braid-module/01-single-disk.nix);
