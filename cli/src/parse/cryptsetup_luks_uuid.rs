@@ -34,14 +34,16 @@ mod tests {
 
     fn fixture(name: &str) -> String {
         let path = format!(
-            "{}/tests/fixtures/phase2/{name}",
+            "{}/tests/fixtures/nixos-25.11/{name}",
             env!("CARGO_MANIFEST_DIR")
         );
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("fixture {name}: {e}"))
     }
 
+    // --- Contract tests (nixos-25.11 fixtures) ---
+
     #[test]
-    fn luks_uuid_parses_valid_fixture() {
+    fn luks_uuid_parses_nixos_25_11() {
         let raw = RawCommandOutput {
             cmd: "cryptsetup luksUUID".into(),
             stdout: fixture("cryptsetup-luks-uuid.txt"),
@@ -49,8 +51,10 @@ mod tests {
             exit_status: 0,
         };
         let out = parse_cryptsetup_luks_uuid(&raw).unwrap();
-        assert_eq!(out.uuid.0, "a1b2c3d4-e5f6-7890-abcd-ef1234567890");
+        assert_eq!(out.uuid.0, "71ff9937-fb2f-4091-9641-30a347a23dfd");
     }
+
+    // --- Synthetic tests (inline) ---
 
     #[test]
     fn luks_uuid_rejects_invalid_uuid() {

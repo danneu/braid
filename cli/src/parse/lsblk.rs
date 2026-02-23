@@ -88,16 +88,16 @@ mod tests {
 
     fn fixture(name: &str) -> String {
         let path = format!(
-            "{}/tests/fixtures/phase2/{name}",
+            "{}/tests/fixtures/nixos-25.11/{name}",
             env!("CARGO_MANIFEST_DIR")
         );
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("fixture {name}: {e}"))
     }
 
-    // --- parse_lsblk_json ---
+    // --- Contract tests (nixos-25.11 fixtures) ---
 
     #[test]
-    fn lsblk_parses_2disk_fixture() {
+    fn lsblk_parses_nixos_25_11_2disk() {
         let raw = RawCommandOutput {
             cmd: "lsblk".into(),
             stdout: fixture("lsblk-2disk.json"),
@@ -106,18 +106,20 @@ mod tests {
         };
         let out = parse_lsblk_json(&raw).unwrap();
         assert_eq!(out.blockdevices.len(), 2);
-        assert_eq!(out.blockdevices[0].name, "vda");
+        assert_eq!(out.blockdevices[0].name, "vdb");
         assert_eq!(out.blockdevices[0].device_type, "disk");
-        assert_eq!(out.blockdevices[0].size, Some(10737418240));
+        assert_eq!(out.blockdevices[0].size, Some(536870912));
         assert_eq!(out.blockdevices[0].children.len(), 1);
         assert_eq!(out.blockdevices[0].children[0].device_type, "crypt");
     }
 
+    // --- Synthetic tests (inline) ---
+
     #[test]
-    fn lsblk_rejects_bad_json() {
+    fn lsblk_rejects_malformed_inline() {
         let raw = RawCommandOutput {
             cmd: "lsblk".into(),
-            stdout: fixture("lsblk-bad.json"),
+            stdout: r#"{"blockdevices": [{"name": 42, "missing_fields": true}]}"#.into(),
             stderr: String::new(),
             exit_status: 0,
         };

@@ -1,3 +1,0 @@
-Overall:
-    Some random line
-    No device size here

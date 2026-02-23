@@ -64,14 +64,16 @@ mod tests {
 
     fn fixture(name: &str) -> String {
         let path = format!(
-            "{}/tests/fixtures/phase2/{name}",
+            "{}/tests/fixtures/nixos-25.11/{name}",
             env!("CARGO_MANIFEST_DIR")
         );
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("fixture {name}: {e}"))
     }
 
+    // --- Contract tests (nixos-25.11 fixtures) ---
+
     #[test]
-    fn findmnt_parses_btrfs_mount() {
+    fn findmnt_parses_nixos_25_11_btrfs() {
         let raw = RawCommandOutput {
             cmd: "findmnt".into(),
             stdout: fixture("findmnt-btrfs.json"),
@@ -84,13 +86,15 @@ mod tests {
         assert_eq!(out.filesystems[0].fstype, "btrfs");
     }
 
+    // --- Synthetic tests (inline) ---
+
     #[test]
-    fn findmnt_returns_empty_on_not_found() {
+    fn findmnt_returns_empty_inline() {
         let raw = RawCommandOutput {
             cmd: "findmnt".into(),
-            stdout: String::new(),
+            stdout: r#"{"filesystems": []}"#.into(),
             stderr: String::new(),
-            exit_status: 1,
+            exit_status: 0,
         };
         let out = parse_findmnt_json(&raw).unwrap();
         assert!(out.filesystems.is_empty());

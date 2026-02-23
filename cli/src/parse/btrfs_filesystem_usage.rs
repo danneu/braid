@@ -62,14 +62,16 @@ mod tests {
 
     fn fixture(name: &str) -> String {
         let path = format!(
-            "{}/tests/fixtures/phase2/{name}",
+            "{}/tests/fixtures/nixos-25.11/{name}",
             env!("CARGO_MANIFEST_DIR")
         );
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("fixture {name}: {e}"))
     }
 
+    // --- Contract tests (nixos-25.11 fixtures) ---
+
     #[test]
-    fn usage_parses_raw_fixture() {
+    fn usage_parses_nixos_25_11() {
         let raw = RawCommandOutput {
             cmd: "btrfs filesystem usage".into(),
             stdout: fixture("btrfs-usage-raw.txt"),
@@ -77,16 +79,18 @@ mod tests {
             exit_status: 0,
         };
         let out = parse_btrfs_filesystem_usage(&raw).unwrap();
-        assert_eq!(out.device_size_bytes, 21474836480);
-        assert_eq!(out.used_bytes, 8589934592);
-        assert_eq!(out.free_estimated_bytes, 6442450944);
+        assert_eq!(out.device_size_bytes, 1040187392);
+        assert_eq!(out.used_bytes, 33914880);
+        assert_eq!(out.free_estimated_bytes, 442957824);
     }
 
+    // --- Synthetic tests (inline) ---
+
     #[test]
-    fn usage_rejects_bad_fixture() {
+    fn usage_rejects_malformed_inline() {
         let raw = RawCommandOutput {
             cmd: "btrfs filesystem usage".into(),
-            stdout: fixture("btrfs-usage-bad.txt"),
+            stdout: "Overall:\n    Some random line\n    No device size here\n".into(),
             stderr: String::new(),
             exit_status: 0,
         };

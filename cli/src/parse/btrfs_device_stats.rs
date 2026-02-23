@@ -93,14 +93,16 @@ mod tests {
 
     fn fixture(name: &str) -> String {
         let path = format!(
-            "{}/tests/fixtures/phase2/{name}",
+            "{}/tests/fixtures/nixos-25.11/{name}",
             env!("CARGO_MANIFEST_DIR")
         );
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("fixture {name}: {e}"))
     }
 
+    // --- Contract tests (nixos-25.11 fixtures) ---
+
     #[test]
-    fn device_stats_parses_2disk_fixture() {
+    fn device_stats_parses_nixos_25_11_2disk() {
         let raw = RawCommandOutput {
             cmd: "btrfs device stats".into(),
             stdout: fixture("btrfs-device-stats-2disk.txt"),
@@ -109,16 +111,28 @@ mod tests {
         };
         let out = parse_btrfs_device_stats(&raw).unwrap();
         assert_eq!(out.devices.len(), 2);
-        assert_eq!(out.devices[0].device_path, "/dev/mapper/braid-vda");
+        assert_eq!(out.devices[0].device_path, "/dev/mapper/braid-vdb");
         assert_eq!(out.devices[0].read_io_errs, 0);
-        assert_eq!(out.devices[1].device_path, "/dev/mapper/braid-vdb");
+        assert_eq!(out.devices[1].device_path, "/dev/mapper/braid-vdc");
     }
 
+    // --- Synthetic tests (inline) ---
+
     #[test]
-    fn device_stats_parses_errors_fixture() {
+    fn device_stats_parses_errors_inline() {
         let raw = RawCommandOutput {
             cmd: "btrfs device stats".into(),
-            stdout: fixture("btrfs-device-stats-errors.txt"),
+            stdout: "[/dev/mapper/braid-vda].write_io_errs    0\n\
+                     [/dev/mapper/braid-vda].read_io_errs     3\n\
+                     [/dev/mapper/braid-vda].flush_io_errs    0\n\
+                     [/dev/mapper/braid-vda].corruption_errs  1\n\
+                     [/dev/mapper/braid-vda].generation_errs  0\n\
+                     [/dev/mapper/braid-vdb].write_io_errs    0\n\
+                     [/dev/mapper/braid-vdb].read_io_errs     0\n\
+                     [/dev/mapper/braid-vdb].flush_io_errs    0\n\
+                     [/dev/mapper/braid-vdb].corruption_errs  0\n\
+                     [/dev/mapper/braid-vdb].generation_errs  0\n"
+                .into(),
             stderr: String::new(),
             exit_status: 0,
         };

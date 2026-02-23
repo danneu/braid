@@ -1,5 +1,0 @@
-Label: none  uuid: f1e2d3c4-b5a6-9788-7654-321fedcba098
-	Total devices 2 FS bytes used 4.00GiB
-	devid    1 size 10.00GiB used 5.00GiB path /dev/mapper/braid-vda
-	*** Some devices missing
-

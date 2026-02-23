@@ -49,14 +49,16 @@ mod tests {
 
     fn fixture(name: &str) -> String {
         let path = format!(
-            "{}/tests/fixtures/phase2/{name}",
+            "{}/tests/fixtures/nixos-25.11/{name}",
             env!("CARGO_MANIFEST_DIR")
         );
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("fixture {name}: {e}"))
     }
 
+    // --- Contract tests (nixos-25.11 fixtures) ---
+
     #[test]
-    fn scrub_never_fixture() {
+    fn scrub_parses_nixos_25_11_never() {
         let raw = RawCommandOutput {
             cmd: "btrfs scrub status".into(),
             stdout: fixture("btrfs-scrub-never.txt"),
@@ -68,7 +70,7 @@ mod tests {
     }
 
     #[test]
-    fn scrub_completed_fixture() {
+    fn scrub_parses_nixos_25_11_completed() {
         let raw = RawCommandOutput {
             cmd: "btrfs scrub status".into(),
             stdout: fixture("btrfs-scrub-completed.txt"),
@@ -78,11 +80,13 @@ mod tests {
         let out = parse_btrfs_scrub_status(&raw).unwrap();
         match &out.state {
             ScrubState::Completed { started_at } => {
-                assert!(started_at.0.contains("Mon Jan  6"));
+                assert!(started_at.0.contains("Mon Feb 23"));
             }
             other => panic!("expected Completed, got {other:?}"),
         }
     }
+
+    // --- Synthetic tests (inline) ---
 
     #[test]
     fn scrub_unknown_on_empty_output() {

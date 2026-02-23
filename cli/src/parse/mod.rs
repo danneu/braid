@@ -9,6 +9,10 @@
 //!   a few labeled lines).
 //! - Do not use free-form `str::contains` for command-output classification in
 //!   domain code; keep text interpretation in `parse/*` and return typed enums.
+//! - File-based fixtures must come from `tests/fixtures/nixos-25.11` only.
+//! - Synthetic scenarios (variant happy-paths, negative/malformed inputs) must
+//!   be inline string literals in tests.
+//! - Compatibility aliases are out of contract unless explicitly documented.
 //!
 pub mod btrfs_device_stats;
 pub mod btrfs_filesystem_df;

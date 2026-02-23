@@ -132,50 +132,64 @@ mod tests {
 
     fn fixture(name: &str) -> String {
         let path = format!(
-            "{}/tests/fixtures/phase2/{name}",
+            "{}/tests/fixtures/nixos-25.11/{name}",
             env!("CARGO_MANIFEST_DIR")
         );
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("fixture {name}: {e}"))
     }
 
-    #[test]
-    fn btrfs_show_parses_3disk_fixture() {
-        let raw = RawCommandOutput {
-            cmd: "btrfs filesystem show".into(),
-            stdout: fixture("btrfs-show-3disk.txt"),
-            stderr: String::new(),
-            exit_status: 0,
-        };
-        let out = parse_btrfs_filesystem_show(&raw).unwrap();
-        assert_eq!(out.total_devices, 3);
-        assert_eq!(out.devices.len(), 3);
-        assert_eq!(out.devices[0].devid, 1);
-        assert_eq!(out.devices[0].path, "/dev/mapper/braid-vda");
-        assert_eq!(out.devices[2].devid, 3);
-        assert!(!out.has_missing);
-    }
+    // --- Contract tests (nixos-25.11 fixtures) ---
 
     #[test]
-    fn btrfs_show_detects_degraded_fixture() {
+    fn btrfs_show_parses_nixos_25_11_2disk() {
         let raw = RawCommandOutput {
             cmd: "btrfs filesystem show".into(),
-            stdout: fixture("btrfs-show-degraded.txt"),
+            stdout: fixture("btrfs-show-2disk.txt"),
             stderr: String::new(),
             exit_status: 0,
         };
         let out = parse_btrfs_filesystem_show(&raw).unwrap();
         assert_eq!(out.total_devices, 2);
-        assert_eq!(out.devices.len(), 1); // only 1 device listed, other is missing
+        assert_eq!(out.devices.len(), 2);
+        assert_eq!(out.devices[0].devid, 1);
+        assert_eq!(out.devices[0].path, "/dev/mapper/braid-vdb");
+        assert_eq!(out.devices[1].devid, 2);
+        assert_eq!(out.devices[1].path, "/dev/mapper/braid-vdc");
+        assert!(!out.has_missing);
+    }
+
+    // --- Synthetic tests (inline) ---
+
+    #[test]
+    fn btrfs_show_detects_degraded_inline() {
+        let raw = RawCommandOutput {
+            cmd: "btrfs filesystem show".into(),
+            stdout: "Label: none  uuid: f1e2d3c4-b5a6-9788-7654-321fedcba098\n\
+                     \tTotal devices 2 FS bytes used 4.00GiB\n\
+                     \tdevid    1 size 10.00GiB used 5.00GiB path /dev/mapper/braid-vda\n\
+                     \t*** Some devices missing\n"
+                .into(),
+            stderr: String::new(),
+            exit_status: 0,
+        };
+        let out = parse_btrfs_filesystem_show(&raw).unwrap();
+        assert_eq!(out.total_devices, 2);
+        assert_eq!(out.devices.len(), 1);
         assert!(out.has_missing);
     }
 
     /// btrfs-progs prints `path /dev/mapper/X MISSING` for gone devices.
     /// Parser excludes the placeholder; total_devices and has_missing are authoritative.
     #[test]
-    fn btrfs_show_excludes_missing_sentinel_device() {
+    fn btrfs_show_excludes_missing_sentinel_inline() {
         let raw = RawCommandOutput {
             cmd: "btrfs filesystem show".into(),
-            stdout: fixture("btrfs-show-degraded-missing-line.txt"),
+            stdout: "Label: none  uuid: f1e2d3c4-b5a6-9788-7654-321fedcba098\n\
+                     \tTotal devices 2 FS bytes used 4.00GiB\n\
+                     \tdevid    1 size 10.00GiB used 5.00GiB path /dev/mapper/braid-vda\n\
+                     \tdevid    2 size 0 used 0 path /dev/mapper/braid-vdb MISSING\n\
+                     \t*** Some devices missing\n"
+                .into(),
             stderr: String::new(),
             exit_status: 0,
         };
@@ -188,10 +202,10 @@ mod tests {
     }
 
     #[test]
-    fn btrfs_show_rejects_bad_fixture() {
+    fn btrfs_show_rejects_malformed_inline() {
         let raw = RawCommandOutput {
             cmd: "btrfs filesystem show".into(),
-            stdout: fixture("btrfs-show-bad.txt"),
+            stdout: "This is not btrfs output at all\nrandom garbage data".into(),
             stderr: String::new(),
             exit_status: 0,
         };
