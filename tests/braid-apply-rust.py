@@ -412,4 +412,44 @@ with subtest("Existing-but-unmounted pool must not be treated as bootstrap"):
         f"mkfs likely destroyed and recreated filesystem!"
     )
 
+with subtest("Resume rejects unrecoverable missing mapper target"):
+    # Optional VM-level hardening guard: if checkpoint points to a mapper target
+    # that cannot be recovered by pending OPEN_LUKS, resume must fail.
+    machine.succeed(write_config([
+        "/dev/disk/by-id/virtio-disk1",
+        "/dev/disk/by-id/virtio-disk2",
+    ]))
+
+    import hashlib
+    raw_cfg = machine.succeed("cat /tmp/braid-config.json")
+    cfg_hash = "sha256:" + hashlib.sha256(raw_cfg.encode()).hexdigest()
+
+    fake_checkpoint = json.dumps({
+        "schema_version": 1,
+        "plan_id": "fake-missing-mapper",
+        "mount_point": "/mnt/storage",
+        "status": "applicable",
+        "config_hash": cfg_hash,
+        "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-01T00:00:00Z",
+        "last_completed_action_id": "",
+        "is_bootstrap": False,
+        "actions": [
+            {
+                "id": "a1",
+                "type": "ADD_DISK_BTRFS_ADD",
+                "target": "/dev/mapper/does-not-exist",
+                "preconditions": [],
+                "status": "pending",
+            }
+        ],
+        "warnings": [],
+        "confirmations": [],
+    })
+    escaped = fake_checkpoint.replace("'", "'\\''")
+    machine.succeed("mkdir -p /var/lib/braid")
+    machine.succeed(f"echo '{escaped}' > /var/lib/braid/apply-state.json")
+    machine.fail(rust_apply("--resume"))
+    machine.succeed("rm -f /var/lib/braid/apply-state.json")
+
 machine.shutdown()

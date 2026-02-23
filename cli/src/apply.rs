@@ -295,57 +295,127 @@ fn execute_btrfs_add<R: CommandRunner>(
     let is_mounted = matches!(mounted, Ok(ref out) if out.exit_status == 0);
 
     if is_bootstrap && !is_mounted {
-        // First disk — mkfs + mount
-        println!("  bootstrap: creating new btrfs filesystem on {target}");
-        let mkfs = runner.run(&CmdRequest::MkfsBtrfs {
-            device: target.to_owned(),
-        });
-        match mkfs {
-            Ok(out) if out.exit_status != 0 => {
+        // Planner thinks this is a fresh pool (unmounted, 0 known devices).
+        // But an existing pool may be offline. Check the device superblock
+        // before destroying anything: `btrfs filesystem show <device>` reads
+        // the superblock directly without needing the full pool assembled.
+        let has_btrfs = probe_device_has_btrfs(runner, target);
+
+        match has_btrfs {
+            DeviceBtrfsProbe::HasBtrfs => {
+                // Existing btrfs metadata — NOT a true bootstrap.
+                // Bring the existing pool online: scan + mount, then return.
+                // Later ADD actions for other devices will see a mounted pool
+                // and use the normal scan+add path.
+                println!("  existing btrfs detected on {target}, mounting existing pool");
+                let _ = runner.run(&CmdRequest::BtrfsDeviceScan {
+                    device: target.to_owned(),
+                });
+
+                std::fs::create_dir_all(mount_point)
+                    .map_err(|e| ApplyError::Io(format!("mkdir -p {mount_point}: {e}")))?;
+
+                let mount_result = runner.run(&CmdRequest::Mount {
+                    device: target.to_owned(),
+                    mount_point: mount_point.to_owned(),
+                });
+                match mount_result {
+                    Ok(out) if out.exit_status == 0 => {
+                        // Pool mounted successfully. Done.
+                    }
+                    Ok(out) => {
+                        if is_deferable_missing_member_mount_error(&out.stderr) {
+                            // Multi-device pool with not all members open yet.
+                            // Safe to defer — a later ADD will retry once more
+                            // mappers are available. The key: we did NOT mkfs.
+                            println!(
+                                "  mount deferred (missing members), will retry after more devices open"
+                            );
+                        } else {
+                            return Err(ApplyError::ActionFailed {
+                                action_id: String::new(),
+                                action_type: "ADD_DISK_BTRFS_ADD".into(),
+                                detail: format!(
+                                    "mount existing pool failed (exit {}): {}",
+                                    out.exit_status, out.stderr
+                                ),
+                            });
+                        }
+                    }
+                    Err(e) => {
+                        return Err(ApplyError::ActionFailed {
+                            action_id: String::new(),
+                            action_type: "ADD_DISK_BTRFS_ADD".into(),
+                            detail: format!("mount existing pool error: {e}"),
+                        });
+                    }
+                }
+
+                // Device is already part of the pool. Done for this action.
+                return Ok(());
+            }
+            DeviceBtrfsProbe::NoBtrfs => {
+                // Device has no btrfs superblock — safe to bootstrap.
+                println!("  bootstrap: creating new btrfs filesystem on {target}");
+                let mkfs = runner.run(&CmdRequest::MkfsBtrfs {
+                    device: target.to_owned(),
+                });
+                match mkfs {
+                    Ok(out) if out.exit_status != 0 => {
+                        return Err(ApplyError::ActionFailed {
+                            action_id: String::new(),
+                            action_type: "ADD_DISK_BTRFS_ADD".into(),
+                            detail: format!("mkfs.btrfs failed (exit {}): {}", out.exit_status, out.stderr),
+                        });
+                    }
+                    Err(e) => {
+                        return Err(ApplyError::ActionFailed {
+                            action_id: String::new(),
+                            action_type: "ADD_DISK_BTRFS_ADD".into(),
+                            detail: format!("mkfs.btrfs error: {e}"),
+                        });
+                    }
+                    _ => {}
+                }
+
+                std::fs::create_dir_all(mount_point)
+                    .map_err(|e| ApplyError::Io(format!("mkdir -p {mount_point}: {e}")))?;
+
+                let mount_result = runner.run(&CmdRequest::Mount {
+                    device: target.to_owned(),
+                    mount_point: mount_point.to_owned(),
+                });
+                match mount_result {
+                    Ok(out) if out.exit_status != 0 => {
+                        return Err(ApplyError::ActionFailed {
+                            action_id: String::new(),
+                            action_type: "ADD_DISK_BTRFS_ADD".into(),
+                            detail: format!("mount failed (exit {}): {}", out.exit_status, out.stderr),
+                        });
+                    }
+                    Err(e) => {
+                        return Err(ApplyError::ActionFailed {
+                            action_id: String::new(),
+                            action_type: "ADD_DISK_BTRFS_ADD".into(),
+                            detail: format!("mount error: {e}"),
+                        });
+                    }
+                    _ => {}
+                }
+
+                return Ok(());
+            }
+            DeviceBtrfsProbe::Unknown(detail) => {
+                // Ambiguous — refuse to mkfs.
                 return Err(ApplyError::ActionFailed {
                     action_id: String::new(),
                     action_type: "ADD_DISK_BTRFS_ADD".into(),
-                    detail: format!("mkfs.btrfs failed (exit {}): {}", out.exit_status, out.stderr),
+                    detail: format!(
+                        "cannot determine if {target} has existing btrfs: {detail}"
+                    ),
                 });
             }
-            Err(e) => {
-                return Err(ApplyError::ActionFailed {
-                    action_id: String::new(),
-                    action_type: "ADD_DISK_BTRFS_ADD".into(),
-                    detail: format!("mkfs.btrfs error: {e}"),
-                });
-            }
-            _ => {}
         }
-
-        // mkdir -p mount_point
-        std::fs::create_dir_all(mount_point)
-            .map_err(|e| ApplyError::Io(format!("mkdir -p {mount_point}: {e}")))?;
-
-        // mount
-        let mount_result = runner.run(&CmdRequest::Mount {
-            device: target.to_owned(),
-            mount_point: mount_point.to_owned(),
-        });
-        match mount_result {
-            Ok(out) if out.exit_status != 0 => {
-                return Err(ApplyError::ActionFailed {
-                    action_id: String::new(),
-                    action_type: "ADD_DISK_BTRFS_ADD".into(),
-                    detail: format!("mount failed (exit {}): {}", out.exit_status, out.stderr),
-                });
-            }
-            Err(e) => {
-                return Err(ApplyError::ActionFailed {
-                    action_id: String::new(),
-                    action_type: "ADD_DISK_BTRFS_ADD".into(),
-                    detail: format!("mount error: {e}"),
-                });
-            }
-            _ => {}
-        }
-
-        return Ok(());
     }
 
     // Existing pool — scan for returning member detection, then add
@@ -637,6 +707,56 @@ fn execute_verify_diskset<R: CommandRunner>(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+enum DeviceBtrfsProbe {
+    HasBtrfs,
+    NoBtrfs,
+    Unknown(String),
+}
+
+/// Classify a mount error as deferrable (missing pool members) vs hard failure.
+/// Only explicit degraded-member signals are deferrable — "no such file or
+/// directory" is a real missing-path error and must fail hard.
+fn is_deferable_missing_member_mount_error(stderr: &str) -> bool {
+    let s = stderr.to_lowercase();
+    // Direct btrfs error messages about absent pool members:
+    s.contains("missing") || s.contains("devid")
+    // Kernel VFS error: btrfs open_ctree fails → mount reports
+    // "fsconfig() failed: No such file or directory" + "dmesg(1) may have more info".
+    // Require both signals to avoid matching plain path-not-found errors.
+    || (s.contains("fsconfig") && s.contains("dmesg"))
+}
+
+/// Check if a device has btrfs metadata by reading its superblock directly.
+/// `btrfs filesystem show <device>` reads the on-disk superblock without
+/// needing the pool to be mounted or all members present.
+fn probe_device_has_btrfs<R: CommandRunner>(runner: &R, device: &str) -> DeviceBtrfsProbe {
+    let result = runner.run(&CmdRequest::BtrfsFilesystemShow {
+        mount_point: device.to_owned(), // show accepts device path too
+    });
+    match result {
+        Ok(ref out) if out.exit_status == 0 => {
+            // Successful parse = btrfs superblock found.
+            DeviceBtrfsProbe::HasBtrfs
+        }
+        Ok(ref out) => {
+            let combined = format!("{} {}", out.stdout, out.stderr).to_lowercase();
+            if combined.contains("not a valid btrfs filesystem")
+                || combined.contains("no valid btrfs found")
+                || combined.contains("no btrfs")
+            {
+                DeviceBtrfsProbe::NoBtrfs
+            } else {
+                DeviceBtrfsProbe::Unknown(format!(
+                    "btrfs filesystem show exit {}: {}",
+                    out.exit_status,
+                    out.stderr.trim()
+                ))
+            }
+        }
+        Err(e) => DeviceBtrfsProbe::Unknown(format!("command error: {e}")),
+    }
+}
 
 fn count_pool_devices<R: CommandRunner>(runner: &R, mount_point: &str) -> usize {
     let show = runner.run(&CmdRequest::BtrfsFilesystemShow {
@@ -1228,6 +1348,253 @@ mod tests {
         let fs = MockFs::new(&["/dev/disk/by-id/disk-1"]);
         let result = execute_open_luks_with(&runner, &fs, "/dev/disk/by-id/disk-1", "secret123");
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn btrfs_add_has_btrfs_no_such_file_mount_must_fail() {
+        let mount_point = "/tmp/braid-test-mount-no-such";
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::MountpointCheck {
+                    path: mount_point.to_owned(),
+                },
+                err_raw(&format!("mountpoint -q {mount_point}"), 1, ""),
+            )
+            .with_output(
+                CmdRequest::BtrfsFilesystemShow {
+                    mount_point: "/dev/mapper/disk-1".to_owned(),
+                },
+                ok_raw("btrfs filesystem show /dev/mapper/disk-1", "Label: none"),
+            )
+            .with_output(
+                CmdRequest::BtrfsDeviceScan {
+                    device: "/dev/mapper/disk-1".to_owned(),
+                },
+                ok_raw("btrfs device scan /dev/mapper/disk-1", ""),
+            )
+            .with_output(
+                CmdRequest::Mount {
+                    device: "/dev/mapper/disk-1".to_owned(),
+                    mount_point: mount_point.to_owned(),
+                },
+                err_raw(
+                    &format!("mount /dev/mapper/disk-1 {mount_point}"),
+                    32,
+                    &format!("mount: {mount_point}: No such file or directory."),
+                ),
+            );
+
+        let err = execute_btrfs_add(&runner, "/dev/mapper/disk-1", mount_point, true)
+            .expect_err("no-such-file mount error must fail hard, not defer");
+
+        assert!(
+            matches!(err, ApplyError::ActionFailed { .. }),
+            "expected ActionFailed, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn btrfs_add_has_btrfs_missing_members_mount_is_deferred() {
+        let mount_point = "/tmp/braid-test-mount-missing";
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::MountpointCheck {
+                    path: mount_point.to_owned(),
+                },
+                err_raw(&format!("mountpoint -q {mount_point}"), 1, ""),
+            )
+            .with_output(
+                CmdRequest::BtrfsFilesystemShow {
+                    mount_point: "/dev/mapper/disk-1".to_owned(),
+                },
+                ok_raw("btrfs filesystem show /dev/mapper/disk-1", "Label: none"),
+            )
+            .with_output(
+                CmdRequest::BtrfsDeviceScan {
+                    device: "/dev/mapper/disk-1".to_owned(),
+                },
+                ok_raw("btrfs device scan /dev/mapper/disk-1", ""),
+            )
+            .with_output(
+                CmdRequest::Mount {
+                    device: "/dev/mapper/disk-1".to_owned(),
+                    mount_point: mount_point.to_owned(),
+                },
+                err_raw(
+                    &format!("mount /dev/mapper/disk-1 {mount_point}"),
+                    32,
+                    &format!("ERROR: cannot mount {mount_point}: missing devid 2"),
+                ),
+            );
+
+        let result = execute_btrfs_add(&runner, "/dev/mapper/disk-1", mount_point, true);
+        assert!(result.is_ok(), "missing-member mount should defer, got: {result:?}");
+    }
+
+    #[test]
+    fn btrfs_add_has_btrfs_fsconfig_dmesg_mount_is_deferred() {
+        // Real kernel error when btrfs open_ctree fails due to missing members:
+        // "fsconfig() failed: No such file or directory" + dmesg hint.
+        let mount_point = "/tmp/braid-test-mount-fsconfig";
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::MountpointCheck {
+                    path: mount_point.to_owned(),
+                },
+                err_raw(&format!("mountpoint -q {mount_point}"), 1, ""),
+            )
+            .with_output(
+                CmdRequest::BtrfsFilesystemShow {
+                    mount_point: "/dev/mapper/disk-1".to_owned(),
+                },
+                ok_raw("btrfs filesystem show /dev/mapper/disk-1", "Label: none"),
+            )
+            .with_output(
+                CmdRequest::BtrfsDeviceScan {
+                    device: "/dev/mapper/disk-1".to_owned(),
+                },
+                ok_raw("btrfs device scan /dev/mapper/disk-1", ""),
+            )
+            .with_output(
+                CmdRequest::Mount {
+                    device: "/dev/mapper/disk-1".to_owned(),
+                    mount_point: mount_point.to_owned(),
+                },
+                err_raw(
+                    &format!("mount /dev/mapper/disk-1 {mount_point}"),
+                    32,
+                    &format!(
+                        "mount: {mount_point}: fsconfig() failed: No such file or directory.\n\
+                         \x20      dmesg(1) may have more information after failed mount system call."
+                    ),
+                ),
+            );
+
+        let result = execute_btrfs_add(&runner, "/dev/mapper/disk-1", mount_point, true);
+        assert!(
+            result.is_ok(),
+            "fsconfig+dmesg mount error should defer, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn btrfs_add_has_btrfs_fsconfig_alone_must_fail() {
+        // fsconfig without dmesg hint — not enough signal to defer.
+        let mount_point = "/tmp/braid-test-mount-fsconfig-only";
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::MountpointCheck {
+                    path: mount_point.to_owned(),
+                },
+                err_raw(&format!("mountpoint -q {mount_point}"), 1, ""),
+            )
+            .with_output(
+                CmdRequest::BtrfsFilesystemShow {
+                    mount_point: "/dev/mapper/disk-1".to_owned(),
+                },
+                ok_raw("btrfs filesystem show /dev/mapper/disk-1", "Label: none"),
+            )
+            .with_output(
+                CmdRequest::BtrfsDeviceScan {
+                    device: "/dev/mapper/disk-1".to_owned(),
+                },
+                ok_raw("btrfs device scan /dev/mapper/disk-1", ""),
+            )
+            .with_output(
+                CmdRequest::Mount {
+                    device: "/dev/mapper/disk-1".to_owned(),
+                    mount_point: mount_point.to_owned(),
+                },
+                err_raw(
+                    &format!("mount /dev/mapper/disk-1 {mount_point}"),
+                    32,
+                    &format!("mount: {mount_point}: fsconfig() failed: unknown error"),
+                ),
+            );
+
+        let err = execute_btrfs_add(&runner, "/dev/mapper/disk-1", mount_point, true)
+            .expect_err("fsconfig without dmesg hint must fail hard");
+
+        assert!(
+            matches!(err, ApplyError::ActionFailed { .. }),
+            "expected ActionFailed, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn probe_device_has_btrfs_no_btrfs_message() {
+        // Real btrfs output: "ERROR: no btrfs on /dev/dm-0"
+        let runner = MockRunner::default().with_output(
+            CmdRequest::BtrfsFilesystemShow {
+                mount_point: "/dev/mapper/disk-1".to_owned(),
+            },
+            err_raw(
+                "btrfs filesystem show /dev/mapper/disk-1",
+                1,
+                "ERROR: no btrfs on /dev/dm-0",
+            ),
+        );
+
+        assert!(matches!(
+            probe_device_has_btrfs(&runner, "/dev/mapper/disk-1"),
+            DeviceBtrfsProbe::NoBtrfs
+        ));
+    }
+
+    #[test]
+    fn probe_device_has_btrfs_not_valid_message() {
+        let runner = MockRunner::default().with_output(
+            CmdRequest::BtrfsFilesystemShow {
+                mount_point: "/dev/mapper/disk-1".to_owned(),
+            },
+            err_raw(
+                "btrfs filesystem show /dev/mapper/disk-1",
+                1,
+                "ERROR: not a valid btrfs filesystem on /dev/dm-0",
+            ),
+        );
+
+        assert!(matches!(
+            probe_device_has_btrfs(&runner, "/dev/mapper/disk-1"),
+            DeviceBtrfsProbe::NoBtrfs
+        ));
+    }
+
+    #[test]
+    fn probe_device_has_btrfs_has_superblock() {
+        let runner = MockRunner::default().with_output(
+            CmdRequest::BtrfsFilesystemShow {
+                mount_point: "/dev/mapper/disk-1".to_owned(),
+            },
+            ok_raw(
+                "btrfs filesystem show /dev/mapper/disk-1",
+                "Label: none  uuid: abc-123\n\tTotal devices 2",
+            ),
+        );
+
+        assert!(matches!(
+            probe_device_has_btrfs(&runner, "/dev/mapper/disk-1"),
+            DeviceBtrfsProbe::HasBtrfs
+        ));
+    }
+
+    #[test]
+    fn probe_device_has_btrfs_unknown_error() {
+        let runner = MockRunner::default().with_output(
+            CmdRequest::BtrfsFilesystemShow {
+                mount_point: "/dev/mapper/disk-1".to_owned(),
+            },
+            err_raw(
+                "btrfs filesystem show /dev/mapper/disk-1",
+                1,
+                "ERROR: unexpected internal error",
+            ),
+        );
+
+        assert!(matches!(
+            probe_device_has_btrfs(&runner, "/dev/mapper/disk-1"),
+            DeviceBtrfsProbe::Unknown(_)
+        ));
     }
 
     #[test]
