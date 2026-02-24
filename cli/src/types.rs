@@ -36,42 +36,43 @@ impl fmt::Display for MapperName {
 // Action status & transitions
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ActionStatus {
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ActionState {
     Pending,
     InProgress,
     Completed,
-    Failed,
+    Failed { error: String },
 }
 
-impl ActionStatus {
-    pub fn transition_to(self, next: ActionStatus) -> Result<ActionStatus, TransitionError> {
-        use ActionStatus::{Completed, Failed, InProgress, Pending};
-        let ok = matches!(
-            (self, next),
-            (Pending, InProgress)
-                | (Pending, Failed)
-                | (InProgress, Completed)
-                | (InProgress, Failed)
-                | (Pending, Pending)
-                | (InProgress, InProgress)
-                | (Completed, Completed)
-                | (Failed, Failed)
-        );
+impl ActionState {
+    pub fn transition_to(self, next: ActionState) -> Result<ActionState, TransitionError> {
+        use std::mem::discriminant;
+        let ok = discriminant(&self) == discriminant(&next)
+            || matches!(
+                (&self, &next),
+                (Self::Pending, Self::InProgress)
+                    | (Self::Pending, Self::Failed { .. })
+                    | (Self::InProgress, Self::Completed)
+                    | (Self::InProgress, Self::Failed { .. })
+                    | (Self::Failed { .. }, Self::InProgress)
+            );
 
         if ok {
             Ok(next)
         } else {
-            Err(TransitionError { from: self, to: next })
+            Err(TransitionError {
+                from: self,
+                to: next,
+            })
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransitionError {
-    pub from: ActionStatus,
-    pub to: ActionStatus,
+    pub from: ActionState,
+    pub to: ActionState,
 }
 
 // ---------------------------------------------------------------------------
@@ -120,7 +121,8 @@ pub struct Action {
     pub action_type: ActionType,
     pub target: String,
     pub preconditions: Vec<String>,
-    pub status: ActionStatus,
+    #[serde(flatten)]
+    pub state: ActionState,
     pub commands: Vec<PlannedCommand>,
 }
 
@@ -354,19 +356,29 @@ mod tests {
 
     #[test]
     fn allows_valid_status_transition() {
-        let next = ActionStatus::Pending
-            .transition_to(ActionStatus::InProgress)
+        let next = ActionState::Pending
+            .transition_to(ActionState::InProgress)
             .expect("pending -> in_progress should be valid");
-        assert_eq!(next, ActionStatus::InProgress);
+        assert_eq!(next, ActionState::InProgress);
     }
 
     #[test]
     fn rejects_invalid_status_transition() {
-        let err = ActionStatus::Completed
-            .transition_to(ActionStatus::InProgress)
+        let err = ActionState::Completed
+            .transition_to(ActionState::InProgress)
             .expect_err("completed -> in_progress should be invalid");
-        assert_eq!(err.from, ActionStatus::Completed);
-        assert_eq!(err.to, ActionStatus::InProgress);
+        assert_eq!(err.from, ActionState::Completed);
+        assert_eq!(err.to, ActionState::InProgress);
+    }
+
+    #[test]
+    fn failed_to_in_progress_allowed_for_retry() {
+        let next = ActionState::Failed {
+            error: "device not found".to_owned(),
+        }
+        .transition_to(ActionState::InProgress)
+        .expect("failed -> in_progress should be valid (retry on resume)");
+        assert_eq!(next, ActionState::InProgress);
     }
 
     #[test]

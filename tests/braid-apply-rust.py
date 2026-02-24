@@ -445,4 +445,61 @@ with subtest("Resume rejects unrecoverable missing mapper target"):
     machine.fail(apply("--resume"))
     machine.succeed("rm -f /var/lib/braid/apply-state.json")
 
+# --- Subtest: Failed action records error in checkpoint and history ---
+
+with subtest("Failed action records error in checkpoint and history"):
+    # Pool: disk1 + disk2 + disk3. disk4 has LUKS, not in pool.
+    machine.succeed(write_config([
+        "/dev/disk/by-id/virtio-disk1",
+        "/dev/disk/by-id/virtio-disk2",
+        "/dev/disk/by-id/virtio-disk3",
+        "/dev/disk/by-id/virtio-disk4",
+    ]))
+    cmd = (
+        f"BRAID_PASSPHRASE='{passphrase}' "
+        f"BRAID_TEST_FAIL_DURING_ACTION=a1 "
+        f"braid apply --config /tmp/braid-config.json"
+    )
+    machine.fail(cmd)
+
+    # Checkpoint: failed action has "status":"failed" + "error"
+    checkpoint = json.loads(machine.succeed("cat /var/lib/braid/apply-state.json"))
+    failed = [a for a in checkpoint["actions"] if a["status"] == "failed"]
+    assert len(failed) == 1, f"Expected 1 failed action, got {len(failed)}: {checkpoint['actions']}"
+    assert failed[0]["error"] == "simulated failure via BRAID_TEST_FAIL_DURING_ACTION", (
+        f"Unexpected error: {failed[0]['error']}"
+    )
+
+    # Non-failed actions: no "error" key in JSON
+    for a in checkpoint["actions"]:
+        if a["status"] != "failed":
+            assert "error" not in a, f"Non-failed action has error key: {a}"
+
+    # Failed history entry exists
+    plan_id = checkpoint["plan_id"]
+    failed_hist = json.loads(machine.succeed(
+        f"cat /var/lib/braid/history/{plan_id}-failed.json"
+    ))
+    assert failed_hist["run_outcome"] == "failed", (
+        f"Expected run_outcome=failed: {failed_hist['run_outcome']}"
+    )
+    assert failed_hist["failed_action_id"] == failed[0]["id"], (
+        f"Expected failed_action_id={failed[0]['id']}: {failed_hist['failed_action_id']}"
+    )
+
+    # Resume: Failed{error} → InProgress → Completed (error cleared)
+    machine.succeed(apply("--resume"))
+    machine.fail("test -f /var/lib/braid/apply-state.json")
+
+    # Completed history: all actions completed, no error fields
+    completed_hist = json.loads(machine.succeed(
+        f"cat /var/lib/braid/history/{plan_id}.json"
+    ))
+    assert completed_hist["run_outcome"] == "completed", (
+        f"Expected run_outcome=completed: {completed_hist['run_outcome']}"
+    )
+    for a in completed_hist["actions"]:
+        assert a["status"] == "completed", f"Expected completed: {a}"
+        assert "error" not in a, f"Completed action has error key: {a}"
+
 machine.shutdown()

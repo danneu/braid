@@ -33,6 +33,13 @@ pub struct ApplyFlags {
 // Checkpoint
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunOutcome {
+    Completed,
+    Failed,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Checkpoint {
     pub schema_version: u32,
@@ -47,6 +54,10 @@ pub struct Checkpoint {
     pub actions: Vec<Action>,
     pub warnings: Vec<Warning>,
     pub confirmations: Vec<Confirmation>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub run_outcome: Option<RunOutcome>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub failed_action_id: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -115,8 +126,11 @@ fn checkpoint_finalize(cp: &Checkpoint) -> Result<(), ApplyError> {
     std::fs::create_dir_all(HISTORY_DIR)
         .map_err(|e| ApplyError::Io(format!("create {HISTORY_DIR}: {e}")))?;
 
+    let mut hist = cp.clone();
+    hist.run_outcome = Some(RunOutcome::Completed);
+
     let history_path = format!("{HISTORY_DIR}/{}.json", cp.plan_id);
-    let json = serde_json::to_string_pretty(cp)
+    let json = serde_json::to_string_pretty(&hist)
         .map_err(|e| ApplyError::Io(format!("serialize history: {e}")))?;
     std::fs::write(&history_path, &json)
         .map_err(|e| ApplyError::Io(format!("write {history_path}: {e}")))?;
@@ -125,6 +139,32 @@ fn checkpoint_finalize(cp: &Checkpoint) -> Result<(), ApplyError> {
     let _ = std::fs::remove_file(CHECKPOINT_FILE);
 
     // Prune history to HISTORY_KEEP newest
+    prune_history();
+
+    Ok(())
+}
+
+fn checkpoint_write_failure_history(
+    cp: &Checkpoint,
+    failed_action_id: &str,
+) -> Result<(), ApplyError> {
+    std::fs::create_dir_all(HISTORY_DIR)
+        .map_err(|e| ApplyError::Io(format!("create {HISTORY_DIR}: {e}")))?;
+
+    let mut hist = cp.clone();
+    hist.run_outcome = Some(RunOutcome::Failed);
+    hist.failed_action_id = Some(failed_action_id.to_owned());
+
+    let history_path = format!("{HISTORY_DIR}/{}-failed.json", cp.plan_id);
+    let json = serde_json::to_string_pretty(&hist)
+        .map_err(|e| ApplyError::Io(format!("serialize failure history: {e}")))?;
+
+    let tmp_path = format!("{history_path}.tmp");
+    std::fs::write(&tmp_path, &json)
+        .map_err(|e| ApplyError::Io(format!("write {tmp_path}: {e}")))?;
+    std::fs::rename(&tmp_path, &history_path)
+        .map_err(|e| ApplyError::Io(format!("rename {tmp_path} -> {history_path}: {e}")))?;
+
     prune_history();
 
     Ok(())
@@ -780,6 +820,14 @@ fn execute_action<R: CommandRunner>(
     config: &Config,
     is_bootstrap: bool,
 ) -> Result<(), ApplyError> {
+    if let Ok(v) = std::env::var("BRAID_TEST_FAIL_DURING_ACTION") {
+        if v == action.id {
+            return Err(ApplyError::Io(
+                "simulated failure via BRAID_TEST_FAIL_DURING_ACTION".into(),
+            ));
+        }
+    }
+
     match action.action_type {
         ActionType::OpenLuks => execute_open_luks(runner, fs, &action.target),
         ActionType::AddDiskBtrfsAdd => {
@@ -815,7 +863,7 @@ fn validate_resume_targets(
         .collect();
 
     for action in actions {
-        if action.status == ActionStatus::Completed {
+        if matches!(action.state, ActionState::Completed) {
             continue;
         }
 
@@ -862,7 +910,10 @@ fn has_pending_open_for_mapper(
         if precond.action_type != ActionType::OpenLuks {
             continue;
         }
-        if !matches!(precond.status, ActionStatus::Pending | ActionStatus::InProgress) {
+        if !matches!(
+            precond.state,
+            ActionState::Pending | ActionState::InProgress | ActionState::Failed { .. }
+        ) {
             continue;
         }
         // Derive the mapper path that OPEN_LUKS will create from its by-id target.
@@ -877,6 +928,31 @@ fn has_pending_open_for_mapper(
 }
 
 // ---------------------------------------------------------------------------
+// Failure recording (best-effort history + infallible error construction)
+// ---------------------------------------------------------------------------
+
+/// Write failure history as best-effort, then return the `ActionFailed` error.
+///
+/// Returns `ApplyError` (not `Result`) — this makes it structurally impossible
+/// for a history-write failure to mask the original action error via `?`.
+fn record_failure_and_build_error(
+    checkpoint: &Checkpoint,
+    action_id: &str,
+    action_type: &ActionType,
+    detail: &str,
+    write_failure_history: &impl Fn(&Checkpoint, &str) -> Result<(), ApplyError>,
+) -> ApplyError {
+    if let Err(hist_err) = write_failure_history(checkpoint, action_id) {
+        eprintln!("warning: failed to write failure history: {hist_err}");
+    }
+    ApplyError::ActionFailed {
+        action_id: action_id.to_owned(),
+        action_type: action_type_label(action_type).to_owned(),
+        detail: detail.to_owned(),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Execute loop (shared between fresh and resume)
 // ---------------------------------------------------------------------------
 
@@ -886,8 +962,18 @@ fn run_execute_loop<R: CommandRunner>(
     checkpoint: &mut Checkpoint,
     config: &Config,
 ) -> Result<(), ApplyError> {
+    run_execute_loop_with(runner, fs, checkpoint, config, checkpoint_write_failure_history)
+}
+
+fn run_execute_loop_with<R: CommandRunner>(
+    runner: &R,
+    fs: &dyn Filesystem,
+    checkpoint: &mut Checkpoint,
+    config: &Config,
+    write_failure_history: impl Fn(&Checkpoint, &str) -> Result<(), ApplyError>,
+) -> Result<(), ApplyError> {
     for i in 0..checkpoint.actions.len() {
-        if checkpoint.actions[i].status == ActionStatus::Completed {
+        if matches!(checkpoint.actions[i].state, ActionState::Completed) {
             println!(
                 "[{}] {} — already completed, skipping.",
                 checkpoint.actions[i].id,
@@ -903,24 +989,27 @@ fn run_execute_loop<R: CommandRunner>(
             checkpoint.actions[i].target,
         );
 
-        checkpoint.actions[i].status = ActionStatus::InProgress;
+        checkpoint.actions[i].state = ActionState::InProgress;
         checkpoint.updated_at = now_utc();
         checkpoint_write(checkpoint)?;
 
         let action_snapshot = checkpoint.actions[i].clone();
         match execute_action(runner, fs, &action_snapshot, config, checkpoint.is_bootstrap) {
             Ok(()) => {
-                checkpoint.actions[i].status = ActionStatus::Completed;
+                checkpoint.actions[i].state = ActionState::Completed;
                 checkpoint.last_completed_action_id = checkpoint.actions[i].id.clone();
             }
             Err(e) => {
-                checkpoint.actions[i].status = ActionStatus::Failed;
+                checkpoint.actions[i].state =
+                    ActionState::Failed { error: format!("{e}") };
                 checkpoint_write(checkpoint)?;
-                return Err(ApplyError::ActionFailed {
-                    action_id: action_snapshot.id,
-                    action_type: action_type_label(&action_snapshot.action_type).to_owned(),
-                    detail: format!("{e}"),
-                });
+                return Err(record_failure_and_build_error(
+                    checkpoint,
+                    &action_snapshot.id,
+                    &action_snapshot.action_type,
+                    &format!("{e}"),
+                    &write_failure_history,
+                ));
             }
         }
 
@@ -1048,6 +1137,8 @@ fn fresh_apply<R: CommandRunner>(
                 actions,
                 warnings,
                 confirmations,
+                run_outcome: None,
+                failed_action_id: None,
             };
 
             // Write initial checkpoint
@@ -1060,7 +1151,7 @@ fn fresh_apply<R: CommandRunner>(
             let mutation_completed = checkpoint
                 .actions
                 .iter()
-                .filter(|a| !is_verify_action(&a.action_type) && a.status == ActionStatus::Completed)
+                .filter(|a| !is_verify_action(&a.action_type) && matches!(a.state, ActionState::Completed))
                 .count();
             let warnings_skipped = checkpoint
                 .warnings
@@ -1116,7 +1207,7 @@ fn resume_apply<R: CommandRunner>(
     let mutation_completed = checkpoint
         .actions
         .iter()
-        .filter(|a| !is_verify_action(&a.action_type) && a.status == ActionStatus::Completed)
+        .filter(|a| !is_verify_action(&a.action_type) && matches!(a.state, ActionState::Completed))
         .count();
     let warnings_skipped = checkpoint
         .warnings
@@ -1231,7 +1322,7 @@ mod tests {
                 action_type: ActionType::OpenLuks,
                 target: "/dev/disk/by-id/disk-1".to_owned(),
                 preconditions: vec![],
-                status: ActionStatus::Completed,
+                state: ActionState::Completed,
                 commands: vec![],
             },
             Action {
@@ -1239,7 +1330,7 @@ mod tests {
                 action_type: ActionType::AddDiskBtrfsAdd,
                 target: "/dev/mapper/disk-1".to_owned(),
                 preconditions: vec!["a1".to_owned()],
-                status: ActionStatus::Pending,
+                state: ActionState::Pending,
                 commands: vec![],
             },
         ];
@@ -1254,7 +1345,7 @@ mod tests {
             action_type: ActionType::OpenLuks,
             target: "/dev/disk/by-id/disk-1".to_owned(),
             preconditions: vec![],
-            status: ActionStatus::Pending,
+            state: ActionState::Pending,
             commands: vec![],
         }];
         let err = validate_resume_targets(&fs, &actions).unwrap_err();
@@ -1273,7 +1364,7 @@ mod tests {
                 action_type: ActionType::OpenLuks,
                 target: "/dev/disk/by-id/disk-2".to_owned(),
                 preconditions: vec![],
-                status: ActionStatus::Pending,
+                state: ActionState::Pending,
                 commands: vec![],
             },
             Action {
@@ -1281,7 +1372,7 @@ mod tests {
                 action_type: ActionType::AddDiskBtrfsAdd,
                 target: "/dev/mapper/disk-2".to_owned(),
                 preconditions: vec!["a1".to_owned()],
-                status: ActionStatus::Pending,
+                state: ActionState::Pending,
                 commands: vec![],
             },
         ];
@@ -1594,5 +1685,45 @@ mod tests {
         assert!(is_verify_action(&ActionType::VerifyExpectedDiskSet));
         assert!(!is_verify_action(&ActionType::OpenLuks));
         assert!(!is_verify_action(&ActionType::AddDiskBtrfsAdd));
+    }
+
+    #[test]
+    fn action_failure_not_masked_by_history_write_failure() {
+        let cp = Checkpoint {
+            schema_version: 1,
+            plan_id: "test".to_owned(),
+            mount_point: "/mnt/storage".to_owned(),
+            status: PlanStatus::Applicable,
+            config_hash: "sha256:0".to_owned(),
+            created_at: "t0".to_owned(),
+            updated_at: "t0".to_owned(),
+            last_completed_action_id: String::new(),
+            is_bootstrap: false,
+            actions: vec![],
+            warnings: vec![],
+            confirmations: vec![],
+            run_outcome: None,
+            failed_action_id: None,
+        };
+
+        let err = record_failure_and_build_error(
+            &cp,
+            "a1",
+            &ActionType::OpenLuks,
+            "device not found",
+            &|_, _| Err(ApplyError::Io("disk full".into())),
+        );
+
+        match err {
+            ApplyError::ActionFailed {
+                action_id,
+                detail,
+                ..
+            } => {
+                assert_eq!(action_id, "a1");
+                assert_eq!(detail, "device not found");
+            }
+            other => panic!("expected ActionFailed, got: {other}"),
+        }
     }
 }

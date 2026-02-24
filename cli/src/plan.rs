@@ -541,7 +541,7 @@ fn make_action(
         action_type,
         target,
         preconditions,
-        status: ActionStatus::Pending,
+        state: ActionState::Pending,
         commands: vec![],
     }
 }
