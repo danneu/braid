@@ -8,6 +8,7 @@ use braid_cli::config::config_read;
 use braid_cli::doctor::cmd_doctor;
 use braid_cli::plan::{compute_plan, format_plan_human, to_plan_report};
 use braid_cli::probe::{probe_config_disk, probe_pool, RealFilesystem};
+use braid_cli::progress::ProgressMode;
 use braid_cli::types::PlanFlags;
 
 #[derive(Debug, Parser)]
@@ -62,6 +63,8 @@ struct ApplyArgs {
     allow_remove_missing: bool,
     #[arg(long)]
     allow_remove_ambiguous: bool,
+    #[arg(long, value_enum, default_value_t = ProgressMode::Auto)]
+    progress: ProgressMode,
 }
 
 #[derive(Debug, Args)]
@@ -170,6 +173,7 @@ fn main() {
                 resume: args.resume,
                 allow_remove_missing: args.allow_remove_missing,
                 allow_remove_ambiguous: args.allow_remove_ambiguous,
+                progress: args.progress,
             };
             if let Err(e) = cmd_apply(Path::new(&config_path), &flags) {
                 eprintln!("error: {e}");

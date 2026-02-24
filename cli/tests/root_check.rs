@@ -38,4 +38,18 @@ fn version_works_without_root() {
     assert!(output.status.success(), "expected success, got {:?}", output.status);
 }
 
-
+#[test]
+fn apply_progress_values_accepted() {
+    if is_root() {
+        return;
+    }
+    let output = braid()
+        .args(["apply", "--help"])
+        .output()
+        .expect("failed to execute braid");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("--progress"), "apply --help should show --progress, got: {stdout}");
+    for val in ["auto", "always", "never"] {
+        assert!(stdout.contains(val), "apply --help should show {val}, got: {stdout}");
+    }
+}

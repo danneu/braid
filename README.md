@@ -87,6 +87,7 @@ braid = {
 sudo nixos-rebuild switch
 sudo braid init-disk /dev/disk/by-id/ata-Toshiba_MN07_XXXX   # LUKS format (one-shot)
 sudo braid apply                                              # open + create pool
+# --progress auto|always|never controls operation progress (default: auto, shows on TTY)
 ```
 
 The pool is live immediately. No redundancy yet — data is available but unprotected until a second drive is added.

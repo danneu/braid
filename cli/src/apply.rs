@@ -5,6 +5,7 @@ use crate::parse::mount::{classify_mount_error, MountOutcome};
 use crate::parse::{parse_btrfs_filesystem_show, parse_cryptsetup_luks_uuid};
 use crate::plan::{compute_plan, mapper_name_for_by_id, to_plan_report};
 use crate::probe::{probe_config_disk, probe_pool, Filesystem};
+use crate::progress::{self, ProgressMode};
 use crate::types::*;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -22,11 +23,23 @@ const HISTORY_KEEP: usize = 20;
 // ApplyFlags
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ApplyFlags {
     pub resume: bool,
     pub allow_remove_missing: bool,
     pub allow_remove_ambiguous: bool,
+    pub progress: ProgressMode,
+}
+
+impl Default for ApplyFlags {
+    fn default() -> Self {
+        Self {
+            resume: false,
+            allow_remove_missing: false,
+            allow_remove_ambiguous: false,
+            progress: ProgressMode::Auto,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -500,13 +513,19 @@ fn execute_btrfs_add<R: CommandRunner>(
     }
 }
 
-fn execute_balance_raid1<R: CommandRunner>(
+fn execute_balance_raid1<R: CommandRunner + Sync>(
     runner: &R,
     mount_point: &str,
+    show_progress: bool,
 ) -> Result<(), ApplyError> {
-    let result = runner.run(&CmdRequest::BtrfsBalanceRaid1 {
+    let request = CmdRequest::BtrfsBalanceRaid1 {
         mount_point: mount_point.to_owned(),
-    });
+    };
+    let result = if show_progress {
+        progress::run_with_balance_progress(runner, &request, mount_point)
+    } else {
+        runner.run(&request)
+    };
     match result {
         Ok(out) if out.exit_status != 0 => Err(ApplyError::ActionFailed {
             action_id: String::new(),
@@ -525,10 +544,11 @@ fn execute_balance_raid1<R: CommandRunner>(
     }
 }
 
-fn execute_remove_graceful<R: CommandRunner>(
+fn execute_remove_graceful<R: CommandRunner + Sync>(
     runner: &R,
     target: &str,
     mount_point: &str,
+    show_progress: bool,
 ) -> Result<(), ApplyError> {
     // Count current devices to decide if we need single conversion
     let device_count = count_pool_devices(runner, mount_point);
@@ -536,9 +556,14 @@ fn execute_remove_graceful<R: CommandRunner>(
     if device_count <= 2 {
         // Convert to single before removing (can't maintain raid1 with < 2 devices)
         println!("  converting to single profile before removal");
-        let conv = runner.run(&CmdRequest::BtrfsBalanceSingle {
+        let balance_req = CmdRequest::BtrfsBalanceSingle {
             mount_point: mount_point.to_owned(),
-        });
+        };
+        let conv = if show_progress {
+            progress::run_with_balance_progress(runner, &balance_req, mount_point)
+        } else {
+            runner.run(&balance_req)
+        };
         match conv {
             Ok(out) if out.exit_status != 0 => {
                 return Err(ApplyError::ActionFailed {
@@ -561,10 +586,14 @@ fn execute_remove_graceful<R: CommandRunner>(
         }
     }
 
-    let result = runner.run(&CmdRequest::BtrfsDeviceRemove {
-        device: target.to_owned(),
-        mount_point: mount_point.to_owned(),
-    });
+    let result = if show_progress {
+        progress::run_with_remove_progress(runner, target, mount_point)
+    } else {
+        runner.run(&CmdRequest::BtrfsDeviceRemove {
+            device: target.to_owned(),
+            mount_point: mount_point.to_owned(),
+        })
+    };
     match result {
         Ok(out) if out.exit_status != 0 => Err(ApplyError::ActionFailed {
             action_id: String::new(),
@@ -583,9 +612,10 @@ fn execute_remove_graceful<R: CommandRunner>(
     }
 }
 
-fn execute_remove_missing<R: CommandRunner>(
+fn execute_remove_missing<R: CommandRunner + Sync>(
     runner: &R,
     mount_point: &str,
+    show_progress: bool,
 ) -> Result<(), ApplyError> {
     // Count present devices
     let device_count = count_pool_devices(runner, mount_point);
@@ -593,9 +623,14 @@ fn execute_remove_missing<R: CommandRunner>(
     if device_count <= 1 {
         // After removing missing, only 0 or 1 present → need single profile
         println!("  converting to single profile before removing missing");
-        let conv = runner.run(&CmdRequest::BtrfsBalanceSingle {
+        let balance_req = CmdRequest::BtrfsBalanceSingle {
             mount_point: mount_point.to_owned(),
-        });
+        };
+        let conv = if show_progress {
+            progress::run_with_balance_progress(runner, &balance_req, mount_point)
+        } else {
+            runner.run(&balance_req)
+        };
         match conv {
             Ok(out) if out.exit_status != 0 => {
                 return Err(ApplyError::ActionFailed {
@@ -618,9 +653,14 @@ fn execute_remove_missing<R: CommandRunner>(
         }
     }
 
-    let result = runner.run(&CmdRequest::BtrfsDeviceRemoveMissing {
+    let remove_req = CmdRequest::BtrfsDeviceRemoveMissing {
         mount_point: mount_point.to_owned(),
-    });
+    };
+    let result = if show_progress {
+        progress::run_with_balance_progress(runner, &remove_req, mount_point)
+    } else {
+        runner.run(&remove_req)
+    };
     match result {
         Ok(out) if out.exit_status != 0 => Err(ApplyError::ActionFailed {
             action_id: String::new(),
@@ -813,12 +853,13 @@ fn is_verify_action(at: &ActionType) -> bool {
 // Action dispatch
 // ---------------------------------------------------------------------------
 
-fn execute_action<R: CommandRunner>(
+fn execute_action<R: CommandRunner + Sync>(
     runner: &R,
     fs: &dyn Filesystem,
     action: &Action,
     config: &Config,
     is_bootstrap: bool,
+    show_progress: bool,
 ) -> Result<(), ApplyError> {
     if let Ok(v) = std::env::var("BRAID_TEST_FAIL_DURING_ACTION") {
         if v == action.id {
@@ -833,12 +874,14 @@ fn execute_action<R: CommandRunner>(
         ActionType::AddDiskBtrfsAdd => {
             execute_btrfs_add(runner, &action.target, config.mount_point(), is_bootstrap)
         }
-        ActionType::BalanceToRaid1 => execute_balance_raid1(runner, &action.target),
+        ActionType::BalanceToRaid1 => {
+            execute_balance_raid1(runner, &action.target, show_progress)
+        }
         ActionType::RemoveDiskGraceful => {
-            execute_remove_graceful(runner, &action.target, config.mount_point())
+            execute_remove_graceful(runner, &action.target, config.mount_point(), show_progress)
         }
         ActionType::RemoveDiskMissingExplicit => {
-            execute_remove_missing(runner, &action.target)
+            execute_remove_missing(runner, &action.target, show_progress)
         }
         ActionType::CloseLuksMapper => execute_close_luks(runner, &action.target),
         ActionType::VerifyPoolHealth => execute_verify_health(runner, &action.target),
@@ -956,20 +999,26 @@ fn record_failure_and_build_error(
 // Execute loop (shared between fresh and resume)
 // ---------------------------------------------------------------------------
 
-fn run_execute_loop<R: CommandRunner>(
+fn run_execute_loop<R: CommandRunner + Sync>(
     runner: &R,
     fs: &dyn Filesystem,
     checkpoint: &mut Checkpoint,
     config: &Config,
+    progress: ProgressMode,
 ) -> Result<(), ApplyError> {
-    run_execute_loop_with(runner, fs, checkpoint, config, checkpoint_write_failure_history)
+    let show_progress = progress::resolve_progress(progress, {
+        use std::io::IsTerminal;
+        std::io::stderr().is_terminal()
+    });
+    run_execute_loop_with(runner, fs, checkpoint, config, show_progress, checkpoint_write_failure_history)
 }
 
-fn run_execute_loop_with<R: CommandRunner>(
+fn run_execute_loop_with<R: CommandRunner + Sync>(
     runner: &R,
     fs: &dyn Filesystem,
     checkpoint: &mut Checkpoint,
     config: &Config,
+    show_progress: bool,
     write_failure_history: impl Fn(&Checkpoint, &str) -> Result<(), ApplyError>,
 ) -> Result<(), ApplyError> {
     for i in 0..checkpoint.actions.len() {
@@ -994,7 +1043,7 @@ fn run_execute_loop_with<R: CommandRunner>(
         checkpoint_write(checkpoint)?;
 
         let action_snapshot = checkpoint.actions[i].clone();
-        match execute_action(runner, fs, &action_snapshot, config, checkpoint.is_bootstrap) {
+        match execute_action(runner, fs, &action_snapshot, config, checkpoint.is_bootstrap, show_progress) {
             Ok(()) => {
                 checkpoint.actions[i].state = ActionState::Completed;
                 checkpoint.last_completed_action_id = checkpoint.actions[i].id.clone();
@@ -1041,7 +1090,7 @@ pub fn cmd_apply(config_path: &Path, flags: &ApplyFlags) -> Result<(), ApplyErro
     cmd_apply_with(config_path, flags, &runner, &fs)
 }
 
-pub fn cmd_apply_with<R: CommandRunner>(
+pub fn cmd_apply_with<R: CommandRunner + Sync>(
     config_path: &Path,
     flags: &ApplyFlags,
     runner: &R,
@@ -1054,7 +1103,7 @@ pub fn cmd_apply_with<R: CommandRunner>(
     }
 }
 
-fn fresh_apply<R: CommandRunner>(
+fn fresh_apply<R: CommandRunner + Sync>(
     config_path: &Path,
     flags: &ApplyFlags,
     runner: &R,
@@ -1145,7 +1194,7 @@ fn fresh_apply<R: CommandRunner>(
             checkpoint_write(&checkpoint)?;
 
             // Execute loop
-            run_execute_loop(runner, fs, &mut checkpoint, &config)?;
+            run_execute_loop(runner, fs, &mut checkpoint, &config, flags.progress)?;
 
             // Print footer
             let mutation_completed = checkpoint
@@ -1177,9 +1226,9 @@ fn fresh_apply<R: CommandRunner>(
     Ok(())
 }
 
-fn resume_apply<R: CommandRunner>(
+fn resume_apply<R: CommandRunner + Sync>(
     config_path: &Path,
-    _flags: &ApplyFlags,
+    flags: &ApplyFlags,
     runner: &R,
     fs: &dyn Filesystem,
 ) -> Result<(), ApplyError> {
@@ -1201,7 +1250,7 @@ fn resume_apply<R: CommandRunner>(
     validate_resume_targets(fs, &checkpoint.actions)?;
 
     // Execute loop
-    run_execute_loop(runner, fs, &mut checkpoint, &config)?;
+    run_execute_loop(runner, fs, &mut checkpoint, &config, flags.progress)?;
 
     // Print footer
     let mutation_completed = checkpoint

@@ -56,7 +56,7 @@ pub enum CmdError {
     MissingMock,
 }
 
-pub trait CommandRunner {
+pub trait CommandRunner: Sync {
     fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError>;
     fn run_with_stdin(
         &self,
