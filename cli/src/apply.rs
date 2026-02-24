@@ -181,7 +181,7 @@ fn prune_history() {
         .filter(|e| {
             e.path()
                 .extension()
-                .map_or(false, |ext| ext == "json")
+                .is_some_and(|ext| ext == "json")
         })
         .collect();
 

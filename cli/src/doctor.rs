@@ -253,11 +253,12 @@ pub fn run_doctor(config_path: &Path) -> DoctorReport {
         config: None,
     };
 
-    let mut checks = Vec::new();
-    checks.push(check_config_file(&mut ctx));
-    checks.push(check_config_schema(&mut ctx));
-    checks.push(check_config_permissions(&mut ctx));
-    checks.push(check_declared_disks(&mut ctx));
+    let checks = vec![
+        check_config_file(&mut ctx),
+        check_config_schema(&mut ctx),
+        check_config_permissions(&mut ctx),
+        check_declared_disks(&mut ctx),
+    ];
 
     let status = overall_status(&checks);
 

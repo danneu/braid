@@ -70,6 +70,7 @@ pub fn cmd_init_disk<R: CommandRunner, F: Filesystem>(
 }
 
 /// Inner implementation with explicit parameters (testable without env vars).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn cmd_init_disk_with<R: CommandRunner, F: Filesystem>(
     runner: &R,
     fs: &F,

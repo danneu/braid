@@ -117,7 +117,7 @@ pub fn compute_plan(
         for pd in &pool.devices {
             let in_config = config_uuids
                 .iter()
-                .any(|u| u.map_or(false, |cu| *cu == pd.luks_uuid));
+                .any(|u| u.is_some_and(|cu| *cu == pd.luks_uuid));
             if !in_config {
                 disks_to_remove_count += 1;
                 let mp = mapper_path(&pd.mapper.0);
