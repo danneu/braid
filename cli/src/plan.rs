@@ -56,8 +56,8 @@ pub fn compute_plan(
                 warnings.push(Warning {
                     code: WarningCode::InitRequired,
                     message: format!(
-                        "{} is not LUKS-formatted, run 'braid init-disk' first",
-                        cd.by_id_path
+                        "{} is not LUKS-formatted.\n    Run: braid init-disk {}",
+                        cd.by_id_path, cd.by_id_path
                     ),
                 });
             }
