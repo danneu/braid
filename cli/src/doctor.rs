@@ -1,4 +1,4 @@
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -169,6 +169,64 @@ fn check_config_permissions(ctx: &mut DoctorContext) -> CheckResult {
     }
 }
 
+fn check_declared_disks(ctx: &mut DoctorContext) -> CheckResult {
+    let config = match &ctx.config {
+        Some(c) => c,
+        None => {
+            return CheckResult {
+                name: "declared_disks".into(),
+                status: CheckStatus::Skip,
+                message: "skipped (config not available)".into(),
+            };
+        }
+    };
+
+    let mut missing: Vec<&str> = Vec::new();
+    let mut not_block: Vec<&str> = Vec::new();
+    for disk in &config.disks {
+        let path = Path::new(disk.0.as_str());
+        match std::fs::metadata(path) {
+            Ok(meta) if meta.file_type().is_block_device() => {}
+            Ok(_) => not_block.push(&disk.0),
+            Err(_) => missing.push(&disk.0),
+        }
+    }
+
+    if missing.is_empty() && not_block.is_empty() {
+        CheckResult {
+            name: "declared_disks".into(),
+            status: CheckStatus::Ok,
+            message: format!("all {} declared disk(s) present", config.disks.len()),
+        }
+    } else {
+        let mut parts: Vec<String> = Vec::new();
+        if !missing.is_empty() {
+            parts.push(format!(
+                "{} not found: {}",
+                missing.len(),
+                missing.join(", ")
+            ));
+        }
+        if !not_block.is_empty() {
+            parts.push(format!(
+                "{} not a block device: {}",
+                not_block.len(),
+                not_block.join(", ")
+            ));
+        }
+        CheckResult {
+            name: "declared_disks".into(),
+            status: CheckStatus::Warn,
+            message: format!(
+                "{}/{} disk(s) have problems: {}",
+                missing.len() + not_block.len(),
+                config.disks.len(),
+                parts.join("; ")
+            ),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Runner
 // ---------------------------------------------------------------------------
@@ -199,6 +257,7 @@ pub fn run_doctor(config_path: &Path) -> DoctorReport {
     checks.push(check_config_file(&mut ctx));
     checks.push(check_config_schema(&mut ctx));
     checks.push(check_config_permissions(&mut ctx));
+    checks.push(check_declared_disks(&mut ctx));
 
     let status = overall_status(&checks);
 
@@ -226,6 +285,7 @@ pub fn format_doctor_human(report: &DoctorReport) -> String {
             "config_file" => "config file",
             "config_schema" => "config schema",
             "config_permissions" => "config perms",
+            "declared_disks" => "declared disks",
             other => other,
         };
         out.push_str(&format!("[{tag:<4}]  {label:<14}  {}\n", c.message));
@@ -295,12 +355,17 @@ mod tests {
     }
 
     #[test]
-    fn valid_config_both_ok() {
+    fn valid_config_parses_ok_disks_warn() {
         let f = write_temp(valid_config_json());
         let report = run_doctor(f.path());
-        assert_eq!(report.checks.len(), 3);
+        assert_eq!(report.checks.len(), 4);
         assert_eq!(find_check(&report, "config_file").status, CheckStatus::Ok);
         assert_eq!(find_check(&report, "config_schema").status, CheckStatus::Ok);
+        // declared_disks warns since /dev/disk/by-id/a doesn't exist in test env
+        assert_eq!(
+            find_check(&report, "declared_disks").status,
+            CheckStatus::Warn
+        );
     }
 
     #[test]
@@ -495,6 +560,67 @@ mod tests {
         assert!(
             human.contains("config perms"),
             "expected 'config perms':\n{human}"
+        );
+    }
+
+    #[test]
+    fn declared_disks_all_missing_warns() {
+        let f = write_temp(
+            r#"{"disks":["/dev/disk/by-id/nonexistent-a","/dev/disk/by-id/nonexistent-b"],"mountPoint":"/mnt/storage"}"#,
+        );
+        let report = run_doctor(f.path());
+        let check = find_check(&report, "declared_disks");
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert!(check.message.contains("2/2"), "{}", check.message);
+        assert!(
+            check.message.contains("nonexistent-a"),
+            "{}",
+            check.message
+        );
+        assert!(
+            check.message.contains("nonexistent-b"),
+            "{}",
+            check.message
+        );
+    }
+
+    #[test]
+    fn declared_disks_not_block_device_warns() {
+        // /dev/null exists but is a char device, not a block device
+        let f = write_temp(r#"{"disks":["/dev/null"],"mountPoint":"/mnt/storage"}"#);
+        let report = run_doctor(f.path());
+        let check = find_check(&report, "declared_disks");
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert!(
+            check.message.contains("not a block device"),
+            "{}",
+            check.message
+        );
+    }
+
+    #[test]
+    fn declared_disks_skip_when_no_config() {
+        let report = run_doctor(Path::new("/tmp/nonexistent-braid-doctor-test.json"));
+        let check = find_check(&report, "declared_disks");
+        assert_eq!(check.status, CheckStatus::Skip);
+    }
+
+    #[test]
+    fn declared_disks_skip_when_bad_schema() {
+        let f = write_temp(r#"{"disks":[],"mountPoint":"/mnt/storage"}"#);
+        let report = run_doctor(f.path());
+        let check = find_check(&report, "declared_disks");
+        assert_eq!(check.status, CheckStatus::Skip);
+    }
+
+    #[test]
+    fn human_format_contains_declared_disks_label() {
+        let f = write_temp(valid_config_json());
+        let report = run_doctor(f.path());
+        let human = format_doctor_human(&report);
+        assert!(
+            human.contains("declared disks"),
+            "expected 'declared disks':\n{human}"
         );
     }
 }

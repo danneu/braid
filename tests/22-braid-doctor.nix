@@ -13,6 +13,10 @@
   name = "braid-doctor";
 
   nodes.machine = { pkgs, ... }: {
+    virtualisation.emptyDiskImages = [
+      { size = 64; driveConfig.deviceExtraOpts.serial = "disk1"; }
+    ];
+
     environment.systemPackages = [
       braid
       pkgs.jq
