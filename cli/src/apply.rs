@@ -46,8 +46,7 @@ pub struct Checkpoint {
     pub is_bootstrap: bool,
     pub actions: Vec<Action>,
     pub warnings: Vec<Warning>,
-    #[serde(alias = "confirmations")]
-    pub confirmations_required: Vec<Confirmation>,
+    pub confirmations: Vec<Confirmation>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1010,7 +1009,7 @@ fn fresh_apply<R: CommandRunner>(
             plan_id,
             actions,
             warnings,
-            confirmations_required,
+            confirmations,
         } => {
             // Print warnings
             for w in &warnings {
@@ -1029,7 +1028,7 @@ fn fresh_apply<R: CommandRunner>(
             }
 
             // Check confirmations
-            check_confirmations(&confirmations_required)?;
+            check_confirmations(&confirmations)?;
 
             // Determine bootstrap
             let is_bootstrap = !pool.mounted && pool.total_devices == 0;
@@ -1048,7 +1047,7 @@ fn fresh_apply<R: CommandRunner>(
                 is_bootstrap,
                 actions,
                 warnings,
-                confirmations_required,
+                confirmations,
             };
 
             // Write initial checkpoint
@@ -1105,7 +1104,7 @@ fn resume_apply<R: CommandRunner>(
     }
 
     // Re-check confirmations
-    check_confirmations(&checkpoint.confirmations_required)?;
+    check_confirmations(&checkpoint.confirmations)?;
 
     // Validate resume targets
     validate_resume_targets(fs, &checkpoint.actions)?;

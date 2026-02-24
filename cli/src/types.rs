@@ -151,7 +151,7 @@ pub enum PlanOutcome {
         plan_id: String,
         actions: Vec<Action>,
         warnings: Vec<Warning>,
-        confirmations_required: Vec<Confirmation>,
+        confirmations: Vec<Confirmation>,
     },
     Blocked {
         plan_id: String,
@@ -174,7 +174,7 @@ pub struct Plan<S> {
     pub plan_id: String,
     pub actions: Vec<Action>,
     pub warnings: Vec<Warning>,
-    pub confirmations_required: Vec<Confirmation>,
+    pub confirmations: Vec<Confirmation>,
     pub blocked_reasons: Vec<BlockedReason>,
     _state: PhantomData<S>,
 }
@@ -184,13 +184,13 @@ impl Plan<Applicable> {
         plan_id: String,
         actions: Vec<Action>,
         warnings: Vec<Warning>,
-        confirmations_required: Vec<Confirmation>,
+        confirmations: Vec<Confirmation>,
     ) -> Self {
         Self {
             plan_id,
             actions,
             warnings,
-            confirmations_required,
+            confirmations,
             blocked_reasons: Vec::new(),
             _state: PhantomData,
         }
@@ -207,7 +207,7 @@ impl Plan<Blocked> {
             plan_id,
             actions: Vec::new(),
             warnings,
-            confirmations_required: Vec::new(),
+            confirmations: Vec::new(),
             blocked_reasons,
             _state: PhantomData,
         }
@@ -226,12 +226,12 @@ impl TryFrom<PlanOutcome> for ApplicablePlan {
                 plan_id,
                 actions,
                 warnings,
-                confirmations_required,
+                confirmations,
             } => Ok(ApplicablePlan(Plan::new_applicable(
                 plan_id,
                 actions,
                 warnings,
-                confirmations_required,
+                confirmations,
             ))),
             PlanOutcome::Blocked { .. } => Err("blocked plans are not executable"),
         }
@@ -272,7 +272,7 @@ pub struct PlanReport {
     pub warning_count: usize,
     pub warnings: Vec<Warning>,
     pub blocked_reasons: Vec<BlockedReason>,
-    pub confirmations_required: Vec<Confirmation>,
+    pub confirmations: Vec<Confirmation>,
     pub actions: Vec<Action>,
     pub summary: PlanSummary,
 }

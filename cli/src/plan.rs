@@ -39,7 +39,7 @@ pub fn compute_plan(
     let mut actions: Vec<Action> = Vec::new();
     let mut warnings: Vec<Warning> = Vec::new();
     let mut blocked_reasons: Vec<BlockedReason> = Vec::new();
-    let mut confirmations_required: Vec<Confirmation> = Vec::new();
+    let mut confirmations: Vec<Confirmation> = Vec::new();
     let mut counter: u32 = 1;
 
     // Collect known config-disk UUIDs for matching against pool.
@@ -166,7 +166,7 @@ pub fn compute_plan(
     if disks_to_remove_count > 0 && has_absent {
         if flags.allow_remove_ambiguous {
             if let Some(ref rid) = first_remove_id {
-                confirmations_required.push(Confirmation {
+                confirmations.push(Confirmation {
                     action_id: rid.clone(),
                     phrase: "remove despite ambiguous identity".to_owned(),
                 });
@@ -219,7 +219,7 @@ pub fn compute_plan(
                     config.mount_point.clone(),
                     vec![],
                 );
-                confirmations_required.push(Confirmation {
+                confirmations.push(Confirmation {
                     action_id: act.id.clone(),
                     phrase: "remove missing device from pool".to_owned(),
                 });
@@ -250,7 +250,7 @@ pub fn compute_plan(
     // -------------------------------------------------------------------
     if disks_to_remove_count > 0 && future_size < 2 {
         if let Some(ref rid) = first_remove_id {
-            confirmations_required.push(Confirmation {
+            confirmations.push(Confirmation {
                 action_id: rid.clone(),
                 phrase: "remove this disk without redundancy".to_owned(),
             });
@@ -290,7 +290,7 @@ pub fn compute_plan(
             plan_id: generate_plan_id(),
             actions,
             warnings,
-            confirmations_required,
+            confirmations,
         }
     }
 }
@@ -300,18 +300,18 @@ pub fn compute_plan(
 // ---------------------------------------------------------------------------
 
 pub fn to_plan_report(outcome: &PlanOutcome, config: &Config) -> PlanReport {
-    let (plan_id, actions, warnings, blocked_reasons, confirmations_required, status) = match outcome {
+    let (plan_id, actions, warnings, blocked_reasons, confirmations, status) = match outcome {
         PlanOutcome::Applicable {
             plan_id,
             actions,
             warnings,
-            confirmations_required,
+            confirmations,
         } => (
             plan_id.clone(),
             actions.clone(),
             warnings.clone(),
             Vec::<BlockedReason>::new(),
-            confirmations_required.clone(),
+            confirmations.clone(),
             PlanStatus::Applicable,
         ),
         PlanOutcome::Blocked {
@@ -355,7 +355,7 @@ pub fn to_plan_report(outcome: &PlanOutcome, config: &Config) -> PlanReport {
         status,
         warning_count: warnings.len(),
         blocked_reasons: blocked_reasons.clone(),
-        confirmations_required,
+        confirmations,
         summary: PlanSummary {
             actions_total: actions.len(),
             actions_mutation,
@@ -416,11 +416,11 @@ pub fn format_plan_human(report: &PlanReport) -> String {
         }
     }
 
-    if !report.confirmations_required.is_empty() {
+    if !report.confirmations.is_empty() {
         out.push('\n');
         out.push_str(&format!(
             "Confirmations required: {}\n",
-            report.confirmations_required.len()
+            report.confirmations.len()
         ));
     }
 
@@ -632,8 +632,8 @@ mod tests {
     fn confirmation_phrases(outcome: &PlanOutcome) -> Vec<&str> {
         match outcome {
             PlanOutcome::Applicable {
-                confirmations_required, ..
-            } => confirmations_required.iter().map(|c| c.phrase.as_str()).collect(),
+                confirmations, ..
+            } => confirmations.iter().map(|c| c.phrase.as_str()).collect(),
             _ => vec![],
         }
     }

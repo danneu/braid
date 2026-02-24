@@ -134,7 +134,7 @@ with subtest("--allow-remove-ambiguous unblocks plan with confirmations"):
     assert p["status"] == "applicable", (
         f"Expected applicable with override:\n{p}"
     )
-    phrases = [c["phrase"] for c in p.get("confirmations_required", [])]
+    phrases = [c["phrase"] for c in p.get("confirmations", [])]
     assert "remove despite ambiguous identity" in phrases, (
         f"Expected ambiguous identity confirmation:\n{phrases}"
     )
@@ -159,7 +159,7 @@ with subtest("Plan shows remove actions for disk in pool but not config"):
 
 with subtest("Remove to single disk triggers redundancy confirmation"):
     p = rust_plan_json()
-    phrases = [c["phrase"] for c in p.get("confirmations_required", [])]
+    phrases = [c["phrase"] for c in p.get("confirmations", [])]
     assert any("redundancy" in ph for ph in phrases), f"Expected redundancy phrase:\n{phrases}"
 
 # --- Subtest 9: Degraded pool warning text ---
