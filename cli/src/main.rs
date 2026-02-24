@@ -10,7 +10,7 @@ use braid_cli::probe::{probe_config_disk, probe_pool, RealFilesystem};
 use braid_cli::types::PlanFlags;
 
 #[derive(Debug, Parser)]
-#[command(name = "braid")]
+#[command(name = "braid", version)]
 #[command(about = "braid Rust CLI", long_about = None)]
 struct Cli {
     #[arg(long, global = true, default_value = "/etc/braid/config.json")]
@@ -71,7 +71,14 @@ struct DoctorArgs {
 }
 
 fn main() {
+    // Parse before root gate so --help/--version work without sudo.
     let cli = Cli::parse();
+
+    // SAFETY: geteuid() is a trivial syscall with no arguments, always safe to call.
+    if unsafe { libc::geteuid() } != 0 {
+        eprintln!("error: braid must be run as root (try: sudo braid ...)");
+        std::process::exit(1);
+    }
 
     let config_path = cli.config;
 
@@ -180,3 +187,4 @@ fn main() {
         }
     }
 }
+
