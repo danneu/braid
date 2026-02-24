@@ -22,10 +22,15 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    /// Initialize and encrypt a new disk
     InitDisk(InitDiskArgs),
+    /// Show what changes would be applied
     Plan(PlanArgs),
+    /// Apply planned changes to the pool
     Apply(ApplyArgs),
+    /// Show pool health and disk info
     Status(StatusArgs),
+    /// Check configuration for problems
     Doctor(DoctorArgs),
 }
 
