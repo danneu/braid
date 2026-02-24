@@ -1,19 +1,17 @@
 { config, lib, pkgs, ... }:
 let
   cfg = config.braid.daemon;
-  braid = pkgs.buildGoModule {
-    pname = "braid";
-    version = "0.1.0";
-    src = ../../daemon;
-    vendorHash = null;
-    postInstall = ''
-      mv $out/bin/daemon $out/bin/braid
-    '';
-  };
 in
 {
   options.braid.daemon = {
     enable = lib.mkEnableOption "braid daemon";
+
+    package = lib.mkOption {
+      type = lib.types.nullOr lib.types.package;
+      default = config.braid.package;
+      defaultText = lib.literalExpression "config.braid.package";
+      description = "The braid package (must provide 'braid daemon' subcommand).";
+    };
 
     socketPath = lib.mkOption {
       type = lib.types.path;
@@ -23,14 +21,25 @@ in
   };
 
   config = lib.mkIf cfg.enable {
+    assertions = [{
+      assertion = cfg.package != null;
+      message = "braid.daemon.package must be set when braid.daemon.enable is true";
+    }];
+
+    systemd.sockets.braid = {
+      description = "braid daemon socket";
+      wantedBy = [ "sockets.target" ];
+      socketConfig = {
+        ListenStream = cfg.socketPath;
+        Accept = false;
+      };
+    };
+
     systemd.services.braid = {
       description = "braid daemon";
-      wantedBy = [ "multi-user.target" ];
       serviceConfig = {
         Type = "simple";
-        ExecStart = "${braid}/bin/braid";
-        RuntimeDirectory = "braid";
-        Environment = "BRAID_SOCKET=${cfg.socketPath}";
+        ExecStart = "${cfg.package}/bin/braid daemon";
         Restart = "on-failure";
       };
     };

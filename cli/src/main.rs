@@ -25,6 +25,7 @@ enum Commands {
     Plan(PlanArgs),
     Apply(ApplyArgs),
     Status(StatusArgs),
+    Daemon,
 }
 
 #[derive(Debug, Args)]
@@ -163,6 +164,9 @@ fn main() {
                 eprintln!("error: {e}");
                 std::process::exit(1);
             }
+        }
+        Commands::Daemon => {
+            braid_cli::daemon::run_daemon();
         }
     }
 }
