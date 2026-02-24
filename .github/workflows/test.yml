@@ -27,17 +27,28 @@ jobs:
   build-braid:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    outputs:
+      braid_out: ${{ steps.build.outputs.braid_out }}
     steps:
       - uses: actions/checkout@v4
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@main
       - name: Cache Nix store
         uses: DeterminateSystems/magic-nix-cache-action@main
-      - name: Prewarm braid build
+      - id: build
+        name: Build braid and export closure
         run: |
-          # Build braid once up front so matrix jobs can hopefully substitute it
-          # from cache instead of recompiling independently on cold runners.
-          nix build .#packages.x86_64-linux.braid -L
+          # Build braid once and export its closure as an artifact so each matrix
+          # job can import it directly, without relying only on cache availability.
+          out=$(nix build .#packages.x86_64-linux.braid --no-link --print-out-paths -L)
+          echo "braid_out=$out" >> "$GITHUB_OUTPUT"
+          nix-store --export $(nix-store --query --requisites "$out") | zstd -T0 -19 > braid-closure.nar.zst
+      - name: Upload braid closure artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: braid-closure
+          path: braid-closure.nar.zst
+          if-no-files-found: error
 
   test:
     needs: [discover, build-braid]
@@ -64,6 +75,16 @@ jobs:
 
       - name: Cache Nix store
         uses: DeterminateSystems/magic-nix-cache-action@main
+
+      - name: Download prebuilt braid closure
+        uses: actions/download-artifact@v4
+        with:
+          name: braid-closure
+
+      - name: Import prebuilt braid closure
+        run: |
+          zstd -dc braid-closure.nar.zst | nix-store --import
+          nix path-info "${{ needs.build-braid.outputs.braid_out }}"
 
       - name: Run test (${{ matrix.test }})
         run: nix build .#checks.x86_64-linux.${{ matrix.test }} -L
