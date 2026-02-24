@@ -193,7 +193,25 @@
         };
     in
     {
-      nixosModules.default = import ./modules/braid;
+      nixosModules.default =
+        { pkgs, lib, ... }:
+        let
+          # Use braid's own pinned nixpkgs for tool versions, not the consumer's
+          braidPkgs = import self.inputs.nixpkgs { system = pkgs.system; };
+        in
+        {
+          imports = [ ./modules/braid ];
+          config.braid = {
+            package = lib.mkDefault self.packages.${pkgs.system}.braid-cli-unwrapped;
+            packages = {
+              cryptsetup = lib.mkDefault braidPkgs.cryptsetup;
+              btrfsProgs = lib.mkDefault braidPkgs.btrfs-progs;
+              utilLinux = lib.mkDefault braidPkgs.util-linux;
+              jq = lib.mkDefault braidPkgs.jq;
+              coreutils = lib.mkDefault braidPkgs.coreutils;
+            };
+          };
+        };
 
       packages = forAllSystems packagesFor;
 
