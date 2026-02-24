@@ -30,20 +30,8 @@ Dan buys a NAS computer and installs NixOS on its internal SSD. He has one 12TB 
 
 4. Format and add it to the pool:
    ```
-   $ sudo braid-add-disk /dev/disk/by-id/ata-Toshiba_MN07_XXXX
-
-   WARNING: This will PERMANENTLY ERASE all data on:
-     /dev/disk/by-id/ata-Toshiba_MN07_XXXX (Toshiba MN07ACA12T, 12TB)
-
-   It will be LUKS-encrypted and become the first disk in a new btrfs pool.
-   NOTE: A single disk has NO redundancy. Add a second disk for RAID1 protection.
-
-   Type 'erase this disk' to confirm: erase this disk
-
-   Formatting LUKS...
-   Creating btrfs filesystem...
-   Mounting at /mnt/storage...
-   Done. This disk will auto-unlock on next reboot.
+   $ sudo braid init-disk /dev/disk/by-id/ata-Toshiba_MN07_XXXX
+   $ sudo braid apply
    ```
 
 5. From MacBook: Finder → Cmd+K → `smb://nas/storage`. Start dragging files over.

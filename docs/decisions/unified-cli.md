@@ -6,7 +6,7 @@ Status: Active
 
 ## Context
 
-Braid has three standalone scripts (`braid-add-disk`, `braid-remove-disk`, `braid-status`). Each handles one operation with its own validation, pool probing, and confirmation flow. The config-first workflow (edit config → rebuild → run script) is sound, but operators must choose the right script and remember its flags.
+Braid had three standalone scripts (`braid-add-disk`, `braid-remove-disk`, `braid-status`). Each handled one operation with its own validation, pool probing, and confirmation flow. The config-first workflow (edit config → rebuild → run script) was sound, but operators had to choose the right script and remember its flags. All three are now replaced by the unified Rust CLI.
 
 A unified `braid` command with `plan` (dry-run diff) and `apply` (execute with checkpoints) replaces the multi-script mental model with one flow: `edit config → rebuild → plan → apply`.
 
@@ -18,18 +18,18 @@ A unified `braid` command with `plan` (dry-run diff) and `apply` (execute with c
 
 ## Decision
 
-Option 3. Bash+jq for phases 1-3. Re-evaluate language choice only after plan/apply semantics are stable.
+Option 3. Initial implementation was bash+jq. Now replaced by Rust CLI (`cli/`).
 
 ### Architecture
 
-Single script `scripts/braid.sh` with subcommand dispatcher:
+Rust CLI (`cli/src/`) with subcommand dispatcher:
 
 - `braid init-disk <by-id> [--force] [--config <path>]` — destructive one-shot: LUKS format a declared disk. Requires explicit operator intent. Never called from `apply`.
 - `braid plan [--json] [--allow-remove-missing] [--allow-remove-ambiguous] [--config <path>]` — read-only diff: desired state (config) vs live state (LUKS/btrfs/mounts). Outputs action list with status (`applicable`/`blocked`), warnings, and blocked reasons.
 - `braid apply [--resume] [--allow-remove-missing] [--allow-remove-ambiguous] [--config <path>]` — executes plan with checkpoint persistence. `--resume` continues from `/var/lib/braid/apply-state.json`. Never performs `luksFormat`.
 - `braid status [--verbose] [--json] [--config <path>]` — pool health summary (replaces `braid-status`).
 
-Packaged via `pkgs.writeShellApplication` in `cli.nix`, same as existing scripts.
+Packaged via Crane + `makeWrapper` in `flake.nix`.
 
 ### Hard boundary
 
@@ -71,7 +71,7 @@ History: `/var/lib/braid/history/<plan_id>.json` (last 20 retained)
 
 ### Backward compatibility
 
-`braid-add-disk` is deprecated and rewired as a thin wrapper that calls `braid init-disk` + `braid apply`. It prints a deprecation warning. No private formatting logic remains in the standalone script. `braid-remove-disk` and `braid-status` remain as standalone scripts.
+`braid-add-disk` is now an error stub that directs operators to `braid init-disk` + `braid apply`. `braid-status` is deleted (replaced by `braid status`). `braid-remove-disk` remains as a standalone legacy script (not yet ported to the Rust CLI).
 
 ## Constraint
 
@@ -82,5 +82,5 @@ Two commands (`plan` then `apply`) instead of one. This is intentional — deter
 - `docs/decisions/config-first-workflow.md` — config-first principle this builds on
 - `docs/decisions/safe-by-construction-reconciliation.md` — destructive boundary principle
 - `docs/decisions/disk-pool-management.md` — existing pool management spec
-- `scripts/braid.sh` — unified CLI implementation
-- `scripts/braid-add-disk.sh` — deprecated wrapper
+- `cli/src/` — Rust CLI implementation
+- `scripts/braid-add-disk.sh` — error stub directing to `init-disk` + `apply`

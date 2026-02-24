@@ -4,17 +4,17 @@ Status: Active
 
 ## Context
 
-Braid's runtime tools (btrfs-progs, cryptsetup, util-linux) are parsed by both the shell script and the Rust CLI. Output formats change between tool versions — a flake update to nixpkgs-unstable could silently break parsers.
+Braid's runtime tools (btrfs-progs, cryptsetup, util-linux) are parsed by the Rust CLI. Output formats change between tool versions — a flake update to nixpkgs-unstable could silently break parsers.
 
 ## Decision
 
-Pin `flake.nix` to a specific NixOS stable release (nixos-25.11). Both the shell and Rust wrappers execute with an explicit PATH containing only module-controlled packages. Parser code is written against the pinned version's output format.
+Pin `flake.nix` to a specific NixOS stable release (nixos-25.11). The Rust wrapper executes with an explicit PATH containing only module-controlled packages. Parser code is written against the pinned version's output format.
 
 ### How it works
 
 - **Flake input**: `nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11"` — all tool packages come from this channel.
 - **Module options**: `braid.packages.*` (cryptsetup, btrfsProgs, utilLinux, jq, coreutils) default to the flake's nixpkgs but can be overridden per-system.
-- **PATH wrapping**: `writeShellApplication` (shell) and `makeWrapper` (Rust) inject only `cfg.packages.*` into PATH. No ambient system tools leak in.
+- **PATH wrapping**: `makeWrapper` (Rust) injects only `cfg.packages.*` into PATH. No ambient system tools leak in.
 - **Two wrapping sites**: flake.nix wraps with `pkgs.*` defaults (for `nix run` and tests); the module wraps `cfg.package` with `cfg.packages.*` (for deployed NixOS systems where package options may be overridden).
 
 ### Upgrading tools

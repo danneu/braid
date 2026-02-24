@@ -57,6 +57,6 @@ If NixOS or LUKS ever provides an idempotent "ensure formatted" primitive that i
 
 ## See
 
-- `scripts/braid.sh` — unified CLI (`init-disk`, `plan`, `apply`, `status`)
+- `cli/src/` — Rust CLI (`init-disk`, `plan`, `apply`, `status`)
 - [config-first-workflow.md](config-first-workflow.md) — config-first principle
 - [unified-cli.md](unified-cli.md) — plan/apply architecture and action types

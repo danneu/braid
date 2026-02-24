@@ -148,16 +148,6 @@ sudo braid apply     # warns about absent disk, proceeds with others
 sudo braid apply     # reconciles the returned disk
 ```
 
-### Standalone scripts (deprecated)
-
-The original `braid-add-disk` still works but prints a deprecation warning. It calls `braid init-disk` + `braid apply` internally:
-
-```
-sudo braid-add-disk /dev/disk/by-id/ata-...     # deprecated, use init-disk + apply
-sudo braid-remove-disk /dev/disk/by-id/ata-...
-sudo braid-status [--verbose]
-```
-
 ## What you get for free
 
 Braid enables these automatically when `braid.enable = true`:
