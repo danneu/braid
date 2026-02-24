@@ -39,9 +39,6 @@
         in {
           inherit braid-cli-unwrapped;
           inherit braid;
-
-          # Alias for backward compat (removed in commit 2)
-          braid-rust = braid;
         };
 
       packagesFor = system:
@@ -52,7 +49,7 @@
         {
           inherit (craneFor system) braid-cli-unwrapped;
         }
-        // (if isLinux then { inherit (craneFor system) braid braid-rust; } else {})
+        // (if isLinux then { inherit (craneFor system) braid; } else {})
         // (
           if system == "aarch64-darwin" then
             {
@@ -88,19 +85,15 @@
           replace-failed-disk = pkgs.testers.nixosTest (import ./tests/7-replace-failed-disk.nix {
             braid = linuxCrane.braid;
           });
-          braid-status = pkgs.testers.nixosTest (import ./tests/8-braid-status.nix);
           braid-remove-disk = pkgs.testers.nixosTest (import ./tests/9-braid-remove-disk.nix {
             braid = linuxCrane.braid;
           });
-          braid-plan = pkgs.testers.nixosTest (import ./tests/10-braid-plan.nix);
-          braid-apply = pkgs.testers.nixosTest (import ./tests/11-braid-apply.nix);
           braid-unified = pkgs.testers.nixosTest (import ./tests/12-braid-unified.nix {
             braid = linuxCrane.braid;
           });
           braid-bootstrap = pkgs.testers.nixosTest (import ./tests/13-braid-bootstrap.nix {
             braid = linuxCrane.braid;
           });
-          braid-init-disk = pkgs.testers.nixosTest (import ./tests/14-braid-init-disk.nix);
           braid-plan-rust = pkgs.testers.nixosTest (import ./tests/15-braid-plan-rust.nix {
             braid = linuxCrane.braid;
           });
