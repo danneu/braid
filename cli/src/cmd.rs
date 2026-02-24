@@ -236,7 +236,7 @@ impl CommandRunner for RealRunner {
                 )
             }
             CmdRequest::CryptsetupLuksFormat { device, extra_opts } => {
-                let mut args: Vec<&str> = vec!["luksFormat", "--batch-mode", "--key-file=-"];
+                let mut args: Vec<&str> = vec!["luksFormat", "--batch-mode", "--key-file=-", "--progress-frequency", "1"];
                 for opt in extra_opts {
                     args.push(opt.as_str());
                 }
