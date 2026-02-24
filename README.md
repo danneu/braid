@@ -6,6 +6,31 @@ NixOS module for encrypted NAS storage with auto-healing and dynamic drive pooli
 - **btrfs RAID1** with checksumming and automatic self-healing
 - Dynamic pool — add or remove drives without reformatting
 
+## Install
+
+Add braid to your flake inputs and import the module:
+
+```nix
+# flake.nix
+{
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
+    braid.url = "github:danneu/braid";
+    braid.inputs.nixpkgs.follows = "nixpkgs";
+  };
+
+  outputs = { nixpkgs, braid, ... }: {
+    nixosConfigurations.myhost = nixpkgs.lib.nixosSystem {
+      system = "x86_64-linux";
+      modules = [
+        braid.nixosModules.default
+        ./configuration.nix
+      ];
+    };
+  };
+}
+```
+
 ## Example
 
 ```nix
@@ -28,7 +53,21 @@ Every drive operation follows the same pattern: **edit config, rebuild, plan, ap
 ### Find your disks
 
 ```
-ls /dev/disk/by-id/
+$ lsblk -d -o NAME,SIZE,ID-LINK
+NAME      SIZE ID-LINK
+sda        7.5G usb-General_UDisk_2510250851560304805623-0:0
+sdb        7.5G usb-General_UDisk_2510251411472126962806-0:0
+sdc        7.5G usb-General_UDisk_2510241444331159432829-0:0
+nvme0n1  931.5G nvme-WDC_WDS100T2B0C-00PXH0_20301E800610
+nvme1n1  476.9G nvme-Inland_TN320_NVMe_SSD_IB25ZH0512P00869
+```
+
+Here `sda`, `sdb`, `sdc` are my three 8GB USB drives — those go in `braid.disks`. The two `nvme*` entries are internal NVMe SSDs I'm not using with braid.
+
+Use the ID-LINK column to build your disk paths:
+
+```
+/dev/disk/by-id/usb-General_UDisk_2510250851560304805623-0:0
 ```
 
 HDDs hooked up to SATA ports probably start with `ata-*`.
