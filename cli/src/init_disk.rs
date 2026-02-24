@@ -92,7 +92,10 @@ pub(crate) fn cmd_init_disk_with<R: CommandRunner, F: Filesystem>(
     let mountpoint_result = runner.run(&CmdRequest::MountpointCheck {
         path: config.mount_point.clone(),
     });
-    let is_mounted = matches!(mountpoint_result, Ok(ref out) if out.exit_status == 0);
+    let is_mounted = match mountpoint_result {
+        Ok(ref out) => out.exit_status == 0,
+        Err(e) => return Err(InitDiskError::Cmd(e)),
+    };
 
     if is_mounted {
         match probe_pool(runner, &config.mount_point) {
@@ -233,6 +236,7 @@ fn find_passphrase_target<R: CommandRunner, F: Filesystem>(
     exclude_path: &str,
 ) -> Result<Option<String>, InitDiskError> {
     let mut had_candidate = false;
+    let mut had_successful_check = false;
     let mut errors: Vec<String> = Vec::new();
 
     // Pass 1: open mapper
@@ -262,7 +266,8 @@ fn find_passphrase_target<R: CommandRunner, F: Filesystem>(
                 return Ok(Some(disk.0.clone()));
             }
             Ok(_) => {
-                // Not active, continue
+                // Not active — check ran successfully, just not a match
+                had_successful_check = true;
             }
             Err(e) => {
                 errors.push(format!("status {}: {e}", mapper_name.0));
@@ -290,7 +295,8 @@ fn find_passphrase_target<R: CommandRunner, F: Filesystem>(
                 return Ok(Some(disk.0.clone()));
             }
             Ok(_) => {
-                // Not LUKS, continue
+                // Not LUKS — check ran successfully, just not a match
+                had_successful_check = true;
             }
             Err(e) => {
                 errors.push(format!("isLuks {}: {e}", disk.0));
@@ -298,8 +304,10 @@ fn find_passphrase_target<R: CommandRunner, F: Filesystem>(
         }
     }
 
-    // Fail-closed rule
-    if had_candidate && !errors.is_empty() {
+    // Fail-closed rule: only error when candidates existed, none checked
+    // successfully, and at least one errored. If any check ran and returned
+    // a normal non-match, we know the search completed — Ok(None) is safe.
+    if had_candidate && !had_successful_check && !errors.is_empty() {
         return Err(InitDiskError::Validation(format!(
             "cannot verify passphrase: all candidate checks failed: {}",
             errors.join("; ")
@@ -1296,6 +1304,106 @@ mod tests {
         assert!(
             err.to_string().contains("all candidate checks failed"),
             "got: {err}"
+        );
+    }
+
+    // ======================================================================
+    // Bug-fix regression tests
+    // ======================================================================
+
+    #[test]
+    fn find_target_mixed_nonmatch_and_error_returns_none() {
+        // Bug: fail-closed rule was "any error → Err" instead of
+        // "all candidates errored → Err". When one candidate returns a
+        // normal non-match (exit!=0) and another errors, the non-match
+        // proves the search ran — we should return Ok(None), not Err.
+        //
+        // Setup: 3-disk config, target = disk3.
+        // - disk1: mapper exists, CryptsetupStatus returns Ok(exit=4) → not active (non-match)
+        // - disk2: mapper exists, CryptsetupStatus → MissingMock (error)
+        // Both pass 2 candidates are not block devices, so pass 2 is skipped.
+        let runner = MockRunner::default().with_output(
+            CmdRequest::CryptsetupStatus {
+                mapper: "virtio-disk1".to_owned(),
+            },
+            err_raw("cryptsetup status virtio-disk1", 4, "not active"),
+        );
+        // disk2 has no CryptsetupStatus mock → MissingMock error
+
+        let config = Config {
+            disks: vec![
+                ByIdPath("/dev/disk/by-id/virtio-disk1".to_owned()),
+                ByIdPath("/dev/disk/by-id/virtio-disk2".to_owned()),
+                ByIdPath("/dev/disk/by-id/virtio-disk3".to_owned()),
+            ],
+            mount_point: "/mnt/storage".to_owned(),
+        };
+
+        let fs = MockFs::new(
+            &[
+                "/dev/mapper/virtio-disk1",
+                "/dev/mapper/virtio-disk2",
+            ],
+            &[], // no block devices → pass 2 skipped entirely
+        );
+
+        let result = find_passphrase_target(
+            &runner,
+            &fs,
+            &config,
+            "/dev/disk/by-id/virtio-disk3",
+        );
+        assert!(
+            matches!(result, Ok(None)),
+            "mixed non-match + error should return Ok(None), got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn init_disk_mountpoint_command_error_is_fatal() {
+        // Bug: MountpointCheck Err was treated as "not mounted" (fail-open)
+        // instead of propagating the error (fail-closed).
+        // If the mountpoint command itself fails to execute, we cannot
+        // determine mount status and must refuse to proceed.
+        //
+        // Provide mocks for everything downstream so the ONLY missing mock
+        // is MountpointCheck. If the bug is present the code skips to
+        // format and succeeds — the test catches that by expecting Err.
+        let runner = MockRunner::default()
+            // NO MountpointCheck mock → MissingMock error
+            .with_output(
+                CmdRequest::CryptsetupIsLuks {
+                    device: "/dev/disk/by-id/virtio-disk1".to_owned(),
+                },
+                err_raw("cryptsetup isLuks", 4, "not LUKS"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupLuksFormat {
+                    device: "/dev/disk/by-id/virtio-disk1".to_owned(),
+                    extra_opts: vec![],
+                },
+                b"pass".to_vec(),
+                ok_raw("cryptsetup luksFormat", ""),
+            );
+
+        let fs = MockFs::new(&[], &["/dev/disk/by-id/virtio-disk1"]);
+        let config = config_1disk();
+
+        let err = cmd_init_disk_with(
+            &runner,
+            &fs,
+            &config,
+            "/dev/disk/by-id/virtio-disk1",
+            false,
+            "pass",
+            "",
+            &[],
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(err, InitDiskError::Cmd(_)),
+            "mountpoint command error should be fatal, got: {err:?}"
         );
     }
 }
