@@ -11,6 +11,7 @@ use crate::types::*;
 
 pub trait Filesystem {
     fn exists(&self, path: &str) -> bool;
+    fn is_block_device(&self, path: &str) -> bool;
 }
 
 pub struct RealFilesystem;
@@ -18,6 +19,13 @@ pub struct RealFilesystem;
 impl Filesystem for RealFilesystem {
     fn exists(&self, path: &str) -> bool {
         std::path::Path::new(path).exists()
+    }
+
+    fn is_block_device(&self, path: &str) -> bool {
+        use std::os::unix::fs::FileTypeExt;
+        std::fs::metadata(path)
+            .map(|m| m.file_type().is_block_device())
+            .unwrap_or(false)
     }
 }
 
@@ -193,12 +201,14 @@ mod tests {
 
     struct MockFs {
         paths: Vec<String>,
+        block_devices: Vec<String>,
     }
 
     impl MockFs {
         fn new(paths: &[&str]) -> Self {
             Self {
                 paths: paths.iter().map(|s| s.to_string()).collect(),
+                block_devices: vec![],
             }
         }
     }
@@ -206,6 +216,10 @@ mod tests {
     impl Filesystem for MockFs {
         fn exists(&self, path: &str) -> bool {
             self.paths.contains(&path.to_string())
+        }
+
+        fn is_block_device(&self, path: &str) -> bool {
+            self.block_devices.contains(&path.to_string())
         }
     }
 

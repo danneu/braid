@@ -39,6 +39,9 @@ pub enum CmdRequest {
     MkfsBtrfs { device: String },
     Mount { device: String, mount_point: String },
     MountpointCheck { path: String },
+    // init-disk commands
+    CryptsetupLuksFormat { device: String, extra_opts: Vec<String> },
+    CryptsetupTestPassphrase { device: String },
 }
 
 #[derive(Debug, Error)]
@@ -189,6 +192,20 @@ impl CommandRunner for RealRunner {
             CmdRequest::MountpointCheck { path } => {
                 RealRunner::exec("mountpoint", &["-q", path])
             }
+            CmdRequest::CryptsetupLuksFormat { device, extra_opts } => {
+                // Passphrase must be piped via run_with_stdin, not here.
+                let _ = (device, extra_opts);
+                Err(CmdError::Failed(
+                    "CryptsetupLuksFormat must use run_with_stdin".to_owned(),
+                ))
+            }
+            CmdRequest::CryptsetupTestPassphrase { device } => {
+                // Passphrase must be piped via run_with_stdin, not here.
+                let _ = device;
+                Err(CmdError::Failed(
+                    "CryptsetupTestPassphrase must use run_with_stdin".to_owned(),
+                ))
+            }
         }
     }
 
@@ -202,6 +219,21 @@ impl CommandRunner for RealRunner {
                 RealRunner::exec_with_stdin(
                     "cryptsetup",
                     &["luksOpen", "--key-file=-", device, mapper],
+                    stdin,
+                )
+            }
+            CmdRequest::CryptsetupLuksFormat { device, extra_opts } => {
+                let mut args: Vec<&str> = vec!["luksFormat", "--batch-mode", "--key-file=-"];
+                for opt in extra_opts {
+                    args.push(opt.as_str());
+                }
+                args.push(device.as_str());
+                RealRunner::exec_with_stdin("cryptsetup", &args, stdin)
+            }
+            CmdRequest::CryptsetupTestPassphrase { device } => {
+                RealRunner::exec_with_stdin(
+                    "cryptsetup",
+                    &["open", "--test-passphrase", "--key-file=-", device],
                     stdin,
                 )
             }
@@ -356,8 +388,87 @@ mod tests {
             CmdRequest::MountpointCheck {
                 path: "/mnt/storage".to_owned(),
             },
+            CmdRequest::CryptsetupLuksFormat {
+                device: "/dev/vda".to_owned(),
+                extra_opts: vec![],
+            },
+            CmdRequest::CryptsetupTestPassphrase {
+                device: "/dev/vda".to_owned(),
+            },
         ];
 
-        assert_eq!(all.len(), 22);
+        assert_eq!(all.len(), 24);
+    }
+
+    #[test]
+    fn luks_format_run_without_stdin_errors() {
+        let runner = RealRunner;
+        let req = CmdRequest::CryptsetupLuksFormat {
+            device: "/dev/vda".to_owned(),
+            extra_opts: vec![],
+        };
+        let result = runner.run(&req);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, CmdError::Failed(ref msg) if msg.contains("must use run_with_stdin")),
+            "expected Failed with stdin hint, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_passphrase_run_without_stdin_errors() {
+        let runner = RealRunner;
+        let req = CmdRequest::CryptsetupTestPassphrase {
+            device: "/dev/vda".to_owned(),
+        };
+        let result = runner.run(&req);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, CmdError::Failed(ref msg) if msg.contains("must use run_with_stdin")),
+            "expected Failed with stdin hint, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn luks_format_run_with_stdin_routes_correctly() {
+        let req = CmdRequest::CryptsetupLuksFormat {
+            device: "/dev/vda".to_owned(),
+            extra_opts: vec!["--pbkdf".to_owned(), "pbkdf2".to_owned()],
+        };
+        let mock = MockRunner::default().with_output_stdin(
+            req.clone(),
+            b"secret".to_vec(),
+            RawCommandOutput {
+                cmd: "cryptsetup luksFormat --batch-mode --key-file=- --pbkdf pbkdf2 /dev/vda".to_owned(),
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_status: 0,
+            },
+        );
+        let result = mock.run_with_stdin(&req, b"secret");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().exit_status, 0);
+    }
+
+    #[test]
+    fn test_passphrase_run_with_stdin_routes_correctly() {
+        let req = CmdRequest::CryptsetupTestPassphrase {
+            device: "/dev/vda".to_owned(),
+        };
+        let mock = MockRunner::default().with_output_stdin(
+            req.clone(),
+            b"secret".to_vec(),
+            RawCommandOutput {
+                cmd: "cryptsetup open --test-passphrase --key-file=- /dev/vda".to_owned(),
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_status: 0,
+            },
+        );
+        let result = mock.run_with_stdin(&req, b"secret");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().exit_status, 0);
     }
 }

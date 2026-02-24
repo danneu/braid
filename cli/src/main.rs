@@ -68,7 +68,23 @@ fn main() {
     let config_path = cli.config;
 
     match cli.command {
-        Commands::InitDisk(_) => println!("not yet implemented"),
+        Commands::InitDisk(args) => {
+            let config = match config_read(Path::new(&config_path)) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                }
+            };
+            let runner = RealRunner;
+            let fs = RealFilesystem;
+            if let Err(e) = braid_cli::init_disk::cmd_init_disk(
+                &runner, &fs, &config, &args.by_id_path, args.force,
+            ) {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        }
         Commands::Plan(args) => {
             let config = match config_read(Path::new(&config_path)) {
                 Ok(c) => c,

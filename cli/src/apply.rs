@@ -1169,12 +1169,14 @@ mod tests {
 
     struct MockFs {
         paths: Vec<String>,
+        block_devices: Vec<String>,
     }
 
     impl MockFs {
         fn new(paths: &[&str]) -> Self {
             Self {
                 paths: paths.iter().map(|s| s.to_string()).collect(),
+                block_devices: vec![],
             }
         }
     }
@@ -1182,6 +1184,10 @@ mod tests {
     impl Filesystem for MockFs {
         fn exists(&self, path: &str) -> bool {
             self.paths.contains(&path.to_string())
+        }
+
+        fn is_block_device(&self, path: &str) -> bool {
+            self.block_devices.contains(&path.to_string())
         }
     }
 
