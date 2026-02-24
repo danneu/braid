@@ -7,6 +7,7 @@
 # (disk present, data migrates off) and failure path (disk gone, remove missing).
 #
 # Dependencies: braid init-disk + braid apply (builds the test pool).
+{ braid }:
 {
   name = "braid-remove-disk";
 
@@ -17,14 +18,8 @@
       { size = 1024; driveConfig.deviceExtraOpts.serial = "disk3"; }
     ];
 
-    environment.systemPackages = let
-      braid-cli = pkgs.writeShellApplication {
-        name = "braid";
-        runtimeInputs = [ pkgs.cryptsetup pkgs.btrfs-progs pkgs.util-linux pkgs.jq pkgs.coreutils ];
-        text = builtins.readFile ../scripts/braid.sh;
-      };
-    in [
-      braid-cli
+    environment.systemPackages = [
+      braid
       (pkgs.writeShellApplication {
         name = "braid-remove-disk";
         runtimeInputs = [ pkgs.cryptsetup pkgs.btrfs-progs pkgs.util-linux pkgs.jq ];

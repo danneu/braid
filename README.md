@@ -148,16 +148,6 @@ sudo braid apply     # warns about absent disk, proceeds with others
 sudo braid apply     # reconciles the returned disk
 ```
 
-### Standalone scripts (deprecated)
-
-The original `braid-add-disk` still works but prints a deprecation warning. It calls `braid init-disk` + `braid apply` internally:
-
-```
-sudo braid-add-disk /dev/disk/by-id/ata-...     # deprecated, use init-disk + apply
-sudo braid-remove-disk /dev/disk/by-id/ata-...
-sudo braid-status [--verbose]
-```
-
 ## What you get for free
 
 Braid enables these automatically when `braid.enable = true`:
@@ -173,6 +163,8 @@ Braid enables these automatically when `braid.enable = true`:
   ```
 
 - **Resilient boot** — a dead or missing drive never blocks boot. The pool mounts in degraded mode and the system stays reachable via SSH.
+
+- **Pinned toolchain** — runtime tools (btrfs-progs, cryptsetup, util-linux) are pinned to a NixOS stable release. Parser output formats don't change on flake updates. Override individual tools via `braid.packages.*` if needed.
 
 ## Samba
 
@@ -208,3 +200,37 @@ sudo smbpasswd -a dan
 ```
 
 Then from macOS: Finder → Cmd+K → `smb://nas/videos`.
+
+## Development
+
+Braid is developed test-first with NixOS VM tests.
+
+Typical loop:
+
+```bash
+# run one test while iterating
+make test-one t=braid-plan-rust
+
+# run full suite before finishing
+make test
+```
+
+Rust CLI code lives in `cli/`. Build it directly with:
+
+```bash
+nix build .#braid
+```
+
+### Crane build caching
+
+`braid` (the Rust CLI) is built with Crane. Crane splits dependency compilation (`buildDepsOnly`) from the final crate build, so dependency artifacts are reused across normal Rust code edits.
+
+Quick check:
+
+```bash
+nix build .#braid
+touch cli/src/main.rs
+nix build .#braid
+```
+
+The second build should be much faster because Cargo dependencies come from cache.

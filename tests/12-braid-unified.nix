@@ -7,6 +7,7 @@
 # standalone scripts must continue to function.
 #
 # Dependencies: braid init-disk + braid apply (pool setup).
+{ braid }:
 {
   name = "braid-unified";
 
@@ -17,14 +18,8 @@
       { size = 1024; driveConfig.deviceExtraOpts.serial = "disk3"; }
     ];
 
-    environment.systemPackages = let
-      braid-cli = pkgs.writeShellApplication {
-        name = "braid";
-        runtimeInputs = [ pkgs.cryptsetup pkgs.btrfs-progs pkgs.util-linux pkgs.jq pkgs.coreutils ];
-        text = builtins.readFile ../scripts/braid.sh;
-      };
-    in [
-      braid-cli
+    environment.systemPackages = [
+      braid
       (pkgs.writeShellApplication {
         name = "braid-remove-disk";
         runtimeInputs = [ pkgs.cryptsetup pkgs.btrfs-progs pkgs.util-linux pkgs.jq ];

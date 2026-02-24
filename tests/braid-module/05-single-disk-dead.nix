@@ -11,6 +11,7 @@
 #
 # Dependencies: braid-module-single-disk (single-disk happy path),
 # braid-module-bad-config (nofail boot-continue works).
+{ braid }:
 { lib, pkgs, ... }:
 let
   passphrase = "testpassphrase";
@@ -30,6 +31,7 @@ in
 
     braid = {
       enable = true;
+      package = braid;
       disks = map (d: "/dev/disk/by-id/virtio-${d}") disks;
     };
 

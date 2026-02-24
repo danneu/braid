@@ -12,6 +12,7 @@
 #
 # Dependencies: braid-module-disabled (module loads without error),
 # hello-world (VM infra).
+{ braid }:
 { lib, pkgs, ... }:
 let
   passphrase = "testpassphrase";
@@ -31,6 +32,7 @@ in
 
     braid = {
       enable = true;
+      package = braid;
       disks = map (d: "/dev/disk/by-id/virtio-${d}") disks;
     };
 

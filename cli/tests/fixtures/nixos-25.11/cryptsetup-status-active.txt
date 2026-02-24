@@ -1,0 +1,10 @@
+/dev/mapper/braid-vdb is active and is in use.
+  type:    LUKS2
+  cipher:  aes-xts-plain64
+  keysize: 512 [bits]
+  key location: keyring
+  device:  /dev/vdb
+  sector size:  512 [bytes]
+  offset:  32768 [512-byte units] (16777216 [bytes])
+  size:    1015808 [512-byte units] (520093696 [bytes])
+  mode:    read/write

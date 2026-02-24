@@ -12,6 +12,7 @@
 #
 # Dependencies: braid-module-raid1 (happy-path RAID1 works),
 # braid-module-bad-config (nofail boot-continue works).
+{ braid }:
 { lib, pkgs, ... }:
 let
   passphrase = "testpassphrase";
@@ -31,6 +32,7 @@ in
 
     braid = {
       enable = true;
+      package = braid;
       disks = map (d: "/dev/disk/by-id/virtio-${d}") disks;
     };
 

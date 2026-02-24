@@ -1,0 +1,39 @@
+{
+   "blockdevices": [
+      {
+         "name": "vdb",
+         "type": "disk",
+         "size": 536870912,
+         "model": null,
+         "serial": "disk1",
+         "uuid": "71ff9937-fb2f-4091-9641-30a347a23dfd",
+         "children": [
+            {
+               "name": "braid-vdb",
+               "type": "crypt",
+               "size": 520093696,
+               "model": null,
+               "serial": null,
+               "uuid": "eab07319-001a-48ff-8bd3-1f734b706a6f"
+            }
+         ]
+      },{
+         "name": "vdc",
+         "type": "disk",
+         "size": 536870912,
+         "model": null,
+         "serial": "disk2",
+         "uuid": "cb97bf33-1624-4710-acc9-43d473bd9db3",
+         "children": [
+            {
+               "name": "braid-vdc",
+               "type": "crypt",
+               "size": 520093696,
+               "model": null,
+               "serial": null,
+               "uuid": "eab07319-001a-48ff-8bd3-1f734b706a6f"
+            }
+         ]
+      }
+   ]
+}

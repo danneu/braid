@@ -55,6 +55,6 @@ If NixOS ever gets a `formatDevice` option type that can safely express one-shot
 
 - `modules/braid/options.nix` — `braid.disks` option definition
 - `modules/braid/storage.nix` — config export and LUKS entry generation
-- `scripts/braid.sh` — unified CLI (`init-disk`, `plan`, `apply`, `status`)
-- `scripts/braid-add-disk.sh` — deprecated wrapper (calls `init-disk` + `apply`)
+- `cli/src/` — Rust CLI (`init-disk`, `plan`, `apply`, `status`)
+- `scripts/braid-add-disk.sh` — error stub directing to `init-disk` + `apply`
 - [archive/design-docs/1-nixos-best-practices.md](../../archive/design-docs/1-nixos-best-practices.md) — original best practices analysis

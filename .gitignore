@@ -1,2 +1,5 @@
 result
 result-*
+/cli/target
+/.direnv
+/.playwright-mcp

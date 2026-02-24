@@ -35,7 +35,7 @@ in
 
     boot.initrd.systemd.users.root.shell = "/bin/sh";
     boot.initrd.systemd.extraBin = {
-      cryptsetup = "${pkgs.cryptsetup}/bin/cryptsetup";
+      cryptsetup = "${config.braid.packages.cryptsetup}/bin/cryptsetup";
     };
 
     boot.initrd.network = {
