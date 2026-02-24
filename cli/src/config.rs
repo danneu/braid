@@ -1,14 +1,65 @@
 use crate::types::ByIdPath;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::fs;
 use std::path::Path;
 use thiserror::Error;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Error)]
+pub enum ConfigBuildError {
+    #[error("disks must not be empty")]
+    EmptyDisks,
+    #[error("duplicate disk in config: {0}")]
+    DuplicateDisk(String),
+    #[error("mountPoint must not be empty")]
+    EmptyMountPoint,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "RawConfig")]
 pub struct Config {
-    pub disks: Vec<ByIdPath>,
+    disks: Vec<ByIdPath>,
+    mount_point: String,
+}
+
+impl Config {
+    pub fn new(disks: Vec<ByIdPath>, mount_point: String) -> Result<Self, ConfigBuildError> {
+        if disks.is_empty() {
+            return Err(ConfigBuildError::EmptyDisks);
+        }
+        let mut seen = std::collections::HashSet::new();
+        for disk in &disks {
+            if !seen.insert(disk) {
+                return Err(ConfigBuildError::DuplicateDisk(disk.to_string()));
+            }
+        }
+        if mount_point.is_empty() {
+            return Err(ConfigBuildError::EmptyMountPoint);
+        }
+        Ok(Config { disks, mount_point })
+    }
+
+    pub fn disks(&self) -> &[ByIdPath] {
+        &self.disks
+    }
+
+    pub fn mount_point(&self) -> &str {
+        &self.mount_point
+    }
+}
+
+#[derive(Deserialize)]
+struct RawConfig {
+    disks: Vec<ByIdPath>,
     #[serde(rename = "mountPoint")]
-    pub mount_point: String,
+    mount_point: String,
+}
+
+impl TryFrom<RawConfig> for Config {
+    type Error = ConfigBuildError;
+
+    fn try_from(raw: RawConfig) -> Result<Self, Self::Error> {
+        Config::new(raw.disks, raw.mount_point)
+    }
 }
 
 #[derive(Debug, Error)]
@@ -23,8 +74,6 @@ pub enum ConfigError {
         path: String,
         source: serde_json::Error,
     },
-    #[error("config validation failed: {0}")]
-    Validation(String),
 }
 
 pub fn config_read(path: &Path) -> Result<Config, ConfigError> {
@@ -38,7 +87,6 @@ pub fn config_read(path: &Path) -> Result<Config, ConfigError> {
         source,
     })?;
 
-    validate(&cfg)?;
     Ok(cfg)
 }
 
@@ -53,7 +101,6 @@ pub fn config_read_raw(path: &Path) -> Result<(Config, String), ConfigError> {
         source,
     })?;
 
-    validate(&cfg)?;
     Ok((cfg, raw))
 }
 
@@ -61,27 +108,6 @@ pub fn config_hash(raw: &str) -> String {
     use sha2::{Digest, Sha256};
     let hash = Sha256::digest(raw.as_bytes());
     format!("sha256:{:x}", hash)
-}
-
-pub fn validate(cfg: &Config) -> Result<(), ConfigError> {
-    if cfg.disks.is_empty() {
-        return Err(ConfigError::Validation("disks must not be empty".to_owned()));
-    }
-    let mut seen = std::collections::HashSet::new();
-    for disk in &cfg.disks {
-        if !seen.insert(disk) {
-            return Err(ConfigError::Validation(format!(
-                "duplicate disk in config: {}",
-                disk
-            )));
-        }
-    }
-    if cfg.mount_point.is_empty() {
-        return Err(ConfigError::Validation(
-            "mountPoint must not be empty".to_owned(),
-        ));
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -92,8 +118,8 @@ mod tests {
     fn parses_valid_config() {
         let raw = r#"{"disks":["/dev/disk/by-id/a"],"mountPoint":"/mnt/storage"}"#;
         let cfg: Config = serde_json::from_str(raw).expect("config should parse");
-        assert_eq!(cfg.disks.len(), 1);
-        assert_eq!(cfg.mount_point, "/mnt/storage");
+        assert_eq!(cfg.disks().len(), 1);
+        assert_eq!(cfg.mount_point(), "/mnt/storage");
     }
 
     #[test]
@@ -107,24 +133,31 @@ mod tests {
 
     #[test]
     fn rejects_duplicate_disks() {
-        let cfg = Config {
-            disks: vec![
+        let err = Config::new(
+            vec![
                 ByIdPath("/dev/disk/by-id/a".to_owned()),
                 ByIdPath("/dev/disk/by-id/a".to_owned()),
             ],
-            mount_point: "/mnt/storage".to_owned(),
-        };
-        let err = validate(&cfg).expect_err("duplicate disks should fail");
-        assert!(matches!(err, ConfigError::Validation(_)));
+            "/mnt/storage".to_owned(),
+        )
+        .expect_err("duplicate disks should fail");
+        assert!(matches!(err, ConfigBuildError::DuplicateDisk(_)));
     }
 
     #[test]
     fn rejects_empty_disks() {
-        let cfg = Config {
-            disks: vec![],
-            mount_point: "/mnt/storage".to_owned(),
-        };
-        let err = validate(&cfg).expect_err("empty disks should fail");
-        assert!(matches!(err, ConfigError::Validation(_)));
+        let err = Config::new(vec![], "/mnt/storage".to_owned())
+            .expect_err("empty disks should fail");
+        assert!(matches!(err, ConfigBuildError::EmptyDisks));
+    }
+
+    #[test]
+    fn rejects_empty_disks_json() {
+        let raw = r#"{"disks":[],"mountPoint":"/mnt/storage"}"#;
+        let err = serde_json::from_str::<Config>(raw).expect_err("empty disks JSON should fail");
+        assert!(
+            err.to_string().contains("disks must not be empty"),
+            "unexpected error: {err}"
+        );
     }
 }

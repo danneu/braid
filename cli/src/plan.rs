@@ -200,7 +200,7 @@ pub fn compute_plan(
                 let act = make_action(
                     &mut counter,
                     ActionType::RemoveDiskMissingExplicit,
-                    config.mount_point.clone(),
+                    config.mount_point().to_owned(),
                     vec![],
                 );
                 confirmations.push(Confirmation {
@@ -224,7 +224,7 @@ pub fn compute_plan(
         actions.push(make_action(
             &mut counter,
             ActionType::BalanceToRaid1,
-            config.mount_point.clone(),
+            config.mount_point().to_owned(),
             preconds,
         ));
     }
@@ -256,7 +256,7 @@ pub fn compute_plan(
             let verify_health = make_action(
                 &mut counter,
                 ActionType::VerifyPoolHealth,
-                config.mount_point.clone(),
+                config.mount_point().to_owned(),
                 all_ids,
             );
             let verify_health_id = verify_health.id.clone();
@@ -265,12 +265,12 @@ pub fn compute_plan(
             actions.push(make_action(
                 &mut counter,
                 ActionType::VerifyExpectedDiskSet,
-                config.mount_point.clone(),
+                config.mount_point().to_owned(),
                 vec![verify_health_id],
             ));
         }
 
-        compute_commands(&mut actions, &config.mount_point, pool);
+        compute_commands(&mut actions, config.mount_point(), pool);
 
         PlanOutcome::Applicable {
             plan_id: generate_plan_id(),
@@ -337,7 +337,7 @@ pub fn to_plan_report(outcome: &PlanOutcome, config: &Config) -> PlanReport {
     PlanReport {
         schema_version: 1,
         plan_id,
-        mount_point: config.mount_point.clone(),
+        mount_point: config.mount_point().to_owned(),
         status,
         warning_count: warnings.len(),
         blocked_reasons: blocked_reasons.clone(),
@@ -596,10 +596,11 @@ mod tests {
     // -- Test helpers -------------------------------------------------------
 
     fn test_config() -> Config {
-        Config {
-            disks: vec![ByIdPath("/dev/disk/by-id/disk-1".into())],
-            mount_point: "/mnt/storage".into(),
-        }
+        Config::new(
+            vec![ByIdPath("/dev/disk/by-id/disk-1".into())],
+            "/mnt/storage".into(),
+        )
+        .unwrap()
     }
 
     fn pool_2disk() -> PoolState {

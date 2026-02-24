@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::{validate, Config};
+use crate::config::Config;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -97,14 +97,6 @@ fn check_config_schema(ctx: &mut DoctorContext) -> CheckResult {
         }
     };
 
-    if let Err(e) = validate(&cfg) {
-        return CheckResult {
-            name: "config_schema".into(),
-            status: CheckStatus::Fail,
-            message: format!("{e}"),
-        };
-    }
-
     ctx.config = Some(cfg);
     CheckResult {
         name: "config_schema".into(),
@@ -183,7 +175,7 @@ fn check_declared_disks(ctx: &mut DoctorContext) -> CheckResult {
 
     let mut missing: Vec<&str> = Vec::new();
     let mut not_block: Vec<&str> = Vec::new();
-    for disk in &config.disks {
+    for disk in config.disks() {
         let path = Path::new(disk.0.as_str());
         match std::fs::metadata(path) {
             Ok(meta) if meta.file_type().is_block_device() => {}
@@ -196,7 +188,7 @@ fn check_declared_disks(ctx: &mut DoctorContext) -> CheckResult {
         CheckResult {
             name: "declared_disks".into(),
             status: CheckStatus::Ok,
-            message: format!("all {} declared disk(s) present", config.disks.len()),
+            message: format!("all {} declared disk(s) present", config.disks().len()),
         }
     } else {
         let mut parts: Vec<String> = Vec::new();
@@ -220,7 +212,7 @@ fn check_declared_disks(ctx: &mut DoctorContext) -> CheckResult {
             message: format!(
                 "{}/{} disk(s) have problems: {}",
                 missing.len() + not_block.len(),
-                config.disks.len(),
+                config.disks().len(),
                 parts.join("; ")
             ),
         }

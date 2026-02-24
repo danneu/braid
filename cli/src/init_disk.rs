@@ -88,7 +88,7 @@ pub(crate) fn cmd_init_disk_with<R: CommandRunner, F: Filesystem>(
     }
 
     // 2. Declared check
-    if !config.disks.iter().any(|d| d.0 == by_id_path) {
+    if !config.disks().iter().any(|d| d.0 == by_id_path) {
         return Err(InitDiskError::Validation(format!(
             "Disk {by_id_path} is not declared in config"
         )));
@@ -96,7 +96,7 @@ pub(crate) fn cmd_init_disk_with<R: CommandRunner, F: Filesystem>(
 
     // 3. Pool membership check (fail-closed)
     let mountpoint_result = runner.run(&CmdRequest::MountpointCheck {
-        path: config.mount_point.clone(),
+        path: config.mount_point().to_owned(),
     });
     let is_mounted = match mountpoint_result {
         Ok(ref out) => out.exit_status == 0,
@@ -104,7 +104,7 @@ pub(crate) fn cmd_init_disk_with<R: CommandRunner, F: Filesystem>(
     };
 
     if is_mounted {
-        match probe_pool(runner, &config.mount_point) {
+        match probe_pool(runner, config.mount_point()) {
             Ok(pool) if pool.mounted => {
                 // Check if target is LUKS
                 let is_luks_result = runner.run(&CmdRequest::CryptsetupIsLuks {
@@ -304,7 +304,7 @@ fn find_passphrase_target<R: CommandRunner, F: Filesystem>(
     let mut errors: Vec<String> = Vec::new();
 
     // Pass 1: open mapper
-    for disk in &config.disks {
+    for disk in config.disks() {
         if disk.0 == exclude_path {
             continue;
         }
@@ -340,7 +340,7 @@ fn find_passphrase_target<R: CommandRunner, F: Filesystem>(
     }
 
     // Pass 2: LUKS-formatted disk
-    for disk in &config.disks {
+    for disk in config.disks() {
         if disk.0 == exclude_path {
             continue;
         }
@@ -433,20 +433,22 @@ mod tests {
     }
 
     fn config_2disk() -> Config {
-        Config {
-            disks: vec![
+        Config::new(
+            vec![
                 ByIdPath("/dev/disk/by-id/virtio-disk1".to_owned()),
                 ByIdPath("/dev/disk/by-id/virtio-disk2".to_owned()),
             ],
-            mount_point: "/mnt/storage".to_owned(),
-        }
+            "/mnt/storage".to_owned(),
+        )
+        .unwrap()
     }
 
     fn config_1disk() -> Config {
-        Config {
-            disks: vec![ByIdPath("/dev/disk/by-id/virtio-disk1".to_owned())],
-            mount_point: "/mnt/storage".to_owned(),
-        }
+        Config::new(
+            vec![ByIdPath("/dev/disk/by-id/virtio-disk1".to_owned())],
+            "/mnt/storage".to_owned(),
+        )
+        .unwrap()
     }
 
     // ======================================================================
@@ -1418,14 +1420,15 @@ mod tests {
 
     #[test]
     fn find_target_none_when_no_members() {
-        // No disks exist
+        // Config has one disk but it's the exclude path, so the loop body is skipped
         let runner = MockRunner::default();
 
         let fs = MockFs::new(&[], &[]);
-        let config = Config {
-            disks: vec![],
-            mount_point: "/mnt/storage".to_owned(),
-        };
+        let config = Config::new(
+            vec![ByIdPath("/dev/disk/by-id/virtio-disk1".to_owned())],
+            "/mnt/storage".to_owned(),
+        )
+        .unwrap();
 
         let result =
             find_passphrase_target(&runner, &fs, &config, "/dev/disk/by-id/virtio-disk1")
@@ -1482,14 +1485,15 @@ mod tests {
         );
         // disk2 has no CryptsetupStatus mock → MissingMock error
 
-        let config = Config {
-            disks: vec![
+        let config = Config::new(
+            vec![
                 ByIdPath("/dev/disk/by-id/virtio-disk1".to_owned()),
                 ByIdPath("/dev/disk/by-id/virtio-disk2".to_owned()),
                 ByIdPath("/dev/disk/by-id/virtio-disk3".to_owned()),
             ],
-            mount_point: "/mnt/storage".to_owned(),
-        };
+            "/mnt/storage".to_owned(),
+        )
+        .unwrap();
 
         let fs = MockFs::new(
             &[

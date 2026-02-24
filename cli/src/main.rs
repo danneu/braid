@@ -125,7 +125,7 @@ fn main() {
             let fs = RealFilesystem;
 
             let config_disks: Vec<_> = match config
-                .disks
+                .disks()
                 .iter()
                 .map(|d| probe_config_disk(&runner, &fs, d))
                 .collect::<Result<Vec<_>, _>>()
@@ -137,7 +137,7 @@ fn main() {
                 }
             };
 
-            let pool = match probe_pool(&runner, &config.mount_point) {
+            let pool = match probe_pool(&runner, config.mount_point()) {
                 Ok(p) => p,
                 Err(e) => {
                     eprintln!("error: {e}");
@@ -223,9 +223,9 @@ fn disk_candidates() -> Vec<CompletionCandidate> {
         return Vec::new();
     };
     config
-        .disks
-        .into_iter()
-        .map(|d| CompletionCandidate::new(d.0))
+        .disks()
+        .iter()
+        .map(|d| CompletionCandidate::new(d.0.clone()))
         .collect()
 }
 

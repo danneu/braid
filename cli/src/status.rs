@@ -130,13 +130,13 @@ pub fn build_status_report<R: CommandRunner, F: Filesystem>(
     fs: &F,
     config: &Config,
 ) -> Result<StatusReport, StatusError> {
-    let pool = match probe_pool(runner, &config.mount_point) {
+    let pool = match probe_pool(runner, config.mount_point()) {
         Ok(p) => p,
         Err(ProbeError::NotBtrfs { .. }) => {
             let code = StatusCode::NotMounted;
             return Ok(StatusReport {
                 schema_version: 1,
-                mount_point: config.mount_point.clone(),
+                mount_point: config.mount_point().to_owned(),
                 status_code: code,
                 status: code.display_status(0),
                 total_devices: None,
@@ -155,7 +155,7 @@ pub fn build_status_report<R: CommandRunner, F: Filesystem>(
         let code = StatusCode::NotMounted;
         return Ok(StatusReport {
             schema_version: 1,
-            mount_point: config.mount_point.clone(),
+            mount_point: config.mount_point().to_owned(),
             status_code: code,
             status: code.display_status(0),
             total_devices: None,
@@ -168,9 +168,9 @@ pub fn build_status_report<R: CommandRunner, F: Filesystem>(
         });
     }
 
-    let profile = get_profile(runner, &config.mount_point)?;
-    let capacity = get_capacity(runner, &config.mount_point)?;
-    let last_scrub = get_scrub_string(runner, &config.mount_point);
+    let profile = get_profile(runner, config.mount_point())?;
+    let capacity = get_capacity(runner, config.mount_point())?;
+    let last_scrub = get_scrub_string(runner, config.mount_point());
 
     let code = if pool.missing_count == 0 {
         StatusCode::Healthy
@@ -179,17 +179,17 @@ pub fn build_status_report<R: CommandRunner, F: Filesystem>(
     };
 
     let config_disks: Vec<ConfigDisk> = config
-        .disks
+        .disks()
         .iter()
         .map(|d| probe_config_disk(runner, fs, d))
         .collect::<Result<Vec<_>, _>>()?;
-    let device_stats = get_device_stats(runner, &config.mount_point)?;
+    let device_stats = get_device_stats(runner, config.mount_point())?;
     let verbose_ctx = build_disk_reports(runner, &config_disks, &pool, &device_stats);
 
     let present_count = pool.total_devices.saturating_sub(pool.missing_count);
     Ok(StatusReport {
         schema_version: 1,
-        mount_point: config.mount_point.clone(),
+        mount_point: config.mount_point().to_owned(),
         status_code: code,
         status: code.display_status(pool.missing_count),
         total_devices: Some(pool.total_devices),
@@ -210,7 +210,7 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
     json: bool,
 ) -> Result<(), StatusError> {
     // 1. Probe pool, mapping NotBtrfs to not-mounted
-    let pool = match probe_pool(runner, &config.mount_point) {
+    let pool = match probe_pool(runner, config.mount_point()) {
         Ok(p) => p,
         Err(ProbeError::NotBtrfs { .. }) => PoolState {
             mounted: false,
@@ -226,7 +226,7 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
         let code = StatusCode::NotMounted;
         let report = StatusReport {
             schema_version: 1,
-            mount_point: config.mount_point.clone(),
+            mount_point: config.mount_point().to_owned(),
             status_code: code,
             status: code.display_status(0),
             total_devices: None,
@@ -246,9 +246,9 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
     }
 
     // 3. Strict data gathering
-    let profile = get_profile(runner, &config.mount_point)?;
-    let capacity = get_capacity(runner, &config.mount_point)?;
-    let last_scrub = get_scrub_string(runner, &config.mount_point);
+    let profile = get_profile(runner, config.mount_point())?;
+    let capacity = get_capacity(runner, config.mount_point())?;
+    let last_scrub = get_scrub_string(runner, config.mount_point());
 
     // 4. Compute status code
     let code = if pool.missing_count == 0 {
@@ -261,11 +261,11 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
     // 5. Verbose context
     let verbose_ctx = if verbose {
         let config_disks: Vec<ConfigDisk> = config
-            .disks
+            .disks()
             .iter()
             .map(|d| probe_config_disk(runner, fs, d))
             .collect::<Result<Vec<_>, _>>()?;
-        let device_stats = get_device_stats(runner, &config.mount_point)?;
+        let device_stats = get_device_stats(runner, config.mount_point())?;
         Some(build_disk_reports(
             runner,
             &config_disks,
@@ -280,7 +280,7 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
     let present_count = pool.total_devices.saturating_sub(pool.missing_count);
     let report = StatusReport {
         schema_version: 1,
-        mount_point: config.mount_point.clone(),
+        mount_point: config.mount_point().to_owned(),
         status_code: code,
         status,
         total_devices: Some(pool.total_devices),
@@ -839,21 +839,23 @@ mod tests {
     }
 
     fn config_3disk() -> Config {
-        Config {
-            disks: vec![
+        Config::new(
+            vec![
                 ByIdPath("/dev/disk/by-id/disk1".to_owned()),
                 ByIdPath("/dev/disk/by-id/disk2".to_owned()),
                 ByIdPath("/dev/disk/by-id/disk3".to_owned()),
             ],
-            mount_point: "/mnt/storage".to_owned(),
-        }
+            "/mnt/storage".to_owned(),
+        )
+        .unwrap()
     }
 
     fn config_1disk() -> Config {
-        Config {
-            disks: vec![ByIdPath("/dev/disk/by-id/disk1".to_owned())],
-            mount_point: "/mnt/storage".to_owned(),
-        }
+        Config::new(
+            vec![ByIdPath("/dev/disk/by-id/disk1".to_owned())],
+            "/mnt/storage".to_owned(),
+        )
+        .unwrap()
     }
 
     /// Build a MockRunner for a 3-disk mounted healthy pool (no verbose).
@@ -987,7 +989,7 @@ mod tests {
         let code = StatusCode::NotMounted;
         let report = StatusReport {
             schema_version: 1,
-            mount_point: config.mount_point.clone(),
+            mount_point: config.mount_point().to_owned(),
             status_code: code,
             status: code.display_status(0),
             total_devices: None,
@@ -1037,7 +1039,7 @@ mod tests {
         let code = StatusCode::Healthy;
         let report = StatusReport {
             schema_version: 1,
-            mount_point: config.mount_point.clone(),
+            mount_point: config.mount_point().to_owned(),
             status_code: code,
             status: code.display_status(0),
             total_devices: Some(3),

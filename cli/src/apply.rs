@@ -720,7 +720,7 @@ fn execute_verify_diskset<R: CommandRunner>(
         }
     };
 
-    for disk in &config.disks {
+    for disk in config.disks() {
         if !fs.exists(&disk.0) {
             eprintln!("  warning: config disk {} not present", disk.0);
             continue;
@@ -831,11 +831,11 @@ fn execute_action<R: CommandRunner>(
     match action.action_type {
         ActionType::OpenLuks => execute_open_luks(runner, fs, &action.target),
         ActionType::AddDiskBtrfsAdd => {
-            execute_btrfs_add(runner, &action.target, &config.mount_point, is_bootstrap)
+            execute_btrfs_add(runner, &action.target, config.mount_point(), is_bootstrap)
         }
         ActionType::BalanceToRaid1 => execute_balance_raid1(runner, &action.target),
         ActionType::RemoveDiskGraceful => {
-            execute_remove_graceful(runner, &action.target, &config.mount_point)
+            execute_remove_graceful(runner, &action.target, config.mount_point())
         }
         ActionType::RemoveDiskMissingExplicit => {
             execute_remove_missing(runner, &action.target)
@@ -1073,12 +1073,12 @@ fn fresh_apply<R: CommandRunner>(
 
     // Probe
     let config_disks: Vec<_> = config
-        .disks
+        .disks()
         .iter()
         .map(|d| probe_config_disk(runner, fs, d))
         .collect::<Result<Vec<_>, _>>()?;
 
-    let pool = probe_pool(runner, &config.mount_point)?;
+    let pool = probe_pool(runner, config.mount_point())?;
 
     // Compute plan
     let plan_flags = PlanFlags {
@@ -1127,7 +1127,7 @@ fn fresh_apply<R: CommandRunner>(
             let mut checkpoint = Checkpoint {
                 schema_version: 1,
                 plan_id,
-                mount_point: config.mount_point.clone(),
+                mount_point: config.mount_point().to_owned(),
                 status: report.status,
                 config_hash: hash,
                 created_at: now.clone(),
