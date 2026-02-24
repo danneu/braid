@@ -7,9 +7,32 @@ on:
     branches: [main, master]
 
 jobs:
-  test:
+  discover:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 10
+    outputs:
+      tests: ${{ steps.list.outputs.tests }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+      - name: Cache Nix store
+        uses: DeterminateSystems/magic-nix-cache-action@main
+      - id: list
+        name: List checks
+        run: |
+          checks=$(nix eval .#checks.x86_64-linux --apply 'cs: builtins.toJSON (builtins.attrNames cs)' --raw)
+          echo "tests=$checks" >> "$GITHUB_OUTPUT"
+
+  test:
+    needs: discover
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix:
+        test: ${{ fromJson(needs.discover.outputs.tests) }}
     steps:
       - uses: actions/checkout@v4
 
@@ -25,5 +48,5 @@ jobs:
       - name: Cache Nix store
         uses: DeterminateSystems/magic-nix-cache-action@main
 
-      - name: Run tests
-        run: nix flake check -L
+      - name: Run test (${{ matrix.test }})
+        run: nix build .#checks.x86_64-linux.${{ matrix.test }} -L
