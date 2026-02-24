@@ -10,7 +10,7 @@ No code changes — purely file moves, deletions, and doc edits.
 
 ## 1. Delete dead bash scripts
 
-`scripts/braid.sh` (1640 lines) and `scripts/braid-status.sh` (182 lines) are dead code — no test, module, or flake references them. Delete them. Git history preserves them if needed.
+`scripts/braid.sh` (1640 lines) and `scripts/braid-status.sh` (182 lines) are dead code — no active test, module, or flake references them. Delete them. Git history preserves them if needed.
 
 **Keep:** `scripts/braid-remove-disk.sh` (still used by tests 9 and 12) and `scripts/braid-add-disk.sh` (error stub).
 
@@ -148,7 +148,7 @@ Four decision docs reference `scripts/braid.sh` or contain stale bash-era langua
 | `docs/decisions/safe-by-construction-reconciliation.md` | Update See section: `scripts/braid.sh` → `cli/src/` |
 | `docs/decisions/toolchain-pinning.md` | Remove shell/bash wrapping references |
 
-**NOT modified:** `scripts/braid-remove-disk.sh` (still tested), `scripts/braid-add-disk.sh` (error stub, harmless), `AGENTS.md` (already accurate), `tests/` (no changes).
+**NOT modified:** `scripts/braid-remove-disk.sh` (still tested), `scripts/braid-add-disk.sh` (error stub, harmless), `AGENTS.md` (already accurate). Active tests receive no behavioral edits; retired bash tests are moved to `archive/tests-legacy/`.
 
 ---
 
@@ -178,8 +178,8 @@ ls *.md
 # Expected: AGENTS.md  CLAUDE.md  README.md
 
 # No retired bash tests in tests/
-ls tests/8-* tests/10-* tests/11-* tests/14-*
-# Expected: not found (all moved to archive/tests-legacy/)
+ls tests/8-* tests/10-* tests/11-* tests/14-* 2>/dev/null | wc -l
+# Expected: 0
 ```
 
 ### Build + full test gate
