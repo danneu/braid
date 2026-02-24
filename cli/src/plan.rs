@@ -1,29 +1,13 @@
 use crate::config::Config;
 use crate::types::*;
-use sha2::{Digest, Sha256};
 
 // ---------------------------------------------------------------------------
 // Plan ID generation
 // ---------------------------------------------------------------------------
 
-/// Generate a plan ID using real clock + random UUID.
+/// Generate a plan ID: UUID v7 (timestamp-ordered, globally unique).
 pub fn generate_plan_id() -> String {
-    let now = time::OffsetDateTime::now_utc();
-    let nonce = uuid::Uuid::new_v4().to_string();
-    build_plan_id(now, &nonce)
-}
-
-/// Deterministic core: formats timestamp, hashes "{ts}-{nonce}", takes first 6 hex chars.
-fn build_plan_id(now: time::OffsetDateTime, nonce: &str) -> String {
-    use time::macros::format_description;
-    let fmt = format_description!(
-        "[year]-[month padding:zero]-[day padding:zero]T[hour padding:zero]:[minute padding:zero]:[second padding:zero]Z"
-    );
-    let ts = now.format(&fmt).expect("timestamp format should not fail");
-    let hash_input = format!("{}-{}", ts, nonce);
-    let hash = Sha256::digest(hash_input.as_bytes());
-    let hex = format!("{:x}", hash);
-    format!("{}-{}", ts, &hex[..6])
+    uuid::Uuid::now_v7().to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -1310,18 +1294,9 @@ mod tests {
     }
 
     #[test]
-    fn build_plan_id_deterministic() {
-        use time::macros::datetime;
-        let now = datetime!(2026-02-23 14:30:45 UTC);
-        let id = build_plan_id(now, "test-nonce");
-
-        assert!(id.starts_with("2026-02-23T14:30:45Z-"));
-        assert_eq!(id.len(), "2026-02-23T14:30:45Z-".len() + 6);
-        // Same inputs produce same output.
-        let id2 = build_plan_id(now, "test-nonce");
-        assert_eq!(id, id2);
-        // Different nonce produces different output.
-        let id3 = build_plan_id(now, "other-nonce");
-        assert_ne!(id, id3);
+    fn plan_id_is_valid_uuid_v7() {
+        let id = generate_plan_id();
+        let parsed = uuid::Uuid::parse_str(&id).expect("plan ID should be valid UUID");
+        assert_eq!(parsed.get_version(), Some(uuid::Version::SortRand));
     }
 }
