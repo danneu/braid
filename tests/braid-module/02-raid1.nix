@@ -12,6 +12,7 @@
 #
 # Dependencies: braid-module-single-disk (single-disk path works),
 # hello-world (VM infra).
+{ braid }:
 { lib, pkgs, ... }:
 let
   passphrase = "testpassphrase";
@@ -31,6 +32,7 @@ in
 
     braid = {
       enable = true;
+      package = braid;
       disks = map (d: "/dev/disk/by-id/virtio-${d}") disks;
     };
 

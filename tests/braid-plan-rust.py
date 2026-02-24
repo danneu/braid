@@ -34,7 +34,7 @@ def write_config(disk_list, mount="/mnt/storage"):
 
 
 def rust_plan(extra=""):
-    return f"braid-rust plan --config /tmp/braid-config.json {extra}"
+    return f"braid plan --config /tmp/braid-config.json {extra}"
 
 
 def rust_plan_json():

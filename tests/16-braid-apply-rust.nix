@@ -1,14 +1,8 @@
-{ braid-rust }:
+{ braid }:
 {
   name = "braid-apply-rust";
 
-  nodes.machine = { pkgs, ... }: let
-    braid-cli = pkgs.writeShellApplication {
-      name = "braid";
-      runtimeInputs = [ pkgs.cryptsetup pkgs.btrfs-progs pkgs.util-linux pkgs.jq pkgs.coreutils ];
-      text = builtins.readFile ../scripts/braid.sh;
-    };
-  in {
+  nodes.machine = { pkgs, ... }: {
     virtualisation.emptyDiskImages = [
       { size = 1024; driveConfig.deviceExtraOpts.serial = "disk1"; }
       { size = 1024; driveConfig.deviceExtraOpts.serial = "disk2"; }
@@ -16,7 +10,7 @@
       { size = 1024; driveConfig.deviceExtraOpts.serial = "disk4"; }
     ];
 
-    environment.systemPackages = [ braid-cli braid-rust pkgs.cryptsetup pkgs.btrfs-progs pkgs.jq ];
+    environment.systemPackages = [ braid pkgs.cryptsetup pkgs.btrfs-progs pkgs.jq ];
 
     environment.etc."braid/config.json".text = builtins.toJSON {
       disks = [

@@ -17,6 +17,7 @@
 # 1. A 4th virtual disk (disk4) as the replacement drive
 # 2. braid CLI + cryptsetup in environment.systemPackages
 # 3. No Samba — this test focuses on the replacement cycle
+{ braid }:
 { lib, pkgs, ... }:
 let
   passphrase = "testpassphrase";
@@ -35,14 +36,8 @@ in
     ];
     virtualisation.memorySize = 2048;
 
-    environment.systemPackages = let
-      braid-cli = pkgs.writeShellApplication {
-        name = "braid";
-        runtimeInputs = [ pkgs.cryptsetup pkgs.btrfs-progs pkgs.util-linux pkgs.jq pkgs.coreutils ];
-        text = builtins.readFile ../scripts/braid.sh;
-      };
-    in [
-      braid-cli
+    environment.systemPackages = [
+      braid
       pkgs.cryptsetup
       pkgs.btrfs-progs
     ];

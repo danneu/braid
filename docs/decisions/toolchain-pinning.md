@@ -15,7 +15,7 @@ Pin `flake.nix` to a specific NixOS stable release (nixos-25.11). Both the shell
 - **Flake input**: `nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11"` — all tool packages come from this channel.
 - **Module options**: `braid.packages.*` (cryptsetup, btrfsProgs, utilLinux, jq, coreutils) default to the flake's nixpkgs but can be overridden per-system.
 - **PATH wrapping**: `writeShellApplication` (shell) and `makeWrapper` (Rust) inject only `cfg.packages.*` into PATH. No ambient system tools leak in.
-- **Two wrapping sites**: flake.nix wraps with `pkgs.*` defaults (for `nix run` and tests); the module wraps `cfg.rustPackage` with `cfg.packages.*` (for deployed NixOS systems where package options may be overridden).
+- **Two wrapping sites**: flake.nix wraps with `pkgs.*` defaults (for `nix run` and tests); the module wraps `cfg.package` with `cfg.packages.*` (for deployed NixOS systems where package options may be overridden).
 
 ### Upgrading tools
 

@@ -9,19 +9,12 @@
 # check, format execution. This mirrors the bash test (14-braid-init-disk)
 # against the Rust implementation.
 #
-# Dependencies: LUKS primitives (cryptsetup), btrfs basics, bash braid for
-# pool setup.
-{ braid-rust }:
+# Dependencies: LUKS primitives (cryptsetup), btrfs basics, Rust braid binary.
+{ braid }:
 {
   name = "braid-init-disk-rust";
 
-  nodes.machine = { pkgs, ... }: let
-    braid-cli = pkgs.writeShellApplication {
-      name = "braid";
-      runtimeInputs = [ pkgs.cryptsetup pkgs.btrfs-progs pkgs.util-linux pkgs.jq pkgs.coreutils ];
-      text = builtins.readFile ../scripts/braid.sh;
-    };
-  in {
+  nodes.machine = { pkgs, ... }: {
     virtualisation.emptyDiskImages = [
       { size = 256; driveConfig.deviceExtraOpts.serial = "disk1"; }
       { size = 256; driveConfig.deviceExtraOpts.serial = "disk2"; }
@@ -29,8 +22,7 @@
     ];
 
     environment.systemPackages = [
-      braid-cli
-      braid-rust
+      braid
       pkgs.cryptsetup
       pkgs.btrfs-progs
       pkgs.jq

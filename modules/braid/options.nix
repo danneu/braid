@@ -22,10 +22,10 @@
       coreutils = lib.mkPackageOption pkgs "coreutils" {};
     };
 
-    rustPackage = lib.mkOption {
+    package = lib.mkOption {
       type = lib.types.nullOr lib.types.package;
       default = null;
-      description = "The braid Rust CLI package (unwrapped crane output). Module wraps with cfg.packages.* PATH.";
+      description = "The braid CLI package (unwrapped crane output). When set, wraps and installs as 'braid'.";
     };
   };
 }

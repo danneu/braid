@@ -10,6 +10,7 @@
 # unified CLI ties them together correctly.
 #
 # Dependencies: btrfs-grow1 (single -> RAID1 -> 3-drive works manually).
+{ braid }:
 {
   name = "braid-add-disk";
 
@@ -22,14 +23,8 @@
       { size = 1024; driveConfig.deviceExtraOpts.serial = "disk5"; }
     ];
 
-    environment.systemPackages = let
-      braid-cli = pkgs.writeShellApplication {
-        name = "braid";
-        runtimeInputs = [ pkgs.cryptsetup pkgs.btrfs-progs pkgs.util-linux pkgs.jq pkgs.coreutils ];
-        text = builtins.readFile ../scripts/braid.sh;
-      };
-    in [
-      braid-cli
+    environment.systemPackages = [
+      braid
       pkgs.cryptsetup
       pkgs.btrfs-progs
     ];

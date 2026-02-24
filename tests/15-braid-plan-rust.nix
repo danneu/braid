@@ -8,19 +8,12 @@
 # bridges unit tests (pure logic) with integration: real LUKS, real btrfs,
 # real command output parsed by the Rust probe layer.
 #
-# Dependencies: bash braid (init-disk, apply) for pool setup; Rust braid-rust
-# binary for plan validation.
-{ braid-rust }:
+# Dependencies: Rust braid binary for all commands.
+{ braid }:
 {
   name = "braid-plan-rust";
 
-  nodes.machine = { pkgs, ... }: let
-    braid-cli = pkgs.writeShellApplication {
-      name = "braid";
-      runtimeInputs = [ pkgs.cryptsetup pkgs.btrfs-progs pkgs.util-linux pkgs.jq pkgs.coreutils ];
-      text = builtins.readFile ../scripts/braid.sh;
-    };
-  in {
+  nodes.machine = { pkgs, ... }: {
     virtualisation.emptyDiskImages = [
       { size = 1024; driveConfig.deviceExtraOpts.serial = "disk1"; }
       { size = 1024; driveConfig.deviceExtraOpts.serial = "disk2"; }
@@ -29,8 +22,7 @@
     ];
 
     environment.systemPackages = [
-      braid-cli
-      braid-rust
+      braid
       pkgs.cryptsetup
       pkgs.btrfs-progs
       pkgs.jq

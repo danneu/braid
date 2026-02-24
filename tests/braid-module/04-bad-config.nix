@@ -12,6 +12,7 @@
 # we need a different approach.
 #
 # Dependencies: braid-module-disabled (module loads without error).
+{ braid }:
 { lib, pkgs, ... }:
 {
   name = "braid-module-bad-config";
@@ -21,6 +22,7 @@
 
     braid = {
       enable = true;
+      package = braid;
       disks = [
         "/dev/disk/by-id/phantom1"
         "/dev/disk/by-id/phantom2"

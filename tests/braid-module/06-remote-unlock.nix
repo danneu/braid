@@ -12,6 +12,7 @@
 #
 # Dependencies: braid-module-raid1 (module storage path works),
 # remote-unlock (mechanism works), hello-world (VM infra).
+{ braid }:
 { lib, pkgs, ... }:
 let
   passphrase = "testpassphrase";
@@ -30,6 +31,7 @@ in
 
     braid = {
       enable = true;
+      package = braid;
       disks = map (d: "/dev/disk/by-id/virtio-${d}") disks;
       remoteUnlock = {
         enable = true;

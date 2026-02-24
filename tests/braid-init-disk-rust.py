@@ -2,7 +2,7 @@ import json
 
 # Test: braid init-disk (Rust implementation)
 #
-# Mirrors the bash init-disk test (14-braid-init-disk) using braid-rust.
+# Mirrors the bash init-disk test (14-braid-init-disk) using braid.
 # Phase 1: Safety contract — all gates must hold.
 
 start_all()
@@ -22,7 +22,7 @@ def init_disk(by_id, extra="", confirm=""):
     env = f"BRAID_PASSPHRASE='{passphrase}' BRAID_LUKS_OPTS='{luks_opts}'"
     if confirm:
         env += f" BRAID_CONFIRM='{confirm}'"
-    return f"{env} braid-rust init-disk --config /tmp/braid-config.json {extra} {by_id}"
+    return f"{env} braid init-disk --config /tmp/braid-config.json {extra} {by_id}"
 
 
 # ============================================================================
@@ -94,7 +94,7 @@ with subtest("wrong passphrase against existing member fails"):
     wrong_pass_cmd = (
         f"BRAID_PASSPHRASE='wrongpassphrase' "
         f"BRAID_LUKS_OPTS='{luks_opts}' "
-        f"braid-rust init-disk --config /tmp/braid-config.json /dev/disk/by-id/virtio-disk2"
+        f"braid init-disk --config /tmp/braid-config.json /dev/disk/by-id/virtio-disk2"
     )
     machine.fail(wrong_pass_cmd)
 

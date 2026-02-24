@@ -29,6 +29,6 @@ with subtest("util-linux version"):
     assert version == exp, f"expected {exp!r}, got {version!r}"
 
 # Rust binary wrapper provenance
-with subtest("braid-rust provenance"):
-    path = machine.succeed("readlink -f $(command -v braid-rust)").strip()
-    assert path.startswith("/nix/store/"), f"braid-rust not from nix store: {path}"
+with subtest("braid provenance"):
+    path = machine.succeed("readlink -f $(command -v braid)").strip()
+    assert path.startswith("/nix/store/"), f"braid not from nix store: {path}"

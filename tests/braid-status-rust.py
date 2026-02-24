@@ -30,7 +30,7 @@ def write_config(disk_list, mount="/mnt/storage"):
 
 
 def rust_status(extra=""):
-    return f"braid-rust status {extra}"
+    return f"braid status {extra}"
 
 
 # --- Phase 1: Single-disk summary ---

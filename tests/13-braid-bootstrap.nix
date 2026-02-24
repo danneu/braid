@@ -8,6 +8,7 @@
 # pool. This validates that the planner's bootstrap path works end-to-end.
 #
 # Dependencies: braid plan/apply bootstrap path (no pool required).
+{ braid }:
 {
   name = "braid-bootstrap";
 
@@ -18,11 +19,7 @@
     ];
 
     environment.systemPackages = [
-      (pkgs.writeShellApplication {
-        name = "braid";
-        runtimeInputs = [ pkgs.cryptsetup pkgs.btrfs-progs pkgs.util-linux pkgs.jq pkgs.coreutils ];
-        text = builtins.readFile ../scripts/braid.sh;
-      })
+      braid
       pkgs.cryptsetup
       pkgs.btrfs-progs
       pkgs.jq

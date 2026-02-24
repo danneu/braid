@@ -53,7 +53,7 @@ with subtest("Plan warns when disk not LUKS formatted"):
     p = plan_json()
     # Plan is applicable (no blocked_reasons) but warns about non-LUKS disk
     assert p["status"] == "applicable", f"Expected applicable status:\n{p}"
-    assert any("INIT_REQUIRED" in w for w in p["warnings"]), (
+    assert any(w["code"] == "INIT_REQUIRED" for w in p["warnings"]), (
         f"Expected INIT_REQUIRED warning:\n{p['warnings']}"
     )
 

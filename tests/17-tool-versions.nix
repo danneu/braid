@@ -1,14 +1,14 @@
 # Test: tool version pinning
 #
 # What: Validates that runtime tools (btrfs-progs, cryptsetup, util-linux) resolve
-# to Nix store paths at the expected versions, and that the braid-rust wrapper
+# to Nix store paths at the expected versions, and that the braid wrapper
 # has correct PATH provenance.
 #
 # Why: Braid parsers assume specific tool output formats. This test catches version
 # drift and PATH leaks where ambient binaries could bypass the pinned toolchain.
 #
 # Dependencies: braid module (options.nix, cli.nix) must wire cfg.packages correctly.
-{ braid-rust, braid-cli-unwrapped }:
+{ braid-cli-unwrapped }:
 {
   name = "tool-versions";
 
@@ -16,10 +16,9 @@
     imports = [ ../modules/braid ];
     braid.enable = true;
     braid.disks = [ "/dev/disk/by-id/dummy" ];
-    braid.rustPackage = braid-cli-unwrapped;
+    braid.package = braid-cli-unwrapped;
 
     environment.systemPackages = [
-      braid-rust
       pkgs.btrfs-progs
       pkgs.cryptsetup
       pkgs.util-linux
