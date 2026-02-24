@@ -89,3 +89,4 @@ Write failing tests first, confirm they fail for the expected reasons, then impl
 - [x] `braid apply` explicit missing-device removal gate (`--allow-remove-missing` + `BRAID_CONFIRM`)
 - [x] `braid apply` absent disk skip+warn, unplug/replug regression
 - [x] `braid status` human, `--json`, `--verbose` output
+- [ ] LUKS header auto-backup on `init-disk`, corrupt header restore + data recovery

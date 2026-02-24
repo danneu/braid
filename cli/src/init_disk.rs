@@ -4,6 +4,7 @@ use crate::parse::{parse_cryptsetup_luks_uuid, ParseError};
 use crate::plan::mapper_name_for_by_id;
 use crate::probe::{probe_pool, Filesystem, ProbeError};
 use crate::types::*;
+use std::os::unix::fs::PermissionsExt;
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -24,6 +25,8 @@ pub enum InitDiskError {
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
+
+pub(crate) const HEADER_BACKUP_DIR: &str = "/var/lib/braid/luks-headers";
 
 /// Entry point: reads env vars, delegates to cmd_init_disk_with.
 pub fn cmd_init_disk<R: CommandRunner, F: Filesystem>(
@@ -60,6 +63,7 @@ pub fn cmd_init_disk<R: CommandRunner, F: Filesystem>(
         &passphrase,
         &confirm,
         &luks_extra_opts,
+        HEADER_BACKUP_DIR,
     )
 }
 
@@ -73,6 +77,7 @@ pub(crate) fn cmd_init_disk_with<R: CommandRunner, F: Filesystem>(
     passphrase: &str,
     confirm: &str,
     luks_extra_opts: &[String],
+    backup_dir: &str,
 ) -> Result<(), InitDiskError> {
     // 1. Block device check
     if !fs.is_block_device(by_id_path) {
@@ -211,7 +216,10 @@ pub(crate) fn cmd_init_disk_with<R: CommandRunner, F: Filesystem>(
         _ => {}
     }
 
-    // 8. Success
+    // 8. Header backup
+    header_backup(runner, by_id_path, backup_dir);
+
+    // 9. Success
     println!("LUKS format complete: {by_id_path}");
     println!("Next step: run 'braid apply' to open and add this disk to the pool.");
 
@@ -221,6 +229,59 @@ pub(crate) fn cmd_init_disk_with<R: CommandRunner, F: Filesystem>(
 // ---------------------------------------------------------------------------
 // Private helpers
 // ---------------------------------------------------------------------------
+
+/// Best-effort LUKS header backup. Warns on failure — the format already succeeded.
+fn header_backup<R: CommandRunner>(runner: &R, by_id_path: &str, backup_dir: &str) {
+    let basename = match mapper_name_for_by_id(&ByIdPath(by_id_path.to_owned())) {
+        Some(mn) => mn.0,
+        None => {
+            eprintln!(
+                "WARNING: skipping header backup — could not derive backup filename from {by_id_path} (invalid by-id basename)"
+            );
+            return;
+        }
+    };
+
+    let backup_path = format!("{backup_dir}/{basename}.img");
+
+    if let Err(e) = std::fs::create_dir_all(backup_dir) {
+        eprintln!("WARNING: could not create {backup_dir}: {e} — back up LUKS header manually");
+        return;
+    }
+    if let Err(e) = std::fs::set_permissions(backup_dir, std::fs::Permissions::from_mode(0o700)) {
+        eprintln!("WARNING: could not set permissions on {backup_dir}: {e} — back up LUKS header manually");
+        return;
+    }
+
+    let result = runner.run(&CmdRequest::CryptsetupLuksHeaderBackup {
+        device: by_id_path.to_owned(),
+        backup_path: backup_path.clone(),
+    });
+    match result {
+        Ok(out) if out.exit_status != 0 => {
+            eprintln!(
+                "WARNING: luksHeaderBackup failed (exit {}): {} — back up LUKS header manually",
+                out.exit_status, out.stderr
+            );
+            return;
+        }
+        Err(e) => {
+            eprintln!("WARNING: luksHeaderBackup failed: {e} — back up LUKS header manually");
+            return;
+        }
+        _ => {}
+    }
+
+    if let Err(e) = std::fs::set_permissions(&backup_path, std::fs::Permissions::from_mode(0o600))
+    {
+        eprintln!(
+            "WARNING: could not set permissions on {backup_path}: {e} — back up LUKS header manually"
+        );
+        return;
+    }
+
+    println!("LUKS header backup saved: {backup_path}");
+}
 
 /// Find an existing LUKS device to test the passphrase against.
 ///
@@ -404,6 +465,7 @@ mod tests {
             "pass",
             "",
             &[],
+            "/tmp/unused",
         )
         .unwrap_err();
 
@@ -428,6 +490,7 @@ mod tests {
             "pass",
             "",
             &[],
+            "/tmp/unused",
         )
         .unwrap_err();
 
@@ -514,6 +577,7 @@ mod tests {
             "pass",
             "reformat this disk",
             &[],
+            "/tmp/unused",
         )
         .unwrap_err();
 
@@ -551,6 +615,7 @@ mod tests {
             "pass",
             "",
             &[],
+            "/tmp/unused",
         )
         .unwrap_err();
 
@@ -588,6 +653,7 @@ mod tests {
             "pass",
             "wrong",
             &[],
+            "/tmp/unused",
         )
         .unwrap_err();
 
@@ -600,6 +666,8 @@ mod tests {
     #[test]
     fn init_disk_force_correct_confirm() {
         // Force reformat with correct confirm — should proceed to format
+        let tmp = tempfile::tempdir().unwrap();
+        let backup_dir = tmp.path().to_str().unwrap();
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::MountpointCheck {
@@ -620,6 +688,13 @@ mod tests {
                 },
                 b"pass".to_vec(),
                 ok_raw("cryptsetup luksFormat", ""),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksHeaderBackup {
+                    device: "/dev/disk/by-id/virtio-disk1".to_owned(),
+                    backup_path: format!("{backup_dir}/virtio-disk1.img"),
+                },
+                ok_raw("cryptsetup luksHeaderBackup", ""),
             );
 
         let fs = MockFs::new(&[], &["/dev/disk/by-id/virtio-disk1"]);
@@ -634,6 +709,7 @@ mod tests {
             "pass",
             "reformat this disk",
             &[],
+            backup_dir,
         );
         assert!(result.is_ok(), "got: {result:?}");
     }
@@ -688,6 +764,7 @@ mod tests {
             "wrongpass",
             "",
             &[],
+            "/tmp/unused",
         )
         .unwrap_err();
 
@@ -700,6 +777,8 @@ mod tests {
     #[test]
     fn init_disk_passphrase_match() {
         // Existing member, passphrase matches → proceeds to format
+        let tmp = tempfile::tempdir().unwrap();
+        let backup_dir = tmp.path().to_str().unwrap();
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::MountpointCheck {
@@ -735,6 +814,13 @@ mod tests {
                 },
                 b"pass".to_vec(),
                 ok_raw("cryptsetup luksFormat", ""),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksHeaderBackup {
+                    device: "/dev/disk/by-id/virtio-disk2".to_owned(),
+                    backup_path: format!("{backup_dir}/virtio-disk2.img"),
+                },
+                ok_raw("cryptsetup luksHeaderBackup", ""),
             );
 
         let fs = MockFs::new(
@@ -755,6 +841,7 @@ mod tests {
             "pass",
             "",
             &[],
+            backup_dir,
         );
         assert!(result.is_ok(), "got: {result:?}");
     }
@@ -795,6 +882,7 @@ mod tests {
             "pass",
             "reformat this disk",
             &[],
+            "/tmp/unused",
         )
         .unwrap_err();
 
@@ -807,6 +895,8 @@ mod tests {
     #[test]
     fn init_disk_force_target_mapper_closed_proceeds() {
         // --force, target mapper not active → proceeds
+        let tmp = tempfile::tempdir().unwrap();
+        let backup_dir = tmp.path().to_str().unwrap();
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::MountpointCheck {
@@ -827,6 +917,13 @@ mod tests {
                 },
                 b"pass".to_vec(),
                 ok_raw("cryptsetup luksFormat", ""),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksHeaderBackup {
+                    device: "/dev/disk/by-id/virtio-disk1".to_owned(),
+                    backup_path: format!("{backup_dir}/virtio-disk1.img"),
+                },
+                ok_raw("cryptsetup luksHeaderBackup", ""),
             );
 
         // mapper does NOT exist
@@ -842,6 +939,7 @@ mod tests {
             "pass",
             "reformat this disk",
             &[],
+            backup_dir,
         );
         assert!(result.is_ok(), "got: {result:?}");
     }
@@ -864,6 +962,8 @@ mod tests {
     #[test]
     fn init_disk_fresh_no_existing_member() {
         // First disk, no members to verify against → format succeeds
+        let tmp = tempfile::tempdir().unwrap();
+        let backup_dir = tmp.path().to_str().unwrap();
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::MountpointCheck {
@@ -884,6 +984,13 @@ mod tests {
                 },
                 b"pass".to_vec(),
                 ok_raw("cryptsetup luksFormat", ""),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksHeaderBackup {
+                    device: "/dev/disk/by-id/virtio-disk1".to_owned(),
+                    backup_path: format!("{backup_dir}/virtio-disk1.img"),
+                },
+                ok_raw("cryptsetup luksHeaderBackup", ""),
             );
 
         let fs = MockFs::new(&[], &["/dev/disk/by-id/virtio-disk1"]);
@@ -898,6 +1005,7 @@ mod tests {
             "pass",
             "",
             &["--pbkdf".to_owned(), "pbkdf2".to_owned()],
+            backup_dir,
         );
         assert!(result.is_ok(), "got: {result:?}");
     }
@@ -905,6 +1013,8 @@ mod tests {
     #[test]
     fn init_disk_with_existing_member() {
         // Second disk, passphrase matches open mapper → format succeeds
+        let tmp = tempfile::tempdir().unwrap();
+        let backup_dir = tmp.path().to_str().unwrap();
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::MountpointCheck {
@@ -942,6 +1052,13 @@ mod tests {
                 },
                 b"pass".to_vec(),
                 ok_raw("cryptsetup luksFormat", ""),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksHeaderBackup {
+                    device: "/dev/disk/by-id/virtio-disk2".to_owned(),
+                    backup_path: format!("{backup_dir}/virtio-disk2.img"),
+                },
+                ok_raw("cryptsetup luksHeaderBackup", ""),
             );
 
         let fs = MockFs::new(
@@ -962,6 +1079,7 @@ mod tests {
             "pass",
             "",
             &[],
+            backup_dir,
         );
         assert!(result.is_ok(), "got: {result:?}");
     }
@@ -969,6 +1087,8 @@ mod tests {
     #[test]
     fn init_disk_non_luks_target_in_pool_not_checked() {
         // Target is not LUKS → pool membership check skipped
+        let tmp = tempfile::tempdir().unwrap();
+        let backup_dir = tmp.path().to_str().unwrap();
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::MountpointCheck {
@@ -1035,6 +1155,13 @@ mod tests {
                 },
                 b"pass".to_vec(),
                 ok_raw("cryptsetup luksFormat", ""),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksHeaderBackup {
+                    device: "/dev/disk/by-id/virtio-disk2".to_owned(),
+                    backup_path: format!("{backup_dir}/virtio-disk2.img"),
+                },
+                ok_raw("cryptsetup luksHeaderBackup", ""),
             );
 
         let fs = MockFs::new(
@@ -1055,6 +1182,7 @@ mod tests {
             "pass",
             "",
             &[],
+            backup_dir,
         );
         assert!(result.is_ok(), "got: {result:?}");
     }
@@ -1089,6 +1217,7 @@ mod tests {
             "pass",
             "",
             &[],
+            "/tmp/unused",
         )
         .unwrap_err();
 
@@ -1101,6 +1230,8 @@ mod tests {
     #[test]
     fn init_disk_not_btrfs_skips_membership() {
         // MountpointCheck succeeds + probe_pool returns NotBtrfs → no membership error
+        let tmp = tempfile::tempdir().unwrap();
+        let backup_dir = tmp.path().to_str().unwrap();
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::MountpointCheck {
@@ -1130,6 +1261,13 @@ mod tests {
                 },
                 b"pass".to_vec(),
                 ok_raw("cryptsetup luksFormat", ""),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksHeaderBackup {
+                    device: "/dev/disk/by-id/virtio-disk1".to_owned(),
+                    backup_path: format!("{backup_dir}/virtio-disk1.img"),
+                },
+                ok_raw("cryptsetup luksHeaderBackup", ""),
             );
 
         let fs = MockFs::new(&[], &["/dev/disk/by-id/virtio-disk1"]);
@@ -1144,6 +1282,7 @@ mod tests {
             "pass",
             "",
             &[],
+            backup_dir,
         );
         assert!(result.is_ok(), "got: {result:?}");
     }
@@ -1151,6 +1290,8 @@ mod tests {
     #[test]
     fn init_disk_not_mounted_skips_membership() {
         // MountpointCheck fails → membership check skipped entirely
+        let tmp = tempfile::tempdir().unwrap();
+        let backup_dir = tmp.path().to_str().unwrap();
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::MountpointCheck {
@@ -1171,6 +1312,13 @@ mod tests {
                 },
                 b"pass".to_vec(),
                 ok_raw("cryptsetup luksFormat", ""),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksHeaderBackup {
+                    device: "/dev/disk/by-id/virtio-disk1".to_owned(),
+                    backup_path: format!("{backup_dir}/virtio-disk1.img"),
+                },
+                ok_raw("cryptsetup luksHeaderBackup", ""),
             );
 
         let fs = MockFs::new(&[], &["/dev/disk/by-id/virtio-disk1"]);
@@ -1185,6 +1333,7 @@ mod tests {
             "pass",
             "",
             &[],
+            backup_dir,
         );
         assert!(result.is_ok(), "got: {result:?}");
     }
@@ -1359,6 +1508,115 @@ mod tests {
         );
     }
 
+    // ======================================================================
+    // Header backup tests
+    // ======================================================================
+
+    #[test]
+    fn init_disk_creates_header_backup_after_format() {
+        let tmp = tempfile::tempdir().unwrap();
+        let backup_dir = tmp.path().join("luks-headers");
+        let backup_dir_str = backup_dir.to_str().unwrap();
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::MountpointCheck {
+                    path: "/mnt/storage".to_owned(),
+                },
+                err_raw("mountpoint", 1, ""),
+            )
+            .with_output(
+                CmdRequest::CryptsetupIsLuks {
+                    device: "/dev/disk/by-id/virtio-disk1".to_owned(),
+                },
+                err_raw("cryptsetup isLuks", 4, "not LUKS"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupLuksFormat {
+                    device: "/dev/disk/by-id/virtio-disk1".to_owned(),
+                    extra_opts: vec![],
+                },
+                b"pass".to_vec(),
+                ok_raw("cryptsetup luksFormat", ""),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksHeaderBackup {
+                    device: "/dev/disk/by-id/virtio-disk1".to_owned(),
+                    backup_path: format!("{backup_dir_str}/virtio-disk1.img"),
+                },
+                ok_raw("cryptsetup luksHeaderBackup", ""),
+            );
+
+        let fs = MockFs::new(&[], &["/dev/disk/by-id/virtio-disk1"]);
+        let config = config_1disk();
+
+        let result = cmd_init_disk_with(
+            &runner,
+            &fs,
+            &config,
+            "/dev/disk/by-id/virtio-disk1",
+            false,
+            "pass",
+            "",
+            &[],
+            backup_dir_str,
+        );
+        assert!(result.is_ok(), "got: {result:?}");
+        // Verify the directory was created
+        assert!(backup_dir.exists(), "backup directory should be created");
+    }
+
+    #[test]
+    fn init_disk_warns_on_header_backup_failure() {
+        // Header backup command fails — init-disk should still succeed
+        let tmp = tempfile::tempdir().unwrap();
+        let backup_dir = tmp.path().to_str().unwrap();
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::MountpointCheck {
+                    path: "/mnt/storage".to_owned(),
+                },
+                err_raw("mountpoint", 1, ""),
+            )
+            .with_output(
+                CmdRequest::CryptsetupIsLuks {
+                    device: "/dev/disk/by-id/virtio-disk1".to_owned(),
+                },
+                err_raw("cryptsetup isLuks", 4, "not LUKS"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupLuksFormat {
+                    device: "/dev/disk/by-id/virtio-disk1".to_owned(),
+                    extra_opts: vec![],
+                },
+                b"pass".to_vec(),
+                ok_raw("cryptsetup luksFormat", ""),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksHeaderBackup {
+                    device: "/dev/disk/by-id/virtio-disk1".to_owned(),
+                    backup_path: format!("{backup_dir}/virtio-disk1.img"),
+                },
+                err_raw("cryptsetup luksHeaderBackup", 1, "I/O error"),
+            );
+
+        let fs = MockFs::new(&[], &["/dev/disk/by-id/virtio-disk1"]);
+        let config = config_1disk();
+
+        let result = cmd_init_disk_with(
+            &runner,
+            &fs,
+            &config,
+            "/dev/disk/by-id/virtio-disk1",
+            false,
+            "pass",
+            "",
+            &[],
+            backup_dir,
+        );
+        // Format succeeded — backup failure is best-effort, should still be Ok
+        assert!(result.is_ok(), "got: {result:?}");
+    }
+
     #[test]
     fn init_disk_mountpoint_command_error_is_fatal() {
         // Bug: MountpointCheck Err was treated as "not mounted" (fail-open)
@@ -1398,6 +1656,7 @@ mod tests {
             "pass",
             "",
             &[],
+            "/tmp/unused",
         )
         .unwrap_err();
 

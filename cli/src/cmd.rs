@@ -45,6 +45,7 @@ pub enum CmdRequest {
     // init-disk commands
     CryptsetupLuksFormat { device: String, extra_opts: Vec<String> },
     CryptsetupTestPassphrase { device: String },
+    CryptsetupLuksHeaderBackup { device: String, backup_path: String },
 }
 
 #[derive(Debug, Error)]
@@ -200,6 +201,9 @@ impl CommandRunner for RealRunner {
             }
             CmdRequest::MountpointCheck { path } => {
                 RealRunner::exec("mountpoint", &["-q", path])
+            }
+            CmdRequest::CryptsetupLuksHeaderBackup { device, backup_path } => {
+                RealRunner::exec("cryptsetup", &["luksHeaderBackup", "--header-backup-file", backup_path, device])
             }
             CmdRequest::CryptsetupLuksFormat { device, extra_opts } => {
                 // Passphrase must be piped via run_with_stdin, not here.
@@ -404,6 +408,10 @@ mod tests {
             CmdRequest::CryptsetupTestPassphrase {
                 device: "/dev/vda".to_owned(),
             },
+            CmdRequest::CryptsetupLuksHeaderBackup {
+                device: "/dev/vda".to_owned(),
+                backup_path: "/tmp/header.img".to_owned(),
+            },
             CmdRequest::BtrfsBalanceStatus {
                 mount_point: "/mnt/storage".to_owned(),
             },
@@ -412,7 +420,7 @@ mod tests {
             },
         ];
 
-        assert_eq!(all.len(), 26);
+        assert_eq!(all.len(), 27);
     }
 
     #[test]
