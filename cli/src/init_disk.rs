@@ -35,6 +35,7 @@ pub fn cmd_init_disk<R: CommandRunner, F: Filesystem>(
     config: &Config,
     by_id_path: &str,
     force: bool,
+    progress: bool,
 ) -> Result<(), InitDiskError> {
     let passphrase = std::env::var("BRAID_PASSPHRASE").unwrap_or_default();
     if passphrase.is_empty() {
@@ -60,6 +61,7 @@ pub fn cmd_init_disk<R: CommandRunner, F: Filesystem>(
         config,
         by_id_path,
         force,
+        progress,
         &passphrase,
         &confirm,
         &luks_extra_opts,
@@ -74,6 +76,7 @@ pub(crate) fn cmd_init_disk_with<R: CommandRunner, F: Filesystem>(
     config: &Config,
     by_id_path: &str,
     force: bool,
+    progress: bool,
     passphrase: &str,
     confirm: &str,
     luks_extra_opts: &[String],
@@ -197,20 +200,28 @@ pub(crate) fn cmd_init_disk_with<R: CommandRunner, F: Filesystem>(
 
     // 7. Format
     println!("Formatting {by_id_path} with LUKS...");
+    let mut extra_opts = luks_extra_opts.to_vec();
+    if progress {
+        extra_opts.push("--progress-frequency".to_owned());
+        extra_opts.push("1".to_owned());
+    }
     let format_result = runner.run_with_stdin(
         &CmdRequest::CryptsetupLuksFormat {
             device: by_id_path.to_owned(),
-            extra_opts: luks_extra_opts.to_vec(),
+            extra_opts,
+            inherit_stderr: progress,
         },
         passphrase.as_bytes(),
     );
 
     match format_result {
         Ok(out) if out.exit_status != 0 => {
-            return Err(InitDiskError::Validation(format!(
-                "luksFormat failed (exit {}): {}",
-                out.exit_status, out.stderr
-            )));
+            let detail = if out.stderr.is_empty() {
+                format!("luksFormat failed (exit {})", out.exit_status)
+            } else {
+                format!("luksFormat failed (exit {}): {}", out.exit_status, out.stderr)
+            };
+            return Err(InitDiskError::Validation(detail));
         }
         Err(e) => return Err(InitDiskError::Cmd(e)),
         _ => {}
@@ -462,6 +473,7 @@ mod tests {
             &config,
             "/dev/disk/by-id/virtio-disk1",
             false,
+            false,
             "pass",
             "",
             &[],
@@ -486,6 +498,7 @@ mod tests {
             &fs,
             &config,
             "/dev/disk/by-id/virtio-disk2",
+            false,
             false,
             "pass",
             "",
@@ -574,6 +587,7 @@ mod tests {
             &config,
             "/dev/disk/by-id/virtio-disk1",
             true,
+            false,
             "pass",
             "reformat this disk",
             &[],
@@ -611,6 +625,7 @@ mod tests {
             &fs,
             &config,
             "/dev/disk/by-id/virtio-disk1",
+            false,
             false,
             "pass",
             "",
@@ -650,6 +665,7 @@ mod tests {
             &config,
             "/dev/disk/by-id/virtio-disk1",
             true,
+            false,
             "pass",
             "wrong",
             &[],
@@ -685,6 +701,7 @@ mod tests {
                 CmdRequest::CryptsetupLuksFormat {
                     device: "/dev/disk/by-id/virtio-disk1".to_owned(),
                     extra_opts: vec![],
+                    inherit_stderr: false,
                 },
                 b"pass".to_vec(),
                 ok_raw("cryptsetup luksFormat", ""),
@@ -706,6 +723,7 @@ mod tests {
             &config,
             "/dev/disk/by-id/virtio-disk1",
             true,
+            false,
             "pass",
             "reformat this disk",
             &[],
@@ -761,6 +779,7 @@ mod tests {
             &config,
             "/dev/disk/by-id/virtio-disk2",
             false,
+            false,
             "wrongpass",
             "",
             &[],
@@ -811,6 +830,7 @@ mod tests {
                 CmdRequest::CryptsetupLuksFormat {
                     device: "/dev/disk/by-id/virtio-disk2".to_owned(),
                     extra_opts: vec![],
+                    inherit_stderr: false,
                 },
                 b"pass".to_vec(),
                 ok_raw("cryptsetup luksFormat", ""),
@@ -837,6 +857,7 @@ mod tests {
             &fs,
             &config,
             "/dev/disk/by-id/virtio-disk2",
+            false,
             false,
             "pass",
             "",
@@ -879,6 +900,7 @@ mod tests {
             &config,
             "/dev/disk/by-id/virtio-disk1",
             true,
+            false,
             "pass",
             "reformat this disk",
             &[],
@@ -914,6 +936,7 @@ mod tests {
                 CmdRequest::CryptsetupLuksFormat {
                     device: "/dev/disk/by-id/virtio-disk1".to_owned(),
                     extra_opts: vec![],
+                    inherit_stderr: false,
                 },
                 b"pass".to_vec(),
                 ok_raw("cryptsetup luksFormat", ""),
@@ -936,6 +959,7 @@ mod tests {
             &config,
             "/dev/disk/by-id/virtio-disk1",
             true,
+            false,
             "pass",
             "reformat this disk",
             &[],
@@ -981,6 +1005,7 @@ mod tests {
                 CmdRequest::CryptsetupLuksFormat {
                     device: "/dev/disk/by-id/virtio-disk1".to_owned(),
                     extra_opts: vec!["--pbkdf".to_owned(), "pbkdf2".to_owned()],
+                    inherit_stderr: false,
                 },
                 b"pass".to_vec(),
                 ok_raw("cryptsetup luksFormat", ""),
@@ -1001,6 +1026,7 @@ mod tests {
             &fs,
             &config,
             "/dev/disk/by-id/virtio-disk1",
+            false,
             false,
             "pass",
             "",
@@ -1049,6 +1075,7 @@ mod tests {
                 CmdRequest::CryptsetupLuksFormat {
                     device: "/dev/disk/by-id/virtio-disk2".to_owned(),
                     extra_opts: vec![],
+                    inherit_stderr: false,
                 },
                 b"pass".to_vec(),
                 ok_raw("cryptsetup luksFormat", ""),
@@ -1075,6 +1102,7 @@ mod tests {
             &fs,
             &config,
             "/dev/disk/by-id/virtio-disk2",
+            false,
             false,
             "pass",
             "",
@@ -1152,6 +1180,7 @@ mod tests {
                 CmdRequest::CryptsetupLuksFormat {
                     device: "/dev/disk/by-id/virtio-disk2".to_owned(),
                     extra_opts: vec![],
+                    inherit_stderr: false,
                 },
                 b"pass".to_vec(),
                 ok_raw("cryptsetup luksFormat", ""),
@@ -1178,6 +1207,7 @@ mod tests {
             &fs,
             &config,
             "/dev/disk/by-id/virtio-disk2",
+            false,
             false,
             "pass",
             "",
@@ -1213,6 +1243,7 @@ mod tests {
             &fs,
             &config,
             "/dev/disk/by-id/virtio-disk1",
+            false,
             false,
             "pass",
             "",
@@ -1258,6 +1289,7 @@ mod tests {
                 CmdRequest::CryptsetupLuksFormat {
                     device: "/dev/disk/by-id/virtio-disk1".to_owned(),
                     extra_opts: vec![],
+                    inherit_stderr: false,
                 },
                 b"pass".to_vec(),
                 ok_raw("cryptsetup luksFormat", ""),
@@ -1278,6 +1310,7 @@ mod tests {
             &fs,
             &config,
             "/dev/disk/by-id/virtio-disk1",
+            false,
             false,
             "pass",
             "",
@@ -1309,6 +1342,7 @@ mod tests {
                 CmdRequest::CryptsetupLuksFormat {
                     device: "/dev/disk/by-id/virtio-disk1".to_owned(),
                     extra_opts: vec![],
+                    inherit_stderr: false,
                 },
                 b"pass".to_vec(),
                 ok_raw("cryptsetup luksFormat", ""),
@@ -1329,6 +1363,7 @@ mod tests {
             &fs,
             &config,
             "/dev/disk/by-id/virtio-disk1",
+            false,
             false,
             "pass",
             "",
@@ -1534,6 +1569,7 @@ mod tests {
                 CmdRequest::CryptsetupLuksFormat {
                     device: "/dev/disk/by-id/virtio-disk1".to_owned(),
                     extra_opts: vec![],
+                    inherit_stderr: false,
                 },
                 b"pass".to_vec(),
                 ok_raw("cryptsetup luksFormat", ""),
@@ -1554,6 +1590,7 @@ mod tests {
             &fs,
             &config,
             "/dev/disk/by-id/virtio-disk1",
+            false,
             false,
             "pass",
             "",
@@ -1587,6 +1624,7 @@ mod tests {
                 CmdRequest::CryptsetupLuksFormat {
                     device: "/dev/disk/by-id/virtio-disk1".to_owned(),
                     extra_opts: vec![],
+                    inherit_stderr: false,
                 },
                 b"pass".to_vec(),
                 ok_raw("cryptsetup luksFormat", ""),
@@ -1607,6 +1645,7 @@ mod tests {
             &fs,
             &config,
             "/dev/disk/by-id/virtio-disk1",
+            false,
             false,
             "pass",
             "",
@@ -1639,6 +1678,7 @@ mod tests {
                 CmdRequest::CryptsetupLuksFormat {
                     device: "/dev/disk/by-id/virtio-disk1".to_owned(),
                     extra_opts: vec![],
+                    inherit_stderr: false,
                 },
                 b"pass".to_vec(),
                 ok_raw("cryptsetup luksFormat", ""),
@@ -1653,6 +1693,7 @@ mod tests {
             &config,
             "/dev/disk/by-id/virtio-disk1",
             false,
+            false,
             "pass",
             "",
             &[],
@@ -1663,6 +1704,170 @@ mod tests {
         assert!(
             matches!(err, InitDiskError::Cmd(_)),
             "mountpoint command error should be fatal, got: {err:?}"
+        );
+    }
+
+    // ======================================================================
+    // Progress flag tests
+    // ======================================================================
+
+    #[test]
+    fn init_disk_progress_injects_flag() {
+        let tmp = tempfile::tempdir().unwrap();
+        let backup_dir = tmp.path().to_str().unwrap();
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::MountpointCheck {
+                    path: "/mnt/storage".to_owned(),
+                },
+                err_raw("mountpoint", 1, ""),
+            )
+            .with_output(
+                CmdRequest::CryptsetupIsLuks {
+                    device: "/dev/disk/by-id/virtio-disk1".to_owned(),
+                },
+                err_raw("cryptsetup isLuks", 4, "not LUKS"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupLuksFormat {
+                    device: "/dev/disk/by-id/virtio-disk1".to_owned(),
+                    extra_opts: vec![
+                        "--progress-frequency".to_owned(),
+                        "1".to_owned(),
+                    ],
+                    inherit_stderr: true,
+                },
+                b"pass".to_vec(),
+                ok_raw("cryptsetup luksFormat", ""),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksHeaderBackup {
+                    device: "/dev/disk/by-id/virtio-disk1".to_owned(),
+                    backup_path: format!("{backup_dir}/virtio-disk1.img"),
+                },
+                ok_raw("cryptsetup luksHeaderBackup", ""),
+            );
+
+        let fs = MockFs::new(&[], &["/dev/disk/by-id/virtio-disk1"]);
+        let config = config_1disk();
+
+        let result = cmd_init_disk_with(
+            &runner,
+            &fs,
+            &config,
+            "/dev/disk/by-id/virtio-disk1",
+            false,
+            true, // progress
+            "pass",
+            "",
+            &[],
+            backup_dir,
+        );
+        assert!(result.is_ok(), "got: {result:?}");
+    }
+
+    #[test]
+    fn init_disk_no_progress_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let backup_dir = tmp.path().to_str().unwrap();
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::MountpointCheck {
+                    path: "/mnt/storage".to_owned(),
+                },
+                err_raw("mountpoint", 1, ""),
+            )
+            .with_output(
+                CmdRequest::CryptsetupIsLuks {
+                    device: "/dev/disk/by-id/virtio-disk1".to_owned(),
+                },
+                err_raw("cryptsetup isLuks", 4, "not LUKS"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupLuksFormat {
+                    device: "/dev/disk/by-id/virtio-disk1".to_owned(),
+                    extra_opts: vec![],
+                    inherit_stderr: false,
+                },
+                b"pass".to_vec(),
+                ok_raw("cryptsetup luksFormat", ""),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksHeaderBackup {
+                    device: "/dev/disk/by-id/virtio-disk1".to_owned(),
+                    backup_path: format!("{backup_dir}/virtio-disk1.img"),
+                },
+                ok_raw("cryptsetup luksHeaderBackup", ""),
+            );
+
+        let fs = MockFs::new(&[], &["/dev/disk/by-id/virtio-disk1"]);
+        let config = config_1disk();
+
+        let result = cmd_init_disk_with(
+            &runner,
+            &fs,
+            &config,
+            "/dev/disk/by-id/virtio-disk1",
+            false,
+            false, // no progress
+            "pass",
+            "",
+            &[],
+            backup_dir,
+        );
+        assert!(result.is_ok(), "got: {result:?}");
+    }
+
+    #[test]
+    fn init_disk_progress_failure_empty_stderr() {
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::MountpointCheck {
+                    path: "/mnt/storage".to_owned(),
+                },
+                err_raw("mountpoint", 1, ""),
+            )
+            .with_output(
+                CmdRequest::CryptsetupIsLuks {
+                    device: "/dev/disk/by-id/virtio-disk1".to_owned(),
+                },
+                err_raw("cryptsetup isLuks", 4, "not LUKS"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupLuksFormat {
+                    device: "/dev/disk/by-id/virtio-disk1".to_owned(),
+                    extra_opts: vec![
+                        "--progress-frequency".to_owned(),
+                        "1".to_owned(),
+                    ],
+                    inherit_stderr: true,
+                },
+                b"pass".to_vec(),
+                // exit 1 with empty stderr (user saw output on terminal)
+                err_raw("cryptsetup luksFormat", 1, ""),
+            );
+
+        let fs = MockFs::new(&[], &["/dev/disk/by-id/virtio-disk1"]);
+        let config = config_1disk();
+
+        let err = cmd_init_disk_with(
+            &runner,
+            &fs,
+            &config,
+            "/dev/disk/by-id/virtio-disk1",
+            false,
+            true, // progress
+            "pass",
+            "",
+            &[],
+            "/tmp/unused",
+        )
+        .unwrap_err();
+
+        let msg = err.to_string();
+        assert!(
+            msg == "luksFormat failed (exit 1)",
+            "expected no trailing ': ', got: {msg}"
         );
     }
 }

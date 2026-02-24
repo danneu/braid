@@ -86,6 +86,7 @@ braid = {
 ```
 sudo nixos-rebuild switch
 sudo braid init-disk /dev/disk/by-id/ata-Toshiba_MN07_XXXX   # LUKS format (one-shot)
+# --progress auto|always|never controls format progress (default: auto, shows on TTY)
 sudo braid apply                                              # open + create pool
 ```
 

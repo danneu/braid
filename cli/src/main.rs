@@ -1,3 +1,4 @@
+use std::io::IsTerminal;
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use clap_complete::engine::{ArgValueCandidates, CompletionCandidate};
 use std::path::Path;
@@ -9,6 +10,21 @@ use braid_cli::doctor::cmd_doctor;
 use braid_cli::plan::{compute_plan, format_plan_human, to_plan_report};
 use braid_cli::probe::{probe_config_disk, probe_pool, RealFilesystem};
 use braid_cli::types::PlanFlags;
+
+#[derive(Debug, Clone, clap::ValueEnum)]
+enum ProgressMode {
+    Auto,
+    Always,
+    Never,
+}
+
+fn resolve_progress(mode: ProgressMode, stderr_is_tty: bool) -> bool {
+    match mode {
+        ProgressMode::Always => true,
+        ProgressMode::Never => false,
+        ProgressMode::Auto => stderr_is_tty,
+    }
+}
 
 #[derive(Debug, Parser)]
 #[command(name = "braid", version)]
@@ -42,6 +58,8 @@ struct InitDiskArgs {
     by_id_path: String,
     #[arg(long)]
     force: bool,
+    #[arg(long, value_enum, default_value_t = ProgressMode::Auto)]
+    progress: ProgressMode,
 }
 
 #[derive(Debug, Args)]
@@ -103,10 +121,11 @@ fn main() {
                     std::process::exit(1);
                 }
             };
+            let show_progress = resolve_progress(args.progress, std::io::stderr().is_terminal());
             let runner = RealRunner;
             let fs = RealFilesystem;
             if let Err(e) = braid_cli::init_disk::cmd_init_disk(
-                &runner, &fs, &config, &args.by_id_path, args.force,
+                &runner, &fs, &config, &args.by_id_path, args.force, show_progress,
             ) {
                 eprintln!("error: {e}");
                 std::process::exit(1);
@@ -227,5 +246,28 @@ fn disk_candidates() -> Vec<CompletionCandidate> {
         .into_iter()
         .map(|d| CompletionCandidate::new(d.0))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_progress_auto_tty() {
+        assert!(resolve_progress(ProgressMode::Auto, true));
+    }
+
+    #[test]
+    fn resolve_progress_auto_no_tty() {
+        assert!(!resolve_progress(ProgressMode::Auto, false));
+    }
+
+    #[test]
+    fn resolve_progress_always_and_never_override_tty() {
+        assert!(resolve_progress(ProgressMode::Always, false));
+        assert!(resolve_progress(ProgressMode::Always, true));
+        assert!(!resolve_progress(ProgressMode::Never, true));
+        assert!(!resolve_progress(ProgressMode::Never, false));
+    }
 }
 
