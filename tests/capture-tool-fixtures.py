@@ -94,6 +94,18 @@ machine.succeed(
     f" > {FIXTURE_DIR}/btrfs-scrub-completed.txt"
 )
 
+# 12. btrfs balance status (idle — no balance running)
+machine.succeed(
+    f"btrfs balance status {MOUNT}"
+    f" > {FIXTURE_DIR}/btrfs-balance-status-none.txt"
+)
+
+# 13. btrfs device usage --raw (per-device allocation breakdown)
+machine.succeed(
+    f"btrfs device usage --raw {MOUNT}"
+    f" > {FIXTURE_DIR}/btrfs-device-usage-2disk.txt"
+)
+
 # 11. cryptsetup status (inactive stderr/stdout)
 # Must unmount before closing mapper; otherwise cryptsetup reports "still in use".
 machine.succeed(f"umount {MOUNT}")

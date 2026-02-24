@@ -167,3 +167,38 @@ golden_test!(
         assert!(!out.uuid.0.is_empty());
     }
 );
+
+// --- Progress-monitoring parsers ---
+
+golden_test!(
+    golden_btrfs_balance_status_none,
+    "btrfs-balance-status-none.txt",
+    "btrfs balance status",
+    parse::btrfs_balance_status::parse_btrfs_balance_status,
+    |out: parse::types::BtrfsBalanceStatusOutput| {
+        assert_eq!(out.state, parse::types::BalanceState::None);
+    }
+);
+
+golden_test!(
+    golden_btrfs_device_usage,
+    "btrfs-device-usage-2disk.txt",
+    "btrfs device usage",
+    parse::btrfs_device_usage::parse_btrfs_device_usage,
+    |out: parse::types::BtrfsDeviceUsageOutput| {
+        assert_eq!(out.devices.len(), 2, "expected 2 devices");
+        // Exact devid/path mapping
+        assert_eq!(out.devices[0].devid, 1);
+        assert!(out.devices[0].path.contains("braid-vdb"), "devid 1 should be braid-vdb");
+        assert_eq!(out.devices[1].devid, 2);
+        assert!(out.devices[1].path.contains("braid-vdc"), "devid 2 should be braid-vdc");
+        // At least one Data,RAID1 allocation with bytes > 0
+        let has_data_raid1 = out.devices[0].allocations.iter().any(|a| {
+            a.alloc_type == "Data" && a.profile == "RAID1" && a.bytes > 0
+        });
+        assert!(has_data_raid1, "expected Data,RAID1 allocation with bytes > 0 on first device");
+        // Sanity: sizes are positive
+        assert!(out.devices[0].device_size > 0, "device_size should be positive");
+        assert!(out.devices[0].unallocated > 0, "unallocated should be positive");
+    }
+);

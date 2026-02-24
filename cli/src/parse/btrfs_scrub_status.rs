@@ -78,9 +78,13 @@ mod tests {
             exit_status: 0,
         };
         let out = parse_btrfs_scrub_status(&raw).unwrap();
+        // Extract expected timestamp directly from fixture
+        let expected_ts = raw.stdout.lines()
+            .find_map(|l| l.trim().strip_prefix("Scrub started:"))
+            .unwrap().trim();
         match &out.state {
             ScrubState::Completed { started_at } => {
-                assert!(started_at.0.contains("Mon Feb 23"));
+                assert_eq!(started_at.0, expected_ts);
             }
             other => panic!("expected Completed, got {other:?}"),
         }

@@ -51,7 +51,8 @@ mod tests {
             exit_status: 0,
         };
         let out = parse_cryptsetup_luks_uuid(&raw).unwrap();
-        assert_eq!(out.uuid.0, "71ff9937-fb2f-4091-9641-30a347a23dfd");
+        // UUID is random per VM run — just verify it parsed as valid
+        assert!(uuid::Uuid::parse_str(&out.uuid.0).is_ok());
     }
 
     // --- Synthetic tests (inline) ---

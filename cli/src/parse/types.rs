@@ -123,3 +123,55 @@ pub struct BtrfsDeviceStatsOutput {
 pub struct LsblkFieldOutput {
     pub value: Option<String>,
 }
+
+/// btrfs balance status
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BalanceState {
+    None,
+    Running {
+        done_chunks: u64,
+        estimated_total_chunks: u64,
+        considered_chunks: u64,
+        pct_left: u8,
+    },
+    Paused {
+        done_chunks: u64,
+        estimated_total_chunks: u64,
+        considered_chunks: u64,
+        pct_left: u8,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BtrfsBalanceStatusOutput {
+    pub state: BalanceState,
+}
+
+/// btrfs device usage --raw
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceAllocation {
+    pub alloc_type: String,
+    pub profile: String,
+    pub bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BtrfsDeviceUsageEntry {
+    pub path: String,
+    pub devid: u64,
+    pub device_size: u64,
+    pub device_slack: u64,
+    pub allocations: Vec<DeviceAllocation>,
+    pub unallocated: u64,
+}
+
+impl BtrfsDeviceUsageEntry {
+    pub fn used_bytes(&self) -> u64 {
+        self.allocations.iter().map(|a| a.bytes).sum()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BtrfsDeviceUsageOutput {
+    pub devices: Vec<BtrfsDeviceUsageEntry>,
+}

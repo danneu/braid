@@ -39,6 +39,9 @@ pub enum CmdRequest {
     MkfsBtrfs { device: String },
     Mount { device: String, mount_point: String },
     MountpointCheck { path: String },
+    // Polling commands for progress monitoring
+    BtrfsBalanceStatus { mount_point: String },
+    BtrfsDeviceUsageRaw { mount_point: String },
     // init-disk commands
     CryptsetupLuksFormat { device: String, extra_opts: Vec<String> },
     CryptsetupTestPassphrase { device: String },
@@ -144,6 +147,12 @@ impl CommandRunner for RealRunner {
             }
             CmdRequest::BtrfsDeviceStats { mount_point } => {
                 RealRunner::exec("btrfs", &["device", "stats", mount_point])
+            }
+            CmdRequest::BtrfsBalanceStatus { mount_point } => {
+                RealRunner::exec("btrfs", &["balance", "status", mount_point])
+            }
+            CmdRequest::BtrfsDeviceUsageRaw { mount_point } => {
+                RealRunner::exec("btrfs", &["device", "usage", "--raw", mount_point])
             }
             CmdRequest::LsblkField { device, field } => {
                 let field_name = match field {
@@ -395,9 +404,15 @@ mod tests {
             CmdRequest::CryptsetupTestPassphrase {
                 device: "/dev/vda".to_owned(),
             },
+            CmdRequest::BtrfsBalanceStatus {
+                mount_point: "/mnt/storage".to_owned(),
+            },
+            CmdRequest::BtrfsDeviceUsageRaw {
+                mount_point: "/mnt/storage".to_owned(),
+            },
         ];
 
-        assert_eq!(all.len(), 24);
+        assert_eq!(all.len(), 26);
     }
 
     #[test]
