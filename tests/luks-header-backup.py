@@ -103,8 +103,9 @@ with subtest("disk1 is no longer recognized as LUKS"):
 # ============================================================================
 
 with subtest("restore LUKS header from backup"):
+    # -q suppresses interactive "Are you sure?" confirmation
     machine.succeed(
-        f"cryptsetup luksHeaderRestore "
+        f"cryptsetup -q luksHeaderRestore "
         f"--header-backup-file {backup_dir}/virtio-disk1.img "
         "/dev/disk/by-id/virtio-disk1"
     )
