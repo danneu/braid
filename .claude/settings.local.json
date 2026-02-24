@@ -2,7 +2,11 @@
   "permissions": {
     "allow": [
       "Bash(nix log:*)",
-      "Bash(grep:*)"
+      "Bash(grep:*)",
+      "Bash(cargo test:*)",
+      "mcp__playwright__browser_navigate",
+      "mcp__playwright__browser_click",
+      "mcp__playwright__browser_close"
     ]
   }
 }
