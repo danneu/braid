@@ -51,6 +51,7 @@ impl CrosstermEventHandler {
                             KeyCode::Char('q' | 'Q') => Message::Quit,
                             KeyCode::Char('d' | 'D') => Message::ToggleDebug,
                             KeyCode::Char('p' | 'P') => Message::Ping,
+                            KeyCode::Char('r' | 'R') => Message::FetchStatus,
                             _ => continue,
                         };
                         if tx.send(msg).is_err() {

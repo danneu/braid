@@ -3,7 +3,7 @@ source: src/tui/ui.rs
 expression: terminal.backend()
 ---
 "┌ braid ───────────────────────────────────────────────────┐"
-"│press r to refresh                                        │"
+"│loading...                                                │"
 "│                                                          │"
 "│                                                          │"
 "│                                                          │"

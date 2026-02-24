@@ -1,4 +1,8 @@
+use crate::cmd::RealRunner;
+use crate::config::config_read;
+use crate::probe::RealFilesystem;
 use crate::protocol::{Request, Response};
+use crate::status::build_status_report;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::io::{AsRawFd, FromRawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -117,6 +121,22 @@ fn listener_from_systemd() -> UnixListener {
     listener
 }
 
+fn handle_status() -> Response {
+    let config = match config_read(std::path::Path::new("/etc/braid/config.json")) {
+        Ok(c) => c,
+        Err(e) => return Response::err(format!("config: {e}")),
+    };
+    let runner = RealRunner;
+    let fs = RealFilesystem;
+    match build_status_report(&runner, &fs, &config) {
+        Ok(report) => match serde_json::to_value(&report) {
+            Ok(data) => Response::ok_with_data(data),
+            Err(e) => Response::err(format!("serialize: {e}")),
+        },
+        Err(e) => Response::err(format!("status: {e}")),
+    }
+}
+
 fn handle_connection(stream: UnixStream) {
     // Cap reads at 64 KiB to prevent unbounded memory usage
     let writer = match stream.try_clone() {
@@ -145,6 +165,7 @@ fn handle_connection(stream: UnixStream) {
         let response = match serde_json::from_str::<Request>(&line) {
             Ok(req) => match req {
                 Request::Ping => Response::ok(),
+                Request::Status => handle_status(),
             },
             Err(_) => Response::err("invalid request"),
         };

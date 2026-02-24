@@ -3,12 +3,12 @@ source: src/tui/ui.rs
 expression: terminal.backend()
 ---
 "┌ braid ───────────────────────────────────────────────────┐"
-"│press r to refresh                                        │"
+"│Pool      /mnt/storage                                    │"
+"│Status    not mounted                                     │"
+"│Capacity  -                                               │"
 "│                                                          │"
-"│                                                          │"
-"│                                                          │"
-"│                                                          │"
-"│                                                          │"
+"│Scrub     -                                               │"
+"│Errors    0 total                                         │"
 "│                                                          │"
 "│                                                          │"
 "│                                                          │"

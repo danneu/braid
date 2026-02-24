@@ -37,6 +37,10 @@ pub fn run_loop<B: Backend>(
     events: &dyn EventSource,
     commands: &tokio::sync::mpsc::Sender<Command>,
 ) -> io::Result<()> {
+    // Auto-fetch status on startup
+    update(model, Message::FetchStatus);
+    send_pending_command(model, commands);
+
     while model.running {
         terminal
             .draw(|frame| view(model, frame))
@@ -47,22 +51,38 @@ pub fn run_loop<B: Backend>(
             chained = update(model, next_msg);
         }
 
-        let cmd = std::mem::take(&mut model.pending_command);
-        if cmd != Command::None {
-            if let Err(e) = commands.try_send(cmd) {
-                if let Some(id) = model.pending_request_id.take() {
+        send_pending_command(model, commands);
+    }
+    Ok(())
+}
+
+fn send_pending_command(model: &mut Model, commands: &tokio::sync::mpsc::Sender<Command>) {
+    let cmd = std::mem::take(&mut model.pending_command);
+    if cmd != Command::None {
+        let is_status = matches!(cmd, Command::FetchStatus { .. });
+        if let Err(e) = commands.try_send(cmd) {
+            if let Some(id) = model.pending_request_id.take() {
+                let err_msg = format!("command channel: {e}");
+                if is_status {
+                    update(
+                        model,
+                        Message::StatusResult {
+                            request_id: id,
+                            result: Err(err_msg),
+                        },
+                    );
+                } else {
                     update(
                         model,
                         Message::PingResult {
                             request_id: id,
-                            result: Err(format!("command channel: {e}")),
+                            result: Err(err_msg),
                         },
                     );
                 }
             }
         }
     }
-    Ok(())
 }
 
 /// Public entrypoint. Sets up terminal, runs loop, restores terminal.
@@ -168,11 +188,70 @@ mod tests {
     }
 
     #[test]
+    fn run_loop_auto_fetch_on_startup() {
+        // Just Quit — but auto-fetch should have sent a FetchStatus command
+        let events = TestEventSource::new(vec![Message::Quit]);
+        let backend = TestBackend::new(60, 16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut model = Model::default();
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel(16);
+
+        let result = run_loop(&mut terminal, &mut model, &events, &cmd_tx);
+        assert!(result.is_ok());
+
+        // The first command should be FetchStatus from auto-fetch
+        let cmd = cmd_rx.try_recv().unwrap();
+        assert_eq!(cmd, Command::FetchStatus { request_id: 0 });
+    }
+
+    #[test]
+    fn run_loop_status_sends_command() {
+        let events = TestEventSource::new(vec![
+            Message::FetchStatus,
+            Message::StatusResult {
+                request_id: 1,
+                result: Ok(crate::status::StatusReport {
+                    schema_version: 1,
+                    mount_point: "/mnt/storage".to_owned(),
+                    status_code: crate::status::StatusCode::Healthy,
+                    status: "healthy".to_owned(),
+                    total_devices: Some(2),
+                    present_count: Some(2),
+                    missing_count: Some(0),
+                    profile: Some("RAID1".to_owned()),
+                    capacity: None,
+                    last_scrub: None,
+                    disks: vec![],
+                }),
+            },
+            Message::Quit,
+        ]);
+        let backend = TestBackend::new(60, 16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut model = Model::default();
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel(16);
+
+        let result = run_loop(&mut terminal, &mut model, &events, &cmd_tx);
+        assert!(result.is_ok());
+
+        // First command: auto-fetch (id=0)
+        let cmd0 = cmd_rx.try_recv().unwrap();
+        assert_eq!(cmd0, Command::FetchStatus { request_id: 0 });
+
+        // Second command: user-triggered FetchStatus (id=1)
+        let cmd1 = cmd_rx.try_recv().unwrap();
+        assert_eq!(cmd1, Command::FetchStatus { request_id: 1 });
+
+        assert_eq!(model.daemon_status, DaemonStatus::Ok);
+        assert!(model.status_report.is_some());
+    }
+
+    #[test]
     fn run_loop_ping_sends_command() {
         let events = TestEventSource::new(vec![
             Message::Ping,
             Message::PingResult {
-                request_id: 0,
+                request_id: 1, // id=0 is auto-fetch
                 result: Ok(()),
             },
             Message::Quit,
@@ -185,9 +264,13 @@ mod tests {
         let result = run_loop(&mut terminal, &mut model, &events, &cmd_tx);
         assert!(result.is_ok());
 
-        // Verify command was sent
-        let cmd = cmd_rx.try_recv().unwrap();
-        assert_eq!(cmd, Command::Ping { request_id: 0 });
+        // First command: auto-fetch (id=0)
+        let cmd0 = cmd_rx.try_recv().unwrap();
+        assert_eq!(cmd0, Command::FetchStatus { request_id: 0 });
+
+        // Second command: user ping (id=1)
+        let cmd1 = cmd_rx.try_recv().unwrap();
+        assert_eq!(cmd1, Command::Ping { request_id: 1 });
 
         assert_eq!(model.daemon_status, DaemonStatus::Ok);
     }
@@ -197,7 +280,7 @@ mod tests {
         let events = TestEventSource::new(vec![
             Message::Ping,
             Message::PingResult {
-                request_id: 0,
+                request_id: 1, // id=0 is auto-fetch
                 result: Err("connection refused".to_string()),
             },
             Message::Quit,

@@ -7,6 +7,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
 use crate::protocol::{Request, Response};
+use crate::status::StatusReport;
 use super::app::{Command, Message};
 
 const MAX_RESPONSE_BYTES: u64 = 64 * 1024;
@@ -48,6 +49,23 @@ impl DaemonClient {
     }
 
     pub async fn ping(&self) -> Result<(), DaemonError> {
+        let payload = self.send_request(&Request::Ping).await?;
+        let _ = payload;
+        Ok(())
+    }
+
+    pub async fn status(&self) -> Result<StatusReport, DaemonError> {
+        let payload = self.send_request(&Request::Status).await?;
+        let data = payload
+            .data
+            .ok_or_else(|| DaemonError::Parse("missing data in status response".to_string()))?;
+        serde_json::from_value(data).map_err(|e| DaemonError::Parse(e.to_string()))
+    }
+
+    async fn send_request(
+        &self,
+        request: &Request,
+    ) -> Result<crate::protocol::OkPayload, DaemonError> {
         let stream = tokio::time::timeout(
             self.timeout,
             UnixStream::connect(&self.socket_path),
@@ -58,7 +76,7 @@ impl DaemonClient {
 
         let (reader, mut writer) = stream.into_split();
 
-        let req = serde_json::to_string(&Request::Ping).unwrap();
+        let req = serde_json::to_string(request).unwrap();
         tokio::time::timeout(
             self.timeout,
             writer.write_all(format!("{req}\n").as_bytes()),
@@ -76,10 +94,7 @@ impl DaemonClient {
 
         let response: Response = serde_json::from_str(line.trim())
             .map_err(|e| DaemonError::Parse(e.to_string()))?;
-        response
-            .into_result()
-            .map(|_| ())
-            .map_err(DaemonError::Daemon)
+        response.into_result().map_err(DaemonError::Daemon)
     }
 }
 
@@ -95,6 +110,15 @@ pub async fn daemon_worker(
                 let result = client.ping().await.map_err(|e| e.to_string());
                 if msg_tx
                     .send(Message::PingResult { request_id, result })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            Command::FetchStatus { request_id } => {
+                let result = client.status().await.map_err(|e| e.to_string());
+                if msg_tx
+                    .send(Message::StatusResult { request_id, result })
                     .is_err()
                 {
                     break;
@@ -165,6 +189,54 @@ mod tests {
         let client = DaemonClient::new(sock, Duration::from_secs(2));
         let result = client.ping().await;
         assert!(matches!(result, Err(DaemonError::Parse(_))));
+    }
+
+    #[tokio::test]
+    async fn status_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        let report_json = serde_json::json!({
+            "schema_version": 1,
+            "mount_point": "/mnt/storage",
+            "status_code": "healthy",
+            "status": "healthy",
+            "total_devices": 2,
+            "present_count": 2,
+            "missing_count": 0,
+            "profile": "RAID1",
+            "last_scrub": "never",
+            "disks": []
+        });
+        let resp = serde_json::json!({"status": "ok", "data": report_json});
+        let sock = mock_server(dir.path(), &resp.to_string());
+        let client = DaemonClient::new(sock, Duration::from_secs(2));
+        let result = client.status().await;
+        let report = result.unwrap();
+        assert_eq!(report.mount_point, "/mnt/storage");
+        assert_eq!(report.status_code, crate::status::StatusCode::Healthy);
+    }
+
+    #[tokio::test]
+    async fn status_daemon_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = mock_server(dir.path(), r#"{"error":"config: not found"}"#);
+        let client = DaemonClient::new(sock, Duration::from_secs(2));
+        let result = client.status().await;
+        match result {
+            Err(DaemonError::Daemon(msg)) => assert!(msg.contains("config")),
+            other => panic!("expected Daemon error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn status_missing_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = mock_server(dir.path(), r#"{"status":"ok"}"#);
+        let client = DaemonClient::new(sock, Duration::from_secs(2));
+        let result = client.status().await;
+        match result {
+            Err(DaemonError::Parse(msg)) => assert!(msg.contains("missing data")),
+            other => panic!("expected Parse error, got {other:?}"),
+        }
     }
 
     #[tokio::test]

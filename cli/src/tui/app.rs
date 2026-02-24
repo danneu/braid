@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::status::StatusReport;
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum DaemonStatus {
     #[default]
@@ -14,6 +16,7 @@ pub enum Command {
     #[default]
     None,
     Ping { request_id: u64 },
+    FetchStatus { request_id: u64 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -30,6 +33,10 @@ pub struct Model {
     pub next_request_id: u64,
     #[serde(skip)]
     pub pending_request_id: Option<u64>,
+    #[serde(skip)]
+    pub status_report: Option<StatusReport>,
+    #[serde(skip)]
+    pub status_error: Option<String>,
 }
 
 impl Default for Model {
@@ -42,6 +49,8 @@ impl Default for Model {
             pending_command: Command::default(),
             next_request_id: 0,
             pending_request_id: None,
+            status_report: None,
+            status_error: None,
         }
     }
 }
@@ -55,6 +64,11 @@ pub enum Message {
     PingResult {
         request_id: u64,
         result: Result<(), String>,
+    },
+    FetchStatus,
+    StatusResult {
+        request_id: u64,
+        result: Result<StatusReport, String>,
     },
 }
 
@@ -83,6 +97,30 @@ pub fn update(model: &mut Model, msg: Message) -> Option<Message> {
                     Ok(()) => DaemonStatus::Ok,
                     Err(e) => DaemonStatus::Error(e),
                 };
+            }
+            // else: stale response, ignore
+        }
+        Message::FetchStatus => {
+            let id = model.next_request_id;
+            model.next_request_id += 1;
+            model.pending_request_id = Some(id);
+            model.daemon_status = DaemonStatus::Requesting;
+            model.pending_command = Command::FetchStatus { request_id: id };
+        }
+        Message::StatusResult { request_id, result } => {
+            if model.pending_request_id == Some(request_id) {
+                model.pending_request_id = None;
+                match result {
+                    Ok(report) => {
+                        model.daemon_status = DaemonStatus::Ok;
+                        model.status_report = Some(report);
+                        model.status_error = None;
+                    }
+                    Err(e) => {
+                        model.daemon_status = DaemonStatus::Error(e.clone());
+                        model.status_error = Some(e);
+                    }
+                }
             }
             // else: stale response, ignore
         }
@@ -181,6 +219,100 @@ mod tests {
             DaemonStatus::Error("connection refused".to_string())
         );
         assert_eq!(model.pending_request_id, None);
+    }
+
+    #[test]
+    fn fetch_status_sets_pending_command() {
+        let mut model = Model::default();
+        update(&mut model, Message::FetchStatus);
+        assert_eq!(model.daemon_status, DaemonStatus::Requesting);
+        assert_eq!(
+            model.pending_command,
+            Command::FetchStatus { request_id: 0 }
+        );
+        assert_eq!(model.pending_request_id, Some(0));
+        assert_eq!(model.next_request_id, 1);
+    }
+
+    #[test]
+    fn status_result_ok_stores_report() {
+        use crate::status::{StatusCode, StatusReport};
+        let mut model = Model::default();
+        update(&mut model, Message::FetchStatus);
+        let report = StatusReport {
+            schema_version: 1,
+            mount_point: "/mnt/storage".to_owned(),
+            status_code: StatusCode::Healthy,
+            status: "healthy".to_owned(),
+            total_devices: Some(2),
+            present_count: Some(2),
+            missing_count: Some(0),
+            profile: Some("RAID1".to_owned()),
+            capacity: None,
+            last_scrub: None,
+            disks: vec![],
+        };
+        update(
+            &mut model,
+            Message::StatusResult {
+                request_id: 0,
+                result: Ok(report.clone()),
+            },
+        );
+        assert_eq!(model.daemon_status, DaemonStatus::Ok);
+        assert_eq!(model.status_report, Some(report));
+        assert_eq!(model.status_error, None);
+    }
+
+    #[test]
+    fn status_result_error() {
+        let mut model = Model::default();
+        update(&mut model, Message::FetchStatus);
+        update(
+            &mut model,
+            Message::StatusResult {
+                request_id: 0,
+                result: Err("config: not found".to_string()),
+            },
+        );
+        assert_eq!(
+            model.daemon_status,
+            DaemonStatus::Error("config: not found".to_string())
+        );
+        assert_eq!(model.status_error, Some("config: not found".to_string()));
+        assert_eq!(model.status_report, None);
+    }
+
+    #[test]
+    fn stale_status_result_ignored() {
+        let mut model = Model::default();
+        update(&mut model, Message::FetchStatus); // id=0
+        update(&mut model, Message::FetchStatus); // id=1
+        assert_eq!(model.pending_request_id, Some(1));
+
+        // Stale response for id=0 — should be ignored
+        update(
+            &mut model,
+            Message::StatusResult {
+                request_id: 0,
+                result: Ok(StatusReport {
+                    schema_version: 1,
+                    mount_point: "/mnt/storage".to_owned(),
+                    status_code: crate::status::StatusCode::Healthy,
+                    status: "healthy".to_owned(),
+                    total_devices: None,
+                    present_count: None,
+                    missing_count: None,
+                    profile: None,
+                    capacity: None,
+                    last_scrub: None,
+                    disks: vec![],
+                }),
+            },
+        );
+        assert_eq!(model.daemon_status, DaemonStatus::Requesting);
+        assert_eq!(model.pending_request_id, Some(1));
+        assert_eq!(model.status_report, None);
     }
 
     #[test]

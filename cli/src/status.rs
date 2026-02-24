@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, LsblkFieldKind};
 use crate::config::Config;
@@ -16,7 +16,7 @@ use crate::types::*;
 // Public types (JSON schema)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StatusCode {
     Healthy,
@@ -37,7 +37,7 @@ impl StatusCode {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StatusReport {
     pub schema_version: u32,
     pub mount_point: String,
@@ -58,14 +58,14 @@ pub struct StatusReport {
     pub disks: Vec<DiskReport>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapacityReport {
     pub total_bytes: u64,
     pub used_bytes: u64,
     pub free_bytes: u64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiskReport {
     pub mapper: String,
     pub by_id: String,
@@ -76,11 +76,13 @@ pub struct DiskReport {
     pub errors: Option<DiskErrors>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiskErrors {
     pub read: u64,
     pub write: u64,
+    pub flush: u64,
     pub corruption: u64,
+    pub generation: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -122,6 +124,83 @@ struct HumanDisk {
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
+
+pub fn build_status_report<R: CommandRunner, F: Filesystem>(
+    runner: &R,
+    fs: &F,
+    config: &Config,
+) -> Result<StatusReport, StatusError> {
+    let pool = match probe_pool(runner, &config.mount_point) {
+        Ok(p) => p,
+        Err(ProbeError::NotBtrfs { .. }) => {
+            let code = StatusCode::NotMounted;
+            return Ok(StatusReport {
+                schema_version: 1,
+                mount_point: config.mount_point.clone(),
+                status_code: code,
+                status: code.display_status(0),
+                total_devices: None,
+                present_count: None,
+                missing_count: None,
+                profile: None,
+                capacity: None,
+                last_scrub: None,
+                disks: vec![],
+            });
+        }
+        Err(e) => return Err(e.into()),
+    };
+
+    if !pool.mounted {
+        let code = StatusCode::NotMounted;
+        return Ok(StatusReport {
+            schema_version: 1,
+            mount_point: config.mount_point.clone(),
+            status_code: code,
+            status: code.display_status(0),
+            total_devices: None,
+            present_count: None,
+            missing_count: None,
+            profile: None,
+            capacity: None,
+            last_scrub: None,
+            disks: vec![],
+        });
+    }
+
+    let profile = get_profile(runner, &config.mount_point)?;
+    let capacity = get_capacity(runner, &config.mount_point)?;
+    let last_scrub = get_scrub_string(runner, &config.mount_point);
+
+    let code = if pool.missing_count == 0 {
+        StatusCode::Healthy
+    } else {
+        StatusCode::Degraded
+    };
+
+    let config_disks: Vec<ConfigDisk> = config
+        .disks
+        .iter()
+        .map(|d| probe_config_disk(runner, fs, d))
+        .collect::<Result<Vec<_>, _>>()?;
+    let device_stats = get_device_stats(runner, &config.mount_point)?;
+    let verbose_ctx = build_disk_reports(runner, &config_disks, &pool, &device_stats);
+
+    let present_count = pool.total_devices.saturating_sub(pool.missing_count);
+    Ok(StatusReport {
+        schema_version: 1,
+        mount_point: config.mount_point.clone(),
+        status_code: code,
+        status: code.display_status(pool.missing_count),
+        total_devices: Some(pool.total_devices),
+        present_count: Some(present_count),
+        missing_count: Some(pool.missing_count),
+        profile: Some(profile),
+        capacity: Some(capacity),
+        last_scrub: Some(last_scrub),
+        disks: verbose_ctx.disks,
+    })
+}
 
 pub fn cmd_status<R: CommandRunner, F: Filesystem>(
     runner: &R,
@@ -364,7 +443,9 @@ fn build_disk_reports<R: CommandRunner>(
             .map(|d| DiskErrors {
                 read: d.read_io_errs,
                 write: d.write_io_errs,
+                flush: d.flush_io_errs,
                 corruption: d.corruption_errs,
+                generation: d.generation_errs,
             });
 
         disk_reports.push(DiskReport {
@@ -517,8 +598,8 @@ fn format_status_human(report: &StatusReport, human_disks: Option<&[HumanDisk]>)
             match &d.errors {
                 Some(e) => {
                     out.push_str(&format!(
-                        "    Errors:  read {} / write {} / corruption {}\n",
-                        e.read, e.write, e.corruption
+                        "    Errors:  read {} / write {} / flush {} / corruption {} / generation {}\n",
+                        e.read, e.write, e.flush, e.corruption, e.generation
                     ));
                 }
                 None if d.status == "missing" => {
@@ -532,7 +613,7 @@ fn format_status_human(report: &StatusReport, human_disks: Option<&[HumanDisk]>)
     out
 }
 
-fn format_bytes(bytes: u64) -> String {
+pub fn format_bytes(bytes: u64) -> String {
     const KIB: u64 = 1024;
     const MIB: u64 = 1024 * KIB;
     const GIB: u64 = 1024 * MIB;
@@ -1020,7 +1101,7 @@ mod tests {
             luks_uuid: "11111111-1111-1111-1111-111111111111".to_owned(),
             devid: Some("1".to_owned()),
             status: "present".to_owned(),
-            errors: Some(DiskErrors { read: 0, write: 0, corruption: 0 }),
+            errors: Some(DiskErrors { read: 0, write: 0, flush: 0, corruption: 0, generation: 0 }),
         };
         let missing = DiskReport {
             mapper: "disk3".to_owned(),
@@ -1149,7 +1230,7 @@ mod tests {
                 luks_uuid: "11111111-1111-1111-1111-111111111111".to_owned(),
                 devid: Some("1".to_owned()),
                 status: "present".to_owned(),
-                errors: Some(DiskErrors { read: 0, write: 0, corruption: 0 }),
+                errors: Some(DiskErrors { read: 0, write: 0, flush: 0, corruption: 0, generation: 0 }),
             }],
         };
         let json_str = serde_json::to_string_pretty(&report).unwrap();
@@ -1308,7 +1389,7 @@ mod tests {
                 status: "present".to_owned(),
                 model: Some("VBOX HARDDISK".to_owned()),
                 serial: Some("disk1".to_owned()),
-                errors: Some(DiskErrors { read: 0, write: 0, corruption: 0 }),
+                errors: Some(DiskErrors { read: 0, write: 0, flush: 0, corruption: 0, generation: 0 }),
             },
         ];
 
@@ -1391,7 +1472,7 @@ mod tests {
                 status: "present".to_owned(),
                 model: None,
                 serial: None,
-                errors: Some(DiskErrors { read: 0, write: 0, corruption: 0 }),
+                errors: Some(DiskErrors { read: 0, write: 0, flush: 0, corruption: 0, generation: 0 }),
             },
         ];
 

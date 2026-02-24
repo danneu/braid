@@ -23,3 +23,10 @@ with subtest("invalid json returns error"):
         "echo 'not json' | socat - UNIX-CONNECT:/run/braid/daemon.sock"
     )
     assert '"error":"invalid request"' in result, f"unexpected response: {result}"
+
+with subtest("status without config returns error"):
+    result = machine.succeed(
+        "echo '{\"method\":\"status\"}' | socat - UNIX-CONNECT:/run/braid/daemon.sock"
+    )
+    assert '"error"' in result, f"expected error, got: {result}"
+    assert 'config' in result.lower(), f"expected config-related error, got: {result}"
