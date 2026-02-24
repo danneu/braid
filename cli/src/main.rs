@@ -25,6 +25,7 @@ enum Commands {
     Plan(PlanArgs),
     Apply(ApplyArgs),
     Status(StatusArgs),
+    Tui(TuiArgs),
     Daemon,
 }
 
@@ -53,6 +54,13 @@ struct ApplyArgs {
     allow_remove_missing: bool,
     #[arg(long)]
     allow_remove_ambiguous: bool,
+}
+
+#[derive(Debug, Args)]
+struct TuiArgs {
+    /// Load model state from a JSON file (dev mode)
+    #[arg(long)]
+    dev: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -161,6 +169,12 @@ fn main() {
             let runner = RealRunner;
             let fs = RealFilesystem;
             if let Err(e) = braid_cli::status::cmd_status(&runner, &fs, &config, args.verbose, args.json) {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        }
+        Commands::Tui(args) => {
+            if let Err(e) = braid_cli::tui::run_tui(args.dev.as_deref().map(Path::new)) {
                 eprintln!("error: {e}");
                 std::process::exit(1);
             }

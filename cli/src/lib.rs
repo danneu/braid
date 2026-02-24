@@ -7,4 +7,5 @@ pub mod parse;
 pub mod plan;
 pub mod probe;
 pub mod status;
+pub mod tui;
 pub mod types;

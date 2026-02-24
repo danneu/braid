@@ -10,6 +10,8 @@ path = "src/main.rs"
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 libc = "0.2"
+crossterm = "0.28"
+ratatui = "0.30"
 serde = { version = "1", features = ["derive"] }
 nom = "7"
 serde_json = "1"
@@ -21,4 +23,6 @@ time = { version = "0.3", features = ["formatting", "macros"] }
 uuid = { version = "1", features = ["serde", "v4"] }
 
 [dev-dependencies]
+insta = "1"
 pretty_assertions = "1"
+tempfile = "3"

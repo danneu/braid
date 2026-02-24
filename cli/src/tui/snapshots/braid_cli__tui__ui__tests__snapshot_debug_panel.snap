@@ -1,0 +1,20 @@
+---
+source: src/tui/ui.rs
+expression: terminal.backend()
+---
+"┌ braid ─────────────────────┐┌ debug ─────────────────────┐"
+"│                            ││Model {                     │"
+"│                            ││    running: true,          │"
+"│                            ││    tick_count: 0,          │"
+"│                            ││    show_debug: true,       │"
+"│                            ││}                           │"
+"│            braid           ││                            │"
+"│           tick: 0          ││                            │"
+"│                            ││                            │"
+"│                            ││                            │"
+"│                            ││                            │"
+"│                            ││                            │"
+"│                            ││                            │"
+"│                            ││                            │"
+"│  press q to quit | d debug ││                            │"
+"└────────────────────────────┘└────────────────────────────┘"
