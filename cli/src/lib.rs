@@ -1,12 +1,9 @@
 pub mod apply;
 pub mod cmd;
 pub mod config;
-pub mod daemon;
 pub mod init_disk;
 pub mod parse;
 pub mod plan;
 pub mod probe;
-pub mod protocol;
 pub mod status;
-pub mod tui;
 pub mod types;

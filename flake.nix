@@ -112,9 +112,6 @@
           });
           capture-tool-fixtures = pkgs.testers.nixosTest (import ./tests/capture-tool-fixtures.nix);
           progress-monitoring = pkgs.testers.nixosTest (import ./tests/20-progress-monitoring.nix);
-          daemon-hello-world = pkgs.testers.nixosTest (import ./tests/daemon/00-hello-world.nix {
-            braid = linuxCrane.braid;
-          });
           braid-module-disabled = pkgs.testers.nixosTest (import ./tests/braid-module/00-disabled.nix);
           braid-module-single-disk = pkgs.testers.nixosTest (import ./tests/braid-module/01-single-disk.nix {
             braid = linuxCrane.braid-cli-unwrapped;

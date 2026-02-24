@@ -25,8 +25,6 @@ enum Commands {
     Plan(PlanArgs),
     Apply(ApplyArgs),
     Status(StatusArgs),
-    Tui(TuiArgs),
-    Daemon,
 }
 
 #[derive(Debug, Args)]
@@ -54,16 +52,6 @@ struct ApplyArgs {
     allow_remove_missing: bool,
     #[arg(long)]
     allow_remove_ambiguous: bool,
-}
-
-#[derive(Debug, Args)]
-struct TuiArgs {
-    /// Load model state from a JSON file (dev mode)
-    #[arg(long)]
-    dev: Option<String>,
-    /// Path to daemon socket
-    #[arg(long, default_value = "/run/braid/daemon.sock")]
-    socket: String,
 }
 
 #[derive(Debug, Args)]
@@ -175,18 +163,6 @@ fn main() {
                 eprintln!("error: {e}");
                 std::process::exit(1);
             }
-        }
-        Commands::Tui(args) => {
-            if let Err(e) = braid_cli::tui::run_tui(
-                args.dev.as_deref().map(Path::new),
-                Path::new(&args.socket),
-            ) {
-                eprintln!("error: {e}");
-                std::process::exit(1);
-            }
-        }
-        Commands::Daemon => {
-            braid_cli::daemon::run_daemon();
         }
     }
 }

@@ -12,8 +12,6 @@ let
 in
 {
   config = lib.mkIf cfg.enable {
-    braid.daemon.enable = lib.mkDefault true;
-
     boot.initrd = {
       supportedFilesystems = [ "btrfs" ];
       systemd.enable = true;
