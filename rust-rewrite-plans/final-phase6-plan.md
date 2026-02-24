@@ -37,6 +37,12 @@ CryptsetupTestPassphrase { device: String },
 
 Update `cmd_request_declares_expected_commands` test: bump count from 22 → 24.
 
+**New cmd.rs tests** (stdin-only safety, matching existing `CryptsetupLuksOpen` pattern):
+- `luks_format_run_without_stdin_errors` — `runner.run(CryptsetupLuksFormat { .. })` returns `CmdError::Failed` (must use `run_with_stdin`)
+- `test_passphrase_run_without_stdin_errors` — `runner.run(CryptsetupTestPassphrase { .. })` returns `CmdError::Failed`
+- `luks_format_run_with_stdin_routes_correctly` — verify `run_with_stdin` dispatches to cryptsetup luksFormat args
+- `test_passphrase_run_with_stdin_routes_correctly` — verify `run_with_stdin` dispatches to cryptsetup open --test-passphrase args
+
 ---
 
 ## Filesystem trait extension
@@ -92,7 +98,7 @@ pub fn cmd_init_disk<R: CommandRunner, F: Filesystem>(
 Reads from env:
 - `BRAID_PASSPHRASE` → required, error if empty/unset
 - `BRAID_CONFIRM` → required when `force`, must equal `"reformat this disk"`
-- `BRAID_LUKS_OPTS` → optional, split by whitespace into `Vec<String>`
+- `BRAID_LUKS_OPTS` → optional, parsed with `shell_words::split()` for shell-like quoting support (handles `--pbkdf-force-iterations 1000` and `"--label=my disk"` correctly). Add `shell-words = "1"` to `Cargo.toml`. If parse fails → error.
 
 Delegates to:
 
@@ -127,10 +133,11 @@ pub(crate) fn cmd_init_disk_with<R: CommandRunner, F: Filesystem>(
    - If `!force` → error "Disk ... already has a LUKS header. Use --force to re-format"
    - If `force` but `confirm != "reformat this disk"` → error "--force requires BRAID_CONFIRM='reformat this disk'"
 5. **Passphrase requirement**: already validated in `cmd_init_disk` (before calling `_with`)
-6. **Single-passphrase check**: `find_passphrase_target(runner, fs, config, by_id_path)` → `Option<String>`:
-   - First pass: find any config disk with an open mapper (`fs.exists("/dev/mapper/<name>")` + `CryptsetupStatus` is active) → return that disk's by-id path
-   - Second pass: find any config disk (excluding target) that is a block device and passes `CryptsetupIsLuks` → return that disk's by-id path
-   - If found: `CryptsetupTestPassphrase { device: member }` with passphrase via stdin. If exit ≠ 0 → error "Passphrase does not match existing pool member ..."
+5b. **Target mapper guard**: if target has a mapper name (via `mapper_name_for_by_id`) and `fs.exists("/dev/mapper/{name}")` → error "close mapper {name} before reformatting {by_id_path}". This prevents reformatting a disk whose LUKS container is currently open (even if not in the btrfs pool).
+6. **Single-passphrase check**: `find_passphrase_target(runner, fs, config, by_id_path)?` → `Result<Option<String>, InitDiskError>`:
+   - If `Ok(Some(member))`: `CryptsetupTestPassphrase { device: member }` with passphrase via stdin. If exit ≠ 0 → error "Passphrase does not match existing pool member ..."
+   - If `Ok(None)`: no existing member to verify against, proceed (first disk scenario)
+   - If `Err(e)`: propagate — fail-closed when candidates exist but all checks errored
 7. **Format**: print "Formatting {by_id_path} with LUKS...", then `CryptsetupLuksFormat { device, extra_opts }` via `run_with_stdin` with passphrase. If error → propagate.
 8. **Success**: print "LUKS format complete: {by_id_path}\nNext step: run 'braid apply' to open and add this disk to the pool."
 
@@ -142,18 +149,18 @@ fn find_passphrase_target<R: CommandRunner, F: Filesystem>(
     fs: &F,
     config: &Config,
     exclude_path: &str,
-) -> Option<String>
+) -> Result<Option<String>, InitDiskError>
 ```
 
-**Fail-closed search** — returns `Result<Option<String>, InitDiskError>`:
+**Fail-closed search:**
+
+**Exclude target** in both passes (better-than-bash: avoids self-validation then busy-device failure at format time).
 
 Two-pass search:
-1. Open mapper: for each config disk, derive mapper name, check `fs.exists("/dev/mapper/{name}")`. If found, check `CryptsetupStatus` — if active, return `Ok(Some(by_id_path))`. If check errors, record the error and continue.
-2. LUKS-formatted: for each config disk (except target), check `fs.is_block_device()` + `CryptsetupIsLuks` exit 0 → return `Ok(Some(by_id_path))`. If check errors, record the error and continue.
+1. Open mapper: for each config disk (excluding target), derive mapper name, check `fs.exists("/dev/mapper/{name}")`. If found, check `CryptsetupStatus` — if active, return `Ok(Some(by_id_path))`. If check errors, record the error and continue.
+2. LUKS-formatted: for each config disk (excluding target), check `fs.is_block_device()` + `CryptsetupIsLuks` exit 0 → return `Ok(Some(by_id_path))`. If check errors, record the error and continue.
 
-**Fail-closed rule**: If no candidate was successfully verified BUT at least one candidate existed (mapper was present or disk was a block device) and ALL checks for those candidates errored → return `Err(InitDiskError)`. Only return `Ok(None)` when there are genuinely no candidates (no mapper paths exist, no other block devices).
-
-Note: the bash impl checks open mappers across ALL config disks (including target), then falls back to LUKS-formatted config disks (excluding target). Match this behavior.
+**Fail-closed rule**: If no candidate was successfully verified BUT at least one candidate existed (mapper was present or disk was a block device) and ALL checks for those candidates errored → return `Err(InitDiskError)`. Only return `Ok(None)` when there are genuinely no candidates.
 
 ---
 
@@ -198,6 +205,10 @@ All use `MockRunner` + `MockFs` with inline data. Use `cmd_init_disk_with` to co
 - `init_disk_force_correct_confirm` — force=true, confirm="reformat this disk" → proceeds to format
 - `init_disk_passphrase_mismatch` — existing member exists, test-passphrase fails → error "does not match"
 - `init_disk_passphrase_match` — existing member, test-passphrase succeeds → proceeds
+
+**Target mapper guard:**
+- `init_disk_force_target_mapper_active_refuses` — --force but target's mapper is open → error "close mapper ... before reformatting"
+- `init_disk_force_target_mapper_closed_proceeds` — --force, target mapper not active → proceeds
 
 **Happy path tests:**
 - `init_disk_fresh_no_existing_member` — first disk, no members to verify against → format succeeds
@@ -261,6 +272,7 @@ Phase 1 — Safety contract:
 
 | File | Change |
 |------|--------|
+| `cli/Cargo.toml` | Add `shell-words = "1"` dependency |
 | `cli/src/init_disk.rs` | **New** — error type, cmd_init_disk, safety gates, format, all unit tests |
 | `cli/src/lib.rs` | Add `pub mod init_disk;` |
 | `cli/src/main.rs` | Wire `Commands::InitDisk` → `cmd_init_disk(runner, fs, config, by_id_path, force)` |
