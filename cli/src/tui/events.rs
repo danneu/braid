@@ -12,15 +12,31 @@ pub trait EventSource {
     fn next(&self) -> io::Result<Message>;
 }
 
-pub struct CrosstermEventHandler {
+pub struct EventReceiver {
     rx: mpsc::Receiver<Message>,
+}
+
+impl EventReceiver {
+    pub fn new(rx: mpsc::Receiver<Message>) -> Self {
+        Self { rx }
+    }
+}
+
+impl EventSource for EventReceiver {
+    fn next(&self) -> io::Result<Message> {
+        self.rx
+            .recv()
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+    }
+}
+
+pub struct CrosstermEventHandler {
     shutdown: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
 }
 
 impl CrosstermEventHandler {
-    pub fn new(tick_rate: Duration) -> Self {
-        let (tx, rx) = mpsc::channel();
+    pub fn new(tick_rate: Duration, tx: mpsc::Sender<Message>) -> Self {
         let shutdown = Arc::new(AtomicBool::new(false));
         let shutdown_flag = Arc::clone(&shutdown);
 
@@ -34,6 +50,7 @@ impl CrosstermEventHandler {
                         let msg = match key.code {
                             KeyCode::Char('q' | 'Q') => Message::Quit,
                             KeyCode::Char('d' | 'D') => Message::ToggleDebug,
+                            KeyCode::Char('p' | 'P') => Message::Ping,
                             _ => continue,
                         };
                         if tx.send(msg).is_err() {
@@ -50,18 +67,9 @@ impl CrosstermEventHandler {
         });
 
         Self {
-            rx,
             shutdown,
             handle: Some(handle),
         }
-    }
-}
-
-impl EventSource for CrosstermEventHandler {
-    fn next(&self) -> io::Result<Message> {
-        self.rx
-            .recv()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
     }
 }
 

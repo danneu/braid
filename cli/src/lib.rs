@@ -6,6 +6,7 @@ pub mod init_disk;
 pub mod parse;
 pub mod plan;
 pub mod probe;
+pub mod protocol;
 pub mod status;
 pub mod tui;
 pub mod types;

@@ -61,6 +61,9 @@ struct TuiArgs {
     /// Load model state from a JSON file (dev mode)
     #[arg(long)]
     dev: Option<String>,
+    /// Path to daemon socket
+    #[arg(long, default_value = "/run/braid/daemon.sock")]
+    socket: String,
 }
 
 #[derive(Debug, Args)]
@@ -174,7 +177,10 @@ fn main() {
             }
         }
         Commands::Tui(args) => {
-            if let Err(e) = braid_cli::tui::run_tui(args.dev.as_deref().map(Path::new)) {
+            if let Err(e) = braid_cli::tui::run_tui(
+                args.dev.as_deref().map(Path::new),
+                Path::new(&args.socket),
+            ) {
                 eprintln!("error: {e}");
                 std::process::exit(1);
             }

@@ -1,4 +1,5 @@
 pub mod app;
+pub mod client;
 pub mod events;
 pub mod ui;
 
@@ -9,8 +10,9 @@ use std::time::Duration;
 use ratatui::backend::Backend;
 use ratatui::Terminal;
 
-use app::{update, Model};
-use events::{CrosstermEventHandler, EventSource};
+use app::{update, Command, Message, Model};
+use client::{daemon_worker, DaemonClient};
+use events::{CrosstermEventHandler, EventReceiver, EventSource};
 use ui::view;
 
 /// Load model from JSON file (dev mode) or create default.
@@ -33,6 +35,7 @@ pub fn run_loop<B: Backend>(
     terminal: &mut Terminal<B>,
     model: &mut Model,
     events: &dyn EventSource,
+    commands: &tokio::sync::mpsc::Sender<Command>,
 ) -> io::Result<()> {
     while model.running {
         terminal
@@ -43,16 +46,45 @@ pub fn run_loop<B: Backend>(
         while let Some(next_msg) = chained {
             chained = update(model, next_msg);
         }
+
+        let cmd = std::mem::take(&mut model.pending_command);
+        if cmd != Command::None {
+            if let Err(e) = commands.try_send(cmd) {
+                if let Some(id) = model.pending_request_id.take() {
+                    update(
+                        model,
+                        Message::PingResult {
+                            request_id: id,
+                            result: Err(format!("command channel: {e}")),
+                        },
+                    );
+                }
+            }
+        }
     }
     Ok(())
 }
 
 /// Public entrypoint. Sets up terminal, runs loop, restores terminal.
-pub fn run_tui(dev_model: Option<&Path>) -> io::Result<()> {
+pub fn run_tui(dev_model: Option<&Path>, socket_path: &Path) -> io::Result<()> {
     let mut model = load_model(dev_model)?;
-    let events = CrosstermEventHandler::new(Duration::from_millis(200));
+
+    let (msg_tx, msg_rx) = std::sync::mpsc::channel();
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(16);
+
+    let _keyboard = CrosstermEventHandler::new(Duration::from_millis(200), msg_tx.clone());
+
+    let client = DaemonClient::new(socket_path.to_owned(), Duration::from_secs(2));
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    rt.spawn(daemon_worker(client, cmd_rx, msg_tx));
+
+    let events = EventReceiver::new(msg_rx);
     let mut terminal = ratatui::init();
-    let result = run_loop(&mut terminal, &mut model, &events);
+    let result = run_loop(&mut terminal, &mut model, &events, &cmd_tx);
     ratatui::restore();
     result
 }
@@ -60,7 +92,7 @@ pub fn run_tui(dev_model: Option<&Path>) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use app::Message;
+    use app::{DaemonStatus, Message};
     use ratatui::backend::TestBackend;
     use std::cell::RefCell;
     use std::collections::VecDeque;
@@ -127,12 +159,60 @@ mod tests {
         let backend = TestBackend::new(60, 16);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut model = Model::default();
+        let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel(16);
 
-        // run_loop will process Tick, Tick, then Quit sets running=false
-        // and the loop exits
-        let result = run_loop(&mut terminal, &mut model, &events);
+        let result = run_loop(&mut terminal, &mut model, &events, &cmd_tx);
         assert!(result.is_ok());
         assert_eq!(model.tick_count, 2);
         assert!(!model.running);
+    }
+
+    #[test]
+    fn run_loop_ping_sends_command() {
+        let events = TestEventSource::new(vec![
+            Message::Ping,
+            Message::PingResult {
+                request_id: 0,
+                result: Ok(()),
+            },
+            Message::Quit,
+        ]);
+        let backend = TestBackend::new(60, 16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut model = Model::default();
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel(16);
+
+        let result = run_loop(&mut terminal, &mut model, &events, &cmd_tx);
+        assert!(result.is_ok());
+
+        // Verify command was sent
+        let cmd = cmd_rx.try_recv().unwrap();
+        assert_eq!(cmd, Command::Ping { request_id: 0 });
+
+        assert_eq!(model.daemon_status, DaemonStatus::Ok);
+    }
+
+    #[test]
+    fn run_loop_ping_error() {
+        let events = TestEventSource::new(vec![
+            Message::Ping,
+            Message::PingResult {
+                request_id: 0,
+                result: Err("connection refused".to_string()),
+            },
+            Message::Quit,
+        ]);
+        let backend = TestBackend::new(60, 16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut model = Model::default();
+        let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel(16);
+
+        let result = run_loop(&mut terminal, &mut model, &events, &cmd_tx);
+        assert!(result.is_ok());
+
+        assert_eq!(
+            model.daemon_status,
+            DaemonStatus::Error("connection refused".to_string())
+        );
     }
 }

@@ -6,7 +6,7 @@ use ratatui::{
     Frame,
 };
 
-use super::app::Model;
+use super::app::{DaemonStatus, Model};
 
 pub fn view(model: &Model, frame: &mut Frame) {
     let debug_width = u16::from(model.show_debug);
@@ -21,12 +21,20 @@ pub fn view(model: &Model, frame: &mut Frame) {
         .border_style(Style::default().fg(Color::Cyan))
         .title(" braid ");
 
+    let daemon_line = match &model.daemon_status {
+        DaemonStatus::Idle => "daemon: -".to_string(),
+        DaemonStatus::Requesting => "daemon: requesting...".to_string(),
+        DaemonStatus::Ok => "daemon: pong".to_string(),
+        DaemonStatus::Error(e) => format!("daemon: error: {e}"),
+    };
+
     let content = Text::from(vec![
         Line::from("braid"),
         Line::from(format!("tick: {}", model.tick_count)),
+        Line::from(daemon_line),
     ]);
 
-    let footer = Line::from("press q to quit | d debug");
+    let footer = Line::from("press q to quit | d debug | p ping");
 
     let inner = main_block.inner(chunks[0]);
     frame.render_widget(main_block, chunks[0]);
@@ -98,6 +106,26 @@ mod tests {
     fn snapshot_debug_panel() {
         let model = Model {
             show_debug: true,
+            ..Model::default()
+        };
+        let terminal = render(&model, 60, 16);
+        insta::assert_snapshot!(terminal.backend());
+    }
+
+    #[test]
+    fn snapshot_daemon_pong() {
+        let model = Model {
+            daemon_status: DaemonStatus::Ok,
+            ..Model::default()
+        };
+        let terminal = render(&model, 60, 16);
+        insta::assert_snapshot!(terminal.backend());
+    }
+
+    #[test]
+    fn snapshot_daemon_error() {
+        let model = Model {
+            daemon_status: DaemonStatus::Error("connection refused".to_string()),
             ..Model::default()
         };
         let terminal = render(&model, 60, 16);

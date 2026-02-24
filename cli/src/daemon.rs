@@ -1,4 +1,4 @@
-use serde_json::Value;
+use crate::protocol::{Request, Response};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::io::{AsRawFd, FromRawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -142,20 +142,13 @@ fn handle_connection(stream: UnixStream) {
             continue;
         }
 
-        let response = match serde_json::from_str::<Value>(&line) {
-            Ok(req) => {
-                let method = req
-                    .get("method")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                match method {
-                    "ping" => serde_json::json!({"status": "ok"}),
-                    other => serde_json::json!({"error": format!("unknown method: {other}")}),
-                }
-            }
-            Err(_) => serde_json::json!({"error": "invalid json"}),
+        let response = match serde_json::from_str::<Request>(&line) {
+            Ok(req) => match req {
+                Request::Ping => Response::ok(),
+            },
+            Err(_) => Response::err("invalid request"),
         };
-        let response = response.to_string();
+        let response = serde_json::to_string(&response).unwrap();
 
         if let Err(e) = writeln!(writer, "{response}") {
             eprintln!("braid daemon: write error: {e}");
