@@ -1,6 +1,6 @@
 SYSTEM := $(shell nix eval --impure --expr builtins.currentSystem --raw)
 
-.PHONY: help test test-one test-verbose test-one-verbose playground test-rust capture-fixtures
+.PHONY: help test test-one test-verbose test-one-verbose playground test-rust capture-fixtures capture-progress-fixtures
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "}; {printf "  %-15s %s\n", $$1, $$2}'
@@ -25,6 +25,12 @@ capture-fixtures: ## Capture tool output fixtures from nixos VM into cli/tests/f
 	chmod u+w cli/tests/fixtures/nixos-25.11/* 2>/dev/null || true
 	cp -f result/fixtures/* cli/tests/fixtures/nixos-25.11/
 	@echo "Fixtures written to cli/tests/fixtures/nixos-25.11/"
+
+capture-progress-fixtures: ## Capture in-progress fixtures from progress-monitoring VM test
+	nix build .#checks.$(SYSTEM).progress-monitoring -L
+	chmod u+w cli/tests/fixtures/nixos-25.11/* 2>/dev/null || true
+	cp -f result/fixtures/* cli/tests/fixtures/nixos-25.11/
+	@echo "Progress fixtures written to cli/tests/fixtures/nixos-25.11/"
 
 playground: ## Boot interactive VM with btrfs + Samba playground
 	nix run .#playground

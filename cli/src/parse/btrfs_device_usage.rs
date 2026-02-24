@@ -1,6 +1,6 @@
 use nom::{
     bytes::complete::{tag, take_till1, take_until},
-    character::complete::{not_line_ending, space0, space1, u64 as parse_u64},
+    character::complete::{i64 as parse_i64, not_line_ending, space0, space1, u64 as parse_u64},
     IResult,
 };
 
@@ -25,14 +25,16 @@ fn parse_device_header(input: &str) -> IResult<&str, (&str, u64)> {
 }
 
 // Parses an indented key-value line: "   Device size:          536870912"  →  ("Device size", 536870912)
+// Uses i64 internally because btrfs can report negative Unallocated during
+// device removal (transient state). Negative values are clamped to 0.
 fn parse_kv_line(input: &str) -> IResult<&str, (&str, u64)> {
     let (input, _) = space1(input)?;
     let (input, key) = take_till1(|c| c == ':')(input)?;
     let (input, _) = tag(":")(input)?;
     let (input, _) = space1(input)?;
-    let (input, value) = parse_u64(input)?;
+    let (input, value) = parse_i64(input)?;
     let (input, _) = not_line_ending(input)?;
-    Ok((input, (key.trim(), value)))
+    Ok((input, (key.trim(), value.max(0) as u64)))
 }
 
 pub fn parse_btrfs_device_usage(

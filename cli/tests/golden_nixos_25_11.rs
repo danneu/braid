@@ -202,3 +202,37 @@ golden_test!(
         assert!(out.devices[0].unallocated > 0, "unallocated should be positive");
     }
 );
+
+// --- In-progress fixtures (captured from progress-monitoring VM test) ---
+
+golden_test!(
+    golden_btrfs_balance_status_running,
+    "btrfs-balance-status-running.txt",
+    "btrfs balance status",
+    parse::btrfs_balance_status::parse_btrfs_balance_status,
+    |out: parse::types::BtrfsBalanceStatusOutput| {
+        match out.state {
+            parse::types::BalanceState::Running {
+                estimated_total_chunks,
+                pct_left,
+                ..
+            } => {
+                assert!(estimated_total_chunks > 0, "expected estimated_total_chunks > 0");
+                assert!(pct_left <= 100, "pct_left should be <= 100, got {pct_left}");
+            }
+            ref other => panic!("expected Running state, got {other:?}"),
+        }
+    }
+);
+
+golden_test!(
+    golden_btrfs_device_usage_removing,
+    "btrfs-device-usage-removing.txt",
+    "btrfs device usage",
+    parse::btrfs_device_usage::parse_btrfs_device_usage,
+    |out: parse::types::BtrfsDeviceUsageOutput| {
+        assert!(!out.devices.is_empty(), "expected at least one device");
+        let has_used = out.devices.iter().any(|d| d.used_bytes() > 0);
+        assert!(has_used, "expected at least one device with used_bytes > 0");
+    }
+);
