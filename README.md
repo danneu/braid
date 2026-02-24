@@ -44,7 +44,7 @@ braid = {
 };
 ```
 
-The Nix config doesn't touch your disks — it only declares which disks are available to braid. You then use `braid init-disk` to LUKS-format each disk (one-time) and `braid apply` to open, assemble, and mount. The system boots gracefully even if a drive is dead or missing.
+The Nix config doesn't touch your disks — it only declares which disks are available to braid. You then use `sudo braid init-disk` to LUKS-format each disk (one-time) and `sudo braid apply` to open, assemble, and mount. The system boots gracefully even if a drive is dead or missing.
 
 ## Managing drives
 
@@ -172,8 +172,8 @@ Shows drive count, RAID profile, capacity, degraded/missing state, and last scru
 ### Diagnostics
 
 ```
-sudo braid doctor          # check config, pool health, etc.
-sudo braid doctor --json   # machine-readable output
+sudo braid doctor           # check config, pool health, etc.
+sudo braid doctor --json    # machine-readable output
 ```
 
 Runs a series of checks and reports results. Exit code 0 when all checks pass, 1 on any failure.
