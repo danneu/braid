@@ -38,18 +38,4 @@ fn version_works_without_root() {
     assert!(output.status.success(), "expected success, got {:?}", output.status);
 }
 
-#[test]
-fn init_disk_progress_values_accepted() {
-    if is_root() {
-        return;
-    }
-    let output = braid()
-        .args(["init-disk", "--help"])
-        .output()
-        .expect("failed to execute braid");
-    assert!(output.status.success(), "expected success, got {:?}", output.status);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    for val in ["auto", "always", "never"] {
-        assert!(stdout.contains(val), "expected --progress help to list '{val}', got:\n{stdout}");
-    }
-}
+

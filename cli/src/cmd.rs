@@ -43,7 +43,7 @@ pub enum CmdRequest {
     BtrfsBalanceStatus { mount_point: String },
     BtrfsDeviceUsageRaw { mount_point: String },
     // init-disk commands
-    CryptsetupLuksFormat { device: String, extra_opts: Vec<String>, inherit_stderr: bool },
+    CryptsetupLuksFormat { device: String, extra_opts: Vec<String> },
     CryptsetupTestPassphrase { device: String },
     CryptsetupLuksHeaderBackup { device: String, backup_path: String },
 }
@@ -86,20 +86,15 @@ impl RealRunner {
     }
 
     fn exec_with_stdin(cmd: &str, args: &[&str], stdin_bytes: &[u8]) -> Result<RawCommandOutput, CmdError> {
-        Self::exec_with_stdin_inner(cmd, args, stdin_bytes, false)
-    }
-
-    fn exec_with_stdin_inner(cmd: &str, args: &[&str], stdin_bytes: &[u8], inherit_stderr: bool) -> Result<RawCommandOutput, CmdError> {
         use std::io::Write;
         use std::process::Stdio;
 
         let cmd_str = format!("{} {}", cmd, args.join(" "));
-        let stderr_cfg = if inherit_stderr { Stdio::inherit() } else { Stdio::piped() };
         let mut child = std::process::Command::new(cmd)
             .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(stderr_cfg)
+            .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| CmdError::Failed(format!("{cmd_str}: {e}")))?;
 
@@ -210,9 +205,9 @@ impl CommandRunner for RealRunner {
             CmdRequest::CryptsetupLuksHeaderBackup { device, backup_path } => {
                 RealRunner::exec("cryptsetup", &["luksHeaderBackup", "--header-backup-file", backup_path, device])
             }
-            CmdRequest::CryptsetupLuksFormat { device, extra_opts, inherit_stderr } => {
+            CmdRequest::CryptsetupLuksFormat { device, extra_opts } => {
                 // Passphrase must be piped via run_with_stdin, not here.
-                let _ = (device, extra_opts, inherit_stderr);
+                let _ = (device, extra_opts);
                 Err(CmdError::Failed(
                     "CryptsetupLuksFormat must use run_with_stdin".to_owned(),
                 ))
@@ -240,13 +235,13 @@ impl CommandRunner for RealRunner {
                     stdin,
                 )
             }
-            CmdRequest::CryptsetupLuksFormat { device, extra_opts, inherit_stderr } => {
+            CmdRequest::CryptsetupLuksFormat { device, extra_opts } => {
                 let mut args: Vec<&str> = vec!["luksFormat", "--batch-mode", "--key-file=-"];
                 for opt in extra_opts {
                     args.push(opt.as_str());
                 }
                 args.push(device.as_str());
-                RealRunner::exec_with_stdin_inner("cryptsetup", &args, stdin, *inherit_stderr)
+                RealRunner::exec_with_stdin("cryptsetup", &args, stdin)
             }
             CmdRequest::CryptsetupTestPassphrase { device } => {
                 RealRunner::exec_with_stdin(
@@ -409,7 +404,6 @@ mod tests {
             CmdRequest::CryptsetupLuksFormat {
                 device: "/dev/vda".to_owned(),
                 extra_opts: vec![],
-                inherit_stderr: false,
             },
             CmdRequest::CryptsetupTestPassphrase {
                 device: "/dev/vda".to_owned(),
@@ -435,7 +429,6 @@ mod tests {
         let req = CmdRequest::CryptsetupLuksFormat {
             device: "/dev/vda".to_owned(),
             extra_opts: vec![],
-            inherit_stderr: false,
         };
         let result = runner.run(&req);
         assert!(result.is_err());
@@ -466,7 +459,6 @@ mod tests {
         let req = CmdRequest::CryptsetupLuksFormat {
             device: "/dev/vda".to_owned(),
             extra_opts: vec!["--pbkdf".to_owned(), "pbkdf2".to_owned()],
-            inherit_stderr: false,
         };
         let mock = MockRunner::default().with_output_stdin(
             req.clone(),

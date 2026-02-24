@@ -67,6 +67,15 @@ pub fn validate(cfg: &Config) -> Result<(), ConfigError> {
     if cfg.disks.is_empty() {
         return Err(ConfigError::Validation("disks must not be empty".to_owned()));
     }
+    let mut seen = std::collections::HashSet::new();
+    for disk in &cfg.disks {
+        if !seen.insert(disk) {
+            return Err(ConfigError::Validation(format!(
+                "duplicate disk in config: {}",
+                disk
+            )));
+        }
+    }
     if cfg.mount_point.is_empty() {
         return Err(ConfigError::Validation(
             "mountPoint must not be empty".to_owned(),
@@ -94,6 +103,19 @@ mod tests {
         let hex = &h["sha256:".len()..];
         assert_eq!(hex.len(), 64, "expected 64 hex chars, got {}", hex.len());
         assert!(hex.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn rejects_duplicate_disks() {
+        let cfg = Config {
+            disks: vec![
+                ByIdPath("/dev/disk/by-id/a".to_owned()),
+                ByIdPath("/dev/disk/by-id/a".to_owned()),
+            ],
+            mount_point: "/mnt/storage".to_owned(),
+        };
+        let err = validate(&cfg).expect_err("duplicate disks should fail");
+        assert!(matches!(err, ConfigError::Validation(_)));
     }
 
     #[test]
