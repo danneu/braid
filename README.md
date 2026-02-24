@@ -169,6 +169,15 @@ sudo braid status --json      # machine-readable output
 
 Shows drive count, RAID profile, capacity, degraded/missing state, and last scrub result. With `--verbose`, adds per-disk detail: model, serial, LUKS UUID, and btrfs error counters.
 
+### Diagnostics
+
+```
+sudo braid doctor          # check config, pool health, etc.
+sudo braid doctor --json   # machine-readable output
+```
+
+Runs a series of checks and reports results. Exit code 0 when all checks pass, 1 on any failure.
+
 ### Resume an interrupted apply
 
 If `braid apply` is interrupted (power loss, killed process), it saves a checkpoint. Resume where it left off:

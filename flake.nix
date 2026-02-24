@@ -147,6 +147,11 @@
               braid = linuxCrane.braid;
             }
           );
+          braid-doctor = pkgs.testers.nixosTest (
+            import ./tests/22-braid-doctor.nix {
+              braid = linuxCrane.braid;
+            }
+          );
           tool-versions = pkgs.testers.nixosTest (
             import ./tests/17-tool-versions.nix {
               braid-cli-unwrapped = linuxCrane.braid-cli-unwrapped;

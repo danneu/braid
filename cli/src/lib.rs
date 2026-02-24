@@ -1,6 +1,7 @@
 pub mod apply;
 pub mod cmd;
 pub mod config;
+pub mod doctor;
 pub mod init_disk;
 pub mod parse;
 pub mod plan;

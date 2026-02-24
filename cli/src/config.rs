@@ -63,7 +63,7 @@ pub fn config_hash(raw: &str) -> String {
     format!("sha256:{:x}", hash)
 }
 
-fn validate(cfg: &Config) -> Result<(), ConfigError> {
+pub fn validate(cfg: &Config) -> Result<(), ConfigError> {
     if cfg.disks.is_empty() {
         return Err(ConfigError::Validation("disks must not be empty".to_owned()));
     }

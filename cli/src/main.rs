@@ -4,6 +4,7 @@ use std::path::Path;
 use braid_cli::apply::{cmd_apply, ApplyFlags};
 use braid_cli::cmd::RealRunner;
 use braid_cli::config::config_read;
+use braid_cli::doctor::cmd_doctor;
 use braid_cli::plan::{compute_plan, format_plan_human, to_plan_report};
 use braid_cli::probe::{probe_config_disk, probe_pool, RealFilesystem};
 use braid_cli::types::PlanFlags;
@@ -25,6 +26,7 @@ enum Commands {
     Plan(PlanArgs),
     Apply(ApplyArgs),
     Status(StatusArgs),
+    Doctor(DoctorArgs),
 }
 
 #[derive(Debug, Args)]
@@ -58,6 +60,12 @@ struct ApplyArgs {
 struct StatusArgs {
     #[arg(long)]
     verbose: bool,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct DoctorArgs {
     #[arg(long)]
     json: bool,
 }
@@ -160,6 +168,12 @@ fn main() {
             let runner = RealRunner;
             let fs = RealFilesystem;
             if let Err(e) = braid_cli::status::cmd_status(&runner, &fs, &config, args.verbose, args.json) {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        }
+        Commands::Doctor(args) => {
+            if let Err(e) = cmd_doctor(Path::new(&config_path), args.json) {
                 eprintln!("error: {e}");
                 std::process::exit(1);
             }
