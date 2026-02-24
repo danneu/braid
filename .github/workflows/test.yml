@@ -45,7 +45,9 @@ jobs:
     timeout-minutes: 30
     strategy:
       fail-fast: false
-      max-parallel: 20
+      # Keep fan-out moderate: 20-way parallelism hit cache API rate limits (HTTP 418/ResourceExhausted),
+      # which disabled the cache and forced large source rebuilds.
+      max-parallel: 10
       matrix:
         test: ${{ fromJson(needs.discover.outputs.tests) }}
     steps:
