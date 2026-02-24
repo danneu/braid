@@ -384,7 +384,20 @@ These tests don't use the `braid` CLI at all:
 9. `make test-one t=tool-versions` — provenance test against module-installed `braid` passes
 10. `make test` — full suite passes (commit 1: including bash tests; commit 2: without)
 
-### Grep guardrails (post-cutover, run manually)
-11. `rg -n "braid-rust" tests/ modules/ flake.nix README.md` — empty (or approved exceptions only: `braid-rust` alias in commit 1)
-12. `rg -n "rustPackage" modules/ tests/` — empty
-13. `rg -n "braid\.sh" modules/ tests/ flake.nix` — only historical references in retired test files, not in active `checksFor`
+### Grep guardrails (run manually after each commit)
+
+**After commit 1:**
+11. `rg -n "braid-rust" tests/ modules/ flake.nix README.md docs/decisions/`
+    - **Allowed**: `flake.nix` — the `braid-rust = braid;` alias line only
+    - **Zero matches expected** in: `tests/`, `modules/`, `README.md`, `docs/decisions/`
+12. `rg -n "rustPackage" modules/ tests/`
+    - **Zero matches expected**
+13. `rg -n "braid\.sh" modules/ flake.nix`
+    - **Zero matches expected** (bash tests still in `checksFor` reference their .nix files, not braid.sh directly; but `modules/` and `flake.nix` must not reference it)
+
+**After commit 2:**
+14. `rg -n "braid-rust" tests/ modules/ flake.nix README.md docs/decisions/`
+    - **Zero matches expected** everywhere (alias removed)
+15. `rg -n "braid\.sh" modules/ tests/ flake.nix` — only in retired test .nix files (8, 10, 11, 14) which are no longer in `checksFor`:
+    - **Allowed**: `tests/8-braid-status.nix`, `tests/10-braid-plan.nix`, `tests/11-braid-apply.nix`, `tests/14-braid-init-disk.nix`
+    - **Zero matches expected** in: `modules/`, `flake.nix`, all other test files
