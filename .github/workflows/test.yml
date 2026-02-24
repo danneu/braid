@@ -1,6 +1,8 @@
 name: Test
 
 on:
+  # Toggled off: NixOS VM tests burn through the free GitHub Actions minutes
+  # too quickly. Uncomment push/pull_request triggers to re-enable.
   workflow_dispatch:
   # push:
   #   branches: [main, master]
