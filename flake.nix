@@ -18,12 +18,13 @@
         let
           pkgs = nixpkgs.legacyPackages.${system};
           craneLib = crane.mkLib pkgs;
-          # cleanCargoSource strips test fixtures (.json/.txt) — include them
+          # cleanCargoSource strips test fixtures and snapshots — include them
           src = pkgs.lib.cleanSourceWith {
             src = ./cli;
             filter = path: type:
               (craneLib.filterCargoSources path type)
-              || (builtins.match ".*tests/fixtures/.*" path != null);
+              || (builtins.match ".*tests/fixtures/.*" path != null)
+              || (builtins.match ".*\\.snap$" path != null);
           };
           commonArgs = { inherit src; pname = "braid-cli"; version = "0.1.0"; };
           cargoArtifacts = craneLib.buildDepsOnly commonArgs;
