@@ -3,7 +3,7 @@ use nom::{
     bytes::complete::{tag, take_till1},
     character::complete::{not_line_ending, space0},
     combinator::eof,
-    IResult,
+    IResult, Parser,
 };
 
 use crate::cmd::RawCommandOutput;
@@ -24,9 +24,9 @@ fn parse_device_line(input: &str) -> IResult<&str, &str> {
 // - "/dev/mapper/braid-vdb is inactive."
 // - "Device braid-vdb is not active."
 fn parse_inactive_message(input: &str) -> IResult<&str, ()> {
-    let (input, _) = alt((tag("Device "), tag("/dev/mapper/")))(input)?;
+    let (input, _) = alt((tag("Device "), tag("/dev/mapper/"))).parse(input)?;
     let (input, _) = take_till1(|c: char| c.is_ascii_whitespace())(input)?;
-    let (input, _) = alt((tag(" is inactive."), tag(" is not active.")))(input)?;
+    let (input, _) = alt((tag(" is inactive."), tag(" is not active."))).parse(input)?;
     let (input, _) = space0(input)?;
     let (input, _) = eof(input)?;
     Ok((input, ()))
