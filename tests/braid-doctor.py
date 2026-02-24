@@ -21,6 +21,7 @@ with subtest("Valid config — human output"):
     assert "[ok" in output, f"Expected [ok] tag:\n{output}"
     assert "config file" in output, f"Expected 'config file':\n{output}"
     assert "config schema" in output, f"Expected 'config schema':\n{output}"
+    assert "config perms" in output, f"Expected 'config perms':\n{output}"
 
 with subtest("Valid config — JSON output"):
     raw = machine.succeed("braid doctor --json")
@@ -31,6 +32,7 @@ with subtest("Valid config — JSON output"):
     checks = {c["name"]: c for c in report["checks"]}
     assert checks["config_file"]["status"] == "ok", f"config_file: {checks['config_file']}"
     assert checks["config_schema"]["status"] == "ok", f"config_schema: {checks['config_schema']}"
+    assert checks["config_permissions"]["status"] == "ok", f"config_permissions: {checks['config_permissions']}"
 
 # --- Missing config ---
 
@@ -45,6 +47,7 @@ with subtest("Missing config — exits 1, fail + skip"):
     checks = {c["name"]: c for c in report["checks"]}
     assert checks["config_file"]["status"] == "fail", f"config_file: {checks['config_file']}"
     assert checks["config_schema"]["status"] == "skip", f"config_schema: {checks['config_schema']}"
+    assert checks["config_permissions"]["status"] == "skip", f"config_permissions: {checks['config_permissions']}"
 
 # --- Invalid JSON ---
 
@@ -73,5 +76,21 @@ with subtest("Bad schema — config_file ok, config_schema fail"):
     checks = {c["name"]: c for c in report["checks"]}
     assert checks["config_file"]["status"] == "ok", f"config_file: {checks['config_file']}"
     assert checks["config_schema"]["status"] == "fail", f"config_schema: {checks['config_schema']}"
+
+# --- Permissions warnings ---
+
+with subtest("World-writable config warns"):
+    machine.succeed("cp /etc/braid/config.json /tmp/world-writable.json")
+    machine.succeed("chmod 666 /tmp/world-writable.json")
+    raw = machine.succeed("braid doctor --json --config /tmp/world-writable.json")
+    print(f"World-writable JSON:\n{raw}")
+    report = json.loads(raw)
+    # warn does not cause failure — overall should be ok or warn, not fail
+    assert report["status"] == "warn", f"Expected overall warn: {report['status']}"
+    checks = {c["name"]: c for c in report["checks"]}
+    assert checks["config_permissions"]["status"] == "warn", f"config_permissions: {checks['config_permissions']}"
+    assert "world-writable" in checks["config_permissions"]["message"], (
+        f"Expected 'world-writable' in message: {checks['config_permissions']['message']}"
+    )
 
 machine.shutdown()

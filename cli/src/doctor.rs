@@ -1,3 +1,4 @@
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -112,6 +113,62 @@ fn check_config_schema(ctx: &mut DoctorContext) -> CheckResult {
     }
 }
 
+fn check_config_permissions(ctx: &mut DoctorContext) -> CheckResult {
+    if ctx.config_value.is_none() {
+        return CheckResult {
+            name: "config_permissions".into(),
+            status: CheckStatus::Skip,
+            message: "skipped (config file not available)".into(),
+        };
+    }
+
+    let meta = match std::fs::metadata(&ctx.config_path) {
+        Ok(m) => m,
+        Err(e) => {
+            return CheckResult {
+                name: "config_permissions".into(),
+                status: CheckStatus::Warn,
+                message: format!("could not stat {}: {e}", ctx.config_path.display()),
+            };
+        }
+    };
+
+    let mode = meta.mode();
+    let uid = meta.uid();
+    let mut warnings: Vec<String> = Vec::new();
+
+    // World-writable (o+w)
+    if mode & 0o002 != 0 {
+        warnings.push("world-writable".into());
+    }
+    // Group-writable (g+w)
+    if mode & 0o020 != 0 {
+        warnings.push("group-writable".into());
+    }
+    // Owner is not root
+    if uid != 0 {
+        warnings.push(format!("owned by uid {uid}, expected root (0)"));
+    }
+
+    if warnings.is_empty() {
+        CheckResult {
+            name: "config_permissions".into(),
+            status: CheckStatus::Ok,
+            message: format!("{} permissions ok", ctx.config_path.display()),
+        }
+    } else {
+        CheckResult {
+            name: "config_permissions".into(),
+            status: CheckStatus::Warn,
+            message: format!(
+                "{}: {}",
+                ctx.config_path.display(),
+                warnings.join(", ")
+            ),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Runner
 // ---------------------------------------------------------------------------
@@ -141,6 +198,7 @@ pub fn run_doctor(config_path: &Path) -> DoctorReport {
     let mut checks = Vec::new();
     checks.push(check_config_file(&mut ctx));
     checks.push(check_config_schema(&mut ctx));
+    checks.push(check_config_permissions(&mut ctx));
 
     let status = overall_status(&checks);
 
@@ -167,6 +225,7 @@ pub fn format_doctor_human(report: &DoctorReport) -> String {
         let label = match c.name.as_str() {
             "config_file" => "config file",
             "config_schema" => "config schema",
+            "config_permissions" => "config perms",
             other => other,
         };
         out.push_str(&format!("[{tag:<4}]  {label:<14}  {}\n", c.message));
@@ -227,26 +286,33 @@ mod tests {
         f
     }
 
+    fn find_check<'a>(report: &'a DoctorReport, name: &str) -> &'a CheckResult {
+        report
+            .checks
+            .iter()
+            .find(|c| c.name == name)
+            .unwrap_or_else(|| panic!("check '{name}' not found"))
+    }
+
     #[test]
     fn valid_config_both_ok() {
         let f = write_temp(valid_config_json());
         let report = run_doctor(f.path());
-        assert_eq!(report.status, CheckStatus::Ok);
-        assert_eq!(report.checks.len(), 2);
-        assert_eq!(report.checks[0].status, CheckStatus::Ok);
-        assert_eq!(report.checks[0].name, "config_file");
-        assert_eq!(report.checks[1].status, CheckStatus::Ok);
-        assert_eq!(report.checks[1].name, "config_schema");
+        assert_eq!(report.checks.len(), 3);
+        assert_eq!(find_check(&report, "config_file").status, CheckStatus::Ok);
+        assert_eq!(find_check(&report, "config_schema").status, CheckStatus::Ok);
     }
 
     #[test]
     fn missing_file_fail_skip() {
         let report = run_doctor(Path::new("/tmp/nonexistent-braid-doctor-test.json"));
         assert_eq!(report.status, CheckStatus::Fail);
-        assert_eq!(report.checks[0].status, CheckStatus::Fail);
-        assert_eq!(report.checks[0].name, "config_file");
-        assert_eq!(report.checks[1].status, CheckStatus::Skip);
-        assert_eq!(report.checks[1].name, "config_schema");
+        assert_eq!(find_check(&report, "config_file").status, CheckStatus::Fail);
+        assert_eq!(find_check(&report, "config_schema").status, CheckStatus::Skip);
+        assert_eq!(
+            find_check(&report, "config_permissions").status,
+            CheckStatus::Skip
+        );
     }
 
     #[test]
@@ -254,8 +320,15 @@ mod tests {
         let f = write_temp("not json at all {{{");
         let report = run_doctor(f.path());
         assert_eq!(report.status, CheckStatus::Fail);
-        assert_eq!(report.checks[0].status, CheckStatus::Fail);
-        assert_eq!(report.checks[1].status, CheckStatus::Skip);
+        assert_eq!(find_check(&report, "config_file").status, CheckStatus::Fail);
+        assert_eq!(
+            find_check(&report, "config_schema").status,
+            CheckStatus::Skip
+        );
+        assert_eq!(
+            find_check(&report, "config_permissions").status,
+            CheckStatus::Skip
+        );
     }
 
     #[test]
@@ -263,20 +336,20 @@ mod tests {
         let f = write_temp(r#"{"disks":[],"mountPoint":"/mnt/storage"}"#);
         let report = run_doctor(f.path());
         assert_eq!(report.status, CheckStatus::Fail);
-        assert_eq!(report.checks[0].status, CheckStatus::Ok);
-        assert_eq!(report.checks[0].name, "config_file");
-        assert_eq!(report.checks[1].status, CheckStatus::Fail);
-        assert_eq!(report.checks[1].name, "config_schema");
-        assert!(report.checks[1].message.contains("disks must not be empty"));
+        assert_eq!(find_check(&report, "config_file").status, CheckStatus::Ok);
+        let schema = find_check(&report, "config_schema");
+        assert_eq!(schema.status, CheckStatus::Fail);
+        assert!(schema.message.contains("disks must not be empty"));
     }
 
     #[test]
     fn valid_json_bad_schema_empty_mount() {
         let f = write_temp(r#"{"disks":["/dev/disk/by-id/a"],"mountPoint":""}"#);
         let report = run_doctor(f.path());
-        assert_eq!(report.checks[0].status, CheckStatus::Ok);
-        assert_eq!(report.checks[1].status, CheckStatus::Fail);
-        assert!(report.checks[1].message.contains("mountPoint must not be empty"));
+        assert_eq!(find_check(&report, "config_file").status, CheckStatus::Ok);
+        let schema = find_check(&report, "config_schema");
+        assert_eq!(schema.status, CheckStatus::Fail);
+        assert!(schema.message.contains("mountPoint must not be empty"));
     }
 
     #[test]
@@ -368,5 +441,60 @@ mod tests {
         let f = write_temp(valid_config_json());
         let report = run_doctor(f.path());
         assert_eq!(report.schema_version, 1);
+    }
+
+    #[test]
+    fn permissions_world_writable_warns() {
+        use std::os::unix::fs::PermissionsExt;
+        let f = write_temp(valid_config_json());
+        std::fs::set_permissions(f.path(), std::fs::Permissions::from_mode(0o666)).unwrap();
+        let report = run_doctor(f.path());
+        let perm = find_check(&report, "config_permissions");
+        assert_eq!(perm.status, CheckStatus::Warn);
+        assert!(perm.message.contains("world-writable"), "{}", perm.message);
+        assert!(
+            perm.message.contains("group-writable"),
+            "{}",
+            perm.message
+        );
+    }
+
+    #[test]
+    fn permissions_restrictive_ok() {
+        use std::os::unix::fs::PermissionsExt;
+        let f = write_temp(valid_config_json());
+        std::fs::set_permissions(f.path(), std::fs::Permissions::from_mode(0o600)).unwrap();
+        let report = run_doctor(f.path());
+        let perm = find_check(&report, "config_permissions");
+        // May still warn about uid (tests don't run as root), but should not
+        // warn about world/group bits.
+        assert!(
+            !perm.message.contains("world-"),
+            "unexpected world- warning: {}",
+            perm.message
+        );
+        assert!(
+            !perm.message.contains("group-writable"),
+            "unexpected group-writable: {}",
+            perm.message
+        );
+    }
+
+    #[test]
+    fn permissions_skip_when_no_config() {
+        let report = run_doctor(Path::new("/tmp/nonexistent-braid-doctor-test.json"));
+        let perm = find_check(&report, "config_permissions");
+        assert_eq!(perm.status, CheckStatus::Skip);
+    }
+
+    #[test]
+    fn human_format_contains_perms_label() {
+        let f = write_temp(valid_config_json());
+        let report = run_doctor(f.path());
+        let human = format_doctor_human(&report);
+        assert!(
+            human.contains("config perms"),
+            "expected 'config perms':\n{human}"
+        );
     }
 }
