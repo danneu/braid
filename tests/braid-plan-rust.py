@@ -93,6 +93,16 @@ with subtest("Plan shows OPEN_LUKS after init-disk"):
 
     open_action = [a for a in p["actions"] if a["type"] == "OPEN_LUKS"][0]
     assert "virtio-disk3" in open_action["target"], f"Wrong target:\n{open_action}"
+    open_cmds = [c["command"] for c in open_action["commands"]]
+    assert any("cryptsetup luksOpen" in c for c in open_cmds), (
+        f"OPEN_LUKS missing cryptsetup luksOpen command:\n{open_cmds}"
+    )
+
+    add_action = [a for a in p["actions"] if a["type"] == "ADD_DISK_BTRFS_ADD"][0]
+    add_cmds = [c["command"] for c in add_action["commands"]]
+    assert any("btrfs device add" in c for c in add_cmds), (
+        f"ADD_DISK_BTRFS_ADD missing btrfs device add command:\n{add_cmds}"
+    )
 
 # --- Subtest 4: Absent disk → DISK_ABSENT_SKIPPED ---
 
@@ -154,6 +164,14 @@ with subtest("Plan shows remove actions for disk in pool but not config"):
 
     remove_action = [a for a in p["actions"] if a["type"] == "REMOVE_DISK_GRACEFUL"][0]
     assert "virtio-disk2" in remove_action["target"], f"Wrong target:\n{remove_action}"
+    # 2-disk pool removing one → should have balance-to-single + device remove
+    remove_cmds = [c["command"] for c in remove_action["commands"]]
+    assert any("btrfs balance start -dconvert=single" in c for c in remove_cmds), (
+        f"REMOVE_DISK_GRACEFUL missing balance-to-single:\n{remove_cmds}"
+    )
+    assert any("btrfs device remove" in c for c in remove_cmds), (
+        f"REMOVE_DISK_GRACEFUL missing btrfs device remove:\n{remove_cmds}"
+    )
 
 # --- Subtest 8: Redundancy confirmation ---
 
@@ -237,14 +255,19 @@ with subtest("JSON output has required schema fields"):
         assert "target" in action, f"Action missing target: {action}"
         assert "status" in action, f"Action missing status: {action}"
         assert action["status"] == "pending", f"Action not pending: {action}"
+        assert "commands" in action, f"Action missing commands: {action}"
+        assert isinstance(action["commands"], list), f"commands not list: {action}"
+        for cmd in action["commands"]:
+            assert "command" in cmd, f"Command entry missing command: {cmd}"
+            assert isinstance(cmd["command"], str), f"command not string: {cmd}"
 
 # --- Subtest 11: Human output format ---
 
-with subtest("Human output shows plan summary"):
+with subtest("Human output shows plan summary and command lines"):
     machine.succeed(write_config([
         "/dev/disk/by-id/virtio-disk1",
         "/dev/disk/by-id/virtio-disk2",
-        "/dev/disk/by-id/virtio-disk99",
+        "/dev/disk/by-id/virtio-disk3",
     ]))
     output = machine.succeed(rust_plan())
     assert "Plan ID:" in output, f"Missing Plan ID:\n{output}"
@@ -252,6 +275,13 @@ with subtest("Human output shows plan summary"):
     assert "Status:" in output, f"Missing Status:\n{output}"
     assert "applicable" in output, (
         f"Expected 'applicable' in output:\n{output}"
+    )
+    # disk3 is LUKS-formatted but not in pool → OPEN_LUKS + ADD
+    assert "$ cryptsetup luksOpen" in output, (
+        f"Missing cryptsetup luksOpen command line:\n{output}"
+    )
+    assert "$ btrfs device add" in output, (
+        f"Missing btrfs device add command line:\n{output}"
     )
 
 # --- Subtest 12: Bootstrap (unmounted) ---
@@ -270,5 +300,45 @@ with subtest("Bootstrap plan for unmounted pool"):
     assert "REMOVE_DISK_GRACEFUL" not in types, f"Unexpected REMOVE_DISK_GRACEFUL:\n{types}"
     assert "BALANCE_TO_RAID1" not in types, f"Unexpected BALANCE_TO_RAID1:\n{types}"
     assert p["status"] == "applicable", f"Expected applicable:\n{p}"
+
+# --- Subtest 13: Bootstrap commands use mkfs.btrfs with may_run ---
+
+with subtest("Bootstrap first ADD_DISK uses mkfs.btrfs with may_run certainty"):
+    # Still in unmounted state from subtest 12
+    add_action = [a for a in p["actions"] if a["type"] == "ADD_DISK_BTRFS_ADD"][0]
+    add_cmds = add_action["commands"]
+    assert any("mkfs.btrfs" in c["command"] for c in add_cmds), (
+        f"Bootstrap ADD_DISK_BTRFS_ADD missing mkfs.btrfs:\n{add_cmds}"
+    )
+    mkfs_cmd = [c for c in add_cmds if "mkfs.btrfs" in c["command"]][0]
+    assert mkfs_cmd.get("certainty") == "may_run", (
+        f"Bootstrap mkfs.btrfs should be may_run:\n{mkfs_cmd}"
+    )
+
+# --- Subtest 14: Verify actions have empty commands ---
+
+with subtest("Verify actions have empty commands list"):
+    # Use a plan that has verify actions — rebuild pool first
+    machine.succeed(
+        f"echo -n '{passphrase}' | cryptsetup luksOpen --key-file=- "
+        "/dev/disk/by-id/virtio-disk1 virtio-disk1"
+    )
+    machine.succeed(
+        f"echo -n '{passphrase}' | cryptsetup luksOpen --key-file=- "
+        "/dev/disk/by-id/virtio-disk2 virtio-disk2"
+    )
+    machine.succeed("btrfs device scan")
+    machine.succeed("mount /dev/mapper/virtio-disk1 /mnt/storage")
+    machine.succeed(write_config([
+        "/dev/disk/by-id/virtio-disk1",
+        "/dev/disk/by-id/virtio-disk2",
+        "/dev/disk/by-id/virtio-disk3",
+    ]))
+    p = rust_plan_json()
+    verify_actions = [a for a in p["actions"] if a["type"].startswith("VERIFY_")]
+    for va in verify_actions:
+        assert va["commands"] == [], (
+            f"Verify action should have empty commands: {va}"
+        )
 
 machine.shutdown()

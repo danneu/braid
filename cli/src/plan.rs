@@ -286,6 +286,8 @@ pub fn compute_plan(
             ));
         }
 
+        compute_commands(&mut actions, &config.mount_point, pool);
+
         PlanOutcome::Applicable {
             plan_id: generate_plan_id(),
             actions,
@@ -403,6 +405,14 @@ pub fn format_plan_human(report: &PlanReport) -> String {
                 action_type_str(&action.action_type),
                 action.target
             ));
+            for cmd in &action.commands {
+                let suffix = if matches!(cmd.certainty, RunCertainty::MayRun) {
+                    "  (may run)"
+                } else {
+                    ""
+                };
+                out.push_str(&format!("    $ {}{}\n", cmd.command, suffix));
+            }
         }
     }
 
@@ -431,6 +441,109 @@ pub fn format_plan_human(report: &PlanReport) -> String {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
+fn compute_commands(actions: &mut [Action], mount_point: &str, pool: &PoolState) {
+    let is_bootstrap = !pool.mounted && pool.total_devices == 0;
+    let mut device_count = pool.devices.len();
+    let mut first_add_seen = false;
+
+    for action in actions.iter_mut() {
+        match action.action_type {
+            ActionType::OpenLuks => {
+                let mapper = action
+                    .target
+                    .strip_prefix(BY_ID_PREFIX)
+                    .unwrap_or(&action.target);
+                action.commands = vec![PlannedCommand {
+                    command: format!(
+                        "cryptsetup luksOpen --key-file=- {} {}",
+                        action.target, mapper
+                    ),
+                    certainty: RunCertainty::WillRun,
+                }];
+            }
+            ActionType::AddDiskBtrfsAdd => {
+                if is_bootstrap && !first_add_seen {
+                    action.commands = vec![PlannedCommand {
+                        command: format!("mkfs.btrfs -f {}", action.target),
+                        certainty: RunCertainty::MayRun,
+                    }];
+                    first_add_seen = true;
+                } else {
+                    action.commands = vec![PlannedCommand {
+                        command: format!(
+                            "btrfs device add -f {} {}",
+                            action.target, mount_point
+                        ),
+                        certainty: RunCertainty::WillRun,
+                    }];
+                }
+                device_count += 1;
+            }
+            ActionType::BalanceToRaid1 => {
+                action.commands = vec![PlannedCommand {
+                    command: format!(
+                        "btrfs balance start -dconvert=raid1 -mconvert=raid1 {}",
+                        mount_point
+                    ),
+                    certainty: RunCertainty::WillRun,
+                }];
+            }
+            ActionType::RemoveDiskGraceful => {
+                let mut cmds = Vec::new();
+                if device_count <= 2 {
+                    cmds.push(PlannedCommand {
+                        command: format!(
+                            "btrfs balance start -dconvert=single -mconvert=single -f {}",
+                            mount_point
+                        ),
+                        certainty: RunCertainty::WillRun,
+                    });
+                }
+                cmds.push(PlannedCommand {
+                    command: format!(
+                        "btrfs device remove {} {}",
+                        action.target, mount_point
+                    ),
+                    certainty: RunCertainty::WillRun,
+                });
+                action.commands = cmds;
+                device_count -= 1;
+            }
+            ActionType::RemoveDiskMissingExplicit => {
+                let mut cmds = Vec::new();
+                if device_count <= 1 {
+                    cmds.push(PlannedCommand {
+                        command: format!(
+                            "btrfs balance start -dconvert=single -mconvert=single -f {}",
+                            mount_point
+                        ),
+                        certainty: RunCertainty::WillRun,
+                    });
+                }
+                cmds.push(PlannedCommand {
+                    command: format!("btrfs device remove missing {}", mount_point),
+                    certainty: RunCertainty::WillRun,
+                });
+                action.commands = cmds;
+                device_count -= 1;
+            }
+            ActionType::CloseLuksMapper => {
+                let mapper = action
+                    .target
+                    .strip_prefix("/dev/mapper/")
+                    .unwrap_or(&action.target);
+                action.commands = vec![PlannedCommand {
+                    command: format!("cryptsetup close {}", mapper),
+                    certainty: RunCertainty::WillRun,
+                }];
+            }
+            ActionType::VerifyPoolHealth | ActionType::VerifyExpectedDiskSet => {
+                // Non-mutation actions — no commands.
+            }
+        }
+    }
+}
+
 fn make_action(
     counter: &mut u32,
     action_type: ActionType,
@@ -445,6 +558,7 @@ fn make_action(
         target,
         preconditions,
         status: ActionStatus::Pending,
+        commands: vec![],
     }
 }
 

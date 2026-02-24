@@ -92,6 +92,28 @@ pub enum ActionType {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunCertainty {
+    WillRun,
+    MayRun,
+}
+
+fn default_will_run() -> RunCertainty {
+    RunCertainty::WillRun
+}
+
+fn is_will_run(c: &RunCertainty) -> bool {
+    matches!(c, RunCertainty::WillRun)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlannedCommand {
+    pub command: String,
+    #[serde(default = "default_will_run", skip_serializing_if = "is_will_run")]
+    pub certainty: RunCertainty,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Action {
     pub id: String,
     #[serde(rename = "type")]
@@ -99,6 +121,7 @@ pub struct Action {
     pub target: String,
     pub preconditions: Vec<String>,
     pub status: ActionStatus,
+    pub commands: Vec<PlannedCommand>,
 }
 
 // ---------------------------------------------------------------------------

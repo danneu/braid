@@ -1232,6 +1232,7 @@ mod tests {
                 target: "/dev/disk/by-id/disk-1".to_owned(),
                 preconditions: vec![],
                 status: ActionStatus::Completed,
+                commands: vec![],
             },
             Action {
                 id: "a2".to_owned(),
@@ -1239,6 +1240,7 @@ mod tests {
                 target: "/dev/mapper/disk-1".to_owned(),
                 preconditions: vec!["a1".to_owned()],
                 status: ActionStatus::Pending,
+                commands: vec![],
             },
         ];
         assert!(validate_resume_targets(&fs, &actions).is_ok());
@@ -1253,6 +1255,7 @@ mod tests {
             target: "/dev/disk/by-id/disk-1".to_owned(),
             preconditions: vec![],
             status: ActionStatus::Pending,
+            commands: vec![],
         }];
         let err = validate_resume_targets(&fs, &actions).unwrap_err();
         assert!(matches!(err, ApplyError::ResumeTargetMissing { .. }));
@@ -1271,6 +1274,7 @@ mod tests {
                 target: "/dev/disk/by-id/disk-2".to_owned(),
                 preconditions: vec![],
                 status: ActionStatus::Pending,
+                commands: vec![],
             },
             Action {
                 id: "a2".to_owned(),
@@ -1278,6 +1282,7 @@ mod tests {
                 target: "/dev/mapper/disk-2".to_owned(),
                 preconditions: vec!["a1".to_owned()],
                 status: ActionStatus::Pending,
+                commands: vec![],
             },
         ];
         // Should succeed: mapper will be created by preceding OPEN_LUKS.
