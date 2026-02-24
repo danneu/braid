@@ -2,35 +2,45 @@
 
 ## Context
 
-All 4 braid CLI commands (`init-disk`, `plan`, `apply`, `status`) are fully ported to Rust and passing both unit tests and VM integration tests (tests 15–19). The bash script `scripts/braid.sh` is now redundant for all CLI functionality. Phase 7 makes the Rust binary the primary `braid` command: rename the wrapped package, update the NixOS module, make Rust tests self-contained, convert integration tests, and retire redundant bash tests.
+All 4 braid CLI commands (`init-disk`, `plan`, `apply`, `status`) are fully ported to Rust and passing both unit tests and VM integration tests (tests 15–19). The bash script `scripts/braid.sh` is now redundant for all CLI functionality. Phase 7 makes the Rust binary the primary `braid` command: rename the wrapped package, update the NixOS module, make Rust tests self-contained, convert integration tests, and update docs.
 
-No new Rust code is written in this phase — it's purely packaging, test config, and module changes.
+No new Rust code is written in this phase — it's purely packaging, test config, module, and doc changes.
+
+### Rollout strategy: two-step rename
+
+To maintain bisectability, the rename `braid-rust` → `braid` is done in two commits:
+
+**Commit 1 — Cutover**: Add `braid` alongside `braid-rust` in `craneFor`, update module, update all tests to use `braid`, update docs. Keep `braid-rust` as an alias in `craneFor` briefly. Keep bash tests 8/10/11/14 in `checksFor` for one green run.
+
+**Commit 2 — Cleanup**: Remove `braid-rust` alias from `craneFor`, remove bash tests 8/10/11/14 from `checksFor`.
 
 ---
 
-## 1. flake.nix packaging rename
+## 1. flake.nix packaging
 
-In `craneFor`:
-- Rename `braid-rust` → `braid` in the `runCommand` wrapper
-- Output `$out/bin/braid` instead of `$out/bin/braid-rust`
+### Commit 1: Add `braid`, keep `braid-rust` alias
+
+In `craneFor`, add the new `braid` wrapped package alongside the existing `braid-rust`:
 
 ```nix
-# Before:
-braid-rust = pkgs.runCommand "braid-rust" { ... } ''
-  makeWrapper ${braid-cli-unwrapped}/bin/braid $out/bin/braid-rust \
-    --prefix PATH : ${toolPath}
-'';
-
-# After:
-braid = pkgs.runCommand "braid" { ... } ''
+# New primary name
+braid = pkgs.runCommand "braid" { nativeBuildInputs = [ pkgs.makeWrapper ]; } ''
+  mkdir -p $out/bin
   makeWrapper ${braid-cli-unwrapped}/bin/braid $out/bin/braid \
     --prefix PATH : ${toolPath}
 '';
+
+# Alias for backward compat (removed in commit 2)
+braid-rust = braid;
 ```
 
-In `packagesFor`: expose `braid` instead of `braid-rust`.
+In `packagesFor`: expose both `braid` and `braid-rust` (commit 1), then drop `braid-rust` (commit 2).
 
-In `checksFor`: pass `braid` (and `braid-cli-unwrapped` where needed) instead of `braid-rust` to all test imports. Details in section 5 below.
+In `checksFor`: update test registrations to pass `braid` (see section 5).
+
+### Commit 2: Remove `braid-rust` alias
+
+Remove `braid-rust = braid;` from `craneFor` and `braid-rust` from `packagesFor`.
 
 ---
 
@@ -38,7 +48,7 @@ In `checksFor`: pass `braid` (and `braid-cli-unwrapped` where needed) instead of
 
 ### `modules/braid/options.nix`
 
-Rename `rustPackage` → `package`. Keep nullable for backward compat (module tests for `00-disabled` don't need to set it):
+Rename `rustPackage` → `package`. Keep nullable (module tests for `00-disabled` don't set it):
 
 ```nix
 package = lib.mkOption {
@@ -50,7 +60,7 @@ package = lib.mkOption {
 
 ### `modules/braid/cli.nix`
 
-Replace bash braid creation with Rust-only wrapping. When `cfg.package` is set, wrap the Rust binary as `braid`. When null, skip CLI installation entirely (or assert).
+Replace bash braid creation with Rust-only wrapping:
 
 ```nix
 { config, lib, pkgs, ... }:
@@ -107,13 +117,13 @@ Global find-replace: `braid-rust` → `braid` in all command strings.
 | File | Change |
 |------|--------|
 | `tests/15-braid-plan-rust.nix` | `{ braid }:`, remove bash braid-cli, use `braid` in packages |
-| `tests/braid-plan-rust.py` | `braid-rust plan` → `braid plan`, `braid-rust` → `braid` everywhere |
+| `tests/braid-plan-rust.py` | `braid-rust` → `braid` everywhere |
 | `tests/16-braid-apply-rust.nix` | Same pattern |
-| `tests/braid-apply-rust.py` | `braid-rust apply` → `braid apply`, keep distinct `rust_apply`/`bash_apply` → just `apply` |
+| `tests/braid-apply-rust.py` | `braid-rust` → `braid`, merge `rust_apply`/`bash_apply` → single `apply` |
 | `tests/18-braid-status-rust.nix` | Same pattern |
-| `tests/braid-status-rust.py` | `braid-rust status` → `braid status` |
+| `tests/braid-status-rust.py` | `braid-rust` → `braid` |
 | `tests/19-braid-init-disk-rust.nix` | Same pattern |
-| `tests/braid-init-disk-rust.py` | `braid-rust init-disk` → `braid init-disk` |
+| `tests/braid-init-disk-rust.py` | `braid-rust` → `braid` |
 
 ---
 
@@ -166,9 +176,42 @@ assert any("INIT_REQUIRED" in w for w in p["warnings"])
 assert any(w["code"] == "INIT_REQUIRED" for w in p["warnings"])
 ```
 
-### Test 17 (`17-tool-versions.nix`)
+### Test 17 (`17-tool-versions.nix`) — module-only `braid` provenance
 
-Accept `{ braid, braid-cli-unwrapped }:` (rename from `{ braid-rust, braid-cli-unwrapped }:`). Update the Python script (`tests/tool-versions.py`) to reference `braid` instead of `braid-rust` in binary name checks.
+**Avoid dual-braid ambiguity.** Don't inject a separate wrapped `braid` package into `environment.systemPackages`. Instead, rely solely on the module-installed `braid` (via `braid.package`) and validate that `command -v braid` resolves to the module wrapper's Nix store path.
+
+Changes:
+- Parameter: `{ braid-rust, braid-cli-unwrapped }:` → `{ braid-cli-unwrapped }:` (drop the separate wrapped binary)
+- Set `braid.rustPackage` → `braid.package = braid-cli-unwrapped;` (module wraps it)
+- Remove `braid-rust` from `environment.systemPackages`
+- Python (`tests/tool-versions.py` line 32-34): check `braid` provenance instead of `braid-rust`
+
+```nix
+# Before:
+{ braid-rust, braid-cli-unwrapped }:
+{
+  ...
+  braid.rustPackage = braid-cli-unwrapped;
+  environment.systemPackages = [ braid-rust ... ];
+  ...
+}
+
+# After:
+{ braid-cli-unwrapped }:
+{
+  ...
+  braid.package = braid-cli-unwrapped;
+  environment.systemPackages = [ pkgs.btrfs-progs pkgs.cryptsetup pkgs.util-linux pkgs.jq pkgs.coreutils ];
+  ...
+}
+```
+
+In flake.nix:
+```nix
+tool-versions = pkgs.testers.nixosTest (import ./tests/17-tool-versions.nix {
+  braid-cli-unwrapped = linuxCrane.braid-cli-unwrapped;
+});
+```
 
 ---
 
@@ -202,18 +245,18 @@ Module tests (01–06) import `../../modules/braid`. After the module requires `
 ```
 
 Tests affected:
-- `tests/braid-module/01-single-disk.nix` — add `{ braid }:`, set `braid.package = braid;`
-- `tests/braid-module/02-raid1.nix` — same
-- `tests/braid-module/03-degraded-raid1.nix` — same
-- `tests/braid-module/04-bad-config.nix` — same
-- `tests/braid-module/05-single-disk-dead.nix` — same
-- `tests/braid-module/06-remote-unlock.nix` — same
+- `tests/braid-module/01-single-disk.nix`
+- `tests/braid-module/02-raid1.nix`
+- `tests/braid-module/03-degraded-raid1.nix`
+- `tests/braid-module/04-bad-config.nix`
+- `tests/braid-module/05-single-disk-dead.nix`
+- `tests/braid-module/06-remote-unlock.nix`
 
-**Exception:** `tests/braid-module/00-disabled.nix` does NOT enable braid, so `package` is never evaluated. No change needed IF we keep the NixOS assertion inside `mkIf cfg.enable`. Verify the test still boots without setting `braid.package`.
+**Exception:** `tests/braid-module/00-disabled.nix` does NOT enable braid, so `package` is never evaluated. No change needed — the NixOS assertion is inside `mkIf cfg.enable`.
 
 ### flake.nix check registration
 
-Each module test gets the Rust binary passed in:
+Module tests pass the **unwrapped** binary (cli.nix does its own wrapping):
 
 ```nix
 braid-module-single-disk = pkgs.testers.nixosTest (import ./tests/braid-module/01-single-disk.nix {
@@ -221,25 +264,63 @@ braid-module-single-disk = pkgs.testers.nixosTest (import ./tests/braid-module/0
 });
 ```
 
-Note: module tests pass the **unwrapped** binary because cli.nix does its own wrapping with `cfg.packages.*`.
+Non-module tests pass the **wrapped** binary (installed directly):
+
+```nix
+braid-plan-rust = pkgs.testers.nixosTest (import ./tests/15-braid-plan-rust.nix {
+  braid = linuxCrane.braid;
+});
+```
 
 ---
 
-## 6. Retire redundant bash tests
+## 6. Docs update
 
-Remove from `checksFor` in `flake.nix`:
-- `braid-status` (test 8) — fully replaced by `braid-status-rust` (test 18)
-- `braid-plan` (test 10) — fully replaced by `braid-plan-rust` (test 15)
-- `braid-apply` (test 11) — fully replaced by `braid-apply-rust` (test 16)
-- `braid-init-disk` (test 14) — fully replaced by `braid-init-disk-rust` (test 19)
+Update all references to `braid-rust` and `rustPackage` in user-facing docs.
+
+### `README.md` (lines 231–244)
+
+```markdown
+# Before:
+nix build .#braid-rust
+`braid-rust` is built with Crane...
+
+# After:
+nix build .#braid
+`braid` (the Rust CLI) is built with Crane...
+```
+
+### `docs/decisions/toolchain-pinning.md` (line 18)
+
+```markdown
+# Before:
+the module wraps `cfg.rustPackage` with `cfg.packages.*`
+
+# After:
+the module wraps `cfg.package` with `cfg.packages.*`
+```
+
+**Not updated**: `rust-rewrite-plans/` and `brainstorm/` — these are historical planning docs and should reflect the terminology used at the time they were written.
+
+---
+
+## 7. Bash test retirement (Commit 2 only)
+
+In commit 1, keep bash tests 8/10/11/14 in `checksFor` for one green run to confirm no regressions.
+
+In commit 2, remove from `checksFor`:
+- `braid-status` (test 8) — replaced by `braid-status-rust` (test 18)
+- `braid-plan` (test 10) — replaced by `braid-plan-rust` (test 15)
+- `braid-apply` (test 11) — replaced by `braid-apply-rust` (test 16)
+- `braid-init-disk` (test 14) — replaced by `braid-init-disk-rust` (test 19)
 
 Keep the .nix/.py files in the repo for historical reference. Just remove from `checksFor`.
 
 ---
 
-## 7. Tests that need NO changes
+## 8. Tests that need NO changes
 
-These tests don't use the `braid` CLI at all (raw cryptsetup/btrfs/infrastructure tests):
+These tests don't use the `braid` CLI at all:
 - 0-hello-world, 1-luks, 2-btrfs-raid1, 3-btrfs-heal, 3-btrfs-grow, 3-btrfs-grow1, 3-btrfs-shrink, 3-btrfs-degrade
 - 4-samba, 4-remote-unlock, 4-degraded-boot
 - 6-first-boot-single-disk
@@ -252,7 +333,7 @@ These tests don't use the `braid` CLI at all (raw cryptsetup/btrfs/infrastructur
 | File | Change |
 |------|--------|
 | **Packaging** | |
-| `flake.nix` | Rename `braid-rust` → `braid`, update all check registrations, retire 4 bash checks, pass `braid`/`braid-cli-unwrapped` to tests |
+| `flake.nix` | Add `braid` (commit 1: keep `braid-rust` alias; commit 2: remove alias + bash checks) |
 | **Module** | |
 | `modules/braid/options.nix` | `rustPackage` → `package` (nullOr package, default null) |
 | `modules/braid/cli.nix` | Remove bash script, wrap Rust binary as `braid`, add assertion |
@@ -260,7 +341,7 @@ These tests don't use the `braid` CLI at all (raw cryptsetup/btrfs/infrastructur
 | `tests/15-braid-plan-rust.nix` | `{ braid }:`, remove bash braid-cli |
 | `tests/braid-plan-rust.py` | `braid-rust` → `braid` |
 | `tests/16-braid-apply-rust.nix` | `{ braid }:`, remove bash braid-cli |
-| `tests/braid-apply-rust.py` | `braid-rust` → `braid` |
+| `tests/braid-apply-rust.py` | `braid-rust` → `braid`, merge apply functions |
 | `tests/18-braid-status-rust.nix` | `{ braid }:`, remove bash braid-cli |
 | `tests/braid-status-rust.py` | `braid-rust` → `braid` |
 | `tests/19-braid-init-disk-rust.nix` | `{ braid }:`, remove bash braid-cli |
@@ -268,12 +349,12 @@ These tests don't use the `braid` CLI at all (raw cryptsetup/btrfs/infrastructur
 | **Integration tests** | |
 | `tests/5-braid-add-disk.nix` | Accept `{ braid }:`, use Rust binary |
 | `tests/7-replace-failed-disk.nix` | Accept `{ braid }:`, use Rust binary |
-| `tests/9-braid-remove-disk.nix` | Accept `{ braid }:`, use Rust binary (keep standalone braid-remove-disk.sh) |
-| `tests/12-braid-unified.nix` | Accept `{ braid }:`, use Rust binary (keep standalone braid-remove-disk.sh) |
+| `tests/9-braid-remove-disk.nix` | Accept `{ braid }:`, use Rust binary (keep braid-remove-disk.sh) |
+| `tests/12-braid-unified.nix` | Accept `{ braid }:`, use Rust binary (keep braid-remove-disk.sh) |
 | `tests/13-braid-bootstrap.nix` | Accept `{ braid }:`, use Rust binary |
 | `tests/braid-bootstrap.py` | Fix warning assertion: `w["code"] == "INIT_REQUIRED"` |
-| `tests/17-tool-versions.nix` | `braid-rust` → `braid` in param name |
-| `tests/tool-versions.py` | `braid-rust` → `braid` in binary checks |
+| `tests/17-tool-versions.nix` | Drop `braid-rust` param, module-only provenance via `braid.package` |
+| `tests/tool-versions.py` | `braid-rust` → `braid` provenance check |
 | **Module tests** | |
 | `tests/braid-module/01-single-disk.nix` | Accept `{ braid }:`, set `braid.package` |
 | `tests/braid-module/02-raid1.nix` | Same |
@@ -281,13 +362,17 @@ These tests don't use the `braid` CLI at all (raw cryptsetup/btrfs/infrastructur
 | `tests/braid-module/04-bad-config.nix` | Same |
 | `tests/braid-module/05-single-disk-dead.nix` | Same |
 | `tests/braid-module/06-remote-unlock.nix` | Same |
+| **Docs** | |
+| `README.md` | `.#braid-rust` → `.#braid`, update Crane cache section |
+| `docs/decisions/toolchain-pinning.md` | `cfg.rustPackage` → `cfg.package` |
 
-**NOT modified:** `scripts/braid.sh` (kept for reference), tests 0–4/6 (no braid CLI usage), `tests/braid-module/00-disabled.nix` (enable=false, no package needed).
+**NOT modified:** `scripts/braid.sh` (kept for reference), tests 0–4/6 (no braid CLI usage), `tests/braid-module/00-disabled.nix` (enable=false), `rust-rewrite-plans/` (historical).
 
 ---
 
 ## Acceptance criteria
 
+### Functional
 1. `cargo test -p braid-cli` — all unit tests pass (no Rust code changes, but verify)
 2. `make test-one t=braid-plan-rust` — self-contained Rust plan test passes
 3. `make test-one t=braid-apply-rust` — self-contained Rust apply test passes
@@ -295,5 +380,11 @@ These tests don't use the `braid` CLI at all (raw cryptsetup/btrfs/infrastructur
 5. `make test-one t=braid-init-disk-rust` — self-contained Rust init-disk test passes
 6. `make test-one t=braid-bootstrap` — Rust bootstrap integration test passes
 7. `make test-one t=braid-add-disk` — Rust integration test passes
-8. `make test-one t=braid-module-single-disk` — module test passes with Rust binary
-9. `make test` — full suite passes (minus retired bash tests 8, 10, 11, 14)
+8. `make test-one t=braid-module-single-disk` — module test with Rust binary passes
+9. `make test-one t=tool-versions` — provenance test against module-installed `braid` passes
+10. `make test` — full suite passes (commit 1: including bash tests; commit 2: without)
+
+### Grep guardrails (post-cutover, run manually)
+11. `rg -n "braid-rust" tests/ modules/ flake.nix README.md` — empty (or approved exceptions only: `braid-rust` alias in commit 1)
+12. `rg -n "rustPackage" modules/ tests/` — empty
+13. `rg -n "braid\.sh" modules/ tests/ flake.nix` — only historical references in retired test files, not in active `checksFor`
