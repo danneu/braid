@@ -1,4 +1,5 @@
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, CommandFactory, Parser, Subcommand};
+use clap_complete::engine::{ArgValueCandidates, CompletionCandidate};
 use std::path::Path;
 
 use braid_cli::apply::{cmd_apply, ApplyFlags};
@@ -36,6 +37,8 @@ enum Commands {
 
 #[derive(Debug, Args)]
 struct InitDiskArgs {
+    // Provide dynamic tab-completion candidates for disk paths, read from config.
+    #[arg(add = ArgValueCandidates::new(disk_candidates))]
     by_id_path: String,
     #[arg(long)]
     force: bool,
@@ -76,6 +79,10 @@ struct DoctorArgs {
 }
 
 fn main() {
+    // When COMPLETE=bash|zsh|fish is set, produce shell completion output and exit.
+    // Normal invocations pass through unchanged.
+    clap_complete::CompleteEnv::with_factory(Cli::command).complete();
+
     // Parse before root gate so --help/--version work without sudo.
     let cli = Cli::parse();
 
@@ -191,5 +198,34 @@ fn main() {
             }
         }
     }
+}
+
+/// Scan the in-flight command line for `--config <path>` or `--config=<path>`.
+/// Fall back to the default `/etc/braid/config.json` if not found.
+fn completion_config_path() -> String {
+    let args: Vec<String> = std::env::args().collect();
+    for pair in args.windows(2) {
+        if pair[0] == "--config" {
+            return pair[1].clone();
+        }
+    }
+    for arg in &args {
+        if let Some(val) = arg.strip_prefix("--config=") {
+            return val.to_string();
+        }
+    }
+    "/etc/braid/config.json".to_string()
+}
+
+fn disk_candidates() -> Vec<CompletionCandidate> {
+    let config_path = completion_config_path();
+    let Ok(config) = config_read(Path::new(&config_path)) else {
+        return Vec::new();
+    };
+    config
+        .disks
+        .into_iter()
+        .map(|d| CompletionCandidate::new(d.0))
+        .collect()
 }
 

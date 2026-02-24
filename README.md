@@ -198,6 +198,20 @@ sudo braid apply     # warns about absent disk, proceeds with others
 sudo braid apply     # reconciles the returned disk
 ```
 
+## Shell Completions
+
+Tab completion for subcommands, flags, and disk paths works out of the box on NixOS
+when `braid.enable = true`. Completions are registered for bash, zsh, and fish.
+
+```
+braid <TAB>              # → init-disk  plan  apply  status  doctor
+braid init-disk <TAB>    # → /dev/disk/by-id/ata-Toshiba_...  /dev/disk/by-id/ata-Ironwolf_...
+braid plan --<TAB>       # → --json  --allow-remove-missing  --allow-remove-ambiguous
+```
+
+Disk path candidates are read from `/etc/braid/config.json` on every tab press,
+so they reflect your current `braid.disks` config after a `nixos-rebuild`.
+
 ## What you get for free
 
 Braid enables these automatically when `braid.enable = true`:
