@@ -65,6 +65,8 @@ struct ApplyArgs {
     allow_remove_ambiguous: bool,
     #[arg(long, value_enum, default_value_t = ProgressMode::Auto)]
     progress: ProgressMode,
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -174,6 +176,7 @@ fn main() {
                 allow_remove_missing: args.allow_remove_missing,
                 allow_remove_ambiguous: args.allow_remove_ambiguous,
                 progress: args.progress,
+                json: args.json,
             };
             if let Err(e) = cmd_apply(Path::new(&config_path), &flags) {
                 eprintln!("error: {e}");

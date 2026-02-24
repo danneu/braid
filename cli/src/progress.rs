@@ -1,5 +1,5 @@
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, RawCommandOutput};
-use crate::parse::{parse_btrfs_balance_status, parse_btrfs_device_usage, BalanceState};
+use crate::parse::{parse_btrfs_balance_status, BalanceState};
 use std::io::Write;
 
 // ---------------------------------------------------------------------------
@@ -13,11 +13,43 @@ pub enum ProgressMode {
     Never,
 }
 
-pub fn resolve_progress(mode: ProgressMode, stderr_is_tty: bool) -> bool {
+// ---------------------------------------------------------------------------
+// ProgressOutput (resolved from ProgressMode + json flag)
+// ---------------------------------------------------------------------------
+
+/// Resolved from ProgressMode + json flag. Plumbed through execute functions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProgressOutput {
+    Off,
+    Human,
+    Json,
+}
+
+pub fn resolve_progress_output(
+    mode: ProgressMode,
+    stderr_is_tty: bool,
+    json: bool,
+) -> ProgressOutput {
     match mode {
-        ProgressMode::Always => true,
-        ProgressMode::Never => false,
-        ProgressMode::Auto => stderr_is_tty,
+        ProgressMode::Never => ProgressOutput::Off,
+        ProgressMode::Always => {
+            if json {
+                ProgressOutput::Json
+            } else {
+                ProgressOutput::Human
+            }
+        }
+        ProgressMode::Auto => {
+            if stderr_is_tty {
+                if json {
+                    ProgressOutput::Json
+                } else {
+                    ProgressOutput::Human
+                }
+            } else {
+                ProgressOutput::Off
+            }
+        }
     }
 }
 
@@ -33,15 +65,9 @@ pub fn format_balance_progress(done: u64, total: u64, pct_left: u8) -> String {
     format!("  balance: {done}/{total} chunks ({pct_complete}% complete)")
 }
 
-pub fn format_remove_progress(current_bytes: u64, initial_bytes: u64) -> String {
-    if initial_bytes == 0 {
-        return "  remove: done".to_owned();
-    }
-    let moved = initial_bytes.saturating_sub(current_bytes);
-    let pct_moved = (moved as f64 / initial_bytes as f64 * 100.0) as u64;
+pub fn format_balance_progress_json(done: u64, total: u64, pct_left: u8) -> String {
     format!(
-        "  remove: {} remaining ({pct_moved}% moved)",
-        format_bytes(current_bytes)
+        r#"{{"event":"progress","done_chunks":{done},"estimated_total_chunks":{total},"pct_left":{pct_left}}}"#
     )
 }
 
@@ -75,6 +101,12 @@ fn write_progress_line(msg: &str) {
     let _ = stderr.flush();
 }
 
+fn write_progress_json(json: &str) {
+    let mut stderr = std::io::stderr().lock();
+    let _ = writeln!(stderr, "{json}");
+    let _ = stderr.flush();
+}
+
 fn clear_progress_line() {
     if is_stderr_tty() {
         let mut stderr = std::io::stderr().lock();
@@ -84,16 +116,22 @@ fn clear_progress_line() {
 }
 
 // ---------------------------------------------------------------------------
-// Threaded runners
+// Threaded runner
 // ---------------------------------------------------------------------------
 
-/// Run a blocking balance-like command with progress polling.
-/// Works for BtrfsBalanceRaid1, BtrfsBalanceSingle, BtrfsDeviceRemoveMissing.
-pub fn run_with_balance_progress<R: CommandRunner + Sync>(
+/// Run a blocking btrfs command with progress polling.
+/// Works for BtrfsBalanceRaid1, BtrfsBalanceSingle, BtrfsDeviceRemove,
+/// and BtrfsDeviceRemoveMissing.
+pub fn run_with_progress<R: CommandRunner + Sync>(
     runner: &R,
     request: &CmdRequest,
     mount_point: &str,
+    output: ProgressOutput,
 ) -> Result<RawCommandOutput, CmdError> {
+    if output == ProgressOutput::Off {
+        return runner.run(request);
+    }
+
     std::thread::scope(|s| {
         let handle = s.spawn(|| runner.run(request));
 
@@ -112,7 +150,7 @@ pub fn run_with_balance_progress<R: CommandRunner + Sync>(
             });
             if let Ok(ref raw) = poll {
                 if let Ok(status) = parse_btrfs_balance_status(raw) {
-                    let msg = match status.state {
+                    match status.state {
                         BalanceState::Running {
                             done_chunks,
                             estimated_total_chunks,
@@ -124,91 +162,39 @@ pub fn run_with_balance_progress<R: CommandRunner + Sync>(
                             estimated_total_chunks,
                             pct_left,
                             ..
-                        } => format_balance_progress(
-                            done_chunks,
-                            estimated_total_chunks,
-                            pct_left,
-                        ),
+                        } => match output {
+                            ProgressOutput::Human => {
+                                let msg = format_balance_progress(
+                                    done_chunks,
+                                    estimated_total_chunks,
+                                    pct_left,
+                                );
+                                if msg != last_msg {
+                                    write_progress_line(&msg);
+                                    last_msg = msg;
+                                }
+                            }
+                            ProgressOutput::Json => {
+                                let json = format_balance_progress_json(
+                                    done_chunks,
+                                    estimated_total_chunks,
+                                    pct_left,
+                                );
+                                write_progress_json(&json);
+                            }
+                            ProgressOutput::Off => unreachable!(),
+                        },
                         BalanceState::None => continue,
-                    };
-                    if msg != last_msg {
-                        write_progress_line(&msg);
-                        last_msg = msg;
                     }
                 }
             }
         }
 
-        clear_progress_line();
-        handle.join().expect("balance thread panicked")
-    })
-}
-
-/// Run btrfs device remove with device-usage progress polling.
-pub fn run_with_remove_progress<R: CommandRunner + Sync>(
-    runner: &R,
-    target: &str,
-    mount_point: &str,
-) -> Result<RawCommandOutput, CmdError> {
-    // Capture initial used_bytes for target device
-    let initial_bytes = get_device_used_bytes(runner, target, mount_point);
-
-    let request = CmdRequest::BtrfsDeviceRemove {
-        device: target.to_owned(),
-        mount_point: mount_point.to_owned(),
-    };
-
-    // If we couldn't get initial bytes, just run without progress
-    let Some(initial) = initial_bytes else {
-        return runner.run(&request);
-    };
-
-    std::thread::scope(|s| {
-        let handle = s.spawn(|| runner.run(&request));
-
-        let mut last_msg = String::new();
-        loop {
-            if handle.is_finished() {
-                break;
-            }
-
-            std::thread::sleep(std::time::Duration::from_secs(1));
-
-            // Poll device usage
-            if let Some(current) = get_device_used_bytes(runner, target, mount_point) {
-                let msg = format_remove_progress(current, initial);
-                if msg != last_msg {
-                    write_progress_line(&msg);
-                    last_msg = msg;
-                }
-            }
+        if output == ProgressOutput::Human {
+            clear_progress_line();
         }
-
-        clear_progress_line();
-        handle.join().expect("remove thread panicked")
+        handle.join().expect("command thread panicked")
     })
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-fn get_device_used_bytes<R: CommandRunner>(
-    runner: &R,
-    target: &str,
-    mount_point: &str,
-) -> Option<u64> {
-    let raw = runner
-        .run(&CmdRequest::BtrfsDeviceUsageRaw {
-            mount_point: mount_point.to_owned(),
-        })
-        .ok()?;
-    let usage = parse_btrfs_device_usage(&raw).ok()?;
-    usage
-        .devices
-        .iter()
-        .find(|d| d.path == target)
-        .map(|d| d.used_bytes())
 }
 
 // ---------------------------------------------------------------------------
@@ -247,23 +233,11 @@ mod tests {
     }
 
     #[test]
-    fn format_remove_progress_basic() {
-        let initial = 1024 * 1024 * 1024; // 1 GiB
-        let current = initial / 2;
-        let msg = format_remove_progress(current, initial);
-        assert!(msg.contains("512.0 MiB remaining"), "got: {msg}");
-        assert!(msg.contains("50% moved"), "got: {msg}");
-    }
-
-    #[test]
-    fn format_remove_progress_done() {
-        let msg = format_remove_progress(0, 1000);
-        assert!(msg.contains("100% moved"), "got: {msg}");
-    }
-
-    #[test]
-    fn format_remove_progress_zero_initial() {
-        assert_eq!(format_remove_progress(0, 0), "  remove: done");
+    fn format_balance_progress_json_basic() {
+        assert_eq!(
+            format_balance_progress_json(3, 10, 70),
+            r#"{"event":"progress","done_chunks":3,"estimated_total_chunks":10,"pct_left":70}"#
+        );
     }
 
     #[test]
@@ -285,24 +259,66 @@ mod tests {
         );
     }
 
+    // --- resolve_progress_output tests ---
+
     #[test]
-    fn resolve_progress_auto_tty() {
-        assert!(resolve_progress(ProgressMode::Auto, true));
+    fn resolve_progress_output_never_returns_off() {
+        assert_eq!(
+            resolve_progress_output(ProgressMode::Never, true, false),
+            ProgressOutput::Off
+        );
+        assert_eq!(
+            resolve_progress_output(ProgressMode::Never, true, true),
+            ProgressOutput::Off
+        );
+        assert_eq!(
+            resolve_progress_output(ProgressMode::Never, false, false),
+            ProgressOutput::Off
+        );
     }
 
     #[test]
-    fn resolve_progress_auto_no_tty() {
-        assert!(!resolve_progress(ProgressMode::Auto, false));
+    fn resolve_progress_output_always_human() {
+        assert_eq!(
+            resolve_progress_output(ProgressMode::Always, false, false),
+            ProgressOutput::Human
+        );
     }
 
     #[test]
-    fn resolve_progress_always_overrides() {
-        assert!(resolve_progress(ProgressMode::Always, false));
+    fn resolve_progress_output_always_json() {
+        assert_eq!(
+            resolve_progress_output(ProgressMode::Always, false, true),
+            ProgressOutput::Json
+        );
     }
 
     #[test]
-    fn resolve_progress_never_overrides() {
-        assert!(!resolve_progress(ProgressMode::Never, true));
+    fn resolve_progress_output_auto_tty_human() {
+        assert_eq!(
+            resolve_progress_output(ProgressMode::Auto, true, false),
+            ProgressOutput::Human
+        );
+    }
+
+    #[test]
+    fn resolve_progress_output_auto_tty_json() {
+        assert_eq!(
+            resolve_progress_output(ProgressMode::Auto, true, true),
+            ProgressOutput::Json
+        );
+    }
+
+    #[test]
+    fn resolve_progress_output_auto_no_tty_off() {
+        assert_eq!(
+            resolve_progress_output(ProgressMode::Auto, false, false),
+            ProgressOutput::Off
+        );
+        assert_eq!(
+            resolve_progress_output(ProgressMode::Auto, false, true),
+            ProgressOutput::Off
+        );
     }
 
     // --- Threaded behavior tests ---
@@ -336,12 +352,13 @@ mod tests {
             ok_raw("btrfs balance start", ""),
         );
 
-        let result = run_with_balance_progress(
+        let result = run_with_progress(
             &runner,
             &CmdRequest::BtrfsBalanceRaid1 {
                 mount_point: "/mnt/storage".to_owned(),
             },
             "/mnt/storage",
+            ProgressOutput::Human,
         );
         assert!(result.is_ok());
     }
@@ -363,46 +380,14 @@ mod tests {
                 ok_raw("btrfs balance status", "garbage output here"),
             );
 
-        let result = run_with_balance_progress(
+        let result = run_with_progress(
             &runner,
             &CmdRequest::BtrfsBalanceRaid1 {
                 mount_point: "/mnt/storage".to_owned(),
             },
             "/mnt/storage",
+            ProgressOutput::Human,
         );
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn remove_progress_missing_target_entry() {
-        // BtrfsDeviceUsageRaw returns valid output but target device isn't in it.
-        let runner = MockRunner::default()
-            .with_output(
-                CmdRequest::BtrfsDeviceUsageRaw {
-                    mount_point: "/mnt/storage".to_owned(),
-                },
-                ok_raw(
-                    "btrfs device usage --raw",
-                    "/dev/mapper/braid-other, ID: 1\n\
-                     \x20  Device size:          536870912\n\
-                     \x20  Device slack:              0\n\
-                     \x20  Unallocated:          536870912\n",
-                ),
-            )
-            .with_output(
-                CmdRequest::BtrfsDeviceRemove {
-                    device: "/dev/mapper/braid-target".to_owned(),
-                    mount_point: "/mnt/storage".to_owned(),
-                },
-                ok_raw("btrfs device remove", ""),
-            );
-
-        let result = run_with_remove_progress(
-            &runner,
-            "/dev/mapper/braid-target",
-            "/mnt/storage",
-        );
-        // Should succeed — missing target in usage just means no progress shown.
         assert!(result.is_ok());
     }
 
@@ -416,17 +401,38 @@ mod tests {
             err_raw("btrfs balance start", 1, "balance failed"),
         );
 
-        let result = run_with_balance_progress(
+        let result = run_with_progress(
             &runner,
             &CmdRequest::BtrfsBalanceRaid1 {
                 mount_point: "/mnt/storage".to_owned(),
             },
             "/mnt/storage",
+            ProgressOutput::Human,
         );
         // The raw result has exit_status=1, but CmdError is not returned for non-zero exits.
         // The RawCommandOutput is returned as Ok with exit_status=1.
         let raw = result.unwrap();
         assert_eq!(raw.exit_status, 1);
         assert_eq!(raw.stderr, "balance failed");
+    }
+
+    #[test]
+    fn progress_off_runs_without_thread() {
+        let runner = MockRunner::default().with_output(
+            CmdRequest::BtrfsBalanceRaid1 {
+                mount_point: "/mnt/storage".to_owned(),
+            },
+            ok_raw("btrfs balance start", ""),
+        );
+
+        let result = run_with_progress(
+            &runner,
+            &CmdRequest::BtrfsBalanceRaid1 {
+                mount_point: "/mnt/storage".to_owned(),
+            },
+            "/mnt/storage",
+            ProgressOutput::Off,
+        );
+        assert!(result.is_ok());
     }
 }

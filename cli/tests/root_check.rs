@@ -39,6 +39,19 @@ fn version_works_without_root() {
 }
 
 #[test]
+fn apply_json_flag_accepted() {
+    if is_root() {
+        return;
+    }
+    let output = braid()
+        .args(["apply", "--help"])
+        .output()
+        .expect("failed to execute braid");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("--json"), "apply --help should show --json, got: {stdout}");
+}
+
+#[test]
 fn apply_progress_values_accepted() {
     if is_root() {
         return;
