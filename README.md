@@ -19,7 +19,7 @@ braid = {
 };
 ```
 
-This creates LUKS devices for each disk, assembles them into a btrfs RAID1 pool, and mounts it. The system boots gracefully even if a drive is dead or missing.
+The Nix config doesn't touch your disks — it only declares which disks are available to braid. You then use `braid init-disk` to LUKS-format each disk (one-time) and `braid apply` to open, assemble, and mount. The system boots gracefully even if a drive is dead or missing.
 
 ## Managing drives
 
@@ -28,8 +28,10 @@ Every drive operation follows the same pattern: **edit config, rebuild, plan, ap
 ### Find your disks
 
 ```
-ls /dev/disk/by-id/ata-*
+ls /dev/disk/by-id/
 ```
+
+HDDs hooked up to SATA ports probably start with `ata-*`.
 
 ### Start with one disk
 
