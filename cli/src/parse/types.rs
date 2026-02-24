@@ -83,6 +83,7 @@ pub struct BtrfsFilesystemUsageOutput {
     pub device_size_bytes: u64,
     pub used_bytes: u64,
     pub free_estimated_bytes: u64,
+    pub data_ratio: u64,
 }
 
 /// Typed wrapper so domain code doesn't re-parse the raw timestamp string.

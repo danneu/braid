@@ -347,8 +347,9 @@ fn get_capacity<R: CommandRunner>(
     })?;
     let usage = parse_btrfs_filesystem_usage(&raw)?;
 
+    let total_bytes = usage.device_size_bytes / usage.data_ratio;
     Ok(CapacityReport {
-        total_bytes: usage.device_size_bytes,
+        total_bytes,
         used_bytes: usage.used_bytes,
         free_bytes: usage.free_estimated_bytes,
     })
@@ -789,7 +790,8 @@ mod tests {
              \tDevice allocated:\t\t503316480\n\
              \tDevice unallocated:\t\t536870912\n\
              \tUsed:\t\t\t\t33914880\n\
-             \tFree (estimated):\t\t442957824\t(min: 442957824)\n",
+             \tFree (estimated):\t\t442957824\t(min: 442957824)\n\
+             \tData ratio:\t\t\t2.00\n",
         )
     }
 
