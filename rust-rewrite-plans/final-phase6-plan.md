@@ -210,6 +210,9 @@ All use `MockRunner` + `MockFs` with inline data. Use `cmd_init_disk_with` to co
 - `init_disk_force_target_mapper_active_refuses` — --force but target's mapper is open → error "close mapper ... before reformatting"
 - `init_disk_force_target_mapper_closed_proceeds` — --force, target mapper not active → proceeds
 
+**Env parsing:**
+- `init_disk_luks_opts_unbalanced_quotes_error` — `BRAID_LUKS_OPTS` set to `"--pbkdf 'unclosed` → `shell_words::split` fails → error propagated (not silently empty)
+
 **Happy path tests:**
 - `init_disk_fresh_no_existing_member` — first disk, no members to verify against → format succeeds
 - `init_disk_with_existing_member` — second disk, passphrase matches → format succeeds
