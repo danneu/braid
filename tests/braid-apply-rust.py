@@ -276,7 +276,7 @@ with subtest("Stale checkpoint refuses resume"):
         "is_bootstrap": False,
         "actions": [],
         "warnings": [],
-        "confirmations": [],
+        "confirmations_required": [],
     })
     machine.succeed("mkdir -p /var/lib/braid")
     escaped = fake_checkpoint.replace("'", "'\\''")
@@ -437,7 +437,7 @@ with subtest("Resume rejects unrecoverable missing mapper target"):
             }
         ],
         "warnings": [],
-        "confirmations": [],
+        "confirmations_required": [],
     })
     escaped = fake_checkpoint.replace("'", "'\\''")
     machine.succeed("mkdir -p /var/lib/braid")

@@ -64,7 +64,7 @@ with subtest("No-op plan when config matches live state"):
     p = rust_plan_json()
     mutation_actions = [a for a in p["actions"] if not a["type"].startswith("VERIFY_")]
     assert len(mutation_actions) == 0, f"Expected zero mutation actions:\n{p['actions']}"
-    assert p["status"] in ["applicable", "applicable_with_warnings"], f"Expected applicable:\n{p}"
+    assert p["status"] == "applicable", f"Expected applicable:\n{p}"
 
 # --- Subtest 2: Non-LUKS disk warning ---
 
@@ -131,10 +131,10 @@ with subtest("Absent config disk blocks removal when pool has unmatched device")
 with subtest("--allow-remove-ambiguous unblocks plan with confirmations"):
     raw = machine.succeed(rust_plan("--json --allow-remove-ambiguous"))
     p = json.loads(raw)
-    assert p["status"] in ["applicable", "applicable_with_warnings"], (
+    assert p["status"] == "applicable", (
         f"Expected applicable with override:\n{p}"
     )
-    phrases = [c["phrase"] for c in p.get("confirmations", [])]
+    phrases = [c["phrase"] for c in p.get("confirmations_required", [])]
     assert "remove despite ambiguous identity" in phrases, (
         f"Expected ambiguous identity confirmation:\n{phrases}"
     )
@@ -159,7 +159,7 @@ with subtest("Plan shows remove actions for disk in pool but not config"):
 
 with subtest("Remove to single disk triggers redundancy confirmation"):
     p = rust_plan_json()
-    phrases = [c["phrase"] for c in p.get("confirmations", [])]
+    phrases = [c["phrase"] for c in p.get("confirmations_required", [])]
     assert any("redundancy" in ph for ph in phrases), f"Expected redundancy phrase:\n{phrases}"
 
 # --- Subtest 9: Degraded pool warning text ---
@@ -250,8 +250,8 @@ with subtest("Human output shows plan summary"):
     assert "Plan ID:" in output, f"Missing Plan ID:\n{output}"
     assert "Mount:" in output, f"Missing Mount:\n{output}"
     assert "Status:" in output, f"Missing Status:\n{output}"
-    assert "applicable with warnings" in output, (
-        f"Expected 'applicable with warnings' in output:\n{output}"
+    assert "applicable" in output, (
+        f"Expected 'applicable' in output:\n{output}"
     )
 
 # --- Subtest 12: Bootstrap (unmounted) ---
@@ -269,6 +269,6 @@ with subtest("Bootstrap plan for unmounted pool"):
     assert "ADD_DISK_BTRFS_ADD" in types, f"Missing ADD_DISK_BTRFS_ADD:\n{types}"
     assert "REMOVE_DISK_GRACEFUL" not in types, f"Unexpected REMOVE_DISK_GRACEFUL:\n{types}"
     assert "BALANCE_TO_RAID1" not in types, f"Unexpected BALANCE_TO_RAID1:\n{types}"
-    assert p["status"] in ["applicable", "applicable_with_warnings"], f"Expected applicable:\n{p}"
+    assert p["status"] == "applicable", f"Expected applicable:\n{p}"
 
 machine.shutdown()
