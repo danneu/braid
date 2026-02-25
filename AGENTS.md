@@ -64,3 +64,29 @@ Write failing tests first, confirm they fail for the expected reasons, then impl
 - **Test framework:** NixOS VM tests (`nixos/lib/testing-python.nix`)
 - **Runs on macOS:** Requires `nix.linux-builder.enable = true` in nix-darwin. Tests are `checks.aarch64-darwin`.
 - **Virtual disks:** `virtualisation.emptyDiskImages` creates throwaway virtual drives.
+
+---
+
+## Plan Review Protocol
+
+When reviewing a plan:
+
+- List findings ordered by severity.
+- For each finding: state issue, impact, and include one recommended fix.
+- Prescriptions must be singular: do not present multiple options in the report.
+- After listing findings, assess the overall plan viability.
+- If you think there's an even better + simpler + more robust solution, tell the
+  user so that they can consider initializing a new plan.
+
+Decision rule:
+
+- For each finding, consider the best resolutions and their trade-offs internally, then choose the best solution.
+- If multiple open-ended solutions exist, brainstorm with the user until one
+  solution is agreed.
+- After alignment, report only that agreed solution.
+
+Example (single finding):
+
+- High: Plan makes `braid status` mutate disk-map state.
+  Impact: A read command causes side effects, which breaks safety expectations and complicates debugging.
+  Recommended fix: Keep `braid status` read-only; perform disk-map reconciliation only in explicit mutating commands (`add`, `remove`, `remove-missing`, `replace`).
