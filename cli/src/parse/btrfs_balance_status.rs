@@ -1,29 +1,53 @@
+use nom::{
+    bytes::complete::{tag, take_till1},
+    character::complete::{space0, space1, u64 as parse_u64, u8 as parse_u8},
+    IResult,
+};
+
 use crate::cmd::RawCommandOutput;
 
 use super::types::{BalanceState, BtrfsBalanceStatusOutput};
 use super::ParseError;
 
-/// Parse chunk-progress line:
-///   "3 out of about 5 chunks balanced (7 considered), 40% left"
-fn parse_chunks_line(line: &str) -> Option<(u64, u64, u64, u8)> {
-    // Split on "out of about" to get done_chunks
-    let (done_str, rest) = line.split_once("out of about")?;
-    let done: u64 = done_str.trim().rsplit(' ').next()?.parse().ok()?;
+// ---------------------------------------------------------------------------
+// nom parsers
+// ---------------------------------------------------------------------------
 
-    // rest: " 5 chunks balanced (7 considered), 40% left"
-    let (total_str, rest) = rest.split_once("chunks balanced")?;
-    let total: u64 = total_str.trim().parse().ok()?;
-
-    // rest: " (7 considered), 40% left"
-    let (considered_str, rest) = rest.split_once("considered")?;
-    let considered: u64 = considered_str.trim().trim_start_matches('(').trim().parse().ok()?;
-
-    // rest: "), 40% left"
-    let (pct_str, _) = rest.split_once('%')?;
-    let pct: u8 = pct_str.trim().trim_start_matches(')').trim_start_matches(',').trim().parse().ok()?;
-
-    Some((done, total, considered, pct))
+// Parses chunk-progress line:
+//   "3 out of about 10 chunks balanced (7 considered), 70% left"
+//   → (3, 10, 7, 70)
+fn parse_chunks_line(input: &str) -> IResult<&str, (u64, u64, u64, u8)> {
+    let (input, _) = space0(input)?;
+    let (input, done) = parse_u64(input)?;
+    let (input, _) = space1(input)?;
+    let (input, _) = tag("out of about")(input)?;
+    let (input, _) = space1(input)?;
+    let (input, total) = parse_u64(input)?;
+    let (input, _) = space1(input)?;
+    let (input, _) = tag("chunks balanced (")(input)?;
+    let (input, considered) = parse_u64(input)?;
+    let (input, _) = space1(input)?;
+    let (input, _) = tag("considered),")(input)?;
+    let (input, _) = space1(input)?;
+    let (input, pct) = parse_u8(input)?;
+    let (input, _) = tag("% left")(input)?;
+    Ok((input, (done, total, considered, pct)))
 }
+
+// Parses the state line, returning "running" or "paused":
+//   "Balance on '/mnt/storage' is running"
+//   "Balance on '/mnt/storage' is paused"
+fn parse_state_line(input: &str) -> IResult<&str, &str> {
+    let (input, _) = tag("Balance on '")(input)?;
+    let (input, _) = take_till1(|c| c == '\'')(input)?;
+    let (input, _) = tag("' is ")(input)?;
+    let (input, state) = take_till1(|c: char| c == ',' || c == '\n' || c.is_ascii_whitespace())(input)?;
+    Ok((input, state))
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
 
 pub fn parse_btrfs_balance_status(
     raw: &RawCommandOutput,
@@ -45,27 +69,33 @@ pub fn parse_btrfs_balance_status(
         });
     }
 
-    // Determine running vs paused
-    let is_running = stdout.lines().any(|l| l.contains("is running"));
-    let is_paused = stdout.lines().any(|l| l.contains("is paused"));
+    // Determine running vs paused from the state line
+    let state_str = stdout
+        .lines()
+        .find_map(|l| parse_state_line(l.trim()).ok().map(|(_, s)| s))
+        .ok_or_else(|| ParseError::InvalidText {
+            cmd: raw.cmd.clone(),
+            detail: "no recognizable balance state pattern found".into(),
+        })?;
+
+    let is_running = state_str == "running";
+    let is_paused = state_str == "paused";
 
     if !is_running && !is_paused {
         return Err(ParseError::InvalidText {
             cmd: raw.cmd.clone(),
-            detail: "no recognizable balance state pattern found".into(),
+            detail: format!("unexpected balance state: {state_str:?}"),
         });
     }
 
     // Find chunk progress line
-    let chunks = stdout
+    let (done_chunks, estimated_total_chunks, considered_chunks, pct_left) = stdout
         .lines()
-        .find_map(parse_chunks_line)
+        .find_map(|l| parse_chunks_line(l.trim()).ok().map(|(_, v)| v))
         .ok_or_else(|| ParseError::InvalidText {
             cmd: raw.cmd.clone(),
             detail: "balance running/paused but no chunk progress line found".into(),
         })?;
-
-    let (done_chunks, estimated_total_chunks, considered_chunks, pct_left) = chunks;
 
     let state = if is_running {
         BalanceState::Running {

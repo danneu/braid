@@ -1,7 +1,30 @@
+use nom::{
+    bytes::complete::tag,
+    character::complete::{not_line_ending, space0},
+    IResult,
+};
+
 use crate::cmd::RawCommandOutput;
 
 use super::types::{BtrfsScrubStatusOutput, ScrubState, ScrubTimestamp};
 use super::ParseError;
+
+// ---------------------------------------------------------------------------
+// nom parsers
+// ---------------------------------------------------------------------------
+
+// Parses: "Scrub started:    Tue Feb 24 02:00:07 2026"  →  "Tue Feb 24 02:00:07 2026"
+fn parse_scrub_started(input: &str) -> IResult<&str, &str> {
+    let (input, _) = space0(input)?;
+    let (input, _) = tag("Scrub started:")(input)?;
+    let (input, _) = space0(input)?;
+    let (input, timestamp) = not_line_ending(input)?;
+    Ok((input, timestamp.trim()))
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
 
 pub fn parse_btrfs_scrub_status(
     raw: &RawCommandOutput,
@@ -25,9 +48,7 @@ pub fn parse_btrfs_scrub_status(
 
     // Look for "Scrub started:" line with a timestamp
     for line in stdout.lines() {
-        let trimmed = line.trim();
-        if let Some(timestamp) = trimmed.strip_prefix("Scrub started:") {
-            let ts = timestamp.trim();
+        if let Ok((_, ts)) = parse_scrub_started(line) {
             if !ts.is_empty() && !ts.contains("not available") {
                 return Ok(BtrfsScrubStatusOutput {
                     state: ScrubState::Completed {
