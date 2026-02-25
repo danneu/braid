@@ -79,12 +79,16 @@ passphrase = "testpassphrase"
 luks_opts = "--pbkdf pbkdf2 --pbkdf-force-iterations 1000"
 
 
+import shlex
+
+
 def replace_cmd(old, new):
     """Build a `braid replace --old <old> --new <new> --yes` command."""
+    passphrase_q = shlex.quote(passphrase)
     return (
-        f"BRAID_PASSPHRASE='{passphrase}' "
+        f"printf '%s\\n' {passphrase_q} | "
         f"BRAID_LUKS_OPTS='{luks_opts}' "
-        f"braid replace --old {old} --new {new} --yes"
+        f"braid replace --old {old} --new {new} --passphrase-stdin --yes"
     )
 
 

@@ -3,28 +3,32 @@ import json
 start_all()
 machine.wait_for_unit("multi-user.target")
 
+import shlex
+
 passphrase = "testpassphrase"
 luks_opts = "--pbkdf pbkdf2 --pbkdf-force-iterations 1000"
 
 
 def init_disk(dev, force=False, config=None):
+    passphrase_q = shlex.quote(passphrase)
     force_flag = "--force" if force else ""
-    confirm = "BRAID_CONFIRM='reformat this disk' " if force else ""
+    confirm_env = "BRAID_CONFIRM='reformat this disk' " if force else ""
     config_flag = f"--config {config}" if config else ""
     return (
-        f"{confirm}"
-        f"BRAID_PASSPHRASE='{passphrase}' "
+        f"printf '%s\\n' {passphrase_q} | "
+        f"{confirm_env}"
         f"BRAID_LUKS_OPTS='{luks_opts}' "
-        f"braid init-disk {force_flag} {config_flag} {dev}"
+        f"braid init-disk --passphrase-stdin {force_flag} {config_flag} {dev}"
     )
 
 
 def apply_cmd(config=None, extra="", confirm=""):
+    passphrase_q = shlex.quote(passphrase)
     config_flag = f"--config {config}" if config else ""
-    env = f"BRAID_PASSPHRASE='{passphrase}'"
+    env = ""
     if confirm:
-        env += f" BRAID_CONFIRM='{confirm}'"
-    return f"{env} braid apply {config_flag} {extra}"
+        env = f"BRAID_CONFIRM='{confirm}' "
+    return f"printf '%s\\n' {passphrase_q} | {env}braid apply --passphrase-stdin {config_flag} {extra}"
 
 
 def write_config(disk_list, mount="/mnt/storage"):

@@ -7,7 +7,7 @@ use braid_cli::cmd::RealRunner;
 use braid_cli::config::config_read;
 use braid_cli::doctor::cmd_doctor;
 use braid_cli::probe::RealFilesystem;
-use braid_cli::progress::{ProgressMode, resolve_progress_output};
+use braid_cli::progress::{resolve_progress_output, ProgressMode};
 
 #[derive(Debug, Parser)]
 #[command(name = "braid", version)]
@@ -43,9 +43,12 @@ struct CommonArgs {
     /// Show what would happen without executing
     #[arg(long)]
     dry_run: bool,
-    /// Skip interactive confirmations (requires BRAID_PASSPHRASE or --passphrase-file)
+    /// Skip interactive confirmations
     #[arg(long)]
     yes: bool,
+    /// Read passphrase from stdin
+    #[arg(long)]
+    passphrase_stdin: bool,
     /// Read passphrase from file instead of TTY prompt
     #[arg(long)]
     passphrase_file: Option<std::path::PathBuf>,
@@ -141,6 +144,7 @@ fn main() {
                 &args.key,
                 args.common.dry_run,
                 args.common.yes,
+                args.common.passphrase_stdin,
                 args.common.passphrase_file.as_deref(),
                 progress,
                 Path::new(CHECKPOINT_FILE),
@@ -200,6 +204,7 @@ fn main() {
                 args.missing_id,
                 args.common.dry_run,
                 args.common.yes,
+                args.common.passphrase_stdin,
                 args.common.passphrase_file.as_deref(),
                 progress,
                 Path::new(CHECKPOINT_FILE),

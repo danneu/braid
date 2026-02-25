@@ -30,6 +30,8 @@ import json
 start_all()
 machine.wait_for_unit("multi-user.target")
 
+import shlex
+
 passphrase = "testpassphrase"
 luks_opts = "--pbkdf pbkdf2 --pbkdf-force-iterations 1000"
 config_path = "/tmp/braid-config.json"
@@ -50,13 +52,11 @@ def write_config(mount_point="/mnt/storage"):
 
 
 def add(key, env=""):
-    prefix = (
-        f"BRAID_PASSPHRASE='{passphrase}' "
-        f"BRAID_LUKS_OPTS='{luks_opts}' "
-    )
+    passphrase_q = shlex.quote(passphrase)
+    env_parts = f"BRAID_LUKS_OPTS='{luks_opts}'"
     if env:
-        prefix += f"{env} "
-    return f"{prefix}braid --config {config_path} add {key} --yes"
+        env_parts += f" {env}"
+    return f"printf '%s\\n' {passphrase_q} | {env_parts} braid --config {config_path} add {key} --passphrase-stdin --yes"
 
 
 def remove(name, env=""):
@@ -130,13 +130,11 @@ with subtest("Pause hook times out with deterministic error code"):
 
 
 def replace(old, new, env=""):
-    prefix = (
-        f"BRAID_PASSPHRASE='{passphrase}' "
-        f"BRAID_LUKS_OPTS='{luks_opts}' "
-    )
+    passphrase_q = shlex.quote(passphrase)
+    env_parts = f"BRAID_LUKS_OPTS='{luks_opts}'"
     if env:
-        prefix += f"{env} "
-    return f"{prefix}braid --config {config_path} replace --old {old} --new {new} --yes"
+        env_parts += f" {env}"
+    return f"printf '%s\\n' {passphrase_q} | {env_parts} braid --config {config_path} replace --old {old} --new {new} --passphrase-stdin --yes"
 
 
 # --- Live replace checkpoint tests ---

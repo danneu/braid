@@ -58,6 +58,7 @@ with subtest("add flag completion"):
     output = machine.succeed("bash /tmp/get-completions.sh braid add --")
     assert "--dry-run" in output, f"Expected --dry-run: {output}"
     assert "--yes" in output, f"Expected --yes: {output}"
+    assert "--passphrase-stdin" in output, f"Expected --passphrase-stdin: {output}"
     assert "--passphrase-file" in output, f"Expected --passphrase-file: {output}"
     assert "--progress" in output, f"Expected --progress: {output}"
 

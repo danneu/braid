@@ -3,6 +3,8 @@ import json
 start_all()
 machine.wait_for_unit("multi-user.target")
 
+import shlex
+
 passphrase = "testpassphrase"
 luks_opts = "--pbkdf pbkdf2 --pbkdf-force-iterations 1000"
 
@@ -14,17 +16,19 @@ def write_config(disk_list, mount="/mnt/storage"):
 
 
 def init_disk(by_id, extra="", confirm=""):
-    env = f"BRAID_PASSPHRASE='{passphrase}' BRAID_LUKS_OPTS='{luks_opts}'"
+    passphrase_q = shlex.quote(passphrase)
+    env = f"BRAID_LUKS_OPTS='{luks_opts}'"
     if confirm:
         env += f" BRAID_CONFIRM='{confirm}'"
-    return f"{env} braid init-disk --config /tmp/braid-config.json {by_id} {extra}"
+    return f"printf '%s\\n' {passphrase_q} | {env} braid init-disk --config /tmp/braid-config.json --passphrase-stdin {by_id} {extra}"
 
 
 def apply(extra="", confirm=""):
-    env = f"BRAID_PASSPHRASE='{passphrase}'"
+    passphrase_q = shlex.quote(passphrase)
+    env = ""
     if confirm:
-        env += f" BRAID_CONFIRM='{confirm}'"
-    return f"{env} braid apply --config /tmp/braid-config.json {extra}"
+        env = f"BRAID_CONFIRM='{confirm}' "
+    return f"printf '%s\\n' {passphrase_q} | {env}braid apply --config /tmp/braid-config.json --passphrase-stdin {extra}"
 
 
 # --- Subtest 0: Setup — init 2 disks, build pool ---
@@ -242,9 +246,9 @@ with subtest("Interrupted apply leaves checkpoint"):
     ]))
     machine.succeed(init_disk("/dev/disk/by-id/virtio-disk3", extra="--force", confirm="reformat this disk"))
     cmd = (
-        f"BRAID_PASSPHRASE='{passphrase}' "
+        f"printf '%s\\n' {shlex.quote(passphrase)} | "
         f"BRAID_TEST_FAIL_AFTER_ACTION=a1 "
-        f"braid apply --config /tmp/braid-config.json"
+        f"braid apply --config /tmp/braid-config.json --passphrase-stdin"
     )
     machine.fail(cmd)
     machine.succeed("test -f /var/lib/braid/apply-state.json")
@@ -296,9 +300,9 @@ with subtest("Resume target absent exits 1"):
     ]))
     machine.succeed(init_disk("/dev/disk/by-id/virtio-disk4", extra="--force", confirm="reformat this disk"))
     cmd = (
-        f"BRAID_PASSPHRASE='{passphrase}' "
+        f"printf '%s\\n' {shlex.quote(passphrase)} | "
         f"BRAID_TEST_FAIL_AFTER_ACTION=a1 "
-        f"braid apply --config /tmp/braid-config.json"
+        f"braid apply --config /tmp/braid-config.json --passphrase-stdin"
     )
     machine.fail(cmd)
     machine.succeed("test -f /var/lib/braid/apply-state.json")
@@ -456,9 +460,9 @@ with subtest("Failed action records error in checkpoint and history"):
         "/dev/disk/by-id/virtio-disk4",
     ]))
     cmd = (
-        f"BRAID_PASSPHRASE='{passphrase}' "
+        f"printf '%s\\n' {shlex.quote(passphrase)} | "
         f"BRAID_TEST_FAIL_DURING_ACTION=a1 "
-        f"braid apply --config /tmp/braid-config.json"
+        f"braid apply --config /tmp/braid-config.json --passphrase-stdin"
     )
     machine.fail(cmd)
 
@@ -602,9 +606,9 @@ with subtest("Resume with stale checkpoint after reboot replans"):
     ]))
     machine.succeed(init_disk("/dev/disk/by-id/virtio-disk4", extra="--force", confirm="reformat this disk"))
     cmd = (
-        f"BRAID_PASSPHRASE='{passphrase}' "
+        f"printf '%s\\n' {shlex.quote(passphrase)} | "
         f"BRAID_TEST_FAIL_AFTER_ACTION=a1 "
-        f"braid apply --config /tmp/braid-config.json"
+        f"braid apply --config /tmp/braid-config.json --passphrase-stdin"
     )
     machine.fail(cmd)
     machine.succeed("test -f /var/lib/braid/apply-state.json")

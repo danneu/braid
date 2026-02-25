@@ -21,7 +21,7 @@ new:  checkpoint check → luks_prephase → probe → plan → checkpoint → e
 
 The `luks_prephase` function:
 
-1. **Opens closed LUKS mappers** — iterates config disks, skips absent and already-open, reads `BRAID_PASSPHRASE` lazily (only when the first closed mapper is encountered).
+1. **Opens closed LUKS mappers** — iterates config disks, skips absent and already-open, reads passphrase from `--passphrase-stdin` or TTY lazily (only when the first closed mapper is encountered).
 2. **Scans all** — runs `btrfs device scan` (no arguments) to register all open btrfs members with the kernel.
 3. **Mounts pool** — if the mount point is not already mounted, finds the first open mapper and attempts mount. Missing-members errors are tolerated (not all disks may be available). Hard errors propagate.
 

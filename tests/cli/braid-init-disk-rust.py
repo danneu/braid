@@ -8,6 +8,8 @@ import json
 start_all()
 machine.wait_for_unit("multi-user.target")
 
+import shlex
+
 passphrase = "testpassphrase"
 luks_opts = "--pbkdf pbkdf2 --pbkdf-force-iterations 1000"
 
@@ -19,10 +21,11 @@ def write_config(disk_list, mount="/mnt/storage"):
 
 
 def init_disk(by_id, extra="", confirm=""):
-    env = f"BRAID_PASSPHRASE='{passphrase}' BRAID_LUKS_OPTS='{luks_opts}'"
+    passphrase_q = shlex.quote(passphrase)
+    env = f"BRAID_LUKS_OPTS='{luks_opts}'"
     if confirm:
         env += f" BRAID_CONFIRM='{confirm}'"
-    return f"{env} braid init-disk --config /tmp/braid-config.json {extra} {by_id}"
+    return f"printf '%s\\n' {passphrase_q} | {env} braid init-disk --config /tmp/braid-config.json --passphrase-stdin {extra} {by_id}"
 
 
 # ============================================================================
@@ -92,9 +95,9 @@ with subtest("init-disk refuses disk currently in pool"):
 with subtest("wrong passphrase against existing member fails"):
     # disk1 is formatted with passphrase "testpassphrase" and mounted in pool
     wrong_pass_cmd = (
-        f"BRAID_PASSPHRASE='wrongpassphrase' "
+        f"printf '%s\\n' wrongpassphrase | "
         f"BRAID_LUKS_OPTS='{luks_opts}' "
-        f"braid init-disk --config /tmp/braid-config.json /dev/disk/by-id/virtio-disk2"
+        f"braid init-disk --config /tmp/braid-config.json --passphrase-stdin /dev/disk/by-id/virtio-disk2"
     )
     machine.fail(wrong_pass_cmd)
 

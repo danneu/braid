@@ -18,6 +18,8 @@ import json
 start_all()
 machine.wait_for_unit("multi-user.target")
 
+import shlex
+
 passphrase = "testpassphrase"
 luks_opts = "--pbkdf pbkdf2 --pbkdf-force-iterations 1000"
 
@@ -30,10 +32,11 @@ def read_disk_map():
 
 def add_cmd(key):
     """Build a `braid add <key> --yes` command with env vars."""
+    passphrase_q = shlex.quote(passphrase)
     return (
-        f"BRAID_PASSPHRASE='{passphrase}' "
+        f"printf '%s\\n' {passphrase_q} | "
         f"BRAID_LUKS_OPTS='{luks_opts}' "
-        f"braid add {key} --yes"
+        f"braid add {key} --passphrase-stdin --yes"
     )
 
 

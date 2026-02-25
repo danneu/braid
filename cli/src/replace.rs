@@ -1,7 +1,7 @@
 use crate::checkpoint::{
-    CheckpointError, InvocationCtx, LiveCtx, OpArgs, OpKind, Phase, PoolFingerprint, ResumeGate,
-    SystemClock, TargetSnapshot, clear_checkpoint, hash_args, maybe_fail_after_checkpoint,
-    new_checkpoint, resolve_resume_gate, run_phase_hooks, save_checkpoint_atomic, update_phase,
+    clear_checkpoint, hash_args, maybe_fail_after_checkpoint, new_checkpoint, resolve_resume_gate,
+    run_phase_hooks, save_checkpoint_atomic, update_phase, CheckpointError, InvocationCtx, LiveCtx,
+    OpArgs, OpKind, Phase, PoolFingerprint, ResumeGate, SystemClock, TargetSnapshot,
 };
 use crate::cmd::CommandRunner;
 use crate::config::{config_hash, config_read_raw, mapper_name};
@@ -14,7 +14,7 @@ use crate::pool::{
     evict_present_device, pool_add_device, pool_balance_raid1, pool_remove_devid,
     pool_remove_missing,
 };
-use crate::probe::{Filesystem, ProbeError, probe_config_disk, probe_pool};
+use crate::probe::{probe_config_disk, probe_pool, Filesystem, ProbeError};
 use crate::progress::ProgressOutput;
 use crate::types::*;
 use std::path::Path;
@@ -56,6 +56,7 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     missing_id: Option<u64>,
     dry_run: bool,
     yes: bool,
+    passphrase_stdin: bool,
     passphrase_file: Option<&Path>,
     progress: ProgressOutput,
     checkpoint_path: &Path,
@@ -201,15 +202,12 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     let mut checkpoint = resume;
     let mut start_from_evict = false;
     if let Some(cp) = &checkpoint {
-        start_from_evict = matches!(
-            cp.phase,
-            Phase::ReplaceEvictDead | Phase::ReplaceEvictLive
-        );
+        start_from_evict = matches!(cp.phase, Phase::ReplaceEvictDead | Phase::ReplaceEvictLive);
     }
 
     if checkpoint.is_none() {
         // Read passphrase
-        let passphrase = read_passphrase(passphrase_file, yes)?;
+        let passphrase = read_passphrase(passphrase_file, passphrase_stdin)?;
         let new_mn = mapper_name(new_key);
 
         // Step 1: Init new disk if needed
@@ -552,8 +550,8 @@ fn apply_replace_disk_map_update(
 mod tests {
     use super::*;
     use crate::checkpoint::{
-        OpArgs, OpKind, Phase, PoolFingerprint, SystemClock, TargetSnapshot, new_checkpoint,
-        save_checkpoint_atomic,
+        new_checkpoint, save_checkpoint_atomic, OpArgs, OpKind, Phase, PoolFingerprint,
+        SystemClock, TargetSnapshot,
     };
     use crate::cmd::{CmdError, CmdRequest, CommandRunner, RawCommandOutput};
     use crate::probe::Filesystem;
@@ -808,6 +806,7 @@ mod tests {
             Some(99),
             false,
             true,
+            false,
             None,
             ProgressOutput::Off,
             &checkpoint_path,
@@ -905,6 +904,7 @@ mod tests {
             None,
             true,
             true,
+            false,
             None,
             ProgressOutput::Off,
             &checkpoint_path,

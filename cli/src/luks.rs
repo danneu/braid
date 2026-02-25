@@ -1,5 +1,5 @@
 use crate::cmd::{CmdError, CmdRequest, CommandRunner};
-use crate::config::{DiskConfig, mapper_name};
+use crate::config::{mapper_name, DiskConfig};
 use crate::probe::Filesystem;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
@@ -16,10 +16,10 @@ pub enum LuksError {
     Io(#[from] std::io::Error),
 }
 
-/// Read passphrase from --passphrase-file, BRAID_PASSPHRASE env, or TTY prompt.
+/// Read passphrase from --passphrase-file, --passphrase-stdin, or TTY prompt.
 pub fn read_passphrase(
     passphrase_file: Option<&std::path::Path>,
-    yes: bool,
+    passphrase_stdin: bool,
 ) -> Result<String, LuksError> {
     if let Some(path) = passphrase_file {
         let contents = std::fs::read_to_string(path).map_err(|e| {
@@ -32,12 +32,14 @@ pub fn read_passphrase(
         // spaces may be intentional passphrase characters.
         return Ok(contents.trim_end_matches('\n').to_owned());
     }
-    if yes {
-        return std::env::var("BRAID_PASSPHRASE").map_err(|_| {
-            LuksError::Validation(
-                "--yes requires BRAID_PASSPHRASE env var or --passphrase-file".to_owned(),
-            )
-        });
+    if passphrase_stdin {
+        let mut buf = String::new();
+        std::io::stdin().read_line(&mut buf)?;
+        let passphrase = buf.trim_end_matches('\n').trim_end_matches('\r').to_owned();
+        if passphrase.is_empty() {
+            return Err(LuksError::Validation("passphrase must not be empty".into()));
+        }
+        return Ok(passphrase);
     }
     prompt_passphrase_tty()
 }

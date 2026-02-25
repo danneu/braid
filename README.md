@@ -170,10 +170,10 @@ sudo braid doctor --json    # machine-readable output
 
 ### Non-interactive mode
 
-For scripting, use `--yes` with either `BRAID_PASSPHRASE` env var or `--passphrase-file`:
+For scripting, use `--passphrase-stdin` or `--passphrase-file` with `--yes`:
 
 ```
-sudo BRAID_PASSPHRASE='secret' braid add ironwolf --yes
+echo 'secret' | sudo braid add ironwolf --passphrase-stdin --yes
 sudo braid add ironwolf --yes --passphrase-file /run/secrets/luks
 ```
 

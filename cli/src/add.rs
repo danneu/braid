@@ -1,17 +1,17 @@
 use crate::checkpoint::{
-    CheckpointError, InvocationCtx, LiveCtx, OpArgs, OpKind, Phase, PoolFingerprint, ResumeGate,
-    SystemClock, TargetSnapshot, clear_checkpoint, hash_args, maybe_fail_after_checkpoint,
-    new_checkpoint, resolve_resume_gate, run_phase_hooks, save_checkpoint_atomic,
+    clear_checkpoint, hash_args, maybe_fail_after_checkpoint, new_checkpoint, resolve_resume_gate,
+    run_phase_hooks, save_checkpoint_atomic, CheckpointError, InvocationCtx, LiveCtx, OpArgs,
+    OpKind, Phase, PoolFingerprint, ResumeGate, SystemClock, TargetSnapshot,
 };
 use crate::cmd::CommandRunner;
-use crate::config::{Config, config_hash, config_read_raw, mapper_name};
+use crate::config::{config_hash, config_read_raw, mapper_name, Config};
 use crate::disk_map;
 use crate::luks::{
     backup_luks_header, device_has_btrfs_superblock, ensure_luks_open, luks_format,
     luks_opts_from_env, read_passphrase, verify_passphrase,
 };
 use crate::pool::{pool_add_device, pool_balance_raid1, pool_bootstrap_mount};
-use crate::probe::{Filesystem, ProbeError, probe_config_disk, probe_pool};
+use crate::probe::{probe_config_disk, probe_pool, Filesystem, ProbeError};
 use crate::progress::ProgressOutput;
 use crate::types::*;
 use std::path::Path;
@@ -52,6 +52,7 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     key: &str,
     dry_run: bool,
     yes: bool,
+    passphrase_stdin: bool,
     passphrase_file: Option<&Path>,
     progress: ProgressOutput,
     checkpoint_path: &Path,
@@ -142,7 +143,7 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     }
 
     // Read passphrase
-    let passphrase = read_passphrase(passphrase_file, yes)?;
+    let passphrase = read_passphrase(passphrase_file, passphrase_stdin)?;
     let mn = mapper_name(key);
 
     // Execute steps
@@ -360,8 +361,8 @@ fn add_confirm_message(key: &str, by_id: &str) -> String {
 mod tests {
     use super::*;
     use crate::checkpoint::{
-        OpArgs, OpKind, Phase, PoolFingerprint, SystemClock, TargetSnapshot, new_checkpoint,
-        save_checkpoint_atomic,
+        new_checkpoint, save_checkpoint_atomic, OpArgs, OpKind, Phase, PoolFingerprint,
+        SystemClock, TargetSnapshot,
     };
     use crate::cmd::{CmdError, CmdRequest, CommandRunner, RawCommandOutput};
     use crate::probe::Filesystem;
@@ -524,6 +525,7 @@ mod tests {
             "disk2",
             false,
             true,
+            false,
             None,
             ProgressOutput::Off,
             &checkpoint_path,
