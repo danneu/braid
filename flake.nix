@@ -4,6 +4,10 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
     crane.url = "github:ipetkov/crane";
+    # Without this, crane evaluates its own copy of nixpkgs internally,
+    # causing duplicate evaluation and minor version skew. This tells
+    # crane to reuse our nixpkgs instead.
+    crane.inputs.nixpkgs.follows = "nixpkgs";
   };
 
   outputs =
