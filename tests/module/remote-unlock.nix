@@ -142,5 +142,5 @@ in
     };
   };
 
-  testScript = builtins.readFile ./06-remote-unlock.py;
+  testScript = builtins.readFile ./remote-unlock.py;
 }

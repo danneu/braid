@@ -58,5 +58,5 @@
     };
   };
 
-  testScript = builtins.readFile ./04-bad-config.py;
+  testScript = builtins.readFile ./bad-config.py;
 }

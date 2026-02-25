@@ -85,113 +85,113 @@
           linuxCrane = craneFor linuxSystem;
         in
         {
-          hello-world = pkgs.testers.nixosTest (import ./tests/0-hello-world.nix);
-          luks = pkgs.testers.nixosTest (import ./tests/1-luks.nix);
-          btrfs-raid1 = pkgs.testers.nixosTest (import ./tests/2-btrfs-raid1.nix);
-          btrfs-heal = pkgs.testers.nixosTest (import ./tests/3-btrfs-heal.nix);
-          btrfs-grow = pkgs.testers.nixosTest (import ./tests/3-btrfs-grow.nix);
-          btrfs-grow1 = pkgs.testers.nixosTest (import ./tests/3-btrfs-grow1.nix);
-          btrfs-shrink = pkgs.testers.nixosTest (import ./tests/3-btrfs-shrink.nix);
-          btrfs-degrade = pkgs.testers.nixosTest (import ./tests/3-btrfs-degrade.nix);
-          samba = pkgs.testers.nixosTest (import ./tests/4-samba.nix);
-          remote-unlock = pkgs.testers.nixosTest (import ./tests/4-remote-unlock.nix);
-          degraded-boot = pkgs.testers.nixosTest (import ./tests/4-degraded-boot.nix);
+          hello-world = pkgs.testers.nixosTest (import ./tests/hello-world.nix);
+          luks = pkgs.testers.nixosTest (import ./tests/storage/luks.nix);
+          btrfs-raid1 = pkgs.testers.nixosTest (import ./tests/storage/btrfs-raid1.nix);
+          btrfs-heal = pkgs.testers.nixosTest (import ./tests/storage/btrfs-heal.nix);
+          btrfs-grow = pkgs.testers.nixosTest (import ./tests/storage/btrfs-grow.nix);
+          btrfs-grow1 = pkgs.testers.nixosTest (import ./tests/storage/btrfs-grow1.nix);
+          btrfs-shrink = pkgs.testers.nixosTest (import ./tests/storage/btrfs-shrink.nix);
+          btrfs-degrade = pkgs.testers.nixosTest (import ./tests/storage/btrfs-degrade.nix);
+          samba = pkgs.testers.nixosTest (import ./tests/samba.nix);
+          remote-unlock = pkgs.testers.nixosTest (import ./tests/boot/remote-unlock.nix);
+          degraded-boot = pkgs.testers.nixosTest (import ./tests/boot/degraded-boot.nix);
           braid-add-disk = pkgs.testers.nixosTest (
-            import ./tests/5-braid-add-disk.nix {
+            import ./tests/cli/braid-add-disk.nix {
               braid = linuxCrane.braid;
             }
           );
-          first-boot-single-disk = pkgs.testers.nixosTest (import ./tests/6-first-boot-single-disk.nix);
+          first-boot-single-disk = pkgs.testers.nixosTest (import ./tests/boot/first-boot-single-disk.nix);
           replace-failed-disk = pkgs.testers.nixosTest (
-            import ./tests/7-replace-failed-disk.nix {
+            import ./tests/cli/replace-failed-disk.nix {
               braid = linuxCrane.braid;
             }
           );
           braid-remove-disk = pkgs.testers.nixosTest (
-            import ./tests/9-braid-remove-disk.nix {
+            import ./tests/cli/braid-remove-disk.nix {
               braid = linuxCrane.braid;
             }
           );
           braid-unified = pkgs.testers.nixosTest (
-            import ./tests/12-braid-unified.nix {
+            import ./tests/cli/braid-unified.nix {
               braid = linuxCrane.braid;
             }
           );
           braid-status-rust = pkgs.testers.nixosTest (
-            import ./tests/18-braid-status-rust.nix {
+            import ./tests/cli/braid-status-rust.nix {
               braid = linuxCrane.braid;
             }
           );
           luks-header-backup = pkgs.testers.nixosTest (
-            import ./tests/21-luks-header-backup.nix {
+            import ./tests/storage/luks-header-backup.nix {
               braid = linuxCrane.braid;
             }
           );
           braid-doctor = pkgs.testers.nixosTest (
-            import ./tests/22-braid-doctor.nix {
+            import ./tests/cli/braid-doctor.nix {
               braid = linuxCrane.braid;
             }
           );
           shell-completion = pkgs.testers.nixosTest (
-            import ./tests/23-shell-completion.nix {
+            import ./tests/cli/shell-completion.nix {
               braid = linuxCrane.braid;
             }
           );
           config-key-immutability = pkgs.testers.nixosTest (
-            import ./tests/24-config-key-immutability.nix {
+            import ./tests/cli/config-key-immutability.nix {
               braid = linuxCrane.braid;
             }
           );
           braid-checkpoint-opstate = pkgs.testers.nixosTest (
-            import ./tests/25-braid-checkpoint-opstate.nix {
+            import ./tests/cli/braid-checkpoint-opstate.nix {
               braid = linuxCrane.braid;
             }
           );
           replace-live-disk = pkgs.testers.nixosTest (
-            import ./tests/26-replace-live-disk.nix {
+            import ./tests/cli/replace-live-disk.nix {
               braid = linuxCrane.braid;
             }
           );
           tool-versions = pkgs.testers.nixosTest (
-            import ./tests/17-tool-versions.nix {
+            import ./tests/cli/tool-versions.nix {
               braid-cli-unwrapped = linuxCrane.braid-cli-unwrapped;
             }
           );
           capture-tool-fixtures = pkgs.testers.nixosTest (import ./tests/capture-tool-fixtures.nix);
-          progress-monitoring = pkgs.testers.nixosTest (import ./tests/20-progress-monitoring.nix);
-          braid-module-disabled = pkgs.testers.nixosTest (import ./tests/braid-module/00-disabled.nix);
+          progress-monitoring = pkgs.testers.nixosTest (import ./tests/progress-monitoring.nix);
+          braid-module-disabled = pkgs.testers.nixosTest (import ./tests/module/disabled.nix);
           braid-module-single-disk = pkgs.testers.nixosTest (
-            import ./tests/braid-module/01-single-disk.nix {
+            import ./tests/module/single-disk.nix {
               braid = linuxCrane.braid-cli-unwrapped;
             }
           );
           braid-module-raid1 = pkgs.testers.nixosTest (
-            import ./tests/braid-module/02-raid1.nix {
+            import ./tests/module/raid1.nix {
               braid = linuxCrane.braid-cli-unwrapped;
             }
           );
           braid-module-degraded-raid1 = pkgs.testers.nixosTest (
-            import ./tests/braid-module/03-degraded-raid1.nix {
+            import ./tests/module/degraded-raid1.nix {
               braid = linuxCrane.braid-cli-unwrapped;
             }
           );
           braid-module-bad-config = pkgs.testers.nixosTest (
-            import ./tests/braid-module/04-bad-config.nix {
+            import ./tests/module/bad-config.nix {
               braid = linuxCrane.braid-cli-unwrapped;
             }
           );
           braid-module-single-disk-dead = pkgs.testers.nixosTest (
-            import ./tests/braid-module/05-single-disk-dead.nix {
+            import ./tests/module/single-disk-dead.nix {
               braid = linuxCrane.braid-cli-unwrapped;
             }
           );
           braid-module-remote-unlock = pkgs.testers.nixosTest (
-            import ./tests/braid-module/06-remote-unlock.nix {
+            import ./tests/module/remote-unlock.nix {
               braid = linuxCrane.braid-cli-unwrapped;
             }
           );
           braid-module-invalid-disk-keys =
-            import ./tests/braid-module/07-invalid-disk-keys.nix {
+            import ./tests/module/invalid-disk-keys.nix {
               inherit nixpkgs;
               system = linuxSystem;
             };

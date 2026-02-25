@@ -120,5 +120,5 @@ in
     };
   };
 
-  testScript = builtins.readFile ./05-single-disk-dead.py;
+  testScript = builtins.readFile ./single-disk-dead.py;
 }

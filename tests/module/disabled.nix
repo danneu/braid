@@ -15,5 +15,5 @@
     imports = [ ../../modules/braid ];
   };
 
-  testScript = builtins.readFile ./00-disabled.py;
+  testScript = builtins.readFile ./disabled.py;
 }
