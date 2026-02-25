@@ -1,8 +1,8 @@
 { lib, pkgs, config, ... }:
 let
   cfg = config.braid;
-  diskNames = builtins.attrNames cfg.disks;
-  byIdValues = map (name: cfg.disks.${name}.byId) diskNames;
+  diskKeys = builtins.attrNames cfg.disks;
+  byIdValues = map (name: cfg.disks.${name}.byId) diskKeys;
   inherit (builtins) map length attrValues;
   validDiskKey = name: builtins.match "[a-zA-Z][a-zA-Z0-9_-]*" name != null && builtins.stringLength name <= 32;
 in
@@ -45,13 +45,13 @@ in
   config = lib.mkIf cfg.enable {
     assertions = [
       {
-        assertion = (length diskNames) >= 1;
+        assertion = (length diskKeys) >= 1;
         message = "braid.disks must contain at least 1 disk when braid.enable = true.";
       }
       {
-        assertion = lib.all validDiskKey diskNames;
+        assertion = lib.all validDiskKey diskKeys;
         message =
-          let bad = builtins.filter (n: !validDiskKey n) diskNames;
+          let bad = builtins.filter (n: !validDiskKey n) diskKeys;
           in "braid.disks: invalid disk key(s): ${lib.concatStringsSep ", " (map (n: "'${n}'") bad)}. "
              + "Keys must start with a letter, contain only letters, digits, hyphens, or underscores, and be at most 32 characters.";
       }

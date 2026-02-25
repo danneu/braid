@@ -23,19 +23,19 @@ pub struct DiskMapEntry {
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum KeyStabilityError {
     #[error(
-        "Disk key rename/reassignment is not allowed in v1.0. Keep original key '{name}' or use explicit replace/remove+add workflow. Details: key '{name}' changed by_id from '{recorded_by_id}' to '{config_by_id}'."
+        "Disk key rename/reassignment is not allowed in v1.0. Keep original key '{key}' or use explicit replace/remove+add workflow. Details: key '{key}' changed by_id from '{recorded_by_id}' to '{config_by_id}'."
     )]
     Reassignment {
-        name: String,
+        key: String,
         recorded_by_id: String,
         config_by_id: String,
     },
     #[error(
-        "Disk key rename/reassignment is not allowed in v1.0. Keep original key '{old_name}' or use explicit replace/remove+add workflow. Details: recorded key '{old_name}' with by_id '{by_id}' now appears as '{new_name}'."
+        "Disk key rename/reassignment is not allowed in v1.0. Keep original key '{old_key}' or use explicit replace/remove+add workflow. Details: recorded key '{old_key}' with by_id '{by_id}' now appears as '{new_key}'."
     )]
     RenameDetected {
-        old_name: String,
-        new_name: String,
+        old_key: String,
+        new_key: String,
         by_id: String,
     },
 }
@@ -83,9 +83,9 @@ pub fn save_disk_map_at(path: &Path, map: &DiskMap) -> Result<(), std::io::Error
 }
 
 /// Upsert a disk entry in the map.
-pub fn record_disk(map: &mut DiskMap, name: &str, by_id: &str, luks_uuid: &str, devid: u64) {
+pub fn record_disk(map: &mut DiskMap, key: &str, by_id: &str, luks_uuid: &str, devid: u64) {
     map.disks.insert(
-        name.to_owned(),
+        key.to_owned(),
         DiskMapEntry {
             by_id: by_id.to_owned(),
             luks_uuid: luks_uuid.to_owned(),
@@ -95,9 +95,9 @@ pub fn record_disk(map: &mut DiskMap, name: &str, by_id: &str, luks_uuid: &str, 
     );
 }
 
-/// Remove a disk entry by name.
-pub fn remove_disk(map: &mut DiskMap, name: &str) {
-    map.disks.remove(name);
+/// Remove a disk entry by key.
+pub fn remove_disk(map: &mut DiskMap, key: &str) {
+    map.disks.remove(key);
 }
 
 /// Remove all entries whose devid is in the given set.
@@ -117,27 +117,27 @@ pub fn validate_config_key_stability(
     config: &Config,
     disk_map: &DiskMap,
 ) -> Result<(), KeyStabilityError> {
-    for (name, disk) in config.disks() {
-        if let Some(entry) = disk_map.disks.get(name)
+    for (key, disk) in config.disks() {
+        if let Some(entry) = disk_map.disks.get(key)
             && entry.by_id != disk.by_id.0 {
                 return Err(KeyStabilityError::Reassignment {
-                    name: name.clone(),
+                    key: key.clone(),
                     recorded_by_id: entry.by_id.clone(),
                     config_by_id: disk.by_id.0.clone(),
                 });
             }
     }
 
-    for (old_name, entry) in &disk_map.disks {
-        if config.disk_by_name(old_name).is_none()
-            && let Some((new_name, _)) = config
+    for (old_key, entry) in &disk_map.disks {
+        if config.disk_by_key(old_key).is_none()
+            && let Some((new_key, _)) = config
                 .disks()
                 .iter()
-                .find(|(new_name, disk)| *new_name != old_name && disk.by_id.0 == entry.by_id)
+                .find(|(new_key, disk)| *new_key != old_key && disk.by_id.0 == entry.by_id)
             {
                 return Err(KeyStabilityError::RenameDetected {
-                    old_name: old_name.clone(),
-                    new_name: new_name.clone(),
+                    old_key: old_key.clone(),
+                    new_key: new_key.clone(),
                     by_id: entry.by_id.clone(),
                 });
             }
@@ -234,7 +234,7 @@ mod tests {
     }
 
     #[test]
-    fn remove_disk_noop_for_missing_name() {
+    fn remove_disk_noop_for_missing_key() {
         let mut map = DiskMap::new();
         record_disk(&mut map, "d1", "/by-id/1", "u1", 1);
 
@@ -326,7 +326,7 @@ mod tests {
     }
 
     #[test]
-    fn key_stability_fails_on_same_name_different_by_id() {
+    fn key_stability_fails_on_same_key_different_by_id() {
         let mut map = DiskMap::new();
         record_disk(&mut map, "disk1", "/dev/disk/by-id/virtio-disk1", "u1", 1);
         let cfg = test_config(&[("disk1", "/dev/disk/by-id/virtio-disk9")]);
@@ -335,7 +335,7 @@ mod tests {
         assert_eq!(
             err,
             KeyStabilityError::Reassignment {
-                name: "disk1".to_owned(),
+                key: "disk1".to_owned(),
                 recorded_by_id: "/dev/disk/by-id/virtio-disk1".to_owned(),
                 config_by_id: "/dev/disk/by-id/virtio-disk9".to_owned(),
             }
@@ -352,8 +352,8 @@ mod tests {
         assert_eq!(
             err,
             KeyStabilityError::RenameDetected {
-                old_name: "old".to_owned(),
-                new_name: "new".to_owned(),
+                old_key: "old".to_owned(),
+                new_key: "new".to_owned(),
                 by_id: "/dev/disk/by-id/virtio-disk1".to_owned(),
             }
         );

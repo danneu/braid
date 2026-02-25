@@ -51,7 +51,7 @@ fn disk_list(model: &Model) -> Paragraph<'_> {
     let lines: Vec<Line> = std::iter::once(Line::from("Disks"))
         .chain(
             model
-                .disk_names
+                .disk_keys
                 .iter()
                 .enumerate()
                 .map(|(i, name)| Line::from(format!("  {}  {}", i + 1, name))),
@@ -142,7 +142,7 @@ mod tests {
         out
     }
 
-    fn sample_disk_names() -> Vec<String> {
+    fn sample_disk_keys() -> Vec<String> {
         vec![
             "toshiba".to_owned(),
             "ironwolf".to_owned(),
@@ -152,14 +152,14 @@ mod tests {
 
     #[test]
     fn snapshot_loading() {
-        let model = Model::new_for_test(sample_disk_names(), PoolStatus::Loading);
+        let model = Model::new_for_test(sample_disk_keys(), PoolStatus::Loading);
         let terminal = render(&model, 60, 20);
         insta::assert_snapshot!(buffer_to_string(&terminal));
     }
 
     #[test]
     fn snapshot_not_mounted() {
-        let model = Model::new_for_test(sample_disk_names(), PoolStatus::NotMounted);
+        let model = Model::new_for_test(sample_disk_keys(), PoolStatus::NotMounted);
         let terminal = render(&model, 60, 20);
         insta::assert_snapshot!(buffer_to_string(&terminal));
     }
@@ -173,7 +173,7 @@ mod tests {
             used: 2_308_094_370_816,  // ~2.1 TiB
             total: 5_937_955_045_376, // ~5.4 TiB
         };
-        let model = Model::new_for_test(sample_disk_names(), PoolStatus::Mounted(pool));
+        let model = Model::new_for_test(sample_disk_keys(), PoolStatus::Mounted(pool));
         let terminal = render(&model, 60, 20);
         insta::assert_snapshot!(buffer_to_string(&terminal));
     }
@@ -181,7 +181,7 @@ mod tests {
     #[test]
     fn snapshot_error() {
         let model = Model::new_for_test(
-            sample_disk_names(),
+            sample_disk_keys(),
             PoolStatus::Error("command failed: findmnt exited 1".to_owned()),
         );
         let terminal = render(&model, 60, 20);

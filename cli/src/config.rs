@@ -60,11 +60,11 @@ impl Config {
         &self.disks
     }
 
-    pub fn disk_by_name(&self, name: &str) -> Option<&DiskConfig> {
-        self.disks.get(name)
+    pub fn disk_by_key(&self, key: &str) -> Option<&DiskConfig> {
+        self.disks.get(key)
     }
 
-    pub fn names(&self) -> Vec<&String> {
+    pub fn keys(&self) -> Vec<&String> {
         self.disks.keys().collect()
     }
 
@@ -73,16 +73,16 @@ impl Config {
     }
 }
 
-/// Returns the mapper name for a named disk: braid-<name>
-pub fn mapper_name(name: &str) -> MapperName {
-    MapperName(format!("braid-{name}"))
+/// Returns the mapper name for a disk key: braid-<key>
+pub fn mapper_name(key: &str) -> MapperName {
+    MapperName(format!("braid-{key}"))
 }
 
-fn is_valid_disk_key(name: &str) -> bool {
-    if name.len() > 32 {
+fn is_valid_disk_key(key: &str) -> bool {
+    if key.len() > 32 {
         return false;
     }
-    let mut chars = name.chars();
+    let mut chars = key.chars();
     match chars.next() {
         Some(c) if c.is_ascii_alphabetic() => {}
         _ => return false,
@@ -162,7 +162,7 @@ mod tests {
             r#"{"disks":{"toshiba":{"by_id":"/dev/disk/by-id/a"}},"mount_point":"/mnt/storage"}"#;
         let cfg: Config = serde_json::from_str(raw).expect("config should parse");
         assert_eq!(cfg.disks().len(), 1);
-        assert!(cfg.disk_by_name("toshiba").is_some());
+        assert!(cfg.disk_by_key("toshiba").is_some());
         assert_eq!(cfg.mount_point(), "/mnt/storage");
     }
 
@@ -237,8 +237,8 @@ mod tests {
             },
         );
         let cfg = Config::new(disks, "/mnt/storage".to_owned()).unwrap();
-        let names: Vec<&str> = cfg.names().into_iter().map(|s| s.as_str()).collect();
-        assert_eq!(names, vec!["alpha", "zebra"]);
+        let keys: Vec<&str> = cfg.keys().into_iter().map(|s| s.as_str()).collect();
+        assert_eq!(keys, vec!["alpha", "zebra"]);
     }
 
     #[test]
@@ -251,7 +251,7 @@ mod tests {
             },
         );
         let err = Config::new(disks, "/mnt/storage".to_owned())
-            .expect_err("digit-starting name should fail");
+            .expect_err("digit-starting key should fail");
         assert!(matches!(err, ConfigBuildError::InvalidDiskKey(_)));
     }
 
@@ -265,7 +265,7 @@ mod tests {
             },
         );
         let err = Config::new(disks, "/mnt/storage".to_owned())
-            .expect_err("hyphen-starting name should fail");
+            .expect_err("hyphen-starting key should fail");
         assert!(matches!(err, ConfigBuildError::InvalidDiskKey(_)));
     }
 
@@ -279,7 +279,7 @@ mod tests {
             },
         );
         let err = Config::new(disks, "/mnt/storage".to_owned())
-            .expect_err("underscore-starting name should fail");
+            .expect_err("underscore-starting key should fail");
         assert!(matches!(err, ConfigBuildError::InvalidDiskKey(_)));
     }
 
@@ -293,7 +293,7 @@ mod tests {
             },
         );
         let err =
-            Config::new(disks, "/mnt/storage".to_owned()).expect_err("space in name should fail");
+            Config::new(disks, "/mnt/storage".to_owned()).expect_err("space in key should fail");
         assert!(matches!(err, ConfigBuildError::InvalidDiskKey(_)));
     }
 
@@ -307,50 +307,50 @@ mod tests {
             },
         );
         let err =
-            Config::new(disks, "/mnt/storage".to_owned()).expect_err("empty name should fail");
+            Config::new(disks, "/mnt/storage".to_owned()).expect_err("empty key should fail");
         assert!(matches!(err, ConfigBuildError::InvalidDiskKey(_)));
     }
 
     #[test]
     fn rejects_disk_key_too_long() {
-        let name = "a".repeat(33);
+        let key = "a".repeat(33);
         let mut disks = BTreeMap::new();
         disks.insert(
-            name,
+            key,
             DiskConfig {
                 by_id: ByIdPath("/dev/disk/by-id/a".to_owned()),
             },
         );
         let err =
-            Config::new(disks, "/mnt/storage".to_owned()).expect_err("33-char name should fail");
+            Config::new(disks, "/mnt/storage".to_owned()).expect_err("33-char key should fail");
         assert!(matches!(err, ConfigBuildError::InvalidDiskKey(_)));
     }
 
     #[test]
     fn accepts_disk_key_at_max_length() {
-        let name = "a".repeat(32);
+        let key = "a".repeat(32);
         let mut disks = BTreeMap::new();
         disks.insert(
-            name,
+            key,
             DiskConfig {
                 by_id: ByIdPath("/dev/disk/by-id/a".to_owned()),
             },
         );
-        Config::new(disks, "/mnt/storage".to_owned()).expect("32-char name should be valid");
+        Config::new(disks, "/mnt/storage".to_owned()).expect("32-char key should be valid");
     }
 
     #[test]
     fn accepts_valid_disk_keys() {
-        for name in ["toshiba", "disk1", "my-disk", "my_disk", "A", "Z1-b2-c3"] {
+        for key in ["toshiba", "disk1", "my-disk", "my_disk", "A", "Z1-b2-c3"] {
             let mut disks = BTreeMap::new();
             disks.insert(
-                name.to_owned(),
+                key.to_owned(),
                 DiskConfig {
-                    by_id: ByIdPath(format!("/dev/disk/by-id/{name}")),
+                    by_id: ByIdPath(format!("/dev/disk/by-id/{key}")),
                 },
             );
             Config::new(disks, "/mnt/storage".to_owned())
-                .unwrap_or_else(|e| panic!("name '{name}' should be valid, got: {e}"));
+                .unwrap_or_else(|e| panic!("key '{key}' should be valid, got: {e}"));
         }
     }
 }

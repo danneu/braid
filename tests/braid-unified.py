@@ -20,11 +20,11 @@ passphrase = "testpassphrase"
 luks_opts = "--pbkdf pbkdf2 --pbkdf-force-iterations 1000"
 
 
-def add_disk(name):
+def add_disk(key):
     return (
         f"BRAID_PASSPHRASE='{passphrase}' "
         f"BRAID_LUKS_OPTS='{luks_opts}' "
-        f"braid add {name} --yes"
+        f"braid add {key} --yes"
     )
 
 

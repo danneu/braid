@@ -31,18 +31,18 @@ pub struct OpArgs {
 }
 
 impl OpArgs {
-    pub fn add(name: &str) -> Self {
+    pub fn add(key: &str) -> Self {
         Self {
-            disk: Some(name.to_owned()),
+            disk: Some(key.to_owned()),
             old_disk: None,
             new_disk: None,
             missing_id: None,
         }
     }
 
-    pub fn remove(name: &str) -> Self {
+    pub fn remove(key: &str) -> Self {
         Self {
-            disk: Some(name.to_owned()),
+            disk: Some(key.to_owned()),
             old_disk: None,
             new_disk: None,
             missing_id: None,
@@ -58,11 +58,11 @@ impl OpArgs {
         }
     }
 
-    pub fn replace(old_name: &str, new_name: &str, missing_id: Option<u64>) -> Self {
+    pub fn replace(old_key: &str, new_key: &str, missing_id: Option<u64>) -> Self {
         Self {
             disk: None,
-            old_disk: Some(old_name.to_owned()),
-            new_disk: Some(new_name.to_owned()),
+            old_disk: Some(old_key.to_owned()),
+            new_disk: Some(new_key.to_owned()),
             missing_id,
         }
     }

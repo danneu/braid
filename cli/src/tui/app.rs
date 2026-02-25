@@ -22,7 +22,7 @@ pub enum PoolStatus {
 
 pub struct Model {
     pub running: bool,
-    pub disk_names: Vec<String>,
+    pub disk_keys: Vec<String>,
     pub pool: PoolStatus,
     pub mount_point: String,
     pub commands: HashMap<CmdId, CommandState>,
@@ -30,13 +30,13 @@ pub struct Model {
 }
 
 impl Model {
-    pub fn new(disk_names: Vec<String>, mount_point: String) -> (Self, Vec<Effect>) {
+    pub fn new(disk_keys: Vec<String>, mount_point: String) -> (Self, Vec<Effect>) {
         let effects = vec![Effect::ProbePool {
             mount_point: mount_point.clone(),
         }];
         let model = Self {
             running: true,
-            disk_names,
+            disk_keys,
             pool: PoolStatus::Loading,
             mount_point,
             commands: HashMap::new(),
@@ -46,10 +46,10 @@ impl Model {
     }
 
     #[cfg(test)]
-    pub fn new_for_test(disk_names: Vec<String>, pool: PoolStatus) -> Self {
+    pub fn new_for_test(disk_keys: Vec<String>, pool: PoolStatus) -> Self {
         Self {
             running: true,
-            disk_names,
+            disk_keys,
             pool,
             mount_point: String::new(),
             commands: HashMap::new(),

@@ -38,7 +38,7 @@ pub struct RemoveStep {
 pub fn cmd_remove<R: CommandRunner + Sync>(
     runner: &R,
     config_path: &Path,
-    name: &str,
+    key: &str,
     dry_run: bool,
     yes: bool,
     progress: ProgressOutput,
@@ -65,13 +65,13 @@ pub fn cmd_remove<R: CommandRunner + Sync>(
         ));
     }
 
-    let mn = mapper_name(name);
+    let mn = mapper_name(key);
 
     // Is the disk present in the pool?
     let in_pool = pool.devices.iter().any(|d| d.mapper == mn);
 
     if !in_pool {
-        let mut msg = format!("disk '{}' not found in pool.", name);
+        let mut msg = format!("disk '{}' not found in pool.", key);
         if pool.missing_count > 0 {
             msg.push_str(&format!(
                 " ({} missing device{} detected. Use 'braid remove-missing' to remove missing devices.)",
@@ -82,7 +82,7 @@ pub fn cmd_remove<R: CommandRunner + Sync>(
         return Err(RemoveError::Validation(msg));
     }
 
-    let steps = compile_remove_present_steps(name, &mn, &pool)?;
+    let steps = compile_remove_present_steps(key, &mn, &pool)?;
 
     if dry_run {
         for step in &steps {
@@ -97,7 +97,7 @@ pub fn cmd_remove<R: CommandRunner + Sync>(
     }
 
     // Resolve checkpoint before any mutating requests.
-    let args_parts: Vec<String> = vec!["remove".into(), name.into()];
+    let args_parts: Vec<String> = vec!["remove".into(), key.into()];
     let args_refs: Vec<&str> = args_parts.iter().map(|s| s.as_str()).collect();
     let args_hash = hash_args(&args_refs);
 
@@ -105,7 +105,7 @@ pub fn cmd_remove<R: CommandRunner + Sync>(
         &config_raw,
         InvocationCtx {
             op: OpKind::Remove,
-            op_args: OpArgs::remove(name),
+            op_args: OpArgs::remove(key),
             args_hash: args_hash.clone(),
             config_hash: config_hash(&config_raw),
         },
@@ -119,7 +119,7 @@ pub fn cmd_remove<R: CommandRunner + Sync>(
         ResumeGate::ResumeFrom(cp) => {
             eprintln!(
                 "Resuming previous 'braid remove {}' at phase {}.",
-                name,
+                key,
                 cp.phase.as_env_value()
             );
             Some(cp)
@@ -149,7 +149,7 @@ pub fn cmd_remove<R: CommandRunner + Sync>(
         } else {
             eprintln!(
                 "Remove {} from pool? Data will migrate off this disk.",
-                name
+                key
             );
             eprint!("Type 'yes' to continue: ");
             let mut input = String::new();
@@ -167,13 +167,13 @@ pub fn cmd_remove<R: CommandRunner + Sync>(
         let cp = new_checkpoint(
             &SystemClock,
             OpKind::Remove,
-            OpArgs::remove(name),
+            OpArgs::remove(key),
             Phase::RemoveStart,
             config_hash(&config_raw),
             args_hash,
             PoolFingerprint::from_pool_state(&pool),
             TargetSnapshot {
-                primary: Some(name.to_owned()),
+                primary: Some(key.to_owned()),
                 secondary: None,
                 missing_id: None,
             },
@@ -189,18 +189,18 @@ pub fn cmd_remove<R: CommandRunner + Sync>(
 
     // Update disk map (best effort — never fail the remove)
     disk_map::update_disk_map_best_effort(|map| {
-        disk_map::remove_disk(map, name);
+        disk_map::remove_disk(map, key);
     });
 
     eprintln!(
         "Done. If not already done: remove '{}' from braid.disks and run nixos-rebuild switch.",
-        name
+        key
     );
     Ok(())
 }
 
 fn compile_remove_present_steps(
-    _name: &str,
+    _key: &str,
     mn: &MapperName,
     pool: &PoolState,
 ) -> Result<Vec<RemoveStep>, RemoveError> {

@@ -206,7 +206,7 @@ One passphrase prompt opens all available LUKS devices and mounts the pool. Work
 
 ## Shell Completions
 
-Tab completion for subcommands, flags, and disk names works out of the box on NixOS when `braid.enable = true`. Completions are registered for bash, zsh, and fish.
+Tab completion for subcommands, flags, and disk keys works out of the box on NixOS when `braid.enable = true`. Completions are registered for bash, zsh, and fish.
 
 ```
 braid <TAB>           # → add  remove  remove-missing  replace  status  doctor

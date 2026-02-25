@@ -18,12 +18,12 @@ passphrase = "testpassphrase"
 luks_opts = "--pbkdf pbkdf2 --pbkdf-force-iterations 1000"
 
 
-def add_cmd(name):
-    """Build a `braid add <name> --yes` command with env vars."""
+def add_cmd(key):
+    """Build a `braid add <key> --yes` command with env vars."""
     return (
         f"BRAID_PASSPHRASE='{passphrase}' "
         f"BRAID_LUKS_OPTS='{luks_opts}' "
-        f"braid add {name} --yes"
+        f"braid add {key} --yes"
     )
 
 
@@ -39,7 +39,7 @@ with subtest("First disk creates single-drive pool"):
     df_output = machine.succeed("btrfs fi df /mnt/storage")
     assert "Data, single" in df_output, f"Expected single profile:\n{df_output}"
 
-    # LUKS mapper exists with correct name (braid-<name>)
+    # LUKS mapper exists with correct name (braid-<key>)
     machine.succeed("test -e /dev/mapper/braid-disk1")
 
     # Can write data
@@ -80,7 +80,7 @@ with subtest("All data survived third disk addition"):
 
 # --- Phase 4: Validation errors ---
 
-with subtest("Non-existent name fails add"):
+with subtest("Non-existent key fails add"):
     machine.fail(add_cmd("nonexistent"))
 
 with subtest("Already-in-pool disk is a no-op (exit 0)"):

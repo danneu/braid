@@ -49,7 +49,7 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
     config_path: &Path,
-    name: &str,
+    key: &str,
     dry_run: bool,
     yes: bool,
     passphrase_file: Option<&Path>,
@@ -61,16 +61,16 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     disk_map::validate_config_key_stability(&config, &disk_map_state)
         .map_err(|e| AddError::Validation(e.to_string()))?;
 
-    let disk = config.disk_by_name(name).ok_or_else(|| {
-        let available: Vec<_> = config.names().into_iter().map(|s| s.as_str()).collect();
+    let disk = config.disk_by_key(key).ok_or_else(|| {
+        let available: Vec<_> = config.keys().into_iter().map(|s| s.as_str()).collect();
         AddError::Validation(format!(
             "disk '{}' not found in config. Available: {}",
-            name,
+            key,
             available.join(", ")
         ))
     })?;
 
-    let probed = probe_config_disk(runner, fs, name, disk)?;
+    let probed = probe_config_disk(runner, fs, key, disk)?;
     let pool = match probe_pool(runner, config.mount_point()) {
         Ok(p) => p,
         Err(ProbeError::NotBtrfs { .. }) => PoolState {
@@ -83,7 +83,7 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     };
 
     // Compile steps based on actual disk state
-    let steps = compile_add_steps(name, &probed, &pool, &config)?;
+    let steps = compile_add_steps(key, &probed, &pool, &config)?;
 
     if dry_run {
         for step in &steps {
@@ -93,12 +93,12 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     }
 
     // Resolve checkpoint before any mutating requests.
-    let args_hash = hash_args(&["add", name]);
+    let args_hash = hash_args(&["add", key]);
     let resume = match resolve_resume_gate(
         &config_raw,
         InvocationCtx {
             op: OpKind::Add,
-            op_args: OpArgs::add(name),
+            op_args: OpArgs::add(key),
             args_hash: args_hash.clone(),
             config_hash: config_hash(&config_raw),
         },
@@ -112,7 +112,7 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         ResumeGate::ResumeFrom(cp) => {
             eprintln!(
                 "Resuming previous 'braid add {}' at phase {}.",
-                name,
+                key,
                 cp.phase.as_env_value()
             );
             Some(cp)
@@ -130,33 +130,33 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         eprintln!("Balancing to RAID1...");
         pool_balance_raid1(runner, config.mount_point(), progress)?;
         clear_checkpoint(checkpoint_path);
-        finalize_add_disk_map_best_effort(runner, config.mount_point(), name, &disk.by_id.0);
+        finalize_add_disk_map_best_effort(runner, config.mount_point(), key, &disk.by_id.0);
         eprintln!("Balance complete.");
-        eprintln!("Done. {} is now part of the pool.", name);
+        eprintln!("Done. {} is now part of the pool.", key);
         return Ok(());
     }
 
     if steps.is_empty() {
-        eprintln!("Nothing to do — {} is already a pool member.", name);
+        eprintln!("Nothing to do — {} is already a pool member.", key);
         return Ok(());
     }
 
     // Read passphrase
     let passphrase = read_passphrase(passphrase_file, yes)?;
-    let mn = mapper_name(name);
+    let mn = mapper_name(key);
 
     // Execute steps
     match probed.state {
         ConfigDiskState::Absent => {
             return Err(AddError::Validation(format!(
                 "disk '{}' ({}) is not present. Is it plugged in?",
-                name, disk.by_id
+                key, disk.by_id
             )));
         }
         ConfigDiskState::PresentNotLuks => {
             // Fresh disk — LUKS format
             if !yes {
-                eprintln!("{}", add_confirm_message(name, &disk.by_id.0));
+                eprintln!("{}", add_confirm_message(key, &disk.by_id.0));
                 eprint!("Type 'yes' to continue: ");
                 let mut input = String::new();
                 std::io::stdin().read_line(&mut input).map_err(|e| {
@@ -191,12 +191,12 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             let backup_path = backup_luks_header(runner, &disk.by_id.0, &mn.0)?;
             eprintln!("LUKS header backed up: {}", backup_path.display());
 
-            ensure_luks_open(runner, fs, name, disk, &passphrase)?;
+            ensure_luks_open(runner, fs, key, disk, &passphrase)?;
             eprintln!("LUKS opened: {} → {}", disk.by_id, mn);
         }
         ConfigDiskState::PresentLuks { mapper_open, .. } => {
             if !mapper_open {
-                ensure_luks_open(runner, fs, name, disk, &passphrase)?;
+                ensure_luks_open(runner, fs, key, disk, &passphrase)?;
                 eprintln!("LUKS opened: {} → {}", disk.by_id, mn);
             }
 
@@ -232,13 +232,13 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             let cp = new_checkpoint(
                 &SystemClock,
                 OpKind::Add,
-                OpArgs::add(name),
+                OpArgs::add(key),
                 Phase::AddBalanceRaid1,
                 config_hash(&config_raw),
-                hash_args(&["add", name]),
+                hash_args(&["add", key]),
                 PoolFingerprint::from_pool_state(&pool_after_add),
                 TargetSnapshot {
-                    primary: Some(name.to_owned()),
+                    primary: Some(key.to_owned()),
                     secondary: None,
                     missing_id: None,
                 },
@@ -254,44 +254,44 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         }
     }
 
-    finalize_add_disk_map_best_effort(runner, config.mount_point(), name, &disk.by_id.0);
+    finalize_add_disk_map_best_effort(runner, config.mount_point(), key, &disk.by_id.0);
 
-    eprintln!("Done. {} is now part of the pool.", name);
+    eprintln!("Done. {} is now part of the pool.", key);
     Ok(())
 }
 
 fn finalize_add_disk_map_best_effort<R: CommandRunner + Sync>(
     runner: &R,
     mount_point: &str,
-    name: &str,
+    key: &str,
     by_id: &str,
 ) {
     // Best effort only: never fail add due to disk-map write issues.
     if let Ok(pool_after) = probe_pool(runner, mount_point) {
-        let mn = mapper_name(name);
+        let mn = mapper_name(key);
         if let Some(dev) = pool_after.devices.iter().find(|d| d.mapper == mn) {
             disk_map::update_disk_map_best_effort(|map| {
-                disk_map::record_disk(map, name, by_id, &dev.luks_uuid.0, dev.devid);
+                disk_map::record_disk(map, key, by_id, &dev.luks_uuid.0, dev.devid);
             });
         }
     }
 }
 
 fn compile_add_steps(
-    name: &str,
+    key: &str,
     probed: &ConfigDisk,
     pool: &PoolState,
     config: &Config,
 ) -> Result<Vec<AddStep>, AddError> {
-    let mn = mapper_name(name);
-    let disk = config.disk_by_name(name).unwrap();
+    let mn = mapper_name(key);
+    let disk = config.disk_by_key(key).unwrap();
     let mut steps = Vec::new();
 
     match &probed.state {
         ConfigDiskState::Absent => {
             return Err(AddError::Validation(format!(
                 "disk '{}' ({}) is not present. Is it plugged in?",
-                name, disk.by_id
+                key, disk.by_id
             )));
         }
         ConfigDiskState::PresentNotLuks => {
@@ -349,10 +349,10 @@ fn compile_add_steps(
     Ok(steps)
 }
 
-fn add_confirm_message(name: &str, by_id: &str) -> String {
+fn add_confirm_message(key: &str, by_id: &str) -> String {
     format!(
         "WARNING: This will LUKS-format {} ({}). Existing data will be inaccessible.",
-        name, by_id
+        key, by_id
     )
 }
 
@@ -449,7 +449,7 @@ mod tests {
     fn add_confirm_message_warns_about_luks_format() {
         let msg = add_confirm_message("data1", "/dev/disk/by-id/usb-WD_1234");
         assert!(msg.contains("LUKS-format"), "should mention LUKS-format");
-        assert!(msg.contains("data1"), "should mention disk name");
+        assert!(msg.contains("data1"), "should mention disk key");
         assert!(
             msg.contains("/dev/disk/by-id/usb-WD_1234"),
             "should mention by-id"

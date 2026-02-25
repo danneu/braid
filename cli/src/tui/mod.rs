@@ -23,8 +23,8 @@ pub fn run(config_path: &Path) -> io::Result<()> {
     let config = config_read(config_path).map_err(|e| io::Error::other(e.to_string()))?;
     let mut terminal = ratatui::init();
     let (_input, cmd_tx, rx) = InputHandler::new();
-    let disk_names: Vec<String> = config.disks().keys().cloned().collect();
-    let (mut model, init_effects) = Model::new(disk_names, config.mount_point().to_owned());
+    let disk_keys: Vec<String> = config.disks().keys().cloned().collect();
+    let (mut model, init_effects) = Model::new(disk_keys, config.mount_point().to_owned());
     for effect in init_effects {
         execute_effect(effect, &cmd_tx);
     }

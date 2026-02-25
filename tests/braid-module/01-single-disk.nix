@@ -17,8 +17,8 @@
 let
   passphrase = "testpassphrase";
   keyFile = pkgs.writeText "luks-test-key" passphrase;
-  diskNames = [ "disk1" ];
-  mapperNames = map (d: "braid-${d}") diskNames;
+  diskKeys = [ "disk1" ];
+  mapperNames = map (d: "braid-${d}") diskKeys;
 
   # systemd-cryptsetup-generator escapes hyphens in unit instance names.
   cryptsetupUnit = name:
@@ -33,7 +33,7 @@ in
     braid = {
       enable = true;
       package = braid;
-      disks = lib.genAttrs diskNames (d: { byId = "/dev/disk/by-id/virtio-${d}"; });
+      disks = lib.genAttrs diskKeys (d: { byId = "/dev/disk/by-id/virtio-${d}"; });
     };
 
     virtualisation.emptyDiskImages = [

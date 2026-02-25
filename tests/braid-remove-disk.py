@@ -1,12 +1,12 @@
 # Test: braid remove / braid remove-missing lifecycle
 #
 # What: Tests the two-command split for disk removal:
-#   - `braid remove <name>` only removes present disks from the pool
+#   - `braid remove <key>` only removes present disks from the pool
 #   - `braid remove-missing` explicitly removes missing/dead devices
 #
 # Why: `braid remove` previously had a dangerous implicit fallback — if a disk
 # wasn't found in the pool but btrfs reported missing devices, it silently
-# performed `btrfs device remove missing`. A typo or stale name could cause a
+# performed `btrfs device remove missing`. A typo or stale key could cause a
 # destructive action on an unrelated device. The fix: `braid remove` only
 # removes present disks; removing missing devices is a separate explicit
 # command `braid remove-missing`.
@@ -28,18 +28,18 @@ def read_disk_map():
     return json.loads(raw)
 
 
-def add_cmd(name):
-    """Build a `braid add <name> --yes` command with env vars."""
+def add_cmd(key):
+    """Build a `braid add <key> --yes` command with env vars."""
     return (
         f"BRAID_PASSPHRASE='{passphrase}' "
         f"BRAID_LUKS_OPTS='{luks_opts}' "
-        f"braid add {name} --yes"
+        f"braid add {key} --yes"
     )
 
 
-def remove_cmd(name, extra=""):
-    """Build a `braid remove <name> --yes` command."""
-    return f"braid remove {name} --yes {extra}"
+def remove_cmd(key, extra=""):
+    """Build a `braid remove <key> --yes` command."""
+    return f"braid remove {key} --yes {extra}"
 
 
 def remove_missing_cmd(extra=""):

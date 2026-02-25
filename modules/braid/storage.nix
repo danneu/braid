@@ -1,7 +1,7 @@
 { config, lib, pkgs, ... }:
 let
   cfg = config.braid;
-  diskNames = builtins.attrNames cfg.disks;
+  diskKeys = builtins.attrNames cfg.disks;
 
   # Mapper names are braid-<name> (e.g. braid-toshiba)
   mapperName = name: "braid-${name}";
@@ -24,12 +24,12 @@ in
           device = cfg.disks.${name}.byId;
           crypttabExtraOpts = [ "nofail" "x-systemd.device-timeout=10s" ];
         };
-      }) diskNames);
+      }) diskKeys);
 
       systemd.services.btrfs-device-scan = {
         description = "Scan for btrfs multi-device filesystems";
-        after = map cryptsetupUnit diskNames;
-        wants = map cryptsetupUnit diskNames;
+        after = map cryptsetupUnit diskKeys;
+        wants = map cryptsetupUnit diskKeys;
         before = [ "initrd-fs.target" ];
         wantedBy = [ "initrd-fs.target" ];
         unitConfig.DefaultDependencies = false;
@@ -42,7 +42,7 @@ in
     # and initrd LUKS+mount handle the actual mount. This entry exists so NixOS
     # knows about the mount point for systemctl targets.
     fileSystems.${cfg.mountPoint} = {
-      device = "/dev/mapper/${mapperName (builtins.head diskNames)}";
+      device = "/dev/mapper/${mapperName (builtins.head diskKeys)}";
       fsType = "btrfs";
       neededForBoot = true;
       options = [
@@ -93,7 +93,7 @@ in
           else
             echo "braid-unlock: WARNING: ${name} not present — skipping" >&2
           fi
-        '') diskNames}
+        '') diskKeys}
 
         if [ -z "$opened" ]; then
           echo "braid-unlock: ERROR: no disks opened, cannot mount pool" >&2

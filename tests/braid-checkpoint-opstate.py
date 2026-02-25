@@ -49,14 +49,14 @@ def write_config(mount_point="/mnt/storage"):
     machine.succeed(f"echo '{escaped}' > {config_path}")
 
 
-def add(name, env=""):
+def add(key, env=""):
     prefix = (
         f"BRAID_PASSPHRASE='{passphrase}' "
         f"BRAID_LUKS_OPTS='{luks_opts}' "
     )
     if env:
         prefix += f"{env} "
-    return f"{prefix}braid --config {config_path} add {name} --yes"
+    return f"{prefix}braid --config {config_path} add {key} --yes"
 
 
 def remove(name, env=""):

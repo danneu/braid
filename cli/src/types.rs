@@ -54,7 +54,7 @@ pub struct PoolDevice {
 /// Pre-probed state of each config disk (produced by probe, consumed by commands).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigDisk {
-    pub name: String,
+    pub key: String,
     pub by_id_path: ByIdPath,
     pub state: ConfigDiskState,
 }

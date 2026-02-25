@@ -16,15 +16,15 @@ Replace plan/apply with five intent commands:
 
 | Command | Purpose | Risk |
 |---------|---------|------|
-| `braid add <name>` | Format + join pool, or join existing LUKS device | Destructive (new disk) or safe (existing LUKS) |
-| `braid remove <name>` | Migrate data off present disk, detach from pool | Long-running |
+| `braid add <key>` | Format + join pool, or join existing LUKS device | Destructive (new disk) or safe (existing LUKS) |
+| `braid remove <key>` | Migrate data off present disk, detach from pool | Long-running |
 | `braid remove-missing` | Remove a missing/dead device from the pool | Long-running |
-| `braid replace --old <name> --new <name>` | Add new, rebalance, then evict old (live or dead) | Transactional (add-first ordering) |
+| `braid replace --old <key> --new <key>` | Add new, rebalance, then evict old (live or dead) | Transactional (add-first ordering) |
 | `braid status` | Display pool health and disk info | Read-only |
 
-### Named disks
+### Disk keys
 
-Config changed from a list of by-id paths to a named attrset:
+Config changed from a list of by-id paths to a keyed attrset:
 
 ```nix
 braid.disks = {
@@ -33,13 +33,13 @@ braid.disks = {
 };
 ```
 
-Mapper names are `braid-<name>` (e.g., `braid-toshiba`) — human-friendly, debuggable in lsblk/systemd logs, deterministic.
+Mapper names are `braid-<key>` (e.g., `braid-toshiba`) — human-friendly, debuggable in lsblk/systemd logs, deterministic.
 
 ### Safety model
 
 The old architecture used a structural code boundary — `luksFormat` was literally unreachable from `apply`. The new architecture replaces this with:
 
-1. **Explicit operator intent**: user names a specific disk and confirms
+1. **Explicit operator intent**: user specifies a disk key and confirms
 2. **Superblock guard**: before any `mkfs.btrfs`, the code opens the LUKS device and checks for an existing btrfs superblock. If found, the device is a returning member and `add` becomes a no-op.
 3. **Confirmation calibrated to risk**: destructive operations (LUKS format) require explicit confirmation; safe operations (opening existing LUKS, adding to pool) proceed after simple yes/no.
 4. **Disk key immutability in v1.0**: mutating commands validate config keys against recorded disk identity and reject key rename/reassignment. Operators must use explicit `replace` or `remove`+`add` workflows instead of renaming keys in config.
@@ -75,4 +75,4 @@ Per-command checkpoint (`/var/lib/braid/op-state.json`) with strict fail-closed 
 
 - Five commands instead of three (no init-disk, no plan, no apply; `remove` split into `remove` + `remove-missing`)
 - Every command supports `--dry-run` and `--yes` for scripting
-- Tab completion returns disk names from config
+- Tab completion returns disk keys from config

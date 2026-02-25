@@ -1,4 +1,4 @@
-# Test: braid-module-invalid-disk-names
+# Test: braid-module-invalid-disk-keys
 #
 # What: Evaluates the braid module with invalid and valid disk keys to verify
 # that assertion validation fires correctly. This is an eval-time test — no VM
@@ -53,7 +53,7 @@ let
     then "echo 'PASS: ${name} correctly accepted'"
     else "echo 'FAIL: ${name} should have been accepted' && exit 1";
 in
-pkgs.runCommand "braid-module-invalid-disk-names" {} ''
+pkgs.runCommand "braid-module-invalid-disk-keys" {} ''
   ${checkReject "1startsWithDigit" { "1startsWithDigit" = { byId = "/dev/disk/by-id/a"; }; }}
   ${checkReject "-startsWithHyphen" { "-startsWithHyphen" = { byId = "/dev/disk/by-id/b"; }; }}
   ${checkReject "_startsWithUnderscore" { "_bad" = { byId = "/dev/disk/by-id/c"; }; }}

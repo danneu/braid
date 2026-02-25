@@ -52,12 +52,12 @@ pub enum ProbeError {
 pub fn probe_config_disk<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
-    name: &str,
+    key: &str,
     disk: &DiskConfig,
 ) -> Result<ConfigDisk, ProbeError> {
     if !fs.exists(&disk.by_id.0) {
         return Ok(ConfigDisk {
-            name: name.to_owned(),
+            key: key.to_owned(),
             by_id_path: disk.by_id.clone(),
             state: ConfigDiskState::Absent,
         });
@@ -71,7 +71,7 @@ pub fn probe_config_disk<R: CommandRunner, F: Filesystem + ?Sized>(
         Ok(out) => out.uuid,
         Err(ParseError::CommandFailed { .. }) => {
             return Ok(ConfigDisk {
-                name: name.to_owned(),
+                key: key.to_owned(),
                 by_id_path: disk.by_id.clone(),
                 state: ConfigDiskState::PresentNotLuks,
             });
@@ -79,11 +79,11 @@ pub fn probe_config_disk<R: CommandRunner, F: Filesystem + ?Sized>(
         Err(e) => return Err(ProbeError::Parse(e)),
     };
 
-    let mn = mapper_name(name);
+    let mn = mapper_name(key);
     let mapper_open = fs.exists(&format!("/dev/mapper/{}", mn.0));
 
     Ok(ConfigDisk {
-        name: name.to_owned(),
+        key: key.to_owned(),
         by_id_path: disk.by_id.clone(),
         state: ConfigDiskState::PresentLuks { uuid, mapper_open },
     })
@@ -248,7 +248,7 @@ mod tests {
         let d = disk("/dev/disk/by-id/disk-1");
 
         let result = probe_config_disk(&runner, &fs, "toshiba", &d).unwrap();
-        assert_eq!(result.name, "toshiba");
+        assert_eq!(result.key, "toshiba");
         assert_eq!(result.state, ConfigDiskState::Absent);
     }
 
@@ -321,7 +321,7 @@ mod tests {
         let d = disk("/dev/disk/by-id/disk-1");
 
         let result = probe_config_disk(&runner, &fs, "toshiba", &d).unwrap();
-        assert_eq!(result.name, "toshiba");
+        assert_eq!(result.key, "toshiba");
         assert_eq!(
             result.state,
             ConfigDiskState::PresentLuks {

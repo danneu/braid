@@ -49,7 +49,7 @@ with subtest("subcommand completion"):
     for cmd in ["add", "remove", "remove-missing", "replace", "status", "doctor"]:
         assert cmd in output, f"Missing subcommand '{cmd}': {output}"
 
-with subtest("add disk name completion"):
+with subtest("add disk key completion"):
     output = machine.succeed("bash /tmp/get-completions.sh braid add ''")
     assert "disk1" in output, f"Expected disk1: {output}"
     assert "disk2" in output, f"Expected disk2: {output}"
@@ -61,7 +61,7 @@ with subtest("add flag completion"):
     assert "--passphrase-file" in output, f"Expected --passphrase-file: {output}"
     assert "--progress" in output, f"Expected --progress: {output}"
 
-with subtest("remove disk name completion"):
+with subtest("remove disk key completion"):
     output = machine.succeed("bash /tmp/get-completions.sh braid remove ''")
     assert "disk1" in output, f"Expected disk1: {output}"
     assert "disk2" in output, f"Expected disk2: {output}"
@@ -104,7 +104,7 @@ with subtest("fish subcommand completion"):
     for cmd in ["add", "remove", "remove-missing", "replace", "status", "doctor"]:
         assert cmd in out, f"Missing {cmd}: {out}"
 
-with subtest("fish add disk name completion"):
+with subtest("fish add disk key completion"):
     out = machine.succeed("fish -c 'COMPLETE=fish braid | source; complete --do-complete \"braid add \"'")
     assert "disk1" in out, f"Expected disk1: {out}"
     assert "disk2" in out, f"Expected disk2: {out}"

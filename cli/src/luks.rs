@@ -123,11 +123,11 @@ pub fn verify_passphrase<R: CommandRunner>(
 pub fn ensure_luks_open<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
-    name: &str,
+    key: &str,
     disk: &DiskConfig,
     passphrase: &str,
 ) -> Result<(), LuksError> {
-    let mn = mapper_name(name);
+    let mn = mapper_name(key);
     let mapper_path = format!("/dev/mapper/{}", mn.0);
     if fs.exists(&mapper_path) {
         return Ok(());

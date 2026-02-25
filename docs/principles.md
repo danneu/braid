@@ -8,7 +8,7 @@ Data drives never block boot. LUKS devices use `nofail` + bounded timeouts. btrf
 
 ## 2. Config-first workflow
 
-Declare the disk in `braid.disks` (named attrset) before formatting it. `nixos-rebuild switch` exports config and creates LUKS entries. `braid add <name>` formats and adds the disk. CLI tools refuse to operate on undeclared disks. Workflow: edit config → `nixos-rebuild switch` → `braid add <name>`. [Why →](decisions/config-first-workflow.md)
+Declare the disk in `braid.disks` (named attrset) before formatting it. `nixos-rebuild switch` exports config and creates LUKS entries. `braid add <key>` formats and adds the disk. CLI tools refuse to operate on undeclared disks. Workflow: edit config → `nixos-rebuild switch` → `braid add <key>`. [Why →](decisions/config-first-workflow.md)
 
 ## 3. Safe-by-construction operations
 
@@ -25,7 +25,7 @@ All drives share one LUKS passphrase. Remote unlock depends on this — one pass
 
 ## 5. Stable identifiers
 
-All persistent storage config uses `/dev/disk/by-id/` paths. Never `/dev/sdX`. Mapper names are `braid-<user-chosen-name>` (e.g., `braid-toshiba`) — deterministic, human-friendly, debuggable in `lsblk`, systemd logs, and error messages. [Why →](decisions/mapper-naming.md)
+All persistent storage config uses `/dev/disk/by-id/` paths. Never `/dev/sdX`. Mapper names are `braid-<disk-key>` (e.g., `braid-toshiba`) — deterministic, human-friendly, debuggable in `lsblk`, systemd logs, and error messages. [Why →](decisions/mapper-naming.md)
 
 ## 6. btrfs RAID1
 

@@ -56,18 +56,18 @@ struct CommonArgs {
 
 #[derive(Debug, Args)]
 struct AddArgs {
-    /// Disk name (as defined in braid.disks)
-    #[arg(add = ArgValueCandidates::new(disk_name_candidates))]
-    name: String,
+    /// Disk key (as defined in braid.disks)
+    #[arg(add = ArgValueCandidates::new(disk_key_candidates))]
+    key: String,
     #[command(flatten)]
     common: CommonArgs,
 }
 
 #[derive(Debug, Args)]
 struct RemoveArgs {
-    /// Disk name to remove
-    #[arg(add = ArgValueCandidates::new(disk_name_candidates))]
-    name: String,
+    /// Disk key to remove
+    #[arg(add = ArgValueCandidates::new(disk_key_candidates))]
+    key: String,
     #[command(flatten)]
     common: CommonArgs,
 }
@@ -83,11 +83,11 @@ struct RemoveMissingArgs {
 
 #[derive(Debug, Args)]
 struct ReplaceArgs {
-    /// Name of the disk to replace
-    #[arg(long, add = ArgValueCandidates::new(disk_name_candidates))]
+    /// Disk key of the disk to replace
+    #[arg(long, add = ArgValueCandidates::new(disk_key_candidates))]
     old: String,
-    /// Name of the new replacement disk
-    #[arg(long, add = ArgValueCandidates::new(disk_name_candidates))]
+    /// Disk key of the new replacement disk
+    #[arg(long, add = ArgValueCandidates::new(disk_key_candidates))]
     new: String,
     /// Target a specific missing device by btrfs devid (dead disk only)
     #[arg(long)]
@@ -138,7 +138,7 @@ fn main() {
                 &runner,
                 &fs,
                 Path::new(&config_path),
-                &args.name,
+                &args.key,
                 args.common.dry_run,
                 args.common.yes,
                 args.common.passphrase_file.as_deref(),
@@ -159,7 +159,7 @@ fn main() {
             if let Err(e) = braid_cli::remove::cmd_remove(
                 &runner,
                 Path::new(&config_path),
-                &args.name,
+                &args.key,
                 args.common.dry_run,
                 args.common.yes,
                 progress,
@@ -264,14 +264,14 @@ fn completion_config_path() -> String {
     "/etc/braid/config.json".to_string()
 }
 
-/// Tab completion returns disk names from config.json keys.
-fn disk_name_candidates() -> Vec<CompletionCandidate> {
+/// Tab completion returns disk keys from config.json keys.
+fn disk_key_candidates() -> Vec<CompletionCandidate> {
     let config_path = completion_config_path();
     let Ok(config) = config_read(Path::new(&config_path)) else {
         return Vec::new();
     };
     config
-        .names()
+        .keys()
         .into_iter()
         .map(|name| CompletionCandidate::new(name.clone()))
         .collect()

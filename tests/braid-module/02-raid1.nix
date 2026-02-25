@@ -17,8 +17,8 @@
 let
   passphrase = "testpassphrase";
   keyFile = pkgs.writeText "luks-test-key" passphrase;
-  diskNames = [ "disk1" "disk2" "disk3" ];
-  mapperNames = map (d: "braid-${d}") diskNames;
+  diskKeys = [ "disk1" "disk2" "disk3" ];
+  mapperNames = map (d: "braid-${d}") diskKeys;
 
   # systemd-cryptsetup-generator escapes hyphens in unit instance names.
   cryptsetupUnit = name:
@@ -33,7 +33,7 @@ in
     braid = {
       enable = true;
       package = braid;
-      disks = lib.genAttrs diskNames (d: { byId = "/dev/disk/by-id/virtio-${d}"; });
+      disks = lib.genAttrs diskKeys (d: { byId = "/dev/disk/by-id/virtio-${d}"; });
     };
 
     virtualisation.emptyDiskImages = [
@@ -85,7 +85,7 @@ in
           script = ''
             set -eu
 
-            for disk in ${lib.concatStringsSep " " diskNames}; do
+            for disk in ${lib.concatStringsSep " " diskKeys}; do
               dev="/dev/disk/by-id/virtio-$disk"
               i=0
               while [ "$i" -lt 100 ]; do
@@ -101,17 +101,17 @@ in
               fi
             done
 
-            for disk in ${lib.concatStringsSep " " diskNames}; do
+            for disk in ${lib.concatStringsSep " " diskKeys}; do
               echo -n '${passphrase}' | cryptsetup luksOpen --key-file=- \
                 "/dev/disk/by-id/virtio-$disk" "braid-$disk-fmt"
             done
 
             if ! btrfs filesystem show /dev/mapper/braid-disk1-fmt >/dev/null 2>&1; then
               mkfs.btrfs -f -d raid1 -m raid1 \
-                ${lib.concatMapStringsSep " " (d: "/dev/mapper/braid-${d}-fmt") diskNames}
+                ${lib.concatMapStringsSep " " (d: "/dev/mapper/braid-${d}-fmt") diskKeys}
             fi
 
-            for disk in ${lib.concatStringsSep " " diskNames}; do
+            for disk in ${lib.concatStringsSep " " diskKeys}; do
               cryptsetup luksClose "braid-$disk-fmt"
             done
           '';
