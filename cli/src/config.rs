@@ -43,7 +43,7 @@ impl Config {
             }
         }
         let mut seen = std::collections::HashSet::new();
-        for (_, disk) in &disks {
+        for disk in disks.values() {
             if !seen.insert(&disk.by_id) {
                 return Err(ConfigBuildError::DuplicateByIdValue(
                     disk.by_id.to_string(),

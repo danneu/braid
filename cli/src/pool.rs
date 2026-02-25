@@ -53,6 +53,30 @@ pub fn pool_balance_raid1<R: CommandRunner + Sync>(
     Ok(())
 }
 
+/// Balance pool to single profile (pre-remove conversion) with progress.
+pub fn pool_balance_single<R: CommandRunner + Sync>(
+    runner: &R,
+    mount_point: &str,
+    progress: ProgressOutput,
+) -> Result<(), PoolError> {
+    let result = run_with_progress(
+        runner,
+        &CmdRequest::BtrfsBalanceSingle {
+            mount_point: mount_point.to_owned(),
+        },
+        mount_point,
+        progress,
+    )?;
+    if result.exit_status != 0 {
+        return Err(PoolError::Failed(format!(
+            "btrfs balance to single failed (exit {}): {}",
+            result.exit_status,
+            result.stderr.trim()
+        )));
+    }
+    Ok(())
+}
+
 /// Gracefully remove a specific device from the pool with progress.
 pub fn pool_remove_device<R: CommandRunner + Sync>(
     runner: &R,

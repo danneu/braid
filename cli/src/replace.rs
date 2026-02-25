@@ -39,6 +39,7 @@ pub struct ReplaceStep {
     pub description: String,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,

@@ -4,7 +4,7 @@ use crate::checkpoint::{
 };
 use crate::cmd::CommandRunner;
 use crate::config::{config_hash, config_read_raw, mapper_name};
-use crate::pool::{pool_remove_device, pool_remove_devid, pool_remove_missing};
+use crate::pool::{pool_balance_single, pool_remove_device, pool_remove_devid, pool_remove_missing};
 use crate::probe::{probe_pool, ProbeError};
 use crate::progress::ProgressOutput;
 use crate::types::*;
@@ -161,6 +161,12 @@ pub fn cmd_remove<R: CommandRunner + Sync>(
     save_checkpoint(&cp)?;
 
     if in_pool {
+        let remaining = pool.devices.len() - 1;
+        if remaining == 1 {
+            eprintln!("Converting pool from RAID1 to single profile...");
+            pool_balance_single(runner, config.mount_point(), progress)?;
+        }
+
         let device = format!("/dev/mapper/{}", mn.0);
         eprintln!("Removing {} from pool (data will migrate)...", name);
         pool_remove_device(runner, &device, config.mount_point(), progress)?;
@@ -189,7 +195,7 @@ pub fn cmd_remove<R: CommandRunner + Sync>(
 }
 
 fn compile_remove_present_steps(
-    name: &str,
+    _name: &str,
     mn: &MapperName,
     pool: &PoolState,
 ) -> Result<Vec<RemoveStep>, RemoveError> {
@@ -201,6 +207,12 @@ fn compile_remove_present_steps(
     }
 
     let mut steps = Vec::new();
+    if remaining == 1 {
+        steps.push(RemoveStep {
+            risk: "long",
+            description: "btrfs balance -dconvert=single -mconvert=single -f (RAID1 → single)".into(),
+        });
+    }
     steps.push(RemoveStep {
         risk: "long",
         description: format!(

@@ -112,7 +112,6 @@ struct VerboseContext {
 
 struct HumanDisk {
     name: String,
-    mapper: String,
     by_id: String,
     luks_uuid: String,
     devid: Option<String>,
@@ -471,7 +470,6 @@ fn build_disk_reports<R: CommandRunner>(
 
         human_details.push(HumanDisk {
             name: disk_name,
-            mapper: mapper.clone(),
             by_id: by_id.clone(),
             luks_uuid: pd.luks_uuid.0.clone(),
             devid: Some(pd.devid.to_string()),
@@ -508,7 +506,6 @@ fn build_disk_reports<R: CommandRunner>(
 
         human_details.push(HumanDisk {
             name: cd.name.clone(),
-            mapper: mapper.clone(),
             by_id: cd.by_id_path.0.clone(),
             luks_uuid: String::new(),
             devid: None,
@@ -1398,7 +1395,6 @@ mod tests {
         let human_disks = vec![
             HumanDisk {
                 name: "disk1".to_owned(),
-                mapper: "disk1".to_owned(),
                 by_id: "/dev/disk/by-id/disk1".to_owned(),
                 luks_uuid: "11111111-1111-1111-1111-111111111111".to_owned(),
                 devid: Some("1".to_owned()),
@@ -1442,7 +1438,6 @@ mod tests {
         let human_disks = vec![
             HumanDisk {
                 name: "disk3".to_owned(),
-                mapper: "disk3".to_owned(),
                 by_id: "/dev/disk/by-id/disk3".to_owned(),
                 luks_uuid: String::new(),
                 devid: None,
@@ -1483,7 +1478,6 @@ mod tests {
         let human_disks = vec![
             HumanDisk {
                 name: "disk1".to_owned(),
-                mapper: "disk1".to_owned(),
                 by_id: "/dev/disk/by-id/disk1".to_owned(),
                 luks_uuid: "11111111-1111-1111-1111-111111111111".to_owned(),
                 devid: Some("1".to_owned()),

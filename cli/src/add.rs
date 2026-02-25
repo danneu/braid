@@ -40,6 +40,7 @@ pub struct AddStep {
     pub description: String,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,

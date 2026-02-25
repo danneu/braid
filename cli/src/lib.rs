@@ -11,5 +11,6 @@ pub mod progress;
 pub mod remove;
 pub mod replace;
 pub mod status;
+#[allow(dead_code)]
 pub mod tui;
 pub mod types;

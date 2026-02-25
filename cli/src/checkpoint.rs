@@ -137,7 +137,7 @@ pub fn save_checkpoint(checkpoint: &OpCheckpoint) -> Result<(), std::io::Error> 
     std::fs::create_dir_all(dir)?;
 
     let json = serde_json::to_string_pretty(checkpoint)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        .map_err(std::io::Error::other)?;
 
     let tmp = format!("{CHECKPOINT_FILE}.tmp");
     std::fs::write(&tmp, &json)?;
