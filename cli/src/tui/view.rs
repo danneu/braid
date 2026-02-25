@@ -1,8 +1,8 @@
-use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Color, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Paragraph, Row, Table};
+use ratatui::Frame;
 
 use crate::tui::model::{Model, PoolState, PoolStatus};
 
@@ -88,9 +88,19 @@ fn disk_table(model: &Model, unit: ByteUnit) -> Table<'_> {
                 format!("{}", i + 1),
                 name.clone(),
                 format!("{:.0}%", percent(usage.data, usage.size)),
-                format!("{} / {} {}", unit.format(usage.data), unit.format(usage.size), unit.suffix()),
+                format!(
+                    "{} / {} {}",
+                    unit.format(usage.data),
+                    unit.format(usage.size),
+                    unit.suffix()
+                ),
             ]),
-            None => Row::new([format!("{}", i + 1), name.clone(), String::new(), String::new()]),
+            None => Row::new([
+                format!("{}", i + 1),
+                name.clone(),
+                String::new(),
+                String::new(),
+            ]),
         })
         .collect();
     let widths = [
@@ -168,8 +178,12 @@ pub fn view(model: &Model, frame: &mut Frame) {
     frame.render_widget(Paragraph::new("Disks"), chunks[2]);
     frame.render_widget(disk_table(model, page_unit), chunks[3]);
 
+    let footer = match model.probe_duration {
+        Some(d) => format!("press q to quit  {}ms", d.as_millis()),
+        None => "press q to quit".to_owned(),
+    };
     frame.render_widget(
-        Paragraph::new("press q to quit").style(Style::default().fg(Color::DarkGray)),
+        Paragraph::new(footer).style(Style::default().fg(Color::DarkGray)),
         chunks[4],
     );
 }
@@ -180,8 +194,8 @@ mod tests {
 
     use super::*;
     use crate::tui::model::DiskUsage;
-    use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
 
     fn render(model: &Model, width: u16, height: u16) -> Terminal<TestBackend> {
         let backend = TestBackend::new(width, height);
@@ -240,9 +254,9 @@ mod tests {
             (
                 "toshiba".to_owned(),
                 DiskUsage {
-                    size: 6_001_175_126_016,  // ~5.5 TiB
-                    data: 1_483_734_958_080,  // ~1.3 TiB
-                    metadata: 1_610_612_736,  // ~1.5 GiB
+                    size: 6_001_175_126_016, // ~5.5 TiB
+                    data: 1_483_734_958_080, // ~1.3 TiB
+                    metadata: 1_610_612_736, // ~1.5 GiB
                 },
             ),
             (
@@ -256,9 +270,9 @@ mod tests {
             (
                 "wdc".to_owned(),
                 DiskUsage {
-                    size: 4_000_787_030_016,  // ~3.6 TiB
-                    data: 824_633_720_832,    // ~0.7 TiB
-                    metadata: 1_073_741_824,  // ~1.0 GiB
+                    size: 4_000_787_030_016, // ~3.6 TiB
+                    data: 824_633_720_832,   // ~0.7 TiB
+                    metadata: 1_073_741_824, // ~1.0 GiB
                 },
             ),
         ]);

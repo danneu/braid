@@ -19,9 +19,11 @@ pub fn execute_effect(effect: Effect, cmd_tx: &mpsc::Sender<Event>) {
         Effect::ProbePool { mount_point } => {
             let tx = cmd_tx.clone();
             thread::spawn(move || {
+                let start = std::time::Instant::now();
                 let runner = RealRunner;
                 let result = crate::tui::probe::probe_pool_for_tui(&runner, &mount_point);
-                let _ = tx.send(Event::PoolProbeFinished(result));
+                let elapsed = start.elapsed();
+                let _ = tx.send(Event::PoolProbeFinished(result, elapsed));
             });
         }
     }

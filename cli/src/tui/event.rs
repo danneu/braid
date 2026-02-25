@@ -27,7 +27,7 @@ pub enum Event {
         id: CmdId,
         status: ExitStatus,
     },
-    PoolProbeFinished(Result<Option<PoolState>, String>),
+    PoolProbeFinished(Result<Option<PoolState>, String>, Duration),
     Tick,
 }
 
@@ -40,7 +40,9 @@ impl Event {
                 Some(Message::CommandOutput { id, stream, line })
             }
             Event::CommandFinished { id, status } => Some(Message::CommandFinished { id, status }),
-            Event::PoolProbeFinished(result) => Some(Message::PoolProbeFinished(result)),
+            Event::PoolProbeFinished(result, elapsed) => {
+                Some(Message::PoolProbeFinished(result, elapsed))
+            }
             Event::Tick => Some(Message::Tick),
         }
     }

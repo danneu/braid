@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::time::Duration;
 
 use crate::tui::effect::Effect;
 use crate::tui::state::{CmdId, CommandState};
@@ -31,6 +32,7 @@ pub struct Model {
     pub pool: PoolStatus,
     pub mount_point: String,
     pub commands: HashMap<CmdId, CommandState>,
+    pub probe_duration: Option<Duration>,
     next_cmd_id: u64,
 }
 
@@ -45,6 +47,7 @@ impl Model {
             pool: PoolStatus::Loading,
             mount_point,
             commands: HashMap::new(),
+            probe_duration: None,
             next_cmd_id: 0,
         };
         (model, effects)
@@ -58,6 +61,7 @@ impl Model {
             pool,
             mount_point: String::new(),
             commands: HashMap::new(),
+            probe_duration: None,
             next_cmd_id: 0,
         }
     }

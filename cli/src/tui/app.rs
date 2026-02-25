@@ -1,12 +1,14 @@
 use std::collections::VecDeque;
 use std::process::ExitStatus;
+use std::time::Duration;
 
 use crate::tui::effect::Effect;
 use crate::tui::model::{Model, PoolState, PoolStatus};
-use crate::tui::state::{CmdId, CmdStatus, CommandState, MAX_LINES, Stream};
+use crate::tui::state::{CmdId, CmdStatus, CommandState, Stream, MAX_LINES};
 
 pub enum Message {
     Quit,
+    RefreshPool,
     Tick,
     CommandStarted {
         id: CmdId,
@@ -21,7 +23,7 @@ pub enum Message {
         id: CmdId,
         status: ExitStatus,
     },
-    PoolProbeFinished(Result<Option<PoolState>, String>),
+    PoolProbeFinished(Result<Option<PoolState>, String>, Duration),
 }
 
 pub fn update(model: &mut Model, msg: Message) -> Vec<Effect> {
@@ -30,6 +32,15 @@ pub fn update(model: &mut Model, msg: Message) -> Vec<Effect> {
             model.running = false;
             vec![]
         }
+        Message::RefreshPool => match model.pool {
+            PoolStatus::Loading => vec![],
+            _ => {
+                model.pool = PoolStatus::Loading;
+                vec![Effect::ProbePool {
+                    mount_point: model.mount_point.clone(),
+                }]
+            }
+        },
         Message::Tick => vec![],
         Message::CommandStarted { id, cmd } => {
             model.commands.insert(
@@ -61,12 +72,13 @@ pub fn update(model: &mut Model, msg: Message) -> Vec<Effect> {
             }
             vec![]
         }
-        Message::PoolProbeFinished(result) => {
+        Message::PoolProbeFinished(result, elapsed) => {
             model.pool = match result {
                 Ok(Some(pool)) => PoolStatus::Mounted(pool),
                 Ok(None) => PoolStatus::NotMounted,
                 Err(e) => PoolStatus::Error(e),
             };
+            model.probe_duration = Some(elapsed);
             vec![]
         }
     }
