@@ -476,33 +476,56 @@ pub fn maybe_fail_after_checkpoint() -> Result<(), CheckpointError> {
     Ok(())
 }
 
+#[derive(Debug, Clone)]
+pub struct PhaseHookConfig {
+    pub fail_at_phase: Option<String>,
+    pub pause_at_phase: Option<String>,
+    pub pause_timeout_secs: u64,
+    pub pause_file: PathBuf,
+}
+
+impl PhaseHookConfig {
+    pub fn from_env() -> Self {
+        Self {
+            fail_at_phase: std::env::var("BRAID_TEST_FAIL_AT_PHASE").ok(),
+            pause_at_phase: std::env::var("BRAID_TEST_PAUSE_AT_PHASE").ok(),
+            pause_timeout_secs: std::env::var("BRAID_TEST_PAUSE_TIMEOUT_SECS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(30),
+            pause_file: std::env::var("BRAID_TEST_PAUSE_FILE")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| PathBuf::from("/tmp/braid-test-unpause")),
+        }
+    }
+}
+
 pub fn run_phase_hooks(phase: &Phase) -> Result<(), CheckpointError> {
-    if std::env::var("BRAID_TEST_FAIL_AT_PHASE").ok().as_deref() == Some(phase.as_env_value()) {
+    run_phase_hooks_with_config(phase, &PhaseHookConfig::from_env())
+}
+
+pub fn run_phase_hooks_with_config(
+    phase: &Phase,
+    config: &PhaseHookConfig,
+) -> Result<(), CheckpointError> {
+    if config.fail_at_phase.as_deref() == Some(phase.as_env_value()) {
         return Err(CheckpointError::new(
             CheckpointErrorCode::TestHook,
             format!("simulated failure at phase {}", phase.as_env_value()),
         ));
     }
 
-    if std::env::var("BRAID_TEST_PAUSE_AT_PHASE").ok().as_deref() == Some(phase.as_env_value()) {
-        let timeout_secs = std::env::var("BRAID_TEST_PAUSE_TIMEOUT_SECS")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(30);
-        let pause_file = std::env::var("BRAID_TEST_PAUSE_FILE")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("/tmp/braid-test-unpause"));
-
+    if config.pause_at_phase.as_deref() == Some(phase.as_env_value()) {
         let start = std::time::Instant::now();
-        while !pause_file.exists() {
-            if start.elapsed() >= Duration::from_secs(timeout_secs) {
+        while !config.pause_file.exists() {
+            if start.elapsed() >= Duration::from_secs(config.pause_timeout_secs) {
                 return Err(CheckpointError::new(
                     CheckpointErrorCode::PauseTimeout,
                     format!(
                         "phase {} pause timed out after {}s waiting for {}",
                         phase.as_env_value(),
-                        timeout_secs,
-                        pause_file.display()
+                        config.pause_timeout_secs,
+                        config.pause_file.display()
                     ),
                 ));
             }
@@ -896,22 +919,14 @@ mod tests {
 
     #[test]
     fn run_phase_hooks_timeout() {
-        unsafe {
-            std::env::set_var("BRAID_TEST_PAUSE_AT_PHASE", "add-balance-raid1");
-            std::env::set_var("BRAID_TEST_PAUSE_TIMEOUT_SECS", "0");
-            std::env::set_var(
-                "BRAID_TEST_PAUSE_FILE",
-                "/tmp/this-file-should-not-exist-braid-tests",
-            );
-        }
+        let config = PhaseHookConfig {
+            fail_at_phase: None,
+            pause_at_phase: Some("add-balance-raid1".to_owned()),
+            pause_timeout_secs: 0,
+            pause_file: PathBuf::from("/tmp/this-file-should-not-exist-braid-tests"),
+        };
 
-        let err = run_phase_hooks(&Phase::AddBalanceRaid1).unwrap_err();
+        let err = run_phase_hooks_with_config(&Phase::AddBalanceRaid1, &config).unwrap_err();
         assert_eq!(err.code, CheckpointErrorCode::PauseTimeout);
-
-        unsafe {
-            std::env::remove_var("BRAID_TEST_PAUSE_AT_PHASE");
-            std::env::remove_var("BRAID_TEST_PAUSE_TIMEOUT_SECS");
-            std::env::remove_var("BRAID_TEST_PAUSE_FILE");
-        }
     }
 }
