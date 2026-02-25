@@ -14,6 +14,7 @@ This plan includes coordinated updates to code, tests, and docs/decision records
 4. Shared primitive must include **post-remove LUKS close** (`cryptsetup close <old-mapper>`) as best-effort warning-only behavior.
 5. Shared primitive must decide conversion need from **current live pool probe + target mapper**, not from caller-provided projected counts.
 6. Keep eviction resumability in a single replace eviction phase; do not add phase complexity unless strictly required.
+7. Shared primitive must be idempotent and return explicit outcome (`Removed` or `AlreadyAbsent`) for live-target eviction.
 
 ## Locked Product Decisions
 1. `--old` validation: **pool-membership only** for live path (no config requirement for `--old`).
@@ -86,8 +87,9 @@ File: `cli/src/replace.rs`
 - `Devid`: existing `pool_remove_devid` path.
 - `Missing`: existing `pool_remove_missing` path.
 3. Keep checkpoint schema version unchanged.
-4. Resume gate `secondary_target_available` semantics:
-- true if live old exists in pool OR missing target exists (`pool.missing_count > 0` or `missing_id` provided).
+4. Resume gate `secondary_target_available` semantics must be phase-aware:
+- for missing/dead path: unchanged behavior (target must still be available).
+- for live path during `ReplaceEvictDead`: allow resume even if live target is already absent, and rely on idempotent eviction helper outcome.
 
 ### 4. Checkpoint/resume behavior for conversion-before-live-evict
 Files: `cli/src/checkpoint.rs`, `cli/src/replace.rs`
@@ -96,8 +98,9 @@ Files: `cli/src/checkpoint.rs`, `cli/src/replace.rs`
 2. Ensure resume remains deterministic when single-profile conversion is required before live remove.
 3. Keep replace resume logic in this phase and make eviction idempotent:
 - re-probe pool at eviction execution time.
-- if live target mapper already absent, skip remove/close and continue.
-- if target present, apply conversion/remove/close flow via shared helper.
+- call shared live-eviction helper that returns explicit outcome:
+  - `Removed`: conversion/remove/close executed.
+  - `AlreadyAbsent`: no-op success for idempotent resume.
 4. If additional phase granularity is added for conversion, do not bump schema version; treat it as additive phase support while continuing to accept existing checkpoints.
 5. Fail-closed behavior remains unchanged for topology/config/target drift.
 
