@@ -5,6 +5,12 @@ use std::process::ExitStatus;
 use crate::tui::effect::Effect;
 use crate::tui::state::{CmdId, CmdStatus, CommandState, MAX_LINES, Stream};
 
+pub struct DiskUsage {
+    pub size: u64,
+    pub data: u64,
+    pub metadata: u64,
+}
+
 pub struct PoolState {
     pub mount_point: String,
     pub profile: String,
@@ -23,6 +29,7 @@ pub enum PoolStatus {
 pub struct Model {
     pub running: bool,
     pub disk_keys: Vec<String>,
+    pub disk_usage: HashMap<String, DiskUsage>,
     pub pool: PoolStatus,
     pub mount_point: String,
     pub commands: HashMap<CmdId, CommandState>,
@@ -37,6 +44,7 @@ impl Model {
         let model = Self {
             running: true,
             disk_keys,
+            disk_usage: HashMap::new(),
             pool: PoolStatus::Loading,
             mount_point,
             commands: HashMap::new(),
@@ -46,10 +54,15 @@ impl Model {
     }
 
     #[cfg(test)]
-    pub fn new_for_test(disk_keys: Vec<String>, pool: PoolStatus) -> Self {
+    pub fn new_for_test(
+        disk_keys: Vec<String>,
+        disk_usage: HashMap<String, DiskUsage>,
+        pool: PoolStatus,
+    ) -> Self {
         Self {
             running: true,
             disk_keys,
+            disk_usage,
             pool,
             mount_point: String::new(),
             commands: HashMap::new(),
