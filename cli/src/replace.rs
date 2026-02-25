@@ -240,16 +240,14 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     if let Ok(pool_after) = probe_pool(runner, config.mount_point()) {
         let new_mn = mapper_name(new_name);
         disk_map::update_disk_map_best_effort(|map| {
-            disk_map::remove_disk(map, old_name);
-            if let Some(dev) = pool_after.devices.iter().find(|d| d.mapper == new_mn) {
-                disk_map::record_disk(
-                    map,
-                    new_name,
-                    &new_disk.by_id.0,
-                    &dev.luks_uuid.0,
-                    dev.devid,
-                );
-            }
+            let _ = apply_replace_disk_map_update(
+                map,
+                old_name,
+                new_name,
+                &new_disk.by_id.0,
+                &new_mn,
+                Some(&pool_after),
+            );
         });
     }
 
@@ -381,6 +379,29 @@ fn now_iso() -> String {
         .unwrap_or_else(|_| "unknown".into())
 }
 
+fn apply_replace_disk_map_update(
+    map: &mut crate::disk_map::DiskMap,
+    old_name: &str,
+    new_name: &str,
+    new_by_id: &str,
+    new_mn: &MapperName,
+    pool_after: Option<&PoolState>,
+) -> Option<String> {
+    if let Some(pool_after) = pool_after {
+        crate::disk_map::remove_disk(map, old_name);
+        if let Some(dev) = pool_after.devices.iter().find(|d| d.mapper == *new_mn) {
+            crate::disk_map::record_disk(
+                map,
+                new_name,
+                new_by_id,
+                &dev.luks_uuid.0,
+                dev.devid,
+            );
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -424,6 +445,53 @@ mod tests {
         assert!(
             !msg.contains("LUKS-format"),
             "should not warn about formatting"
+        );
+    }
+
+    #[test]
+    fn spec_replace_probe_failure_still_removes_old_map_entry() {
+        let mut map = crate::disk_map::DiskMap::new();
+        crate::disk_map::record_disk(
+            &mut map,
+            "old",
+            "/dev/disk/by-id/old",
+            "old-uuid",
+            1,
+        );
+
+        let new_mn = MapperName("braid-new".into());
+        let _ = apply_replace_disk_map_update(
+            &mut map,
+            "old",
+            "new",
+            "/dev/disk/by-id/new",
+            &new_mn,
+            None,
+        );
+
+        assert!(
+            !map.disks.contains_key("old"),
+            "old entry should be removed even if post-replace re-probe fails"
+        );
+    }
+
+    #[test]
+    fn spec_replace_probe_failure_requests_warning() {
+        let mut map = crate::disk_map::DiskMap::new();
+        let new_mn = MapperName("braid-new".into());
+
+        let warning = apply_replace_disk_map_update(
+            &mut map,
+            "old",
+            "new",
+            "/dev/disk/by-id/new",
+            &new_mn,
+            None,
+        );
+
+        assert!(
+            warning.is_some(),
+            "expected a warning when post-replace disk-map update is skipped due to re-probe failure"
         );
     }
 }
