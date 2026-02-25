@@ -34,6 +34,8 @@ enum Commands {
     Status(StatusArgs),
     /// Check configuration for problems
     Doctor(DoctorArgs),
+    /// Launch the terminal UI
+    Tui,
 }
 
 #[derive(Debug, Args)]
@@ -91,8 +93,9 @@ fn main() {
     // Parse before root gate so --help/--version work without sudo.
     let cli = Cli::parse();
 
+    // TUI doesn't need root yet — will need root or capability-based auth once it runs real commands.
     // SAFETY: geteuid() is a trivial syscall with no arguments, always safe to call.
-    if unsafe { libc::geteuid() } != 0 {
+    if !matches!(&cli.command, Commands::Tui) && unsafe { libc::geteuid() } != 0 {
         eprintln!("error: braid must be run as root (try: sudo braid ...)");
         std::process::exit(1);
     }
@@ -200,6 +203,12 @@ fn main() {
         }
         Commands::Doctor(args) => {
             if let Err(e) = cmd_doctor(Path::new(&config_path), args.json) {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        }
+        Commands::Tui => {
+            if let Err(e) = braid_cli::tui::run() {
                 eprintln!("error: {e}");
                 std::process::exit(1);
             }
