@@ -1,4 +1,5 @@
 use crate::config::config_hash;
+use crate::state_io::atomic_write;
 use crate::types::PoolState;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -133,15 +134,9 @@ pub fn load_checkpoint(
 
 /// Save a checkpoint atomically.
 pub fn save_checkpoint(checkpoint: &OpCheckpoint) -> Result<(), std::io::Error> {
-    let dir = Path::new(CHECKPOINT_FILE).parent().unwrap();
-    std::fs::create_dir_all(dir)?;
-
     let json = serde_json::to_string_pretty(checkpoint)
         .map_err(std::io::Error::other)?;
-
-    let tmp = format!("{CHECKPOINT_FILE}.tmp");
-    std::fs::write(&tmp, &json)?;
-    std::fs::rename(&tmp, CHECKPOINT_FILE)?;
+    atomic_write(Path::new(CHECKPOINT_FILE), json.as_bytes())?;
     Ok(())
 }
 

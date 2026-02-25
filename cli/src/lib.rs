@@ -13,5 +13,6 @@ pub mod remove;
 pub mod remove_missing;
 pub mod replace;
 pub mod status;
+pub mod state_io;
 pub mod tui;
 pub mod types;

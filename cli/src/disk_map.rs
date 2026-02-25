@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
+use crate::state_io::atomic_write;
 
 pub const DISK_MAP_FILE: &str = "/var/lib/braid/disk-map.json";
 
@@ -49,16 +50,9 @@ pub fn save_disk_map(map: &DiskMap) -> Result<(), std::io::Error> {
 
 /// Save disk map to an arbitrary path (for testing). Atomic: tmp + rename in same dir.
 pub fn save_disk_map_at(path: &Path, map: &DiskMap) -> Result<(), std::io::Error> {
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-
     let json =
         serde_json::to_string_pretty(map).map_err(std::io::Error::other)?;
-
-    let tmp = format!("{}.tmp", path.display());
-    std::fs::write(&tmp, &json)?;
-    std::fs::rename(&tmp, path)?;
+    atomic_write(path, json.as_bytes())?;
     Ok(())
 }
 
