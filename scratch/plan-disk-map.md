@@ -1,101 +1,133 @@
-# Disk Identity Map
+# Plan: Add disk identity map for missing-device resolution
 
 ## Context
 
-When a btrfs device goes missing (disk failure), `btrfs filesystem show` only reports the devid — there's no backward link to which physical disk (by-id path) or LUKS UUID it was. This makes it hard to know which bay to pull or what to pass to `braid replace --missing-id`.
+When a btrfs member is missing, operators mostly get a `devid` from btrfs tooling, but not a direct mapping back to braid disk key (`name`) and by-id path. This plan adds an advisory map at `/var/lib/braid/disk-map.json` to preserve `name/by_id/luks_uuid/devid` across command executions so missing-device flows (`replace --missing-id`, `remove-missing --missing-id`) are easier and safer.
 
-This adds a persistent map file at `/var/lib/braid/disk-map.json` that records `name → {by_id, luks_uuid, devid}` on every add/remove/replace/remove-missing. When a disk disappears, the map tells you exactly which physical disk it was.
+## Approach (TDD — tests first)
 
-## Format
+### Step 1: Add failing tests for map behavior
 
-```json
-{
-  "schema_version": 1,
-  "disks": {
-    "toshiba": {
-      "by_id": "/dev/disk/by-id/ata-Toshiba_MN07_XXXX",
-      "luks_uuid": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-      "devid": 1,
-      "added_at": "2026-02-25T12:00:00Z"
-    },
-    "ironwolf": {
-      "by_id": "/dev/disk/by-id/ata-Ironwolf_ST12_YYYY",
-      "luks_uuid": "e5f6g7h8-i9j0-...",
-      "devid": 2,
-      "added_at": "2026-02-25T13:00:00Z"
-    }
-  }
-}
-```
+**File: `cli/src/disk_map.rs` (new tests in module)**
 
-## Files to create/modify
+- Add unit tests for:
+  - load when file missing (returns empty map)
+  - atomic save + reload roundtrip
+  - `record_disk` upsert behavior
+  - `remove_disk` behavior
+  - prune-by-devid behavior for remove-missing flows
 
-### New: `cli/src/disk_map.rs`
+**File: `tests/braid-remove-disk.py`**
 
-New module following the same pattern as `checkpoint.rs`:
-- `DISK_MAP_FILE` const: `/var/lib/braid/disk-map.json`
-- `DiskMap` struct (schema_version + BTreeMap<String, DiskMapEntry>)
-- `DiskMapEntry` struct: `by_id`, `luks_uuid`, `devid`, `added_at`
-- `load_disk_map()` → loads existing or returns empty map
-- `save_disk_map(map)` → atomic write (write tmp, rename)
-- `record_disk(map, name, by_id, luks_uuid, devid)` → upserts entry
-- `remove_disk(map, name)` → removes entry
-
-### Modify: `cli/src/lib.rs`
-
-Add `pub mod disk_map;`
-
-### Modify: `cli/src/add.rs`
-
-After the final success message ("Done. {} is now part of the pool."):
-1. Re-probe the pool with `probe_pool()` to get current devids
-2. Find the new device by matching its mapper name
-3. Get the LUKS UUID from the probed device
-4. Load disk map, call `record_disk`, save disk map
-5. On failure: warn to stderr but don't fail the add (map is advisory)
-
-### Modify: `cli/src/remove.rs`
-
-After the final success message ("Done."):
-1. Load disk map, call `remove_disk(name)`, save
-2. On failure: warn to stderr
-
-### Modify: `cli/src/replace.rs`
-
-After the final success message ("Done."):
-1. Remove old disk entry from map
-2. Re-probe pool, find new device's devid
-3. Record new disk entry
-4. Save map
-5. On failure: warn to stderr
-
-### New: `cli/src/remove_missing.rs`
-
-After successful `remove-missing` execution:
-1. Re-probe the pool with `probe_pool()`
-2. Determine which device(s) were evicted:
-   - If `--missing-id <devid>` was used, remove map entries whose `devid` matches that value
-   - If plain `remove-missing` was used, remove map entries whose `devid` is no longer present in pool membership
-3. Save map
-4. On failure: warn to stderr (command success still stands)
+- Extend remove lifecycle to validate map updates:
+  - after `braid add disk1|2|3`: map contains all 3 names with devids
+  - after graceful `braid remove disk3`: `disk3` map entry removed
+  - after failed `braid remove disk3` on missing disk: map unchanged
+  - after `braid remove-missing --yes`: missing entry removed
+  - for multi-missing + `--missing-id`: only targeted entry removed
 
 Notes:
-- This is best-effort cleanup: if map entries are stale or devids were reused, the pool remains authoritative.
-- If `remove-missing` fails, do not touch map state.
+- Read map via `cat /var/lib/braid/disk-map.json` and parse with Python `json.loads`.
+- Keep assertions on behavior (entry present/absent + expected keys), not exact timestamps.
 
-## Design decisions
+### Step 2: Confirm tests fail
 
-- **Advisory, not authoritative**: The map is best-effort. If it gets corrupted or out of sync, nothing breaks. Load failures return an empty map; save failures print a warning.
-- **Atomic writes**: Same tmp+rename pattern as checkpoint.rs.
-- **Same directory**: `/var/lib/braid/` alongside existing state files.
-- **Re-probe for devid**: After add, call `probe_pool` to get the btrfs-assigned devid rather than guessing. This is a few extra syscalls but is correct.
-- **remove-missing cleanup**: Update map only after successful pool eviction. For targeted eviction (`--missing-id`), delete by exact devid match; otherwise prune entries not present in the re-probed pool.
-- **No dry-run writes**: Map is only updated when operations actually execute.
+Run:
+1. `make test-rust`
+2. `make test-one t=braid-remove-disk`
 
-## Verification
+Expected initial failures:
+- missing `disk_map` module/functions
+- no map file created/updated by command flows
 
-1. `make test-rust` — unit tests for load/save/record/remove
-2. Manual: `braid add` a disk, check `/var/lib/braid/disk-map.json` has the entry
-3. Manual: `braid remove` a disk, check entry is gone
-4. Manual: simulate missing disk, run `braid remove-missing --yes`, check stale missing entry is removed from map
-5. Manual: with multiple missing devices, run `braid remove-missing --yes --missing-id <devid>`, verify only matching map entry is removed
+### Step 3: Implement disk map module
+
+**New file: `cli/src/disk_map.rs`**
+
+- Add:
+  - `DISK_MAP_FILE: &str = "/var/lib/braid/disk-map.json"`
+  - `DiskMap { schema_version, disks: BTreeMap<String, DiskMapEntry> }`
+  - `DiskMapEntry { by_id, luks_uuid, devid, added_at }`
+  - helpers:
+    - `load_disk_map() -> DiskMap` (best-effort; corrupted/unreadable => empty)
+    - `save_disk_map(&DiskMap) -> io::Result<()>` (tmp + rename)
+    - `record_disk(...)` (upsert)
+    - `remove_disk(...)` (by name)
+    - `remove_disks_by_devids(...)` (for remove-missing pruning)
+- Add unit tests from Step 1.
+
+**File: `cli/src/lib.rs`**
+
+- Add `pub mod disk_map;`
+
+### Step 4: Wire map updates into command flows
+
+**File: `cli/src/add.rs`**
+
+- After successful add:
+  - re-probe pool
+  - resolve added device mapper => `devid` + `luks_uuid`
+  - load map, `record_disk(name, by_id, luks_uuid, devid)`, save
+- If map update fails: warn on stderr; do not fail add.
+- No updates in `--dry-run`.
+
+**File: `cli/src/remove.rs`**
+
+- After successful present-disk remove:
+  - load map, `remove_disk(name)`, save
+- Warn-only on map update errors.
+- No map writes on failed remove.
+
+**File: `cli/src/replace.rs`**
+
+- After successful replace:
+  - remove old disk entry
+  - re-probe pool for new disk `devid/luks_uuid`
+  - record new disk entry
+  - save once
+- Warn-only on map update errors.
+
+**File: `cli/src/remove_missing.rs`**
+
+- After successful remove-missing:
+  - re-probe pool to collect current devid set
+  - if `--missing-id <devid>`: remove map entries with that devid
+  - else: remove entries whose devid is no longer in pool
+  - save map
+- If command fails, do not mutate map.
+- Warn-only on map update errors.
+
+### Step 5: Verify
+
+1. `make test-rust` — disk-map unit tests + existing Rust tests pass
+2. `make test-one t=braid-remove-disk` — map assertions + remove semantics pass
+3. `make test-one t=replace-failed-disk` — replace flow unchanged and still green
+4. `make test` — full suite green
+
+### Step 6: Document behavior
+
+**File: `README.md`**
+
+- Add brief operator note that braid tracks an advisory disk identity map at `/var/lib/braid/disk-map.json` for missing-device workflows.
+- Clarify it is non-authoritative and rebuilt/updated by command executions.
+
+## Files to modify
+
+| File | Change |
+|------|--------|
+| `cli/src/disk_map.rs` | **New** — map schema, load/save, helpers, unit tests |
+| `cli/src/lib.rs` | Export `disk_map` module |
+| `cli/src/add.rs` | Record new disk mapping after successful add |
+| `cli/src/remove.rs` | Remove disk mapping after successful remove |
+| `cli/src/replace.rs` | Remove old mapping + record new mapping after replace |
+| `cli/src/remove_missing.rs` | Prune mapping entries after successful missing-device eviction |
+| `tests/braid-remove-disk.py` | Add map assertions for add/remove/remove-missing flows |
+| `README.md` | Document advisory disk map |
+
+## Design constraints
+
+- Advisory only: map must never be treated as source of truth over live pool probing.
+- Best effort: map write/read failures must not fail successful storage operations.
+- Atomic writes only (`tmp` + `rename`).
+- No writes during dry-run paths.
+- Keep schema versioned for future migrations.
