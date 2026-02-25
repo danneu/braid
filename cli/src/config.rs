@@ -13,6 +13,8 @@ pub enum ConfigBuildError {
     DuplicateByIdValue(String),
     #[error("mount_point must not be empty")]
     EmptyMountPoint,
+    #[error("invalid disk key '{0}': must start with a letter and contain only letters, digits, hyphens, or underscores")]
+    InvalidDiskKey(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -34,6 +36,11 @@ impl Config {
     ) -> Result<Self, ConfigBuildError> {
         if disks.is_empty() {
             return Err(ConfigBuildError::EmptyDisks);
+        }
+        for name in disks.keys() {
+            if !is_valid_disk_key(name) {
+                return Err(ConfigBuildError::InvalidDiskKey(name.clone()));
+            }
         }
         let mut seen = std::collections::HashSet::new();
         for (_, disk) in &disks {
@@ -69,6 +76,15 @@ impl Config {
 /// Returns the mapper name for a named disk: braid-<name>
 pub fn mapper_name(name: &str) -> MapperName {
     MapperName(format!("braid-{name}"))
+}
+
+fn is_valid_disk_key(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 #[derive(Deserialize)]
@@ -216,5 +232,90 @@ mod tests {
         let cfg = Config::new(disks, "/mnt/storage".to_owned()).unwrap();
         let names: Vec<&str> = cfg.names().into_iter().map(|s| s.as_str()).collect();
         assert_eq!(names, vec!["alpha", "zebra"]);
+    }
+
+    #[test]
+    fn rejects_disk_key_starting_with_digit() {
+        let mut disks = BTreeMap::new();
+        disks.insert(
+            "1bad".to_owned(),
+            DiskConfig {
+                by_id: ByIdPath("/dev/disk/by-id/a".to_owned()),
+            },
+        );
+        let err = Config::new(disks, "/mnt/storage".to_owned())
+            .expect_err("digit-starting name should fail");
+        assert!(matches!(err, ConfigBuildError::InvalidDiskKey(_)));
+    }
+
+    #[test]
+    fn rejects_disk_key_starting_with_hyphen() {
+        let mut disks = BTreeMap::new();
+        disks.insert(
+            "-bad".to_owned(),
+            DiskConfig {
+                by_id: ByIdPath("/dev/disk/by-id/a".to_owned()),
+            },
+        );
+        let err = Config::new(disks, "/mnt/storage".to_owned())
+            .expect_err("hyphen-starting name should fail");
+        assert!(matches!(err, ConfigBuildError::InvalidDiskKey(_)));
+    }
+
+    #[test]
+    fn rejects_disk_key_starting_with_underscore() {
+        let mut disks = BTreeMap::new();
+        disks.insert(
+            "_bad".to_owned(),
+            DiskConfig {
+                by_id: ByIdPath("/dev/disk/by-id/a".to_owned()),
+            },
+        );
+        let err = Config::new(disks, "/mnt/storage".to_owned())
+            .expect_err("underscore-starting name should fail");
+        assert!(matches!(err, ConfigBuildError::InvalidDiskKey(_)));
+    }
+
+    #[test]
+    fn rejects_disk_key_with_space() {
+        let mut disks = BTreeMap::new();
+        disks.insert(
+            "my disk".to_owned(),
+            DiskConfig {
+                by_id: ByIdPath("/dev/disk/by-id/a".to_owned()),
+            },
+        );
+        let err = Config::new(disks, "/mnt/storage".to_owned())
+            .expect_err("space in name should fail");
+        assert!(matches!(err, ConfigBuildError::InvalidDiskKey(_)));
+    }
+
+    #[test]
+    fn rejects_empty_disk_key() {
+        let mut disks = BTreeMap::new();
+        disks.insert(
+            "".to_owned(),
+            DiskConfig {
+                by_id: ByIdPath("/dev/disk/by-id/a".to_owned()),
+            },
+        );
+        let err = Config::new(disks, "/mnt/storage".to_owned())
+            .expect_err("empty name should fail");
+        assert!(matches!(err, ConfigBuildError::InvalidDiskKey(_)));
+    }
+
+    #[test]
+    fn accepts_valid_disk_keys() {
+        for name in ["toshiba", "disk1", "my-disk", "my_disk", "A", "Z1-b2-c3"] {
+            let mut disks = BTreeMap::new();
+            disks.insert(
+                name.to_owned(),
+                DiskConfig {
+                    by_id: ByIdPath(format!("/dev/disk/by-id/{name}")),
+                },
+            );
+            Config::new(disks, "/mnt/storage".to_owned())
+                .unwrap_or_else(|e| panic!("name '{name}' should be valid, got: {e}"));
+        }
     }
 }

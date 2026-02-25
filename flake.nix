@@ -198,6 +198,11 @@
               braid = linuxCrane.braid-cli-unwrapped;
             }
           );
+          braid-module-invalid-disk-names =
+            import ./tests/braid-module/07-invalid-disk-names.nix {
+              inherit nixpkgs;
+              system = linuxSystem;
+            };
         };
     in
     {

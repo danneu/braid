@@ -4,6 +4,7 @@ let
   diskNames = builtins.attrNames cfg.disks;
   byIdValues = map (name: cfg.disks.${name}.byId) diskNames;
   inherit (builtins) map length attrValues;
+  validDiskKey = name: builtins.match "[a-zA-Z][a-zA-Z0-9_-]*" name != null;
 in
 {
   options.braid = {
@@ -46,6 +47,13 @@ in
       {
         assertion = (length diskNames) >= 1;
         message = "braid.disks must contain at least 1 disk when braid.enable = true.";
+      }
+      {
+        assertion = lib.all validDiskKey diskNames;
+        message =
+          let bad = builtins.filter (n: !validDiskKey n) diskNames;
+          in "braid.disks: invalid disk key(s): ${lib.concatStringsSep ", " (map (n: "'${n}'") bad)}. "
+             + "Keys must start with a letter and contain only letters, digits, hyphens, or underscores.";
       }
       {
         assertion = lib.all (v: lib.hasPrefix "/dev/disk/by-id/" v) byIdValues;
