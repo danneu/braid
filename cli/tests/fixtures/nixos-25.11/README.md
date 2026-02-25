@@ -3,7 +3,7 @@ Golden-file fixtures captured from a nixos-25.11 VM.
 To populate (or refresh) these fixtures:
 
 ```
-make capture-fixtures
+just capture-fixtures
 ```
 
 This boots a VM, sets up LUKS + btrfs RAID1, captures tool output,

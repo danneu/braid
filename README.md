@@ -281,10 +281,16 @@ Typical loop:
 
 ```bash
 # run one test while iterating
-make test-one t=braid-add-first-disk
+just test first-boot-single-disk
+
+# run a few specific tests
+just test first-boot-single-disk braid-remove-disk
+
+# add verbose VM logs
+just test first-boot-single-disk -v
 
 # run full suite before finishing
-make test
+just test
 ```
 
 Rust CLI code lives in `cli/`. Build it directly with:

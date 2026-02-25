@@ -242,6 +242,7 @@
               rustc
               rustfmt
               clippy
+              just
             ];
           };
         }
