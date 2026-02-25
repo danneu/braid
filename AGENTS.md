@@ -49,13 +49,15 @@ Decision docs must include an explicit status: `Draft`, `Active`, `Superseded`, 
 - `just test test1 -v` — Run specific checks with verbose output.
 - `just test-rust` — Run Rust unit tests (`cargo test`).
 
+**Test verbosity:** Run tests without `-v` by default. Only add `-v` to a specific failing test when the non-verbose output doesn't explain the failure. Never run `just test -v` (all tests verbose) — it produces too much output to be useful.
+
 ## Test Conventions
 
-Every test file must start with a block comment explaining:
+Every individual test must start with a block comment explaining this:
 
-1. **What** is being tested
-2. **Why** this test exists and what it validates in the architecture
-3. **Dependencies** — what must already work for this test to be meaningful
+1. **Intent** — what behavior this test verifies (or tries to verify)
+2. **Why it exists** — what risk/regression this protects against
+3. **Scenario** — the real-world user/system story this models, especially the concrete bug or incident that inspired the test
 
 ## Development Approach: TDD with NixOS VM Tests
 
