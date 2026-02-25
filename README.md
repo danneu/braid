@@ -214,6 +214,48 @@ braid plan --<TAB>       # → --json  --allow-remove-missing  --allow-remove-am
 Disk path candidates are read from `/etc/braid/config.json` on every tab press,
 so they reflect your current `braid.disks` config after a `nixos-rebuild`.
 
+## Remote Unlock (SSH)
+
+Unlock LUKS disks over SSH during early boot so you don't need physical access.
+
+### Setup
+
+1. Generate an initrd SSH host key:
+
+```
+sudo mkdir -p /etc/secrets/initrd
+sudo ssh-keygen -t ed25519 -f /etc/secrets/initrd/ssh_host_ed25519_key -N ''
+```
+
+2. Enable remote unlock in your config:
+
+```nix
+braid = {
+  enable = true;
+  disks = [ ... ];
+  remoteUnlock = {
+    enable = true;
+    authorizedKeys = [
+      "ssh-ed25519 AAAA... you@host"  # ~/.ssh/id_ed25519.pub from your client machine
+    ];
+    # sshPort = 2222;    # default
+    # hostKeys = [ "/etc/secrets/initrd/ssh_host_ed25519_key" ];  # default
+  };
+};
+```
+
+3. Rebuild: `sudo nixos-rebuild switch`
+
+### Unlocking
+
+From your client machine:
+
+```
+ssh -p 2222 root@<hostname>
+```
+
+You'll be dropped into the initrd shell where you can enter the LUKS passphrase. Boot continues after unlock.
+
 ## What you get for free
 
 Braid enables these automatically when `braid.enable = true`:
