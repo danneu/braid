@@ -29,7 +29,7 @@ with subtest("Initrd SSH is up with pending ask-password requests"):
         timeout=120,
     )
 
-with subtest("Unlock disk1 and disk2 over SSH, restart cryptsetup target"):
+with subtest("Unlock disk1 and disk2 over SSH, restart cryptsetup units"):
     # Unlock the two healthy drives (disk3 is bricked).
     # Mapper names are braid-disk1, braid-disk2 per the NixOS LUKS config.
     for name in ["disk1", "disk2"]:
@@ -40,9 +40,12 @@ with subtest("Unlock disk1 and disk2 over SSH, restart cryptsetup target"):
             f" || cryptsetup status braid-{name}\""
         )
 
-    # Restart each cryptsetup unit individually. Restarting the target alone
-    # does not restart the member units. disk3 fails immediately (bad LUKS
-    # header), while disk1/disk2 become active, so btrfs-device-scan can run.
+    # Important: restart unit instances, not cryptsetup.target.
+    # The target does not retrigger member units already stuck in "activating"
+    # (waiting for ask-password). btrfs-device-scan has After= on all three
+    # cryptsetup units, so boot blocks until each is terminal (active/failed).
+    # For the bricked drive, restart forces a fast "failed" state; for healthy
+    # drives, restart makes them "active", unblocking initrd-fs.target.
     for name in ["braid-disk1", "braid-disk2", "braid-disk3"]:
         escaped = name.replace("-", "\\x2d")
         unit = f"systemd-cryptsetup@{escaped}.service"

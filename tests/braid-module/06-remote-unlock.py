@@ -14,7 +14,7 @@ with subtest("Initrd SSH is up with pending ask-password requests"):
         timeout=120,
     )
 
-with subtest("Unlock all 3 LUKS devices over SSH"):
+with subtest("Unlock all 3 LUKS devices over SSH, restart cryptsetup units"):
     for name in ["disk1", "disk2", "disk3"]:
         client.succeed(
             f"{ssh_cmd}"
@@ -23,8 +23,12 @@ with subtest("Unlock all 3 LUKS devices over SSH"):
             f" || cryptsetup status braid-{name}\""
         )
 
-    # Restart cryptsetup target so systemd knows the devices are unlocked.
-    client.execute(f"{ssh_cmd} 'systemctl restart cryptsetup.target'")
+    # Restart unit instances, not cryptsetup.target. The target does not
+    # reliably retrigger member units that are still waiting for ask-password.
+    for name in ["braid-disk1", "braid-disk2", "braid-disk3"]:
+        escaped = name.replace("-", "\\x2d")
+        unit = f"systemd-cryptsetup@{escaped}.service"
+        client.execute(f"{ssh_cmd} \"systemctl restart '{unit}'\"")
 
 with subtest("Server reaches full boot after remote unlock"):
     server.wait_for_unit("multi-user.target", timeout=120)
