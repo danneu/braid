@@ -87,9 +87,10 @@ File: `cli/src/replace.rs`
 - `Devid`: existing `pool_remove_devid` path.
 - `Missing`: existing `pool_remove_missing` path.
 3. Keep checkpoint schema version unchanged.
-4. Resume gate `secondary_target_available` semantics must be phase-aware:
-- for missing/dead path: unchanged behavior (target must still be available).
-- for live path during `ReplaceEvictDead`: allow resume even if live target is already absent, and rely on idempotent eviction helper outcome.
+4. Resume gate relaxation for `OpKind::Replace` + `Phase::ReplaceEvictDead` + live-target path:
+- `pool_fingerprint`: skip strict equality check. After successful live eviction the device list and counts legitimately change; strict fingerprint equality is not a safe precondition for this phase/path. Rely on idempotent eviction helper execution-time probe instead.
+- `secondary_target_available`: allow resume even if live target is already absent.
+- Both relaxations apply **only** to this (op, phase, path) triple. All other phases, ops, and the missing/dead path retain strict checks unchanged.
 
 ### 4. Checkpoint/resume behavior for conversion-before-live-evict
 Files: `cli/src/checkpoint.rs`, `cli/src/replace.rs`
@@ -102,7 +103,7 @@ Files: `cli/src/checkpoint.rs`, `cli/src/replace.rs`
   - `Removed`: conversion/remove/close executed.
   - `AlreadyAbsent`: no-op success for idempotent resume.
 4. If additional phase granularity is added for conversion, do not bump schema version; treat it as additive phase support while continuing to accept existing checkpoints.
-5. Fail-closed behavior remains unchanged for topology/config/target drift.
+5. Fail-closed behavior remains unchanged for topology/config/target drift, except for the resume gate relaxation specified in section 3.4 above.
 
 ### 5. Dry-run and confirmation messaging
 File: `cli/src/replace.rs`
@@ -142,6 +143,7 @@ Add tests for:
 9. shared helper calls conversion before remove when projected remaining count is 1.
 10. shared helper skips conversion when projected remaining count > 1.
 11. shared helper attempts `cryptsetup close` after successful remove and surfaces warning-only behavior on close failure.
+12. resume gate relaxes `pool_fingerprint` and `secondary_target_available` for `Replace` + `ReplaceEvictDead` + live path; rejects for all other (op, phase, path) combinations unchanged.
 
 ### 2. Existing dead-path integration remains
 Files: `tests/7-replace-failed-disk.nix`, `tests/replace-failed-disk.py`
