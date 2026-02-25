@@ -126,12 +126,19 @@ with subtest("Data intact after graceful remove"):
 with subtest("Redundancy-reducing remove with --yes succeeds"):
     machine.succeed(remove_cmd("disk2"))
 
-with subtest("Pool has 1 device after redundancy removal"):
+with subtest("Pool has 1 device with single profile after redundancy removal"):
+    # btrfs RAID1 requires ≥2 devices, so removing the second-to-last device
+    # must first balance to single profile before the device remove can succeed.
+    # Verify both the device count and that the profile converted to single.
     fi_show = machine.succeed("btrfs fi show /mnt/storage")
     print(f"Pool after redundancy removal:\n{fi_show}")
     devid_count = fi_show.count("devid")
     assert devid_count == 1, f"Expected 1 device, got {devid_count}:\n{fi_show}"
     assert "braid-disk1" in fi_show, f"disk1 missing:\n{fi_show}"
+
+    df_output = machine.succeed("btrfs fi df /mnt/storage")
+    assert "single" in df_output.lower(), f"Expected single profile after 2→1 remove:\n{df_output}"
+    assert "raid1" not in df_output.lower(), f"RAID1 profile should not remain after 2→1 remove:\n{df_output}"
 
 with subtest("LUKS mapper closed after redundancy removal"):
     machine.fail("test -e /dev/mapper/braid-disk2")

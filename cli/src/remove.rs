@@ -181,6 +181,9 @@ pub fn cmd_remove<R: CommandRunner + Sync>(
     }
     run_phase_hooks(&Phase::RemoveStart)?;
 
+    // btrfs RAID1 requires at least 2 devices. When removing a device would
+    // leave only 1, we must first convert the profile to single — otherwise
+    // btrfs device remove will refuse.
     let remaining = pool.devices.len() - 1;
     if remaining == 1 {
         eprintln!("Converting pool from RAID1 to single profile...");
@@ -261,6 +264,7 @@ mod tests {
     use crate::progress::ProgressOutput;
     use std::collections::BTreeMap;
     use std::path::Path;
+    use std::sync::{Arc, Mutex};
     struct GuardedRunner;
 
     impl GuardedRunner {
@@ -334,6 +338,78 @@ mod tests {
                         &format!("{uuid}\n"),
                         0,
                     ))
+                }
+                _ => Err(CmdError::MissingMock),
+            }
+        }
+
+        fn run_with_stdin(
+            &self,
+            request: &CmdRequest,
+            _stdin: &[u8],
+        ) -> Result<RawCommandOutput, CmdError> {
+            self.run(request)
+        }
+    }
+
+    #[derive(Clone)]
+    struct RecordingRunner {
+        log: Arc<Mutex<Vec<CmdRequest>>>,
+    }
+
+    impl RecordingRunner {
+        fn new(log: Arc<Mutex<Vec<CmdRequest>>>) -> Self {
+            Self { log }
+        }
+    }
+
+    impl CommandRunner for RecordingRunner {
+        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
+            self.log.lock().unwrap().push(request.clone());
+
+            match request {
+                CmdRequest::FindmntJson { mount_point } => Ok(GuardedRunner::out(
+                    &format!("findmnt --json --mountpoint {mount_point}"),
+                    r#"{"filesystems":[{"target":"/mnt/storage","source":"/dev/mapper/braid-disk1","fstype":"btrfs"}]}"#,
+                    0,
+                )),
+                CmdRequest::BtrfsFilesystemShow { mount_point } => Ok(GuardedRunner::out(
+                    &format!("btrfs filesystem show {mount_point}"),
+                    "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\tTotal devices 2 FS bytes used 16.17MiB\n\tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk2\n",
+                    0,
+                )),
+                CmdRequest::CryptsetupStatus { mapper } => {
+                    let dev = if mapper == "braid-disk1" {
+                        "/dev/vdb"
+                    } else {
+                        "/dev/vdc"
+                    };
+                    Ok(GuardedRunner::out(
+                        &format!("cryptsetup status {mapper}"),
+                        &format!("{mapper} is active and is in use.\n  type:    LUKS2\n  device:  {dev}\n  mode:    read/write\n"),
+                        0,
+                    ))
+                }
+                CmdRequest::CryptsetupLuksUuid { device } => {
+                    let uuid = if device == "/dev/vdb" {
+                        "11111111-1111-1111-1111-111111111111"
+                    } else {
+                        "22222222-2222-2222-2222-222222222222"
+                    };
+                    Ok(GuardedRunner::out(
+                        &format!("cryptsetup luksUUID {device}"),
+                        &format!("{uuid}\n"),
+                        0,
+                    ))
+                }
+                CmdRequest::BtrfsBalanceSingle { .. } => {
+                    Ok(GuardedRunner::out("btrfs balance start", "", 0))
+                }
+                CmdRequest::BtrfsDeviceRemove { .. } => {
+                    Ok(GuardedRunner::out("btrfs device remove", "", 0))
+                }
+                CmdRequest::CryptsetupClose { .. } => {
+                    Ok(GuardedRunner::out("cryptsetup close", "", 0))
                 }
                 _ => Err(CmdError::MissingMock),
             }
@@ -423,6 +499,79 @@ mod tests {
         assert!(
             err.to_string().contains("error[CHECKPOINT_OP_MISMATCH]:"),
             "unexpected error: {err}"
+        );
+
+        unsafe {
+            std::env::remove_var("BRAID_TEST_CHECKPOINT_FILE");
+        }
+    }
+
+    #[test]
+    // Intent:
+    // - What behavior this test (tries to) verify.
+    //   - `braid remove` converts RAID1 to single before removing a device when only one disk remains.
+    //
+    // Why it exists:
+    // - What risk/regression this protects against.
+    //   - Prevents command-order regressions that make `btrfs device remove` fail under RAID1 minimum-device constraints.
+    //
+    // Scenario:
+    // - Real-world situation this models (user/system story). Especially the
+    //   specific scenario that inspired this test (like a real world bug).
+    //   - Operator removes one disk from a healthy two-disk pool and expects the operation to succeed end-to-end.
+    fn remove_two_disk_pool_balances_single_before_device_remove() {
+        let _guard = checkpoint_test_env_lock().lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.json");
+        let checkpoint_path = tmp.path().join("op-state.json");
+
+        let mut disks = BTreeMap::new();
+        disks.insert(
+            "disk1".to_owned(),
+            serde_json::json!({ "by_id": "/dev/disk/by-id/virtio-disk1" }),
+        );
+        disks.insert(
+            "disk2".to_owned(),
+            serde_json::json!({ "by_id": "/dev/disk/by-id/virtio-disk2" }),
+        );
+        let config_json = serde_json::json!({
+            "disks": disks,
+            "mount_point": "/mnt/storage"
+        });
+        std::fs::write(&config_path, serde_json::to_vec(&config_json).unwrap()).unwrap();
+
+        unsafe {
+            std::env::set_var(
+                "BRAID_TEST_CHECKPOINT_FILE",
+                checkpoint_path.to_string_lossy().to_string(),
+            );
+        }
+
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let runner = RecordingRunner::new(log.clone());
+        cmd_remove(
+            &runner,
+            Path::new(&config_path),
+            "disk2",
+            false,
+            true,
+            ProgressOutput::Off,
+        )
+        .expect("remove should succeed");
+
+        let calls = log.lock().unwrap();
+        let balance_idx = calls
+            .iter()
+            .position(|c| matches!(c, CmdRequest::BtrfsBalanceSingle { .. }))
+            .expect("expected balance-to-single request");
+        let remove_idx = calls
+            .iter()
+            .position(|c| matches!(c, CmdRequest::BtrfsDeviceRemove { .. }))
+            .expect("expected device-remove request");
+
+        assert!(
+            balance_idx < remove_idx,
+            "expected balance-to-single before device-remove; calls: {calls:?}"
         );
 
         unsafe {
