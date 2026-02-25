@@ -33,7 +33,8 @@ enum Commands {
     Status(StatusArgs),
     /// Check configuration for problems
     Doctor(DoctorArgs),
-    // Tui — commented out, revisit after intent CLI is stable
+    /// Interactive terminal dashboard
+    Tui,
 }
 
 #[derive(Debug, Args)]
@@ -219,6 +220,12 @@ fn main() {
         }
         Commands::Doctor(args) => {
             if let Err(e) = cmd_doctor(Path::new(&config_path), args.json) {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        }
+        Commands::Tui => {
+            if let Err(e) = braid_cli::tui::run(Path::new(&config_path)) {
                 eprintln!("error: {e}");
                 std::process::exit(1);
             }
