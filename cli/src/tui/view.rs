@@ -4,9 +4,49 @@ use ratatui::text::Line;
 use ratatui::widgets::{Block, Paragraph};
 use ratatui::Frame;
 
-use crate::tui::app::Model;
+use crate::tui::app::{Model, PoolState, PoolStatus};
 
 const BY_ID_PREFIX: &str = "/dev/disk/by-id/";
+const BAR_WIDTH: usize = 28;
+
+fn format_bytes(bytes: u64) -> String {
+    const TIB: f64 = 1024.0 * 1024.0 * 1024.0 * 1024.0;
+    const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+    let b = bytes as f64;
+    if b >= TIB {
+        format!("{:.1} TiB", b / TIB)
+    } else {
+        format!("{:.1} GiB", b / GIB)
+    }
+}
+
+fn usage_bar(used: u64, total: u64) -> String {
+    let ratio = if total == 0 {
+        0.0
+    } else {
+        (used as f64 / total as f64).clamp(0.0, 1.0)
+    };
+    let filled = (ratio * BAR_WIDTH as f64).round() as usize;
+    let empty = BAR_WIDTH - filled;
+    format!(
+        "{}{}  {} / {}",
+        "\u{2588}".repeat(filled),
+        "\u{2591}".repeat(empty),
+        format_bytes(used),
+        format_bytes(total),
+    )
+}
+
+fn pool_view(pool: &PoolState) -> Paragraph<'_> {
+    let lines = vec![
+        Line::from(format!(
+            "Pool: {} {} {}",
+            pool.mount_point, pool.profile, pool.health
+        )),
+        Line::from(format!("Data: {}", usage_bar(pool.used, pool.total))),
+    ];
+    Paragraph::new(lines)
+}
 
 fn disk_list(model: &Model) -> Paragraph<'_> {
     let lines: Vec<Line> = std::iter::once(Line::from("Disks"))
@@ -28,13 +68,48 @@ pub fn view(model: &Model, frame: &mut Frame) {
     let inner = outer.inner(area);
     frame.render_widget(outer, area);
 
-    let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(inner);
+    let pool_lines: u16 = match &model.pool {
+        PoolStatus::Mounted(_) => 2,
+        PoolStatus::Loading | PoolStatus::NotMounted | PoolStatus::Error(_) => 1,
+    };
 
-    frame.render_widget(disk_list(model), chunks[0]);
+    let chunks = Layout::vertical([
+        Constraint::Length(pool_lines),
+        Constraint::Length(1), // separator
+        Constraint::Min(1),
+        Constraint::Length(1),
+    ])
+    .split(inner);
+
+    match &model.pool {
+        PoolStatus::Loading => {
+            frame.render_widget(
+                Paragraph::new("Pool: loading...").style(Style::default().fg(Color::DarkGray)),
+                chunks[0],
+            );
+        }
+        PoolStatus::NotMounted => {
+            frame.render_widget(
+                Paragraph::new("Pool: not mounted").style(Style::default().fg(Color::Yellow)),
+                chunks[0],
+            );
+        }
+        PoolStatus::Mounted(pool) => {
+            frame.render_widget(pool_view(pool), chunks[0]);
+        }
+        PoolStatus::Error(msg) => {
+            frame.render_widget(
+                Paragraph::new(format!("Pool error: {msg}")).style(Style::default().fg(Color::Red)),
+                chunks[0],
+            );
+        }
+    }
+
+    frame.render_widget(disk_list(model), chunks[2]);
 
     frame.render_widget(
         Paragraph::new("press q to quit").style(Style::default().fg(Color::DarkGray)),
-        chunks[1],
+        chunks[3],
     );
 }
 
@@ -75,8 +150,39 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_disk_list() {
-        let model = Model::new(sample_disks());
+    fn snapshot_loading() {
+        let model = Model::new_for_test(sample_disks(), PoolStatus::Loading);
+        let terminal = render(&model, 60, 20);
+        insta::assert_snapshot!(buffer_to_string(&terminal));
+    }
+
+    #[test]
+    fn snapshot_not_mounted() {
+        let model = Model::new_for_test(sample_disks(), PoolStatus::NotMounted);
+        let terminal = render(&model, 60, 20);
+        insta::assert_snapshot!(buffer_to_string(&terminal));
+    }
+
+    #[test]
+    fn snapshot_with_pool() {
+        let pool = PoolState {
+            mount_point: "/mnt/storage".to_owned(),
+            profile: "RAID1".to_owned(),
+            health: "healthy".to_owned(),
+            used: 2_308_094_370_816,  // ~2.1 TiB
+            total: 5_937_955_045_376, // ~5.4 TiB
+        };
+        let model = Model::new_for_test(sample_disks(), PoolStatus::Mounted(pool));
+        let terminal = render(&model, 60, 20);
+        insta::assert_snapshot!(buffer_to_string(&terminal));
+    }
+
+    #[test]
+    fn snapshot_error() {
+        let model = Model::new_for_test(
+            sample_disks(),
+            PoolStatus::Error("command failed: findmnt exited 1".to_owned()),
+        );
         let terminal = render(&model, 60, 20);
         insta::assert_snapshot!(buffer_to_string(&terminal));
     }

@@ -3,6 +3,7 @@ mod command;
 mod effect;
 mod event;
 mod keymap;
+pub(crate) mod probe;
 mod state;
 mod view;
 
@@ -22,7 +23,13 @@ pub fn run(config_path: &Path) -> io::Result<()> {
     let config = config_read(config_path).map_err(|e| io::Error::other(e.to_string()))?;
     let mut terminal = ratatui::init();
     let (_input, cmd_tx, rx) = InputHandler::new();
-    let mut model = Model::new(config.disks().to_vec());
+    let (mut model, init_effects) = Model::new(
+        config.disks().to_vec(),
+        config.mount_point().to_owned(),
+    );
+    for effect in init_effects {
+        execute_effect(effect, &cmd_tx);
+    }
     let result = run_loop(&mut terminal, &mut model, &rx, &cmd_tx);
     ratatui::restore();
     result

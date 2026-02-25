@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use ratatui::crossterm::event::{self, KeyEvent};
 
-use crate::tui::app::Message;
+use crate::tui::app::{Message, PoolState};
 use crate::tui::keymap;
 use crate::tui::state::{CmdId, Stream};
 
@@ -16,6 +16,7 @@ pub enum Event {
     CommandStarted { id: CmdId, cmd: String },
     CommandOutput { id: CmdId, stream: Stream, line: String },
     CommandFinished { id: CmdId, status: ExitStatus },
+    PoolProbeFinished(Result<Option<PoolState>, String>),
     Tick,
 }
 
@@ -30,6 +31,7 @@ impl Event {
             Event::CommandFinished { id, status } => {
                 Some(Message::CommandFinished { id, status })
             }
+            Event::PoolProbeFinished(result) => Some(Message::PoolProbeFinished(result)),
             Event::Tick => Some(Message::Tick),
         }
     }
