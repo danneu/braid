@@ -142,6 +142,11 @@
               braid = linuxCrane.braid;
             }
           );
+          braid-checkpoint-opstate = pkgs.testers.nixosTest (
+            import ./tests/25-braid-checkpoint-opstate.nix {
+              braid = linuxCrane.braid;
+            }
+          );
           tool-versions = pkgs.testers.nixosTest (
             import ./tests/17-tool-versions.nix {
               braid-cli-unwrapped = linuxCrane.braid-cli-unwrapped;

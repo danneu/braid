@@ -1,16 +1,17 @@
 use crate::checkpoint::{
-    clear_checkpoint, hash_args, load_checkpoint, save_checkpoint, CheckpointValidity,
-    OpCheckpoint, PoolFingerprint,
+    CheckpointError, InvocationCtx, LiveCtx, OpArgs, OpKind, Phase, PoolFingerprint, ResumeGate,
+    SystemClock, TargetSnapshot, clear_checkpoint, hash_args, maybe_fail_after_checkpoint,
+    new_checkpoint, resolve_resume_gate, run_phase_hooks, save_checkpoint_atomic,
 };
 use crate::cmd::CommandRunner;
-use crate::config::{config_hash, config_read_raw, mapper_name, Config};
+use crate::config::{Config, config_hash, config_read_raw, mapper_name};
 use crate::disk_map;
 use crate::luks::{
     backup_luks_header, device_has_btrfs_superblock, ensure_luks_open, luks_format,
     luks_opts_from_env, read_passphrase, verify_passphrase,
 };
 use crate::pool::{pool_add_device, pool_balance_raid1, pool_bootstrap_mount};
-use crate::probe::{probe_config_disk, probe_pool, Filesystem, ProbeError};
+use crate::probe::{Filesystem, ProbeError, probe_config_disk, probe_pool};
 use crate::progress::ProgressOutput;
 use crate::types::*;
 use std::path::Path;
@@ -32,7 +33,9 @@ pub enum AddError {
     #[error("parse error: {0}")]
     Parse(#[from] crate::parse::ParseError),
     #[error("checkpoint error: {0}")]
-    Checkpoint(#[from] std::io::Error),
+    Checkpoint(#[from] CheckpointError),
+    #[error("checkpoint IO error: {0}")]
+    CheckpointIo(#[from] std::io::Error),
 }
 
 /// A step in the add operation, for dry-run display.
@@ -88,24 +91,51 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         return Ok(());
     }
 
-    if steps.is_empty() {
-        eprintln!("Nothing to do — {} is already a pool member.", name);
+    // Resolve checkpoint before any mutating requests.
+    let args_hash = hash_args(&["add", name]);
+    let resume = match resolve_resume_gate(
+        &config_raw,
+        InvocationCtx {
+            op: OpKind::Add,
+            op_args: OpArgs::add(name),
+            args_hash: args_hash.clone(),
+            config_hash: config_hash(&config_raw),
+        },
+        LiveCtx {
+            pool_fingerprint: PoolFingerprint::from_pool_state(&pool),
+            primary_target_available: !matches!(probed.state, ConfigDiskState::Absent),
+            secondary_target_available: None,
+        },
+    ) {
+        ResumeGate::ResumeFrom(cp) => {
+            eprintln!(
+                "Resuming previous 'braid add {}' at phase {}.",
+                name,
+                cp.phase.as_env_value()
+            );
+            Some(cp)
+        }
+        ResumeGate::NoCheckpoint => None,
+        ResumeGate::Reject(error) => return Err(AddError::Checkpoint(error)),
+    };
+
+    // Resume from long-running phase directly.
+    if matches!(
+        resume.as_ref().map(|cp| &cp.phase),
+        Some(Phase::AddBalanceRaid1)
+    ) {
+        run_phase_hooks(&Phase::AddBalanceRaid1)?;
+        eprintln!("Balancing to RAID1...");
+        pool_balance_raid1(runner, config.mount_point(), progress)?;
+        clear_checkpoint();
+        eprintln!("Balance complete.");
+        eprintln!("Done. {} is now part of the pool.", name);
         return Ok(());
     }
 
-    // Check for valid checkpoint
-    let args_hash = hash_args(&["add", name]);
-    match load_checkpoint(&config_raw, &pool, "add", &args_hash) {
-        CheckpointValidity::Valid(cp) => {
-            eprintln!(
-                "Resuming previous 'braid add {}' interrupted at step {}.",
-                name, cp.step
-            );
-        }
-        CheckpointValidity::Stale(reason) => {
-            eprintln!("Previous checkpoint invalidated: {reason}. Starting fresh.");
-        }
-        CheckpointValidity::None => {}
+    if steps.is_empty() {
+        eprintln!("Nothing to do — {} is already a pool member.", name);
+        return Ok(());
     }
 
     // Read passphrase
@@ -190,22 +220,30 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         pool_add_device(runner, &mapper_path, config.mount_point())?;
         eprintln!("Device added to pool: {}", mn);
 
+        // Re-probe after device add so checkpoint fingerprint matches live resume topology.
+        let pool_after_add = probe_pool(runner, config.mount_point())?;
+
         // Balance to RAID1 if 2+ disks
         let total_after = pool.devices.len() + 1;
         if total_after >= 2 {
-            let cp = OpCheckpoint {
-                op: "add".into(),
-                disk: name.into(),
-                step: 3,
-                started_at: now_iso(),
-                config_hash: config_hash(&config_raw),
-                args_hash: hash_args(&["add", name]),
-                pool_fingerprint: PoolFingerprint::from_pool_state(&pool),
-                old_disk: None,
-                new_disk: None,
-            };
-            save_checkpoint(&cp)?;
+            let cp = new_checkpoint(
+                &SystemClock,
+                OpKind::Add,
+                OpArgs::add(name),
+                Phase::AddBalanceRaid1,
+                config_hash(&config_raw),
+                hash_args(&["add", name]),
+                PoolFingerprint::from_pool_state(&pool_after_add),
+                TargetSnapshot {
+                    primary: Some(name.to_owned()),
+                    secondary: None,
+                    missing_id: None,
+                },
+            );
+            save_checkpoint_atomic(&cp)?;
+            maybe_fail_after_checkpoint()?;
 
+            run_phase_hooks(&Phase::AddBalanceRaid1)?;
             eprintln!("Balancing to RAID1...");
             pool_balance_raid1(runner, config.mount_point(), progress)?;
             clear_checkpoint();
@@ -218,13 +256,7 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         let mn = mapper_name(name);
         if let Some(dev) = pool_after.devices.iter().find(|d| d.mapper == mn) {
             disk_map::update_disk_map_best_effort(|map| {
-                disk_map::record_disk(
-                    map,
-                    name,
-                    &disk.by_id.0,
-                    &dev.luks_uuid.0,
-                    dev.devid,
-                );
+                disk_map::record_disk(map, name, &disk.by_id.0, &dev.luks_uuid.0, dev.devid);
             });
         }
     }
@@ -312,16 +344,95 @@ fn add_confirm_message(name: &str, by_id: &str) -> String {
     )
 }
 
-fn now_iso() -> String {
-    use time::format_description::well_known::Iso8601;
-    time::OffsetDateTime::now_utc()
-        .format(&Iso8601::DEFAULT)
-        .unwrap_or_else(|_| "unknown".into())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::checkpoint::{
+        OpArgs, OpKind, Phase, PoolFingerprint, SystemClock, TargetSnapshot, new_checkpoint,
+        save_checkpoint_atomic,
+    };
+    use crate::cmd::{CmdError, CmdRequest, CommandRunner, RawCommandOutput};
+    use crate::probe::Filesystem;
+    use crate::progress::ProgressOutput;
+    use std::collections::BTreeMap;
+    use std::path::Path;
+
+    struct StaticFs {
+        paths: Vec<String>,
+    }
+
+    impl Filesystem for StaticFs {
+        fn exists(&self, path: &str) -> bool {
+            self.paths.iter().any(|p| p == path)
+        }
+
+        fn is_block_device(&self, _path: &str) -> bool {
+            false
+        }
+    }
+
+    struct GuardedRunner;
+
+    impl GuardedRunner {
+        fn out(cmd: &str, stdout: &str, exit_status: i32) -> RawCommandOutput {
+            RawCommandOutput {
+                cmd: cmd.to_owned(),
+                stdout: stdout.to_owned(),
+                stderr: String::new(),
+                exit_status,
+            }
+        }
+
+        fn is_mutating(req: &CmdRequest) -> bool {
+            matches!(
+                req,
+                CmdRequest::CryptsetupLuksOpen { .. }
+                    | CmdRequest::CryptsetupClose { .. }
+                    | CmdRequest::BtrfsDeviceAdd { .. }
+                    | CmdRequest::BtrfsDeviceRemove { .. }
+                    | CmdRequest::BtrfsDeviceRemoveMissing { .. }
+                    | CmdRequest::BtrfsDeviceScan { .. }
+                    | CmdRequest::BtrfsDeviceScanAll
+                    | CmdRequest::BtrfsBalanceRaid1 { .. }
+                    | CmdRequest::BtrfsBalanceSingle { .. }
+                    | CmdRequest::MkfsBtrfs { .. }
+                    | CmdRequest::Mount { .. }
+                    | CmdRequest::CryptsetupLuksFormat { .. }
+                    | CmdRequest::CryptsetupTestPassphrase { .. }
+                    | CmdRequest::CryptsetupLuksHeaderBackup { .. }
+            )
+        }
+    }
+
+    impl CommandRunner for GuardedRunner {
+        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
+            if Self::is_mutating(request) {
+                panic!("mutating request should not run before resume gate: {request:?}");
+            }
+
+            match request {
+                CmdRequest::CryptsetupLuksUuid { device } => Ok(Self::out(
+                    &format!("cryptsetup luksUUID {device}"),
+                    "Device /dev/test is not a valid LUKS device.\n",
+                    4,
+                )),
+                CmdRequest::FindmntJson { mount_point } => Ok(Self::out(
+                    &format!("findmnt --json --mountpoint {mount_point}"),
+                    "{\"filesystems\":[]}\n",
+                    0,
+                )),
+                _ => Err(CmdError::MissingMock),
+            }
+        }
+
+        fn run_with_stdin(
+            &self,
+            request: &CmdRequest,
+            _stdin: &[u8],
+        ) -> Result<RawCommandOutput, CmdError> {
+            self.run(request)
+        }
+    }
 
     #[test]
     fn add_confirm_message_warns_about_luks_format() {
@@ -340,5 +451,73 @@ mod tests {
             !msg.contains("DESTROY"),
             "should not use inaccurate 'DESTROY' wording"
         );
+    }
+
+    #[test]
+    fn invariant_rejected_checkpoint_runs_no_mutating_requests() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.json");
+        let checkpoint_path = tmp.path().join("op-state.json");
+
+        let mut disks = BTreeMap::new();
+        disks.insert(
+            "disk2".to_owned(),
+            serde_json::json!({ "by_id": "/dev/disk/by-id/virtio-disk2" }),
+        );
+        let config_json = serde_json::json!({
+            "disks": disks,
+            "mount_point": "/mnt/storage"
+        });
+        std::fs::write(&config_path, serde_json::to_vec(&config_json).unwrap()).unwrap();
+
+        unsafe {
+            std::env::set_var(
+                "BRAID_TEST_CHECKPOINT_FILE",
+                checkpoint_path.to_string_lossy().to_string(),
+            );
+        }
+        let checkpoint = new_checkpoint(
+            &SystemClock,
+            OpKind::Remove,
+            OpArgs::remove("disk2"),
+            Phase::RemoveStart,
+            "sha256:placeholder".to_owned(),
+            hash_args(&["remove", "disk2"]),
+            PoolFingerprint {
+                devices: vec![],
+                missing_count: 0,
+                total_devices: 0,
+                mounted: false,
+            },
+            TargetSnapshot {
+                primary: Some("disk2".to_owned()),
+                secondary: None,
+                missing_id: None,
+            },
+        );
+        save_checkpoint_atomic(&checkpoint).unwrap();
+
+        let fs = StaticFs {
+            paths: vec!["/dev/disk/by-id/virtio-disk2".to_owned()],
+        };
+        let err = cmd_add(
+            &GuardedRunner,
+            &fs,
+            Path::new(&config_path),
+            "disk2",
+            false,
+            true,
+            None,
+            ProgressOutput::Off,
+        )
+        .expect_err("checkpoint mismatch should fail before mutation");
+
+        assert!(
+            err.to_string().contains("error[CHECKPOINT_OP_MISMATCH]:"),
+            "unexpected error: {err}"
+        );
+        unsafe {
+            std::env::remove_var("BRAID_TEST_CHECKPOINT_FILE");
+        }
     }
 }

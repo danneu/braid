@@ -1,12 +1,13 @@
 use crate::checkpoint::{
-    clear_checkpoint, hash_args, load_checkpoint, save_checkpoint, CheckpointValidity,
-    OpCheckpoint, PoolFingerprint,
+    CheckpointError, InvocationCtx, LiveCtx, OpArgs, OpKind, Phase, PoolFingerprint, ResumeGate,
+    SystemClock, TargetSnapshot, clear_checkpoint, hash_args, maybe_fail_after_checkpoint,
+    new_checkpoint, resolve_resume_gate, run_phase_hooks, save_checkpoint_atomic,
 };
 use crate::cmd::CommandRunner;
 use crate::config::{config_hash, config_read_raw, mapper_name};
 use crate::disk_map;
 use crate::pool::{pool_balance_single, pool_remove_device};
-use crate::probe::{probe_pool, ProbeError};
+use crate::probe::{ProbeError, probe_pool};
 use crate::progress::ProgressOutput;
 use crate::types::*;
 use std::path::Path;
@@ -24,7 +25,9 @@ pub enum RemoveError {
     #[error("command error: {0}")]
     Cmd(#[from] crate::cmd::CmdError),
     #[error("checkpoint error: {0}")]
-    Checkpoint(#[from] std::io::Error),
+    Checkpoint(#[from] CheckpointError),
+    #[error("checkpoint IO error: {0}")]
+    CheckpointIo(#[from] std::io::Error),
 }
 
 pub struct RemoveStep {
@@ -92,26 +95,39 @@ pub fn cmd_remove<R: CommandRunner + Sync>(
         return Ok(());
     }
 
-    // Check checkpoint
+    // Resolve checkpoint before any mutating requests.
     let args_parts: Vec<String> = vec!["remove".into(), name.into()];
     let args_refs: Vec<&str> = args_parts.iter().map(|s| s.as_str()).collect();
     let args_hash = hash_args(&args_refs);
 
-    match load_checkpoint(&config_raw, &pool, "remove", &args_hash) {
-        CheckpointValidity::Valid(cp) => {
+    let resume = match resolve_resume_gate(
+        &config_raw,
+        InvocationCtx {
+            op: OpKind::Remove,
+            op_args: OpArgs::remove(name),
+            args_hash: args_hash.clone(),
+            config_hash: config_hash(&config_raw),
+        },
+        LiveCtx {
+            pool_fingerprint: PoolFingerprint::from_pool_state(&pool),
+            primary_target_available: in_pool,
+            secondary_target_available: None,
+        },
+    ) {
+        ResumeGate::ResumeFrom(cp) => {
             eprintln!(
-                "Resuming previous 'braid remove {}' interrupted at step {}.",
-                name, cp.step
+                "Resuming previous 'braid remove {}' at phase {}.",
+                name,
+                cp.phase.as_env_value()
             );
+            Some(cp)
         }
-        CheckpointValidity::Stale(reason) => {
-            eprintln!("Previous checkpoint invalidated: {reason}. Starting fresh.");
-        }
-        CheckpointValidity::None => {}
-    }
+        ResumeGate::NoCheckpoint => None,
+        ResumeGate::Reject(error) => return Err(RemoveError::Checkpoint(error)),
+    };
 
     // Confirm
-    if !yes {
+    if !yes && resume.is_none() {
         let remaining = pool.devices.len() - 1;
         if remaining == 0 {
             return Err(RemoveError::Validation(
@@ -129,7 +145,10 @@ pub fn cmd_remove<R: CommandRunner + Sync>(
                 return Err(RemoveError::Validation("aborted by user".into()));
             }
         } else {
-            eprintln!("Remove {} from pool? Data will migrate off this disk.", name);
+            eprintln!(
+                "Remove {} from pool? Data will migrate off this disk.",
+                name
+            );
             eprint!("Type 'yes' to continue: ");
             let mut input = String::new();
             std::io::stdin().read_line(&mut input).map_err(|e| {
@@ -142,18 +161,25 @@ pub fn cmd_remove<R: CommandRunner + Sync>(
     }
 
     // Execute
-    let cp = OpCheckpoint {
-        op: "remove".into(),
-        disk: name.into(),
-        step: 1,
-        started_at: now_iso(),
-        config_hash: config_hash(&config_raw),
-        args_hash,
-        pool_fingerprint: PoolFingerprint::from_pool_state(&pool),
-        old_disk: None,
-        new_disk: None,
-    };
-    save_checkpoint(&cp)?;
+    if resume.is_none() {
+        let cp = new_checkpoint(
+            &SystemClock,
+            OpKind::Remove,
+            OpArgs::remove(name),
+            Phase::RemoveStart,
+            config_hash(&config_raw),
+            args_hash,
+            PoolFingerprint::from_pool_state(&pool),
+            TargetSnapshot {
+                primary: Some(name.to_owned()),
+                secondary: None,
+                missing_id: None,
+            },
+        );
+        save_checkpoint_atomic(&cp)?;
+        maybe_fail_after_checkpoint()?;
+    }
+    run_phase_hooks(&Phase::RemoveStart)?;
 
     let remaining = pool.devices.len() - 1;
     if remaining == 1 {
@@ -183,7 +209,10 @@ pub fn cmd_remove<R: CommandRunner + Sync>(
         disk_map::remove_disk(map, name);
     });
 
-    eprintln!("Done. If not already done: remove '{}' from braid.disks and run nixos-rebuild switch.", name);
+    eprintln!(
+        "Done. If not already done: remove '{}' from braid.disks and run nixos-rebuild switch.",
+        name
+    );
     Ok(())
 }
 
@@ -203,7 +232,8 @@ fn compile_remove_present_steps(
     if remaining == 1 {
         steps.push(RemoveStep {
             risk: "long",
-            description: "btrfs balance -dconvert=single -mconvert=single -f (RAID1 → single)".into(),
+            description: "btrfs balance -dconvert=single -mconvert=single -f (RAID1 → single)"
+                .into(),
         });
     }
     steps.push(RemoveStep {
@@ -218,11 +248,4 @@ fn compile_remove_present_steps(
         description: format!("cryptsetup close {}", mn),
     });
     Ok(steps)
-}
-
-fn now_iso() -> String {
-    use time::format_description::well_known::Iso8601;
-    time::OffsetDateTime::now_utc()
-        .format(&Iso8601::DEFAULT)
-        .unwrap_or_else(|_| "unknown".into())
 }

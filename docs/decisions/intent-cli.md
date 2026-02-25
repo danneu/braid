@@ -48,11 +48,11 @@ The btrfs superblock check is the "idempotent format primitive" described in `sa
 
 ### Resumability
 
-Per-command checkpoint (`/var/lib/braid/op-state.json`) with staleness rules:
-- Config hash changed → invalidate
-- Pool topology changed → invalidate
-- Different command or args → invalidate
-- btrfs balance and device remove are inherently resumable (btrfs tracks internal progress)
+Per-command checkpoint (`/var/lib/braid/op-state.json`) with strict fail-closed resume:
+- Resume gate validates command, args, config hash, pool topology, phase validity, and target availability before any mutating command runs.
+- Validation failures do not auto-invalidate and continue; they fail with explicit stable error codes (for example `CHECKPOINT_CONFIG_DRIFT`, `CHECKPOINT_TOPOLOGY_DRIFT`).
+- Checkpoint errors use `error[CODE]: message` format for operator visibility and test assertions.
+- Long-running phases (balance/device remove) resume deterministically via explicit phase markers.
 
 ### NixOS-native automation
 
@@ -66,7 +66,6 @@ Per-command checkpoint (`/var/lib/braid/op-state.json`) with staleness rules:
 
 ## Consequences
 
-- No backwards compatibility with v1 — project is unreleased
 - Five commands instead of three (no init-disk, no plan, no apply; `remove` split into `remove` + `remove-missing`)
 - Every command supports `--dry-run` and `--yes` for scripting
 - Tab completion returns disk names from config

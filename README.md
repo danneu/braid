@@ -176,7 +176,13 @@ sudo braid add ironwolf     # interrupted during balance
 sudo braid add ironwolf     # resumes balance from where it stopped
 ```
 
-Checkpoints are invalidated if config changes or pool topology changes.
+Resume validation is strict and fail-closed:
+
+```
+error[CHECKPOINT_CONFIG_DRIFT]: config changed since checkpoint was created
+```
+
+Invalid checkpoints never auto-continue. Update config/pool to match, or complete the original operation intent first.
 
 ## Post-boot pool unlock
 

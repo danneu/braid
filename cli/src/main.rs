@@ -6,7 +6,7 @@ use braid_cli::cmd::RealRunner;
 use braid_cli::config::config_read;
 use braid_cli::doctor::cmd_doctor;
 use braid_cli::probe::RealFilesystem;
-use braid_cli::progress::{resolve_progress_output, ProgressMode};
+use braid_cli::progress::{ProgressMode, resolve_progress_output};
 
 #[derive(Debug, Parser)]
 #[command(name = "braid", version)]
@@ -143,7 +143,7 @@ fn main() {
                 args.common.passphrase_file.as_deref(),
                 progress,
             ) {
-                eprintln!("error: {e}");
+                print_cli_error(&e.to_string());
                 std::process::exit(1);
             }
         }
@@ -162,7 +162,7 @@ fn main() {
                 args.common.yes,
                 progress,
             ) {
-                eprintln!("error: {e}");
+                print_cli_error(&e.to_string());
                 std::process::exit(1);
             }
         }
@@ -175,7 +175,7 @@ fn main() {
                 args.common.dry_run,
                 args.common.yes,
             ) {
-                eprintln!("error: {e}");
+                print_cli_error(&e.to_string());
                 std::process::exit(1);
             }
         }
@@ -199,7 +199,7 @@ fn main() {
                 args.common.passphrase_file.as_deref(),
                 progress,
             ) {
-                eprintln!("error: {e}");
+                print_cli_error(&e.to_string());
                 std::process::exit(1);
             }
         }
@@ -213,23 +213,33 @@ fn main() {
             };
             let runner = RealRunner;
             let fs = RealFilesystem;
-            if let Err(e) = braid_cli::status::cmd_status(&runner, &fs, &config, args.verbose, args.json) {
-                eprintln!("error: {e}");
+            if let Err(e) =
+                braid_cli::status::cmd_status(&runner, &fs, &config, args.verbose, args.json)
+            {
+                print_cli_error(&e.to_string());
                 std::process::exit(1);
             }
         }
         Commands::Doctor(args) => {
             if let Err(e) = cmd_doctor(Path::new(&config_path), args.json) {
-                eprintln!("error: {e}");
+                print_cli_error(&e.to_string());
                 std::process::exit(1);
             }
         }
         Commands::Tui => {
             if let Err(e) = braid_cli::tui::run(Path::new(&config_path)) {
-                eprintln!("error: {e}");
+                print_cli_error(&e.to_string());
                 std::process::exit(1);
             }
         }
+    }
+}
+
+fn print_cli_error(message: &str) {
+    if message.starts_with("error[") {
+        eprintln!("{message}");
+    } else {
+        eprintln!("error: {message}");
     }
 }
 

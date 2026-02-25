@@ -1,16 +1,17 @@
 use crate::checkpoint::{
-    clear_checkpoint, hash_args, load_checkpoint, save_checkpoint, CheckpointValidity,
-    OpCheckpoint, PoolFingerprint,
+    CheckpointError, InvocationCtx, LiveCtx, OpArgs, OpKind, Phase, PoolFingerprint, ResumeGate,
+    SystemClock, TargetSnapshot, clear_checkpoint, hash_args, maybe_fail_after_checkpoint,
+    new_checkpoint, resolve_resume_gate, run_phase_hooks, save_checkpoint_atomic, update_phase,
 };
 use crate::cmd::CommandRunner;
 use crate::config::{config_hash, config_read_raw, mapper_name};
 use crate::disk_map;
 use crate::luks::{
-    backup_luks_header, ensure_luks_open, luks_format,
-    luks_opts_from_env, read_passphrase, verify_passphrase,
+    backup_luks_header, ensure_luks_open, luks_format, luks_opts_from_env, read_passphrase,
+    verify_passphrase,
 };
 use crate::pool::{pool_add_device, pool_balance_raid1, pool_remove_devid, pool_remove_missing};
-use crate::probe::{probe_config_disk, probe_pool, Filesystem, ProbeError};
+use crate::probe::{Filesystem, ProbeError, probe_config_disk, probe_pool};
 use crate::progress::ProgressOutput;
 use crate::types::*;
 use std::path::Path;
@@ -32,7 +33,9 @@ pub enum ReplaceError {
     #[error("parse error: {0}")]
     Parse(#[from] crate::parse::ParseError),
     #[error("checkpoint error: {0}")]
-    Checkpoint(#[from] std::io::Error),
+    Checkpoint(#[from] CheckpointError),
+    #[error("checkpoint IO error: {0}")]
+    CheckpointIo(#[from] std::io::Error),
 }
 
 pub struct ReplaceStep {
@@ -112,7 +115,7 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         return Ok(());
     }
 
-    // Check checkpoint
+    // Resolve checkpoint before any mutating requests.
     let args_parts: Vec<String> = if let Some(id) = missing_id {
         vec![
             "replace".into(),
@@ -126,21 +129,33 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     let args_refs: Vec<&str> = args_parts.iter().map(|s| s.as_str()).collect();
     let args_hash = hash_args(&args_refs);
 
-    match load_checkpoint(&config_raw, &pool, "replace", &args_hash) {
-        CheckpointValidity::Valid(cp) => {
+    let resume = match resolve_resume_gate(
+        &config_raw,
+        InvocationCtx {
+            op: OpKind::Replace,
+            op_args: OpArgs::replace(old_name, new_name, missing_id),
+            args_hash: args_hash.clone(),
+            config_hash: config_hash(&config_raw),
+        },
+        LiveCtx {
+            pool_fingerprint: PoolFingerprint::from_pool_state(&pool),
+            primary_target_available: !matches!(new_probed.state, ConfigDiskState::Absent),
+            secondary_target_available: Some(pool.missing_count > 0 || missing_id.is_some()),
+        },
+    ) {
+        ResumeGate::ResumeFrom(cp) => {
             eprintln!(
-                "Resuming previous 'braid replace' interrupted at step {}.",
-                cp.step
+                "Resuming previous 'braid replace' at phase {}.",
+                cp.phase.as_env_value()
             );
+            Some(cp)
         }
-        CheckpointValidity::Stale(reason) => {
-            eprintln!("Previous checkpoint invalidated: {reason}. Starting fresh.");
-        }
-        CheckpointValidity::None => {}
-    }
+        ResumeGate::NoCheckpoint => None,
+        ResumeGate::Reject(error) => return Err(ReplaceError::Checkpoint(error)),
+    };
 
     // Confirm
-    if !yes {
+    if !yes && resume.is_none() {
         eprintln!(
             "{}",
             replace_confirm_message(&new_probed.state, old_name, new_name, &new_disk.by_id.0)
@@ -155,77 +170,102 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         }
     }
 
-    // Read passphrase
-    let passphrase = read_passphrase(passphrase_file, yes)?;
-    let new_mn = mapper_name(new_name);
+    let mut checkpoint = resume;
+    let mut start_from_evict = false;
+    if let Some(cp) = &checkpoint {
+        start_from_evict = matches!(cp.phase, Phase::ReplaceEvictDead);
+    }
 
-    // Step 1: Init new disk if needed
-    match new_probed.state {
-        ConfigDiskState::Absent => {
-            return Err(ReplaceError::Validation(format!(
-                "new disk '{}' ({}) is not present. Is it plugged in?",
-                new_name, new_disk.by_id
-            )));
-        }
-        ConfigDiskState::PresentNotLuks => {
-            // If pool exists, verify passphrase against existing member
-            if let Some(existing) = pool.devices.first() {
-                let status_raw = runner.run(&crate::cmd::CmdRequest::CryptsetupStatus {
-                    mapper: existing.mapper.0.clone(),
-                })?;
-                let status = crate::parse::parse_cryptsetup_status(&status_raw)?;
-                if let Some(underlying) = status.device {
-                    let ok = verify_passphrase(runner, &underlying, &passphrase)?;
-                    if !ok {
-                        return Err(ReplaceError::Validation(
-                            "passphrase does not match existing pool member".into(),
-                        ));
+    if checkpoint.is_none() {
+        // Read passphrase
+        let passphrase = read_passphrase(passphrase_file, yes)?;
+        let new_mn = mapper_name(new_name);
+
+        // Step 1: Init new disk if needed
+        match new_probed.state {
+            ConfigDiskState::Absent => {
+                return Err(ReplaceError::Validation(format!(
+                    "new disk '{}' ({}) is not present. Is it plugged in?",
+                    new_name, new_disk.by_id
+                )));
+            }
+            ConfigDiskState::PresentNotLuks => {
+                // If pool exists, verify passphrase against existing member
+                if let Some(existing) = pool.devices.first() {
+                    let status_raw = runner.run(&crate::cmd::CmdRequest::CryptsetupStatus {
+                        mapper: existing.mapper.0.clone(),
+                    })?;
+                    let status = crate::parse::parse_cryptsetup_status(&status_raw)?;
+                    if let Some(underlying) = status.device {
+                        let ok = verify_passphrase(runner, &underlying, &passphrase)?;
+                        if !ok {
+                            return Err(ReplaceError::Validation(
+                                "passphrase does not match existing pool member".into(),
+                            ));
+                        }
                     }
                 }
-            }
 
-            let luks_opts = luks_opts_from_env();
-            luks_format(runner, &new_disk.by_id.0, &passphrase, &luks_opts)?;
-            eprintln!("LUKS formatted: {}", new_disk.by_id);
+                let luks_opts = luks_opts_from_env();
+                luks_format(runner, &new_disk.by_id.0, &passphrase, &luks_opts)?;
+                eprintln!("LUKS formatted: {}", new_disk.by_id);
 
-            let backup_path = backup_luks_header(runner, &new_disk.by_id.0, &new_mn.0)?;
-            eprintln!("LUKS header backed up: {}", backup_path.display());
+                let backup_path = backup_luks_header(runner, &new_disk.by_id.0, &new_mn.0)?;
+                eprintln!("LUKS header backed up: {}", backup_path.display());
 
-            ensure_luks_open(runner, fs, new_name, new_disk, &passphrase)?;
-            eprintln!("LUKS opened: {} → {}", new_disk.by_id, new_mn);
-        }
-        ConfigDiskState::PresentLuks { mapper_open, .. } => {
-            if !mapper_open {
                 ensure_luks_open(runner, fs, new_name, new_disk, &passphrase)?;
                 eprintln!("LUKS opened: {} → {}", new_disk.by_id, new_mn);
             }
+            ConfigDiskState::PresentLuks { mapper_open, .. } => {
+                if !mapper_open {
+                    ensure_luks_open(runner, fs, new_name, new_disk, &passphrase)?;
+                    eprintln!("LUKS opened: {} → {}", new_disk.by_id, new_mn);
+                }
+            }
+        }
+
+        // Step 2: Add new disk to pool
+        let new_mapper_path = format!("/dev/mapper/{}", new_mn.0);
+        pool_add_device(runner, &new_mapper_path, config.mount_point())?;
+        eprintln!("Device added to pool: {}", new_mn);
+
+        // Re-probe after add so resume fingerprint reflects post-add topology.
+        let pool_after_add = probe_pool(runner, config.mount_point())?;
+
+        // Step 3: Balance to RAID1 (with checkpoint)
+        let cp = new_checkpoint(
+            &SystemClock,
+            OpKind::Replace,
+            OpArgs::replace(old_name, new_name, missing_id),
+            Phase::ReplaceBalanceRaid1,
+            config_hash(&config_raw),
+            args_hash.clone(),
+            PoolFingerprint::from_pool_state(&pool_after_add),
+            TargetSnapshot {
+                primary: Some(new_name.to_owned()),
+                secondary: Some(old_name.to_owned()),
+                missing_id,
+            },
+        );
+        save_checkpoint_atomic(&cp)?;
+        maybe_fail_after_checkpoint()?;
+        checkpoint = Some(cp);
+    }
+
+    if !start_from_evict {
+        run_phase_hooks(&Phase::ReplaceBalanceRaid1)?;
+        eprintln!("Balancing to RAID1...");
+        pool_balance_raid1(runner, config.mount_point(), progress)?;
+        eprintln!("Balance complete.");
+
+        if let Some(cp) = checkpoint.as_mut() {
+            update_phase(cp, Phase::ReplaceEvictDead, &SystemClock);
+            save_checkpoint_atomic(cp)?;
+            maybe_fail_after_checkpoint()?;
         }
     }
 
-    // Step 2: Add new disk to pool
-    let new_mapper_path = format!("/dev/mapper/{}", new_mn.0);
-    pool_add_device(runner, &new_mapper_path, config.mount_point())?;
-    eprintln!("Device added to pool: {}", new_mn);
-
-    // Step 3: Balance to RAID1 (with checkpoint)
-    let cp = OpCheckpoint {
-        op: "replace".into(),
-        disk: new_name.into(),
-        step: 3,
-        started_at: now_iso(),
-        config_hash: config_hash(&config_raw),
-        args_hash: args_hash.clone(),
-        pool_fingerprint: PoolFingerprint::from_pool_state(&pool),
-        old_disk: Some(old_name.into()),
-        new_disk: Some(new_name.into()),
-    };
-    save_checkpoint(&cp)?;
-
-    eprintln!("Balancing to RAID1...");
-    pool_balance_raid1(runner, config.mount_point(), progress)?;
-    eprintln!("Balance complete.");
-
-    // Step 4: Evict dead disk
+    run_phase_hooks(&Phase::ReplaceEvictDead)?;
     match eviction_target {
         EvictionTarget::Devid(devid) => {
             eprintln!("Removing dead device (devid {})...", devid);
@@ -378,13 +418,6 @@ fn replace_confirm_message(
     }
 }
 
-fn now_iso() -> String {
-    use time::format_description::well_known::Iso8601;
-    time::OffsetDateTime::now_utc()
-        .format(&Iso8601::DEFAULT)
-        .unwrap_or_else(|_| "unknown".into())
-}
-
 fn apply_replace_disk_map_update(
     map: &mut crate::disk_map::DiskMap,
     old_name: &str,
@@ -397,13 +430,7 @@ fn apply_replace_disk_map_update(
 
     if let Some(pool_after) = pool_after {
         if let Some(dev) = pool_after.devices.iter().find(|d| d.mapper == *new_mn) {
-            crate::disk_map::record_disk(
-                map,
-                new_name,
-                new_by_id,
-                &dev.luks_uuid.0,
-                dev.devid,
-            );
+            crate::disk_map::record_disk(map, new_name, new_by_id, &dev.luks_uuid.0, dev.devid);
             None
         } else {
             Some(format!(
@@ -468,13 +495,7 @@ mod tests {
     #[test]
     fn spec_replace_probe_failure_still_removes_old_map_entry() {
         let mut map = crate::disk_map::DiskMap::new();
-        crate::disk_map::record_disk(
-            &mut map,
-            "old",
-            "/dev/disk/by-id/old",
-            "old-uuid",
-            1,
-        );
+        crate::disk_map::record_disk(&mut map, "old", "/dev/disk/by-id/old", "old-uuid", 1);
 
         let new_mn = MapperName("braid-new".into());
         let _ = apply_replace_disk_map_update(

@@ -1,12 +1,13 @@
 use crate::checkpoint::{
-    clear_checkpoint, hash_args, load_checkpoint, save_checkpoint, CheckpointValidity,
-    OpCheckpoint, PoolFingerprint,
+    CheckpointError, InvocationCtx, LiveCtx, OpArgs, OpKind, Phase, PoolFingerprint, ResumeGate,
+    SystemClock, TargetSnapshot, clear_checkpoint, hash_args, maybe_fail_after_checkpoint,
+    new_checkpoint, resolve_resume_gate, run_phase_hooks, save_checkpoint_atomic,
 };
 use crate::cmd::CommandRunner;
 use crate::config::{config_hash, config_read_raw};
 use crate::disk_map;
 use crate::pool::{pool_remove_devid, pool_remove_missing};
-use crate::probe::{probe_pool, ProbeError};
+use crate::probe::{ProbeError, probe_pool};
 use crate::types::*;
 use std::path::Path;
 
@@ -23,7 +24,9 @@ pub enum RemoveMissingError {
     #[error("command error: {0}")]
     Cmd(#[from] crate::cmd::CmdError),
     #[error("checkpoint error: {0}")]
-    Checkpoint(#[from] std::io::Error),
+    Checkpoint(#[from] CheckpointError),
+    #[error("checkpoint IO error: {0}")]
+    CheckpointIo(#[from] std::io::Error),
 }
 
 pub struct RemoveMissingStep {
@@ -81,7 +84,7 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync>(
         return Ok(());
     }
 
-    // Check checkpoint
+    // Resolve checkpoint before any mutating requests.
     let args_parts: Vec<String> = if let Some(id) = missing_id {
         vec!["remove-missing".into(), id.to_string()]
     } else {
@@ -90,21 +93,33 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync>(
     let args_refs: Vec<&str> = args_parts.iter().map(|s| s.as_str()).collect();
     let args_hash = hash_args(&args_refs);
 
-    match load_checkpoint(&config_raw, &pool, "remove-missing", &args_hash) {
-        CheckpointValidity::Valid(cp) => {
+    let resume = match resolve_resume_gate(
+        &config_raw,
+        InvocationCtx {
+            op: OpKind::RemoveMissing,
+            op_args: OpArgs::remove_missing(missing_id),
+            args_hash: args_hash.clone(),
+            config_hash: config_hash(&config_raw),
+        },
+        LiveCtx {
+            pool_fingerprint: PoolFingerprint::from_pool_state(&pool),
+            primary_target_available: pool.missing_count > 0,
+            secondary_target_available: None,
+        },
+    ) {
+        ResumeGate::ResumeFrom(cp) => {
             eprintln!(
-                "Resuming previous 'braid remove-missing' interrupted at step {}.",
-                cp.step
+                "Resuming previous 'braid remove-missing' at phase {}.",
+                cp.phase.as_env_value()
             );
+            Some(cp)
         }
-        CheckpointValidity::Stale(reason) => {
-            eprintln!("Previous checkpoint invalidated: {reason}. Starting fresh.");
-        }
-        CheckpointValidity::None => {}
-    }
+        ResumeGate::NoCheckpoint => None,
+        ResumeGate::Reject(error) => return Err(RemoveMissingError::Checkpoint(error)),
+    };
 
     // Confirm
-    if !yes {
+    if !yes && resume.is_none() {
         if let Some(devid) = missing_id {
             eprintln!("Remove missing device (devid {}) from pool?", devid);
         } else {
@@ -121,18 +136,25 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync>(
     }
 
     // Execute
-    let cp = OpCheckpoint {
-        op: "remove-missing".into(),
-        disk: "missing".into(),
-        step: 1,
-        started_at: now_iso(),
-        config_hash: config_hash(&config_raw),
-        args_hash,
-        pool_fingerprint: PoolFingerprint::from_pool_state(&pool),
-        old_disk: None,
-        new_disk: None,
-    };
-    save_checkpoint(&cp)?;
+    if resume.is_none() {
+        let cp = new_checkpoint(
+            &SystemClock,
+            OpKind::RemoveMissing,
+            OpArgs::remove_missing(missing_id),
+            Phase::RemoveMissingStart,
+            config_hash(&config_raw),
+            args_hash,
+            PoolFingerprint::from_pool_state(&pool),
+            TargetSnapshot {
+                primary: Some("missing".to_owned()),
+                secondary: None,
+                missing_id,
+            },
+        );
+        save_checkpoint_atomic(&cp)?;
+        maybe_fail_after_checkpoint()?;
+    }
+    run_phase_hooks(&Phase::RemoveMissingStart)?;
 
     if let Some(devid) = missing_id {
         eprintln!("Removing missing device (devid {}) from pool...", devid);
@@ -167,7 +189,10 @@ fn compile_steps(missing_id: Option<u64>, _pool: &PoolState) -> Vec<RemoveMissin
     if let Some(devid) = missing_id {
         steps.push(RemoveMissingStep {
             risk: "long",
-            description: format!("btrfs device remove {} (target specific missing device)", devid),
+            description: format!(
+                "btrfs device remove {} (target specific missing device)",
+                devid
+            ),
         });
     } else {
         steps.push(RemoveMissingStep {
@@ -176,11 +201,4 @@ fn compile_steps(missing_id: Option<u64>, _pool: &PoolState) -> Vec<RemoveMissin
         });
     }
     steps
-}
-
-fn now_iso() -> String {
-    use time::format_description::well_known::Iso8601;
-    time::OffsetDateTime::now_utc()
-        .format(&Iso8601::DEFAULT)
-        .unwrap_or_else(|_| "unknown".into())
 }
