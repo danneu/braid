@@ -12,7 +12,7 @@ Declare the disk in `braid.disks` (named attrset) before formatting it. `nixos-r
 
 ## 3. Safe-by-construction operations
 
-`nixos-rebuild switch` is declarative and idempotent — always safe to run. Each intent command (`add`, `remove`, `replace`) does exactly one thing with risk-appropriate confirmation. `mkfs.btrfs` is gated on bootstrap only (no existing superblock). An existing LUKS device or pool member is never reformatted — the btrfs superblock guard prevents accidental data loss. [Why →](decisions/intent-cli.md)
+`nixos-rebuild switch` is declarative and idempotent — always safe to run. Each intent command (`add`, `remove`, `remove-missing`, `replace`) does exactly one thing with risk-appropriate confirmation. `mkfs.btrfs` is gated on bootstrap only (no existing superblock). An existing LUKS device or pool member is never reformatted — the btrfs superblock guard prevents accidental data loss. [Why →](decisions/intent-cli.md)
 
 ## 4. Single passphrase
 

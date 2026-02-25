@@ -113,11 +113,11 @@ Data migrates off the drive before it's detached. If removing would leave a sing
 sudo nixos-rebuild switch
 ```
 
-For a missing/dead disk:
+### Remove a missing/dead device
 
 ```
-sudo braid remove ironwolf                    # 1 missing device: auto-detected
-sudo braid remove ironwolf --missing-id 3     # multiple missing: target by devid
+sudo braid remove-missing                    # 1 missing device: auto-detected
+sudo braid remove-missing --missing-id 3     # multiple missing: target by devid
 ```
 
 Use `braid status --verbose` to see device IDs.
@@ -187,7 +187,7 @@ One passphrase prompt opens all available LUKS devices and mounts the pool. Work
 Tab completion for subcommands, flags, and disk names works out of the box on NixOS when `braid.enable = true`. Completions are registered for bash, zsh, and fish.
 
 ```
-braid <TAB>           # → add  remove  replace  status  doctor
+braid <TAB>           # → add  remove  remove-missing  replace  status  doctor
 braid add <TAB>       # → toshiba  ironwolf  seagate
 braid add --<TAB>     # → --dry-run  --yes  --passphrase-file  --progress
 ```

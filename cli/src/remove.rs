@@ -4,7 +4,7 @@ use crate::checkpoint::{
 };
 use crate::cmd::CommandRunner;
 use crate::config::{config_hash, config_read_raw, mapper_name};
-use crate::pool::{pool_balance_single, pool_remove_device, pool_remove_devid, pool_remove_missing};
+use crate::pool::{pool_balance_single, pool_remove_device};
 use crate::probe::{probe_pool, ProbeError};
 use crate::progress::ProgressOutput;
 use crate::types::*;
@@ -35,7 +35,6 @@ pub fn cmd_remove<R: CommandRunner + Sync>(
     runner: &R,
     config_path: &Path,
     name: &str,
-    missing_id: Option<u64>,
     dry_run: bool,
     yes: bool,
     progress: ProgressOutput,
@@ -63,11 +62,19 @@ pub fn cmd_remove<R: CommandRunner + Sync>(
     // Is the disk present in the pool?
     let in_pool = pool.devices.iter().any(|d| d.mapper == mn);
 
-    let steps = if in_pool {
-        compile_remove_present_steps(name, &mn, &pool)?
-    } else {
-        compile_remove_missing_steps(name, missing_id, &pool)?
-    };
+    if !in_pool {
+        let mut msg = format!("disk '{}' not found in pool.", name);
+        if pool.missing_count > 0 {
+            msg.push_str(&format!(
+                " ({} missing device{} detected. Use 'braid remove-missing' to remove missing devices.)",
+                pool.missing_count,
+                if pool.missing_count == 1 { "" } else { "s" }
+            ));
+        }
+        return Err(RemoveError::Validation(msg));
+    }
+
+    let steps = compile_remove_present_steps(name, &mn, &pool)?;
 
     if dry_run {
         for step in &steps {
@@ -82,11 +89,7 @@ pub fn cmd_remove<R: CommandRunner + Sync>(
     }
 
     // Check checkpoint
-    let args_parts: Vec<String> = if let Some(id) = missing_id {
-        vec!["remove".into(), name.into(), id.to_string()]
-    } else {
-        vec!["remove".into(), name.into()]
-    };
+    let args_parts: Vec<String> = vec!["remove".into(), name.into()];
     let args_refs: Vec<&str> = args_parts.iter().map(|s| s.as_str()).collect();
     let args_hash = hash_args(&args_refs);
 
@@ -105,36 +108,24 @@ pub fn cmd_remove<R: CommandRunner + Sync>(
 
     // Confirm
     if !yes {
-        if in_pool {
-            let remaining = pool.devices.len() - 1;
-            if remaining == 0 {
-                return Err(RemoveError::Validation(
-                    "cannot remove the last disk from the pool".into(),
-                ));
-            }
-            if remaining == 1 {
-                eprintln!("WARNING: Removing this disk leaves only 1 disk — no redundancy.");
-                eprint!("Type 'remove without redundancy' to confirm: ");
-                let mut input = String::new();
-                std::io::stdin().read_line(&mut input).map_err(|e| {
-                    RemoveError::Validation(format!("failed to read confirmation: {e}"))
-                })?;
-                if input.trim() != "remove without redundancy" {
-                    return Err(RemoveError::Validation("aborted by user".into()));
-                }
-            } else {
-                eprintln!("Remove {} from pool? Data will migrate off this disk.", name);
-                eprint!("Type 'yes' to continue: ");
-                let mut input = String::new();
-                std::io::stdin().read_line(&mut input).map_err(|e| {
-                    RemoveError::Validation(format!("failed to read confirmation: {e}"))
-                })?;
-                if input.trim() != "yes" {
-                    return Err(RemoveError::Validation("aborted by user".into()));
-                }
+        let remaining = pool.devices.len() - 1;
+        if remaining == 0 {
+            return Err(RemoveError::Validation(
+                "cannot remove the last disk from the pool".into(),
+            ));
+        }
+        if remaining == 1 {
+            eprintln!("WARNING: Removing this disk leaves only 1 disk — no redundancy.");
+            eprint!("Type 'remove without redundancy' to confirm: ");
+            let mut input = String::new();
+            std::io::stdin().read_line(&mut input).map_err(|e| {
+                RemoveError::Validation(format!("failed to read confirmation: {e}"))
+            })?;
+            if input.trim() != "remove without redundancy" {
+                return Err(RemoveError::Validation("aborted by user".into()));
             }
         } else {
-            eprintln!("Remove missing device from pool?");
+            eprintln!("Remove {} from pool? Data will migrate off this disk.", name);
             eprint!("Type 'yes' to continue: ");
             let mut input = String::new();
             std::io::stdin().read_line(&mut input).map_err(|e| {
@@ -160,33 +151,25 @@ pub fn cmd_remove<R: CommandRunner + Sync>(
     };
     save_checkpoint(&cp)?;
 
-    if in_pool {
-        let remaining = pool.devices.len() - 1;
-        if remaining == 1 {
-            eprintln!("Converting pool from RAID1 to single profile...");
-            pool_balance_single(runner, config.mount_point(), progress)?;
-        }
+    let remaining = pool.devices.len() - 1;
+    if remaining == 1 {
+        eprintln!("Converting pool from RAID1 to single profile...");
+        pool_balance_single(runner, config.mount_point(), progress)?;
+    }
 
-        let device = format!("/dev/mapper/{}", mn.0);
-        eprintln!("Removing {} from pool (data will migrate)...", name);
-        pool_remove_device(runner, &device, config.mount_point(), progress)?;
+    let device = format!("/dev/mapper/{}", mn.0);
+    eprintln!("Removing {} from pool (data will migrate)...", name);
+    pool_remove_device(runner, &device, config.mount_point(), progress)?;
 
-        // Close LUKS mapper
-        let result = runner.run(&crate::cmd::CmdRequest::CryptsetupClose {
-            mapper: mn.0.clone(),
-        })?;
-        if result.exit_status != 0 {
-            eprintln!(
-                "Warning: failed to close LUKS mapper {} (exit {})",
-                mn, result.exit_status
-            );
-        }
-    } else if let Some(devid) = missing_id {
-        eprintln!("Removing missing device (devid {}) from pool...", devid);
-        pool_remove_devid(runner, config.mount_point(), devid)?;
-    } else {
-        eprintln!("Removing missing device from pool...");
-        pool_remove_missing(runner, config.mount_point())?;
+    // Close LUKS mapper
+    let result = runner.run(&crate::cmd::CmdRequest::CryptsetupClose {
+        mapper: mn.0.clone(),
+    })?;
+    if result.exit_status != 0 {
+        eprintln!(
+            "Warning: failed to close LUKS mapper {} (exit {})",
+            mn, result.exit_status
+        );
     }
 
     clear_checkpoint();
@@ -224,40 +207,6 @@ fn compile_remove_present_steps(
         risk: "safe",
         description: format!("cryptsetup close {}", mn),
     });
-    Ok(steps)
-}
-
-fn compile_remove_missing_steps(
-    name: &str,
-    missing_id: Option<u64>,
-    pool: &PoolState,
-) -> Result<Vec<RemoveStep>, RemoveError> {
-    if pool.missing_count == 0 {
-        return Err(RemoveError::Validation(format!(
-            "disk '{}' not found in pool and no missing devices detected",
-            name
-        )));
-    }
-
-    if pool.missing_count > 1 && missing_id.is_none() {
-        return Err(RemoveError::Validation(format!(
-            "multiple missing devices ({} missing). Pass --missing-id <devid> to target a specific one. Use 'braid status --verbose' to see device IDs.",
-            pool.missing_count
-        )));
-    }
-
-    let mut steps = Vec::new();
-    if let Some(devid) = missing_id {
-        steps.push(RemoveStep {
-            risk: "long",
-            description: format!("btrfs device remove {} (target specific missing device)", devid),
-        });
-    } else {
-        steps.push(RemoveStep {
-            risk: "long",
-            description: "btrfs device remove missing".into(),
-        });
-    }
     Ok(steps)
 }
 

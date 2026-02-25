@@ -12,12 +12,13 @@ Braid's plan/apply reconciliation engine was over-engineered for NAS drives, whi
 
 ## Decision
 
-Replace plan/apply with four intent commands:
+Replace plan/apply with five intent commands:
 
 | Command | Purpose | Risk |
 |---------|---------|------|
 | `braid add <name>` | Format + join pool, or join existing LUKS device | Destructive (new disk) or safe (existing LUKS) |
-| `braid remove <name>` | Migrate data off, detach from pool | Long-running |
+| `braid remove <name>` | Migrate data off present disk, detach from pool | Long-running |
+| `braid remove-missing` | Remove a missing/dead device from the pool | Long-running |
 | `braid replace --old <name> --new <name>` | Add new, rebalance, then evict dead | Transactional (add-first ordering) |
 | `braid status` | Display pool health and disk info | Read-only |
 
@@ -65,6 +66,6 @@ Per-command checkpoint (`/var/lib/braid/op-state.json`) with staleness rules:
 ## Consequences
 
 - No backwards compatibility with v1 — project is unreleased
-- Four commands instead of five (no init-disk, no plan, no apply)
+- Five commands instead of three (no init-disk, no plan, no apply; `remove` split into `remove` + `remove-missing`)
 - Every command supports `--dry-run` and `--yes` for scripting
 - Tab completion returns disk names from config

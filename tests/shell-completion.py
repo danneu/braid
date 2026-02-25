@@ -46,7 +46,7 @@ chmod +x /tmp/get-completions.sh
 
 with subtest("subcommand completion"):
     output = machine.succeed("bash /tmp/get-completions.sh braid ''")
-    for cmd in ["add", "remove", "replace", "status", "doctor"]:
+    for cmd in ["add", "remove", "remove-missing", "replace", "status", "doctor"]:
         assert cmd in output, f"Missing subcommand '{cmd}': {output}"
 
 with subtest("add disk name completion"):
@@ -69,7 +69,13 @@ with subtest("remove disk name completion"):
 with subtest("remove flag completion"):
     output = machine.succeed("bash /tmp/get-completions.sh braid remove --")
     assert "--yes" in output, f"Expected --yes: {output}"
+    assert "--missing-id" not in output, f"--missing-id should not be on remove: {output}"
+
+with subtest("remove-missing flag completion"):
+    output = machine.succeed("bash /tmp/get-completions.sh braid remove-missing --")
+    assert "--yes" in output, f"Expected --yes: {output}"
     assert "--missing-id" in output, f"Expected --missing-id: {output}"
+    assert "--dry-run" in output, f"Expected --dry-run: {output}"
 
 with subtest("status flag completion"):
     output = machine.succeed("bash /tmp/get-completions.sh braid status --")
@@ -95,7 +101,7 @@ with subtest("disk completion with missing config returns empty"):
 
 with subtest("fish subcommand completion"):
     out = machine.succeed("fish -c 'COMPLETE=fish braid | source; complete --do-complete \"braid \"'")
-    for cmd in ["add", "remove", "replace", "status", "doctor"]:
+    for cmd in ["add", "remove", "remove-missing", "replace", "status", "doctor"]:
         assert cmd in out, f"Missing {cmd}: {out}"
 
 with subtest("fish add disk name completion"):
@@ -106,7 +112,13 @@ with subtest("fish add disk name completion"):
 with subtest("fish remove flag completion"):
     out = machine.succeed("fish -c 'COMPLETE=fish braid | source; complete --do-complete \"braid remove --\"'")
     assert "--yes" in out, f"Expected --yes: {out}"
+    assert "--missing-id" not in out, f"--missing-id should not be on remove: {out}"
+
+with subtest("fish remove-missing flag completion"):
+    out = machine.succeed("fish -c 'COMPLETE=fish braid | source; complete --do-complete \"braid remove-missing --\"'")
+    assert "--yes" in out, f"Expected --yes: {out}"
     assert "--missing-id" in out, f"Expected --missing-id: {out}"
+    assert "--dry-run" in out, f"Expected --dry-run: {out}"
 
 # --- --config override during completion (fish) ---
 

@@ -25,6 +25,8 @@ enum Commands {
     Add(AddArgs),
     /// Remove a disk from the pool
     Remove(RemoveArgs),
+    /// Remove a missing/dead device from the pool
+    RemoveMissing(RemoveMissingArgs),
     /// Replace a dead disk with a new one
     Replace(ReplaceArgs),
     /// Show pool health and disk info
@@ -64,6 +66,12 @@ struct RemoveArgs {
     /// Disk name to remove
     #[arg(add = ArgValueCandidates::new(disk_name_candidates))]
     name: String,
+    #[command(flatten)]
+    common: CommonArgs,
+}
+
+#[derive(Debug, Args)]
+struct RemoveMissingArgs {
     /// Target a specific missing device by btrfs devid
     #[arg(long)]
     missing_id: Option<u64>,
@@ -149,10 +157,22 @@ fn main() {
                 &runner,
                 Path::new(&config_path),
                 &args.name,
-                args.missing_id,
                 args.common.dry_run,
                 args.common.yes,
                 progress,
+            ) {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        }
+        Commands::RemoveMissing(args) => {
+            let runner = RealRunner;
+            if let Err(e) = braid_cli::remove_missing::cmd_remove_missing(
+                &runner,
+                Path::new(&config_path),
+                args.missing_id,
+                args.common.dry_run,
+                args.common.yes,
             ) {
                 eprintln!("error: {e}");
                 std::process::exit(1);

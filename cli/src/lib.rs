@@ -9,6 +9,7 @@ pub mod pool;
 pub mod probe;
 pub mod progress;
 pub mod remove;
+pub mod remove_missing;
 pub mod replace;
 pub mod status;
 #[allow(dead_code)]
