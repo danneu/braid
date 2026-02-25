@@ -237,18 +237,21 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     clear_checkpoint();
 
     // Update disk map (best effort — never fail the replace)
-    if let Ok(pool_after) = probe_pool(runner, config.mount_point()) {
-        let new_mn = mapper_name(new_name);
-        disk_map::update_disk_map_best_effort(|map| {
-            let _ = apply_replace_disk_map_update(
-                map,
-                old_name,
-                new_name,
-                &new_disk.by_id.0,
-                &new_mn,
-                Some(&pool_after),
-            );
-        });
+    let pool_after = probe_pool(runner, config.mount_point()).ok();
+    let new_mn = mapper_name(new_name);
+    let mut map_warning: Option<String> = None;
+    disk_map::update_disk_map_best_effort(|map| {
+        map_warning = apply_replace_disk_map_update(
+            map,
+            old_name,
+            new_name,
+            &new_disk.by_id.0,
+            &new_mn,
+            pool_after.as_ref(),
+        );
+    });
+    if let Some(w) = map_warning {
+        eprintln!("{w}");
     }
 
     eprintln!(
@@ -387,8 +390,9 @@ fn apply_replace_disk_map_update(
     new_mn: &MapperName,
     pool_after: Option<&PoolState>,
 ) -> Option<String> {
+    crate::disk_map::remove_disk(map, old_name);
+
     if let Some(pool_after) = pool_after {
-        crate::disk_map::remove_disk(map, old_name);
         if let Some(dev) = pool_after.devices.iter().find(|d| d.mapper == *new_mn) {
             crate::disk_map::record_disk(
                 map,
@@ -397,9 +401,19 @@ fn apply_replace_disk_map_update(
                 &dev.luks_uuid.0,
                 dev.devid,
             );
+            None
+        } else {
+            Some(format!(
+                "Warning: replace succeeded but could not find '{}' in post-operation pool probe; old disk map entry removed, new entry not recorded.",
+                new_name
+            ))
         }
+    } else {
+        Some(
+            "Warning: replace succeeded but post-operation pool probe failed; old disk map entry removed, new entry not recorded."
+                .to_owned(),
+        )
     }
-    None
 }
 
 #[cfg(test)]
