@@ -35,7 +35,7 @@
           commonArgs = {
             inherit src;
             pname = "braid-cli";
-            version = "0.1.0";
+            version = "0.0.1";
           };
           cargoArtifacts = craneLib.buildDepsOnly commonArgs;
           braid-cli-unwrapped = craneLib.buildPackage (commonArgs // { inherit cargoArtifacts; });
