@@ -137,6 +137,10 @@ sudo braid replace --old ironwolf --new seagate
 
 The new drive is added and rebalanced **before** the dead device is evicted. Redundancy never drops.
 
+### Disk identity map
+
+Braid maintains an advisory disk identity map at `/var/lib/braid/disk-map.json`, recording each disk's `name`, `by_id`, `luks_uuid`, and `devid`. This is updated automatically by `add`, `remove`, `replace`, and `remove-missing` commands. It is non-authoritative — live pool probing is always the source of truth — and is rebuilt by normal command executions.
+
 ### Pool status
 
 ```

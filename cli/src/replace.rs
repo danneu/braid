@@ -4,6 +4,7 @@ use crate::checkpoint::{
 };
 use crate::cmd::CommandRunner;
 use crate::config::{config_hash, config_read_raw, mapper_name};
+use crate::disk_map;
 use crate::luks::{
     backup_luks_header, ensure_luks_open, luks_format,
     luks_opts_from_env, read_passphrase, verify_passphrase,
@@ -234,6 +235,24 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     }
 
     clear_checkpoint();
+
+    // Update disk map (best effort — never fail the replace)
+    if let Ok(pool_after) = probe_pool(runner, config.mount_point()) {
+        let new_mn = mapper_name(new_name);
+        disk_map::update_disk_map_best_effort(|map| {
+            disk_map::remove_disk(map, old_name);
+            if let Some(dev) = pool_after.devices.iter().find(|d| d.mapper == new_mn) {
+                disk_map::record_disk(
+                    map,
+                    new_name,
+                    &new_disk.by_id.0,
+                    &dev.luks_uuid.0,
+                    dev.devid,
+                );
+            }
+        });
+    }
+
     eprintln!(
         "Done. Replaced {} with {}. If not already done: update braid.disks and run nixos-rebuild switch.",
         old_name, new_name

@@ -4,6 +4,7 @@ use crate::checkpoint::{
 };
 use crate::cmd::CommandRunner;
 use crate::config::{config_hash, config_read_raw};
+use crate::disk_map;
 use crate::pool::{pool_remove_devid, pool_remove_missing};
 use crate::probe::{probe_pool, ProbeError};
 use crate::types::*;
@@ -139,6 +140,21 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync>(
     }
 
     clear_checkpoint();
+
+    // Update disk map (best effort — never fail the remove-missing)
+    if let Some(devid) = missing_id {
+        // Targeted removal: prune entries with this specific devid
+        disk_map::update_disk_map_best_effort(|map| {
+            disk_map::remove_disks_by_devids(map, &[devid]);
+        });
+    } else if let Ok(pool_after) = probe_pool(runner, config.mount_point()) {
+        // General removal: prune entries whose devid is no longer in pool
+        let live_devids: Vec<u64> = pool_after.devices.iter().map(|d| d.devid).collect();
+        disk_map::update_disk_map_best_effort(|map| {
+            disk_map::prune_absent_devids(map, &live_devids);
+        });
+    }
+
     eprintln!("Done. Missing device removed from pool.");
     Ok(())
 }

@@ -4,6 +4,7 @@ use crate::checkpoint::{
 };
 use crate::cmd::CommandRunner;
 use crate::config::{config_hash, config_read_raw, mapper_name, Config};
+use crate::disk_map;
 use crate::luks::{
     backup_luks_header, device_has_btrfs_superblock, ensure_luks_open, luks_format,
     luks_opts_from_env, read_passphrase, verify_passphrase,
@@ -206,6 +207,22 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             pool_balance_raid1(runner, config.mount_point(), progress)?;
             clear_checkpoint();
             eprintln!("Balance complete.");
+        }
+    }
+
+    // Update disk map (best effort — never fail the add)
+    if let Ok(pool_after) = probe_pool(runner, config.mount_point()) {
+        let mn = mapper_name(name);
+        if let Some(dev) = pool_after.devices.iter().find(|d| d.mapper == mn) {
+            disk_map::update_disk_map_best_effort(|map| {
+                disk_map::record_disk(
+                    map,
+                    name,
+                    &disk.by_id.0,
+                    &dev.luks_uuid.0,
+                    dev.devid,
+                );
+            });
         }
     }
 

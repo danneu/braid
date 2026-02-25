@@ -4,6 +4,7 @@ use crate::checkpoint::{
 };
 use crate::cmd::CommandRunner;
 use crate::config::{config_hash, config_read_raw, mapper_name};
+use crate::disk_map;
 use crate::pool::{pool_balance_single, pool_remove_device};
 use crate::probe::{probe_pool, ProbeError};
 use crate::progress::ProgressOutput;
@@ -173,6 +174,12 @@ pub fn cmd_remove<R: CommandRunner + Sync>(
     }
 
     clear_checkpoint();
+
+    // Update disk map (best effort — never fail the remove)
+    disk_map::update_disk_map_best_effort(|map| {
+        disk_map::remove_disk(map, name);
+    });
+
     eprintln!("Done. If not already done: remove '{}' from braid.disks and run nixos-rebuild switch.", name);
     Ok(())
 }

@@ -13,11 +13,19 @@
 #
 # Dependencies: braid add (builds the test pool).
 
+import json
+
 start_all()
 machine.wait_for_unit("multi-user.target")
 
 passphrase = "testpassphrase"
 luks_opts = "--pbkdf pbkdf2 --pbkdf-force-iterations 1000"
+
+
+def read_disk_map():
+    """Read and parse the disk map file."""
+    raw = machine.succeed("cat /var/lib/braid/disk-map.json")
+    return json.loads(raw)
 
 
 def add_cmd(name):
@@ -56,6 +64,17 @@ with subtest("Setup: build 3-drive pool with braid add"):
     machine.succeed("echo 'important data' > /mnt/storage/precious.txt")
     machine.succeed("sync")
 
+with subtest("Disk map has all 3 disks after add"):
+    dm = read_disk_map()
+    assert dm["schema_version"] == 1, f"Expected schema_version 1, got {dm['schema_version']}"
+    for name in ["disk1", "disk2", "disk3"]:
+        assert name in dm["disks"], f"{name} missing from disk map: {dm}"
+        entry = dm["disks"][name]
+        assert "by_id" in entry, f"Missing by_id for {name}"
+        assert "luks_uuid" in entry, f"Missing luks_uuid for {name}"
+        assert "devid" in entry, f"Missing devid for {name}"
+        assert "added_at" in entry, f"Missing added_at for {name}"
+
 # --- Phase 1: Validation errors ---
 
 with subtest("Remove nonexistent disk fails with 'not found in pool'"):
@@ -86,6 +105,12 @@ with subtest("disk3 gone from pool, disk1+disk2 remain, RAID1 profile"):
 
     df_output = machine.succeed("btrfs fi df /mnt/storage")
     assert "RAID1" in df_output, f"Expected RAID1 profile:\n{df_output}"
+
+with subtest("Disk map updated after graceful remove"):
+    dm = read_disk_map()
+    assert "disk3" not in dm["disks"], f"disk3 still in map after remove: {dm}"
+    assert "disk1" in dm["disks"], f"disk1 missing from map: {dm}"
+    assert "disk2" in dm["disks"], f"disk2 missing from map: {dm}"
 
 with subtest("LUKS mapper closed after graceful remove"):
     machine.fail("test -e /dev/mapper/braid-disk3")
@@ -148,6 +173,13 @@ with subtest("Pool unchanged after failed remove"):
     fi_show = machine.succeed("btrfs fi show /mnt/storage")
     assert "missing" in fi_show.lower(), f"Missing device should still be present:\n{fi_show}"
 
+with subtest("Disk map unchanged after failed remove"):
+    dm = read_disk_map()
+    # Map should still have all 3 disks from the rebuild
+    assert "disk1" in dm["disks"], f"disk1 missing from map: {dm}"
+    assert "disk2" in dm["disks"], f"disk2 missing from map: {dm}"
+    assert "disk3" in dm["disks"], f"disk3 missing from map: {dm}"
+
 # --- Phase 5: Explicit remove-missing succeeds ---
 
 with subtest("remove-missing succeeds for dead disk"):
@@ -157,6 +189,12 @@ with subtest("No missing devices after remove-missing"):
     fi_show = machine.succeed("btrfs fi show /mnt/storage")
     print(f"Pool after remove-missing:\n{fi_show}")
     assert "missing" not in fi_show.lower(), f"Still has missing device:\n{fi_show}"
+
+with subtest("Disk map pruned after remove-missing"):
+    dm = read_disk_map()
+    assert "disk3" not in dm["disks"], f"disk3 still in map after remove-missing: {dm}"
+    assert "disk1" in dm["disks"], f"disk1 missing from map: {dm}"
+    assert "disk2" in dm["disks"], f"disk2 missing from map: {dm}"
 
 with subtest("Data intact after remove-missing"):
     content = machine.succeed("cat /mnt/storage/precious.txt").strip()
