@@ -41,6 +41,10 @@ Decision docs must include an explicit status: `Draft`, `Active`, `Superseded`, 
 - [User stories](docs/1-user-stories.md) — full UX walkthrough from first disk to third
 - [Design: braid-add-disk](design-docs/1-braid-add-disk.md) — script design (historical, replaced by unified CLI)
 
+## Git Commits
+
+The first line of a commit message must not be capitalized (e.g. `fix the foo bug`, not `Fix the foo bug`).
+
 ## Commands
 
 - `just test` — Run all NixOS VM tests.
