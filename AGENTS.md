@@ -76,7 +76,7 @@ When reviewing a plan:
 - Prescriptions must be singular: do not present multiple options in the report.
 - After listing findings, assess the overall plan viability.
 - If you think there's an even better + simpler + more robust solution, tell the
-  user so that they can consider initializing a new plan.
+  user so that they can consider pivoting to a new, better plan.
 
 Decision rule:
 
