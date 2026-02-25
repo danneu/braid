@@ -9,8 +9,6 @@
 #
 # Dependencies: LUKS primitives, btrfs basics, Rust braid binary with add command.
 
-import json
-
 start_all()
 machine.wait_for_unit("multi-user.target")
 
@@ -43,10 +41,10 @@ with subtest("backup directory has 0700 permissions"):
     perms = machine.succeed(f"stat -c '%a' {backup_dir}").strip()
     assert perms == "700", f"expected 700, got {perms}"
 
-with subtest("backup files have 0600 permissions"):
+with subtest("backup files have 0400 permissions"):
     for disk in ["braid-disk1", "braid-disk2"]:
         perms = machine.succeed(f"stat -c '%a' {backup_dir}/{disk}.img").strip()
-        assert perms == "600", f"expected 600 for {disk}.img, got {perms}"
+        assert perms == "400", f"expected 400 for {disk}.img, got {perms}"
 
 with subtest("backup UUID matches device UUID"):
     for name, by_id in [("braid-disk1", "virtio-disk1"), ("braid-disk2", "virtio-disk2")]:

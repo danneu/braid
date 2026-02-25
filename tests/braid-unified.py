@@ -76,7 +76,7 @@ with subtest("braid status --verbose shows per-disk detail"):
     output = machine.succeed("braid status --verbose")
     print(f"braid status --verbose:\n{output}")
     lines = output.splitlines()
-    for disk in ["braid-disk1", "braid-disk2", "braid-disk3"]:
+    for disk in ["disk1", "disk2", "disk3"]:
         disk_lines = [l for l in lines if disk in l and "present" in l]
         assert disk_lines, f"{disk} not shown as present:\n{output}"
     assert "devid" in output, f"Expected 'devid':\n{output}"

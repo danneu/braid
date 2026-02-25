@@ -57,17 +57,17 @@ pub fn parse_btrfs_filesystem_usage(
                 "Used" if used.is_none() => used = value_str.parse().ok(),
                 "Free (estimated)" => free_est = value_str.parse().ok(),
                 "Data ratio" => {
-                    // braid only supports RAID1 (data ratio 2). Reject anything else
-                    // so we get a clear error rather than silently computing wrong capacity.
-                    if value_str == "2.00" {
-                        data_ratio = Some(2);
-                    } else {
-                        return Err(ParseError::InvalidText {
-                            cmd: raw.cmd.clone(),
-                            detail: format!(
-                                "unsupported Data ratio {value_str:?} (expected \"2.00\" for RAID1)"
-                            ),
-                        });
+                    match value_str {
+                        "1.00" => data_ratio = Some(1),
+                        "2.00" => data_ratio = Some(2),
+                        _ => {
+                            return Err(ParseError::InvalidText {
+                                cmd: raw.cmd.clone(),
+                                detail: format!(
+                                    "unsupported Data ratio {value_str:?} (expected \"1.00\" or \"2.00\")"
+                                ),
+                            });
+                        }
                     }
                 }
                 _ => {}
@@ -144,7 +144,7 @@ mod tests {
     }
 
     #[test]
-    fn usage_rejects_unsupported_data_ratio() {
+    fn usage_parses_single_data_ratio() {
         let raw = RawCommandOutput {
             cmd: "btrfs filesystem usage".into(),
             stdout: "Overall:\n\
@@ -156,10 +156,27 @@ mod tests {
             stderr: String::new(),
             exit_status: 0,
         };
+        let out = parse_btrfs_filesystem_usage(&raw).unwrap();
+        assert_eq!(out.data_ratio, 1);
+    }
+
+    #[test]
+    fn usage_rejects_unsupported_data_ratio() {
+        let raw = RawCommandOutput {
+            cmd: "btrfs filesystem usage".into(),
+            stdout: "Overall:\n\
+                     \tDevice size:\t\t\t1040187392\n\
+                     \tUsed:\t\t\t\t33914880\n\
+                     \tFree (estimated):\t\t442957824\n\
+                     \tData ratio:\t\t\t3.00\n"
+                .into(),
+            stderr: String::new(),
+            exit_status: 0,
+        };
         let err = parse_btrfs_filesystem_usage(&raw).unwrap_err();
         assert!(
-            matches!(err, ParseError::InvalidText { ref detail, .. } if detail.contains("1.00")),
-            "expected InvalidText mentioning 1.00, got: {err:?}"
+            matches!(err, ParseError::InvalidText { ref detail, .. } if detail.contains("3.00")),
+            "expected InvalidText mentioning 3.00, got: {err:?}"
         );
     }
 }

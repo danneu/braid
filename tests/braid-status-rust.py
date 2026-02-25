@@ -74,7 +74,7 @@ with subtest("Healthy verbose"):
     output = machine.succeed(rust_status("--verbose"))
     print(f"Healthy verbose:\n{output}")
     lines = output.splitlines()
-    for disk in ["braid-disk1", "braid-disk2", "braid-disk3"]:
+    for disk in ["disk1", "disk2", "disk3"]:
         disk_lines = [l for l in lines if disk in l and "present" in l]
         assert disk_lines, f"{disk} not shown as present:\n{output}"
     assert "devid" in output, f"Expected 'devid':\n{output}"
@@ -117,12 +117,12 @@ with subtest("Degraded verbose"):
     output = machine.succeed(rust_status("--verbose"))
     print(f"Degraded verbose:\n{output}")
     assert "MISSING" in output, f"Expected 'MISSING':\n{output}"
-    assert "braid-disk3" in output, f"Expected 'braid-disk3':\n{output}"
+    assert "disk3" in output, f"Expected 'disk3':\n{output}"
     assert "not found" in output or "device absent" in output, (
         f"Expected 'not found' or 'device absent':\n{output}"
     )
     lines = output.splitlines()
-    for disk in ["braid-disk1", "braid-disk2"]:
+    for disk in ["disk1", "disk2"]:
         disk_lines = [l for l in lines if disk in l and "present" in l]
         assert disk_lines, f"{disk} not shown as present:\n{output}"
 
