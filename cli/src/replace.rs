@@ -137,7 +137,10 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
 
     // Confirm
     if !yes {
-        eprintln!("Replace {} (dead) with {} (new)?", old_name, new_name);
+        eprintln!(
+            "{}",
+            replace_confirm_message(&new_probed.state, old_name, new_name, &new_disk.by_id.0)
+        );
         eprint!("Type 'yes' to continue: ");
         let mut input = String::new();
         std::io::stdin()
@@ -337,9 +340,71 @@ fn compile_replace_steps(
     Ok(steps)
 }
 
+fn replace_confirm_message(
+    new_state: &ConfigDiskState,
+    old_name: &str,
+    new_name: &str,
+    by_id: &str,
+) -> String {
+    match new_state {
+        ConfigDiskState::PresentNotLuks => format!(
+            "WARNING: This will LUKS-format {} ({}). Existing data will be inaccessible.",
+            new_name, by_id
+        ),
+        _ => format!("Replace {} (dead) with {} (new)?", old_name, new_name),
+    }
+}
+
 fn now_iso() -> String {
     use time::format_description::well_known::Iso8601;
     time::OffsetDateTime::now_utc()
         .format(&Iso8601::DEFAULT)
         .unwrap_or_else(|_| "unknown".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn replace_confirm_warns_about_luks_format_for_non_luks_disk() {
+        let msg = replace_confirm_message(
+            &ConfigDiskState::PresentNotLuks,
+            "old1",
+            "new1",
+            "/dev/disk/by-id/usb-WD_5678",
+        );
+        assert!(msg.contains("LUKS-format"), "should mention LUKS-format");
+        assert!(msg.contains("new1"), "should mention new disk name");
+        assert!(
+            msg.contains("/dev/disk/by-id/usb-WD_5678"),
+            "should mention by-id"
+        );
+        assert!(
+            msg.contains("inaccessible"),
+            "should say data will be inaccessible"
+        );
+    }
+
+    #[test]
+    fn replace_confirm_generic_for_luks_disk() {
+        let msg = replace_confirm_message(
+            &ConfigDiskState::PresentLuks {
+                uuid: LuksUuid("abc-123".into()),
+                mapper_open: false,
+            },
+            "old1",
+            "new1",
+            "/dev/disk/by-id/usb-WD_5678",
+        );
+        assert!(
+            msg.contains("Replace old1 (dead) with new1 (new)?"),
+            "should be generic replace prompt, got: {}",
+            msg
+        );
+        assert!(
+            !msg.contains("LUKS-format"),
+            "should not warn about formatting"
+        );
+    }
 }

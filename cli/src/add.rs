@@ -119,10 +119,7 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         ConfigDiskState::PresentNotLuks => {
             // Fresh disk — LUKS format
             if !yes {
-                eprintln!(
-                    "WARNING: This will DESTROY all data on {} ({}).",
-                    name, disk.by_id
-                );
+                eprintln!("{}", add_confirm_message(name, &disk.by_id.0));
                 eprint!("Type 'yes' to continue: ");
                 let mut input = String::new();
                 std::io::stdin().read_line(&mut input).map_err(|e| {
@@ -288,9 +285,40 @@ fn compile_add_steps(
     Ok(steps)
 }
 
+fn add_confirm_message(name: &str, by_id: &str) -> String {
+    format!(
+        "WARNING: This will LUKS-format {} ({}). Existing data will be inaccessible.",
+        name, by_id
+    )
+}
+
 fn now_iso() -> String {
     use time::format_description::well_known::Iso8601;
     time::OffsetDateTime::now_utc()
         .format(&Iso8601::DEFAULT)
         .unwrap_or_else(|_| "unknown".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn add_confirm_message_warns_about_luks_format() {
+        let msg = add_confirm_message("data1", "/dev/disk/by-id/usb-WD_1234");
+        assert!(msg.contains("LUKS-format"), "should mention LUKS-format");
+        assert!(msg.contains("data1"), "should mention disk name");
+        assert!(
+            msg.contains("/dev/disk/by-id/usb-WD_1234"),
+            "should mention by-id"
+        );
+        assert!(
+            msg.contains("inaccessible"),
+            "should say data will be inaccessible"
+        );
+        assert!(
+            !msg.contains("DESTROY"),
+            "should not use inaccurate 'DESTROY' wording"
+        );
+    }
 }
