@@ -15,7 +15,7 @@
   nodes.machine = { pkgs, ... }: {
     imports = [ ../modules/braid ];
     braid.enable = true;
-    braid.disks = [ "/dev/disk/by-id/dummy" ];
+    braid.disks.dummy = { byId = "/dev/disk/by-id/dummy"; };
     braid.package = braid-cli-unwrapped;
 
     environment.systemPackages = [

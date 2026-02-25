@@ -1,4 +1,17 @@
-# Phase 1 — Degraded boot (same as degraded-boot.py, without Samba)
+# Test: replace-failed-disk (Phase 2 — replace dead disk with intent CLI)
+#
+# What: After a degraded boot (Phase 1), the dead disk3 is replaced with a
+# fresh disk4 using `braid replace --old disk3 --new disk4 --yes`. The pool
+# returns to healthy 3-drive RAID1 with all data intact.
+#
+# Why: This is the scariest real-world scenario — a drive dies, you boot
+# degraded, and you need to replace it without reinstalling. It crosses every
+# integration boundary: initrd SSH, degraded btrfs, and the intent CLI. No
+# other test covers this full recovery cycle.
+#
+# Dependencies: degraded-boot (initrd SSH + degraded mount), braid add/replace.
+
+# Phase 1 — Degraded boot (initrd SSH unlock with braid-* mapper names)
 
 start_all()
 client.wait_for_unit("network.target")
@@ -16,20 +29,22 @@ with subtest("Initrd SSH is up with pending ask-password requests"):
         timeout=120,
     )
 
-with subtest("Unlock disk1 and disk2 over SSH, restart all cryptsetup units"):
+with subtest("Unlock disk1 and disk2 over SSH, restart cryptsetup target"):
+    # Unlock the two healthy drives (disk3 is bricked).
+    # Mapper names are braid-disk1, braid-disk2 per the NixOS LUKS config.
     for name in ["disk1", "disk2"]:
         client.succeed(
             f"{ssh_cmd}"
             f" \"echo -n testpassphrase | cryptsetup luksOpen --key-file=-"
-            f" /dev/disk/by-id/virtio-{name} {name}"
-            f" || cryptsetup status {name}\""
+            f" /dev/disk/by-id/virtio-{name} braid-{name}"
+            f" || cryptsetup status braid-{name}\""
         )
 
-    for name in ["disk1", "disk2", "disk3"]:
-        client.execute(
-            f"{ssh_cmd}"
-            f" \"systemctl restart systemd-cryptsetup@{name}.service\""
-        )
+    # Restart cryptsetup target to unblock boot. The bricked disk3's unit
+    # will fail immediately (bad LUKS header), transitioning to a terminal
+    # state. Without this, disk3's unit stays "activating" (waiting for
+    # password) and After= on btrfs-device-scan blocks forever.
+    client.execute(f"{ssh_cmd} 'systemctl restart cryptsetup.target'")
 
 with subtest("Server reaches full boot after degraded unlock"):
     server.wait_for_unit("multi-user.target", timeout=120)
@@ -40,7 +55,7 @@ with subtest("btrfs mounted in degraded mode — disk1+disk2 present, disk3 miss
 
     fi_show = server.succeed("btrfs fi show /mnt/storage")
     print(f"Pool after degraded boot:\n{fi_show}")
-    for name in ["disk1", "disk2"]:
+    for name in ["braid-disk1", "braid-disk2"]:
         assert f"/dev/mapper/{name}" in fi_show, f"{name} missing from pool:\n{fi_show}"
     assert "missing" in fi_show.lower(), f"Expected 'missing' device in pool:\n{fi_show}"
 
@@ -53,45 +68,32 @@ with subtest("Pre-existing data survived drive death"):
         f"Expected 'data written before drive death', got '{content}'"
     )
 
-# Phase 2 — Replace failed drive with disk4
+# Phase 2 — Replace dead disk3 with disk4 using `braid replace`
 
 passphrase = "testpassphrase"
 luks_opts = "--pbkdf pbkdf2 --pbkdf-force-iterations 1000"
 
 
-def init_disk(dev, force=False):
-    force_flag = "--force" if force else ""
-    confirm = "BRAID_CONFIRM='reformat this disk' " if force else ""
+def replace_cmd(old, new):
+    """Build a `braid replace --old <old> --new <new> --yes` command."""
     return (
-        f"{confirm}"
         f"BRAID_PASSPHRASE='{passphrase}' "
         f"BRAID_LUKS_OPTS='{luks_opts}' "
-        f"braid init-disk {force_flag} {dev}"
+        f"braid replace --old {old} --new {new} --yes"
     )
 
 
-def apply_cmd(extra="", confirm=""):
-    env = f"BRAID_PASSPHRASE='{passphrase}'"
-    if confirm:
-        env += f" BRAID_CONFIRM='{confirm}'"
-    return f"{env} braid apply {extra}"
-
-
-with subtest("Replace dead disk3 with disk4 using init-disk + apply"):
-    server.succeed(init_disk("/dev/disk/by-id/virtio-disk4"))
-    result = server.succeed(apply_cmd(
-        extra="--allow-remove-missing",
-        confirm="remove missing device from pool",
-    ))
-    print(f"braid apply output:\n{result}")
+with subtest("Replace dead disk3 with disk4"):
+    result = server.succeed(replace_cmd("disk3", "disk4"))
+    print(f"braid replace output:\n{result}")
 
 with subtest("Pool is healthy — 3 devices, no missing"):
     fi_show = server.succeed("btrfs fi show /mnt/storage")
     print(f"Pool after replacement:\n{fi_show}")
 
-    # Replacement drive is in the pool
-    assert "virtio-disk4" in fi_show, (
-        f"Replacement mapper virtio-disk4 missing from pool:\n{fi_show}"
+    # Replacement drive is in the pool (mapper = braid-disk4)
+    assert "/dev/mapper/braid-disk4" in fi_show, (
+        f"Replacement mapper braid-disk4 missing from pool:\n{fi_show}"
     )
 
     # No more missing devices — the key assertion
@@ -106,7 +108,7 @@ with subtest("Pool is healthy — 3 devices, no missing"):
     )
 
     # Original surviving drives still present
-    for name in ["disk1", "disk2"]:
+    for name in ["braid-disk1", "braid-disk2"]:
         assert f"/dev/mapper/{name}" in fi_show, (
             f"{name} missing from pool after replacement:\n{fi_show}"
         )
@@ -115,6 +117,12 @@ with subtest("Pool is healthy — 3 devices, no missing"):
     df_output = server.succeed("btrfs fi df /mnt/storage")
     assert "Data, RAID1" in df_output, (
         f"Expected RAID1 profile after replacement:\n{df_output}"
+    )
+
+with subtest("Dead disk3 mapper is NOT in pool"):
+    fi_show = server.succeed("btrfs fi show /mnt/storage")
+    assert "braid-disk3" not in fi_show, (
+        f"Dead braid-disk3 should not be in pool:\n{fi_show}"
     )
 
 with subtest("Data intact after replacement"):

@@ -173,14 +173,15 @@ fn check_declared_disks(ctx: &mut DoctorContext) -> CheckResult {
         }
     };
 
-    let mut missing: Vec<&str> = Vec::new();
-    let mut not_block: Vec<&str> = Vec::new();
-    for disk in config.disks() {
-        let path = Path::new(disk.0.as_str());
+    let mut missing: Vec<String> = Vec::new();
+    let mut not_block: Vec<String> = Vec::new();
+    let total = config.disks().len();
+    for (name, disk) in config.disks() {
+        let path = Path::new(disk.by_id.0.as_str());
         match std::fs::metadata(path) {
             Ok(meta) if meta.file_type().is_block_device() => {}
-            Ok(_) => not_block.push(&disk.0),
-            Err(_) => missing.push(&disk.0),
+            Ok(_) => not_block.push(format!("{name} ({})", disk.by_id)),
+            Err(_) => missing.push(format!("{name} ({})", disk.by_id)),
         }
     }
 
@@ -188,7 +189,7 @@ fn check_declared_disks(ctx: &mut DoctorContext) -> CheckResult {
         CheckResult {
             name: "declared_disks".into(),
             status: CheckStatus::Ok,
-            message: format!("all {} declared disk(s) present", config.disks().len()),
+            message: format!("all {total} declared disk(s) present"),
         }
     } else {
         let mut parts: Vec<String> = Vec::new();
@@ -212,7 +213,7 @@ fn check_declared_disks(ctx: &mut DoctorContext) -> CheckResult {
             message: format!(
                 "{}/{} disk(s) have problems: {}",
                 missing.len() + not_block.len(),
-                config.disks().len(),
+                total,
                 parts.join("; ")
             ),
         }
@@ -329,7 +330,7 @@ mod tests {
     use tempfile::NamedTempFile;
 
     fn valid_config_json() -> &'static str {
-        r#"{"disks":["/dev/disk/by-id/a"],"mountPoint":"/mnt/storage"}"#
+        r#"{"disks":{"toshiba":{"by_id":"/dev/disk/by-id/a"}},"mount_point":"/mnt/storage"}"#
     }
 
     fn write_temp(content: &str) -> NamedTempFile {
@@ -391,23 +392,31 @@ mod tests {
 
     #[test]
     fn valid_json_bad_schema_empty_disks() {
-        let f = write_temp(r#"{"disks":[],"mountPoint":"/mnt/storage"}"#);
+        let f = write_temp(r#"{"disks":{},"mount_point":"/mnt/storage"}"#);
         let report = run_doctor(f.path());
         assert_eq!(report.status, CheckStatus::Fail);
         assert_eq!(find_check(&report, "config_file").status, CheckStatus::Ok);
         let schema = find_check(&report, "config_schema");
         assert_eq!(schema.status, CheckStatus::Fail);
-        assert!(schema.message.contains("disks must not be empty"));
+        assert!(
+            schema.message.contains("disks must not be empty"),
+            "unexpected message: {}",
+            schema.message
+        );
     }
 
     #[test]
     fn valid_json_bad_schema_empty_mount() {
-        let f = write_temp(r#"{"disks":["/dev/disk/by-id/a"],"mountPoint":""}"#);
+        let f = write_temp(r#"{"disks":{"a":{"by_id":"/dev/disk/by-id/a"}},"mount_point":""}"#);
         let report = run_doctor(f.path());
         assert_eq!(find_check(&report, "config_file").status, CheckStatus::Ok);
         let schema = find_check(&report, "config_schema");
         assert_eq!(schema.status, CheckStatus::Fail);
-        assert!(schema.message.contains("mountPoint must not be empty"));
+        assert!(
+            schema.message.contains("mount_point must not be empty"),
+            "unexpected message: {}",
+            schema.message
+        );
     }
 
     #[test]
@@ -559,19 +568,19 @@ mod tests {
     #[test]
     fn declared_disks_all_missing_warns() {
         let f = write_temp(
-            r#"{"disks":["/dev/disk/by-id/nonexistent-a","/dev/disk/by-id/nonexistent-b"],"mountPoint":"/mnt/storage"}"#,
+            r#"{"disks":{"disk-a":{"by_id":"/dev/disk/by-id/nonexistent-a"},"disk-b":{"by_id":"/dev/disk/by-id/nonexistent-b"}},"mount_point":"/mnt/storage"}"#,
         );
         let report = run_doctor(f.path());
         let check = find_check(&report, "declared_disks");
         assert_eq!(check.status, CheckStatus::Warn);
         assert!(check.message.contains("2/2"), "{}", check.message);
         assert!(
-            check.message.contains("nonexistent-a"),
+            check.message.contains("disk-a"),
             "{}",
             check.message
         );
         assert!(
-            check.message.contains("nonexistent-b"),
+            check.message.contains("disk-b"),
             "{}",
             check.message
         );
@@ -580,7 +589,7 @@ mod tests {
     #[test]
     fn declared_disks_not_block_device_warns() {
         // /dev/null exists but is a char device, not a block device
-        let f = write_temp(r#"{"disks":["/dev/null"],"mountPoint":"/mnt/storage"}"#);
+        let f = write_temp(r#"{"disks":{"null":{"by_id":"/dev/null"}},"mount_point":"/mnt/storage"}"#);
         let report = run_doctor(f.path());
         let check = find_check(&report, "declared_disks");
         assert_eq!(check.status, CheckStatus::Warn);
@@ -600,7 +609,7 @@ mod tests {
 
     #[test]
     fn declared_disks_skip_when_bad_schema() {
-        let f = write_temp(r#"{"disks":[],"mountPoint":"/mnt/storage"}"#);
+        let f = write_temp(r#"{"disks":{},"mount_point":"/mnt/storage"}"#);
         let report = run_doctor(f.path());
         let check = find_check(&report, "declared_disks");
         assert_eq!(check.status, CheckStatus::Skip);

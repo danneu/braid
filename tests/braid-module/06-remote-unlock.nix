@@ -17,8 +17,8 @@
 let
   passphrase = "testpassphrase";
   initrdSshFixtureDir = pkgs.path + "/nixos/tests/initrd-network-ssh";
-  disks = [ "disk1" "disk2" "disk3" ];
-  mapperNames = map (d: "virtio-${d}") disks;
+  diskNames = [ "disk1" "disk2" "disk3" ];
+  mapperNames = map (d: "braid-${d}") diskNames;
 
   cryptsetupUnit = name:
     "systemd-cryptsetup@${builtins.replaceStrings ["-"] ["\\x2d"] name}.service";
@@ -32,7 +32,7 @@ in
     braid = {
       enable = true;
       package = braid;
-      disks = map (d: "/dev/disk/by-id/virtio-${d}") disks;
+      disks = lib.genAttrs diskNames (d: { byId = "/dev/disk/by-id/virtio-${d}"; });
       remoteUnlock = {
         enable = true;
         authorizedKeys = [ (builtins.readFile (initrdSshFixtureDir + "/id_ed25519.pub")) ];
@@ -55,7 +55,7 @@ in
 
     # Re-declare mount for VM compat (qemu-vm.nix clobbers fileSystems)
     virtualisation.fileSystems."/mnt/storage" = {
-      device = "/dev/mapper/virtio-disk1";
+      device = "/dev/mapper/braid-disk1";
       fsType = "btrfs";
       neededForBoot = true;
       options = [
@@ -93,7 +93,7 @@ in
         script = ''
           set -eu
 
-          for disk in ${lib.concatStringsSep " " disks}; do
+          for disk in ${lib.concatStringsSep " " diskNames}; do
             dev="/dev/disk/by-id/virtio-$disk"
             i=0
             while [ "$i" -lt 100 ]; do
@@ -109,18 +109,18 @@ in
             fi
           done
 
-          for disk in ${lib.concatStringsSep " " disks}; do
+          for disk in ${lib.concatStringsSep " " diskNames}; do
             echo -n '${passphrase}' | cryptsetup luksOpen --key-file=- \
-              "/dev/disk/by-id/virtio-$disk" "virtio-$disk-fmt"
+              "/dev/disk/by-id/virtio-$disk" "braid-$disk-fmt"
           done
 
-          if ! btrfs filesystem show /dev/mapper/virtio-disk1-fmt >/dev/null 2>&1; then
+          if ! btrfs filesystem show /dev/mapper/braid-disk1-fmt >/dev/null 2>&1; then
             mkfs.btrfs -f -d raid1 -m raid1 \
-              ${lib.concatMapStringsSep " " (d: "/dev/mapper/virtio-${d}-fmt") disks}
+              ${lib.concatMapStringsSep " " (d: "/dev/mapper/braid-${d}-fmt") diskNames}
           fi
 
-          for disk in ${lib.concatStringsSep " " disks}; do
-            cryptsetup luksClose "virtio-$disk-fmt"
+          for disk in ${lib.concatStringsSep " " diskNames}; do
+            cryptsetup luksClose "braid-$disk-fmt"
           done
         '';
       };
@@ -128,7 +128,7 @@ in
       # No keyFile — drives must be unlocked over SSH.
       luks.devices = lib.mkVMOverride (
         lib.genAttrs mapperNames (name: {
-          device = "/dev/disk/by-id/virtio-${lib.removePrefix "virtio-" name}";
+          device = "/dev/disk/by-id/virtio-${lib.removePrefix "braid-" name}";
           crypttabExtraOpts = [ "nofail" "x-systemd.device-timeout=10s" ];
         })
       );

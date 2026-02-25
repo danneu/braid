@@ -1,7 +1,8 @@
 # Test: braid doctor
 #
 # What: End-to-end tests for braid doctor against real config files — valid,
-# missing, malformed JSON, and bad schema — in both human and --json modes.
+# missing, malformed JSON, bad schema, missing disks, and world-writable
+# permissions — in both human and --json modes.
 #
 # Why: Ensures doctor correctly categorizes config problems and produces
 # structured output that operators and scripts can rely on.
@@ -68,7 +69,7 @@ with subtest("Invalid JSON — exits 1, config_file fail"):
 # --- Bad schema (valid JSON, fails validation) ---
 
 with subtest("Bad schema — config_file ok, config_schema fail"):
-    machine.succeed("""echo '{"disks":[],"mountPoint":""}' > /tmp/bad-schema.json""")
+    machine.succeed("""echo '{"disks":{},"mount_point":""}' > /tmp/bad-schema.json""")
     result = machine.execute("braid doctor --json --config /tmp/bad-schema.json")
     exit_code = result[0]
     raw = result[1]
@@ -83,7 +84,7 @@ with subtest("Bad schema — config_file ok, config_schema fail"):
 
 with subtest("Missing disk warns"):
     machine.succeed(
-        """echo '{"disks":["/dev/disk/by-id/nonexistent-xyz"],"mountPoint":"/mnt/storage"}' > /tmp/missing-disk.json"""
+        """echo '{"disks":{"missing1":{"by_id":"/dev/disk/by-id/nonexistent-xyz"}},"mount_point":"/mnt/storage"}' > /tmp/missing-disk.json"""
     )
     raw = machine.succeed("braid doctor --json --config /tmp/missing-disk.json")
     print(f"Missing disk JSON:\n{raw}")

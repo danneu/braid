@@ -1,12 +1,12 @@
 # Test: braid unified CLI
 #
-# What: Exercises `braid status` (human, --json, --verbose), and verifies
-# that standalone scripts (braid-remove-disk) still work.
+# What: Exercises `braid status` (human, --json, --verbose), verifies the full
+# add workflow, and validates error cases.
 #
-# Why: The unified CLI must produce correct results and the remaining
-# standalone scripts must continue to function.
+# Why: The unified CLI must produce correct results for status reporting after
+# pool setup using named disk commands.
 #
-# Dependencies: braid init-disk + braid apply (pool setup).
+# Dependencies: braid add (pool setup).
 { braid }:
 {
   name = "braid-unified";
@@ -20,23 +20,18 @@
 
     environment.systemPackages = [
       braid
-      (pkgs.writeShellApplication {
-        name = "braid-remove-disk";
-        runtimeInputs = [ pkgs.cryptsetup pkgs.btrfs-progs pkgs.util-linux pkgs.jq ];
-        text = builtins.readFile ../scripts/braid-remove-disk.sh;
-      })
       pkgs.cryptsetup
       pkgs.btrfs-progs
       pkgs.jq
     ];
 
     environment.etc."braid/config.json".text = builtins.toJSON {
-      disks = [
-        "/dev/disk/by-id/virtio-disk1"
-        "/dev/disk/by-id/virtio-disk2"
-        "/dev/disk/by-id/virtio-disk3"
-      ];
-      mountPoint = "/mnt/storage";
+      disks = {
+        disk1 = { by_id = "/dev/disk/by-id/virtio-disk1"; };
+        disk2 = { by_id = "/dev/disk/by-id/virtio-disk2"; };
+        disk3 = { by_id = "/dev/disk/by-id/virtio-disk3"; };
+      };
+      mount_point = "/mnt/storage";
     };
   };
 

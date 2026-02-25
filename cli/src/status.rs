@@ -3,12 +3,11 @@ use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, LsblkFieldKind};
-use crate::config::Config;
+use crate::config::{mapper_name, Config};
 use crate::parse::{
     parse_btrfs_device_stats, parse_btrfs_df_json, parse_btrfs_filesystem_usage,
     parse_btrfs_scrub_status, parse_lsblk_field, BtrfsDeviceStatsOutput, ParseError, ScrubState,
 };
-use crate::plan::mapper_name_for_by_id;
 use crate::probe::{probe_config_disk, probe_pool, Filesystem, ProbeError};
 use crate::types::*;
 
@@ -67,6 +66,7 @@ pub struct CapacityReport {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiskReport {
+    pub name: String,
     pub mapper: String,
     pub by_id: String,
     pub luks_uuid: String,
@@ -111,6 +111,7 @@ struct VerboseContext {
 }
 
 struct HumanDisk {
+    name: String,
     mapper: String,
     by_id: String,
     luks_uuid: String,
@@ -181,7 +182,7 @@ pub fn build_status_report<R: CommandRunner, F: Filesystem>(
     let config_disks: Vec<ConfigDisk> = config
         .disks()
         .iter()
-        .map(|d| probe_config_disk(runner, fs, d))
+        .map(|(name, disk)| probe_config_disk(runner, fs, name, disk))
         .collect::<Result<Vec<_>, _>>()?;
     let device_stats = get_device_stats(runner, config.mount_point())?;
     let verbose_ctx = build_disk_reports(runner, &config_disks, &pool, &device_stats);
@@ -263,7 +264,7 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
         let config_disks: Vec<ConfigDisk> = config
             .disks()
             .iter()
-            .map(|d| probe_config_disk(runner, fs, d))
+            .map(|(name, disk)| probe_config_disk(runner, fs, name, disk))
             .collect::<Result<Vec<_>, _>>()?;
         let device_stats = get_device_stats(runner, config.mount_point())?;
         Some(build_disk_reports(
@@ -420,10 +421,19 @@ fn build_disk_reports<R: CommandRunner>(
 
     // Present pool devices
     for pd in &pool.devices {
-        // Find matching config disk
+        // Find matching config disk by LUKS UUID
         let matched_config = config_disks.iter().find(|cd| {
             matches!(&cd.state, ConfigDiskState::PresentLuks { uuid, .. } if uuid == &pd.luks_uuid)
         });
+
+        let disk_name = matched_config
+            .map(|cd| cd.name.clone())
+            .unwrap_or_else(|| {
+                // Derive name from mapper (strip braid- prefix)
+                pd.mapper.0.strip_prefix("braid-")
+                    .unwrap_or(&pd.mapper.0)
+                    .to_owned()
+            });
 
         let by_id = matched_config
             .map(|cd| cd.by_id_path.0.clone())
@@ -450,6 +460,7 @@ fn build_disk_reports<R: CommandRunner>(
             });
 
         disk_reports.push(DiskReport {
+            name: disk_name.clone(),
             mapper: mapper.clone(),
             by_id: by_id.clone(),
             luks_uuid: pd.luks_uuid.0.clone(),
@@ -459,6 +470,7 @@ fn build_disk_reports<R: CommandRunner>(
         });
 
         human_details.push(HumanDisk {
+            name: disk_name,
             mapper: mapper.clone(),
             by_id: by_id.clone(),
             luks_uuid: pd.luks_uuid.0.clone(),
@@ -482,11 +494,10 @@ fn build_disk_reports<R: CommandRunner>(
             continue;
         }
 
-        let mapper = mapper_name_for_by_id(&cd.by_id_path)
-            .map(|m| m.0)
-            .unwrap_or_else(|| cd.by_id_path.0.clone());
+        let mapper = mapper_name(&cd.name).0;
 
         disk_reports.push(DiskReport {
+            name: cd.name.clone(),
             mapper: mapper.clone(),
             by_id: cd.by_id_path.0.clone(),
             luks_uuid: String::new(),
@@ -496,6 +507,7 @@ fn build_disk_reports<R: CommandRunner>(
         });
 
         human_details.push(HumanDisk {
+            name: cd.name.clone(),
             mapper: mapper.clone(),
             by_id: cd.by_id_path.0.clone(),
             luks_uuid: String::new(),
@@ -560,9 +572,9 @@ fn format_status_human(report: &StatusReport, human_disks: Option<&[HumanDisk]>)
         out.push_str("\nDisks:\n");
         for d in disks {
             out.push('\n');
-            // Header line
+            // Header line — show disk name
             if d.status == "missing" {
-                out.push_str(&format!("  {:<18}MISSING\n", d.mapper));
+                out.push_str(&format!("  {:<18}MISSING\n", d.name));
             } else {
                 let devid_str = d
                     .devid
@@ -571,7 +583,7 @@ fn format_status_human(report: &StatusReport, human_disks: Option<&[HumanDisk]>)
                     .unwrap_or_default();
                 out.push_str(&format!(
                     "  {:<18}{:<10}{}\n",
-                    d.mapper, devid_str, d.status
+                    d.name, devid_str, d.status
                 ));
             }
 
@@ -641,6 +653,8 @@ pub fn format_bytes(bytes: u64) -> String {
 mod tests {
     use super::*;
     use crate::cmd::{MockRunner, RawCommandOutput};
+    use crate::config::DiskConfig;
+    use std::collections::BTreeMap;
 
     struct MockFs {
         paths: Vec<String>,
@@ -841,23 +855,17 @@ mod tests {
     }
 
     fn config_3disk() -> Config {
-        Config::new(
-            vec![
-                ByIdPath("/dev/disk/by-id/disk1".to_owned()),
-                ByIdPath("/dev/disk/by-id/disk2".to_owned()),
-                ByIdPath("/dev/disk/by-id/disk3".to_owned()),
-            ],
-            "/mnt/storage".to_owned(),
-        )
-        .unwrap()
+        let mut disks = BTreeMap::new();
+        disks.insert("disk1".to_owned(), DiskConfig { by_id: ByIdPath("/dev/disk/by-id/disk1".to_owned()) });
+        disks.insert("disk2".to_owned(), DiskConfig { by_id: ByIdPath("/dev/disk/by-id/disk2".to_owned()) });
+        disks.insert("disk3".to_owned(), DiskConfig { by_id: ByIdPath("/dev/disk/by-id/disk3".to_owned()) });
+        Config::new(disks, "/mnt/storage".to_owned()).unwrap()
     }
 
     fn config_1disk() -> Config {
-        Config::new(
-            vec![ByIdPath("/dev/disk/by-id/disk1".to_owned())],
-            "/mnt/storage".to_owned(),
-        )
-        .unwrap()
+        let mut disks = BTreeMap::new();
+        disks.insert("disk1".to_owned(), DiskConfig { by_id: ByIdPath("/dev/disk/by-id/disk1".to_owned()) });
+        Config::new(disks, "/mnt/storage".to_owned()).unwrap()
     }
 
     /// Build a MockRunner for a 3-disk mounted healthy pool (no verbose).
@@ -1100,6 +1108,7 @@ mod tests {
     #[test]
     fn status_json_verbose_disks() {
         let present = DiskReport {
+            name: "disk1".to_owned(),
             mapper: "disk1".to_owned(),
             by_id: "/dev/disk/by-id/disk1".to_owned(),
             luks_uuid: "11111111-1111-1111-1111-111111111111".to_owned(),
@@ -1108,6 +1117,7 @@ mod tests {
             errors: Some(DiskErrors { read: 0, write: 0, flush: 0, corruption: 0, generation: 0 }),
         };
         let missing = DiskReport {
+            name: "disk3".to_owned(),
             mapper: "disk3".to_owned(),
             by_id: "/dev/disk/by-id/disk3".to_owned(),
             luks_uuid: String::new(),
@@ -1229,6 +1239,7 @@ mod tests {
             }),
             last_scrub: Some("never".to_owned()),
             disks: vec![DiskReport {
+                name: "disk1".to_owned(),
                 mapper: "disk1".to_owned(),
                 by_id: "/dev/disk/by-id/disk1".to_owned(),
                 luks_uuid: "11111111-1111-1111-1111-111111111111".to_owned(),
@@ -1386,6 +1397,7 @@ mod tests {
     fn status_verbose_present_disks() {
         let human_disks = vec![
             HumanDisk {
+                name: "disk1".to_owned(),
                 mapper: "disk1".to_owned(),
                 by_id: "/dev/disk/by-id/disk1".to_owned(),
                 luks_uuid: "11111111-1111-1111-1111-111111111111".to_owned(),
@@ -1429,6 +1441,7 @@ mod tests {
     fn status_verbose_missing_disk() {
         let human_disks = vec![
             HumanDisk {
+                name: "disk3".to_owned(),
                 mapper: "disk3".to_owned(),
                 by_id: "/dev/disk/by-id/disk3".to_owned(),
                 luks_uuid: String::new(),
@@ -1469,6 +1482,7 @@ mod tests {
     fn status_verbose_lsblk_failure() {
         let human_disks = vec![
             HumanDisk {
+                name: "disk1".to_owned(),
                 mapper: "disk1".to_owned(),
                 by_id: "/dev/disk/by-id/disk1".to_owned(),
                 luks_uuid: "11111111-1111-1111-1111-111111111111".to_owned(),

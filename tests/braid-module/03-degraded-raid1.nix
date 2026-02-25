@@ -17,8 +17,8 @@
 let
   passphrase = "testpassphrase";
   keyFile = pkgs.writeText "luks-test-key" passphrase;
-  disks = [ "disk1" "disk2" "disk3" ];
-  mapperNames = map (d: "virtio-${d}") disks;
+  diskNames = [ "disk1" "disk2" "disk3" ];
+  mapperNames = map (d: "braid-${d}") diskNames;
 
   # systemd-cryptsetup-generator escapes hyphens in unit instance names.
   cryptsetupUnit = name:
@@ -33,7 +33,7 @@ in
     braid = {
       enable = true;
       package = braid;
-      disks = map (d: "/dev/disk/by-id/virtio-${d}") disks;
+      disks = lib.genAttrs diskNames (d: { byId = "/dev/disk/by-id/virtio-${d}"; });
     };
 
     virtualisation.emptyDiskImages = [
@@ -47,7 +47,7 @@ in
 
     # Re-declare mount for VM compat (qemu-vm.nix clobbers fileSystems)
     virtualisation.fileSystems."/mnt/storage" = {
-      device = "/dev/mapper/virtio-disk1";
+      device = "/dev/mapper/braid-disk1";
       fsType = "btrfs";
       neededForBoot = true;
       options = [
@@ -86,7 +86,7 @@ in
             set -eu
 
             # Wait for all drives and LUKS-format them
-            for disk in ${lib.concatStringsSep " " disks}; do
+            for disk in ${lib.concatStringsSep " " diskNames}; do
               dev="/dev/disk/by-id/virtio-$disk"
               i=0
               while [ "$i" -lt 100 ]; do
@@ -103,27 +103,27 @@ in
             done
 
             # Open with -fmt suffix to avoid triggering systemd units
-            for disk in ${lib.concatStringsSep " " disks}; do
+            for disk in ${lib.concatStringsSep " " diskNames}; do
               echo -n '${passphrase}' | cryptsetup luksOpen --key-file=- \
-                "/dev/disk/by-id/virtio-$disk" "virtio-$disk-fmt"
+                "/dev/disk/by-id/virtio-$disk" "braid-$disk-fmt"
             done
 
             # Create btrfs RAID1 across all drives
-            if ! btrfs filesystem show /dev/mapper/virtio-disk1-fmt >/dev/null 2>&1; then
+            if ! btrfs filesystem show /dev/mapper/braid-disk1-fmt >/dev/null 2>&1; then
               mkfs.btrfs -f -d raid1 -m raid1 \
-                ${lib.concatMapStringsSep " " (d: "/dev/mapper/virtio-${d}-fmt") disks}
+                ${lib.concatMapStringsSep " " (d: "/dev/mapper/braid-${d}-fmt") diskNames}
             fi
 
             # Mount and write test data before bricking disk3
             mkdir -p /tmp/fixture-mount
-            mount /dev/mapper/virtio-disk1-fmt /tmp/fixture-mount
+            mount /dev/mapper/braid-disk1-fmt /tmp/fixture-mount
             echo 'data written before drive death' > /tmp/fixture-mount/survived.txt
             sync
             umount /tmp/fixture-mount
 
             # Close all — the real cryptsetup units will reopen them
-            for disk in ${lib.concatStringsSep " " disks}; do
-              cryptsetup luksClose "virtio-$disk-fmt"
+            for disk in ${lib.concatStringsSep " " diskNames}; do
+              cryptsetup luksClose "braid-$disk-fmt"
             done
 
             # Brick disk3 — zero the LUKS header so cryptsetup fails on it
@@ -135,7 +135,7 @@ in
       # Override module's luks.devices: add keyFile for auto-unlock in VM.
       luks.devices = lib.mkVMOverride (
         lib.genAttrs mapperNames (name: {
-          device = "/dev/disk/by-id/virtio-${lib.removePrefix "virtio-" name}";
+          device = "/dev/disk/by-id/virtio-${lib.removePrefix "braid-" name}";
           keyFile = "${keyFile}";
           crypttabExtraOpts = [ "nofail" "x-systemd.device-timeout=10s" ];
         })

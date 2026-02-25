@@ -23,10 +23,10 @@
     braid = {
       enable = true;
       package = braid;
-      disks = [
-        "/dev/disk/by-id/phantom1"
-        "/dev/disk/by-id/phantom2"
-      ];
+      disks = {
+        phantom1 = { byId = "/dev/disk/by-id/phantom1"; };
+        phantom2 = { byId = "/dev/disk/by-id/phantom2"; };
+      };
     };
 
     # No virtualisation.emptyDiskImages — the block devices never appear.

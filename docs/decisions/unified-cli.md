@@ -1,6 +1,6 @@
 # Decision: Unified CLI with Plan/Apply
 
-Status: Active
+Status: Superseded by [intent-cli.md](intent-cli.md)
 
 > Principle: [Config-first workflow](../principles.md#2-config-first-workflow)
 

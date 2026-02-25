@@ -2,27 +2,23 @@
 #
 # What: Server boots with 3 LUKS-encrypted drives as btrfs RAID1, but disk3 is
 # bricked (simulating drive death). The server boots degraded via initrd SSH
-# unlock, then `braid init-disk` + `braid apply` replaces the dead drive with a
-# fresh disk4. The pool returns to healthy 3-drive RAID1 with all data intact.
+# unlock, then `braid replace --old disk3 --new disk4` replaces the dead drive
+# with a fresh disk4. The pool returns to healthy 3-drive RAID1 with all data
+# intact.
 #
 # Why: This is the scariest real-world scenario — a drive dies, you boot
 # degraded, and you need to replace it without reinstalling. It crosses every
-# integration boundary: initrd SSH, degraded btrfs, and the unified CLI. No
+# integration boundary: initrd SSH, degraded btrfs, and the intent CLI. No
 # other test covers this full recovery cycle.
 #
-# Dependencies: degraded-boot (initrd SSH + degraded mount), braid init-disk
-# + braid apply (LUKS format + pool expansion).
-#
-# Changes from degraded-boot:
-# 1. A 4th virtual disk (disk4) as the replacement drive
-# 2. braid CLI + cryptsetup in environment.systemPackages
-# 3. No Samba — this test focuses on the replacement cycle
+# Dependencies: degraded-boot (initrd SSH + degraded mount), braid add/replace.
 { braid }:
 { lib, pkgs, ... }:
 let
   passphrase = "testpassphrase";
   initrdSshFixtureDir = pkgs.path + "/nixos/tests/initrd-network-ssh";
   disks = [ "disk1" "disk2" "disk3" ];
+  mapperNames = map (d: "braid-${d}") disks;
 in
 {
   name = "replace-failed-disk";
@@ -43,20 +39,18 @@ in
     ];
 
     environment.etc."braid/config.json".text = builtins.toJSON {
-      disks = [
-        "/dev/disk/by-id/virtio-disk1"
-        "/dev/disk/by-id/virtio-disk2"
-        "/dev/disk/by-id/virtio-disk3"
-        "/dev/disk/by-id/virtio-disk4"
-      ];
-      mountPoint = "/mnt/storage";
+      disks = {
+        disk1 = { by_id = "/dev/disk/by-id/virtio-disk1"; };
+        disk2 = { by_id = "/dev/disk/by-id/virtio-disk2"; };
+        disk3 = { by_id = "/dev/disk/by-id/virtio-disk3"; };
+        disk4 = { by_id = "/dev/disk/by-id/virtio-disk4"; };
+      };
+      mount_point = "/mnt/storage";
     };
 
-    # Mount in initrd with degraded option. The x-systemd options prevent the
-    # mount from starting until btrfs-device-scan completes. "degraded" allows
-    # btrfs to mount with missing members (harmless when all present).
+    # Mount in initrd with degraded option.
     virtualisation.fileSystems."/mnt/storage" = {
-      device = "/dev/mapper/disk1";
+      device = "/dev/mapper/braid-disk1";
       fsType = "btrfs";
       neededForBoot = true;
       options = [
@@ -66,9 +60,7 @@ in
       ];
     };
 
-    # Stage-2 copy of btrfs-device-scan. The x-systemd.requires on the mount
-    # persists across switch-root, so the service must also exist in stage 2
-    # or systemd will unmount /mnt/storage after switch-root.
+    # Stage-2 copy of btrfs-device-scan.
     systemd.services.btrfs-device-scan = {
       description = "Scan for btrfs multi-device filesystems";
       serviceConfig = {
@@ -103,9 +95,9 @@ in
         # write test data, then brick disk3's LUKS header to simulate drive death.
         services.prepare-luks-btrfs-fixture = {
           description = "Prepare LUKS + btrfs RAID1 fixture with bricked disk3";
-          requiredBy = map (d: "systemd-cryptsetup@${d}.service") disks;
+          requiredBy = map (d: "systemd-cryptsetup@${d}.service") mapperNames;
           before = [ "cryptsetup-pre.target" ]
-            ++ map (d: "systemd-cryptsetup@${d}.service") disks;
+            ++ map (d: "systemd-cryptsetup@${d}.service") mapperNames;
           after = [ "systemd-udevd.service" ];
           unitConfig.DefaultDependencies = false;
           serviceConfig = {
@@ -138,27 +130,27 @@ in
             done
 
             # Open with -fmt suffix to avoid triggering systemd device/mount
-            # units. Using the real names would make /dev/mapper/disk1 appear,
-            # which could trigger dependent units prematurely.
+            # units. Using the real names would make /dev/mapper/braid-disk1
+            # appear, which could trigger dependent units prematurely.
             for disk in ${lib.concatStringsSep " " disks}; do
-              echo -n '${passphrase}' | cryptsetup luksOpen --key-file=- "/dev/disk/by-id/virtio-$disk" "$disk-fmt"
+              echo -n '${passphrase}' | cryptsetup luksOpen --key-file=- "/dev/disk/by-id/virtio-$disk" "braid-$disk-fmt"
             done
 
             # Create btrfs RAID1 across all drives
-            if ! btrfs filesystem show /dev/mapper/disk1-fmt >/dev/null 2>&1; then
-              mkfs.btrfs -f -d raid1 -m raid1 ${lib.concatMapStringsSep " " (d: "/dev/mapper/${d}-fmt") disks}
+            if ! btrfs filesystem show /dev/mapper/braid-disk1-fmt >/dev/null 2>&1; then
+              mkfs.btrfs -f -d raid1 -m raid1 ${lib.concatMapStringsSep " " (d: "/dev/mapper/braid-${d}-fmt") disks}
             fi
 
             # Mount and write test data before bricking disk3
             mkdir -p /tmp/fixture-mount
-            mount /dev/mapper/disk1-fmt /tmp/fixture-mount
+            mount /dev/mapper/braid-disk1-fmt /tmp/fixture-mount
             echo 'data written before drive death' > /tmp/fixture-mount/survived.txt
             sync
             umount /tmp/fixture-mount
 
             # Close all — the real cryptsetup units will reopen them
             for disk in ${lib.concatStringsSep " " disks}; do
-              cryptsetup luksClose "$disk-fmt"
+              cryptsetup luksClose "braid-$disk-fmt"
             done
 
             # Brick disk3 — zero the LUKS header so cryptsetup fails on it
@@ -166,13 +158,11 @@ in
           '';
         };
 
-        # After LUKS devices are unlocked, scan for btrfs devices so the kernel
-        # learns the filesystem members at their new paths. Uses "wants" instead
-        # of "requires" so disk3's cryptsetup failure doesn't cascade.
+        # After LUKS devices are unlocked, scan for btrfs devices.
         services.btrfs-device-scan = {
           description = "Scan for btrfs multi-device filesystems";
-          after = map (d: "systemd-cryptsetup@${d}.service") disks;
-          wants = map (d: "systemd-cryptsetup@${d}.service") disks;
+          after = map (d: "systemd-cryptsetup@${d}.service") mapperNames;
+          wants = map (d: "systemd-cryptsetup@${d}.service") mapperNames;
           before = [ "initrd-fs.target" ];
           wantedBy = [ "initrd-fs.target" ];
           unitConfig.DefaultDependencies = false;
@@ -186,11 +176,9 @@ in
       };
 
       # LUKS devices with nofail + timeout so a dead drive doesn't block boot.
-      # nofail: makes cryptsetup unit Wants instead of Requires of cryptsetup.target
-      # x-systemd.device-timeout=10s: don't wait 90s for a missing device
       luks.devices = lib.mkVMOverride (
-        lib.genAttrs disks (name: {
-          device = "/dev/disk/by-id/virtio-${name}";
+        lib.genAttrs mapperNames (name: {
+          device = "/dev/disk/by-id/virtio-${lib.removePrefix "braid-" name}";
           crypttabExtraOpts = [ "nofail" "x-systemd.device-timeout=10s" ];
         })
       );

@@ -44,9 +44,10 @@ Decision docs must include an explicit status: `Draft`, `Active`, `Superseded`, 
 ## Commands
 
 - `make test` — Run all NixOS VM tests.
-- `make test-one t=<name>` — Run a single test by name (e.g. `make test-one t=hello-world`).
+- `make test-one t=<name>` — Run a single test by name (e.g. `make test-one t=braid-add-first-disk`).
 - `make test-one-verbose t=<name>` — Run a single test with full VM logs.
 - `make test-verbose` — Run tests with full VM logs. Avoid unless debugging.
+- `make test-rust` — Run Rust unit tests (`cargo test`).
 
 ## Test Conventions
 

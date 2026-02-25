@@ -36,142 +36,114 @@ Add braid to your flake inputs and import the module:
 ```nix
 braid = {
   enable = true;
-  disks = [
-    "/dev/disk/by-id/ata-Toshiba_MN07_XXXX"
-    "/dev/disk/by-id/ata-Ironwolf_ST12_YYYY"
-  ];
+  disks = {
+    toshiba  = { byId = "/dev/disk/by-id/ata-Toshiba_MN07_XXXX"; };
+    ironwolf = { byId = "/dev/disk/by-id/ata-Ironwolf_ST12_YYYY"; };
+  };
   mountPoint = "/mnt/storage";  # default
 };
 ```
 
-The Nix config doesn't touch your disks — it only declares which disks are available to braid. You then use `sudo braid init-disk` to LUKS-format each disk (one-time) and `sudo braid apply` to open, assemble, and mount. The system boots gracefully even if a drive is dead or missing.
+Each disk gets a human-friendly name used in CLI commands, systemd mapper names (`braid-toshiba`), logs, and error messages.
 
 ## Managing drives
-
-Every drive operation follows the same pattern: **edit config, rebuild, plan, apply.**
 
 ### Find your disks
 
 ```
 $ lsblk -d -o NAME,SIZE,ID-LINK
 NAME      SIZE ID-LINK
-sda        7.5G usb-General_UDisk_2510250851560304805623-0:0
-sdb        7.5G usb-General_UDisk_2510251411472126962806-0:0
-sdc        7.5G usb-General_UDisk_2510241444331159432829-0:0
-nvme0n1  931.5G nvme-WDC_WDS100T2B0C-00PXH0_20301E800610
-nvme1n1  476.9G nvme-Inland_TN320_NVMe_SSD_IB25ZH0512P00869
+sda      12.0T ata-Toshiba_MN07ACA12TEA_XXXXXXXXXXXX
+sdb      12.0T ata-Ironwolf_ST12000VN0008_YYYYYYYY
 ```
 
-Here `sda`, `sdb`, `sdc` are my three 8GB USB drives — those go in `braid.disks`. The two `nvme*` entries are internal NVMe SSDs I'm not using with braid.
-
-Use the ID-LINK column to build your disk paths:
-
-```
-/dev/disk/by-id/usb-General_UDisk_2510250851560304805623-0:0
-```
-
-HDDs hooked up to SATA ports probably start with `ata-*`.
+Use the ID-LINK column to build your by-id paths.
 
 ### Start with one disk
-
-You don't need to wait for a second drive. Start with one and add redundancy later.
 
 ```nix
 braid = {
   enable = true;
-  disks = [ "/dev/disk/by-id/ata-Toshiba_MN07_XXXX" ];
+  disks.toshiba = { byId = "/dev/disk/by-id/ata-Toshiba_MN07_XXXX"; };
 };
 ```
 
 ```
 sudo nixos-rebuild switch
-sudo braid init-disk /dev/disk/by-id/ata-Toshiba_MN07_XXXX   # LUKS format (one-shot)
-sudo braid apply                                              # open + create pool
-# --progress auto|always|never controls operation progress (default: auto, shows on TTY)
-# --json emits machine-readable ndjson progress events to stderr
+sudo braid add toshiba
 ```
 
 The pool is live immediately. No redundancy yet — data is available but unprotected until a second drive is added.
 
-`braid apply` opens LUKS before planning, so `BRAID_PASSPHRASE` is needed even for a dry-run-like invocation. After reboot, a single `braid apply` re-opens all LUKS containers, assembles the pool, and applies any pending changes.
-
 ### Add a drive
 
-Edit config, rebuild, init the new disk, apply:
-
 ```nix
-braid.disks = [
-  "/dev/disk/by-id/ata-Toshiba_MN07_XXXX"
-  "/dev/disk/by-id/ata-Ironwolf_ST12_YYYY"  # new
-];
+braid.disks.ironwolf = { byId = "/dev/disk/by-id/ata-Ironwolf_ST12_YYYY"; };
 ```
 
 ```
 sudo nixos-rebuild switch
-sudo braid init-disk /dev/disk/by-id/ata-Ironwolf_ST12_YYYY   # LUKS format new disk
-sudo braid apply                                               # open + add to pool + RAID1
+sudo braid add ironwolf
 ```
 
-The pool converts to RAID1 automatically. Existing data rebalances in the background. The pool stays online the entire time.
+The pool converts to RAID1 automatically. Existing data rebalances in the background.
+
+### Preview before executing
+
+```
+$ sudo braid add ironwolf --dry-run
+[destructive] LUKS format /dev/disk/by-id/ata-Ironwolf_ST12_YYYY
+[safe       ] LUKS open → braid-ironwolf
+[safe       ] btrfs device add /dev/mapper/braid-ironwolf /mnt/storage
+[long       ] btrfs balance to RAID1
+```
+
+Steps reflect actual disk state — if the disk is already LUKS-formatted, the destructive step is omitted.
 
 ### Remove a drive
 
-Same pattern — remove from config, rebuild, plan, apply:
+```
+sudo braid remove ironwolf
+```
+
+Data migrates off the drive before it's detached. If removing would leave a single disk (losing redundancy), confirmation is required. After removing, update config and rebuild:
 
 ```nix
-braid.disks = [
-  "/dev/disk/by-id/ata-Toshiba_MN07_XXXX"
-  # removed: ata-Ironwolf_ST12_YYYY
-];
-```
-
-```
+# Remove from braid.disks, then:
 sudo nixos-rebuild switch
-sudo braid plan
-sudo braid apply
 ```
 
-Data migrates off the drive before it's detached. Requires enough free space on remaining drives. If removing would leave a single disk (losing redundancy), `braid apply` requires explicit confirmation.
+For a missing/dead disk:
+
+```
+sudo braid remove ironwolf                    # 1 missing device: auto-detected
+sudo braid remove ironwolf --missing-id 3     # multiple missing: target by devid
+```
+
+Use `braid status --verbose` to see device IDs.
 
 ### Replace a failed drive
 
-If a drive dies, the pool stays mounted in degraded mode. Replace it by swapping the dead disk for the replacement in config:
-
 ```nix
-braid.disks = [
-  "/dev/disk/by-id/ata-Toshiba_MN07_XXXX"
-  "/dev/disk/by-id/ata-Seagate_NEW_ZZZZ"  # replacement
-  # removed: ata-Ironwolf_ST12_YYYY (dead)
-];
+# Add replacement to config:
+braid.disks.seagate = { byId = "/dev/disk/by-id/ata-Seagate_NEW_ZZZZ"; };
+# (keep dead disk in config until replace completes, then remove it)
 ```
 
 ```
 sudo nixos-rebuild switch
-sudo braid init-disk /dev/disk/by-id/ata-Seagate_NEW_ZZZZ     # LUKS format replacement
-sudo braid plan --allow-remove-missing                         # preview: add + evict missing
-sudo BRAID_CONFIRM='remove missing device from pool' braid apply --allow-remove-missing
+sudo braid replace --old ironwolf --new seagate
 ```
 
-The new drive joins the pool and the dead device is evicted. Missing-device removal requires explicit intent to prevent accidental eviction of temporarily absent disks.
-
-If any configured disk is physically absent when you run `plan` or `apply` with removal actions, you'll see an `IDENTITY_AMBIGUOUS_ABSENT_DISK` block. Add `--allow-remove-ambiguous` and `BRAID_CONFIRM='remove despite ambiguous identity'` to proceed.
-
-When an operation triggers multiple confirmations (e.g., ambiguous identity + redundancy loss), separate the phrases with semicolons:
-
-```
-sudo BRAID_CONFIRM='remove despite ambiguous identity;remove this disk without redundancy' \
-  braid apply --allow-remove-ambiguous
-```
+The new drive is added and rebalanced **before** the dead device is evicted. Redundancy never drops.
 
 ### Pool status
 
 ```
 sudo braid status             # pool health summary
-sudo braid status --verbose   # per-disk detail
+sudo braid status --verbose   # per-disk detail with devids
 sudo braid status --json      # machine-readable output
 ```
-
-Shows drive count, RAID profile, capacity, degraded/missing state, and last scrub result. With `--verbose`, adds per-disk detail: model, serial, LUKS UUID, and btrfs error counters.
 
 ### Diagnostics
 
@@ -180,43 +152,47 @@ sudo braid doctor           # check config, pool health, etc.
 sudo braid doctor --json    # machine-readable output
 ```
 
-Runs a series of checks and reports results. Exit code 0 when all checks pass, 1 on any failure.
+### Non-interactive mode
 
-### Resume an interrupted apply
-
-If `braid apply` is interrupted (power loss, killed process), it saves a checkpoint. Resume where it left off:
+For scripting, use `--yes` with either `BRAID_PASSPHRASE` env var or `--passphrase-file`:
 
 ```
-sudo braid apply --resume
+sudo BRAID_PASSPHRASE='secret' braid add ironwolf --yes
+sudo braid add ironwolf --yes --passphrase-file /run/secrets/luks
 ```
 
-The checkpoint is validated against the current config — if the config changed since the interruption, resume is refused and you must start fresh.
+### Resume an interrupted operation
 
-If the system rebooted between the interruption and resume (LUKS mappers are closed), `--resume` automatically invalidates the stale checkpoint, re-opens LUKS, and re-plans from scratch. Work already completed before the reboot (e.g., a balance) is reflected in the pool state, so the new plan skips it naturally.
-
-### Temporarily absent disk
-
-If a configured disk is temporarily disconnected, `braid apply` skips it with a warning and continues other safe operations:
+If a long-running operation (balance, device remove) is interrupted, re-run the same command. The checkpoint resumes where it left off:
 
 ```
-sudo braid apply     # warns about absent disk, proceeds with others
-# reconnect disk
-sudo braid apply     # reconciles the returned disk
+sudo braid add ironwolf     # interrupted during balance
+sudo braid add ironwolf     # resumes balance from where it stopped
 ```
+
+Checkpoints are invalidated if config changes or pool topology changes.
+
+## Post-boot pool unlock
+
+If you missed the initrd SSH unlock window, bring the pool online from a normal session:
+
+```
+systemctl start braid-pool.target
+```
+
+One passphrase prompt opens all available LUKS devices and mounts the pool. Works from TTY, SSH, or scripted. Tolerates missing/dead disks (mounts degraded).
 
 ## Shell Completions
 
-Tab completion for subcommands, flags, and disk paths works out of the box on NixOS
-when `braid.enable = true`. Completions are registered for bash, zsh, and fish.
+Tab completion for subcommands, flags, and disk names works out of the box on NixOS when `braid.enable = true`. Completions are registered for bash, zsh, and fish.
 
 ```
-braid <TAB>              # → init-disk  plan  apply  status  doctor
-braid init-disk <TAB>    # → /dev/disk/by-id/ata-Toshiba_...  /dev/disk/by-id/ata-Ironwolf_...
-braid plan --<TAB>       # → --json  --allow-remove-missing  --allow-remove-ambiguous
+braid <TAB>           # → add  remove  replace  status  doctor
+braid add <TAB>       # → toshiba  ironwolf  seagate
+braid add --<TAB>     # → --dry-run  --yes  --passphrase-file  --progress
 ```
 
-Disk path candidates are read from `/etc/braid/config.json` on every tab press,
-so they reflect your current `braid.disks` config after a `nixos-rebuild`.
+Disk name candidates are read from `/etc/braid/config.json` on every tab press, so they reflect your current `braid.disks` config after a `nixos-rebuild`.
 
 ## Remote Unlock (SSH)
 
@@ -236,7 +212,7 @@ sudo ssh-keygen -t ed25519 -f /etc/secrets/initrd/ssh_host_ed25519_key -N ''
 ```nix
 braid = {
   enable = true;
-  disks = [ ... ];
+  disks = { ... };
   remoteUnlock = {
     enable = true;
     authorizedKeys = [
@@ -293,25 +269,9 @@ services.samba = {
       "read only" = "yes";
       browseable = "yes";
     };
-    poetry = {
-      path = "${config.braid.mountPoint}/poetry";
-      "guest ok" = "no";
-      "valid users" = "dan";
-      browseable = "no";
-    };
   };
 };
 ```
-
-Change `braid.mountPoint` and Samba follows automatically — no extra module code needed, just a Nix expression referencing an existing option.
-
-After rebuilding, create the Samba password (one-time):
-
-```
-sudo smbpasswd -a dan
-```
-
-Then from macOS: Finder → Cmd+K → `smb://nas/videos`.
 
 ## Development
 
@@ -321,7 +281,7 @@ Typical loop:
 
 ```bash
 # run one test while iterating
-make test-one t=braid-plan-rust
+make test-one t=braid-add-first-disk
 
 # run full suite before finishing
 make test
@@ -332,17 +292,3 @@ Rust CLI code lives in `cli/`. Build it directly with:
 ```bash
 nix build .#braid
 ```
-
-### Crane build caching
-
-`braid` (the Rust CLI) is built with Crane. Crane splits dependency compilation (`buildDepsOnly`) from the final crate build, so dependency artifacts are reused across normal Rust code edits.
-
-Quick check:
-
-```bash
-nix build .#braid
-touch cli/src/main.rs
-nix build .#braid
-```
-
-The second build should be much faster because Cargo dependencies come from cache.

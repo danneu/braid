@@ -1,13 +1,13 @@
-# Test: LUKS header auto-backup on init-disk, corrupt header restore + data recovery
+# Test: LUKS header auto-backup on braid add, corrupt header restore + data recovery
 #
-# What: Verifies that braid init-disk automatically backs up LUKS headers,
+# What: Verifies that braid add automatically backs up LUKS headers,
 # and that a corrupted header can be restored from backup to recover data.
 #
 # Why: LUKS header corruption means permanent data loss regardless of knowing
-# the passphrase. init-disk is the only luksFormat path (Principle 3), so
+# the passphrase. braid add is the only luksFormat path (Principle 3), so
 # auto-backup here guarantees every formatted disk has a recoverable header.
 #
-# Dependencies: LUKS primitives, btrfs basics, Rust braid binary with init-disk.
+# Dependencies: LUKS primitives, btrfs basics, Rust braid binary with add command.
 { braid }:
 {
   name = "luks-header-backup";
@@ -24,6 +24,14 @@
       pkgs.btrfs-progs
       pkgs.jq
     ];
+
+    environment.etc."braid/config.json".text = builtins.toJSON {
+      disks = {
+        disk1 = { by_id = "/dev/disk/by-id/virtio-disk1"; };
+        disk2 = { by_id = "/dev/disk/by-id/virtio-disk2"; };
+      };
+      mount_point = "/mnt/storage";
+    };
   };
 
   testScript = builtins.readFile ./luks-header-backup.py;

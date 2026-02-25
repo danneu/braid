@@ -1,3 +1,16 @@
+# Test: braid unified CLI — status reporting and error cases
+#
+# What: Exercises `braid status` in all output modes (human, --json, --verbose,
+# --json --verbose) against a 3-disk RAID1 pool, and validates the "not mounted"
+# error case.
+#
+# Why: The unified CLI must produce correct, complete status reports after pool
+# setup using intent commands (`braid add`). This covers the primary read path
+# that operators use to check pool health.
+#
+# Dependencies: `braid add` must correctly format LUKS, create/extend btrfs pool,
+# and mount at the configured mount point. `braid status` must read live pool state.
+
 import json
 
 start_all()
@@ -7,28 +20,20 @@ passphrase = "testpassphrase"
 luks_opts = "--pbkdf pbkdf2 --pbkdf-force-iterations 1000"
 
 
-def init_disk(dev, force=False):
-    force_flag = "--force" if force else ""
-    confirm = "BRAID_CONFIRM='reformat this disk' " if force else ""
+def add_disk(name):
     return (
-        f"{confirm}"
         f"BRAID_PASSPHRASE='{passphrase}' "
         f"BRAID_LUKS_OPTS='{luks_opts}' "
-        f"braid init-disk {force_flag} {dev}"
+        f"braid add {name} --yes"
     )
-
-
-def apply_cmd():
-    return f"BRAID_PASSPHRASE='{passphrase}' braid apply"
 
 
 # --- Phase 0: Build 3-disk RAID1 pool ---
 
 with subtest("Setup: build 3-disk RAID1 pool"):
-    machine.succeed(init_disk("/dev/disk/by-id/virtio-disk1"))
-    machine.succeed(init_disk("/dev/disk/by-id/virtio-disk2"))
-    machine.succeed(init_disk("/dev/disk/by-id/virtio-disk3"))
-    machine.succeed(apply_cmd())
+    machine.succeed(add_disk("disk1"))
+    machine.succeed(add_disk("disk2"))
+    machine.succeed(add_disk("disk3"))
     machine.succeed("echo 'test data' > /mnt/storage/file.txt && sync")
 
     fi_df = machine.succeed("btrfs fi df /mnt/storage")
@@ -71,7 +76,7 @@ with subtest("braid status --verbose shows per-disk detail"):
     output = machine.succeed("braid status --verbose")
     print(f"braid status --verbose:\n{output}")
     lines = output.splitlines()
-    for disk in ["virtio-disk1", "virtio-disk2", "virtio-disk3"]:
+    for disk in ["braid-disk1", "braid-disk2", "braid-disk3"]:
         disk_lines = [l for l in lines if disk in l and "present" in l]
         assert disk_lines, f"{disk} not shown as present:\n{output}"
     assert "devid" in output, f"Expected 'devid':\n{output}"
@@ -91,13 +96,7 @@ with subtest("braid status --json --verbose includes disk details"):
         assert disk["status"] == "present", f"Disk not present: {disk}"
         assert "errors" in disk, f"Disk missing errors: {disk}"
 
-# --- Phase 5: Standalone scripts ---
-
-with subtest("braid-remove-disk still works"):
-    # Verify the command exists and shows usage
-    machine.succeed("which braid-remove-disk")
-
-# --- Phase 6: Error cases ---
+# --- Phase 5: Error cases ---
 
 with subtest("braid status reports not mounted on unmounted pool"):
     machine.succeed("umount /mnt/storage")

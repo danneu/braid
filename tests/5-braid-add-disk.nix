@@ -1,13 +1,12 @@
-# Test: braid init-disk + apply lifecycle
+# Test: braid add lifecycle
 #
-# What: Runs `braid init-disk` + `braid apply` through its full lifecycle: first
-# disk (creates pool), second disk (converts to RAID1), third disk (expands pool),
-# plus validation errors, crash recovery, and unmounted pool guard.
+# What: Runs `braid add <name>` through its full lifecycle: first disk (creates
+# pool), second disk (converts to RAID1), third disk (expands pool), plus
+# validation errors, pre-formatted disk handling, and idempotent re-add.
 #
-# Why: This is the first real deliverable — the unified CLI that orchestrates
-# LUKS + btrfs for new disks. Every primitive has been proven in isolation
-# (luks, btrfs-raid1, grow, shrink, heal, degrade). This test proves the
-# unified CLI ties them together correctly.
+# Why: `braid add` is the primary path for LUKS format + pool join. Every
+# primitive has been proven in isolation (luks, btrfs-raid1, grow, shrink, heal,
+# degrade). This test proves the intent CLI ties them together correctly.
 #
 # Dependencies: btrfs-grow1 (single -> RAID1 -> 3-drive works manually).
 { braid }:
@@ -30,14 +29,14 @@
     ];
 
     environment.etc."braid/config.json".text = builtins.toJSON {
-      disks = [
-        "/dev/disk/by-id/virtio-disk1"
-        "/dev/disk/by-id/virtio-disk2"
-        "/dev/disk/by-id/virtio-disk3"
-        "/dev/disk/by-id/virtio-disk4"
-        "/dev/disk/by-id/virtio-disk5"
-      ];
-      mountPoint = "/mnt/storage";
+      disks = {
+        disk1 = { by_id = "/dev/disk/by-id/virtio-disk1"; };
+        disk2 = { by_id = "/dev/disk/by-id/virtio-disk2"; };
+        disk3 = { by_id = "/dev/disk/by-id/virtio-disk3"; };
+        disk4 = { by_id = "/dev/disk/by-id/virtio-disk4"; };
+        disk5 = { by_id = "/dev/disk/by-id/virtio-disk5"; };
+      };
+      mount_point = "/mnt/storage";
     };
   };
 

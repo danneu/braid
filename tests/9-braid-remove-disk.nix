@@ -1,12 +1,12 @@
-# Test: braid-remove-disk
+# Test: braid remove
 #
-# What: Runs braid-remove-disk through its lifecycle: graceful remove, remove-missing,
-# LUKS cleanup, redundancy warning, and validation errors.
+# What: Runs `braid remove <name>` through its lifecycle: graceful remove,
+# remove-missing, LUKS cleanup, redundancy warning, and validation errors.
 #
-# Why: Symmetric counterpart to braid init-disk + apply. Must handle both happy path
-# (disk present, data migrates off) and failure path (disk gone, remove missing).
+# Why: Symmetric counterpart to braid add. Must handle both happy path (disk
+# present, data migrates off) and failure path (disk gone, remove missing).
 #
-# Dependencies: braid init-disk + braid apply (builds the test pool).
+# Dependencies: braid add (builds the test pool).
 { braid }:
 {
   name = "braid-remove-disk";
@@ -20,22 +20,17 @@
 
     environment.systemPackages = [
       braid
-      (pkgs.writeShellApplication {
-        name = "braid-remove-disk";
-        runtimeInputs = [ pkgs.cryptsetup pkgs.btrfs-progs pkgs.util-linux pkgs.jq ];
-        text = builtins.readFile ../scripts/braid-remove-disk.sh;
-      })
       pkgs.cryptsetup
       pkgs.btrfs-progs
     ];
 
     environment.etc."braid/config.json".text = builtins.toJSON {
-      disks = [
-        "/dev/disk/by-id/virtio-disk1"
-        "/dev/disk/by-id/virtio-disk2"
-        "/dev/disk/by-id/virtio-disk3"
-      ];
-      mountPoint = "/mnt/storage";
+      disks = {
+        disk1 = { by_id = "/dev/disk/by-id/virtio-disk1"; };
+        disk2 = { by_id = "/dev/disk/by-id/virtio-disk2"; };
+        disk3 = { by_id = "/dev/disk/by-id/virtio-disk3"; };
+      };
+      mount_point = "/mnt/storage";
     };
   };
 

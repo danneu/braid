@@ -16,8 +16,8 @@
 let
   passphrase = "testpassphrase";
   keyFile = pkgs.writeText "luks-test-key" passphrase;
-  disks = [ "disk1" ];
-  mapperNames = map (d: "virtio-${d}") disks;
+  diskNames = [ "disk1" ];
+  mapperNames = map (d: "braid-${d}") diskNames;
 
   # systemd-cryptsetup-generator escapes hyphens in unit instance names.
   cryptsetupUnit = name:
@@ -32,7 +32,7 @@ in
     braid = {
       enable = true;
       package = braid;
-      disks = map (d: "/dev/disk/by-id/virtio-${d}") disks;
+      disks = lib.genAttrs diskNames (d: { byId = "/dev/disk/by-id/virtio-${d}"; });
     };
 
     virtualisation.emptyDiskImages = [
@@ -42,7 +42,7 @@ in
 
     # Re-declare mount for VM compat (qemu-vm.nix clobbers fileSystems)
     virtualisation.fileSystems."/mnt/storage" = {
-      device = "/dev/mapper/virtio-disk1";
+      device = "/dev/mapper/braid-disk1";
       fsType = "btrfs";
       neededForBoot = true;
       options = [
@@ -95,13 +95,13 @@ in
             fi
 
             echo -n '${passphrase}' | cryptsetup luksOpen --key-file=- \
-              "$dev" "virtio-disk1-fmt"
+              "$dev" "braid-disk1-fmt"
 
-            if ! btrfs filesystem show /dev/mapper/virtio-disk1-fmt >/dev/null 2>&1; then
-              mkfs.btrfs -f /dev/mapper/virtio-disk1-fmt
+            if ! btrfs filesystem show /dev/mapper/braid-disk1-fmt >/dev/null 2>&1; then
+              mkfs.btrfs -f /dev/mapper/braid-disk1-fmt
             fi
 
-            cryptsetup luksClose "virtio-disk1-fmt"
+            cryptsetup luksClose "braid-disk1-fmt"
 
             # Brick the disk — zero the LUKS header so cryptsetup fails
             dd if=/dev/zero of=/dev/disk/by-id/virtio-disk1 bs=1M count=10
@@ -112,7 +112,7 @@ in
       # Override module's luks.devices: add keyFile for auto-unlock in VM.
       luks.devices = lib.mkVMOverride (
         lib.genAttrs mapperNames (name: {
-          device = "/dev/disk/by-id/virtio-${lib.removePrefix "virtio-" name}";
+          device = "/dev/disk/by-id/virtio-${lib.removePrefix "braid-" name}";
           keyFile = "${keyFile}";
           crypttabExtraOpts = [ "nofail" "x-systemd.device-timeout=10s" ];
         })

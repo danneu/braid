@@ -6,9 +6,9 @@ expression: buffer_to_string(&terminal)
 │Pool error: command failed: findmnt exited 1              │
 │                                                          │
 │Disks                                                     │
-│  1  ata-Toshiba_MN07_XXXX                                │
-│  2  ata-Ironwolf_ST12_YYYY                               │
-│  3  ata-WDC_WD120_ZZZZ                                   │
+│  1  toshiba                                              │
+│  2  ironwolf                                             │
+│  3  wdc                                                  │
 │                                                          │
 │                                                          │
 │                                                          │

@@ -39,30 +39,31 @@ fn version_works_without_root() {
 }
 
 #[test]
-fn apply_json_flag_accepted() {
+fn add_dry_run_flag_accepted() {
     if is_root() {
         return;
     }
     let output = braid()
-        .args(["apply", "--help"])
+        .args(["add", "--help"])
         .output()
         .expect("failed to execute braid");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("--json"), "apply --help should show --json, got: {stdout}");
+    assert!(stdout.contains("--dry-run"), "add --help should show --dry-run, got: {stdout}");
+    assert!(stdout.contains("--yes"), "add --help should show --yes, got: {stdout}");
 }
 
 #[test]
-fn apply_progress_values_accepted() {
+fn add_progress_values_accepted() {
     if is_root() {
         return;
     }
     let output = braid()
-        .args(["apply", "--help"])
+        .args(["add", "--help"])
         .output()
         .expect("failed to execute braid");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("--progress"), "apply --help should show --progress, got: {stdout}");
+    assert!(stdout.contains("--progress"), "add --help should show --progress, got: {stdout}");
     for val in ["auto", "always", "never"] {
-        assert!(stdout.contains(val), "apply --help should show {val}, got: {stdout}");
+        assert!(stdout.contains(val), "add --help should show {val}, got: {stdout}");
     }
 }

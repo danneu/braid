@@ -7,7 +7,7 @@ with subtest("btrfs RAID1 pool is mounted"):
     fi_show = machine.succeed("btrfs fi show /mnt/storage")
     print(f"Pool:\n{fi_show}")
     for i in range(1, 4):
-        assert f"/dev/mapper/virtio-disk{i}" in fi_show, (
+        assert f"/dev/mapper/braid-disk{i}" in fi_show, (
             f"disk{i} missing from pool:\n{fi_show}"
         )
 
@@ -18,9 +18,11 @@ with subtest("Runtime config file is generated"):
     import json
     config_raw = machine.succeed("cat /etc/braid/config.json")
     config = json.loads(config_raw)
-    assert config["mountPoint"] == "/mnt/storage", f"Expected /mnt/storage, got {config['mountPoint']}"
-    expected_disks = [f"/dev/disk/by-id/virtio-disk{i}" for i in range(1, 4)]
-    assert config["disks"] == expected_disks, f"Unexpected disks: {config['disks']}"
+    assert config["mount_point"] == "/mnt/storage", f"Expected /mnt/storage, got {config['mount_point']}"
+    for i in range(1, 4):
+        name = f"disk{i}"
+        assert name in config["disks"], f"Expected {name} in disks: {config['disks']}"
+        assert config["disks"][name]["by_id"] == f"/dev/disk/by-id/virtio-disk{i}", f"Unexpected by_id for {name}: {config['disks']}"
 
 with subtest("Write and read round-trip"):
     machine.succeed("echo 'raid1 data' > /mnt/storage/test.txt")

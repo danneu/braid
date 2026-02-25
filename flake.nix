@@ -117,31 +117,34 @@
               braid = linuxCrane.braid;
             }
           );
-          braid-bootstrap = pkgs.testers.nixosTest (
-            import ./tests/13-braid-bootstrap.nix {
-              braid = linuxCrane.braid;
-            }
-          );
-          braid-plan-rust = pkgs.testers.nixosTest (
-            import ./tests/15-braid-plan-rust.nix {
-              braid = linuxCrane.braid;
-            }
-          );
-          braid-apply-rust = pkgs.testers.nixosTest (
-            import ./tests/16-braid-apply-rust.nix {
-              braid = linuxCrane.braid;
-            }
-          );
+          # Retired: bootstrap tested init-disk + plan/apply; replaced by braid-add-disk
+          # braid-bootstrap = pkgs.testers.nixosTest (
+          #   import ./tests/13-braid-bootstrap.nix {
+          #     braid = linuxCrane.braid;
+          #   }
+          # );
+          # Retired: plan/apply commands replaced by intent CLI (add/remove/replace)
+          # braid-plan-rust = pkgs.testers.nixosTest (
+          #   import ./tests/15-braid-plan-rust.nix {
+          #     braid = linuxCrane.braid;
+          #   }
+          # );
+          # braid-apply-rust = pkgs.testers.nixosTest (
+          #   import ./tests/16-braid-apply-rust.nix {
+          #     braid = linuxCrane.braid;
+          #   }
+          # );
           braid-status-rust = pkgs.testers.nixosTest (
             import ./tests/18-braid-status-rust.nix {
               braid = linuxCrane.braid;
             }
           );
-          braid-init-disk-rust = pkgs.testers.nixosTest (
-            import ./tests/19-braid-init-disk-rust.nix {
-              braid = linuxCrane.braid;
-            }
-          );
+          # Retired: init-disk absorbed into `braid add`
+          # braid-init-disk-rust = pkgs.testers.nixosTest (
+          #   import ./tests/19-braid-init-disk-rust.nix {
+          #     braid = linuxCrane.braid;
+          #   }
+          # );
           luks-header-backup = pkgs.testers.nixosTest (
             import ./tests/21-luks-header-backup.nix {
               braid = linuxCrane.braid;

@@ -4,7 +4,6 @@ use std::process::ExitStatus;
 
 use crate::tui::effect::Effect;
 use crate::tui::state::{CmdId, CmdStatus, CommandState, Stream, MAX_LINES};
-use crate::types::ByIdPath;
 
 pub struct PoolState {
     pub mount_point: String,
@@ -23,7 +22,7 @@ pub enum PoolStatus {
 
 pub struct Model {
     pub running: bool,
-    pub disks: Vec<ByIdPath>,
+    pub disk_names: Vec<String>,
     pub pool: PoolStatus,
     pub mount_point: String,
     pub commands: HashMap<CmdId, CommandState>,
@@ -31,13 +30,13 @@ pub struct Model {
 }
 
 impl Model {
-    pub fn new(disks: Vec<ByIdPath>, mount_point: String) -> (Self, Vec<Effect>) {
+    pub fn new(disk_names: Vec<String>, mount_point: String) -> (Self, Vec<Effect>) {
         let effects = vec![Effect::ProbePool {
             mount_point: mount_point.clone(),
         }];
         let model = Self {
             running: true,
-            disks,
+            disk_names,
             pool: PoolStatus::Loading,
             mount_point,
             commands: HashMap::new(),
@@ -47,10 +46,10 @@ impl Model {
     }
 
     #[cfg(test)]
-    pub fn new_for_test(disks: Vec<ByIdPath>, pool: PoolStatus) -> Self {
+    pub fn new_for_test(disk_names: Vec<String>, pool: PoolStatus) -> Self {
         Self {
             running: true,
-            disks,
+            disk_names,
             pool,
             mount_point: String::new(),
             commands: HashMap::new(),

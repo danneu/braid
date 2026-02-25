@@ -1,3 +1,16 @@
+# Test: braid status (Rust implementation) across pool states
+#
+# What: Validates the Rust braid status subcommand end-to-end against real
+# virtual disks — single-disk, RAID1, degraded, and not-mounted states in both
+# human and JSON output modes (including --verbose).
+#
+# Why: The Rust CLI must produce correct status reports from real disk state.
+# This test bridges unit tests (pure logic) with integration: real LUKS, real
+# btrfs, real command output parsed by the Rust probe and status layers.
+#
+# Dependencies: `braid add` must correctly format LUKS, create/extend btrfs pool,
+# and mount at the configured mount point. Rust braid binary for status.
+
 import json
 
 start_all()
@@ -7,26 +20,12 @@ passphrase = "testpassphrase"
 luks_opts = "--pbkdf pbkdf2 --pbkdf-force-iterations 1000"
 
 
-def init_disk(dev, force=False):
-    force_flag = "--force" if force else ""
-    confirm = "BRAID_CONFIRM='reformat this disk' " if force else ""
+def add_disk(name):
     return (
-        f"{confirm}"
         f"BRAID_PASSPHRASE='{passphrase}' "
         f"BRAID_LUKS_OPTS='{luks_opts}' "
-        f"braid init-disk {force_flag} {dev}"
+        f"braid add {name} --yes"
     )
-
-
-def apply_cmd(config=None, extra=""):
-    config_flag = f"--config {config}" if config else ""
-    return f"BRAID_PASSPHRASE='{passphrase}' braid apply {config_flag} {extra}"
-
-
-def write_config(disk_list, mount="/mnt/storage"):
-    config = json.dumps({"disks": disk_list, "mountPoint": mount})
-    escaped = config.replace("'", "'\\''")
-    return f"echo '{escaped}' > /tmp/braid-config.json"
 
 
 def rust_status(extra=""):
@@ -36,9 +35,7 @@ def rust_status(extra=""):
 # --- Phase 1: Single-disk summary ---
 
 with subtest("Setup: single disk pool"):
-    machine.succeed(init_disk("/dev/disk/by-id/virtio-disk1"))
-    machine.succeed(write_config(["/dev/disk/by-id/virtio-disk1"]))
-    machine.succeed(apply_cmd(config="/tmp/braid-config.json"))
+    machine.succeed(add_disk("disk1"))
     machine.succeed("mountpoint -q /mnt/storage")
 
 with subtest("Single-disk summary"):
@@ -56,9 +53,8 @@ with subtest("Single-disk summary"):
 # --- Phase 2: RAID1 healthy ---
 
 with subtest("Setup: 3-disk RAID1 pool"):
-    machine.succeed(init_disk("/dev/disk/by-id/virtio-disk2"))
-    machine.succeed(init_disk("/dev/disk/by-id/virtio-disk3"))
-    machine.succeed(apply_cmd())
+    machine.succeed(add_disk("disk2"))
+    machine.succeed(add_disk("disk3"))
     df_output = machine.succeed("btrfs fi df /mnt/storage")
     assert "RAID1" in df_output, f"Expected RAID1 after adding 3 disks:\n{df_output}"
 
@@ -78,7 +74,7 @@ with subtest("Healthy verbose"):
     output = machine.succeed(rust_status("--verbose"))
     print(f"Healthy verbose:\n{output}")
     lines = output.splitlines()
-    for disk in ["virtio-disk1", "virtio-disk2", "virtio-disk3"]:
+    for disk in ["braid-disk1", "braid-disk2", "braid-disk3"]:
         disk_lines = [l for l in lines if disk in l and "present" in l]
         assert disk_lines, f"{disk} not shown as present:\n{output}"
     assert "devid" in output, f"Expected 'devid':\n{output}"
@@ -103,10 +99,10 @@ with subtest("Healthy JSON verbose"):
 
 # --- Phase 3: Degraded ---
 
-with subtest("Simulate drive failure — close disk3"):
+with subtest("Simulate drive failure - close disk3"):
     machine.succeed("umount /mnt/storage")
-    machine.succeed("cryptsetup luksClose virtio-disk3")
-    machine.succeed("mount -o degraded /dev/mapper/virtio-disk1 /mnt/storage")
+    machine.succeed("cryptsetup close braid-disk3")
+    machine.succeed("mount -o degraded /dev/mapper/braid-disk1 /mnt/storage")
     machine.succeed("mountpoint -q /mnt/storage")
 
 with subtest("Degraded summary"):
@@ -121,12 +117,12 @@ with subtest("Degraded verbose"):
     output = machine.succeed(rust_status("--verbose"))
     print(f"Degraded verbose:\n{output}")
     assert "MISSING" in output, f"Expected 'MISSING':\n{output}"
-    assert "virtio-disk3" in output, f"Expected 'virtio-disk3':\n{output}"
+    assert "braid-disk3" in output, f"Expected 'braid-disk3':\n{output}"
     assert "not found" in output or "device absent" in output, (
         f"Expected 'not found' or 'device absent':\n{output}"
     )
     lines = output.splitlines()
-    for disk in ["virtio-disk1", "virtio-disk2"]:
+    for disk in ["braid-disk1", "braid-disk2"]:
         disk_lines = [l for l in lines if disk in l and "present" in l]
         assert disk_lines, f"{disk} not shown as present:\n{output}"
 

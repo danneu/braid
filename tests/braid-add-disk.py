@@ -1,3 +1,16 @@
+# Test: braid add lifecycle
+#
+# What: Runs `braid add <name> --yes` through its full lifecycle: first disk
+# (creates pool), second disk (converts to RAID1), third disk (expands pool),
+# validation errors, idempotent re-add, pre-formatted disk recovery, and fifth
+# disk expansion.
+#
+# Why: `braid add` is the primary intent command for LUKS format + pool join.
+# Every primitive has been proven in isolation (luks, btrfs-raid1, grow, shrink,
+# heal, degrade). This test proves the intent CLI ties them together correctly.
+#
+# Dependencies: btrfs-grow1 (single -> RAID1 -> 3-drive works manually).
+
 start_all()
 machine.wait_for_unit("multi-user.target")
 
@@ -5,30 +18,19 @@ passphrase = "testpassphrase"
 luks_opts = "--pbkdf pbkdf2 --pbkdf-force-iterations 1000"
 
 
-def init_disk(dev, force=False):
-    force_flag = "--force" if force else ""
-    confirm = "BRAID_CONFIRM='reformat this disk' " if force else ""
+def add_cmd(name):
+    """Build a `braid add <name> --yes` command with env vars."""
     return (
-        f"{confirm}"
         f"BRAID_PASSPHRASE='{passphrase}' "
         f"BRAID_LUKS_OPTS='{luks_opts}' "
-        f"braid init-disk {force_flag} {dev}"
+        f"braid add {name} --yes"
     )
-
-
-def apply_cmd(config=None, extra="", confirm=""):
-    config_flag = f"--config {config}" if config else ""
-    env = f"BRAID_PASSPHRASE='{passphrase}'"
-    if confirm:
-        env += f" BRAID_CONFIRM='{confirm}'"
-    return f"{env} braid apply {config_flag} {extra}"
 
 
 # --- Phase 1: First disk (no pool) ---
 
 with subtest("First disk creates single-drive pool"):
-    machine.succeed(init_disk("/dev/disk/by-id/virtio-disk1"))
-    machine.succeed(apply_cmd())
+    machine.succeed(add_cmd("disk1"))
 
     # Pool is mounted
     machine.succeed("mountpoint -q /mnt/storage")
@@ -37,8 +39,8 @@ with subtest("First disk creates single-drive pool"):
     df_output = machine.succeed("btrfs fi df /mnt/storage")
     assert "Data, single" in df_output, f"Expected single profile:\n{df_output}"
 
-    # LUKS mapper exists with correct name (by-id basename)
-    machine.succeed("test -e /dev/mapper/virtio-disk1")
+    # LUKS mapper exists with correct name (braid-<name>)
+    machine.succeed("test -e /dev/mapper/braid-disk1")
 
     # Can write data
     machine.succeed("echo 'day one data' > /mnt/storage/day1.txt")
@@ -47,8 +49,7 @@ with subtest("First disk creates single-drive pool"):
 # --- Phase 2: Second disk (convert to RAID1) ---
 
 with subtest("Second disk converts pool to RAID1"):
-    machine.succeed(init_disk("/dev/disk/by-id/virtio-disk2"))
-    machine.succeed(apply_cmd())
+    machine.succeed(add_cmd("disk2"))
 
     df_output = machine.succeed("btrfs fi df /mnt/storage")
     assert "Data, RAID1" in df_output, f"Expected RAID1:\n{df_output}"
@@ -64,12 +65,11 @@ with subtest("Write more data on RAID1"):
 # --- Phase 3: Third disk (add to RAID1) ---
 
 with subtest("Third disk expands RAID1 pool"):
-    machine.succeed(init_disk("/dev/disk/by-id/virtio-disk3"))
-    machine.succeed(apply_cmd())
+    machine.succeed(add_cmd("disk3"))
 
     # All 3 mapper devices in pool
     fi_show = machine.succeed("btrfs fi show /mnt/storage")
-    for name in ["virtio-disk1", "virtio-disk2", "virtio-disk3"]:
+    for name in ["braid-disk1", "braid-disk2", "braid-disk3"]:
         assert f"/dev/mapper/{name}" in fi_show, f"{name} missing:\n{fi_show}"
 
 with subtest("All data survived third disk addition"):
@@ -80,49 +80,36 @@ with subtest("All data survived third disk addition"):
 
 # --- Phase 4: Validation errors ---
 
-with subtest("Non-existent device fails init-disk"):
-    machine.fail(init_disk("/dev/disk/by-id/nonexistent"))
+with subtest("Non-existent name fails add"):
+    machine.fail(add_cmd("nonexistent"))
 
-with subtest("Non-by-id path rejected"):
-    machine.fail(init_disk("/dev/vdb"))
+with subtest("Already-in-pool disk is a no-op (exit 0)"):
+    machine.succeed(add_cmd("disk1"))
 
-with subtest("Unconfigured disk rejected"):
-    # Create a fake by-id symlink pointing to a real block device (disk5's underlying device)
-    machine.succeed("ln -sf $(readlink -f /dev/disk/by-id/virtio-disk5) /dev/disk/by-id/virtio-fake")
-    result = machine.fail(init_disk("/dev/disk/by-id/virtio-fake") + " 2>&1")
-    assert "not declared" in result.lower() or "braid.disks" in result, f"Expected config guard:\n{result}"
+# --- Phase 5: Crash recovery — pre-formatted LUKS ---
 
-with subtest("Disk already in pool fails init-disk"):
-    result = machine.fail(init_disk("/dev/disk/by-id/virtio-disk1") + " 2>&1")
-    assert "currently part of" in result.lower() or "already" in result.lower(), (
-        f"Expected pool membership guard:\n{result}"
-    )
-
-# --- Phase 5: Crash recovery ---
-
-with subtest("Crash recovery — LUKS with no filesystem"):
-    # Format disk4 as LUKS manually (simulating crash between luksFormat and mkfs)
+with subtest("Crash recovery — pre-formatted LUKS completes add"):
+    # Format disk4 as LUKS manually (simulating crash between luksFormat and add)
     dev = "/dev/disk/by-id/virtio-disk4"
     machine.succeed(
         f"echo -n '{passphrase}' | cryptsetup luksFormat --batch-mode --key-file=- "
         f"{luks_opts} {dev}"
     )
-    # Run init-disk with --force (already LUKS), then apply
-    machine.succeed(init_disk(dev, force=True))
-    machine.succeed(apply_cmd())
+
+    # braid add should detect existing LUKS, skip luksFormat, open, and add to pool
+    machine.succeed(add_cmd("disk4"))
 
     # Verify it was added to the pool
     fi_show = machine.succeed("btrfs fi show /mnt/storage")
-    assert "virtio-disk4" in fi_show, f"disk4 mapper missing:\n{fi_show}"
+    assert "/dev/mapper/braid-disk4" in fi_show, f"braid-disk4 missing:\n{fi_show}"
 
 # --- Phase 6: Fifth disk expands pool ---
 
 with subtest("Fifth disk expands pool"):
-    machine.succeed(init_disk("/dev/disk/by-id/virtio-disk5"))
-    machine.succeed(apply_cmd())
+    machine.succeed(add_cmd("disk5"))
 
     fi_show = machine.succeed("btrfs fi show /mnt/storage")
-    assert "virtio-disk5" in fi_show, f"disk5 missing:\n{fi_show}"
+    assert "/dev/mapper/braid-disk5" in fi_show, f"braid-disk5 missing:\n{fi_show}"
     devid_count = fi_show.count("devid")
     assert devid_count == 5, f"Expected 5 devices, got {devid_count}:\n{fi_show}"
 

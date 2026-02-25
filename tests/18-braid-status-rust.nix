@@ -28,12 +28,12 @@
     ];
 
     environment.etc."braid/config.json".text = builtins.toJSON {
-      disks = [
-        "/dev/disk/by-id/virtio-disk1"
-        "/dev/disk/by-id/virtio-disk2"
-        "/dev/disk/by-id/virtio-disk3"
-      ];
-      mountPoint = "/mnt/storage";
+      disks = {
+        disk1 = { by_id = "/dev/disk/by-id/virtio-disk1"; };
+        disk2 = { by_id = "/dev/disk/by-id/virtio-disk2"; };
+        disk3 = { by_id = "/dev/disk/by-id/virtio-disk3"; };
+      };
+      mount_point = "/mnt/storage";
     };
   };
 

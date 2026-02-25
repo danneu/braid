@@ -15,24 +15,16 @@ with subtest("Initrd SSH is up with pending ask-password requests"):
     )
 
 with subtest("Unlock all 3 LUKS devices over SSH"):
-    for name in ["virtio-disk1", "virtio-disk2", "virtio-disk3"]:
+    for name in ["disk1", "disk2", "disk3"]:
         client.succeed(
             f"{ssh_cmd}"
             f" \"echo -n testpassphrase | cryptsetup luksOpen --key-file=-"
-            f" /dev/disk/by-id/{name} {name}"
-            f" || cryptsetup status {name}\""
+            f" /dev/disk/by-id/virtio-{name} braid-{name}"
+            f" || cryptsetup status braid-{name}\""
         )
 
-    # Restart cryptsetup units so systemd knows the devices are unlocked.
-    # Without this, the units are still in "activating" (waiting for
-    # passphrase) and downstream dependencies won't trigger.
-    # Hyphens in mapper names must be escaped as \x2d for systemd unit names.
-    for name in ["virtio-disk1", "virtio-disk2", "virtio-disk3"]:
-        escaped = name.replace("-", "\\x2d")
-        client.succeed(
-            f"{ssh_cmd}"
-            f" \"systemctl restart 'systemd-cryptsetup@{escaped}.service'\""
-        )
+    # Restart cryptsetup target so systemd knows the devices are unlocked.
+    client.execute(f"{ssh_cmd} 'systemctl restart cryptsetup.target'")
 
 with subtest("Server reaches full boot after remote unlock"):
     server.wait_for_unit("multi-user.target", timeout=120)
@@ -44,8 +36,8 @@ with subtest("btrfs RAID1 pool is mounted"):
     fi_show = server.succeed("btrfs fi show /mnt/storage")
     print(f"Pool after unlock:\n{fi_show}")
     for i in range(1, 4):
-        assert f"/dev/mapper/virtio-disk{i}" in fi_show, (
-            f"virtio-disk{i} missing from pool:\n{fi_show}"
+        assert f"/dev/mapper/braid-disk{i}" in fi_show, (
+            f"braid-disk{i} missing from pool:\n{fi_show}"
         )
 
     df_output = server.succeed("btrfs fi df /mnt/storage")

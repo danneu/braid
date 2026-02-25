@@ -8,8 +8,8 @@ with subtest("Pool is mounted in degraded mode"):
     print(f"Pool:\n{fi_show}")
 
     # disk1 and disk2 should be present
-    assert "/dev/mapper/virtio-disk1" in fi_show, f"disk1 missing:\n{fi_show}"
-    assert "/dev/mapper/virtio-disk2" in fi_show, f"disk2 missing:\n{fi_show}"
+    assert "/dev/mapper/braid-disk1" in fi_show, f"disk1 missing:\n{fi_show}"
+    assert "/dev/mapper/braid-disk2" in fi_show, f"disk2 missing:\n{fi_show}"
 
     # disk3 should show as missing
     assert "missing" in fi_show.lower(), f"Expected 'missing' device:\n{fi_show}"

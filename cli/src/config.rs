@@ -1,5 +1,6 @@
-use crate::types::ByIdPath;
+use crate::types::{ByIdPath, MapperName};
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 use thiserror::Error;
@@ -8,28 +9,38 @@ use thiserror::Error;
 pub enum ConfigBuildError {
     #[error("disks must not be empty")]
     EmptyDisks,
-    #[error("duplicate disk in config: {0}")]
-    DuplicateDisk(String),
-    #[error("mountPoint must not be empty")]
+    #[error("duplicate by_id value in config: {0}")]
+    DuplicateByIdValue(String),
+    #[error("mount_point must not be empty")]
     EmptyMountPoint,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct DiskConfig {
+    pub by_id: ByIdPath,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(try_from = "RawConfig")]
 pub struct Config {
-    disks: Vec<ByIdPath>,
+    disks: BTreeMap<String, DiskConfig>,
     mount_point: String,
 }
 
 impl Config {
-    pub fn new(disks: Vec<ByIdPath>, mount_point: String) -> Result<Self, ConfigBuildError> {
+    pub fn new(
+        disks: BTreeMap<String, DiskConfig>,
+        mount_point: String,
+    ) -> Result<Self, ConfigBuildError> {
         if disks.is_empty() {
             return Err(ConfigBuildError::EmptyDisks);
         }
         let mut seen = std::collections::HashSet::new();
-        for disk in &disks {
-            if !seen.insert(disk) {
-                return Err(ConfigBuildError::DuplicateDisk(disk.to_string()));
+        for (_, disk) in &disks {
+            if !seen.insert(&disk.by_id) {
+                return Err(ConfigBuildError::DuplicateByIdValue(
+                    disk.by_id.to_string(),
+                ));
             }
         }
         if mount_point.is_empty() {
@@ -38,8 +49,16 @@ impl Config {
         Ok(Config { disks, mount_point })
     }
 
-    pub fn disks(&self) -> &[ByIdPath] {
+    pub fn disks(&self) -> &BTreeMap<String, DiskConfig> {
         &self.disks
+    }
+
+    pub fn disk_by_name(&self, name: &str) -> Option<&DiskConfig> {
+        self.disks.get(name)
+    }
+
+    pub fn names(&self) -> Vec<&String> {
+        self.disks.keys().collect()
     }
 
     pub fn mount_point(&self) -> &str {
@@ -47,10 +66,14 @@ impl Config {
     }
 }
 
+/// Returns the mapper name for a named disk: braid-<name>
+pub fn mapper_name(name: &str) -> MapperName {
+    MapperName(format!("braid-{name}"))
+}
+
 #[derive(Deserialize)]
 struct RawConfig {
-    disks: Vec<ByIdPath>,
-    #[serde(rename = "mountPoint")]
+    disks: BTreeMap<String, DiskConfig>,
     mount_point: String,
 }
 
@@ -116,9 +139,10 @@ mod tests {
 
     #[test]
     fn parses_valid_config() {
-        let raw = r#"{"disks":["/dev/disk/by-id/a"],"mountPoint":"/mnt/storage"}"#;
+        let raw = r#"{"disks":{"toshiba":{"by_id":"/dev/disk/by-id/a"}},"mount_point":"/mnt/storage"}"#;
         let cfg: Config = serde_json::from_str(raw).expect("config should parse");
         assert_eq!(cfg.disks().len(), 1);
+        assert!(cfg.disk_by_name("toshiba").is_some());
         assert_eq!(cfg.mount_point(), "/mnt/storage");
     }
 
@@ -132,32 +156,65 @@ mod tests {
     }
 
     #[test]
-    fn rejects_duplicate_disks() {
-        let err = Config::new(
-            vec![
-                ByIdPath("/dev/disk/by-id/a".to_owned()),
-                ByIdPath("/dev/disk/by-id/a".to_owned()),
-            ],
-            "/mnt/storage".to_owned(),
-        )
-        .expect_err("duplicate disks should fail");
-        assert!(matches!(err, ConfigBuildError::DuplicateDisk(_)));
+    fn rejects_duplicate_by_id_values() {
+        let mut disks = BTreeMap::new();
+        disks.insert(
+            "a".to_owned(),
+            DiskConfig {
+                by_id: ByIdPath("/dev/disk/by-id/same".to_owned()),
+            },
+        );
+        disks.insert(
+            "b".to_owned(),
+            DiskConfig {
+                by_id: ByIdPath("/dev/disk/by-id/same".to_owned()),
+            },
+        );
+        let err = Config::new(disks, "/mnt/storage".to_owned())
+            .expect_err("duplicate by_id values should fail");
+        assert!(matches!(err, ConfigBuildError::DuplicateByIdValue(_)));
     }
 
     #[test]
     fn rejects_empty_disks() {
-        let err = Config::new(vec![], "/mnt/storage".to_owned())
+        let err = Config::new(BTreeMap::new(), "/mnt/storage".to_owned())
             .expect_err("empty disks should fail");
         assert!(matches!(err, ConfigBuildError::EmptyDisks));
     }
 
     #[test]
     fn rejects_empty_disks_json() {
-        let raw = r#"{"disks":[],"mountPoint":"/mnt/storage"}"#;
+        let raw = r#"{"disks":{},"mount_point":"/mnt/storage"}"#;
         let err = serde_json::from_str::<Config>(raw).expect_err("empty disks JSON should fail");
         assert!(
             err.to_string().contains("disks must not be empty"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn mapper_name_for_disk() {
+        assert_eq!(mapper_name("toshiba"), MapperName("braid-toshiba".into()));
+        assert_eq!(mapper_name("ironwolf"), MapperName("braid-ironwolf".into()));
+    }
+
+    #[test]
+    fn names_returns_sorted_keys() {
+        let mut disks = BTreeMap::new();
+        disks.insert(
+            "zebra".to_owned(),
+            DiskConfig {
+                by_id: ByIdPath("/dev/disk/by-id/z".to_owned()),
+            },
+        );
+        disks.insert(
+            "alpha".to_owned(),
+            DiskConfig {
+                by_id: ByIdPath("/dev/disk/by-id/a".to_owned()),
+            },
+        );
+        let cfg = Config::new(disks, "/mnt/storage".to_owned()).unwrap();
+        let names: Vec<&str> = cfg.names().into_iter().map(|s| s.as_str()).collect();
+        assert_eq!(names, vec!["alpha", "zebra"]);
     }
 }
