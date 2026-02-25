@@ -62,11 +62,10 @@ impl InputHandler {
             while !thread_shutdown.load(Ordering::Relaxed) {
                 match event::poll(Duration::from_millis(100)) {
                     Ok(true) => {
-                        if let Ok(event::Event::Key(key)) = event::read() {
-                            if thread_tx.send(Event::Key(key)).is_err() {
+                        if let Ok(event::Event::Key(key)) = event::read()
+                            && thread_tx.send(Event::Key(key)).is_err() {
                                 break;
                             }
-                        }
                     }
                     Ok(false) => {
                         if thread_tx.send(Event::Tick).is_err() {

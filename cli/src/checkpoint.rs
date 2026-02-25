@@ -266,6 +266,7 @@ pub enum ValidationDecision {
 }
 
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum ResumeGate {
     NoCheckpoint,
     ResumeFrom(CheckpointV1),
@@ -289,6 +290,7 @@ pub fn hash_args(parts: &[&str]) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn new_checkpoint(
     clock: &dyn Clock,
     op: OpKind,

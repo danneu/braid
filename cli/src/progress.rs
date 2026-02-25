@@ -148,8 +148,8 @@ pub fn run_with_progress<R: CommandRunner + Sync>(
             let poll = runner.run(&CmdRequest::BtrfsBalanceStatus {
                 mount_point: mount_point.to_owned(),
             });
-            if let Ok(ref raw) = poll {
-                if let Ok(status) = parse_btrfs_balance_status(raw) {
+            if let Ok(ref raw) = poll
+                && let Ok(status) = parse_btrfs_balance_status(raw) {
                     match status.state {
                         BalanceState::Running {
                             done_chunks,
@@ -187,7 +187,6 @@ pub fn run_with_progress<R: CommandRunner + Sync>(
                         BalanceState::None => continue,
                     }
                 }
-            }
         }
 
         if output == ProgressOutput::Human {

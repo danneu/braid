@@ -63,8 +63,8 @@ pub fn parse_btrfs_device_usage(
         }
 
         // Try parsing as device header (unindented line with ", ID:")
-        if !line.starts_with(' ') && !line.starts_with('\t') {
-            if let Ok((_, (path, devid))) = parse_device_header(line) {
+        if !line.starts_with(' ') && !line.starts_with('\t')
+            && let Ok((_, (path, devid))) = parse_device_header(line) {
                 // Finalize previous device if any
                 if let Some(partial) = current.take() {
                     devices.push(finalize_device(&raw.cmd, partial)?);
@@ -79,11 +79,10 @@ pub fn parse_btrfs_device_usage(
                 });
                 continue;
             }
-        }
 
         // Try parsing as key-value line (indented)
-        if let Some(ref mut dev) = current {
-            if let Ok((_, (key, value))) = parse_kv_line(line) {
+        if let Some(ref mut dev) = current
+            && let Ok((_, (key, value))) = parse_kv_line(line) {
                 match key {
                     "Device size" => dev.device_size = Some(value),
                     "Device slack" => dev.device_slack = Some(value),
@@ -103,7 +102,6 @@ pub fn parse_btrfs_device_usage(
                     }
                 }
             }
-        }
     }
 
     // Finalize last device

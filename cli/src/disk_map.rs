@@ -40,6 +40,12 @@ pub enum KeyStabilityError {
     },
 }
 
+impl Default for DiskMap {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DiskMap {
     pub fn new() -> Self {
         DiskMap {
@@ -112,20 +118,19 @@ pub fn validate_config_key_stability(
     disk_map: &DiskMap,
 ) -> Result<(), KeyStabilityError> {
     for (name, disk) in config.disks() {
-        if let Some(entry) = disk_map.disks.get(name) {
-            if entry.by_id != disk.by_id.0 {
+        if let Some(entry) = disk_map.disks.get(name)
+            && entry.by_id != disk.by_id.0 {
                 return Err(KeyStabilityError::Reassignment {
                     name: name.clone(),
                     recorded_by_id: entry.by_id.clone(),
                     config_by_id: disk.by_id.0.clone(),
                 });
             }
-        }
     }
 
     for (old_name, entry) in &disk_map.disks {
-        if config.disk_by_name(old_name).is_none() {
-            if let Some((new_name, _)) = config
+        if config.disk_by_name(old_name).is_none()
+            && let Some((new_name, _)) = config
                 .disks()
                 .iter()
                 .find(|(new_name, disk)| *new_name != old_name && disk.by_id.0 == entry.by_id)
@@ -136,7 +141,6 @@ pub fn validate_config_key_stability(
                     by_id: entry.by_id.clone(),
                 });
             }
-        }
     }
 
     Ok(())

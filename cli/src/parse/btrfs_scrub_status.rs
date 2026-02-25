@@ -48,15 +48,14 @@ pub fn parse_btrfs_scrub_status(
 
     // Look for "Scrub started:" line with a timestamp
     for line in stdout.lines() {
-        if let Ok((_, ts)) = parse_scrub_started(line) {
-            if !ts.is_empty() && !ts.contains("not available") {
+        if let Ok((_, ts)) = parse_scrub_started(line)
+            && !ts.is_empty() && !ts.contains("not available") {
                 return Ok(BtrfsScrubStatusOutput {
                     state: ScrubState::Completed {
                         started_at: ScrubTimestamp(ts.to_owned()),
                     },
                 });
             }
-        }
     }
 
     Ok(BtrfsScrubStatusOutput {
