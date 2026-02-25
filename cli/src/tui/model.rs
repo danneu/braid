@@ -29,6 +29,7 @@ pub enum PoolStatus {
 pub struct Model {
     pub running: bool,
     pub disk_keys: Vec<String>,
+    pub selected_disk: usize,
     pub pool: PoolStatus,
     pub mount_point: String,
     pub commands: HashMap<CmdId, CommandState>,
@@ -44,6 +45,7 @@ impl Model {
         let model = Self {
             running: true,
             disk_keys,
+            selected_disk: 0,
             pool: PoolStatus::Loading,
             mount_point,
             commands: HashMap::new(),
@@ -58,6 +60,7 @@ impl Model {
         Self {
             running: true,
             disk_keys,
+            selected_disk: 0,
             pool,
             mount_point: String::new(),
             commands: HashMap::new(),

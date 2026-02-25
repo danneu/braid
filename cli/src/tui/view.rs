@@ -1,7 +1,7 @@
 use ratatui::layout::{Constraint, Layout};
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Line;
-use ratatui::widgets::{Block, Paragraph, Row, Table};
+use ratatui::widgets::{Block, Paragraph, Row, Table, TableState};
 use ratatui::Frame;
 
 use crate::tui::model::{Model, PoolState, PoolStatus};
@@ -59,16 +59,13 @@ fn percent(used: u64, total: u64) -> f64 {
 
 fn pool_view(pool: &PoolState, unit: ByteUnit) -> Paragraph<'_> {
     let lines = vec![
+        Line::from(format!("Path: {} ({})", pool.mount_point, pool.health)),
         Line::from(format!(
-            "Pool: {} {} {}",
-            pool.mount_point, pool.profile, pool.health
-        )),
-        Line::from(format!(
-            "Data: {} / {} {} {:.0}%",
+            "Usage: {:.0}% - {} / {} {}",
+            percent(pool.used, pool.total),
             unit.format(pool.used),
             unit.format(pool.total),
             unit.suffix(),
-            percent(pool.used, pool.total),
         )),
     ];
     Paragraph::new(lines)
@@ -109,7 +106,7 @@ fn disk_table(model: &Model, unit: ByteUnit) -> Table<'_> {
         Constraint::Length(4),
         Constraint::Min(10),
     ];
-    Table::new(rows, widths)
+    Table::new(rows, widths).row_highlight_style(Style::default().add_modifier(Modifier::REVERSED))
 }
 
 fn page_unit(model: &Model) -> ByteUnit {
@@ -176,7 +173,8 @@ pub fn view(model: &Model, frame: &mut Frame) {
     }
 
     frame.render_widget(Paragraph::new("Disks"), chunks[2]);
-    frame.render_widget(disk_table(model, page_unit), chunks[3]);
+    let mut table_state = TableState::default().with_selected(Some(model.selected_disk));
+    frame.render_stateful_widget(disk_table(model, page_unit), chunks[3], &mut table_state);
 
     let footer = match model.probe_duration {
         Some(d) => format!("press q to quit  {}ms", d.as_millis()),

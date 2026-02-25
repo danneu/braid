@@ -9,6 +9,8 @@ use crate::tui::state::{CmdId, CmdStatus, CommandState, Stream, MAX_LINES};
 pub enum Message {
     Quit,
     RefreshPool,
+    SelectNextDisk,
+    SelectPrevDisk,
     Tick,
     CommandStarted {
         id: CmdId,
@@ -41,6 +43,20 @@ pub fn update(model: &mut Model, msg: Message) -> Vec<Effect> {
                 }]
             }
         },
+        Message::SelectNextDisk => {
+            let len = model.disk_keys.len();
+            if len > 0 {
+                model.selected_disk = (model.selected_disk + 1) % len;
+            }
+            vec![]
+        }
+        Message::SelectPrevDisk => {
+            let len = model.disk_keys.len();
+            if len > 0 {
+                model.selected_disk = (model.selected_disk + len - 1) % len;
+            }
+            vec![]
+        }
         Message::Tick => vec![],
         Message::CommandStarted { id, cmd } => {
             model.commands.insert(
