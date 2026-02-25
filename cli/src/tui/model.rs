@@ -1,0 +1,64 @@
+use std::collections::HashMap;
+
+use crate::tui::effect::Effect;
+use crate::tui::state::{CmdId, CommandState};
+
+pub struct DiskUsage {
+    pub size: u64,
+    pub data: u64,
+    pub metadata: u64,
+}
+
+pub struct PoolState {
+    pub mount_point: String,
+    pub profile: String,
+    pub health: String,
+    pub used: u64,
+    pub total: u64,
+    pub disk_usage: HashMap<String, DiskUsage>,
+}
+
+pub enum PoolStatus {
+    Loading,
+    NotMounted,
+    Mounted(PoolState),
+    Error(String),
+}
+
+pub struct Model {
+    pub running: bool,
+    pub disk_keys: Vec<String>,
+    pub pool: PoolStatus,
+    pub mount_point: String,
+    pub commands: HashMap<CmdId, CommandState>,
+    next_cmd_id: u64,
+}
+
+impl Model {
+    pub fn new(disk_keys: Vec<String>, mount_point: String) -> (Self, Vec<Effect>) {
+        let effects = vec![Effect::ProbePool {
+            mount_point: mount_point.clone(),
+        }];
+        let model = Self {
+            running: true,
+            disk_keys,
+            pool: PoolStatus::Loading,
+            mount_point,
+            commands: HashMap::new(),
+            next_cmd_id: 0,
+        };
+        (model, effects)
+    }
+
+    #[cfg(test)]
+    pub fn new_for_test(disk_keys: Vec<String>, pool: PoolStatus) -> Self {
+        Self {
+            running: true,
+            disk_keys,
+            pool,
+            mount_point: String::new(),
+            commands: HashMap::new(),
+            next_cmd_id: 0,
+        }
+    }
+}

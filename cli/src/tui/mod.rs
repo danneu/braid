@@ -3,6 +3,7 @@ mod command;
 mod effect;
 mod event;
 mod keymap;
+mod model;
 pub(crate) mod probe;
 mod state;
 mod view;
@@ -12,7 +13,8 @@ use std::path::Path;
 use std::sync::mpsc;
 use std::time::Duration;
 
-use app::{Model, update};
+use app::update;
+use model::Model;
 use effect::execute_effect;
 use event::InputHandler;
 use view::view;

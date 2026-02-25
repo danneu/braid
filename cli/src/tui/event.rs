@@ -7,7 +7,8 @@ use std::time::Duration;
 
 use ratatui::crossterm::event::{self, KeyEvent};
 
-use crate::tui::app::{Message, PoolState};
+use crate::tui::app::Message;
+use crate::tui::model::PoolState;
 use crate::tui::keymap;
 use crate::tui::state::{CmdId, Stream};
 

@@ -4,7 +4,7 @@ use ratatui::style::{Color, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Paragraph, Row, Table};
 
-use crate::tui::app::{Model, PoolState, PoolStatus};
+use crate::tui::model::{Model, PoolState, PoolStatus};
 
 #[derive(Clone, Copy)]
 enum ByteUnit {
@@ -75,11 +75,15 @@ fn pool_view(pool: &PoolState, unit: ByteUnit) -> Paragraph<'_> {
 }
 
 fn disk_table(model: &Model, unit: ByteUnit) -> Table<'_> {
+    let disk_usage = match &model.pool {
+        PoolStatus::Mounted(p) => Some(&p.disk_usage),
+        _ => None,
+    };
     let rows: Vec<Row> = model
         .disk_keys
         .iter()
         .enumerate()
-        .map(|(i, name)| match model.disk_usage.get(name) {
+        .map(|(i, name)| match disk_usage.and_then(|u| u.get(name)) {
             Some(usage) => Row::new([
                 format!("{}", i + 1),
                 name.clone(),
@@ -99,16 +103,16 @@ fn disk_table(model: &Model, unit: ByteUnit) -> Table<'_> {
 }
 
 fn page_unit(model: &Model) -> ByteUnit {
-    let max_bytes = model
-        .disk_usage
-        .values()
-        .map(|u| u.size)
-        .chain(match &model.pool {
-            PoolStatus::Mounted(p) => Some(p.total),
-            _ => None,
-        })
-        .max()
-        .unwrap_or(0);
+    let max_bytes = match &model.pool {
+        PoolStatus::Mounted(p) => p
+            .disk_usage
+            .values()
+            .map(|u| u.size)
+            .chain(Some(p.total))
+            .max()
+            .unwrap_or(0),
+        _ => 0,
+    };
     ByteUnit::friendliest(max_bytes)
 }
 
@@ -175,7 +179,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
-    use crate::tui::app::DiskUsage;
+    use crate::tui::model::DiskUsage;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -218,29 +222,21 @@ mod tests {
 
     #[test]
     fn snapshot_loading() {
-        let model = Model::new_for_test(sample_disk_keys(), HashMap::new(), PoolStatus::Loading);
+        let model = Model::new_for_test(sample_disk_keys(), PoolStatus::Loading);
         let terminal = render(&model, 60, 20);
         snap!(buffer_to_string(&terminal));
     }
 
     #[test]
     fn snapshot_not_mounted() {
-        let model =
-            Model::new_for_test(sample_disk_keys(), HashMap::new(), PoolStatus::NotMounted);
+        let model = Model::new_for_test(sample_disk_keys(), PoolStatus::NotMounted);
         let terminal = render(&model, 60, 20);
         snap!(buffer_to_string(&terminal));
     }
 
     #[test]
     fn snapshot_with_pool() {
-        let pool = PoolState {
-            mount_point: "/mnt/storage".to_owned(),
-            profile: "RAID1".to_owned(),
-            health: "healthy".to_owned(),
-            used: 2_308_094_370_816,  // ~2.1 TiB
-            total: 5_937_955_045_376, // ~5.4 TiB
-        };
-        let usage = HashMap::from([
+        let disk_usage = HashMap::from([
             (
                 "toshiba".to_owned(),
                 DiskUsage {
@@ -266,7 +262,15 @@ mod tests {
                 },
             ),
         ]);
-        let model = Model::new_for_test(sample_disk_keys(), usage, PoolStatus::Mounted(pool));
+        let pool = PoolState {
+            mount_point: "/mnt/storage".to_owned(),
+            profile: "RAID1".to_owned(),
+            health: "healthy".to_owned(),
+            used: 2_308_094_370_816,  // ~2.1 TiB
+            total: 5_937_955_045_376, // ~5.4 TiB
+            disk_usage,
+        };
+        let model = Model::new_for_test(sample_disk_keys(), PoolStatus::Mounted(pool));
         let terminal = render(&model, 60, 20);
         snap!(buffer_to_string(&terminal));
     }
@@ -275,7 +279,6 @@ mod tests {
     fn snapshot_error() {
         let model = Model::new_for_test(
             sample_disk_keys(),
-            HashMap::new(),
             PoolStatus::Error("command failed: findmnt exited 1".to_owned()),
         );
         let terminal = render(&model, 60, 20);
