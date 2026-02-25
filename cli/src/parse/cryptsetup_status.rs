@@ -1,15 +1,15 @@
 use nom::{
+    IResult, Parser,
     branch::alt,
     bytes::complete::{tag, take_till1},
     character::complete::{not_line_ending, space0},
     combinator::eof,
-    IResult, Parser,
 };
 
 use crate::cmd::RawCommandOutput;
 
-use super::types::CryptsetupStatusOutput;
 use super::ParseError;
+use super::types::CryptsetupStatusOutput;
 
 // Parses: "  device:  /dev/vda"  →  "/dev/vda"
 fn parse_device_line(input: &str) -> IResult<&str, &str> {
@@ -65,7 +65,11 @@ pub fn parse_cryptsetup_status(
     let device = raw
         .stdout
         .lines()
-        .find_map(|line| parse_device_line(line.trim()).ok().map(|(_, v)| v.to_owned()))
+        .find_map(|line| {
+            parse_device_line(line.trim())
+                .ok()
+                .map(|(_, v)| v.to_owned())
+        })
         .ok_or_else(|| ParseError::MissingField {
             cmd: raw.cmd.clone(),
             field: "device".into(),

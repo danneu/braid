@@ -2,8 +2,8 @@ use serde::Deserialize;
 
 use crate::cmd::RawCommandOutput;
 
-use super::types::{BtrfsDfEntry, BtrfsDfOutput};
 use super::ParseError;
+use super::types::{BtrfsDfEntry, BtrfsDfOutput};
 
 // --- Serde helper structs (not exposed to domain code) ---
 

@@ -12,7 +12,7 @@ use std::path::Path;
 use std::sync::mpsc;
 use std::time::Duration;
 
-use app::{update, Model};
+use app::{Model, update};
 use effect::execute_effect;
 use event::InputHandler;
 use view::view;
@@ -24,10 +24,7 @@ pub fn run(config_path: &Path) -> io::Result<()> {
     let mut terminal = ratatui::init();
     let (_input, cmd_tx, rx) = InputHandler::new();
     let disk_names: Vec<String> = config.disks().keys().cloned().collect();
-    let (mut model, init_effects) = Model::new(
-        disk_names,
-        config.mount_point().to_owned(),
-    );
+    let (mut model, init_effects) = Model::new(disk_names, config.mount_point().to_owned());
     for effect in init_effects {
         execute_effect(effect, &cmd_tx);
     }

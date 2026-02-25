@@ -1,5 +1,5 @@
 use crate::cmd::{CmdError, CmdRequest, CommandRunner};
-use crate::config::{mapper_name, DiskConfig};
+use crate::config::{DiskConfig, mapper_name};
 use crate::probe::Filesystem;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;

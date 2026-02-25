@@ -1,13 +1,13 @@
 use nom::{
+    IResult,
     bytes::complete::{tag, take_until},
     character::complete::{not_line_ending, space0, space1, u64 as parse_u64},
-    IResult,
 };
 
 use crate::cmd::RawCommandOutput;
 
-use super::types::{BtrfsFilesystemShowOutput, BtrfsShowDevice};
 use super::ParseError;
+use super::types::{BtrfsFilesystemShowOutput, BtrfsShowDevice};
 
 // ---------------------------------------------------------------------------
 // DeviceBtrfsProbe — classify raw btrfs-filesystem-show output
@@ -195,7 +195,11 @@ mod tests {
         };
         let out = parse_btrfs_filesystem_show(&raw).unwrap();
         assert_eq!(out.total_devices, 2);
-        assert_eq!(out.devices.len(), 1, "MISSING sentinel device must be excluded");
+        assert_eq!(
+            out.devices.len(),
+            1,
+            "MISSING sentinel device must be excluded"
+        );
         assert_eq!(out.devices[0].devid, 1);
         assert_eq!(out.devices[0].path, "/dev/mapper/braid-vda");
         assert!(out.has_missing);
@@ -223,7 +227,10 @@ mod tests {
             stderr: String::new(),
             exit_status: 0,
         };
-        assert!(matches!(classify_btrfs_probe(&raw), DeviceBtrfsProbe::HasBtrfs));
+        assert!(matches!(
+            classify_btrfs_probe(&raw),
+            DeviceBtrfsProbe::HasBtrfs
+        ));
     }
 
     #[test]
@@ -234,7 +241,10 @@ mod tests {
             stderr: "ERROR: not a valid btrfs filesystem on /dev/dm-0".into(),
             exit_status: 1,
         };
-        assert!(matches!(classify_btrfs_probe(&raw), DeviceBtrfsProbe::NoBtrfs));
+        assert!(matches!(
+            classify_btrfs_probe(&raw),
+            DeviceBtrfsProbe::NoBtrfs
+        ));
     }
 
     #[test]
@@ -245,7 +255,10 @@ mod tests {
             stderr: "ERROR: no btrfs on /dev/dm-0".into(),
             exit_status: 1,
         };
-        assert!(matches!(classify_btrfs_probe(&raw), DeviceBtrfsProbe::NoBtrfs));
+        assert!(matches!(
+            classify_btrfs_probe(&raw),
+            DeviceBtrfsProbe::NoBtrfs
+        ));
     }
 
     #[test]
@@ -256,6 +269,9 @@ mod tests {
             stderr: "ERROR: unexpected internal error".into(),
             exit_status: 1,
         };
-        assert!(matches!(classify_btrfs_probe(&raw), DeviceBtrfsProbe::Unknown(_)));
+        assert!(matches!(
+            classify_btrfs_probe(&raw),
+            DeviceBtrfsProbe::Unknown(_)
+        ));
     }
 }

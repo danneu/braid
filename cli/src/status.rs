@@ -3,12 +3,12 @@ use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, LsblkFieldKind};
-use crate::config::{mapper_name, Config};
+use crate::config::{Config, mapper_name};
 use crate::parse::{
-    parse_btrfs_device_stats, parse_btrfs_df_json, parse_btrfs_filesystem_usage,
-    parse_btrfs_scrub_status, parse_lsblk_field, BtrfsDeviceStatsOutput, ParseError, ScrubState,
+    BtrfsDeviceStatsOutput, ParseError, ScrubState, parse_btrfs_device_stats, parse_btrfs_df_json,
+    parse_btrfs_filesystem_usage, parse_btrfs_scrub_status, parse_lsblk_field,
 };
-use crate::probe::{probe_config_disk, probe_pool, Filesystem, ProbeError};
+use crate::probe::{Filesystem, ProbeError, probe_config_disk, probe_pool};
 use crate::types::*;
 
 // ---------------------------------------------------------------------------
@@ -27,9 +27,7 @@ impl StatusCode {
     pub fn display_status(self, missing_count: u64) -> String {
         match self {
             StatusCode::Healthy => "healthy".to_owned(),
-            StatusCode::Degraded if missing_count == 1 => {
-                "DEGRADED (1 missing device)".to_owned()
-            }
+            StatusCode::Degraded if missing_count == 1 => "DEGRADED (1 missing device)".to_owned(),
             StatusCode::Degraded => format!("DEGRADED ({missing_count} missing devices)"),
             StatusCode::NotMounted => "not mounted".to_owned(),
         }
@@ -303,9 +301,7 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
             "{}",
             format_status_human(
                 &report,
-                verbose_ctx
-                    .as_ref()
-                    .map(|v| v.human_details.as_slice()),
+                verbose_ctx.as_ref().map(|v| v.human_details.as_slice()),
             )
         );
     }
@@ -317,10 +313,7 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
 // Private helpers — strict (return Result)
 // ---------------------------------------------------------------------------
 
-fn get_profile<R: CommandRunner>(
-    runner: &R,
-    mount_point: &str,
-) -> Result<String, StatusError> {
+fn get_profile<R: CommandRunner>(runner: &R, mount_point: &str) -> Result<String, StatusError> {
     let raw = runner.run(&CmdRequest::BtrfsFilesystemDfJson {
         mount_point: mount_point.to_owned(),
     })?;
@@ -412,8 +405,7 @@ fn build_disk_reports<R: CommandRunner>(
     pool: &PoolState,
     device_stats: &BtrfsDeviceStatsOutput,
 ) -> VerboseContext {
-    let pool_uuid_set: HashSet<&LuksUuid> =
-        pool.devices.iter().map(|d| &d.luks_uuid).collect();
+    let pool_uuid_set: HashSet<&LuksUuid> = pool.devices.iter().map(|d| &d.luks_uuid).collect();
 
     let mut disk_reports = Vec::new();
     let mut human_details = Vec::new();
@@ -425,14 +417,14 @@ fn build_disk_reports<R: CommandRunner>(
             matches!(&cd.state, ConfigDiskState::PresentLuks { uuid, .. } if uuid == &pd.luks_uuid)
         });
 
-        let disk_name = matched_config
-            .map(|cd| cd.name.clone())
-            .unwrap_or_else(|| {
-                // Derive name from mapper (strip braid- prefix)
-                pd.mapper.0.strip_prefix("braid-")
-                    .unwrap_or(&pd.mapper.0)
-                    .to_owned()
-            });
+        let disk_name = matched_config.map(|cd| cd.name.clone()).unwrap_or_else(|| {
+            // Derive name from mapper (strip braid- prefix)
+            pd.mapper
+                .0
+                .strip_prefix("braid-")
+                .unwrap_or(&pd.mapper.0)
+                .to_owned()
+        });
 
         let by_id = matched_config
             .map(|cd| cd.by_id_path.0.clone())
@@ -540,9 +532,7 @@ fn format_status_human(report: &StatusReport, human_disks: Option<&[HumanDisk]>)
     if let (Some(total), Some(missing)) = (report.total_devices, report.missing_count) {
         if missing > 0 {
             let present = total.saturating_sub(missing);
-            out.push_str(&format!(
-                "Drives:   {present} present, {missing} missing\n"
-            ));
+            out.push_str(&format!("Drives:   {present} present, {missing} missing\n"));
         } else {
             out.push_str(&format!("Drives:   {total}\n"));
         }
@@ -578,10 +568,7 @@ fn format_status_human(report: &StatusReport, human_disks: Option<&[HumanDisk]>)
                     .as_deref()
                     .map(|id| format!("devid {id}"))
                     .unwrap_or_default();
-                out.push_str(&format!(
-                    "  {:<18}{:<10}{}\n",
-                    d.name, devid_str, d.status
-                ));
+                out.push_str(&format!("  {:<18}{:<10}{}\n", d.name, devid_str, d.status));
             }
 
             // Device path
@@ -853,15 +840,35 @@ mod tests {
 
     fn config_3disk() -> Config {
         let mut disks = BTreeMap::new();
-        disks.insert("disk1".to_owned(), DiskConfig { by_id: ByIdPath("/dev/disk/by-id/disk1".to_owned()) });
-        disks.insert("disk2".to_owned(), DiskConfig { by_id: ByIdPath("/dev/disk/by-id/disk2".to_owned()) });
-        disks.insert("disk3".to_owned(), DiskConfig { by_id: ByIdPath("/dev/disk/by-id/disk3".to_owned()) });
+        disks.insert(
+            "disk1".to_owned(),
+            DiskConfig {
+                by_id: ByIdPath("/dev/disk/by-id/disk1".to_owned()),
+            },
+        );
+        disks.insert(
+            "disk2".to_owned(),
+            DiskConfig {
+                by_id: ByIdPath("/dev/disk/by-id/disk2".to_owned()),
+            },
+        );
+        disks.insert(
+            "disk3".to_owned(),
+            DiskConfig {
+                by_id: ByIdPath("/dev/disk/by-id/disk3".to_owned()),
+            },
+        );
         Config::new(disks, "/mnt/storage".to_owned()).unwrap()
     }
 
     fn config_1disk() -> Config {
         let mut disks = BTreeMap::new();
-        disks.insert("disk1".to_owned(), DiskConfig { by_id: ByIdPath("/dev/disk/by-id/disk1".to_owned()) });
+        disks.insert(
+            "disk1".to_owned(),
+            DiskConfig {
+                by_id: ByIdPath("/dev/disk/by-id/disk1".to_owned()),
+            },
+        );
         Config::new(disks, "/mnt/storage".to_owned()).unwrap()
     }
 
@@ -869,47 +876,69 @@ mod tests {
     fn runner_healthy_3disk_base() -> MockRunner {
         MockRunner::default()
             .with_output(
-                CmdRequest::FindmntJson { mount_point: "/mnt/storage".into() },
+                CmdRequest::FindmntJson {
+                    mount_point: "/mnt/storage".into(),
+                },
                 findmnt_btrfs(),
             )
             .with_output(
-                CmdRequest::BtrfsFilesystemShow { mount_point: "/mnt/storage".into() },
+                CmdRequest::BtrfsFilesystemShow {
+                    mount_point: "/mnt/storage".into(),
+                },
                 btrfs_show_3disk(),
             )
             .with_output(
-                CmdRequest::CryptsetupStatus { mapper: "disk1".into() },
+                CmdRequest::CryptsetupStatus {
+                    mapper: "disk1".into(),
+                },
                 cryptsetup_status_active("disk1", "/dev/vda"),
             )
             .with_output(
-                CmdRequest::CryptsetupLuksUuid { device: "/dev/vda".into() },
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vda".into(),
+                },
                 cryptsetup_uuid_ok("/dev/vda", "11111111-1111-1111-1111-111111111111"),
             )
             .with_output(
-                CmdRequest::CryptsetupStatus { mapper: "disk2".into() },
+                CmdRequest::CryptsetupStatus {
+                    mapper: "disk2".into(),
+                },
                 cryptsetup_status_active("disk2", "/dev/vdb"),
             )
             .with_output(
-                CmdRequest::CryptsetupLuksUuid { device: "/dev/vdb".into() },
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vdb".into(),
+                },
                 cryptsetup_uuid_ok("/dev/vdb", "22222222-2222-2222-2222-222222222222"),
             )
             .with_output(
-                CmdRequest::CryptsetupStatus { mapper: "disk3".into() },
+                CmdRequest::CryptsetupStatus {
+                    mapper: "disk3".into(),
+                },
                 cryptsetup_status_active("disk3", "/dev/vdc"),
             )
             .with_output(
-                CmdRequest::CryptsetupLuksUuid { device: "/dev/vdc".into() },
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vdc".into(),
+                },
                 cryptsetup_uuid_ok("/dev/vdc", "33333333-3333-3333-3333-333333333333"),
             )
             .with_output(
-                CmdRequest::BtrfsFilesystemDfJson { mount_point: "/mnt/storage".into() },
+                CmdRequest::BtrfsFilesystemDfJson {
+                    mount_point: "/mnt/storage".into(),
+                },
                 btrfs_df_raid1(),
             )
             .with_output(
-                CmdRequest::BtrfsFilesystemUsageRaw { mount_point: "/mnt/storage".into() },
+                CmdRequest::BtrfsFilesystemUsageRaw {
+                    mount_point: "/mnt/storage".into(),
+                },
                 btrfs_usage_raw(),
             )
             .with_output(
-                CmdRequest::BtrfsScrubStatus { mount_point: "/mnt/storage".into() },
+                CmdRequest::BtrfsScrubStatus {
+                    mount_point: "/mnt/storage".into(),
+                },
                 btrfs_scrub_never(),
             )
     }
@@ -919,45 +948,80 @@ mod tests {
         runner
             // probe_config_disk for each disk
             .with_output(
-                CmdRequest::CryptsetupLuksUuid { device: "/dev/disk/by-id/disk1".into() },
-                cryptsetup_uuid_ok("/dev/disk/by-id/disk1", "11111111-1111-1111-1111-111111111111"),
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/disk1".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/disk1",
+                    "11111111-1111-1111-1111-111111111111",
+                ),
             )
             .with_output(
-                CmdRequest::CryptsetupLuksUuid { device: "/dev/disk/by-id/disk2".into() },
-                cryptsetup_uuid_ok("/dev/disk/by-id/disk2", "22222222-2222-2222-2222-222222222222"),
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/disk2".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/disk2",
+                    "22222222-2222-2222-2222-222222222222",
+                ),
             )
             .with_output(
-                CmdRequest::CryptsetupLuksUuid { device: "/dev/disk/by-id/disk3".into() },
-                cryptsetup_uuid_ok("/dev/disk/by-id/disk3", "33333333-3333-3333-3333-333333333333"),
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/disk3".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/disk3",
+                    "33333333-3333-3333-3333-333333333333",
+                ),
             )
             // device stats
             .with_output(
-                CmdRequest::BtrfsDeviceStats { mount_point: "/mnt/storage".into() },
+                CmdRequest::BtrfsDeviceStats {
+                    mount_point: "/mnt/storage".into(),
+                },
                 btrfs_device_stats_3disk(),
             )
             // lsblk model/serial for each disk
             .with_output(
-                CmdRequest::LsblkField { device: "/dev/disk/by-id/disk1".into(), field: LsblkFieldKind::Model },
+                CmdRequest::LsblkField {
+                    device: "/dev/disk/by-id/disk1".into(),
+                    field: LsblkFieldKind::Model,
+                },
                 lsblk_field_ok("lsblk", "VBOX HARDDISK"),
             )
             .with_output(
-                CmdRequest::LsblkField { device: "/dev/disk/by-id/disk1".into(), field: LsblkFieldKind::Serial },
+                CmdRequest::LsblkField {
+                    device: "/dev/disk/by-id/disk1".into(),
+                    field: LsblkFieldKind::Serial,
+                },
                 lsblk_field_ok("lsblk", "disk1"),
             )
             .with_output(
-                CmdRequest::LsblkField { device: "/dev/disk/by-id/disk2".into(), field: LsblkFieldKind::Model },
+                CmdRequest::LsblkField {
+                    device: "/dev/disk/by-id/disk2".into(),
+                    field: LsblkFieldKind::Model,
+                },
                 lsblk_field_ok("lsblk", "VBOX HARDDISK"),
             )
             .with_output(
-                CmdRequest::LsblkField { device: "/dev/disk/by-id/disk2".into(), field: LsblkFieldKind::Serial },
+                CmdRequest::LsblkField {
+                    device: "/dev/disk/by-id/disk2".into(),
+                    field: LsblkFieldKind::Serial,
+                },
                 lsblk_field_ok("lsblk", "disk2"),
             )
             .with_output(
-                CmdRequest::LsblkField { device: "/dev/disk/by-id/disk3".into(), field: LsblkFieldKind::Model },
+                CmdRequest::LsblkField {
+                    device: "/dev/disk/by-id/disk3".into(),
+                    field: LsblkFieldKind::Model,
+                },
                 lsblk_field_ok("lsblk", "VBOX HARDDISK"),
             )
             .with_output(
-                CmdRequest::LsblkField { device: "/dev/disk/by-id/disk3".into(), field: LsblkFieldKind::Serial },
+                CmdRequest::LsblkField {
+                    device: "/dev/disk/by-id/disk3".into(),
+                    field: LsblkFieldKind::Serial,
+                },
                 lsblk_field_ok("lsblk", "disk3"),
             )
     }
@@ -974,10 +1038,7 @@ mod tests {
     }
 
     fn fs_1disk() -> MockFs {
-        MockFs::new(&[
-            "/dev/disk/by-id/disk1",
-            "/dev/mapper/disk1",
-        ])
+        MockFs::new(&["/dev/disk/by-id/disk1", "/dev/mapper/disk1"])
     }
 
     // =======================================================================
@@ -987,7 +1048,9 @@ mod tests {
     #[test]
     fn status_json_not_mounted() {
         let runner = MockRunner::default().with_output(
-            CmdRequest::FindmntJson { mount_point: "/mnt/storage".into() },
+            CmdRequest::FindmntJson {
+                mount_point: "/mnt/storage".into(),
+            },
             findmnt_not_mounted(),
         );
         let fs = MockFs::new(&[]);
@@ -1028,7 +1091,11 @@ mod tests {
         assert!(!obj.contains_key("last_scrub"));
 
         // Lock envelope: exactly 5 keys
-        assert_eq!(obj.len(), 5, "envelope should have exactly 5 keys, got: {obj:?}");
+        assert_eq!(
+            obj.len(),
+            5,
+            "envelope should have exactly 5 keys, got: {obj:?}"
+        );
 
         // Also verify cmd_status doesn't error
         let _ = cmd_status(&runner, &fs, &config, false, false);
@@ -1111,7 +1178,13 @@ mod tests {
             luks_uuid: "11111111-1111-1111-1111-111111111111".to_owned(),
             devid: Some("1".to_owned()),
             status: "present".to_owned(),
-            errors: Some(DiskErrors { read: 0, write: 0, flush: 0, corruption: 0, generation: 0 }),
+            errors: Some(DiskErrors {
+                read: 0,
+                write: 0,
+                flush: 0,
+                corruption: 0,
+                generation: 0,
+            }),
         };
         let missing = DiskReport {
             name: "disk3".to_owned(),
@@ -1242,7 +1315,13 @@ mod tests {
                 luks_uuid: "11111111-1111-1111-1111-111111111111".to_owned(),
                 devid: Some("1".to_owned()),
                 status: "present".to_owned(),
-                errors: Some(DiskErrors { read: 0, write: 0, flush: 0, corruption: 0, generation: 0 }),
+                errors: Some(DiskErrors {
+                    read: 0,
+                    write: 0,
+                    flush: 0,
+                    corruption: 0,
+                    generation: 0,
+                }),
             }],
         };
         let json_str = serde_json::to_string_pretty(&report).unwrap();
@@ -1358,7 +1437,10 @@ mod tests {
             disks: vec![],
         };
         let human = format_status_human(&report, None);
-        assert!(human.contains("DEGRADED (1 missing device)"), "got:\n{human}");
+        assert!(
+            human.contains("DEGRADED (1 missing device)"),
+            "got:\n{human}"
+        );
         assert!(human.contains("2 present, 1 missing"), "got:\n{human}");
     }
 
@@ -1383,7 +1465,10 @@ mod tests {
             disks: vec![],
         };
         let human = format_status_human(&report, None);
-        assert!(human.contains("DEGRADED (2 missing devices)"), "got:\n{human}");
+        assert!(
+            human.contains("DEGRADED (2 missing devices)"),
+            "got:\n{human}"
+        );
     }
 
     // =======================================================================
@@ -1392,18 +1477,22 @@ mod tests {
 
     #[test]
     fn status_verbose_present_disks() {
-        let human_disks = vec![
-            HumanDisk {
-                name: "disk1".to_owned(),
-                by_id: "/dev/disk/by-id/disk1".to_owned(),
-                luks_uuid: "11111111-1111-1111-1111-111111111111".to_owned(),
-                devid: Some("1".to_owned()),
-                status: "present".to_owned(),
-                model: Some("VBOX HARDDISK".to_owned()),
-                serial: Some("disk1".to_owned()),
-                errors: Some(DiskErrors { read: 0, write: 0, flush: 0, corruption: 0, generation: 0 }),
-            },
-        ];
+        let human_disks = vec![HumanDisk {
+            name: "disk1".to_owned(),
+            by_id: "/dev/disk/by-id/disk1".to_owned(),
+            luks_uuid: "11111111-1111-1111-1111-111111111111".to_owned(),
+            devid: Some("1".to_owned()),
+            status: "present".to_owned(),
+            model: Some("VBOX HARDDISK".to_owned()),
+            serial: Some("disk1".to_owned()),
+            errors: Some(DiskErrors {
+                read: 0,
+                write: 0,
+                flush: 0,
+                corruption: 0,
+                generation: 0,
+            }),
+        }];
 
         let code = StatusCode::Healthy;
         let report = StatusReport {
@@ -1435,18 +1524,16 @@ mod tests {
 
     #[test]
     fn status_verbose_missing_disk() {
-        let human_disks = vec![
-            HumanDisk {
-                name: "disk3".to_owned(),
-                by_id: "/dev/disk/by-id/disk3".to_owned(),
-                luks_uuid: String::new(),
-                devid: None,
-                status: "missing".to_owned(),
-                model: None,
-                serial: None,
-                errors: None,
-            },
-        ];
+        let human_disks = vec![HumanDisk {
+            name: "disk3".to_owned(),
+            by_id: "/dev/disk/by-id/disk3".to_owned(),
+            luks_uuid: String::new(),
+            devid: None,
+            status: "missing".to_owned(),
+            model: None,
+            serial: None,
+            errors: None,
+        }];
 
         let code = StatusCode::Degraded;
         let report = StatusReport {
@@ -1475,18 +1562,22 @@ mod tests {
 
     #[test]
     fn status_verbose_lsblk_failure() {
-        let human_disks = vec![
-            HumanDisk {
-                name: "disk1".to_owned(),
-                by_id: "/dev/disk/by-id/disk1".to_owned(),
-                luks_uuid: "11111111-1111-1111-1111-111111111111".to_owned(),
-                devid: Some("1".to_owned()),
-                status: "present".to_owned(),
-                model: None,
-                serial: None,
-                errors: Some(DiskErrors { read: 0, write: 0, flush: 0, corruption: 0, generation: 0 }),
-            },
-        ];
+        let human_disks = vec![HumanDisk {
+            name: "disk1".to_owned(),
+            by_id: "/dev/disk/by-id/disk1".to_owned(),
+            luks_uuid: "11111111-1111-1111-1111-111111111111".to_owned(),
+            devid: Some("1".to_owned()),
+            status: "present".to_owned(),
+            model: None,
+            serial: None,
+            errors: Some(DiskErrors {
+                read: 0,
+                write: 0,
+                flush: 0,
+                corruption: 0,
+                generation: 0,
+            }),
+        }];
 
         let code = StatusCode::Healthy;
         let report = StatusReport {
@@ -1518,7 +1609,9 @@ mod tests {
     #[test]
     fn status_scrub_completed() {
         let runner = MockRunner::default().with_output(
-            CmdRequest::BtrfsScrubStatus { mount_point: "/mnt/storage".into() },
+            CmdRequest::BtrfsScrubStatus {
+                mount_point: "/mnt/storage".into(),
+            },
             btrfs_scrub_completed(),
         );
         let result = get_scrub_string(&runner, "/mnt/storage");
@@ -1528,7 +1621,9 @@ mod tests {
     #[test]
     fn status_scrub_failure_tolerant() {
         let runner = MockRunner::default().with_output(
-            CmdRequest::BtrfsScrubStatus { mount_point: "/mnt/storage".into() },
+            CmdRequest::BtrfsScrubStatus {
+                mount_point: "/mnt/storage".into(),
+            },
             err_raw("btrfs scrub status", 1, "some error"),
         );
         let result = get_scrub_string(&runner, "/mnt/storage");
@@ -1538,7 +1633,9 @@ mod tests {
     #[test]
     fn status_df_failure_fatal() {
         let runner = MockRunner::default().with_output(
-            CmdRequest::BtrfsFilesystemDfJson { mount_point: "/mnt/storage".into() },
+            CmdRequest::BtrfsFilesystemDfJson {
+                mount_point: "/mnt/storage".into(),
+            },
             err_raw("btrfs filesystem df", 1, "not a btrfs filesystem"),
         );
         let result = get_profile(&runner, "/mnt/storage");
@@ -1548,7 +1645,9 @@ mod tests {
     #[test]
     fn status_usage_failure_fatal() {
         let runner = MockRunner::default().with_output(
-            CmdRequest::BtrfsFilesystemUsageRaw { mount_point: "/mnt/storage".into() },
+            CmdRequest::BtrfsFilesystemUsageRaw {
+                mount_point: "/mnt/storage".into(),
+            },
             err_raw("btrfs filesystem usage", 1, "error"),
         );
         let result = get_capacity(&runner, "/mnt/storage");
@@ -1558,7 +1657,9 @@ mod tests {
     #[test]
     fn status_device_stats_failure_fatal() {
         let runner = MockRunner::default().with_output(
-            CmdRequest::BtrfsDeviceStats { mount_point: "/mnt/storage".into() },
+            CmdRequest::BtrfsDeviceStats {
+                mount_point: "/mnt/storage".into(),
+            },
             err_raw("btrfs device stats", 1, "error"),
         );
         let result = get_device_stats(&runner, "/mnt/storage");
@@ -1568,7 +1669,9 @@ mod tests {
     #[test]
     fn status_not_btrfs_maps_to_not_mounted() {
         let runner = MockRunner::default().with_output(
-            CmdRequest::FindmntJson { mount_point: "/mnt/storage".into() },
+            CmdRequest::FindmntJson {
+                mount_point: "/mnt/storage".into(),
+            },
             findmnt_ext4(),
         );
         let fs = MockFs::new(&[]);
@@ -1601,7 +1704,9 @@ mod tests {
     #[test]
     fn cmd_status_not_mounted_ok() {
         let runner = MockRunner::default().with_output(
-            CmdRequest::FindmntJson { mount_point: "/mnt/storage".into() },
+            CmdRequest::FindmntJson {
+                mount_point: "/mnt/storage".into(),
+            },
             findmnt_not_mounted(),
         );
         let fs = MockFs::new(&[]);
@@ -1645,39 +1750,57 @@ mod tests {
     fn cmd_status_degraded_non_verbose_ok() {
         let runner = MockRunner::default()
             .with_output(
-                CmdRequest::FindmntJson { mount_point: "/mnt/storage".into() },
+                CmdRequest::FindmntJson {
+                    mount_point: "/mnt/storage".into(),
+                },
                 findmnt_btrfs(),
             )
             .with_output(
-                CmdRequest::BtrfsFilesystemShow { mount_point: "/mnt/storage".into() },
+                CmdRequest::BtrfsFilesystemShow {
+                    mount_point: "/mnt/storage".into(),
+                },
                 btrfs_show_3disk_1missing(),
             )
             .with_output(
-                CmdRequest::CryptsetupStatus { mapper: "disk1".into() },
+                CmdRequest::CryptsetupStatus {
+                    mapper: "disk1".into(),
+                },
                 cryptsetup_status_active("disk1", "/dev/vda"),
             )
             .with_output(
-                CmdRequest::CryptsetupLuksUuid { device: "/dev/vda".into() },
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vda".into(),
+                },
                 cryptsetup_uuid_ok("/dev/vda", "11111111-1111-1111-1111-111111111111"),
             )
             .with_output(
-                CmdRequest::CryptsetupStatus { mapper: "disk2".into() },
+                CmdRequest::CryptsetupStatus {
+                    mapper: "disk2".into(),
+                },
                 cryptsetup_status_active("disk2", "/dev/vdb"),
             )
             .with_output(
-                CmdRequest::CryptsetupLuksUuid { device: "/dev/vdb".into() },
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vdb".into(),
+                },
                 cryptsetup_uuid_ok("/dev/vdb", "22222222-2222-2222-2222-222222222222"),
             )
             .with_output(
-                CmdRequest::BtrfsFilesystemDfJson { mount_point: "/mnt/storage".into() },
+                CmdRequest::BtrfsFilesystemDfJson {
+                    mount_point: "/mnt/storage".into(),
+                },
                 btrfs_df_raid1(),
             )
             .with_output(
-                CmdRequest::BtrfsFilesystemUsageRaw { mount_point: "/mnt/storage".into() },
+                CmdRequest::BtrfsFilesystemUsageRaw {
+                    mount_point: "/mnt/storage".into(),
+                },
                 btrfs_usage_raw(),
             )
             .with_output(
-                CmdRequest::BtrfsScrubStatus { mount_point: "/mnt/storage".into() },
+                CmdRequest::BtrfsScrubStatus {
+                    mount_point: "/mnt/storage".into(),
+                },
                 btrfs_scrub_never(),
             );
         let fs = fs_3disk();
@@ -1691,31 +1814,45 @@ mod tests {
     fn cmd_status_single_disk_ok() {
         let runner = MockRunner::default()
             .with_output(
-                CmdRequest::FindmntJson { mount_point: "/mnt/storage".into() },
+                CmdRequest::FindmntJson {
+                    mount_point: "/mnt/storage".into(),
+                },
                 findmnt_btrfs(),
             )
             .with_output(
-                CmdRequest::BtrfsFilesystemShow { mount_point: "/mnt/storage".into() },
+                CmdRequest::BtrfsFilesystemShow {
+                    mount_point: "/mnt/storage".into(),
+                },
                 btrfs_show_1disk(),
             )
             .with_output(
-                CmdRequest::CryptsetupStatus { mapper: "disk1".into() },
+                CmdRequest::CryptsetupStatus {
+                    mapper: "disk1".into(),
+                },
                 cryptsetup_status_active("disk1", "/dev/vda"),
             )
             .with_output(
-                CmdRequest::CryptsetupLuksUuid { device: "/dev/vda".into() },
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vda".into(),
+                },
                 cryptsetup_uuid_ok("/dev/vda", "11111111-1111-1111-1111-111111111111"),
             )
             .with_output(
-                CmdRequest::BtrfsFilesystemDfJson { mount_point: "/mnt/storage".into() },
+                CmdRequest::BtrfsFilesystemDfJson {
+                    mount_point: "/mnt/storage".into(),
+                },
                 btrfs_df_single(),
             )
             .with_output(
-                CmdRequest::BtrfsFilesystemUsageRaw { mount_point: "/mnt/storage".into() },
+                CmdRequest::BtrfsFilesystemUsageRaw {
+                    mount_point: "/mnt/storage".into(),
+                },
                 btrfs_usage_raw(),
             )
             .with_output(
-                CmdRequest::BtrfsScrubStatus { mount_point: "/mnt/storage".into() },
+                CmdRequest::BtrfsScrubStatus {
+                    mount_point: "/mnt/storage".into(),
+                },
                 btrfs_scrub_never(),
             );
         let fs = fs_1disk();

@@ -1,5 +1,5 @@
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, RawCommandOutput};
-use crate::parse::{parse_btrfs_balance_status, BalanceState};
+use crate::parse::{BalanceState, parse_btrfs_balance_status};
 use std::io::Write;
 
 // ---------------------------------------------------------------------------
@@ -226,10 +226,7 @@ mod tests {
 
     #[test]
     fn format_balance_progress_zero_total() {
-        assert_eq!(
-            format_balance_progress(0, 0, 0),
-            "  balance: waiting..."
-        );
+        assert_eq!(format_balance_progress(0, 0, 0), "  balance: waiting...");
     }
 
     #[test]
@@ -253,10 +250,7 @@ mod tests {
     #[test]
     fn format_bytes_below_gib_threshold() {
         // Just under 1 GiB should show MiB
-        assert_eq!(
-            format_bytes(1024 * 1024 * 1024 - 1),
-            "1024.0 MiB"
-        );
+        assert_eq!(format_bytes(1024 * 1024 * 1024 - 1), "1024.0 MiB");
     }
 
     // --- resolve_progress_output tests ---

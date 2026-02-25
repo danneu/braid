@@ -1,14 +1,14 @@
 use nom::{
+    IResult,
     bytes::complete::take_till1,
     character::complete::{char, digit1, space1},
     combinator::eof,
-    IResult,
 };
 
 use crate::cmd::RawCommandOutput;
 
-use super::types::{BtrfsDeviceStatsOutput, DeviceErrorStats};
 use super::ParseError;
+use super::types::{BtrfsDeviceStatsOutput, DeviceErrorStats};
 
 // Parses: "[/dev/mapper/braid-vda].write_io_errs    0"
 //      → ("/dev/mapper/braid-vda", "write_io_errs", "0")

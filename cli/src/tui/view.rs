@@ -1,8 +1,8 @@
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Color, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Paragraph};
-use ratatui::Frame;
 
 use crate::tui::app::{Model, PoolState, PoolStatus};
 
@@ -49,9 +49,13 @@ fn pool_view(pool: &PoolState) -> Paragraph<'_> {
 
 fn disk_list(model: &Model) -> Paragraph<'_> {
     let lines: Vec<Line> = std::iter::once(Line::from("Disks"))
-        .chain(model.disk_names.iter().enumerate().map(|(i, name)| {
-            Line::from(format!("  {}  {}", i + 1, name))
-        }))
+        .chain(
+            model
+                .disk_names
+                .iter()
+                .enumerate()
+                .map(|(i, name)| Line::from(format!("  {}  {}", i + 1, name))),
+        )
         .collect();
     Paragraph::new(lines)
 }
@@ -114,8 +118,8 @@ pub fn view(model: &Model, frame: &mut Frame) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     fn render(model: &Model, width: u16, height: u16) -> Terminal<TestBackend> {
         let backend = TestBackend::new(width, height);

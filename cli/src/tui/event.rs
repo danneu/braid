@@ -1,7 +1,7 @@
 use std::process::ExitStatus;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -13,9 +13,19 @@ use crate::tui::state::{CmdId, Stream};
 
 pub enum Event {
     Key(KeyEvent),
-    CommandStarted { id: CmdId, cmd: String },
-    CommandOutput { id: CmdId, stream: Stream, line: String },
-    CommandFinished { id: CmdId, status: ExitStatus },
+    CommandStarted {
+        id: CmdId,
+        cmd: String,
+    },
+    CommandOutput {
+        id: CmdId,
+        stream: Stream,
+        line: String,
+    },
+    CommandFinished {
+        id: CmdId,
+        status: ExitStatus,
+    },
     PoolProbeFinished(Result<Option<PoolState>, String>),
     Tick,
 }
@@ -28,9 +38,7 @@ impl Event {
             Event::CommandOutput { id, stream, line } => {
                 Some(Message::CommandOutput { id, stream, line })
             }
-            Event::CommandFinished { id, status } => {
-                Some(Message::CommandFinished { id, status })
-            }
+            Event::CommandFinished { id, status } => Some(Message::CommandFinished { id, status }),
             Event::PoolProbeFinished(result) => Some(Message::PoolProbeFinished(result)),
             Event::Tick => Some(Message::Tick),
         }

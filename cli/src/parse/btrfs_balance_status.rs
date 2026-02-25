@@ -1,13 +1,13 @@
 use nom::{
-    bytes::complete::{tag, take_till1},
-    character::complete::{space0, space1, u64 as parse_u64, u8 as parse_u8},
     IResult,
+    bytes::complete::{tag, take_till1},
+    character::complete::{space0, space1, u8 as parse_u8, u64 as parse_u64},
 };
 
 use crate::cmd::RawCommandOutput;
 
-use super::types::{BalanceState, BtrfsBalanceStatusOutput};
 use super::ParseError;
+use super::types::{BalanceState, BtrfsBalanceStatusOutput};
 
 // ---------------------------------------------------------------------------
 // nom parsers
@@ -41,7 +41,8 @@ fn parse_state_line(input: &str) -> IResult<&str, &str> {
     let (input, _) = tag("Balance on '")(input)?;
     let (input, _) = take_till1(|c| c == '\'')(input)?;
     let (input, _) = tag("' is ")(input)?;
-    let (input, state) = take_till1(|c: char| c == ',' || c == '\n' || c.is_ascii_whitespace())(input)?;
+    let (input, state) =
+        take_till1(|c: char| c == ',' || c == '\n' || c.is_ascii_whitespace())(input)?;
     Ok((input, state))
 }
 

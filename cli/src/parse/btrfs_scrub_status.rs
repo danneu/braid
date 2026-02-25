@@ -1,13 +1,13 @@
 use nom::{
+    IResult,
     bytes::complete::tag,
     character::complete::{not_line_ending, space0},
-    IResult,
 };
 
 use crate::cmd::RawCommandOutput;
 
-use super::types::{BtrfsScrubStatusOutput, ScrubState, ScrubTimestamp};
 use super::ParseError;
+use super::types::{BtrfsScrubStatusOutput, ScrubState, ScrubTimestamp};
 
 // ---------------------------------------------------------------------------
 // nom parsers
@@ -100,9 +100,12 @@ mod tests {
         };
         let out = parse_btrfs_scrub_status(&raw).unwrap();
         // Extract expected timestamp directly from fixture
-        let expected_ts = raw.stdout.lines()
+        let expected_ts = raw
+            .stdout
+            .lines()
             .find_map(|l| l.trim().strip_prefix("Scrub started:"))
-            .unwrap().trim();
+            .unwrap()
+            .trim();
         match &out.state {
             ScrubState::Completed { started_at } => {
                 assert_eq!(started_at.0, expected_ts);

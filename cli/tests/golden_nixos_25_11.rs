@@ -23,7 +23,10 @@ macro_rules! golden_test {
         #[test]
         fn $name() {
             let Some(content) = fixture($fixture) else {
-                eprintln!("SKIP: fixture {} not captured yet (run `make capture-fixtures`)", $fixture);
+                eprintln!(
+                    "SKIP: fixture {} not captured yet (run `make capture-fixtures`)",
+                    $fixture
+                );
                 return;
             };
             let raw = RawCommandOutput {
@@ -32,7 +35,8 @@ macro_rules! golden_test {
                 stderr: String::new(),
                 exit_status: 0,
             };
-            let out = $parse_fn(&raw).expect(concat!("parser failed on golden fixture: ", $fixture));
+            let out =
+                $parse_fn(&raw).expect(concat!("parser failed on golden fixture: ", $fixture));
             $assert_fn(out);
         }
     };
@@ -50,7 +54,11 @@ golden_test!(
         // Each disk should have a crypt child (LUKS)
         for dev in &out.blockdevices {
             assert_eq!(dev.device_type, "disk");
-            assert!(!dev.children.is_empty(), "disk {} has no children", dev.name);
+            assert!(
+                !dev.children.is_empty(),
+                "disk {} has no children",
+                dev.name
+            );
             assert_eq!(dev.children[0].device_type, "crypt");
         }
     }
@@ -103,7 +111,10 @@ golden_test!(
     parse::btrfs_filesystem_usage::parse_btrfs_filesystem_usage,
     |out: parse::types::BtrfsFilesystemUsageOutput| {
         assert!(out.device_size_bytes > 0, "device_size should be positive");
-        assert!(out.used_bytes > 0, "used should be positive (we wrote test data)");
+        assert!(
+            out.used_bytes > 0,
+            "used should be positive (we wrote test data)"
+        );
     }
 );
 
@@ -189,17 +200,33 @@ golden_test!(
         assert_eq!(out.devices.len(), 2, "expected 2 devices");
         // Exact devid/path mapping
         assert_eq!(out.devices[0].devid, 1);
-        assert!(out.devices[0].path.contains("braid-vdb"), "devid 1 should be braid-vdb");
+        assert!(
+            out.devices[0].path.contains("braid-vdb"),
+            "devid 1 should be braid-vdb"
+        );
         assert_eq!(out.devices[1].devid, 2);
-        assert!(out.devices[1].path.contains("braid-vdc"), "devid 2 should be braid-vdc");
+        assert!(
+            out.devices[1].path.contains("braid-vdc"),
+            "devid 2 should be braid-vdc"
+        );
         // At least one Data,RAID1 allocation with bytes > 0
-        let has_data_raid1 = out.devices[0].allocations.iter().any(|a| {
-            a.alloc_type == "Data" && a.profile == "RAID1" && a.bytes > 0
-        });
-        assert!(has_data_raid1, "expected Data,RAID1 allocation with bytes > 0 on first device");
+        let has_data_raid1 = out.devices[0]
+            .allocations
+            .iter()
+            .any(|a| a.alloc_type == "Data" && a.profile == "RAID1" && a.bytes > 0);
+        assert!(
+            has_data_raid1,
+            "expected Data,RAID1 allocation with bytes > 0 on first device"
+        );
         // Sanity: sizes are positive
-        assert!(out.devices[0].device_size > 0, "device_size should be positive");
-        assert!(out.devices[0].unallocated > 0, "unallocated should be positive");
+        assert!(
+            out.devices[0].device_size > 0,
+            "device_size should be positive"
+        );
+        assert!(
+            out.devices[0].unallocated > 0,
+            "unallocated should be positive"
+        );
     }
 );
 
@@ -217,7 +244,10 @@ golden_test!(
                 pct_left,
                 ..
             } => {
-                assert!(estimated_total_chunks > 0, "expected estimated_total_chunks > 0");
+                assert!(
+                    estimated_total_chunks > 0,
+                    "expected estimated_total_chunks > 0"
+                );
                 assert!(pct_left <= 100, "pct_left should be <= 100, got {pct_left}");
             }
             ref other => panic!("expected Running state, got {other:?}"),

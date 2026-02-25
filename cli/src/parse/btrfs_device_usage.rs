@@ -1,13 +1,13 @@
 use nom::{
+    IResult,
     bytes::complete::{tag, take_till1, take_until},
     character::complete::{i64 as parse_i64, not_line_ending, space0, space1, u64 as parse_u64},
-    IResult,
 };
 
 use crate::cmd::RawCommandOutput;
 
-use super::types::{BtrfsDeviceUsageEntry, BtrfsDeviceUsageOutput, DeviceAllocation};
 use super::ParseError;
+use super::types::{BtrfsDeviceUsageEntry, BtrfsDeviceUsageOutput, DeviceAllocation};
 
 // ---------------------------------------------------------------------------
 // nom parsers

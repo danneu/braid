@@ -1,8 +1,8 @@
 use crate::cmd::RawCommandOutput;
 use crate::types::LuksUuid;
 
-use super::types::CryptsetupLuksUuidOutput;
 use super::ParseError;
+use super::types::CryptsetupLuksUuidOutput;
 
 pub fn parse_cryptsetup_luks_uuid(
     raw: &RawCommandOutput,

@@ -1,13 +1,13 @@
 use nom::{
+    IResult,
     bytes::complete::{tag, take_till1},
     character::complete::{not_line_ending, space1},
-    IResult,
 };
 
 use crate::cmd::RawCommandOutput;
 
-use super::types::BtrfsFilesystemUsageOutput;
 use super::ParseError;
+use super::types::BtrfsFilesystemUsageOutput;
 
 // ---------------------------------------------------------------------------
 // nom parsers
@@ -56,20 +56,18 @@ pub fn parse_btrfs_filesystem_usage(
                 "Device size" => device_size = value_str.parse().ok(),
                 "Used" if used.is_none() => used = value_str.parse().ok(),
                 "Free (estimated)" => free_est = value_str.parse().ok(),
-                "Data ratio" => {
-                    match value_str {
-                        "1.00" => data_ratio = Some(1),
-                        "2.00" => data_ratio = Some(2),
-                        _ => {
-                            return Err(ParseError::InvalidText {
-                                cmd: raw.cmd.clone(),
-                                detail: format!(
-                                    "unsupported Data ratio {value_str:?} (expected \"1.00\" or \"2.00\")"
-                                ),
-                            });
-                        }
+                "Data ratio" => match value_str {
+                    "1.00" => data_ratio = Some(1),
+                    "2.00" => data_ratio = Some(2),
+                    _ => {
+                        return Err(ParseError::InvalidText {
+                            cmd: raw.cmd.clone(),
+                            detail: format!(
+                                "unsupported Data ratio {value_str:?} (expected \"1.00\" or \"2.00\")"
+                            ),
+                        });
                     }
-                }
+                },
                 _ => {}
             }
         }

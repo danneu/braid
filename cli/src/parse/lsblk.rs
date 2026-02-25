@@ -2,8 +2,8 @@ use serde::Deserialize;
 
 use crate::cmd::RawCommandOutput;
 
-use super::types::{LsblkDevice, LsblkFieldOutput, LsblkOutput};
 use super::ParseError;
+use super::types::{LsblkDevice, LsblkFieldOutput, LsblkOutput};
 
 // --- Serde helper structs (not exposed to domain code) ---
 

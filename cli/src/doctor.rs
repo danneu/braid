@@ -152,11 +152,7 @@ fn check_config_permissions(ctx: &mut DoctorContext) -> CheckResult {
         CheckResult {
             name: "config_permissions".into(),
             status: CheckStatus::Warn,
-            message: format!(
-                "{}: {}",
-                ctx.config_path.display(),
-                warnings.join(", ")
-            ),
+            message: format!("{}: {}", ctx.config_path.display(), warnings.join(", ")),
         }
     }
 }
@@ -367,7 +363,10 @@ mod tests {
         let report = run_doctor(Path::new("/tmp/nonexistent-braid-doctor-test.json"));
         assert_eq!(report.status, CheckStatus::Fail);
         assert_eq!(find_check(&report, "config_file").status, CheckStatus::Fail);
-        assert_eq!(find_check(&report, "config_schema").status, CheckStatus::Skip);
+        assert_eq!(
+            find_check(&report, "config_schema").status,
+            CheckStatus::Skip
+        );
         assert_eq!(
             find_check(&report, "config_permissions").status,
             CheckStatus::Skip
@@ -491,8 +490,14 @@ mod tests {
         let report = run_doctor(f.path());
         let human = format_doctor_human(&report);
         assert!(human.contains("[ok  ]"), "expected [ok  ] tag:\n{human}");
-        assert!(human.contains("config file"), "expected 'config file':\n{human}");
-        assert!(human.contains("config schema"), "expected 'config schema':\n{human}");
+        assert!(
+            human.contains("config file"),
+            "expected 'config file':\n{human}"
+        );
+        assert!(
+            human.contains("config schema"),
+            "expected 'config schema':\n{human}"
+        );
     }
 
     #[test]
@@ -519,11 +524,7 @@ mod tests {
         let perm = find_check(&report, "config_permissions");
         assert_eq!(perm.status, CheckStatus::Warn);
         assert!(perm.message.contains("world-writable"), "{}", perm.message);
-        assert!(
-            perm.message.contains("group-writable"),
-            "{}",
-            perm.message
-        );
+        assert!(perm.message.contains("group-writable"), "{}", perm.message);
     }
 
     #[test]
@@ -574,22 +575,15 @@ mod tests {
         let check = find_check(&report, "declared_disks");
         assert_eq!(check.status, CheckStatus::Warn);
         assert!(check.message.contains("2/2"), "{}", check.message);
-        assert!(
-            check.message.contains("disk-a"),
-            "{}",
-            check.message
-        );
-        assert!(
-            check.message.contains("disk-b"),
-            "{}",
-            check.message
-        );
+        assert!(check.message.contains("disk-a"), "{}", check.message);
+        assert!(check.message.contains("disk-b"), "{}", check.message);
     }
 
     #[test]
     fn declared_disks_not_block_device_warns() {
         // /dev/null exists but is a char device, not a block device
-        let f = write_temp(r#"{"disks":{"null":{"by_id":"/dev/null"}},"mount_point":"/mnt/storage"}"#);
+        let f =
+            write_temp(r#"{"disks":{"null":{"by_id":"/dev/null"}},"mount_point":"/mnt/storage"}"#);
         let report = run_doctor(f.path());
         let check = find_check(&report, "declared_disks");
         assert_eq!(check.status, CheckStatus::Warn);

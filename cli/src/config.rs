@@ -13,7 +13,9 @@ pub enum ConfigBuildError {
     DuplicateByIdValue(String),
     #[error("mount_point must not be empty")]
     EmptyMountPoint,
-    #[error("invalid disk key '{0}': must start with a letter, contain only letters, digits, hyphens, or underscores, and be at most 32 characters")]
+    #[error(
+        "invalid disk key '{0}': must start with a letter, contain only letters, digits, hyphens, or underscores, and be at most 32 characters"
+    )]
     InvalidDiskKey(String),
 }
 
@@ -45,9 +47,7 @@ impl Config {
         let mut seen = std::collections::HashSet::new();
         for disk in disks.values() {
             if !seen.insert(&disk.by_id) {
-                return Err(ConfigBuildError::DuplicateByIdValue(
-                    disk.by_id.to_string(),
-                ));
+                return Err(ConfigBuildError::DuplicateByIdValue(disk.by_id.to_string()));
             }
         }
         if mount_point.is_empty() {
@@ -158,7 +158,8 @@ mod tests {
 
     #[test]
     fn parses_valid_config() {
-        let raw = r#"{"disks":{"toshiba":{"by_id":"/dev/disk/by-id/a"}},"mount_point":"/mnt/storage"}"#;
+        let raw =
+            r#"{"disks":{"toshiba":{"by_id":"/dev/disk/by-id/a"}},"mount_point":"/mnt/storage"}"#;
         let cfg: Config = serde_json::from_str(raw).expect("config should parse");
         assert_eq!(cfg.disks().len(), 1);
         assert!(cfg.disk_by_name("toshiba").is_some());
@@ -168,7 +169,10 @@ mod tests {
     #[test]
     fn config_hash_uses_sha256_prefix() {
         let h = config_hash("anything");
-        assert!(h.starts_with("sha256:"), "expected sha256: prefix, got: {h}");
+        assert!(
+            h.starts_with("sha256:"),
+            "expected sha256: prefix, got: {h}"
+        );
         let hex = &h["sha256:".len()..];
         assert_eq!(hex.len(), 64, "expected 64 hex chars, got {}", hex.len());
         assert!(hex.chars().all(|c| c.is_ascii_hexdigit()));
@@ -288,8 +292,8 @@ mod tests {
                 by_id: ByIdPath("/dev/disk/by-id/a".to_owned()),
             },
         );
-        let err = Config::new(disks, "/mnt/storage".to_owned())
-            .expect_err("space in name should fail");
+        let err =
+            Config::new(disks, "/mnt/storage".to_owned()).expect_err("space in name should fail");
         assert!(matches!(err, ConfigBuildError::InvalidDiskKey(_)));
     }
 
@@ -302,8 +306,8 @@ mod tests {
                 by_id: ByIdPath("/dev/disk/by-id/a".to_owned()),
             },
         );
-        let err = Config::new(disks, "/mnt/storage".to_owned())
-            .expect_err("empty name should fail");
+        let err =
+            Config::new(disks, "/mnt/storage".to_owned()).expect_err("empty name should fail");
         assert!(matches!(err, ConfigBuildError::InvalidDiskKey(_)));
     }
 
@@ -317,8 +321,8 @@ mod tests {
                 by_id: ByIdPath("/dev/disk/by-id/a".to_owned()),
             },
         );
-        let err = Config::new(disks, "/mnt/storage".to_owned())
-            .expect_err("33-char name should fail");
+        let err =
+            Config::new(disks, "/mnt/storage".to_owned()).expect_err("33-char name should fail");
         assert!(matches!(err, ConfigBuildError::InvalidDiskKey(_)));
     }
 
@@ -332,8 +336,7 @@ mod tests {
                 by_id: ByIdPath("/dev/disk/by-id/a".to_owned()),
             },
         );
-        Config::new(disks, "/mnt/storage".to_owned())
-            .expect("32-char name should be valid");
+        Config::new(disks, "/mnt/storage".to_owned()).expect("32-char name should be valid");
     }
 
     #[test]

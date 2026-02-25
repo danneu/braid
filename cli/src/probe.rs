@@ -1,7 +1,7 @@
 use crate::cmd::{CmdError, CmdRequest, CommandRunner};
-use crate::config::{mapper_name, DiskConfig};
+use crate::config::{DiskConfig, mapper_name};
 use crate::parse::{
-    parse_btrfs_filesystem_show, parse_cryptsetup_luks_uuid, parse_cryptsetup_status, ParseError,
+    ParseError, parse_btrfs_filesystem_show, parse_cryptsetup_luks_uuid, parse_cryptsetup_status,
 };
 use crate::types::*;
 
@@ -103,10 +103,7 @@ pub fn probe_pool<R: CommandRunner>(
     let findmnt = crate::parse::parse_findmnt_json(&findmnt_raw)?;
 
     // Defensive: only consider entries whose target exactly matches mount_point.
-    let exact = findmnt
-        .filesystems
-        .iter()
-        .find(|e| e.target == mount_point);
+    let exact = findmnt.filesystems.iter().find(|e| e.target == mount_point);
 
     let entry = match exact {
         None => {
@@ -165,9 +162,7 @@ pub fn probe_pool<R: CommandRunner>(
             detail: "active but no underlying device".to_owned(),
         })?;
 
-        let uuid_raw = runner.run(&CmdRequest::CryptsetupLuksUuid {
-            device: underlying,
-        })?;
+        let uuid_raw = runner.run(&CmdRequest::CryptsetupLuksUuid { device: underlying })?;
         let uuid_out = parse_cryptsetup_luks_uuid(&uuid_raw)?;
 
         devices.push(PoolDevice {
@@ -177,9 +172,7 @@ pub fn probe_pool<R: CommandRunner>(
         });
     }
 
-    let missing_count = show
-        .total_devices
-        .saturating_sub(devices.len() as u64);
+    let missing_count = show.total_devices.saturating_sub(devices.len() as u64);
 
     Ok(PoolState {
         mounted: true,
@@ -265,7 +258,11 @@ mod tests {
             CmdRequest::CryptsetupLuksUuid {
                 device: "/dev/disk/by-id/disk-1".into(),
             },
-            err_raw("cryptsetup luksUUID /dev/disk/by-id/disk-1", 4, "Device is not a valid LUKS device."),
+            err_raw(
+                "cryptsetup luksUUID /dev/disk/by-id/disk-1",
+                4,
+                "Device is not a valid LUKS device.",
+            ),
         );
         let fs = MockFs::new(&["/dev/disk/by-id/disk-1"]);
         let d = disk("/dev/disk/by-id/disk-1");
@@ -362,7 +359,11 @@ mod tests {
     // -- probe_pool tests --
 
     fn findmnt_empty() -> RawCommandOutput {
-        err_raw("findmnt --json --output TARGET,SOURCE,FSTYPE -T /mnt/storage", 1, "")
+        err_raw(
+            "findmnt --json --output TARGET,SOURCE,FSTYPE -T /mnt/storage",
+            1,
+            "",
+        )
     }
 
     fn findmnt_btrfs() -> RawCommandOutput {
@@ -522,7 +523,10 @@ mod tests {
             LuksUuid("11111111-1111-1111-1111-111111111111".into())
         );
         assert_eq!(result.devices[0].devid, 1);
-        assert_eq!(result.devices[1].mapper, MapperName("braid-ironwolf".into()));
+        assert_eq!(
+            result.devices[1].mapper,
+            MapperName("braid-ironwolf".into())
+        );
     }
 
     #[test]
@@ -639,7 +643,11 @@ mod tests {
                 CmdRequest::CryptsetupStatus {
                     mapper: "braid-toshiba".into(),
                 },
-                err_raw("cryptsetup status braid-toshiba", 4, "/dev/mapper/braid-toshiba is not active.\n"),
+                err_raw(
+                    "cryptsetup status braid-toshiba",
+                    4,
+                    "/dev/mapper/braid-toshiba is not active.\n",
+                ),
             );
 
         let result = probe_pool(&runner, "/mnt/storage");
@@ -716,6 +724,9 @@ mod tests {
             );
 
         let result = probe_pool(&runner, "/mnt/storage").unwrap();
-        assert_eq!(result.missing_count, 0, "saturating_sub should prevent underflow");
+        assert_eq!(
+            result.missing_count, 0,
+            "saturating_sub should prevent underflow"
+        );
     }
 }

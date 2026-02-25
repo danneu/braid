@@ -7,7 +7,8 @@ pub enum MountOutcome {
 
 pub fn classify_mount_error(stderr: &str) -> MountOutcome {
     let s = stderr.to_lowercase();
-    if s.contains("missing") || s.contains("devid")
+    if s.contains("missing")
+        || s.contains("devid")
         || (s.contains("fsconfig") && s.contains("dmesg"))
     {
         MountOutcome::MissingMembersDeferred

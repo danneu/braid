@@ -17,36 +17,95 @@ pub enum LsblkFieldKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CmdRequest {
     LsblkJson,
-    FindmntJson { mount_point: String },
-    BtrfsFilesystemDfJson { mount_point: String },
-    BtrfsFilesystemShow { mount_point: String },
-    CryptsetupStatus { mapper: String },
-    CryptsetupLuksUuid { device: String },
-    BtrfsFilesystemUsageRaw { mount_point: String },
-    BtrfsScrubStatus { mount_point: String },
-    BtrfsDeviceStats { mount_point: String },
-    LsblkField { device: String, field: LsblkFieldKind },
+    FindmntJson {
+        mount_point: String,
+    },
+    BtrfsFilesystemDfJson {
+        mount_point: String,
+    },
+    BtrfsFilesystemShow {
+        mount_point: String,
+    },
+    CryptsetupStatus {
+        mapper: String,
+    },
+    CryptsetupLuksUuid {
+        device: String,
+    },
+    BtrfsFilesystemUsageRaw {
+        mount_point: String,
+    },
+    BtrfsScrubStatus {
+        mount_point: String,
+    },
+    BtrfsDeviceStats {
+        mount_point: String,
+    },
+    LsblkField {
+        device: String,
+        field: LsblkFieldKind,
+    },
     // Mutation commands for apply
-    CryptsetupLuksOpen { device: String, mapper: String },
-    CryptsetupIsLuks { device: String },
-    CryptsetupClose { mapper: String },
-    BtrfsDeviceAdd { device: String, mount_point: String },
-    BtrfsDeviceRemove { device: String, mount_point: String },
-    BtrfsDeviceRemoveMissing { mount_point: String },
-    BtrfsDeviceScan { device: String },
+    CryptsetupLuksOpen {
+        device: String,
+        mapper: String,
+    },
+    CryptsetupIsLuks {
+        device: String,
+    },
+    CryptsetupClose {
+        mapper: String,
+    },
+    BtrfsDeviceAdd {
+        device: String,
+        mount_point: String,
+    },
+    BtrfsDeviceRemove {
+        device: String,
+        mount_point: String,
+    },
+    BtrfsDeviceRemoveMissing {
+        mount_point: String,
+    },
+    BtrfsDeviceScan {
+        device: String,
+    },
     BtrfsDeviceScanAll,
-    BtrfsBalanceRaid1 { mount_point: String },
-    BtrfsBalanceSingle { mount_point: String },
-    MkfsBtrfs { device: String },
-    Mount { device: String, mount_point: String },
-    MountpointCheck { path: String },
+    BtrfsBalanceRaid1 {
+        mount_point: String,
+    },
+    BtrfsBalanceSingle {
+        mount_point: String,
+    },
+    MkfsBtrfs {
+        device: String,
+    },
+    Mount {
+        device: String,
+        mount_point: String,
+    },
+    MountpointCheck {
+        path: String,
+    },
     // Polling commands for progress monitoring
-    BtrfsBalanceStatus { mount_point: String },
-    BtrfsDeviceUsageRaw { mount_point: String },
+    BtrfsBalanceStatus {
+        mount_point: String,
+    },
+    BtrfsDeviceUsageRaw {
+        mount_point: String,
+    },
     // init-disk commands
-    CryptsetupLuksFormat { device: String, extra_opts: Vec<String> },
-    CryptsetupTestPassphrase { device: String },
-    CryptsetupLuksHeaderBackup { device: String, backup_path: String },
+    CryptsetupLuksFormat {
+        device: String,
+        extra_opts: Vec<String>,
+    },
+    CryptsetupTestPassphrase {
+        device: String,
+    },
+    CryptsetupLuksHeaderBackup {
+        device: String,
+        backup_path: String,
+    },
 }
 
 #[derive(Debug, Error)]
@@ -86,7 +145,11 @@ impl RealRunner {
         })
     }
 
-    fn exec_with_stdin(cmd: &str, args: &[&str], stdin_bytes: &[u8]) -> Result<RawCommandOutput, CmdError> {
+    fn exec_with_stdin(
+        cmd: &str,
+        args: &[&str],
+        stdin_bytes: &[u8],
+    ) -> Result<RawCommandOutput, CmdError> {
         use std::io::Write;
         use std::process::Stdio;
 
@@ -123,12 +186,25 @@ impl RealRunner {
 impl CommandRunner for RealRunner {
     fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
         match request {
-            CmdRequest::LsblkJson => {
-                RealRunner::exec("lsblk", &["--json", "--bytes", "--output", "NAME,TYPE,SIZE,MODEL,SERIAL,UUID"])
-            }
-            CmdRequest::FindmntJson { mount_point } => {
-                RealRunner::exec("findmnt", &["--json", "--output", "TARGET,SOURCE,FSTYPE", "--mountpoint", mount_point])
-            }
+            CmdRequest::LsblkJson => RealRunner::exec(
+                "lsblk",
+                &[
+                    "--json",
+                    "--bytes",
+                    "--output",
+                    "NAME,TYPE,SIZE,MODEL,SERIAL,UUID",
+                ],
+            ),
+            CmdRequest::FindmntJson { mount_point } => RealRunner::exec(
+                "findmnt",
+                &[
+                    "--json",
+                    "--output",
+                    "TARGET,SOURCE,FSTYPE",
+                    "--mountpoint",
+                    mount_point,
+                ],
+            ),
             CmdRequest::BtrfsFilesystemShow { mount_point } => {
                 RealRunner::exec("btrfs", &["filesystem", "show", mount_point])
             }
@@ -138,9 +214,10 @@ impl CommandRunner for RealRunner {
             CmdRequest::CryptsetupLuksUuid { device } => {
                 RealRunner::exec("cryptsetup", &["luksUUID", device])
             }
-            CmdRequest::BtrfsFilesystemDfJson { mount_point } => {
-                RealRunner::exec("btrfs", &["--format", "json", "filesystem", "df", mount_point])
-            }
+            CmdRequest::BtrfsFilesystemDfJson { mount_point } => RealRunner::exec(
+                "btrfs",
+                &["--format", "json", "filesystem", "df", mount_point],
+            ),
             CmdRequest::BtrfsFilesystemUsageRaw { mount_point } => {
                 RealRunner::exec("btrfs", &["filesystem", "usage", "--raw", mount_point])
             }
@@ -176,39 +253,60 @@ impl CommandRunner for RealRunner {
             CmdRequest::CryptsetupClose { mapper } => {
                 RealRunner::exec("cryptsetup", &["close", mapper])
             }
-            CmdRequest::BtrfsDeviceAdd { device, mount_point } => {
-                RealRunner::exec("btrfs", &["device", "add", "-f", device, mount_point])
-            }
-            CmdRequest::BtrfsDeviceRemove { device, mount_point } => {
-                RealRunner::exec("btrfs", &["device", "remove", device, mount_point])
-            }
+            CmdRequest::BtrfsDeviceAdd {
+                device,
+                mount_point,
+            } => RealRunner::exec("btrfs", &["device", "add", "-f", device, mount_point]),
+            CmdRequest::BtrfsDeviceRemove {
+                device,
+                mount_point,
+            } => RealRunner::exec("btrfs", &["device", "remove", device, mount_point]),
             CmdRequest::BtrfsDeviceRemoveMissing { mount_point } => {
                 RealRunner::exec("btrfs", &["device", "remove", "missing", mount_point])
             }
             CmdRequest::BtrfsDeviceScan { device } => {
                 RealRunner::exec("btrfs", &["device", "scan", device])
             }
-            CmdRequest::BtrfsDeviceScanAll => {
-                RealRunner::exec("btrfs", &["device", "scan"])
-            }
-            CmdRequest::BtrfsBalanceRaid1 { mount_point } => {
-                RealRunner::exec("btrfs", &["balance", "start", "-dconvert=raid1", "-mconvert=raid1", mount_point])
-            }
-            CmdRequest::BtrfsBalanceSingle { mount_point } => {
-                RealRunner::exec("btrfs", &["balance", "start", "-dconvert=single", "-mconvert=single", "-f", mount_point])
-            }
-            CmdRequest::MkfsBtrfs { device } => {
-                RealRunner::exec("mkfs.btrfs", &["-f", device])
-            }
-            CmdRequest::Mount { device, mount_point } => {
-                RealRunner::exec("mount", &[device, mount_point])
-            }
-            CmdRequest::MountpointCheck { path } => {
-                RealRunner::exec("mountpoint", &["-q", path])
-            }
-            CmdRequest::CryptsetupLuksHeaderBackup { device, backup_path } => {
-                RealRunner::exec("cryptsetup", &["luksHeaderBackup", "--header-backup-file", backup_path, device])
-            }
+            CmdRequest::BtrfsDeviceScanAll => RealRunner::exec("btrfs", &["device", "scan"]),
+            CmdRequest::BtrfsBalanceRaid1 { mount_point } => RealRunner::exec(
+                "btrfs",
+                &[
+                    "balance",
+                    "start",
+                    "-dconvert=raid1",
+                    "-mconvert=raid1",
+                    mount_point,
+                ],
+            ),
+            CmdRequest::BtrfsBalanceSingle { mount_point } => RealRunner::exec(
+                "btrfs",
+                &[
+                    "balance",
+                    "start",
+                    "-dconvert=single",
+                    "-mconvert=single",
+                    "-f",
+                    mount_point,
+                ],
+            ),
+            CmdRequest::MkfsBtrfs { device } => RealRunner::exec("mkfs.btrfs", &["-f", device]),
+            CmdRequest::Mount {
+                device,
+                mount_point,
+            } => RealRunner::exec("mount", &[device, mount_point]),
+            CmdRequest::MountpointCheck { path } => RealRunner::exec("mountpoint", &["-q", path]),
+            CmdRequest::CryptsetupLuksHeaderBackup {
+                device,
+                backup_path,
+            } => RealRunner::exec(
+                "cryptsetup",
+                &[
+                    "luksHeaderBackup",
+                    "--header-backup-file",
+                    backup_path,
+                    device,
+                ],
+            ),
             CmdRequest::CryptsetupLuksFormat { device, extra_opts } => {
                 // Passphrase must be piped via run_with_stdin, not here.
                 let _ = (device, extra_opts);
@@ -232,13 +330,11 @@ impl CommandRunner for RealRunner {
         stdin: &[u8],
     ) -> Result<RawCommandOutput, CmdError> {
         match request {
-            CmdRequest::CryptsetupLuksOpen { device, mapper } => {
-                RealRunner::exec_with_stdin(
-                    "cryptsetup",
-                    &["luksOpen", "--key-file=-", device, mapper],
-                    stdin,
-                )
-            }
+            CmdRequest::CryptsetupLuksOpen { device, mapper } => RealRunner::exec_with_stdin(
+                "cryptsetup",
+                &["luksOpen", "--key-file=-", device, mapper],
+                stdin,
+            ),
             CmdRequest::CryptsetupLuksFormat { device, extra_opts } => {
                 let mut args: Vec<&str> = vec!["luksFormat", "--batch-mode", "--key-file=-"];
                 for opt in extra_opts {
@@ -247,13 +343,11 @@ impl CommandRunner for RealRunner {
                 args.push(device.as_str());
                 RealRunner::exec_with_stdin("cryptsetup", &args, stdin)
             }
-            CmdRequest::CryptsetupTestPassphrase { device } => {
-                RealRunner::exec_with_stdin(
-                    "cryptsetup",
-                    &["open", "--test-passphrase", "--key-file=-", device],
-                    stdin,
-                )
-            }
+            CmdRequest::CryptsetupTestPassphrase { device } => RealRunner::exec_with_stdin(
+                "cryptsetup",
+                &["open", "--test-passphrase", "--key-file=-", device],
+                stdin,
+            ),
             _ => {
                 // For non-stdin commands, delegate to run() and ignore stdin.
                 self.run(request)
@@ -302,10 +396,7 @@ impl CommandRunner for MockRunner {
     ) -> Result<RawCommandOutput, CmdError> {
         let key = format!("{request:?}");
         if let Some(expected) = self.stdin_expectations.get(&key) {
-            assert_eq!(
-                stdin, expected.as_slice(),
-                "stdin mismatch for {key}"
-            );
+            assert_eq!(stdin, expected.as_slice(), "stdin mismatch for {key}");
         }
         self.outputs.get(&key).cloned().ok_or(CmdError::MissingMock)
     }
@@ -469,7 +560,8 @@ mod tests {
             req.clone(),
             b"secret".to_vec(),
             RawCommandOutput {
-                cmd: "cryptsetup luksFormat --batch-mode --key-file=- --pbkdf pbkdf2 /dev/vda".to_owned(),
+                cmd: "cryptsetup luksFormat --batch-mode --key-file=- --pbkdf pbkdf2 /dev/vda"
+                    .to_owned(),
                 stdout: String::new(),
                 stderr: String::new(),
                 exit_status: 0,

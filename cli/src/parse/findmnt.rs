@@ -2,8 +2,8 @@ use serde::Deserialize;
 
 use crate::cmd::RawCommandOutput;
 
-use super::types::{FindmntEntry, FindmntOutput};
 use super::ParseError;
+use super::types::{FindmntEntry, FindmntOutput};
 
 // --- Serde helper structs (not exposed to domain code) ---
 

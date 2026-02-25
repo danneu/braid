@@ -1,5 +1,5 @@
 use crate::cmd::{CmdError, CmdRequest, CommandRunner};
-use crate::progress::{run_with_progress, ProgressOutput};
+use crate::progress::{ProgressOutput, run_with_progress};
 
 #[derive(Debug, thiserror::Error)]
 pub enum PoolError {

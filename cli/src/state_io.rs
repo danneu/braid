@@ -10,9 +10,9 @@ pub fn atomic_write(path: &Path, contents: &[u8]) -> io::Result<()> {
     })?;
     fs::create_dir_all(dir)?;
 
-    let file_name = path.file_name().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidInput, "path has no file name")
-    })?;
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no file name"))?;
     let tmp_path = dir.join(format!(".{}.tmp", file_name.to_string_lossy()));
 
     {

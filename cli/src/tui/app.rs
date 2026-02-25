@@ -3,7 +3,7 @@ use std::collections::VecDeque;
 use std::process::ExitStatus;
 
 use crate::tui::effect::Effect;
-use crate::tui::state::{CmdId, CmdStatus, CommandState, Stream, MAX_LINES};
+use crate::tui::state::{CmdId, CmdStatus, CommandState, MAX_LINES, Stream};
 
 pub struct PoolState {
     pub mount_point: String,
@@ -61,9 +61,19 @@ impl Model {
 pub enum Message {
     Quit,
     Tick,
-    CommandStarted { id: CmdId, cmd: String },
-    CommandOutput { id: CmdId, stream: Stream, line: String },
-    CommandFinished { id: CmdId, status: ExitStatus },
+    CommandStarted {
+        id: CmdId,
+        cmd: String,
+    },
+    CommandOutput {
+        id: CmdId,
+        stream: Stream,
+        line: String,
+    },
+    CommandFinished {
+        id: CmdId,
+        status: ExitStatus,
+    },
     PoolProbeFinished(Result<Option<PoolState>, String>),
 }
 
