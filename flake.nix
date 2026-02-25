@@ -195,6 +195,21 @@
               inherit nixpkgs;
               system = linuxSystem;
             };
+          braid-wrong-passphrase-resume = pkgs.testers.nixosTest (
+            import ./tests/cli/braid-wrong-passphrase-resume.nix {
+              braid = linuxCrane.braid;
+            }
+          );
+          braid-remove-disk-busy = pkgs.testers.nixosTest (
+            import ./tests/cli/braid-remove-disk-busy.nix {
+              braid = linuxCrane.braid;
+            }
+          );
+          braid-module-no-discard =
+            import ./tests/module/no-discard.nix {
+              inherit nixpkgs;
+              system = linuxSystem;
+            };
         };
     in
     {
