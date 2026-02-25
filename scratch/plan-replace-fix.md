@@ -10,12 +10,11 @@ This plan includes coordinated updates to code, tests, and docs/decision records
 ## Implementor Directives (Mandatory)
 1. **Mandatory pivot:** implement live-old eviction through one shared primitive used by both `remove` and `replace`.
 2. Do not add bespoke live-eviction logic inside `replace`.
-3. Keep checkpoint schema/version unchanged; keep `Phase::ReplaceEvictDead` name/value.
+3. Keep checkpoint schema/version unchanged.
 4. Shared primitive must include **post-remove LUKS close** (`cryptsetup close <old-mapper>`) as best-effort warning-only behavior.
 5. Shared primitive must decide conversion need from **current live pool probe + target mapper**, not from caller-provided projected counts.
-6. Keep eviction resumability in a single replace eviction phase; do not add phase complexity unless strictly required.
+6. Use distinct phases for live and dead eviction paths: `ReplaceEvictLive` and `ReplaceEvictDead`.
 7. Shared primitive must be idempotent and return explicit outcome (`Removed` or `AlreadyAbsent`) for live-target eviction.
-8. Resume-time live-path classification for relaxation must use checkpoint pre-eviction fingerprint (Option D), not current pool state or CLI-arg heuristics.
 
 ## Locked Product Decisions
 1. `--old` validation: **pool-membership only** for live path (no config requirement for `--old`).
@@ -23,7 +22,7 @@ This plan includes coordinated updates to code, tests, and docs/decision records
 3. Mixed state policy: if `--old` is live and pool has any missing devices, **reject** and require cleanup first.
 4. `--missing-id` behavior: if `--old` is live, `--missing-id` is **invalid** and rejected.
 5. Checkpoint schema version remains unchanged for this migration.
-6. `Phase::ReplaceEvictDead` name and env value are retained for compatibility with existing checkpoints.
+6. `Phase::ReplaceEvictDead` handles the missing/dead path. `Phase::ReplaceEvictLive` handles the live path.
 7. **Implementation mandate (pivot):** live-device eviction semantics are centralized in one shared helper used by both `remove` and `replace`.
 8. Single-device final topology safety: when projected post-eviction device count is 1, conversion from RAID1 to single profile is required before removing the live device.
 
@@ -88,27 +87,24 @@ File: `cli/src/replace.rs`
 - `Devid`: existing `pool_remove_devid` path.
 - `Missing`: existing `pool_remove_missing` path.
 3. Keep checkpoint schema version unchanged.
-4. Resume gate relaxation for `OpKind::Replace` + `Phase::ReplaceEvictDead` + live-target path:
-- `pool_fingerprint`: skip strict equality check. After successful live eviction the device list and counts legitimately change; strict fingerprint equality is not a safe precondition for this phase/path. Rely on idempotent eviction helper execution-time probe instead.
+4. Resume gate relaxation for `Phase::ReplaceEvictLive`:
+- `pool_fingerprint`: skip strict equality check. After successful live eviction the device list and counts legitimately change. Rely on idempotent eviction helper execution-time probe instead.
 - `secondary_target_available`: allow resume even if live target is already absent.
-- Both relaxations apply **only** to this (op, phase, path) triple. All other phases, ops, and the missing/dead path retain strict checks unchanged.
+- These relaxations apply only to `ReplaceEvictLive`. All other phases retain strict checks.
 
 ### 4. Checkpoint/resume behavior for conversion-before-live-evict
 Files: `cli/src/checkpoint.rs`, `cli/src/replace.rs`
 
-1. Preserve `ReplaceEvictDead` phase name/value for compatibility.
-2. Ensure resume remains deterministic when single-profile conversion is required before live remove.
-3. Define live-target path classification for resume gating (Option D, no schema change):
-- For `OpKind::Replace` + `Phase::ReplaceEvictDead`, classify as live-target path when `old` mapper appears in `checkpoint.pool_fingerprint.devices`.
-- Otherwise classify as missing/dead path.
-- Do not infer from current pool probe (can be post-eviction) and do not infer from `--missing-id` presence/absence alone.
-4. Keep replace resume logic in this phase and make eviction idempotent:
+1. Ensure resume remains deterministic when single-profile conversion is required before live remove.
+2. Eviction phase dispatch at checkpoint creation:
+- Live path: write `Phase::ReplaceEvictLive`.
+- Dead/missing path: write `Phase::ReplaceEvictDead`.
+3. Make eviction idempotent:
 - re-probe pool at eviction execution time.
 - call shared live-eviction helper that returns explicit outcome:
   - `Removed`: conversion/remove/close executed.
   - `AlreadyAbsent`: no-op success for idempotent resume.
-5. If additional phase granularity is added for conversion, do not bump schema version; treat it as additive phase support while continuing to accept existing checkpoints.
-6. Fail-closed behavior remains unchanged for topology/config/target drift, except for the resume gate relaxation specified in section 3.4 above.
+4. Fail-closed behavior remains unchanged for topology/config/target drift. `ReplaceEvictLive` phase has its own resume gate rules (section 3.4).
 
 ### 5. Dry-run and confirmation messaging
 File: `cli/src/replace.rs`
@@ -148,8 +144,7 @@ Add tests for:
 9. shared helper calls conversion before remove when projected remaining count is 1.
 10. shared helper skips conversion when projected remaining count > 1.
 11. shared helper attempts `cryptsetup close` after successful remove and surfaces warning-only behavior on close failure.
-12. resume gate relaxes `pool_fingerprint` and `secondary_target_available` for `Replace` + `ReplaceEvictDead` + live path; rejects for all other (op, phase, path) combinations unchanged.
-13. live-path classification for that relaxation is derived from checkpoint pre-eviction fingerprint (old mapper present in `cp.pool_fingerprint.devices`), not current pool state or `missing_id` heuristic.
+12. resume gate relaxes `pool_fingerprint` and `secondary_target_available` for `ReplaceEvictLive`; rejects for all other phases unchanged.
 
 ### 2. Existing dead-path integration remains
 Files: `tests/7-replace-failed-disk.nix`, `tests/replace-failed-disk.py`
@@ -255,6 +250,6 @@ File: `docs/principles.md`
 1. `--old` does not need to exist in config; live pool membership is authoritative.
 2. Disk-map remains advisory only and is not used for `--old` target resolution.
 3. Checkpoint schema version remains unchanged.
-4. Existing `ReplaceEvictDead` phase name/value are retained for compatibility.
+4. `ReplaceEvictDead` handles missing/dead eviction; `ReplaceEvictLive` handles live eviction.
 5. Redundancy-loss confirmation phrase for replace is standardized as `replace without redundancy`.
 6. Shared present-device eviction helper is the canonical implementation for live remove semantics across commands.
