@@ -41,6 +41,9 @@ pub fn cmd_remove<R: CommandRunner + Sync>(
     progress: ProgressOutput,
 ) -> Result<(), RemoveError> {
     let (config, config_raw) = config_read_raw(config_path)?;
+    let disk_map_state = disk_map::load_disk_map();
+    disk_map::validate_config_key_stability(&config, &disk_map_state)
+        .map_err(|e| RemoveError::Validation(e.to_string()))?;
 
     let pool = match probe_pool(runner, config.mount_point()) {
         Ok(p) => p,

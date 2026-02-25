@@ -54,6 +54,9 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     progress: ProgressOutput,
 ) -> Result<(), ReplaceError> {
     let (config, config_raw) = config_read_raw(config_path)?;
+    let disk_map_state = disk_map::load_disk_map();
+    disk_map::validate_config_key_stability(&config, &disk_map_state)
+        .map_err(|e| ReplaceError::Validation(e.to_string()))?;
 
     // --new must be in config
     let new_disk = config.disk_by_name(new_name).ok_or_else(|| {

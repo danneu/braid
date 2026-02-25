@@ -42,6 +42,7 @@ The old architecture used a structural code boundary — `luksFormat` was litera
 1. **Explicit operator intent**: user names a specific disk and confirms
 2. **Superblock guard**: before any `mkfs.btrfs`, the code opens the LUKS device and checks for an existing btrfs superblock. If found, the device is a returning member and `add` becomes a no-op.
 3. **Confirmation calibrated to risk**: destructive operations (LUKS format) require explicit confirmation; safe operations (opening existing LUKS, adding to pool) proceed after simple yes/no.
+4. **Disk key immutability in v1.0**: mutating commands validate config keys against recorded disk identity and reject key rename/reassignment. Operators must use explicit `replace` or `remove`+`add` workflows instead of renaming keys in config.
 
 The btrfs superblock check is the "idempotent format primitive" described in `safe-by-construction-reconciliation.md` as a potential revisit trigger.
 

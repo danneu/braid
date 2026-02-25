@@ -141,6 +141,8 @@ The new drive is added and rebalanced **before** the dead device is evicted. Red
 
 Braid maintains an advisory disk identity map at `/var/lib/braid/disk-map.json`, recording each disk's `name`, `by_id`, `luks_uuid`, and `devid`. This is updated automatically by `add`, `remove`, `replace`, and `remove-missing` commands. It is non-authoritative — live pool probing is always the source of truth — and is rebuilt by normal command executions.
 
+In v1.0, disk keys are immutable once recorded in this map. Renaming/reassigning a key in config is rejected by mutating commands. Keep the original key, or use explicit `braid replace` / `braid remove` + `braid add` workflows.
+
 ### Pool status
 
 ```

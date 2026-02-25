@@ -39,6 +39,9 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync>(
     yes: bool,
 ) -> Result<(), RemoveMissingError> {
     let (config, config_raw) = config_read_raw(config_path)?;
+    let disk_map_state = disk_map::load_disk_map();
+    disk_map::validate_config_key_stability(&config, &disk_map_state)
+        .map_err(|e| RemoveMissingError::Validation(e.to_string()))?;
 
     let pool = match probe_pool(runner, config.mount_point()) {
         Ok(p) => p,

@@ -53,6 +53,9 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     progress: ProgressOutput,
 ) -> Result<(), AddError> {
     let (config, config_raw) = config_read_raw(config_path)?;
+    let disk_map_state = disk_map::load_disk_map();
+    disk_map::validate_config_key_stability(&config, &disk_map_state)
+        .map_err(|e| AddError::Validation(e.to_string()))?;
 
     let disk = config.disk_by_name(name).ok_or_else(|| {
         let available: Vec<_> = config.names().into_iter().map(|s| s.as_str()).collect();
