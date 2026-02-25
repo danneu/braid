@@ -6,8 +6,6 @@ use ratatui::widgets::{Block, Paragraph};
 
 use crate::tui::app::{Model, PoolState, PoolStatus};
 
-const BAR_WIDTH: usize = 28;
-
 fn format_bytes(bytes: u64) -> String {
     const TIB: f64 = 1024.0 * 1024.0 * 1024.0 * 1024.0;
     const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
@@ -19,20 +17,17 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
-fn usage_bar(used: u64, total: u64) -> String {
-    let ratio = if total == 0 {
+fn usage_summary(used: u64, total: u64) -> String {
+    let percent = if total == 0 {
         0.0
     } else {
-        (used as f64 / total as f64).clamp(0.0, 1.0)
+        (used as f64 / total as f64) * 100.0
     };
-    let filled = (ratio * BAR_WIDTH as f64).round() as usize;
-    let empty = BAR_WIDTH - filled;
     format!(
-        "{}{}  {} / {}",
-        "\u{2588}".repeat(filled),
-        "\u{2591}".repeat(empty),
+        "{} / {} {:.0}%",
         format_bytes(used),
         format_bytes(total),
+        percent,
     )
 }
 
@@ -42,7 +37,7 @@ fn pool_view(pool: &PoolState) -> Paragraph<'_> {
             "Pool: {} {} {}",
             pool.mount_point, pool.profile, pool.health
         )),
-        Line::from(format!("Data: {}", usage_bar(pool.used, pool.total))),
+        Line::from(format!("Data: {}", usage_summary(pool.used, pool.total))),
     ];
     Paragraph::new(lines)
 }

@@ -4,7 +4,7 @@ expression: buffer_to_string(&terminal)
 ---
 ┌ braid ───────────────────────────────────────────────────┐
 │Pool: /mnt/storage RAID1 healthy                          │
-│Data: ███████████░░░░░░░░░░░░░░░░░  2.1 TiB / 5.4 TiB     │
+│Data: 2.1 TiB / 5.4 TiB 39%                               │
 │                                                          │
 │Disks                                                     │
 │  1  toshiba                                              │
