@@ -53,7 +53,7 @@ JSON"""
 
     map_before = machine.succeed("cat /var/lib/braid/disk-map.json")
     status, output = machine.execute(
-        "braid --config /tmp/renamed-config.json remove-missing --yes"
+        "braid --config /tmp/renamed-config.json remove-missing --yes 2>&1"
     )
     assert status != 0, f"expected non-zero exit, got {status}:\n{output}"
 
@@ -74,4 +74,3 @@ JSON"""
     assert map_after == map_before, "disk-map changed on rejected key rename"
 
 machine.shutdown()
-
