@@ -1,5 +1,21 @@
 # Test: checkpoint op-state strict resumability
 #
+# Intent:
+# - What behavior this test (tries to) verify.
+#   - Checkpoint/resume safety contracts hold end-to-end for intent CLI, including
+#     deterministic interruption handling and explicit fail-closed rejects.
+#
+# Why it exists:
+# - What risk/regression this protects against.
+#   - Protects against silent resume misbehavior, weak error surfaces, and
+#     non-deterministic interruption handling in long-running operations.
+#
+# Scenario:
+# - Real-world situation this models (user/system story). Especially the
+#   specific scenario that inspired this test (like a real world bug).
+#   - User runs `braid add/remove`, process is interrupted, then retried; system
+#     must either resume safely or reject with explicit checkpoint error codes.
+#
 # What: Validates strict checkpoint behavior for intent commands: deterministic
 # fail-after-checkpoint resume, strict config-drift rejection with stable error
 # code format, and bounded pause timeout behavior.

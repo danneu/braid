@@ -280,6 +280,12 @@ pub fn checkpoint_file_path() -> PathBuf {
     PathBuf::from(CHECKPOINT_FILE)
 }
 
+#[cfg(test)]
+pub fn checkpoint_test_env_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
 /// Compute a hash for the command arguments (for staleness detection).
 pub fn hash_args(parts: &[&str]) -> String {
     let mut hasher = Sha256::new();

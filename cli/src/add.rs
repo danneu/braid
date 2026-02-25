@@ -128,6 +128,7 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         eprintln!("Balancing to RAID1...");
         pool_balance_raid1(runner, config.mount_point(), progress)?;
         clear_checkpoint();
+        finalize_add_disk_map_best_effort(runner, config.mount_point(), name, &disk.by_id.0);
         eprintln!("Balance complete.");
         eprintln!("Done. {} is now part of the pool.", name);
         return Ok(());
@@ -251,18 +252,27 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         }
     }
 
-    // Update disk map (best effort — never fail the add)
-    if let Ok(pool_after) = probe_pool(runner, config.mount_point()) {
-        let mn = mapper_name(name);
-        if let Some(dev) = pool_after.devices.iter().find(|d| d.mapper == mn) {
-            disk_map::update_disk_map_best_effort(|map| {
-                disk_map::record_disk(map, name, &disk.by_id.0, &dev.luks_uuid.0, dev.devid);
-            });
-        }
-    }
+    finalize_add_disk_map_best_effort(runner, config.mount_point(), name, &disk.by_id.0);
 
     eprintln!("Done. {} is now part of the pool.", name);
     Ok(())
+}
+
+fn finalize_add_disk_map_best_effort<R: CommandRunner + Sync>(
+    runner: &R,
+    mount_point: &str,
+    name: &str,
+    by_id: &str,
+) {
+    // Best effort only: never fail add due to disk-map write issues.
+    if let Ok(pool_after) = probe_pool(runner, mount_point) {
+        let mn = mapper_name(name);
+        if let Some(dev) = pool_after.devices.iter().find(|d| d.mapper == mn) {
+            disk_map::update_disk_map_best_effort(|map| {
+                disk_map::record_disk(map, name, by_id, &dev.luks_uuid.0, dev.devid);
+            });
+        }
+    }
 }
 
 fn compile_add_steps(
@@ -348,15 +358,14 @@ fn add_confirm_message(name: &str, by_id: &str) -> String {
 mod tests {
     use super::*;
     use crate::checkpoint::{
-        OpArgs, OpKind, Phase, PoolFingerprint, SystemClock, TargetSnapshot, new_checkpoint,
-        save_checkpoint_atomic,
+        OpArgs, OpKind, Phase, PoolFingerprint, SystemClock, TargetSnapshot,
+        checkpoint_test_env_lock, new_checkpoint, save_checkpoint_atomic,
     };
     use crate::cmd::{CmdError, CmdRequest, CommandRunner, RawCommandOutput};
     use crate::probe::Filesystem;
     use crate::progress::ProgressOutput;
     use std::collections::BTreeMap;
     use std::path::Path;
-
     struct StaticFs {
         paths: Vec<String>,
     }
@@ -454,7 +463,20 @@ mod tests {
     }
 
     #[test]
+    // Intent:
+    // - What behavior this test (tries to) verify.
+    //   - If resume gate rejects a checkpoint, `braid add` fails before any mutating command runs.
+    //
+    // Why it exists:
+    // - What risk/regression this protects against.
+    //   - Prevents regressions where rejected checkpoints still trigger disk mutations.
+    //
+    // Scenario:
+    // - Real-world situation this models (user/system story). Especially the
+    //   specific scenario that inspired this test (like a real world bug).
+    //   - Operator retries `braid add` with a stale checkpoint from another command; CLI must fail closed with zero side effects.
     fn invariant_rejected_checkpoint_runs_no_mutating_requests() {
+        let _guard = checkpoint_test_env_lock().lock().unwrap();
         let tmp = tempfile::tempdir().unwrap();
         let config_path = tmp.path().join("config.json");
         let checkpoint_path = tmp.path().join("op-state.json");

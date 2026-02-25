@@ -202,3 +202,158 @@ fn compile_steps(missing_id: Option<u64>, _pool: &PoolState) -> Vec<RemoveMissin
     }
     steps
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::checkpoint::{
+        OpArgs, OpKind, Phase, PoolFingerprint, SystemClock, TargetSnapshot,
+        checkpoint_test_env_lock, new_checkpoint, save_checkpoint_atomic,
+    };
+    use crate::cmd::{CmdError, CmdRequest, CommandRunner, RawCommandOutput};
+    use std::collections::BTreeMap;
+    use std::path::Path;
+    struct GuardedRunner;
+
+    impl GuardedRunner {
+        fn out(cmd: &str, stdout: &str, exit_status: i32) -> RawCommandOutput {
+            RawCommandOutput {
+                cmd: cmd.to_owned(),
+                stdout: stdout.to_owned(),
+                stderr: String::new(),
+                exit_status,
+            }
+        }
+
+        fn is_mutating(req: &CmdRequest) -> bool {
+            matches!(
+                req,
+                CmdRequest::CryptsetupLuksOpen { .. }
+                    | CmdRequest::CryptsetupClose { .. }
+                    | CmdRequest::BtrfsDeviceAdd { .. }
+                    | CmdRequest::BtrfsDeviceRemove { .. }
+                    | CmdRequest::BtrfsDeviceRemoveMissing { .. }
+                    | CmdRequest::BtrfsDeviceScan { .. }
+                    | CmdRequest::BtrfsDeviceScanAll
+                    | CmdRequest::BtrfsBalanceRaid1 { .. }
+                    | CmdRequest::BtrfsBalanceSingle { .. }
+                    | CmdRequest::MkfsBtrfs { .. }
+                    | CmdRequest::Mount { .. }
+                    | CmdRequest::CryptsetupLuksFormat { .. }
+                    | CmdRequest::CryptsetupTestPassphrase { .. }
+                    | CmdRequest::CryptsetupLuksHeaderBackup { .. }
+            )
+        }
+    }
+
+    impl CommandRunner for GuardedRunner {
+        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
+            if Self::is_mutating(request) {
+                panic!("mutating request should not run before resume gate: {request:?}");
+            }
+
+            match request {
+                CmdRequest::FindmntJson { mount_point } => Ok(Self::out(
+                    &format!("findmnt --json --mountpoint {mount_point}"),
+                    r#"{"filesystems":[{"target":"/mnt/storage","source":"/dev/mapper/braid-disk1","fstype":"btrfs"}]}"#,
+                    0,
+                )),
+                CmdRequest::BtrfsFilesystemShow { mount_point } => Ok(Self::out(
+                    &format!("btrfs filesystem show {mount_point}"),
+                    "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\tTotal devices 2 FS bytes used 16.17MiB\n\tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n",
+                    0,
+                )),
+                CmdRequest::CryptsetupStatus { mapper } => Ok(Self::out(
+                    &format!("cryptsetup status {mapper}"),
+                    &format!("{mapper} is active and is in use.\n  type:    LUKS2\n  device:  /dev/vdb\n  mode:    read/write\n"),
+                    0,
+                )),
+                CmdRequest::CryptsetupLuksUuid { device } => Ok(Self::out(
+                    &format!("cryptsetup luksUUID {device}"),
+                    "11111111-1111-1111-1111-111111111111\n",
+                    0,
+                )),
+                _ => Err(CmdError::MissingMock),
+            }
+        }
+
+        fn run_with_stdin(
+            &self,
+            request: &CmdRequest,
+            _stdin: &[u8],
+        ) -> Result<RawCommandOutput, CmdError> {
+            self.run(request)
+        }
+    }
+
+    #[test]
+    // Intent:
+    // - What behavior this test (tries to) verify.
+    //   - If resume gate rejects a checkpoint, `braid remove-missing` fails before any mutating command runs.
+    //
+    // Why it exists:
+    // - What risk/regression this protects against.
+    //   - Prevents removing the wrong missing/dead member when checkpoint context is invalid.
+    //
+    // Scenario:
+    // - Real-world situation this models (user/system story). Especially the
+    //   specific scenario that inspired this test (like a real world bug).
+    //   - Pool is degraded and operator retries cleanup with stale checkpoint metadata; command must fail closed.
+    fn invariant_rejected_checkpoint_runs_no_mutating_requests() {
+        let _guard = checkpoint_test_env_lock().lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.json");
+        let checkpoint_path = tmp.path().join("op-state.json");
+
+        let mut disks = BTreeMap::new();
+        disks.insert(
+            "disk1".to_owned(),
+            serde_json::json!({ "by_id": "/dev/disk/by-id/virtio-disk1" }),
+        );
+        let config_json = serde_json::json!({
+            "disks": disks,
+            "mount_point": "/mnt/storage"
+        });
+        std::fs::write(&config_path, serde_json::to_vec(&config_json).unwrap()).unwrap();
+
+        unsafe {
+            std::env::set_var(
+                "BRAID_TEST_CHECKPOINT_FILE",
+                checkpoint_path.to_string_lossy().to_string(),
+            );
+        }
+
+        let checkpoint = new_checkpoint(
+            &SystemClock,
+            OpKind::Add,
+            OpArgs::add("disk1"),
+            Phase::AddBalanceRaid1,
+            "sha256:placeholder".to_owned(),
+            hash_args(&["add", "disk1"]),
+            PoolFingerprint {
+                devices: vec![],
+                missing_count: 0,
+                total_devices: 0,
+                mounted: false,
+            },
+            TargetSnapshot {
+                primary: Some("disk1".to_owned()),
+                secondary: None,
+                missing_id: None,
+            },
+        );
+        save_checkpoint_atomic(&checkpoint).unwrap();
+
+        let err = cmd_remove_missing(&GuardedRunner, Path::new(&config_path), None, false, true)
+            .expect_err("checkpoint mismatch should fail before mutation");
+
+        assert!(
+            err.to_string().contains("error[CHECKPOINT_OP_MISMATCH]:"),
+            "unexpected error: {err}"
+        );
+
+        unsafe {
+            std::env::remove_var("BRAID_TEST_CHECKPOINT_FILE");
+        }
+    }
+}
