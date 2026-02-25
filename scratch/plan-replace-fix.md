@@ -7,6 +7,14 @@ This plan is now committed to a specific implementation pivot: **`replace` must 
 
 This plan includes coordinated updates to code, tests, and docs/decision records to keep architecture authority and behavior aligned.
 
+## Implementor Directives (Mandatory)
+1. **Mandatory pivot:** implement live-old eviction through one shared primitive used by both `remove` and `replace`.
+2. Do not add bespoke live-eviction logic inside `replace`.
+3. Keep checkpoint schema/version unchanged; keep `Phase::ReplaceEvictDead` name/value.
+4. Shared primitive must include **post-remove LUKS close** (`cryptsetup close <old-mapper>`) as best-effort warning-only behavior.
+5. Shared primitive must decide conversion need from **current live pool probe + target mapper**, not from caller-provided projected counts.
+6. Keep eviction resumability in a single replace eviction phase; do not add phase complexity unless strictly required.
+
 ## Locked Product Decisions
 1. `--old` validation: **pool-membership only** for live path (no config requirement for `--old`).
 2. Scope: support live replace in **all topologies**, including operations that end with a single-device pool.
@@ -53,13 +61,14 @@ Files: `cli/src/remove.rs`, `cli/src/replace.rs`, `cli/src/pool.rs` (or dedicate
 
 1. Extract present-device eviction behavior into a shared helper used by both commands.
 2. Helper contract must include:
-- target device path (`/dev/mapper/...`)
+- target mapper/device path (`/dev/mapper/...`)
 - mount point
-- projected post-eviction device count
 - progress output
 3. Helper behavior must be exactly:
-- if projected remaining count is 1: run profile conversion RAID1 -> single (`pool_balance_single`) before remove.
+- probe current pool state and determine if live removal would leave one device.
+- if removal would leave one device: run profile conversion RAID1 -> single (`pool_balance_single`) before remove.
 - then run `pool_remove_device` for the target mapper.
+- then run `cryptsetup close` for the target mapper (best effort; warn on failure, do not fail command).
 4. `remove` must switch to this helper (replace existing inline conversion/remove logic).
 5. `replace` live-path must call this helper instead of introducing bespoke live remove logic.
 
@@ -73,7 +82,7 @@ File: `cli/src/replace.rs`
 - checkpoint creation at `ReplaceBalanceRaid1`
 - balance RAID1
 2. Change eviction phase dispatch:
-- `Live`: compute projected post-eviction device count from current pool state and call shared present-device eviction helper.
+- `Live`: call shared present-device eviction helper (helper owns conversion decision from live probe).
 - `Devid`: existing `pool_remove_devid` path.
 - `Missing`: existing `pool_remove_missing` path.
 3. Keep checkpoint schema version unchanged.
@@ -85,8 +94,12 @@ Files: `cli/src/checkpoint.rs`, `cli/src/replace.rs`
 
 1. Preserve `ReplaceEvictDead` phase name/value for compatibility.
 2. Ensure resume remains deterministic when single-profile conversion is required before live remove.
-3. If additional phase granularity is added for conversion, do not bump schema version; treat it as additive phase support while continuing to accept existing checkpoints.
-4. Fail-closed behavior remains unchanged for topology/config/target drift.
+3. Keep replace resume logic in this phase and make eviction idempotent:
+- re-probe pool at eviction execution time.
+- if live target mapper already absent, skip remove/close and continue.
+- if target present, apply conversion/remove/close flow via shared helper.
+4. If additional phase granularity is added for conversion, do not bump schema version; treat it as additive phase support while continuing to accept existing checkpoints.
+5. Fail-closed behavior remains unchanged for topology/config/target drift.
 
 ### 5. Dry-run and confirmation messaging
 File: `cli/src/replace.rs`
@@ -125,6 +138,7 @@ Add tests for:
 8. no-redundancy confirmation trigger logic for live replace in single-device final topology.
 9. shared helper calls conversion before remove when projected remaining count is 1.
 10. shared helper skips conversion when projected remaining count > 1.
+11. shared helper attempts `cryptsetup close` after successful remove and surfaces warning-only behavior on close failure.
 
 ### 2. Existing dead-path integration remains
 Files: `tests/7-replace-failed-disk.nix`, `tests/replace-failed-disk.py`
@@ -168,6 +182,7 @@ Add subtests:
 1. existing replace interruption/resume still succeeds for dead/missing path.
 2. interruption/resume succeeds for live path without conversion requirement.
 3. interruption/resume succeeds for live path when conversion-before-evict is required.
+4. resumed live-evict path is idempotent when target is already absent at resume time.
 
 ### 6. Test file header convention (mandatory)
 All new test files must start with the required block comment describing:
@@ -213,8 +228,9 @@ File: `docs/principles.md`
 5. live old + `--missing-id` fails with actionable message.
 6. `old == new` fails with actionable message.
 7. checkpoint resume works for replace path after forced interruption, including conversion-before-evict live path.
-8. README and active decision docs match actual behavior and no longer describe replace as dead-only.
-9. Full test suite passes for impacted checks (`replace-failed-disk`, `replace-live-disk`, `braid-checkpoint-opstate`, Rust unit tests).
+8. live replace path fully releases old disk semantics: removal plus best-effort mapper close warning behavior.
+9. README and active decision docs match actual behavior and no longer describe replace as dead-only.
+10. Full test suite passes for impacted checks (`replace-failed-disk`, `replace-live-disk`, `braid-checkpoint-opstate`, Rust unit tests).
 
 ## Assumptions / Defaults
 1. `--old` does not need to exist in config; live pool membership is authoritative.

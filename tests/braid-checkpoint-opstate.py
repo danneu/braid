@@ -43,6 +43,13 @@ def add(name, env=""):
     return f"{prefix}braid --config {config_path} add {name} --yes"
 
 
+def remove(name, env=""):
+    prefix = ""
+    if env:
+        prefix = f"{env} "
+    return f"{prefix}braid --config {config_path} remove {name} --yes"
+
+
 def fail_with_stderr(cmd):
     return machine.fail(f"{cmd} 2>&1")
 
@@ -62,6 +69,17 @@ with subtest("Interrupted add leaves checkpoint and resume succeeds"):
     machine.fail("test -f /var/lib/braid/op-state.json")
     df_output = machine.succeed("btrfs fi df /mnt/storage")
     assert "RAID1" in df_output, f"expected RAID1 after resume:\n{df_output}"
+
+with subtest("Interrupted remove leaves checkpoint and resume succeeds"):
+    fail_with_stderr(remove("disk2", env="BRAID_TEST_FAIL_AFTER_CHECKPOINT=1"))
+    machine.succeed("test -f /var/lib/braid/op-state.json")
+    phase = machine.succeed("jq -r '.phase' /var/lib/braid/op-state.json").strip()
+    assert phase == "remove-start", f"unexpected phase: {phase}"
+
+    machine.succeed(remove("disk2"))
+    machine.fail("test -f /var/lib/braid/op-state.json")
+    fi_show = machine.succeed("btrfs fi show /mnt/storage")
+    assert "braid-disk2" not in fi_show, f"disk2 should be removed after resume:\n{fi_show}"
 
 with subtest("Config drift rejects checkpoint with stable error code format"):
     fail_with_stderr(add("disk3", env="BRAID_TEST_FAIL_AFTER_CHECKPOINT=1"))
