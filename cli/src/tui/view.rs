@@ -61,7 +61,7 @@ fn pool_view(pool: &PoolState, unit: ByteUnit) -> Paragraph<'_> {
     let lines = vec![
         Line::from(format!("Path: {} ({})", pool.mount_point, pool.health)),
         Line::from(format!(
-            "Usage: {:.0}% - {} / {} {}",
+            "Usage: {:.0}% ({} / {} {})",
             percent(pool.used, pool.total),
             unit.format(pool.used),
             unit.format(pool.total),
@@ -134,47 +134,50 @@ pub fn view(model: &Model, frame: &mut Frame) {
     let inner = outer.inner(area);
     frame.render_widget(outer, area);
 
-    let pool_lines: u16 = match &model.pool {
+    let pool_detail_lines: u16 = match &model.pool {
         PoolStatus::Mounted(_) => 2,
         PoolStatus::Loading | PoolStatus::NotMounted | PoolStatus::Error(_) => 1,
     };
 
     let chunks = Layout::vertical([
-        Constraint::Length(pool_lines),
-        Constraint::Length(1), // separator
-        Constraint::Length(1), // "Disks" header
-        Constraint::Min(1),    // disk table
-        Constraint::Length(1),
+        Constraint::Length(1),                 // "Pool" header
+        Constraint::Length(pool_detail_lines), // pool details
+        Constraint::Length(1),                 // separator
+        Constraint::Length(1),                 // "Disks" header
+        Constraint::Min(1),                    // disk table
+        Constraint::Length(1),                 // footer
     ])
     .split(inner);
+
+    frame.render_widget(Paragraph::new("Pool"), chunks[0]);
 
     match &model.pool {
         PoolStatus::Loading => {
             frame.render_widget(
-                Paragraph::new("Pool: loading...").style(Style::default().fg(Color::DarkGray)),
-                chunks[0],
+                Paragraph::new("loading...").style(Style::default().fg(Color::DarkGray)),
+                chunks[1],
             );
         }
         PoolStatus::NotMounted => {
             frame.render_widget(
-                Paragraph::new("Pool: not mounted").style(Style::default().fg(Color::Yellow)),
-                chunks[0],
+                Paragraph::new("not mounted").style(Style::default().fg(Color::Yellow)),
+                chunks[1],
             );
         }
         PoolStatus::Mounted(pool) => {
-            frame.render_widget(pool_view(pool, page_unit), chunks[0]);
+            frame.render_widget(pool_view(pool, page_unit), chunks[1]);
         }
         PoolStatus::Error(msg) => {
             frame.render_widget(
-                Paragraph::new(format!("Pool error: {msg}")).style(Style::default().fg(Color::Red)),
-                chunks[0],
+                Paragraph::new(format!("error: {msg}")).style(Style::default().fg(Color::Red)),
+                chunks[1],
             );
         }
     }
 
-    frame.render_widget(Paragraph::new("Disks"), chunks[2]);
+    frame.render_widget(Paragraph::new("Disks"), chunks[3]);
     let mut table_state = TableState::default().with_selected(Some(model.selected_disk));
-    frame.render_stateful_widget(disk_table(model, page_unit), chunks[3], &mut table_state);
+    frame.render_stateful_widget(disk_table(model, page_unit), chunks[4], &mut table_state);
 
     let footer = match model.probe_duration {
         Some(d) => format!("press q to quit  {}ms", d.as_millis()),
@@ -182,7 +185,7 @@ pub fn view(model: &Model, frame: &mut Frame) {
     };
     frame.render_widget(
         Paragraph::new(footer).style(Style::default().fg(Color::DarkGray)),
-        chunks[4],
+        chunks[5],
     );
 }
 
