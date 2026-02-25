@@ -127,6 +127,25 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         resume.as_ref().map(|cp| &cp.phase),
         Some(Phase::AddBalanceRaid1)
     ) {
+        // Verify passphrase against an existing pool member before resuming.
+        // A wrong passphrase must fail with a clear error and leave the
+        // checkpoint intact so the user can fix their env and retry.
+        let passphrase = read_passphrase(passphrase_file, passphrase_stdin)?;
+        if let Some(existing) = pool.devices.first() {
+            let status_raw = runner.run(&crate::cmd::CmdRequest::CryptsetupStatus {
+                mapper: existing.mapper.0.clone(),
+            })?;
+            let status = crate::parse::parse_cryptsetup_status(&status_raw)?;
+            if let Some(underlying) = status.device {
+                let ok = verify_passphrase(runner, &underlying, &passphrase)?;
+                if !ok {
+                    return Err(AddError::Validation(
+                        "passphrase does not match existing pool member. All disks must use the same passphrase."
+                            .into(),
+                    ));
+                }
+            }
+        }
         run_phase_hooks(&Phase::AddBalanceRaid1)?;
         eprintln!("Balancing to RAID1...");
         pool_balance_raid1(runner, config.mount_point(), progress)?;
