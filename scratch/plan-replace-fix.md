@@ -57,7 +57,7 @@ File: `cli/src/replace.rs`
 4. Add `old_name == new_name` validation early.
 
 ### 2. Shared present-device eviction primitive (Committed Pivot)
-Files: `cli/src/remove.rs`, `cli/src/replace.rs`, `cli/src/pool.rs` (or dedicated shared module)
+Files: `cli/src/remove.rs`, `cli/src/replace.rs`, `cli/src/pool.rs`
 
 1. Extract present-device eviction behavior into a shared helper used by both commands.
 2. Helper contract must include:
@@ -167,7 +167,7 @@ Scenarios in new VM test:
 5. Validate `--missing-id` rejection on live path.
 
 ### 4. New single-device-final-topology integration scenario (required)
-Files: include in `tests/26-replace-live-disk.nix` / `tests/replace-live-disk.py` or separate dedicated test pair
+Files: `tests/26-replace-live-disk.nix`, `tests/replace-live-disk.py`
 
 1. Start from topology where post-replace pool will end with one device.
 2. Execute live replace.
