@@ -76,6 +76,7 @@ pub enum Phase {
     RemoveMissingStart,
     ReplaceBalanceRaid1,
     ReplaceEvictDead,
+    ReplaceEvictLive,
 }
 
 impl Phase {
@@ -86,6 +87,7 @@ impl Phase {
             Phase::RemoveMissingStart => "remove-missing-start",
             Phase::ReplaceBalanceRaid1 => "replace-balance-raid1",
             Phase::ReplaceEvictDead => "replace-evict-dead",
+            Phase::ReplaceEvictLive => "replace-evict-live",
         }
     }
 
@@ -97,6 +99,7 @@ impl Phase {
                 | (OpKind::RemoveMissing, Phase::RemoveMissingStart)
                 | (OpKind::Replace, Phase::ReplaceBalanceRaid1)
                 | (OpKind::Replace, Phase::ReplaceEvictDead)
+                | (OpKind::Replace, Phase::ReplaceEvictLive)
         )
     }
 }
@@ -395,7 +398,12 @@ pub fn validate_resume(
         };
     }
 
-    if checkpoint.pool_fingerprint != live.pool_fingerprint {
+    // ReplaceEvictLive legitimately changes topology (device removed) and
+    // the eviction target may already be gone on resume, so skip strict
+    // fingerprint and secondary_target checks for that phase.
+    let is_live_evict = checkpoint.phase == Phase::ReplaceEvictLive;
+
+    if !is_live_evict && checkpoint.pool_fingerprint != live.pool_fingerprint {
         return ValidationDecision::Reject {
             error: CheckpointError::new(
                 CheckpointErrorCode::TopologyDrift,
@@ -413,7 +421,9 @@ pub fn validate_resume(
         };
     }
 
-    if !live.primary_target_available || matches!(live.secondary_target_available, Some(false)) {
+    if !live.primary_target_available
+        || (!is_live_evict && matches!(live.secondary_target_available, Some(false)))
+    {
         return ValidationDecision::Reject {
             error: CheckpointError::new(
                 CheckpointErrorCode::TargetMissing,
@@ -801,6 +811,97 @@ mod tests {
 
         let err = load_checkpoint_file(&path).unwrap_err();
         assert_eq!(err.code, CheckpointErrorCode::Corrupt);
+    }
+
+    #[test]
+    // Intent: ReplaceEvictLive phase skips topology drift check on resume.
+    // Why: after live eviction, the pool topology legitimately changes.
+    // Scenario: live replace interrupted during eviction, operator retries.
+    fn validate_resume_replace_evict_live_skips_topology_check() {
+        let pool = test_pool();
+        let mut cp = new_checkpoint(
+            &FixedClock {
+                value: "2026-01-01T00:00:00Z".to_owned(),
+            },
+            OpKind::Replace,
+            OpArgs::replace("old", "new", None),
+            Phase::ReplaceEvictLive,
+            "sha256:abc".to_owned(),
+            "args123".to_owned(),
+            PoolFingerprint::from_pool_state(&pool),
+            TargetSnapshot {
+                primary: Some("new".to_owned()),
+                secondary: Some("old".to_owned()),
+                missing_id: None,
+            },
+        );
+        // Change the fingerprint to simulate topology drift after eviction
+        cp.pool_fingerprint.total_devices = 99;
+
+        let invocation = InvocationCtx {
+            op: OpKind::Replace,
+            op_args: OpArgs::replace("old", "new", None),
+            args_hash: "args123".to_owned(),
+            config_hash: "sha256:abc".to_owned(),
+        };
+        // Live context has different topology (device already removed)
+        let live = LiveCtx {
+            pool_fingerprint: PoolFingerprint::from_pool_state(&pool),
+            primary_target_available: true,
+            secondary_target_available: Some(false), // old device may be gone
+        };
+
+        let result = validate_resume(&cp, &invocation, &live);
+        assert!(
+            matches!(result, ValidationDecision::ResumeFrom { .. }),
+            "expected ResumeFrom despite topology drift for ReplaceEvictLive, got: {result:?}"
+        );
+    }
+
+    #[test]
+    // Intent: ReplaceEvictDead still enforces strict topology check.
+    // Why: dead eviction doesn't change topology, so drift should reject.
+    // Scenario: regression guard — relaxation only applies to live eviction.
+    fn validate_resume_replace_evict_dead_strict_topology() {
+        let pool = test_pool();
+        let cp = new_checkpoint(
+            &FixedClock {
+                value: "2026-01-01T00:00:00Z".to_owned(),
+            },
+            OpKind::Replace,
+            OpArgs::replace("old", "new", None),
+            Phase::ReplaceEvictDead,
+            "sha256:abc".to_owned(),
+            "args123".to_owned(),
+            PoolFingerprint::from_pool_state(&pool),
+            TargetSnapshot {
+                primary: Some("new".to_owned()),
+                secondary: Some("old".to_owned()),
+                missing_id: None,
+            },
+        );
+
+        let mut different_pool = pool;
+        different_pool.total_devices = 99;
+        let invocation = InvocationCtx {
+            op: OpKind::Replace,
+            op_args: OpArgs::replace("old", "new", None),
+            args_hash: "args123".to_owned(),
+            config_hash: "sha256:abc".to_owned(),
+        };
+        let live = LiveCtx {
+            pool_fingerprint: PoolFingerprint::from_pool_state(&different_pool),
+            primary_target_available: true,
+            secondary_target_available: Some(true),
+        };
+
+        let result = validate_resume(&cp, &invocation, &live);
+        match result {
+            ValidationDecision::Reject { error } => {
+                assert_eq!(error.code, CheckpointErrorCode::TopologyDrift);
+            }
+            _ => panic!("expected topology drift reject for ReplaceEvictDead"),
+        }
     }
 
     #[test]

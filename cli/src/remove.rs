@@ -6,7 +6,7 @@ use crate::checkpoint::{
 use crate::cmd::CommandRunner;
 use crate::config::{config_hash, config_read_raw, mapper_name};
 use crate::disk_map;
-use crate::pool::{pool_balance_single, pool_remove_device};
+use crate::pool::evict_present_device;
 use crate::probe::{ProbeError, probe_pool};
 use crate::progress::ProgressOutput;
 use crate::types::*;
@@ -181,29 +181,7 @@ pub fn cmd_remove<R: CommandRunner + Sync>(
     }
     run_phase_hooks(&Phase::RemoveStart)?;
 
-    // btrfs RAID1 requires at least 2 devices. When removing a device would
-    // leave only 1, we must first convert the profile to single — otherwise
-    // btrfs device remove will refuse.
-    let remaining = pool.devices.len() - 1;
-    if remaining == 1 {
-        eprintln!("Converting pool from RAID1 to single profile...");
-        pool_balance_single(runner, config.mount_point(), progress)?;
-    }
-
-    let device = format!("/dev/mapper/{}", mn.0);
-    eprintln!("Removing {} from pool (data will migrate)...", name);
-    pool_remove_device(runner, &device, config.mount_point(), progress)?;
-
-    // Close LUKS mapper
-    let result = runner.run(&crate::cmd::CmdRequest::CryptsetupClose {
-        mapper: mn.0.clone(),
-    })?;
-    if result.exit_status != 0 {
-        eprintln!(
-            "Warning: failed to close LUKS mapper {} (exit {})",
-            mn, result.exit_status
-        );
-    }
+    evict_present_device(runner, &mn.0, config.mount_point(), progress)?;
 
     clear_checkpoint();
 

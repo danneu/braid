@@ -27,7 +27,7 @@ enum Commands {
     Remove(RemoveArgs),
     /// Remove a missing/dead device from the pool
     RemoveMissing(RemoveMissingArgs),
-    /// Replace a dead disk with a new one
+    /// Replace a disk with a new one
     Replace(ReplaceArgs),
     /// Show pool health and disk info
     Status(StatusArgs),
@@ -82,13 +82,13 @@ struct RemoveMissingArgs {
 
 #[derive(Debug, Args)]
 struct ReplaceArgs {
-    /// Name of the dead disk to replace
+    /// Name of the disk to replace
     #[arg(long, add = ArgValueCandidates::new(disk_name_candidates))]
     old: String,
     /// Name of the new replacement disk
     #[arg(long, add = ArgValueCandidates::new(disk_name_candidates))]
     new: String,
-    /// Target a specific missing device by btrfs devid
+    /// Target a specific missing device by btrfs devid (dead disk only)
     #[arg(long)]
     missing_id: Option<u64>,
     #[command(flatten)]

@@ -19,7 +19,7 @@ Replace plan/apply with five intent commands:
 | `braid add <name>` | Format + join pool, or join existing LUKS device | Destructive (new disk) or safe (existing LUKS) |
 | `braid remove <name>` | Migrate data off present disk, detach from pool | Long-running |
 | `braid remove-missing` | Remove a missing/dead device from the pool | Long-running |
-| `braid replace --old <name> --new <name>` | Add new, rebalance, then evict dead | Transactional (add-first ordering) |
+| `braid replace --old <name> --new <name>` | Add new, rebalance, then evict old (live or dead) | Transactional (add-first ordering) |
 | `braid status` | Display pool health and disk info | Read-only |
 
 ### Named disks
@@ -45,6 +45,13 @@ The old architecture used a structural code boundary — `luksFormat` was litera
 4. **Disk key immutability in v1.0**: mutating commands validate config keys against recorded disk identity and reject key rename/reassignment. Operators must use explicit `replace` or `remove`+`add` workflows instead of renaming keys in config.
 
 The btrfs superblock check is the "idempotent format primitive" described in `safe-by-construction-reconciliation.md` as a potential revisit trigger.
+
+### Replace safety constraints
+
+- `--old` accepts both live (present in pool) and dead/missing disks.
+- `--missing-id` is only valid when `--old` is dead/missing. Rejected with live `--old`.
+- Mixed state (live `--old` + pool has missing devices) is rejected — operator must run `braid remove-missing` first.
+- Live eviction uses a shared helper (also used by `remove`) that probes pool state to decide if RAID1→single conversion is needed.
 
 ### Resumability
 

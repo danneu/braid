@@ -122,7 +122,17 @@ sudo braid remove-missing --missing-id 3     # multiple missing: target by devid
 
 Use `braid status --verbose` to see device IDs.
 
-### Replace a failed drive
+### Replace a drive
+
+Replace works for both live and dead/missing disks. The new drive is added and rebalanced **before** the old device is evicted — redundancy never drops.
+
+**Live disk** (swap a working drive):
+
+```
+sudo braid replace --old ironwolf --new seagate
+```
+
+**Dead/missing disk** (after a drive failure):
 
 ```nix
 # Add replacement to config:
@@ -135,7 +145,7 @@ sudo nixos-rebuild switch
 sudo braid replace --old ironwolf --new seagate
 ```
 
-The new drive is added and rebalanced **before** the dead device is evicted. Redundancy never drops.
+If the pool has missing devices when you try a live replace, resolve them first with `braid remove-missing`. The `--missing-id` flag is only valid when the old disk is dead.
 
 ### Disk identity map
 

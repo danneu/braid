@@ -128,4 +128,68 @@ with subtest("Pause hook times out with deterministic error code"):
         f"expected pause timeout error code:\n{output}"
     )
 
+
+def replace(old, new, env=""):
+    prefix = (
+        f"BRAID_PASSPHRASE='{passphrase}' "
+        f"BRAID_LUKS_OPTS='{luks_opts}' "
+    )
+    if env:
+        prefix += f"{env} "
+    return f"{prefix}braid --config {config_path} replace --old {old} --new {new} --yes"
+
+
+# --- Live replace checkpoint tests ---
+# Rebuild a 2-disk pool for replace testing.
+
+with subtest("Setup for replace: rebuild 2-disk pool"):
+    write_config()
+    machine.succeed("rm -f /var/lib/braid/op-state.json")
+    # Earlier subtests left disk3 and disk4 in the pool. Remove them to get
+    # back to a clean state before testing replace.
+    fi_show = machine.succeed("btrfs fi show /mnt/storage")
+    if "braid-disk4" in fi_show:
+        machine.succeed(remove("disk4"))
+    if "braid-disk3" in fi_show:
+        machine.succeed(remove("disk3"))
+    fi_show = machine.succeed("btrfs fi show /mnt/storage")
+    if "braid-disk2" not in fi_show:
+        machine.succeed(add("disk2"))
+    df_output = machine.succeed("btrfs fi df /mnt/storage")
+    assert "RAID1" in df_output, f"expected RAID1 after setup:\n{df_output}"
+
+with subtest("Interrupted live replace leaves checkpoint and resume succeeds"):
+    fail_with_stderr(replace("disk2", "disk3", env="BRAID_TEST_FAIL_AFTER_CHECKPOINT=1"))
+    machine.succeed("test -f /var/lib/braid/op-state.json")
+    phase = machine.succeed("jq -r '.phase' /var/lib/braid/op-state.json").strip()
+    assert phase == "replace-balance-raid1", f"unexpected phase: {phase}"
+
+    machine.succeed(replace("disk2", "disk3"))
+    machine.fail("test -f /var/lib/braid/op-state.json")
+
+    fi_show = machine.succeed("btrfs fi show /mnt/storage")
+    assert "braid-disk2" not in fi_show, f"disk2 should be evicted after resume:\n{fi_show}"
+    assert "braid-disk3" in fi_show, f"disk3 should be in pool after resume:\n{fi_show}"
+
+    df_output = machine.succeed("btrfs fi df /mnt/storage")
+    assert "RAID1" in df_output, f"expected RAID1 after live replace:\n{df_output}"
+
+with subtest("Dead replace interruption/resume still works"):
+    # Simulate disk3 death, then replace with disk4.
+    machine.succeed("umount /mnt/storage")
+    machine.succeed("cryptsetup close braid-disk3")
+    machine.succeed("mount -o degraded /dev/mapper/braid-disk1 /mnt/storage")
+
+    fail_with_stderr(replace("disk3", "disk4", env="BRAID_TEST_FAIL_AFTER_CHECKPOINT=1"))
+    machine.succeed("test -f /var/lib/braid/op-state.json")
+    phase = machine.succeed("jq -r '.phase' /var/lib/braid/op-state.json").strip()
+    assert phase == "replace-balance-raid1", f"unexpected phase: {phase}"
+
+    machine.succeed(replace("disk3", "disk4"))
+    machine.fail("test -f /var/lib/braid/op-state.json")
+
+    fi_show = machine.succeed("btrfs fi show /mnt/storage")
+    assert "missing" not in fi_show.lower(), f"should have no missing devices:\n{fi_show}"
+    assert "braid-disk4" in fi_show, f"disk4 should be in pool:\n{fi_show}"
+
 machine.shutdown()

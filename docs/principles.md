@@ -13,7 +13,7 @@ Declare the disk in `braid.disks` (named attrset) before formatting it. `nixos-r
 ## 3. Safe-by-construction operations
 
 - `nixos-rebuild switch` is declarative and idempotent — always safe to run.
-- Each intent command (`add`, `remove`, `remove-missing`, `replace`) does exactly one thing with risk-appropriate confirmation.
+- Each intent command (`add`, `remove`, `remove-missing`, `replace`) does exactly one thing with risk-appropriate confirmation. `replace` handles both live and dead/missing old disks with add-first ordering.
 - Disk keys are immutable in v1.0 once recorded in braid state; key rename/reassignment is rejected by mutating commands and must use explicit `replace` or `remove`+`add` workflows.
 - `mkfs.btrfs` is gated on bootstrap only (no existing superblock).
 - An existing LUKS device or pool member is never reformatted — the btrfs superblock guard prevents accidental data loss.
