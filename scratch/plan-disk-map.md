@@ -49,12 +49,15 @@ Expected initial failures:
   - `DiskMap { schema_version, disks: BTreeMap<String, DiskMapEntry> }`
   - `DiskMapEntry { by_id, luks_uuid, devid, added_at }`
   - helpers:
-    - `load_disk_map() -> DiskMap` (best-effort; corrupted/unreadable => empty)
-    - `save_disk_map(&DiskMap) -> io::Result<()>` (tmp + rename)
+    - `load_disk_map() -> DiskMap` (production wrapper using `DISK_MAP_FILE`)
+    - `save_disk_map(&DiskMap) -> io::Result<()>` (production wrapper using `DISK_MAP_FILE`)
+    - `load_disk_map_at(path: &Path) -> DiskMap` (testable path-injected helper)
+    - `save_disk_map_at(path: &Path, map: &DiskMap) -> io::Result<()>` (testable path-injected helper; tmp + rename in same dir)
     - `record_disk(...)` (upsert)
     - `remove_disk(...)` (by name)
     - `remove_disks_by_devids(...)` (for remove-missing pruning)
 - Add unit tests from Step 1.
+- Unit tests must use `*_at(...)` helpers with temp paths, not `/var/lib/braid/disk-map.json`.
 
 **File: `cli/src/lib.rs`**
 
@@ -120,7 +123,7 @@ Expected initial failures:
 | `cli/src/add.rs` | Record new disk mapping after successful add |
 | `cli/src/remove.rs` | Remove disk mapping after successful remove |
 | `cli/src/replace.rs` | Remove old mapping + record new mapping after replace |
-| `cli/src/remove_missing.rs` | Prune mapping entries after successful missing-device eviction |
+| `cli/src/remove_missing.rs` | Existing file: prune mapping entries after successful missing-device eviction |
 | `tests/braid-remove-disk.py` | Add map assertions for add/remove/remove-missing flows |
 | `README.md` | Document advisory disk map |
 
