@@ -3,10 +3,10 @@ source: src/tui/view.rs
 expression: buffer_to_string(&terminal)
 ---
 ┌ braid ───────────────────────────────────────────────────┐
-│1 command(s) running                                      │
-│                                                          │
-│                                                          │
-│                                                          │
+│Disks                                                     │
+│  1  ata-Toshiba_MN07_XXXX                                │
+│  2  ata-Ironwolf_ST12_YYYY                               │
+│  3  ata-WDC_WD120_ZZZZ                                   │
 │                                                          │
 │                                                          │
 │                                                          │

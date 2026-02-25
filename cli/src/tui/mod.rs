@@ -7,6 +7,7 @@ mod state;
 mod view;
 
 use std::io;
+use std::path::Path;
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -15,10 +16,13 @@ use effect::execute_effect;
 use event::InputHandler;
 use view::view;
 
-pub fn run() -> io::Result<()> {
+use crate::config::config_read;
+
+pub fn run(config_path: &Path) -> io::Result<()> {
+    let config = config_read(config_path).map_err(|e| io::Error::other(e.to_string()))?;
     let mut terminal = ratatui::init();
     let (_input, cmd_tx, rx) = InputHandler::new();
-    let mut model = Model::default();
+    let mut model = Model::new(config.disks().to_vec());
     let result = run_loop(&mut terminal, &mut model, &rx, &cmd_tx);
     ratatui::restore();
     result

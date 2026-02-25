@@ -1,10 +1,22 @@
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Color, Style};
+use ratatui::text::Line;
 use ratatui::widgets::{Block, Paragraph};
 use ratatui::Frame;
 
 use crate::tui::app::Model;
-use crate::tui::state::CmdStatus;
+
+const BY_ID_PREFIX: &str = "/dev/disk/by-id/";
+
+fn disk_list(model: &Model) -> Paragraph<'_> {
+    let lines: Vec<Line> = std::iter::once(Line::from("Disks"))
+        .chain(model.disks.iter().enumerate().map(|(i, disk)| {
+            let label = disk.0.strip_prefix(BY_ID_PREFIX).unwrap_or(&disk.0);
+            Line::from(format!("  {}  {}", i + 1, label))
+        }))
+        .collect();
+    Paragraph::new(lines)
+}
 
 pub fn view(model: &Model, frame: &mut Frame) {
     let area = frame.area();
@@ -18,17 +30,7 @@ pub fn view(model: &Model, frame: &mut Frame) {
 
     let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(inner);
 
-    let content = if model.commands.is_empty() {
-        "No commands running.".to_string()
-    } else {
-        let running = model
-            .commands
-            .values()
-            .filter(|c| matches!(c.status, CmdStatus::Running))
-            .count();
-        format!("{running} command(s) running")
-    };
-    frame.render_widget(Paragraph::new(content), chunks[0]);
+    frame.render_widget(disk_list(model), chunks[0]);
 
     frame.render_widget(
         Paragraph::new("press q to quit").style(Style::default().fg(Color::DarkGray)),
@@ -39,10 +41,9 @@ pub fn view(model: &Model, frame: &mut Frame) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tui::state::{CmdStatus, CommandState};
+    use crate::types::ByIdPath;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
-    use std::collections::VecDeque;
 
     fn render(model: &Model, width: u16, height: u16) -> Terminal<TestBackend> {
         let backend = TestBackend::new(width, height);
@@ -65,24 +66,17 @@ mod tests {
         out
     }
 
-    #[test]
-    fn snapshot_default() {
-        let model = Model::default();
-        let terminal = render(&model, 60, 20);
-        insta::assert_snapshot!(buffer_to_string(&terminal));
+    fn sample_disks() -> Vec<ByIdPath> {
+        vec![
+            ByIdPath("/dev/disk/by-id/ata-Toshiba_MN07_XXXX".to_owned()),
+            ByIdPath("/dev/disk/by-id/ata-Ironwolf_ST12_YYYY".to_owned()),
+            ByIdPath("/dev/disk/by-id/ata-WDC_WD120_ZZZZ".to_owned()),
+        ]
     }
 
     #[test]
-    fn snapshot_with_running_command() {
-        let mut model = Model::default();
-        model.commands.insert(
-            1,
-            CommandState {
-                cmd: "braid status".to_string(),
-                status: CmdStatus::Running,
-                output: VecDeque::new(),
-            },
-        );
+    fn snapshot_disk_list() {
+        let model = Model::new(sample_disks());
         let terminal = render(&model, 60, 20);
         insta::assert_snapshot!(buffer_to_string(&terminal));
     }

@@ -4,17 +4,20 @@ use std::process::ExitStatus;
 
 use crate::tui::effect::Effect;
 use crate::tui::state::{CmdId, CmdStatus, CommandState, Stream, MAX_LINES};
+use crate::types::ByIdPath;
 
 pub struct Model {
     pub running: bool,
+    pub disks: Vec<ByIdPath>,
     pub commands: HashMap<CmdId, CommandState>,
     next_cmd_id: u64,
 }
 
-impl Default for Model {
-    fn default() -> Self {
+impl Model {
+    pub fn new(disks: Vec<ByIdPath>) -> Self {
         Self {
             running: true,
+            disks,
             commands: HashMap::new(),
             next_cmd_id: 0,
         }

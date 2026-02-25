@@ -208,7 +208,7 @@ fn main() {
             }
         }
         Commands::Tui => {
-            if let Err(e) = braid_cli::tui::run() {
+            if let Err(e) = braid_cli::tui::run(Path::new(&config_path)) {
                 eprintln!("error: {e}");
                 std::process::exit(1);
             }
