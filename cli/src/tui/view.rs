@@ -150,18 +150,26 @@ mod tests {
         ]
     }
 
+    macro_rules! snap {
+        ($value:expr) => {
+            insta::with_settings!({ prepend_module_to_snapshot => false }, {
+                insta::assert_snapshot!($value);
+            });
+        };
+    }
+
     #[test]
     fn snapshot_loading() {
         let model = Model::new_for_test(sample_disk_keys(), PoolStatus::Loading);
         let terminal = render(&model, 60, 20);
-        insta::assert_snapshot!(buffer_to_string(&terminal));
+        snap!(buffer_to_string(&terminal));
     }
 
     #[test]
     fn snapshot_not_mounted() {
         let model = Model::new_for_test(sample_disk_keys(), PoolStatus::NotMounted);
         let terminal = render(&model, 60, 20);
-        insta::assert_snapshot!(buffer_to_string(&terminal));
+        snap!(buffer_to_string(&terminal));
     }
 
     #[test]
@@ -175,7 +183,7 @@ mod tests {
         };
         let model = Model::new_for_test(sample_disk_keys(), PoolStatus::Mounted(pool));
         let terminal = render(&model, 60, 20);
-        insta::assert_snapshot!(buffer_to_string(&terminal));
+        snap!(buffer_to_string(&terminal));
     }
 
     #[test]
@@ -185,6 +193,6 @@ mod tests {
             PoolStatus::Error("command failed: findmnt exited 1".to_owned()),
         );
         let terminal = render(&model, 60, 20);
-        insta::assert_snapshot!(buffer_to_string(&terminal));
+        snap!(buffer_to_string(&terminal));
     }
 }
