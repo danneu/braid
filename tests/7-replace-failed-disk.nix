@@ -19,6 +19,11 @@ let
   initrdSshFixtureDir = pkgs.path + "/nixos/tests/initrd-network-ssh";
   disks = [ "disk1" "disk2" "disk3" ];
   mapperNames = map (d: "braid-${d}") disks;
+
+  # systemd escapes "-" as "\x2d" in unit instance names.
+  # Without this, dependencies silently don't match and the fixture never runs.
+  cryptsetupUnit = name:
+    "systemd-cryptsetup@${builtins.replaceStrings ["-"] ["\\x2d"] name}.service";
 in
 {
   name = "replace-failed-disk";
@@ -95,9 +100,9 @@ in
         # write test data, then brick disk3's LUKS header to simulate drive death.
         services.prepare-luks-btrfs-fixture = {
           description = "Prepare LUKS + btrfs RAID1 fixture with bricked disk3";
-          requiredBy = map (d: "systemd-cryptsetup@${d}.service") mapperNames;
+          requiredBy = map cryptsetupUnit mapperNames;
           before = [ "cryptsetup-pre.target" ]
-            ++ map (d: "systemd-cryptsetup@${d}.service") mapperNames;
+            ++ map cryptsetupUnit mapperNames;
           after = [ "systemd-udevd.service" ];
           unitConfig.DefaultDependencies = false;
           serviceConfig = {
@@ -161,8 +166,8 @@ in
         # After LUKS devices are unlocked, scan for btrfs devices.
         services.btrfs-device-scan = {
           description = "Scan for btrfs multi-device filesystems";
-          after = map (d: "systemd-cryptsetup@${d}.service") mapperNames;
-          wants = map (d: "systemd-cryptsetup@${d}.service") mapperNames;
+          after = map cryptsetupUnit mapperNames;
+          wants = map cryptsetupUnit mapperNames;
           before = [ "initrd-fs.target" ];
           wantedBy = [ "initrd-fs.target" ];
           unitConfig.DefaultDependencies = false;

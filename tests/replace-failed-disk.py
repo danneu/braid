@@ -40,11 +40,13 @@ with subtest("Unlock disk1 and disk2 over SSH, restart cryptsetup target"):
             f" || cryptsetup status braid-{name}\""
         )
 
-    # Restart cryptsetup target to unblock boot. The bricked disk3's unit
-    # will fail immediately (bad LUKS header), transitioning to a terminal
-    # state. Without this, disk3's unit stays "activating" (waiting for
-    # password) and After= on btrfs-device-scan blocks forever.
-    client.execute(f"{ssh_cmd} 'systemctl restart cryptsetup.target'")
+    # Restart each cryptsetup unit individually. Restarting the target alone
+    # does not restart the member units. disk3 fails immediately (bad LUKS
+    # header), while disk1/disk2 become active, so btrfs-device-scan can run.
+    for name in ["braid-disk1", "braid-disk2", "braid-disk3"]:
+        escaped = name.replace("-", "\\x2d")
+        unit = f"systemd-cryptsetup@{escaped}.service"
+        client.execute(f"{ssh_cmd} \"systemctl restart '{unit}'\"")
 
 with subtest("Server reaches full boot after degraded unlock"):
     server.wait_for_unit("multi-user.target", timeout=120)
