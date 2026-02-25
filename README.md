@@ -93,6 +93,8 @@ sudo braid apply                                              # open + create po
 
 The pool is live immediately. No redundancy yet — data is available but unprotected until a second drive is added.
 
+`braid apply` opens LUKS before planning, so `BRAID_PASSPHRASE` is needed even for a dry-run-like invocation. After reboot, a single `braid apply` re-opens all LUKS containers, assembles the pool, and applies any pending changes.
+
 ### Add a drive
 
 Edit config, rebuild, init the new disk, apply:
@@ -189,6 +191,8 @@ sudo braid apply --resume
 ```
 
 The checkpoint is validated against the current config — if the config changed since the interruption, resume is refused and you must start fresh.
+
+If the system rebooted between the interruption and resume (LUKS mappers are closed), `--resume` automatically invalidates the stale checkpoint, re-opens LUKS, and re-plans from scratch. Work already completed before the reboot (e.g., a balance) is reflected in the pool state, so the new plan skips it naturally.
 
 ### Temporarily absent disk
 

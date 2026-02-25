@@ -400,6 +400,23 @@ pub fn format_plan_human(report: &PlanReport) -> String {
         }
     }
 
+    // Detect ambiguous case: OPEN_LUKS + mkfs.btrfs shown together
+    let has_open_luks = report
+        .actions
+        .iter()
+        .any(|a| a.action_type == ActionType::OpenLuks);
+    let has_mkfs = report.actions.iter().any(|a| {
+        a.commands
+            .iter()
+            .any(|c| c.command.starts_with("mkfs.btrfs"))
+    });
+    if has_open_luks && has_mkfs {
+        out.push('\n');
+        out.push_str("Note: LUKS containers are closed — mkfs.btrfs shown above is worst-case only.\n");
+        out.push_str("      'braid apply' opens LUKS first, then re-probes. Existing pools will be\n");
+        out.push_str("      mounted, not formatted.\n");
+    }
+
     out.push('\n');
     if report.warnings.is_empty() {
         out.push_str("Warnings: none\n");

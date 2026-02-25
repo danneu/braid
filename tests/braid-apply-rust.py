@@ -502,4 +502,130 @@ with subtest("Failed action records error in checkpoint and history"):
         assert a["status"] == "completed", f"Expected completed: {a}"
         assert "error" not in a, f"Completed action has error key: {a}"
 
+# --- Subtest: Reboot scenario — all LUKS closed, fresh apply re-opens and mounts ---
+
+with subtest("Setup: ensure clean 3-disk RAID1 for reboot test"):
+    machine.succeed("rm -f /var/lib/braid/apply-state.json")
+    machine.succeed(write_config([
+        "/dev/disk/by-id/virtio-disk1",
+        "/dev/disk/by-id/virtio-disk2",
+        "/dev/disk/by-id/virtio-disk3",
+    ]))
+    machine.succeed(apply())
+    fi_show = machine.succeed("btrfs fi show /mnt/storage")
+    assert "virtio-disk1" in fi_show
+    assert "virtio-disk2" in fi_show
+    assert "virtio-disk3" in fi_show
+    machine.succeed("echo 'reboot canary' > /mnt/storage/reboot-test.txt && sync")
+
+with subtest("Reboot: LUKS closed, fresh apply re-opens and mounts"):
+    # Simulate reboot: unmount + close all mappers
+    machine.succeed("umount /mnt/storage")
+    machine.succeed("cryptsetup close virtio-disk1")
+    machine.succeed("cryptsetup close virtio-disk2")
+    machine.succeed("cryptsetup close virtio-disk3")
+    machine.succeed("rm -f /var/lib/braid/apply-state.json")
+
+    # Fresh apply — pre-phase should open LUKS, scan, mount
+    output = machine.succeed(apply())
+    print(f"Reboot apply output:\n{output}")
+
+    # Primary assertions
+    machine.succeed("mountpoint -q /mnt/storage")
+    content = machine.succeed("cat /mnt/storage/reboot-test.txt").strip()
+    assert content == "reboot canary", f"Data lost after reboot: '{content}'"
+
+    fi_show = machine.succeed("btrfs fi show /mnt/storage")
+    for name in ["virtio-disk1", "virtio-disk2", "virtio-disk3"]:
+        assert f"/dev/mapper/{name}" in fi_show, f"{name} missing:\n{fi_show}"
+
+    # Secondary assertion: no mkfs ran
+    assert "mkfs" not in output.lower(), f"mkfs should not run on reboot:\n{output}"
+    assert "bootstrap" not in output.lower(), f"bootstrap should not trigger:\n{output}"
+
+    # Second apply should be no-op
+    output2 = machine.succeed(apply())
+    assert "nothing to do" in output2.lower() or "no actions" in output2.lower(), (
+        f"Expected no-op after reboot apply:\n{output2}"
+    )
+
+# --- Subtest: Blocked-after-prephase — pre-phase runs even when plan is blocked ---
+
+with subtest("Blocked after prephase: LUKS opens but plan blocks"):
+    # Start from mounted 3-disk pool
+    machine.succeed("umount /mnt/storage")
+    machine.succeed("cryptsetup close virtio-disk1")
+    machine.succeed("cryptsetup close virtio-disk2")
+    machine.succeed("cryptsetup close virtio-disk3")
+    machine.succeed("rm -f /var/lib/braid/apply-state.json")
+
+    # Remove disk3 from config (triggers identity ambiguity → blocked)
+    machine.succeed(write_config([
+        "/dev/disk/by-id/virtio-disk1",
+        "/dev/disk/by-id/virtio-disk2",
+        "/dev/disk/by-id/virtio-disk99",
+    ]))
+
+    # Apply should exit 1 (blocked)
+    machine.fail(apply())
+
+    # Assert: pre-phase ran — LUKS mappers are open
+    machine.succeed("test -e /dev/mapper/virtio-disk1")
+    machine.succeed("test -e /dev/mapper/virtio-disk2")
+
+    # Assert: pool is mounted (pre-phase mounted it)
+    machine.succeed("mountpoint -q /mnt/storage")
+
+    # Assert: data intact
+    content = machine.succeed("cat /mnt/storage/reboot-test.txt").strip()
+    assert content == "reboot canary", f"Data lost: '{content}'"
+
+# --- Subtest: Resume with stale checkpoint after reboot → re-plans ---
+
+with subtest("Resume with stale checkpoint after reboot replans"):
+    # Restore config to 3-disk
+    machine.succeed(write_config([
+        "/dev/disk/by-id/virtio-disk1",
+        "/dev/disk/by-id/virtio-disk2",
+        "/dev/disk/by-id/virtio-disk3",
+    ]))
+    # Ensure clean state
+    machine.succeed("rm -f /var/lib/braid/apply-state.json")
+    machine.succeed(apply())
+
+    # Create a checkpoint, then simulate reboot
+    machine.succeed(write_config([
+        "/dev/disk/by-id/virtio-disk1",
+        "/dev/disk/by-id/virtio-disk2",
+        "/dev/disk/by-id/virtio-disk3",
+        "/dev/disk/by-id/virtio-disk4",
+    ]))
+    machine.succeed(init_disk("/dev/disk/by-id/virtio-disk4", extra="--force", confirm="reformat this disk"))
+    cmd = (
+        f"BRAID_PASSPHRASE='{passphrase}' "
+        f"BRAID_TEST_FAIL_AFTER_ACTION=a1 "
+        f"braid apply --config /tmp/braid-config.json"
+    )
+    machine.fail(cmd)
+    machine.succeed("test -f /var/lib/braid/apply-state.json")
+
+    # Simulate reboot: unmount + close all mappers
+    machine.succeed("umount /mnt/storage")
+    machine.succeed("cryptsetup close virtio-disk1")
+    machine.succeed("cryptsetup close virtio-disk2")
+    machine.succeed("cryptsetup close virtio-disk3")
+    machine.succeed("cryptsetup close virtio-disk4 || true")
+
+    # Resume should detect stale checkpoint and re-plan
+    output = machine.succeed(apply("--resume"))
+    print(f"Resume-after-reboot output:\n{output}")
+
+    # Checkpoint should be cleaned up
+    machine.fail("test -f /var/lib/braid/apply-state.json")
+
+    # Pool should be healthy with all 4 disks
+    machine.succeed("mountpoint -q /mnt/storage")
+    fi_show = machine.succeed("btrfs fi show /mnt/storage")
+    assert "virtio-disk4" in fi_show, f"disk4 not in pool after resume-replan:\n{fi_show}"
+
 machine.shutdown()

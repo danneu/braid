@@ -34,6 +34,7 @@ pub enum CmdRequest {
     BtrfsDeviceRemove { device: String, mount_point: String },
     BtrfsDeviceRemoveMissing { mount_point: String },
     BtrfsDeviceScan { device: String },
+    BtrfsDeviceScanAll,
     BtrfsBalanceRaid1 { mount_point: String },
     BtrfsBalanceSingle { mount_point: String },
     MkfsBtrfs { device: String },
@@ -186,6 +187,9 @@ impl CommandRunner for RealRunner {
             }
             CmdRequest::BtrfsDeviceScan { device } => {
                 RealRunner::exec("btrfs", &["device", "scan", device])
+            }
+            CmdRequest::BtrfsDeviceScanAll => {
+                RealRunner::exec("btrfs", &["device", "scan"])
             }
             CmdRequest::BtrfsBalanceRaid1 { mount_point } => {
                 RealRunner::exec("btrfs", &["balance", "start", "-dconvert=raid1", "-mconvert=raid1", mount_point])
@@ -385,6 +389,7 @@ mod tests {
             CmdRequest::BtrfsDeviceScan {
                 device: "/dev/mapper/disk1".to_owned(),
             },
+            CmdRequest::BtrfsDeviceScanAll,
             CmdRequest::BtrfsBalanceRaid1 {
                 mount_point: "/mnt/storage".to_owned(),
             },
@@ -420,7 +425,7 @@ mod tests {
             },
         ];
 
-        assert_eq!(all.len(), 27);
+        assert_eq!(all.len(), 28);
     }
 
     #[test]

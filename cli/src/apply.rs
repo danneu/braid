@@ -339,6 +339,114 @@ fn execute_open_luks_with<R: CommandRunner>(
     }
 }
 
+// ---------------------------------------------------------------------------
+// LUKS pre-phase — open mappers + scan + mount before planning
+// ---------------------------------------------------------------------------
+
+fn luks_prephase<R: CommandRunner>(
+    runner: &R,
+    fs: &dyn Filesystem,
+    config: &Config,
+) -> Result<(), ApplyError> {
+    // Step 1: Open closed LUKS mappers (lazy passphrase).
+    let mut passphrase: Option<String> = None;
+
+    for disk in config.disks() {
+        if !fs.exists(&disk.0) {
+            continue; // absent disk, skip
+        }
+        let mapper = match mapper_name_for_by_id(disk) {
+            Some(mn) => mn,
+            None => continue,
+        };
+        let mapper_path = format!("/dev/mapper/{}", mapper.0);
+        if fs.exists(&mapper_path) {
+            continue; // already open
+        }
+
+        // Need to open — get passphrase on first use
+        let pass = match &passphrase {
+            Some(p) => p.clone(),
+            None => {
+                let p = std::env::var("BRAID_PASSPHRASE").map_err(|_| {
+                    ApplyError::ActionFailed {
+                        action_id: String::new(),
+                        action_type: "LUKS_PREPHASE".into(),
+                        detail: "BRAID_PASSPHRASE not set".into(),
+                    }
+                })?;
+                passphrase = Some(p.clone());
+                p
+            }
+        };
+
+        println!("  pre-phase: opening LUKS on {}", disk.0);
+        execute_open_luks_with(runner, fs, &disk.0, &pass)?;
+    }
+
+    // Step 2: Scan all — register all open btrfs members with kernel.
+    let _ = runner.run(&CmdRequest::BtrfsDeviceScanAll);
+
+    // Step 3: Mount pool if not already mounted.
+    let mount_point = config.mount_point();
+    let mounted = runner.run(&CmdRequest::MountpointCheck {
+        path: mount_point.to_owned(),
+    });
+    let is_mounted = matches!(mounted, Ok(ref out) if out.exit_status == 0);
+
+    if !is_mounted {
+        // Find first open mapper to use as mount device
+        let mount_device = config.disks().iter().find_map(|disk| {
+            let mn = mapper_name_for_by_id(disk)?;
+            let path = format!("/dev/mapper/{}", mn.0);
+            if fs.exists(&path) { Some(path) } else { None }
+        });
+
+        if let Some(device) = mount_device {
+            std::fs::create_dir_all(mount_point)
+                .map_err(|e| ApplyError::Io(format!("mkdir -p {mount_point}: {e}")))?;
+
+            let mount_result = runner.run(&CmdRequest::Mount {
+                device: device.clone(),
+                mount_point: mount_point.to_owned(),
+            });
+            match mount_result {
+                Ok(out) if out.exit_status == 0 => {
+                    println!("  pre-phase: mounted pool at {mount_point}");
+                }
+                Ok(out) => {
+                    match classify_mount_error(&out.stderr) {
+                        MountOutcome::MissingMembersDeferred => {
+                            println!(
+                                "  pre-phase: mount deferred (missing members), planner will handle"
+                            );
+                        }
+                        MountOutcome::HardError(msg) => {
+                            return Err(ApplyError::ActionFailed {
+                                action_id: String::new(),
+                                action_type: "LUKS_PREPHASE".into(),
+                                detail: format!(
+                                    "mount failed (exit {}): {}",
+                                    out.exit_status, msg
+                                ),
+                            });
+                        }
+                    }
+                }
+                Err(e) => {
+                    return Err(ApplyError::ActionFailed {
+                        action_id: String::new(),
+                        action_type: "LUKS_PREPHASE".into(),
+                        detail: format!("mount error: {e}"),
+                    });
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn execute_btrfs_add<R: CommandRunner>(
     runner: &R,
     target: &str,
@@ -365,9 +473,7 @@ fn execute_btrfs_add<R: CommandRunner>(
                 // Later ADD actions for other devices will see a mounted pool
                 // and use the normal scan+add path.
                 println!("  existing btrfs detected on {target}, mounting existing pool");
-                let _ = runner.run(&CmdRequest::BtrfsDeviceScan {
-                    device: target.to_owned(),
-                });
+                let _ = runner.run(&CmdRequest::BtrfsDeviceScanAll);
 
                 std::fs::create_dir_all(mount_point)
                     .map_err(|e| ApplyError::Io(format!("mkdir -p {mount_point}: {e}")))?;
@@ -1104,6 +1210,9 @@ fn fresh_apply<R: CommandRunner + Sync>(
     let (config, raw_text) = config_read_raw(config_path)?;
     let hash = config_hash(&raw_text);
 
+    // LUKS pre-phase: open mappers + scan + mount before planning
+    luks_prephase(runner, fs, &config)?;
+
     // Probe
     let config_disks: Vec<_> = config
         .disks()
@@ -1217,7 +1326,7 @@ fn resume_apply<R: CommandRunner + Sync>(
     fs: &dyn Filesystem,
 ) -> Result<(), ApplyError> {
     // Read checkpoint
-    let mut checkpoint = checkpoint_read()?;
+    let checkpoint = checkpoint_read()?;
 
     // Read config and check staleness
     let (config, raw_text) = config_read_raw(config_path)?;
@@ -1226,6 +1335,28 @@ fn resume_apply<R: CommandRunner + Sync>(
     if hash != checkpoint.config_hash {
         return Err(ApplyError::StaleCheckpoint);
     }
+
+    // Check if any config disk has a closed mapper (stale checkpoint from pre-reboot).
+    let has_closed_mapper = config.disks().iter().any(|disk| {
+        if !fs.exists(&disk.0) {
+            return false; // absent disk, not a reboot indicator
+        }
+        if let Some(mn) = mapper_name_for_by_id(disk) {
+            let mapper_path = format!("/dev/mapper/{}", mn.0);
+            // Device exists but mapper is closed → reboot happened
+            !fs.exists(&mapper_path)
+        } else {
+            false
+        }
+    });
+
+    if has_closed_mapper {
+        println!("Checkpoint stale after reboot, re-planning.");
+        let _ = std::fs::remove_file(CHECKPOINT_FILE);
+        return fresh_apply(config_path, flags, runner, fs);
+    }
+
+    let mut checkpoint = checkpoint;
 
     // Re-check confirmations
     check_confirmations(&checkpoint.confirmations)?;
@@ -1470,10 +1601,8 @@ mod tests {
                 ok_raw("btrfs filesystem show /dev/mapper/disk-1", "Label: none"),
             )
             .with_output(
-                CmdRequest::BtrfsDeviceScan {
-                    device: "/dev/mapper/disk-1".to_owned(),
-                },
-                ok_raw("btrfs device scan /dev/mapper/disk-1", ""),
+                CmdRequest::BtrfsDeviceScanAll,
+                ok_raw("btrfs device scan", ""),
             )
             .with_output(
                 CmdRequest::Mount {
@@ -1513,10 +1642,8 @@ mod tests {
                 ok_raw("btrfs filesystem show /dev/mapper/disk-1", "Label: none"),
             )
             .with_output(
-                CmdRequest::BtrfsDeviceScan {
-                    device: "/dev/mapper/disk-1".to_owned(),
-                },
-                ok_raw("btrfs device scan /dev/mapper/disk-1", ""),
+                CmdRequest::BtrfsDeviceScanAll,
+                ok_raw("btrfs device scan", ""),
             )
             .with_output(
                 CmdRequest::Mount {
@@ -1553,10 +1680,8 @@ mod tests {
                 ok_raw("btrfs filesystem show /dev/mapper/disk-1", "Label: none"),
             )
             .with_output(
-                CmdRequest::BtrfsDeviceScan {
-                    device: "/dev/mapper/disk-1".to_owned(),
-                },
-                ok_raw("btrfs device scan /dev/mapper/disk-1", ""),
+                CmdRequest::BtrfsDeviceScanAll,
+                ok_raw("btrfs device scan", ""),
             )
             .with_output(
                 CmdRequest::Mount {
@@ -1598,10 +1723,8 @@ mod tests {
                 ok_raw("btrfs filesystem show /dev/mapper/disk-1", "Label: none"),
             )
             .with_output(
-                CmdRequest::BtrfsDeviceScan {
-                    device: "/dev/mapper/disk-1".to_owned(),
-                },
-                ok_raw("btrfs device scan /dev/mapper/disk-1", ""),
+                CmdRequest::BtrfsDeviceScanAll,
+                ok_raw("btrfs device scan", ""),
             )
             .with_output(
                 CmdRequest::Mount {
@@ -1758,5 +1881,273 @@ mod tests {
             }
             other => panic!("expected ActionFailed, got: {other}"),
         }
+    }
+
+    // -- luks_prephase tests -------------------------------------------------
+
+    fn test_config_2disk() -> Config {
+        Config::new(
+            vec![
+                ByIdPath("/dev/disk/by-id/disk-1".into()),
+                ByIdPath("/dev/disk/by-id/disk-2".into()),
+            ],
+            "/mnt/storage".into(),
+        )
+        .unwrap()
+    }
+
+    fn test_config_3disk() -> Config {
+        Config::new(
+            vec![
+                ByIdPath("/dev/disk/by-id/disk-1".into()),
+                ByIdPath("/dev/disk/by-id/disk-2".into()),
+                ByIdPath("/dev/disk/by-id/disk-3".into()),
+            ],
+            "/mnt/storage".into(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn luks_prephase_opens_closed_mappers() {
+        std::env::set_var("BRAID_PASSPHRASE", "testpass");
+        let fs = MockFs::new(&[
+            "/dev/disk/by-id/disk-1",
+            "/dev/disk/by-id/disk-2",
+        ]);
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::CryptsetupIsLuks {
+                    device: "/dev/disk/by-id/disk-1".to_owned(),
+                },
+                ok_raw("cryptsetup isLuks", ""),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupLuksOpen {
+                    device: "/dev/disk/by-id/disk-1".to_owned(),
+                    mapper: "disk-1".to_owned(),
+                },
+                b"testpass".to_vec(),
+                ok_raw("cryptsetup luksOpen", ""),
+            )
+            .with_output(
+                CmdRequest::CryptsetupIsLuks {
+                    device: "/dev/disk/by-id/disk-2".to_owned(),
+                },
+                ok_raw("cryptsetup isLuks", ""),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupLuksOpen {
+                    device: "/dev/disk/by-id/disk-2".to_owned(),
+                    mapper: "disk-2".to_owned(),
+                },
+                b"testpass".to_vec(),
+                ok_raw("cryptsetup luksOpen", ""),
+            )
+            .with_output(
+                CmdRequest::BtrfsDeviceScanAll,
+                ok_raw("btrfs device scan", ""),
+            )
+            .with_output(
+                CmdRequest::MountpointCheck {
+                    path: "/mnt/storage".to_owned(),
+                },
+                ok_raw("mountpoint -q /mnt/storage", ""),
+            );
+
+        let config = test_config_2disk();
+        let result = luks_prephase(&runner, &fs, &config);
+        assert!(result.is_ok(), "luks_prephase should succeed: {result:?}");
+    }
+
+    #[test]
+    fn luks_prephase_skips_already_open() {
+        // Both mappers exist → no luksOpen issued, passphrase not needed
+        let fs = MockFs::new(&[
+            "/dev/disk/by-id/disk-1",
+            "/dev/mapper/disk-1",
+            "/dev/disk/by-id/disk-2",
+            "/dev/mapper/disk-2",
+        ]);
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::BtrfsDeviceScanAll,
+                ok_raw("btrfs device scan", ""),
+            )
+            .with_output(
+                CmdRequest::MountpointCheck {
+                    path: "/mnt/storage".to_owned(),
+                },
+                ok_raw("mountpoint -q /mnt/storage", ""),
+            );
+
+        let config = test_config_2disk();
+        // No BRAID_PASSPHRASE set — should still succeed since no open needed
+        let result = luks_prephase(&runner, &fs, &config);
+        assert!(result.is_ok(), "should skip without passphrase: {result:?}");
+    }
+
+    #[test]
+    fn luks_prephase_skips_absent_disks() {
+        std::env::set_var("BRAID_PASSPHRASE", "testpass");
+        // disk-1 absent, disk-2 present but closed
+        let fs = MockFs::new(&["/dev/disk/by-id/disk-2"]);
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::CryptsetupIsLuks {
+                    device: "/dev/disk/by-id/disk-2".to_owned(),
+                },
+                ok_raw("cryptsetup isLuks", ""),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupLuksOpen {
+                    device: "/dev/disk/by-id/disk-2".to_owned(),
+                    mapper: "disk-2".to_owned(),
+                },
+                b"testpass".to_vec(),
+                ok_raw("cryptsetup luksOpen", ""),
+            )
+            .with_output(
+                CmdRequest::BtrfsDeviceScanAll,
+                ok_raw("btrfs device scan", ""),
+            )
+            .with_output(
+                CmdRequest::MountpointCheck {
+                    path: "/mnt/storage".to_owned(),
+                },
+                ok_raw("mountpoint -q /mnt/storage", ""),
+            );
+
+        let config = test_config_2disk();
+        let result = luks_prephase(&runner, &fs, &config);
+        assert!(result.is_ok(), "should skip absent disk: {result:?}");
+    }
+
+    #[test]
+    fn luks_prephase_mounts_returning_pool() {
+        // Both mappers open, pool not mounted → mount succeeds
+        let tmp = std::env::temp_dir().join("braid-test-prephase-mount");
+        let mount_point = tmp.to_str().unwrap();
+        let fs = MockFs::new(&[
+            "/dev/disk/by-id/disk-1",
+            "/dev/mapper/disk-1",
+            "/dev/disk/by-id/disk-2",
+            "/dev/mapper/disk-2",
+        ]);
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::BtrfsDeviceScanAll,
+                ok_raw("btrfs device scan", ""),
+            )
+            .with_output(
+                CmdRequest::MountpointCheck {
+                    path: mount_point.to_owned(),
+                },
+                err_raw(&format!("mountpoint -q {mount_point}"), 1, ""),
+            )
+            .with_output(
+                CmdRequest::Mount {
+                    device: "/dev/mapper/disk-1".to_owned(),
+                    mount_point: mount_point.to_owned(),
+                },
+                ok_raw(&format!("mount /dev/mapper/disk-1 {mount_point}"), ""),
+            );
+
+        let config = Config::new(
+            vec![
+                ByIdPath("/dev/disk/by-id/disk-1".into()),
+                ByIdPath("/dev/disk/by-id/disk-2".into()),
+            ],
+            mount_point.into(),
+        )
+        .unwrap();
+        let result = luks_prephase(&runner, &fs, &config);
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert!(result.is_ok(), "mount should succeed: {result:?}");
+    }
+
+    #[test]
+    fn luks_prephase_mount_hard_error_propagates() {
+        let tmp = std::env::temp_dir().join("braid-test-prephase-hard");
+        let mount_point = tmp.to_str().unwrap();
+        let fs = MockFs::new(&[
+            "/dev/disk/by-id/disk-1",
+            "/dev/mapper/disk-1",
+        ]);
+        let config = Config::new(
+            vec![ByIdPath("/dev/disk/by-id/disk-1".into())],
+            mount_point.into(),
+        )
+        .unwrap();
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::BtrfsDeviceScanAll,
+                ok_raw("btrfs device scan", ""),
+            )
+            .with_output(
+                CmdRequest::MountpointCheck {
+                    path: mount_point.to_owned(),
+                },
+                err_raw(&format!("mountpoint -q {mount_point}"), 1, ""),
+            )
+            .with_output(
+                CmdRequest::Mount {
+                    device: "/dev/mapper/disk-1".to_owned(),
+                    mount_point: mount_point.to_owned(),
+                },
+                err_raw(
+                    &format!("mount /dev/mapper/disk-1 {mount_point}"),
+                    32,
+                    &format!("mount: {mount_point}: No such file or directory."),
+                ),
+            );
+
+        let result = luks_prephase(&runner, &fs, &config);
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert!(
+            matches!(result, Err(ApplyError::ActionFailed { .. })),
+            "hard mount error should propagate: {result:?}"
+        );
+    }
+
+    #[test]
+    fn luks_prephase_mount_missing_members_continues() {
+        let tmp = std::env::temp_dir().join("braid-test-prephase-missing");
+        let mount_point = tmp.to_str().unwrap();
+        let fs = MockFs::new(&[
+            "/dev/disk/by-id/disk-1",
+            "/dev/mapper/disk-1",
+        ]);
+        let config = Config::new(
+            vec![ByIdPath("/dev/disk/by-id/disk-1".into())],
+            mount_point.into(),
+        )
+        .unwrap();
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::BtrfsDeviceScanAll,
+                ok_raw("btrfs device scan", ""),
+            )
+            .with_output(
+                CmdRequest::MountpointCheck {
+                    path: mount_point.to_owned(),
+                },
+                err_raw(&format!("mountpoint -q {mount_point}"), 1, ""),
+            )
+            .with_output(
+                CmdRequest::Mount {
+                    device: "/dev/mapper/disk-1".to_owned(),
+                    mount_point: mount_point.to_owned(),
+                },
+                err_raw(
+                    &format!("mount /dev/mapper/disk-1 {mount_point}"),
+                    32,
+                    &format!("ERROR: cannot mount {mount_point}: missing devid 2"),
+                ),
+            );
+
+        let result = luks_prephase(&runner, &fs, &config);
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert!(result.is_ok(), "missing members should continue: {result:?}");
     }
 }
