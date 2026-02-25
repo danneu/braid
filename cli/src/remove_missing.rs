@@ -40,6 +40,7 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync>(
     missing_id: Option<u64>,
     dry_run: bool,
     yes: bool,
+    checkpoint_path: &Path,
 ) -> Result<(), RemoveMissingError> {
     let (config, config_raw) = config_read_raw(config_path)?;
     let disk_map_state = disk_map::load_disk_map();
@@ -106,6 +107,7 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync>(
             primary_target_available: pool.missing_count > 0,
             secondary_target_available: None,
         },
+        checkpoint_path,
     ) {
         ResumeGate::ResumeFrom(cp) => {
             eprintln!(
@@ -151,7 +153,7 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync>(
                 missing_id,
             },
         );
-        save_checkpoint_atomic(&cp)?;
+        save_checkpoint_atomic(&cp, checkpoint_path)?;
         maybe_fail_after_checkpoint()?;
     }
     run_phase_hooks(&Phase::RemoveMissingStart)?;
@@ -164,7 +166,7 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync>(
         pool_remove_missing(runner, config.mount_point())?;
     }
 
-    clear_checkpoint();
+    clear_checkpoint(checkpoint_path);
 
     // Update disk map (best effort — never fail the remove-missing)
     if let Some(devid) = missing_id {
@@ -207,8 +209,8 @@ fn compile_steps(missing_id: Option<u64>, _pool: &PoolState) -> Vec<RemoveMissin
 mod tests {
     use super::*;
     use crate::checkpoint::{
-        OpArgs, OpKind, Phase, PoolFingerprint, SystemClock, TargetSnapshot,
-        checkpoint_test_env_lock, new_checkpoint, save_checkpoint_atomic,
+        OpArgs, OpKind, Phase, PoolFingerprint, SystemClock, TargetSnapshot, new_checkpoint,
+        save_checkpoint_atomic,
     };
     use crate::cmd::{CmdError, CmdRequest, CommandRunner, RawCommandOutput};
     use std::collections::BTreeMap;
@@ -300,7 +302,6 @@ mod tests {
     //   specific scenario that inspired this test (like a real world bug).
     //   - Pool is degraded and operator retries cleanup with stale checkpoint metadata; command must fail closed.
     fn invariant_rejected_checkpoint_runs_no_mutating_requests() {
-        let _guard = checkpoint_test_env_lock().lock().unwrap();
         let tmp = tempfile::tempdir().unwrap();
         let config_path = tmp.path().join("config.json");
         let checkpoint_path = tmp.path().join("op-state.json");
@@ -315,13 +316,6 @@ mod tests {
             "mount_point": "/mnt/storage"
         });
         std::fs::write(&config_path, serde_json::to_vec(&config_json).unwrap()).unwrap();
-
-        unsafe {
-            std::env::set_var(
-                "BRAID_TEST_CHECKPOINT_FILE",
-                checkpoint_path.to_string_lossy().to_string(),
-            );
-        }
 
         let checkpoint = new_checkpoint(
             &SystemClock,
@@ -342,18 +336,21 @@ mod tests {
                 missing_id: None,
             },
         );
-        save_checkpoint_atomic(&checkpoint).unwrap();
+        save_checkpoint_atomic(&checkpoint, &checkpoint_path).unwrap();
 
-        let err = cmd_remove_missing(&GuardedRunner, Path::new(&config_path), None, false, true)
-            .expect_err("checkpoint mismatch should fail before mutation");
+        let err = cmd_remove_missing(
+            &GuardedRunner,
+            Path::new(&config_path),
+            None,
+            false,
+            true,
+            &checkpoint_path,
+        )
+        .expect_err("checkpoint mismatch should fail before mutation");
 
         assert!(
             err.to_string().contains("error[CHECKPOINT_OP_MISMATCH]:"),
             "unexpected error: {err}"
         );
-
-        unsafe {
-            std::env::remove_var("BRAID_TEST_CHECKPOINT_FILE");
-        }
     }
 }

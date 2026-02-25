@@ -58,6 +58,7 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     yes: bool,
     passphrase_file: Option<&Path>,
     progress: ProgressOutput,
+    checkpoint_path: &Path,
 ) -> Result<(), ReplaceError> {
     let (config, config_raw) = config_read_raw(config_path)?;
     let disk_map_state = disk_map::load_disk_map();
@@ -147,6 +148,7 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
                 Some(pool.missing_count > 0 || missing_id.is_some())
             },
         },
+        checkpoint_path,
     ) {
         ResumeGate::ResumeFrom(cp) => {
             eprintln!(
@@ -276,7 +278,7 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
                 missing_id,
             },
         );
-        save_checkpoint_atomic(&cp)?;
+        save_checkpoint_atomic(&cp, checkpoint_path)?;
         maybe_fail_after_checkpoint()?;
         checkpoint = Some(cp);
     }
@@ -293,7 +295,7 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         };
         if let Some(cp) = checkpoint.as_mut() {
             update_phase(cp, evict_phase.clone(), &SystemClock);
-            save_checkpoint_atomic(cp)?;
+            save_checkpoint_atomic(cp, checkpoint_path)?;
             maybe_fail_after_checkpoint()?;
         }
     }
@@ -315,7 +317,7 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         }
     }
 
-    clear_checkpoint();
+    clear_checkpoint(checkpoint_path);
 
     // Update disk map (best effort — never fail the replace)
     let pool_after = probe_pool(runner, config.mount_point()).ok();
@@ -550,8 +552,8 @@ fn apply_replace_disk_map_update(
 mod tests {
     use super::*;
     use crate::checkpoint::{
-        OpArgs, OpKind, Phase, PoolFingerprint, SystemClock, TargetSnapshot,
-        checkpoint_test_env_lock, new_checkpoint, save_checkpoint_atomic,
+        OpArgs, OpKind, Phase, PoolFingerprint, SystemClock, TargetSnapshot, new_checkpoint,
+        save_checkpoint_atomic,
     };
     use crate::cmd::{CmdError, CmdRequest, CommandRunner, RawCommandOutput};
     use crate::probe::Filesystem;
@@ -754,7 +756,6 @@ mod tests {
     //   specific scenario that inspired this test (like a real world bug).
     //   - Operator retries replace after interruption with mismatched checkpoint state; CLI must reject before touching devices.
     fn invariant_rejected_checkpoint_runs_no_mutating_requests() {
-        let _guard = checkpoint_test_env_lock().lock().unwrap();
         let tmp = tempfile::tempdir().unwrap();
         let config_path = tmp.path().join("config.json");
         let checkpoint_path = tmp.path().join("op-state.json");
@@ -773,13 +774,6 @@ mod tests {
             "mount_point": "/mnt/storage"
         });
         std::fs::write(&config_path, serde_json::to_vec(&config_json).unwrap()).unwrap();
-
-        unsafe {
-            std::env::set_var(
-                "BRAID_TEST_CHECKPOINT_FILE",
-                checkpoint_path.to_string_lossy().to_string(),
-            );
-        }
 
         let checkpoint = new_checkpoint(
             &SystemClock,
@@ -800,7 +794,7 @@ mod tests {
                 missing_id: None,
             },
         );
-        save_checkpoint_atomic(&checkpoint).unwrap();
+        save_checkpoint_atomic(&checkpoint, &checkpoint_path).unwrap();
 
         let fs = StaticFs {
             paths: vec!["/dev/disk/by-id/virtio-disk4".to_owned()],
@@ -816,6 +810,7 @@ mod tests {
             true,
             None,
             ProgressOutput::Off,
+            &checkpoint_path,
         )
         .expect_err("checkpoint mismatch should fail before mutation");
 
@@ -823,10 +818,6 @@ mod tests {
             err.to_string().contains("error[CHECKPOINT_OP_MISMATCH]:"),
             "unexpected error: {err}"
         );
-
-        unsafe {
-            std::env::remove_var("BRAID_TEST_CHECKPOINT_FILE");
-        }
     }
 
     fn two_device_pool() -> PoolState {
@@ -903,6 +894,8 @@ mod tests {
     // Scenario: operator typo — same name for both flags.
     fn old_equals_new_rejects() {
         // Test via the public entry point — this hits the early guard.
+        let tmp = tempfile::tempdir().unwrap();
+        let checkpoint_path = tmp.path().join("op-state.json");
         let err = cmd_replace(
             &GuardedRunner,
             &StaticFs { paths: vec![] },
@@ -914,6 +907,7 @@ mod tests {
             true,
             None,
             ProgressOutput::Off,
+            &checkpoint_path,
         );
         // cmd_replace will fail (config read), but the old==new check is before
         // config read, so test the resolve_eviction_target guard instead.

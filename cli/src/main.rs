@@ -2,6 +2,7 @@ use clap::{Args, CommandFactory, Parser, Subcommand};
 use clap_complete::engine::{ArgValueCandidates, CompletionCandidate};
 use std::path::Path;
 
+use braid_cli::checkpoint::CHECKPOINT_FILE;
 use braid_cli::cmd::RealRunner;
 use braid_cli::config::config_read;
 use braid_cli::doctor::cmd_doctor;
@@ -142,6 +143,7 @@ fn main() {
                 args.common.yes,
                 args.common.passphrase_file.as_deref(),
                 progress,
+                Path::new(CHECKPOINT_FILE),
             ) {
                 print_cli_error(&e.to_string());
                 std::process::exit(1);
@@ -161,6 +163,7 @@ fn main() {
                 args.common.dry_run,
                 args.common.yes,
                 progress,
+                Path::new(CHECKPOINT_FILE),
             ) {
                 print_cli_error(&e.to_string());
                 std::process::exit(1);
@@ -174,6 +177,7 @@ fn main() {
                 args.missing_id,
                 args.common.dry_run,
                 args.common.yes,
+                Path::new(CHECKPOINT_FILE),
             ) {
                 print_cli_error(&e.to_string());
                 std::process::exit(1);
@@ -198,6 +202,7 @@ fn main() {
                 args.common.yes,
                 args.common.passphrase_file.as_deref(),
                 progress,
+                Path::new(CHECKPOINT_FILE),
             ) {
                 print_cli_error(&e.to_string());
                 std::process::exit(1);

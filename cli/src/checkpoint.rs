@@ -276,19 +276,6 @@ pub enum ResumeGate {
     Reject(CheckpointError),
 }
 
-pub fn checkpoint_file_path() -> PathBuf {
-    if let Ok(path) = std::env::var("BRAID_TEST_CHECKPOINT_FILE") {
-        return PathBuf::from(path);
-    }
-    PathBuf::from(CHECKPOINT_FILE)
-}
-
-#[cfg(test)]
-pub fn checkpoint_test_env_lock() -> &'static std::sync::Mutex<()> {
-    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-    LOCK.get_or_init(|| std::sync::Mutex::new(()))
-}
-
 /// Compute a hash for the command arguments (for staleness detection).
 pub fn hash_args(parts: &[&str]) -> String {
     let mut hasher = Sha256::new();
@@ -441,9 +428,9 @@ pub fn resolve_resume_gate(
     config_raw: &str,
     invocation: InvocationCtx,
     live: LiveCtx,
+    checkpoint_path: &Path,
 ) -> ResumeGate {
-    let path = checkpoint_file_path();
-    let checkpoint = match load_checkpoint_file(&path) {
+    let checkpoint = match load_checkpoint_file(checkpoint_path) {
         Ok(Some(cp)) => cp,
         Ok(None) => return ResumeGate::NoCheckpoint,
         Err(e) => return ResumeGate::Reject(e),
@@ -461,15 +448,18 @@ pub fn resolve_resume_gate(
 }
 
 /// Save a checkpoint atomically.
-pub fn save_checkpoint_atomic(checkpoint: &CheckpointV1) -> Result<(), std::io::Error> {
+pub fn save_checkpoint_atomic(
+    checkpoint: &CheckpointV1,
+    checkpoint_path: &Path,
+) -> Result<(), std::io::Error> {
     let json = serde_json::to_string_pretty(checkpoint).map_err(std::io::Error::other)?;
-    atomic_write(checkpoint_file_path().as_path(), json.as_bytes())?;
+    atomic_write(checkpoint_path, json.as_bytes())?;
     Ok(())
 }
 
 /// Clear the checkpoint file on successful completion.
-pub fn clear_checkpoint() {
-    let _ = std::fs::remove_file(checkpoint_file_path());
+pub fn clear_checkpoint(checkpoint_path: &Path) {
+    let _ = std::fs::remove_file(checkpoint_path);
 }
 
 pub fn maybe_fail_after_checkpoint() -> Result<(), CheckpointError> {

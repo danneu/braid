@@ -54,6 +54,7 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     yes: bool,
     passphrase_file: Option<&Path>,
     progress: ProgressOutput,
+    checkpoint_path: &Path,
 ) -> Result<(), AddError> {
     let (config, config_raw) = config_read_raw(config_path)?;
     let disk_map_state = disk_map::load_disk_map();
@@ -106,6 +107,7 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             primary_target_available: !matches!(probed.state, ConfigDiskState::Absent),
             secondary_target_available: None,
         },
+        checkpoint_path,
     ) {
         ResumeGate::ResumeFrom(cp) => {
             eprintln!(
@@ -127,7 +129,7 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         run_phase_hooks(&Phase::AddBalanceRaid1)?;
         eprintln!("Balancing to RAID1...");
         pool_balance_raid1(runner, config.mount_point(), progress)?;
-        clear_checkpoint();
+        clear_checkpoint(checkpoint_path);
         finalize_add_disk_map_best_effort(runner, config.mount_point(), name, &disk.by_id.0);
         eprintln!("Balance complete.");
         eprintln!("Done. {} is now part of the pool.", name);
@@ -241,13 +243,13 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
                     missing_id: None,
                 },
             );
-            save_checkpoint_atomic(&cp)?;
+            save_checkpoint_atomic(&cp, checkpoint_path)?;
             maybe_fail_after_checkpoint()?;
 
             run_phase_hooks(&Phase::AddBalanceRaid1)?;
             eprintln!("Balancing to RAID1...");
             pool_balance_raid1(runner, config.mount_point(), progress)?;
-            clear_checkpoint();
+            clear_checkpoint(checkpoint_path);
             eprintln!("Balance complete.");
         }
     }
@@ -358,8 +360,8 @@ fn add_confirm_message(name: &str, by_id: &str) -> String {
 mod tests {
     use super::*;
     use crate::checkpoint::{
-        OpArgs, OpKind, Phase, PoolFingerprint, SystemClock, TargetSnapshot,
-        checkpoint_test_env_lock, new_checkpoint, save_checkpoint_atomic,
+        OpArgs, OpKind, Phase, PoolFingerprint, SystemClock, TargetSnapshot, new_checkpoint,
+        save_checkpoint_atomic,
     };
     use crate::cmd::{CmdError, CmdRequest, CommandRunner, RawCommandOutput};
     use crate::probe::Filesystem;
@@ -476,7 +478,6 @@ mod tests {
     //   specific scenario that inspired this test (like a real world bug).
     //   - Operator retries `braid add` with a stale checkpoint from another command; CLI must fail closed with zero side effects.
     fn invariant_rejected_checkpoint_runs_no_mutating_requests() {
-        let _guard = checkpoint_test_env_lock().lock().unwrap();
         let tmp = tempfile::tempdir().unwrap();
         let config_path = tmp.path().join("config.json");
         let checkpoint_path = tmp.path().join("op-state.json");
@@ -492,12 +493,6 @@ mod tests {
         });
         std::fs::write(&config_path, serde_json::to_vec(&config_json).unwrap()).unwrap();
 
-        unsafe {
-            std::env::set_var(
-                "BRAID_TEST_CHECKPOINT_FILE",
-                checkpoint_path.to_string_lossy().to_string(),
-            );
-        }
         let checkpoint = new_checkpoint(
             &SystemClock,
             OpKind::Remove,
@@ -517,7 +512,7 @@ mod tests {
                 missing_id: None,
             },
         );
-        save_checkpoint_atomic(&checkpoint).unwrap();
+        save_checkpoint_atomic(&checkpoint, &checkpoint_path).unwrap();
 
         let fs = StaticFs {
             paths: vec!["/dev/disk/by-id/virtio-disk2".to_owned()],
@@ -531,6 +526,7 @@ mod tests {
             true,
             None,
             ProgressOutput::Off,
+            &checkpoint_path,
         )
         .expect_err("checkpoint mismatch should fail before mutation");
 
@@ -538,8 +534,5 @@ mod tests {
             err.to_string().contains("error[CHECKPOINT_OP_MISMATCH]:"),
             "unexpected error: {err}"
         );
-        unsafe {
-            std::env::remove_var("BRAID_TEST_CHECKPOINT_FILE");
-        }
     }
 }

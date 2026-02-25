@@ -42,6 +42,7 @@ pub fn cmd_remove<R: CommandRunner + Sync>(
     dry_run: bool,
     yes: bool,
     progress: ProgressOutput,
+    checkpoint_path: &Path,
 ) -> Result<(), RemoveError> {
     let (config, config_raw) = config_read_raw(config_path)?;
     let disk_map_state = disk_map::load_disk_map();
@@ -113,6 +114,7 @@ pub fn cmd_remove<R: CommandRunner + Sync>(
             primary_target_available: in_pool,
             secondary_target_available: None,
         },
+        checkpoint_path,
     ) {
         ResumeGate::ResumeFrom(cp) => {
             eprintln!(
@@ -176,14 +178,14 @@ pub fn cmd_remove<R: CommandRunner + Sync>(
                 missing_id: None,
             },
         );
-        save_checkpoint_atomic(&cp)?;
+        save_checkpoint_atomic(&cp, checkpoint_path)?;
         maybe_fail_after_checkpoint()?;
     }
     run_phase_hooks(&Phase::RemoveStart)?;
 
     evict_present_device(runner, &mn.0, config.mount_point(), progress)?;
 
-    clear_checkpoint();
+    clear_checkpoint(checkpoint_path);
 
     // Update disk map (best effort — never fail the remove)
     disk_map::update_disk_map_best_effort(|map| {
@@ -235,8 +237,8 @@ fn compile_remove_present_steps(
 mod tests {
     use super::*;
     use crate::checkpoint::{
-        OpArgs, OpKind, Phase, PoolFingerprint, SystemClock, TargetSnapshot,
-        checkpoint_test_env_lock, new_checkpoint, save_checkpoint_atomic,
+        OpArgs, OpKind, Phase, PoolFingerprint, SystemClock, TargetSnapshot, new_checkpoint,
+        save_checkpoint_atomic,
     };
     use crate::cmd::{CmdError, CmdRequest, CommandRunner, RawCommandOutput};
     use crate::progress::ProgressOutput;
@@ -416,7 +418,6 @@ mod tests {
     //   specific scenario that inspired this test (like a real world bug).
     //   - An interrupted operation leaves stale state; operator reruns `remove` and command must reject before any mutation.
     fn invariant_rejected_checkpoint_runs_no_mutating_requests() {
-        let _guard = checkpoint_test_env_lock().lock().unwrap();
         let tmp = tempfile::tempdir().unwrap();
         let config_path = tmp.path().join("config.json");
         let checkpoint_path = tmp.path().join("op-state.json");
@@ -435,13 +436,6 @@ mod tests {
             "mount_point": "/mnt/storage"
         });
         std::fs::write(&config_path, serde_json::to_vec(&config_json).unwrap()).unwrap();
-
-        unsafe {
-            std::env::set_var(
-                "BRAID_TEST_CHECKPOINT_FILE",
-                checkpoint_path.to_string_lossy().to_string(),
-            );
-        }
 
         let checkpoint = new_checkpoint(
             &SystemClock,
@@ -462,7 +456,7 @@ mod tests {
                 missing_id: None,
             },
         );
-        save_checkpoint_atomic(&checkpoint).unwrap();
+        save_checkpoint_atomic(&checkpoint, &checkpoint_path).unwrap();
 
         let err = cmd_remove(
             &GuardedRunner,
@@ -471,6 +465,7 @@ mod tests {
             false,
             true,
             ProgressOutput::Off,
+            &checkpoint_path,
         )
         .expect_err("checkpoint mismatch should fail before mutation");
 
@@ -478,10 +473,6 @@ mod tests {
             err.to_string().contains("error[CHECKPOINT_OP_MISMATCH]:"),
             "unexpected error: {err}"
         );
-
-        unsafe {
-            std::env::remove_var("BRAID_TEST_CHECKPOINT_FILE");
-        }
     }
 
     #[test]
@@ -498,7 +489,6 @@ mod tests {
     //   specific scenario that inspired this test (like a real world bug).
     //   - Operator removes one disk from a healthy two-disk pool and expects the operation to succeed end-to-end.
     fn remove_two_disk_pool_balances_single_before_device_remove() {
-        let _guard = checkpoint_test_env_lock().lock().unwrap();
         let tmp = tempfile::tempdir().unwrap();
         let config_path = tmp.path().join("config.json");
         let checkpoint_path = tmp.path().join("op-state.json");
@@ -518,13 +508,6 @@ mod tests {
         });
         std::fs::write(&config_path, serde_json::to_vec(&config_json).unwrap()).unwrap();
 
-        unsafe {
-            std::env::set_var(
-                "BRAID_TEST_CHECKPOINT_FILE",
-                checkpoint_path.to_string_lossy().to_string(),
-            );
-        }
-
         let log = Arc::new(Mutex::new(Vec::new()));
         let runner = RecordingRunner::new(log.clone());
         cmd_remove(
@@ -534,6 +517,7 @@ mod tests {
             false,
             true,
             ProgressOutput::Off,
+            &checkpoint_path,
         )
         .expect("remove should succeed");
 
@@ -551,9 +535,5 @@ mod tests {
             balance_idx < remove_idx,
             "expected balance-to-single before device-remove; calls: {calls:?}"
         );
-
-        unsafe {
-            std::env::remove_var("BRAID_TEST_CHECKPOINT_FILE");
-        }
     }
 }
