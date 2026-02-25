@@ -149,6 +149,14 @@ Files: `tests/7-replace-failed-disk.nix`, `tests/replace-failed-disk.py`
 1. Keep as regression test for degraded/missing replacement flow.
 2. Update wording/comments only where behavior text implies dead-only command semantics.
 
+### 2b. Remove regression coverage for shared eviction refactor (required)
+Files: `tests/9-braid-remove-disk.nix`, `tests/braid-remove-disk.py`
+
+1. Keep/remove-path coverage in the impacted run set because `remove` now depends on the shared present-device eviction helper.
+2. Assert no behavioral regression for:
+- conversion-before-remove when post-remove topology is single-device.
+- warning-only `cryptsetup close` behavior after successful remove.
+
 ### 3. New live-replace integration test
 Add files:
 - `tests/26-replace-live-disk.nix`
@@ -233,7 +241,7 @@ File: `docs/principles.md`
 7. checkpoint resume works for replace path after forced interruption, including conversion-before-evict live path.
 8. live replace path fully releases old disk semantics: removal plus best-effort mapper close warning behavior.
 9. README and active decision docs match actual behavior and no longer describe replace as dead-only.
-10. Full test suite passes for impacted checks (`replace-failed-disk`, `replace-live-disk`, `braid-checkpoint-opstate`, Rust unit tests).
+10. Full test suite passes for impacted checks (`replace-failed-disk`, `replace-live-disk`, `braid-checkpoint-opstate`, `braid-remove-disk`, Rust unit tests).
 
 ## Assumptions / Defaults
 1. `--old` does not need to exist in config; live pool membership is authoritative.
