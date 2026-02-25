@@ -4,7 +4,7 @@
 
 When a btrfs device goes missing (disk failure), `btrfs filesystem show` only reports the devid — there's no backward link to which physical disk (by-id path) or LUKS UUID it was. This makes it hard to know which bay to pull or what to pass to `braid replace --missing-id`.
 
-This adds a persistent map file at `/var/lib/braid/disk-map.json` that records `name → {by_id, luks_uuid, devid}` on every add/remove/replace. When a disk disappears, the map tells you exactly which physical disk it was.
+This adds a persistent map file at `/var/lib/braid/disk-map.json` that records `name → {by_id, luks_uuid, devid}` on every add/remove/replace/remove-missing. When a disk disappears, the map tells you exactly which physical disk it was.
 
 ## Format
 
@@ -69,12 +69,27 @@ After the final success message ("Done."):
 4. Save map
 5. On failure: warn to stderr
 
+### New: `cli/src/remove_missing.rs`
+
+After successful `remove-missing` execution:
+1. Re-probe the pool with `probe_pool()`
+2. Determine which device(s) were evicted:
+   - If `--missing-id <devid>` was used, remove map entries whose `devid` matches that value
+   - If plain `remove-missing` was used, remove map entries whose `devid` is no longer present in pool membership
+3. Save map
+4. On failure: warn to stderr (command success still stands)
+
+Notes:
+- This is best-effort cleanup: if map entries are stale or devids were reused, the pool remains authoritative.
+- If `remove-missing` fails, do not touch map state.
+
 ## Design decisions
 
 - **Advisory, not authoritative**: The map is best-effort. If it gets corrupted or out of sync, nothing breaks. Load failures return an empty map; save failures print a warning.
 - **Atomic writes**: Same tmp+rename pattern as checkpoint.rs.
 - **Same directory**: `/var/lib/braid/` alongside existing state files.
 - **Re-probe for devid**: After add, call `probe_pool` to get the btrfs-assigned devid rather than guessing. This is a few extra syscalls but is correct.
+- **remove-missing cleanup**: Update map only after successful pool eviction. For targeted eviction (`--missing-id`), delete by exact devid match; otherwise prune entries not present in the re-probed pool.
 - **No dry-run writes**: Map is only updated when operations actually execute.
 
 ## Verification
@@ -82,3 +97,5 @@ After the final success message ("Done."):
 1. `make test-rust` — unit tests for load/save/record/remove
 2. Manual: `braid add` a disk, check `/var/lib/braid/disk-map.json` has the entry
 3. Manual: `braid remove` a disk, check entry is gone
+4. Manual: simulate missing disk, run `braid remove-missing --yes`, check stale missing entry is removed from map
+5. Manual: with multiple missing devices, run `braid remove-missing --yes --missing-id <devid>`, verify only matching map entry is removed
