@@ -13,7 +13,7 @@ pub enum ConfigBuildError {
     DuplicateByIdValue(String),
     #[error("mount_point must not be empty")]
     EmptyMountPoint,
-    #[error("invalid disk key '{0}': must start with a letter and contain only letters, digits, hyphens, or underscores")]
+    #[error("invalid disk key '{0}': must start with a letter, contain only letters, digits, hyphens, or underscores, and be at most 32 characters")]
     InvalidDiskKey(String),
 }
 
@@ -79,6 +79,9 @@ pub fn mapper_name(name: &str) -> MapperName {
 }
 
 fn is_valid_disk_key(name: &str) -> bool {
+    if name.len() > 32 {
+        return false;
+    }
     let mut chars = name.chars();
     match chars.next() {
         Some(c) if c.is_ascii_alphabetic() => {}
@@ -302,6 +305,35 @@ mod tests {
         let err = Config::new(disks, "/mnt/storage".to_owned())
             .expect_err("empty name should fail");
         assert!(matches!(err, ConfigBuildError::InvalidDiskKey(_)));
+    }
+
+    #[test]
+    fn rejects_disk_key_too_long() {
+        let name = "a".repeat(33);
+        let mut disks = BTreeMap::new();
+        disks.insert(
+            name,
+            DiskConfig {
+                by_id: ByIdPath("/dev/disk/by-id/a".to_owned()),
+            },
+        );
+        let err = Config::new(disks, "/mnt/storage".to_owned())
+            .expect_err("33-char name should fail");
+        assert!(matches!(err, ConfigBuildError::InvalidDiskKey(_)));
+    }
+
+    #[test]
+    fn accepts_disk_key_at_max_length() {
+        let name = "a".repeat(32);
+        let mut disks = BTreeMap::new();
+        disks.insert(
+            name,
+            DiskConfig {
+                by_id: ByIdPath("/dev/disk/by-id/a".to_owned()),
+            },
+        );
+        Config::new(disks, "/mnt/storage".to_owned())
+            .expect("32-char name should be valid");
     }
 
     #[test]

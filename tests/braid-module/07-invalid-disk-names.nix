@@ -57,6 +57,8 @@ pkgs.runCommand "braid-module-invalid-disk-names" {} ''
   ${checkReject "1startsWithDigit" { "1startsWithDigit" = { byId = "/dev/disk/by-id/a"; }; }}
   ${checkReject "-startsWithHyphen" { "-startsWithHyphen" = { byId = "/dev/disk/by-id/b"; }; }}
   ${checkReject "_startsWithUnderscore" { "_bad" = { byId = "/dev/disk/by-id/c"; }; }}
+  ${checkReject "tooLong33chars" { "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" = { byId = "/dev/disk/by-id/d"; }; }}
+  ${checkAccept "exactly32chars" { "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" = { byId = "/dev/disk/by-id/e"; }; }}
   ${checkAccept "valid-names" {
     toshiba = { byId = "/dev/disk/by-id/a"; };
     disk1 = { byId = "/dev/disk/by-id/b"; };
