@@ -8,8 +8,6 @@ use crate::parse::{
 use crate::probe::probe_pool;
 use crate::tui::model::{DiskUsage, PoolState};
 
-const BRAID_MAPPER_PREFIX: &str = "/dev/mapper/braid-";
-
 pub fn probe_pool_for_tui<R: CommandRunner>(
     runner: &R,
     mount_point: &str,
@@ -40,12 +38,21 @@ pub fn probe_pool_for_tui<R: CommandRunner>(
         .map_err(|e| e.to_string())?;
     let dev_usage = parse_btrfs_device_usage(&dev_usage_raw).map_err(|e| e.to_string())?;
 
+    // Map devid → disk key via probe_pool's devices (from btrfs filesystem show,
+    // which reports stable /dev/mapper/braid-* paths). btrfs device usage may
+    // report raw /dev/dm-N paths that don't match config disk names.
+    let devid_to_key: HashMap<u64, &str> = domain
+        .devices
+        .iter()
+        .filter_map(|d| d.mapper.0.strip_prefix("braid-").map(|key| (d.devid, key)))
+        .collect();
+
     let mut disk_usage = HashMap::new();
     for entry in &dev_usage.devices {
-        let disk_key = entry
-            .path
-            .strip_prefix(BRAID_MAPPER_PREFIX)
-            .unwrap_or(&entry.path);
+        let disk_key = match devid_to_key.get(&entry.devid) {
+            Some(key) => *key,
+            None => continue,
+        };
         let data: u64 = entry
             .allocations
             .iter()
@@ -80,7 +87,7 @@ pub fn probe_pool_for_tui<R: CommandRunner>(
     Ok(Some(PoolState {
         mount_point: mount_point.to_owned(),
         profile: profile.to_owned(),
-        health: "healthy".to_owned(),
+        health: if domain.missing_count > 0 { "degraded".to_owned() } else { "healthy".to_owned() },
         used: usage.used_bytes,
         total: usage.free_estimated_bytes + usage.used_bytes,
         disk_usage,
