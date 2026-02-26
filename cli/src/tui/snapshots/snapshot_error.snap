@@ -2,23 +2,10 @@
 source: src/tui/view.rs
 expression: buffer_to_string(&terminal)
 ---
-┌ braid ───────────────────────────────────────────────────┐
-│Pool                                                      │
-│error: command failed: findmnt exited 1                   │
-│                                                          │
-│Disks                                                     │
-│1  toshiba                                                │
-│2  ironwolf                                               │
-│3  wdc                                                    │
-│                                                          │
-│                                                          │
-│                                                          │
-│                                                          │
-│                                                          │
-│                                                          │
-│                                                          │
-│                                                          │
-│                                                          │
-│                                                          │
-│press q to quit                                           │
-└──────────────────────────────────────────────────────────┘
+ Pool ──────────────────────────────────────────────────────
+ error: command failed: findmnt exited 1
+ Disks ─────────────────────────────────────────────────────
+ 1  toshiba
+ 2  ironwolf
+ 3  wdc
+press q to quit
