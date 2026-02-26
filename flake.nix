@@ -93,6 +93,7 @@
           btrfs-grow1 = pkgs.testers.nixosTest (import ./tests/storage/btrfs-grow1.nix);
           btrfs-shrink = pkgs.testers.nixosTest (import ./tests/storage/btrfs-shrink.nix);
           btrfs-degrade = pkgs.testers.nixosTest (import ./tests/storage/btrfs-degrade.nix);
+          btrfs-enospc = pkgs.testers.nixosTest (import ./tests/storage/btrfs-enospc.nix);
           samba = pkgs.testers.nixosTest (import ./tests/samba.nix);
           remote-unlock = pkgs.testers.nixosTest (import ./tests/boot/remote-unlock.nix);
           degraded-boot = pkgs.testers.nixosTest (import ./tests/boot/degraded-boot.nix);
