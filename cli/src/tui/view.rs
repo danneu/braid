@@ -237,9 +237,16 @@ fn disk_table(model: &Model, unit: ByteUnit) -> Table<'_> {
             }
         })
         .collect();
+    let longest_name_len = model
+        .disk_keys
+        .iter()
+        .map(|k| k.len())
+        .max()
+        .unwrap_or(4)
+        .max(4) as u16;
     let widths = [
         Constraint::Length(2),
-        Constraint::Length(10),
+        Constraint::Length(longest_name_len),
         Constraint::Length(8),
         Constraint::Length(4),
         Constraint::Min(10),

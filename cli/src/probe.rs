@@ -165,13 +165,15 @@ pub fn probe_pool<R: CommandRunner>(
             Some(d) => d,
         };
 
-        let uuid_raw = runner.run(&CmdRequest::CryptsetupLuksUuid { device: underlying })?;
+        let uuid_raw =
+            runner.run(&CmdRequest::CryptsetupLuksUuid { device: underlying.clone() })?;
         let uuid_out = parse_cryptsetup_luks_uuid(&uuid_raw)?;
 
         devices.push(PoolDevice {
             mapper: MapperName(name),
             luks_uuid: uuid_out.uuid,
             devid: bdev.devid,
+            underlying,
         });
     }
 

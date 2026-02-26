@@ -10,10 +10,10 @@ Data  Encryption  Sharing
  Usage        39% (2.1 / 5.4 TiB)
  ███████████████████████
  Disks ─────────────────────────────────────────────────────
-   #  Name       SMART    Use  Allocated
- ▶ 1  toshiba    ok       25%  1.3 / 5.5 TiB
-   2  ironwolf   degraded 25%  1.3 / 5.5 TiB
-   3  wdc        ?        21%  0.8 / 3.6 TiB
+   #  Name     SMART    Use  Allocated
+ ▶ 1  toshiba  ok       25%  1.3 / 5.5 TiB
+   2  ironwolf degraded 25%  1.3 / 5.5 TiB
+   3  wdc      ?        21%  0.8 / 3.6 TiB
  Scrub ─────────────────────────────────────────────────────
  Last run     Tue Feb 24 02:00:07 2026 (11 min ago)
  Errors       0

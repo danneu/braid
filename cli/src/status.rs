@@ -68,6 +68,7 @@ pub struct DiskReport {
     pub by_id: String,
     pub luks_uuid: String,
     pub devid: Option<String>,
+    pub underlying: Option<String>,
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub errors: Option<DiskErrors>,
@@ -80,6 +81,58 @@ pub struct DiskErrors {
     pub flush: u64,
     pub corruption: u64,
     pub generation: u64,
+}
+
+// ---------------------------------------------------------------------------
+// Compact drive (always-on summary)
+// ---------------------------------------------------------------------------
+
+struct CompactDrive {
+    key: String,
+    device_short: String,
+    devid: Option<u64>,
+    status: &'static str,
+}
+
+fn build_compact_drives(pool: &PoolState, config: &Config) -> Vec<CompactDrive> {
+    let mut drives = Vec::new();
+
+    // Present pool devices
+    let pool_mappers: HashSet<&str> = pool.devices.iter().map(|d| d.mapper.0.as_str()).collect();
+    for pd in &pool.devices {
+        let key = pd
+            .mapper
+            .0
+            .strip_prefix("braid-")
+            .unwrap_or(&pd.mapper.0)
+            .to_owned();
+        let device_short = pd
+            .underlying
+            .strip_prefix("/dev/")
+            .unwrap_or(&pd.underlying)
+            .to_owned();
+        drives.push(CompactDrive {
+            key,
+            device_short,
+            devid: Some(pd.devid),
+            status: "present",
+        });
+    }
+
+    // Missing config keys (no matching pool device)
+    for (name, _disk) in config.disks() {
+        let expected_mapper = format!("braid-{name}");
+        if !pool_mappers.contains(expected_mapper.as_str()) {
+            drives.push(CompactDrive {
+                key: name.clone(),
+                device_short: "-".to_owned(),
+                devid: None,
+                status: "missing",
+            });
+        }
+    }
+
+    drives
 }
 
 // ---------------------------------------------------------------------------
@@ -233,7 +286,7 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
         if json {
             println!("{}", serde_json::to_string_pretty(&report)?);
         } else {
-            print!("{}", format_status_human(&report, None));
+            print!("{}", format_status_human(&report, None, None));
         }
         return Ok(());
     }
@@ -251,7 +304,10 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
     };
     let status = code.display_status(pool.missing_count);
 
-    // 5. Verbose context
+    // 5. Compact drives (always built when mounted)
+    let compact_drives = build_compact_drives(&pool, config);
+
+    // 6. Verbose context
     let verbose_ctx = if verbose {
         let config_disks: Vec<ConfigDisk> = config
             .disks()
@@ -269,7 +325,7 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
         None
     };
 
-    // 6. Assemble report
+    // 7. Assemble report
     let present_count = pool.total_devices.saturating_sub(pool.missing_count);
     let report = StatusReport {
         mount_point: config.mount_point().to_owned(),
@@ -287,7 +343,7 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
             .unwrap_or_default(),
     };
 
-    // 7. Output
+    // 8. Output
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
@@ -295,6 +351,7 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
             "{}",
             format_status_human(
                 &report,
+                Some(&compact_drives),
                 verbose_ctx.as_ref().map(|v| v.human_details.as_slice()),
             )
         );
@@ -460,6 +517,7 @@ fn build_disk_reports<R: CommandRunner>(
             by_id: by_id.clone(),
             luks_uuid: pd.luks_uuid.0.clone(),
             devid: Some(pd.devid.to_string()),
+            underlying: Some(pd.underlying.clone()),
             status: "present".to_owned(),
             errors: errors.clone(),
         });
@@ -496,6 +554,7 @@ fn build_disk_reports<R: CommandRunner>(
             by_id: cd.by_id_path.0.clone(),
             luks_uuid: String::new(),
             devid: None,
+            underlying: None,
             status: "missing".to_owned(),
             errors: None,
         });
@@ -522,7 +581,11 @@ fn build_disk_reports<R: CommandRunner>(
 // Human output formatting
 // ---------------------------------------------------------------------------
 
-fn format_status_human(report: &StatusReport, human_disks: Option<&[HumanDisk]>) -> String {
+fn format_status_human(
+    report: &StatusReport,
+    compact_drives: Option<&[CompactDrive]>,
+    human_disks: Option<&[HumanDisk]>,
+) -> String {
     let mut out = String::new();
 
     out.push_str(&format!("Pool:     {}\n", report.mount_point));
@@ -532,13 +595,18 @@ fn format_status_human(report: &StatusReport, human_disks: Option<&[HumanDisk]>)
         return out;
     }
 
-    // Drive count line
-    if let (Some(total), Some(missing)) = (report.total_devices, report.missing_count) {
-        if missing > 0 {
-            let present = total.saturating_sub(missing);
-            out.push_str(&format!("Drives:   {present} present, {missing} missing\n"));
-        } else {
-            out.push_str(&format!("Drives:   {total}\n"));
+    // Compact drive listing
+    if let Some(drives) = compact_drives {
+        out.push_str("Drives:\n");
+        for d in drives {
+            let devid_str = d
+                .devid
+                .map(|id| format!("devid={id}"))
+                .unwrap_or_else(|| "-".to_owned());
+            out.push_str(&format!(
+                "  {:<12} {:<4} {:<8} {}\n",
+                d.key, d.device_short, devid_str, d.status
+            ));
         }
     }
 
@@ -1177,6 +1245,7 @@ mod tests {
             by_id: "/dev/disk/by-id/disk1".to_owned(),
             luks_uuid: "11111111-1111-1111-1111-111111111111".to_owned(),
             devid: Some("1".to_owned()),
+            underlying: Some("/dev/vda".to_owned()),
             status: "present".to_owned(),
             errors: Some(DiskErrors {
                 read: 0,
@@ -1192,6 +1261,7 @@ mod tests {
             by_id: "/dev/disk/by-id/disk3".to_owned(),
             luks_uuid: String::new(),
             devid: None,
+            underlying: None,
             status: "missing".to_owned(),
             errors: None,
         };
@@ -1310,6 +1380,7 @@ mod tests {
                 by_id: "/dev/disk/by-id/disk1".to_owned(),
                 luks_uuid: "11111111-1111-1111-1111-111111111111".to_owned(),
                 devid: Some("1".to_owned()),
+                underlying: Some("/dev/vda".to_owned()),
                 status: "present".to_owned(),
                 errors: Some(DiskErrors {
                     read: 0,
@@ -1345,7 +1416,7 @@ mod tests {
             last_scrub: None,
             disks: vec![],
         };
-        let human = format_status_human(&report, None);
+        let human = format_status_human(&report, None, None);
         assert!(human.contains("not mounted"), "got:\n{human}");
         assert!(!human.contains("Capacity"), "got:\n{human}");
         assert!(!human.contains("Profile"), "got:\n{human}");
@@ -1370,9 +1441,18 @@ mod tests {
             last_scrub: Some("never".to_owned()),
             disks: vec![],
         };
-        let human = format_status_human(&report, None);
+        let compact = vec![CompactDrive {
+            key: "disk1".to_owned(),
+            device_short: "vda".to_owned(),
+            devid: Some(1),
+            status: "present",
+        }];
+        let human = format_status_human(&report, Some(&compact), None);
         assert!(human.contains("healthy"), "got:\n{human}");
-        assert!(human.contains("Drives:   1"), "got:\n{human}");
+        assert!(human.contains("Drives:"), "got:\n{human}");
+        assert!(human.contains("disk1"), "got:\n{human}");
+        assert!(human.contains("vda"), "got:\n{human}");
+        assert!(human.contains("present"), "got:\n{human}");
         assert!(human.contains("single"), "got:\n{human}");
         assert!(human.contains("Total:"), "got:\n{human}");
         assert!(human.contains("Used:"), "got:\n{human}");
@@ -1400,9 +1480,15 @@ mod tests {
             last_scrub: Some("never".to_owned()),
             disks: vec![],
         };
-        let human = format_status_human(&report, None);
+        let compact = vec![
+            CompactDrive { key: "disk1".into(), device_short: "vda".into(), devid: Some(1), status: "present" },
+            CompactDrive { key: "disk2".into(), device_short: "vdb".into(), devid: Some(2), status: "present" },
+            CompactDrive { key: "disk3".into(), device_short: "vdc".into(), devid: Some(3), status: "present" },
+        ];
+        let human = format_status_human(&report, Some(&compact), None);
         assert!(human.contains("healthy"), "got:\n{human}");
-        assert!(human.contains("Drives:   3"), "got:\n{human}");
+        assert!(human.contains("Drives:"), "got:\n{human}");
+        assert!(human.contains("disk1"), "got:\n{human}");
         assert!(human.contains("RAID1"), "got:\n{human}");
         assert!(human.contains("Total:"), "got:\n{human}");
         assert!(human.contains("scrub"), "got:\n{human}");
@@ -1428,12 +1514,18 @@ mod tests {
             last_scrub: Some("never".to_owned()),
             disks: vec![],
         };
-        let human = format_status_human(&report, None);
+        let compact = vec![
+            CompactDrive { key: "disk1".into(), device_short: "vda".into(), devid: Some(1), status: "present" },
+            CompactDrive { key: "disk2".into(), device_short: "vdb".into(), devid: Some(2), status: "present" },
+            CompactDrive { key: "disk3".into(), device_short: "-".into(), devid: None, status: "missing" },
+        ];
+        let human = format_status_human(&report, Some(&compact), None);
         assert!(
             human.contains("DEGRADED (1 missing device)"),
             "got:\n{human}"
         );
-        assert!(human.contains("2 present, 1 missing"), "got:\n{human}");
+        assert!(human.contains("missing"), "got:\n{human}");
+        assert!(human.contains("disk3"), "got:\n{human}");
     }
 
     #[test]
@@ -1455,7 +1547,7 @@ mod tests {
             last_scrub: Some("never".to_owned()),
             disks: vec![],
         };
-        let human = format_status_human(&report, None);
+        let human = format_status_human(&report, None, None);
         assert!(
             human.contains("DEGRADED (2 missing devices)"),
             "got:\n{human}"
@@ -1503,7 +1595,7 @@ mod tests {
             disks: vec![],
         };
 
-        let human = format_status_human(&report, Some(&human_disks));
+        let human = format_status_human(&report, None, Some(&human_disks));
         assert!(human.contains("present"), "got:\n{human}");
         assert!(human.contains("devid 1"), "got:\n{human}");
         assert!(human.contains("LUKS:"), "got:\n{human}");
@@ -1543,7 +1635,7 @@ mod tests {
             disks: vec![],
         };
 
-        let human = format_status_human(&report, Some(&human_disks));
+        let human = format_status_human(&report, None, Some(&human_disks));
         assert!(human.contains("MISSING"), "got:\n{human}");
         assert!(human.contains("not found"), "got:\n{human}");
         assert!(human.contains("device absent"), "got:\n{human}");
@@ -1586,7 +1678,7 @@ mod tests {
             disks: vec![],
         };
 
-        let human = format_status_human(&report, Some(&human_disks));
+        let human = format_status_human(&report, None, Some(&human_disks));
         assert!(human.contains("(unknown)"), "got:\n{human}");
     }
 

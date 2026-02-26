@@ -49,6 +49,7 @@ pub struct PoolDevice {
     pub mapper: MapperName,
     pub luks_uuid: LuksUuid,
     pub devid: u64,
+    pub underlying: String,
 }
 
 /// Pre-probed state of each config disk (produced by probe, consumed by commands).

@@ -827,11 +827,13 @@ mod tests {
                     mapper: MapperName("braid-disk1".into()),
                     luks_uuid: LuksUuid("11111111-1111-1111-1111-111111111111".into()),
                     devid: 1,
+                    underlying: "/dev/vda".into(),
                 },
                 PoolDevice {
                     mapper: MapperName("braid-disk2".into()),
                     luks_uuid: LuksUuid("22222222-2222-2222-2222-222222222222".into()),
                     devid: 2,
+                    underlying: "/dev/vdb".into(),
                 },
             ],
             missing_count: 0,
