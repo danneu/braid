@@ -208,6 +208,16 @@
               braid = linuxCrane.braid;
             }
           );
+          braid-remove-missing-enospc = pkgs.testers.nixosTest (
+            import ./tests/cli/braid-remove-missing-enospc.nix {
+              braid = linuxCrane.braid;
+            }
+          );
+          braid-remove-missing-enospc-hang = pkgs.testers.nixosTest (
+            import ./tests/cli/braid-remove-missing-enospc-hang.nix {
+              braid = linuxCrane.braid;
+            }
+          );
           luks-label = pkgs.testers.nixosTest (
             import ./tests/cli/luks-label.nix {
               braid = linuxCrane.braid;
