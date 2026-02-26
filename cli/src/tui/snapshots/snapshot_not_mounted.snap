@@ -1,12 +1,13 @@
 ---
 source: src/tui/view.rs
+assertion_line: 466
 expression: buffer_to_string(&terminal)
 ---
 Data  Encryption  Sharing
  Pool ──────────────────────────────────────────────────────
  not mounted
  Disks ─────────────────────────────────────────────────────
-   #  Name       Use  Allocated
+   #  Name       SMART    Use  Allocated
  ▶ 1  toshiba
    2  ironwolf
    3  wdc

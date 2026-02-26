@@ -1,0 +1,74 @@
+{
+  "json_format_version": [
+    1,
+    0
+  ],
+  "smartctl": {
+    "version": [
+      7,
+      5
+    ],
+    "pre_release": false,
+    "svn_revision": "5714",
+    "platform_info": "x86_64-linux-6.12.74",
+    "build_info": "(local build)",
+    "argv": [
+      "smartctl",
+      "-H",
+      "-A",
+      "/dev/disk/by-id/nvme-eui.e8238fa6bf530001001b448b4986d34a",
+      "--json"
+    ],
+    "exit_status": 0
+  },
+  "local_time": {
+    "time_t": 1772129723,
+    "asctime": "Thu Feb 26 12:15:23 2026 CST"
+  },
+  "device": {
+    "name": "/dev/disk/by-id/nvme-eui.e8238fa6bf530001001b448b4986d34a",
+    "info_name": "/dev/disk/by-id/nvme-eui.e8238fa6bf530001001b448b4986d34a",
+    "type": "nvme",
+    "protocol": "NVMe"
+  },
+  "smart_status": {
+    "passed": true,
+    "nvme": {
+      "value": 0
+    }
+  },
+  "nvme_smart_health_information_log": {
+    "nsid": -1,
+    "critical_warning": 0,
+    "temperature": 36,
+    "available_spare": 100,
+    "available_spare_threshold": 10,
+    "percentage_used": 1,
+    "data_units_read": 64704797,
+    "data_units_written": 46138715,
+    "host_reads": 469599348,
+    "host_writes": 408009556,
+    "controller_busy_time": 1684,
+    "power_cycles": 1336,
+    "power_on_hours": 2736,
+    "unsafe_shutdowns": 68,
+    "media_errors": 0,
+    "num_err_log_entries": 1,
+    "warning_temp_time": 0,
+    "critical_comp_time": 0
+  },
+  "temperature": {
+    "current": 36
+  },
+  "spare_available": {
+    "current_percent": 100,
+    "threshold_percent": 10
+  },
+  "endurance_used": {
+    "current_percent": 1
+  },
+  "power_cycle_count": 1336,
+  "power_on_time": {
+    "hours": 2736
+  }
+}

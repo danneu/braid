@@ -6,7 +6,7 @@ use ratatui::Frame;
 use time::macros::format_description;
 use time::PrimitiveDateTime;
 
-use crate::parse::types::ScrubState;
+use crate::parse::types::{ScrubState, SmartHealth};
 use crate::tui::model::{Model, PoolState, PoolStatus, Tab};
 
 fn format_timestamp(dt: &PrimitiveDateTime) -> String {
@@ -189,37 +189,58 @@ fn scrub_lines(scrub: &ScrubState) -> u16 {
     }
 }
 
+fn smart_label(health: &SmartHealth) -> &'static str {
+    match health {
+        SmartHealth::Healthy => "ok",
+        SmartHealth::Degraded => "degraded",
+        SmartHealth::Failing => "FAILING",
+        SmartHealth::Unknown => "?",
+    }
+}
+
 fn disk_table(model: &Model, unit: ByteUnit) -> Table<'_> {
-    let disk_usage = model.pool.current().map(|p| &p.disk_usage);
-    let header =
-        Row::new(["#", "Name", "Use", "Allocated"]).style(Style::default().fg(Color::DarkGray));
+    let pool = model.pool.current();
+    let disk_usage = pool.map(|p| &p.disk_usage);
+    let smart_health = pool.map(|p| &p.smart_health);
+    let header = Row::new(["#", "Name", "SMART", "Use", "Allocated"])
+        .style(Style::default().fg(Color::DarkGray));
     let rows: Vec<Row> = model
         .disk_keys
         .iter()
         .enumerate()
-        .map(|(i, name)| match disk_usage.and_then(|u| u.get(name)) {
-            Some(usage) => Row::new([
-                format!("{}", i + 1),
-                name.clone(),
-                format!("{:.0}%", percent(usage.data, usage.size)),
-                format!(
-                    "{} / {} {}",
-                    unit.format(usage.data),
-                    unit.format(usage.size),
-                    unit.suffix()
-                ),
-            ]),
-            None => Row::new([
-                format!("{}", i + 1),
-                name.clone(),
-                String::new(),
-                String::new(),
-            ]),
+        .map(|(i, name)| {
+            let smart = smart_health
+                .and_then(|s| s.get(name))
+                .map(smart_label)
+                .unwrap_or("")
+                .to_owned();
+            match disk_usage.and_then(|u| u.get(name)) {
+                Some(usage) => Row::new([
+                    format!("{}", i + 1),
+                    name.clone(),
+                    smart,
+                    format!("{:.0}%", percent(usage.data, usage.size)),
+                    format!(
+                        "{} / {} {}",
+                        unit.format(usage.data),
+                        unit.format(usage.size),
+                        unit.suffix()
+                    ),
+                ]),
+                None => Row::new([
+                    format!("{}", i + 1),
+                    name.clone(),
+                    smart,
+                    String::new(),
+                    String::new(),
+                ]),
+            }
         })
         .collect();
     let widths = [
         Constraint::Length(2),
         Constraint::Length(10),
+        Constraint::Length(8),
         Constraint::Length(4),
         Constraint::Min(10),
     ];
@@ -388,7 +409,7 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
-    use crate::parse::types::{ScrubState, ScrubTimestamp};
+    use crate::parse::types::{ScrubState, ScrubTimestamp, SmartHealth};
     use crate::tui::model::DiskUsage;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
@@ -473,6 +494,11 @@ mod tests {
                 },
             ),
         ]);
+        let smart_health = HashMap::from([
+            ("toshiba".to_owned(), SmartHealth::Healthy),
+            ("ironwolf".to_owned(), SmartHealth::Degraded),
+            ("wdc".to_owned(), SmartHealth::Unknown),
+        ]);
         let pool = PoolState {
             mount_point: "/mnt/storage".to_owned(),
             profile: "RAID1".to_owned(),
@@ -480,6 +506,7 @@ mod tests {
             used: 2_308_094_370_816,  // ~2.1 TiB
             total: 5_937_955_045_376, // ~5.4 TiB
             disk_usage,
+            smart_health,
             scrub: ScrubState::Completed {
                 started_at: ScrubTimestamp(time::macros::datetime!(2026-02-24 02:00:07)),
                 error_count: 0,

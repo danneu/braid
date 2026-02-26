@@ -2,9 +2,10 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use crate::cmd::{CmdRequest, CommandRunner};
-use crate::parse::types::ScrubState;
+use crate::parse::types::{ScrubState, SmartHealth};
 use crate::parse::{
     parse_btrfs_device_usage, parse_btrfs_filesystem_usage, parse_btrfs_scrub_status,
+    parse_smartctl_health,
 };
 use crate::probe::probe_pool;
 use crate::tui::model::{DiskUsage, PoolState};
@@ -12,6 +13,7 @@ use crate::tui::model::{DiskUsage, PoolState};
 pub fn probe_pool_for_tui<R: CommandRunner>(
     runner: &R,
     mount_point: &str,
+    disk_by_id: &HashMap<String, String>,
 ) -> Result<Option<PoolState>, String> {
     let domain = probe_pool(runner, mount_point).map_err(|e| e.to_string())?;
 
@@ -85,6 +87,17 @@ pub fn probe_pool_for_tui<R: CommandRunner>(
         .map(|out| out.state)
         .unwrap_or(ScrubState::Unknown);
 
+    let mut smart_health = HashMap::new();
+    for (disk_key, by_id_path) in disk_by_id {
+        let health = runner
+            .run(&CmdRequest::SmartctlHealthJson {
+                device: by_id_path.clone(),
+            })
+            .map(|raw| parse_smartctl_health(&raw))
+            .unwrap_or(SmartHealth::Unknown);
+        smart_health.insert(disk_key.clone(), health);
+    }
+
     Ok(Some(PoolState {
         mount_point: mount_point.to_owned(),
         profile: profile.to_owned(),
@@ -92,6 +105,7 @@ pub fn probe_pool_for_tui<R: CommandRunner>(
         used: usage.used_bytes,
         total: usage.free_estimated_bytes + usage.used_bytes,
         disk_usage,
+        smart_health,
         scrub,
         probed_at: Instant::now(),
     }))

@@ -230,6 +230,26 @@ golden_test!(
     }
 );
 
+// --- SMART fixtures ---
+
+#[test]
+fn golden_smartctl_nvme_healthy() {
+    let Some(content) = fixture("smartctl-nvme-healthy.json") else {
+        eprintln!("SKIP: fixture not captured yet");
+        return;
+    };
+    let raw = RawCommandOutput {
+        cmd: "smartctl".into(),
+        stdout: content,
+        stderr: String::new(),
+        exit_status: 0,
+    };
+    assert_eq!(
+        parse::smartctl::parse_smartctl_health(&raw),
+        parse::types::SmartHealth::Healthy
+    );
+}
+
 // --- In-progress fixtures (captured from progress-monitoring VM test) ---
 
 golden_test!(

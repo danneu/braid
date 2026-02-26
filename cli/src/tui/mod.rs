@@ -21,14 +21,20 @@ use model::{DiskUsage, Model, PoolState, PoolStatus};
 use view::view;
 
 use crate::config::config_read;
-use crate::parse::types::{ScrubState, ScrubTimestamp};
+use crate::parse::types::{ScrubState, ScrubTimestamp, SmartHealth};
 
 pub fn run(config_path: &Path) -> io::Result<()> {
     let config = config_read(config_path).map_err(|e| io::Error::other(e.to_string()))?;
     let mut terminal = ratatui::init();
     let (_input, cmd_tx, rx) = InputHandler::new();
     let disk_keys: Vec<String> = config.disks().keys().cloned().collect();
-    let (mut model, init_effects) = Model::new(disk_keys, config.mount_point().to_owned());
+    let disk_by_id: HashMap<String, String> = config
+        .disks()
+        .iter()
+        .map(|(k, v)| (k.clone(), v.by_id.to_string()))
+        .collect();
+    let (mut model, init_effects) =
+        Model::new(disk_keys, disk_by_id, config.mount_point().to_owned());
     for effect in init_effects {
         execute_effect(effect, &cmd_tx);
     }
@@ -69,6 +75,11 @@ pub fn run_demo() -> io::Result<()> {
             },
         ),
     ]);
+    let smart_health = HashMap::from([
+        ("toshiba".to_owned(), SmartHealth::Healthy),
+        ("ironwolf".to_owned(), SmartHealth::Healthy),
+        ("wdc".to_owned(), SmartHealth::Healthy),
+    ]);
     let pool = PoolState {
         mount_point: "/mnt/storage".to_owned(),
         profile: "RAID1".to_owned(),
@@ -76,6 +87,7 @@ pub fn run_demo() -> io::Result<()> {
         used: 2_308_094_370_816,
         total: 5_937_955_045_376,
         disk_usage,
+        smart_health,
         scrub: ScrubState::Completed {
             started_at: ScrubTimestamp(time::macros::datetime!(2026-02-24 02:00:07)),
             error_count: 0,

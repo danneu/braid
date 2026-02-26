@@ -159,6 +159,15 @@ pub struct BtrfsBalanceStatusOutput {
     pub state: BalanceState,
 }
 
+/// smartctl health classification
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SmartHealth {
+    Healthy,
+    Degraded,
+    Failing,
+    Unknown,
+}
+
 /// btrfs device usage --raw
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceAllocation {

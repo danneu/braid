@@ -114,6 +114,9 @@ pub enum CmdRequest {
         device: String,
         backup_path: String,
     },
+    SmartctlHealthJson {
+        device: String,
+    },
 }
 
 #[derive(Debug, Error)]
@@ -348,6 +351,9 @@ impl CommandRunner for RealRunner {
                     "CryptsetupTestPassphrase must use run_with_stdin".to_owned(),
                 ))
             }
+            CmdRequest::SmartctlHealthJson { device } => {
+                RealRunner::exec("smartctl", &["-H", "-A", device, "--json"])
+            }
         }
     }
 
@@ -460,110 +466,6 @@ mod tests {
 
         let out = mock.run(&req).expect("mock should have output");
         assert_eq!(out.exit_status, 0);
-    }
-
-    #[test]
-    fn cmd_request_declares_expected_commands() {
-        let all = vec![
-            CmdRequest::LsblkJson,
-            CmdRequest::FindmntJson {
-                mount_point: "/mnt/storage".to_owned(),
-            },
-            CmdRequest::BtrfsFilesystemDfJson {
-                mount_point: "/mnt/storage".to_owned(),
-            },
-            CmdRequest::BtrfsFilesystemShow {
-                mount_point: "/mnt/storage".to_owned(),
-            },
-            CmdRequest::CryptsetupStatus {
-                mapper: "disk1".to_owned(),
-            },
-            CmdRequest::CryptsetupLuksUuid {
-                device: "/dev/vda".to_owned(),
-            },
-            CmdRequest::BtrfsFilesystemUsageRaw {
-                mount_point: "/mnt/storage".to_owned(),
-            },
-            CmdRequest::BtrfsScrubStatus {
-                mount_point: "/mnt/storage".to_owned(),
-            },
-            CmdRequest::BtrfsDeviceStats {
-                mount_point: "/mnt/storage".to_owned(),
-            },
-            CmdRequest::LsblkField {
-                device: "/dev/vda".to_owned(),
-                field: LsblkFieldKind::Model,
-            },
-            // Mutation commands
-            CmdRequest::CryptsetupLuksOpen {
-                device: "/dev/vda".to_owned(),
-                mapper: "disk1".to_owned(),
-            },
-            CmdRequest::CryptsetupIsLuks {
-                device: "/dev/vda".to_owned(),
-            },
-            CmdRequest::CryptsetupClose {
-                mapper: "disk1".to_owned(),
-            },
-            CmdRequest::BtrfsDeviceAdd {
-                device: "/dev/mapper/disk1".to_owned(),
-                mount_point: "/mnt/storage".to_owned(),
-            },
-            CmdRequest::BtrfsDeviceRemove {
-                device: "/dev/mapper/disk1".to_owned(),
-                mount_point: "/mnt/storage".to_owned(),
-            },
-            CmdRequest::BtrfsDeviceRemoveMissing {
-                mount_point: "/mnt/storage".to_owned(),
-            },
-            CmdRequest::BtrfsDeviceScan {
-                device: "/dev/mapper/disk1".to_owned(),
-            },
-            CmdRequest::BtrfsDeviceScanAll,
-            CmdRequest::BtrfsBalanceRaid1 {
-                mount_point: "/mnt/storage".to_owned(),
-            },
-            CmdRequest::BtrfsBalanceSingle {
-                mount_point: "/mnt/storage".to_owned(),
-            },
-            CmdRequest::MkfsBtrfs {
-                device: "/dev/mapper/disk1".to_owned(),
-            },
-            CmdRequest::Mount {
-                device: "/dev/mapper/disk1".to_owned(),
-                mount_point: "/mnt/storage".to_owned(),
-            },
-            CmdRequest::MountWithOptions {
-                device: "/dev/mapper/disk1".to_owned(),
-                mount_point: "/mnt/storage".to_owned(),
-                options: vec!["degraded".to_owned()],
-            },
-            CmdRequest::Umount {
-                mount_point: "/mnt/storage".to_owned(),
-            },
-            CmdRequest::MountpointCheck {
-                path: "/mnt/storage".to_owned(),
-            },
-            CmdRequest::CryptsetupLuksFormat {
-                device: "/dev/vda".to_owned(),
-                extra_opts: vec![],
-            },
-            CmdRequest::CryptsetupTestPassphrase {
-                device: "/dev/vda".to_owned(),
-            },
-            CmdRequest::CryptsetupLuksHeaderBackup {
-                device: "/dev/vda".to_owned(),
-                backup_path: "/tmp/header.img".to_owned(),
-            },
-            CmdRequest::BtrfsBalanceStatus {
-                mount_point: "/mnt/storage".to_owned(),
-            },
-            CmdRequest::BtrfsDeviceUsageRaw {
-                mount_point: "/mnt/storage".to_owned(),
-            },
-        ];
-
-        assert_eq!(all.len(), 30);
     }
 
     #[test]

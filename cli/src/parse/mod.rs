@@ -26,6 +26,7 @@ pub mod cryptsetup_status;
 pub mod findmnt;
 pub mod lsblk;
 pub mod mount;
+pub mod smartctl;
 pub mod types;
 
 use thiserror::Error;
@@ -64,3 +65,4 @@ pub use cryptsetup_luks_uuid::parse_cryptsetup_luks_uuid;
 pub use cryptsetup_status::parse_cryptsetup_status;
 pub use findmnt::parse_findmnt_json;
 pub use lsblk::{parse_lsblk_field, parse_lsblk_json};
+pub use smartctl::parse_smartctl_health;

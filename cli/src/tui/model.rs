@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use crate::parse::types::ScrubState;
+use crate::parse::types::{ScrubState, SmartHealth};
 use crate::tui::effect::Effect;
 use crate::tui::state::{CmdId, CommandState};
 
@@ -55,6 +55,7 @@ pub struct PoolState {
     pub used: u64,
     pub total: u64,
     pub disk_usage: HashMap<String, DiskUsage>,
+    pub smart_health: HashMap<String, SmartHealth>,
     pub scrub: ScrubState,
     pub probed_at: Instant,
 }
@@ -87,6 +88,7 @@ pub struct Model {
     pub running: bool,
     pub tab: Tab,
     pub disk_keys: Vec<String>,
+    pub disk_by_id: HashMap<String, String>,
     pub selected_disk: usize,
     pub pool: PoolStatus,
     pub mount_point: String,
@@ -96,14 +98,20 @@ pub struct Model {
 }
 
 impl Model {
-    pub fn new(disk_keys: Vec<String>, mount_point: String) -> (Self, Vec<Effect>) {
+    pub fn new(
+        disk_keys: Vec<String>,
+        disk_by_id: HashMap<String, String>,
+        mount_point: String,
+    ) -> (Self, Vec<Effect>) {
         let effects = vec![Effect::ProbePool {
             mount_point: mount_point.clone(),
+            disk_by_id: disk_by_id.clone(),
         }];
         let model = Self {
             running: true,
             tab: Tab::Data,
             disk_keys,
+            disk_by_id,
             selected_disk: 0,
             pool: PoolStatus::Loading,
             mount_point,
@@ -119,6 +127,7 @@ impl Model {
             running: true,
             tab: Tab::Data,
             disk_keys,
+            disk_by_id: HashMap::new(),
             selected_disk: 0,
             pool,
             mount_point: String::new(),
