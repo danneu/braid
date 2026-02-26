@@ -1,12 +1,13 @@
-use ratatui::layout::{Constraint, Layout};
-use ratatui::style::{Color, Style};
+use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Gauge, Paragraph, Row, Table, TableState};
 use ratatui::Frame;
 use time::macros::format_description;
 use time::PrimitiveDateTime;
 
 use crate::parse::types::ScrubState;
-use crate::tui::model::{Model, PoolState, PoolStatus};
+use crate::tui::model::{Model, PoolState, PoolStatus, Tab};
 
 fn format_timestamp(dt: &PrimitiveDateTime) -> String {
     let fmt = format_description!(
@@ -246,9 +247,31 @@ fn page_unit(model: &Model) -> ByteUnit {
     ByteUnit::friendliest(max_bytes)
 }
 
-pub fn view(model: &Model, frame: &mut Frame, now: PrimitiveDateTime) {
+fn tab_bar(active: Tab) -> Line<'static> {
+    let mut spans = Vec::new();
+    for (i, tab) in Tab::ALL.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::raw("  "));
+        }
+        if *tab == active {
+            spans.push(Span::styled(
+                tab.label(),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+            ));
+        } else {
+            spans.push(Span::styled(
+                tab.label(),
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+    }
+    Line::from(spans)
+}
+
+fn view_data(model: &Model, frame: &mut Frame, area: Rect, now: PrimitiveDateTime) {
     let page_unit = page_unit(model);
-    let area = frame.area();
 
     // +1 per section for top border
     let pool_height: u16 = match &model.pool {
@@ -266,7 +289,6 @@ pub fn view(model: &Model, frame: &mut Frame, now: PrimitiveDateTime) {
         Constraint::Length(disk_height),  // [1] disks
         Constraint::Length(scrub_height), // [2] scrub
         Constraint::Min(0),               // [3] spacer
-        Constraint::Length(1),            // [4] footer
     ])
     .spacing(1)
     .split(area);
@@ -325,6 +347,33 @@ pub fn view(model: &Model, frame: &mut Frame, now: PrimitiveDateTime) {
     if let PoolStatus::Mounted(pool) = &model.pool {
         frame.render_widget(scrub_table(&pool.scrub, now), chunks[2]);
     }
+}
+
+fn view_placeholder(frame: &mut Frame, area: Rect, name: &str) {
+    frame.render_widget(
+        Paragraph::new(format!("{name} — coming soon")).style(Style::default().fg(Color::DarkGray)),
+        area,
+    );
+}
+
+pub fn view(model: &Model, frame: &mut Frame, now: PrimitiveDateTime) {
+    let area = frame.area();
+
+    let outer = Layout::vertical([
+        Constraint::Length(1), // [0] tab bar
+        Constraint::Length(1), // [1] spacer
+        Constraint::Min(0),    // [2] tab body
+        Constraint::Length(1), // [3] footer
+    ])
+    .split(area);
+
+    frame.render_widget(tab_bar(model.tab), outer[0]);
+
+    match model.tab {
+        Tab::Data => view_data(model, frame, outer[2], now),
+        Tab::Encryption => view_placeholder(frame, outer[2], "Encryption"),
+        Tab::Sharing => view_placeholder(frame, outer[2], "Sharing"),
+    }
 
     let footer = match model.probe_duration {
         Some(d) => format!("press q to quit  {}ms", d.as_millis()),
@@ -332,7 +381,7 @@ pub fn view(model: &Model, frame: &mut Frame, now: PrimitiveDateTime) {
     };
     frame.render_widget(
         Paragraph::new(footer).style(Style::default().fg(Color::DarkGray)),
-        chunks[4],
+        outer[3],
     );
 }
 
@@ -387,14 +436,14 @@ mod tests {
     #[test]
     fn snapshot_loading() {
         let model = Model::new_demo(sample_disk_keys(), PoolStatus::Loading);
-        let terminal = render(&model, 60, 20);
+        let terminal = render(&model, 60, 22);
         snap!(buffer_to_string(&terminal));
     }
 
     #[test]
     fn snapshot_not_mounted() {
         let model = Model::new_demo(sample_disk_keys(), PoolStatus::NotMounted);
-        let terminal = render(&model, 60, 20);
+        let terminal = render(&model, 60, 22);
         snap!(buffer_to_string(&terminal));
     }
 
@@ -442,7 +491,7 @@ mod tests {
             },
         };
         let model = Model::new_demo(sample_disk_keys(), PoolStatus::Mounted(pool));
-        let terminal = render(&model, 60, 20);
+        let terminal = render(&model, 60, 22);
         snap!(buffer_to_string(&terminal));
     }
 
@@ -452,7 +501,7 @@ mod tests {
             sample_disk_keys(),
             PoolStatus::Error("command failed: findmnt exited 1".to_owned()),
         );
-        let terminal = render(&model, 60, 20);
+        let terminal = render(&model, 60, 22);
         snap!(buffer_to_string(&terminal));
     }
 }

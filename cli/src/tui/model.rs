@@ -5,6 +5,41 @@ use crate::parse::types::ScrubState;
 use crate::tui::effect::Effect;
 use crate::tui::state::{CmdId, CommandState};
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Tab {
+    Data,
+    Encryption,
+    Sharing,
+}
+
+impl Tab {
+    pub const ALL: [Tab; 3] = [Tab::Data, Tab::Encryption, Tab::Sharing];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Tab::Data => "Data",
+            Tab::Encryption => "Encryption",
+            Tab::Sharing => "Sharing",
+        }
+    }
+
+    pub fn next(self) -> Tab {
+        match self {
+            Tab::Data => Tab::Encryption,
+            Tab::Encryption => Tab::Sharing,
+            Tab::Sharing => Tab::Data,
+        }
+    }
+
+    pub fn prev(self) -> Tab {
+        match self {
+            Tab::Data => Tab::Sharing,
+            Tab::Encryption => Tab::Data,
+            Tab::Sharing => Tab::Encryption,
+        }
+    }
+}
+
 pub struct DiskUsage {
     pub size: u64,
     pub data: u64,
@@ -30,6 +65,7 @@ pub enum PoolStatus {
 
 pub struct Model {
     pub running: bool,
+    pub tab: Tab,
     pub disk_keys: Vec<String>,
     pub selected_disk: usize,
     pub pool: PoolStatus,
@@ -46,6 +82,7 @@ impl Model {
         }];
         let model = Self {
             running: true,
+            tab: Tab::Data,
             disk_keys,
             selected_disk: 0,
             pool: PoolStatus::Loading,
@@ -60,6 +97,7 @@ impl Model {
     pub fn new_demo(disk_keys: Vec<String>, pool: PoolStatus) -> Self {
         Self {
             running: true,
+            tab: Tab::Data,
             disk_keys,
             selected_disk: 0,
             pool,

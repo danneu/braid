@@ -2,6 +2,7 @@
 source: src/tui/view.rs
 expression: buffer_to_string(&terminal)
 ---
+Data  Encryption  Sharing
  Pool ──────────────────────────────────────────────────────
  Path         /mnt/storage (healthy)
  Redundancy   2x (RAID1)
@@ -17,4 +18,5 @@ expression: buffer_to_string(&terminal)
  Errors       0
  Total        32.36MiB
  Rate         32.34MiB/s
+ Duration     0:00:00
 press q to quit

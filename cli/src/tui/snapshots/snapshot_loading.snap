@@ -2,6 +2,7 @@
 source: src/tui/view.rs
 expression: buffer_to_string(&terminal)
 ---
+Data  Encryption  Sharing
  Pool ──────────────────────────────────────────────────────
  loading...
  Disks ─────────────────────────────────────────────────────

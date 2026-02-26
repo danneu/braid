@@ -8,6 +8,8 @@ use crate::tui::state::{CmdId, CmdStatus, CommandState, Stream, MAX_LINES};
 
 pub enum Message {
     Quit,
+    NextTab,
+    PrevTab,
     RefreshPool,
     SelectNextDisk,
     SelectPrevDisk,
@@ -32,6 +34,14 @@ pub fn update(model: &mut Model, msg: Message) -> Vec<Effect> {
     match msg {
         Message::Quit => {
             model.running = false;
+            vec![]
+        }
+        Message::NextTab => {
+            model.tab = model.tab.next();
+            vec![]
+        }
+        Message::PrevTab => {
+            model.tab = model.tab.prev();
             vec![]
         }
         Message::RefreshPool => match model.pool {
