@@ -192,8 +192,8 @@ fn scrub_lines(scrub: &ScrubState) -> u16 {
 fn smart_label(health: &SmartHealth) -> &'static str {
     match health {
         SmartHealth::Healthy => "ok",
-        SmartHealth::Degraded => "degraded",
-        SmartHealth::Failing => "FAILING",
+        SmartHealth::Degraded => "warning",
+        SmartHealth::Failing => "failing",
         SmartHealth::Unknown => "?",
     }
 }
@@ -202,38 +202,46 @@ fn disk_table(model: &Model, unit: ByteUnit) -> Table<'_> {
     let pool = model.pool.current();
     let disk_usage = pool.map(|p| &p.disk_usage);
     let smart_health = pool.map(|p| &p.smart_health);
-    let header = Row::new(["#", "Name", "SMART", "Use", "Allocated"])
+    let header = Row::new(["#", "Name", "SMART", "Usage"])
         .style(Style::default().fg(Color::DarkGray));
     let rows: Vec<Row> = model
         .disk_keys
         .iter()
         .enumerate()
         .map(|(i, name)| {
-            let smart = smart_health
-                .and_then(|s| s.get(name))
-                .map(smart_label)
-                .unwrap_or("")
-                .to_owned();
+            let smart_val = smart_health.and_then(|s| s.get(name));
+            let smart_cell = match smart_val {
+                Some(SmartHealth::Failing) => {
+                    Line::from(Span::styled("failing", Style::default().fg(Color::Red)))
+                }
+                _ => Line::from(smart_val.map(smart_label).unwrap_or("")),
+            };
+            let num = Line::from(format!("{}", i + 1));
+            let name_cell = Line::from(name.clone());
             match disk_usage.and_then(|u| u.get(name)) {
-                Some(usage) => Row::new([
-                    format!("{}", i + 1),
-                    name.clone(),
-                    smart,
-                    format!("{:.0}%", percent(usage.data, usage.size)),
-                    format!(
-                        "{} / {} {}",
+                Some(usage) => Row::new(vec![
+                    num,
+                    name_cell,
+                    smart_cell,
+                    Line::from(format!(
+                        "{:.0}%  {} / {} {}",
+                        percent(usage.data, usage.size),
                         unit.format(usage.data),
                         unit.format(usage.size),
                         unit.suffix()
-                    ),
+                    )),
                 ]),
-                None => Row::new([
-                    format!("{}", i + 1),
-                    name.clone(),
-                    smart,
-                    String::new(),
-                    String::new(),
-                ]),
+                None if disk_usage.is_some() => Row::new(vec![
+                    num,
+                    name_cell,
+                    smart_cell,
+                    Line::from(Span::styled(
+                        "missing",
+                        Style::default().fg(Color::Yellow),
+                    )),
+                ])
+                .style(Style::default().add_modifier(Modifier::DIM)),
+                None => Row::new(vec![num, name_cell, smart_cell, Line::default()]),
             }
         })
         .collect();
@@ -248,7 +256,6 @@ fn disk_table(model: &Model, unit: ByteUnit) -> Table<'_> {
         Constraint::Length(2),
         Constraint::Length(longest_name_len),
         Constraint::Length(8),
-        Constraint::Length(4),
         Constraint::Min(10),
     ];
     Table::new(rows, widths)

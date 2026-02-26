@@ -595,6 +595,10 @@ fn format_status_human(
         return out;
     }
 
+    if let Some(ref profile) = report.profile {
+        out.push_str(&format!("Profile:  {profile}\n"));
+    }
+
     // Compact drive listing
     if let Some(drives) = compact_drives {
         out.push_str("Drives:\n");
@@ -608,10 +612,6 @@ fn format_status_human(
                 d.key, d.device_short, devid_str, d.status
             ));
         }
-    }
-
-    if let Some(ref profile) = report.profile {
-        out.push_str(&format!("Profile:  {profile}\n"));
     }
 
     if let Some(ref cap) = report.capacity {

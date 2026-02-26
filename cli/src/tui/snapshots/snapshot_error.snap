@@ -7,7 +7,7 @@ Data  Encryption  Sharing
  Pool ──────────────────────────────────────────────────────
  error: command failed: findmnt exited 1
  Disks ─────────────────────────────────────────────────────
-   #  Name     SMART    Use  Allocated
+   #  Name     SMART    Usage
  ▶ 1  toshiba
    2  ironwolf
    3  wdc
