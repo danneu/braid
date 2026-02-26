@@ -190,10 +190,7 @@ fn scrub_lines(scrub: &ScrubState) -> u16 {
 }
 
 fn disk_table(model: &Model, unit: ByteUnit) -> Table<'_> {
-    let disk_usage = match &model.pool {
-        PoolStatus::Mounted(p) => Some(&p.disk_usage),
-        _ => None,
-    };
+    let disk_usage = model.pool.current().map(|p| &p.disk_usage);
     let header =
         Row::new(["#", "Name", "Use", "Allocated"]).style(Style::default().fg(Color::DarkGray));
     let rows: Vec<Row> = model
@@ -234,15 +231,15 @@ fn disk_table(model: &Model, unit: ByteUnit) -> Table<'_> {
 }
 
 fn page_unit(model: &Model) -> ByteUnit {
-    let max_bytes = match &model.pool {
-        PoolStatus::Mounted(p) => p
+    let max_bytes = match model.pool.current() {
+        Some(p) => p
             .disk_usage
             .values()
             .map(|u| u.size)
             .chain(Some(p.total))
             .max()
             .unwrap_or(0),
-        _ => 0,
+        None => 0,
     };
     ByteUnit::friendliest(max_bytes)
 }
@@ -274,14 +271,14 @@ fn view_data(model: &Model, frame: &mut Frame, area: Rect, now: PrimitiveDateTim
     let page_unit = page_unit(model);
 
     // +1 per section for top border
-    let pool_height: u16 = match &model.pool {
-        PoolStatus::Mounted(_) => 3 + 1 + 1, // +1 gauge
-        _ => 1 + 1,
+    let pool_height: u16 = match model.pool.current() {
+        Some(_) => 3 + 1 + 1, // +1 gauge
+        None => 1 + 1,
     };
     let disk_height: u16 = model.disk_keys.len() as u16 + 2; // +1 border, +1 header
-    let scrub_height: u16 = match &model.pool {
-        PoolStatus::Mounted(p) => scrub_lines(&p.scrub) + 1,
-        _ => 0,
+    let scrub_height: u16 = match model.pool.current() {
+        Some(p) => scrub_lines(&p.scrub) + 1,
+        None => 0,
     };
 
     let chunks = Layout::vertical([
@@ -310,7 +307,7 @@ fn view_data(model: &Model, frame: &mut Frame, area: Rect, now: PrimitiveDateTim
                 chunks[0],
             );
         }
-        PoolStatus::Mounted(pool) => {
+        PoolStatus::Mounted(pool) | PoolStatus::Refreshing(pool) | PoolStatus::ErrorStale(_, pool) => {
             let pool_inner = Layout::vertical([
                 Constraint::Min(0),    // table
                 Constraint::Length(1), // gauge
@@ -344,7 +341,7 @@ fn view_data(model: &Model, frame: &mut Frame, area: Rect, now: PrimitiveDateTim
     let mut table_state = TableState::default().with_selected(Some(model.selected_disk));
     frame.render_stateful_widget(disk_table(model, page_unit), chunks[1], &mut table_state);
 
-    if let PoolStatus::Mounted(pool) = &model.pool {
+    if let Some(pool) = model.pool.current() {
         frame.render_widget(scrub_table(&pool.scrub, now), chunks[2]);
     }
 }
@@ -388,6 +385,7 @@ pub fn view(model: &Model, frame: &mut Frame, now: PrimitiveDateTime) {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::time::Instant;
 
     use super::*;
     use crate::parse::types::{ScrubState, ScrubTimestamp};
@@ -489,6 +487,7 @@ mod tests {
                 total: Some("32.36MiB".to_owned()),
                 rate: Some("32.34MiB/s".to_owned()),
             },
+            probed_at: Instant::now(),
         };
         let model = Model::new_demo(sample_disk_keys(), PoolStatus::Mounted(pool));
         let terminal = render(&model, 60, 22);

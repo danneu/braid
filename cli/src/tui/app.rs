@@ -44,15 +44,19 @@ pub fn update(model: &mut Model, msg: Message) -> Vec<Effect> {
             model.tab = model.tab.prev();
             vec![]
         }
-        Message::RefreshPool => match model.pool {
-            PoolStatus::Loading => vec![],
-            _ => {
-                model.pool = PoolStatus::Loading;
-                vec![Effect::ProbePool {
-                    mount_point: model.mount_point.clone(),
-                }]
+        Message::RefreshPool => {
+            if model.pool.is_inflight() {
+                return vec![];
             }
-        },
+            if let Some(stale) = model.pool.current().cloned() {
+                model.pool = PoolStatus::Refreshing(stale);
+            } else {
+                model.pool = PoolStatus::Loading;
+            }
+            vec![Effect::ProbePool {
+                mount_point: model.mount_point.clone(),
+            }]
+        }
         Message::SelectNextDisk => {
             let len = model.disk_keys.len();
             if len > 0 {
@@ -99,10 +103,14 @@ pub fn update(model: &mut Model, msg: Message) -> Vec<Effect> {
             vec![]
         }
         Message::PoolProbeFinished(result, elapsed) => {
+            let stale = model.pool.current().cloned();
             model.pool = match result {
                 Ok(Some(pool)) => PoolStatus::Mounted(pool),
                 Ok(None) => PoolStatus::NotMounted,
-                Err(e) => PoolStatus::Error(e),
+                Err(e) => match stale {
+                    Some(s) => PoolStatus::ErrorStale(e, s),
+                    None => PoolStatus::Error(e),
+                },
             };
             model.probe_duration = Some(elapsed);
             vec![Effect::ScheduleProbe {

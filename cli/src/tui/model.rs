@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::parse::types::ScrubState;
 use crate::tui::effect::Effect;
@@ -40,12 +40,14 @@ impl Tab {
     }
 }
 
+#[derive(Clone)]
 pub struct DiskUsage {
     pub size: u64,
     pub data: u64,
     pub metadata: u64,
 }
 
+#[derive(Clone)]
 pub struct PoolState {
     pub mount_point: String,
     pub profile: String,
@@ -54,13 +56,31 @@ pub struct PoolState {
     pub total: u64,
     pub disk_usage: HashMap<String, DiskUsage>,
     pub scrub: ScrubState,
+    pub probed_at: Instant,
 }
 
 pub enum PoolStatus {
     Loading,
     NotMounted,
     Mounted(PoolState),
+    Refreshing(PoolState),
     Error(String),
+    ErrorStale(String, PoolState),
+}
+
+impl PoolStatus {
+    pub fn current(&self) -> Option<&PoolState> {
+        match self {
+            PoolStatus::Mounted(p) | PoolStatus::Refreshing(p) | PoolStatus::ErrorStale(_, p) => {
+                Some(p)
+            }
+            _ => None,
+        }
+    }
+
+    pub fn is_inflight(&self) -> bool {
+        matches!(self, PoolStatus::Loading | PoolStatus::Refreshing(_))
+    }
 }
 
 pub struct Model {

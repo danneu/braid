@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::io;
 use std::path::Path;
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use app::update;
 use effect::execute_effect;
@@ -83,6 +83,7 @@ pub fn run_demo() -> io::Result<()> {
             total: Some("32.36MiB".to_owned()),
             rate: Some("32.34MiB/s".to_owned()),
         },
+        probed_at: Instant::now(),
     };
     let mut model = Model::new_demo(disk_keys, PoolStatus::Mounted(pool));
 

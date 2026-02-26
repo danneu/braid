@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::time::Instant;
 
 use crate::cmd::{CmdRequest, CommandRunner};
 use crate::parse::types::ScrubState;
@@ -92,5 +93,6 @@ pub fn probe_pool_for_tui<R: CommandRunner>(
         total: usage.free_estimated_bytes + usage.used_bytes,
         disk_usage,
         scrub,
+        probed_at: Instant::now(),
     }))
 }
