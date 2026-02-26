@@ -284,7 +284,8 @@ impl CommandRunner for RealRunner {
                     "balance",
                     "start",
                     "-dconvert=single",
-                    "-mconvert=single",
+                    // Important: use dup for metadata when converting to single
+                    "-mconvert=dup",
                     "-f",
                     mount_point,
                 ],

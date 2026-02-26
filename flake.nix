@@ -113,6 +113,11 @@
               braid = linuxCrane.braid;
             }
           );
+          remove-metadata-dup = pkgs.testers.nixosTest (
+            import ./tests/cli/remove-metadata-dup.nix {
+              braid = linuxCrane.braid;
+            }
+          );
           braid-unified = pkgs.testers.nixosTest (
             import ./tests/cli/braid-unified.nix {
               braid = linuxCrane.braid;
