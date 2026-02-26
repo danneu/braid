@@ -13,12 +13,12 @@ expression: buffer_to_string(&terminal)
 │2  ironwolf   25%  1.3 / 5.5 TiB                          │
 │3  wdc        21%  0.8 / 3.6 TiB                          │
 │                                                          │
-│                                                          │
-│                                                          │
-│                                                          │
-│                                                          │
 │Scrub                                                     │
 │Last run: Tue Feb 24 02:00:07 2026                        │
 │Errors: 0                                                 │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
 │press q to quit                                           │
 └──────────────────────────────────────────────────────────┘

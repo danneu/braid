@@ -35,7 +35,7 @@ enum Commands {
     /// Check configuration for problems
     Doctor(DoctorArgs),
     /// Interactive terminal dashboard
-    Tui,
+    Tui(TuiArgs),
 }
 
 #[derive(Debug, Args)]
@@ -113,6 +113,13 @@ struct DoctorArgs {
     json: bool,
 }
 
+#[derive(Debug, Args)]
+struct TuiArgs {
+    /// Run with fake data (no config or btrfs required)
+    #[arg(long)]
+    demo: bool,
+}
+
 fn main() {
     // When COMPLETE=bash|zsh|fish is set, produce shell completion output and exit.
     clap_complete::CompleteEnv::with_factory(Cli::command).complete();
@@ -120,8 +127,11 @@ fn main() {
     // Parse before root gate so --help/--version work without sudo.
     let cli = Cli::parse();
 
+    // Allow --demo without root; everything else needs root.
+    let needs_root = !matches!(&cli.command, Commands::Tui(args) if args.demo);
+
     // SAFETY: geteuid() is a trivial syscall with no arguments, always safe to call.
-    if unsafe { libc::geteuid() } != 0 {
+    if needs_root && unsafe { libc::geteuid() } != 0 {
         eprintln!("error: braid must be run as root (try: sudo braid ...)");
         std::process::exit(1);
     }
@@ -236,8 +246,13 @@ fn main() {
                 std::process::exit(1);
             }
         }
-        Commands::Tui => {
-            if let Err(e) = braid_cli::tui::run(Path::new(&config_path)) {
+        Commands::Tui(args) => {
+            let result = if args.demo {
+                braid_cli::tui::run_demo()
+            } else {
+                braid_cli::tui::run(Path::new(&config_path))
+            };
+            if let Err(e) = result {
                 print_cli_error(&e.to_string());
                 std::process::exit(1);
             }

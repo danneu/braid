@@ -57,8 +57,7 @@ impl Model {
         (model, effects)
     }
 
-    #[cfg(test)]
-    pub fn new_for_test(disk_keys: Vec<String>, pool: PoolStatus) -> Self {
+    pub fn new_demo(disk_keys: Vec<String>, pool: PoolStatus) -> Self {
         Self {
             running: true,
             disk_keys,

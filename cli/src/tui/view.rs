@@ -191,14 +191,21 @@ pub fn view(model: &Model, frame: &mut Frame) {
         0
     };
 
+    let scrub_with_sep = if scrub_section_lines > 0 {
+        1 + scrub_section_lines // separator + section
+    } else {
+        0
+    };
+
     let chunks = Layout::vertical([
-        Constraint::Length(1),                   // "Pool" header
-        Constraint::Length(pool_detail_lines),   // pool details
-        Constraint::Length(1),                   // separator
-        Constraint::Length(1),                   // "Disks" header
-        Constraint::Min(1),                      // disk table
-        Constraint::Length(scrub_section_lines), // scrub section
-        Constraint::Length(1),                   // footer
+        Constraint::Length(1),                            // [0] "Pool" header
+        Constraint::Length(pool_detail_lines),            // [1] pool details
+        Constraint::Length(1),                            // [2] separator
+        Constraint::Length(1),                            // [3] "Disks" header
+        Constraint::Length(model.disk_keys.len() as u16), // [4] disk table
+        Constraint::Length(scrub_with_sep),               // [5] separator + scrub section
+        Constraint::Min(0),                               // [6] spacer
+        Constraint::Length(1),                            // [7] footer
     ])
     .split(inner);
 
@@ -235,12 +242,13 @@ pub fn view(model: &Model, frame: &mut Frame) {
     if let PoolStatus::Mounted(pool) = &model.pool {
         let scrub_area = chunks[5];
         let scrub_chunks = Layout::vertical([
+            Constraint::Length(1), // separator
             Constraint::Length(1), // "Scrub" header
             Constraint::Min(1),    // scrub details
         ])
         .split(scrub_area);
-        frame.render_widget(Paragraph::new("Scrub"), scrub_chunks[0]);
-        frame.render_widget(scrub_view(&pool.scrub), scrub_chunks[1]);
+        frame.render_widget(Paragraph::new("Scrub"), scrub_chunks[1]);
+        frame.render_widget(scrub_view(&pool.scrub), scrub_chunks[2]);
     }
 
     let footer = match model.probe_duration {
@@ -249,7 +257,7 @@ pub fn view(model: &Model, frame: &mut Frame) {
     };
     frame.render_widget(
         Paragraph::new(footer).style(Style::default().fg(Color::DarkGray)),
-        chunks[6],
+        chunks[7],
     );
 }
 
@@ -302,14 +310,14 @@ mod tests {
 
     #[test]
     fn snapshot_loading() {
-        let model = Model::new_for_test(sample_disk_keys(), PoolStatus::Loading);
+        let model = Model::new_demo(sample_disk_keys(), PoolStatus::Loading);
         let terminal = render(&model, 60, 20);
         snap!(buffer_to_string(&terminal));
     }
 
     #[test]
     fn snapshot_not_mounted() {
-        let model = Model::new_for_test(sample_disk_keys(), PoolStatus::NotMounted);
+        let model = Model::new_demo(sample_disk_keys(), PoolStatus::NotMounted);
         let terminal = render(&model, 60, 20);
         snap!(buffer_to_string(&terminal));
     }
@@ -354,14 +362,14 @@ mod tests {
                 error_count: 0,
             },
         };
-        let model = Model::new_for_test(sample_disk_keys(), PoolStatus::Mounted(pool));
+        let model = Model::new_demo(sample_disk_keys(), PoolStatus::Mounted(pool));
         let terminal = render(&model, 60, 20);
         snap!(buffer_to_string(&terminal));
     }
 
     #[test]
     fn snapshot_error() {
-        let model = Model::new_for_test(
+        let model = Model::new_demo(
             sample_disk_keys(),
             PoolStatus::Error("command failed: findmnt exited 1".to_owned()),
         );
