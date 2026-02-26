@@ -81,7 +81,7 @@ Machine-readable output for monitoring and automation. Not yet implemented.
 
 ## Replace workflow
 
-Replace uses `braid-add-disk`, which already auto-evicts missing devices during rebalance (tested in `tests/cli/replace-failed-disk.nix`).
+Replace uses `braid-add-disk`, which already auto-evicts missing devices during rebalance.
 
 Workflow:
 
@@ -117,4 +117,4 @@ Separate scripts (`braid-add-disk`, `braid-remove-disk`, `braid-status`) — not
 - `modules/braid/options.nix` — `braid.disks` option definition
 - `modules/braid/storage.nix` — config export and LUKS entry generation
 - `docs/decisions/config-first-workflow.md` — original config-first decision
-- `tests/cli/replace-failed-disk.nix` — auto-evict test
+

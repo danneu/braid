@@ -261,13 +261,13 @@ Typical loop:
 
 ```bash
 # run one test while iterating
-just test first-boot-single-disk
+just test braid-add-disk
 
 # run a few specific tests
-just test first-boot-single-disk braid-remove-disk
+just test braid-add-disk braid-remove-disk
 
 # add verbose VM logs
-just test first-boot-single-disk -v
+just test braid-add-disk -v
 
 # run full suite before finishing
 just test
