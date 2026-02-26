@@ -177,23 +177,6 @@ echo 'secret' | sudo braid add ironwolf --passphrase-stdin --yes
 sudo braid add ironwolf --yes --passphrase-file /run/secrets/luks
 ```
 
-### Resume an interrupted operation
-
-If a long-running operation (balance, device remove) is interrupted, re-run the same command. The checkpoint resumes where it left off:
-
-```
-sudo braid add ironwolf     # interrupted during balance
-sudo braid add ironwolf     # resumes balance from where it stopped
-```
-
-Resume validation is strict and fail-closed:
-
-```
-error[CHECKPOINT_CONFIG_DRIFT]: config changed since checkpoint was created
-```
-
-Invalid checkpoints never auto-continue. Update config/pool to match, or complete the original operation intent first.
-
 ## Pool unlock
 
 After boot, bring the encrypted pool online:

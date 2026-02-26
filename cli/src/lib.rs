@@ -1,5 +1,4 @@
 pub mod add;
-pub mod checkpoint;
 pub mod cmd;
 pub mod config;
 pub mod disk_map;

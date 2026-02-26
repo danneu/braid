@@ -1,10 +1,5 @@
-use crate::checkpoint::{
-    clear_checkpoint, hash_args, maybe_fail_after_checkpoint, new_checkpoint, resolve_resume_gate,
-    run_phase_hooks, save_checkpoint_atomic, CheckpointError, InvocationCtx, LiveCtx, OpArgs,
-    OpKind, Phase, PoolFingerprint, ResumeGate, SystemClock, TargetSnapshot,
-};
 use crate::cmd::CommandRunner;
-use crate::config::{config_hash, config_read_raw, mapper_name, Config};
+use crate::config::{config_read_raw, mapper_name, Config};
 use crate::disk_map;
 use crate::luks::{
     backup_luks_header, device_has_btrfs_superblock, ensure_luks_open, luks_format,
@@ -32,10 +27,6 @@ pub enum AddError {
     Cmd(#[from] crate::cmd::CmdError),
     #[error("parse error: {0}")]
     Parse(#[from] crate::parse::ParseError),
-    #[error("checkpoint error: {0}")]
-    Checkpoint(#[from] CheckpointError),
-    #[error("checkpoint IO error: {0}")]
-    CheckpointIo(#[from] std::io::Error),
 }
 
 /// A step in the add operation, for dry-run display.
@@ -55,9 +46,8 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     passphrase_stdin: bool,
     passphrase_file: Option<&Path>,
     progress: ProgressOutput,
-    checkpoint_path: &Path,
 ) -> Result<(), AddError> {
-    let (config, config_raw) = config_read_raw(config_path)?;
+    let (config, _config_raw) = config_read_raw(config_path)?;
     let disk_map_state = disk_map::load_disk_map();
     disk_map::validate_config_key_stability(&config, &disk_map_state)
         .map_err(|e| AddError::Validation(e.to_string()))?;
@@ -90,69 +80,6 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         for step in &steps {
             println!("[{:<11}] {}", step.risk, step.description);
         }
-        return Ok(());
-    }
-
-    // Resolve checkpoint before any mutating requests.
-    let args_hash = hash_args(&["add", key]);
-    let resume = match resolve_resume_gate(
-        &config_raw,
-        InvocationCtx {
-            op: OpKind::Add,
-            op_args: OpArgs::add(key),
-            args_hash: args_hash.clone(),
-            config_hash: config_hash(&config_raw),
-        },
-        LiveCtx {
-            pool_fingerprint: PoolFingerprint::from_pool_state(&pool),
-            primary_target_available: !matches!(probed.state, ConfigDiskState::Absent),
-            secondary_target_available: None,
-        },
-        checkpoint_path,
-    ) {
-        ResumeGate::ResumeFrom(cp) => {
-            eprintln!(
-                "Resuming previous 'braid add {}' at phase {}.",
-                key,
-                cp.phase.as_env_value()
-            );
-            Some(cp)
-        }
-        ResumeGate::NoCheckpoint => None,
-        ResumeGate::Reject(error) => return Err(AddError::Checkpoint(error)),
-    };
-
-    // Resume from long-running phase directly.
-    if matches!(
-        resume.as_ref().map(|cp| &cp.phase),
-        Some(Phase::AddBalanceRaid1)
-    ) {
-        // Verify passphrase against an existing pool member before resuming.
-        // A wrong passphrase must fail with a clear error and leave the
-        // checkpoint intact so the user can fix their env and retry.
-        let passphrase = read_passphrase(passphrase_file, passphrase_stdin)?;
-        if let Some(existing) = pool.devices.first() {
-            let status_raw = runner.run(&crate::cmd::CmdRequest::CryptsetupStatus {
-                mapper: existing.mapper.0.clone(),
-            })?;
-            let status = crate::parse::parse_cryptsetup_status(&status_raw)?;
-            if let Some(underlying) = status.device {
-                let ok = verify_passphrase(runner, &underlying, &passphrase)?;
-                if !ok {
-                    return Err(AddError::Validation(
-                        "passphrase does not match existing pool member. All disks must use the same passphrase."
-                            .into(),
-                    ));
-                }
-            }
-        }
-        run_phase_hooks(&Phase::AddBalanceRaid1)?;
-        eprintln!("Balancing to RAID1...");
-        pool_balance_raid1(runner, config.mount_point(), progress)?;
-        clear_checkpoint(checkpoint_path);
-        finalize_add_disk_map_best_effort(runner, config.mount_point(), key, &disk.by_id.0);
-        eprintln!("Balance complete.");
-        eprintln!("Done. {} is now part of the pool.", key);
         return Ok(());
     }
 
@@ -245,33 +172,11 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         pool_add_device(runner, &mapper_path, config.mount_point())?;
         eprintln!("Device added to pool: {}", mn);
 
-        // Re-probe after device add so checkpoint fingerprint matches live resume topology.
-        let pool_after_add = probe_pool(runner, config.mount_point())?;
-
         // Balance to RAID1 if 2+ disks
         let total_after = pool.devices.len() + 1;
         if total_after >= 2 {
-            let cp = new_checkpoint(
-                &SystemClock,
-                OpKind::Add,
-                OpArgs::add(key),
-                Phase::AddBalanceRaid1,
-                config_hash(&config_raw),
-                hash_args(&["add", key]),
-                PoolFingerprint::from_pool_state(&pool_after_add),
-                TargetSnapshot {
-                    primary: Some(key.to_owned()),
-                    secondary: None,
-                    missing_id: None,
-                },
-            );
-            save_checkpoint_atomic(&cp, checkpoint_path)?;
-            maybe_fail_after_checkpoint()?;
-
-            run_phase_hooks(&Phase::AddBalanceRaid1)?;
             eprintln!("Balancing to RAID1...");
             pool_balance_raid1(runner, config.mount_point(), progress)?;
-            clear_checkpoint(checkpoint_path);
             eprintln!("Balance complete.");
         }
     }
@@ -381,91 +286,6 @@ fn add_confirm_message(key: &str, by_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::checkpoint::{
-        new_checkpoint, save_checkpoint_atomic, OpArgs, OpKind, Phase, PoolFingerprint,
-        SystemClock, TargetSnapshot,
-    };
-    use crate::cmd::{CmdError, CmdRequest, CommandRunner, RawCommandOutput};
-    use crate::probe::Filesystem;
-    use crate::progress::ProgressOutput;
-    use std::collections::BTreeMap;
-    use std::path::Path;
-    struct StaticFs {
-        paths: Vec<String>,
-    }
-
-    impl Filesystem for StaticFs {
-        fn exists(&self, path: &str) -> bool {
-            self.paths.iter().any(|p| p == path)
-        }
-
-        fn is_block_device(&self, _path: &str) -> bool {
-            false
-        }
-    }
-
-    struct GuardedRunner;
-
-    impl GuardedRunner {
-        fn out(cmd: &str, stdout: &str, exit_status: i32) -> RawCommandOutput {
-            RawCommandOutput {
-                cmd: cmd.to_owned(),
-                stdout: stdout.to_owned(),
-                stderr: String::new(),
-                exit_status,
-            }
-        }
-
-        fn is_mutating(req: &CmdRequest) -> bool {
-            matches!(
-                req,
-                CmdRequest::CryptsetupLuksOpen { .. }
-                    | CmdRequest::CryptsetupClose { .. }
-                    | CmdRequest::BtrfsDeviceAdd { .. }
-                    | CmdRequest::BtrfsDeviceRemove { .. }
-                    | CmdRequest::BtrfsDeviceRemoveMissing { .. }
-                    | CmdRequest::BtrfsDeviceScan { .. }
-                    | CmdRequest::BtrfsDeviceScanAll
-                    | CmdRequest::BtrfsBalanceRaid1 { .. }
-                    | CmdRequest::BtrfsBalanceSingle { .. }
-                    | CmdRequest::MkfsBtrfs { .. }
-                    | CmdRequest::Mount { .. }
-                    | CmdRequest::CryptsetupLuksFormat { .. }
-                    | CmdRequest::CryptsetupTestPassphrase { .. }
-                    | CmdRequest::CryptsetupLuksHeaderBackup { .. }
-            )
-        }
-    }
-
-    impl CommandRunner for GuardedRunner {
-        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
-            if Self::is_mutating(request) {
-                panic!("mutating request should not run before resume gate: {request:?}");
-            }
-
-            match request {
-                CmdRequest::CryptsetupLuksUuid { device } => Ok(Self::out(
-                    &format!("cryptsetup luksUUID {device}"),
-                    "Device /dev/test is not a valid LUKS device.\n",
-                    4,
-                )),
-                CmdRequest::FindmntJson { mount_point } => Ok(Self::out(
-                    &format!("findmnt --json --mountpoint {mount_point}"),
-                    "{\"filesystems\":[]}\n",
-                    0,
-                )),
-                _ => Err(CmdError::MissingMock),
-            }
-        }
-
-        fn run_with_stdin(
-            &self,
-            request: &CmdRequest,
-            _stdin: &[u8],
-        ) -> Result<RawCommandOutput, CmdError> {
-            self.run(request)
-        }
-    }
 
     #[test]
     fn add_confirm_message_warns_about_luks_format() {
@@ -483,79 +303,6 @@ mod tests {
         assert!(
             !msg.contains("DESTROY"),
             "should not use inaccurate 'DESTROY' wording"
-        );
-    }
-
-    #[test]
-    // Intent:
-    // - What behavior this test (tries to) verify.
-    //   - If resume gate rejects a checkpoint, `braid add` fails before any mutating command runs.
-    //
-    // Why it exists:
-    // - What risk/regression this protects against.
-    //   - Prevents regressions where rejected checkpoints still trigger disk mutations.
-    //
-    // Scenario:
-    // - Real-world situation this models (user/system story). Especially the
-    //   specific scenario that inspired this test (like a real world bug).
-    //   - Operator retries `braid add` with a stale checkpoint from another command; CLI must fail closed with zero side effects.
-    fn invariant_rejected_checkpoint_runs_no_mutating_requests() {
-        let tmp = tempfile::tempdir().unwrap();
-        let config_path = tmp.path().join("config.json");
-        let checkpoint_path = tmp.path().join("op-state.json");
-
-        let mut disks = BTreeMap::new();
-        disks.insert(
-            "disk2".to_owned(),
-            serde_json::json!({ "by_id": "/dev/disk/by-id/virtio-disk2" }),
-        );
-        let config_json = serde_json::json!({
-            "disks": disks,
-            "mount_point": "/mnt/storage"
-        });
-        std::fs::write(&config_path, serde_json::to_vec(&config_json).unwrap()).unwrap();
-
-        let checkpoint = new_checkpoint(
-            &SystemClock,
-            OpKind::Remove,
-            OpArgs::remove("disk2"),
-            Phase::RemoveStart,
-            "sha256:placeholder".to_owned(),
-            hash_args(&["remove", "disk2"]),
-            PoolFingerprint {
-                devices: vec![],
-                missing_count: 0,
-                total_devices: 0,
-                mounted: false,
-            },
-            TargetSnapshot {
-                primary: Some("disk2".to_owned()),
-                secondary: None,
-                missing_id: None,
-            },
-        );
-        save_checkpoint_atomic(&checkpoint, &checkpoint_path).unwrap();
-
-        let fs = StaticFs {
-            paths: vec!["/dev/disk/by-id/virtio-disk2".to_owned()],
-        };
-        let err = cmd_add(
-            &GuardedRunner,
-            &fs,
-            Path::new(&config_path),
-            "disk2",
-            false,
-            true,
-            false,
-            None,
-            ProgressOutput::Off,
-            &checkpoint_path,
-        )
-        .expect_err("checkpoint mismatch should fail before mutation");
-
-        assert!(
-            err.to_string().contains("error[CHECKPOINT_OP_MISMATCH]:"),
-            "unexpected error: {err}"
         );
     }
 }

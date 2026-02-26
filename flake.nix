@@ -140,11 +140,6 @@
               braid = linuxCrane.braid;
             }
           );
-          braid-checkpoint-opstate = pkgs.testers.nixosTest (
-            import ./tests/cli/braid-checkpoint-opstate.nix {
-              braid = linuxCrane.braid;
-            }
-          );
           replace-live-disk = pkgs.testers.nixosTest (
             import ./tests/cli/replace-live-disk.nix {
               braid = linuxCrane.braid;
@@ -195,11 +190,6 @@
           );
           braid-unlock = pkgs.testers.nixosTest (
             import ./tests/cli/braid-unlock.nix {
-              braid = linuxCrane.braid;
-            }
-          );
-          braid-wrong-passphrase-resume = pkgs.testers.nixosTest (
-            import ./tests/cli/braid-wrong-passphrase-resume.nix {
               braid = linuxCrane.braid;
             }
           );

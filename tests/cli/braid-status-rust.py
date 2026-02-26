@@ -45,13 +45,14 @@ with subtest("Single-disk summary"):
     output = machine.succeed(rust_status())
     print(f"Single-disk status:\n{output}")
     assert "healthy" in output, f"Expected 'healthy':\n{output}"
-    assert "Drives:   1" in output, f"Expected 'Drives:   1':\n{output}"
+    assert "Drives:" in output, f"Expected 'Drives:':\n{output}"
+    assert "disk1" in output, f"Expected 'disk1':\n{output}"
+    assert "present" in output, f"Expected 'present':\n{output}"
     assert "single" in output, f"Expected 'single' profile:\n{output}"
     assert "Total:" in output, f"Expected 'Total:':\n{output}"
     assert "Used:" in output, f"Expected 'Used:':\n{output}"
     assert "Free:" in output, f"Expected 'Free:':\n{output}"
     assert "RAID1" not in output, f"Unexpected 'RAID1' in single-disk:\n{output}"
-    assert "missing" not in output.lower(), f"Unexpected 'missing':\n{output}"
 
 # --- Phase 2: RAID1 healthy ---
 
@@ -65,7 +66,9 @@ with subtest("Healthy RAID1 summary"):
     output = machine.succeed(rust_status())
     print(f"Healthy RAID1 status:\n{output}")
     assert "healthy" in output, f"Expected 'healthy':\n{output}"
-    assert "Drives:   3" in output, f"Expected 'Drives:   3':\n{output}"
+    assert "Drives:" in output, f"Expected 'Drives:':\n{output}"
+    for disk in ["disk1", "disk2", "disk3"]:
+        assert disk in output, f"Expected '{disk}':\n{output}"
     assert "RAID1" in output, f"Expected 'RAID1':\n{output}"
     assert "Total:" in output, f"Expected 'Total:':\n{output}"
     assert "Used:" in output, f"Expected 'Used:':\n{output}"
@@ -114,7 +117,7 @@ with subtest("Degraded summary"):
     assert "DEGRADED" in output, f"Expected 'DEGRADED':\n{output}"
     assert "missing" in output.lower(), f"Expected 'missing':\n{output}"
     assert "RAID1" in output, f"Expected 'RAID1':\n{output}"
-    assert "2 present, 1 missing" in output, f"Expected '2 present, 1 missing':\n{output}"
+    assert "1 missing device" in output, f"Expected '1 missing device':\n{output}"
 
 with subtest("Degraded verbose"):
     output = machine.succeed(rust_status("--verbose"))

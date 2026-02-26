@@ -53,14 +53,6 @@ The btrfs superblock check is the "idempotent format primitive" described in `sa
 - Mixed state (live `--old` + pool has missing devices) is rejected — operator must run `braid remove-missing` first.
 - Live eviction uses a shared helper (also used by `remove`) that probes pool state to decide if RAID1→single conversion is needed.
 
-### Resumability
-
-Per-command checkpoint (`/var/lib/braid/op-state.json`) with strict fail-closed resume:
-- Resume gate validates command, args, config hash, pool topology, phase validity, and target availability before any mutating command runs.
-- Validation failures do not auto-invalidate and continue; they fail with explicit stable error codes (for example `CHECKPOINT_CONFIG_DRIFT`, `CHECKPOINT_TOPOLOGY_DRIFT`).
-- Checkpoint errors use `error[CODE]: message` format for operator visibility and test assertions.
-- Long-running phases (balance/device remove) resume deterministically via explicit phase markers.
-
 ### NixOS-native automation
 
 - systemd `braid-unlock.service` + `braid-pool.target` for post-boot unlock
