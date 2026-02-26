@@ -94,8 +94,9 @@ pub fn parse_btrfs_filesystem_show(
             field: "Total devices".into(),
         })?;
 
-    // Filter out missing-device placeholders. btrfs-progs prints:
+    // Filter out missing-device placeholders. btrfs-progs prints either:
     //   devid  2 size 0 used 0 path /dev/mapper/disk-2 MISSING
+    //   devid  2 size 0 used 0 path MISSING
     // These are synthetic — the device is gone. Only real present devices
     // are included; non-mapper real paths (e.g. /dev/sda1) are kept so
     // probe_pool can hard-fail on the invariant violation.
@@ -103,7 +104,7 @@ pub fn parse_btrfs_filesystem_show(
         .lines()
         .filter_map(|line| {
             parse_devid_line(line).ok().and_then(|(_, (devid, path))| {
-                if path.ends_with(" MISSING") {
+                if path == "MISSING" || path.ends_with(" MISSING") {
                     None
                 } else {
                     Some(BtrfsShowDevice {
@@ -202,6 +203,33 @@ mod tests {
         );
         assert_eq!(out.devices[0].devid, 1);
         assert_eq!(out.devices[0].path, "/dev/mapper/braid-vda");
+        assert!(out.has_missing);
+    }
+
+    /// When a device is fully gone, btrfs-progs prints bare `path MISSING`
+    /// without a /dev/mapper/ prefix. The parser must exclude these too.
+    /// Bug: `ends_with(" MISSING")` didn't catch bare `MISSING`.
+    #[test]
+    fn btrfs_show_excludes_bare_missing_path() {
+        let raw = RawCommandOutput {
+            cmd: "btrfs filesystem show".into(),
+            stdout: "Label: none  uuid: f1e2d3c4-b5a6-9788-7654-321fedcba098\n\
+                     \tTotal devices 2 FS bytes used 4.00GiB\n\
+                     \tdevid    1 size 10.00GiB used 5.00GiB path /dev/mapper/braid-vda\n\
+                     \tdevid    2 size 0 used 0 path MISSING\n\
+                     \t*** Some devices missing\n"
+                .into(),
+            stderr: String::new(),
+            exit_status: 0,
+        };
+        let out = parse_btrfs_filesystem_show(&raw).unwrap();
+        assert_eq!(out.total_devices, 2);
+        assert_eq!(
+            out.devices.len(),
+            1,
+            "bare MISSING path must be excluded"
+        );
+        assert_eq!(out.devices[0].devid, 1);
         assert!(out.has_missing);
     }
 

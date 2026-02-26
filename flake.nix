@@ -201,6 +201,11 @@
               inherit nixpkgs;
               system = linuxSystem;
             };
+          braid-lock = pkgs.testers.nixosTest (
+            import ./tests/cli/braid-lock.nix {
+              braid = linuxCrane.braid;
+            }
+          );
           braid-unlock = pkgs.testers.nixosTest (
             import ./tests/cli/braid-unlock.nix {
               braid = linuxCrane.braid;

@@ -36,6 +36,8 @@ enum Commands {
     Doctor(DoctorArgs),
     /// Unlock LUKS volumes and mount the pool
     Unlock(UnlockArgs),
+    /// Lock the pool: unmount and close LUKS volumes
+    Lock,
     /// Interactive terminal dashboard
     Tui(TuiArgs),
 }
@@ -275,6 +277,21 @@ fn main() {
                 args.passphrase_stdin,
                 args.passphrase_file.as_deref(),
             ) {
+                print_cli_error(&e.to_string());
+                std::process::exit(1);
+            }
+        }
+        Commands::Lock => {
+            let config = match config_read(Path::new(&config_path)) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                }
+            };
+            let runner = RealRunner;
+            let fs = RealFilesystem;
+            if let Err(e) = braid_cli::lock::cmd_lock(&runner, &fs, &config) {
                 print_cli_error(&e.to_string());
                 std::process::exit(1);
             }

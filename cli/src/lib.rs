@@ -4,6 +4,7 @@ pub mod cmd;
 pub mod config;
 pub mod disk_map;
 pub mod doctor;
+pub mod lock;
 pub mod luks;
 pub mod parse;
 pub mod pool;
