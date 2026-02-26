@@ -3,11 +3,21 @@ use nom::{
     character::complete::{not_line_ending, space0},
     IResult,
 };
+use time::macros::format_description;
+use time::PrimitiveDateTime;
 
 use crate::cmd::RawCommandOutput;
 
 use super::types::{BtrfsScrubStatusOutput, ScrubState, ScrubTimestamp};
 use super::ParseError;
+
+fn parse_ctime(s: &str) -> Option<PrimitiveDateTime> {
+    // "Tue Feb 24 02:00:07 2026" — ctime format from btrfs scrub status
+    let fmt = format_description!(
+        "[weekday repr:short] [month repr:short] [day padding:space] [hour]:[minute]:[second] [year]"
+    );
+    PrimitiveDateTime::parse(s, &fmt).ok()
+}
 
 // ---------------------------------------------------------------------------
 // nom parsers
@@ -51,6 +61,9 @@ pub fn parse_btrfs_scrub_status(
     let mut is_running = false;
     let mut error_count: u64 = 0;
     let mut pct: Option<u8> = None;
+    let mut duration: Option<String> = None;
+    let mut total: Option<String> = None;
+    let mut rate: Option<String> = None;
 
     for line in stdout.lines() {
         let trimmed = line.trim();
@@ -70,6 +83,12 @@ pub fn parse_btrfs_scrub_status(
                     .filter_map(|v| v.parse::<u64>().ok())
                     .sum();
             }
+        } else if let Some(rest) = trimmed.strip_prefix("Duration:") {
+            duration = Some(rest.trim().to_owned());
+        } else if let Some(rest) = trimmed.strip_prefix("Total to scrub:") {
+            total = Some(rest.trim().to_owned());
+        } else if let Some(rest) = trimmed.strip_prefix("Rate:") {
+            rate = Some(rest.trim().to_owned());
         } else if trimmed.ends_with("% done") {
             // e.g. "  8.00% done" on some versions, or embedded in other lines
             if let Some(pct_str) = trimmed.split('%').next() {
@@ -80,15 +99,18 @@ pub fn parse_btrfs_scrub_status(
 
     if is_running {
         return Ok(BtrfsScrubStatusOutput {
-            state: ScrubState::Running { pct },
+            state: ScrubState::Running { pct, total, rate },
         });
     }
 
-    if let Some(ts) = started_at {
+    if let Some(ts) = started_at.and_then(|s| parse_ctime(&s)) {
         return Ok(BtrfsScrubStatusOutput {
             state: ScrubState::Completed {
                 started_at: ScrubTimestamp(ts),
                 error_count,
+                duration,
+                total,
+                rate,
             },
         });
     }
@@ -140,12 +162,14 @@ mod tests {
             .find_map(|l| l.trim().strip_prefix("Scrub started:"))
             .unwrap()
             .trim();
+        let expected_dt = parse_ctime(expected_ts).unwrap();
         match &out.state {
             ScrubState::Completed {
                 started_at,
                 error_count,
+                ..
             } => {
-                assert_eq!(started_at.0, expected_ts);
+                assert_eq!(started_at.0, expected_dt);
                 assert_eq!(*error_count, 0);
             }
             other => panic!("expected Completed, got {other:?}"),
@@ -172,7 +196,7 @@ Error summary:    no errors found
             exit_status: 0,
         };
         let out = parse_btrfs_scrub_status(&raw).unwrap();
-        assert_eq!(out.state, ScrubState::Running { pct: None });
+        assert!(matches!(out.state, ScrubState::Running { pct: None, .. }));
     }
 
     #[test]
@@ -197,8 +221,12 @@ Error summary:    read=1 csum=2
             ScrubState::Completed {
                 started_at,
                 error_count,
+                ..
             } => {
-                assert_eq!(started_at.0, "Tue Feb 25 10:00:00 2026");
+                assert_eq!(
+                    started_at.0,
+                    parse_ctime("Tue Feb 25 10:00:00 2026").unwrap()
+                );
                 assert_eq!(*error_count, 3);
             }
             other => panic!("expected Completed, got {other:?}"),

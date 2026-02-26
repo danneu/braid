@@ -5,7 +5,8 @@ expression: buffer_to_string(&terminal)
  Pool ──────────────────────────────────────────────────────
  error: command failed: findmnt exited 1
  Disks ─────────────────────────────────────────────────────
- 1  toshiba
- 2  ironwolf
- 3  wdc
+   #  Name       Use  Allocated
+ ▶ 1  toshiba
+   2  ironwolf
+   3  wdc
 press q to quit

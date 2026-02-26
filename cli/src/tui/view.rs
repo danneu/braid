@@ -1,11 +1,37 @@
 use ratatui::layout::{Constraint, Layout};
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::Line;
-use ratatui::widgets::{Block, Paragraph, Row, Table, TableState};
+use ratatui::style::{Color, Style};
+use ratatui::widgets::{Block, Gauge, Paragraph, Row, Table, TableState};
 use ratatui::Frame;
+use time::macros::format_description;
+use time::PrimitiveDateTime;
 
 use crate::parse::types::ScrubState;
 use crate::tui::model::{Model, PoolState, PoolStatus};
+
+fn format_timestamp(dt: &PrimitiveDateTime) -> String {
+    let fmt = format_description!(
+        "[weekday repr:short] [month repr:short] [day padding:space] [hour]:[minute]:[second] [year]"
+    );
+    dt.format(&fmt).unwrap_or_else(|_| "unknown".to_owned())
+}
+
+fn timeago(dt: &PrimitiveDateTime, now: PrimitiveDateTime) -> Option<String> {
+    let diff = now - *dt;
+    if diff.is_negative() {
+        return None;
+    }
+    let days = diff.whole_days();
+    let minutes = diff.whole_minutes();
+    Some(if days > 1 {
+        format!("{days} days ago")
+    } else if days == 1 {
+        "1 day ago".to_owned()
+    } else if minutes < 1 {
+        "<1 min ago".to_owned()
+    } else {
+        format!("{minutes} min ago")
+    })
+}
 
 #[derive(Clone, Copy)]
 enum ByteUnit {
@@ -45,11 +71,6 @@ impl ByteUnit {
     }
 }
 
-fn format_bytes(bytes: u64) -> String {
-    let unit = ByteUnit::friendliest(bytes);
-    format!("{} {}", unit.format(bytes), unit.suffix())
-}
-
 fn percent(used: u64, total: u64) -> f64 {
     if total == 0 {
         0.0
@@ -66,58 +87,103 @@ fn section_block(title: &str) -> Block<'_> {
         .padding(ratatui::widgets::Padding::left(1))
 }
 
-fn pool_view(pool: &PoolState, unit: ByteUnit) -> Paragraph<'_> {
-    let lines = vec![
-        Line::from(format!("Path: {} ({})", pool.mount_point, pool.health)),
-        Line::from(format!(
-            "Redundancy: {}",
-            match pool.profile.as_str() {
-                "RAID1" => "2x (RAID1)",
-                "single" => "None (single)",
-                other => other,
-            }
-        )),
-        Line::from(format!(
-            "Usage: {:.0}% ({} / {} {})",
-            percent(pool.used, pool.total),
-            unit.format(pool.used),
-            unit.format(pool.total),
-            unit.suffix(),
-        )),
+fn pool_table(pool: &PoolState, unit: ByteUnit) -> Table<'_> {
+    let redundancy = match pool.profile.as_str() {
+        "RAID1" => "2x (RAID1)",
+        "single" => "None (single)",
+        other => other,
+    };
+    let rows = [
+        Row::new([
+            "Path".to_owned(),
+            format!("{} ({})", pool.mount_point, pool.health),
+        ]),
+        Row::new(["Redundancy".to_owned(), redundancy.to_owned()]),
+        Row::new([
+            "Usage".to_owned(),
+            format!(
+                "{:.0}% ({} / {} {})",
+                percent(pool.used, pool.total),
+                unit.format(pool.used),
+                unit.format(pool.total),
+                unit.suffix(),
+            ),
+        ]),
     ];
-    Paragraph::new(lines).block(section_block("Pool"))
+    let widths = [Constraint::Length(12), Constraint::Min(10)];
+    Table::new(rows, widths).block(section_block("Pool"))
 }
 
-fn scrub_view(scrub: &ScrubState) -> Paragraph<'_> {
-    let p = match scrub {
-        ScrubState::Never => Paragraph::new("Last run: never"),
-        ScrubState::Running { pct } => {
+fn scrub_table(scrub: &ScrubState, now: PrimitiveDateTime) -> Table<'_> {
+    let (rows, style) = match scrub {
+        ScrubState::Never => (
+            vec![Row::new(["Last run".to_owned(), "never".to_owned()])],
+            None,
+        ),
+        ScrubState::Running { pct, total, rate } => {
             let detail = match pct {
-                Some(p) => format!("Last run: now ({}% completed)", p),
-                None => "Last run: now".to_owned(),
+                Some(p) => format!("now ({}% completed)", p),
+                None => "now".to_owned(),
             };
-            Paragraph::new(detail)
+            let mut rows = vec![Row::new(["Last run".to_owned(), detail])];
+            if let Some(t) = total {
+                rows.push(Row::new(["Total".to_owned(), t.clone()]));
+            }
+            if let Some(r) = rate {
+                rows.push(Row::new(["Rate".to_owned(), r.clone()]));
+            }
+            (rows, None)
         }
         ScrubState::Completed {
             started_at,
             error_count,
+            duration,
+            total,
+            rate,
         } => {
-            let lines = vec![
-                Line::from(format!("Last run: {}", started_at.0)),
-                Line::from(format!("Errors: {}", error_count)),
+            let display = match timeago(&started_at.0, now) {
+                Some(ago) => format!("{} ({})", format_timestamp(&started_at.0), ago),
+                None => format_timestamp(&started_at.0),
+            };
+            let mut rows = vec![
+                Row::new(["Last run".to_owned(), display]),
+                Row::new(["Errors".to_owned(), error_count.to_string()]),
             ];
-            Paragraph::new(lines)
+            if let Some(t) = total {
+                rows.push(Row::new(["Total".to_owned(), t.clone()]));
+            }
+            if let Some(r) = rate {
+                rows.push(Row::new(["Rate".to_owned(), r.clone()]));
+            }
+            if let Some(d) = duration {
+                rows.push(Row::new(["Duration".to_owned(), d.clone()]));
+            }
+            (rows, None)
         }
-        ScrubState::Unknown => {
-            Paragraph::new("Last run: unknown").style(Style::default().fg(Color::DarkGray))
-        }
+        ScrubState::Unknown => (
+            vec![Row::new(["Last run".to_owned(), "unknown".to_owned()])],
+            Some(Style::default().fg(Color::DarkGray)),
+        ),
     };
-    p.block(section_block("Scrub"))
+    let widths = [Constraint::Length(12), Constraint::Min(10)];
+    let t = Table::new(rows, widths).block(section_block("Scrub"));
+    match style {
+        Some(s) => t.style(s),
+        None => t,
+    }
 }
 
 fn scrub_lines(scrub: &ScrubState) -> u16 {
     match scrub {
-        ScrubState::Completed { .. } => 2,
+        ScrubState::Running { total, rate, .. } => {
+            1 + total.is_some() as u16 + rate.is_some() as u16
+        }
+        ScrubState::Completed {
+            total,
+            rate,
+            duration,
+            ..
+        } => 2 + total.is_some() as u16 + rate.is_some() as u16 + duration.is_some() as u16,
         _ => 1,
     }
 }
@@ -127,6 +193,8 @@ fn disk_table(model: &Model, unit: ByteUnit) -> Table<'_> {
         PoolStatus::Mounted(p) => Some(&p.disk_usage),
         _ => None,
     };
+    let header =
+        Row::new(["#", "Name", "Use", "Allocated"]).style(Style::default().fg(Color::DarkGray));
     let rows: Vec<Row> = model
         .disk_keys
         .iter()
@@ -158,8 +226,10 @@ fn disk_table(model: &Model, unit: ByteUnit) -> Table<'_> {
         Constraint::Min(10),
     ];
     Table::new(rows, widths)
+        .header(header)
         .block(section_block("Disks"))
-        .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED))
+        .highlight_symbol("▶ ")
+        .row_highlight_style(Style::default().fg(Color::Cyan))
 }
 
 fn page_unit(model: &Model) -> ByteUnit {
@@ -176,32 +246,29 @@ fn page_unit(model: &Model) -> ByteUnit {
     ByteUnit::friendliest(max_bytes)
 }
 
-pub fn view(model: &Model, frame: &mut Frame) {
+pub fn view(model: &Model, frame: &mut Frame, now: PrimitiveDateTime) {
     let page_unit = page_unit(model);
     let area = frame.area();
 
     // +1 per section for top border
     let pool_height: u16 = match &model.pool {
-        PoolStatus::Mounted(_) => 3 + 1,
+        PoolStatus::Mounted(_) => 3 + 1 + 1, // +1 gauge
         _ => 1 + 1,
     };
-    let disk_height: u16 = model.disk_keys.len() as u16 + 1;
+    let disk_height: u16 = model.disk_keys.len() as u16 + 2; // +1 border, +1 header
     let scrub_height: u16 = match &model.pool {
         PoolStatus::Mounted(p) => scrub_lines(&p.scrub) + 1,
         _ => 0,
     };
 
-    let scrub_gap: u16 = if scrub_height > 0 { 1 } else { 0 };
-
     let chunks = Layout::vertical([
-        Constraint::Length(pool_height),  // [0] pool section
-        Constraint::Length(1),            // [1] gap
-        Constraint::Length(disk_height),  // [2] disks section
-        Constraint::Length(scrub_gap),    // [3] gap (only when scrub visible)
-        Constraint::Length(scrub_height), // [4] scrub section
-        Constraint::Min(0),               // [5] spacer
-        Constraint::Length(1),            // [6] footer
+        Constraint::Length(pool_height),  // [0] pool
+        Constraint::Length(disk_height),  // [1] disks
+        Constraint::Length(scrub_height), // [2] scrub
+        Constraint::Min(0),               // [3] spacer
+        Constraint::Length(1),            // [4] footer
     ])
+    .spacing(1)
     .split(area);
 
     match &model.pool {
@@ -222,7 +289,25 @@ pub fn view(model: &Model, frame: &mut Frame) {
             );
         }
         PoolStatus::Mounted(pool) => {
-            frame.render_widget(pool_view(pool, page_unit), chunks[0]);
+            let pool_inner = Layout::vertical([
+                Constraint::Min(0),    // table
+                Constraint::Length(1), // gauge
+            ])
+            .split(chunks[0]);
+            frame.render_widget(pool_table(pool, page_unit), pool_inner[0]);
+            let ratio = if pool.total > 0 {
+                pool.used as f64 / pool.total as f64
+            } else {
+                0.0
+            };
+            frame.render_widget(
+                Gauge::default()
+                    .ratio(ratio)
+                    .label("")
+                    .gauge_style(Style::default().fg(Color::Cyan).bg(Color::DarkGray))
+                    .block(Block::new().padding(ratatui::widgets::Padding::left(1))),
+                pool_inner[1],
+            );
         }
         PoolStatus::Error(msg) => {
             frame.render_widget(
@@ -235,10 +320,10 @@ pub fn view(model: &Model, frame: &mut Frame) {
     }
 
     let mut table_state = TableState::default().with_selected(Some(model.selected_disk));
-    frame.render_stateful_widget(disk_table(model, page_unit), chunks[2], &mut table_state);
+    frame.render_stateful_widget(disk_table(model, page_unit), chunks[1], &mut table_state);
 
     if let PoolStatus::Mounted(pool) = &model.pool {
-        frame.render_widget(scrub_view(&pool.scrub), chunks[4]);
+        frame.render_widget(scrub_table(&pool.scrub, now), chunks[2]);
     }
 
     let footer = match model.probe_duration {
@@ -247,7 +332,7 @@ pub fn view(model: &Model, frame: &mut Frame) {
     };
     frame.render_widget(
         Paragraph::new(footer).style(Style::default().fg(Color::DarkGray)),
-        chunks[6],
+        chunks[4],
     );
 }
 
@@ -262,9 +347,10 @@ mod tests {
     use ratatui::Terminal;
 
     fn render(model: &Model, width: u16, height: u16) -> Terminal<TestBackend> {
+        let now = time::macros::datetime!(2026-02-24 02:12:00);
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|frame| view(model, frame)).unwrap();
+        terminal.draw(|frame| view(model, frame, now)).unwrap();
         terminal
     }
 
@@ -348,8 +434,11 @@ mod tests {
             total: 5_937_955_045_376, // ~5.4 TiB
             disk_usage,
             scrub: ScrubState::Completed {
-                started_at: ScrubTimestamp("Tue Feb 24 02:00:07 2026".to_owned()),
+                started_at: ScrubTimestamp(time::macros::datetime!(2026-02-24 02:00:07)),
                 error_count: 0,
+                duration: Some("0:00:00".to_owned()),
+                total: Some("32.36MiB".to_owned()),
+                rate: Some("32.34MiB/s".to_owned()),
             },
         };
         let model = Model::new_demo(sample_disk_keys(), PoolStatus::Mounted(pool));

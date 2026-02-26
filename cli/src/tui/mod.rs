@@ -77,8 +77,11 @@ pub fn run_demo() -> io::Result<()> {
         total: 5_937_955_045_376,
         disk_usage,
         scrub: ScrubState::Completed {
-            started_at: ScrubTimestamp("Tue Feb 24 02:00:07 2026".to_owned()),
+            started_at: ScrubTimestamp(time::macros::datetime!(2026-02-24 02:00:07)),
             error_count: 0,
+            duration: Some("0:00:00".to_owned()),
+            total: Some("32.36MiB".to_owned()),
+            rate: Some("32.34MiB/s".to_owned()),
         },
     };
     let mut model = Model::new_demo(disk_keys, PoolStatus::Mounted(pool));
@@ -100,7 +103,13 @@ fn run_loop(
     cmd_tx: &mpsc::Sender<event::Event>,
 ) -> io::Result<()> {
     while model.running {
-        terminal.draw(|f| view(model, f))?;
+        let now = {
+            let offset =
+                time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC);
+            let local = time::OffsetDateTime::now_utc().to_offset(offset);
+            time::PrimitiveDateTime::new(local.date(), local.time())
+        };
+        terminal.draw(|f| view(model, f, now))?;
 
         let mut messages = Vec::new();
         if let Ok(event) = rx.recv_timeout(FRAME_BUDGET) {

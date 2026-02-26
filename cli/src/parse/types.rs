@@ -86,9 +86,9 @@ pub struct BtrfsFilesystemUsageOutput {
     pub data_ratio: u64,
 }
 
-/// Typed wrapper so domain code doesn't re-parse the raw timestamp string.
+/// Parsed scrub timestamp — the parser converts the raw ctime string.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ScrubTimestamp(pub String);
+pub struct ScrubTimestamp(pub time::PrimitiveDateTime);
 
 /// btrfs scrub status
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,10 +96,15 @@ pub enum ScrubState {
     Never,
     Running {
         pct: Option<u8>,
+        total: Option<String>,
+        rate: Option<String>,
     },
     Completed {
         started_at: ScrubTimestamp,
         error_count: u64,
+        duration: Option<String>,
+        total: Option<String>,
+        rate: Option<String>,
     },
     Unknown,
 }

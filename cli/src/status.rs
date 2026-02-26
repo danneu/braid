@@ -375,7 +375,16 @@ fn get_scrub_string<R: CommandRunner>(runner: &R, mount_point: &str) -> String {
         Ok(out) => match out.state {
             ScrubState::Never => "never".to_owned(),
             ScrubState::Running { .. } => "running".to_owned(),
-            ScrubState::Completed { started_at, .. } => started_at.0,
+            ScrubState::Completed { started_at, .. } => {
+                use time::macros::format_description;
+                let fmt = format_description!(
+                    "[weekday repr:short] [month repr:short] [day padding:space] [hour]:[minute]:[second] [year]"
+                );
+                started_at
+                    .0
+                    .format(&fmt)
+                    .unwrap_or_else(|_| "unknown".to_owned())
+            }
             ScrubState::Unknown => "unknown".to_owned(),
         },
         Err(_) => "unknown".to_owned(),
