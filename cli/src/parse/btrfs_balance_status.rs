@@ -1,13 +1,13 @@
 use nom::{
-    IResult,
     bytes::complete::{tag, take_till1},
-    character::complete::{space0, space1, u8 as parse_u8, u64 as parse_u64},
+    character::complete::{space0, space1, u64 as parse_u64, u8 as parse_u8},
+    IResult,
 };
 
 use crate::cmd::RawCommandOutput;
 
-use super::ParseError;
 use super::types::{BalanceState, BtrfsBalanceStatusOutput};
+use super::ParseError;
 
 // ---------------------------------------------------------------------------
 // nom parsers
@@ -53,6 +53,62 @@ fn parse_state_line(input: &str) -> IResult<&str, &str> {
 pub fn parse_btrfs_balance_status(
     raw: &RawCommandOutput,
 ) -> Result<BtrfsBalanceStatusOutput, ParseError> {
+    let stdout = &raw.stdout;
+
+    // Check for "no balance" first (btrfs exits 0 for this case)
+    if stdout.lines().any(|l| l.contains("No balance found")) {
+        return Ok(BtrfsBalanceStatusOutput {
+            state: BalanceState::None,
+        });
+    }
+
+    // Determine running vs paused from the state line.
+    // btrfs exits with 1 when a balance is running or paused, so we parse
+    // stdout before checking the exit code.
+    let state_str = stdout
+        .lines()
+        .find_map(|l| parse_state_line(l.trim()).ok().map(|(_, s)| s));
+
+    if let Some(state_str) = state_str {
+        let is_running = state_str == "running";
+        let is_paused = state_str == "paused";
+
+        if !is_running && !is_paused {
+            return Err(ParseError::InvalidText {
+                cmd: raw.cmd.clone(),
+                detail: format!("unexpected balance state: {state_str:?}"),
+            });
+        }
+
+        // Find chunk progress line
+        let (done_chunks, estimated_total_chunks, considered_chunks, pct_left) = stdout
+            .lines()
+            .find_map(|l| parse_chunks_line(l.trim()).ok().map(|(_, v)| v))
+            .ok_or_else(|| ParseError::InvalidText {
+                cmd: raw.cmd.clone(),
+                detail: "balance running/paused but no chunk progress line found".into(),
+            })?;
+
+        let state = if is_running {
+            BalanceState::Running {
+                done_chunks,
+                estimated_total_chunks,
+                considered_chunks,
+                pct_left,
+            }
+        } else {
+            BalanceState::Paused {
+                done_chunks,
+                estimated_total_chunks,
+                considered_chunks,
+                pct_left,
+            }
+        };
+
+        return Ok(BtrfsBalanceStatusOutput { state });
+    }
+
+    // stdout didn't match any known pattern — treat non-zero exit as a hard error
     if raw.exit_status != 0 {
         return Err(ParseError::CommandFailed {
             cmd: raw.cmd.clone(),
@@ -61,60 +117,10 @@ pub fn parse_btrfs_balance_status(
         });
     }
 
-    let stdout = &raw.stdout;
-
-    // Check for "no balance" first
-    if stdout.lines().any(|l| l.contains("No balance found")) {
-        return Ok(BtrfsBalanceStatusOutput {
-            state: BalanceState::None,
-        });
-    }
-
-    // Determine running vs paused from the state line
-    let state_str = stdout
-        .lines()
-        .find_map(|l| parse_state_line(l.trim()).ok().map(|(_, s)| s))
-        .ok_or_else(|| ParseError::InvalidText {
-            cmd: raw.cmd.clone(),
-            detail: "no recognizable balance state pattern found".into(),
-        })?;
-
-    let is_running = state_str == "running";
-    let is_paused = state_str == "paused";
-
-    if !is_running && !is_paused {
-        return Err(ParseError::InvalidText {
-            cmd: raw.cmd.clone(),
-            detail: format!("unexpected balance state: {state_str:?}"),
-        });
-    }
-
-    // Find chunk progress line
-    let (done_chunks, estimated_total_chunks, considered_chunks, pct_left) = stdout
-        .lines()
-        .find_map(|l| parse_chunks_line(l.trim()).ok().map(|(_, v)| v))
-        .ok_or_else(|| ParseError::InvalidText {
-            cmd: raw.cmd.clone(),
-            detail: "balance running/paused but no chunk progress line found".into(),
-        })?;
-
-    let state = if is_running {
-        BalanceState::Running {
-            done_chunks,
-            estimated_total_chunks,
-            considered_chunks,
-            pct_left,
-        }
-    } else {
-        BalanceState::Paused {
-            done_chunks,
-            estimated_total_chunks,
-            considered_chunks,
-            pct_left,
-        }
-    };
-
-    Ok(BtrfsBalanceStatusOutput { state })
+    Err(ParseError::InvalidText {
+        cmd: raw.cmd.clone(),
+        detail: "no recognizable balance state pattern found".into(),
+    })
 }
 
 #[cfg(test)]
@@ -143,6 +149,27 @@ mod tests {
         assert_eq!(out.state, BalanceState::None);
     }
 
+    #[test]
+    fn balance_status_parses_nixos_25_11_running() {
+        // btrfs exits 1 when a balance is running — this is the real behavior
+        let raw = RawCommandOutput {
+            cmd: "btrfs balance status".into(),
+            stdout: fixture("btrfs-balance-status-running.txt"),
+            stderr: String::new(),
+            exit_status: 1,
+        };
+        let out = parse_btrfs_balance_status(&raw).unwrap();
+        assert_eq!(
+            out.state,
+            BalanceState::Running {
+                done_chunks: 0,
+                estimated_total_chunks: 6,
+                considered_chunks: 1,
+                pct_left: 100,
+            }
+        );
+    }
+
     // --- Synthetic tests (inline) ---
 
     #[test]
@@ -153,7 +180,7 @@ mod tests {
                      3 out of about 10 chunks balanced (7 considered), 70% left\n"
                 .into(),
             stderr: String::new(),
-            exit_status: 0,
+            exit_status: 1,
         };
         let out = parse_btrfs_balance_status(&raw).unwrap();
         assert_eq!(
@@ -175,7 +202,7 @@ mod tests {
                      5 out of about 12 chunks balanced (8 considered), 58% left\n"
                 .into(),
             stderr: String::new(),
-            exit_status: 0,
+            exit_status: 1,
         };
         let out = parse_btrfs_balance_status(&raw).unwrap();
         assert_eq!(
@@ -200,7 +227,7 @@ mod tests {
                      extra trailing info\n"
                 .into(),
             stderr: String::new(),
-            exit_status: 0,
+            exit_status: 1,
         };
         let out = parse_btrfs_balance_status(&raw).unwrap();
         assert_eq!(
@@ -227,12 +254,13 @@ mod tests {
     }
 
     #[test]
-    fn balance_status_error_exit() {
+    fn balance_status_error_exit_code_2() {
+        // exit 2 is the hard-error code (e.g. not a btrfs filesystem)
         let raw = RawCommandOutput {
             cmd: "btrfs balance status".into(),
             stdout: String::new(),
             stderr: "ERROR: not a btrfs filesystem".into(),
-            exit_status: 1,
+            exit_status: 2,
         };
         let err = parse_btrfs_balance_status(&raw).unwrap_err();
         assert!(matches!(err, ParseError::CommandFailed { .. }));
