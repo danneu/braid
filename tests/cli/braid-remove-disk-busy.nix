@@ -8,8 +8,8 @@
 # 0). The happy path is covered by braid-remove-disk, but no test confirms the
 # warning IS surfaced and the mapper remains open when a process holds an fd.
 #
-# Scenario: Admin removes a pool member while a background process has an open
-# fd on the mapper device. braid remove must still succeed (disk is out of
+# Scenario: Admin removes a pool member while a loop device is attached to the
+# mapper, holding it busy. braid remove must still succeed (disk is out of
 # btrfs) but the kernel refuses cryptsetup close.
 { braid }:
 {

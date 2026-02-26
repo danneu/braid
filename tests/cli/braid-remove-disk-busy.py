@@ -2,8 +2,8 @@
 #
 # Intent:
 #   Verify that `braid remove` exits 0 and surfaces a warning when the LUKS
-#   mapper cannot be closed because another process holds it open, and that
-#   the mapper remains open afterward.
+#   mapper cannot be closed because the device is held busy, and that the
+#   mapper remains open afterward.
 #
 # Why it exists:
 #   pool.rs intentionally treats `cryptsetup close` as best-effort: it warns
@@ -13,11 +13,12 @@
 #   close fails.
 #
 # Scenario:
-#   A 3-disk RAID1 pool is built. A background `sleep` holds an open fd on
-#   /dev/mapper/braid-disk3, causing `cryptsetup close` to fail. `braid remove
-#   disk3` must still succeed: disk3 is removed from btrfs, a warning is
-#   printed, and the mapper stays open. Killing the holder then allows a clean
-#   manual close.
+#   A 3-disk RAID1 pool is built. A loop device is set up over
+#   /dev/mapper/braid-disk3, which holds an open reference to the mapper and
+#   causes `cryptsetup close` to fail with EBUSY. `braid remove disk3` must
+#   still succeed: disk3 is removed from btrfs, a warning is printed, and the
+#   mapper stays open. Detaching the loop device then allows a clean manual
+#   close.
 
 import shlex
 
@@ -43,9 +44,13 @@ with subtest("Setup: build 3-disk RAID1 pool"):
     machine.succeed(add_cmd("disk3"))
     machine.succeed("echo 'important data' > /mnt/storage/precious.txt")
 
-with subtest("Hold mapper open with background process"):
-    # sleep holds an open fd on /dev/mapper/braid-disk3, making cryptsetup close fail
-    machine.succeed("sleep 3600 < /dev/mapper/braid-disk3 &")
+with subtest("Hold mapper busy with a loop device"):
+    # losetup --find --show atomically attaches and prints the loop device path.
+    # The loop device holds an open fd on braid-disk3, causing cryptsetup close to fail.
+    loop_dev = machine.succeed(
+        "losetup --find --show /dev/mapper/braid-disk3"
+    ).strip()
+    assert loop_dev, "expected a loop device to be attached"
 
 with subtest("braid remove exits 0 even when luksClose fails"):
     output = machine.succeed("braid remove disk3 --yes 2>&1")
@@ -60,8 +65,8 @@ with subtest("Pool is otherwise correct — disk3 gone from btrfs"):
     fi_show = machine.succeed("btrfs fi show /mnt/storage")
     assert "braid-disk3" not in fi_show, f"disk3 still in btrfs pool:\n{fi_show}"
 
-with subtest("Closing the holder allows clean luksClose"):
-    machine.succeed("pkill -f 'sleep 3600' || true")
+with subtest("Detaching loop device allows clean luksClose"):
+    machine.succeed(f"losetup -d {loop_dev}")
     machine.succeed("cryptsetup close braid-disk3")
     machine.fail("test -e /dev/mapper/braid-disk3")
 
