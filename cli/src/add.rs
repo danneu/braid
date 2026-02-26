@@ -204,7 +204,9 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
                 }
             }
 
-            let luks_opts = luks_opts_from_env();
+            let mut luks_opts = luks_opts_from_env();
+            luks_opts.push("--label".into());
+            luks_opts.push(format!("braid-{key}"));
             luks_format(runner, &disk.by_id.0, &passphrase, &luks_opts)?;
             eprintln!("LUKS formatted: {}", disk.by_id);
 

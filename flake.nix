@@ -206,6 +206,11 @@
               braid = linuxCrane.braid;
             }
           );
+          luks-label = pkgs.testers.nixosTest (
+            import ./tests/cli/luks-label.nix {
+              braid = linuxCrane.braid;
+            }
+          );
           braid-module-no-discard =
             import ./tests/module/no-discard.nix {
               inherit nixpkgs;
