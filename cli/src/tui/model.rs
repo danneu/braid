@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use crate::parse::types::ScrubState;
 use crate::tui::effect::Effect;
 use crate::tui::state::{CmdId, CommandState};
 
@@ -17,6 +18,7 @@ pub struct PoolState {
     pub used: u64,
     pub total: u64,
     pub disk_usage: HashMap<String, DiskUsage>,
+    pub scrub: ScrubState,
 }
 
 pub enum PoolStatus {

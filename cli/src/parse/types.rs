@@ -94,7 +94,13 @@ pub struct ScrubTimestamp(pub String);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScrubState {
     Never,
-    Completed { started_at: ScrubTimestamp },
+    Running {
+        pct: Option<u8>,
+    },
+    Completed {
+        started_at: ScrubTimestamp,
+        error_count: u64,
+    },
     Unknown,
 }
 

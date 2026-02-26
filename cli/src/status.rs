@@ -3,12 +3,12 @@ use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, LsblkFieldKind};
-use crate::config::{Config, mapper_name};
+use crate::config::{mapper_name, Config};
 use crate::parse::{
-    BtrfsDeviceStatsOutput, ParseError, ScrubState, parse_btrfs_device_stats, parse_btrfs_df_json,
-    parse_btrfs_filesystem_usage, parse_btrfs_scrub_status, parse_lsblk_field,
+    parse_btrfs_device_stats, parse_btrfs_df_json, parse_btrfs_filesystem_usage,
+    parse_btrfs_scrub_status, parse_lsblk_field, BtrfsDeviceStatsOutput, ParseError, ScrubState,
 };
-use crate::probe::{Filesystem, ProbeError, probe_config_disk, probe_pool};
+use crate::probe::{probe_config_disk, probe_pool, Filesystem, ProbeError};
 use crate::types::*;
 
 // ---------------------------------------------------------------------------
@@ -374,7 +374,8 @@ fn get_scrub_string<R: CommandRunner>(runner: &R, mount_point: &str) -> String {
     match parse_btrfs_scrub_status(&raw) {
         Ok(out) => match out.state {
             ScrubState::Never => "never".to_owned(),
-            ScrubState::Completed { started_at } => started_at.0,
+            ScrubState::Running { .. } => "running".to_owned(),
+            ScrubState::Completed { started_at, .. } => started_at.0,
             ScrubState::Unknown => "unknown".to_owned(),
         },
         Err(_) => "unknown".to_owned(),

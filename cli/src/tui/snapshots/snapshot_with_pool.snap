@@ -5,6 +5,7 @@ expression: buffer_to_string(&terminal)
 ┌ braid ───────────────────────────────────────────────────┐
 │Pool                                                      │
 │Path: /mnt/storage (healthy)                              │
+│Redundancy: 2x (RAID1)                                    │
 │Usage: 39% (2.1 / 5.4 TiB)                                │
 │                                                          │
 │Disks                                                     │
@@ -16,9 +17,8 @@ expression: buffer_to_string(&terminal)
 │                                                          │
 │                                                          │
 │                                                          │
-│                                                          │
-│                                                          │
-│                                                          │
-│                                                          │
+│Scrub                                                     │
+│Last run: Tue Feb 24 02:00:07 2026                        │
+│Errors: 0                                                 │
 │press q to quit                                           │
 └──────────────────────────────────────────────────────────┘

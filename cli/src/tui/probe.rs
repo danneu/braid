@@ -1,7 +1,10 @@
 use std::collections::HashMap;
 
 use crate::cmd::{CmdRequest, CommandRunner};
-use crate::parse::{parse_btrfs_device_usage, parse_btrfs_filesystem_usage};
+use crate::parse::types::ScrubState;
+use crate::parse::{
+    parse_btrfs_device_usage, parse_btrfs_filesystem_usage, parse_btrfs_scrub_status,
+};
 use crate::probe::probe_pool;
 use crate::tui::model::{DiskUsage, PoolState};
 
@@ -65,6 +68,15 @@ pub fn probe_pool_for_tui<R: CommandRunner>(
         );
     }
 
+    let scrub = runner
+        .run(&CmdRequest::BtrfsScrubStatus {
+            mount_point: mount_point.to_owned(),
+        })
+        .ok()
+        .and_then(|raw| parse_btrfs_scrub_status(&raw).ok())
+        .map(|out| out.state)
+        .unwrap_or(ScrubState::Unknown);
+
     Ok(Some(PoolState {
         mount_point: mount_point.to_owned(),
         profile: profile.to_owned(),
@@ -72,5 +84,6 @@ pub fn probe_pool_for_tui<R: CommandRunner>(
         used: usage.used_bytes,
         total: usage.free_estimated_bytes + usage.used_bytes,
         disk_usage,
+        scrub,
     }))
 }

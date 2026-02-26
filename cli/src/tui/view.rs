@@ -4,6 +4,7 @@ use ratatui::text::Line;
 use ratatui::widgets::{Block, Paragraph, Row, Table, TableState};
 use ratatui::Frame;
 
+use crate::parse::types::ScrubState;
 use crate::tui::model::{Model, PoolState, PoolStatus};
 
 #[derive(Clone, Copy)]
@@ -61,6 +62,14 @@ fn pool_view(pool: &PoolState, unit: ByteUnit) -> Paragraph<'_> {
     let lines = vec![
         Line::from(format!("Path: {} ({})", pool.mount_point, pool.health)),
         Line::from(format!(
+            "Redundancy: {}",
+            match pool.profile.as_str() {
+                "RAID1" => "2x (RAID1)",
+                "single" => "None (single)",
+                other => other,
+            }
+        )),
+        Line::from(format!(
             "Usage: {:.0}% ({} / {} {})",
             percent(pool.used, pool.total),
             unit.format(pool.used),
@@ -69,6 +78,39 @@ fn pool_view(pool: &PoolState, unit: ByteUnit) -> Paragraph<'_> {
         )),
     ];
     Paragraph::new(lines)
+}
+
+fn scrub_view(scrub: &ScrubState) -> Paragraph<'_> {
+    match scrub {
+        ScrubState::Never => Paragraph::new("Last run: never"),
+        ScrubState::Running { pct } => {
+            let detail = match pct {
+                Some(p) => format!("Last run: now ({}% completed)", p),
+                None => "Last run: now".to_owned(),
+            };
+            Paragraph::new(detail)
+        }
+        ScrubState::Completed {
+            started_at,
+            error_count,
+        } => {
+            let lines = vec![
+                Line::from(format!("Last run: {}", started_at.0)),
+                Line::from(format!("Errors: {}", error_count)),
+            ];
+            Paragraph::new(lines)
+        }
+        ScrubState::Unknown => {
+            Paragraph::new("Last run: unknown").style(Style::default().fg(Color::DarkGray))
+        }
+    }
+}
+
+fn scrub_lines(scrub: &ScrubState) -> u16 {
+    match scrub {
+        ScrubState::Completed { .. } => 2,
+        _ => 1,
+    }
 }
 
 fn disk_table(model: &Model, unit: ByteUnit) -> Table<'_> {
@@ -135,17 +177,28 @@ pub fn view(model: &Model, frame: &mut Frame) {
     frame.render_widget(outer, area);
 
     let pool_detail_lines: u16 = match &model.pool {
-        PoolStatus::Mounted(_) => 2,
+        PoolStatus::Mounted(_) => 3,
         PoolStatus::Loading | PoolStatus::NotMounted | PoolStatus::Error(_) => 1,
     };
 
+    let scrub_detail_lines: u16 = match &model.pool {
+        PoolStatus::Mounted(p) => scrub_lines(&p.scrub),
+        _ => 0,
+    };
+    let scrub_section_lines = if scrub_detail_lines > 0 {
+        1 + scrub_detail_lines // header + details
+    } else {
+        0
+    };
+
     let chunks = Layout::vertical([
-        Constraint::Length(1),                 // "Pool" header
-        Constraint::Length(pool_detail_lines), // pool details
-        Constraint::Length(1),                 // separator
-        Constraint::Length(1),                 // "Disks" header
-        Constraint::Min(1),                    // disk table
-        Constraint::Length(1),                 // footer
+        Constraint::Length(1),                   // "Pool" header
+        Constraint::Length(pool_detail_lines),   // pool details
+        Constraint::Length(1),                   // separator
+        Constraint::Length(1),                   // "Disks" header
+        Constraint::Min(1),                      // disk table
+        Constraint::Length(scrub_section_lines), // scrub section
+        Constraint::Length(1),                   // footer
     ])
     .split(inner);
 
@@ -179,13 +232,24 @@ pub fn view(model: &Model, frame: &mut Frame) {
     let mut table_state = TableState::default().with_selected(Some(model.selected_disk));
     frame.render_stateful_widget(disk_table(model, page_unit), chunks[4], &mut table_state);
 
+    if let PoolStatus::Mounted(pool) = &model.pool {
+        let scrub_area = chunks[5];
+        let scrub_chunks = Layout::vertical([
+            Constraint::Length(1), // "Scrub" header
+            Constraint::Min(1),    // scrub details
+        ])
+        .split(scrub_area);
+        frame.render_widget(Paragraph::new("Scrub"), scrub_chunks[0]);
+        frame.render_widget(scrub_view(&pool.scrub), scrub_chunks[1]);
+    }
+
     let footer = match model.probe_duration {
         Some(d) => format!("press q to quit  {}ms", d.as_millis()),
         None => "press q to quit".to_owned(),
     };
     frame.render_widget(
         Paragraph::new(footer).style(Style::default().fg(Color::DarkGray)),
-        chunks[5],
+        chunks[6],
     );
 }
 
@@ -194,6 +258,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
+    use crate::parse::types::{ScrubState, ScrubTimestamp};
     use crate::tui::model::DiskUsage;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
@@ -284,6 +349,10 @@ mod tests {
             used: 2_308_094_370_816,  // ~2.1 TiB
             total: 5_937_955_045_376, // ~5.4 TiB
             disk_usage,
+            scrub: ScrubState::Completed {
+                started_at: ScrubTimestamp("Tue Feb 24 02:00:07 2026".to_owned()),
+                error_count: 0,
+            },
         };
         let model = Model::new_for_test(sample_disk_keys(), PoolStatus::Mounted(pool));
         let terminal = render(&model, 60, 20);
