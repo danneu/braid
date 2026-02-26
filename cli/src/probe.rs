@@ -157,10 +157,13 @@ pub fn probe_pool<R: CommandRunner>(
             });
         }
 
-        let underlying = status.device.ok_or_else(|| ProbeError::PoolDevice {
-            mapper: name.clone(),
-            detail: "active but no underlying device".to_owned(),
-        })?;
+        // When a backing device is hot-unplugged, cryptsetup reports
+        // device: (null). Skip these — the device is effectively gone.
+        let underlying = match status.device {
+            None => continue,
+            Some(ref d) if d == "(null)" => continue,
+            Some(d) => d,
+        };
 
         let uuid_raw = runner.run(&CmdRequest::CryptsetupLuksUuid { device: underlying })?;
         let uuid_out = parse_cryptsetup_luks_uuid(&uuid_raw)?;
@@ -688,6 +691,66 @@ mod tests {
                 if mapper == "/dev/sda1" && detail == "not a /dev/mapper/ path"),
             "expected ProbeError::PoolDevice non-mapper, got: {err:?}"
         );
+    }
+
+    /// Hot-unplugged device: btrfs still lists the mapper path, but
+    /// cryptsetup status reports `device: (null)` because the underlying
+    /// block device is gone. probe_pool must skip this device instead of
+    /// crashing on `cryptsetup luksUUID (null)`.
+    #[test]
+    fn probe_pool_device_null_underlying() {
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::FindmntJson {
+                    mount_point: "/mnt/storage".into(),
+                },
+                findmnt_btrfs(),
+            )
+            .with_output(
+                CmdRequest::BtrfsFilesystemShow {
+                    mount_point: "/mnt/storage".into(),
+                },
+                ok_raw(
+                    "btrfs filesystem show /mnt/storage",
+                    "Label: none  uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
+                     \tTotal devices 2 FS bytes used 1.00GiB\n\
+                     \tdevid    1 size 10.00GiB used 2.00GiB path /dev/mapper/braid-toshiba\n\
+                     \tdevid    2 size 10.00GiB used 2.00GiB path /dev/mapper/braid-ironwolf\n",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-toshiba".into(),
+                },
+                cryptsetup_status_active("braid-toshiba", "/dev/vda"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vda".into(),
+                },
+                cryptsetup_uuid_ok("/dev/vda", "11111111-1111-1111-1111-111111111111"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-ironwolf".into(),
+                },
+                // cryptsetup reports device: (null) when backing device vanishes
+                ok_raw(
+                    "cryptsetup status braid-ironwolf",
+                    "/dev/mapper/braid-ironwolf is active and is in use.\n\
+                     \ttype:    LUKS2\n\
+                     \tcipher:  aes-xts-plain64\n\
+                     \tdevice:  (null)\n\
+                     \tsector size:  512\n",
+                ),
+            );
+
+        let result = probe_pool(&runner, "/mnt/storage").unwrap();
+        assert!(result.mounted);
+        assert_eq!(result.devices.len(), 1, "device with (null) underlying must be skipped");
+        assert_eq!(result.devices[0].mapper, MapperName("braid-toshiba".into()));
+        assert_eq!(result.missing_count, 1);
+        assert_eq!(result.total_devices, 2);
     }
 
     #[test]
