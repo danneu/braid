@@ -60,7 +60,6 @@ with subtest("braid status shows pool summary"):
 with subtest("braid status --json has schema fields"):
     raw = machine.succeed("braid status --json")
     s = json.loads(raw)
-    assert s["schema_version"] == 1, f"Bad schema_version: {s['schema_version']}"
     assert s["mount_point"] == "/mnt/storage", f"Bad mount_point: {s['mount_point']}"
     assert s["status"] == "healthy", f"Bad status: {s['status']}"
     assert s["total_devices"] == 3, f"Bad total_devices: {s['total_devices']}"
@@ -109,7 +108,6 @@ with subtest("braid status reports not mounted on unmounted pool"):
     json_output = machine.succeed("braid status --json")
     s = json.loads(json_output)
     assert s["status"] == "not mounted", f"Expected status 'not mounted':\n{s}"
-    assert s["schema_version"] == 1, f"Expected schema_version 1:\n{s}"
     assert "mount_point" in s, f"Expected mount_point in JSON:\n{s}"
 
 machine.shutdown()

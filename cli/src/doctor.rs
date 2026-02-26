@@ -27,7 +27,6 @@ pub struct CheckResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DoctorReport {
-    pub schema_version: u32,
     pub status: CheckStatus,
     pub checks: Vec<CheckResult>,
 }
@@ -251,11 +250,7 @@ pub fn run_doctor(config_path: &Path) -> DoctorReport {
 
     let status = overall_status(&checks);
 
-    DoctorReport {
-        schema_version: 1,
-        status,
-        checks,
-    }
+    DoctorReport { status, checks }
 }
 
 // ---------------------------------------------------------------------------
@@ -469,7 +464,6 @@ mod tests {
     #[test]
     fn json_serialization_lowercase() {
         let report = DoctorReport {
-            schema_version: 1,
             status: CheckStatus::Ok,
             checks: vec![CheckResult {
                 name: "test".into(),
@@ -506,13 +500,6 @@ mod tests {
         let human = format_doctor_human(&report);
         assert!(human.contains("[FAIL]"), "expected [FAIL] tag:\n{human}");
         assert!(human.contains("[skip]"), "expected [skip] tag:\n{human}");
-    }
-
-    #[test]
-    fn schema_version_is_1() {
-        let f = write_temp(valid_config_json());
-        let report = run_doctor(f.path());
-        assert_eq!(report.schema_version, 1);
     }
 
     #[test]

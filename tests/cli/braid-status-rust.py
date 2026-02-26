@@ -149,7 +149,6 @@ with subtest("Not mounted"):
 with subtest("Not mounted JSON"):
     raw = machine.succeed(rust_status("--json"))
     s = json.loads(raw)
-    assert s["schema_version"] == 1, f"Expected schema_version 1: {s['schema_version']}"
     assert s["status_code"] == "not_mounted", f"Expected not_mounted: {s['status_code']}"
     assert s["status"] == "not mounted", f"Expected 'not mounted': {s['status']}"
     assert s["disks"] == [], f"Expected empty disks: {s['disks']}"

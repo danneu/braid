@@ -7,7 +7,6 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 pub const CHECKPOINT_FILE: &str = "/var/lib/braid/op-state.json";
-pub const CHECKPOINT_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -116,7 +115,6 @@ pub struct TargetSnapshot {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckpointV1 {
-    pub schema_version: u32,
     pub run_id: String,
     pub op: OpKind,
     pub op_args: OpArgs,
@@ -169,7 +167,6 @@ impl PoolFingerprint {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CheckpointErrorCode {
     Corrupt,
-    SchemaUnsupported,
     OpMismatch,
     ArgsMismatch,
     ConfigDrift,
@@ -184,7 +181,6 @@ impl CheckpointErrorCode {
     pub fn as_str(&self) -> &'static str {
         match self {
             CheckpointErrorCode::Corrupt => "CHECKPOINT_CORRUPT",
-            CheckpointErrorCode::SchemaUnsupported => "CHECKPOINT_SCHEMA_UNSUPPORTED",
             CheckpointErrorCode::OpMismatch => "CHECKPOINT_OP_MISMATCH",
             CheckpointErrorCode::ArgsMismatch => "CHECKPOINT_ARGS_MISMATCH",
             CheckpointErrorCode::ConfigDrift => "CHECKPOINT_CONFIG_DRIFT",
@@ -299,7 +295,6 @@ pub fn new_checkpoint(
 ) -> CheckpointV1 {
     let now = clock.now_rfc3339();
     CheckpointV1 {
-        schema_version: CHECKPOINT_SCHEMA_VERSION,
         run_id: uuid::Uuid::now_v7().to_string(),
         op,
         op_args,
@@ -336,16 +331,6 @@ pub fn load_checkpoint_file(path: &Path) -> Result<Option<CheckpointV1>, Checkpo
             format!("checkpoint file is not valid JSON: {e}"),
         )
     })?;
-
-    if checkpoint.schema_version != CHECKPOINT_SCHEMA_VERSION {
-        return Err(CheckpointError::new(
-            CheckpointErrorCode::SchemaUnsupported,
-            format!(
-                "checkpoint schema_version={} is unsupported (expected {})",
-                checkpoint.schema_version, CHECKPOINT_SCHEMA_VERSION
-            ),
-        ));
-    }
 
     Ok(Some(checkpoint))
 }
@@ -669,11 +654,9 @@ mod tests {
         match result {
             ValidationDecision::Reject { error } => {
                 assert_eq!(error.code, CheckpointErrorCode::OpMismatch);
-                assert!(
-                    error
-                        .to_string()
-                        .starts_with("error[CHECKPOINT_OP_MISMATCH]:")
-                );
+                assert!(error
+                    .to_string()
+                    .starts_with("error[CHECKPOINT_OP_MISMATCH]:"));
             }
             _ => panic!("expected reject"),
         }
@@ -800,20 +783,6 @@ mod tests {
             }
             _ => panic!("expected reject"),
         }
-    }
-
-    #[test]
-    fn load_checkpoint_rejects_schema_mismatch() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("cp.json");
-        std::fs::write(
-            &path,
-            r#"{"schema_version":99,"run_id":"x","op":"add","op_args":{"disk":"disk2"},"phase":"add-balance-raid1","created_at":"x","updated_at":"x","config_hash":"c","args_hash":"a","pool_fingerprint":{"devices":[],"missing_count":0,"total_devices":0,"mounted":true},"target_snapshot":{}}"#,
-        )
-        .unwrap();
-
-        let err = load_checkpoint_file(&path).unwrap_err();
-        assert_eq!(err.code, CheckpointErrorCode::SchemaUnsupported);
     }
 
     #[test]

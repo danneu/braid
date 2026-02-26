@@ -224,7 +224,6 @@ with subtest("JSON output has required schema fields"):
         "/dev/disk/by-id/virtio-disk2",
     ]))
     p = rust_plan_json()
-    assert p["schema_version"] == 1, f"Bad schema_version: {p['schema_version']}"
     assert "plan_id" in p, "Missing plan_id"
     assert "mount_point" in p, "Missing mount_point"
     assert "warnings" in p, "Missing warnings"

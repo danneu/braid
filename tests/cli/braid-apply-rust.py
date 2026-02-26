@@ -269,7 +269,6 @@ with subtest("Resume continues from checkpoint"):
 
 with subtest("Stale checkpoint refuses resume"):
     fake_checkpoint = json.dumps({
-        "schema_version": 1,
         "plan_id": "fake",
         "mount_point": "/mnt/storage",
         "status": "applicable",
@@ -422,7 +421,6 @@ with subtest("Resume rejects unrecoverable missing mapper target"):
     cfg_hash = "sha256:" + hashlib.sha256(raw_cfg.encode()).hexdigest()
 
     fake_checkpoint = json.dumps({
-        "schema_version": 1,
         "plan_id": "fake-missing-mapper",
         "mount_point": "/mnt/storage",
         "status": "applicable",

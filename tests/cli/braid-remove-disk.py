@@ -69,7 +69,6 @@ with subtest("Setup: build 3-drive pool with braid add"):
 
 with subtest("Disk map has all 3 disks after add"):
     dm = read_disk_map()
-    assert dm["schema_version"] == 1, f"Expected schema_version 1, got {dm['schema_version']}"
     for name in ["disk1", "disk2", "disk3"]:
         assert name in dm["disks"], f"{name} missing from disk map: {dm}"
         entry = dm["disks"][name]

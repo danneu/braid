@@ -29,7 +29,6 @@ with subtest("Valid config — JSON output"):
     raw = machine.succeed("braid doctor --json")
     print(f"Valid JSON:\n{raw}")
     report = json.loads(raw)
-    assert report["schema_version"] == 1, f"Expected schema_version 1: {report}"
     assert report["status"] == "ok", f"Expected overall ok: {report['status']}"
     checks = {c["name"]: c for c in report["checks"]}
     assert checks["config_file"]["status"] == "ok", f"config_file: {checks['config_file']}"

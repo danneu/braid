@@ -36,7 +36,6 @@ impl StatusCode {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StatusReport {
-    pub schema_version: u32,
     pub mount_point: String,
     pub status_code: StatusCode,
     pub status: String,
@@ -133,7 +132,6 @@ pub fn build_status_report<R: CommandRunner, F: Filesystem>(
         Err(ProbeError::NotBtrfs { .. }) => {
             let code = StatusCode::NotMounted;
             return Ok(StatusReport {
-                schema_version: 1,
                 mount_point: config.mount_point().to_owned(),
                 status_code: code,
                 status: code.display_status(0),
@@ -152,7 +150,6 @@ pub fn build_status_report<R: CommandRunner, F: Filesystem>(
     if !pool.mounted {
         let code = StatusCode::NotMounted;
         return Ok(StatusReport {
-            schema_version: 1,
             mount_point: config.mount_point().to_owned(),
             status_code: code,
             status: code.display_status(0),
@@ -186,7 +183,6 @@ pub fn build_status_report<R: CommandRunner, F: Filesystem>(
 
     let present_count = pool.total_devices.saturating_sub(pool.missing_count);
     Ok(StatusReport {
-        schema_version: 1,
         mount_point: config.mount_point().to_owned(),
         status_code: code,
         status: code.display_status(pool.missing_count),
@@ -223,7 +219,6 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
     if !pool.mounted {
         let code = StatusCode::NotMounted;
         let report = StatusReport {
-            schema_version: 1,
             mount_point: config.mount_point().to_owned(),
             status_code: code,
             status: code.display_status(0),
@@ -277,7 +272,6 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
     // 6. Assemble report
     let present_count = pool.total_devices.saturating_sub(pool.missing_count);
     let report = StatusReport {
-        schema_version: 1,
         mount_point: config.mount_point().to_owned(),
         status_code: code,
         status,
@@ -1068,7 +1062,6 @@ mod tests {
 
         let code = StatusCode::NotMounted;
         let report = StatusReport {
-            schema_version: 1,
             mount_point: config.mount_point().to_owned(),
             status_code: code,
             status: code.display_status(0),
@@ -1086,7 +1079,6 @@ mod tests {
         let obj = v.as_object().unwrap();
 
         // Must exist
-        assert_eq!(obj["schema_version"], 1);
         assert_eq!(obj["mount_point"], "/mnt/storage");
         assert_eq!(obj["status_code"], "not_mounted");
         assert_eq!(obj["status"], "not mounted");
@@ -1100,11 +1092,11 @@ mod tests {
         assert!(!obj.contains_key("capacity"));
         assert!(!obj.contains_key("last_scrub"));
 
-        // Lock envelope: exactly 5 keys
+        // Lock envelope: exactly 4 keys
         assert_eq!(
             obj.len(),
-            5,
-            "envelope should have exactly 5 keys, got: {obj:?}"
+            4,
+            "envelope should have exactly 4 keys, got: {obj:?}"
         );
 
         // Also verify cmd_status doesn't error
@@ -1122,7 +1114,6 @@ mod tests {
 
         let code = StatusCode::Healthy;
         let report = StatusReport {
-            schema_version: 1,
             mount_point: config.mount_point().to_owned(),
             status_code: code,
             status: code.display_status(0),
@@ -1154,7 +1145,6 @@ mod tests {
     fn status_json_degraded() {
         let code = StatusCode::Degraded;
         let report = StatusReport {
-            schema_version: 1,
             mount_point: "/mnt/storage".to_owned(),
             status_code: code,
             status: code.display_status(1),
@@ -1207,7 +1197,6 @@ mod tests {
         };
 
         let report = StatusReport {
-            schema_version: 1,
             mount_point: "/mnt/storage".to_owned(),
             status_code: StatusCode::Degraded,
             status: "DEGRADED (1 missing device)".to_owned(),
@@ -1257,7 +1246,6 @@ mod tests {
     fn status_json_disks_always_array_not_mounted() {
         let code = StatusCode::NotMounted;
         let report = StatusReport {
-            schema_version: 1,
             mount_point: "/mnt/storage".to_owned(),
             status_code: code,
             status: code.display_status(0),
@@ -1279,7 +1267,6 @@ mod tests {
     fn status_json_disks_always_array_non_verbose() {
         let code = StatusCode::Healthy;
         let report = StatusReport {
-            schema_version: 1,
             mount_point: "/mnt/storage".to_owned(),
             status_code: code,
             status: code.display_status(0),
@@ -1304,7 +1291,6 @@ mod tests {
     #[test]
     fn status_json_disks_always_array_verbose() {
         let report = StatusReport {
-            schema_version: 1,
             mount_point: "/mnt/storage".to_owned(),
             status_code: StatusCode::Healthy,
             status: "healthy".to_owned(),
@@ -1348,7 +1334,6 @@ mod tests {
     fn status_human_not_mounted() {
         let code = StatusCode::NotMounted;
         let report = StatusReport {
-            schema_version: 1,
             mount_point: "/mnt/storage".to_owned(),
             status_code: code,
             status: code.display_status(0),
@@ -1370,7 +1355,6 @@ mod tests {
     fn status_human_healthy_single() {
         let code = StatusCode::Healthy;
         let report = StatusReport {
-            schema_version: 1,
             mount_point: "/mnt/storage".to_owned(),
             status_code: code,
             status: code.display_status(0),
@@ -1401,7 +1385,6 @@ mod tests {
     fn status_human_healthy_raid1() {
         let code = StatusCode::Healthy;
         let report = StatusReport {
-            schema_version: 1,
             mount_point: "/mnt/storage".to_owned(),
             status_code: code,
             status: code.display_status(0),
@@ -1430,7 +1413,6 @@ mod tests {
     fn status_human_degraded() {
         let code = StatusCode::Degraded;
         let report = StatusReport {
-            schema_version: 1,
             mount_point: "/mnt/storage".to_owned(),
             status_code: code,
             status: code.display_status(1),
@@ -1458,7 +1440,6 @@ mod tests {
     fn status_human_degraded_plural() {
         let code = StatusCode::Degraded;
         let report = StatusReport {
-            schema_version: 1,
             mount_point: "/mnt/storage".to_owned(),
             status_code: code,
             status: code.display_status(2),
@@ -1506,7 +1487,6 @@ mod tests {
 
         let code = StatusCode::Healthy;
         let report = StatusReport {
-            schema_version: 1,
             mount_point: "/mnt/storage".to_owned(),
             status_code: code,
             status: code.display_status(0),
@@ -1547,7 +1527,6 @@ mod tests {
 
         let code = StatusCode::Degraded;
         let report = StatusReport {
-            schema_version: 1,
             mount_point: "/mnt/storage".to_owned(),
             status_code: code,
             status: code.display_status(1),
@@ -1591,7 +1570,6 @@ mod tests {
 
         let code = StatusCode::Healthy;
         let report = StatusReport {
-            schema_version: 1,
             mount_point: "/mnt/storage".to_owned(),
             status_code: code,
             status: code.display_status(0),

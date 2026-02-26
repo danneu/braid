@@ -8,7 +8,6 @@ pub const DISK_MAP_FILE: &str = "/var/lib/braid/disk-map.json";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DiskMap {
-    pub schema_version: u32,
     pub disks: BTreeMap<String, DiskMapEntry>,
 }
 
@@ -49,7 +48,6 @@ impl Default for DiskMap {
 impl DiskMap {
     pub fn new() -> Self {
         DiskMap {
-            schema_version: 1,
             disks: BTreeMap::new(),
         }
     }
@@ -178,7 +176,6 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = map_path(&dir);
         let map = load_disk_map_at(&path);
-        assert_eq!(map.schema_version, 1);
         assert!(map.disks.is_empty());
     }
 
@@ -199,7 +196,6 @@ mod tests {
         save_disk_map_at(&path, &map).unwrap();
         let reloaded = load_disk_map_at(&path);
 
-        assert_eq!(reloaded.schema_version, 1);
         assert_eq!(reloaded.disks.len(), 1);
         let entry = &reloaded.disks["toshiba"];
         assert_eq!(entry.by_id, "/dev/disk/by-id/ata-Toshiba_1");
@@ -288,7 +284,6 @@ mod tests {
         std::fs::write(&path, "not json at all").unwrap();
 
         let map = load_disk_map_at(&path);
-        assert_eq!(map.schema_version, 1);
         assert!(map.disks.is_empty());
     }
 
@@ -301,7 +296,7 @@ mod tests {
         save_disk_map_at(&path, &map).unwrap();
 
         let reloaded = load_disk_map_at(&path);
-        assert_eq!(reloaded.schema_version, 1);
+        assert!(reloaded.disks.is_empty());
     }
 
     fn test_config(disks: &[(&str, &str)]) -> Config {
