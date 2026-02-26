@@ -34,6 +34,8 @@ enum Commands {
     Status(StatusArgs),
     /// Check configuration for problems
     Doctor(DoctorArgs),
+    /// Unlock LUKS volumes and mount the pool
+    Unlock(UnlockArgs),
     /// Interactive terminal dashboard
     Tui(TuiArgs),
 }
@@ -111,6 +113,16 @@ struct StatusArgs {
 struct DoctorArgs {
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Debug, Args)]
+struct UnlockArgs {
+    /// Read passphrase from stdin
+    #[arg(long)]
+    passphrase_stdin: bool,
+    /// Read passphrase from file instead of TTY prompt
+    #[arg(long)]
+    passphrase_file: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -242,6 +254,27 @@ fn main() {
         }
         Commands::Doctor(args) => {
             if let Err(e) = cmd_doctor(Path::new(&config_path), args.json) {
+                print_cli_error(&e.to_string());
+                std::process::exit(1);
+            }
+        }
+        Commands::Unlock(args) => {
+            let config = match config_read(Path::new(&config_path)) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                }
+            };
+            let runner = RealRunner;
+            let fs = RealFilesystem;
+            if let Err(e) = braid_cli::unlock::cmd_unlock(
+                &runner,
+                &fs,
+                &config,
+                args.passphrase_stdin,
+                args.passphrase_file.as_deref(),
+            ) {
                 print_cli_error(&e.to_string());
                 std::process::exit(1);
             }

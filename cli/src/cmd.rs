@@ -84,6 +84,11 @@ pub enum CmdRequest {
         device: String,
         mount_point: String,
     },
+    MountWithOptions {
+        device: String,
+        mount_point: String,
+        options: Vec<String>,
+    },
     MountpointCheck {
         path: String,
     },
@@ -295,6 +300,21 @@ impl CommandRunner for RealRunner {
                 device,
                 mount_point,
             } => RealRunner::exec("mount", &[device, mount_point]),
+            CmdRequest::MountWithOptions {
+                device,
+                mount_point,
+                options,
+            } => {
+                let mut args = Vec::new();
+                let opts_str = options.join(",");
+                if !options.is_empty() {
+                    args.push("-o");
+                    args.push(&opts_str);
+                }
+                args.push(device);
+                args.push(mount_point);
+                RealRunner::exec("mount", &args)
+            }
             CmdRequest::MountpointCheck { path } => RealRunner::exec("mountpoint", &["-q", path]),
             CmdRequest::CryptsetupLuksHeaderBackup {
                 device,
@@ -507,6 +527,11 @@ mod tests {
                 device: "/dev/mapper/disk1".to_owned(),
                 mount_point: "/mnt/storage".to_owned(),
             },
+            CmdRequest::MountWithOptions {
+                device: "/dev/mapper/disk1".to_owned(),
+                mount_point: "/mnt/storage".to_owned(),
+                options: vec!["degraded".to_owned()],
+            },
             CmdRequest::MountpointCheck {
                 path: "/mnt/storage".to_owned(),
             },
@@ -529,7 +554,7 @@ mod tests {
             },
         ];
 
-        assert_eq!(all.len(), 28);
+        assert_eq!(all.len(), 29);
     }
 
     #[test]

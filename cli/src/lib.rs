@@ -19,3 +19,4 @@ pub mod status;
 #[allow(dead_code)]
 pub mod tui;
 pub mod types;
+pub mod unlock;
