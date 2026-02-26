@@ -3,12 +3,14 @@ use crate::checkpoint::{
     SystemClock, TargetSnapshot, clear_checkpoint, hash_args, maybe_fail_after_checkpoint,
     new_checkpoint, resolve_resume_gate, run_phase_hooks, save_checkpoint_atomic,
 };
-use crate::cmd::CommandRunner;
+use crate::cmd::{CmdRequest, CommandRunner};
 use crate::config::{config_hash, config_read_raw, mapper_name};
 use crate::disk_map;
+use crate::parse::parse_btrfs_device_usage;
 use crate::pool::evict_present_device;
 use crate::probe::{ProbeError, probe_pool};
 use crate::progress::ProgressOutput;
+use crate::status::format_bytes;
 use crate::types::*;
 use std::path::Path;
 
@@ -80,6 +82,14 @@ pub fn cmd_remove<R: CommandRunner + Sync>(
             ));
         }
         return Err(RemoveError::Validation(msg));
+    }
+
+    // Pre-flight: reject if other devices lack space to absorb data from
+    // the device being removed. Without this, btrfs will either ENOSPC
+    // instantly or crash the filesystem to read-only mid-relocation.
+    let target_devid = pool.devices.iter().find(|d| d.mapper == mn).map(|d| d.devid);
+    if let Some(devid) = target_devid {
+        check_eviction_space(runner, config.mount_point(), devid)?;
     }
 
     let steps = compile_remove_present_steps(key, &mn, &pool)?;
@@ -196,6 +206,61 @@ pub fn cmd_remove<R: CommandRunner + Sync>(
         "Done. If not already done: remove '{}' from braid.disks and run nixos-rebuild switch.",
         key
     );
+    Ok(())
+}
+
+/// Check that the remaining devices have enough unallocated space to absorb
+/// data from the device being removed. If they don't, btrfs device remove will
+/// either ENOSPC instantly or crash the filesystem to read-only mid-relocation.
+///
+/// If the check itself fails (parse error, command error), we log a warning and
+/// proceed — a bug in the safety net shouldn't block a valid operation.
+fn check_eviction_space<R: CommandRunner>(
+    runner: &R,
+    mount_point: &str,
+    target_devid: u64,
+) -> Result<(), RemoveError> {
+    let raw = match runner.run(&CmdRequest::BtrfsDeviceUsageRaw {
+        mount_point: mount_point.to_owned(),
+    }) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("warning: ENOSPC pre-flight check failed: {e}; proceeding anyway");
+            return Ok(());
+        }
+    };
+
+    let usage = match parse_btrfs_device_usage(&raw) {
+        Ok(u) => u,
+        Err(e) => {
+            eprintln!("warning: ENOSPC pre-flight check failed: {e}; proceeding anyway");
+            return Ok(());
+        }
+    };
+
+    let mut target_allocated: u64 = 0;
+    let mut other_unallocated: u64 = 0;
+
+    for dev in &usage.devices {
+        if dev.devid == target_devid {
+            target_allocated += dev.used_bytes();
+        } else {
+            other_unallocated += dev.unallocated;
+        }
+    }
+
+    if other_unallocated < target_allocated {
+        return Err(RemoveError::Validation(format!(
+            "not enough free space to remove this device.\n\n  \
+             Device has {} allocated (must be relocated to other devices).\n  \
+             Other devices have {} total unallocated.\n\n\
+             Without enough space, btrfs will hang and then crash the filesystem to read-only.\n\
+             Free up space by deleting files, or add a new device first with `braid add`.",
+            format_bytes(target_allocated),
+            format_bytes(other_unallocated),
+        )));
+    }
+
     Ok(())
 }
 
