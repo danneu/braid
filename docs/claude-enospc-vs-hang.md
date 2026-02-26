@@ -124,8 +124,11 @@ allocation decisions, improving the chance of even distribution.
 
 ## Test files
 
-- `tests/cli/braid-remove-missing-enospc.nix/.py` — failure mode 1 (instant ENOSPC, 3×512MiB)
-- `tests/cli/braid-remove-missing-enospc-hang.nix/.py` — failure mode 2 (partial relocation crash, 3×4GiB)
+- `tests/repro/btrfs-remove-enospc.nix/.py` — failure mode 1 (instant ENOSPC, 3×512MiB)
+- `tests/repro/btrfs-remove-enospc-crash.nix/.py` — failure mode 2 (partial relocation crash, 3×4GiB)
 
-Both assert that braid's pre-flight space check rejects the operation before
-btrfs is invoked, preventing both failure modes.
+These are repro tests that document actual btrfs behavior, not TDD tests.
+They use raw `btrfs device remove missing` (not braid) and assert the real
+outcomes: instant ENOSPC with surviving filesystem, or transaction abort
+with forced read-only. They live in `tests/repro/` — a folder reserved for
+tests that reproduce real-world scenarios for our records.

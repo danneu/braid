@@ -208,13 +208,13 @@
               braid = linuxCrane.braid;
             }
           );
-          braid-remove-missing-enospc = pkgs.testers.nixosTest (
-            import ./tests/cli/braid-remove-missing-enospc.nix {
+          repro-btrfs-remove-enospc = pkgs.testers.nixosTest (
+            import ./tests/repro/btrfs-remove-enospc.nix {
               braid = linuxCrane.braid;
             }
           );
-          braid-remove-missing-enospc-hang = pkgs.testers.nixosTest (
-            import ./tests/cli/braid-remove-missing-enospc-hang.nix {
+          repro-btrfs-remove-enospc-crash = pkgs.testers.nixosTest (
+            import ./tests/repro/btrfs-remove-enospc-crash.nix {
               braid = linuxCrane.braid;
             }
           );
