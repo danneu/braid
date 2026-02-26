@@ -18,11 +18,6 @@ Dan buys a NAS computer and installs NixOS on its internal SSD. He has one 12TB 
      disks = [
        "/dev/disk/by-id/ata-Toshiba_MN07_XXXX"
      ];
-     remoteUnlock = {
-       enable = true;
-       sshPort = 2222;
-       authorizedKeys = [ "ssh-ed25519 AAAA..." ];
-     };
    };
    ```
 
@@ -36,16 +31,16 @@ Dan buys a NAS computer and installs NixOS on its internal SSD. He has one 12TB 
 
 5. From MacBook: Finder → Cmd+K → `smb://nas/storage`. Start dragging files over.
 
-6. On reboot, SSH in to unlock:
+6. On reboot, SSH in and unlock the pool:
    ```
-   $ ssh -p 2222 root@nas
-   # type LUKS passphrase
-   # NAS finishes booting, Samba comes up
+   $ ssh user@nas
+   $ sudo braid unlock
+   # type LUKS passphrase — all drives open, pool mounts, Samba comes up
    ```
 
 ### One week later: second drive arrives
 
-7. Shut down NAS, plug in the Ironwolf 12TB. Boot, SSH-unlock.
+7. Shut down NAS, plug in the Ironwolf 12TB. Boot, unlock the pool.
 
 8. Find the new disk:
    ```

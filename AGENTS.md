@@ -12,16 +12,16 @@ Physical drives:
   /dev/sdb → LUKS ─┼─ single btrfs RAID1 → /mnt/storage
   /dev/sdc → LUKS ─┘
 
-Boot unlock:
-  NAS powers on → initrd starts dropbear SSH + DHCP
-  → ssh root@nas "cryptsetup-askpass" from MacBook
-  → LUKS drives unlock → btrfs assembles → full boot continues
+Unlock:
+  NAS powers on → boots to login (pool offline)
+  → ssh user@nas → sudo braid unlock
+  → LUKS drives open → btrfs assembles → pool online
 ```
 
 ## The Stack
 
 - **NixOS** — declarative, reproducible system configuration
-- **LUKS** — passphrase-based full disk encryption (keys never stored on disk), SSH remote unlock via dropbear in initrd
+- **LUKS** — passphrase-based full disk encryption (keys never stored on disk)
 - **btrfs RAID1** — checksumming filesystem with automatic self-healing from redundant copies; dynamic add/remove drives
 
 ## Architecture Authority

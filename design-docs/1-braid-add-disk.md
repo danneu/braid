@@ -60,7 +60,7 @@ Same as above. `btrfs device add` + `balance -dconvert=raid1` to redistribute ac
 ### Passphrase handling
 
 - **First disk:** prompt twice, confirm match. Standard new-passphrase flow.
-- **Subsequent disks:** prompt once, then verify against an existing LUKS device in the pool. This enforces all disks use the same passphrase without storing it anywhere. The remote unlock UX depends on this — one passphrase unlocks all drives.
+- **Subsequent disks:** prompt once, then verify against an existing LUKS device in the pool. This enforces all disks use the same passphrase without storing it anywhere. The `braid unlock` UX depends on this — one passphrase unlocks all drives.
 - **How verification works:** the script reads which devices are in the btrfs pool (`btrfs fi show /mnt/storage`), picks one, tries `cryptsetup luksOpen --test-passphrase` against it. If it fails, the user mistyped or used a different passphrase.
 
 ### LUKS mapper naming
@@ -88,7 +88,7 @@ The script must refuse to proceed if:
 
 ### Config guard
 
-The script refuses to format disks not listed in `braid.disks`. This prevents config drift (disk formatted but not in NixOS config) and ensures boot-time unlock works automatically. The error message tells the user exactly what to add and which commands to run.
+The script refuses to format disks not listed in `braid.disks`. This prevents config drift (disk formatted but not in NixOS config) and ensures pool unlock works automatically. The error message tells the user exactly what to add and which commands to run.
 
 ### Confirmation UX
 
@@ -139,7 +139,7 @@ braid-add-disk = pkgs.writeShellApplication {
 
 The module is the source of truth. The script reads from it:
 
-- **Module** declares disks in `braid.disks`, exports `/etc/braid/config.json`, sets up boot-time unlock/mount/samba
+- **Module** declares disks in `braid.disks`, exports `/etc/braid/config.json`, sets up pool unlock/mount/samba
 - **Script** reads config, validates disk is expected, runs destructive one-shot operations
 
 They agree on:

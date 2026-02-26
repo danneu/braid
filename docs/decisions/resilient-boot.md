@@ -61,5 +61,4 @@ This is not configurable. There is no `braid.resilient` option. Every braid depl
 
 - `modules/braid/storage.nix` — LUKS, mount, and device-scan config
 - `tests/module/` — module tests validate boot with all drives healthy
-- `tests/boot/degraded-boot.nix` — validates degraded boot with a bricked drive
 - [archive/plans/test-boot-degraded.md](../../archive/plans/test-boot-degraded.md) — original plan and research

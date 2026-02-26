@@ -1,1 +1,1 @@
-{ imports = [ ./options.nix ./storage.nix ./remote-unlock.nix ./cli.nix ]; }
+{ imports = [ ./options.nix ./storage.nix ./cli.nix ]; }

@@ -95,16 +95,8 @@
           btrfs-degrade = pkgs.testers.nixosTest (import ./tests/storage/btrfs-degrade.nix);
           btrfs-enospc = pkgs.testers.nixosTest (import ./tests/storage/btrfs-enospc.nix);
           samba = pkgs.testers.nixosTest (import ./tests/samba.nix);
-          remote-unlock = pkgs.testers.nixosTest (import ./tests/boot/remote-unlock.nix);
-          degraded-boot = pkgs.testers.nixosTest (import ./tests/boot/degraded-boot.nix);
           braid-add-disk = pkgs.testers.nixosTest (
             import ./tests/cli/braid-add-disk.nix {
-              braid = linuxCrane.braid;
-            }
-          );
-          first-boot-single-disk = pkgs.testers.nixosTest (import ./tests/boot/first-boot-single-disk.nix);
-          replace-failed-disk = pkgs.testers.nixosTest (
-            import ./tests/cli/replace-failed-disk.nix {
               braid = linuxCrane.braid;
             }
           );
@@ -188,11 +180,6 @@
           );
           braid-module-single-disk-dead = pkgs.testers.nixosTest (
             import ./tests/module/single-disk-dead.nix {
-              braid = linuxCrane.braid-cli-unwrapped;
-            }
-          );
-          braid-module-remote-unlock = pkgs.testers.nixosTest (
-            import ./tests/module/remote-unlock.nix {
               braid = linuxCrane.braid-cli-unwrapped;
             }
           );

@@ -11,7 +11,7 @@ NixOS is declarative — `nixos-rebuild switch` should describe the system's des
 ## Options considered
 
 1. **Fully declarative** — module handles formatting in an activation script. Simple but catastrophic if re-run.
-2. **Fully imperative** — script manages everything, module reads live state. Works but creates config drift (disk formatted but not in NixOS config; boot-time unlock breaks).
+2. **Fully imperative** — script manages everything, module reads live state. Works but creates config drift (disk formatted but not in NixOS config; pool unlock breaks).
 3. **Config-first hybrid** — declare disk in NixOS config (source of truth), rebuild (creates LUKS entries that fail gracefully), then run imperative script to format. Script refuses undeclared disks.
 
 ## Decision
@@ -32,7 +32,7 @@ The module writes `/etc/braid/config.json` via `environment.etc`. This is the si
 
 ### Config drift prevention
 
-The script refuses to format disks not listed in `braid.disks`. Error message tells the user exactly what to add and which commands to run. This ensures every formatted disk has a corresponding LUKS entry for boot-time unlock.
+The script refuses to format disks not listed in `braid.disks`. Error message tells the user exactly what to add and which commands to run. This ensures every formatted disk has a corresponding LUKS entry for pool unlock.
 
 ## Symmetric guards
 

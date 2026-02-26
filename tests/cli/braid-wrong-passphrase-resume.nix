@@ -3,9 +3,8 @@
 # What: Verifies that a wrong passphrase during `braid add` resume fails with
 # a clear error and leaves the checkpoint file intact.
 #
-# Why: `verify_passphrase` is exercised by the remote-unlock tests but not by
-# the `braid add` resume flow. This guards against a regression where a wrong
-# passphrase silently corrupts or clears the checkpoint on resume.
+# Why: This guards against a regression where a wrong passphrase silently
+# corrupts or clears the checkpoint on resume.
 #
 # Scenario: User interrupts `braid add disk2`, fixes the env, then retries
 # with the wrong passphrase. The checkpoint must survive so the user can

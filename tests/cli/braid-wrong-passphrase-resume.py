@@ -6,10 +6,8 @@
 #   the user can fix their environment and retry.
 #
 # Why it exists:
-#   `verify_passphrase` is tested for remote-unlock flows but not for the
-#   `braid add` resume path. Without this guard a regression could silently
-#   clear or corrupt the checkpoint on a wrong-passphrase attempt, making
-#   recovery impossible.
+#   Without this guard a regression could silently clear or corrupt the
+#   checkpoint on a wrong-passphrase attempt, making recovery impossible.
 #
 # Scenario:
 #   User adds disk1 (single-disk pool), then begins adding disk2 but the

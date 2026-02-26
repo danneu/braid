@@ -6,7 +6,7 @@ Status: Active
 
 ## Context
 
-Remote unlock via dropbear SSH prompts for a passphrase that unlocks all LUKS devices. If each drive had a different passphrase, the user would need to type N passphrases on every reboot. The UX must be: one passphrase, all drives unlock.
+`braid unlock` and `braid add` prompt for a passphrase that unlocks all LUKS devices. If each drive had a different passphrase, the user would need to type N passphrases on every unlock. The UX must be: one passphrase, all drives unlock.
 
 ## Options considered
 
@@ -33,5 +33,5 @@ No keyfiles. The passphrase is never written to disk. It exists only in memory d
 
 ## See
 
-- `scripts/braid-add-disk.sh` — passphrase prompt and verification logic
-- `design-docs/1-braid-add-disk.md` — full script design
+- `cli/src/` — passphrase prompt and verification logic in the Rust CLI
+- `design-docs/1-braid-add-disk.md` — original script design (historical)
