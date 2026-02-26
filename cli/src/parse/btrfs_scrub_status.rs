@@ -11,7 +11,7 @@ use crate::cmd::RawCommandOutput;
 use super::types::{BtrfsScrubStatusOutput, ScrubState, ScrubTimestamp};
 use super::ParseError;
 
-fn parse_ctime(s: &str) -> Option<PrimitiveDateTime> {
+pub(super) fn parse_ctime(s: &str) -> Option<PrimitiveDateTime> {
     // "Tue Feb 24 02:00:07 2026" — ctime format from btrfs scrub status
     let fmt = format_description!(
         "[weekday repr:short] [month repr:short] [day padding:space] [hour]:[minute]:[second] [year]"

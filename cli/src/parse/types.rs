@@ -114,6 +114,50 @@ pub struct BtrfsScrubStatusOutput {
     pub state: ScrubState,
 }
 
+/// btrfs scrub status -d -R (per-device)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeviceScrubState {
+    Running,
+    Finished,
+    Aborted,
+    Unknown(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceScrubEntry {
+    pub devid: u64,
+    pub path: Option<String>,
+    pub state: DeviceScrubState,
+    pub started_at: Option<ScrubTimestamp>,
+    pub duration_secs: u64,
+    pub data_bytes_scrubbed: u64,
+    pub tree_bytes_scrubbed: u64,
+    pub read_errors: u64,
+    pub csum_errors: u64,
+    pub verify_errors: u64,
+    pub uncorrectable_errors: u64,
+    pub corrected_errors: u64,
+    pub super_errors: u64,
+    pub last_physical: u64,
+}
+
+impl DeviceScrubEntry {
+    pub fn total_errors(&self) -> u64 {
+        self.read_errors
+            + self.csum_errors
+            + self.verify_errors
+            + self.uncorrectable_errors
+            + self.corrected_errors
+            + self.super_errors
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BtrfsScrubStatusPerDeviceOutput {
+    pub uuid: String,
+    pub devices: Vec<DeviceScrubEntry>,
+}
+
 /// btrfs device stats
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceErrorStats {

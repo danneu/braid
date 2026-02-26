@@ -38,6 +38,9 @@ pub enum CmdRequest {
     BtrfsScrubStatus {
         mount_point: String,
     },
+    BtrfsScrubStatusPerDevice {
+        mount_point: String,
+    },
     BtrfsDeviceStats {
         mount_point: String,
     },
@@ -234,6 +237,9 @@ impl CommandRunner for RealRunner {
             }
             CmdRequest::BtrfsScrubStatus { mount_point } => {
                 RealRunner::exec("btrfs", &["scrub", "status", mount_point])
+            }
+            CmdRequest::BtrfsScrubStatusPerDevice { mount_point } => {
+                RealRunner::exec("btrfs", &["scrub", "status", "-d", "-R", mount_point])
             }
             CmdRequest::BtrfsDeviceStats { mount_point } => {
                 RealRunner::exec("btrfs", &["device", "stats", mount_point])

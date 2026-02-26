@@ -1,0 +1,61 @@
+UUID:             5c5c88c9-9cdd-42b8-b60b-b670d3ad40fa
+
+Scrub device /dev/dm-0 (id 1) status
+Scrub started:    Thu Feb 26 13:08:51 2026
+Status:           running
+Duration:         0:00:25
+    data_extents_scrubbed: 8269
+    tree_extents_scrubbed: 0
+    data_bytes_scrubbed: 541917184
+    tree_bytes_scrubbed: 0
+    read_errors: 0
+    csum_errors: 0
+    verify_errors: 0
+    no_csum: 0
+    csum_discards: 0
+    super_errors: 0
+    malloc_errors: 0
+    uncorrectable_errors: 0
+    unverified_errors: 0
+    corrected_errors: 0
+    last_physical: 604045312
+
+Scrub device  (id 2) history
+Scrub started:    Thu Feb 26 13:08:51 2026
+Status:           running
+Duration:         0:00:00
+    data_extents_scrubbed: 0
+    tree_extents_scrubbed: 0
+    data_bytes_scrubbed: 0
+    tree_bytes_scrubbed: 0
+    read_errors: 0
+    csum_errors: 0
+    verify_errors: 0
+    no_csum: 0
+    csum_discards: 0
+    super_errors: 0
+    malloc_errors: 0
+    uncorrectable_errors: 0
+    unverified_errors: 0
+    corrected_errors: 0
+    last_physical: 0
+
+Scrub device /dev/dm-1 (id 3) status
+Scrub started:    Thu Feb 26 13:08:51 2026
+Status:           running
+Duration:         0:00:25
+    data_extents_scrubbed: 8154
+    tree_extents_scrubbed: 403
+    data_bytes_scrubbed: 534380544
+    tree_bytes_scrubbed: 6602752
+    read_errors: 0
+    csum_errors: 0
+    verify_errors: 0
+    no_csum: 0
+    csum_discards: 0
+    super_errors: 0
+    malloc_errors: 0
+    uncorrectable_errors: 0
+    unverified_errors: 0
+    corrected_errors: 0
+    last_physical: 831520768
