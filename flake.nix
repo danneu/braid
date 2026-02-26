@@ -208,6 +208,11 @@
               braid = linuxCrane.braid;
             }
           );
+          braid-remove-missing-enospc = pkgs.testers.nixosTest (
+            import ./tests/cli/braid-remove-missing-enospc.nix {
+              braid = linuxCrane.braid;
+            }
+          );
           repro-btrfs-remove-enospc = pkgs.testers.nixosTest (
             import ./tests/repro/btrfs-remove-enospc.nix {
               braid = linuxCrane.braid;
