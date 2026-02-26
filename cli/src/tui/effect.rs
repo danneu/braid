@@ -6,9 +6,22 @@ use crate::tui::command;
 use crate::tui::event::Event;
 use crate::tui::state::CmdId;
 
+use std::time::Duration;
+
+pub const PROBE_INTERVAL: Duration = Duration::from_secs(5);
+
 pub enum Effect {
-    SpawnCommand { id: CmdId, cmd: String },
-    ProbePool { mount_point: String },
+    SpawnCommand {
+        id: CmdId,
+        cmd: String,
+    },
+    ProbePool {
+        mount_point: String,
+    },
+    ScheduleProbe {
+        mount_point: String,
+        delay: Duration,
+    },
 }
 
 pub fn execute_effect(effect: Effect, cmd_tx: &mpsc::Sender<Event>) {
@@ -24,6 +37,13 @@ pub fn execute_effect(effect: Effect, cmd_tx: &mpsc::Sender<Event>) {
                 let result = crate::tui::probe::probe_pool_for_tui(&runner, &mount_point);
                 let elapsed = start.elapsed();
                 let _ = tx.send(Event::PoolProbeFinished(result, elapsed));
+            });
+        }
+        Effect::ScheduleProbe { mount_point, delay } => {
+            let tx = cmd_tx.clone();
+            thread::spawn(move || {
+                thread::sleep(delay);
+                let _ = tx.send(Event::PollRefresh { mount_point });
             });
         }
     }

@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::process::ExitStatus;
 use std::time::Duration;
 
-use crate::tui::effect::Effect;
+use crate::tui::effect::{Effect, PROBE_INTERVAL};
 use crate::tui::model::{Model, PoolState, PoolStatus};
 use crate::tui::state::{CmdId, CmdStatus, CommandState, Stream, MAX_LINES};
 
@@ -95,7 +95,10 @@ pub fn update(model: &mut Model, msg: Message) -> Vec<Effect> {
                 Err(e) => PoolStatus::Error(e),
             };
             model.probe_duration = Some(elapsed);
-            vec![]
+            vec![Effect::ScheduleProbe {
+                mount_point: model.mount_point.clone(),
+                delay: PROBE_INTERVAL,
+            }]
         }
     }
 }

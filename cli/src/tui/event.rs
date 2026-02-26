@@ -28,6 +28,7 @@ pub enum Event {
         status: ExitStatus,
     },
     PoolProbeFinished(Result<Option<PoolState>, String>, Duration),
+    PollRefresh { mount_point: String },
     Tick,
 }
 
@@ -43,6 +44,7 @@ impl Event {
             Event::PoolProbeFinished(result, elapsed) => {
                 Some(Message::PoolProbeFinished(result, elapsed))
             }
+            Event::PollRefresh { .. } => Some(Message::RefreshPool),
             Event::Tick => Some(Message::Tick),
         }
     }
