@@ -332,7 +332,19 @@ impl CommandRunner for RealRunner {
         match request {
             CmdRequest::CryptsetupLuksOpen { device, mapper } => RealRunner::exec_with_stdin(
                 "cryptsetup",
-                &["luksOpen", "--key-file=-", device, mapper],
+                &[
+                    "open",
+                    // This just means we can universally open LUKS1 and LUKS2
+                    "--type",
+                    "luks",
+                    "--key-file=-",
+                    // Bypass dm-crypt's internal workqueues — they add 3-4x queuing
+                    // overhead regardless of disk type (HDD or SSD). Requires kernel >= 5.9.
+                    "--perf-no_read_workqueue",
+                    "--perf-no_write_workqueue",
+                    device,
+                    mapper,
+                ],
                 stdin,
             ),
             CmdRequest::CryptsetupLuksFormat { device, extra_opts } => {

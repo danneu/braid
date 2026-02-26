@@ -98,8 +98,8 @@ with subtest("Plan shows OPEN_LUKS after init-disk"):
     open_action = [a for a in p["actions"] if a["type"] == "OPEN_LUKS"][0]
     assert "virtio-disk3" in open_action["target"], f"Wrong target:\n{open_action}"
     open_cmds = [c["command"] for c in open_action["commands"]]
-    assert any("cryptsetup luksOpen" in c for c in open_cmds), (
-        f"OPEN_LUKS missing cryptsetup luksOpen command:\n{open_cmds}"
+    assert any("cryptsetup open" in c for c in open_cmds), (
+        f"OPEN_LUKS missing cryptsetup open command:\n{open_cmds}"
     )
 
     add_action = [a for a in p["actions"] if a["type"] == "ADD_DISK_BTRFS_ADD"][0]
@@ -280,8 +280,8 @@ with subtest("Human output shows plan summary and command lines"):
         f"Expected 'applicable' in output:\n{output}"
     )
     # disk3 is LUKS-formatted but not in pool → OPEN_LUKS + ADD
-    assert "$ cryptsetup luksOpen" in output, (
-        f"Missing cryptsetup luksOpen command line:\n{output}"
+    assert "$ cryptsetup open" in output, (
+        f"Missing cryptsetup open command line:\n{output}"
     )
     assert "$ btrfs device add" in output, (
         f"Missing btrfs device add command line:\n{output}"

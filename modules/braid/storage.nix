@@ -1,4 +1,9 @@
-{ config, lib, pkgs, ... }:
+{
+  config,
+  lib,
+  pkgs,
+  ...
+}:
 let
   cfg = config.braid;
   diskKeys = builtins.attrNames cfg.disks;
@@ -9,8 +14,8 @@ let
   # systemd-cryptsetup-generator escapes mapper names for unit instance names
   # (e.g. "braid-toshiba" → "braid\x2dtoshiba"). We must match this escaping
   # when referencing those units in After=, Requires=, etc.
-  cryptsetupUnit = name:
-    "systemd-cryptsetup@${builtins.replaceStrings ["-"] ["\\x2d"] (mapperName name)}.service";
+  cryptsetupUnit =
+    name: "systemd-cryptsetup@${builtins.replaceStrings [ "-" ] [ "\\x2d" ] (mapperName name)}.service";
 in
 {
   config = lib.mkIf cfg.enable {
@@ -18,13 +23,23 @@ in
       supportedFilesystems = [ "btrfs" ];
       systemd.enable = true;
 
-      luks.devices = builtins.listToAttrs (map (name: {
-        name = mapperName name;
-        value = {
-          device = cfg.disks.${name}.byId;
-          crypttabExtraOpts = [ "nofail" "x-systemd.device-timeout=10s" ];
-        };
-      }) diskKeys);
+      luks.devices = builtins.listToAttrs (
+        map (name: {
+          name = mapperName name;
+          value = {
+            device = cfg.disks.${name}.byId;
+            # dm-crypt's internal workqueues add 3-4x queuing overhead regardless
+            # of disk type (HDD or SSD). Bypassing them reduces CPU load, latency,
+            # and eliminates I/O stall patterns on spinning disks. Requires kernel >= 5.9.
+            # TODO: I think this is just doing --perf-no_read_workqueue and --perf-no_write_workqueue, but verify.
+            bypassWorkqueues = true;
+            crypttabExtraOpts = [
+              "nofail"
+              "x-systemd.device-timeout=10s"
+            ];
+          };
+        }) diskKeys
+      );
 
       systemd.services.btrfs-device-scan = {
         description = "Scan for btrfs multi-device filesystems";
@@ -33,7 +48,10 @@ in
         before = [ "initrd-fs.target" ];
         wantedBy = [ "initrd-fs.target" ];
         unitConfig.DefaultDependencies = false;
-        serviceConfig = { Type = "oneshot"; RemainAfterExit = true; };
+        serviceConfig = {
+          Type = "oneshot";
+          RemainAfterExit = true;
+        };
         script = "${config.braid.packages.btrfsProgs}/bin/btrfs device scan";
       };
     };
@@ -62,7 +80,10 @@ in
     # Stage-2 copy: x-systemd.requires persists across switch-root
     systemd.services.btrfs-device-scan = {
       description = "Scan for btrfs multi-device filesystems";
-      serviceConfig = { Type = "oneshot"; RemainAfterExit = true; };
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+      };
       script = "${config.braid.packages.btrfsProgs}/bin/btrfs device scan";
     };
 
@@ -72,7 +93,10 @@ in
     # Usage: systemctl start braid-pool.target
     systemd.services.braid-unlock = {
       description = "Open LUKS and mount braid pool";
-      serviceConfig = { Type = "oneshot"; RemainAfterExit = true; };
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+      };
       unitConfig.ConditionPathIsMountPoint = "!${cfg.mountPoint}";
       script = ''
         passphrase=$(${pkgs.systemd}/bin/systemd-ask-password \
@@ -80,20 +104,28 @@ in
 
         opened=""
 
-        ${lib.concatMapStringsSep "\n" (name: let disk = cfg.disks.${name}; in ''
-          if [ -e /dev/mapper/${mapperName name} ]; then
-            opened="$opened /dev/mapper/${mapperName name}"
-          elif [ -e ${disk.byId} ]; then
-            if echo "$passphrase" | ${cfg.packages.cryptsetup}/bin/cryptsetup \
-                luksOpen --key-file=- ${disk.byId} ${mapperName name} 2>/dev/null; then
+        ${lib.concatMapStringsSep "\n" (
+          name:
+          let
+            disk = cfg.disks.${name};
+          in
+          ''
+            if [ -e /dev/mapper/${mapperName name} ]; then
               opened="$opened /dev/mapper/${mapperName name}"
+            elif [ -e ${disk.byId} ]; then
+              if echo "$passphrase" | ${cfg.packages.cryptsetup}/bin/cryptsetup \
+                  open --type luks --key-file=- \
+                  --perf-no_read_workqueue --perf-no_write_workqueue \
+                  ${disk.byId} ${mapperName name} 2>/dev/null; then
+                opened="$opened /dev/mapper/${mapperName name}"
+              else
+                echo "braid-unlock: WARNING: failed to open ${name} — skipping" >&2
+              fi
             else
-              echo "braid-unlock: WARNING: failed to open ${name} — skipping" >&2
+              echo "braid-unlock: WARNING: ${name} not present — skipping" >&2
             fi
-          else
-            echo "braid-unlock: WARNING: ${name} not present — skipping" >&2
-          fi
-        '') diskKeys}
+          ''
+        ) diskKeys}
 
         if [ -z "$opened" ]; then
           echo "braid-unlock: ERROR: no disks opened, cannot mount pool" >&2
