@@ -29,11 +29,16 @@ in
     # nofail — not authoritative for mounting. braid-unlock or
     # braid-auto-unlock handle the actual mount in stage 2. This entry
     # exists so NixOS knows about the mount point for systemctl targets.
+    #
+    # No 'degraded' here — that must only come from `braid unlock`, which
+    # detects missing devices and adds -o degraded deliberately. If systemd
+    # could mount degraded via this entry, the pool would silently run with
+    # single-profile block groups (zero redundancy) and the user would never
+    # know.
     fileSystems.${cfg.mountPoint} = {
       device = "/dev/mapper/${mapperName (builtins.head diskNames)}";
       fsType = "btrfs";
       options = [
-        "degraded"
         "nofail"
         "x-systemd.requires=btrfs-device-scan.service"
         "x-systemd.after=btrfs-device-scan.service"

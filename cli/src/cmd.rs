@@ -227,6 +227,22 @@ impl RealRunner {
     }
 }
 
+/// Build the argument list for `btrfs replace start`.
+/// Extracted for testability — the -r flag (read from mirrors) must always
+/// be present so replacements avoid reading from a potentially failing source.
+fn btrfs_replace_start_args(devid: u64, target_device: &str, mount_point: &str) -> Vec<String> {
+    vec![
+        "replace".into(),
+        "start".into(),
+        "-r".into(),
+        "-f".into(),
+        "-B".into(),
+        devid.to_string(),
+        target_device.into(),
+        mount_point.into(),
+    ]
+}
+
 impl CommandRunner for RealRunner {
     fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
         match request {
@@ -364,19 +380,9 @@ impl CommandRunner for RealRunner {
                 target_device,
                 mount_point,
             } => {
-                let devid_str = devid.to_string();
-                RealRunner::exec(
-                    "btrfs",
-                    &[
-                        "replace",
-                        "start",
-                        "-f",
-                        "-B",
-                        &devid_str,
-                        target_device,
-                        mount_point,
-                    ],
-                )
+                let args = btrfs_replace_start_args(*devid, target_device, mount_point);
+                let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+                RealRunner::exec("btrfs", &arg_refs)
             }
             CmdRequest::BtrfsReplaceStatus { mount_point } => {
                 RealRunner::exec("btrfs", &["replace", "status", mount_point])
@@ -721,6 +727,24 @@ mod tests {
         let result = mock.run_with_stdin(&req, b"existingpassphrase");
         assert!(result.is_ok());
         assert_eq!(result.unwrap().exit_status, 0);
+    }
+
+    #[test]
+    // Intent: btrfs replace start must pass -r to read from mirrors instead of
+    // the source device.
+    // Why: without -r, replacing a degrading (but still present) drive hits
+    // every bad sector, triggering kernel I/O retries/timeouts and making
+    // replacement dramatically slower. Always passing -r is the safe default —
+    // negligible downside on healthy swaps, massive upside on failing drives.
+    // Scenario: drive has SMART warnings with growing bad sectors. Operator
+    // runs braid replace proactively. -r skips the dying drive, reads from
+    // healthy mirrors, and finishes in minutes instead of hours.
+    fn btrfs_replace_start_includes_read_from_mirrors_flag() {
+        let args = btrfs_replace_start_args(2, "/dev/mapper/braid-new", "/mnt/storage");
+        assert!(
+            args.iter().any(|a| a == "-r"),
+            "btrfs replace start must include -r flag to read from mirrors, got: {args:?}"
+        );
     }
 
     #[test]

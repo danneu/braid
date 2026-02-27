@@ -292,3 +292,85 @@ pub fn pool_bootstrap_mount<R: CommandRunner + Sync>(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cmd::{MockRunner, RawCommandOutput};
+    use crate::progress::ProgressOutput;
+
+    fn ok_raw() -> RawCommandOutput {
+        RawCommandOutput {
+            cmd: String::new(),
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_status: 0,
+        }
+    }
+
+    #[test]
+    // Intent: pool_replace_device must issue BtrfsReplaceStart with the correct
+    // devid, target device, and mount point.
+    // Why: the pool layer is the boundary between business logic and shell
+    // commands. If the CmdRequest contract breaks, the wrong btrfs command runs.
+    // The actual -r flag is enforced in btrfs_replace_start_args (tested in
+    // cmd::tests); this test locks in the CmdRequest plumbing.
+    // Scenario: live replace of devid 2 with a new encrypted mapper device.
+    fn pool_replace_device_issues_correct_replace_start() {
+        let runner = MockRunner::default().with_output(
+            CmdRequest::BtrfsReplaceStart {
+                devid: 2,
+                target_device: "/dev/mapper/braid-new".to_owned(),
+                mount_point: "/mnt/storage".to_owned(),
+            },
+            ok_raw(),
+        );
+
+        let result = pool_replace_device(
+            &runner,
+            2,
+            "/dev/mapper/braid-new",
+            "/mnt/storage",
+            ProgressOutput::Off,
+        );
+        assert!(
+            result.is_ok(),
+            "pool_replace_device should succeed when mock matches: {result:?}"
+        );
+    }
+
+    #[test]
+    // Intent: pool_replace_device must propagate non-zero exit status as an error.
+    // Why: if btrfs replace fails (e.g. ENOSPC, device busy), the error must
+    // bubble up so callers can handle it.
+    // Scenario: replacement fails because the target device is too small.
+    fn pool_replace_device_propagates_failure() {
+        let runner = MockRunner::default().with_output(
+            CmdRequest::BtrfsReplaceStart {
+                devid: 2,
+                target_device: "/dev/mapper/braid-new".to_owned(),
+                mount_point: "/mnt/storage".to_owned(),
+            },
+            RawCommandOutput {
+                cmd: String::new(),
+                stdout: String::new(),
+                stderr: "target device is too small".to_owned(),
+                exit_status: 1,
+            },
+        );
+
+        let result = pool_replace_device(
+            &runner,
+            2,
+            "/dev/mapper/braid-new",
+            "/mnt/storage",
+            ProgressOutput::Off,
+        );
+        assert!(result.is_err(), "should propagate btrfs replace failure");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("target device is too small"),
+            "error should include stderr: {err}"
+        );
+    }
+}

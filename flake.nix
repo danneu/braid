@@ -224,6 +224,11 @@
               braid = linuxCrane.braid-cli-unwrapped;
             }
           );
+          no-silent-degraded = pkgs.testers.nixosTest (
+            import ./tests/module/no-silent-degraded.nix {
+              braid = linuxCrane.braid-cli-unwrapped;
+            }
+          );
           braid-module-bad-config = pkgs.testers.nixosTest (
             import ./tests/module/bad-config.nix {
               braid = linuxCrane.braid-cli-unwrapped;

@@ -62,6 +62,7 @@ pub struct BtrfsShowDevice {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BtrfsFilesystemShowOutput {
+    pub uuid: Option<String>,
     pub total_devices: u64,
     pub devices: Vec<BtrfsShowDevice>,
     pub has_missing: bool,

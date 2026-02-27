@@ -1,4 +1,4 @@
-# NOTE: I don't remember what I was trying to test here
+# See: ./research/degraded-hell.md
 #
 # Repro: degraded RAID1 writes create single-profile block groups
 #

@@ -1,13 +1,13 @@
 use nom::{
-    IResult,
     bytes::complete::{tag, take_until},
     character::complete::{not_line_ending, space0, space1, u64 as parse_u64},
+    IResult,
 };
 
 use crate::cmd::RawCommandOutput;
 
-use super::ParseError;
 use super::types::{BtrfsFilesystemShowOutput, BtrfsShowDevice};
+use super::ParseError;
 
 // ---------------------------------------------------------------------------
 // DeviceBtrfsProbe — classify raw btrfs-filesystem-show output
@@ -121,6 +121,7 @@ pub fn parse_btrfs_filesystem_show(
         .any(|line| parse_missing_sentinel(line).is_ok());
 
     Ok(BtrfsFilesystemShowOutput {
+        uuid: None,
         total_devices,
         devices,
         has_missing,
@@ -224,11 +225,7 @@ mod tests {
         };
         let out = parse_btrfs_filesystem_show(&raw).unwrap();
         assert_eq!(out.total_devices, 2);
-        assert_eq!(
-            out.devices.len(),
-            1,
-            "bare MISSING path must be excluded"
-        );
+        assert_eq!(out.devices.len(), 1, "bare MISSING path must be excluded");
         assert_eq!(out.devices[0].devid, 1);
         assert!(out.has_missing);
     }
