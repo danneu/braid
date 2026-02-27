@@ -74,16 +74,24 @@ pub fn cmd_remove<R: CommandRunner + Sync>(
         return Err(RemoveError::Validation(msg));
     }
 
-    // Pre-flight: reject if other devices lack space to absorb data from
-    // the device being removed. Without this, btrfs will either ENOSPC
-    // instantly or crash the filesystem to read-only mid-relocation.
+    let remaining = pool.devices.len() - 1;
     let target_devid = pool
         .devices
         .iter()
         .find(|d| d.mapper == mn)
         .map(|d| d.devid);
-    if let Some(devid) = target_devid {
-        check_eviction_space(runner, config.mount_point(), devid)?;
+    // Pre-flight: reject if other devices lack space to absorb data from
+    // the device being removed. Without this, btrfs will either ENOSPC
+    // instantly or crash the filesystem to read-only mid-relocation
+    // (see tests/repro/).
+    //
+    // Skip for single-survivor removals (remaining == 1): the eviction
+    // path balances RAID1→single first, which handles data redistribution.
+    // This does not match the reproduced relocation-failure mode.
+    if remaining > 1 {
+        if let Some(devid) = target_devid {
+            check_eviction_space(runner, config.mount_point(), devid)?;
+        }
     }
 
     let steps = compile_remove_present_steps(key, &mn, &pool)?;
@@ -102,7 +110,6 @@ pub fn cmd_remove<R: CommandRunner + Sync>(
 
     // Confirm
     if !yes {
-        let remaining = pool.devices.len() - 1;
         if remaining == 0 {
             return Err(RemoveError::Validation(
                 "cannot remove the last disk from the pool".into(),
@@ -318,6 +325,57 @@ mod tests {
         ) -> Result<RawCommandOutput, CmdError> {
             self.run(request)
         }
+    }
+
+    #[test]
+    // Intent: cmd_remove succeeds on a 2→1 removal without invoking the ENOSPC
+    //   pre-flight check.
+    //
+    // Why: The 2→1 eviction path balances RAID1→single before device remove,
+    //   which does not match the reproduced relocation-failure mode. The pre-
+    //   flight check compares pre-balance allocations and would false-positive.
+    //
+    // Scenario: User removes one disk from a healthy 2-disk pool. The disks are
+    //   small and mostly allocated. The operation succeeds because the balance
+    //   step handles redistribution, making the space check irrelevant.
+    fn enospc_check_skipped_for_two_to_one_removal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.json");
+
+        let mut disks = BTreeMap::new();
+        disks.insert(
+            "disk1".to_owned(),
+            serde_json::json!({ "by_id": "/dev/disk/by-id/virtio-disk1" }),
+        );
+        disks.insert(
+            "disk2".to_owned(),
+            serde_json::json!({ "by_id": "/dev/disk/by-id/virtio-disk2" }),
+        );
+        let config_json = serde_json::json!({
+            "disks": disks,
+            "mount_point": "/mnt/storage"
+        });
+        std::fs::write(&config_path, serde_json::to_vec(&config_json).unwrap()).unwrap();
+
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let runner = RecordingRunner::new(log.clone());
+        cmd_remove(
+            &runner,
+            Path::new(&config_path),
+            "disk2",
+            false,
+            true,
+            ProgressOutput::Off,
+        )
+        .expect("remove should succeed");
+
+        let calls = log.lock().unwrap();
+        assert!(
+            !calls
+                .iter()
+                .any(|c| matches!(c, CmdRequest::BtrfsDeviceUsageRaw { .. })),
+            "ENOSPC pre-flight should not be invoked for 2→1 removal; calls: {calls:?}"
+        );
     }
 
     #[test]

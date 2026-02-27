@@ -53,6 +53,21 @@ The btrfs superblock check is the "idempotent format primitive" described in `sa
 - Mixed state (live `--old` + pool has missing devices) is rejected — operator must run `braid remove-missing` first.
 - Live eviction uses a shared helper (also used by `remove`) that probes pool state to decide if RAID1→single conversion is needed.
 
+### ENOSPC pre-flight check
+
+`remove` and `remove-missing` validate that surviving devices have enough
+unallocated space to absorb the target device's allocations before invoking
+`btrfs device remove`. Without this, btrfs will either ENOSPC instantly or
+crash the filesystem to read-only mid-relocation (reproduced in
+`tests/repro/`).
+
+The check is skipped when only one device survives the removal:
+
+- **`remove` (2→1):** the eviction path balances RAID1→single before device
+  remove, which does not match the reproduced relocation-failure mode.
+- **`remove-missing` (1 present + 1 missing):** in 2-device RAID1, the
+  survivor already mirrors all data. No relocation is needed.
+
 ### NixOS-native automation
 
 - systemd `braid-unlock.service` + `braid-pool.target` for post-boot unlock

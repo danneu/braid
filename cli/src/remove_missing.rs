@@ -68,10 +68,16 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync>(
         )));
     }
 
-    // Pre-flight: reject if survivors lack space to absorb the missing device's data.
-    // Without this check, btrfs will either fail with ENOSPC (harmless) or — worse —
-    // start relocating, hit ENOSPC mid-transaction, and force the filesystem read-only.
-    check_relocation_space(runner, config.mount_point(), missing_id)?;
+    // Pre-flight: reject if survivors lack space to absorb the missing
+    // device's data. Without this check, btrfs will either ENOSPC or
+    // crash the filesystem to read-only mid-relocation (see tests/repro/).
+    //
+    // Skip when only 1 present device survives: in 2-device RAID1, the
+    // survivor already has all data (every chunk is mirrored). This does
+    // not match the reproduced relocation-failure mode.
+    if pool.devices.len() >= 2 {
+        check_relocation_space(runner, config.mount_point(), missing_id)?;
+    }
 
     let steps = compile_steps(missing_id, &pool);
 
@@ -240,6 +246,116 @@ mod tests {
         ) -> Result<RawCommandOutput, CmdError> {
             self.run(request)
         }
+    }
+
+    use std::sync::{Arc, Mutex};
+
+    /// End-to-end runner that records all calls, modeling a pool with
+    /// 1 present device + 1 missing device.
+    #[derive(Clone)]
+    struct RecordingRunner {
+        log: Arc<Mutex<Vec<CmdRequest>>>,
+    }
+
+    impl RecordingRunner {
+        fn new(log: Arc<Mutex<Vec<CmdRequest>>>) -> Self {
+            Self { log }
+        }
+    }
+
+    fn mock_out(cmd: &str, stdout: &str, exit_status: i32) -> RawCommandOutput {
+        RawCommandOutput {
+            cmd: cmd.to_owned(),
+            stdout: stdout.to_owned(),
+            stderr: String::new(),
+            exit_status,
+        }
+    }
+
+    impl CommandRunner for RecordingRunner {
+        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
+            self.log.lock().unwrap().push(request.clone());
+
+            match request {
+                CmdRequest::FindmntJson { mount_point } => Ok(mock_out(
+                    &format!("findmnt --json --mountpoint {mount_point}"),
+                    r#"{"filesystems":[{"target":"/mnt/storage","source":"/dev/mapper/braid-disk1","fstype":"btrfs"}]}"#,
+                    0,
+                )),
+                CmdRequest::BtrfsFilesystemShow { mount_point } => Ok(mock_out(
+                    &format!("btrfs filesystem show {mount_point}"),
+                    "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\tTotal devices 2 FS bytes used 16.17MiB\n\tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\t*** Some devices missing\n",
+                    0,
+                )),
+                CmdRequest::CryptsetupStatus { mapper } => Ok(mock_out(
+                    &format!("cryptsetup status {mapper}"),
+                    &format!(
+                        "{mapper} is active and is in use.\n  type:    LUKS2\n  device:  /dev/vdb\n  mode:    read/write\n"
+                    ),
+                    0,
+                )),
+                CmdRequest::CryptsetupLuksUuid { .. } => Ok(mock_out(
+                    "cryptsetup luksUUID",
+                    "11111111-1111-1111-1111-111111111111\n",
+                    0,
+                )),
+                CmdRequest::BtrfsDeviceRemoveMissing { .. } => {
+                    Ok(mock_out("btrfs device remove missing", "", 0))
+                }
+                _ => Err(CmdError::MissingMock),
+            }
+        }
+
+        fn run_with_stdin(
+            &self,
+            request: &CmdRequest,
+            _stdin: &[u8],
+        ) -> Result<RawCommandOutput, CmdError> {
+            self.run(request)
+        }
+    }
+
+    #[test]
+    // Intent: cmd_remove_missing succeeds when the pool has 1 present device and
+    //   1 missing device, without invoking the ENOSPC pre-flight check.
+    //
+    // Why: In a 2-device RAID1 pool with 1 missing device, the survivor already
+    //   has all data (every chunk is mirrored). This does not match the reproduced
+    //   relocation-failure mode. The pre-flight check would false-positive.
+    //
+    // Scenario: User's 2-disk NAS has one drive die. They run braid remove-missing.
+    //   The operation succeeds because no data relocation is needed.
+    fn enospc_check_skipped_for_single_survivor() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.json");
+
+        let mut disks = std::collections::BTreeMap::new();
+        disks.insert(
+            "disk1".to_owned(),
+            serde_json::json!({ "by_id": "/dev/disk/by-id/virtio-disk1" }),
+        );
+        disks.insert(
+            "disk2".to_owned(),
+            serde_json::json!({ "by_id": "/dev/disk/by-id/virtio-disk2" }),
+        );
+        let config_json = serde_json::json!({
+            "disks": disks,
+            "mount_point": "/mnt/storage"
+        });
+        std::fs::write(&config_path, serde_json::to_vec(&config_json).unwrap()).unwrap();
+
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let runner = RecordingRunner::new(log.clone());
+        cmd_remove_missing(&runner, &config_path, None, false, true)
+            .expect("remove-missing should succeed");
+
+        let calls = log.lock().unwrap();
+        assert!(
+            !calls
+                .iter()
+                .any(|c| matches!(c, CmdRequest::BtrfsDeviceUsageRaw { .. })),
+            "ENOSPC pre-flight should not be invoked for single-survivor removal; calls: {calls:?}"
+        );
     }
 
     #[test]
