@@ -132,20 +132,6 @@ pub fn config_read(path: &Path) -> Result<Config, ConfigError> {
     Ok(cfg)
 }
 
-pub fn config_read_raw(path: &Path) -> Result<(Config, String), ConfigError> {
-    let raw = fs::read_to_string(path).map_err(|source| ConfigError::Read {
-        path: path.display().to_string(),
-        source,
-    })?;
-
-    let cfg: Config = serde_json::from_str(&raw).map_err(|source| ConfigError::Parse {
-        path: path.display().to_string(),
-        source,
-    })?;
-
-    Ok((cfg, raw))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

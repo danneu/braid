@@ -1,5 +1,5 @@
 use crate::cmd::{CmdRequest, CommandRunner};
-use crate::config::{config_read_raw, mapper_name};
+use crate::config::{config_read, mapper_name};
 use crate::disk_map;
 use crate::parse::parse_btrfs_device_usage;
 use crate::pool::evict_present_device;
@@ -37,7 +37,7 @@ pub fn cmd_remove<R: CommandRunner + Sync>(
     yes: bool,
     progress: ProgressOutput,
 ) -> Result<(), RemoveError> {
-    let (config, _config_raw) = config_read_raw(config_path)?;
+    let config = config_read(config_path)?;
     let disk_map_state = disk_map::load_disk_map();
     disk_map::validate_config_name_stability(&config, &disk_map_state)
         .map_err(|e| RemoveError::Validation(e.to_string()))?;
@@ -104,7 +104,7 @@ pub fn cmd_remove<R: CommandRunner + Sync>(
         }
     }
 
-    let steps = compile_remove_present_steps(name, &mn, &pool)?;
+    let steps = compile_remove_present_steps(&mn, &pool)?;
 
     if dry_run {
         for step in &steps {
@@ -222,7 +222,6 @@ fn check_eviction_space<R: CommandRunner>(
 }
 
 fn compile_remove_present_steps(
-    _name: &str,
     mn: &MapperName,
     pool: &PoolState,
 ) -> Result<Vec<RemoveStep>, RemoveError> {

@@ -1,5 +1,5 @@
 use crate::cmd::CommandRunner;
-use crate::config::{config_read_raw, mapper_name, Config};
+use crate::config::{config_read, mapper_name, Config};
 use crate::disk_map;
 use crate::luks::{
     backup_luks_header, device_has_btrfs_superblock, ensure_luks_open, luks_format,
@@ -49,7 +49,7 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     enroll_key_file: Option<&Path>,
     progress: ProgressOutput,
 ) -> Result<(), AddError> {
-    let (config, _config_raw) = config_read_raw(config_path)?;
+    let config = config_read(config_path)?;
     let disk_map_state = disk_map::load_disk_map();
     disk_map::validate_config_name_stability(&config, &disk_map_state)
         .map_err(|e| AddError::Validation(e.to_string()))?;

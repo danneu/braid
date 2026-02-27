@@ -27,7 +27,6 @@ pub mod cryptsetup_luks_uuid;
 pub mod cryptsetup_status;
 pub mod findmnt;
 pub mod lsblk;
-pub mod mount;
 pub mod smartctl;
 pub mod types;
 

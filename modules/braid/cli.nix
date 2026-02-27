@@ -21,11 +21,6 @@ let
 in
 {
   config = lib.mkIf cfg.enable {
-    assertions = [{
-      assertion = cfg.package != null;
-      message = "braid.package must be set when braid.enable is true";
-    }];
-
     environment.etc."braid/config.json".text = configJson;
 
     environment.systemPackages = lib.optional (cfg.package != null) braid;

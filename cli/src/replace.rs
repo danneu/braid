@@ -1,5 +1,5 @@
 use crate::cmd::CommandRunner;
-use crate::config::{config_read_raw, mapper_name};
+use crate::config::{config_read, mapper_name};
 use crate::disk_map;
 use crate::luks::{
     backup_luks_header, ensure_luks_open, luks_format, luks_opts_from_env, read_passphrase,
@@ -53,7 +53,7 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     enroll_key_file: Option<&Path>,
     progress: ProgressOutput,
 ) -> Result<(), ReplaceError> {
-    let (config, _config_raw) = config_read_raw(config_path)?;
+    let config = config_read(config_path)?;
     let disk_map_state = disk_map::load_disk_map();
     disk_map::validate_config_name_stability(&config, &disk_map_state)
         .map_err(|e| ReplaceError::Validation(e.to_string()))?;

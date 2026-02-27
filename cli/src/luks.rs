@@ -6,8 +6,6 @@ use std::path::PathBuf;
 
 pub(crate) const HEADER_BACKUP_DIR: &str = "/var/lib/braid/luks-headers";
 
-/// LUKS key slot 0: interactive passphrase (Argon2id/PBKDF2 key stretching).
-pub const LUKS_SLOT_PASSPHRASE: u8 = 0;
 /// LUKS key slot 1: binary random keyfile (no PBKDF, raw key material).
 pub const LUKS_SLOT_KEYFILE: u8 = 1;
 

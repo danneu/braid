@@ -1,12 +1,11 @@
 use crate::cmd::{CmdRequest, CommandRunner};
-use crate::config::config_read_raw;
+use crate::config::config_read;
 use crate::disk_map;
 use crate::parse::parse_btrfs_device_usage;
 use crate::pool::{pool_remove_devid, pool_remove_missing};
 use crate::preflight;
 use crate::probe::{probe_pool, ProbeError};
 use crate::status::format_bytes;
-use crate::types::*;
 use std::path::Path;
 
 #[derive(Debug, thiserror::Error)]
@@ -35,7 +34,7 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync>(
     dry_run: bool,
     yes: bool,
 ) -> Result<(), RemoveMissingError> {
-    let (config, _config_raw) = config_read_raw(config_path)?;
+    let config = config_read(config_path)?;
     let disk_map_state = disk_map::load_disk_map();
     disk_map::validate_config_name_stability(&config, &disk_map_state)
         .map_err(|e| RemoveMissingError::Validation(e.to_string()))?;
@@ -103,7 +102,7 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync>(
         check_relocation_space(runner, config.mount_point(), missing_id)?;
     }
 
-    let steps = compile_steps(missing_id, &pool);
+    let steps = compile_steps(missing_id);
 
     if dry_run {
         for step in &steps {
@@ -222,7 +221,7 @@ fn check_relocation_space<R: CommandRunner>(
     Ok(())
 }
 
-fn compile_steps(missing_id: Option<u64>, _pool: &PoolState) -> Vec<RemoveMissingStep> {
+fn compile_steps(missing_id: Option<u64>) -> Vec<RemoveMissingStep> {
     let mut steps = Vec::new();
     if let Some(devid) = missing_id {
         steps.push(RemoveMissingStep {
