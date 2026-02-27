@@ -48,7 +48,9 @@ with subtest("braid status shows pool summary"):
     output = machine.succeed("braid status")
     print(f"braid status output:\n{output}")
     assert "healthy" in output, f"Expected 'healthy':\n{output}"
-    assert "Drives:   3" in output, f"Expected 'Drives:   3':\n{output}"
+    assert "Drives:" in output, f"Expected 'Drives:':\n{output}"
+    for disk in ["disk1", "disk2", "disk3"]:
+        assert disk in output, f"Expected '{disk}':\n{output}"
     assert "RAID1" in output, f"Expected 'RAID1':\n{output}"
     assert "Total:" in output, f"Expected 'Total:':\n{output}"
     assert "Used:" in output, f"Expected 'Used:':\n{output}"
