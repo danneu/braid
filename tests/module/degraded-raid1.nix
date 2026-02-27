@@ -2,13 +2,11 @@
 #
 # What: Enables the braid module with 3 disks. An initrd fixture formats all 3
 # as LUKS + btrfs RAID1, writes test data, then bricks disk3's LUKS header.
-# The module's nofail/wants/degraded defaults let disk3's cryptsetup fail
-# without cascading. The VM boots with the pool mounted degraded (2 of 3),
-# test data survives, and new writes work.
+# After boot, `braid unlock` opens the surviving 2 disks, skips the bricked
+# one, and mounts the pool degraded. Test data survives, new writes work.
 #
-# Why: Validates the "one drive dead" tier of graceful failure using the module's
-# own defaults — no manual overrides needed. This is the most common failure
-# scenario: a single drive dies in a RAID1 pool.
+# Why: Validates the "one drive dead" tier of graceful failure. This is the most
+# common failure scenario: a single drive dies in a RAID1 pool.
 #
 # Dependencies: braid-module-raid1 (happy-path RAID1 works),
 # braid-module-bad-config (nofail boot-continue works).
@@ -16,13 +14,7 @@
 { lib, pkgs, ... }:
 let
   passphrase = "testpassphrase";
-  keyFile = pkgs.writeText "luks-test-key" passphrase;
   diskNames = [ "disk1" "disk2" "disk3" ];
-  mapperNames = map (d: "braid-${d}") diskNames;
-
-  # systemd-cryptsetup-generator escapes hyphens in unit instance names.
-  cryptsetupUnit = name:
-    "systemd-cryptsetup@${builtins.replaceStrings ["-"] ["\\x2d"] name}.service";
 in
 {
   name = "braid-module-degraded-raid1";
@@ -49,10 +41,10 @@ in
     virtualisation.fileSystems."/mnt/storage" = {
       device = "/dev/mapper/braid-disk1";
       fsType = "btrfs";
-      neededForBoot = true;
       options = [
         "degraded"
         "nofail"
+        "x-systemd.device-timeout=1s"
         "x-systemd.requires=btrfs-device-scan.service"
         "x-systemd.after=btrfs-device-scan.service"
       ];
@@ -61,10 +53,11 @@ in
     boot.initrd = {
       # btrfs kernel module needed for fixture's mount step
       supportedFilesystems = [ "btrfs" ];
+      kernelModules = [ "dm-crypt" ];
+
       systemd.enable = true;
       systemd = {
         storePaths = [
-          keyFile
           pkgs.cryptsetup
           pkgs.btrfs-progs
           pkgs.util-linux
@@ -73,9 +66,8 @@ in
         # Fixture: format LUKS + btrfs RAID1, write test data, brick disk3
         services.prepare-luks-btrfs-fixture = {
           description = "Prepare LUKS + btrfs RAID1 fixture with bricked disk3";
-          requiredBy = map cryptsetupUnit mapperNames;
-          before = [ "cryptsetup-pre.target" ]
-            ++ map cryptsetupUnit mapperNames;
+          wantedBy = [ "initrd.target" ];
+          before = [ "initrd.target" ];
           after = [ "systemd-udevd.service" ];
           unitConfig.DefaultDependencies = false;
           serviceConfig = { Type = "oneshot"; RemainAfterExit = true; };
@@ -124,7 +116,7 @@ in
             sync
             umount /tmp/fixture-mount
 
-            # Close all — the real cryptsetup units will reopen them
+            # Close all
             for disk in ${lib.concatStringsSep " " diskNames}; do
               cryptsetup luksClose "braid-$disk-fmt"
             done
@@ -134,15 +126,6 @@ in
           '';
         };
       };
-
-      # Override module's luks.devices: add keyFile for auto-unlock in VM.
-      luks.devices = lib.mkVMOverride (
-        lib.genAttrs mapperNames (name: {
-          device = "/dev/disk/by-id/virtio-${lib.removePrefix "braid-" name}";
-          keyFile = "${keyFile}";
-          crypttabExtraOpts = [ "nofail" "x-systemd.device-timeout=10s" ];
-        })
-      );
     };
   };
 

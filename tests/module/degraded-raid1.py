@@ -1,9 +1,11 @@
 start_all()
 machine.wait_for_unit("multi-user.target", timeout=180)
 
-with subtest("Pool is mounted in degraded mode"):
+with subtest("braid unlock handles bricked disk and mounts degraded"):
+    machine.succeed("echo -n 'testpassphrase' | braid unlock --passphrase-stdin")
     machine.succeed("mountpoint /mnt/storage")
 
+with subtest("Pool is mounted in degraded mode"):
     fi_show = machine.succeed("btrfs fi show /mnt/storage")
     print(f"Pool:\n{fi_show}")
 

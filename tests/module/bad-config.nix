@@ -1,9 +1,8 @@
 # Test: braid-module-bad-config
 #
 # What: Enables the braid module with disk paths that don't exist. No virtual
-# disks are attached. LUKS units wait for devices that never appear, timeout
-# after 10s, and fail. The mount also fails (no mapper devices). Boot completes
-# anyway thanks to nofail on both LUKS and mount.
+# disks are attached. The mount fails (no mapper devices). Boot completes
+# anyway thanks to nofail on the mount.
 #
 # Why: Validates the "all drives dead / wrong config" tier of graceful failure.
 # The OS lives on an internal SSD — a misconfigured or missing data pool must
@@ -35,28 +34,15 @@
     # Re-declare mount for VM compat (qemu-vm.nix clobbers fileSystems).
     # Mirrors the module's mount settings exactly.
     virtualisation.fileSystems."/mnt/storage" = {
-      device = "/dev/mapper/phantom1";
+      device = "/dev/mapper/braid-phantom1";
       fsType = "btrfs";
-      neededForBoot = true;
       options = [
         "degraded"
         "nofail"
+        "x-systemd.device-timeout=1s"
         "x-systemd.requires=btrfs-device-scan.service"
         "x-systemd.after=btrfs-device-scan.service"
       ];
-    };
-
-    boot.initrd = {
-      systemd.enable = true;
-
-      # Override module's luks.devices: must use mkVMOverride because
-      # qemu-vm.nix blanket-overrides luks.devices.
-      luks.devices = lib.mkVMOverride (
-        lib.genAttrs [ "phantom1" "phantom2" ] (name: {
-          device = "/dev/disk/by-id/${name}";
-          crypttabExtraOpts = [ "nofail" "x-systemd.device-timeout=10s" ];
-        })
-      );
     };
   };
 

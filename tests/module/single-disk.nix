@@ -1,12 +1,12 @@
 # Test: braid-module-single-disk
 #
 # What: Enables the braid module with a single disk. An initrd fixture
-# pre-formats the empty virtual drive as LUKS + single-disk btrfs. A keyFile
-# auto-unlocks LUKS (no SSH needed). The VM boots to multi-user with
-# /mnt/storage mounted.
+# pre-formats the empty virtual drive as LUKS + single-disk btrfs. After boot,
+# the test script unlocks the pool via `braid unlock --passphrase-stdin`.
 #
-# Why: Validates the module's core storage path — stage-2 btrfs-device-scan
-# and the mount — on the simplest possible pool (one disk, no RAID1).
+# Why: Validates the module's core storage path — braid-unlock opening LUKS,
+# stage-2 btrfs-device-scan, and the mount — on the simplest possible pool
+# (one disk, no RAID1).
 #
 # Dependencies: braid-module-disabled (module loads without error),
 # hello-world (VM infra).
@@ -14,13 +14,7 @@
 { lib, pkgs, ... }:
 let
   passphrase = "testpassphrase";
-  keyFile = pkgs.writeText "luks-test-key" passphrase;
   diskNames = [ "disk1" ];
-  mapperNames = map (d: "braid-${d}") diskNames;
-
-  # systemd-cryptsetup-generator escapes hyphens in unit instance names.
-  cryptsetupUnit = name:
-    "systemd-cryptsetup@${builtins.replaceStrings ["-"] ["\\x2d"] name}.service";
 in
 {
   name = "braid-module-single-disk";
@@ -45,32 +39,32 @@ in
     virtualisation.fileSystems."/mnt/storage" = {
       device = "/dev/mapper/braid-disk1";
       fsType = "btrfs";
-      neededForBoot = true;
       options = [
         "degraded"
         "nofail"
+        "x-systemd.device-timeout=1s"
         "x-systemd.requires=btrfs-device-scan.service"
         "x-systemd.after=btrfs-device-scan.service"
       ];
     };
 
     boot.initrd = {
+      kernelModules = [ "dm-crypt" ];
+
       systemd.enable = true;
       systemd = {
         storePaths = [
-          keyFile
           pkgs.cryptsetup
           pkgs.btrfs-progs
           pkgs.util-linux
         ];
 
         # Fixture: format the empty drive as LUKS + single-disk btrfs
-        # before the real cryptsetup units run.
+        # before switch-root. Stage-2 braid-unlock opens it.
         services.prepare-luks-btrfs-fixture = {
           description = "Prepare LUKS + btrfs fixture (single disk)";
-          requiredBy = map cryptsetupUnit mapperNames;
-          before = [ "cryptsetup-pre.target" ]
-            ++ map cryptsetupUnit mapperNames;
+          wantedBy = [ "initrd.target" ];
+          before = [ "initrd.target" ];
           after = [ "systemd-udevd.service" ];
           unitConfig.DefaultDependencies = false;
           serviceConfig = { Type = "oneshot"; RemainAfterExit = true; };
@@ -108,16 +102,6 @@ in
           '';
         };
       };
-
-      # Override module's luks.devices: add keyFile for auto-unlock in VM.
-      # mkVMOverride needed because qemu-vm.nix blanket-overrides luks.devices.
-      luks.devices = lib.mkVMOverride (
-        lib.genAttrs mapperNames (name: {
-          device = "/dev/disk/by-id/virtio-${lib.removePrefix "braid-" name}";
-          keyFile = "${keyFile}";
-          crypttabExtraOpts = [ "nofail" "x-systemd.device-timeout=10s" ];
-        })
-      );
     };
   };
 

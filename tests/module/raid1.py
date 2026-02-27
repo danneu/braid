@@ -1,9 +1,11 @@
 start_all()
 machine.wait_for_unit("multi-user.target", timeout=120)
 
-with subtest("btrfs RAID1 pool is mounted"):
+with subtest("braid unlock opens LUKS and mounts pool"):
+    machine.succeed("echo -n 'testpassphrase' | braid unlock --passphrase-stdin")
     machine.succeed("mountpoint /mnt/storage")
 
+with subtest("btrfs RAID1 pool has all 3 disks"):
     fi_show = machine.succeed("btrfs fi show /mnt/storage")
     print(f"Pool:\n{fi_show}")
     for i in range(1, 4):

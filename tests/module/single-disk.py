@@ -1,9 +1,11 @@
 start_all()
 machine.wait_for_unit("multi-user.target", timeout=120)
 
-with subtest("btrfs single-disk pool is mounted"):
+with subtest("braid unlock opens LUKS and mounts pool"):
+    machine.succeed("echo -n 'testpassphrase' | braid unlock --passphrase-stdin")
     machine.succeed("mountpoint /mnt/storage")
 
+with subtest("btrfs single-disk pool has correct profile"):
     fi_show = machine.succeed("btrfs fi show /mnt/storage")
     print(f"Pool:\n{fi_show}")
     assert "/dev/mapper/braid-disk1" in fi_show, f"disk missing from pool:\n{fi_show}"

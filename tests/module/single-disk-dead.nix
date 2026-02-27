@@ -1,9 +1,9 @@
 # Test: braid-module-single-disk-dead
 #
 # What: Enables the braid module with a single disk. An initrd fixture formats
-# it as LUKS + single-disk btrfs, then bricks the LUKS header. The module's
-# nofail defaults let the cryptsetup failure pass without cascading. The VM
-# boots to multi-user with no /mnt/storage (no RAID1 fallback).
+# it as LUKS + single-disk btrfs, then bricks the LUKS header. After boot,
+# `braid unlock` fails (bricked LUKS). The system boots to multi-user with
+# no /mnt/storage (no RAID1 fallback).
 #
 # Why: Validates the "all drives dead" tier on the simplest config. With only
 # one drive and no RAID1, a dead drive means total data loss — but the system
@@ -15,13 +15,7 @@
 { lib, pkgs, ... }:
 let
   passphrase = "testpassphrase";
-  keyFile = pkgs.writeText "luks-test-key" passphrase;
   diskNames = [ "disk1" ];
-  mapperNames = map (d: "braid-${d}") diskNames;
-
-  # systemd-cryptsetup-generator escapes hyphens in unit instance names.
-  cryptsetupUnit = name:
-    "systemd-cryptsetup@${builtins.replaceStrings ["-"] ["\\x2d"] name}.service";
 in
 {
   name = "braid-module-single-disk-dead";
@@ -44,20 +38,21 @@ in
     virtualisation.fileSystems."/mnt/storage" = {
       device = "/dev/mapper/braid-disk1";
       fsType = "btrfs";
-      neededForBoot = true;
       options = [
         "degraded"
         "nofail"
+        "x-systemd.device-timeout=1s"
         "x-systemd.requires=btrfs-device-scan.service"
         "x-systemd.after=btrfs-device-scan.service"
       ];
     };
 
     boot.initrd = {
+      kernelModules = [ "dm-crypt" ];
+
       systemd.enable = true;
       systemd = {
         storePaths = [
-          keyFile
           pkgs.cryptsetup
           pkgs.btrfs-progs
           pkgs.util-linux
@@ -66,9 +61,8 @@ in
         # Fixture: format LUKS + btrfs, then brick the LUKS header
         services.prepare-luks-btrfs-fixture = {
           description = "Prepare LUKS + btrfs fixture then brick disk";
-          requiredBy = map cryptsetupUnit mapperNames;
-          before = [ "cryptsetup-pre.target" ]
-            ++ map cryptsetupUnit mapperNames;
+          wantedBy = [ "initrd.target" ];
+          before = [ "initrd.target" ];
           after = [ "systemd-udevd.service" ];
           unitConfig.DefaultDependencies = false;
           serviceConfig = { Type = "oneshot"; RemainAfterExit = true; };
@@ -109,15 +103,6 @@ in
           '';
         };
       };
-
-      # Override module's luks.devices: add keyFile for auto-unlock in VM.
-      luks.devices = lib.mkVMOverride (
-        lib.genAttrs mapperNames (name: {
-          device = "/dev/disk/by-id/virtio-${lib.removePrefix "braid-" name}";
-          keyFile = "${keyFile}";
-          crypttabExtraOpts = [ "nofail" "x-systemd.device-timeout=10s" ];
-        })
-      );
     };
   };
 
