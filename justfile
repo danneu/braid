@@ -42,6 +42,10 @@ capture-progress-fixtures:
 playground:
     nix run .#playground
 
+# Build and push x86_64-linux binary to cachix
+cachix:
+    nix build .#packages.x86_64-linux.braid-cli-unwrapped --no-link --print-out-paths | xargs nix run nixpkgs#cachix -- push braid
+
 # Destroy an entire braid pool (dev use only — wipes LUKS signatures + state files)
 destroy config="/etc/braid/config.json":
     ./scripts/braid-destroy.sh {{config}}
