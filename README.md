@@ -1,10 +1,33 @@
 # braid
 
-NixOS module for encrypted NAS storage with auto-healing and dynamic drive pooling.
+NixOS-native CLI tool for managing an encrypted, redundant (RAID1) pool of hard drives, especially on a NAS device.
 
-- **LUKS** full disk encryption
-- **btrfs RAID1** with checksumming and automatic self-healing
-- Dynamic pool — add or remove drives without reformatting
+Just two standard ingredients:
+
+- **[LUKS](https://en.wikipedia.org/wiki/Linux_Unified_Key_Setup)** full disk encryption
+- **[btrfs](https://btrfs.readthedocs.io/en/latest/)** file system for native RAID1, checksumming, auto self-healing
+
+## Features
+
+- Full disk encryption - plug in a USB keyfile or run `braid unlock` with a passphrase to mount
+- Redundancy - data is stored on two disks, so you can always tolerate a single disk failure
+- Dynamic pool — add or remove drives incrementally
+- Self-healing data - btrfs checksums and silently repairs corruption from the redundant copy
+- Declarative config - declare your disks in nix; the pool state follows the config
+- `--dry-run` - always know what will happen before you run anything
+- Dashboard - `braid tui` shows you the state of your system
+
+## Downsides
+
+- RAID1
+  - simple, but it means you lose half of your capacity to redundancy; four 12TB drives will only give you 48TB/2 = 24TB storage
+  - more drives won't increase your redundacy
+  - only tolerates one disk failure at a time
+
+## Goals and aspirations
+
+- Simple - I want anyone to be able to use this
+- Well-tested - Every bug, fix, and regression I encounter is turned into another NixOS VM test in `tests/`
 
 ## Install
 
@@ -64,21 +87,28 @@ Use the ID-LINK column to build your by-id paths.
 ```nix
 braid = {
   enable = true;
-  disks.toshiba = { byId = "/dev/disk/by-id/ata-Toshiba_MN07_XXXX"; };
+  disks = {
+    toshiba = { byId = "/dev/disk/by-id/ata-Toshiba_MN07_XXXX"; };
+  };
 };
 ```
 
-```
+```sh
 sudo nixos-rebuild switch
 sudo braid add toshiba
 ```
 
-The pool is live immediately. No redundancy yet — data is available but unprotected until a second drive is added.
+`braid add` will ask you for a passphrase, write the LUKS header to the disk, and create/add the disk to the btrfs disk pool.
+
+The pool is live immediately at `/mnt/storage`. No redundancy yet — data is available but unprotected until a second drive is added.
 
 ### Add a drive
 
 ```nix
-braid.disks.ironwolf = { byId = "/dev/disk/by-id/ata-Ironwolf_ST12_YYYY"; };
+braid.disks = {
+    toshiba = { byId = "/dev/disk/by-id/ata-Toshiba_MN07_XXXX"; };
+   ironwolf = { byId = "/dev/disk/by-id/ata-Ironwolf_ST12_YYYY"; };
+};
 ```
 
 ```
@@ -86,11 +116,11 @@ sudo nixos-rebuild switch
 sudo braid add ironwolf
 ```
 
-The pool converts to RAID1 automatically. Existing data rebalances in the background.
+The pool converts to RAID1 automatically. Existing data rebalances to the new disk in the background.
 
 ### Preview before executing
 
-```
+```sh
 $ sudo braid add ironwolf --dry-run
 [destructive] LUKS format /dev/disk/by-id/ata-Ironwolf_ST12_YYYY
 [safe       ] LUKS open → braid-ironwolf
@@ -155,7 +185,7 @@ In v1.0, disk keys are immutable once recorded in this map. Renaming/reassigning
 
 ### Pool status
 
-```
+```sh
 sudo braid status             # pool health summary
 sudo braid status --verbose   # per-disk detail with devids
 sudo braid status --json      # machine-readable output
@@ -163,7 +193,7 @@ sudo braid status --json      # machine-readable output
 
 ### Diagnostics
 
-```
+```sh
 sudo braid doctor           # check config, pool health, etc.
 sudo braid doctor --json    # machine-readable output
 ```
@@ -172,7 +202,7 @@ sudo braid doctor --json    # machine-readable output
 
 For scripting, use `--passphrase-stdin` or `--passphrase-file` with `--yes`:
 
-```
+```sh
 echo 'secret' | sudo braid add ironwolf --passphrase-stdin --yes
 sudo braid add ironwolf --yes --passphrase-file /run/secrets/luks
 ```
@@ -181,7 +211,7 @@ sudo braid add ironwolf --yes --passphrase-file /run/secrets/luks
 
 After boot, bring the encrypted pool online:
 
-```
+```sh
 systemctl start braid-pool.target
 ```
 
@@ -191,7 +221,7 @@ One passphrase prompt opens all available LUKS devices and mounts the pool. Work
 
 Tab completion for subcommands, flags, and disk keys works out of the box on NixOS when `braid.enable = true`. Completions are registered for bash, zsh, and fish.
 
-```
+```sh
 braid <TAB>           # → add  remove  remove-missing  replace  status  doctor
 braid add <TAB>       # → toshiba  ironwolf  seagate
 braid add --<TAB>     # → --dry-run  --yes  --passphrase-file  --progress
