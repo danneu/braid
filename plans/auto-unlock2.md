@@ -230,10 +230,10 @@ Assertions:
   a broken service if someone enables the module without the package)
 - `cfg.autoUnlock.enable -> hasPrefix "/dev/disk/by-id/" cfg.autoUnlock.keyDevice`
 - `cfg.autoUnlock.enable -> cfg.autoUnlock.timeoutSec > 0`
-- keyFile path safety (CWE-22): reject if it starts with `/`, contains `..`,
-  or contains null bytes. The resolved path must be strictly under
-  `/run/braid-key/`. This is a config-time assertion so bad paths fail at
-  `nixos-rebuild`, not silently at 3 AM.
+- keyFile path safety (CWE-22): reject if it starts with `/` or contains `..`.
+  This is the config-time half of path traversal defense — catches obvious
+  misconfiguration at `nixos-rebuild` time. The runtime half (symlink
+  rejection in the service script) handles attacks via USB filesystem content.
 
   ```nix
   {
