@@ -19,4 +19,4 @@ Data  Encryption  Sharing
  Total        32.36MiB
  Rate         32.34MiB/s
  Duration     0:00:00
-q quit │ r reload │ <tab> switch tabs │ hjkl move selection
+Quit: q │ Help: ? │ Reload: r

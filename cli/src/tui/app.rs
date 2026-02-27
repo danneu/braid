@@ -119,10 +119,12 @@ pub fn update(model: &mut Model, msg: Message) -> Vec<Effect> {
                 },
             };
             model.probe_duration = Some(elapsed);
-            vec![Effect::ScheduleProbe {
-                mount_point: model.mount_point.clone(),
-                delay: PROBE_INTERVAL,
-            }]
+            // TODO: re-enable auto-polling
+            // vec![Effect::ScheduleProbe {
+            //     mount_point: model.mount_point.clone(),
+            //     delay: PROBE_INTERVAL,
+            // }]
+            vec![]
         }
     }
 }

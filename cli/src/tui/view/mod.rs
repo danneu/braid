@@ -462,11 +462,11 @@ pub fn view(model: &Model, frame: &mut Frame, now: PrimitiveDateTime) {
         Tab::Sharing => view_placeholder(frame, outer[2], "Sharing"),
     }
 
-    let hints = "q quit │ r reload │ <tab> switch tabs │ hjkl move selection │ ? help";
-    let footer = match model.probe_duration {
-        Some(d) => format!("{hints}  {}ms", d.as_millis()),
-        None => hints.to_owned(),
+    let reload = match model.probe_duration {
+        Some(d) => format!("Reload: r ({}ms)", d.as_millis()),
+        None => "Reload: r".to_owned(),
     };
+    let footer = format!("Quit: q │ Help: ? │ {reload}");
     frame.render_widget(
         Paragraph::new(footer).style(Style::default().fg(Color::DarkGray)),
         outer[3],
