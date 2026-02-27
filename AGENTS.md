@@ -2,9 +2,9 @@
 
 ## Project: braid
 
-A NixOS-based NAS with full disk encryption, auto-healing storage, and dynamic drive pooling.
+`braid` is a Rust CLI tool + NixOS module for managing a NixOS-based NAS of full-disk-encrypted drives (LUKS) in a btrfs RAID1 array.
 
-## Architecture
+## Example
 
 ```
 Physical drives:
