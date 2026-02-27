@@ -14,7 +14,8 @@
       "Bash(tail:*)",
       "Bash(cargo insta:*)",
       "Bash(just test-rust:*)",
-      "Bash(cargo check:*)"
+      "Bash(cargo check:*)",
+      "Bash(just test:*)"
     ]
   }
 }
