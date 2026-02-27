@@ -316,33 +316,41 @@ systemd.services.braid-auto-unlock = lib.mkIf cfg.autoUnlock.enable {
       exit 0
     fi
 
-    if [ ! -f "${keyPath}" ]; then
+    # Path traversal defense (runtime half — complements config-time
+    # assertion that rejects leading / and ..). The USB filesystem is
+    # attacker-controlled, so we must verify the resolved path stays
+    # within /run/braid-key/ before reading. This guards against:
+    #   - CWE-59: symlinked keyfile (braid.key -> /etc/shadow)
+    #   - CWE-22: symlinked parent dir (subdir/ -> /etc, keyFile=subdir/braid.key)
+    # realpath -e also fails if the file doesn't exist, so this
+    # subsumes the existence check.
+    resolved=$(${pkgs.coreutils}/bin/realpath -e "${keyPath}" 2>/dev/null) || {
       echo "braid-auto-unlock: keyfile not found at ${keyPath}, skipping" >&2
       umount /run/braid-key 2>/dev/null || true
       exit 0
-    fi
-
-    # Reject symlinks — a USB-crafted symlink (e.g. braid.key -> /etc/shadow)
-    # would pass the Nix config assertion (no leading /, no ..) but resolve
-    # outside /run/braid-key at runtime. CWE-59 (symlink following).
-    if [ -L "${keyPath}" ]; then
-      echo "braid-auto-unlock: keyfile is a symlink, refusing (CWE-59)" >&2
-      umount /run/braid-key 2>/dev/null || true
-      exit 0
-    fi
+    }
+    case "$resolved" in
+      /run/braid-key/*)
+        ;;
+      *)
+        echo "braid-auto-unlock: keyfile resolves outside mount root ($resolved), refusing" >&2
+        umount /run/braid-key 2>/dev/null || true
+        exit 0
+        ;;
+    esac
 
     # Warn if keyfile is world/group-readable. On vfat (no Unix perms),
     # files are typically 0755 — we can't fix that (vfat doesn't support
     # chmod), so warn rather than fail. The mount point perms (0700) and
     # short mount window limit exposure. Hard-failing here would break
     # the most common USB format.
-    perms=$(${pkgs.coreutils}/bin/stat -c '%a' "${keyPath}" 2>/dev/null || echo "???")
+    perms=$(${pkgs.coreutils}/bin/stat -c '%a' "$resolved" 2>/dev/null || echo "???")
     case "$perms" in
       400|600) ;; # good
       *) echo "braid-auto-unlock: WARNING: keyfile perms are $perms (expected 400)" >&2 ;;
     esac
 
-    if braid unlock --key-file "${keyPath}"; then
+    if braid unlock --key-file "$resolved"; then
       echo "braid-auto-unlock: pool unlocked successfully" >&2
     else
       echo "braid-auto-unlock: unlock failed (wrong keyfile?), skipping" >&2
