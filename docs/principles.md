@@ -23,6 +23,8 @@ Declare the disk in `braid.disks` (named attrset) before formatting it. `nixos-r
 
 All drives share one LUKS passphrase. `braid unlock` and `braid add` depend on this — one passphrase unlocks all drives. Enforced at format time: subsequent disks verify against an existing pool member via `cryptsetup --test-passphrase`. [Why →](decisions/single-passphrase.md)
 
+Keyfile support will be adopted after v1.0 release.
+
 ## 5. Stable identifiers
 
 All persistent storage config uses `/dev/disk/by-id/` paths. Never `/dev/sdX`. Mapper names are `braid-<disk-key>` (e.g., `braid-toshiba`) — deterministic, human-friendly, debuggable in `lsblk`, systemd logs, and error messages. [Why →](decisions/mapper-naming.md)

@@ -16,7 +16,7 @@ Status: Active
 
 ## Decision
 
-Option 3. Enforcement at format time with zero at-rest key material.
+Option 3. Enforcement at format time.
 
 ### How it works
 
@@ -27,9 +27,13 @@ Option 3. Enforcement at format time with zero at-rest key material.
 
 The script reads which devices are in the btrfs pool (`btrfs fi show /mnt/storage`), picks one that's currently open, and tests the passphrase against its underlying LUKS device.
 
-## Constraint
+## Scope
 
-No keyfiles. The passphrase is never written to disk. It exists only in memory during `braid-add-disk` execution and in the user's head.
+This decision governs the shared passphrase: one passphrase, enrolled in
+LUKS key slot 0 on every pool disk, enforced at format time. Additional
+unlock mechanisms (USB keyfiles, TPM, etc.) are orthogonal — they use
+separate LUKS key slots and do not weaken or replace the passphrase
+requirement.
 
 ## See
 
