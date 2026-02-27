@@ -266,6 +266,12 @@
           repro-degraded-writes-single = pkgs.testers.nixosTest (
             import ./tests/repro/degraded-writes-single.nix
           );
+          repro-btrfs-replace-preserves-devid = pkgs.testers.nixosTest (
+            import ./tests/repro/btrfs-replace-preserves-devid.nix
+          );
+          repro-btrfs-replace-rejects-smaller = pkgs.testers.nixosTest (
+            import ./tests/repro/btrfs-replace-rejects-smaller-target.nix
+          );
           luks-label = pkgs.testers.nixosTest (
             import ./tests/cli/luks-label.nix {
               braid = linuxCrane.braid;

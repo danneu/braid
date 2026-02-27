@@ -81,6 +81,13 @@ with subtest("Pre-format disk4 as LUKS (simulating crash recovery)"):
     # Verify it's now LUKS
     machine.succeed("cryptsetup isLuks /dev/disk/by-id/virtio-disk4")
 
+    # Capture LUKS UUID before replace — if braid re-formats, this changes
+    luks_uuid_before = machine.succeed(
+        "cryptsetup luksUUID /dev/disk/by-id/virtio-disk4"
+    ).strip()
+    print(f"LUKS UUID before replace: {luks_uuid_before}")
+    assert luks_uuid_before != "", "Expected non-empty LUKS UUID"
+
     # Make sure the mapper is NOT open (simulating state after crash)
     machine.fail("test -e /dev/mapper/braid-disk4")
 
@@ -111,6 +118,16 @@ with subtest("Pool healthy after replace with pre-formatted disk"):
 with subtest("Data intact after replace with pre-formatted disk"):
     content = machine.succeed("cat /mnt/storage/precious.txt").strip()
     assert content == "important data", f"Got '{content}'"
+
+with subtest("LUKS UUID unchanged — disk was NOT re-formatted"):
+    luks_uuid_after = machine.succeed(
+        "cryptsetup luksUUID /dev/disk/by-id/virtio-disk4"
+    ).strip()
+    print(f"LUKS UUID after replace: {luks_uuid_after}")
+    assert luks_uuid_after == luks_uuid_before, (
+        f"LUKS UUID changed — disk was re-formatted! "
+        f"before={luks_uuid_before}, after={luks_uuid_after}"
+    )
 
 with subtest("Disk map updated"):
     dm = read_disk_map()

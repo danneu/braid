@@ -19,6 +19,7 @@
       { size = 1024; driveConfig.deviceExtraOpts.serial = "disk3"; }
       { size = 1024; driveConfig.deviceExtraOpts.serial = "disk4"; }
       { size = 1024; driveConfig.deviceExtraOpts.serial = "disk5"; }
+      { size = 1024; driveConfig.deviceExtraOpts.serial = "disk6"; }
     ];
 
     environment.systemPackages = [
@@ -34,6 +35,7 @@
         disk3 = { by_id = "/dev/disk/by-id/virtio-disk3"; };
         disk4 = { by_id = "/dev/disk/by-id/virtio-disk4"; };
         disk5 = { by_id = "/dev/disk/by-id/virtio-disk5"; };
+        disk6 = { by_id = "/dev/disk/by-id/virtio-disk6"; };
       };
       mount_point = "/mnt/storage";
     };

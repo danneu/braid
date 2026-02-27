@@ -2,10 +2,9 @@
 #
 # Intent:
 # - What behavior this test (tries to) verify.
-#   - `braid replace` works correctly in a 2-disk RAID1 pool. The pool
-#     temporarily grows to 3 devices during the replace (add new → balance →
-#     evict old), then returns to exactly 2 devices. RAID1 profile is
-#     maintained throughout and the old disk's LUKS mapper is closed.
+#   - `braid replace` works correctly in a 2-disk RAID1 pool. After the
+#     replace completes, the pool has exactly 2 devices, RAID1 profile is
+#     intact, data is preserved, and the old disk's LUKS mapper is closed.
 #
 # Why it exists:
 # - What risk/regression this protects against.

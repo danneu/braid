@@ -97,18 +97,20 @@ with subtest("Replace disk2 (512MB) with disk3 (1024MB)"):
     result = machine.succeed(replace_cmd("disk2", "disk3"))
     print(f"braid replace output:\n{result}")
 
-with subtest("New disk reports full capacity (>700 MiB, not capped at ~500)"):
+with subtest("New disk reports full capacity (significantly larger than old disk)"):
     fi_show = machine.succeed("btrfs fi show /mnt/storage")
     print(f"Pool after replace:\n{fi_show}")
 
     new_size = get_device_size_mib("braid-disk3")
     print(f"New disk3 size: {new_size} MiB (old disk2 was {old_size} MiB)")
 
-    # 1024MB disk minus LUKS overhead should be well over 700MiB.
-    # If capped at old size it would be ~480MiB.
-    assert new_size > 700, (
-        f"New disk should use full capacity (>700 MiB), got {new_size} MiB. "
-        f"Disk may be capped at old size ({old_size} MiB)."
+    # The new disk (1024MB raw) should be ~1.8x+ the old disk (512MB raw)
+    # after LUKS overhead. If capped at old size, ratio would be ~1.0.
+    ratio = new_size / old_size
+    assert ratio > 1.5, (
+        f"New disk should be significantly larger than old. "
+        f"Got {new_size:.1f} MiB vs {old_size:.1f} MiB (ratio {ratio:.2f}x, expected >1.5x). "
+        f"Disk may be capped at old size."
     )
 
 with subtest("Pool healthy after larger-disk replace"):
