@@ -41,3 +41,7 @@ capture-progress-fixtures:
 # Boot interactive VM with btrfs + Samba playground
 playground:
     nix run .#playground
+
+# Destroy an entire braid pool (dev use only — wipes LUKS signatures + state files)
+destroy config="/etc/braid/config.json":
+    ./scripts/braid-destroy.sh {{config}}
