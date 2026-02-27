@@ -56,6 +56,12 @@ replace shell-open loop in systemd.services.braid-unlock with wrapper behavior:
   - printf '%s\n' "$pass" | braid unlock --passphrase-stdin
 - keep ConditionPathIsMountPoint = "!${cfg.mountPoint}"
 
+Prerequisite: this makes the manual service depend on the braid CLI binary.
+Add assertion: cfg.package != null when braid.enable = true. The module
+already requires the CLI for `braid add`, `braid status`, etc. — making it
+explicit prevents a broken service if someone enables the module without
+setting the package.
+
 Result: manual service and CLI share one unlock implementation while CLI
 remains systemd-agnostic.
 
@@ -66,9 +72,18 @@ changes):
 
 - mount source: cfg.autoUnlock.keyDevice
 - mountpoint: /run/braid-key
+- DirectoryMode=0700 (root:root) — passphrase file is plaintext; non-root
+  users must not be able to traverse to it even during the brief mount window.
+  See docs/luks-unlock.md § "Mount point permissions".
 - fstype: "auto" (hardcoded — kernel probes vfat, ext4, etc.)
 - options: ro,nofail,noauto,x-systemd.device-timeout=${timeout}s
 - add automount unit so first file access triggers mount attempt
+
+nofail + device-timeout + noauto together guarantee the USB never blocks
+boot: systemd waits at most timeoutSec for the device, then gives up. The
+automount unit is not started at boot — it fires only when the auto-unlock
+service accesses the mount point. See docs/luks-unlock.md § "Boot
+resilience".
 
 These units must not make boot fail if device is missing.
 
@@ -84,7 +99,15 @@ New unit: systemd.services.braid-auto-unlock:
   2. Check readability of key file (this triggers automount)
   3. If missing/unreadable: log informational message, exit 0
   4. If present: run braid unlock --passphrase-file "$key_path"
-  5. On failure: log warning, exit 0 (boot resilience invariant)
+  5. Cleanup: umount /run/braid-key || true (always, regardless of outcome)
+  6. On failure: log warning, exit 0 (boot resilience invariant)
+
+Step 5 is critical: the standard USB-key-unlock pattern is mount → read →
+unmount. Without cleanup, the plaintext passphrase stays readable at
+/run/braid-key/passphrase.txt for the rest of the session. This is exactly
+the Unraid CVE pattern (passphrase at rest on a mounted filesystem). The
+umount closes that window. See docs/luks-unlock.md § "Plaintext keyfile
+exposure".
 
 No systemctl start braid-pool.target from this service.
 
@@ -95,7 +118,12 @@ dependent service readiness.
 
 - Discoverable through systemctl list-units.
 - A place to hang future services that should start when the pool comes online
-  (if you ever want WantedBy=braid-pool.target on something
+  (if you ever want WantedBy=braid-pool.target on something).
+
+Note: braid-pool.target stays inactive after a successful auto-unlock because
+nothing starts it. This is intentional — the target is a manual trigger, not
+a status indicator. Operators should check mount state directly
+(`mountpoint -q ${cfg.mountPoint}`). Document this in README.
 
 ## 6) Dependency guidance for consumers
 
@@ -110,30 +138,52 @@ Document and apply where relevant:
 
 - modules/braid/options.nix (/Users/dan/Code/braid/modules/braid/options.nix)
   - add autoUnlock option subtree + validation assertions
+  - add assertion: cfg.package != null when braid.enable = true
 - modules/braid/storage.nix (/Users/dan/Code/braid/modules/braid/storage.nix)
   - refactor braid-unlock wrapper
-  - add /run/braid-key mount/automount
-  - add braid-auto-unlock.service
+  - add /run/braid-key mount/automount (DirectoryMode=0700)
+  - add braid-auto-unlock.service (with umount cleanup)
 - README.md (/Users/dan/Code/braid/README.md)
   - add “USB Auto-Unlock” section with config + behavior guarantees
   - keep/manual braid unlock and braid-pool.target docs
   - explicitly state best-effort semantics
+  - note that braid-pool.target does not reflect auto-unlock state
 - docs/1-user-stories.md (/Users/dan/Code/braid/docs/1-user-stories.md)
   - add flow for boot with USB key present/absent
+- docs/luks-unlock.md (/Users/dan/Code/braid/docs/luks-unlock.md)
+  - already created — research reference for USB naming stability,
+    passphrase vs keyfile semantics, Unraid CVE, boot resilience, mount
+    permissions
 - docs/decisions/single-passphrase.md (/Users/dan/Code/braid/docs/decisions/
   single-passphrase.md)
-  - update mechanism wording: manual prompt or USB passphrase file, still one
-    passphrase invariant
+  - already updated — “Constraint: No keyfiles” replaced with “Scope”
+    section clarifying that additional unlock mechanisms (USB keyfiles, TPM)
+    are orthogonal to the shared passphrase
 
 ## Validation and Assertions
 
-Add module assertions under braid.autoUnlock.enable:
+Add module assertions:
 
-- keyDevice starts with /dev/disk/by-id/
+- cfg.package != null when braid.enable = true (the refactored braid-unlock
+  service and auto-unlock both call the CLI binary)
+- keyDevice starts with /dev/disk/by-id/ (see docs/luks-unlock.md § "USB
+  device naming stability" — /dev/sdX names shift across reboots)
 - passphraseFile is absolute within the USB FS (/…)
 - timeoutSec > 0
 
 These are config-time validation only; runtime failures remain non-fatal.
+
+## Implementation Comments
+
+Code implementing this plan should include comments at key points
+referencing docs/luks-unlock.md so future readers find the research:
+
+- keyDevice validation: why by-id is required (naming stability)
+- mount unit options: why nofail + device-timeout + noauto (boot resilience)
+- DirectoryMode=0700: why the mount point is locked down (passphrase exposure)
+- umount cleanup: why we unmount after use (Unraid CVE pattern)
+- passphraseFile option: how this differs from a binary keyfile and why they
+  are not interchangeable (PBKDF vs raw key material)
 
 ## Test Plan
 
