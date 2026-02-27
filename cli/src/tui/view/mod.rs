@@ -609,8 +609,7 @@ mod tests {
         snap!(buffer_to_string(&terminal));
     }
 
-    #[test]
-    fn snapshot_with_pool() {
+    fn sample_pool() -> PoolState {
         let disk_usage = HashMap::from([
             (
                 "toshiba".to_owned(),
@@ -673,7 +672,7 @@ mod tests {
                 },
             ),
         ]);
-        let pool = PoolState {
+        PoolState {
             mount_point: "/mnt/storage".to_owned(),
             profile: "RAID1".to_owned(),
             used: 2_308_094_370_816,  // ~2.1 TiB
@@ -690,8 +689,20 @@ mod tests {
                 rate: Some("32.34MiB/s".to_owned()),
             },
             probed_at: Instant::now(),
-        };
-        let model = Model::new_demo(sample_disk_keys(), PoolStatus::Mounted(pool));
+        }
+    }
+
+    #[test]
+    fn snapshot_with_pool() {
+        let model = Model::new_demo(sample_disk_keys(), PoolStatus::Mounted(sample_pool()));
+        let terminal = render(&model, 60, 22);
+        snap!(buffer_to_string(&terminal));
+    }
+
+    #[test]
+    fn snapshot_disk_detail() {
+        let mut model = Model::new_demo(sample_disk_keys(), PoolStatus::Mounted(sample_pool()));
+        model.show_disk_detail = true;
         let terminal = render(&model, 60, 22);
         snap!(buffer_to_string(&terminal));
     }

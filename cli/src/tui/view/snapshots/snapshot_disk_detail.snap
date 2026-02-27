@@ -1,0 +1,24 @@
+---
+source: cli/src/tui/view/mod.rs
+expression: buffer_to_string(&terminal)
+---
+Data  Sharing
+ Pool ──────────────────────────────────────────────────────
+ Path         /mnt/storage
+ Redundancy   2x (RAID1)
+ Usage        39% (2.1 / 5.4 TiB)
+ █████████┌ Disk Detail ─────────────────────────┐
+          │ Disk       toshiba                   │
+ Disks ───│ Status     unlocked                  │──────────
+     Name │ Cipher     aes-xts-plain64           │
+ ▶ 1 toshi│ Key size   512 bits                  │
+   2 ironw│ Keyslots   1 of 32 slots used        │
+   3 wdc  │                                      │
+          │ Esc to go back                       │
+ Scrub ───└──────────────────────────────────────┘──────────
+ Last run     Tue Feb 24 02:00:07 2026 (11 min ago)
+ Errors       0
+ Total        32.36MiB
+ Rate         32.34MiB/s
+ Duration     0:00:00
+Quit: q │ Help: ? │ Reload: r
