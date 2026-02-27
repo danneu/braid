@@ -79,6 +79,14 @@ pub fn enroll_key_file(runner, device, passphrase, key_file_path) -> Result<(), 
 Uses CryptsetupLuksAddKeyFile via `runner.run_with_stdin()` with passphrase
 bytes as stdin.
 
+```
+pub fn check_key_slot(runner, device, slot: u8) -> Result<KeySlotState, LuksError>
+```
+Runs `CryptsetupLuksDump` (already exists), parses JSON for
+`keyslots.<slot>.type`. Returns `KeySlotState::Empty` or
+`KeySlotState::Occupied`. Used by `enroll-key-file` preflight to detect
+slot 1 conflicts before attempting enrollment.
+
 ## Phase 2: `braid unlock --key-file`
 
 Depends on: Phase 1.
@@ -126,10 +134,23 @@ Steps:
 2. Read passphrase via `luks::read_passphrase()` (to authorize enrollment).
 3. Verify passphrase against first present LUKS disk.
 4. For each config disk that is present + LUKS-formatted:
-   a. `luks::verify_key_file()` — if already enrolled, skip (idempotent).
-   b. Otherwise `luks::enroll_key_file()` to add to new slot.
-   c. Print per-disk result.
+   a. `luks::verify_key_file()` — if keyfile already works, skip (idempotent).
+   b. Preflight: `cryptsetup luksDump` (JSON) → check slot 1 state.
+      - If slot 1 is empty: proceed to enroll.
+      - If slot 1 is occupied (and step 4a didn't skip): fail with error:
+        "slot 1 on <disk> is occupied by an unknown key. Remove it first
+        with `cryptsetup luksKillSlot <device> 1` then re-run enrollment."
+        This catches migration debris and manual key experiments without
+        silently overwriting or leaving partial state across a multi-disk
+        array.
+   c. `luks::enroll_key_file()` to add to slot 1.
+   d. Print per-disk result.
 5. Print summary.
+
+The preflight prevents a partial-enrollment scenario where some disks succeed
+and others fail because slot 1 is occupied. By checking all disks up front
+(or failing fast on the first conflict), the operator gets one clear message
+instead of cryptsetup errors mid-way through a multi-disk enrollment.
 
 ### main.rs — register subcommand
 
@@ -422,6 +443,31 @@ for those comments.
 - Setup: pool with both passphrase (slot 0) and keyfile (slot 1).
 - Subtests: correct keyfile → success; wrong keyfile → failure; passphrase
   path unaffected.
+
+**tests/cli/braid-add-enroll-key-file.nix + .py**
+```python
+# Test: braid-add-enroll-key-file
+#
+# Intent: Verify that `braid add --enroll-key-file` enrolls the keyfile
+# into the new disk as part of the add operation, and that the disk is
+# unlockable with both passphrase and keyfile afterward.
+#
+# Why it exists: The --enroll-key-file flag on add/replace wires
+# enrollment into the format path, reusing the passphrase already in
+# scope. If the passphrase handoff from luks_format() to
+# enroll_key_file() is wrong (e.g., passphrase consumed/dropped),
+# enrollment silently fails even though standalone enroll-key-file and
+# unlock --key-file tests pass.
+#
+# Scenario: 1-disk pool created without keyfile. Generate keyfile.
+# Add a second disk with --enroll-key-file. Verify new disk has keyfile
+# in slot 1. Lock pool. Unlock with keyfile. Verify passphrase still
+# works on both disks.
+```
+- Setup: 1-disk pool (passphrase only), generate 4096-byte random keyfile.
+- Subtests: `braid add <disk2> --enroll-key-file /path/to/key` → verify
+  slot 1 occupied on new disk → lock → unlock with keyfile → unlock with
+  passphrase.
 
 ### Module tests
 
