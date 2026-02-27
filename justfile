@@ -22,7 +22,7 @@ test *args:
 
 # Run Rust unit tests
 test-rust:
-    cd cli && cargo test
+    cargo test
 
 # Capture tool output fixtures into cli/tests/fixtures/nixos-25.11/
 capture-fixtures:
