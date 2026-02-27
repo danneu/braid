@@ -11,9 +11,9 @@ Data  Sharing
           │ Disk       toshiba                   │
  Disks ───│ Status     unlocked                  │──────────
      Name │ Cipher     aes-xts-plain64           │
- ▶ 1 toshi│ Key size   512 bits                  │
-   2 ironw│ Keyslots   1 of 32 slots used        │
-   3 wdc  │                                      │
+ ▶ 1 toshi│ Key size   512 bits                  │TiB
+   2 ironw│ Keyslots   1 of 32 slots used        │TiB
+   3 wdc  │                                      │TiB
           │ Esc to go back                       │
  Scrub ───└──────────────────────────────────────┘──────────
  Last run     Tue Feb 24 02:00:07 2026 (11 min ago)

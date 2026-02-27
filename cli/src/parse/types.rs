@@ -11,6 +11,8 @@ pub struct LsblkDevice {
     pub model: Option<String>,
     pub serial: Option<String>,
     pub uuid: Option<String>,
+    pub rota: Option<bool>,
+    pub tran: Option<String>,
     pub children: Vec<LsblkDevice>,
 }
 

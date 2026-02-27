@@ -112,12 +112,18 @@ pub fn run_demo() -> io::Result<()> {
             },
         ),
     ]);
+    let disk_transport = HashMap::from([
+        ("toshiba".to_owned(), "sata".to_owned()),
+        ("ironwolf".to_owned(), "sata".to_owned()),
+        ("wdc".to_owned(), "usb".to_owned()),
+    ]);
     let pool = PoolState {
         mount_point: "/mnt/storage".to_owned(),
         profile: "RAID1".to_owned(),
         used: 2_308_094_370_816,
         total: 5_937_955_045_376,
         disk_usage,
+        disk_transport,
         smart_health,
         power_state,
         luks_info,

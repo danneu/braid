@@ -6,7 +6,7 @@ use crate::hdparm::check_power_mode;
 use crate::parse::types::{ScrubState, SmartHealth};
 use crate::parse::{
     parse_btrfs_device_usage, parse_btrfs_filesystem_usage, parse_btrfs_scrub_status,
-    parse_cryptsetup_luks_dump, parse_smartctl_health,
+    parse_cryptsetup_luks_dump, parse_lsblk_json, parse_smartctl_health,
 };
 use crate::probe::probe_pool;
 use crate::tui::model::{DiskLuksInfo, DiskUsage, PoolState};
@@ -120,12 +120,31 @@ pub fn probe_pool_for_tui<R: CommandRunner>(
         }
     }
 
+    // Extract transport type (sata, nvme, usb, etc.) from lsblk tree.
+    // Walk parent devices: for each child named "braid-{key}", take the
+    // parent's TRAN value. TRAN is only set on physical devices, not dm-crypt.
+    let mut disk_transport = HashMap::new();
+    if let Ok(lsblk_raw) = runner.run(&CmdRequest::LsblkJson) {
+        if let Ok(lsblk) = parse_lsblk_json(&lsblk_raw) {
+            for dev in &lsblk.blockdevices {
+                if let Some(tran) = &dev.tran {
+                    for child in &dev.children {
+                        if let Some(key) = child.name.strip_prefix("braid-") {
+                            disk_transport.insert(key.to_owned(), tran.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     Ok(Some(PoolState {
         mount_point: mount_point.to_owned(),
         profile: profile.to_owned(),
         used: usage.used_bytes,
         total: usage.free_estimated_bytes + usage.used_bytes,
         disk_usage,
+        disk_transport,
         smart_health,
         power_state,
         luks_info,

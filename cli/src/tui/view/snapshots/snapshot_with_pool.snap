@@ -9,10 +9,10 @@ Data  Sharing
  Usage        39% (2.1 / 5.4 TiB)
  ███████████████████████
  Disks ─────────────────────────────────────────────────────
-     Name     SMART   Power   Usage
- ▶ 1 toshiba  ok      active  25%  1.3 / 5.5 TiB
-   2 ironwolf warning standby 25%  1.3 / 5.5 TiB
-   3 wdc      -       idle    21%  0.8 / 3.6 TiB
+     Name     Bus  SMART   Power   Usage
+ ▶ 1 toshiba  sata ok      active  25%  1.3 / 5.5 TiB
+   2 ironwolf sata warning standby 25%  1.3 / 5.5 TiB
+   3 wdc      usb  -       idle    21%  0.8 / 3.6 TiB
  Scrub ─────────────────────────────────────────────────────
  Last run     Tue Feb 24 02:00:07 2026 (11 min ago)
  Errors       0

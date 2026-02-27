@@ -58,6 +58,7 @@ pub struct PoolState {
     pub used: u64,
     pub total: u64,
     pub disk_usage: HashMap<String, DiskUsage>,
+    pub disk_transport: HashMap<String, String>,
     pub smart_health: HashMap<String, SmartHealth>,
     pub power_state: HashMap<String, DrivePowerState>,
     pub luks_info: HashMap<String, DiskLuksInfo>,

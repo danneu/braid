@@ -209,7 +209,7 @@ impl CommandRunner for RealRunner {
                     "--json",
                     "--bytes",
                     "--output",
-                    "NAME,TYPE,SIZE,MODEL,SERIAL,UUID",
+                    "NAME,TYPE,SIZE,MODEL,SERIAL,UUID,ROTA,TRAN",
                 ],
             ),
             CmdRequest::FindmntJson { mount_point } => RealRunner::exec(

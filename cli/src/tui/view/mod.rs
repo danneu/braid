@@ -210,15 +210,22 @@ fn power_label(state: &DrivePowerState) -> &'static str {
 fn disk_table(model: &Model, unit: ByteUnit) -> Table<'_> {
     let pool = model.pool.current();
     let disk_usage = pool.map(|p| &p.disk_usage);
+    let disk_transport = pool.map(|p| &p.disk_transport);
     let smart_health = pool.map(|p| &p.smart_health);
     let power_state = pool.map(|p| &p.power_state);
-    let header = Row::new(["", "Name", "SMART", "Power", "Usage"])
+    let header = Row::new(["", "Name", "Bus", "SMART", "Power", "Usage"])
         .style(Style::default().fg(Color::DarkGray));
     let rows: Vec<Row> = model
         .disk_keys
         .iter()
         .enumerate()
         .map(|(i, name)| {
+            let transport_cell = Line::from(
+                disk_transport
+                    .and_then(|t| t.get(name))
+                    .map(|s| s.as_str())
+                    .unwrap_or("\u{2014}"),
+            );
             let smart_val = smart_health.and_then(|s| s.get(name));
             let smart_line = Line::from(match smart_val {
                 Some(h) => smart_cell(h),
@@ -242,6 +249,7 @@ fn disk_table(model: &Model, unit: ByteUnit) -> Table<'_> {
                 Some(usage) => Row::new(vec![
                     num,
                     name_cell,
+                    transport_cell,
                     smart_line,
                     power_cell,
                     Line::from(format!(
@@ -255,6 +263,7 @@ fn disk_table(model: &Model, unit: ByteUnit) -> Table<'_> {
                 None if disk_usage.is_some() => Row::new(vec![
                     num,
                     name_cell,
+                    transport_cell,
                     smart_line,
                     power_cell,
                     Line::from(Span::styled("missing", Style::default().fg(Color::Yellow))),
@@ -263,6 +272,7 @@ fn disk_table(model: &Model, unit: ByteUnit) -> Table<'_> {
                 None => Row::new(vec![
                     num,
                     name_cell,
+                    transport_cell,
                     smart_line,
                     power_cell,
                     Line::default(),
@@ -277,6 +287,18 @@ fn disk_table(model: &Model, unit: ByteUnit) -> Table<'_> {
         .max()
         .unwrap_or(4)
         .max("Name".len()) as u16;
+    let transport_width = disk_transport
+        .map(|t| {
+            model
+                .disk_keys
+                .iter()
+                .filter_map(|name| t.get(name))
+                .map(|s| s.len())
+                .max()
+                .unwrap_or(0)
+        })
+        .unwrap_or(0)
+        .max("Bus".len()) as u16;
     let smart_width = smart_health
         .map(|s| {
             model
@@ -304,6 +326,7 @@ fn disk_table(model: &Model, unit: ByteUnit) -> Table<'_> {
     let widths = [
         Constraint::Length(1),
         Constraint::Length(longest_name_len),
+        Constraint::Length(transport_width),
         Constraint::Length(smart_width),
         Constraint::Length(power_width),
         Constraint::Min(10),
@@ -672,12 +695,18 @@ mod tests {
                 },
             ),
         ]);
+        let disk_transport = HashMap::from([
+            ("toshiba".to_owned(), "sata".to_owned()),
+            ("ironwolf".to_owned(), "sata".to_owned()),
+            ("wdc".to_owned(), "usb".to_owned()),
+        ]);
         PoolState {
             mount_point: "/mnt/storage".to_owned(),
             profile: "RAID1".to_owned(),
             used: 2_308_094_370_816,  // ~2.1 TiB
             total: 5_937_955_045_376, // ~5.4 TiB
             disk_usage,
+            disk_transport,
             smart_health,
             power_state,
             luks_info,

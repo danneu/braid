@@ -2,8 +2,8 @@ use serde::Deserialize;
 
 use crate::cmd::RawCommandOutput;
 
-use super::ParseError;
 use super::types::{LsblkDevice, LsblkFieldOutput, LsblkOutput};
+use super::ParseError;
 
 // --- Serde helper structs (not exposed to domain code) ---
 
@@ -22,6 +22,10 @@ struct RawLsblkDevice {
     serial: Option<String>,
     uuid: Option<String>,
     #[serde(default)]
+    rota: Option<bool>,
+    #[serde(default)]
+    tran: Option<String>,
+    #[serde(default)]
     children: Vec<RawLsblkDevice>,
 }
 
@@ -33,6 +37,8 @@ fn convert_lsblk_device(raw: RawLsblkDevice) -> LsblkDevice {
         model: raw.model,
         serial: raw.serial,
         uuid: raw.uuid,
+        rota: raw.rota,
+        tran: raw.tran,
         children: raw.children.into_iter().map(convert_lsblk_device).collect(),
     }
 }
