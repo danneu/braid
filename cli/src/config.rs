@@ -146,12 +146,6 @@ pub fn config_read_raw(path: &Path) -> Result<(Config, String), ConfigError> {
     Ok((cfg, raw))
 }
 
-pub fn config_hash(raw: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let hash = Sha256::digest(raw.as_bytes());
-    format!("sha256:{:x}", hash)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -164,18 +158,6 @@ mod tests {
         assert_eq!(cfg.disks().len(), 1);
         assert!(cfg.disk_by_name("toshiba").is_some());
         assert_eq!(cfg.mount_point(), "/mnt/storage");
-    }
-
-    #[test]
-    fn config_hash_uses_sha256_prefix() {
-        let h = config_hash("anything");
-        assert!(
-            h.starts_with("sha256:"),
-            "expected sha256: prefix, got: {h}"
-        );
-        let hex = &h["sha256:".len()..];
-        assert_eq!(hex.len(), 64, "expected 64 hex chars, got {}", hex.len());
-        assert!(hex.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     #[test]
