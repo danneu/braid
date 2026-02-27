@@ -33,9 +33,9 @@ pub enum Event {
 }
 
 impl Event {
-    pub fn into_message(self, show_help: bool) -> Option<Message> {
+    pub fn into_message(self, show_help: bool, show_disk_detail: bool) -> Option<Message> {
         match self {
-            Event::Key(key) => keymap::handle_key(key, show_help),
+            Event::Key(key) => keymap::handle_key(key, show_help, show_disk_detail),
             Event::CommandStarted { id, cmd } => Some(Message::CommandStarted { id, cmd }),
             Event::CommandOutput { id, stream, line } => {
                 Some(Message::CommandOutput { id, stream, line })

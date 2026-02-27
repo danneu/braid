@@ -78,6 +78,14 @@ pub struct CryptsetupLuksUuidOutput {
     pub uuid: LuksUuid,
 }
 
+/// cryptsetup luksDump --dump-json-metadata
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CryptsetupLuksDumpOutput {
+    pub cipher: String,     // e.g. "aes-xts-plain64"
+    pub key_size_bits: u32, // e.g. 512
+    pub keyslot_count: u32, // e.g. 1
+}
+
 /// btrfs filesystem usage --raw
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BtrfsFilesystemUsageOutput {

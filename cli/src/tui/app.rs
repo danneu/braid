@@ -14,6 +14,8 @@ pub enum Message {
     RefreshPool,
     SelectNextDisk,
     SelectPrevDisk,
+    OpenDiskDetail,
+    CloseDiskDetail,
     Tick,
     CommandStarted {
         id: CmdId,
@@ -75,6 +77,14 @@ pub fn update(model: &mut Model, msg: Message) -> Vec<Effect> {
             if len > 0 {
                 model.selected_disk = (model.selected_disk + len - 1) % len;
             }
+            vec![]
+        }
+        Message::OpenDiskDetail => {
+            model.show_disk_detail = true;
+            vec![]
+        }
+        Message::CloseDiskDetail => {
+            model.show_disk_detail = false;
             vec![]
         }
         Message::Tick => vec![],

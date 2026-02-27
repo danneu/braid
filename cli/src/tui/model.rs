@@ -9,25 +9,22 @@ use crate::tui::state::{CmdId, CommandState};
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
     Data,
-    Encryption,
     Sharing,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 3] = [Tab::Data, Tab::Encryption, Tab::Sharing];
+    pub const ALL: [Tab; 2] = [Tab::Data, Tab::Sharing];
 
     pub fn label(self) -> &'static str {
         match self {
             Tab::Data => "Data",
-            Tab::Encryption => "Encryption",
             Tab::Sharing => "Sharing",
         }
     }
 
     pub fn next(self) -> Tab {
         match self {
-            Tab::Data => Tab::Encryption,
-            Tab::Encryption => Tab::Sharing,
+            Tab::Data => Tab::Sharing,
             Tab::Sharing => Tab::Data,
         }
     }
@@ -35,10 +32,16 @@ impl Tab {
     pub fn prev(self) -> Tab {
         match self {
             Tab::Data => Tab::Sharing,
-            Tab::Encryption => Tab::Data,
-            Tab::Sharing => Tab::Encryption,
+            Tab::Sharing => Tab::Data,
         }
     }
+}
+
+#[derive(Clone)]
+pub struct DiskLuksInfo {
+    pub cipher: String,
+    pub key_size_bits: u32,
+    pub keyslot_count: u32,
 }
 
 #[derive(Clone)]
@@ -57,6 +60,7 @@ pub struct PoolState {
     pub disk_usage: HashMap<String, DiskUsage>,
     pub smart_health: HashMap<String, SmartHealth>,
     pub power_state: HashMap<String, DrivePowerState>,
+    pub luks_info: HashMap<String, DiskLuksInfo>,
     pub scrub: ScrubState,
     pub probed_at: Instant,
 }
@@ -88,6 +92,7 @@ impl PoolStatus {
 pub struct Model {
     pub running: bool,
     pub show_help: bool,
+    pub show_disk_detail: bool,
     pub tab: Tab,
     pub disk_keys: Vec<String>,
     pub disk_by_id: HashMap<String, String>,
@@ -112,6 +117,7 @@ impl Model {
         let model = Self {
             running: true,
             show_help: false,
+            show_disk_detail: false,
             tab: Tab::Data,
             disk_keys,
             disk_by_id,
@@ -129,6 +135,7 @@ impl Model {
         Self {
             running: true,
             show_help: false,
+            show_disk_detail: false,
             tab: Tab::Data,
             disk_keys,
             disk_by_id: HashMap::new(),

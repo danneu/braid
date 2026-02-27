@@ -3,7 +3,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 mod help;
 
-use ratatui::widgets::{Block, Gauge, Paragraph, Row, Table, TableState};
+use ratatui::widgets::{Block, Borders, Clear, Gauge, Padding, Paragraph, Row, Table, TableState};
 use ratatui::Frame;
 use time::macros::format_description;
 use time::PrimitiveDateTime;
@@ -440,6 +440,74 @@ fn view_placeholder(frame: &mut Frame, area: Rect, name: &str) {
     );
 }
 
+fn view_disk_detail(model: &Model, frame: &mut Frame, area: Rect) {
+    let disk_name = match model.disk_keys.get(model.selected_disk) {
+        Some(name) => name.clone(),
+        None => return,
+    };
+    let pool = model.pool.current();
+    let has_usage = pool
+        .map(|p| p.disk_usage.contains_key(&disk_name))
+        .unwrap_or(false);
+    let lock_status = if has_usage { "unlocked" } else { "locked" };
+    let luks = pool.and_then(|p| p.luks_info.get(&disk_name));
+
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled("Disk       ", Style::default().fg(Color::DarkGray)),
+            Span::raw(&disk_name),
+        ]),
+        Line::from(vec![
+            Span::styled("Status     ", Style::default().fg(Color::DarkGray)),
+            Span::raw(lock_status),
+        ]),
+    ];
+
+    if let Some(info) = luks {
+        lines.push(Line::from(vec![
+            Span::styled("Cipher     ", Style::default().fg(Color::DarkGray)),
+            Span::raw(&info.cipher),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("Key size   ", Style::default().fg(Color::DarkGray)),
+            Span::raw(format!("{} bits", info.key_size_bits)),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("Keyslots   ", Style::default().fg(Color::DarkGray)),
+            Span::raw(format!("{} of 32 slots used", info.keyslot_count)),
+        ]));
+    } else {
+        lines.push(Line::from(Span::styled(
+            "LUKS metadata unavailable",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+
+    lines.push(Line::default());
+    lines.push(Line::from(Span::styled(
+        "Esc to go back",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let width = 40u16.min(area.width);
+    let height = (lines.len() as u16 + 2).min(area.height);
+    let x = area.width.saturating_sub(width) / 2;
+    let y = area.height.saturating_sub(height) / 2;
+    let popup = Rect::new(x, y, width, height);
+
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan))
+                .title(" Disk Detail ")
+                .padding(Padding::horizontal(1)),
+        ),
+        popup,
+    );
+}
+
 pub fn view(model: &Model, frame: &mut Frame, now: PrimitiveDateTime) {
     let area = frame.area();
 
@@ -455,7 +523,6 @@ pub fn view(model: &Model, frame: &mut Frame, now: PrimitiveDateTime) {
 
     match model.tab {
         Tab::Data => view_data(model, frame, outer[2], now),
-        Tab::Encryption => view_placeholder(frame, outer[2], "Encryption"),
         Tab::Sharing => view_placeholder(frame, outer[2], "Sharing"),
     }
 
@@ -468,6 +535,10 @@ pub fn view(model: &Model, frame: &mut Frame, now: PrimitiveDateTime) {
         Paragraph::new(footer).style(Style::default().fg(Color::DarkGray)),
         outer[3],
     );
+
+    if model.show_disk_detail {
+        view_disk_detail(model, frame, area);
+    }
 
     if model.show_help {
         help::view_help(frame, area);
@@ -482,7 +553,7 @@ mod tests {
     use super::*;
     use crate::hdparm::DrivePowerState;
     use crate::parse::types::{ScrubState, ScrubTimestamp, SmartHealth};
-    use crate::tui::model::DiskUsage;
+    use crate::tui::model::{DiskLuksInfo, DiskUsage};
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
@@ -576,6 +647,32 @@ mod tests {
             ("ironwolf".to_owned(), DrivePowerState::Standby),
             ("wdc".to_owned(), DrivePowerState::Idle),
         ]);
+        let luks_info = HashMap::from([
+            (
+                "toshiba".to_owned(),
+                DiskLuksInfo {
+                    cipher: "aes-xts-plain64".to_owned(),
+                    key_size_bits: 512,
+                    keyslot_count: 1,
+                },
+            ),
+            (
+                "ironwolf".to_owned(),
+                DiskLuksInfo {
+                    cipher: "aes-xts-plain64".to_owned(),
+                    key_size_bits: 512,
+                    keyslot_count: 1,
+                },
+            ),
+            (
+                "wdc".to_owned(),
+                DiskLuksInfo {
+                    cipher: "aes-xts-plain64".to_owned(),
+                    key_size_bits: 512,
+                    keyslot_count: 1,
+                },
+            ),
+        ]);
         let pool = PoolState {
             mount_point: "/mnt/storage".to_owned(),
             profile: "RAID1".to_owned(),
@@ -584,6 +681,7 @@ mod tests {
             disk_usage,
             smart_health,
             power_state,
+            luks_info,
             scrub: ScrubState::Completed {
                 started_at: ScrubTimestamp(time::macros::datetime!(2026-02-24 02:00:07)),
                 error_count: 0,

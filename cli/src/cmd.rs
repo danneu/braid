@@ -120,6 +120,9 @@ pub enum CmdRequest {
     SmartctlHealthJson {
         device: String,
     },
+    CryptsetupLuksDump {
+        device: String,
+    },
 }
 
 #[derive(Debug, Error)]
@@ -357,6 +360,9 @@ impl CommandRunner for RealRunner {
             }
             CmdRequest::SmartctlHealthJson { device } => {
                 RealRunner::exec("smartctl", &["-H", "-A", device, "--json"])
+            }
+            CmdRequest::CryptsetupLuksDump { device } => {
+                RealRunner::exec("cryptsetup", &["luksDump", "--dump-json-metadata", device])
             }
         }
     }

@@ -27,6 +27,14 @@ pub fn view_help(frame: &mut Frame, area: Rect) {
             Span::raw("select disk"),
         ]),
         Line::from(vec![
+            Span::styled("<enter> ", Style::default().fg(Color::Cyan)),
+            Span::raw("disk detail"),
+        ]),
+        Line::from(vec![
+            Span::styled("<esc>   ", Style::default().fg(Color::Cyan)),
+            Span::raw("close detail"),
+        ]),
+        Line::from(vec![
             Span::styled("?       ", Style::default().fg(Color::Cyan)),
             Span::raw("toggle this help"),
         ]),

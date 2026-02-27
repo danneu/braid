@@ -6,10 +6,10 @@ use crate::hdparm::check_power_mode;
 use crate::parse::types::{ScrubState, SmartHealth};
 use crate::parse::{
     parse_btrfs_device_usage, parse_btrfs_filesystem_usage, parse_btrfs_scrub_status,
-    parse_smartctl_health,
+    parse_cryptsetup_luks_dump, parse_smartctl_health,
 };
 use crate::probe::probe_pool;
-use crate::tui::model::{DiskUsage, PoolState};
+use crate::tui::model::{DiskLuksInfo, DiskUsage, PoolState};
 
 pub fn probe_pool_for_tui<R: CommandRunner>(
     runner: &R,
@@ -90,6 +90,7 @@ pub fn probe_pool_for_tui<R: CommandRunner>(
 
     let mut smart_health = HashMap::new();
     let mut power_state = HashMap::new();
+    let mut luks_info = HashMap::new();
     for (disk_key, by_id_path) in disk_by_id {
         let health = runner
             .run(&CmdRequest::SmartctlHealthJson {
@@ -102,6 +103,21 @@ pub fn probe_pool_for_tui<R: CommandRunner>(
         if let Ok(state) = check_power_mode(by_id_path) {
             power_state.insert(disk_key.clone(), state);
         }
+
+        if let Ok(raw) = runner.run(&CmdRequest::CryptsetupLuksDump {
+            device: by_id_path.clone(),
+        }) {
+            if let Ok(dump) = parse_cryptsetup_luks_dump(&raw) {
+                luks_info.insert(
+                    disk_key.clone(),
+                    DiskLuksInfo {
+                        cipher: dump.cipher,
+                        key_size_bits: dump.key_size_bits,
+                        keyslot_count: dump.keyslot_count,
+                    },
+                );
+            }
+        }
     }
 
     Ok(Some(PoolState {
@@ -112,6 +128,7 @@ pub fn probe_pool_for_tui<R: CommandRunner>(
         disk_usage,
         smart_health,
         power_state,
+        luks_info,
         scrub,
         probed_at: Instant::now(),
     }))

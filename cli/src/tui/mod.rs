@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use app::update;
 use effect::execute_effect;
 use event::InputHandler;
-use model::{DiskUsage, Model, PoolState, PoolStatus};
+use model::{DiskLuksInfo, DiskUsage, Model, PoolState, PoolStatus};
 use view::view;
 
 use crate::config::config_read;
@@ -86,6 +86,32 @@ pub fn run_demo() -> io::Result<()> {
         ("ironwolf".to_owned(), DrivePowerState::Standby),
         ("wdc".to_owned(), DrivePowerState::Idle),
     ]);
+    let luks_info = HashMap::from([
+        (
+            "toshiba".to_owned(),
+            DiskLuksInfo {
+                cipher: "aes-xts-plain64".to_owned(),
+                key_size_bits: 512,
+                keyslot_count: 1,
+            },
+        ),
+        (
+            "ironwolf".to_owned(),
+            DiskLuksInfo {
+                cipher: "aes-xts-plain64".to_owned(),
+                key_size_bits: 512,
+                keyslot_count: 1,
+            },
+        ),
+        (
+            "wdc".to_owned(),
+            DiskLuksInfo {
+                cipher: "aes-xts-plain64".to_owned(),
+                key_size_bits: 512,
+                keyslot_count: 1,
+            },
+        ),
+    ]);
     let pool = PoolState {
         mount_point: "/mnt/storage".to_owned(),
         profile: "RAID1".to_owned(),
@@ -94,6 +120,7 @@ pub fn run_demo() -> io::Result<()> {
         disk_usage,
         smart_health,
         power_state,
+        luks_info,
         scrub: ScrubState::Completed {
             started_at: ScrubTimestamp(time::macros::datetime!(2026-02-24 02:00:07)),
             error_count: 0,
@@ -132,10 +159,12 @@ fn run_loop(
 
         let mut messages = Vec::new();
         if let Ok(event) = rx.recv_timeout(FRAME_BUDGET) {
-            messages.extend(event.into_message(model.show_help));
+            messages.extend(event.into_message(model.show_help, model.show_disk_detail));
             for _ in 1..MAX_EVENTS_PER_FRAME {
                 match rx.try_recv() {
-                    Ok(event) => messages.extend(event.into_message(model.show_help)),
+                    Ok(event) => {
+                        messages.extend(event.into_message(model.show_help, model.show_disk_detail))
+                    }
                     Err(_) => break,
                 }
             }
