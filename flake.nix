@@ -191,6 +191,11 @@
               braid = linuxCrane.braid;
             }
           );
+          replace-new-in-pool-guard = pkgs.testers.nixosTest (
+            import ./tests/cli/replace-new-in-pool-guard.nix {
+              braid = linuxCrane.braid;
+            }
+          );
           replace-preserves-devid = pkgs.testers.nixosTest (
             import ./tests/cli/replace-preserves-devid.nix {
               braid = linuxCrane.braid;

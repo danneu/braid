@@ -205,12 +205,17 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
                 ensure_luks_open(runner, fs, new_name, new_disk, &passphrase)?;
                 eprintln!("LUKS opened: {} → {}", new_disk.by_id, new_mn);
             } else if !pool.devices.iter().any(|d| d.mapper == new_mn) {
-                eprintln!("note: LUKS mapper is already open but device is not yet in pool. Completing replace.");
+                eprintln!(
+                    "note: LUKS mapper is already open but device is not yet in pool. Completing replace."
+                );
             }
         }
     }
 
     let new_mapper_path = format!("/dev/mapper/{}", new_mn.0);
+
+    // Guard: new disk must not already be in the pool.
+    check_new_not_in_pool(new_name, &new_mn, &pool)?;
 
     // Step 2+: Execute replacement — branched by eviction target.
     match &eviction_target {
@@ -325,6 +330,20 @@ enum EvictionTarget {
     Devid(u64),
     /// Old disk is dead — evict via `btrfs device remove missing`.
     Missing,
+}
+
+fn check_new_not_in_pool(
+    new_name: &str,
+    new_mn: &MapperName,
+    pool: &PoolState,
+) -> Result<(), ReplaceError> {
+    if pool.devices.iter().any(|d| d.mapper == *new_mn) {
+        return Err(ReplaceError::Validation(format!(
+            "new disk '{}' is already a member of the pool. Cannot replace with an existing member.",
+            new_name
+        )));
+    }
+    Ok(())
 }
 
 fn resolve_eviction_target(
@@ -760,6 +779,33 @@ mod tests {
                 .any(|d| d.contains("cryptsetup close braid-disk2")),
             "expected LUKS close step for live path, got: {descriptions:?}"
         );
+    }
+
+    #[test]
+    // Intent: replacing with a disk that's already in the pool is rejected.
+    // Why: without the guard, the Live path would pass an existing pool member
+    //   to `btrfs replace start`. The old add+balance+remove path relied on
+    //   `btrfs device add` rejecting duplicates; the btrfs replace path has no
+    //   such natural guard, so we need an explicit one.
+    // Scenario: operator typo — specifies an existing pool member as --new.
+    fn new_disk_already_in_pool_rejected() {
+        let pool = two_device_pool(); // has braid-disk1 and braid-disk2
+        let new_mn = mapper_name("disk2"); // → "braid-disk2"
+        let err = check_new_not_in_pool("disk2", &new_mn, &pool).unwrap_err();
+        assert!(
+            err.to_string().contains("already a member"),
+            "expected 'already a member' error, got: {err}"
+        );
+    }
+
+    #[test]
+    // Intent: a disk NOT in the pool passes the guard.
+    // Why: regression — the guard must not block valid replacements.
+    // Scenario: normal replace with a fresh disk.
+    fn new_disk_not_in_pool_passes() {
+        let pool = two_device_pool();
+        let new_mn = mapper_name("disk3");
+        check_new_not_in_pool("disk3", &new_mn, &pool).expect("disk3 is not in pool — should pass");
     }
 
     #[test]
