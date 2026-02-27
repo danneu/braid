@@ -22,7 +22,7 @@ in
     };
 
     mountPoint = lib.mkOption {
-      type = lib.types.str;
+      type = lib.types.path;
       default = "/mnt/storage";
       description = "Where to mount the btrfs pool.";
     };
