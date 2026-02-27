@@ -52,7 +52,6 @@ pub struct DiskUsage {
 pub struct PoolState {
     pub mount_point: String,
     pub profile: String,
-    pub health: String,
     pub used: u64,
     pub total: u64,
     pub disk_usage: HashMap<String, DiskUsage>,

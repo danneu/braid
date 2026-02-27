@@ -4,7 +4,7 @@ expression: buffer_to_string(&terminal)
 ---
 Data  Encryption  Sharing
  Pool ──────────────────────────────────────────────────────
- Path         /mnt/storage (healthy)
+ Path         /mnt/storage
  Redundancy   2x (RAID1)
  Usage        39% (2.1 / 5.4 TiB)
  ███████████████████████

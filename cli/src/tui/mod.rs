@@ -89,7 +89,6 @@ pub fn run_demo() -> io::Result<()> {
     let pool = PoolState {
         mount_point: "/mnt/storage".to_owned(),
         profile: "RAID1".to_owned(),
-        health: "healthy".to_owned(),
         used: 2_308_094_370_816,
         total: 5_937_955_045_376,
         disk_usage,

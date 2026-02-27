@@ -98,10 +98,7 @@ fn pool_table(pool: &PoolState, unit: ByteUnit) -> Table<'_> {
         other => other,
     };
     let rows = [
-        Row::new([
-            "Path".to_owned(),
-            format!("{} ({})", pool.mount_point, pool.health),
-        ]),
+        Row::new(["Path".to_owned(), pool.mount_point.clone()]),
         Row::new(["Redundancy".to_owned(), redundancy.to_owned()]),
         Row::new([
             "Usage".to_owned(),
@@ -582,7 +579,6 @@ mod tests {
         let pool = PoolState {
             mount_point: "/mnt/storage".to_owned(),
             profile: "RAID1".to_owned(),
-            health: "healthy".to_owned(),
             used: 2_308_094_370_816,  // ~2.1 TiB
             total: 5_937_955_045_376, // ~5.4 TiB
             disk_usage,

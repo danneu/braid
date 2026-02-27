@@ -107,11 +107,6 @@ pub fn probe_pool_for_tui<R: CommandRunner>(
     Ok(Some(PoolState {
         mount_point: mount_point.to_owned(),
         profile: profile.to_owned(),
-        health: if domain.missing_count > 0 {
-            "degraded".to_owned()
-        } else {
-            "healthy".to_owned()
-        },
         used: usage.used_bytes,
         total: usage.free_estimated_bytes + usage.used_bytes,
         disk_usage,
