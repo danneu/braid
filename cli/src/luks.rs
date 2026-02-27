@@ -118,6 +118,8 @@ pub fn backup_luks_header<R: CommandRunner>(
             result.stderr.trim()
         )));
     }
+    // cryptsetup already creates the file as 0400, but enforce it ourselves for defense-in-depth
+    std::fs::set_permissions(&backup_path, std::fs::Permissions::from_mode(0o400))?;
     Ok(backup_path)
 }
 
