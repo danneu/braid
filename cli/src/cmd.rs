@@ -123,6 +123,19 @@ pub enum CmdRequest {
     CryptsetupLuksDump {
         device: String,
     },
+    // btrfs replace commands
+    BtrfsReplaceStart {
+        devid: u64,
+        target_device: String,
+        mount_point: String,
+    },
+    BtrfsReplaceStatus {
+        mount_point: String,
+    },
+    BtrfsFilesystemResize {
+        devid: u64,
+        mount_point: String,
+    },
     // Keyfile commands (auto-unlock)
     CryptsetupLuksOpenKeyFile {
         device: String,
@@ -346,6 +359,32 @@ impl CommandRunner for RealRunner {
             }
             CmdRequest::Umount { mount_point } => RealRunner::exec("umount", &[mount_point]),
             CmdRequest::MountpointCheck { path } => RealRunner::exec("mountpoint", &["-q", path]),
+            CmdRequest::BtrfsReplaceStart {
+                devid,
+                target_device,
+                mount_point,
+            } => {
+                let devid_str = devid.to_string();
+                RealRunner::exec(
+                    "btrfs",
+                    &[
+                        "replace",
+                        "start",
+                        "-f",
+                        "-B",
+                        &devid_str,
+                        target_device,
+                        mount_point,
+                    ],
+                )
+            }
+            CmdRequest::BtrfsReplaceStatus { mount_point } => {
+                RealRunner::exec("btrfs", &["replace", "status", mount_point])
+            }
+            CmdRequest::BtrfsFilesystemResize { devid, mount_point } => {
+                let resize_arg = format!("{devid}:max");
+                RealRunner::exec("btrfs", &["filesystem", "resize", &resize_arg, mount_point])
+            }
             CmdRequest::CryptsetupLuksHeaderBackup {
                 device,
                 backup_path,

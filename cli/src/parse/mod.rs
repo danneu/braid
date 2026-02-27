@@ -16,6 +16,7 @@
 //!
 pub mod btrfs_balance_status;
 pub mod btrfs_device_stats;
+pub mod btrfs_replace_status;
 pub mod btrfs_device_usage;
 pub mod btrfs_filesystem_df;
 pub mod btrfs_filesystem_show;
@@ -57,6 +58,7 @@ pub use types::*;
 // Re-export parse functions (same names, new source modules)
 pub use btrfs_balance_status::parse_btrfs_balance_status;
 pub use btrfs_device_stats::parse_btrfs_device_stats;
+pub use btrfs_replace_status::parse_btrfs_replace_status;
 pub use btrfs_device_usage::parse_btrfs_device_usage;
 pub use btrfs_filesystem_df::parse_btrfs_df_json;
 pub use btrfs_filesystem_show::parse_btrfs_filesystem_show;

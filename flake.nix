@@ -185,6 +185,11 @@
               braid = linuxCrane.braid;
             }
           );
+          replace-preserves-devid = pkgs.testers.nixosTest (
+            import ./tests/cli/replace-preserves-devid.nix {
+              braid = linuxCrane.braid;
+            }
+          );
           tool-versions = pkgs.testers.nixosTest (
             import ./tests/cli/tool-versions.nix {
               braid-cli-unwrapped = linuxCrane.braid-cli-unwrapped;

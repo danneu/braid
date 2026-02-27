@@ -1,6 +1,6 @@
 use crate::cmd::{CmdError, CmdRequest, CommandRunner};
 use crate::probe::probe_pool;
-use crate::progress::{ProgressOutput, run_with_progress};
+use crate::progress::{run_replace_with_progress, run_with_progress, ProgressOutput};
 
 #[derive(Debug, thiserror::Error)]
 pub enum PoolError {
@@ -135,6 +135,54 @@ pub fn pool_remove_devid<R: CommandRunner + Sync>(
     if result.exit_status != 0 {
         return Err(PoolError::Failed(format!(
             "btrfs device remove devid {devid} failed (exit {}): {}",
+            result.exit_status,
+            result.stderr.trim()
+        )));
+    }
+    Ok(())
+}
+
+/// Replace a device in the pool using `btrfs replace start` with progress display.
+pub fn pool_replace_device<R: CommandRunner + Sync>(
+    runner: &R,
+    devid: u64,
+    target_device: &str,
+    mount_point: &str,
+    progress: ProgressOutput,
+) -> Result<(), PoolError> {
+    let result = run_replace_with_progress(
+        runner,
+        &CmdRequest::BtrfsReplaceStart {
+            devid,
+            target_device: target_device.to_owned(),
+            mount_point: mount_point.to_owned(),
+        },
+        mount_point,
+        progress,
+    )?;
+    if result.exit_status != 0 {
+        return Err(PoolError::Failed(format!(
+            "btrfs replace failed (exit {}): {}",
+            result.exit_status,
+            result.stderr.trim()
+        )));
+    }
+    Ok(())
+}
+
+/// Resize a device in the pool to its maximum capacity.
+pub fn pool_resize_device<R: CommandRunner + Sync>(
+    runner: &R,
+    devid: u64,
+    mount_point: &str,
+) -> Result<(), PoolError> {
+    let result = runner.run(&CmdRequest::BtrfsFilesystemResize {
+        devid,
+        mount_point: mount_point.to_owned(),
+    })?;
+    if result.exit_status != 0 {
+        return Err(PoolError::Failed(format!(
+            "btrfs filesystem resize failed (exit {}): {}",
             result.exit_status,
             result.stderr.trim()
         )));

@@ -1,13 +1,14 @@
-use crate::cmd::CommandRunner;
+use crate::cmd::{CmdRequest, CommandRunner};
 use crate::config::{config_read, mapper_name};
 use crate::disk_map;
 use crate::luks::{
     backup_luks_header, ensure_luks_open, luks_format, luks_opts_from_env, read_passphrase,
     verify_passphrase,
 };
+use crate::parse::parse_btrfs_device_stats;
 use crate::pool::{
-    evict_present_device, pool_add_device, pool_balance_raid1, pool_remove_devid,
-    pool_remove_missing,
+    pool_add_device, pool_balance_raid1, pool_remove_devid, pool_remove_missing,
+    pool_replace_device, pool_resize_device,
 };
 use crate::preflight;
 use crate::probe::{probe_config_disk, probe_pool, Filesystem, ProbeError};
@@ -105,7 +106,7 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     let new_probed = probe_config_disk(runner, fs, new_name, new_disk)?;
 
     // Compile steps
-    let steps = compile_replace_steps(new_name, &new_probed, &eviction_target, &config, &pool)?;
+    let steps = compile_replace_steps(new_name, &new_probed, &eviction_target, &config)?;
 
     if dry_run {
         for step in &steps {
@@ -207,28 +208,85 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         }
     }
 
-    // Step 2: Add new disk to pool
     let new_mapper_path = format!("/dev/mapper/{}", new_mn.0);
-    pool_add_device(runner, &new_mapper_path, config.mount_point())?;
-    eprintln!("Device added to pool: {}", new_mn);
 
-    // Step 3: Balance to RAID1
-    eprintln!("Balancing to RAID1...");
-    pool_balance_raid1(runner, config.mount_point(), progress)?;
-    eprintln!("Balance complete.");
-
-    // Step 4: Evict old device
+    // Step 2+: Execute replacement — branched by eviction target.
     match &eviction_target {
-        EvictionTarget::Live { mapper } => {
-            evict_present_device(runner, &mapper.0, config.mount_point(), progress)?;
+        EvictionTarget::Live { mapper, devid } => {
+            // --- btrfs replace path (fast, preserves devid) ---
+
+            // Pre-flight: warn if source device has I/O errors (informational only).
+            let stats_raw = runner.run(&CmdRequest::BtrfsDeviceStats {
+                mount_point: config.mount_point().to_owned(),
+            });
+            if let Ok(ref raw) = stats_raw {
+                if let Ok(stats) = parse_btrfs_device_stats(raw) {
+                    let has_errs = stats.devices.iter().any(|d| {
+                        d.device_path.contains(&mapper.0)
+                            && (d.read_io_errs > 0
+                                || d.write_io_errs > 0
+                                || d.flush_io_errs > 0
+                                || d.corruption_errs > 0
+                                || d.generation_errs > 0)
+                    });
+                    if has_errs {
+                        eprintln!(
+                            "Warning: source device (devid {devid}) has I/O errors. \
+                             btrfs replace will read from mirrors where possible, \
+                             but may fail if any data lacks a healthy mirror copy."
+                        );
+                    }
+                }
+            }
+
+            eprintln!("Replacing device (devid {devid}) with {}...", new_mn);
+            pool_replace_device(
+                runner,
+                *devid,
+                &new_mapper_path,
+                config.mount_point(),
+                progress,
+            )?;
+            eprintln!("Replace complete.");
+
+            pool_resize_device(runner, *devid, config.mount_point())?;
+
+            // Best-effort LUKS close of old mapper.
+            let close_result = runner.run(&CmdRequest::CryptsetupClose {
+                mapper: mapper.0.clone(),
+            });
+            match close_result {
+                Ok(r) if r.exit_status != 0 => {
+                    eprintln!(
+                        "Warning: failed to close LUKS mapper {} (exit {})",
+                        mapper, r.exit_status
+                    );
+                }
+                Err(e) => eprintln!("Warning: failed to close LUKS mapper {}: {}", mapper, e),
+                _ => {}
+            }
+            eprintln!("Old device closed. If repurposing the physical disk, wipe it separately.");
         }
-        EvictionTarget::Devid(devid) => {
-            eprintln!("Removing dead device (devid {})...", *devid);
-            pool_remove_devid(runner, config.mount_point(), *devid)?;
-        }
-        EvictionTarget::Missing => {
-            eprintln!("Removing missing device...");
-            pool_remove_missing(runner, config.mount_point())?;
+        EvictionTarget::Devid(_) | EvictionTarget::Missing => {
+            // --- add + balance + remove path (dead/missing disk) ---
+            pool_add_device(runner, &new_mapper_path, config.mount_point())?;
+            eprintln!("Device added to pool: {}", new_mn);
+
+            eprintln!("Balancing to RAID1...");
+            pool_balance_raid1(runner, config.mount_point(), progress)?;
+            eprintln!("Balance complete.");
+
+            match &eviction_target {
+                EvictionTarget::Devid(devid) => {
+                    eprintln!("Removing dead device (devid {})...", *devid);
+                    pool_remove_devid(runner, config.mount_point(), *devid)?;
+                }
+                EvictionTarget::Missing => {
+                    eprintln!("Removing missing device...");
+                    pool_remove_missing(runner, config.mount_point())?;
+                }
+                _ => unreachable!(),
+            }
         }
     }
 
@@ -259,8 +317,8 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
 
 #[derive(Debug)]
 enum EvictionTarget {
-    /// Old disk is alive in the pool — evict via shared helper.
-    Live { mapper: MapperName },
+    /// Old disk is alive in the pool — replace via `btrfs replace start`.
+    Live { mapper: MapperName, devid: u64 },
     /// Old disk is dead — evict by btrfs devid.
     Devid(u64),
     /// Old disk is dead — evict via `btrfs device remove missing`.
@@ -289,8 +347,15 @@ fn resolve_eviction_target(
                 if pool.missing_count == 1 { "" } else { "s" }
             )));
         }
+        let devid = pool
+            .devices
+            .iter()
+            .find(|d| d.mapper == *old_mn)
+            .map(|d| d.devid)
+            .expect("old_in_pool was true but device not found");
         return Ok(EvictionTarget::Live {
             mapper: old_mn.clone(),
+            devid,
         });
     }
 
@@ -321,7 +386,6 @@ fn compile_replace_steps(
     new_probed: &ConfigDisk,
     eviction_target: &EvictionTarget,
     config: &crate::config::Config,
-    pool: &PoolState,
 ) -> Result<Vec<ReplaceStep>, ReplaceError> {
     let new_disk = config.disk_by_name(new_name).unwrap();
     let new_mn = mapper_name(new_name);
@@ -354,36 +418,24 @@ fn compile_replace_steps(
         }
     }
 
-    steps.push(ReplaceStep {
-        risk: "safe",
-        description: format!(
-            "btrfs device add /dev/mapper/{} {}",
-            new_mn,
-            config.mount_point()
-        ),
-    });
-    steps.push(ReplaceStep {
-        risk: "long",
-        description: "btrfs balance to RAID1".into(),
-    });
-
     match eviction_target {
-        EvictionTarget::Live { mapper } => {
-            // After add-new + evict-old, the pool ends with the same device count
-            // as it started. If that's 1 (edge case: single-disk pool), the helper
-            // will need to convert RAID1→single before the device remove.
-            let projected_remaining = pool.devices.len();
-            if projected_remaining == 1 {
-                steps.push(ReplaceStep {
-                    risk: "long",
-                    description:
-                        "btrfs balance -dconvert=single -mconvert=single -f (RAID1 → single)"
-                            .into(),
-                });
-            }
+        EvictionTarget::Live { mapper, devid } => {
             steps.push(ReplaceStep {
                 risk: "long",
-                description: format!("btrfs device remove /dev/mapper/{}", mapper),
+                description: format!(
+                    "btrfs replace start {} /dev/mapper/{} {}",
+                    devid,
+                    new_mn,
+                    config.mount_point()
+                ),
+            });
+            steps.push(ReplaceStep {
+                risk: "safe",
+                description: format!(
+                    "btrfs filesystem resize {}:max {}",
+                    devid,
+                    config.mount_point()
+                ),
             });
             steps.push(ReplaceStep {
                 risk: "safe",
@@ -393,10 +445,34 @@ fn compile_replace_steps(
         EvictionTarget::Devid(devid) => {
             steps.push(ReplaceStep {
                 risk: "safe",
+                description: format!(
+                    "btrfs device add /dev/mapper/{} {}",
+                    new_mn,
+                    config.mount_point()
+                ),
+            });
+            steps.push(ReplaceStep {
+                risk: "long",
+                description: "btrfs balance to RAID1".into(),
+            });
+            steps.push(ReplaceStep {
+                risk: "safe",
                 description: format!("btrfs device remove {}", devid),
             });
         }
         EvictionTarget::Missing => {
+            steps.push(ReplaceStep {
+                risk: "safe",
+                description: format!(
+                    "btrfs device add /dev/mapper/{} {}",
+                    new_mn,
+                    config.mount_point()
+                ),
+            });
+            steps.push(ReplaceStep {
+                risk: "long",
+                description: "btrfs balance to RAID1".into(),
+            });
             steps.push(ReplaceStep {
                 risk: "safe",
                 description: "btrfs device remove missing".into(),
@@ -633,11 +709,10 @@ mod tests {
     }
 
     #[test]
-    // Intent: dry-run for live path shows device remove step.
+    // Intent: dry-run for live path shows btrfs replace and resize steps.
     // Why: operator should see what the live replace will do before committing.
     // Scenario: operator runs --dry-run to preview live replace.
-    fn dry_run_live_path_shows_device_remove() {
-        let pool = two_device_pool();
+    fn dry_run_live_path_shows_btrfs_replace() {
         let config_json = serde_json::json!({
             "disks": {
                 "disk1": { "by_id": "/dev/disk/by-id/virtio-disk1" },
@@ -655,14 +730,27 @@ mod tests {
         };
         let target = EvictionTarget::Live {
             mapper: MapperName("braid-disk2".into()),
+            devid: 2,
         };
-        let steps = compile_replace_steps("disk3", &new_probed, &target, &config, &pool).unwrap();
+        let steps = compile_replace_steps("disk3", &new_probed, &target, &config).unwrap();
         let descriptions: Vec<&str> = steps.iter().map(|s| s.description.as_str()).collect();
         assert!(
             descriptions
                 .iter()
-                .any(|d| d.contains("btrfs device remove /dev/mapper/braid-disk2")),
-            "expected device remove step for live path, got: {descriptions:?}"
+                .any(|d| d.contains("btrfs replace start")),
+            "expected btrfs replace start step for live path, got: {descriptions:?}"
+        );
+        assert!(
+            descriptions
+                .iter()
+                .any(|d| d.contains("btrfs filesystem resize")),
+            "expected btrfs filesystem resize step for live path, got: {descriptions:?}"
+        );
+        assert!(
+            !descriptions
+                .iter()
+                .any(|d| d.contains("btrfs device remove")),
+            "live path should NOT show btrfs device remove, got: {descriptions:?}"
         );
         assert!(
             descriptions

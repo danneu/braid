@@ -1,5 +1,5 @@
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, RawCommandOutput};
-use crate::parse::{BalanceState, parse_btrfs_balance_status};
+use crate::parse::{BalanceState, ReplaceState, parse_btrfs_balance_status, parse_btrfs_replace_status};
 use std::io::Write;
 
 // ---------------------------------------------------------------------------
@@ -69,6 +69,14 @@ pub fn format_balance_progress_json(done: u64, total: u64, pct_left: u8) -> Stri
     format!(
         r#"{{"event":"progress","done_chunks":{done},"estimated_total_chunks":{total},"pct_left":{pct_left}}}"#
     )
+}
+
+pub fn format_replace_progress(pct: f64) -> String {
+    format!("  replace: {pct:.1}% done")
+}
+
+pub fn format_replace_progress_json(pct: f64) -> String {
+    format!(r#"{{"event":"progress","operation":"replace","pct_done":{pct:.1}}}"#)
 }
 
 pub fn format_bytes(bytes: u64) -> String {
@@ -185,6 +193,60 @@ pub fn run_with_progress<R: CommandRunner + Sync>(
                             ProgressOutput::Off => unreachable!(),
                         },
                         BalanceState::None => continue,
+                    }
+                }
+        }
+
+        if output == ProgressOutput::Human {
+            clear_progress_line();
+        }
+        handle.join().expect("command thread panicked")
+    })
+}
+
+/// Run a blocking btrfs replace command with progress polling.
+pub fn run_replace_with_progress<R: CommandRunner + Sync>(
+    runner: &R,
+    request: &CmdRequest,
+    mount_point: &str,
+    output: ProgressOutput,
+) -> Result<RawCommandOutput, CmdError> {
+    if output == ProgressOutput::Off {
+        return runner.run(request);
+    }
+
+    std::thread::scope(|s| {
+        let handle = s.spawn(|| runner.run(request));
+
+        let mut last_msg = String::new();
+        loop {
+            if handle.is_finished() {
+                break;
+            }
+
+            std::thread::sleep(std::time::Duration::from_secs(1));
+
+            let poll = runner.run(&CmdRequest::BtrfsReplaceStatus {
+                mount_point: mount_point.to_owned(),
+            });
+            if let Ok(ref raw) = poll
+                && let Ok(status) = parse_btrfs_replace_status(raw) {
+                    match status.state {
+                        ReplaceState::Running { pct } => match output {
+                            ProgressOutput::Human => {
+                                let msg = format_replace_progress(pct);
+                                if msg != last_msg {
+                                    write_progress_line(&msg);
+                                    last_msg = msg;
+                                }
+                            }
+                            ProgressOutput::Json => {
+                                let json = format_replace_progress_json(pct);
+                                write_progress_json(&json);
+                            }
+                            ProgressOutput::Off => unreachable!(),
+                        },
+                        ReplaceState::Finished | ReplaceState::None => continue,
                     }
                 }
         }
@@ -427,5 +489,101 @@ mod tests {
             ProgressOutput::Off,
         );
         assert!(result.is_ok());
+    }
+
+    // --- Replace progress tests ---
+
+    #[test]
+    fn format_replace_progress_basic() {
+        assert_eq!(format_replace_progress(45.3), "  replace: 45.3% done");
+    }
+
+    #[test]
+    fn format_replace_progress_json_basic() {
+        assert_eq!(
+            format_replace_progress_json(45.3),
+            r#"{"event":"progress","operation":"replace","pct_done":45.3}"#
+        );
+    }
+
+    #[test]
+    fn replace_progress_fast_finish_before_first_poll() {
+        let runner = MockRunner::default().with_output(
+            CmdRequest::BtrfsReplaceStart {
+                devid: 2,
+                target_device: "/dev/mapper/new".to_owned(),
+                mount_point: "/mnt/storage".to_owned(),
+            },
+            ok_raw("btrfs replace start", ""),
+        );
+
+        let result = run_replace_with_progress(
+            &runner,
+            &CmdRequest::BtrfsReplaceStart {
+                devid: 2,
+                target_device: "/dev/mapper/new".to_owned(),
+                mount_point: "/mnt/storage".to_owned(),
+            },
+            "/mnt/storage",
+            ProgressOutput::Human,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn replace_progress_poll_parse_failure_is_silent() {
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::BtrfsReplaceStart {
+                    devid: 2,
+                    target_device: "/dev/mapper/new".to_owned(),
+                    mount_point: "/mnt/storage".to_owned(),
+                },
+                ok_raw("btrfs replace start", ""),
+            )
+            .with_output(
+                CmdRequest::BtrfsReplaceStatus {
+                    mount_point: "/mnt/storage".to_owned(),
+                },
+                ok_raw("btrfs replace status", "garbage output here"),
+            );
+
+        let result = run_replace_with_progress(
+            &runner,
+            &CmdRequest::BtrfsReplaceStart {
+                devid: 2,
+                target_device: "/dev/mapper/new".to_owned(),
+                mount_point: "/mnt/storage".to_owned(),
+            },
+            "/mnt/storage",
+            ProgressOutput::Human,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn replace_progress_action_failure_propagation() {
+        let runner = MockRunner::default().with_output(
+            CmdRequest::BtrfsReplaceStart {
+                devid: 2,
+                target_device: "/dev/mapper/new".to_owned(),
+                mount_point: "/mnt/storage".to_owned(),
+            },
+            err_raw("btrfs replace start", 1, "replace failed"),
+        );
+
+        let result = run_replace_with_progress(
+            &runner,
+            &CmdRequest::BtrfsReplaceStart {
+                devid: 2,
+                target_device: "/dev/mapper/new".to_owned(),
+                mount_point: "/mnt/storage".to_owned(),
+            },
+            "/mnt/storage",
+            ProgressOutput::Human,
+        );
+        let raw = result.unwrap();
+        assert_eq!(raw.exit_status, 1);
+        assert_eq!(raw.stderr, "replace failed");
     }
 }

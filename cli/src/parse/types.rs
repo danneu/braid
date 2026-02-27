@@ -223,6 +223,22 @@ pub enum SmartHealth {
     Unknown,
 }
 
+/// btrfs replace status
+#[derive(Debug, Clone, PartialEq)]
+pub enum ReplaceState {
+    /// No replace operation running.
+    None,
+    /// Replace in progress with percentage.
+    Running { pct: f64 },
+    /// Replace finished.
+    Finished,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BtrfsReplaceStatusOutput {
+    pub state: ReplaceState,
+}
+
 /// btrfs device usage --raw
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceAllocation {
