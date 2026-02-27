@@ -3,6 +3,7 @@ use crate::config::config_read_raw;
 use crate::disk_map;
 use crate::parse::parse_btrfs_device_usage;
 use crate::pool::{pool_remove_devid, pool_remove_missing};
+use crate::preflight;
 use crate::probe::{probe_pool, ProbeError};
 use crate::status::format_bytes;
 use crate::types::*;
@@ -55,6 +56,12 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync>(
         ));
     }
 
+    // Preflight
+    preflight::check_no_exclusive_op(runner, config.mount_point())
+        .map_err(RemoveMissingError::Validation)?;
+    preflight::check_not_read_only(runner, config.mount_point())
+        .map_err(RemoveMissingError::Validation)?;
+
     if pool.missing_count == 0 {
         return Err(RemoveMissingError::Validation(
             "no missing devices detected in pool.".into(),
@@ -66,6 +73,23 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync>(
             "multiple missing devices ({} missing). Pass --missing-id <devid> to target a specific one. Use 'braid status --verbose' to see device IDs.",
             pool.missing_count
         )));
+    }
+
+    if let Some(devid) = missing_id {
+        if pool.devices.iter().any(|d| d.devid == devid) {
+            return Err(RemoveMissingError::Validation(format!(
+                "devid {devid} is a live device, not a missing one. \
+                 Use 'braid remove' to remove live devices."
+            )));
+        }
+        let missing_devids = preflight::probe_missing_devids(runner, config.mount_point())
+            .map_err(RemoveMissingError::Validation)?;
+        if !missing_devids.contains(&devid) {
+            return Err(RemoveMissingError::Validation(format!(
+                "devid {devid} is not a device in this pool. \
+                 Use 'braid status --verbose' to see device IDs."
+            )));
+        }
     }
 
     // Pre-flight: reject if survivors lack space to absorb the missing
@@ -297,6 +321,11 @@ mod tests {
                 CmdRequest::CryptsetupLuksUuid { .. } => Ok(mock_out(
                     "cryptsetup luksUUID",
                     "11111111-1111-1111-1111-111111111111\n",
+                    0,
+                )),
+                CmdRequest::BtrfsBalanceStatus { .. } => Ok(mock_out(
+                    "btrfs balance status",
+                    "No balance found on '/mnt/storage'\n",
                     0,
                 )),
                 CmdRequest::BtrfsDeviceRemoveMissing { .. } => {

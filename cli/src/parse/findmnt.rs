@@ -2,8 +2,8 @@ use serde::Deserialize;
 
 use crate::cmd::RawCommandOutput;
 
-use super::ParseError;
 use super::types::{FindmntEntry, FindmntOutput};
+use super::ParseError;
 
 // --- Serde helper structs (not exposed to domain code) ---
 
@@ -17,6 +17,8 @@ struct RawFindmntEntry {
     target: String,
     source: String,
     fstype: String,
+    #[serde(default)]
+    options: String,
 }
 
 // --- Public parse function ---
@@ -53,6 +55,7 @@ pub fn parse_findmnt_json(raw: &RawCommandOutput) -> Result<FindmntOutput, Parse
                 target: e.target,
                 source: e.source,
                 fstype: e.fstype,
+                options: e.options,
             })
             .collect(),
     })

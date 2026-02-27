@@ -6,6 +6,7 @@ use crate::luks::{
     luks_opts_from_env, read_passphrase, verify_passphrase,
 };
 use crate::pool::{pool_add_device, pool_balance_raid1, pool_bootstrap_mount};
+use crate::preflight;
 use crate::probe::{probe_config_disk, probe_pool, Filesystem, ProbeError};
 use crate::progress::ProgressOutput;
 use crate::types::*;
@@ -64,14 +65,29 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     let probed = probe_config_disk(runner, fs, key, disk)?;
     let pool = match probe_pool(runner, config.mount_point()) {
         Ok(p) => p,
-        Err(ProbeError::NotBtrfs { .. }) => PoolState {
-            mounted: false,
-            devices: vec![],
-            missing_count: 0,
-            total_devices: 0,
-        },
+        Err(ProbeError::NotBtrfs { fstype, .. }) => {
+            return Err(AddError::Validation(format!(
+                "{} is already mounted with {fstype}, not btrfs. Unmount it first.",
+                config.mount_point()
+            )));
+        }
         Err(e) => return Err(AddError::Probe(e)),
     };
+
+    // Preflight
+    if pool.mounted {
+        preflight::check_no_exclusive_op(runner, config.mount_point())
+            .map_err(AddError::Validation)?;
+        preflight::check_not_read_only(runner, config.mount_point())
+            .map_err(AddError::Validation)?;
+    }
+    if pool.missing_count > 0 {
+        eprintln!(
+            "warning: pool has {} missing device{}. Consider running `braid remove-missing` first.",
+            pool.missing_count,
+            if pool.missing_count == 1 { "" } else { "s" }
+        );
+    }
 
     // Compile steps based on actual disk state
     let steps = compile_add_steps(key, &probed, &pool, &config)?;
@@ -157,6 +173,10 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
                     eprintln!("Already a pool member. Nothing to do.");
                     return Ok(());
                 }
+            }
+
+            if !pool.devices.iter().any(|d| d.mapper == mn) {
+                eprintln!("note: LUKS mapper is already open but device is not yet in pool. Completing add.");
             }
         }
     }

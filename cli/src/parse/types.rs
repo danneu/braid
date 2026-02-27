@@ -25,6 +25,7 @@ pub struct FindmntEntry {
     pub target: String,
     pub source: String,
     pub fstype: String,
+    pub options: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

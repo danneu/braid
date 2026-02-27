@@ -1,5 +1,6 @@
 use crate::cmd::{CmdError, CmdRequest, CommandRunner};
 use crate::config::{mapper_name, Config, ConfigError};
+use crate::preflight;
 use crate::probe::Filesystem;
 
 #[derive(Debug, thiserror::Error)]
@@ -29,6 +30,11 @@ pub fn cmd_lock<R: CommandRunner, F: Filesystem + ?Sized>(
         path: mount_point.to_owned(),
     })?;
     let pool_was_mounted = mp_result.exit_status == 0;
+
+    // Preflight
+    if pool_was_mounted {
+        preflight::check_no_exclusive_op(runner, mount_point).map_err(LockError::Failed)?;
+    }
 
     // 2. If mounted → unmount
     if pool_was_mounted {
@@ -153,6 +159,17 @@ mod tests {
                 ok_raw("mountpoint -q /mnt/storage"),
             )
             .with_output(
+                CmdRequest::BtrfsBalanceStatus {
+                    mount_point: "/mnt/storage".into(),
+                },
+                RawCommandOutput {
+                    cmd: "btrfs balance status /mnt/storage".into(),
+                    stdout: "No balance found on '/mnt/storage'\n".into(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                },
+            )
+            .with_output(
                 CmdRequest::Umount {
                     mount_point: "/mnt/storage".into(),
                 },
@@ -220,6 +237,17 @@ mod tests {
                     path: "/mnt/storage".into(),
                 },
                 ok_raw("mountpoint -q /mnt/storage"),
+            )
+            .with_output(
+                CmdRequest::BtrfsBalanceStatus {
+                    mount_point: "/mnt/storage".into(),
+                },
+                RawCommandOutput {
+                    cmd: "btrfs balance status /mnt/storage".into(),
+                    stdout: "No balance found on '/mnt/storage'\n".into(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                },
             )
             .with_output(
                 CmdRequest::Umount {

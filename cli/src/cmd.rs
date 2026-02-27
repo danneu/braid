@@ -214,7 +214,7 @@ impl CommandRunner for RealRunner {
                 &[
                     "--json",
                     "--output",
-                    "TARGET,SOURCE,FSTYPE",
+                    "TARGET,SOURCE,FSTYPE,OPTIONS",
                     "--mountpoint",
                     mount_point,
                 ],
@@ -327,9 +327,7 @@ impl CommandRunner for RealRunner {
                 args.push(mount_point);
                 RealRunner::exec("mount", &args)
             }
-            CmdRequest::Umount { mount_point } => {
-                RealRunner::exec("umount", &[mount_point])
-            }
+            CmdRequest::Umount { mount_point } => RealRunner::exec("umount", &[mount_point]),
             CmdRequest::MountpointCheck { path } => RealRunner::exec("mountpoint", &["-q", path]),
             CmdRequest::CryptsetupLuksHeaderBackup {
                 device,

@@ -9,6 +9,7 @@ use crate::pool::{
     evict_present_device, pool_add_device, pool_balance_raid1, pool_remove_devid,
     pool_remove_missing,
 };
+use crate::preflight;
 use crate::probe::{probe_config_disk, probe_pool, Filesystem, ProbeError};
 use crate::progress::ProgressOutput;
 use crate::types::*;
@@ -81,6 +82,12 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             "pool is not mounted. Cannot replace.".into(),
         ));
     }
+
+    // Preflight
+    preflight::check_no_exclusive_op(runner, config.mount_point())
+        .map_err(ReplaceError::Validation)?;
+    preflight::check_not_read_only(runner, config.mount_point())
+        .map_err(ReplaceError::Validation)?;
 
     // --old == --new: reject early.
     if old_key == new_key {
@@ -188,6 +195,8 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             if !mapper_open {
                 ensure_luks_open(runner, fs, new_key, new_disk, &passphrase)?;
                 eprintln!("LUKS opened: {} → {}", new_disk.by_id, new_mn);
+            } else if !pool.devices.iter().any(|d| d.mapper == new_mn) {
+                eprintln!("note: LUKS mapper is already open but device is not yet in pool. Completing replace.");
             }
         }
     }

@@ -3,6 +3,7 @@ use crate::config::{config_read_raw, mapper_name};
 use crate::disk_map;
 use crate::parse::parse_btrfs_device_usage;
 use crate::pool::evict_present_device;
+use crate::preflight;
 use crate::probe::{probe_pool, ProbeError};
 use crate::progress::ProgressOutput;
 use crate::status::format_bytes;
@@ -57,6 +58,12 @@ pub fn cmd_remove<R: CommandRunner + Sync>(
         ));
     }
 
+    // Preflight
+    preflight::check_no_exclusive_op(runner, config.mount_point())
+        .map_err(RemoveError::Validation)?;
+    preflight::check_not_read_only(runner, config.mount_point())
+        .map_err(RemoveError::Validation)?;
+
     let mn = mapper_name(key);
 
     // Is the disk present in the pool?
@@ -73,6 +80,9 @@ pub fn cmd_remove<R: CommandRunner + Sync>(
         }
         return Err(RemoveError::Validation(msg));
     }
+
+    preflight::check_no_missing_devices(pool.missing_count, "remove a live disk from the pool")
+        .map_err(RemoveError::Validation)?;
 
     let remaining = pool.devices.len() - 1;
     let target_devid = pool
@@ -311,6 +321,11 @@ mod tests {
                         0,
                     ))
                 }
+                CmdRequest::BtrfsBalanceStatus { .. } => Ok(mock_out(
+                    "btrfs balance status",
+                    "No balance found on '/mnt/storage'\n",
+                    0,
+                )),
                 CmdRequest::BtrfsBalanceSingle { .. } => Ok(mock_out("btrfs balance start", "", 0)),
                 CmdRequest::BtrfsDeviceRemove { .. } => Ok(mock_out("btrfs device remove", "", 0)),
                 CmdRequest::CryptsetupClose { .. } => Ok(mock_out("cryptsetup close", "", 0)),
