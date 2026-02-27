@@ -183,7 +183,9 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
                 }
             }
 
-            let luks_opts = luks_opts_from_env();
+            let mut luks_opts = luks_opts_from_env();
+            luks_opts.push("--label".into());
+            luks_opts.push(format!("braid-{new_name}"));
             luks_format(runner, &new_disk.by_id.0, &passphrase, &luks_opts)?;
             eprintln!("LUKS formatted: {}", new_disk.by_id);
 

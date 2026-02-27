@@ -165,6 +165,11 @@
               braid = linuxCrane.braid;
             }
           );
+          replace-luks-label = pkgs.testers.nixosTest (
+            import ./tests/cli/replace-luks-label.nix {
+              braid = linuxCrane.braid;
+            }
+          );
           replace-sequential = pkgs.testers.nixosTest (
             import ./tests/cli/replace-sequential.nix {
               braid = linuxCrane.braid;
