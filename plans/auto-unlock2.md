@@ -244,30 +244,9 @@ Assertions:
   }
   ```
 
-### storage.nix — remove initrd LUKS, add auto-unlock, refactor manual service
+### storage.nix — add auto-unlock, refactor manual service
 
 File: `modules/braid/storage.nix`
-
-**0. Remove initrd LUKS path** (lines 22-57):
-
-Delete the entire `boot.initrd` block: `luks.devices` generation (lines 26-42)
-and the initrd `btrfs-device-scan` service (lines 44-56). Keep only
-`boot.initrd.supportedFilesystems = [ "btrfs" ];`.
-
-Braid pool drives are non-root data drives on a headless NAS — nobody is at
-the console to type a passphrase during initrd. The pool is always unlocked
-in stage 2: either manually via `braid unlock` (SSH) or automatically via
-`braid-auto-unlock` (USB keyfile). The initrd entries just burn
-10s × N-disks of boot time waiting for prompts that are never answered.
-
-Also remove the stage-2 `btrfs-device-scan` duplicate (lines 81-88) and the
-`x-systemd.requires/after=btrfs-device-scan.service` options from the
-`fileSystems` entry (lines 69-70) — without the initrd LUKS path, there are
-no stage-2 dm-crypt units for this service to sequence after. The CLI's
-`btrfs device scan` call inside `cmd_unlock` handles device discovery.
-
-Also set `neededForBoot = false` on the `fileSystems` entry (line 65) — the
-pool is not needed for boot and is mounted by stage-2 services.
 
 **1. Refactor braid-unlock service** (line 94-142) to call CLI:
 ```nix
@@ -487,7 +466,7 @@ for those comments.
 ### Regression
 
 Run full existing suite (`just test`) to confirm no regressions from the
-braid-unlock service refactor and initrd removal.
+braid-unlock service refactor.
 
 ## Phase 7: Documentation
 
