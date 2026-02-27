@@ -14,10 +14,17 @@ test *args:
     if [ ${#tests[@]} -eq 0 ]; then
         nix flake check $verbose
     else
+        # Build all specified tests in a single `nix build` so nix can run them
+        # concurrently (up to the linux-builder's maxJobs). A single invocation
+        # also evaluates shared dependencies once and avoids SQLite lock
+        # contention that happens when multiple nix processes hit the store.
+        # Add --keep-going to continue past failures instead of bailing on first error.
+        # https://nix.dev/manual/nix/stable/advanced-topics/cores-vs-jobs.html
+        installables=()
         for t in "${tests[@]}"; do
-            echo "==> $t"
-            nix build .#checks.{{system}}.$t $verbose
+            installables+=(".#checks.{{system}}.$t")
         done
+        nix build "${installables[@]}" $verbose
     fi
 
 # Run Rust unit tests
