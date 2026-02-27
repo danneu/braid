@@ -28,9 +28,10 @@
         let
           pkgs = nixpkgs.legacyPackages.${system};
           craneLib = crane.mkLib pkgs;
-          # cleanCargoSource strips test fixtures and snapshots — include them
+          # Source from repo root so crane sees the workspace Cargo.toml + Cargo.lock,
+          # while still including cli/ sources, test fixtures, and snapshots.
           src = pkgs.lib.cleanSourceWith {
-            src = ./cli;
+            src = ./.;
             filter =
               path: type:
               (craneLib.filterCargoSources path type)
