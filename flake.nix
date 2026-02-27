@@ -287,6 +287,9 @@
           repro-degraded-writes-single = pkgs.testers.nixosTest (
             import ./tests/repro/degraded-writes-single.nix
           );
+          repro-degraded-writes-3disk = pkgs.testers.nixosTest (
+            import ./tests/repro/degraded-writes-3disk.nix
+          );
           repro-btrfs-replace-preserves-devid = pkgs.testers.nixosTest (
             import ./tests/repro/btrfs-replace-preserves-devid.nix
           );

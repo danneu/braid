@@ -20,6 +20,7 @@ machine.wait_for_unit("multi-user.target")
 passphrase = "testpassphrase"
 luks_format = "--batch-mode --key-file=- --pbkdf pbkdf2 --pbkdf-force-iterations 1000"
 
+
 # --- Phase 1: Setup — LUKS format + open all 3 disks, create RAID1 pool ---
 
 with subtest("Setup: create 3-drive LUKS + btrfs RAID1 pool"):
@@ -40,8 +41,7 @@ with subtest("Setup: create 3-drive LUKS + btrfs RAID1 pool"):
 # --- Phase 2: Baseline — write data, confirm pure RAID1 profile ---
 
 with subtest("Baseline: only RAID1 block groups exist"):
-    machine.succeed("dd if=/dev/urandom of=/mnt/storage/baseline.bin bs=1M count=50")
-    machine.succeed("sync")
+    util.write_file_mib("/mnt/storage/baseline.bin", 100)
 
     fi_df = machine.succeed("btrfs fi df /mnt/storage")
     print(f"Baseline btrfs fi df:\n{fi_df}")
@@ -64,8 +64,7 @@ with subtest("Write new data while degraded"):
     # Write enough to overflow existing RAID1 block groups and force btrfs
     # to allocate new block groups — with 2 surviving disks, will btrfs
     # allocate RAID1 or single?
-    machine.succeed("dd if=/dev/urandom of=/mnt/storage/degraded-write.bin bs=1M count=100")
-    machine.succeed("sync")
+    util.write_file_mib("/mnt/storage/degraded-write.bin", 100)
 
 # --- Phase 5: Core observation — what profile did the new blocks get? ---
 
@@ -83,6 +82,10 @@ with subtest("Check block group profiles after degraded writes"):
         print("RESULT: degraded 3-disk RAID1 (2 survivors) keeps allocating RAID1 blocks")
     else:
         print(f"RESULT: unexpected profile mix: {fi_df}")
+
+    # Assert our observation so the test will fail if we're ever wrong
+    assert has_raid1, f"Expected degraded writes to keep RAID1 profile:\n{fi_df}"
+    assert not has_single, f"Did not expect single-profile blocks after degraded writes:\n{fi_df}"
 
     # Also dump usage for extra context
     usage = machine.succeed("btrfs fi usage /mnt/storage")

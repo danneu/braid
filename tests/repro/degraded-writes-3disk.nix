@@ -5,6 +5,9 @@
 # disk, mount degraded with 2 survivors. 2 disks is enough for RAID1 — does
 # btrfs actually allocate RAID1 block groups, or does degraded mode still
 # fall back to single?
+let
+  util = import ../util.nix;
+in
 {
   name = "repro-degraded-writes-3disk";
 
@@ -21,5 +24,5 @@
     ];
   };
 
-  testScript = builtins.readFile ./degraded-writes-3disk.py;
+  testScript = util.py + builtins.readFile ./degraded-writes-3disk.py;
 }

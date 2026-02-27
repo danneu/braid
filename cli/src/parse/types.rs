@@ -36,9 +36,17 @@ pub struct FindmntOutput {
 }
 
 /// btrfs --format json filesystem df
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BtrfsBgType {
+    Data,
+    Metadata,
+    System,
+    GlobalReserve,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BtrfsDfEntry {
-    pub bg_type: String,
+    pub bg_type: BtrfsBgType,
     pub bg_profile: String,
     pub bg_used: u64,
     pub bg_total: u64,

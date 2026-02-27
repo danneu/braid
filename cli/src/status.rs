@@ -6,7 +6,8 @@ use crate::cmd::{CmdError, CmdRequest, CommandRunner, LsblkFieldKind};
 use crate::config::{mapper_name, Config};
 use crate::parse::{
     parse_btrfs_device_stats, parse_btrfs_df_json, parse_btrfs_filesystem_usage,
-    parse_btrfs_scrub_status, parse_lsblk_field, BtrfsDeviceStatsOutput, ParseError, ScrubState,
+    parse_btrfs_scrub_status, parse_lsblk_field, BtrfsBgType, BtrfsDeviceStatsOutput, ParseError,
+    ScrubState,
 };
 use crate::probe::{probe_config_disk, probe_pool, Filesystem, ProbeError};
 use crate::types::*;
@@ -374,7 +375,7 @@ fn get_profile<R: CommandRunner>(runner: &R, mount_point: &str) -> Result<String
     let profile = df
         .entries
         .iter()
-        .find(|e| e.bg_type == "Data")
+        .find(|e| e.bg_type == BtrfsBgType::Data)
         .or_else(|| df.entries.first())
         .map(|e| e.bg_profile.clone())
         .unwrap_or_else(|| "unknown".to_owned());

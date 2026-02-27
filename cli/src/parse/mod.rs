@@ -50,6 +50,13 @@ pub enum ParseError {
 
     #[error("missing field `{field}` in output of `{cmd}`")]
     MissingField { cmd: String, field: String },
+
+    #[error("unexpected value `{value}` for field `{field}` in output of `{cmd}`")]
+    UnexpectedValue {
+        cmd: String,
+        field: String,
+        value: String,
+    },
 }
 
 // Re-export all types for convenient access

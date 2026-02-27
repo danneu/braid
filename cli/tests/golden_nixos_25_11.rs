@@ -84,7 +84,10 @@ golden_test!(
     |out: parse::types::BtrfsDfOutput| {
         assert!(!out.entries.is_empty(), "expected at least one df entry");
         // RAID1 setup should have Data with RAID1 profile
-        let data = out.entries.iter().find(|e| e.bg_type == "Data");
+        let data = out
+            .entries
+            .iter()
+            .find(|e| e.bg_type == parse::types::BtrfsBgType::Data);
         assert!(data.is_some(), "expected a Data entry");
         assert_eq!(data.unwrap().bg_profile, "RAID1");
     }

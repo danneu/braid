@@ -17,10 +17,6 @@
 # fi df reveals single-profile block groups alongside RAID1. Then replace
 # the dead disk with a spare, rebalance, and confirm everything is back
 # to RAID1.
-#
-# Note: A 3-disk RAID1 losing 1 disk still has 2 survivors — enough for
-# RAID1 — and would NOT trigger this behavior. The pitfall only appears
-# when the surviving disk count drops below the RAID1 minimum of 2.
 
 start_all()
 machine.wait_for_unit("multi-user.target")

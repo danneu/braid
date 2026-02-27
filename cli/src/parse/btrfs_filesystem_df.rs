@@ -2,8 +2,8 @@ use serde::Deserialize;
 
 use crate::cmd::RawCommandOutput;
 
+use super::types::{BtrfsBgType, BtrfsDfEntry, BtrfsDfOutput};
 use super::ParseError;
-use super::types::{BtrfsDfEntry, BtrfsDfOutput};
 
 // --- Serde helper structs (not exposed to domain code) ---
 
@@ -52,18 +52,33 @@ pub fn parse_btrfs_df_json(raw: &RawCommandOutput) -> Result<BtrfsDfOutput, Pars
             detail: e.to_string(),
         })?;
 
-    Ok(BtrfsDfOutput {
-        entries: parsed
-            .filesystem_df
-            .into_iter()
-            .map(|e| BtrfsDfEntry {
-                bg_type: e.bg_type,
+    let entries = parsed
+        .filesystem_df
+        .into_iter()
+        .map(|e| {
+            let bg_type = match e.bg_type.as_str() {
+                "Data" => BtrfsBgType::Data,
+                "Metadata" => BtrfsBgType::Metadata,
+                "System" => BtrfsBgType::System,
+                "GlobalReserve" => BtrfsBgType::GlobalReserve,
+                other => {
+                    return Err(ParseError::UnexpectedValue {
+                        cmd: raw.cmd.clone(),
+                        field: "bg-type".into(),
+                        value: other.into(),
+                    })
+                }
+            };
+            Ok(BtrfsDfEntry {
+                bg_type,
                 bg_profile: e.bg_profile,
                 bg_used: e.bg_used,
                 bg_total: e.bg_total,
             })
-            .collect(),
-    })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(BtrfsDfOutput { entries })
 }
 
 #[cfg(test)]
@@ -90,13 +105,13 @@ mod tests {
         };
         let out = parse_btrfs_df_json(&raw).unwrap();
         assert_eq!(out.entries.len(), 4);
-        assert_eq!(out.entries[0].bg_type, "Data");
+        assert_eq!(out.entries[0].bg_type, BtrfsBgType::Data);
         assert_eq!(out.entries[0].bg_profile, "RAID1");
         assert_eq!(out.entries[0].bg_used, 16777216);
         assert_eq!(out.entries[0].bg_total, 67108864);
-        assert_eq!(out.entries[1].bg_type, "System");
-        assert_eq!(out.entries[2].bg_type, "Metadata");
-        assert_eq!(out.entries[3].bg_type, "GlobalReserve");
+        assert_eq!(out.entries[1].bg_type, BtrfsBgType::System);
+        assert_eq!(out.entries[2].bg_type, BtrfsBgType::Metadata);
+        assert_eq!(out.entries[3].bg_type, BtrfsBgType::GlobalReserve);
     }
 
     // --- Synthetic tests (inline) ---
