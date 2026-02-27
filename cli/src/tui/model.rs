@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use crate::hdparm::DrivePowerState;
 use crate::parse::types::{ScrubState, SmartHealth};
 use crate::tui::effect::Effect;
 use crate::tui::state::{CmdId, CommandState};
@@ -56,6 +57,7 @@ pub struct PoolState {
     pub total: u64,
     pub disk_usage: HashMap<String, DiskUsage>,
     pub smart_health: HashMap<String, SmartHealth>,
+    pub power_state: HashMap<String, DrivePowerState>,
     pub scrub: ScrubState,
     pub probed_at: Instant,
 }
@@ -86,6 +88,7 @@ impl PoolStatus {
 
 pub struct Model {
     pub running: bool,
+    pub show_help: bool,
     pub tab: Tab,
     pub disk_keys: Vec<String>,
     pub disk_by_id: HashMap<String, String>,
@@ -109,6 +112,7 @@ impl Model {
         }];
         let model = Self {
             running: true,
+            show_help: false,
             tab: Tab::Data,
             disk_keys,
             disk_by_id,
@@ -125,6 +129,7 @@ impl Model {
     pub fn new_demo(disk_keys: Vec<String>, pool: PoolStatus) -> Self {
         Self {
             running: true,
+            show_help: false,
             tab: Tab::Data,
             disk_keys,
             disk_by_id: HashMap::new(),

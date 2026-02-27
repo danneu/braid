@@ -1,11 +1,14 @@
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
+mod help;
+
 use ratatui::widgets::{Block, Gauge, Paragraph, Row, Table, TableState};
 use ratatui::Frame;
 use time::macros::format_description;
 use time::PrimitiveDateTime;
 
+use crate::hdparm::DrivePowerState;
 use crate::parse::types::{ScrubState, SmartHealth};
 use crate::tui::model::{Model, PoolState, PoolStatus, Tab};
 
@@ -189,12 +192,21 @@ fn scrub_lines(scrub: &ScrubState) -> u16 {
     }
 }
 
-fn smart_label(health: &SmartHealth) -> &'static str {
+fn smart_cell(health: &SmartHealth) -> Span<'static> {
     match health {
-        SmartHealth::Healthy => "ok",
-        SmartHealth::Degraded => "warning",
-        SmartHealth::Failing => "failing",
-        SmartHealth::Unknown => "?",
+        SmartHealth::Healthy => Span::styled("ok", Style::default().fg(Color::DarkGray)),
+        SmartHealth::Degraded => Span::styled("warning", Style::default().fg(Color::Yellow)),
+        SmartHealth::Failing => Span::styled("failing", Style::default().fg(Color::Red)),
+        SmartHealth::Unknown => Span::styled("-", Style::default().fg(Color::DarkGray)),
+    }
+}
+
+fn power_label(state: &DrivePowerState) -> &'static str {
+    match state {
+        DrivePowerState::Active => "active",
+        DrivePowerState::Idle => "idle",
+        DrivePowerState::Standby => "standby",
+        DrivePowerState::Unknown(_) => "unknown",
     }
 }
 
@@ -202,7 +214,8 @@ fn disk_table(model: &Model, unit: ByteUnit) -> Table<'_> {
     let pool = model.pool.current();
     let disk_usage = pool.map(|p| &p.disk_usage);
     let smart_health = pool.map(|p| &p.smart_health);
-    let header = Row::new(["#", "Name", "SMART", "Usage"])
+    let power_state = pool.map(|p| &p.power_state);
+    let header = Row::new(["", "Name", "SMART", "Power", "Usage"])
         .style(Style::default().fg(Color::DarkGray));
     let rows: Vec<Row> = model
         .disk_keys
@@ -210,11 +223,21 @@ fn disk_table(model: &Model, unit: ByteUnit) -> Table<'_> {
         .enumerate()
         .map(|(i, name)| {
             let smart_val = smart_health.and_then(|s| s.get(name));
-            let smart_cell = match smart_val {
-                Some(SmartHealth::Failing) => {
-                    Line::from(Span::styled("failing", Style::default().fg(Color::Red)))
+            let smart_line = Line::from(match smart_val {
+                Some(h) => smart_cell(h),
+                None => Span::raw(""),
+            });
+            let power_val = power_state.and_then(|p| p.get(name));
+            let power_cell = match power_val {
+                Some(DrivePowerState::Standby) => Line::from(Span::styled(
+                    "standby",
+                    Style::default().fg(Color::DarkGray),
+                )),
+                Some(DrivePowerState::Idle) => {
+                    Line::from(Span::styled("idle", Style::default().fg(Color::DarkGray)))
                 }
-                _ => Line::from(smart_val.map(smart_label).unwrap_or("")),
+                Some(s) => Line::from(power_label(s)),
+                None => Line::from("\u{2014}"),
             };
             let num = Line::from(format!("{}", i + 1));
             let name_cell = Line::from(name.clone());
@@ -222,7 +245,8 @@ fn disk_table(model: &Model, unit: ByteUnit) -> Table<'_> {
                 Some(usage) => Row::new(vec![
                     num,
                     name_cell,
-                    smart_cell,
+                    smart_line,
+                    power_cell,
                     Line::from(format!(
                         "{:.0}%  {} / {} {}",
                         percent(usage.data, usage.size),
@@ -234,14 +258,18 @@ fn disk_table(model: &Model, unit: ByteUnit) -> Table<'_> {
                 None if disk_usage.is_some() => Row::new(vec![
                     num,
                     name_cell,
-                    smart_cell,
-                    Line::from(Span::styled(
-                        "missing",
-                        Style::default().fg(Color::Yellow),
-                    )),
+                    smart_line,
+                    power_cell,
+                    Line::from(Span::styled("missing", Style::default().fg(Color::Yellow))),
                 ])
                 .style(Style::default().add_modifier(Modifier::DIM)),
-                None => Row::new(vec![num, name_cell, smart_cell, Line::default()]),
+                None => Row::new(vec![
+                    num,
+                    name_cell,
+                    smart_line,
+                    power_cell,
+                    Line::default(),
+                ]),
             }
         })
         .collect();
@@ -251,11 +279,36 @@ fn disk_table(model: &Model, unit: ByteUnit) -> Table<'_> {
         .map(|k| k.len())
         .max()
         .unwrap_or(4)
-        .max(4) as u16;
+        .max("Name".len()) as u16;
+    let smart_width = smart_health
+        .map(|s| {
+            model
+                .disk_keys
+                .iter()
+                .filter_map(|name| s.get(name))
+                .map(|h| smart_cell(h).width())
+                .max()
+                .unwrap_or(0)
+        })
+        .unwrap_or(0)
+        .max("SMART".len()) as u16;
+    let power_width = power_state
+        .map(|p| {
+            model
+                .disk_keys
+                .iter()
+                .filter_map(|name| p.get(name))
+                .map(|s| power_label(s).len())
+                .max()
+                .unwrap_or(0)
+        })
+        .unwrap_or(0)
+        .max("Power".len()) as u16;
     let widths = [
-        Constraint::Length(2),
+        Constraint::Length(1),
         Constraint::Length(longest_name_len),
-        Constraint::Length(8),
+        Constraint::Length(smart_width),
+        Constraint::Length(power_width),
         Constraint::Min(10),
     ];
     Table::new(rows, widths)
@@ -342,7 +395,9 @@ fn view_data(model: &Model, frame: &mut Frame, area: Rect, now: PrimitiveDateTim
                 chunks[0],
             );
         }
-        PoolStatus::Mounted(pool) | PoolStatus::Refreshing(pool) | PoolStatus::ErrorStale(_, pool) => {
+        PoolStatus::Mounted(pool)
+        | PoolStatus::Refreshing(pool)
+        | PoolStatus::ErrorStale(_, pool) => {
             let pool_inner = Layout::vertical([
                 Constraint::Min(0),    // table
                 Constraint::Length(1), // gauge
@@ -407,14 +462,19 @@ pub fn view(model: &Model, frame: &mut Frame, now: PrimitiveDateTime) {
         Tab::Sharing => view_placeholder(frame, outer[2], "Sharing"),
     }
 
+    let hints = "q quit │ r reload │ <tab> switch tabs │ hjkl move selection │ ? help";
     let footer = match model.probe_duration {
-        Some(d) => format!("press q to quit  {}ms", d.as_millis()),
-        None => "press q to quit".to_owned(),
+        Some(d) => format!("{hints}  {}ms", d.as_millis()),
+        None => hints.to_owned(),
     };
     frame.render_widget(
         Paragraph::new(footer).style(Style::default().fg(Color::DarkGray)),
         outer[3],
     );
+
+    if model.show_help {
+        help::view_help(frame, area);
+    }
 }
 
 #[cfg(test)]
@@ -423,6 +483,7 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
+    use crate::hdparm::DrivePowerState;
     use crate::parse::types::{ScrubState, ScrubTimestamp, SmartHealth};
     use crate::tui::model::DiskUsage;
     use ratatui::backend::TestBackend;
@@ -513,6 +574,11 @@ mod tests {
             ("ironwolf".to_owned(), SmartHealth::Degraded),
             ("wdc".to_owned(), SmartHealth::Unknown),
         ]);
+        let power_state = HashMap::from([
+            ("toshiba".to_owned(), DrivePowerState::Active),
+            ("ironwolf".to_owned(), DrivePowerState::Standby),
+            ("wdc".to_owned(), DrivePowerState::Idle),
+        ]);
         let pool = PoolState {
             mount_point: "/mnt/storage".to_owned(),
             profile: "RAID1".to_owned(),
@@ -521,6 +587,7 @@ mod tests {
             total: 5_937_955_045_376, // ~5.4 TiB
             disk_usage,
             smart_health,
+            power_state,
             scrub: ScrubState::Completed {
                 started_at: ScrubTimestamp(time::macros::datetime!(2026-02-24 02:00:07)),
                 error_count: 0,

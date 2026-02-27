@@ -8,6 +8,7 @@ use crate::tui::state::{CmdId, CmdStatus, CommandState, Stream, MAX_LINES};
 
 pub enum Message {
     Quit,
+    ToggleHelp,
     NextTab,
     PrevTab,
     RefreshPool,
@@ -34,6 +35,10 @@ pub fn update(model: &mut Model, msg: Message) -> Vec<Effect> {
     match msg {
         Message::Quit => {
             model.running = false;
+            vec![]
+        }
+        Message::ToggleHelp => {
+            model.show_help = !model.show_help;
             vec![]
         }
         Message::NextTab => {

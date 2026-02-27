@@ -1,14 +1,13 @@
 ---
-source: src/tui/view.rs
-assertion_line: 466
+source: cli/src/tui/view/mod.rs
 expression: buffer_to_string(&terminal)
 ---
 Data  Encryption  Sharing
  Pool ──────────────────────────────────────────────────────
- not mounted
+ loading...
  Disks ─────────────────────────────────────────────────────
-   #  Name     SMART    Usage
- ▶ 1  toshiba
-   2  ironwolf
-   3  wdc
-press q to quit
+     Name     SMART Power Usage
+ ▶ 1 toshiba        —
+   2 ironwolf       —
+   3 wdc            —
+q quit │ r reload │ <tab> switch tabs │ hjkl move selection

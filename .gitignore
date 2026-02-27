@@ -3,3 +3,5 @@ result-*
 /cli/target
 /.direnv
 /.playwright-mcp
+/target
+/target

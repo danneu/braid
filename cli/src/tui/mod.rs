@@ -21,6 +21,7 @@ use model::{DiskUsage, Model, PoolState, PoolStatus};
 use view::view;
 
 use crate::config::config_read;
+use crate::hdparm::DrivePowerState;
 use crate::parse::types::{ScrubState, ScrubTimestamp, SmartHealth};
 
 pub fn run(config_path: &Path) -> io::Result<()> {
@@ -77,8 +78,13 @@ pub fn run_demo() -> io::Result<()> {
     ]);
     let smart_health = HashMap::from([
         ("toshiba".to_owned(), SmartHealth::Healthy),
-        ("ironwolf".to_owned(), SmartHealth::Healthy),
-        ("wdc".to_owned(), SmartHealth::Healthy),
+        ("ironwolf".to_owned(), SmartHealth::Degraded),
+        ("wdc".to_owned(), SmartHealth::Unknown),
+    ]);
+    let power_state = HashMap::from([
+        ("toshiba".to_owned(), DrivePowerState::Active),
+        ("ironwolf".to_owned(), DrivePowerState::Standby),
+        ("wdc".to_owned(), DrivePowerState::Idle),
     ]);
     let pool = PoolState {
         mount_point: "/mnt/storage".to_owned(),
@@ -88,6 +94,7 @@ pub fn run_demo() -> io::Result<()> {
         total: 5_937_955_045_376,
         disk_usage,
         smart_health,
+        power_state,
         scrub: ScrubState::Completed {
             started_at: ScrubTimestamp(time::macros::datetime!(2026-02-24 02:00:07)),
             error_count: 0,
@@ -126,10 +133,10 @@ fn run_loop(
 
         let mut messages = Vec::new();
         if let Ok(event) = rx.recv_timeout(FRAME_BUDGET) {
-            messages.extend(event.into_message());
+            messages.extend(event.into_message(model.show_help));
             for _ in 1..MAX_EVENTS_PER_FRAME {
                 match rx.try_recv() {
-                    Ok(event) => messages.extend(event.into_message()),
+                    Ok(event) => messages.extend(event.into_message(model.show_help)),
                     Err(_) => break,
                 }
             }
