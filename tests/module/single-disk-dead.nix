@@ -54,6 +54,7 @@ in
     };
 
     boot.initrd = {
+      systemd.enable = true;
       systemd = {
         storePaths = [
           keyFile

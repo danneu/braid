@@ -6,6 +6,23 @@ use std::path::PathBuf;
 
 pub(crate) const HEADER_BACKUP_DIR: &str = "/var/lib/braid/luks-headers";
 
+/// LUKS key slot 0: interactive passphrase (Argon2id/PBKDF2 key stretching).
+pub const LUKS_SLOT_PASSPHRASE: u8 = 0;
+/// LUKS key slot 1: binary random keyfile (no PBKDF, raw key material).
+pub const LUKS_SLOT_KEYFILE: u8 = 1;
+
+/// Canonical keyfile filename, hardcoded to match the NixOS auto-unlock module.
+pub const KEYFILE_NAME: &str = "braid.key";
+/// Keyfile size in bytes: 4096 bytes of random data from /dev/urandom.
+pub const KEYFILE_SIZE: usize = 4096;
+
+/// State of a LUKS key slot, as reported by `cryptsetup luksDump`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeySlotState {
+    Empty,
+    Occupied,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum LuksError {
     #[error("{0}")]
@@ -171,4 +188,97 @@ pub fn luks_opts_from_env() -> Vec<String> {
         return vec![];
     }
     shell_words::split(&raw).unwrap_or_default()
+}
+
+/// Open a LUKS device with a binary keyfile (no passphrase, no PBKDF).
+pub fn ensure_luks_open_with_key_file<R: CommandRunner, F: Filesystem + ?Sized>(
+    runner: &R,
+    fs: &F,
+    key: &str,
+    disk: &DiskConfig,
+    key_file_path: &std::path::Path,
+) -> Result<(), LuksError> {
+    let mn = mapper_name(key);
+    let mapper_path = format!("/dev/mapper/{}", mn.0);
+    if fs.exists(&mapper_path) {
+        return Ok(());
+    }
+
+    let result = runner.run(&CmdRequest::CryptsetupLuksOpenKeyFile {
+        device: disk.by_id.0.clone(),
+        mapper: mn.0.clone(),
+        key_file_path: key_file_path.display().to_string(),
+    })?;
+    if result.exit_status != 0 {
+        return Err(LuksError::Validation(format!(
+            "failed to open LUKS device {} with keyfile. Wrong keyfile?",
+            disk.by_id
+        )));
+    }
+    Ok(())
+}
+
+/// Verify a binary keyfile against an existing LUKS device.
+pub fn verify_key_file<R: CommandRunner>(
+    runner: &R,
+    device: &str,
+    key_file_path: &std::path::Path,
+) -> Result<bool, LuksError> {
+    let result = runner.run(&CmdRequest::CryptsetupTestKeyFile {
+        device: device.to_owned(),
+        key_file_path: key_file_path.display().to_string(),
+    })?;
+    Ok(result.exit_status == 0)
+}
+
+/// Enroll a binary keyfile into LUKS slot 1, authorized by the existing passphrase.
+pub fn enroll_key_file<R: CommandRunner>(
+    runner: &R,
+    device: &str,
+    passphrase: &str,
+    key_file_path: &std::path::Path,
+) -> Result<(), LuksError> {
+    let result = runner.run_with_stdin(
+        &CmdRequest::CryptsetupLuksAddKeyFile {
+            device: device.to_owned(),
+            key_file_path: key_file_path.display().to_string(),
+        },
+        passphrase.as_bytes(),
+    )?;
+    if result.exit_status != 0 {
+        return Err(LuksError::Validation(format!(
+            "cryptsetup luksAddKey failed (exit {}): {}",
+            result.exit_status,
+            result.stderr.trim()
+        )));
+    }
+    Ok(())
+}
+
+/// Check the state of a specific LUKS key slot via `cryptsetup luksDump`.
+pub fn check_key_slot<R: CommandRunner>(
+    runner: &R,
+    device: &str,
+    slot: u8,
+) -> Result<KeySlotState, LuksError> {
+    let raw = runner.run(&CmdRequest::CryptsetupLuksDump {
+        device: device.to_owned(),
+    })?;
+    if raw.exit_status != 0 {
+        return Err(LuksError::Validation(format!(
+            "cryptsetup luksDump failed (exit {}): {}",
+            raw.exit_status,
+            raw.stderr.trim()
+        )));
+    }
+
+    // Parse JSON: look for keyslots.<slot>
+    let parsed: serde_json::Value = serde_json::from_str(&raw.stdout)
+        .map_err(|e| LuksError::Validation(format!("failed to parse luksDump JSON: {e}")))?;
+
+    let slot_key = slot.to_string();
+    match parsed.get("keyslots").and_then(|ks| ks.get(&slot_key)) {
+        Some(_) => Ok(KeySlotState::Occupied),
+        None => Ok(KeySlotState::Empty),
+    }
 }

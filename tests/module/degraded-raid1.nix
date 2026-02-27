@@ -59,6 +59,9 @@ in
     };
 
     boot.initrd = {
+      # btrfs kernel module needed for fixture's mount step
+      supportedFilesystems = [ "btrfs" ];
+      systemd.enable = true;
       systemd = {
         storePaths = [
           keyFile

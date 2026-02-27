@@ -59,10 +59,12 @@ in
     };
 
     boot.initrd = {
+      systemd.enable = true;
       systemd = {
         storePaths = [
           keyFile
           pkgs.cryptsetup
+          pkgs.btrfs-progs
           pkgs.util-linux
         ];
 

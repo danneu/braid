@@ -20,12 +20,12 @@ Option 3. Resilience is the default, not an option.
 
 ## Implementation
 
+LUKS unlock is strictly stage-2 — `braid-unlock` or `braid-auto-unlock` opens LUKS and mounts the pool. The module does not generate `boot.initrd.luks.devices`.
+
 Every layer has a specific resilience mechanism:
 
-- **LUKS devices**: `crypttabExtraOpts = [ "nofail" "x-systemd.device-timeout=10s" ]`. A missing drive times out in 10s (tests) or 30s (production) and boot continues.
-- **btrfs-device-scan**: `wants` (not `requires`) on cryptsetup units. A failed unlock doesn't cascade to the scan service.
 - **Mount**: `nofail` + `degraded` in mount options. A partial pool still mounts. A total failure doesn't block boot.
-- **Two-service pattern**: `btrfs-device-scan` must exist in both initrd and stage-2 because `x-systemd.requires` in mount options persists across switch-root.
+- **btrfs-device-scan**: Stage-2 service referenced by the mount unit's `x-systemd.requires`. Scans for btrfs multi-device filesystems after LUKS mappers are opened.
 
 ### Three-tier failure model
 
@@ -36,14 +36,6 @@ Every layer has a specific resilience mechanism:
 | All drives dead / wrong config | 10s timeout, mount fails | System boots, SSH works, no /mnt/storage |
 
 ## Key discoveries
-
-### crypttabExtraOpts
-
-Hidden NixOS option (`listOf singleLineStr`), systemd initrd only. Appends to the crypttab options column. `nofail` makes the cryptsetup unit use `Wants=` instead of `Requires=` toward `cryptsetup.target`.
-
-### neededForBoot tension
-
-`neededForBoot = true` is required for the btrfs mount to survive into the real root (LUKS mapper devices are only available in initrd). But `neededForBoot` normally makes a failed mount fatal. The combination of `neededForBoot + nofail` resolves this: the mount is attempted in initrd (where mapper devices exist) but failure doesn't block boot.
 
 ### udev SYSTEMD_READY=0 risk
 

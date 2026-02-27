@@ -222,20 +222,9 @@ autoUnlock = {
     description = "Block device for the USB key (/dev/disk/by-id/...).";
   };
 
-  # This is a binary random keyfile, NOT a passphrase file. cryptsetup
-  # treats these differently: keyfiles are used as raw key material (no
-  # PBKDF), while passphrases go through Argon2id/PBKDF2 key stretching.
-  # They occupy separate LUKS key slots and are not interchangeable.
-  # See docs/luks-unlock.md § "Passphrase file vs binary keyfile".
-  #
-  # This path is relative to the USB mount root (/run/braid-key). No
-  # leading slash, no ".." components. Resolved via safe path-join under
-  # the fixed root to prevent path traversal (CWE-22).
-  keyFile = lib.mkOption {
-    type = lib.types.str;
-    default = "braid.key";
-    description = "Relative path to keyfile within the mounted USB filesystem.";
-  };
+  # The keyfile name is hardcoded as "braid.key" in storage.nix, not
+  # user-configurable. This eliminates CWE-22 path traversal from config
+  # by construction — there are no user-supplied path components to validate.
 
   timeoutSec = lib.mkOption {
     type = lib.types.ints.positive;
@@ -251,19 +240,11 @@ Assertions:
   a broken service if someone enables the module without the package)
 - `cfg.autoUnlock.enable -> hasPrefix "/dev/disk/by-id/" cfg.autoUnlock.keyDevice`
 - `cfg.autoUnlock.enable -> cfg.autoUnlock.timeoutSec > 0`
-- keyFile path safety (CWE-22): reject if it starts with `/` or contains `..`.
-  This is the config-time half of path traversal defense — catches obvious
-  misconfiguration at `nixos-rebuild` time. The runtime half (symlink
-  rejection in the service script) handles attacks via USB filesystem content.
-
-  ```nix
-  {
-    assertion = cfg.autoUnlock.enable ->
-      !(lib.hasPrefix "/" cfg.autoUnlock.keyFile)
-      && !(lib.hasInfix ".." cfg.autoUnlock.keyFile);
-    message = "braid.autoUnlock.keyFile must be a relative path with no '..' components.";
-  }
-  ```
+- keyFile path safety (CWE-22): eliminated by construction — the keyfile name
+  is hardcoded as `"braid.key"` in `storage.nix`, not user-configurable, so
+  there are no user-supplied path components to validate at config time. The
+  runtime `realpath` check in the service script still guards against symlink
+  attacks on the attacker-controlled USB filesystem (CWE-59).
 
 ### storage.nix — add auto-unlock, refactor manual service
 
@@ -326,7 +307,7 @@ systemd.services.braid-auto-unlock = lib.mkIf cfg.autoUnlock.enable {
   # subsequent starts. See systemd.service(5).
   serviceConfig = { Type = "oneshot"; };
   path = [ cfg.package cfg.packages.cryptsetup cfg.packages.btrfsProgs cfg.packages.utilLinux ];
-  script = let keyPath = "/run/braid-key/${cfg.autoUnlock.keyFile}"; in ''
+  script = let keyPath = "/run/braid-key/braid.key"; in ''
     # Mount USB via systemd mount unit — this respects the device-timeout
     # configured on the mount unit, so slow USB enumeration gets the full
     # wait window. A direct `mount` call would bypass that timeout.

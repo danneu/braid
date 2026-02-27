@@ -11,58 +11,27 @@ let
   # Mapper names are braid-<name> (e.g. braid-toshiba)
   mapperName = name: "braid-${name}";
 
-  # systemd-cryptsetup-generator escapes mapper names for unit instance names
-  # (e.g. "braid-toshiba" → "braid\x2dtoshiba"). We must match this escaping
-  # when referencing those units in After=, Requires=, etc.
-  cryptsetupUnit =
-    name: "systemd-cryptsetup@${builtins.replaceStrings [ "-" ] [ "\\x2d" ] (mapperName name)}.service";
+  # Wrapper: braid CLI with all tool packages on PATH
+  braidWrapped = pkgs.runCommand "braid" { nativeBuildInputs = [ pkgs.makeWrapper ]; } ''
+    mkdir -p $out/bin
+    makeWrapper ${cfg.package}/bin/braid $out/bin/braid \
+      --prefix PATH : ${lib.makeBinPath [
+        cfg.packages.cryptsetup
+        cfg.packages.btrfsProgs
+        cfg.packages.utilLinux
+        cfg.packages.jq
+        cfg.packages.coreutils
+      ]}
+  '';
 in
 {
   config = lib.mkIf cfg.enable {
-    boot.initrd = {
-      supportedFilesystems = [ "btrfs" ];
-      systemd.enable = true;
-
-      luks.devices = builtins.listToAttrs (
-        map (name: {
-          name = mapperName name;
-          value = {
-            device = cfg.disks.${name}.byId;
-            # dm-crypt's internal workqueues add 3-4x queuing overhead regardless
-            # of disk type (HDD or SSD). Bypassing them reduces CPU load, latency,
-            # and eliminates I/O stall patterns on spinning disks. Requires kernel >= 5.9.
-            # TODO: I think this is just doing --perf-no_read_workqueue and --perf-no_write_workqueue, but verify.
-            bypassWorkqueues = true;
-            crypttabExtraOpts = [
-              "nofail"
-              "x-systemd.device-timeout=10s"
-            ];
-          };
-        }) diskKeys
-      );
-
-      systemd.services.btrfs-device-scan = {
-        description = "Scan for btrfs multi-device filesystems";
-        after = map cryptsetupUnit diskKeys;
-        wants = map cryptsetupUnit diskKeys;
-        before = [ "initrd-fs.target" ];
-        wantedBy = [ "initrd-fs.target" ];
-        unitConfig.DefaultDependencies = false;
-        serviceConfig = {
-          Type = "oneshot";
-          RemainAfterExit = true;
-        };
-        script = "${config.braid.packages.btrfsProgs}/bin/btrfs device scan";
-      };
-    };
-
-    # noauto — not authoritative for mounting. braid-unlock.service (stage-2)
-    # and initrd LUKS+mount handle the actual mount. This entry exists so NixOS
-    # knows about the mount point for systemctl targets.
+    # nofail — not authoritative for mounting. braid-unlock or
+    # braid-auto-unlock handle the actual mount in stage 2. This entry
+    # exists so NixOS knows about the mount point for systemctl targets.
     fileSystems.${cfg.mountPoint} = {
       device = "/dev/mapper/${mapperName (builtins.head diskKeys)}";
       fsType = "btrfs";
-      neededForBoot = true;
       options = [
         "degraded"
         "nofail"
@@ -77,7 +46,10 @@ in
       fileSystems = [ cfg.mountPoint ];
     };
 
-    # Stage-2 copy: x-systemd.requires persists across switch-root
+    # Stage-2 btrfs-device-scan: the mount unit's x-systemd.requires
+    # references this service. In production it scans and finds nothing
+    # (LUKS mappers aren't opened yet); braid-unlock handles the mount.
+    # In VM tests it finds LUKS mappers opened by initrd fixtures.
     systemd.services.btrfs-device-scan = {
       description = "Scan for btrfs multi-device filesystems";
       serviceConfig = {
@@ -86,6 +58,9 @@ in
       };
       script = "${config.braid.packages.btrfsProgs}/bin/btrfs device scan";
     };
+
+    # Wrapped CLI available on PATH
+    environment.systemPackages = [ braidWrapped ];
 
     # Single orchestrator service that opens all LUKS and mounts pool.
     # Guarantees one passphrase prompt — avoids relying on systemd-ask-password
@@ -98,46 +73,11 @@ in
         RemainAfterExit = true;
       };
       unitConfig.ConditionPathIsMountPoint = "!${cfg.mountPoint}";
+      path = [ braidWrapped cfg.packages.cryptsetup cfg.packages.btrfsProgs cfg.packages.utilLinux ];
       script = ''
-        passphrase=$(${pkgs.systemd}/bin/systemd-ask-password \
-          --id=braid "LUKS passphrase for braid pool:")
-
-        opened=""
-
-        ${lib.concatMapStringsSep "\n" (
-          name:
-          let
-            disk = cfg.disks.${name};
-          in
-          ''
-            if [ -e /dev/mapper/${mapperName name} ]; then
-              opened="$opened /dev/mapper/${mapperName name}"
-            elif [ -e ${disk.byId} ]; then
-              if echo "$passphrase" | ${cfg.packages.cryptsetup}/bin/cryptsetup \
-                  open --type luks --key-file=- \
-                  --perf-no_read_workqueue --perf-no_write_workqueue \
-                  ${disk.byId} ${mapperName name} 2>/dev/null; then
-                opened="$opened /dev/mapper/${mapperName name}"
-              else
-                echo "braid-unlock: WARNING: failed to open ${name} — skipping" >&2
-              fi
-            else
-              echo "braid-unlock: WARNING: ${name} not present — skipping" >&2
-            fi
-          ''
-        ) diskKeys}
-
-        if [ -z "$opened" ]; then
-          echo "braid-unlock: ERROR: no disks opened, cannot mount pool" >&2
-          exit 1
-        fi
-
-        ${cfg.packages.btrfsProgs}/bin/btrfs device scan
-
-        first_mapper=$(echo $opened | ${pkgs.coreutils}/bin/cut -d' ' -f1)
-        ${cfg.packages.utilLinux}/bin/mount -o degraded "$first_mapper" ${cfg.mountPoint} || {
-          ${cfg.packages.utilLinux}/bin/mount "$first_mapper" ${cfg.mountPoint}
-        }
+        ${pkgs.systemd}/bin/systemd-ask-password \
+          --id=braid "LUKS passphrase for braid pool:" \
+        | braid unlock --passphrase-stdin
       '';
     };
 
@@ -145,6 +85,94 @@ in
       description = "Braid storage pool online";
       wants = [ "braid-unlock.service" ];
       after = [ "braid-unlock.service" ];
+    };
+
+    # --- Auto-unlock via USB keyfile ---
+
+    fileSystems."/run/braid-key" = lib.mkIf cfg.autoUnlock.enable {
+      device = cfg.autoUnlock.keyDevice;
+      fsType = "auto";
+      options = [
+        "ro" "nosuid" "nodev" "noexec"
+        "nofail"    # never fail boot
+        "noauto"    # only mount on-demand
+        "x-systemd.device-timeout=${toString cfg.autoUnlock.timeoutSec}s"
+      ];
+    };
+
+    systemd.tmpfiles.rules = lib.mkIf cfg.autoUnlock.enable [
+      # 0700 root:root — keyfile is sensitive; non-root must not traverse.
+      "d /run/braid-key 0700 root root -"
+    ];
+
+    systemd.services.braid-auto-unlock = lib.mkIf cfg.autoUnlock.enable {
+      description = "Auto-unlock braid pool from USB keyfile";
+      wantedBy = [ "multi-user.target" ];
+      after = [ "local-fs.target" ];
+      unitConfig.ConditionPathIsMountPoint = "!${cfg.mountPoint}";
+      # No RemainAfterExit — if USB is absent at boot (service exits 0 on
+      # skip), a later `systemctl start braid-auto-unlock` must be able to
+      # re-run the service when the USB is inserted. With RemainAfterExit=true,
+      # systemd considers the unit "active" after exit 0 and suppresses
+      # subsequent starts. See systemd.service(5).
+      serviceConfig = { Type = "oneshot"; };
+      path = [ braidWrapped cfg.packages.cryptsetup cfg.packages.btrfsProgs cfg.packages.utilLinux ];
+      script = let keyPath = "/run/braid-key/braid.key"; in ''
+        # Mount USB via systemd mount unit — this respects the device-timeout
+        # configured on the mount unit, so slow USB enumeration gets the full
+        # wait window. A direct `mount` call would bypass that timeout.
+        # The escaped unit name matches systemd's path encoding for
+        # /run/braid-key → run-braid\x2dkey.mount.
+        if ! ${pkgs.systemd}/bin/systemctl start run-braid\\x2dkey.mount 2>/dev/null; then
+          echo "braid-auto-unlock: USB key device not available, skipping" >&2
+          exit 0
+        fi
+
+        # Path traversal defense. The keyfile name is a hardcoded literal
+        # ("braid.key"), not user-configurable, so CWE-22 via config is
+        # eliminated by construction. However, the USB filesystem is
+        # attacker-controlled, so we still verify the resolved path stays
+        # within /run/braid-key/ to guard against:
+        #   - CWE-59: symlinked keyfile (braid.key -> /etc/shadow)
+        # realpath -e also fails if the file doesn't exist, so this
+        # subsumes the existence check.
+        resolved=$(${pkgs.coreutils}/bin/realpath -e "${keyPath}" 2>/dev/null) || {
+          echo "braid-auto-unlock: keyfile not found at ${keyPath}, skipping" >&2
+          umount /run/braid-key 2>/dev/null || true
+          exit 0
+        }
+        case "$resolved" in
+          /run/braid-key/*)
+            ;;
+          *)
+            echo "braid-auto-unlock: keyfile resolves outside mount root ($resolved), refusing" >&2
+            umount /run/braid-key 2>/dev/null || true
+            exit 0
+            ;;
+        esac
+
+        # Warn if keyfile is world/group-readable. On vfat (no Unix perms),
+        # files are typically 0755 — we can't fix that (vfat doesn't support
+        # chmod), so warn rather than fail. The mount point perms (0700) and
+        # short mount window limit exposure. Hard-failing here would break
+        # the most common USB format.
+        perms=$(${pkgs.coreutils}/bin/stat -c '%a' "$resolved" 2>/dev/null || echo "???")
+        case "$perms" in
+          400|600) ;; # good
+          *) echo "braid-auto-unlock: WARNING: keyfile perms are $perms (expected 400)" >&2 ;;
+        esac
+
+        if braid unlock --key-file "$resolved"; then
+          echo "braid-auto-unlock: pool unlocked successfully" >&2
+        else
+          echo "braid-auto-unlock: unlock failed (wrong keyfile?), skipping" >&2
+        fi
+
+        # Always unmount USB after use. Never leave keyfile accessible — this
+        # is the Unraid CVE pattern (plaintext credential on a mounted FS).
+        umount /run/braid-key 2>/dev/null || true
+        exit 0
+      '';
     };
   };
 }

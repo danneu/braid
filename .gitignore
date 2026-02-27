@@ -5,3 +5,4 @@ result-*
 /.playwright-mcp
 /target
 /target
+/.claude/worktrees

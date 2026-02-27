@@ -80,6 +80,46 @@ Dan buys a NAS computer and installs NixOS on its internal SSD. He has one 12TB 
 
 13. Same flow — plug in, add to config, rebuild, `braid plan`, `braid apply`. Pool grows to ~18TB usable with RAID1 across 3 drives.
 
+## Story 2: USB keyfile auto-unlock
+
+Dan is tired of SSH'ing in to type the passphrase after every reboot. He sets up a USB keyfile for unattended auto-unlock.
+
+### Setup
+
+1. Generate a random keyfile on a USB drive:
+   ```
+   $ dd if=/dev/urandom of=/mnt/usb/braid.key bs=4096 count=1 iflag=fullblock
+   $ chmod 400 /mnt/usb/braid.key
+   ```
+
+2. Enroll the keyfile into all pool disks:
+   ```
+   $ sudo braid enroll /mnt/usb/braid.key
+   ```
+
+3. Find the USB's by-id path:
+   ```
+   $ ls /dev/disk/by-id/usb-*
+   ```
+
+4. Enable auto-unlock in NixOS config:
+   ```nix
+   braid.autoUnlock = {
+     enable = true;
+     keyDevice = "/dev/disk/by-id/usb-Kingston_DataTraveler_XXXX-0:0";
+   };
+   ```
+
+5. `nixos-rebuild switch`.
+
+### Reboot with USB key present
+
+6. NAS reboots. `braid-auto-unlock` service mounts the USB, opens all LUKS volumes with the keyfile, mounts the pool, then unmounts the USB. Pool is online before anyone SSH's in.
+
+### Reboot without USB key
+
+7. USB is removed (or lost). NAS reboots. `braid-auto-unlock` sees no USB device, prints a skip message, exits 0. Boot completes normally. Pool stays locked. Dan SSH's in and runs `sudo braid unlock` with his passphrase. Everything works — the passphrase is an independent credential.
+
 ## Design principles
 
 See [docs/principles.md](principles.md) for the canonical list of invariants behind this workflow.

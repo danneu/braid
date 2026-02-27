@@ -306,8 +306,7 @@ mod tests {
                 by_id: ByIdPath("/dev/disk/by-id/a".to_owned()),
             },
         );
-        let err =
-            Config::new(disks, "/mnt/storage".to_owned()).expect_err("empty key should fail");
+        let err = Config::new(disks, "/mnt/storage".to_owned()).expect_err("empty key should fail");
         assert!(matches!(err, ConfigBuildError::InvalidDiskKey(_)));
     }
 

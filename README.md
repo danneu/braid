@@ -1,11 +1,11 @@
 # braid
 
-NixOS-native CLI tool for managing an encrypted, redundant (RAID1) pool of hard drives, especially on a NAS device.
+NixOS-native cli tool for managing an encrypted, redundant (raid1) pool of hard drives, especially on a NAS device.
 
-Just two standard ingredients:
+It wraps two standard tools:
 
-- **[LUKS](https://en.wikipedia.org/wiki/Linux_Unified_Key_Setup)** full disk encryption
-- **[btrfs](https://btrfs.readthedocs.io/en/latest/)** file system for native RAID1, checksumming, auto self-healing
+- **[luks](https://en.wikipedia.org/wiki/Linux_Unified_Key_Setup)** full disk encryption
+- **[btrfs](https://btrfs.readthedocs.io/en/latest/)** file system for native raid1 redundancy, checksumming, self-healing
 
 ## Features
 
@@ -14,7 +14,6 @@ Just two standard ingredients:
 - Dynamic pool — add or remove drives incrementally
 - Self-healing data - btrfs checksums and silently repairs corruption from the redundant copy
 - Declarative config - declare your disks in nix; the pool state follows the config
-- `--dry-run` - always know what will happen before you run anything
 - Dashboard - `braid tui` shows you the state of your system
 
 ## Downsides
@@ -88,7 +87,9 @@ Use the ID-LINK column to build your by-id paths.
 braid = {
   enable = true;
   disks = {
-    toshiba = { byId = "/dev/disk/by-id/ata-Toshiba_MN07_XXXX"; };
+    toshiba = {
+      byId = "/dev/disk/by-id/ata-Toshiba_MN07_XXXX";
+    };
   };
 };
 ```
@@ -216,6 +217,54 @@ systemctl start braid-pool.target
 ```
 
 One passphrase prompt opens all available LUKS devices and mounts the pool. Works from TTY, SSH, or scripted. Tolerates missing/dead disks (mounts degraded).
+
+## Auto-unlock with USB keyfile
+
+For unattended reboots, a binary random keyfile on a removable USB device can auto-unlock the pool without typing a passphrase.
+
+### Generate and enroll a keyfile
+
+```sh
+sudo braid enroll /mnt/usb --generate
+```
+
+This creates a 4096-byte random keyfile at `/mnt/usb/braid.key` (mode 400) and enrolls it into LUKS slot 1 on all pool disks in one step. Slot conflicts and passphrase are validated before the keyfile is created.
+
+### Enroll an existing keyfile
+
+When your usb stick already has a braid.key on it:
+
+```sh
+sudo braid enroll /mnt/usb
+```
+
+Enrolls an existing `braid.key` in the given directory into all pool disks. The passphrase (slot 0) still works.
+
+### Enroll during `braid add`
+
+```sh
+sudo braid add ironwolf --enroll /mnt/usb
+```
+
+### Enable auto-unlock during boot
+
+```nix
+braid.autoUnlock = {
+  enable = true;
+  keyDevice = "/dev/disk/by-id/usb-Kingston_DataTraveler_XXXX-0:0";
+  timeoutSec = 5;          # seconds to wait for USB (default)
+};
+```
+
+```sh
+sudo nixos-rebuild switch
+```
+
+On boot, the `braid-auto-unlock` service mounts the USB read-only, unlocks the pool with the keyfile, then unmounts the USB. If the USB is missing or the keyfile is wrong, boot continues normally with the pool locked — unlock manually with `braid unlock` or `systemctl start braid-pool.target`.
+
+**Note:** `braid-pool.target` does not reflect auto-unlock state. Check mount state with `mountpoint -q /mnt/storage`.
+
+**Security:** For maximum security, remove the USB key after the pool unlocks. If the USB remains in the server, an attacker who steals both the server and USB can unlock all drives — the encryption provides no protection against physical theft of the combined unit.
 
 ## Shell Completions
 

@@ -37,6 +37,9 @@ enum Commands {
     Unlock(UnlockArgs),
     /// Lock the pool: unmount and close LUKS volumes
     Lock,
+    /// Enroll a binary keyfile into LUKS slot 1 on all pool disks
+    #[command(name = "enroll")]
+    EnrollKeyFile(EnrollKeyFileArgs),
     /// Interactive terminal dashboard
     Tui(TuiArgs),
 }
@@ -65,6 +68,9 @@ struct AddArgs {
     /// Disk key (as defined in braid.disks)
     #[arg(add = ArgValueCandidates::new(disk_key_candidates))]
     key: String,
+    /// Directory containing braid.key to enroll in the new disk (LUKS slot 1)
+    #[arg(long = "enroll")]
+    enroll_key_file: Option<std::path::PathBuf>,
     #[command(flatten)]
     common: CommonArgs,
 }
@@ -98,6 +104,9 @@ struct ReplaceArgs {
     /// Target a specific missing device by btrfs devid (dead disk only)
     #[arg(long)]
     missing_id: Option<u64>,
+    /// Directory containing braid.key to enroll in the new disk (LUKS slot 1)
+    #[arg(long = "enroll")]
+    enroll_key_file: Option<std::path::PathBuf>,
     #[command(flatten)]
     common: CommonArgs,
 }
@@ -118,6 +127,24 @@ struct DoctorArgs {
 
 #[derive(Debug, Args)]
 struct UnlockArgs {
+    /// Read passphrase from stdin
+    #[arg(long)]
+    passphrase_stdin: bool,
+    /// Read passphrase from file instead of TTY prompt
+    #[arg(long)]
+    passphrase_file: Option<std::path::PathBuf>,
+    /// Unlock with a binary keyfile instead of passphrase
+    #[arg(long, conflicts_with_all = ["passphrase_stdin", "passphrase_file"])]
+    key_file: Option<std::path::PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct EnrollKeyFileArgs {
+    /// Directory containing (or to receive) braid.key
+    dir: std::path::PathBuf,
+    /// Generate a new 4096-byte random keyfile before enrolling
+    #[arg(long)]
+    generate: bool,
     /// Read passphrase from stdin
     #[arg(long)]
     passphrase_stdin: bool,
@@ -160,6 +187,10 @@ fn main() {
             );
             let runner = RealRunner;
             let fs = RealFilesystem;
+            let enroll_kf = args
+                .enroll_key_file
+                .as_ref()
+                .map(|dir| dir.join(braid_cli::luks::KEYFILE_NAME));
             if let Err(e) = braid_cli::add::cmd_add(
                 &runner,
                 &fs,
@@ -169,6 +200,7 @@ fn main() {
                 args.common.yes,
                 args.common.passphrase_stdin,
                 args.common.passphrase_file.as_deref(),
+                enroll_kf.as_deref(),
                 progress,
             ) {
                 print_cli_error(&e.to_string());
@@ -215,6 +247,10 @@ fn main() {
             );
             let runner = RealRunner;
             let fs = RealFilesystem;
+            let enroll_kf = args
+                .enroll_key_file
+                .as_ref()
+                .map(|dir| dir.join(braid_cli::luks::KEYFILE_NAME));
             if let Err(e) = braid_cli::replace::cmd_replace(
                 &runner,
                 &fs,
@@ -226,6 +262,7 @@ fn main() {
                 args.common.yes,
                 args.common.passphrase_stdin,
                 args.common.passphrase_file.as_deref(),
+                enroll_kf.as_deref(),
                 progress,
             ) {
                 print_cli_error(&e.to_string());
@@ -269,6 +306,31 @@ fn main() {
                 &runner,
                 &fs,
                 &config,
+                args.passphrase_stdin,
+                args.passphrase_file.as_deref(),
+                args.key_file.as_deref(),
+            ) {
+                print_cli_error(&e.to_string());
+                std::process::exit(1);
+            }
+        }
+        Commands::EnrollKeyFile(args) => {
+            let config = match config_read(Path::new(&config_path)) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                }
+            };
+            let runner = RealRunner;
+            let fs = RealFilesystem;
+            let key_file_path = args.dir.join(braid_cli::luks::KEYFILE_NAME);
+            if let Err(e) = braid_cli::enroll_key_file::cmd_enroll_key_file(
+                &runner,
+                &fs,
+                &config,
+                &key_file_path,
+                args.generate,
                 args.passphrase_stdin,
                 args.passphrase_file.as_deref(),
             ) {

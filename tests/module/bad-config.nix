@@ -8,8 +8,8 @@
 # Why: Validates the "all drives dead / wrong config" tier of graceful failure.
 # The OS lives on an internal SSD — a misconfigured or missing data pool must
 # never prevent the system from booting. This is the critical gate test: if
-# neededForBoot + nofail doesn't let boot continue when the mount truly fails,
-# we need a different approach.
+# nofail doesn't let boot continue when the mount truly fails, we need a
+# different approach.
 #
 # Dependencies: braid-module-disabled (module loads without error).
 { braid }:
@@ -47,6 +47,8 @@
     };
 
     boot.initrd = {
+      systemd.enable = true;
+
       # Override module's luks.devices: must use mkVMOverride because
       # qemu-vm.nix blanket-overrides luks.devices.
       luks.devices = lib.mkVMOverride (

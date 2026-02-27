@@ -46,6 +46,7 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     yes: bool,
     passphrase_stdin: bool,
     passphrase_file: Option<&Path>,
+    enroll_key_file: Option<&Path>,
     progress: ProgressOutput,
 ) -> Result<(), AddError> {
     let (config, _config_raw) = config_read_raw(config_path)?;
@@ -158,6 +159,11 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
 
             ensure_luks_open(runner, fs, key, disk, &passphrase)?;
             eprintln!("LUKS opened: {} → {}", disk.by_id, mn);
+
+            if let Some(kf) = enroll_key_file {
+                crate::luks::enroll_key_file(runner, &disk.by_id.0, &passphrase, kf)?;
+                eprintln!("Keyfile enrolled in slot 1: {}", disk.by_id);
+            }
         }
         ConfigDiskState::PresentLuks { mapper_open, .. } => {
             if !mapper_open {

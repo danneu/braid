@@ -123,6 +123,20 @@ pub enum CmdRequest {
     CryptsetupLuksDump {
         device: String,
     },
+    // Keyfile commands (auto-unlock)
+    CryptsetupLuksOpenKeyFile {
+        device: String,
+        mapper: String,
+        key_file_path: String,
+    },
+    CryptsetupTestKeyFile {
+        device: String,
+        key_file_path: String,
+    },
+    CryptsetupLuksAddKeyFile {
+        device: String,
+        key_file_path: String,
+    },
 }
 
 #[derive(Debug, Error)]
@@ -364,6 +378,51 @@ impl CommandRunner for RealRunner {
             CmdRequest::CryptsetupLuksDump { device } => {
                 RealRunner::exec("cryptsetup", &["luksDump", "--dump-json-metadata", device])
             }
+            CmdRequest::CryptsetupLuksOpenKeyFile {
+                device,
+                mapper,
+                key_file_path,
+            } => RealRunner::exec(
+                "cryptsetup",
+                &[
+                    "open",
+                    "--type",
+                    "luks",
+                    "--key-file",
+                    key_file_path,
+                    "--keyfile-size",
+                    "4096",
+                    "--perf-no_read_workqueue",
+                    "--perf-no_write_workqueue",
+                    device,
+                    mapper,
+                ],
+            ),
+            CmdRequest::CryptsetupTestKeyFile {
+                device,
+                key_file_path,
+            } => RealRunner::exec(
+                "cryptsetup",
+                &[
+                    "open",
+                    "--test-passphrase",
+                    "--key-file",
+                    key_file_path,
+                    "--keyfile-size",
+                    "4096",
+                    device,
+                ],
+            ),
+            CmdRequest::CryptsetupLuksAddKeyFile {
+                device,
+                key_file_path,
+            } => {
+                // Passphrase must be piped via run_with_stdin, not here.
+                let _ = (device, key_file_path);
+                Err(CmdError::Failed(
+                    "CryptsetupLuksAddKeyFile must use run_with_stdin".to_owned(),
+                ))
+            }
         }
     }
 
@@ -401,6 +460,22 @@ impl CommandRunner for RealRunner {
             CmdRequest::CryptsetupTestPassphrase { device } => RealRunner::exec_with_stdin(
                 "cryptsetup",
                 &["open", "--test-passphrase", "--key-file=-", device],
+                stdin,
+            ),
+            CmdRequest::CryptsetupLuksAddKeyFile {
+                device,
+                key_file_path,
+            } => RealRunner::exec_with_stdin(
+                "cryptsetup",
+                &[
+                    "luksAddKey",
+                    "--key-slot",
+                    "1",
+                    "--new-keyfile-size",
+                    "4096",
+                    device,
+                    key_file_path,
+                ],
                 stdin,
             ),
             _ => {
@@ -527,6 +602,84 @@ mod tests {
             },
         );
         let result = mock.run_with_stdin(&req, b"secret");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().exit_status, 0);
+    }
+
+    #[test]
+    fn luks_open_key_file_run_dispatches_directly() {
+        let req = CmdRequest::CryptsetupLuksOpenKeyFile {
+            device: "/dev/vda".to_owned(),
+            mapper: "braid-test".to_owned(),
+            key_file_path: "/run/braid-key/braid.key".to_owned(),
+        };
+        let mock = MockRunner::default().with_output(
+            req.clone(),
+            RawCommandOutput {
+                cmd: "cryptsetup open".to_owned(),
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_status: 0,
+            },
+        );
+        let result = mock.run(&req);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().exit_status, 0);
+    }
+
+    #[test]
+    fn test_key_file_run_dispatches_directly() {
+        let req = CmdRequest::CryptsetupTestKeyFile {
+            device: "/dev/vda".to_owned(),
+            key_file_path: "/run/braid-key/braid.key".to_owned(),
+        };
+        let mock = MockRunner::default().with_output(
+            req.clone(),
+            RawCommandOutput {
+                cmd: "cryptsetup open --test-passphrase".to_owned(),
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_status: 0,
+            },
+        );
+        let result = mock.run(&req);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().exit_status, 0);
+    }
+
+    #[test]
+    fn luks_add_key_file_run_without_stdin_errors() {
+        let runner = RealRunner;
+        let req = CmdRequest::CryptsetupLuksAddKeyFile {
+            device: "/dev/vda".to_owned(),
+            key_file_path: "/tmp/braid.key".to_owned(),
+        };
+        let result = runner.run(&req);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, CmdError::Failed(ref msg) if msg.contains("must use run_with_stdin")),
+            "expected Failed with stdin hint, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn luks_add_key_file_run_with_stdin_routes_correctly() {
+        let req = CmdRequest::CryptsetupLuksAddKeyFile {
+            device: "/dev/vda".to_owned(),
+            key_file_path: "/tmp/braid.key".to_owned(),
+        };
+        let mock = MockRunner::default().with_output_stdin(
+            req.clone(),
+            b"existingpassphrase".to_vec(),
+            RawCommandOutput {
+                cmd: "cryptsetup luksAddKey --key-slot 1 /dev/vda /tmp/braid.key".to_owned(),
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_status: 0,
+            },
+        );
+        let result = mock.run_with_stdin(&req, b"existingpassphrase");
         assert!(result.is_ok());
         assert_eq!(result.unwrap().exit_status, 0);
     }

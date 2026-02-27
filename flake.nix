@@ -228,11 +228,41 @@
               braid = linuxCrane.braid;
             }
           );
-          braid-module-no-discard =
-            import ./tests/module/no-discard.nix {
-              inherit nixpkgs;
-              system = linuxSystem;
-            };
+          braid-enroll = pkgs.testers.nixosTest (
+            import ./tests/cli/braid-enroll.nix {
+              braid = linuxCrane.braid;
+            }
+          );
+          braid-enroll-generate = pkgs.testers.nixosTest (
+            import ./tests/cli/braid-enroll-generate.nix {
+              braid = linuxCrane.braid;
+            }
+          );
+          braid-unlock-key-file = pkgs.testers.nixosTest (
+            import ./tests/cli/braid-unlock-key-file.nix {
+              braid = linuxCrane.braid;
+            }
+          );
+          braid-add-enroll = pkgs.testers.nixosTest (
+            import ./tests/cli/braid-add-enroll.nix {
+              braid = linuxCrane.braid;
+            }
+          );
+          auto-unlock-key-present = pkgs.testers.nixosTest (
+            import ./tests/module/auto-unlock-key-present.nix {
+              braid = linuxCrane.braid-cli-unwrapped;
+            }
+          );
+          auto-unlock-key-missing = pkgs.testers.nixosTest (
+            import ./tests/module/auto-unlock-key-missing.nix {
+              braid = linuxCrane.braid-cli-unwrapped;
+            }
+          );
+          auto-unlock-key-wrong = pkgs.testers.nixosTest (
+            import ./tests/module/auto-unlock-key-wrong.nix {
+              braid = linuxCrane.braid-cli-unwrapped;
+            }
+          );
         };
     in
     {

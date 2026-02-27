@@ -40,6 +40,26 @@ in
       default = null;
       description = "The braid CLI package (unwrapped crane output). When set, wraps and installs as 'braid'.";
     };
+
+    autoUnlock = {
+      enable = lib.mkEnableOption "USB keyfile auto-unlock for braid pool";
+
+      # keyDevice must use /dev/disk/by-id/ — /dev/sdX names shift when devices
+      # are added or removed. by-id paths use hardware serial numbers and are
+      # stable across reboots. See docs/luks-unlock.md § "USB device naming
+      # stability".
+      keyDevice = lib.mkOption {
+        type = lib.types.str;
+        default = "";
+        description = "Block device for the USB key (/dev/disk/by-id/...).";
+      };
+
+      timeoutSec = lib.mkOption {
+        type = lib.types.ints.positive;
+        default = 5;
+        description = "Seconds to wait for USB device before giving up.";
+      };
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -62,6 +82,18 @@ in
       {
         assertion = (length (lib.unique byIdValues)) == (length byIdValues);
         message = "braid.disks contains duplicate byId values. Each disk must have a unique by-id path.";
+      }
+      {
+        assertion = cfg.package != null;
+        message = "braid.package must be set when braid.enable = true. The braid-unlock service requires the CLI binary.";
+      }
+      {
+        assertion = cfg.autoUnlock.enable -> lib.hasPrefix "/dev/disk/by-id/" cfg.autoUnlock.keyDevice;
+        message = "braid.autoUnlock.keyDevice must start with /dev/disk/by-id/.";
+      }
+      {
+        assertion = cfg.autoUnlock.enable -> cfg.autoUnlock.timeoutSec > 0;
+        message = "braid.autoUnlock.timeoutSec must be positive.";
       }
     ];
   };
