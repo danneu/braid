@@ -12,6 +12,8 @@ We want to accumulate all the checks here in one place before implementing them.
 
 - [x] Key exists in config? → error if not
 - [x] Key stability (disk-map drift)? → error if by-id reassigned
+- [ ] Is mount point occupied by non-btrfs? → hard error (currently swallowed as "pool absent")
+- [ ] Is the pool mounted read-only? → refuse with guidance (btrfs would error anyway, but the native error is cryptic; this gives the user a clear diagnosis and next step)
 - [ ] Is a btrfs exclusive op (balance/device remove) already running? → refuse
 - [x] Is the config disk present? → error if absent
 - [x] Is the LUKS mapper already open? → skip LUKS open
@@ -25,17 +27,20 @@ We want to accumulate all the checks here in one place before implementing them.
 - [x] Key stability (disk-map drift)? → error if by-id reassigned
 - [ ] Is a btrfs exclusive op already running? → refuse
 - [x] Is the pool mounted? → error if not
+- [ ] Is the pool mounted read-only? → refuse with guidance (btrfs would error anyway, but the native error is cryptic; this gives the user a clear diagnosis and next step)
 - [x] Is the device in the pool? → error if not
 - [ ] Does the pool have missing devices? → refuse ("run braid remove-missing first")
 - [x] ENOSPC pre-flight check
 - [x] Would this leave 0 devices? → error
 
-## `braid remove-missing`
+## `braid remove-missing [--missing-id <devid>]`
 
 - [x] Key stability (disk-map drift)? → error if by-id reassigned
 - [ ] Is a btrfs exclusive op already running? → refuse
 - [x] Is the pool mounted? → error if not
+- [ ] Is the pool mounted read-only? → refuse with guidance (btrfs would error anyway, but the native error is cryptic; this gives the user a clear diagnosis and next step)
 - [x] Are there actually missing devices? → error if not
+- [ ] If --missing-id provided, is that devid actually a missing device? → error with guidance
 - [x] ENOSPC pre-flight check
 
 ## `braid replace --old <key> --new <key>`
@@ -45,6 +50,7 @@ We want to accumulate all the checks here in one place before implementing them.
 - [x] --old != --new? → error if same
 - [ ] Is a btrfs exclusive op already running? → refuse
 - [x] Is the pool mounted? → error if not
+- [ ] Is the pool mounted read-only? → refuse with guidance (btrfs would error anyway, but the native error is cryptic; this gives the user a clear diagnosis and next step)
 - [x] Is the new disk present? → error if absent
 - [ ] Is the new disk's mapper already open but not in pool? → partial prior replace
 - [ ] Does the new disk belong to a foreign btrfs pool or have a mismatched LUKS UUID? → refuse
@@ -55,7 +61,7 @@ We want to accumulate all the checks here in one place before implementing them.
 
 - [x] Is the pool already mounted? → "nothing to do"
 - [x] For each config disk: is LUKS already open? → skip that disk
-- [ ] Are there zero unlockable disks (all absent or not-LUKS)? → clear error with guidance
+- [x] Are there zero unlockable disks (all absent or not-LUKS)? → clear error with guidance
 
 ## `braid lock`
 
