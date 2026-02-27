@@ -19,7 +19,7 @@ We want to accumulate all the checks here in one place before implementing them.
 - [x] Is the LUKS mapper already open? → skip LUKS open
 - [ ] Is the mapper open but device NOT in the pool? → partial prior add (LUKS opened, but btrfs device add never ran)
 - [x] Is the device already in the pool (by mapper name)? → "nothing to do"
-- [ ] Does the disk belong to a foreign btrfs pool or have a LUKS UUID that doesn't match? → refuse (prevents cross-wiring)
+- [ ] After LUKS open, does the device have a btrfs superblock from a different pool? → refuse (partially implemented: `device_has_btrfs_superblock()` exists but doesn't compare pool UUIDs)
 - [ ] Does the pool have missing devices? → warn about adding to a degraded pool
 
 ## `braid remove <key>`
@@ -53,7 +53,7 @@ We want to accumulate all the checks here in one place before implementing them.
 - [ ] Is the pool mounted read-only? → refuse with guidance (btrfs would error anyway, but the native error is cryptic; this gives the user a clear diagnosis and next step)
 - [x] Is the new disk present? → error if absent
 - [ ] Is the new disk's mapper already open but not in pool? → partial prior replace
-- [ ] Does the new disk belong to a foreign btrfs pool or have a mismatched LUKS UUID? → refuse
+- [ ] After LUKS open, does the new device have a btrfs superblock from a different pool? → refuse (partially implemented: `device_has_btrfs_superblock()` exists but doesn't compare pool UUIDs)
 - [x] Is the old disk live or dead? → determines eviction path
 - [x] If old disk is live, does pool have other missing devices? → refuse
 
