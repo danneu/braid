@@ -1,7 +1,7 @@
 use crate::cmd::{CmdError, CmdRequest, CommandRunner};
-use crate::config::{DiskConfig, mapper_name};
+use crate::config::{mapper_name, DiskConfig};
 use crate::parse::{
-    ParseError, parse_btrfs_filesystem_show, parse_cryptsetup_luks_uuid, parse_cryptsetup_status,
+    parse_btrfs_filesystem_show, parse_cryptsetup_luks_uuid, parse_cryptsetup_status, ParseError,
 };
 use crate::types::*;
 
@@ -52,12 +52,12 @@ pub enum ProbeError {
 pub fn probe_config_disk<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
-    key: &str,
+    name: &str,
     disk: &DiskConfig,
 ) -> Result<ConfigDisk, ProbeError> {
     if !fs.exists(&disk.by_id.0) {
         return Ok(ConfigDisk {
-            key: key.to_owned(),
+            name: name.to_owned(),
             by_id_path: disk.by_id.clone(),
             state: ConfigDiskState::Absent,
         });
@@ -71,7 +71,7 @@ pub fn probe_config_disk<R: CommandRunner, F: Filesystem + ?Sized>(
         Ok(out) => out.uuid,
         Err(ParseError::CommandFailed { .. }) => {
             return Ok(ConfigDisk {
-                key: key.to_owned(),
+                name: name.to_owned(),
                 by_id_path: disk.by_id.clone(),
                 state: ConfigDiskState::PresentNotLuks,
             });
@@ -79,11 +79,11 @@ pub fn probe_config_disk<R: CommandRunner, F: Filesystem + ?Sized>(
         Err(e) => return Err(ProbeError::Parse(e)),
     };
 
-    let mn = mapper_name(key);
+    let mn = mapper_name(name);
     let mapper_open = fs.exists(&format!("/dev/mapper/{}", mn.0));
 
     Ok(ConfigDisk {
-        key: key.to_owned(),
+        name: name.to_owned(),
         by_id_path: disk.by_id.clone(),
         state: ConfigDiskState::PresentLuks { uuid, mapper_open },
     })
@@ -165,8 +165,9 @@ pub fn probe_pool<R: CommandRunner>(
             Some(d) => d,
         };
 
-        let uuid_raw =
-            runner.run(&CmdRequest::CryptsetupLuksUuid { device: underlying.clone() })?;
+        let uuid_raw = runner.run(&CmdRequest::CryptsetupLuksUuid {
+            device: underlying.clone(),
+        })?;
         let uuid_out = parse_cryptsetup_luks_uuid(&uuid_raw)?;
 
         devices.push(PoolDevice {
@@ -253,7 +254,7 @@ mod tests {
         let d = disk("/dev/disk/by-id/disk-1");
 
         let result = probe_config_disk(&runner, &fs, "toshiba", &d).unwrap();
-        assert_eq!(result.key, "toshiba");
+        assert_eq!(result.name, "toshiba");
         assert_eq!(result.state, ConfigDiskState::Absent);
     }
 
@@ -326,7 +327,7 @@ mod tests {
         let d = disk("/dev/disk/by-id/disk-1");
 
         let result = probe_config_disk(&runner, &fs, "toshiba", &d).unwrap();
-        assert_eq!(result.key, "toshiba");
+        assert_eq!(result.name, "toshiba");
         assert_eq!(
             result.state,
             ConfigDiskState::PresentLuks {
@@ -749,7 +750,11 @@ mod tests {
 
         let result = probe_pool(&runner, "/mnt/storage").unwrap();
         assert!(result.mounted);
-        assert_eq!(result.devices.len(), 1, "device with (null) underlying must be skipped");
+        assert_eq!(
+            result.devices.len(),
+            1,
+            "device with (null) underlying must be skipped"
+        );
         assert_eq!(result.devices[0].mapper, MapperName("braid-toshiba".into()));
         assert_eq!(result.missing_count, 1);
         assert_eq!(result.total_devices, 2);

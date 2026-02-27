@@ -1,15 +1,15 @@
-# Test: config disk-key immutability
+# Test: config disk-name immutability
 #
-# What: Verifies mutating braid commands fail fast when a disk key is renamed
+# What: Verifies mutating braid commands fail fast when a disk name is renamed
 # in config while reusing the same by-id identity.
 #
-# Why: v1.0 treats disk keys as immutable identity anchors. A key rename must
+# Why: v1.0 treats disk names as immutable identity anchors. A name rename must
 # not be silently reconciled by mutating commands.
 #
 # Dependencies: braid add (to build initial pool and disk-map entries).
 { braid }:
 {
-  name = "config-key-immutability";
+  name = "config-name-immutability";
 
   nodes.machine = { pkgs, ... }: {
     virtualisation.emptyDiskImages = [
@@ -33,6 +33,6 @@
     };
   };
 
-  testScript = builtins.readFile ./config-key-immutability.py;
+  testScript = builtins.readFile ./config-name-immutability.py;
 }
 

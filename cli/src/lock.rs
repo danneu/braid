@@ -53,8 +53,8 @@ pub fn cmd_lock<R: CommandRunner, F: Filesystem + ?Sized>(
 
     // 3. Close each mapper
     let mut all_already_closed = true;
-    for key in config.disks().keys() {
-        let mn = mapper_name(key);
+    for name in config.disks().keys() {
+        let mn = mapper_name(name);
         let mapper_path = format!("/dev/mapper/{}", mn.0);
 
         if fs.exists(&mapper_path) {
@@ -69,10 +69,10 @@ pub fn cmd_lock<R: CommandRunner, F: Filesystem + ?Sized>(
                     close_result.stderr.trim()
                 )));
             }
-            eprintln!("{}  disk: {:<7}locked", tag("ok"), key);
+            eprintln!("{}  disk: {:<7}locked", tag("ok"), name);
             all_already_closed = false;
         } else {
-            eprintln!("{}  disk: {:<7}already closed", tag("ok"), key);
+            eprintln!("{}  disk: {:<7}already closed", tag("ok"), name);
         }
     }
 

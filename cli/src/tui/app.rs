@@ -66,14 +66,14 @@ pub fn update(model: &mut Model, msg: Message) -> Vec<Effect> {
             }]
         }
         Message::SelectNextDisk => {
-            let len = model.disk_keys.len();
+            let len = model.disk_names.len();
             if len > 0 {
                 model.selected_disk = (model.selected_disk + 1) % len;
             }
             vec![]
         }
         Message::SelectPrevDisk => {
-            let len = model.disk_keys.len();
+            let len = model.disk_names.len();
             if len > 0 {
                 model.selected_disk = (model.selected_disk + len - 1) % len;
             }

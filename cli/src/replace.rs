@@ -43,8 +43,8 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
     config_path: &Path,
-    old_key: &str,
-    new_key: &str,
+    old_name: &str,
+    new_name: &str,
     missing_id: Option<u64>,
     dry_run: bool,
     yes: bool,
@@ -55,15 +55,15 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
 ) -> Result<(), ReplaceError> {
     let (config, _config_raw) = config_read_raw(config_path)?;
     let disk_map_state = disk_map::load_disk_map();
-    disk_map::validate_config_key_stability(&config, &disk_map_state)
+    disk_map::validate_config_name_stability(&config, &disk_map_state)
         .map_err(|e| ReplaceError::Validation(e.to_string()))?;
 
     // --new must be in config
-    let new_disk = config.disk_by_key(new_key).ok_or_else(|| {
-        let available: Vec<_> = config.keys().into_iter().map(|s| s.as_str()).collect();
+    let new_disk = config.disk_by_name(new_name).ok_or_else(|| {
+        let available: Vec<_> = config.names().into_iter().map(|s| s.as_str()).collect();
         ReplaceError::Validation(format!(
             "new disk '{}' not found in config. Available: {}",
-            new_key,
+            new_name,
             available.join(", ")
         ))
     })?;
@@ -91,21 +91,21 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         .map_err(ReplaceError::Validation)?;
 
     // --old == --new: reject early.
-    if old_key == new_key {
+    if old_name == new_name {
         return Err(ReplaceError::Validation(
             "--old and --new must be different disks".into(),
         ));
     }
 
     // Resolve --old: live, dead-by-devid, or dead-missing.
-    let old_mn = mapper_name(old_key);
-    let eviction_target = resolve_eviction_target(old_key, &old_mn, missing_id, &pool)?;
+    let old_mn = mapper_name(old_name);
+    let eviction_target = resolve_eviction_target(old_name, &old_mn, missing_id, &pool)?;
 
     // Probe --new disk state
-    let new_probed = probe_config_disk(runner, fs, new_key, new_disk)?;
+    let new_probed = probe_config_disk(runner, fs, new_name, new_disk)?;
 
     // Compile steps
-    let steps = compile_replace_steps(new_key, &new_probed, &eviction_target, &config, &pool)?;
+    let steps = compile_replace_steps(new_name, &new_probed, &eviction_target, &config, &pool)?;
 
     if dry_run {
         for step in &steps {
@@ -122,8 +122,8 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             "{}",
             replace_confirm_message(
                 &new_probed.state,
-                old_key,
-                new_key,
+                old_name,
+                new_name,
                 &new_disk.by_id.0,
                 is_live
             )
@@ -155,14 +155,14 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
 
     // Read passphrase
     let passphrase = read_passphrase(passphrase_file, passphrase_stdin)?;
-    let new_mn = mapper_name(new_key);
+    let new_mn = mapper_name(new_name);
 
     // Step 1: Init new disk if needed
     match new_probed.state {
         ConfigDiskState::Absent => {
             return Err(ReplaceError::Validation(format!(
                 "new disk '{}' ({}) is not present. Is it plugged in?",
-                new_key, new_disk.by_id
+                new_name, new_disk.by_id
             )));
         }
         ConfigDiskState::PresentNotLuks => {
@@ -189,7 +189,7 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             let backup_path = backup_luks_header(runner, &new_disk.by_id.0, &new_mn.0)?;
             eprintln!("LUKS header backed up: {}", backup_path.display());
 
-            ensure_luks_open(runner, fs, new_key, new_disk, &passphrase)?;
+            ensure_luks_open(runner, fs, new_name, new_disk, &passphrase)?;
             eprintln!("LUKS opened: {} → {}", new_disk.by_id, new_mn);
 
             if let Some(kf) = enroll_key_file {
@@ -199,7 +199,7 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         }
         ConfigDiskState::PresentLuks { mapper_open, .. } => {
             if !mapper_open {
-                ensure_luks_open(runner, fs, new_key, new_disk, &passphrase)?;
+                ensure_luks_open(runner, fs, new_name, new_disk, &passphrase)?;
                 eprintln!("LUKS opened: {} → {}", new_disk.by_id, new_mn);
             } else if !pool.devices.iter().any(|d| d.mapper == new_mn) {
                 eprintln!("note: LUKS mapper is already open but device is not yet in pool. Completing replace.");
@@ -234,13 +234,13 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
 
     // Update disk map (best effort — never fail the replace)
     let pool_after = probe_pool(runner, config.mount_point()).ok();
-    let new_mn = mapper_name(new_key);
+    let new_mn = mapper_name(new_name);
     let mut map_warning: Option<String> = None;
     disk_map::update_disk_map_best_effort(|map| {
         map_warning = apply_replace_disk_map_update(
             map,
-            old_key,
-            new_key,
+            old_name,
+            new_name,
             &new_disk.by_id.0,
             &new_mn,
             pool_after.as_ref(),
@@ -252,7 +252,7 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
 
     eprintln!(
         "Done. Replaced {} with {}. If not already done: update braid.disks and run nixos-rebuild switch.",
-        old_key, new_key
+        old_name, new_name
     );
     Ok(())
 }
@@ -268,7 +268,7 @@ enum EvictionTarget {
 }
 
 fn resolve_eviction_target(
-    old_key: &str,
+    old_name: &str,
     old_mn: &MapperName,
     missing_id: Option<u64>,
     pool: &PoolState,
@@ -302,7 +302,7 @@ fn resolve_eviction_target(
     if pool.missing_count == 0 {
         return Err(ReplaceError::Validation(format!(
             "disk '{}' not found in pool and no missing devices detected.",
-            old_key
+            old_name
         )));
     }
 
@@ -317,21 +317,21 @@ fn resolve_eviction_target(
 }
 
 fn compile_replace_steps(
-    new_key: &str,
+    new_name: &str,
     new_probed: &ConfigDisk,
     eviction_target: &EvictionTarget,
     config: &crate::config::Config,
     pool: &PoolState,
 ) -> Result<Vec<ReplaceStep>, ReplaceError> {
-    let new_disk = config.disk_by_key(new_key).unwrap();
-    let new_mn = mapper_name(new_key);
+    let new_disk = config.disk_by_name(new_name).unwrap();
+    let new_mn = mapper_name(new_name);
     let mut steps = Vec::new();
 
     match &new_probed.state {
         ConfigDiskState::Absent => {
             return Err(ReplaceError::Validation(format!(
                 "new disk '{}' ({}) is not present. Is it plugged in?",
-                new_key, new_disk.by_id
+                new_name, new_disk.by_id
             )));
         }
         ConfigDiskState::PresentNotLuks => {
@@ -409,25 +409,25 @@ fn compile_replace_steps(
 
 fn replace_confirm_message(
     new_state: &ConfigDiskState,
-    old_key: &str,
-    new_key: &str,
+    old_name: &str,
+    new_name: &str,
     by_id: &str,
     is_live: bool,
 ) -> String {
     let mut msg = if matches!(new_state, ConfigDiskState::PresentNotLuks) {
         format!(
             "WARNING: This will LUKS-format {} ({}). Existing data will be inaccessible.\n",
-            new_key, by_id
+            new_name, by_id
         )
     } else {
         String::new()
     };
     if is_live {
-        msg.push_str(&format!("Replace {} with {}?", old_key, new_key));
+        msg.push_str(&format!("Replace {} with {}?", old_name, new_name));
     } else {
         msg.push_str(&format!(
             "Replace {} (dead) with {} (new)?",
-            old_key, new_key
+            old_name, new_name
         ));
     }
     msg
@@ -435,22 +435,22 @@ fn replace_confirm_message(
 
 fn apply_replace_disk_map_update(
     map: &mut crate::disk_map::DiskMap,
-    old_key: &str,
-    new_key: &str,
+    old_name: &str,
+    new_name: &str,
     new_by_id: &str,
     new_mn: &MapperName,
     pool_after: Option<&PoolState>,
 ) -> Option<String> {
-    crate::disk_map::remove_disk(map, old_key);
+    crate::disk_map::remove_disk(map, old_name);
 
     if let Some(pool_after) = pool_after {
         if let Some(dev) = pool_after.devices.iter().find(|d| d.mapper == *new_mn) {
-            crate::disk_map::record_disk(map, new_key, new_by_id, &dev.luks_uuid.0, dev.devid);
+            crate::disk_map::record_disk(map, new_name, new_by_id, &dev.luks_uuid.0, dev.devid);
             None
         } else {
             Some(format!(
                 "Warning: replace succeeded but could not find '{}' in post-operation pool probe; old disk map entry removed, new entry not recorded.",
-                new_key
+                new_name
             ))
         }
     } else {
@@ -475,7 +475,7 @@ mod tests {
             false,
         );
         assert!(msg.contains("LUKS-format"), "should mention LUKS-format");
-        assert!(msg.contains("new1"), "should mention new disk key");
+        assert!(msg.contains("new1"), "should mention new disk name");
         assert!(
             msg.contains("/dev/disk/by-id/usb-WD_5678"),
             "should mention by-id"
@@ -649,7 +649,7 @@ mod tests {
         let config: crate::config::Config =
             serde_json::from_value(config_json).expect("valid config");
         let new_probed = ConfigDisk {
-            key: "disk3".into(),
+            name: "disk3".into(),
             by_id_path: ByIdPath("/dev/disk/by-id/virtio-disk3".into()),
             state: ConfigDiskState::PresentNotLuks,
         };

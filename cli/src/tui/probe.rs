@@ -42,19 +42,24 @@ pub fn probe_pool_for_tui<R: CommandRunner>(
         .map_err(|e| e.to_string())?;
     let dev_usage = parse_btrfs_device_usage(&dev_usage_raw).map_err(|e| e.to_string())?;
 
-    // Map devid → disk key via probe_pool's devices (from btrfs filesystem show,
+    // Map devid → disk name via probe_pool's devices (from btrfs filesystem show,
     // which reports stable /dev/mapper/braid-* paths). btrfs device usage may
     // report raw /dev/dm-N paths that don't match config disk names.
-    let devid_to_key: HashMap<u64, &str> = domain
+    let devid_to_name: HashMap<u64, &str> = domain
         .devices
         .iter()
-        .filter_map(|d| d.mapper.0.strip_prefix("braid-").map(|key| (d.devid, key)))
+        .filter_map(|d| {
+            d.mapper
+                .0
+                .strip_prefix("braid-")
+                .map(|name| (d.devid, name))
+        })
         .collect();
 
     let mut disk_usage = HashMap::new();
     for entry in &dev_usage.devices {
-        let disk_key = match devid_to_key.get(&entry.devid) {
-            Some(key) => *key,
+        let disk_name = match devid_to_name.get(&entry.devid) {
+            Some(name) => *name,
             None => continue,
         };
         let data: u64 = entry
@@ -70,7 +75,7 @@ pub fn probe_pool_for_tui<R: CommandRunner>(
             .map(|a| a.bytes)
             .sum();
         disk_usage.insert(
-            disk_key.to_owned(),
+            disk_name.to_owned(),
             DiskUsage {
                 size: entry.device_size,
                 data,
@@ -91,17 +96,17 @@ pub fn probe_pool_for_tui<R: CommandRunner>(
     let mut smart_health = HashMap::new();
     let mut power_state = HashMap::new();
     let mut luks_info = HashMap::new();
-    for (disk_key, by_id_path) in disk_by_id {
+    for (disk_name, by_id_path) in disk_by_id {
         let health = runner
             .run(&CmdRequest::SmartctlHealthJson {
                 device: by_id_path.clone(),
             })
             .map(|raw| parse_smartctl_health(&raw))
             .unwrap_or(SmartHealth::Unknown);
-        smart_health.insert(disk_key.clone(), health);
+        smart_health.insert(disk_name.clone(), health);
 
         if let Ok(state) = check_power_mode(by_id_path) {
-            power_state.insert(disk_key.clone(), state);
+            power_state.insert(disk_name.clone(), state);
         }
 
         if let Ok(raw) = runner.run(&CmdRequest::CryptsetupLuksDump {
@@ -109,7 +114,7 @@ pub fn probe_pool_for_tui<R: CommandRunner>(
         }) {
             if let Ok(dump) = parse_cryptsetup_luks_dump(&raw) {
                 luks_info.insert(
-                    disk_key.clone(),
+                    disk_name.clone(),
                     DiskLuksInfo {
                         cipher: dump.cipher,
                         key_size_bits: dump.key_size_bits,
@@ -121,7 +126,7 @@ pub fn probe_pool_for_tui<R: CommandRunner>(
     }
 
     // Extract transport type (sata, nvme, usb, etc.) from lsblk tree.
-    // Walk parent devices: for each child named "braid-{key}", take the
+    // Walk parent devices: for each child named "braid-{name}", take the
     // parent's TRAN value. TRAN is only set on physical devices, not dm-crypt.
     let mut disk_transport = HashMap::new();
     if let Ok(lsblk_raw) = runner.run(&CmdRequest::LsblkJson) {
@@ -129,8 +134,8 @@ pub fn probe_pool_for_tui<R: CommandRunner>(
             for dev in &lsblk.blockdevices {
                 if let Some(tran) = &dev.tran {
                     for child in &dev.children {
-                        if let Some(key) = child.name.strip_prefix("braid-") {
-                            disk_transport.insert(key.to_owned(), tran.clone());
+                        if let Some(name) = child.name.strip_prefix("braid-") {
+                            disk_transport.insert(name.to_owned(), tran.clone());
                         }
                     }
                 }

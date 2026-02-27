@@ -142,11 +142,11 @@ pub fn verify_passphrase<R: CommandRunner>(
 pub fn ensure_luks_open<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
-    key: &str,
+    name: &str,
     disk: &DiskConfig,
     passphrase: &str,
 ) -> Result<(), LuksError> {
-    let mn = mapper_name(key);
+    let mn = mapper_name(name);
     let mapper_path = format!("/dev/mapper/{}", mn.0);
     if fs.exists(&mapper_path) {
         return Ok(());
@@ -194,11 +194,11 @@ pub fn luks_opts_from_env() -> Vec<String> {
 pub fn ensure_luks_open_with_key_file<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
-    key: &str,
+    name: &str,
     disk: &DiskConfig,
     key_file_path: &std::path::Path,
 ) -> Result<(), LuksError> {
-    let mn = mapper_name(key);
+    let mn = mapper_name(name);
     let mapper_path = format!("/dev/mapper/{}", mn.0);
     if fs.exists(&mapper_path) {
         return Ok(());

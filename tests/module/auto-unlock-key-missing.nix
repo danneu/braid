@@ -9,7 +9,7 @@
 { lib, pkgs, ... }:
 let
   passphrase = "testpassphrase";
-  diskKeys = [ "disk1" ];
+  diskNames = [ "disk1" ];
 in
 {
   name = "auto-unlock-key-missing";
@@ -20,7 +20,7 @@ in
     braid = {
       enable = true;
       package = braid;
-      disks = lib.genAttrs diskKeys (d: { byId = "/dev/disk/by-id/virtio-${d}"; });
+      disks = lib.genAttrs diskNames (d: { byId = "/dev/disk/by-id/virtio-${d}"; });
       autoUnlock = {
         enable = true;
         # Point at a device that does NOT exist in this VM

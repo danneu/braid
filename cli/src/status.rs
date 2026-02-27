@@ -63,7 +63,7 @@ pub struct CapacityReport {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiskReport {
-    pub key: String,
+    pub name: String,
     pub mapper: String,
     pub by_id: String,
     pub luks_uuid: String,
@@ -88,7 +88,7 @@ pub struct DiskErrors {
 // ---------------------------------------------------------------------------
 
 struct CompactDrive {
-    key: String,
+    name: String,
     device_short: String,
     devid: Option<u64>,
     status: &'static str,
@@ -100,7 +100,7 @@ fn build_compact_drives(pool: &PoolState, config: &Config) -> Vec<CompactDrive> 
     // Present pool devices
     let pool_mappers: HashSet<&str> = pool.devices.iter().map(|d| d.mapper.0.as_str()).collect();
     for pd in &pool.devices {
-        let key = pd
+        let name = pd
             .mapper
             .0
             .strip_prefix("braid-")
@@ -112,7 +112,7 @@ fn build_compact_drives(pool: &PoolState, config: &Config) -> Vec<CompactDrive> 
             .unwrap_or(&pd.underlying)
             .to_owned();
         drives.push(CompactDrive {
-            key,
+            name,
             device_short,
             devid: Some(pd.devid),
             status: "present",
@@ -124,7 +124,7 @@ fn build_compact_drives(pool: &PoolState, config: &Config) -> Vec<CompactDrive> 
         let expected_mapper = format!("braid-{name}");
         if !pool_mappers.contains(expected_mapper.as_str()) {
             drives.push(CompactDrive {
-                key: name.clone(),
+                name: name.clone(),
                 device_short: "-".to_owned(),
                 devid: None,
                 status: "missing",
@@ -161,7 +161,7 @@ struct VerboseContext {
 }
 
 struct HumanDisk {
-    key: String,
+    name: String,
     by_id: String,
     luks_uuid: String,
     devid: Option<String>,
@@ -478,8 +478,8 @@ fn build_disk_reports<R: CommandRunner>(
             matches!(&cd.state, ConfigDiskState::PresentLuks { uuid, .. } if uuid == &pd.luks_uuid)
         });
 
-        let disk_key = matched_config.map(|cd| cd.key.clone()).unwrap_or_else(|| {
-            // Derive key from mapper (strip braid- prefix)
+        let disk_name = matched_config.map(|cd| cd.name.clone()).unwrap_or_else(|| {
+            // Derive name from mapper (strip braid- prefix)
             pd.mapper
                 .0
                 .strip_prefix("braid-")
@@ -512,7 +512,7 @@ fn build_disk_reports<R: CommandRunner>(
             });
 
         disk_reports.push(DiskReport {
-            key: disk_key.clone(),
+            name: disk_name.clone(),
             mapper: mapper.clone(),
             by_id: by_id.clone(),
             luks_uuid: pd.luks_uuid.0.clone(),
@@ -523,7 +523,7 @@ fn build_disk_reports<R: CommandRunner>(
         });
 
         human_details.push(HumanDisk {
-            key: disk_key,
+            name: disk_name,
             by_id: by_id.clone(),
             luks_uuid: pd.luks_uuid.0.clone(),
             devid: Some(pd.devid.to_string()),
@@ -546,10 +546,10 @@ fn build_disk_reports<R: CommandRunner>(
             continue;
         }
 
-        let mapper = mapper_name(&cd.key).0;
+        let mapper = mapper_name(&cd.name).0;
 
         disk_reports.push(DiskReport {
-            key: cd.key.clone(),
+            name: cd.name.clone(),
             mapper: mapper.clone(),
             by_id: cd.by_id_path.0.clone(),
             luks_uuid: String::new(),
@@ -560,7 +560,7 @@ fn build_disk_reports<R: CommandRunner>(
         });
 
         human_details.push(HumanDisk {
-            key: cd.key.clone(),
+            name: cd.name.clone(),
             by_id: cd.by_id_path.0.clone(),
             luks_uuid: String::new(),
             devid: None,
@@ -609,7 +609,7 @@ fn format_status_human(
                 .unwrap_or_else(|| "-".to_owned());
             out.push_str(&format!(
                 "  {:<12} {:<4} {:<8} {}\n",
-                d.key, d.device_short, devid_str, d.status
+                d.name, d.device_short, devid_str, d.status
             ));
         }
     }
@@ -631,16 +631,16 @@ fn format_status_human(
         out.push_str("\nDisks:\n");
         for d in disks {
             out.push('\n');
-            // show disk key
+            // show disk name
             if d.status == "missing" {
-                out.push_str(&format!("  {:<18}MISSING\n", d.key));
+                out.push_str(&format!("  {:<18}MISSING\n", d.name));
             } else {
                 let devid_str = d
                     .devid
                     .as_deref()
                     .map(|id| format!("devid {id}"))
                     .unwrap_or_default();
-                out.push_str(&format!("  {:<18}{:<10}{}\n", d.key, devid_str, d.status));
+                out.push_str(&format!("  {:<18}{:<10}{}\n", d.name, devid_str, d.status));
             }
 
             // Device path
@@ -1240,7 +1240,7 @@ mod tests {
     #[test]
     fn status_json_verbose_disks() {
         let present = DiskReport {
-            key: "disk1".to_owned(),
+            name: "disk1".to_owned(),
             mapper: "disk1".to_owned(),
             by_id: "/dev/disk/by-id/disk1".to_owned(),
             luks_uuid: "11111111-1111-1111-1111-111111111111".to_owned(),
@@ -1256,7 +1256,7 @@ mod tests {
             }),
         };
         let missing = DiskReport {
-            key: "disk3".to_owned(),
+            name: "disk3".to_owned(),
             mapper: "disk3".to_owned(),
             by_id: "/dev/disk/by-id/disk3".to_owned(),
             luks_uuid: String::new(),
@@ -1375,7 +1375,7 @@ mod tests {
             }),
             last_scrub: Some("never".to_owned()),
             disks: vec![DiskReport {
-                key: "disk1".to_owned(),
+                name: "disk1".to_owned(),
                 mapper: "disk1".to_owned(),
                 by_id: "/dev/disk/by-id/disk1".to_owned(),
                 luks_uuid: "11111111-1111-1111-1111-111111111111".to_owned(),
@@ -1442,7 +1442,7 @@ mod tests {
             disks: vec![],
         };
         let compact = vec![CompactDrive {
-            key: "disk1".to_owned(),
+            name: "disk1".to_owned(),
             device_short: "vda".to_owned(),
             devid: Some(1),
             status: "present",
@@ -1481,9 +1481,24 @@ mod tests {
             disks: vec![],
         };
         let compact = vec![
-            CompactDrive { key: "disk1".into(), device_short: "vda".into(), devid: Some(1), status: "present" },
-            CompactDrive { key: "disk2".into(), device_short: "vdb".into(), devid: Some(2), status: "present" },
-            CompactDrive { key: "disk3".into(), device_short: "vdc".into(), devid: Some(3), status: "present" },
+            CompactDrive {
+                name: "disk1".into(),
+                device_short: "vda".into(),
+                devid: Some(1),
+                status: "present",
+            },
+            CompactDrive {
+                name: "disk2".into(),
+                device_short: "vdb".into(),
+                devid: Some(2),
+                status: "present",
+            },
+            CompactDrive {
+                name: "disk3".into(),
+                device_short: "vdc".into(),
+                devid: Some(3),
+                status: "present",
+            },
         ];
         let human = format_status_human(&report, Some(&compact), None);
         assert!(human.contains("healthy"), "got:\n{human}");
@@ -1515,9 +1530,24 @@ mod tests {
             disks: vec![],
         };
         let compact = vec![
-            CompactDrive { key: "disk1".into(), device_short: "vda".into(), devid: Some(1), status: "present" },
-            CompactDrive { key: "disk2".into(), device_short: "vdb".into(), devid: Some(2), status: "present" },
-            CompactDrive { key: "disk3".into(), device_short: "-".into(), devid: None, status: "missing" },
+            CompactDrive {
+                name: "disk1".into(),
+                device_short: "vda".into(),
+                devid: Some(1),
+                status: "present",
+            },
+            CompactDrive {
+                name: "disk2".into(),
+                device_short: "vdb".into(),
+                devid: Some(2),
+                status: "present",
+            },
+            CompactDrive {
+                name: "disk3".into(),
+                device_short: "-".into(),
+                devid: None,
+                status: "missing",
+            },
         ];
         let human = format_status_human(&report, Some(&compact), None);
         assert!(
@@ -1561,7 +1591,7 @@ mod tests {
     #[test]
     fn status_verbose_present_disks() {
         let human_disks = vec![HumanDisk {
-            key: "disk1".to_owned(),
+            name: "disk1".to_owned(),
             by_id: "/dev/disk/by-id/disk1".to_owned(),
             luks_uuid: "11111111-1111-1111-1111-111111111111".to_owned(),
             devid: Some("1".to_owned()),
@@ -1607,7 +1637,7 @@ mod tests {
     #[test]
     fn status_verbose_missing_disk() {
         let human_disks = vec![HumanDisk {
-            key: "disk3".to_owned(),
+            name: "disk3".to_owned(),
             by_id: "/dev/disk/by-id/disk3".to_owned(),
             luks_uuid: String::new(),
             devid: None,
@@ -1644,7 +1674,7 @@ mod tests {
     #[test]
     fn status_verbose_lsblk_failure() {
         let human_disks = vec![HumanDisk {
-            key: "disk1".to_owned(),
+            name: "disk1".to_owned(),
             by_id: "/dev/disk/by-id/disk1".to_owned(),
             luks_uuid: "11111111-1111-1111-1111-111111111111".to_owned(),
             devid: Some("1".to_owned()),

@@ -95,7 +95,7 @@ pub struct Model {
     pub show_help: bool,
     pub show_disk_detail: bool,
     pub tab: Tab,
-    pub disk_keys: Vec<String>,
+    pub disk_names: Vec<String>,
     pub disk_by_id: HashMap<String, String>,
     pub selected_disk: usize,
     pub pool: PoolStatus,
@@ -107,7 +107,7 @@ pub struct Model {
 
 impl Model {
     pub fn new(
-        disk_keys: Vec<String>,
+        disk_names: Vec<String>,
         disk_by_id: HashMap<String, String>,
         mount_point: String,
     ) -> (Self, Vec<Effect>) {
@@ -120,7 +120,7 @@ impl Model {
             show_help: false,
             show_disk_detail: false,
             tab: Tab::Data,
-            disk_keys,
+            disk_names,
             disk_by_id,
             selected_disk: 0,
             pool: PoolStatus::Loading,
@@ -132,13 +132,13 @@ impl Model {
         (model, effects)
     }
 
-    pub fn new_demo(disk_keys: Vec<String>, pool: PoolStatus) -> Self {
+    pub fn new_demo(disk_names: Vec<String>, pool: PoolStatus) -> Self {
         Self {
             running: true,
             show_help: false,
             show_disk_detail: false,
             tab: Tab::Data,
-            disk_keys,
+            disk_names,
             disk_by_id: HashMap::new(),
             selected_disk: 0,
             pool,

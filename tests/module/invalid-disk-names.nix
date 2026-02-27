@@ -1,10 +1,10 @@
-# Test: braid-module-invalid-disk-keys
+# Test: braid-module-invalid-disk-names
 #
-# What: Evaluates the braid module with invalid and valid disk keys to verify
+# What: Evaluates the braid module with invalid and valid disk names to verify
 # that assertion validation fires correctly. This is an eval-time test — no VM
 # is booted.
 #
-# Why: Disk keys become device-mapper names (braid-<key>), which flow into
+# Why: Disk names become device-mapper names (braid-<name>), which flow into
 # systemd unit names, initrd scripts, and kernel interfaces. Invalid characters
 # could cause silent breakage. This validates the Nix-side guard.
 #
@@ -35,25 +35,25 @@ let
       ];
     }).config.assertions;
 
-  # Returns true if evaluating with these disks triggers a disk-key assertion failure
-  hasDiskKeyError = disks:
+  # Returns true if evaluating with these disks triggers a disk-name assertion failure
+  hasDiskNameError = disks:
     let
       assertions = evalBraid disks;
       failed = builtins.filter (a: !a.assertion) assertions;
     in
-    builtins.any (a: lib.hasInfix "invalid disk key" a.message) failed;
+    builtins.any (a: lib.hasInfix "invalid disk name" a.message) failed;
 
   checkReject = name: disks:
-    if hasDiskKeyError disks
+    if hasDiskNameError disks
     then "echo 'PASS: ${name} correctly rejected'"
     else "echo 'FAIL: ${name} should have been rejected' && exit 1";
 
   checkAccept = name: disks:
-    if !(hasDiskKeyError disks)
+    if !(hasDiskNameError disks)
     then "echo 'PASS: ${name} correctly accepted'"
     else "echo 'FAIL: ${name} should have been accepted' && exit 1";
 in
-pkgs.runCommand "braid-module-invalid-disk-keys" {} ''
+pkgs.runCommand "braid-module-invalid-disk-names" {} ''
   ${checkReject "1startsWithDigit" { "1startsWithDigit" = { byId = "/dev/disk/by-id/a"; }; }}
   ${checkReject "-startsWithHyphen" { "-startsWithHyphen" = { byId = "/dev/disk/by-id/b"; }; }}
   ${checkReject "_startsWithUnderscore" { "_bad" = { byId = "/dev/disk/by-id/c"; }; }}

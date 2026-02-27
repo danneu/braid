@@ -182,7 +182,7 @@ If the pool has missing devices when you try a live replace, resolve them first 
 
 Braid maintains an advisory disk identity map at `/var/lib/braid/disk-map.json`, recording each disk's `name`, `by_id`, `luks_uuid`, and `devid`. This is updated automatically by `add`, `remove`, `replace`, and `remove-missing` commands. It is non-authoritative — live pool probing is always the source of truth — and is rebuilt by normal command executions.
 
-In v1.0, disk keys are immutable once recorded in this map. Renaming/reassigning a key in config is rejected by mutating commands. Keep the original key, or use explicit `braid replace` / `braid remove` + `braid add` workflows.
+In v1.0, disk names are immutable once recorded in this map. Renaming/reassigning a name in config is rejected by mutating commands. Keep the original name, or use explicit `braid replace` / `braid remove` + `braid add` workflows.
 
 ### Pool status
 
@@ -268,7 +268,7 @@ On boot, the `braid-auto-unlock` service mounts the USB read-only, unlocks the p
 
 ## Shell Completions
 
-Tab completion for subcommands, flags, and disk keys works out of the box on NixOS when `braid.enable = true`. Completions are registered for bash, zsh, and fish.
+Tab completion for subcommands, flags, and disk names works out of the box on NixOS when `braid.enable = true`. Completions are registered for bash, zsh, and fish.
 
 ```sh
 braid <TAB>           # → add  remove  remove-missing  replace  status  doctor

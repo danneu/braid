@@ -23,8 +23,8 @@ pub enum EnrollKeyFileError {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DiskEnrollAction {
-    AlreadyEnrolled { key: String, disk: DiskConfig },
-    NeedsEnroll { key: String, disk: DiskConfig },
+    AlreadyEnrolled { name: String, disk: DiskConfig },
+    NeedsEnroll { name: String, disk: DiskConfig },
 }
 
 /// Discovery phase: iterate config disks and collect present LUKS candidates.
@@ -36,17 +36,17 @@ fn discover_enrollment_candidates<R: CommandRunner, F: Filesystem + ?Sized>(
     config: &Config,
 ) -> Result<Vec<(String, DiskConfig)>, EnrollKeyFileError> {
     let mut candidates = Vec::new();
-    for (key, disk) in config.disks() {
-        let probed = probe::probe_config_disk(runner, fs, key, disk)?;
+    for (name, disk) in config.disks() {
+        let probed = probe::probe_config_disk(runner, fs, name, disk)?;
         match &probed.state {
             ConfigDiskState::Absent => {
-                eprintln!("skip: {} not present", key);
+                eprintln!("skip: {} not present", name);
             }
             ConfigDiskState::PresentNotLuks => {
-                eprintln!("skip: {} not LUKS-formatted", key);
+                eprintln!("skip: {} not LUKS-formatted", name);
             }
             ConfigDiskState::PresentLuks { .. } => {
-                candidates.push((key.clone(), disk.clone()));
+                candidates.push((name.clone(), disk.clone()));
             }
         }
     }
@@ -70,22 +70,22 @@ fn plan_enrollment<R: CommandRunner>(
     passphrase: &str,
 ) -> Result<Vec<DiskEnrollAction>, EnrollKeyFileError> {
     // Verify passphrase once against first candidate
-    let (ref first_key, ref first_disk) = candidates[0];
+    let (ref first_name, ref first_disk) = candidates[0];
     let ok = luks::verify_passphrase(runner, &first_disk.by_id.0, passphrase)?;
     if !ok {
         return Err(EnrollKeyFileError::Validation(format!(
             "wrong passphrase (verified against {})",
-            first_key
+            first_name
         )));
     }
 
     let mut plan = Vec::new();
-    for (key, disk) in candidates {
+    for (name, disk) in candidates {
         // Check if keyfile already works (idempotent)
         if luks::verify_key_file(runner, &disk.by_id.0, key_file_path)? {
-            eprintln!("ok: {} — keyfile already enrolled", key);
+            eprintln!("ok: {} — keyfile already enrolled", name);
             plan.push(DiskEnrollAction::AlreadyEnrolled {
-                key: key.clone(),
+                name: name.clone(),
                 disk: disk.clone(),
             });
             continue;
@@ -97,13 +97,13 @@ fn plan_enrollment<R: CommandRunner>(
             return Err(EnrollKeyFileError::Validation(format!(
                 "slot 1 on {} ({}) is occupied by an unknown key. \
                  Remove it first with `cryptsetup luksKillSlot {} 1` then re-run enrollment.",
-                key, disk.by_id, disk.by_id
+                name, disk.by_id, disk.by_id
             )));
         }
 
-        eprintln!("enroll: {} — will add keyfile to slot 1", key);
+        eprintln!("enroll: {} — will add keyfile to slot 1", name);
         plan.push(DiskEnrollAction::NeedsEnroll {
-            key: key.clone(),
+            name: name.clone(),
             disk: disk.clone(),
         });
     }
@@ -126,9 +126,9 @@ fn apply_enrollment<R: CommandRunner>(
             DiskEnrollAction::AlreadyEnrolled { .. } => {
                 already += 1;
             }
-            DiskEnrollAction::NeedsEnroll { key, disk } => {
+            DiskEnrollAction::NeedsEnroll { name, disk } => {
                 luks::enroll_key_file(runner, &disk.by_id.0, passphrase, key_file_path)?;
-                eprintln!("ok: {} — keyfile enrolled in slot 1", key);
+                eprintln!("ok: {} — keyfile enrolled in slot 1", name);
                 enrolled += 1;
             }
         }
@@ -548,14 +548,14 @@ mod tests {
         assert_eq!(
             plan[0],
             DiskEnrollAction::NeedsEnroll {
-                key: "disk1".to_owned(),
+                name: "disk1".to_owned(),
                 disk: disk(d1),
             }
         );
         assert_eq!(
             plan[1],
             DiskEnrollAction::NeedsEnroll {
-                key: "disk2".to_owned(),
+                name: "disk2".to_owned(),
                 disk: disk(d2),
             }
         );
@@ -590,10 +590,10 @@ mod tests {
         let plan = plan_enrollment(&runner, &candidates, Path::new(kf), pass).unwrap();
         assert_eq!(plan.len(), 2);
         assert!(
-            matches!(&plan[0], DiskEnrollAction::AlreadyEnrolled { key, .. } if key == "disk1")
+            matches!(&plan[0], DiskEnrollAction::AlreadyEnrolled { name, .. } if name == "disk1")
         );
         assert!(
-            matches!(&plan[1], DiskEnrollAction::AlreadyEnrolled { key, .. } if key == "disk2")
+            matches!(&plan[1], DiskEnrollAction::AlreadyEnrolled { name, .. } if name == "disk2")
         );
     }
 
@@ -628,9 +628,9 @@ mod tests {
         let plan = plan_enrollment(&runner, &candidates, Path::new(kf), pass).unwrap();
         assert_eq!(plan.len(), 2);
         assert!(
-            matches!(&plan[0], DiskEnrollAction::AlreadyEnrolled { key, .. } if key == "disk1")
+            matches!(&plan[0], DiskEnrollAction::AlreadyEnrolled { name, .. } if name == "disk1")
         );
-        assert!(matches!(&plan[1], DiskEnrollAction::NeedsEnroll { key, .. } if key == "disk2"));
+        assert!(matches!(&plan[1], DiskEnrollAction::NeedsEnroll { name, .. } if name == "disk2"));
     }
 
     /*
@@ -728,11 +728,11 @@ mod tests {
 
         let plan = vec![
             DiskEnrollAction::NeedsEnroll {
-                key: "disk1".to_owned(),
+                name: "disk1".to_owned(),
                 disk: disk(d1),
             },
             DiskEnrollAction::NeedsEnroll {
-                key: "disk2".to_owned(),
+                name: "disk2".to_owned(),
                 disk: disk(d2),
             },
         ];
@@ -756,7 +756,7 @@ mod tests {
         let runner = MockRunner::default();
 
         let plan = vec![DiskEnrollAction::AlreadyEnrolled {
-            key: "disk1".to_owned(),
+            name: "disk1".to_owned(),
             disk: disk(d1),
         }];
 
@@ -781,11 +781,11 @@ mod tests {
 
         let plan = vec![
             DiskEnrollAction::AlreadyEnrolled {
-                key: "disk1".to_owned(),
+                name: "disk1".to_owned(),
                 disk: disk(d1),
             },
             DiskEnrollAction::NeedsEnroll {
-                key: "disk2".to_owned(),
+                name: "disk2".to_owned(),
                 disk: disk(d2),
             },
         ];

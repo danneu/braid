@@ -46,38 +46,38 @@ pub fn cmd_unlock<R: CommandRunner, F: Filesystem + ?Sized>(
     }
 
     // 2. Probe each config disk
-    let mut to_unlock = Vec::new(); // (key, disk) pairs needing unlock
+    let mut to_unlock = Vec::new(); // (name, disk) pairs needing unlock
     let mut any_open = false;
     let mut any_absent = false;
     let mut any_not_luks = false;
 
-    for (key, disk) in config.disks() {
-        let probed = probe::probe_config_disk(runner, fs, key, disk)?;
+    for (name, disk) in config.disks() {
+        let probed = probe::probe_config_disk(runner, fs, name, disk)?;
         match &probed.state {
             ConfigDiskState::Absent => {
-                eprintln!("{}  disk: {:<10}not found (unplugged?)", tag("skip"), key);
+                eprintln!("{}  disk: {:<10}not found (unplugged?)", tag("skip"), name);
                 any_absent = true;
             }
             ConfigDiskState::PresentNotLuks => {
                 eprintln!(
                     "{}  disk: {:<10}not initialized, run `braid add {}`",
                     tag("skip"),
-                    key,
-                    key
+                    name,
+                    name
                 );
                 any_not_luks = true;
             }
             ConfigDiskState::PresentLuks {
                 mapper_open: true, ..
             } => {
-                eprintln!("{}  disk: {:<10}already open", tag("ok"), key);
+                eprintln!("{}  disk: {:<10}already open", tag("ok"), name);
                 any_open = true;
             }
             ConfigDiskState::PresentLuks {
                 mapper_open: false, ..
             } => {
-                eprintln!("{}  disk: {:<10}found", tag("ok"), key);
-                to_unlock.push((key.clone(), disk.clone()));
+                eprintln!("{}  disk: {:<10}found", tag("ok"), name);
+                to_unlock.push((name.clone(), disk.clone()));
             }
         }
     }
@@ -97,35 +97,35 @@ pub fn cmd_unlock<R: CommandRunner, F: Filesystem + ?Sized>(
     if !to_unlock.is_empty() {
         if let Some(kf) = key_file {
             // Keyfile path: verify against first disk, then open each
-            let (ref first_key, ref first_disk) = to_unlock[0];
+            let (ref first_name, ref first_disk) = to_unlock[0];
             let ok = luks::verify_key_file(runner, &first_disk.by_id.0, kf)?;
             if !ok {
                 return Err(UnlockError::Failed(format!(
                     "wrong keyfile (verified against {})",
-                    first_key
+                    first_name
                 )));
             }
 
-            for (key, disk) in &to_unlock {
-                luks::ensure_luks_open_with_key_file(runner, fs, key, disk, kf)?;
-                eprintln!("{}  disk: {:<10}unlocked", tag("ok"), key);
+            for (name, disk) in &to_unlock {
+                luks::ensure_luks_open_with_key_file(runner, fs, name, disk, kf)?;
+                eprintln!("{}  disk: {:<10}unlocked", tag("ok"), name);
             }
         } else {
             // Passphrase path (unchanged)
             let passphrase = luks::read_passphrase(passphrase_file, passphrase_stdin)?;
 
-            let (ref first_key, ref first_disk) = to_unlock[0];
+            let (ref first_name, ref first_disk) = to_unlock[0];
             let ok = luks::verify_passphrase(runner, &first_disk.by_id.0, &passphrase)?;
             if !ok {
                 return Err(UnlockError::Failed(format!(
                     "wrong passphrase (verified against {})",
-                    first_key
+                    first_name
                 )));
             }
 
-            for (key, disk) in &to_unlock {
-                luks::ensure_luks_open(runner, fs, key, disk, &passphrase)?;
-                eprintln!("{}  disk: {:<10}unlocked", tag("ok"), key);
+            for (name, disk) in &to_unlock {
+                luks::ensure_luks_open(runner, fs, name, disk, &passphrase)?;
+                eprintln!("{}  disk: {:<10}unlocked", tag("ok"), name);
             }
         }
     }

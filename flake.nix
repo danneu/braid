@@ -135,8 +135,8 @@
               braid = linuxCrane.braid;
             }
           );
-          config-key-immutability = pkgs.testers.nixosTest (
-            import ./tests/cli/config-key-immutability.nix {
+          config-name-immutability = pkgs.testers.nixosTest (
+            import ./tests/cli/config-name-immutability.nix {
               braid = linuxCrane.braid;
             }
           );
@@ -178,8 +178,8 @@
               braid = linuxCrane.braid-cli-unwrapped;
             }
           );
-          braid-module-invalid-disk-keys =
-            import ./tests/module/invalid-disk-keys.nix {
+          braid-module-invalid-disk-names =
+            import ./tests/module/invalid-disk-names.nix {
               inherit nixpkgs;
               system = linuxSystem;
             };

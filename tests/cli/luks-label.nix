@@ -1,11 +1,11 @@
 # Test: luks-label
 #
-# What: Verifies that `braid add` sets the LUKS2 label to "braid-<key>" on
+# What: Verifies that `braid add` sets the LUKS2 label to "braid-<name>" on
 # each volume it formats.
 #
 # Why: LUKS labels make volumes identifiable during manual recovery or
 # debugging (e.g. luksDump). If the label is missing or wrong, an operator
-# loses the mapping between raw device and braid disk key.
+# loses the mapping between raw device and braid disk name.
 #
 # Scenario: Operator runs luksDump on an unknown drive and expects to see
 # "braid-disk1" so they can match it back to the braid config.

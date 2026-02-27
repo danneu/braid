@@ -216,7 +216,7 @@ fn disk_table(model: &Model, unit: ByteUnit) -> Table<'_> {
     let header = Row::new(["", "Name", "Bus", "SMART", "Power", "Usage"])
         .style(Style::default().fg(Color::DarkGray));
     let rows: Vec<Row> = model
-        .disk_keys
+        .disk_names
         .iter()
         .enumerate()
         .map(|(i, name)| {
@@ -281,7 +281,7 @@ fn disk_table(model: &Model, unit: ByteUnit) -> Table<'_> {
         })
         .collect();
     let longest_name_len = model
-        .disk_keys
+        .disk_names
         .iter()
         .map(|k| k.len())
         .max()
@@ -290,7 +290,7 @@ fn disk_table(model: &Model, unit: ByteUnit) -> Table<'_> {
     let transport_width = disk_transport
         .map(|t| {
             model
-                .disk_keys
+                .disk_names
                 .iter()
                 .filter_map(|name| t.get(name))
                 .map(|s| s.len())
@@ -302,7 +302,7 @@ fn disk_table(model: &Model, unit: ByteUnit) -> Table<'_> {
     let smart_width = smart_health
         .map(|s| {
             model
-                .disk_keys
+                .disk_names
                 .iter()
                 .filter_map(|name| s.get(name))
                 .map(|h| smart_cell(h).width())
@@ -314,7 +314,7 @@ fn disk_table(model: &Model, unit: ByteUnit) -> Table<'_> {
     let power_width = power_state
         .map(|p| {
             model
-                .disk_keys
+                .disk_names
                 .iter()
                 .filter_map(|name| p.get(name))
                 .map(|s| power_label(s).len())
@@ -383,7 +383,7 @@ fn view_data(model: &Model, frame: &mut Frame, area: Rect, now: PrimitiveDateTim
         Some(_) => 3 + 1 + 1, // +1 gauge
         None => 1 + 1,
     };
-    let disk_height: u16 = model.disk_keys.len() as u16 + 2; // +1 border, +1 header
+    let disk_height: u16 = model.disk_names.len() as u16 + 2; // +1 border, +1 header
     let scrub_height: u16 = match model.pool.current() {
         Some(p) => scrub_lines(&p.scrub) + 1,
         None => 0,
@@ -464,7 +464,7 @@ fn view_placeholder(frame: &mut Frame, area: Rect, name: &str) {
 }
 
 fn view_disk_detail(model: &Model, frame: &mut Frame, area: Rect) {
-    let disk_name = match model.disk_keys.get(model.selected_disk) {
+    let disk_name = match model.disk_names.get(model.selected_disk) {
         Some(name) => name.clone(),
         None => return,
     };
@@ -602,7 +602,7 @@ mod tests {
         out
     }
 
-    fn sample_disk_keys() -> Vec<String> {
+    fn sample_disk_names() -> Vec<String> {
         vec![
             "toshiba".to_owned(),
             "ironwolf".to_owned(),
@@ -620,14 +620,14 @@ mod tests {
 
     #[test]
     fn snapshot_loading() {
-        let model = Model::new_demo(sample_disk_keys(), PoolStatus::Loading);
+        let model = Model::new_demo(sample_disk_names(), PoolStatus::Loading);
         let terminal = render(&model, 60, 22);
         snap!(buffer_to_string(&terminal));
     }
 
     #[test]
     fn snapshot_not_mounted() {
-        let model = Model::new_demo(sample_disk_keys(), PoolStatus::NotMounted);
+        let model = Model::new_demo(sample_disk_names(), PoolStatus::NotMounted);
         let terminal = render(&model, 60, 22);
         snap!(buffer_to_string(&terminal));
     }
@@ -723,14 +723,14 @@ mod tests {
 
     #[test]
     fn snapshot_with_pool() {
-        let model = Model::new_demo(sample_disk_keys(), PoolStatus::Mounted(sample_pool()));
+        let model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(sample_pool()));
         let terminal = render(&model, 60, 22);
         snap!(buffer_to_string(&terminal));
     }
 
     #[test]
     fn snapshot_disk_detail() {
-        let mut model = Model::new_demo(sample_disk_keys(), PoolStatus::Mounted(sample_pool()));
+        let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(sample_pool()));
         model.show_disk_detail = true;
         let terminal = render(&model, 60, 22);
         snap!(buffer_to_string(&terminal));
@@ -739,7 +739,7 @@ mod tests {
     #[test]
     fn snapshot_error() {
         let model = Model::new_demo(
-            sample_disk_keys(),
+            sample_disk_names(),
             PoolStatus::Error("command failed: findmnt exited 1".to_owned()),
         );
         let terminal = render(&model, 60, 22);

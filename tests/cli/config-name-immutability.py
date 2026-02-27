@@ -1,9 +1,9 @@
-# Test: config disk-key immutability
+# Test: config disk-name immutability
 #
-# What: Builds a pool and disk-map entries, then renames one disk key in config
+# What: Builds a pool and disk-map entries, then renames one disk name in config
 # while keeping the same by-id path and runs a mutating command.
 #
-# Why: v1.0 forbids key rename/reassignment in mutating commands; they must
+# Why: v1.0 forbids name rename/reassignment in mutating commands; they must
 # fail fast before probing or making storage changes.
 #
 # Dependencies: braid add succeeds and writes disk-map entries.
@@ -41,7 +41,7 @@ with subtest("Setup: build 2-disk pool and disk-map entries"):
     assert "disk1" in disk_map["disks"], disk_map
     assert "disk2" in disk_map["disks"], disk_map
 
-with subtest("Rename key in config and run mutating command"):
+with subtest("Rename name in config and run mutating command"):
     machine.succeed(
         """cat > /tmp/renamed-config.json <<'JSON'
 {
@@ -61,9 +61,9 @@ JSON"""
     assert status != 0, f"expected non-zero exit, got {status}:\n{output}"
 
     expected = (
-        "Disk key rename/reassignment is not allowed in v1.0. "
-        "Keep original key 'disk1' or use explicit replace/remove+add workflow. "
-        "Details: recorded key 'disk1' with by_id '/dev/disk/by-id/virtio-disk1' "
+        "Disk name rename/reassignment is not allowed in v1.0. "
+        "Keep original name 'disk1' or use explicit replace/remove+add workflow. "
+        "Details: recorded name 'disk1' with by_id '/dev/disk/by-id/virtio-disk1' "
         "now appears as 'wd-red'."
     )
     assert expected in output, f"expected exact immutability error:\n{output}"
@@ -74,6 +74,6 @@ JSON"""
     assert "missing" not in fi_show.lower(), fi_show
 
     map_after = machine.succeed("cat /var/lib/braid/disk-map.json")
-    assert map_after == map_before, "disk-map changed on rejected key rename"
+    assert map_after == map_before, "disk-map changed on rejected name rename"
 
 machine.shutdown()

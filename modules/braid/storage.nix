@@ -6,7 +6,7 @@
 }:
 let
   cfg = config.braid;
-  diskKeys = builtins.attrNames cfg.disks;
+  diskNames = builtins.attrNames cfg.disks;
 
   # Mapper names are braid-<name> (e.g. braid-toshiba)
   mapperName = name: "braid-${name}";
@@ -30,7 +30,7 @@ in
     # braid-auto-unlock handle the actual mount in stage 2. This entry
     # exists so NixOS knows about the mount point for systemctl targets.
     fileSystems.${cfg.mountPoint} = {
-      device = "/dev/mapper/${mapperName (builtins.head diskKeys)}";
+      device = "/dev/mapper/${mapperName (builtins.head diskNames)}";
       fsType = "btrfs";
       options = [
         "degraded"

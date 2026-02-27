@@ -14,9 +14,9 @@ pub enum ConfigBuildError {
     #[error("mount_point must not be empty")]
     EmptyMountPoint,
     #[error(
-        "invalid disk key '{0}': must start with a letter, contain only letters, digits, hyphens, or underscores, and be at most 32 characters"
+        "invalid disk name '{0}': must start with a letter, contain only letters, digits, hyphens, or underscores, and be at most 32 characters"
     )]
-    InvalidDiskKey(String),
+    InvalidDiskName(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -40,8 +40,8 @@ impl Config {
             return Err(ConfigBuildError::EmptyDisks);
         }
         for name in disks.keys() {
-            if !is_valid_disk_key(name) {
-                return Err(ConfigBuildError::InvalidDiskKey(name.clone()));
+            if !is_valid_disk_name(name) {
+                return Err(ConfigBuildError::InvalidDiskName(name.clone()));
             }
         }
         let mut seen = std::collections::HashSet::new();
@@ -60,11 +60,11 @@ impl Config {
         &self.disks
     }
 
-    pub fn disk_by_key(&self, key: &str) -> Option<&DiskConfig> {
-        self.disks.get(key)
+    pub fn disk_by_name(&self, name: &str) -> Option<&DiskConfig> {
+        self.disks.get(name)
     }
 
-    pub fn keys(&self) -> Vec<&String> {
+    pub fn names(&self) -> Vec<&String> {
         self.disks.keys().collect()
     }
 
@@ -73,16 +73,16 @@ impl Config {
     }
 }
 
-/// Returns the mapper name for a disk key: braid-<key>
-pub fn mapper_name(key: &str) -> MapperName {
-    MapperName(format!("braid-{key}"))
+/// Returns the mapper name for a disk name: braid-<name>
+pub fn mapper_name(name: &str) -> MapperName {
+    MapperName(format!("braid-{name}"))
 }
 
-fn is_valid_disk_key(key: &str) -> bool {
-    if key.len() > 32 {
+fn is_valid_disk_name(name: &str) -> bool {
+    if name.len() > 32 {
         return false;
     }
-    let mut chars = key.chars();
+    let mut chars = name.chars();
     match chars.next() {
         Some(c) if c.is_ascii_alphabetic() => {}
         _ => return false,
@@ -162,7 +162,7 @@ mod tests {
             r#"{"disks":{"toshiba":{"by_id":"/dev/disk/by-id/a"}},"mount_point":"/mnt/storage"}"#;
         let cfg: Config = serde_json::from_str(raw).expect("config should parse");
         assert_eq!(cfg.disks().len(), 1);
-        assert!(cfg.disk_by_key("toshiba").is_some());
+        assert!(cfg.disk_by_name("toshiba").is_some());
         assert_eq!(cfg.mount_point(), "/mnt/storage");
     }
 
@@ -237,12 +237,12 @@ mod tests {
             },
         );
         let cfg = Config::new(disks, "/mnt/storage".to_owned()).unwrap();
-        let keys: Vec<&str> = cfg.keys().into_iter().map(|s| s.as_str()).collect();
+        let keys: Vec<&str> = cfg.names().into_iter().map(|s| s.as_str()).collect();
         assert_eq!(keys, vec!["alpha", "zebra"]);
     }
 
     #[test]
-    fn rejects_disk_key_starting_with_digit() {
+    fn rejects_disk_name_starting_with_digit() {
         let mut disks = BTreeMap::new();
         disks.insert(
             "1bad".to_owned(),
@@ -252,11 +252,11 @@ mod tests {
         );
         let err = Config::new(disks, "/mnt/storage".to_owned())
             .expect_err("digit-starting key should fail");
-        assert!(matches!(err, ConfigBuildError::InvalidDiskKey(_)));
+        assert!(matches!(err, ConfigBuildError::InvalidDiskName(_)));
     }
 
     #[test]
-    fn rejects_disk_key_starting_with_hyphen() {
+    fn rejects_disk_name_starting_with_hyphen() {
         let mut disks = BTreeMap::new();
         disks.insert(
             "-bad".to_owned(),
@@ -266,11 +266,11 @@ mod tests {
         );
         let err = Config::new(disks, "/mnt/storage".to_owned())
             .expect_err("hyphen-starting key should fail");
-        assert!(matches!(err, ConfigBuildError::InvalidDiskKey(_)));
+        assert!(matches!(err, ConfigBuildError::InvalidDiskName(_)));
     }
 
     #[test]
-    fn rejects_disk_key_starting_with_underscore() {
+    fn rejects_disk_name_starting_with_underscore() {
         let mut disks = BTreeMap::new();
         disks.insert(
             "_bad".to_owned(),
@@ -280,11 +280,11 @@ mod tests {
         );
         let err = Config::new(disks, "/mnt/storage".to_owned())
             .expect_err("underscore-starting key should fail");
-        assert!(matches!(err, ConfigBuildError::InvalidDiskKey(_)));
+        assert!(matches!(err, ConfigBuildError::InvalidDiskName(_)));
     }
 
     #[test]
-    fn rejects_disk_key_with_space() {
+    fn rejects_disk_name_with_space() {
         let mut disks = BTreeMap::new();
         disks.insert(
             "my disk".to_owned(),
@@ -294,11 +294,11 @@ mod tests {
         );
         let err =
             Config::new(disks, "/mnt/storage".to_owned()).expect_err("space in key should fail");
-        assert!(matches!(err, ConfigBuildError::InvalidDiskKey(_)));
+        assert!(matches!(err, ConfigBuildError::InvalidDiskName(_)));
     }
 
     #[test]
-    fn rejects_empty_disk_key() {
+    fn rejects_empty_disk_name() {
         let mut disks = BTreeMap::new();
         disks.insert(
             "".to_owned(),
@@ -307,11 +307,11 @@ mod tests {
             },
         );
         let err = Config::new(disks, "/mnt/storage".to_owned()).expect_err("empty key should fail");
-        assert!(matches!(err, ConfigBuildError::InvalidDiskKey(_)));
+        assert!(matches!(err, ConfigBuildError::InvalidDiskName(_)));
     }
 
     #[test]
-    fn rejects_disk_key_too_long() {
+    fn rejects_disk_name_too_long() {
         let key = "a".repeat(33);
         let mut disks = BTreeMap::new();
         disks.insert(
@@ -322,11 +322,11 @@ mod tests {
         );
         let err =
             Config::new(disks, "/mnt/storage".to_owned()).expect_err("33-char key should fail");
-        assert!(matches!(err, ConfigBuildError::InvalidDiskKey(_)));
+        assert!(matches!(err, ConfigBuildError::InvalidDiskName(_)));
     }
 
     #[test]
-    fn accepts_disk_key_at_max_length() {
+    fn accepts_disk_name_at_max_length() {
         let key = "a".repeat(32);
         let mut disks = BTreeMap::new();
         disks.insert(
@@ -339,7 +339,7 @@ mod tests {
     }
 
     #[test]
-    fn accepts_valid_disk_keys() {
+    fn accepts_valid_disk_names() {
         for key in ["toshiba", "disk1", "my-disk", "my_disk", "A", "Z1-b2-c3"] {
             let mut disks = BTreeMap::new();
             disks.insert(

@@ -32,14 +32,14 @@ pub struct RemoveStep {
 pub fn cmd_remove<R: CommandRunner + Sync>(
     runner: &R,
     config_path: &Path,
-    key: &str,
+    name: &str,
     dry_run: bool,
     yes: bool,
     progress: ProgressOutput,
 ) -> Result<(), RemoveError> {
     let (config, _config_raw) = config_read_raw(config_path)?;
     let disk_map_state = disk_map::load_disk_map();
-    disk_map::validate_config_key_stability(&config, &disk_map_state)
+    disk_map::validate_config_name_stability(&config, &disk_map_state)
         .map_err(|e| RemoveError::Validation(e.to_string()))?;
 
     let pool = match probe_pool(runner, config.mount_point()) {
@@ -64,13 +64,13 @@ pub fn cmd_remove<R: CommandRunner + Sync>(
     preflight::check_not_read_only(runner, config.mount_point())
         .map_err(RemoveError::Validation)?;
 
-    let mn = mapper_name(key);
+    let mn = mapper_name(name);
 
     // Is the disk present in the pool?
     let in_pool = pool.devices.iter().any(|d| d.mapper == mn);
 
     if !in_pool {
-        let mut msg = format!("disk '{}' not found in pool.", key);
+        let mut msg = format!("disk '{}' not found in pool.", name);
         if pool.missing_count > 0 {
             msg.push_str(&format!(
                 " ({} missing device{} detected. Use 'braid remove-missing' to remove missing devices.)",
@@ -104,7 +104,7 @@ pub fn cmd_remove<R: CommandRunner + Sync>(
         }
     }
 
-    let steps = compile_remove_present_steps(key, &mn, &pool)?;
+    let steps = compile_remove_present_steps(name, &mn, &pool)?;
 
     if dry_run {
         for step in &steps {
@@ -136,7 +136,10 @@ pub fn cmd_remove<R: CommandRunner + Sync>(
                 return Err(RemoveError::Validation("aborted by user".into()));
             }
         } else {
-            eprintln!("Remove {} from pool? Data will migrate off this disk.", key);
+            eprintln!(
+                "Remove {} from pool? Data will migrate off this disk.",
+                name
+            );
             eprint!("Type 'yes' to continue: ");
             let mut input = String::new();
             std::io::stdin().read_line(&mut input).map_err(|e| {
@@ -153,12 +156,12 @@ pub fn cmd_remove<R: CommandRunner + Sync>(
 
     // Update disk map (best effort — never fail the remove)
     disk_map::update_disk_map_best_effort(|map| {
-        disk_map::remove_disk(map, key);
+        disk_map::remove_disk(map, name);
     });
 
     eprintln!(
         "Done. If not already done: remove '{}' from braid.disks and run nixos-rebuild switch.",
-        key
+        name
     );
     Ok(())
 }
@@ -219,7 +222,7 @@ fn check_eviction_space<R: CommandRunner>(
 }
 
 fn compile_remove_present_steps(
-    _key: &str,
+    _name: &str,
     mn: &MapperName,
     pool: &PoolState,
 ) -> Result<Vec<RemoveStep>, RemoveError> {

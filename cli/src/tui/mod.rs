@@ -28,14 +28,14 @@ pub fn run(config_path: &Path) -> io::Result<()> {
     let config = config_read(config_path).map_err(|e| io::Error::other(e.to_string()))?;
     let mut terminal = ratatui::init();
     let (_input, cmd_tx, rx) = InputHandler::new();
-    let disk_keys: Vec<String> = config.disks().keys().cloned().collect();
+    let disk_names: Vec<String> = config.disks().keys().cloned().collect();
     let disk_by_id: HashMap<String, String> = config
         .disks()
         .iter()
         .map(|(k, v)| (k.clone(), v.by_id.to_string()))
         .collect();
     let (mut model, init_effects) =
-        Model::new(disk_keys, disk_by_id, config.mount_point().to_owned());
+        Model::new(disk_names, disk_by_id, config.mount_point().to_owned());
     for effect in init_effects {
         execute_effect(effect, &cmd_tx);
     }
@@ -45,7 +45,7 @@ pub fn run(config_path: &Path) -> io::Result<()> {
 }
 
 pub fn run_demo() -> io::Result<()> {
-    let disk_keys = vec![
+    let disk_names = vec![
         "toshiba".to_owned(),
         "ironwolf".to_owned(),
         "wdc".to_owned(),
@@ -136,7 +136,7 @@ pub fn run_demo() -> io::Result<()> {
         },
         probed_at: Instant::now(),
     };
-    let mut model = Model::new_demo(disk_keys, PoolStatus::Mounted(pool));
+    let mut model = Model::new_demo(disk_names, PoolStatus::Mounted(pool));
 
     let mut terminal = ratatui::init();
     let (_input, cmd_tx, rx) = InputHandler::new();

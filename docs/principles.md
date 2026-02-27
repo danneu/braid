@@ -8,13 +8,13 @@ Data drives never block boot. LUKS devices use `nofail` + bounded timeouts. btrf
 
 ## 2. Config-first workflow
 
-Declare the disk in `braid.disks` (named attrset) before formatting it. `nixos-rebuild switch` exports config and creates LUKS entries. `braid add <key>` formats and adds the disk. CLI tools refuse to operate on undeclared disks. Workflow: edit config → `nixos-rebuild switch` → `braid add <key>`. [Why →](decisions/config-first-workflow.md)
+Declare the disk in `braid.disks` (named attrset) before formatting it. `nixos-rebuild switch` exports config and creates LUKS entries. `braid add <disk>` formats and adds the disk. CLI tools refuse to operate on undeclared disks. Workflow: edit config → `nixos-rebuild switch` → `braid add <disk>`. [Why →](decisions/config-first-workflow.md)
 
 ## 3. Safe-by-construction operations
 
 - `nixos-rebuild switch` is declarative and idempotent — always safe to run.
 - Each intent command (`add`, `remove`, `remove-missing`, `replace`) does exactly one thing with risk-appropriate confirmation. `replace` handles both live and dead/missing old disks with add-first ordering.
-- Disk keys are immutable in v1.0 once recorded in braid state; key rename/reassignment is rejected by mutating commands and must use explicit `replace` or `remove`+`add` workflows.
+- Disk names are immutable in v1.0 once recorded in braid state; name rename/reassignment is rejected by mutating commands and must use explicit `replace` or `remove`+`add` workflows.
 - `mkfs.btrfs` is gated on bootstrap only (no existing superblock).
 - An existing LUKS device or pool member is never reformatted — the btrfs superblock guard prevents accidental data loss.
 - [Why →](decisions/intent-cli.md)
@@ -27,7 +27,7 @@ Binary keyfile support is available via `braid enroll` (slot 1) and `braid.autoU
 
 ## 5. Stable identifiers
 
-All persistent storage config uses `/dev/disk/by-id/` paths. Never `/dev/sdX`. Mapper names are `braid-<disk-key>` (e.g., `braid-toshiba`) — deterministic, human-friendly, debuggable in `lsblk`, systemd logs, and error messages. [Why →](decisions/mapper-naming.md)
+All persistent storage config uses `/dev/disk/by-id/` paths. Never `/dev/sdX`. Mapper names are `braid-<disk-name>` (e.g., `braid-toshiba`) — deterministic, human-friendly, debuggable in `lsblk`, systemd logs, and error messages. [Why →](decisions/mapper-naming.md)
 
 ## 6. btrfs RAID1
 

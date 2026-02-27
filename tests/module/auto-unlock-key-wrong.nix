@@ -10,7 +10,7 @@
 { lib, pkgs, ... }:
 let
   passphrase = "testpassphrase";
-  diskKeys = [ "disk1" ];
+  diskNames = [ "disk1" ];
 in
 {
   name = "auto-unlock-key-wrong";
@@ -21,7 +21,7 @@ in
     braid = {
       enable = true;
       package = braid;
-      disks = lib.genAttrs diskKeys (d: { byId = "/dev/disk/by-id/virtio-${d}"; });
+      disks = lib.genAttrs diskNames (d: { byId = "/dev/disk/by-id/virtio-${d}"; });
       autoUnlock = {
         enable = true;
         keyDevice = "/dev/disk/by-id/virtio-usbkey";

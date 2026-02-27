@@ -1,10 +1,10 @@
 # Test: luks-label
 #
 # What: After `braid add disk1`, the LUKS2 volume must carry the label
-# "braid-disk1" so that luksDump / blkid can identify it by braid key.
+# "braid-disk1" so that luksDump / blkid can identify it by braid name.
 #
 # Why: Without a label, an operator inspecting raw drives during recovery
-# has no way to map a LUKS device back to its braid disk key.
+# has no way to map a LUKS device back to its braid disk name.
 #
 # Scenario: Operator runs `cryptsetup luksDump /dev/sda` on a pulled drive
 # and expects to see "Label: braid-disk1".
