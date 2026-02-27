@@ -1,0 +1,143 @@
+# Test: replace a disk with a larger one
+#
+# Intent:
+# - What behavior this test (tries to) verify.
+#   - `braid replace --old <small> --new <large>` succeeds and btrfs reports
+#     the full capacity of the larger new disk, not capped at the old size.
+#
+# Why it exists:
+# - What risk/regression this protects against.
+#   - This is the exact user migration scenario: upgrading from smaller to
+#     larger drives (e.g. 2x12TB → 2x20TB). If btrfs or braid caps the new
+#     device at the old size, the user silently loses capacity.
+#
+# Scenario:
+# - Real-world situation this models.
+#   - Operator buys larger drives and replaces pool members one at a time.
+#     After replacing a 512MB disk with a 1024MB disk, the pool should report
+#     the new disk at its full ~1GiB size.
+
+import json
+import re
+
+start_all()
+machine.wait_for_unit("multi-user.target")
+
+import shlex
+
+passphrase = "testpassphrase"
+luks_opts = "--pbkdf pbkdf2 --pbkdf-force-iterations 1000"
+
+
+def read_disk_map():
+    raw = machine.succeed("cat /var/lib/braid/disk-map.json")
+    return json.loads(raw)
+
+
+def add_cmd(name):
+    passphrase_q = shlex.quote(passphrase)
+    return (
+        f"printf '%s\\n' {passphrase_q} | "
+        f"BRAID_LUKS_OPTS='{luks_opts}' "
+        f"braid add {name} --passphrase-stdin --yes"
+    )
+
+
+def replace_cmd(old, new, extra=""):
+    passphrase_q = shlex.quote(passphrase)
+    return (
+        f"printf '%s\\n' {passphrase_q} | "
+        f"BRAID_LUKS_OPTS='{luks_opts}' "
+        f"braid replace --old {old} --new {new} --passphrase-stdin --yes {extra}"
+    )
+
+
+def get_device_size_mib(mapper_name):
+    """Extract the reported size (in MiB) of a device from `btrfs fi show`."""
+    fi_show = machine.succeed("btrfs fi show /mnt/storage")
+    for line in fi_show.splitlines():
+        if mapper_name in line:
+            # Match sizes like "1006.00MiB" or "1.00GiB"
+            m = re.search(r"size\s+([\d.]+)([A-Za-z]+)", line)
+            if m:
+                val = float(m.group(1))
+                unit = m.group(2)
+                if unit == "GiB":
+                    return val * 1024
+                elif unit == "MiB":
+                    return val
+                elif unit == "TiB":
+                    return val * 1024 * 1024
+    raise AssertionError(f"size not found for {mapper_name} in:\n{fi_show}")
+
+
+# --- Phase 0: Build 2-drive pool with 512MB disks ---
+
+with subtest("Setup: build 2-drive pool (512MB each)"):
+    machine.succeed(add_cmd("disk1"))
+    machine.succeed(add_cmd("disk2"))
+
+    fi_show = machine.succeed("btrfs fi show /mnt/storage")
+    for name in ["braid-disk1", "braid-disk2"]:
+        assert f"/dev/mapper/{name}" in fi_show, f"{name} missing:\n{fi_show}"
+
+    df_output = machine.succeed("btrfs fi df /mnt/storage")
+    assert "RAID1" in df_output, f"Expected RAID1 profile:\n{df_output}"
+
+    machine.succeed("echo 'important data' > /mnt/storage/precious.txt")
+    machine.succeed("sync")
+
+    # Record size of a 512MB disk for comparison
+    old_size = get_device_size_mib("braid-disk2")
+    print(f"Old disk2 size: {old_size} MiB")
+
+# --- Phase 1: Replace disk2 (512MB) with disk3 (1024MB) ---
+
+with subtest("Replace disk2 (512MB) with disk3 (1024MB)"):
+    result = machine.succeed(replace_cmd("disk2", "disk3"))
+    print(f"braid replace output:\n{result}")
+
+with subtest("New disk reports full capacity (>700 MiB, not capped at ~500)"):
+    fi_show = machine.succeed("btrfs fi show /mnt/storage")
+    print(f"Pool after replace:\n{fi_show}")
+
+    new_size = get_device_size_mib("braid-disk3")
+    print(f"New disk3 size: {new_size} MiB (old disk2 was {old_size} MiB)")
+
+    # 1024MB disk minus LUKS overhead should be well over 700MiB.
+    # If capped at old size it would be ~480MiB.
+    assert new_size > 700, (
+        f"New disk should use full capacity (>700 MiB), got {new_size} MiB. "
+        f"Disk may be capped at old size ({old_size} MiB)."
+    )
+
+with subtest("Pool healthy after larger-disk replace"):
+    fi_show = machine.succeed("btrfs fi show /mnt/storage")
+
+    assert "/dev/mapper/braid-disk3" in fi_show, (
+        f"braid-disk3 missing from pool:\n{fi_show}"
+    )
+    assert "braid-disk2" not in fi_show, (
+        f"Old disk braid-disk2 should be removed:\n{fi_show}"
+    )
+    assert "missing" not in fi_show.lower(), (
+        f"Pool should have no missing devices:\n{fi_show}"
+    )
+
+    devid_count = fi_show.count("devid")
+    assert devid_count == 2, f"Expected 2 devices, got {devid_count}:\n{fi_show}"
+
+    df_output = machine.succeed("btrfs fi df /mnt/storage")
+    assert "RAID1" in df_output, f"Expected RAID1 profile:\n{df_output}"
+
+with subtest("Data intact after larger-disk replace"):
+    content = machine.succeed("cat /mnt/storage/precious.txt").strip()
+    assert content == "important data", f"Expected 'important data', got '{content}'"
+
+with subtest("Disk map updated after larger-disk replace"):
+    dm = read_disk_map()
+    assert "disk2" not in dm["disks"], f"disk2 still in map: {dm}"
+    assert "disk3" in dm["disks"], f"disk3 missing from map: {dm}"
+    assert "disk1" in dm["disks"], f"disk1 missing from map: {dm}"
+
+machine.shutdown()

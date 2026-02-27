@@ -150,6 +150,41 @@
               braid = linuxCrane.braid;
             }
           );
+          replace-dead-disk = pkgs.testers.nixosTest (
+            import ./tests/cli/replace-dead-disk.nix {
+              braid = linuxCrane.braid;
+            }
+          );
+          replace-larger-disk = pkgs.testers.nixosTest (
+            import ./tests/cli/replace-larger-disk.nix {
+              braid = linuxCrane.braid;
+            }
+          );
+          replace-2disk-pool = pkgs.testers.nixosTest (
+            import ./tests/cli/replace-2disk-pool.nix {
+              braid = linuxCrane.braid;
+            }
+          );
+          replace-sequential = pkgs.testers.nixosTest (
+            import ./tests/cli/replace-sequential.nix {
+              braid = linuxCrane.braid;
+            }
+          );
+          replace-new-already-luks = pkgs.testers.nixosTest (
+            import ./tests/cli/replace-new-already-luks.nix {
+              braid = linuxCrane.braid;
+            }
+          );
+          replace-passphrase-mismatch = pkgs.testers.nixosTest (
+            import ./tests/cli/replace-passphrase-mismatch.nix {
+              braid = linuxCrane.braid;
+            }
+          );
+          replace-new-already-in-pool = pkgs.testers.nixosTest (
+            import ./tests/cli/replace-new-already-in-pool.nix {
+              braid = linuxCrane.braid;
+            }
+          );
           tool-versions = pkgs.testers.nixosTest (
             import ./tests/cli/tool-versions.nix {
               braid-cli-unwrapped = linuxCrane.braid-cli-unwrapped;
@@ -227,6 +262,9 @@
             import ./tests/repro/btrfs-remove-enospc-crash.nix {
               braid = linuxCrane.braid;
             }
+          );
+          repro-degraded-writes-single = pkgs.testers.nixosTest (
+            import ./tests/repro/degraded-writes-single.nix
           );
           luks-label = pkgs.testers.nixosTest (
             import ./tests/cli/luks-label.nix {
