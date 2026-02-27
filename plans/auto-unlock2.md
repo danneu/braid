@@ -331,6 +331,17 @@ systemd.services.braid-auto-unlock = lib.mkIf cfg.autoUnlock.enable {
       exit 0
     fi
 
+    # Warn if keyfile is world/group-readable. On vfat (no Unix perms),
+    # files are typically 0755 — we can't fix that (vfat doesn't support
+    # chmod), so warn rather than fail. The mount point perms (0700) and
+    # short mount window limit exposure. Hard-failing here would break
+    # the most common USB format.
+    perms=$(${pkgs.coreutils}/bin/stat -c '%a' "${keyPath}" 2>/dev/null || echo "???")
+    case "$perms" in
+      400|600) ;; # good
+      *) echo "braid-auto-unlock: WARNING: keyfile perms are $perms (expected 400)" >&2 ;;
+    esac
+
     if braid unlock --key-file "${keyPath}"; then
       echo "braid-auto-unlock: pool unlocked successfully" >&2
     else
