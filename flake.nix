@@ -284,6 +284,9 @@
               braid = linuxCrane.braid;
             }
           );
+          repro-degrade2x-read-only = pkgs.testers.nixosTest (
+            import ./tests/repro/degrade2x-read-only.nix
+          );
           repro-degraded-writes-single = pkgs.testers.nixosTest (
             import ./tests/repro/degraded-writes-single.nix
           );
