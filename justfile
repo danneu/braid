@@ -5,9 +5,11 @@ test *args:
     #!/usr/bin/env bash
     set -euo pipefail
     verbose=""
+    rebuild=false
     tests=()
     for arg in {{args}}; do
         if [ "$arg" = "-v" ]; then verbose="-L"
+        elif [ "$arg" = "-rebuild" ]; then rebuild=true
         else tests+=("$arg")
         fi
     done
@@ -24,7 +26,11 @@ test *args:
         for t in "${tests[@]}"; do
             installables+=(".#checks.{{system}}.$t")
         done
-        nix build "${installables[@]}" $verbose
+        if $rebuild; then
+            nix build "${installables[@]}" --rebuild $verbose
+        else
+            nix build "${installables[@]}" $verbose
+        fi
     fi
 
 # Run Rust unit tests
