@@ -236,8 +236,7 @@ fn compile_remove_present_steps(
     if remaining == 1 {
         steps.push(RemoveStep {
             risk: "long",
-            description: "btrfs balance -dconvert=single -mconvert=single -f (RAID1 → single)"
-                .into(),
+            description: "btrfs balance -dconvert=single -mconvert=dup -f (RAID1 → single)".into(),
         });
     }
     steps.push(RemoveStep {
