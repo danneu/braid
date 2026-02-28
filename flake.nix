@@ -299,6 +299,9 @@
           repro-btrfs-replace-rejects-smaller = pkgs.testers.nixosTest (
             import ./tests/repro/btrfs-replace-rejects-smaller-target.nix
           );
+          repro-remove-without-balance = pkgs.testers.nixosTest (
+            import ./tests/repro/remove-without-balance.nix
+          );
           luks-label = pkgs.testers.nixosTest (
             import ./tests/cli/luks-label.nix {
               braid = linuxCrane.braid;

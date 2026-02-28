@@ -41,7 +41,8 @@ with subtest("Setup: create 3-drive LUKS + btrfs RAID1 pool"):
 # --- Phase 2: Baseline — write data, confirm pure RAID1 profile ---
 
 with subtest("Baseline: only RAID1 block groups exist"):
-    util.write_file_mib("/mnt/storage/baseline.bin", 100)
+    machine.succeed("dd if=/dev/urandom of=/mnt/storage/baseline.bin bs=1M count=100")
+    machine.succeed("sync")
 
     fi_df = machine.succeed("btrfs fi df /mnt/storage")
     print(f"Baseline btrfs fi df:\n{fi_df}")
@@ -64,7 +65,8 @@ with subtest("Write new data while degraded"):
     # Write enough to overflow existing RAID1 block groups and force btrfs
     # to allocate new block groups — with 2 surviving disks, will btrfs
     # allocate RAID1 or single?
-    util.write_file_mib("/mnt/storage/degraded-write.bin", 100)
+    machine.succeed("dd if=/dev/urandom of=/mnt/storage/degraded-write.bin bs=1M count=100")
+    machine.succeed("sync")
 
 # --- Phase 5: Core observation — what profile did the new blocks get? ---
 

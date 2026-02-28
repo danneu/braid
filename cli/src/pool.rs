@@ -203,6 +203,8 @@ pub enum EvictResult {
 ///
 /// 1. Probes the current pool to decide if RAID1→single conversion is needed.
 /// 2. If only one device would remain, balances to single first.
+///    Note: if a device is faulty, we do not want it to participate in the balance.
+///          Rather, it should just be removed. But we don't have that info.
 /// 3. Removes the target device from the pool.
 /// 4. Closes the LUKS mapper (best-effort; warns on failure).
 ///
