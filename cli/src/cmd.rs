@@ -152,6 +152,371 @@ pub enum CmdRequest {
     },
 }
 
+#[derive(Debug)]
+pub struct CmdArgs {
+    pub program: &'static str,
+    pub args: Vec<String>,
+}
+
+impl CmdRequest {
+    pub fn to_argv(&self) -> CmdArgs {
+        match self {
+            CmdRequest::LsblkJson => CmdArgs {
+                program: "lsblk",
+                args: vec![
+                    "--json".into(),
+                    "--bytes".into(),
+                    "--output".into(),
+                    "NAME,TYPE,SIZE,MODEL,SERIAL,UUID,ROTA,TRAN".into(),
+                ],
+            },
+            CmdRequest::FindmntJson { mount_point } => CmdArgs {
+                program: "findmnt",
+                args: vec![
+                    "--json".into(),
+                    "--output".into(),
+                    "TARGET,SOURCE,FSTYPE,OPTIONS".into(),
+                    "--mountpoint".into(),
+                    mount_point.clone(),
+                ],
+            },
+            CmdRequest::BtrfsFilesystemShow { mount_point } => CmdArgs {
+                program: "btrfs",
+                args: vec!["filesystem".into(), "show".into(), mount_point.clone()],
+            },
+            CmdRequest::CryptsetupStatus { mapper } => CmdArgs {
+                program: "cryptsetup",
+                args: vec!["status".into(), mapper.clone()],
+            },
+            CmdRequest::CryptsetupLuksUuid { device } => CmdArgs {
+                program: "cryptsetup",
+                args: vec!["luksUUID".into(), device.clone()],
+            },
+            CmdRequest::BtrfsFilesystemDfJson { mount_point } => CmdArgs {
+                program: "btrfs",
+                args: vec![
+                    "--format".into(),
+                    "json".into(),
+                    "filesystem".into(),
+                    "df".into(),
+                    mount_point.clone(),
+                ],
+            },
+            CmdRequest::BtrfsFilesystemUsageRaw { mount_point } => CmdArgs {
+                program: "btrfs",
+                args: vec![
+                    "filesystem".into(),
+                    "usage".into(),
+                    "--raw".into(),
+                    mount_point.clone(),
+                ],
+            },
+            CmdRequest::BtrfsScrubStatus { mount_point } => CmdArgs {
+                program: "btrfs",
+                args: vec!["scrub".into(), "status".into(), mount_point.clone()],
+            },
+            CmdRequest::BtrfsScrubStatusPerDevice { mount_point } => CmdArgs {
+                program: "btrfs",
+                args: vec![
+                    "scrub".into(),
+                    "status".into(),
+                    "-d".into(),
+                    "-R".into(),
+                    mount_point.clone(),
+                ],
+            },
+            CmdRequest::BtrfsDeviceStats { mount_point } => CmdArgs {
+                program: "btrfs",
+                args: vec!["device".into(), "stats".into(), mount_point.clone()],
+            },
+            CmdRequest::BtrfsBalanceStatus { mount_point } => CmdArgs {
+                program: "btrfs",
+                args: vec!["balance".into(), "status".into(), mount_point.clone()],
+            },
+            CmdRequest::BtrfsDeviceUsageRaw { mount_point } => CmdArgs {
+                program: "btrfs",
+                args: vec![
+                    "device".into(),
+                    "usage".into(),
+                    "--raw".into(),
+                    mount_point.clone(),
+                ],
+            },
+            CmdRequest::LsblkField { device, field } => {
+                let field_name = match field {
+                    LsblkFieldKind::Model => "MODEL",
+                    LsblkFieldKind::Serial => "SERIAL",
+                };
+                CmdArgs {
+                    program: "lsblk",
+                    args: vec!["-ndo".into(), field_name.into(), device.clone()],
+                }
+            }
+            CmdRequest::CryptsetupLuksOpen { device, mapper } => CmdArgs {
+                program: "cryptsetup",
+                args: vec![
+                    "open".into(),
+                    "--type".into(),
+                    "luks".into(),
+                    "--key-file=-".into(),
+                    // Bypass dm-crypt's internal workqueues — they add 3-4x queuing
+                    // overhead regardless of disk type (HDD or SSD). Requires kernel >= 5.9.
+                    "--perf-no_read_workqueue".into(),
+                    "--perf-no_write_workqueue".into(),
+                    device.clone(),
+                    mapper.clone(),
+                ],
+            },
+            CmdRequest::CryptsetupIsLuks { device } => CmdArgs {
+                program: "cryptsetup",
+                args: vec!["isLuks".into(), device.clone()],
+            },
+            CmdRequest::CryptsetupClose { mapper } => CmdArgs {
+                program: "cryptsetup",
+                args: vec!["close".into(), mapper.clone()],
+            },
+            CmdRequest::BtrfsDeviceAdd {
+                device,
+                mount_point,
+            } => CmdArgs {
+                program: "btrfs",
+                args: vec![
+                    "device".into(),
+                    "add".into(),
+                    "-f".into(),
+                    device.clone(),
+                    mount_point.clone(),
+                ],
+            },
+            CmdRequest::BtrfsDeviceRemove {
+                device,
+                mount_point,
+            } => CmdArgs {
+                program: "btrfs",
+                args: vec![
+                    "device".into(),
+                    "remove".into(),
+                    device.clone(),
+                    mount_point.clone(),
+                ],
+            },
+            CmdRequest::BtrfsDeviceRemoveMissing { mount_point } => CmdArgs {
+                program: "btrfs",
+                args: vec![
+                    "device".into(),
+                    "remove".into(),
+                    "missing".into(),
+                    mount_point.clone(),
+                ],
+            },
+            CmdRequest::BtrfsDeviceScan { device } => CmdArgs {
+                program: "btrfs",
+                args: vec!["device".into(), "scan".into(), device.clone()],
+            },
+            CmdRequest::BtrfsDeviceScanAll => CmdArgs {
+                program: "btrfs",
+                args: vec!["device".into(), "scan".into()],
+            },
+            CmdRequest::BtrfsBalanceRaid1 { mount_point } => CmdArgs {
+                program: "btrfs",
+                args: vec![
+                    "balance".into(),
+                    "start".into(),
+                    "-dconvert=raid1".into(),
+                    "-mconvert=raid1".into(),
+                    mount_point.clone(),
+                ],
+            },
+            CmdRequest::BtrfsBalanceSingle { mount_point } => CmdArgs {
+                program: "btrfs",
+                args: vec![
+                    "balance".into(),
+                    "start".into(),
+                    "-dconvert=single".into(),
+                    // Important: use dup for metadata when converting to single
+                    "-mconvert=dup".into(),
+                    "-f".into(),
+                    mount_point.clone(),
+                ],
+            },
+            CmdRequest::MkfsBtrfs { device } => CmdArgs {
+                program: "mkfs.btrfs",
+                args: vec!["-f".into(), device.clone()],
+            },
+            CmdRequest::Mount {
+                device,
+                mount_point,
+            } => CmdArgs {
+                program: "mount",
+                args: vec![device.clone(), mount_point.clone()],
+            },
+            CmdRequest::MountWithOptions {
+                device,
+                mount_point,
+                options,
+            } => {
+                let mut args = Vec::new();
+                if !options.is_empty() {
+                    args.push("-o".into());
+                    args.push(options.join(","));
+                }
+                args.push(device.clone());
+                args.push(mount_point.clone());
+                CmdArgs {
+                    program: "mount",
+                    args,
+                }
+            }
+            CmdRequest::Umount { mount_point } => CmdArgs {
+                program: "umount",
+                args: vec![mount_point.clone()],
+            },
+            CmdRequest::MountpointCheck { path } => CmdArgs {
+                program: "mountpoint",
+                args: vec!["-q".into(), path.clone()],
+            },
+            CmdRequest::BtrfsReplaceStart {
+                devid,
+                target_device,
+                mount_point,
+            } => CmdArgs {
+                program: "btrfs",
+                args: vec![
+                    "replace".into(),
+                    "start".into(),
+                    "-r".into(),
+                    "-f".into(),
+                    "-B".into(),
+                    devid.to_string(),
+                    target_device.clone(),
+                    mount_point.clone(),
+                ],
+            },
+            CmdRequest::BtrfsReplaceStatus { mount_point } => CmdArgs {
+                program: "btrfs",
+                args: vec!["replace".into(), "status".into(), mount_point.clone()],
+            },
+            CmdRequest::BtrfsFilesystemResize { devid, mount_point } => CmdArgs {
+                program: "btrfs",
+                args: vec![
+                    "filesystem".into(),
+                    "resize".into(),
+                    format!("{devid}:max"),
+                    mount_point.clone(),
+                ],
+            },
+            CmdRequest::CryptsetupLuksHeaderBackup {
+                device,
+                backup_path,
+            } => CmdArgs {
+                program: "cryptsetup",
+                args: vec![
+                    "luksHeaderBackup".into(),
+                    "--header-backup-file".into(),
+                    backup_path.clone(),
+                    device.clone(),
+                ],
+            },
+            CmdRequest::CryptsetupLuksFormat { device, extra_opts } => {
+                let mut args: Vec<String> = vec![
+                    "luksFormat".into(),
+                    "--batch-mode".into(),
+                    "--key-file=-".into(),
+                ];
+                for opt in extra_opts {
+                    args.push(opt.clone());
+                }
+                args.push(device.clone());
+                CmdArgs {
+                    program: "cryptsetup",
+                    args,
+                }
+            }
+            CmdRequest::CryptsetupTestPassphrase { device } => CmdArgs {
+                program: "cryptsetup",
+                args: vec![
+                    "open".into(),
+                    "--test-passphrase".into(),
+                    "--key-file=-".into(),
+                    device.clone(),
+                ],
+            },
+            CmdRequest::SmartctlHealthJson { device } => CmdArgs {
+                program: "smartctl",
+                args: vec!["-H".into(), "-A".into(), device.clone(), "--json".into()],
+            },
+            CmdRequest::CryptsetupLuksDump { device } => CmdArgs {
+                program: "cryptsetup",
+                args: vec![
+                    "luksDump".into(),
+                    "--dump-json-metadata".into(),
+                    device.clone(),
+                ],
+            },
+            CmdRequest::CryptsetupLuksOpenKeyFile {
+                device,
+                mapper,
+                key_file_path,
+            } => CmdArgs {
+                program: "cryptsetup",
+                args: vec![
+                    "open".into(),
+                    "--type".into(),
+                    "luks".into(),
+                    "--key-file".into(),
+                    key_file_path.clone(),
+                    "--keyfile-size".into(),
+                    "4096".into(),
+                    "--perf-no_read_workqueue".into(),
+                    "--perf-no_write_workqueue".into(),
+                    device.clone(),
+                    mapper.clone(),
+                ],
+            },
+            CmdRequest::CryptsetupTestKeyFile {
+                device,
+                key_file_path,
+            } => CmdArgs {
+                program: "cryptsetup",
+                args: vec![
+                    "open".into(),
+                    "--test-passphrase".into(),
+                    "--key-file".into(),
+                    key_file_path.clone(),
+                    "--keyfile-size".into(),
+                    "4096".into(),
+                    device.clone(),
+                ],
+            },
+            CmdRequest::CryptsetupLuksAddKeyFile {
+                device,
+                key_file_path,
+            } => CmdArgs {
+                program: "cryptsetup",
+                args: vec![
+                    "luksAddKey".into(),
+                    "--key-slot".into(),
+                    "1".into(),
+                    "--new-keyfile-size".into(),
+                    "4096".into(),
+                    device.clone(),
+                    key_file_path.clone(),
+                ],
+            },
+        }
+    }
+
+    pub fn requires_stdin(&self) -> bool {
+        matches!(
+            self,
+            CmdRequest::CryptsetupLuksOpen { .. }
+                | CmdRequest::CryptsetupLuksFormat { .. }
+                | CmdRequest::CryptsetupTestPassphrase { .. }
+                | CmdRequest::CryptsetupLuksAddKeyFile { .. }
+        )
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum CmdError {
     #[error("command failed: {0}")]
@@ -172,10 +537,10 @@ pub trait CommandRunner: Sync {
 pub struct RealRunner;
 
 impl RealRunner {
-    fn exec(cmd: &str, args: &[&str]) -> Result<RawCommandOutput, CmdError> {
-        let cmd_str = format!("{} {}", cmd, args.join(" "));
-        let output = std::process::Command::new(cmd)
-            .args(args)
+    fn exec(cmd: &CmdArgs) -> Result<RawCommandOutput, CmdError> {
+        let cmd_str = format!("{} {}", cmd.program, cmd.args.join(" "));
+        let output = std::process::Command::new(cmd.program)
+            .args(&cmd.args)
             .output()
             .map_err(|e| CmdError::Failed(format!("{cmd_str}: {e}")))?;
 
@@ -189,17 +554,13 @@ impl RealRunner {
         })
     }
 
-    fn exec_with_stdin(
-        cmd: &str,
-        args: &[&str],
-        stdin_bytes: &[u8],
-    ) -> Result<RawCommandOutput, CmdError> {
+    fn exec_with_stdin(cmd: &CmdArgs, stdin_bytes: &[u8]) -> Result<RawCommandOutput, CmdError> {
         use std::io::Write;
         use std::process::Stdio;
 
-        let cmd_str = format!("{} {}", cmd, args.join(" "));
-        let mut child = std::process::Command::new(cmd)
-            .args(args)
+        let cmd_str = format!("{} {}", cmd.program, cmd.args.join(" "));
+        let mut child = std::process::Command::new(cmd.program)
+            .args(&cmd.args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -227,248 +588,14 @@ impl RealRunner {
     }
 }
 
-/// Build the argument list for `btrfs replace start`.
-/// Extracted for testability — the -r flag (read from mirrors) must always
-/// be present so replacements avoid reading from a potentially failing source.
-fn btrfs_replace_start_args(devid: u64, target_device: &str, mount_point: &str) -> Vec<String> {
-    vec![
-        "replace".into(),
-        "start".into(),
-        "-r".into(),
-        "-f".into(),
-        "-B".into(),
-        devid.to_string(),
-        target_device.into(),
-        mount_point.into(),
-    ]
-}
-
 impl CommandRunner for RealRunner {
     fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
-        match request {
-            CmdRequest::LsblkJson => RealRunner::exec(
-                "lsblk",
-                &[
-                    "--json",
-                    "--bytes",
-                    "--output",
-                    "NAME,TYPE,SIZE,MODEL,SERIAL,UUID,ROTA,TRAN",
-                ],
-            ),
-            CmdRequest::FindmntJson { mount_point } => RealRunner::exec(
-                "findmnt",
-                &[
-                    "--json",
-                    "--output",
-                    "TARGET,SOURCE,FSTYPE,OPTIONS",
-                    "--mountpoint",
-                    mount_point,
-                ],
-            ),
-            CmdRequest::BtrfsFilesystemShow { mount_point } => {
-                RealRunner::exec("btrfs", &["filesystem", "show", mount_point])
-            }
-            CmdRequest::CryptsetupStatus { mapper } => {
-                RealRunner::exec("cryptsetup", &["status", mapper])
-            }
-            CmdRequest::CryptsetupLuksUuid { device } => {
-                RealRunner::exec("cryptsetup", &["luksUUID", device])
-            }
-            CmdRequest::BtrfsFilesystemDfJson { mount_point } => RealRunner::exec(
-                "btrfs",
-                &["--format", "json", "filesystem", "df", mount_point],
-            ),
-            CmdRequest::BtrfsFilesystemUsageRaw { mount_point } => {
-                RealRunner::exec("btrfs", &["filesystem", "usage", "--raw", mount_point])
-            }
-            CmdRequest::BtrfsScrubStatus { mount_point } => {
-                RealRunner::exec("btrfs", &["scrub", "status", mount_point])
-            }
-            CmdRequest::BtrfsScrubStatusPerDevice { mount_point } => {
-                RealRunner::exec("btrfs", &["scrub", "status", "-d", "-R", mount_point])
-            }
-            CmdRequest::BtrfsDeviceStats { mount_point } => {
-                RealRunner::exec("btrfs", &["device", "stats", mount_point])
-            }
-            CmdRequest::BtrfsBalanceStatus { mount_point } => {
-                RealRunner::exec("btrfs", &["balance", "status", mount_point])
-            }
-            CmdRequest::BtrfsDeviceUsageRaw { mount_point } => {
-                RealRunner::exec("btrfs", &["device", "usage", "--raw", mount_point])
-            }
-            CmdRequest::LsblkField { device, field } => {
-                let field_name = match field {
-                    LsblkFieldKind::Model => "MODEL",
-                    LsblkFieldKind::Serial => "SERIAL",
-                };
-                RealRunner::exec("lsblk", &["-ndo", field_name, device])
-            }
-            CmdRequest::CryptsetupLuksOpen { device, mapper } => {
-                // Passphrase must be piped via run_with_stdin, not here.
-                // Calling run() for luksOpen is an error — return a failure.
-                Err(CmdError::Failed(format!(
-                    "CryptsetupLuksOpen must use run_with_stdin (device={device}, mapper={mapper})"
-                )))
-            }
-            CmdRequest::CryptsetupIsLuks { device } => {
-                RealRunner::exec("cryptsetup", &["isLuks", device])
-            }
-            CmdRequest::CryptsetupClose { mapper } => {
-                RealRunner::exec("cryptsetup", &["close", mapper])
-            }
-            CmdRequest::BtrfsDeviceAdd {
-                device,
-                mount_point,
-            } => RealRunner::exec("btrfs", &["device", "add", "-f", device, mount_point]),
-            CmdRequest::BtrfsDeviceRemove {
-                device,
-                mount_point,
-            } => RealRunner::exec("btrfs", &["device", "remove", device, mount_point]),
-            CmdRequest::BtrfsDeviceRemoveMissing { mount_point } => {
-                RealRunner::exec("btrfs", &["device", "remove", "missing", mount_point])
-            }
-            CmdRequest::BtrfsDeviceScan { device } => {
-                RealRunner::exec("btrfs", &["device", "scan", device])
-            }
-            CmdRequest::BtrfsDeviceScanAll => RealRunner::exec("btrfs", &["device", "scan"]),
-            CmdRequest::BtrfsBalanceRaid1 { mount_point } => RealRunner::exec(
-                "btrfs",
-                &[
-                    "balance",
-                    "start",
-                    "-dconvert=raid1",
-                    "-mconvert=raid1",
-                    mount_point,
-                ],
-            ),
-            CmdRequest::BtrfsBalanceSingle { mount_point } => RealRunner::exec(
-                "btrfs",
-                &[
-                    "balance",
-                    "start",
-                    "-dconvert=single",
-                    // Important: use dup for metadata when converting to single
-                    "-mconvert=dup",
-                    "-f",
-                    mount_point,
-                ],
-            ),
-            CmdRequest::MkfsBtrfs { device } => RealRunner::exec("mkfs.btrfs", &["-f", device]),
-            CmdRequest::Mount {
-                device,
-                mount_point,
-            } => RealRunner::exec("mount", &[device, mount_point]),
-            CmdRequest::MountWithOptions {
-                device,
-                mount_point,
-                options,
-            } => {
-                let mut args = Vec::new();
-                let opts_str = options.join(",");
-                if !options.is_empty() {
-                    args.push("-o");
-                    args.push(&opts_str);
-                }
-                args.push(device);
-                args.push(mount_point);
-                RealRunner::exec("mount", &args)
-            }
-            CmdRequest::Umount { mount_point } => RealRunner::exec("umount", &[mount_point]),
-            CmdRequest::MountpointCheck { path } => RealRunner::exec("mountpoint", &["-q", path]),
-            CmdRequest::BtrfsReplaceStart {
-                devid,
-                target_device,
-                mount_point,
-            } => {
-                let args = btrfs_replace_start_args(*devid, target_device, mount_point);
-                let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-                RealRunner::exec("btrfs", &arg_refs)
-            }
-            CmdRequest::BtrfsReplaceStatus { mount_point } => {
-                RealRunner::exec("btrfs", &["replace", "status", mount_point])
-            }
-            CmdRequest::BtrfsFilesystemResize { devid, mount_point } => {
-                let resize_arg = format!("{devid}:max");
-                RealRunner::exec("btrfs", &["filesystem", "resize", &resize_arg, mount_point])
-            }
-            CmdRequest::CryptsetupLuksHeaderBackup {
-                device,
-                backup_path,
-            } => RealRunner::exec(
-                "cryptsetup",
-                &[
-                    "luksHeaderBackup",
-                    "--header-backup-file",
-                    backup_path,
-                    device,
-                ],
-            ),
-            CmdRequest::CryptsetupLuksFormat { device, extra_opts } => {
-                // Passphrase must be piped via run_with_stdin, not here.
-                let _ = (device, extra_opts);
-                Err(CmdError::Failed(
-                    "CryptsetupLuksFormat must use run_with_stdin".to_owned(),
-                ))
-            }
-            CmdRequest::CryptsetupTestPassphrase { device } => {
-                // Passphrase must be piped via run_with_stdin, not here.
-                let _ = device;
-                Err(CmdError::Failed(
-                    "CryptsetupTestPassphrase must use run_with_stdin".to_owned(),
-                ))
-            }
-            CmdRequest::SmartctlHealthJson { device } => {
-                RealRunner::exec("smartctl", &["-H", "-A", device, "--json"])
-            }
-            CmdRequest::CryptsetupLuksDump { device } => {
-                RealRunner::exec("cryptsetup", &["luksDump", "--dump-json-metadata", device])
-            }
-            CmdRequest::CryptsetupLuksOpenKeyFile {
-                device,
-                mapper,
-                key_file_path,
-            } => RealRunner::exec(
-                "cryptsetup",
-                &[
-                    "open",
-                    "--type",
-                    "luks",
-                    "--key-file",
-                    key_file_path,
-                    "--keyfile-size",
-                    "4096",
-                    "--perf-no_read_workqueue",
-                    "--perf-no_write_workqueue",
-                    device,
-                    mapper,
-                ],
-            ),
-            CmdRequest::CryptsetupTestKeyFile {
-                device,
-                key_file_path,
-            } => RealRunner::exec(
-                "cryptsetup",
-                &[
-                    "open",
-                    "--test-passphrase",
-                    "--key-file",
-                    key_file_path,
-                    "--keyfile-size",
-                    "4096",
-                    device,
-                ],
-            ),
-            CmdRequest::CryptsetupLuksAddKeyFile {
-                device,
-                key_file_path,
-            } => {
-                // Passphrase must be piped via run_with_stdin, not here.
-                let _ = (device, key_file_path);
-                Err(CmdError::Failed(
-                    "CryptsetupLuksAddKeyFile must use run_with_stdin".to_owned(),
-                ))
-            }
+        if request.requires_stdin() {
+            return Err(CmdError::Failed(format!(
+                "{request:?} must use run_with_stdin"
+            )));
         }
+        RealRunner::exec(&request.to_argv())
     }
 
     fn run_with_stdin(
@@ -476,58 +603,12 @@ impl CommandRunner for RealRunner {
         request: &CmdRequest,
         stdin: &[u8],
     ) -> Result<RawCommandOutput, CmdError> {
-        match request {
-            CmdRequest::CryptsetupLuksOpen { device, mapper } => RealRunner::exec_with_stdin(
-                "cryptsetup",
-                &[
-                    "open",
-                    // This just means we can universally open LUKS1 and LUKS2
-                    "--type",
-                    "luks",
-                    "--key-file=-",
-                    // Bypass dm-crypt's internal workqueues — they add 3-4x queuing
-                    // overhead regardless of disk type (HDD or SSD). Requires kernel >= 5.9.
-                    "--perf-no_read_workqueue",
-                    "--perf-no_write_workqueue",
-                    device,
-                    mapper,
-                ],
-                stdin,
-            ),
-            CmdRequest::CryptsetupLuksFormat { device, extra_opts } => {
-                let mut args: Vec<&str> = vec!["luksFormat", "--batch-mode", "--key-file=-"];
-                for opt in extra_opts {
-                    args.push(opt.as_str());
-                }
-                args.push(device.as_str());
-                RealRunner::exec_with_stdin("cryptsetup", &args, stdin)
-            }
-            CmdRequest::CryptsetupTestPassphrase { device } => RealRunner::exec_with_stdin(
-                "cryptsetup",
-                &["open", "--test-passphrase", "--key-file=-", device],
-                stdin,
-            ),
-            CmdRequest::CryptsetupLuksAddKeyFile {
-                device,
-                key_file_path,
-            } => RealRunner::exec_with_stdin(
-                "cryptsetup",
-                &[
-                    "luksAddKey",
-                    "--key-slot",
-                    "1",
-                    "--new-keyfile-size",
-                    "4096",
-                    device,
-                    key_file_path,
-                ],
-                stdin,
-            ),
-            _ => {
-                // For non-stdin commands, delegate to run() and ignore stdin.
-                self.run(request)
-            }
+        if !request.requires_stdin() {
+            return Err(CmdError::Failed(format!(
+                "{request:?} must use run, not run_with_stdin"
+            )));
         }
+        RealRunner::exec_with_stdin(&request.to_argv(), stdin)
     }
 }
 
@@ -740,10 +821,16 @@ mod tests {
     // runs braid replace proactively. -r skips the dying drive, reads from
     // healthy mirrors, and finishes in minutes instead of hours.
     fn btrfs_replace_start_includes_read_from_mirrors_flag() {
-        let args = btrfs_replace_start_args(2, "/dev/mapper/braid-new", "/mnt/storage");
+        let cmd = CmdRequest::BtrfsReplaceStart {
+            devid: 2,
+            target_device: "/dev/mapper/braid-new".to_owned(),
+            mount_point: "/mnt/storage".to_owned(),
+        }
+        .to_argv();
         assert!(
-            args.iter().any(|a| a == "-r"),
-            "btrfs replace start must include -r flag to read from mirrors, got: {args:?}"
+            cmd.args.iter().any(|a| a == "-r"),
+            "btrfs replace start must include -r flag to read from mirrors, got: {:?}",
+            cmd.args
         );
     }
 

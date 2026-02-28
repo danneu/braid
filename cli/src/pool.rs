@@ -315,7 +315,7 @@ mod tests {
     // devid, target device, and mount point.
     // Why: the pool layer is the boundary between business logic and shell
     // commands. If the CmdRequest contract breaks, the wrong btrfs command runs.
-    // The actual -r flag is enforced in btrfs_replace_start_args (tested in
+    // The actual -r flag is enforced in CmdRequest::to_argv() (tested in
     // cmd::tests); this test locks in the CmdRequest plumbing.
     // Scenario: live replace of devid 2 with a new encrypted mapper device.
     fn pool_replace_device_issues_correct_replace_start() {
