@@ -420,6 +420,9 @@ impl CmdRequest {
             CmdRequest::CryptsetupLuksFormat { device, extra_opts } => {
                 let mut args: Vec<String> = vec![
                     "luksFormat".into(),
+                    // luks2 is already the default but might as well
+                    "--type".into(),
+                    "luks2".into(),
                     "--batch-mode".into(),
                     "--key-file=-".into(),
                 ];
