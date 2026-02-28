@@ -1,6 +1,7 @@
 use crate::cmd::{CmdRequest, CommandRunner};
-use crate::parse::types::BalanceState;
+use crate::parse::types::{BalanceState, BtrfsDeviceUsageEntry};
 use crate::parse::{parse_btrfs_balance_status, parse_btrfs_device_usage, parse_findmnt_json};
+use crate::status::format_bytes;
 
 /// Refuse if a btrfs balance or device remove is already running.
 /// Fail-closed: if we can't determine state, refuse. Unmounting or starting
@@ -97,6 +98,70 @@ pub fn probe_missing_devids<R: CommandRunner>(
         .filter(|d| d.device_size == 0)
         .map(|d| d.devid)
         .collect())
+}
+
+/// Check that remaining devices have enough RAID1-aware space to absorb the
+/// allocations from the target device(s) being removed or relocated.
+///
+/// Checks per allocation type (Data, Metadata, System) independently, because
+/// the kernel allocates chunks per type and cannot use Data space for Metadata.
+///
+/// For RAID1, two constraints must hold:
+///   1. At least 2 remaining devices must have unallocated space (RAID1 requires
+///      two devices with capacity to write a new chunk).
+///   2. Effective RAID1 capacity = min(largest, rest) where largest is the
+///      biggest device's unallocated space and rest is the sum of all others.
+///      This accounts for the pairing constraint: a large device can only pair
+///      with what the other devices can collectively provide.
+pub fn check_raid1_relocation_space(
+    target_devs: &[&BtrfsDeviceUsageEntry],
+    remaining_devs: &[&BtrfsDeviceUsageEntry],
+) -> Result<(), String> {
+    for alloc_type in &["Data", "Metadata", "System"] {
+        let bytes_on_target: u64 = target_devs
+            .iter()
+            .map(|d| d.allocated_by_type(alloc_type))
+            .sum();
+
+        if bytes_on_target == 0 {
+            continue;
+        }
+
+        let mut remaining_unalloc: Vec<u64> = remaining_devs
+            .iter()
+            .map(|d| d.unallocated)
+            .collect();
+        remaining_unalloc.sort_unstable_by(|a, b| b.cmp(a));
+
+        let devices_with_space = remaining_unalloc.iter().filter(|&&s| s > 0).count();
+        if devices_with_space < 2 {
+            return Err(format!(
+                "cannot relocate {} chunks: fewer than 2 remaining devices \
+                 have unallocated space (need space on 2 devices for RAID1)",
+                alloc_type
+            ));
+        }
+
+        let total: u64 = remaining_unalloc.iter().sum();
+        let largest = remaining_unalloc[0];
+        let rest: u64 = remaining_unalloc[1..].iter().sum();
+
+        let raid1_capacity = if largest > rest { rest } else { total / 2 };
+
+        if raid1_capacity < bytes_on_target {
+            return Err(format!(
+                "not enough space to relocate {} chunks.\n\n  \
+                 {} allocated on device(s) being removed: {}\n  \
+                 RAID1 capacity on remaining devices: {}\n\n\
+                 Each RAID1 chunk requires space on 2 devices simultaneously.",
+                alloc_type,
+                alloc_type,
+                format_bytes(bytes_on_target),
+                format_bytes(raid1_capacity),
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -340,5 +405,130 @@ mod tests {
         );
         let missing = probe_missing_devids(&runner, "/mnt/storage").unwrap();
         assert!(missing.is_empty());
+    }
+
+    // --- check_raid1_relocation_space tests ---
+
+    use crate::parse::types::DeviceAllocation;
+
+    fn make_dev(devid: u64, unallocated: u64, allocs: &[(&str, u64)]) -> BtrfsDeviceUsageEntry {
+        BtrfsDeviceUsageEntry {
+            path: format!("/dev/mapper/braid-disk{}", devid),
+            devid,
+            device_size: 1_000_000_000,
+            device_slack: 0,
+            allocations: allocs
+                .iter()
+                .map(|(t, b)| DeviceAllocation {
+                    alloc_type: t.to_string(),
+                    profile: "RAID1".to_string(),
+                    bytes: *b,
+                })
+                .collect(),
+            unallocated,
+        }
+    }
+
+    #[test]
+    // Intent: check_raid1_relocation_space passes when 3 remaining devices have
+    //   enough space for target's Data and Metadata allocations.
+    // Why: Confirms valid operations are not blocked.
+    // Scenario: 4-disk pool removing one disk; remaining three each have 200MB
+    //   unallocated; target has 100MB Data + 50MB Metadata.
+    fn raid1_space_passes_sufficient_space() {
+        let target = make_dev(1, 0, &[("Data", 100_000_000), ("Metadata", 50_000_000)]);
+        let rem1 = make_dev(2, 200_000_000, &[]);
+        let rem2 = make_dev(3, 200_000_000, &[]);
+        let rem3 = make_dev(4, 200_000_000, &[]);
+        let result =
+            check_raid1_relocation_space(&[&target], &[&rem1, &rem2, &rem3]);
+        assert!(result.is_ok(), "should pass: {result:?}");
+    }
+
+    #[test]
+    // Intent: check_raid1_relocation_space fails when RAID1 pairing capacity is
+    //   insufficient despite large total unallocated.
+    // Why: The naive sum/2 can be misleading when one device dominates —
+    //   the dominant device can only pair with what others can provide.
+    // Scenario: 3 remaining devices with [200MB, 10MB, 10MB] unallocated.
+    //   RAID1 capacity = rest = 20MB (not 110MB). Target has 500MB Data.
+    fn raid1_space_fails_pairing_constraint() {
+        let target = make_dev(1, 0, &[("Data", 500_000_000)]);
+        let rem1 = make_dev(2, 200_000_000, &[]);
+        let rem2 = make_dev(3, 10_000_000, &[]);
+        let rem3 = make_dev(4, 10_000_000, &[]);
+        let result =
+            check_raid1_relocation_space(&[&target], &[&rem1, &rem2, &rem3]);
+        let err = result.expect_err("should fail: pairing constraint");
+        assert!(
+            err.contains("Data"),
+            "expected 'Data' in error: {err}"
+        );
+    }
+
+    #[test]
+    // Intent: check_raid1_relocation_space fails when fewer than 2 remaining
+    //   devices have unallocated space.
+    // Why: RAID1 requires 2 devices with capacity; 1 device cannot form a RAID1 chunk.
+    // Scenario: Target has 100MB Data; remaining has 200MB + 0MB unallocated.
+    fn raid1_space_fails_fewer_than_two_devices_with_space() {
+        let target = make_dev(1, 0, &[("Data", 100_000_000)]);
+        let rem1 = make_dev(2, 200_000_000, &[]);
+        let rem2 = make_dev(3, 0, &[]);
+        let result = check_raid1_relocation_space(&[&target], &[&rem1, &rem2]);
+        let err = result.expect_err("should fail: fewer than 2 devices with space");
+        assert!(
+            err.contains("fewer than 2"),
+            "expected 'fewer than 2' in error: {err}"
+        );
+    }
+
+    #[test]
+    // Intent: check_raid1_relocation_space skips types with zero allocations on target.
+    // Why: Types not present on target don't need relocation; checking them would
+    //   cause false negatives against an empty remaining device list.
+    // Scenario: Target has 0 Data but 40MB Metadata; remaining have 50MB each.
+    //   Data is skipped (0 allocated). Metadata RAID1 capacity = 50MB > 40MB → pass.
+    fn raid1_space_skips_zero_allocation_type() {
+        let target = make_dev(1, 0, &[("Data", 0), ("Metadata", 40_000_000)]);
+        let rem1 = make_dev(2, 50_000_000, &[]);
+        let rem2 = make_dev(3, 50_000_000, &[]);
+        let result = check_raid1_relocation_space(&[&target], &[&rem1, &rem2]);
+        assert!(result.is_ok(), "should pass (Data skipped, Metadata fits): {result:?}");
+    }
+
+    #[test]
+    // Intent: check_raid1_relocation_space fails on the per-type that is tight,
+    //   even when other types have plenty of space.
+    // Why: DATA and METADATA are independent allocation pools in the kernel.
+    //   Surplus Data space cannot cover Metadata relocation.
+    // Scenario: Target has 0 Data but 100MB Metadata; remaining have 40MB each.
+    //   Metadata RAID1 capacity = 40MB < 100MB → fail.
+    fn raid1_space_fails_tight_metadata_despite_data_ok() {
+        let target = make_dev(1, 0, &[("Metadata", 100_000_000)]);
+        let rem1 = make_dev(2, 40_000_000, &[]);
+        let rem2 = make_dev(3, 40_000_000, &[]);
+        let result = check_raid1_relocation_space(&[&target], &[&rem1, &rem2]);
+        let err = result.expect_err("should fail: Metadata tight");
+        assert!(
+            err.contains("Metadata"),
+            "expected 'Metadata' in error: {err}"
+        );
+    }
+
+    #[test]
+    // Intent: check_raid1_relocation_space handles 4 remaining devices with
+    //   RAID1 capacity correctly using total/2 (no dominant device).
+    // Why: When no single device dominates, capacity = total/2 is the correct formula.
+    // Scenario: 5-disk pool, target has 1GB Data; remaining [500MB, 400MB, 300MB] unallocated.
+    //   total=1200MB, largest=500MB, rest=700MB → 500 <= 700 → capacity=600MB < 1000MB → fail.
+    fn raid1_space_fails_4devs_insufficient_total() {
+        let target = make_dev(1, 0, &[("Data", 1_000_000_000)]);
+        let rem1 = make_dev(2, 500_000_000, &[]);
+        let rem2 = make_dev(3, 400_000_000, &[]);
+        let rem3 = make_dev(4, 300_000_000, &[]);
+        let result = check_raid1_relocation_space(&[&target], &[&rem1, &rem2, &rem3]);
+        let err = result.expect_err("should fail: total/2 < bytes_on_target");
+        assert!(err.contains("Data"), "expected 'Data' in error: {err}");
     }
 }

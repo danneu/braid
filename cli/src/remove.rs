@@ -6,7 +6,6 @@ use crate::pool::evict_present_device;
 use crate::preflight;
 use crate::probe::{probe_pool, ProbeError};
 use crate::progress::ProgressOutput;
-use crate::status::format_bytes;
 use crate::types::*;
 use std::path::Path;
 
@@ -166,9 +165,9 @@ pub fn cmd_remove<R: CommandRunner + Sync>(
     Ok(())
 }
 
-/// Check that the remaining devices have enough unallocated space to absorb
-/// data from the device being removed. If they don't, btrfs device remove will
-/// either ENOSPC instantly or crash the filesystem to read-only mid-relocation.
+/// Check that the remaining devices have enough RAID1-aware, per-type space to
+/// absorb data from the device being removed. If they don't, btrfs device remove
+/// will either ENOSPC instantly or crash the filesystem to read-only mid-relocation.
 ///
 /// If the check itself fails (parse error, command error), we log a warning and
 /// proceed — a bug in the safety net shouldn't block a valid operation.
@@ -195,30 +194,23 @@ fn check_eviction_space<R: CommandRunner>(
         }
     };
 
-    let mut target_allocated: u64 = 0;
-    let mut other_unallocated: u64 = 0;
+    let target: Vec<_> = usage
+        .devices
+        .iter()
+        .filter(|d| d.devid == target_devid)
+        .collect();
+    let remaining: Vec<_> = usage
+        .devices
+        .iter()
+        .filter(|d| d.devid != target_devid)
+        .collect();
 
-    for dev in &usage.devices {
-        if dev.devid == target_devid {
-            target_allocated += dev.used_bytes();
-        } else {
-            other_unallocated += dev.unallocated;
-        }
-    }
-
-    if other_unallocated < target_allocated {
-        return Err(RemoveError::Validation(format!(
-            "not enough free space to remove this device.\n\n  \
-             Device has {} allocated (must be relocated to other devices).\n  \
-             Other devices have {} total unallocated.\n\n\
-             Without enough space, btrfs will hang and then crash the filesystem to read-only.\n\
-             Free up space by deleting files, or add a new device first with `braid add`.",
-            format_bytes(target_allocated),
-            format_bytes(other_unallocated),
-        )));
-    }
-
-    Ok(())
+    preflight::check_raid1_relocation_space(&target, &remaining)
+        .map_err(|e| {
+            RemoveError::Validation(format!(
+                "{e}\n\nFree up space by deleting files, or add a new device first with `braid add`."
+            ))
+        })
 }
 
 fn compile_remove_present_steps(

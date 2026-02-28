@@ -5,7 +5,6 @@ use crate::parse::parse_btrfs_device_usage;
 use crate::pool::{pool_remove_devid, pool_remove_missing};
 use crate::preflight;
 use crate::probe::{probe_pool, ProbeError};
-use crate::status::format_bytes;
 use std::path::Path;
 
 #[derive(Debug, thiserror::Error)]
@@ -155,8 +154,8 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync>(
     Ok(())
 }
 
-/// Check that surviving devices have enough unallocated space to absorb the
-/// missing device's allocations. If they don't, btrfs device remove will
+/// Check that surviving devices have enough RAID1-aware, per-type space to absorb
+/// the missing device's allocations. If they don't, btrfs device remove will
 /// either ENOSPC instantly or — worse — crash the filesystem to read-only
 /// mid-relocation.
 ///
@@ -190,35 +189,24 @@ fn check_relocation_space<R: CommandRunner>(
         }
     };
 
-    // Partition devices: missing (device_size == 0) vs surviving (device_size > 0)
-    let mut total_allocated_missing: u64 = 0;
-    let mut total_unallocated_survivors: u64 = 0;
+    // Partition: missing (device_size == 0, optionally filtered by devid) vs surviving (device_size > 0)
+    let target: Vec<_> = usage
+        .devices
+        .iter()
+        .filter(|d| d.device_size == 0 && (missing_id.is_none() || missing_id == Some(d.devid)))
+        .collect();
+    let remaining: Vec<_> = usage
+        .devices
+        .iter()
+        .filter(|d| d.device_size > 0)
+        .collect();
 
-    for dev in &usage.devices {
-        if dev.device_size == 0 {
-            // Missing device — count its allocations (optionally filtered by devid)
-            if missing_id.is_none() || missing_id == Some(dev.devid) {
-                total_allocated_missing += dev.used_bytes();
-            }
-        } else {
-            // Surviving device
-            total_unallocated_survivors += dev.unallocated;
-        }
-    }
-
-    if total_unallocated_survivors < total_allocated_missing {
-        return Err(RemoveMissingError::Validation(format!(
-            "not enough free space to remove the missing device.\n\n  \
-             Missing device has {} allocated (must be relocated to survivors).\n  \
-             Surviving devices have {} total unallocated.\n\n\
-             Without enough space, btrfs will hang and then crash the filesystem to read-only.\n\
-             Free up space by deleting files, or add a new device first with `braid add`.",
-            format_bytes(total_allocated_missing),
-            format_bytes(total_unallocated_survivors),
-        )));
-    }
-
-    Ok(())
+    preflight::check_raid1_relocation_space(&target, &remaining)
+        .map_err(|e| {
+            RemoveMissingError::Validation(format!(
+                "{e}\n\nFree up space by deleting files, or add a new device first with `braid add`."
+            ))
+        })
 }
 
 fn compile_steps(missing_id: Option<u64>) -> Vec<RemoveMissingStep> {
@@ -431,8 +419,8 @@ mod tests {
         let err = result.expect_err("should reject insufficient space");
         let msg = err.to_string();
         assert!(
-            msg.contains("not enough free space"),
-            "expected 'not enough free space' in: {msg}"
+            msg.contains("not enough space to relocate"),
+            "expected 'not enough space to relocate' in: {msg}"
         );
     }
 
@@ -484,8 +472,16 @@ mod tests {
     // Scenario: Two missing devices, but only one is targeted. The targeted
     //   device has small allocations that fit in survivors.
     fn check_relocation_space_with_missing_id_filters() {
+        // Two surviving devices (4-disk pool, 2 missing). The RAID1-aware check
+        // requires >= 2 surviving devices with space, which this fixture satisfies.
         let fixture = "\
 /dev/mapper/braid-disk1, ID: 1
+   Device size:           520093696
+   Device slack:                  0
+   Data,RAID1:             67108864
+   Unallocated:           200000000
+
+/dev/mapper/braid-disk4, ID: 4
    Device size:           520093696
    Device slack:                  0
    Data,RAID1:             67108864
@@ -509,11 +505,11 @@ mod tests {
             device_usage_stdout: fixture,
         };
 
-        // Targeting devid 2 (50 MB allocated) — should pass (200 MB available)
+        // Targeting devid 2 (50 MB Data) — should pass: RAID1 capacity = 200 MB >= 50 MB
         let result = check_relocation_space(&runner, "/mnt/storage", Some(2));
         assert!(result.is_ok(), "targeting devid 2 should pass: {result:?}");
 
-        // Targeting devid 3 (5 GB allocated) — should fail
+        // Targeting devid 3 (5 GB Data) — should fail: RAID1 capacity = 200 MB < 5 GB
         let result = check_relocation_space(&runner, "/mnt/storage", Some(3));
         assert!(result.is_err(), "targeting devid 3 should fail");
     }

@@ -262,6 +262,14 @@ impl BtrfsDeviceUsageEntry {
     pub fn used_bytes(&self) -> u64 {
         self.allocations.iter().map(|a| a.bytes).sum()
     }
+
+    pub fn allocated_by_type(&self, alloc_type: &str) -> u64 {
+        self.allocations
+            .iter()
+            .filter(|a| a.alloc_type == alloc_type)
+            .map(|a| a.bytes)
+            .sum()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
