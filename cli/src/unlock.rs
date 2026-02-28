@@ -107,7 +107,14 @@ pub fn cmd_unlock<R: CommandRunner, F: Filesystem + ?Sized>(
             }
 
             for (name, disk) in &to_unlock {
-                luks::ensure_luks_open_with_key_file(runner, fs, name, disk, kf)?;
+                luks::ensure_luks_open_with_key_file(runner, fs, name, disk, kf).map_err(|_| {
+                    UnlockError::Failed(format!(
+                        "failed to open disk '{}': keyfile was verified against \
+                             '{}' but rejected here (single-passphrase invariant \
+                             may be violated by external LUKS manipulation)",
+                        name, first_name
+                    ))
+                })?;
                 eprintln!("{}  disk: {:<10}unlocked", tag("ok"), name);
             }
         } else {
@@ -124,7 +131,15 @@ pub fn cmd_unlock<R: CommandRunner, F: Filesystem + ?Sized>(
             }
 
             for (name, disk) in &to_unlock {
-                luks::ensure_luks_open(runner, fs, name, disk, &passphrase)?;
+                luks::ensure_luks_open(runner, fs, name, disk, &passphrase).map_err(|_| {
+                    UnlockError::Failed(format!(
+                        "failed to open disk '{}': passphrase was verified \
+                             against '{}' but rejected here (single-passphrase \
+                             invariant may be violated by external LUKS \
+                             manipulation)",
+                        name, first_name
+                    ))
+                })?;
                 eprintln!("{}  disk: {:<10}unlocked", tag("ok"), name);
             }
         }
@@ -364,5 +379,127 @@ mod tests {
         // If the code incorrectly uses Mount instead of MountWithOptions,
         // MockRunner returns MissingMock → the test fails.
         result.expect("unlock with bricked disk should use degraded mount and succeed");
+    }
+
+    /// Passphrase mismatch on a non-first disk must identify the failing disk.
+    ///
+    /// Intent: When the single-passphrase invariant (Principle 4) is violated
+    /// by external LUKS manipulation, the error message must name the specific
+    /// disk that rejected the passphrase.
+    ///
+    /// Why it exists: Previously, ensure_luks_open failed with a generic
+    /// "Wrong passphrase?" error — misleading because the passphrase had
+    /// already been verified against another disk.
+    ///
+    /// Scenario: 2-disk RAID1 where someone ran `cryptsetup luksChangeKey` on
+    /// disk2 outside of braid. `braid unlock` verifies against disk1
+    /// (succeeds), opens disk1 (succeeds), then fails on disk2 with a message
+    /// naming both disks.
+    #[test]
+    fn passphrase_mismatch_names_failing_disk() {
+        let mut disks = BTreeMap::new();
+        for (name, path) in [
+            ("disk1", "/dev/disk/by-id/virtio-disk1"),
+            ("disk2", "/dev/disk/by-id/virtio-disk2"),
+        ] {
+            disks.insert(
+                name.to_owned(),
+                DiskConfig {
+                    by_id: ByIdPath(path.to_owned()),
+                },
+            );
+        }
+        let config = Config::new(disks, "/mnt/storage".to_owned()).unwrap();
+
+        let fs = MockFs::new(&[
+            "/dev/disk/by-id/virtio-disk1",
+            "/dev/disk/by-id/virtio-disk2",
+        ]);
+
+        let runner = MockRunner::default()
+            // mountpoint check → not mounted
+            .with_output(
+                CmdRequest::MountpointCheck {
+                    path: "/mnt/storage".into(),
+                },
+                err_raw("mountpoint", 1, ""),
+            )
+            // probe: disk1 is LUKS
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                RawCommandOutput {
+                    cmd: "cryptsetup luksUUID".into(),
+                    stdout: "aaaaaaaa-1111-2222-3333-444444444444\n".into(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                },
+            )
+            // probe: disk2 is LUKS
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                },
+                RawCommandOutput {
+                    cmd: "cryptsetup luksUUID".into(),
+                    stdout: "bbbbbbbb-1111-2222-3333-444444444444\n".into(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                },
+            )
+            // verify passphrase against disk1 → success
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw("cryptsetup open --test-passphrase"),
+            )
+            // open disk1 → success
+            .with_output_stdin(
+                CmdRequest::CryptsetupLuksOpen {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                    mapper: "braid-disk1".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw("cryptsetup open"),
+            )
+            // open disk2 → FAILURE (different passphrase)
+            .with_output_stdin(
+                CmdRequest::CryptsetupLuksOpen {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                    mapper: "braid-disk2".into(),
+                },
+                b"testpass".to_vec(),
+                err_raw(
+                    "cryptsetup open",
+                    5,
+                    "No key available with this passphrase.",
+                ),
+            );
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        {
+            use std::io::Write;
+            tmp.as_file().write_all(b"testpass").unwrap();
+        }
+
+        let result = cmd_unlock(&runner, &fs, &config, false, Some(tmp.path()), None);
+
+        let err = result.expect_err("should fail when disk2 rejects passphrase");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("disk2"),
+            "error should name the failing disk, got: {msg}"
+        );
+        assert!(
+            msg.contains("disk1"),
+            "error should name the verification disk, got: {msg}"
+        );
+        assert!(
+            !msg.contains("Wrong passphrase?"),
+            "error should not say 'Wrong passphrase?', got: {msg}"
+        );
     }
 }
