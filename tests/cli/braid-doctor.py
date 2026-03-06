@@ -7,9 +7,10 @@
 # Why: Ensures doctor correctly categorizes config problems and produces
 # structured output that operators and scripts can rely on.
 #
-# Dependencies: Rust braid binary.
+# Dependencies: Rust braid binary, cryptsetup, btrfs-progs.
 
 import json
+import shlex
 
 start_all()
 machine.wait_for_unit("multi-user.target")
@@ -120,5 +121,67 @@ with subtest("World-writable config warns"):
     assert "world-writable" in checks["config_permissions"]["message"], (
         f"Expected 'world-writable' in message: {checks['config_permissions']['message']}"
     )
+
+# --- Data profile mismatch (pool-based checks) ---
+
+passphrase = "testpassphrase"
+luks_opts = "--pbkdf pbkdf2 --pbkdf-force-iterations 1000"
+
+def add_cmd(key):
+    passphrase_q = shlex.quote(passphrase)
+    return (
+        f"printf '%s\\n' {passphrase_q} | "
+        f"BRAID_LUKS_OPTS='{luks_opts}' "
+        f"braid add {key} --passphrase-stdin --yes"
+    )
+
+with subtest("Data profile mismatch — skip when pool not mounted"):
+    raw = machine.succeed("braid doctor --json")
+    print(f"Pool not mounted JSON:\n{raw}")
+    report = json.loads(raw)
+    checks = {c["name"]: c for c in report["checks"]}
+    assert checks["data_profile_mismatch"]["status"] == "skip", (
+        f"data_profile_mismatch: {checks['data_profile_mismatch']}"
+    )
+
+# Set up the pool: add two disks → RAID1, write data
+with subtest("Setup pool — add disk1 and disk2"):
+    machine.succeed(add_cmd("disk1"))
+    machine.succeed(add_cmd("disk2"))
+    machine.succeed("dd if=/dev/urandom of=/mnt/storage/testdata bs=1M count=80 status=none")
+    machine.succeed("sync")
+
+with subtest("Data profile mismatch — clean RAID1 is ok"):
+    raw = machine.succeed("braid doctor --json")
+    print(f"Clean RAID1 JSON:\n{raw}")
+    report = json.loads(raw)
+    checks = {c["name"]: c for c in report["checks"]}
+    assert checks["data_profile_mismatch"]["status"] == "ok", (
+        f"data_profile_mismatch: {checks['data_profile_mismatch']}"
+    )
+    assert "RAID1" in checks["data_profile_mismatch"]["message"], (
+        f"Expected RAID1 in message: {checks['data_profile_mismatch']['message']}"
+    )
+
+# Create mixed state: convert one block group to single
+with subtest("Create mixed data profiles"):
+    machine.succeed("btrfs balance start -dconvert=single,limit=1 /mnt/storage")
+
+with subtest("Data profile mismatch — mixed profiles warns"):
+    raw = machine.succeed("braid doctor --json")
+    print(f"Mixed profiles JSON:\n{raw}")
+    report = json.loads(raw)
+    checks = {c["name"]: c for c in report["checks"]}
+    assert checks["data_profile_mismatch"]["status"] == "warn", (
+        f"data_profile_mismatch: {checks['data_profile_mismatch']}"
+    )
+    assert "mixed" in checks["data_profile_mismatch"]["message"], (
+        f"Expected 'mixed' in message: {checks['data_profile_mismatch']['message']}"
+    )
+
+with subtest("Data profile mismatch — human output contains label"):
+    output = machine.succeed("braid doctor")
+    print(f"Mixed human:\n{output}")
+    assert "data profiles" in output, f"Expected 'data profiles':\n{output}"
 
 machine.shutdown()

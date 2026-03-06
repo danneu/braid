@@ -3,7 +3,10 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::cmd::{CmdRequest, CommandRunner, RealRunner};
 use crate::config::Config;
+use crate::parse::parse_btrfs_df_json;
+use crate::status::format_bytes;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -31,18 +34,18 @@ pub struct DoctorReport {
     pub checks: Vec<CheckResult>,
 }
 
-struct DoctorContext {
+struct DoctorContext<'a, R: CommandRunner> {
     config_path: PathBuf,
     config_value: Option<serde_json::Value>,
-    #[allow(dead_code)]
     config: Option<Config>,
+    runner: &'a R,
 }
 
 // ---------------------------------------------------------------------------
 // Checks
 // ---------------------------------------------------------------------------
 
-fn check_config_file(ctx: &mut DoctorContext) -> CheckResult {
+fn check_config_file<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> CheckResult {
     let path = &ctx.config_path;
 
     let raw = match std::fs::read_to_string(path) {
@@ -73,7 +76,7 @@ fn check_config_file(ctx: &mut DoctorContext) -> CheckResult {
     }
 }
 
-fn check_config_schema(ctx: &mut DoctorContext) -> CheckResult {
+fn check_config_schema<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> CheckResult {
     let value = match &ctx.config_value {
         Some(v) => v.clone(),
         None => {
@@ -104,7 +107,7 @@ fn check_config_schema(ctx: &mut DoctorContext) -> CheckResult {
     }
 }
 
-fn check_config_permissions(ctx: &mut DoctorContext) -> CheckResult {
+fn check_config_permissions<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> CheckResult {
     if ctx.config_value.is_none() {
         return CheckResult {
             name: "config_permissions".into(),
@@ -156,7 +159,7 @@ fn check_config_permissions(ctx: &mut DoctorContext) -> CheckResult {
     }
 }
 
-fn check_declared_disks(ctx: &mut DoctorContext) -> CheckResult {
+fn check_declared_disks<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> CheckResult {
     let config = match &ctx.config {
         Some(c) => c,
         None => {
@@ -215,6 +218,98 @@ fn check_declared_disks(ctx: &mut DoctorContext) -> CheckResult {
     }
 }
 
+fn check_data_profile_mismatch<R: CommandRunner>(ctx: &DoctorContext<'_, R>) -> CheckResult {
+    let config = match &ctx.config {
+        Some(c) => c,
+        None => {
+            return CheckResult {
+                name: "data_profile_mismatch".into(),
+                status: CheckStatus::Skip,
+                message: "skipped (config not available)".into(),
+            };
+        }
+    };
+
+    let mount_point = config.mount_point().to_owned();
+
+    // Skip if pool not mounted
+    match ctx.runner.run(&CmdRequest::MountpointCheck {
+        path: mount_point.clone(),
+    }) {
+        Ok(out) if out.exit_status == 0 => {}
+        _ => {
+            return CheckResult {
+                name: "data_profile_mismatch".into(),
+                status: CheckStatus::Skip,
+                message: "skipped (pool not mounted)".into(),
+            };
+        }
+    }
+
+    // Query btrfs filesystem df
+    let raw = match ctx.runner.run(&CmdRequest::BtrfsFilesystemDfJson {
+        mount_point: mount_point.clone(),
+    }) {
+        Ok(raw) => raw,
+        Err(e) => {
+            return CheckResult {
+                name: "data_profile_mismatch".into(),
+                status: CheckStatus::Warn,
+                message: format!("could not query data profiles: {e}"),
+            };
+        }
+    };
+
+    let df = match parse_btrfs_df_json(&raw) {
+        Ok(df) => df,
+        Err(e) => {
+            return CheckResult {
+                name: "data_profile_mismatch".into(),
+                status: CheckStatus::Warn,
+                message: format!("could not parse data profiles: {e}"),
+            };
+        }
+    };
+
+    // Filter to Data entries (GlobalReserve is always "single" even on RAID1 — exclude it)
+    use crate::parse::types::BtrfsBgType;
+    let data_entries: Vec<_> = df
+        .entries
+        .iter()
+        .filter(|e| e.bg_type == BtrfsBgType::Data)
+        .collect();
+
+    let profiles: std::collections::BTreeSet<&str> =
+        data_entries.iter().map(|e| e.bg_profile.as_str()).collect();
+
+    if profiles.len() <= 1 {
+        let profile_name = profiles.into_iter().next().unwrap_or("unknown");
+        CheckResult {
+            name: "data_profile_mismatch".into(),
+            status: CheckStatus::Ok,
+            message: format!("data profile: {profile_name}"),
+        }
+    } else {
+        let mut parts: Vec<String> = Vec::new();
+        for entry in &data_entries {
+            parts.push(format!(
+                "{}: {} used / {} total",
+                entry.bg_profile,
+                format_bytes(entry.bg_used),
+                format_bytes(entry.bg_total),
+            ));
+        }
+        CheckResult {
+            name: "data_profile_mismatch".into(),
+            status: CheckStatus::Warn,
+            message: format!(
+                "mixed data profiles ({}); run: btrfs balance start -dconvert=raid1 -mconvert=raid1 {mount_point}",
+                parts.join(", "),
+            ),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Runner
 // ---------------------------------------------------------------------------
@@ -234,11 +329,12 @@ fn overall_status(checks: &[CheckResult]) -> CheckStatus {
     worst
 }
 
-pub fn run_doctor(config_path: &Path) -> DoctorReport {
+pub fn run_doctor<R: CommandRunner>(config_path: &Path, runner: &R) -> DoctorReport {
     let mut ctx = DoctorContext {
         config_path: config_path.to_owned(),
         config_value: None,
         config: None,
+        runner,
     };
 
     let checks = vec![
@@ -246,6 +342,7 @@ pub fn run_doctor(config_path: &Path) -> DoctorReport {
         check_config_schema(&mut ctx),
         check_config_permissions(&mut ctx),
         check_declared_disks(&mut ctx),
+        check_data_profile_mismatch(&ctx),
     ];
 
     let status = overall_status(&checks);
@@ -271,6 +368,7 @@ pub fn format_doctor_human(report: &DoctorReport) -> String {
             "config_schema" => "config schema",
             "config_permissions" => "config perms",
             "declared_disks" => "declared disks",
+            "data_profile_mismatch" => "data profiles",
             other => other,
         };
         out.push_str(&format!("[{tag:<4}]  {label:<14}  {}\n", c.message));
@@ -292,7 +390,8 @@ impl std::fmt::Display for DoctorError {
 }
 
 pub fn cmd_doctor(config_path: &Path, json: bool) -> Result<(), DoctorError> {
-    let report = run_doctor(config_path);
+    let runner = RealRunner;
+    let report = run_doctor(config_path, &runner);
 
     if json {
         // serde_json::to_string_pretty won't fail on our types
@@ -317,11 +416,16 @@ pub fn cmd_doctor(config_path: &Path, json: bool) -> Result<(), DoctorError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cmd::{MockRunner, RawCommandOutput};
     use std::io::Write;
     use tempfile::NamedTempFile;
 
     fn valid_config_json() -> &'static str {
         r#"{"disks":{"toshiba":{"by_id":"/dev/disk/by-id/a"}},"mount_point":"/mnt/storage"}"#
+    }
+
+    fn mock() -> MockRunner {
+        MockRunner::default()
     }
 
     fn write_temp(content: &str) -> NamedTempFile {
@@ -342,8 +446,8 @@ mod tests {
     #[test]
     fn valid_config_parses_ok_disks_warn() {
         let f = write_temp(valid_config_json());
-        let report = run_doctor(f.path());
-        assert_eq!(report.checks.len(), 4);
+        let report = run_doctor(f.path(), &mock());
+        assert_eq!(report.checks.len(), 5);
         assert_eq!(find_check(&report, "config_file").status, CheckStatus::Ok);
         assert_eq!(find_check(&report, "config_schema").status, CheckStatus::Ok);
         // declared_disks warns since /dev/disk/by-id/a doesn't exist in test env
@@ -355,7 +459,10 @@ mod tests {
 
     #[test]
     fn missing_file_fail_skip() {
-        let report = run_doctor(Path::new("/tmp/nonexistent-braid-doctor-test.json"));
+        let report = run_doctor(
+            Path::new("/tmp/nonexistent-braid-doctor-test.json"),
+            &mock(),
+        );
         assert_eq!(report.status, CheckStatus::Fail);
         assert_eq!(find_check(&report, "config_file").status, CheckStatus::Fail);
         assert_eq!(
@@ -371,7 +478,7 @@ mod tests {
     #[test]
     fn invalid_json_fail_skip() {
         let f = write_temp("not json at all {{{");
-        let report = run_doctor(f.path());
+        let report = run_doctor(f.path(), &mock());
         assert_eq!(report.status, CheckStatus::Fail);
         assert_eq!(find_check(&report, "config_file").status, CheckStatus::Fail);
         assert_eq!(
@@ -387,7 +494,7 @@ mod tests {
     #[test]
     fn valid_json_bad_schema_empty_disks() {
         let f = write_temp(r#"{"disks":{},"mount_point":"/mnt/storage"}"#);
-        let report = run_doctor(f.path());
+        let report = run_doctor(f.path(), &mock());
         assert_eq!(report.status, CheckStatus::Fail);
         assert_eq!(find_check(&report, "config_file").status, CheckStatus::Ok);
         let schema = find_check(&report, "config_schema");
@@ -402,7 +509,7 @@ mod tests {
     #[test]
     fn valid_json_bad_schema_empty_mount() {
         let f = write_temp(r#"{"disks":{"a":{"by_id":"/dev/disk/by-id/a"}},"mount_point":""}"#);
-        let report = run_doctor(f.path());
+        let report = run_doctor(f.path(), &mock());
         assert_eq!(find_check(&report, "config_file").status, CheckStatus::Ok);
         let schema = find_check(&report, "config_schema");
         assert_eq!(schema.status, CheckStatus::Fail);
@@ -481,7 +588,7 @@ mod tests {
     #[test]
     fn human_format_contains_tags() {
         let f = write_temp(valid_config_json());
-        let report = run_doctor(f.path());
+        let report = run_doctor(f.path(), &mock());
         let human = format_doctor_human(&report);
         assert!(human.contains("[ok  ]"), "expected [ok  ] tag:\n{human}");
         assert!(
@@ -496,7 +603,10 @@ mod tests {
 
     #[test]
     fn human_format_fail_tag() {
-        let report = run_doctor(Path::new("/tmp/nonexistent-braid-doctor-test.json"));
+        let report = run_doctor(
+            Path::new("/tmp/nonexistent-braid-doctor-test.json"),
+            &mock(),
+        );
         let human = format_doctor_human(&report);
         assert!(human.contains("[FAIL]"), "expected [FAIL] tag:\n{human}");
         assert!(human.contains("[skip]"), "expected [skip] tag:\n{human}");
@@ -507,7 +617,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let f = write_temp(valid_config_json());
         std::fs::set_permissions(f.path(), std::fs::Permissions::from_mode(0o666)).unwrap();
-        let report = run_doctor(f.path());
+        let report = run_doctor(f.path(), &mock());
         let perm = find_check(&report, "config_permissions");
         assert_eq!(perm.status, CheckStatus::Warn);
         assert!(perm.message.contains("world-writable"), "{}", perm.message);
@@ -519,7 +629,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let f = write_temp(valid_config_json());
         std::fs::set_permissions(f.path(), std::fs::Permissions::from_mode(0o600)).unwrap();
-        let report = run_doctor(f.path());
+        let report = run_doctor(f.path(), &mock());
         let perm = find_check(&report, "config_permissions");
         // May still warn about uid (tests don't run as root), but should not
         // warn about world/group bits.
@@ -537,7 +647,10 @@ mod tests {
 
     #[test]
     fn permissions_skip_when_no_config() {
-        let report = run_doctor(Path::new("/tmp/nonexistent-braid-doctor-test.json"));
+        let report = run_doctor(
+            Path::new("/tmp/nonexistent-braid-doctor-test.json"),
+            &mock(),
+        );
         let perm = find_check(&report, "config_permissions");
         assert_eq!(perm.status, CheckStatus::Skip);
     }
@@ -545,7 +658,7 @@ mod tests {
     #[test]
     fn human_format_contains_perms_label() {
         let f = write_temp(valid_config_json());
-        let report = run_doctor(f.path());
+        let report = run_doctor(f.path(), &mock());
         let human = format_doctor_human(&report);
         assert!(
             human.contains("config perms"),
@@ -558,7 +671,7 @@ mod tests {
         let f = write_temp(
             r#"{"disks":{"disk-a":{"by_id":"/dev/disk/by-id/nonexistent-a"},"disk-b":{"by_id":"/dev/disk/by-id/nonexistent-b"}},"mount_point":"/mnt/storage"}"#,
         );
-        let report = run_doctor(f.path());
+        let report = run_doctor(f.path(), &mock());
         let check = find_check(&report, "declared_disks");
         assert_eq!(check.status, CheckStatus::Warn);
         assert!(check.message.contains("2/2"), "{}", check.message);
@@ -571,7 +684,7 @@ mod tests {
         // /dev/null exists but is a char device, not a block device
         let f =
             write_temp(r#"{"disks":{"null":{"by_id":"/dev/null"}},"mount_point":"/mnt/storage"}"#);
-        let report = run_doctor(f.path());
+        let report = run_doctor(f.path(), &mock());
         let check = find_check(&report, "declared_disks");
         assert_eq!(check.status, CheckStatus::Warn);
         assert!(
@@ -583,7 +696,10 @@ mod tests {
 
     #[test]
     fn declared_disks_skip_when_no_config() {
-        let report = run_doctor(Path::new("/tmp/nonexistent-braid-doctor-test.json"));
+        let report = run_doctor(
+            Path::new("/tmp/nonexistent-braid-doctor-test.json"),
+            &mock(),
+        );
         let check = find_check(&report, "declared_disks");
         assert_eq!(check.status, CheckStatus::Skip);
     }
@@ -591,7 +707,7 @@ mod tests {
     #[test]
     fn declared_disks_skip_when_bad_schema() {
         let f = write_temp(r#"{"disks":{},"mount_point":"/mnt/storage"}"#);
-        let report = run_doctor(f.path());
+        let report = run_doctor(f.path(), &mock());
         let check = find_check(&report, "declared_disks");
         assert_eq!(check.status, CheckStatus::Skip);
     }
@@ -599,11 +715,193 @@ mod tests {
     #[test]
     fn human_format_contains_declared_disks_label() {
         let f = write_temp(valid_config_json());
-        let report = run_doctor(f.path());
+        let report = run_doctor(f.path(), &mock());
         let human = format_doctor_human(&report);
         assert!(
             human.contains("declared disks"),
             "expected 'declared disks':\n{human}"
+        );
+    }
+
+    // --- data_profile_mismatch tests ---
+
+    fn mountpoint_ok() -> (CmdRequest, RawCommandOutput) {
+        (
+            CmdRequest::MountpointCheck {
+                path: "/mnt/storage".into(),
+            },
+            RawCommandOutput {
+                cmd: "mountpoint -q /mnt/storage".into(),
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_status: 0,
+            },
+        )
+    }
+
+    fn mountpoint_fail() -> (CmdRequest, RawCommandOutput) {
+        (
+            CmdRequest::MountpointCheck {
+                path: "/mnt/storage".into(),
+            },
+            RawCommandOutput {
+                cmd: "mountpoint -q /mnt/storage".into(),
+                stdout: String::new(),
+                stderr: "/mnt/storage is not a mountpoint\n".into(),
+                exit_status: 1,
+            },
+        )
+    }
+
+    fn df_json(json: &str) -> (CmdRequest, RawCommandOutput) {
+        (
+            CmdRequest::BtrfsFilesystemDfJson {
+                mount_point: "/mnt/storage".into(),
+            },
+            RawCommandOutput {
+                cmd: "btrfs --format json filesystem df /mnt/storage".into(),
+                stdout: json.into(),
+                stderr: String::new(),
+                exit_status: 0,
+            },
+        )
+    }
+
+    fn df_json_fail() -> (CmdRequest, RawCommandOutput) {
+        (
+            CmdRequest::BtrfsFilesystemDfJson {
+                mount_point: "/mnt/storage".into(),
+            },
+            RawCommandOutput {
+                cmd: "btrfs --format json filesystem df /mnt/storage".into(),
+                stdout: String::new(),
+                stderr: "ERROR: not a btrfs filesystem".into(),
+                exit_status: 1,
+            },
+        )
+    }
+
+    const DF_RAID1_CLEAN: &str = r#"{
+        "filesystem-df": [
+            { "bg-type": "Data", "bg-profile": "RAID1", "total": 67108864, "used": 16777216 },
+            { "bg-type": "System", "bg-profile": "RAID1", "total": 8388608, "used": 16384 },
+            { "bg-type": "Metadata", "bg-profile": "RAID1", "total": 33554432, "used": 262144 },
+            { "bg-type": "GlobalReserve", "bg-profile": "single", "total": 3407872, "used": 0 }
+        ]
+    }"#;
+
+    const DF_MIXED: &str = r#"{
+        "filesystem-df": [
+            { "bg-type": "Data", "bg-profile": "RAID1", "total": 67108864, "used": 16777216 },
+            { "bg-type": "Data", "bg-profile": "single", "total": 8388608, "used": 4194304 },
+            { "bg-type": "System", "bg-profile": "RAID1", "total": 8388608, "used": 16384 },
+            { "bg-type": "Metadata", "bg-profile": "RAID1", "total": 33554432, "used": 262144 },
+            { "bg-type": "GlobalReserve", "bg-profile": "single", "total": 3407872, "used": 0 }
+        ]
+    }"#;
+
+    #[test]
+    fn data_profile_clean_raid1_ok() {
+        let (mp_req, mp_out) = mountpoint_ok();
+        let (df_req, df_out) = df_json(DF_RAID1_CLEAN);
+        let runner = mock()
+            .with_output(mp_req, mp_out)
+            .with_output(df_req, df_out);
+        let f = write_temp(valid_config_json());
+        let report = run_doctor(f.path(), &runner);
+        let check = find_check(&report, "data_profile_mismatch");
+        assert_eq!(check.status, CheckStatus::Ok);
+        assert!(
+            check.message.contains("RAID1"),
+            "expected RAID1 in message: {}",
+            check.message
+        );
+    }
+
+    #[test]
+    fn data_profile_mixed_warns() {
+        let (mp_req, mp_out) = mountpoint_ok();
+        let (df_req, df_out) = df_json(DF_MIXED);
+        let runner = mock()
+            .with_output(mp_req, mp_out)
+            .with_output(df_req, df_out);
+        let f = write_temp(valid_config_json());
+        let report = run_doctor(f.path(), &runner);
+        let check = find_check(&report, "data_profile_mismatch");
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert!(
+            check.message.contains("mixed"),
+            "expected 'mixed' in message: {}",
+            check.message
+        );
+        assert!(
+            check.message.contains("btrfs balance"),
+            "expected balance suggestion: {}",
+            check.message
+        );
+    }
+
+    #[test]
+    fn data_profile_global_reserve_single_not_warned() {
+        // GlobalReserve is always "single" — must not trigger mismatch
+        let json = r#"{
+            "filesystem-df": [
+                { "bg-type": "Data", "bg-profile": "RAID1", "total": 67108864, "used": 16777216 },
+                { "bg-type": "GlobalReserve", "bg-profile": "single", "total": 3407872, "used": 0 }
+            ]
+        }"#;
+        let (mp_req, mp_out) = mountpoint_ok();
+        let (df_req, df_out) = df_json(json);
+        let runner = mock()
+            .with_output(mp_req, mp_out)
+            .with_output(df_req, df_out);
+        let f = write_temp(valid_config_json());
+        let report = run_doctor(f.path(), &runner);
+        let check = find_check(&report, "data_profile_mismatch");
+        assert_eq!(check.status, CheckStatus::Ok);
+    }
+
+    #[test]
+    fn data_profile_skip_when_config_unavailable() {
+        let report = run_doctor(
+            Path::new("/tmp/nonexistent-braid-doctor-test.json"),
+            &mock(),
+        );
+        let check = find_check(&report, "data_profile_mismatch");
+        assert_eq!(check.status, CheckStatus::Skip);
+        assert!(
+            check.message.contains("config not available"),
+            "{}",
+            check.message
+        );
+    }
+
+    #[test]
+    fn data_profile_skip_when_pool_not_mounted() {
+        let (mp_req, mp_out) = mountpoint_fail();
+        let runner = mock().with_output(mp_req, mp_out);
+        let f = write_temp(valid_config_json());
+        let report = run_doctor(f.path(), &runner);
+        let check = find_check(&report, "data_profile_mismatch");
+        assert_eq!(check.status, CheckStatus::Skip);
+        assert!(check.message.contains("not mounted"), "{}", check.message);
+    }
+
+    #[test]
+    fn data_profile_warn_when_df_fails() {
+        let (mp_req, mp_out) = mountpoint_ok();
+        let (df_req, df_out) = df_json_fail();
+        let runner = mock()
+            .with_output(mp_req, mp_out)
+            .with_output(df_req, df_out);
+        let f = write_temp(valid_config_json());
+        let report = run_doctor(f.path(), &runner);
+        let check = find_check(&report, "data_profile_mismatch");
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert!(
+            check.message.contains("could not"),
+            "expected error message: {}",
+            check.message
         );
     }
 }

@@ -14,17 +14,21 @@
 
   nodes.machine = { pkgs, ... }: {
     virtualisation.emptyDiskImages = [
-      { size = 64; driveConfig.deviceExtraOpts.serial = "disk1"; }
+      { size = 512; driveConfig.deviceExtraOpts.serial = "disk1"; }
+      { size = 512; driveConfig.deviceExtraOpts.serial = "disk2"; }
     ];
 
     environment.systemPackages = [
       braid
       pkgs.jq
+      pkgs.cryptsetup
+      pkgs.btrfs-progs
     ];
 
     environment.etc."braid/config.json".text = builtins.toJSON {
       disks = {
         disk1 = { by_id = "/dev/disk/by-id/virtio-disk1"; };
+        disk2 = { by_id = "/dev/disk/by-id/virtio-disk2"; };
       };
       mount_point = "/mnt/storage";
     };
