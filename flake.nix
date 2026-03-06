@@ -239,13 +239,22 @@
               braid = linuxCrane.braid-cli-unwrapped;
             }
           );
-          braid-module-invalid-disk-names =
-            import ./tests/module/invalid-disk-names.nix {
-              inherit nixpkgs;
-              system = linuxSystem;
-            };
+          braid-module-invalid-disk-names = import ./tests/module/invalid-disk-names.nix {
+            inherit nixpkgs;
+            system = linuxSystem;
+          };
           braid-lock = pkgs.testers.nixosTest (
             import ./tests/cli/braid-lock.nix {
+              braid = linuxCrane.braid;
+            }
+          );
+          braid-lock-umount-busy = pkgs.testers.nixosTest (
+            import ./tests/cli/braid-lock-umount-busy.nix {
+              braid = linuxCrane.braid;
+            }
+          );
+          braid-lock-btrfs-held = pkgs.testers.nixosTest (
+            import ./tests/cli/braid-lock-btrfs-held.nix {
               braid = linuxCrane.braid;
             }
           );
@@ -284,9 +293,7 @@
               braid = linuxCrane.braid;
             }
           );
-          repro-degrade2x-read-only = pkgs.testers.nixosTest (
-            import ./tests/repro/degrade2x-read-only.nix
-          );
+          repro-degrade2x-read-only = pkgs.testers.nixosTest (import ./tests/repro/degrade2x-read-only.nix);
           repro-degraded-writes-single = pkgs.testers.nixosTest (
             import ./tests/repro/degraded-writes-single.nix
           );
@@ -301,6 +308,12 @@
           );
           repro-remove-without-balance = pkgs.testers.nixosTest (
             import ./tests/repro/remove-without-balance.nix
+          );
+          repro-cryptsetup-close-mounted = pkgs.testers.nixosTest (
+            import ./tests/repro/cryptsetup-close-mounted.nix
+          );
+          repro-cryptsetup-close-btrfs-held = pkgs.testers.nixosTest (
+            import ./tests/repro/cryptsetup-close-btrfs-held.nix
           );
           luks-label = pkgs.testers.nixosTest (
             import ./tests/cli/luks-label.nix {

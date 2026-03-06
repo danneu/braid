@@ -1,3 +1,6 @@
+use std::thread;
+use std::time::Duration;
+
 use crate::cmd::{CmdError, CmdRequest, CommandRunner};
 use crate::config::{mapper_name, Config, ConfigError};
 use crate::preflight;
@@ -16,6 +19,37 @@ pub enum LockError {
 /// Status line tag for output.
 fn tag(label: &str) -> String {
     format!("[{:<4}]", label)
+}
+
+const CLOSE_RETRY_ATTEMPTS: u32 = 3;
+const CLOSE_RETRY_DELAY: Duration = Duration::from_millis(500);
+
+/// Close a LUKS mapper, retrying up to 3 times if the error indicates the
+/// device is busy. Non-busy errors fail immediately.
+fn close_mapper_with_retry<R: CommandRunner>(runner: &R, mapper: &str) -> Result<(), LockError> {
+    for attempt in 1..=CLOSE_RETRY_ATTEMPTS {
+        let result = runner.run(&CmdRequest::CryptsetupClose {
+            mapper: mapper.to_owned(),
+        })?;
+        if result.exit_status == 0 {
+            return Ok(());
+        }
+        let stderr = result.stderr.to_lowercase();
+        let is_busy = stderr.contains("busy") || stderr.contains("in use");
+        if !is_busy || attempt == CLOSE_RETRY_ATTEMPTS {
+            return Err(LockError::Failed(format!(
+                "cryptsetup close {} failed (exit {}): {}",
+                mapper,
+                result.exit_status,
+                result.stderr.trim()
+            )));
+        }
+        eprintln!(
+            "[warn]  cryptsetup close {mapper} busy, retrying ({attempt}/{CLOSE_RETRY_ATTEMPTS})..."
+        );
+        thread::sleep(CLOSE_RETRY_DELAY);
+    }
+    unreachable!()
 }
 
 pub fn cmd_lock<R: CommandRunner, F: Filesystem + ?Sized>(
@@ -43,12 +77,32 @@ pub fn cmd_lock<R: CommandRunner, F: Filesystem + ?Sized>(
         })?;
         if umount_result.exit_status != 0 {
             return Err(LockError::Failed(format!(
-                "umount {mount_point} failed (exit {}): {}",
+                "umount {mount_point} failed (exit {}): {}\n\
+                 hint: a process may be using files on the mount. \
+                 Run 'lsof {mount_point}' or 'fuser -vm {mount_point}' to identify it.",
                 umount_result.exit_status,
-                umount_result.stderr.trim()
+                umount_result.stderr.trim(),
+                mount_point = mount_point,
             )));
         }
         eprintln!("{}  {:<14}unmounted {}", tag("ok"), "pool", mount_point);
+
+        // Clear btrfs kernel scan registry so that cryptsetup close doesn't
+        // race against stale device references on multi-device pools.
+        let forget_result = runner.run(&CmdRequest::BtrfsDeviceScanForget);
+        match forget_result {
+            Ok(r) if r.exit_status == 0 => {}
+            Ok(r) => {
+                eprintln!(
+                    "[warn]  btrfs device scan --forget failed (exit {}): {} (continuing)",
+                    r.exit_status,
+                    r.stderr.trim()
+                );
+            }
+            Err(e) => {
+                eprintln!("[warn]  btrfs device scan --forget failed: {e} (continuing)");
+            }
+        }
     }
 
     // 3. Close each mapper
@@ -58,17 +112,7 @@ pub fn cmd_lock<R: CommandRunner, F: Filesystem + ?Sized>(
         let mapper_path = format!("/dev/mapper/{}", mn.0);
 
         if fs.exists(&mapper_path) {
-            let close_result = runner.run(&CmdRequest::CryptsetupClose {
-                mapper: mn.0.clone(),
-            })?;
-            if close_result.exit_status != 0 {
-                return Err(LockError::Failed(format!(
-                    "cryptsetup close {} failed (exit {}): {}",
-                    mn.0,
-                    close_result.exit_status,
-                    close_result.stderr.trim()
-                )));
-            }
+            close_mapper_with_retry(runner, &mn.0)?;
             eprintln!("{}  disk: {:<7}locked", tag("ok"), name);
             all_already_closed = false;
         } else {
@@ -149,9 +193,11 @@ mod tests {
         Config::new(disks, "/mnt/storage".to_owned()).unwrap()
     }
 
-    #[test]
-    fn lock_happy_path_unmounts_and_closes() {
-        let runner = MockRunner::default()
+    /// Build a MockRunner pre-loaded with the standard preflight outputs
+    /// (mountpoint check = mounted, balance status = no balance, umount = ok,
+    /// forget = ok).
+    fn mounted_runner() -> MockRunner {
+        MockRunner::default()
             .with_output(
                 CmdRequest::MountpointCheck {
                     path: "/mnt/storage".into(),
@@ -175,6 +221,15 @@ mod tests {
                 },
                 ok_raw("umount /mnt/storage"),
             )
+            .with_output(
+                CmdRequest::BtrfsDeviceScanForget,
+                ok_raw("btrfs device scan --forget"),
+            )
+    }
+
+    #[test]
+    fn lock_happy_path_unmounts_and_closes() {
+        let runner = mounted_runner()
             .with_output(
                 CmdRequest::CryptsetupClose {
                     mapper: "braid-aaa".into(),
@@ -260,5 +315,113 @@ mod tests {
 
         let err = cmd_lock(&runner, &fs, &config).expect_err("should fail on busy");
         assert!(err.to_string().contains("target is busy"));
+    }
+
+    #[test]
+    fn lock_umount_busy_includes_hint() {
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::MountpointCheck {
+                    path: "/mnt/storage".into(),
+                },
+                ok_raw("mountpoint -q /mnt/storage"),
+            )
+            .with_output(
+                CmdRequest::BtrfsBalanceStatus {
+                    mount_point: "/mnt/storage".into(),
+                },
+                RawCommandOutput {
+                    cmd: "btrfs balance status /mnt/storage".into(),
+                    stdout: "No balance found on '/mnt/storage'\n".into(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                },
+            )
+            .with_output(
+                CmdRequest::Umount {
+                    mount_point: "/mnt/storage".into(),
+                },
+                err_raw("umount /mnt/storage", 32, "target is busy"),
+            );
+        let fs = MockFs::new(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]);
+        let config = test_config();
+
+        let err = cmd_lock(&runner, &fs, &config).expect_err("should fail on busy");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("lsof") && msg.contains("fuser"),
+            "expected lsof/fuser hint in error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn lock_adds_forget_after_umount() {
+        let runner = mounted_runner()
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: "braid-aaa".into(),
+                },
+                ok_raw("cryptsetup close braid-aaa"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: "braid-bbb".into(),
+                },
+                ok_raw("cryptsetup close braid-bbb"),
+            );
+        let fs = MockFs::new(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]);
+        let config = test_config();
+
+        // If BtrfsDeviceScanForget were not called, MockRunner would return
+        // MissingMock and the test would fail.
+        cmd_lock(&runner, &fs, &config).expect("lock should succeed with forget");
+    }
+
+    #[test]
+    fn lock_forget_failure_is_nonfatal() {
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::MountpointCheck {
+                    path: "/mnt/storage".into(),
+                },
+                ok_raw("mountpoint -q /mnt/storage"),
+            )
+            .with_output(
+                CmdRequest::BtrfsBalanceStatus {
+                    mount_point: "/mnt/storage".into(),
+                },
+                RawCommandOutput {
+                    cmd: "btrfs balance status /mnt/storage".into(),
+                    stdout: "No balance found on '/mnt/storage'\n".into(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                },
+            )
+            .with_output(
+                CmdRequest::Umount {
+                    mount_point: "/mnt/storage".into(),
+                },
+                ok_raw("umount /mnt/storage"),
+            )
+            .with_output(
+                CmdRequest::BtrfsDeviceScanForget,
+                err_raw("btrfs device scan --forget", 1, "some error"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: "braid-aaa".into(),
+                },
+                ok_raw("cryptsetup close braid-aaa"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: "braid-bbb".into(),
+                },
+                ok_raw("cryptsetup close braid-bbb"),
+            );
+        let fs = MockFs::new(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]);
+        let config = test_config();
+
+        cmd_lock(&runner, &fs, &config).expect("lock should succeed even when forget fails");
     }
 }

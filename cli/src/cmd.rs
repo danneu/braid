@@ -74,6 +74,7 @@ pub enum CmdRequest {
         device: String,
     },
     BtrfsDeviceScanAll,
+    BtrfsDeviceScanForget,
     BtrfsBalanceRaid1 {
         mount_point: String,
     },
@@ -316,6 +317,10 @@ impl CmdRequest {
             CmdRequest::BtrfsDeviceScanAll => CmdArgs {
                 program: "btrfs",
                 args: vec!["device".into(), "scan".into()],
+            },
+            CmdRequest::BtrfsDeviceScanForget => CmdArgs {
+                program: "btrfs",
+                args: vec!["device".into(), "scan".into(), "--forget".into()],
             },
             CmdRequest::BtrfsBalanceRaid1 { mount_point } => CmdArgs {
                 program: "btrfs",
