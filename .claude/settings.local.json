@@ -15,7 +15,8 @@
       "Bash(cargo insta:*)",
       "Bash(just test-rust:*)",
       "Bash(cargo check:*)",
-      "Bash(just test:*)"
+      "Bash(just test:*)",
+      "Bash(gh search:*)"
     ]
   }
 }
