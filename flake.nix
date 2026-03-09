@@ -136,6 +136,11 @@
               braid = linuxCrane.braid;
             }
           );
+          doctor-metadata-mixed = pkgs.testers.nixosTest (
+            import ./tests/cli/doctor-metadata-mixed.nix {
+              braid = linuxCrane.braid;
+            }
+          );
           shell-completion = pkgs.testers.nixosTest (
             import ./tests/cli/shell-completion.nix {
               braid = linuxCrane.braid;

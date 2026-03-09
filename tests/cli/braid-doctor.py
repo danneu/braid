@@ -198,9 +198,4 @@ with subtest("Data profile mismatch — human output contains label"):
     assert "data profiles" in output, f"Expected 'data profiles':\n{output}"
     assert "meta profiles" in output, f"Expected 'meta profiles':\n{output}"
 
-# Note: Mixed metadata VM test is omitted — 512 MiB VM disks only
-# allocate one metadata block group (256 MiB), making it impossible to
-# create a mixed state with limit=1. Mixed metadata detection is
-# covered by unit tests (metadata_profile_mixed_warns).
-
 machine.shutdown()
