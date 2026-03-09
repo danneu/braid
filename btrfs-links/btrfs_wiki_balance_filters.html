@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr" class="client-nojs">
+<head>
+<title>Balance Filters - btrfs Wiki</title>
+<meta charset="UTF-8" />
+<meta name="generator" content="MediaWiki 1.19.24" />
+<link rel="shortcut icon" href="../favicon.ico" />
+<link rel="search" type="application/opensearchdescription+xml" href="../opensearch_desc.php" title="btrfs Wiki (en)" />
+<link rel="EditURI" type="application/rsd+xml" href="https://btrfs.wiki.kernel.org/api.php?action=rsd" />
+<link rel="alternate" type="application/atom+xml" title="btrfs Wiki Atom feed" href="https://btrfs.wiki.kernel.org/index.php?title=Special:RecentChanges&amp;feed=atom" />
+<link rel="stylesheet" href="../load.php%3Fdebug=false&amp;lang=en&amp;modules=mediawiki.legacy.commonPrint,shared|skins.monobook&amp;only=styles&amp;skin=monobook&amp;*.css" />
+<!--[if IE 6]><link rel="stylesheet" href="/skins/monobook/IE60Fixes.css?303" media="screen" /><![endif]-->
+<!--[if IE 7]><link rel="stylesheet" href="/skins/monobook/IE70Fixes.css?303" media="screen" /><![endif]--><meta name="ResourceLoaderDynamicStyles" content="" />
+<style>a:lang(ar),a:lang(ckb),a:lang(fa),a:lang(kk-arab),a:lang(mzn),a:lang(ps),a:lang(ur){text-decoration:none}a.new,#quickbar a.new{color:#ba0000}
+
+/* cache key: korg_mediawiki_btrfs:resourceloader:filter:minify-css:7:c88e2bcd56513749bec09a7e29cb3ffa */
+</style>
+
+<script src="../load.php%3Fdebug=false&amp;lang=en&amp;modules=startup&amp;only=scripts&amp;skin=monobook&amp;*"></script>
+<script>if(window.mw){
+mw.config.set({"wgCanonicalNamespace":"","wgCanonicalSpecialPageName":false,"wgNamespaceNumber":0,"wgPageName":"Balance_Filters","wgTitle":"Balance Filters","wgCurRevisionId":33516,"wgArticleId":2381,"wgIsArticle":true,"wgAction":"view","wgUserName":null,"wgUserGroups":["*"],"wgCategories":[],"wgBreakFrames":false,"wgPageContentLanguage":"en","wgSeparatorTransformTable":["",""],"wgDigitTransformTable":["",""],"wgRelevantPageName":"Balance_Filters","wgRestrictionEdit":[],"wgRestrictionMove":[]});
+}</script><script>if(window.mw){
+mw.loader.implement("user.options",function($){mw.user.options.set({"ccmeonemails":0,"cols":80,"date":"default","diffonly":0,"disablemail":0,"disablesuggest":0,"editfont":"default","editondblclick":0,"editsection":1,"editsectiononrightclick":0,"enotifminoredits":0,"enotifrevealaddr":0,"enotifusertalkpages":1,"enotifwatchlistpages":0,"extendwatchlist":0,"externaldiff":0,"externaleditor":0,"fancysig":0,"forceeditsummary":0,"gender":"unknown","hideminor":0,"hidepatrolled":0,"highlightbroken":1,"imagesize":2,"justify":0,"math":1,"minordefault":0,"newpageshidepatrolled":0,"nocache":0,"noconvertlink":0,"norollbackdiff":0,"numberheadings":0,"previewonfirst":0,"previewontop":1,"quickbar":5,"rcdays":7,"rclimit":50,"rememberpassword":0,"rows":25,"searchlimit":20,"showhiddencats":0,"showjumplinks":1,"shownumberswatching":1,"showtoc":1,"showtoolbar":1,"skin":"monobook","stubthreshold":0,"thumbsize":2,"underline":2,"uselivepreview":0,"usenewrc":0,"watchcreations":0,"watchdefault":0,"watchdeletion":
+0,"watchlistdays":3,"watchlisthideanons":0,"watchlisthidebots":0,"watchlisthideliu":0,"watchlisthideminor":0,"watchlisthideown":0,"watchlisthidepatrolled":0,"watchmoves":0,"wllimit":250,"variant":"en","language":"en","searchNs0":true,"searchNs1":false,"searchNs2":false,"searchNs3":false,"searchNs4":false,"searchNs5":false,"searchNs6":false,"searchNs7":false,"searchNs8":false,"searchNs9":false,"searchNs10":false,"searchNs11":false,"searchNs12":false,"searchNs13":false,"searchNs14":false,"searchNs15":false});;},{},{});mw.loader.implement("user.tokens",function($){mw.user.tokens.set({"editToken":"+\\","watchToken":false});;},{},{});
+
+/* cache key: korg_mediawiki_btrfs:resourceloader:filter:minify-js:7:74a832f2292f1f4d40d425d223444e78 */
+}</script>
+<script>if(window.mw){
+mw.loader.load(["mediawiki.page.startup","mediawiki.legacy.wikibits","mediawiki.legacy.ajax"]);
+}</script>
+</head>
+<body class="mediawiki ltr sitedir-ltr ns-0 ns-subject page-Balance_Filters skin-monobook action-view">
+<div id="globalWrapper">
+<div id="column-content"><div id="content">
+	<a id="top"></a>
+	
+	<h1 id="firstHeading" class="firstHeading"><span dir="auto">Balance Filters</span></h1>
+	<div id="bodyContent" class="mw-body">
+		<div id="siteSub">From btrfs Wiki</div>
+		<div id="contentSub"></div>
+		<div id="jump-to-nav" class="mw-jump">Jump to: <a href="Balance_Filters.html#column-one">navigation</a>, <a href="Balance_Filters.html#searchInput">search</a></div>
+		<!-- start content -->
+<div id="mw-content-text" lang="en" dir="ltr" class="mw-content-ltr"><div class="warningbox" id="archived-warning"><h1>OBSOLETE CONTENT</h1><p>This wiki has been archived and the content is no longer updated.</p></div><div class="visualClear"></div><div style="background-color: #ffffe0; padding:.5em .75em; margin:.5em; border:1px solid #cccc66; border-left:10px solid #cccc66; color: #777777;"><b>Deprecated</b> <a rel="nofollow" class="external free" href="Manpage/btrfs-balance.html#FILTERS">https://btrfs.wiki.kernel.org/index.php/Manpage/btrfs-balance#FILTERS</a></div>
+<h2> <span class="mw-headline" id="Balancing_to_fix_filesystem_full_errors"> Balancing to fix filesystem full errors </span></h2>
+<p>This is explained in more details on <a rel="nofollow" class="external text" href="http://marc.merlins.org/perso/btrfs/post_2014-05-04_Fixing-Btrfs-Filesystem-Full-Problems.html">Marc's Blog on Fixing Btrfs Filesystem Full Problems</a>, but basically there are times when btrfs will need rebalancing to fix issues with chunks being misbalanced.
+</p><p>Keys points:
+</p>
+<ul><li> If you are getting out of space errors due to metadata being full, before 3.18 (where it's now automatic), you can try this:
+</li></ul>
+<pre>btrfs balance start -v -dusage=0 /mnt/btrfs
+</pre>
+<ul><li> If your data chunks are misbalanced, look at how much space is really used in percentage and you can feed that to -dusage in smaller increments starting from 10. This will ask btrfs to rebalance all chunks that are not at that threshold (bigger number means more work). Rebalancing means chunks under that usage threshold will have their data moved to other chunks so that they can be freed up and made available for new allocations (fixing your filesystem full problem):
+</li></ul>
+<pre>btrfs balance start -dusage=55 /mnt/btrfs
+</pre>
+<h2> <span class="mw-headline" id="Other_Examples"> Other Examples </span></h2>
+<p><b>Convert data to raid1 after mkfs with defaults</b>
+</p><p>You want to increase redundancy for data as well, with at least 2 devices you can do:
+</p>
+<pre>$ mkfs.btrfs /dev/sda1 /dev/sdb1
+$ mount /dev/sda1 /mnt
+[...]
+$ btrfs fi df /mnt
+</pre>
+<p>output:
+</p>
+<pre>Data, RAID0: total=409.50MB, used=0.00
+Data: total=8.00MB, used=0.00
+System, RAID1: total=8.00MB, used=4.00KB
+System: total=4.00MB, used=0.00
+Metadata, RAID1: total=204.75MB, used=24.00KB
+Metadata: total=8.00MB, used=0.00
+</pre>
+<pre>$ btrfs fi balance start -dconvert=raid1 /mnt
+$ btrfs fi df /mnt
+</pre>
+<p>output:
+</p>
+<pre>Data, RAID1: total=819.12MB, used=128.00KB
+System, RAID1: total=8.00MB, used=4.00KB
+System: total=4.00MB, used=0.00
+Metadata, RAID1: total=460.75MB, used=24.00KB
+Metadata: total=8.00MB, used=0.00
+</pre>
+<p><b>Convert data and metadata to raid1 after mkfs with defaults</b>
+</p><p>The above example won't give you an actual RAID1 configuration if you haven't already mirrored your metadata, as it only mirrors data. You can see this if your output after running the above commands looks like the following:
+</p>
+<pre>Data, RAID1: total=819.12MB, used=128.00KB
+System, DUP: total=8.00MB, used=4.00KB
+System: total=4.00MB, used=0.00
+Metadata, DUP: total=460.75MB, used=24.00KB
+Metadata: total=8.00MB, used=0.00
+</pre>
+<p>You can also see it didn't work out the way you might have wanted to because 
+</p>
+<pre>$ btrfs fi show 
+</pre>
+<p>will report an unbalanced amount of space used on your devices.
+</p><p>To actually get RAID1 where you are left with a working copy of the filesystem after you lose one of your devices, you must specify the following to rebalance to RAID1:
+</p>
+<pre>$ btrfs balance start -dconvert=raid1 -mconvert=raid1 /mnt
+$ btrfs fi df /mnt
+</pre>
+<p><br />
+For more examples read this email: <a rel="nofollow" class="external text" href="http://www.mail-archive.com/linux-btrfs@vger.kernel.org/msg14365.html">patch</a>
+</p>
+<!-- 
+NewPP limit report
+Preprocessor node count: 13/1000000
+Post‐expand include size: 239/2097152 bytes
+Template argument size: 69/2097152 bytes
+Expensive parser function count: 0/100
+-->
+
+<!-- Saved in parser cache with key korg_mediawiki_btrfs:pcache:idhash:2381-0!*!*!!*!*!* and timestamp 20230310023506 -->
+</div><div class="printfooter">
+Retrieved from "<a href="https://btrfs.wiki.kernel.org/index.php?title=Balance_Filters&amp;oldid=33516">https://btrfs.wiki.kernel.org/index.php?title=Balance_Filters&amp;oldid=33516</a>"</div>
+		<div id='catlinks' class='catlinks catlinks-allhidden'></div>		<!-- end content -->
+				<div class="visualClear"></div>
+	</div>
+</div></div>
+<div id="column-one">
+	<div id="p-cactions" class="portlet">
+		<h5>Views</h5>
+		<div class="pBody">
+			<ul>
+				<li id="ca-nstab-main" class="selected"><a href="Balance_Filters.html" primary="1" context="subject" title="View the content page [c]" accesskey="c">Page</a></li>
+				<li id="ca-talk" class="new"><a href="https://btrfs.wiki.kernel.org/index.php?title=Talk:Balance_Filters&amp;action=edit&amp;redlink=1" primary="1" context="talk" title="Discussion about the content page [t]" accesskey="t">Discussion</a></li>
+				<li id="ca-viewsource"><a href="https://btrfs.wiki.kernel.org/index.php?title=Balance_Filters&amp;action=edit" primary="1" title="This page is protected.&#10;You can view its source [e]" accesskey="e">View source</a></li>
+				<li id="ca-history"><a href="https://btrfs.wiki.kernel.org/index.php?title=Balance_Filters&amp;action=history" rel="archives" title="Past revisions of this page [h]" accesskey="h">History</a></li>
+			</ul>
+		</div>
+	</div>
+	<div class="portlet" id="p-personal">
+		<h5>Personal tools</h5>
+		<div class="pBody">
+			<ul>
+				<li id="pt-login"><a href="https://btrfs.wiki.kernel.org/index.php?title=Special:UserLogin&amp;returnto=Balance+Filters" title="You are encouraged to log in; however, it is not mandatory [o]" accesskey="o">Log in / create account</a></li>
+			</ul>
+		</div>
+	</div>
+	<div class="portlet" id="p-logo">
+<a href="Main_Page.html" style="background-image: url(../skins/common/images-btrfs/wiki.png);" title="Visit the main page"></a>
+	</div>
+	<div class="generated-sidebar portlet" id="p-navigation">
+		<h5>Navigation</h5>
+		<div class='pBody'>
+			<ul>
+				<li id="n-mainpage-description"><a href="Main_Page.html" title="Visit the main page [z]" accesskey="z">Main page</a></li>
+				<li id="n-recentchanges"><a href="https://btrfs.wiki.kernel.org/index.php/Special:RecentChanges" title="A list of recent changes in the wiki [r]" accesskey="r">Recent changes</a></li>
+				<li id="n-randompage"><a href="https://btrfs.wiki.kernel.org/index.php/Special:Random" title="Load a random page [x]" accesskey="x">Random page</a></li>
+			</ul>
+		</div>
+	</div>
+	<div id="p-search" class="portlet">
+		<h5><label for="searchInput">Search</label></h5>
+		<div id="searchBody" class="pBody">
+			<form action="https://btrfs.wiki.kernel.org/index.php" id="searchform">
+				<input type='hidden' name="title" value="Special:Search"/>
+				<input type="search" name="search" title="Search btrfs Wiki [f]" accesskey="f" id="searchInput" />
+				<input type="submit" name="go" value="Go" title="Go to a page with this exact name if exists" id="searchGoButton" class="searchButton" />&#160;
+				<input type="submit" name="fulltext" value="Search" title="Search the pages for this text" id="mw-searchButton" class="searchButton" />
+			</form>
+		</div>
+	</div>
+	<div class="portlet" id="p-tb">
+		<h5>Tools</h5>
+		<div class="pBody">
+			<ul>
+				<li id="t-whatlinkshere"><a href="https://btrfs.wiki.kernel.org/index.php/Special:WhatLinksHere/Balance_Filters" title="A list of all wiki pages that link here [j]" accesskey="j">What links here</a></li>
+				<li id="t-recentchangeslinked"><a href="https://btrfs.wiki.kernel.org/index.php/Special:RecentChangesLinked/Balance_Filters" title="Recent changes in pages linked from this page [k]" accesskey="k">Related changes</a></li>
+				<li id="t-specialpages"><a href="https://btrfs.wiki.kernel.org/index.php/Special:SpecialPages" title="A list of all special pages [q]" accesskey="q">Special pages</a></li>
+				<li><a href="https://btrfs.wiki.kernel.org/index.php?title=Balance_Filters&amp;printable=yes" rel="alternate">Printable version</a></li>
+				<li id="t-permalink"><a href="https://btrfs.wiki.kernel.org/index.php?title=Balance_Filters&amp;oldid=33516" title="Permanent link to this revision of the page">Permanent link</a></li>
+			</ul>
+		</div>
+	</div>
+</div><!-- end of the left (by default at least) column -->
+<div class="visualClear"></div>
+<div id="footer">
+	<div id="f-poweredbyico">
+		<a href="https://www.mediawiki.org/"><img src="../skins/common/images/poweredby_mediawiki_88x31.png" alt="Powered by MediaWiki" width="88" height="31" /></a>
+	</div>
+	<ul id="f-list">
+		<li id="lastmod"> This page was last modified on 21 October 2021, at 13:08.</li>
+		<li id="privacy"><a href="https://btrfs.wiki.kernel.org/index.php/btrfs_Wiki:Privacy_policy" title="btrfs Wiki:Privacy policy">Privacy policy</a></li>
+		<li id="about"><a href="https://btrfs.wiki.kernel.org/index.php/btrfs_Wiki:About" title="btrfs Wiki:About">About btrfs Wiki</a></li>
+		<li id="disclaimer"><a href="https://btrfs.wiki.kernel.org/index.php/btrfs_Wiki:General_disclaimer" title="btrfs Wiki:General disclaimer">Disclaimers</a></li>
+	</ul>
+</div>
+</div>
+<script>if(window.mw){
+mw.loader.load(["mediawiki.user","mediawiki.page.ready"], null, true);
+}</script>
+<!-- Served in 0.110 secs. --></body></html>

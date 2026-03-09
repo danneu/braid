@@ -1,0 +1,4559 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="./">
+<head>
+  <meta charset="utf-8" />
+  <meta name="readthedocs-addons-api-version" content="1"><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Changes (btrfs-progs) &mdash; BTRFS  documentation</title>
+      <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="_static/css/theme.css?v=9edc463e" />
+
+  
+      <script src="_static/jquery.js?v=5d32c60e"></script>
+      <script src="_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="_static/documentation_options.js?v=8a448e45"></script>
+      <script src="_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="_static/js/theme.js"></script>
+    <script src="_static/js/versions.js"></script>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="next" title="Contributors" href="Contributors.html" />
+    <link rel="prev" title="Changes (kernel/version)" href="Kernel-by-version.html" />
+    <link href="_static/style.css" rel="stylesheet" type="text/css">
+
+<script async type="text/javascript" src="/_/static/javascript/readthedocs-addons.js"></script><meta name="readthedocs-project-slug" content="btrfs" /><meta name="readthedocs-version-slug" content="latest" /><meta name="readthedocs-resolver-filename" content="/CHANGES.html" /><meta name="readthedocs-http-status" content="200" /></head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="index.html" class="icon icon-home">
+            BTRFS
+          </a>
+              <div class="switch-menus">
+                <div class="version-switch"></div>
+                <div class="language-switch"></div>
+              </div>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Overview</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="Introduction.html">Introduction</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Status.html">Status</a></li>
+<li class="toctree-l1"><a class="reference internal" href="man-index.html">Manual pages</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Administration.html">Administration</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Hardware.html">Hardware considerations</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Feature-by-version.html">Changes (feature/version)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Kernel-by-version.html">Changes (kernel/version)</a></li>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Changes (btrfs-progs)</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#btrfs-progs-6-19-2025-02-13">btrfs-progs-6.19 (2025-02-13)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#btrfs-progs-6-18-skipped">btrfs-progs-6.18 (skipped)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#btrfs-progs-6-17-2025-09-29">btrfs-progs-6.17 (2025-09-29)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-6-17-1-2025-11-07">btrfs-progs-6.17.1 (2025-11-07)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#btrfs-progs-6-16-2025-08-13">btrfs-progs-6.16 (2025-08-13)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-6-16-1-2025-09-10">btrfs-progs-6.16.1 (2025-09-10)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#btrfs-progs-6-15-2025-06-23">btrfs-progs-6.15 (2025-06-23)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#btrfs-progs-6-14-2025-03-26">btrfs-progs-6.14 (2025-03-26)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#btrfs-progs-6-13-2025-02-15">btrfs-progs-6.13 (2025-02-15)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#btrfs-progs-6-12-2024-11-29">btrfs-progs-6.12 (2024-11-29)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#btrfs-progs-6-11-2024-09-17">btrfs-progs-6.11 (2024-09-17)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#btrfs-progs-6-10-2024-07-30">btrfs-progs-6.10 (2024-07-30)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-6-10-1-2024-08-15">btrfs-progs-6.10.1 (2024-08-15)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#btrfs-progs-6-9-2024-06-07">btrfs-progs-6.9 (2024-06-07)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-6-9-1-2024-06-24">btrfs-progs-6.9.1 (2024-06-24)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-6-9-2-2024-06-27">btrfs-progs-6.9.2 (2024-06-27)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#btrfs-progs-6-8-2024-03-26">btrfs-progs-6.8 (2024-03-26)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-6-8-1-2024-05-02">btrfs-progs-6.8.1 (2024-05-02)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#btrfs-progs-6-7-2024-01-22">btrfs-progs-6.7 (2024-01-22)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-6-7-1-2024-02-14">btrfs-progs-6.7.1 (2024-02-14)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#btrfs-progs-6-6-2023-11-03">btrfs-progs-6.6 (2023-11-03)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-6-6-1-2023-11-05">btrfs-progs-6.6.1 (2023-11-05)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-6-6-2-2023-11-15">btrfs-progs-6.6.2 (2023-11-15)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-6-6-3-2023-12-14">btrfs-progs-6.6.3 (2023-12-14)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#btrfs-progs-6-5-2023-09-01">btrfs-progs-6.5 (2023-09-01)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-6-5-1-2023-09-13">btrfs-progs-6.5.1 (2023-09-13)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-6-5-2-2023-10-03">btrfs-progs-6.5.2 (2023-10-03)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-6-5-3-2023-10-21">btrfs-progs-6.5.3 (2023-10-21)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#btrfs-progs-6-4-skipped">btrfs-progs-6.4 (skipped)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#btrfs-progs-6-3-2023-04-27">btrfs-progs-6.3 (2023-04-27)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-6-3-1-2023-05-29">btrfs-progs-6.3.1 (2023-05-29)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-6-3-2-2023-06-15">btrfs-progs-6.3.2 (2023-06-15)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-6-3-3-2023-07-27">btrfs-progs-6.3.3 (2023-07-27)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#btrfs-progs-6-2-2023-02-28">btrfs-progs-6.2 (2023-02-28)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-6-2-1-2023-02-03">btrfs-progs-6.2.1 (2023-02-03)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-6-2-2-2023-03-25">btrfs-progs-6.2.2 (2023-03-25)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#btrfs-progs-6-1-2022-12-22">btrfs-progs-6.1 (2022-12-22)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-6-1-1-2023-01-03">btrfs-progs-6.1.1 (2023-01-03)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-6-1-2-2023-01-05">btrfs-progs-6.1.2 (2023-01-05)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-6-1-3-2023-01-25">btrfs-progs-6.1.3 (2023-01-25)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#btrfs-progs-6-0-2022-10-11">btrfs-progs-6.0 (2022-10-11)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-6-0-1-2022-11-04">btrfs-progs-6.0.1 (2022-11-04)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-6-0-2-2022-11-24">btrfs-progs-6.0.2 (2022-11-24)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#btrfs-progs-5-x-2022-09-12">btrfs-progs-5.x (2022-09-12)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-5-19-2022-08-16">btrfs-progs-5.19 (2022-08-16)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-5-18-2022-05-25">btrfs-progs-5.18 (2022-05-25)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-5-17-2022-04-26">btrfs-progs-5.17 (2022-04-26)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-5-16-2022-01-12">btrfs-progs-5.16 (2022-01-12)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-5-15-2021-11-05">btrfs-progs-5.15 (2021-11-05)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-5-14-2021-09-10">btrfs-progs-5.14 (2021-09-10)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-5-13-2021-07-13">btrfs-progs-5.13 (2021-07-13)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-5-12-2021-05-10">btrfs-progs-5.12 (2021-05-10)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-5-11-2021-03-05">btrfs-progs-5.11 (2021-03-05)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-5-10-2021-01-18">btrfs-progs-5.10 (2021-01-18)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-5-9-2020-10-23">btrfs-progs-5.9 (2020-10-23)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-5-8-skipped">btrfs-progs-5.8 (skipped)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-5-7-2020-07-02">btrfs-progs-5.7 (2020-07-02)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-5-6-2020-04-05">btrfs-progs-5.6 (2020-04-05)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-5-5-skipped">btrfs-progs-5.5 (skipped)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-5-4-2019-12-03">btrfs-progs-5.4 (2019-12-03)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-5-3-2019-10-21">btrfs-progs-5.3 (2019-10-21)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-5-2-2019-07-05">btrfs-progs-5.2 (2019-07-05)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-5-1-2019-05-17">btrfs-progs-5.1 (2019-05-17)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#btrfs-progs-4-x-2019-02-25">btrfs-progs-4.x (2019-02-25)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-4-20-2019-01-19">btrfs-progs-4.20 (2019-01-19)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-4-19-2018-11-03">btrfs-progs-4.19 (2018-11-03)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-4-18-skipped">btrfs-progs-4.18 (skipped)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-4-17-2018-06-14">btrfs-progs-4.17 (2018-06-14)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-4-16-2018-04-06">btrfs-progs-4.16 (2018-04-06)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-4-15-2018-02-01">btrfs-progs-4.15 (2018-02-01)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-4-14-2017-11-16">btrfs-progs-4.14 (2017-11-16)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-4-13-2017-09-08">btrfs-progs-4.13 (2017-09-08)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-4-12-2017-07-26">btrfs-progs-4.12 (2017-07-26)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-4-11-2017-05-18">btrfs-progs-4.11 (2017-05-18)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-4-10-2017-03-08">btrfs-progs-4.10 (2017-03-08)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-4-9-2016-12-23">btrfs-progs-4.9 (2016-12-23)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-4-8-2016-10-05">btrfs-progs-4.8 (2016-10-05)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-4-7-2016-07-29">btrfs-progs-4.7 (2016-07-29)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-4-6-2016-06-10">btrfs-progs-4.6 (2016-06-10)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-4-5-2016-03-20">btrfs-progs-4.5 (2016-03-20)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-4-4-2016-01-18">btrfs-progs-4.4 (2016-01-18)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-4-3-2015-11-06">btrfs-progs-4.3 (2015-11-06)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-4-2-2015-09-03">btrfs-progs-4.2 (2015-09-03)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-4-1-2015-06-22">btrfs-progs-4.1 (2015-06-22)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-4-0-2015-04-29">btrfs-progs-4.0 (2015-04-29)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#btrfs-progs-3-x-2015-03-25">btrfs-progs-3.x (2015-03-25)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-3-19-2015-03-11">btrfs-progs-3.19 (2015-03-11)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-3-18-2014-12-30">btrfs-progs-3.18 (2014-12-30)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-3-17-2014-10-17">btrfs-progs-3.17 (2014-10-17)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-3-16-2014-08-26">btrfs-progs-3.16 (2014-08-26)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-3-15-skipped">btrfs-progs-3.15 (skipped)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-3-14-2014-04-06">btrfs-progs-3.14 (2014-04-06)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-3-13-skipped">btrfs-progs-3.13 (skipped)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#btrfs-progs-3-12-2013-11-25">btrfs-progs-3.12 (2013-11-25)</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="Contributors.html">Contributors</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Glossary.html">Glossary</a></li>
+<li class="toctree-l1"><a class="reference internal" href="INSTALL.html">Installation instructions</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Source-repositories.html">Source repositories</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Interoperability.html">Interoperability</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Features</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="Common-features.html">Common Linux features</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Custom-ioctls.html">Custom ioctls</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Auto-repair.html">Auto-repair on read</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Balance.html">Balance</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Compression.html">Compression</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Checksumming.html">Checksumming</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Convert.html">Convert</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Deduplication.html">Deduplication</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Defragmentation.html">Defragmentation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Inline-files.html">Inline files</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Qgroups.html">Quota groups</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Reflink.html">Reflink</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Resize.html">Resize</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Scrub.html">Scrub</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Seeding-device.html">Seeding device</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Send-receive.html">Send/receive</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Subpage.html">Subpage support</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Subvolumes.html">Subvolumes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Swapfile.html">Swapfile</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Tree-checker.html">Tree checker</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Trim.html">Trim/discard</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Volume-management.html">Volume management</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Zoned-mode.html">Zoned mode</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Developer documentation</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="dev/Development-notes.html">Development notes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/Developer-s-FAQ.html">Developer’s FAQ</a></li>
+<li class="toctree-l1"><a class="reference internal" href="DocConventions.html">Conventions and style for documentation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/Experimental.html">Experimental features</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/dev-btrfs-design.html">Btrfs design</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/dev-btrees.html">Btrees</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/On-disk-format.html">On-disk Format</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/dev-send-stream.html">Send stream format</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/dev-json.html">JSON output</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/dev-internal-apis.html">Internal APIs</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/ReleaseChecklist.html">Release checklist</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/GithubReviewWorkflow.html">Pull request review workflow</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/CmdLineConventions.html">Command line, formatting, UI guidelines</a></li>
+<li class="toctree-l1"><a class="reference internal" href="btrfs-ioctl.html">btrfs-ioctl(2)</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">TODO</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="trouble-index.html">Troubleshooting pages</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="index.html">BTRFS</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">Changes (btrfs-progs)</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="_sources/CHANGES.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="changes-btrfs-progs">
+<h1>Changes (btrfs-progs)<a class="headerlink" href="#changes-btrfs-progs" title="Link to this heading"></a></h1>
+<p>Signed release tarballs can be found at <a class="reference external" href="https://www.kernel.org/pub/linux/kernel/people/kdave/btrfs-progs/">https://www.kernel.org/pub/linux/kernel/people/kdave/btrfs-progs/</a></p>
+<section id="btrfs-progs-6-19-2025-02-13">
+<h2>btrfs-progs-6.19 (2025-02-13)<a class="headerlink" href="#btrfs-progs-6-19-2025-02-13" title="Link to this heading"></a></h2>
+<blockquote>
+<div><ul class="simple">
+<li><dl class="simple">
+<dt>mkfs:</dt><dd><ul>
+<li><p>make block-group-tree default (support since linux 6.1), use -O ^bgt to</p></li>
+<li><p>unset it for backward compatibility</p></li>
+<li><p>speed up initial device discard by procesing the ranges in order</p></li>
+<li><p>disable block-grooup-tree feature if a dependent feature is explicitly
+unselected (like disabling no-holes), instead of erroring out</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>check:</dt><dd><ul>
+<li><p>add ability to detect and fix missing orphan items in deleted subvolumes</p></li>
+<li><p>add ability to fix inode refs from directory items</p></li>
+<li><p>enhance detection on unknown inode keys</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>libbtrfsutil:</dt><dd><ul>
+<li><p>minor version update to 1.4.0</p></li>
+<li><p>add missing aliases for API updates done in 0.1.3, C and python</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>libbtrfs:</dt><dd><ul>
+<li><p>patchlevel version update 0.1.5</p></li>
+<li><p>error handling updates</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>fixes:</dt><dd><ul>
+<li><p>with DUP profile and mixed sequential and conventional zoned make sure
+to track the right write pointers</p></li>
+<li><p>scrub: fix ETA wraparound calculations, when many files get deleted
+during the operation bytes_scrubbed and bytes_total get too much out of
+sync, the ETA will be 0</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>corrupt-block: add ability to specify key value when corrupting item keys</p></li>
+<li><dl class="simple">
+<dt>experimental features:</dt><dd><ul>
+<li><p>initial remap tree support (new logical-to-logical mapping layer),
+coming in linux 7.0</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>other:</dt><dd><ul>
+<li><p>error handling improvements</p></li>
+<li><p>CI updates</p></li>
+<li><p>code cleanups and refactoring</p></li>
+<li><p>documentation updates</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</div></blockquote>
+</section>
+<section id="btrfs-progs-6-18-skipped">
+<h2>btrfs-progs-6.18 (skipped)<a class="headerlink" href="#btrfs-progs-6-18-skipped" title="Link to this heading"></a></h2>
+</section>
+<section id="btrfs-progs-6-17-2025-09-29">
+<h2>btrfs-progs-6.17 (2025-09-29)<a class="headerlink" href="#btrfs-progs-6-17-2025-09-29" title="Link to this heading"></a></h2>
+<blockquote>
+<div><ul class="simple">
+<li><p>inspect list-chunks: more sorting keys, descending order</p></li>
+<li><p>fi resize: add support for offline (unmounted) growing of single device</p></li>
+<li><p>device stats: add support for offline (unmounted) reads</p></li>
+<li><p>quota status: new command, overview what mode is enabled, tunables</p></li>
+<li><p>fi commit-stats: new command, print various commit stats from sysfs (since
+kernel 6.1)</p></li>
+<li><p>balance start: print warning and delay start if there’s a missing device
+in the filesystem</p></li>
+<li><dl class="simple">
+<dt>mkfs:</dt><dd><ul>
+<li><p>print zoned mode (native, emulated)</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>check:</dt><dd><ul>
+<li><p>verify device bytes in super block item and in chunk tree</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>other</dt><dd><ul>
+<li><p>updated CI, new and updated tests</p></li>
+<li><p>cleanups, refactoring</p></li>
+<li><p>documentation updates</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</div></blockquote>
+<section id="btrfs-progs-6-17-1-2025-11-07">
+<h3>btrfs-progs-6.17.1 (2025-11-07)<a class="headerlink" href="#btrfs-progs-6-17-1-2025-11-07" title="Link to this heading"></a></h3>
+<blockquote>
+<div><ul class="simple">
+<li><p>dump-tree: print compat-ro bit for fs-verity</p></li>
+<li><p>check: add ability to repair orphan device extents so kernel does not
+refuse to mount such filesystem due to strict checks</p></li>
+<li><dl class="simple">
+<dt>convert:</dt><dd><ul>
+<li><p>print label if it’s being copied from the source filesystem</p></li>
+<li><p>drop alignment check of chunk length, kernel workaround is in place</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>scrub and device replace: document behaviour in 6.19+ that
+freezing/suspend will cancel the operation</p></li>
+<li><dl class="simple">
+<dt>other:</dt><dd><ul>
+<li><p>documentation fixes and updates</p></li>
+<li><p>updated tests</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</div></blockquote>
+</section>
+</section>
+<section id="btrfs-progs-6-16-2025-08-13">
+<h2>btrfs-progs-6.16 (2025-08-13)<a class="headerlink" href="#btrfs-progs-6-16-2025-08-13" title="Link to this heading"></a></h2>
+<blockquote>
+<div><ul class="simple">
+<li><dl class="simple">
+<dt>mkfs:</dt><dd><ul>
+<li><p>print label of existing filesystem if attempting to overwrite</p></li>
+<li><p>remove note about changed defaults in 6.15</p></li>
+<li><p>discard support detection uses the ioctl and not sysfs, this should
+work for all types of block devices</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>device usage: fix printing units of partition sizes, used to be in 512B
+sectors</p></li>
+<li><p>defrag: new option --nocomp to request no compression (kernel 6.17)</p></li>
+<li><p>check: detect missing orphan items for deleted subvolumes</p></li>
+<li><p>subvol delete: don’t print warning if filesystem is mounted with
+user_subvol_rm_allowed</p></li>
+<li><p>build: add build support for Android</p></li>
+<li><dl class="simple">
+<dt>other:</dt><dd><ul>
+<li><p>cleanups and refactoring</p></li>
+<li><p>sync sources with kernel</p></li>
+<li><p>documentation updates</p></li>
+<li><p>CI and test updates</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</div></blockquote>
+<section id="btrfs-progs-6-16-1-2025-09-10">
+<h3>btrfs-progs-6.16.1 (2025-09-10)<a class="headerlink" href="#btrfs-progs-6-16-1-2025-09-10" title="Link to this heading"></a></h3>
+<blockquote>
+<div><ul class="simple">
+<li><dl class="simple">
+<dt>mkfs:</dt><dd><ul>
+<li><p>add option --reflink, when used with --rootdir clone file extents instead
+of copying (requires source and target image on the same filesystem)</p></li>
+<li><p>improved tracking of inodes and subvolumes for option --inode-flags</p></li>
+<li><p>fix initializing raid-stripe-tree</p></li>
+<li><p>extend what is trimmed/discarded during initialization (temporary chunks,
+free space)</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>check: detect duplicate file names in directory items</p></li>
+<li><p>inspect tree-stats: accept string names for option -t</p></li>
+<li><p>receive: allow to dump stream from different user</p></li>
+<li><dl class="simple">
+<dt>other:</dt><dd><ul>
+<li><p>updated documentation</p></li>
+<li><p>new and updated tests</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</div></blockquote>
+</section>
+</section>
+<section id="btrfs-progs-6-15-2025-06-23">
+<h2>btrfs-progs-6.15 (2025-06-23)<a class="headerlink" href="#btrfs-progs-6-15-2025-06-23" title="Link to this heading"></a></h2>
+<blockquote>
+<div><ul class="simple">
+<li><p>mkfs: new option --inode-flags to specify flags/attributes for
+inodes/directories/subvolumes</p></li>
+<li><p>check:
+* fix false alert on missing checksum for hole
+* in lowmem mode, fix false alerts when checking refs</p></li>
+<li><p>convert: check feature compatibility when enabling block-group-tree</p></li>
+<li><p>tune convert-bgt: fix resume of conversion</p></li>
+<li><p>rescue: add new command fix-data-checksum, selectively fix or find
+mismatching checksums</p></li>
+<li><dl class="simple">
+<dt>other:</dt><dd><ul>
+<li><p>new and updated tests</p></li>
+<li><p>documentation updates</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</div></blockquote>
+</section>
+<section id="btrfs-progs-6-14-2025-03-26">
+<h2>btrfs-progs-6.14 (2025-03-26)<a class="headerlink" href="#btrfs-progs-6-14-2025-03-26" title="Link to this heading"></a></h2>
+<blockquote>
+<div><ul class="simple">
+<li><dl class="simple">
+<dt>mkfs:</dt><dd><ul>
+<li><p>allow --sectorsize to be 2K for testing purposes of subpage mode (needs
+the same block size supported by kernel)</p></li>
+<li><p>fix false error when no compression is requested and lzo is not compiled in</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>convert: support 2K block size in the source filesystem</p></li>
+<li><p>defrag: new parameter -L/--level to specify compression levels (kernel 6.15),
+also supports the realtime levels</p></li>
+<li><p>subvol delete: show names of recursively deleted child subvolumes</p></li>
+<li><p>qgroup show: use sysfs to detect up to date consistency status</p></li>
+<li><p>zoned mode: support zone capacity tracking</p></li>
+<li><dl class="simple">
+<dt>other:</dt><dd><ul>
+<li><p>CI new and updated workflows</p></li>
+<li><p>documentation updates</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</div></blockquote>
+</section>
+<section id="btrfs-progs-6-13-2025-02-15">
+<h2>btrfs-progs-6.13 (2025-02-15)<a class="headerlink" href="#btrfs-progs-6-13-2025-02-15" title="Link to this heading"></a></h2>
+<blockquote>
+<div><ul class="simple">
+<li><dl class="simple">
+<dt>mkfs:</dt><dd><ul>
+<li><p>new option to enable compression</p></li>
+<li><p>updated summary (subvolumes, compression)</p></li>
+<li><p>completely remove option --leafsize, deprecated long ago</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>btrfstune: add option to remove squota</p></li>
+<li><dl class="simple">
+<dt>scrub:</dt><dd><ul>
+<li><p>start: new option --limit to set the bandwidth limit for the duration of the run</p></li>
+<li><p>status: fix printing of Rate unit suffix (SI/IEC)</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>qgroup clean-stale: check if quotas are enabled before starting filesystem sync()</p></li>
+<li><p>print builtin features and options in --version output (mkfs, convert, image, btrfstune)</p></li>
+<li><dl class="simple">
+<dt>build:</dt><dd><ul>
+<li><p>Botan minimum version is now 3.x</p></li>
+<li><p>target to build compile_commands.json (for LSP)</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>other:</dt><dd><ul>
+<li><p>a bit more optimized crc32c code</p></li>
+<li><p>sync some headers from kernel code</p></li>
+<li><p>command help updates and fixes</p></li>
+<li><p>build warning fixes</p></li>
+<li><p>error message updates</p></li>
+<li><p>cleanups and refactoring</p></li>
+<li><p>updated tests</p></li>
+<li><p>lots of documentation updates</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</div></blockquote>
+</section>
+<section id="btrfs-progs-6-12-2024-11-29">
+<h2>btrfs-progs-6.12 (2024-11-29)<a class="headerlink" href="#btrfs-progs-6-12-2024-11-29" title="Link to this heading"></a></h2>
+<blockquote>
+<div><ul class="simple">
+<li><p>subvolume delete: add new option to do recursive subvolume deletion (for
+regular user delete only accessible subvolumes)</p></li>
+<li><dl class="simple">
+<dt>mkfs:</dt><dd><ul>
+<li><p>new option --subvol to create subvolumes in given paths, read-write,
+read-only and default</p></li>
+<li><p>add hard link detection support for --rootdir option</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>fixes:</dt><dd><ul>
+<li><p>receive: message verbosity fixes</p></li>
+<li><p>check: fix false positive report of missing checksum for extent holes</p></li>
+<li><p>check: handle compressed extents when checking tree log</p></li>
+<li><p>when asking Y/N user questions, flush the terminal so the question is
+displayed (e.g. btrfstune -S)</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>other</dt><dd><ul>
+<li><p>code refactoring, error handling</p></li>
+<li><p>python packaging fixes</p></li>
+<li><p>documentation updates</p></li>
+<li><p>new tests</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</div></blockquote>
+</section>
+<section id="btrfs-progs-6-11-2024-09-17">
+<h2>btrfs-progs-6.11 (2024-09-17)<a class="headerlink" href="#btrfs-progs-6-11-2024-09-17" title="Link to this heading"></a></h2>
+<blockquote>
+<div><ul class="simple">
+<li><dl class="simple">
+<dt>check:</dt><dd><ul>
+<li><p>check items in tree-log</p></li>
+<li><p>detect invalid file extent items for symlinks</p></li>
+<li><p>properly detect inode cache and suggest removal by ‘clear-ino-cache’</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>convert: fix symlink length checks</p></li>
+<li><p>fi show: remove stray newline at the end of the output</p></li>
+<li><dl class="simple">
+<dt>fixes:</dt><dd><ul>
+<li><p>open devices in write-exclusive mode in most commands, prevent
+concurrent mount by other programs</p></li>
+<li><p>rescue clear-ino-cache: fix subvolume iteration that can fail in some cases</p></li>
+<li><p>map-logical: fix first extent searching condition</p></li>
+<li><p>fi resize: warn if new size is below 256M</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>tree-checker:</dt><dd><ul>
+<li><p>slightly stricter file type validation</p></li>
+<li><p>verify device extent items</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>other:</dt><dd><ul>
+<li><p>documentation updates</p></li>
+<li><p>ship btrfs-ioctl manual page (incomplete)</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</div></blockquote>
+</section>
+<section id="btrfs-progs-6-10-2024-07-30">
+<h2>btrfs-progs-6.10 (2024-07-30)<a class="headerlink" href="#btrfs-progs-6-10-2024-07-30" title="Link to this heading"></a></h2>
+<blockquote>
+<div><ul class="simple">
+<li><dl class="simple">
+<dt>inspect:</dt><dd><ul>
+<li><p>list-chunks: new command to print information about chunks (i.e.
+the physical chunks as stored on devices), sortable; requires root as
+it’s using SEARCH_TREE ioctl</p></li>
+<li><p>tree-stats:
+* new option -t to print only the given tree
+* add long options for size units</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>filesystem df: with increased verbosity print per-type information from sysfs</p></li>
+<li><p>version: print a line with built-in features or options (+FEATURE1 -FEATURE2)</p></li>
+<li><p>image: document option -s and its potential problems</p></li>
+<li><dl class="simple">
+<dt>fixes:</dt><dd><ul>
+<li><p>scrub status: user selected base for Rate values</p></li>
+<li><p>receive: escape special characters in paths and xattrs</p></li>
+<li><p>dump-tree: escape special characters in paths and xattrs</p></li>
+<li><p>image: sanitizing filenames did not work properly in all cases</p></li>
+<li><p>convert: fix displayed restored image path on rollback</p></li>
+<li><p>tune change csum: do conversion in smaller batches</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>other:</dt><dd><ul>
+<li><p>CI workflows updates (sanitizers, code spelling, manual page preview)</p></li>
+<li><p>build fixes for uClibc</p></li>
+<li><p>build fix for python 3.13</p></li>
+<li><p>documentation updates</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</div></blockquote>
+<section id="btrfs-progs-6-10-1-2024-08-15">
+<h3>btrfs-progs-6.10.1 (2024-08-15)<a class="headerlink" href="#btrfs-progs-6-10-1-2024-08-15" title="Link to this heading"></a></h3>
+<blockquote>
+<div><ul class="simple">
+<li><p>mkfs: rework --rootdir traversal, skip hardlinks and create new inodes
+instead, also warn about them, this did not work as expected and will be
+fixed in the future</p></li>
+<li><p>receive: search in older trees for UUIDs when detecting clone sources</p></li>
+<li><p>libbtrfsutil: bindings available at <a class="reference external" href="https://pypi.org/project/btrfsutil">https://pypi.org/project/btrfsutil</a></p></li>
+<li><dl class="simple">
+<dt>libbtrfs:</dt><dd><ul>
+<li><p>patchlevel version update 0.1.4</p></li>
+<li><p>cleanup in headers, removed unused definitions, no functional changes</p></li>
+<li><p>don’t ship list.h and rbtree.h</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>other:</dt><dd><ul>
+<li><p>documentation updates</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</div></blockquote>
+</section>
+</section>
+<section id="btrfs-progs-6-9-2024-06-07">
+<h2>btrfs-progs-6.9 (2024-06-07)<a class="headerlink" href="#btrfs-progs-6-9-2024-06-07" title="Link to this heading"></a></h2>
+<blockquote>
+<div><ul class="simple">
+<li><dl class="simple">
+<dt>mkfs:</dt><dd><ul>
+<li><p>if --force used, don’t continue if the mount status cannot be
+determined (e.g. due to permissions)</p></li>
+<li><p>fix minimum size calculation on zoned devices, make it work with option -b</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>check:</dt><dd><ul>
+<li><p>option --clear-ino-cache removed (functionality still provided in
+‘rescue’ command group)</p></li>
+<li><p>detect and repair wrong file extent item ram_bytes value</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>qgroup clear-stale:</dt><dd><ul>
+<li><p>sync the filesystem before search to read the up to date state</p></li>
+<li><p>handle cases where qgroup cannot be deleted due to uncleaned subvolume
+or when squota is enabled</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>qgroup show: display status of qgroup regarding the cleaning of the
+subvolume or if it’s squota</p></li>
+<li><p>receive: fix stream parsing on strict alignment hosts (e.g. ARM v5 or v6)</p></li>
+<li><p>tune change-csum: fix check of dev-replace status item, continue if no
+dev-replace in progress</p></li>
+<li><p>dump-tree: print contents of dev-replace status item</p></li>
+<li><p>convert: fix extent iteration to handle prealloc/unwritten extents</p></li>
+<li><dl class="simple">
+<dt>libbtrfsutil:</dt><dd><ul>
+<li><p>patchlevel version update 1.3.1</p></li>
+<li><p>fix potentially unaligned access to send stream</p></li>
+<li><p>create library links to all version levels</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>libbtrfs:</dt><dd><ul>
+<li><p>patchlevel version update 0.1.3</p></li>
+<li><p>fix potentially unaligned access to send stream</p></li>
+<li><p>create library links to all version levels</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>build:</dt><dd><ul>
+<li><p>fix compatibility with e2fsprogs 1.47.1</p></li>
+<li><p>fix header file dependency tracking</p></li>
+<li><p>-O2 by default</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>other:</dt><dd><ul>
+<li><p>new and updated tests</p></li>
+<li><p>ASAN and UBSAN test coverage in CI</p></li>
+<li><p>documentation updates</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</div></blockquote>
+<section id="btrfs-progs-6-9-1-2024-06-24">
+<h3>btrfs-progs-6.9.1 (2024-06-24)<a class="headerlink" href="#btrfs-progs-6-9-1-2024-06-24" title="Link to this heading"></a></h3>
+<blockquote>
+<div><ul class="simple">
+<li><p>fix detection of intermediate super block flags (e.g. csum change and
+other conversions)</p></li>
+<li><dl class="simple">
+<dt>raid-stripe-tree support (still experimental):</dt><dd><ul>
+<li><p>moved under experimental build flags (mkfs, convert)</p></li>
+<li><p>format change, removed encoding type; backward incompatible</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>receive dump: escape special chars in xattr names and values, and clone
+source path</p></li>
+<li><p>tune change csum: fix reservation size when starting a transaction</p></li>
+<li><dl class="simple">
+<dt>other:</dt><dd><ul>
+<li><p>new and updated tests</p></li>
+<li><p>updated CI images, new reference build targets</p></li>
+<li><p>cleanups and refactoring</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</div></blockquote>
+</section>
+<section id="btrfs-progs-6-9-2-2024-06-27">
+<h3>btrfs-progs-6.9.2 (2024-06-27)<a class="headerlink" href="#btrfs-progs-6-9-2-2024-06-27" title="Link to this heading"></a></h3>
+<blockquote>
+<div><ul class="simple">
+<li><p>subvol list: fix accidental trimming of subvolume name</p></li>
+<li><p>check: revert checking file extent item ‘ram_bytes’</p></li>
+<li><dl class="simple">
+<dt>libbtrfsutil:</dt><dd><ul>
+<li><p>patchlevel version update 1.3.2</p></li>
+<li><p>fix accidentally closing fd passed to subvolume iterator</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</div></blockquote>
+</section>
+</section>
+<section id="btrfs-progs-6-8-2024-03-26">
+<h2>btrfs-progs-6.8 (2024-03-26)<a class="headerlink" href="#btrfs-progs-6-8-2024-03-26" title="Link to this heading"></a></h2>
+<blockquote>
+<div><ul class="simple">
+<li><p>fix --enqueue option timeout handling</p></li>
+<li><p>subvolume: remove support for undocumented options -c and -x,
+functionality disabled in kernel</p></li>
+<li><dl class="simple">
+<dt>libbtrfsutil:</dt><dd><ul>
+<li><p>version 0.1.3, backward compatible</p></li>
+<li><p>add aliases for all existing functions with unified naming scheme</p></li>
+<li><p>updated header definitions for recently added kernel features</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>send: v3 supported in experimental mode</p></li>
+<li><dl class="simple">
+<dt>other:</dt><dd><ul>
+<li><p>docs: manual page references, graphs, enhancements, clarifications</p></li>
+<li><p>error handling fixes</p></li>
+<li><p>cleanups and refactoring</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</div></blockquote>
+<section id="btrfs-progs-6-8-1-2024-05-02">
+<h3>btrfs-progs-6.8.1 (2024-05-02)<a class="headerlink" href="#btrfs-progs-6-8-1-2024-05-02" title="Link to this heading"></a></h3>
+<blockquote>
+<div><ul class="simple">
+<li><p>mkfs: fix writing on zoned device when block-group-tree is selected</p></li>
+<li><p>tune: fix writing on zoned device with option --convert-to-block-group-tree</p></li>
+<li><dl class="simple">
+<dt>check:</dt><dd><ul>
+<li><p>more progress and error messages</p></li>
+<li><p>unify handling of unknown command line options with other commands</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>subvolume delete: remove options --delete-qgroup and --no-delete-qgroup
+(added in 6.6.3), qgroup deletion does not always work due to delayed
+background processing of subvolume or set value in
+sysfs:ggroup/drop_subtree_threshold</p></li>
+<li><dl class="simple">
+<dt>other:</dt><dd><ul>
+<li><p>misc refactoring</p></li>
+<li><p>error handling fixes reported by gcc -fanalyzer</p></li>
+<li><p>documentation updates</p></li>
+<li><p>new and updated tests</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</div></blockquote>
+</section>
+</section>
+<section id="btrfs-progs-6-7-2024-01-22">
+<h2>btrfs-progs-6.7 (2024-01-22)<a class="headerlink" href="#btrfs-progs-6-7-2024-01-22" title="Link to this heading"></a></h2>
+<blockquote>
+<div><ul class="simple">
+<li><p>mkfs: make 4k sectorsize default, recommended minimum kernel for that is
+6.1 and requires subpage support on architectures with page size &gt; 4k</p></li>
+<li><p>subvolume create: return correct error code when a target already exists</p></li>
+<li><p>tree-checker: dump tree block on error (btrfs-convert, …)</p></li>
+<li><p>scrub limit: fix reporting of a limit set while there’s none</p></li>
+<li><p>fi usage: fix reporting of unallocated data or raid56 profile without root
+privs due to lack of that information</p></li>
+<li><dl class="simple">
+<dt>convert:</dt><dd><ul>
+<li><p>align data block group lengths to 64K</p></li>
+<li><p>fix conversion of a large filesystem when there are partial inode items
+present due to caching</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>other:</dt><dd><ul>
+<li><p>build fixes</p></li>
+<li><p>updated documentation</p></li>
+<li><p>new and updated tests</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</div></blockquote>
+<section id="btrfs-progs-6-7-1-2024-02-14">
+<h3>btrfs-progs-6.7.1 (2024-02-14)<a class="headerlink" href="#btrfs-progs-6-7-1-2024-02-14" title="Link to this heading"></a></h3>
+<blockquote>
+<div><ul class="simple">
+<li><p>convert: raid-stripe-tree can be now enabled for the target filesystem</p></li>
+<li><dl class="simple">
+<dt>mkfs:</dt><dd><ul>
+<li><p>handle lifetime of open file descriptors so it does not trigger udev
+that could miss to create the UUID symlinks in /dev</p></li>
+<li><p>update warning when CPU page size does not match sector size</p></li>
+<li><p>merge features in summary, no more distinction of incompat and runtime
+to match the semantics of option -O</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>fi show: fix recognizing raw device mapper paths</p></li>
+<li><dl class="simple">
+<dt>other:</dt><dd><ul>
+<li><p>CI updates, build images updates</p></li>
+<li><p>minor cleanups</p></li>
+<li><p>minor sync with kernel</p></li>
+<li><p>documentation updates, fix links to labels in included directories</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</div></blockquote>
+</section>
+</section>
+<section id="btrfs-progs-6-6-2023-11-03">
+<h2>btrfs-progs-6.6 (2023-11-03)<a class="headerlink" href="#btrfs-progs-6-6-2023-11-03" title="Link to this heading"></a></h2>
+<blockquote>
+<div><ul class="simple">
+<li><p>new global option --dry-run, now implemented for ‘subvolume delete’</p></li>
+<li><p>fi defrag: new option --step to defragment files in steps, report progress</p></li>
+<li><p>balance: removed support for obsolete short syntax ‘btrfs balance /path’</p></li>
+<li><p>mkfs: print zone count for each device in the overview</p></li>
+<li><dl class="simple">
+<dt>check:</dt><dd><ul>
+<li><p>verify inline ref ordering</p></li>
+<li><p>deprecate --clear-space-cache, moved to the ‘rescue’ group</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>rescue clear-space-cache: new command moved from ‘btrfs check’ implementing
+the same as option --clear-space-cache (to be deprecated and removed in the
+future)</p></li>
+<li><p>dump-tree: output sequence number for inline refs</p></li>
+<li><dl class="simple">
+<dt>fixes:</dt><dd><ul>
+<li><p>fi resize: fallback to lowest devid when 1 does not exist, previously the
+command would fail with “No such device”</p></li>
+<li><p>fi usage: fix “devices 0 != 1” message and broken output on multi-device
+filesystem</p></li>
+<li><p>open files in non-blocking mode when reading fsid, this could hang when
+trying to open fifo files or some special character devices, was observed
+with ‘prop set/get’</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>experimental:</dt><dd><ul>
+<li><p>mkfs: parametric zone size for emulated zoned mode</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>other:</dt><dd><ul>
+<li><p>cleanups refactoring</p></li>
+<li><p>new and updated tests</p></li>
+<li><p>CI updates</p></li>
+<li><p>documentation updates</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</div></blockquote>
+<section id="btrfs-progs-6-6-1-2023-11-05">
+<h3>btrfs-progs-6.6.1 (2023-11-05)<a class="headerlink" href="#btrfs-progs-6-6-1-2023-11-05" title="Link to this heading"></a></h3>
+<blockquote>
+<div><ul class="simple">
+<li><p>fix device scanning ioctl definition, accidental change to the ‘forget’ ioctl
+that breaks mounting multi-device filesystems</p></li>
+</ul>
+</div></blockquote>
+</section>
+<section id="btrfs-progs-6-6-2-2023-11-15">
+<h3>btrfs-progs-6.6.2 (2023-11-15)<a class="headerlink" href="#btrfs-progs-6-6-2-2023-11-15" title="Link to this heading"></a></h3>
+<blockquote>
+<div><ul class="simple">
+<li><p>squota: change key number of EXTENT_OWNER_REF_KEY, sync with kernel 6.7-rc1</p></li>
+<li><p>property set/get: completely skip char devices, trying to set properties
+and open /dev/watchdog* causes a reboot</p></li>
+<li><p>other: build warnings, test updates, documentation updates</p></li>
+</ul>
+</div></blockquote>
+</section>
+<section id="btrfs-progs-6-6-3-2023-12-14">
+<h3>btrfs-progs-6.6.3 (2023-12-14)<a class="headerlink" href="#btrfs-progs-6-6-3-2023-12-14" title="Link to this heading"></a></h3>
+<blockquote>
+<div><ul class="simple">
+<li><p>subvol create: accept multiple arguments</p></li>
+<li><p>subvol delete: print the subvolume id in the output</p></li>
+<li><p>subvol sync: check if the filesystems is still writeable so it does not
+wait indefinitely</p></li>
+<li><p>device delete: add a timeout and warning when deleting multiple devices</p></li>
+<li><p>scrub status: report limit if set in sysfs/../scrub_speed_max</p></li>
+<li><p>scrub limit: new command to show or set the per-device scrub limits</p></li>
+<li><p>scrub start: report the limit if set</p></li>
+<li><dl class="simple">
+<dt>build:</dt><dd><ul>
+<li><p>fix CPU feature detection on aarch64</p></li>
+<li><p>support Botan and OpenSSL (3.2+) as crypto backends</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>other:</dt><dd><ul>
+<li><p>documentation updates, RTD config update</p></li>
+<li><p>new and updated tests</p></li>
+<li><p>CI updates</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</div></blockquote>
+</section>
+</section>
+<section id="btrfs-progs-6-5-2023-09-01">
+<h2>btrfs-progs-6.5 (2023-09-01)<a class="headerlink" href="#btrfs-progs-6-5-2023-09-01" title="Link to this heading"></a></h2>
+<blockquote>
+<div><ul class="simple">
+<li><p>crc32c implementation speedup (3x)</p></li>
+<li><dl class="simple">
+<dt>btrfstune:</dt><dd><ul>
+<li><p>be more strict about option combinations and refuse changing
+features from incompatible groups</p></li>
+<li><p>metadata_uuid changes fixes</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>libbtrfs: fix ABI breakage introduced in 6.3.1, revert struct subvol_info
+and subvol_uuid_search changes</p></li>
+<li><dl class="simple">
+<dt>CI updates</dt><dd><ul>
+<li><p>pull request build tests enabled</p></li>
+<li><p>published static binaries built with backward compatibility (-march=x86-64)</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>other</dt><dd><ul>
+<li><p>documentation updates</p></li>
+<li><p>new and updated tests</p></li>
+<li><p>experimental feature updates (json, list-chunks, checksum switch)</p></li>
+<li><p>code refactoring</p></li>
+<li><p>remove btrfs-fragments</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</div></blockquote>
+<section id="btrfs-progs-6-5-1-2023-09-13">
+<h3>btrfs-progs-6.5.1 (2023-09-13)<a class="headerlink" href="#btrfs-progs-6-5-1-2023-09-13" title="Link to this heading"></a></h3>
+<blockquote>
+<div><ul class="simple">
+<li><dl class="simple">
+<dt>build fixes:</dt><dd><ul>
+<li><p>crc32c if PIE or relro is enabled</p></li>
+<li><p>detect if PCLMUL feature is recognized by compiler and also detect that
+at runtime</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>check: verify metadata item level when skinny-metadata is enabled</p></li>
+<li><p>other: minor build and docs updates</p></li>
+</ul>
+</div></blockquote>
+</section>
+<section id="btrfs-progs-6-5-2-2023-10-03">
+<h3>btrfs-progs-6.5.2 (2023-10-03)<a class="headerlink" href="#btrfs-progs-6-5-2-2023-10-03" title="Link to this heading"></a></h3>
+<blockquote>
+<div><ul class="simple">
+<li><dl class="simple">
+<dt>new feature support:</dt><dd><ul>
+<li><p>raid-stripe-tree, new tree to track extent mapping for raid profiles,
+allows raid1*, raid0 and raid10 on zoned devices (kernel 6.7)</p></li>
+<li><p>simple quotas, simplified accounting that does not track exclusive and
+shared extents (kernel 6.7)</p></li>
+<li><p>mkfs with duplicate UUID on a single device, temp-fsid (kernel 6.7)</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>metadata_uuid: enhanced capabilities to repair partially updated fsid on
+multiple devices</p></li>
+<li><dl class="simple">
+<dt>other:</dt><dd><ul>
+<li><p>updated tests and CI</p></li>
+<li><p>sync sources with kernel</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</div></blockquote>
+</section>
+<section id="btrfs-progs-6-5-3-2023-10-21">
+<h3>btrfs-progs-6.5.3 (2023-10-21)<a class="headerlink" href="#btrfs-progs-6-5-3-2023-10-21" title="Link to this heading"></a></h3>
+<blockquote>
+<div><ul class="simple">
+<li><dl class="simple">
+<dt>mkfs:</dt><dd><ul>
+<li><p>add short aliases for -O specification, block-group-tree (bgt),
+free-space-tree (fst), raid-stripe-tree (rst)</p></li>
+<li><p>don’t try to resize the image (namely when backed by file) when --rootdir
+contains sparse file larger than the image</p></li>
+<li><p>also copy xattr/permissions/ugid/timestamps of the top --rootdir directory</p></li>
+<li><p>add new option --device-uuid to let user specify exact uuid of the
+device item (only for single device filesystems)</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>check:</dt><dd><ul>
+<li><p>on zoned devices, use correct super block offsets when repairing</p></li>
+<li><p>check inline extent refs order</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>subvolume create: add new option --parent to create missing path
+components of the given path (like mkdir -p)</p></li>
+<li><p>rescue clear-ino-cache: new command moved from ‘btrfs check’ implementing
+the same as option --clear-ino-cache (to be deprecated and removed in the
+future)</p></li>
+<li><p>dump-tree: allow ‘-’ in tree identifier names for option -t</p></li>
+<li><dl class="simple">
+<dt>btrfstune:</dt><dd><ul>
+<li><p>drop short option and add long option to enable squota</p></li>
+<li><p>tune space reservation and batch size for block-group-tree conversion</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>scrub status: print correct value of “Bytes scrubbed” for unfinished runs</p></li>
+<li><p>qgroup show: fix crash when attempting to print path of stale qgroups</p></li>
+<li><dl class="simple">
+<dt>experimental features:</dt><dd><ul>
+<li><p>move build of raid-stripe-tree out for testing but it’s still considered
+experimental</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>other:</dt><dd><ul>
+<li><p>shell completion updates</p></li>
+<li><p>sync raid-stripe-tree code with kernel</p></li>
+<li><p>build fixes</p></li>
+<li><p>new and updated tests</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</div></blockquote>
+</section>
+</section>
+<section id="btrfs-progs-6-4-skipped">
+<h2>btrfs-progs-6.4 (skipped)<a class="headerlink" href="#btrfs-progs-6-4-skipped" title="Link to this heading"></a></h2>
+</section>
+<section id="btrfs-progs-6-3-2023-04-27">
+<h2>btrfs-progs-6.3 (2023-04-27)<a class="headerlink" href="#btrfs-progs-6-3-2023-04-27" title="Link to this heading"></a></h2>
+<blockquote>
+<div><ul class="simple">
+<li><p>mkfs: option -R deprecated, options unified in -O (-R still works)</p></li>
+<li><p>mkfs: fix potential race with udev leading to EBUSY due to repeatedly
+opened file descriptors</p></li>
+<li><dl class="simple">
+<dt>block-group-tree is out of experimental mode</dt><dd><ul>
+<li><p>available as ‘mkfs.btrfs -O block-group-tree’</p></li>
+<li><p>btrfstune can do in-place conversion to/from (use with care)</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>balance: fix recognizing old and new syntax</p></li>
+<li><p>subvol snapshot: specific error if a failure is caused by an active swapfile</p></li>
+<li><p>tree-stats: rephrase warning when run on a mounted filesystem</p></li>
+<li><p>completion: ‘filesystem du’ also completes files</p></li>
+<li><p>check: fix docs, help text and warning that --force + --repair works on a
+mounted filesystem</p></li>
+<li><p>build: fix static build when static libudev is available</p></li>
+<li><dl class="simple">
+<dt>documentation:</dt><dd><ul>
+<li><p>more updates from wiki, developer docs, changelogs</p></li>
+<li><p>reformatting</p></li>
+<li><p>updates and fixes</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>other:</dt><dd><ul>
+<li><p>test updates and fixes</p></li>
+<li><p>CI cleanups and old files removed</p></li>
+<li><p>integration with Github actions</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</div></blockquote>
+<section id="btrfs-progs-6-3-1-2023-05-29">
+<h3>btrfs-progs-6.3.1 (2023-05-29)<a class="headerlink" href="#btrfs-progs-6-3-1-2023-05-29" title="Link to this heading"></a></h3>
+<blockquote>
+<div><ul class="simple">
+<li><p>convert: fix checksum of a block relocated from 0-1M range</p></li>
+<li><p>qgroup show: fix formatting of limit values in json output</p></li>
+<li><p>receive: report parent subvol UUID on errors</p></li>
+<li><p>btrfstune: new option --convert-to-free-space-tree to convert from
+block-group-tree back to extent tree for block group tracking</p></li>
+<li><p>mkfs: make option --rootdir more verbose and report start when filling
+from the given directory starts</p></li>
+<li><dl class="simple">
+<dt>experimental:</dt><dd><ul>
+<li><p>btrfstune: checksum switch logic reimplemented, conversion of all
+metadata and data now works, resume from various states also supported</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>other:</dt><dd><ul>
+<li><p>more CI github actions test coverage</p></li>
+<li><p>more kernel/userspace source code sync</p></li>
+<li><p>warning fixes</p></li>
+<li><p>code cleanups</p></li>
+<li><p>documentation updates</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</div></blockquote>
+</section>
+<section id="btrfs-progs-6-3-2-2023-06-15">
+<h3>btrfs-progs-6.3.2 (2023-06-15)<a class="headerlink" href="#btrfs-progs-6-3-2-2023-06-15" title="Link to this heading"></a></h3>
+<blockquote>
+<div><ul class="simple">
+<li><p>fix mkfs and others on big endian hosts</p></li>
+<li><p>mkfs: don’t print changed defaults notice with --quiet</p></li>
+<li><p>scrub: fix wrong stats of processed bytes in background and foreground mode</p></li>
+<li><p>convert: actually create free-space-tree instead of v1 space cache</p></li>
+<li><p>print-tree: recognize and print CHANGING_FSID_V2 flag (for the
+metadata_uuid change in progress)</p></li>
+<li><p>other: documentation updates</p></li>
+</ul>
+</div></blockquote>
+</section>
+<section id="btrfs-progs-6-3-3-2023-07-27">
+<h3>btrfs-progs-6.3.3 (2023-07-27)<a class="headerlink" href="#btrfs-progs-6-3-3-2023-07-27" title="Link to this heading"></a></h3>
+<blockquote>
+<div><ul class="simple">
+<li><p>add btrfs-find-root to btrfs.box</p></li>
+<li><p>replace: properly enqueue if there’s another replace running</p></li>
+<li><dl class="simple">
+<dt>other:</dt><dd><ul>
+<li><p>CI updates, more tests enabled, code coverage, badges</p></li>
+<li><p>documentation updates</p></li>
+<li><p>build warning fixes</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</div></blockquote>
+</section>
+</section>
+<section id="btrfs-progs-6-2-2023-02-28">
+<h2>btrfs-progs-6.2 (2023-02-28)<a class="headerlink" href="#btrfs-progs-6-2-2023-02-28" title="Link to this heading"></a></h2>
+<blockquote>
+<div><ul class="simple">
+<li><p>receive: fix a corruption when decompressing zstd extents</p></li>
+<li><p>subvol sync: print total number and deletion progress</p></li>
+<li><p>accelerated hash algorithm implementations in fallback mode on x86_64</p></li>
+<li><p>fi mkswapfile: new option --uuid</p></li>
+<li><p>new global option --log=level to set the verbosity level directly</p></li>
+<li><dl class="simple">
+<dt>other:</dt><dd><ul>
+<li><p>experimental: update checksum conversion (not usable yet)</p></li>
+<li><p>build actually requires -std=gnu11</p></li>
+<li><p>refactor help option formatting, auto wrap long lines</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</div></blockquote>
+<section id="btrfs-progs-6-2-1-2023-02-03">
+<h3>btrfs-progs-6.2.1 (2023-02-03)<a class="headerlink" href="#btrfs-progs-6-2-1-2023-02-03" title="Link to this heading"></a></h3>
+<blockquote>
+<div><ul class="simple">
+<li><p>fix build with crypto libraries</p></li>
+<li><p>CI images updated, build tests extended</p></li>
+</ul>
+</div></blockquote>
+</section>
+<section id="btrfs-progs-6-2-2-2023-03-25">
+<h3>btrfs-progs-6.2.2 (2023-03-25)<a class="headerlink" href="#btrfs-progs-6-2-2-2023-03-25" title="Link to this heading"></a></h3>
+<blockquote>
+<div><ul class="simple">
+<li><p>fix build on old x86 architectures with builtin crypto</p></li>
+<li><p>device stats: fix printing wrong values in tabular output</p></li>
+<li><p>qgroup show: fix qgroup id formatting in json output</p></li>
+<li><p>restore: fix restoring xattrs on directories</p></li>
+<li><p>restore: don’t modify metadata in dry-run mode</p></li>
+<li><p>balance: fix some cases wrongly parsed as old syntax</p></li>
+<li><p>balance: warn when deprecated syntax is used</p></li>
+<li><p>seeding: fall back to old way if sysfs device fsid is not available</p></li>
+<li><p>convert: handle orphan file ext4 feature</p></li>
+<li><dl class="simple">
+<dt>other:</dt><dd><ul>
+<li><p>sync ioctl definitions</p></li>
+<li><p>enable github CI</p></li>
+<li><p>update documentation</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</div></blockquote>
+</section>
+</section>
+<section id="btrfs-progs-6-1-2022-12-22">
+<h2>btrfs-progs-6.1 (2022-12-22)<a class="headerlink" href="#btrfs-progs-6-1-2022-12-22" title="Link to this heading"></a></h2>
+<blockquote>
+<div><ul class="simple">
+<li><p>NOTE: this version breaks build of applications using ctree.h and qgroup items</p></li>
+<li><p>filesystem df: add json output</p></li>
+<li><p>qgroup show: add json output</p></li>
+<li><p>new command: ‘inspect-internal map-swapfile’ to check swapfile and its
+swapfile_offset value used for hibernation</p></li>
+<li><p>corrupt-block: fix parsing of option --root argument</p></li>
+<li><dl class="simple">
+<dt>experimental (interfaces not finalized):</dt><dd><ul>
+<li><p>new command ‘inspect-internal list-chunks’</p></li>
+<li><p>new group reflink, command clone</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>other:</dt><dd><ul>
+<li><p>synchronize some files with kernel versions</p></li>
+<li><p>docs updates</p></li>
+<li><p>build: use gnu11</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</div></blockquote>
+<section id="btrfs-progs-6-1-1-2023-01-03">
+<h3>btrfs-progs-6.1.1 (2023-01-03)<a class="headerlink" href="#btrfs-progs-6-1-1-2023-01-03" title="Link to this heading"></a></h3>
+<blockquote>
+<div><ul class="simple">
+<li><p>subvol list: fix printing of UUID</p></li>
+<li><p>revert changes to ctree.h regarding qgroup items, breaks build of several
+applications</p></li>
+<li><p>hide __init definition in kerncompat.h, may break build</p></li>
+</ul>
+</div></blockquote>
+</section>
+<section id="btrfs-progs-6-1-2-2023-01-05">
+<h3>btrfs-progs-6.1.2 (2023-01-05)<a class="headerlink" href="#btrfs-progs-6-1-2-2023-01-05" title="Link to this heading"></a></h3>
+<blockquote>
+<div><ul class="simple">
+<li><p>revert libbtrfs changes to v6.0.2, fix remaining build problems</p></li>
+</ul>
+</div></blockquote>
+</section>
+<section id="btrfs-progs-6-1-3-2023-01-25">
+<h3>btrfs-progs-6.1.3 (2023-01-25)<a class="headerlink" href="#btrfs-progs-6-1-3-2023-01-25" title="Link to this heading"></a></h3>
+<blockquote>
+<div><ul class="simple">
+<li><p>fi mkswapfile: fix setting size</p></li>
+<li><p>mkfs: check zoned support of libblkid</p></li>
+<li><p>check: improve error messages for mismatched references</p></li>
+<li><dl class="simple">
+<dt>other:</dt><dd><ul>
+<li><p>pass CFLAGS to static build</p></li>
+<li><p>documentation updates</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</div></blockquote>
+</section>
+</section>
+<section id="btrfs-progs-6-0-2022-10-11">
+<h2>btrfs-progs-6.0 (2022-10-11)<a class="headerlink" href="#btrfs-progs-6-0-2022-10-11" title="Link to this heading"></a></h2>
+<blockquote>
+<div><ul class="simple">
+<li><p>fi usage: in tabular output, print total size and slack size</p></li>
+<li><dl class="simple">
+<dt>mkfs:</dt><dd><ul>
+<li><p>option -O now accepts values from -R to unify the interface (-R will
+continue to work)</p></li>
+<li><p>zone reset and discard is done in parallel on all devices</p></li>
+<li><p>removed option --leafsize, deprecated long time ago</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>corrupt-block: recalculate checksum when changing generation</p></li>
+<li><dl class="simple">
+<dt>fixes:</dt><dd><ul>
+<li><p>convert: fix reserved range detection and overlaps</p></li>
+<li><p>mkfs: fix creating files with reserved inode numbers with --rootdir</p></li>
+<li><p>receive: escape filenames in command attributes</p></li>
+<li><p>fix extent buffer leaks after transaction abort</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>experimental:</dt><dd><ul>
+<li><p>mkfs: support for block-group-tree (kernel 6.1)</p></li>
+<li><p>fsverity in send (protocol v3, WIP)</p></li>
+<li><p>btrfstune -b converts to block-group-tree</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>other:</dt><dd><ul>
+<li><p>cleanups, refactoring</p></li>
+<li><p>new and updated tests</p></li>
+<li><p>update documentation</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</div></blockquote>
+<section id="btrfs-progs-6-0-1-2022-11-04">
+<h3>btrfs-progs-6.0.1 (2022-11-04)<a class="headerlink" href="#btrfs-progs-6-0-1-2022-11-04" title="Link to this heading"></a></h3>
+<blockquote>
+<div><ul class="simple">
+<li><p>send: minor speed up for v2 due to increased buffer size</p></li>
+<li><p>resize: invalid command line options fail with error code</p></li>
+<li><dl class="simple">
+<dt>quota rescan:</dt><dd><ul>
+<li><p>add long options --status and --wait</p></li>
+<li><p>new option to wait but don’t start rescan</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>qgroup show: print path by default, updated format</p></li>
+<li><p>qgroup: new subcommand clear-stale, remove qgroups without their subvolumes</p></li>
+<li><dl class="simple">
+<dt>experimental:</dt><dd><ul>
+<li><p>add warnings to commands that have it enabled (mkfs, image, btrfstune)</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>other:</dt><dd><ul>
+<li><p>documentation, help text, error message updates</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</div></blockquote>
+</section>
+<section id="btrfs-progs-6-0-2-2022-11-24">
+<h3>btrfs-progs-6.0.2 (2022-11-24)<a class="headerlink" href="#btrfs-progs-6-0-2-2022-11-24" title="Link to this heading"></a></h3>
+<blockquote>
+<div><ul class="simple">
+<li><dl class="simple">
+<dt>fixes:</dt><dd><ul>
+<li><p>resize cancel did not work in some cases</p></li>
+<li><p>fix fileattr stream command format and add workaround when it cannot be applied</p></li>
+<li><p>properly handle degraded raid56 reads</p></li>
+<li><p>fi defrag: fix verbosity, don’t print file names by default</p></li>
+<li><p>receive: fix silent data loss after fall back from encoded write</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>fi mkswapfile: new command to create a formatted swapfile in one go</p></li>
+</ul>
+</div></blockquote>
+</section>
+</section>
+<section id="btrfs-progs-5-x-2022-09-12">
+<h2>btrfs-progs-5.x (2022-09-12)<a class="headerlink" href="#btrfs-progs-5-x-2022-09-12" title="Link to this heading"></a></h2>
+<section id="btrfs-progs-5-19-2022-08-16">
+<h3>btrfs-progs-5.19 (2022-08-16)<a class="headerlink" href="#btrfs-progs-5-19-2022-08-16" title="Link to this heading"></a></h3>
+<blockquote>
+<div><ul class="simple">
+<li><p>send: support protocol version 2</p></li>
+<li><p>fi show: print all missing devices</p></li>
+<li><p>device stats: add tabular output</p></li>
+<li><p>replace: add alias to device group (device replace)</p></li>
+<li><p>check: validate free space tree items</p></li>
+<li><dl class="simple">
+<dt>fixes:</dt><dd><ul>
+<li><p>convert: support large filesystems (block count &gt; 32bit)</p></li>
+<li><p>recognize filesystems with verity enabled</p></li>
+<li><p>mkfs and DUP could write out of order, fix it for zoned mode</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>build:</dt><dd><ul>
+<li><p>optional support for LZO and ZSTD in receive</p></li>
+<li><p>compatibility with glibc 2.36 (mount.h)</p></li>
+<li><p>add fallbacks for new GCC builtins</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>other:</dt><dd><ul>
+<li><p>corrupt-block: target specific items, offsets</p></li>
+<li><p>documentation updates, new pages from wiki</p></li>
+<li><p>new tests</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</div></blockquote>
+<dl class="simple">
+<dt>btrfs-progs-5.19.1 (2022-09-12)</dt><dd><ul class="simple">
+<li><p>fix memory leaks (extent buffer, path)</p></li>
+<li><p>check: verify block device size vs item</p></li>
+<li><p>rescue fix-device-size: allow to shrink device item</p></li>
+<li><p>receive: fix crash on wrong pointer free()</p></li>
+<li><dl class="simple">
+<dt>other:</dt><dd><ul>
+<li><p>experimental: support for block-group-tree</p></li>
+<li><p>documentation updates</p></li>
+<li><p>new tests</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</dd>
+</dl>
+</section>
+<section id="btrfs-progs-5-18-2022-05-25">
+<h3>btrfs-progs-5.18 (2022-05-25)<a class="headerlink" href="#btrfs-progs-5-18-2022-05-25" title="Link to this heading"></a></h3>
+<blockquote>
+<div><ul class="simple">
+<li><dl class="simple">
+<dt>fixes:</dt><dd><ul>
+<li><p>dump-tree: don’t print trailing zeros in checksums</p></li>
+<li><p>recognize paused balance as exclusive operation state, allow to start
+device add</p></li>
+<li><p>convert: properly initialize target filesystem label</p></li>
+<li><p>mkfs: don’t create free space bitmaps for empty filesystem</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>restore: make lzo support build-time configurable, print supported
+compression in help text</p></li>
+<li><p>update kernel-lib sources</p></li>
+<li><dl class="simple">
+<dt>other:</dt><dd><ul>
+<li><p>documentation updates, finish conversion to RST, CHANGES and INSTALL
+could be included into RST</p></li>
+<li><p>fix build detection of experimental mode</p></li>
+<li><p>new tests</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</div></blockquote>
+<dl class="simple">
+<dt>btrfs-progs-5.18.1 (2022-06-06)</dt><dd><ul class="simple">
+<li><dl class="simple">
+<dt>fixes:</dt><dd><ul>
+<li><p>convert: fix self reference of toplevel directory</p></li>
+<li><p>build: make kernel lib headers compatible with C++</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>zoned mode: verify minimum zone size 4MiB</p></li>
+<li><p>libbtrfs: cleanups, merge headers and remove declarations of unexported
+symbols</p></li>
+<li><p>other: documentation updates</p></li>
+</ul>
+</dd>
+</dl>
+</section>
+<section id="btrfs-progs-5-17-2022-04-26">
+<h3>btrfs-progs-5.17 (2022-04-26)<a class="headerlink" href="#btrfs-progs-5-17-2022-04-26" title="Link to this heading"></a></h3>
+<blockquote>
+<div><ul class="simple">
+<li><dl class="simple">
+<dt>check:</dt><dd><ul>
+<li><p>repair wrong num_devices in superblock</p></li>
+<li><p>recognize overly long xattr names</p></li>
+<li><p>fix wrong total bytes check for seed device</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>auto-repair on read on RAID56</p></li>
+<li><p>property set: unify handling of empty value to mean default, changed meaning
+for property ‘compression’ to allow reset to default and to set NOCOMPRESS,
+since kernel 5.14</p></li>
+<li><dl class="simple">
+<dt>fixes:</dt><dd><ul>
+<li><p>dump-tree: print fs-verity items</p></li>
+<li><p>fix location of system chunk on zoned filesystem</p></li>
+<li><p>do not allow setting seeding flag on a filesystem with dirty log</p></li>
+<li><p>mkfs and subpage support: use sectorsize as nodesize fallback for mixed
+profiles</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>preparatory work for extent tree v2, global roots</p></li>
+<li><dl class="simple">
+<dt>experimental feature (unstable interface, not built by default,</dt><dd><p>do not use for production)
+* btrfstune: option --csum to switch checksum algorithm</p>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>other:</dt><dd><ul>
+<li><p>cleanups, refactoring</p></li>
+<li><p>update documentation build, remove asciidoc leftovers</p></li>
+<li><p>update fssum to consider xattrs</p></li>
+<li><p>add fsstress</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</div></blockquote>
+</section>
+<section id="btrfs-progs-5-16-2022-01-12">
+<h3>btrfs-progs-5.16 (2022-01-12)<a class="headerlink" href="#btrfs-progs-5-16-2022-01-12" title="Link to this heading"></a></h3>
+<blockquote>
+<div><ul class="simple">
+<li><p>rescue: new subcommand clear-uuid-tree to fix failed mount due to bad uuid
+subvolume keys, caught by tree-checker</p></li>
+<li><p>fi du: skip inaccessible files</p></li>
+<li><p>prop: properly resolve to symlink targets</p></li>
+<li><p>send, receive: fix crash after parent subvolume lookup errors</p></li>
+<li><dl class="simple">
+<dt>build:</dt><dd><ul>
+<li><p>fix build on 5.12+ kernels due to changes in linux/kernel.h</p></li>
+<li><p>fix build on musl with old kernel headers</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>other:</dt><dd><ul>
+<li><p>error handling fixes, cleanups, refactoring</p></li>
+<li><p>extent tree v2 preparatory work</p></li>
+<li><p>lots of RST documentation updates (last release with asciidoc sources),
+<a class="reference external" href="https://btrfs.readthedocs.io">https://btrfs.readthedocs.io</a></p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</div></blockquote>
+<dl class="simple">
+<dt>btrfs-progs-5.16.1 (2022-02-04)</dt><dd><ul class="simple">
+<li><p>mkfs: support DUP on metadata on zoned devices</p></li>
+<li><p>subvol delete: drop warning for root when search ioctl fails</p></li>
+<li><dl class="simple">
+<dt>check:</dt><dd><ul>
+<li><p>fix --init-csum-tree to not create checksums for extents that are not
+supposed to have them</p></li>
+<li><p>add check for metadata item levels</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>add udev rule for zoned devices as they require mq-deadline</p></li>
+<li><p>build: fix redefinition of ALIGN on mixed old/new kernel/userspace (5.11)</p></li>
+<li><dl class="simple">
+<dt>other:</dt><dd><ul>
+<li><p>typo fixes</p></li>
+<li><p>new tests</p></li>
+<li><p>CI targets updated</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</dd>
+<dt>btrfs-progs-5.16.2 (2022-02-16)</dt><dd><ul class="simple">
+<li><p>mkfs: fix detection of profile type for zoned mode when creating DUP</p></li>
+<li><dl class="simple">
+<dt>build:</dt><dd><ul>
+<li><p>add missing stub for zoned mode helper when zoned mode not enabled</p></li>
+<li><p>fix 64bit types on MIPS and PowerPC</p></li>
+<li><p>improved zoned mode support autodetection, for systems with existing
+blkzone.h header but missing support for zone capacity</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>other:</dt><dd><ul>
+<li><p>doc updates</p></li>
+<li><p>test updates</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</dd>
+</dl>
+</section>
+<section id="btrfs-progs-5-15-2021-11-05">
+<h3>btrfs-progs-5.15 (2021-11-05)<a class="headerlink" href="#btrfs-progs-5-15-2021-11-05" title="Link to this heading"></a></h3>
+<blockquote>
+<div><ul class="simple">
+<li><dl class="simple">
+<dt>mkfs: new defaults!</dt><dd><ul>
+<li><p>no-holes</p></li>
+<li><p>free-space-tree</p></li>
+<li><p>DUP for metadata unconditionally</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>libbtrfsutil</dt><dd><ul>
+<li><p>add missing profile defines</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>libbtrfs</dt><dd><ul>
+<li><p>minimize its impact on the other code, refactor and separate implementation
+where needed, cleanup afterwards, reduced header exports</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>documentation</dt><dd><ul>
+<li><p>introduce sphinx build and RST versions of manual pages, will become the
+new format and replace asciidoc</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>fixes:</dt><dd><ul>
+<li><p>fix warning regarding v1 space cache when only v2 (free space tree) is
+enabled</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>other</dt><dd><ul>
+<li><p>lots of cleanups and refactoring</p></li>
+<li><p>zoned mode uses direct io for file backed images</p></li>
+<li><p>new and updated tests</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</div></blockquote>
+<dl class="simple">
+<dt>btrfs-progs-5.15.1 (2021-11-22)</dt><dd><ul class="simple">
+<li><dl class="simple">
+<dt>fixes:</dt><dd><ul>
+<li><p>fi usage: fix wrongly reported space of used or unallocated space</p></li>
+<li><p>fix detection of block device discard capability</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>check: add more sanity checks for checksum items</p></li>
+<li><p>build: make sphinx optional backend for documentation</p></li>
+</ul>
+</dd>
+</dl>
+</section>
+<section id="btrfs-progs-5-14-2021-09-10">
+<h3>btrfs-progs-5.14 (2021-09-10)<a class="headerlink" href="#btrfs-progs-5-14-2021-09-10" title="Link to this heading"></a></h3>
+<blockquote>
+<div><ul class="simple">
+<li><dl class="simple">
+<dt>convert:</dt><dd><ul>
+<li><p>new option --uuid to copy, generate or set a given uuid</p></li>
+<li><p>improve output</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>mkfs:</dt><dd><ul>
+<li><p>allow to create degenerate raid0 (on 1 device) and raid10 (on 2 devices)</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>image:</dt><dd><ul>
+<li><p>improved error messages</p></li>
+<li><p>fix some alignment of restored image</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>subvol delete: allow to delete by id when path is not resolvable</p></li>
+<li><dl class="simple">
+<dt>check:</dt><dd><ul>
+<li><p>require alignment of nodesize for 64k page systems</p></li>
+<li><p>detect and fix invalid block groups</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>libbtrfs (deprecated):</dt><dd><ul>
+<li><p>remove most exported symbols, leave only a few that are used by snapper</p></li>
+<li><p>no version change (still 0.1)</p></li>
+<li><p>remove btrfs-list.h, btrfsck.h</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>fixes:</dt><dd><ul>
+<li><p>reset generation of space v1 if v2 is used</p></li>
+<li><p>fi us: don’t wrongly report missing device size when partition is not readable</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>other:</dt><dd><ul>
+<li><p>build: experimental features</p></li>
+<li><p>build: better detection of 64bit timestamp support for ext4</p></li>
+<li><p>corrupt-block: block group items</p></li>
+<li><p>new and updated tests</p></li>
+<li><p>refactoring</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>experimental features:</dt><dd><ul>
+<li><p>new image dump format, with data</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</div></blockquote>
+<dl class="simple">
+<dt>btrfs-progs-5.14.1 (2021-09-20)</dt><dd><ul class="simple">
+<li><dl class="simple">
+<dt>fixes:</dt><dd><ul>
+<li><p>defrag: fix parsing of compression (option -c)</p></li>
+<li><p>add workaround for old kernels when reading zone sizes</p></li>
+<li><p>let only check and restore open the fs with transid failures, namely
+preventing btrfstune to do so</p></li>
+<li><p>convert: --uuid copy does not fail on duplicate uuids</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</dd>
+<dt>btrfs-progs-5.14.2 (2021-10-08)</dt><dd><ul class="simple">
+<li><dl class="simple">
+<dt>fixes</dt><dd><ul>
+<li><dl class="simple">
+<dt>zoned mode</dt><dd><ul>
+<li><p>properly detect non-zoned devices in emulation mode</p></li>
+<li><p>properly create quota tree</p></li>
+<li><p>raid1c3/4 also excluded from unsupported profiles</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>use sysfs-based detection of device discard capability, fix mkfs-time trim
+for non-standard devices</p></li>
+<li><p>mkfs: fix creation of populated filesystem with free space tree</p></li>
+<li><p>detect multipath devices (needs libudev)</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>replace start: add option -K/--nodiscard, similar to what mkfs or device add has</p></li>
+<li><p>dump-tree: print complete root_item</p></li>
+<li><p>mkfs: add option --verbose</p></li>
+<li><p>sb-mod: better help, no checksum calculation on read-only actions</p></li>
+<li><dl class="simple">
+<dt>subvol show:</dt><dd><ul>
+<li><p>print more information (regarding send and receive)</p></li>
+<li><p>print warning if read-write subvolume has received_uuid set</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>property set:</dt><dd><ul>
+<li><p>add parameter -f to force changes</p></li>
+<li><p>changing ro-&gt;rw switch now needs -f if subvolume has received_uuid set,
+(see documentation)</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>build</dt><dd><ul>
+<li><p>optional libudev (on by default)</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>other</dt><dd><ul>
+<li><p>remove deprecated support for CREATE_ASYNC bit for subvolume ioctl</p></li>
+<li><p>CI updates</p></li>
+<li><p>new and updated tests</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</dd>
+</dl>
+</section>
+<section id="btrfs-progs-5-13-2021-07-13">
+<h3>btrfs-progs-5.13 (2021-07-13)<a class="headerlink" href="#btrfs-progs-5-13-2021-07-13" title="Link to this heading"></a></h3>
+<blockquote>
+<div><ul class="simple">
+<li><p>restore: remove loop checks for extent count and directory scan</p></li>
+<li><p>inspect dump-tree: new options to print node (--csum-headers) and data
+checksums (--csum-items)</p></li>
+<li><dl class="simple">
+<dt>fi usage:</dt><dd><ul>
+<li><p>print stripe count for striped profiles</p></li>
+<li><p>print zoned information: size, total unusable</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>mkfs: print note about sha256 accelerated module loading issue</p></li>
+<li><p>check: ability to reset dev_item::bytes_used</p></li>
+<li><dl class="simple">
+<dt>fixes</dt><dd><ul>
+<li><p>detect zoned kernel support at run time too</p></li>
+<li><p>exclusive op running check return value</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>fi resize: support cancel (kernel 5.14)</p></li>
+<li><p>device remove: support cancel (kernel 5.14)</p></li>
+<li><dl class="simple">
+<dt>documentation about general topics</dt><dd><ul>
+<li><p>compression</p></li>
+<li><p>zoned mode</p></li>
+<li><p>storage model</p></li>
+<li><p>hardware considerations</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>other</dt><dd><ul>
+<li><p>libbtrfsutil API overview</p></li>
+<li><p>help text fixes and updates</p></li>
+<li><p>hash speedtest measure time, cycles using perf and print throughput</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</div></blockquote>
+<dl class="simple">
+<dt>btrfs-progs-5.13.1 (2021-07-30)</dt><dd><ul class="simple">
+<li><p>build: fix build on musl libc due to missing definition of NAME_MAX</p></li>
+<li><dl class="simple">
+<dt>check:</dt><dd><ul>
+<li><p>batch more work into one transaction when clearing v1 free space inodes</p></li>
+<li><p>detect directories with wrong number of links</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>libbtrfsutil: fix race between subvolume iterator and deletion</p></li>
+<li><p>mkfs: be more specific about supported profiles for zoned device</p></li>
+<li><dl class="simple">
+<dt>other:</dt><dd><ul>
+<li><p>documentation updates</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</dd>
+</dl>
+</section>
+<section id="btrfs-progs-5-12-2021-05-10">
+<h3>btrfs-progs-5.12 (2021-05-10)<a class="headerlink" href="#btrfs-progs-5-12-2021-05-10" title="Link to this heading"></a></h3>
+<blockquote>
+<div><ul class="simple">
+<li><p>libbtrfsutil: relicensed to LGPL v2.1+</p></li>
+<li><p>mkfs: zoned mode support (kernel 5.12+)</p></li>
+<li><p>fi df: show zone_unusable per profile type in zoned mode</p></li>
+<li><p>fi usage: show total amount of zone_unusable</p></li>
+<li><p>fi resize: fix message for exact size</p></li>
+<li><p>image: fix warning and enlarge output file if necessary</p></li>
+<li><dl class="simple">
+<dt>core</dt><dd><ul>
+<li><p>refactor chunk allocator for more modes</p></li>
+<li><p>implement zoned mode support: allocation and writes, sb log</p></li>
+<li><p>crypto/hash refactoring and cleanups</p></li>
+<li><p>refactoring and cleanups</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>other</dt><dd><ul>
+<li><p>test updates</p></li>
+<li><p>CI updates</p></li>
+<li><p>travis-ci integration disabled</p></li>
+<li><p>docker images updated, more coverage</p></li>
+<li><p>incomplete build support for Android removed</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>doc updates</dt><dd><ul>
+<li><p>chattr mode m for ‘NOCOMPRESS”</p></li>
+<li><p>swapfile used from fstab</p></li>
+<li><p>how to add a new export to libbtrfsutil</p></li>
+<li><p>update status of mount options since 5.9</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</div></blockquote>
+<dl class="simple">
+<dt>btrfs-progs-5.12.1 (2021-05-13)</dt><dd><ul class="simple">
+<li><p>build: fix missing symbols in libbtrfs</p></li>
+<li><p>mkfs: check for minimal number of zones</p></li>
+<li><p>check: fix warning about cache generation when free space tree is enabled</p></li>
+<li><p>fix superblock write in zoned mode on 16K pages</p></li>
+</ul>
+</dd>
+</dl>
+</section>
+<section id="btrfs-progs-5-11-2021-03-05">
+<h3>btrfs-progs-5.11 (2021-03-05)<a class="headerlink" href="#btrfs-progs-5-11-2021-03-05" title="Link to this heading"></a></h3>
+<blockquote>
+<div><ul class="simple">
+<li><p>fix device path canonicalization for device mapper devices</p></li>
+<li><p>receive: remove workaround for setting capabilities, all stable kernels
+have been patched</p></li>
+<li><p>receive: fix duplicate mount path detection</p></li>
+<li><p>rescue: new subcommand create-control-device</p></li>
+<li><p>device stats: minor fix for plain text format output</p></li>
+<li><p>build: detect if e2fsprogs support 64bit timestamps</p></li>
+<li><p>build: drop libmount, required functionality has been reimplemented</p></li>
+<li><p>mkfs: warn when raid56 is used</p></li>
+<li><p>balance convert: warn when raid56 is used</p></li>
+<li><dl class="simple">
+<dt>other</dt><dd><ul>
+<li><p>new and updated tests</p></li>
+<li><dl class="simple">
+<dt>documentation updates</dt><dd><ul>
+<li><p>seeding device</p></li>
+<li><p>raid56 status</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>CI updates</dt><dd><ul>
+<li><p>docker images for various distros</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</div></blockquote>
+<dl class="simple">
+<dt>btrfs-progs-5.11.1 (2021-03-24)</dt><dd><ul class="simple">
+<li><p>properly format checksums when a mismatch is reported</p></li>
+<li><p>check: fix false alert on tree block crossing 64K page boundary</p></li>
+<li><dl class="simple">
+<dt>convert:</dt><dd><ul>
+<li><p>refuse to convert filesystem with ‘needs_recovery’</p></li>
+<li><p>update documentation to require fsck before conversion</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>balance convert: fix raid56 warning when converting other profiles</p></li>
+<li><p>fi resize: improved summary</p></li>
+<li><dl class="simple">
+<dt>other</dt><dd><ul>
+<li><p>build: fix checks and autoconf defines</p></li>
+<li><p>fix symlink paths for CI support scripts</p></li>
+<li><p>updated tests</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</dd>
+</dl>
+</section>
+<section id="btrfs-progs-5-10-2021-01-18">
+<h3>btrfs-progs-5.10 (2021-01-18)<a class="headerlink" href="#btrfs-progs-5-10-2021-01-18" title="Link to this heading"></a></h3>
+<blockquote>
+<div><ul class="simple">
+<li><dl class="simple">
+<dt>scrub status:</dt><dd><ul>
+<li><p>print percentage of progress</p></li>
+<li><p>add size unit options</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>fi usage: also print free space from statfs</p></li>
+<li><p>convert: copy full 64 bit timestamp from ext4 if available</p></li>
+<li><dl class="simple">
+<dt>check:</dt><dd><ul>
+<li><p>add ability to repair extent item generation</p></li>
+<li><p>new option to remove leftovers from inode number cache (-o inode_cache)</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>check for already running exclusive operation (balance, device add/…)
+when starting one</p></li>
+<li><p>preliminary json output support for ‘device stats’</p></li>
+<li><dl class="simple">
+<dt>fixes:</dt><dd><ul>
+<li><p>subvolume set-default: id 0 correctly falls back to toplevel</p></li>
+<li><p>receive: align internal buffer to allow fast CRC calculation</p></li>
+<li><p>logical-resolve: distinguish -o subvol and bind mounts</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>build: new dependency libmount</p></li>
+<li><dl class="simple">
+<dt>other</dt><dd><ul>
+<li><p>doc fixes and updates</p></li>
+<li><p>new tests</p></li>
+<li><p>ci on gitlab temporarily disabled</p></li>
+<li><p>debugging output enhancements</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</div></blockquote>
+<dl class="simple">
+<dt>btrfs-progs-5.10.1 (2021-02-05)</dt><dd><ul class="simple">
+<li><p>static build works again</p></li>
+<li><dl class="simple">
+<dt>other:</dt><dd><ul>
+<li><p>add a way to test static binaries with the testsuite</p></li>
+<li><p>clarify scrub docs</p></li>
+<li><p>update dependencies, minimum version for libmount is 2.24, this may
+change in the future</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</dd>
+</dl>
+</section>
+<section id="btrfs-progs-5-9-2020-10-23">
+<h3>btrfs-progs-5.9 (2020-10-23)<a class="headerlink" href="#btrfs-progs-5-9-2020-10-23" title="Link to this heading"></a></h3>
+<blockquote>
+<div><ul class="simple">
+<li><dl class="simple">
+<dt>mkfs:</dt><dd><ul>
+<li><p>switch default to single profile for multi-device filesystem, up to
+now it was raid0 that may not be simple to convert to some other profile
+as raid0 needs a workspace on all device for that</p></li>
+<li><p>new option -R for run-time options (eg. mount time enabled), now
+understands free-space-tree</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>subvolume delete:</dt><dd><ul>
+<li><p>refuse to delete the default subvolume (kernel will not allow that but
+the error reason is not obvious)</p></li>
+<li><p>warn on EPERM, eg. if send is on progress on the subvolume</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>convert:</dt><dd><ul>
+<li><p>fix 32bit overflows on large filesystems</p></li>
+<li><p>improved error handling and error messages</p></li>
+<li><p>check free space taking fragmentation into account</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>check:</dt><dd><ul>
+<li><p>detect and repair wrong inode generation</p></li>
+<li><p>minor improvement in error reporting on roots</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>libbtrfsutils: follow main package versioning (5.9)</dt><dd><ul>
+<li><p>add pkg-config file definitions</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>python-btrfsutil: follow main package versioning (5.9)</p></li>
+<li><p>inspect tree-stats: print node counts for each level, fanout</p></li>
+<li><dl class="simple">
+<dt>other:</dt><dd><ul>
+<li><dl class="simple">
+<dt>docs:</dt><dd><ul>
+<li><p>remove obsolete mount options (alloc_start, subvolrootid)</p></li>
+<li><p>deleting default subvolume is not permitted</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>updated or fixed tests</p></li>
+<li><p>.editorconfig updates</p></li>
+<li><p>move files to kernel-shared/</p></li>
+<li><dl class="simple">
+<dt>CI:</dt><dd><ul>
+<li><p>updated to use zstd 1.4.5</p></li>
+<li><p>fix reiserfs build</p></li>
+<li><p>more builds with asan, ubsan</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>sb-mod updates</p></li>
+<li><dl class="simple">
+<dt>build:</dt><dd><ul>
+<li><p>print .so versions of libraries in configure summary</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</div></blockquote>
+</section>
+<section id="btrfs-progs-5-8-skipped">
+<h3>btrfs-progs-5.8 (skipped)<a class="headerlink" href="#btrfs-progs-5-8-skipped" title="Link to this heading"></a></h3>
+</section>
+<section id="btrfs-progs-5-7-2020-07-02">
+<h3>btrfs-progs-5.7 (2020-07-02)<a class="headerlink" href="#btrfs-progs-5-7-2020-07-02" title="Link to this heading"></a></h3>
+<blockquote>
+<div><ul class="simple">
+<li><dl class="simple">
+<dt>mkfs:</dt><dd><ul>
+<li><p>new option to enable features otherwise enabled at runtime, now
+implemented for quotas, ‘mkfs.btrfs -R quota’</p></li>
+<li><p>fix space accounting for small image, DUP and --rootdir</p></li>
+<li><p>option -A removed</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>check: detect ranges with overlapping csum items</p></li>
+<li><p>fi usage: report correct numbers when plain RAID56 profiles are used</p></li>
+<li><p>convert: ensure the data chunks size never exceed device size</p></li>
+<li><p>libbtrfsutil: update documentation regarding subvolume deletion</p></li>
+<li><p>build: support libkcapi as implementation backend for cryptographic
+primitives</p></li>
+<li><p>core: global options for verbosity (-v, -q), subcommands -v or -q are
+aliases and will continue to work but are considered deprecated,
+current command output is preserved to keep scripts working</p></li>
+<li><dl class="simple">
+<dt>other:</dt><dd><ul>
+<li><p>block group code cleanups</p></li>
+<li><p>build warning fixes</p></li>
+<li><p>more files moved to kernel-shared</p></li>
+<li><p>btrfs-debugfs ported to python 3</p></li>
+<li><p>documentation updates</p></li>
+<li><p>new tests</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</div></blockquote>
+</section>
+<section id="btrfs-progs-5-6-2020-04-05">
+<h3>btrfs-progs-5.6 (2020-04-05)<a class="headerlink" href="#btrfs-progs-5-6-2020-04-05" title="Link to this heading"></a></h3>
+<blockquote>
+<div><ul class="simple">
+<li><p>inspect logical-resolve: support LOGICAL_INO_V2 as new option ‘-o’,
+helps advanced dedupe tools</p></li>
+<li><p>inspect: user larger buffer (64K) for results</p></li>
+<li><p>subvol delete: support deletion by id (requires kernel 5.7+)</p></li>
+<li><dl class="simple">
+<dt>libbtrfsutil:</dt><dd><ul>
+<li><p>support subvolume deletion by id</p></li>
+<li><p>bump version to 1.2</p></li>
+<li><p>library symbols are now versioned</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>dump-tree: new option --hide-names, replace any names (file, directory,
+subvolume, xattr) in the output with stubs</p></li>
+<li><p>convert: warn if the filesystem is not mountable on the machine</p></li>
+<li><dl class="simple">
+<dt>fixes:</dt><dd><ul>
+<li><p>restore: proper mirror iteration on decompression error</p></li>
+<li><p>restore: make symlink messages less noisy</p></li>
+<li><p>check: handle holes at the beginning or end of file</p></li>
+<li><p>fix xxhash output on big endian machines</p></li>
+<li><p>receive: fix lookup of subvolume by uuid in case it was already
+received before</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>other:</dt><dd><ul>
+<li><p>new and updated tests</p></li>
+<li><p>add missing binaries in exported testsuite</p></li>
+<li><p>docs updates</p></li>
+<li><p>remove obsolete files</p></li>
+<li><p>move files to more appropriate directories</p></li>
+<li><p>fixes reported by valgrind</p></li>
+<li><p>many typos fixed</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</div></blockquote>
+<dl class="simple">
+<dt>btrfs-progs-5.6.1 (2020-05-07)</dt><dd><ul class="simple">
+<li><p>print warning when multiple block group profiles exist, update ‘fi usage’
+summary, add docs to manual page explaining the situation</p></li>
+<li><p>build: optional support for libgcrypt or libsodium, providing hash
+implementations</p></li>
+<li><dl class="simple">
+<dt>other:</dt><dd><ul>
+<li><p>fixed, updated and new tests</p></li>
+<li><p>cleanups</p></li>
+<li><p>updated docs</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</dd>
+</dl>
+</section>
+<section id="btrfs-progs-5-5-skipped">
+<h3>btrfs-progs-5.5 (skipped)<a class="headerlink" href="#btrfs-progs-5-5-skipped" title="Link to this heading"></a></h3>
+</section>
+<section id="btrfs-progs-5-4-2019-12-03">
+<h3>btrfs-progs-5.4 (2019-12-03)<a class="headerlink" href="#btrfs-progs-5-4-2019-12-03" title="Link to this heading"></a></h3>
+<blockquote>
+<div><ul class="simple">
+<li><dl class="simple">
+<dt>support new hash algorithms (kernel 5.5):</dt><dd><ul>
+<li><p>mkfs.btrfs and btrfs-convert with --csum, crc32c, xxhash, sha256, blake2</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>mkfs: support new raid1c3 and raid1c4 block group profiles (kernel 5.5)</p></li>
+<li><dl class="simple">
+<dt>check:</dt><dd><ul>
+<li><p>--repair delays start with a warning, can be skipped using --force</p></li>
+<li><p>enhanced detection of inode types from partial data, more options for
+repair</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>receive: fix quiet option</p></li>
+<li><p>image: speed up chunk loading</p></li>
+<li><dl class="simple">
+<dt>fi usage:</dt><dd><ul>
+<li><p>sort devices by id</p></li>
+<li><p>print ratio of used/total per block group type</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>rescue zero-log: reset the log pointers directly, avoid reading some other
+potentially damaged structures</p></li>
+<li><p>new make target install-static to install only static binaries/libraries</p></li>
+<li><dl class="simple">
+<dt>other</dt><dd><ul>
+<li><p>docs updates</p></li>
+<li><p>new tests</p></li>
+<li><p>cleanups and refactoring</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</div></blockquote>
+<dl class="simple">
+<dt>btrfs-progs-5.4.1 (2020-01-09)</dt><dd><ul class="simple">
+<li><p>build: fix docbook5 build</p></li>
+<li><p>check: do extra verification of extent items, inode items and chunks</p></li>
+<li><p>qgroup: return ENOTCONN if quotas not running (needs updated kernel)</p></li>
+<li><p>other: various test fixups</p></li>
+</ul>
+</dd>
+</dl>
+</section>
+<section id="btrfs-progs-5-3-2019-10-21">
+<h3>btrfs-progs-5.3 (2019-10-21)<a class="headerlink" href="#btrfs-progs-5-3-2019-10-21" title="Link to this heading"></a></h3>
+<blockquote>
+<div><ul class="simple">
+<li><dl class="simple">
+<dt>mkfs:</dt><dd><ul>
+<li><p>new option to specify checksum algorithm (only crc32c)</p></li>
+<li><p>fix xattr enumeration</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>dump-tree: BFS (breadth-first) traversal now default</p></li>
+<li><p>libbtrfsutil: remove stale BTRFS_DEV_REPLACE_ITEM_STATE_x defines</p></li>
+<li><p>ci: add support for gitlab</p></li>
+<li><dl class="simple">
+<dt>other:</dt><dd><ul>
+<li><p>preparatory work for more checksum algorithms</p></li>
+<li><p>docs update</p></li>
+<li><p>switch to docbook5 backend for asciidoc</p></li>
+<li><p>fix build on uClibc due to missing backtrace()</p></li>
+<li><p>lots of printf format fixups</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</div></blockquote>
+<dl class="simple">
+<dt>btrfs-progs-5.3.1 (2019-10-25)</dt><dd><ul class="simple">
+<li><p>libbtrfs: fix link breakage due to missing symbols</p></li>
+</ul>
+</dd>
+</dl>
+</section>
+<section id="btrfs-progs-5-2-2019-07-05">
+<h3>btrfs-progs-5.2 (2019-07-05)<a class="headerlink" href="#btrfs-progs-5-2-2019-07-05" title="Link to this heading"></a></h3>
+<blockquote>
+<div><ul class="simple">
+<li><p>subvol show: print qgroup information when available</p></li>
+<li><dl class="simple">
+<dt>scrub:</dt><dd><ul>
+<li><p>status: show ETA, revamp the whole output</p></li>
+<li><p>fix reading/writing of last position on resume/cancel, potentially
+skipping part of the filesystem on next resume</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>dump-tree: add new option --noscan to use only devices given on the
+command line</p></li>
+<li><p>all-in-one binary (busybox style) with mkfs.btrfs, btrfs-image,
+btrfs-convert, btrfstune</p></li>
+<li><p>image: fix hang when there are more than 32 cpus online and compression is
+requested</p></li>
+<li><p>convert: fix some false ENOSPC errors when --rootdir is used</p></li>
+<li><p>build: fix gcc9 warnings</p></li>
+<li><dl class="simple">
+<dt>core changes</dt><dd><ul>
+<li><p>command handling cleanups</p></li>
+<li><p>dead code removal</p></li>
+<li><p>cmds-* files moved to cmds/</p></li>
+<li><p>other shared userspace files moved to common/</p></li>
+<li><p>utils.c split into more files</p></li>
+<li><p>preparatory work for more output formats</p></li>
+<li><p>libbtrfsutil: fix unaligned access</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>other</dt><dd><ul>
+<li><p>new and updated tests</p></li>
+<li><p>fix tests so CI passes again</p></li>
+<li><p>sb-mod can modify more superblock items</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</div></blockquote>
+<dl class="simple">
+<dt>btrfs-progs-5.2.1 (2019-07-26)</dt><dd><ul class="simple">
+<li><p>scrub status: fix ETA calculation after resume</p></li>
+<li><p>check: fix crash when using -Q</p></li>
+<li><p>restore: fix symlink owner restoration</p></li>
+<li><p>mkfs: fix regression with mixed block groups</p></li>
+<li><p>core: fix commit to process all delayed refs</p></li>
+<li><dl class="simple">
+<dt>other:</dt><dd><ul>
+<li><p>minor cleanups</p></li>
+<li><p>test updates</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</dd>
+<dt>btrfs-progs-5.2.2 (2019-09-05)</dt><dd><ul class="simple">
+<li><dl class="simple">
+<dt>check:</dt><dd><ul>
+<li><p>fix false report of wrong byte count for orphan inodes</p></li>
+<li><p>option -E was not handled correctly</p></li>
+<li><p>new check and repair for root item generation</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>balance: check for full-balance before background fork</p></li>
+<li><p>mkfs: check that total device size does not overflow 16EiB</p></li>
+<li><p>dump-tree: print DEV_STATS key type</p></li>
+<li><dl class="simple">
+<dt>other:</dt><dd><ul>
+<li><p>new and updated tests</p></li>
+<li><p>doc fixups and updates</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</dd>
+</dl>
+</section>
+<section id="btrfs-progs-5-1-2019-05-17">
+<h3>btrfs-progs-5.1 (2019-05-17)<a class="headerlink" href="#btrfs-progs-5-1-2019-05-17" title="Link to this heading"></a></h3>
+<blockquote>
+<div><ul class="simple">
+<li><p>(version 5.0 skipped)</p></li>
+<li><dl class="simple">
+<dt>check:</dt><dd><ul>
+<li><p>repair: flush/FUA support to avoid breaking metadata COW</p></li>
+<li><p>file extents repair no longer relies on data in extent tree</p></li>
+<li><p>lowmem: fix false error reports about gaps between extents</p></li>
+<li><p>add inode mode check and repair for various objects</p></li>
+<li><p>add check for invalid combination of nocow/compressed extents</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>device scan: new option to forget scanned devices</p></li>
+<li><p>mkfs: use same chunk size as kernel for initial creation</p></li>
+<li><p>dev-replace: better report when other exclusive operation is running</p></li>
+<li><p>help: for syntax errors on command line, print only the relevant messages,
+not the whole help text</p></li>
+<li><dl class="simple">
+<dt>receive:</dt><dd><ul>
+<li><p>new option for quiet mode</p></li>
+<li><p>on -vv print information about written ranges</p></li>
+<li><p>fix endless loop with --dump on an invalid stream</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>defrag: able open files in RO mode (needs kernel support to work)</p></li>
+<li><p>dump-tree: --block can be specified multiple times</p></li>
+<li><p>libbtrfsutil: fix: don’t close fd on error in btrfs_util_subvolume_id_fd</p></li>
+<li><dl class="simple">
+<dt>core:</dt><dd><ul>
+<li><p>add sync before superblock write</p></li>
+<li><p>better error handling on the transaction commit path</p></li>
+<li><p>try to find best copy when reading tree blocks</p></li>
+<li><p>update backup roots on commit transaction</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>other:</dt><dd><ul>
+<li><p>fuzz tests pass and are enabled in CI</p></li>
+<li><p>cleanups</p></li>
+<li><p>new tests</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</div></blockquote>
+<dl class="simple">
+<dt>btrfs-progs-5.1.1 (2019-06-11)</dt><dd><ul class="simple">
+<li><p>convert and mkfs will try to use optimized crc32c</p></li>
+<li><p>fi show: accept a file-backed image</p></li>
+<li><p>fi show: fix possible crash when device is deleted in parallel</p></li>
+<li><dl class="simple">
+<dt>build:</dt><dd><ul>
+<li><p>support extra flags for python bindings</p></li>
+<li><p>separate LDFLAGS for libbtrfsutil</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>other:</dt><dd><ul>
+<li><p>space reservation fixes or debugging improvements</p></li>
+<li><p>V0 extent code removed</p></li>
+<li><p>more tests and cleanups</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</dd>
+</dl>
+</section>
+</section>
+<section id="btrfs-progs-4-x-2019-02-25">
+<h2>btrfs-progs-4.x (2019-02-25)<a class="headerlink" href="#btrfs-progs-4-x-2019-02-25" title="Link to this heading"></a></h2>
+<section id="btrfs-progs-4-20-2019-01-19">
+<h3>btrfs-progs-4.20 (2019-01-19)<a class="headerlink" href="#btrfs-progs-4-20-2019-01-19" title="Link to this heading"></a></h3>
+<blockquote>
+<div><ul class="simple">
+<li><dl class="simple">
+<dt>new feature: metadata uuid</dt><dd><ul>
+<li><p>lightweight change of UUID without rewriting all metadata
+(incompatible change)</p></li>
+<li><p>done by btrfstune -m/-M</p></li>
+<li><p>needs kernel support, 5.0+</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>image:</dt><dd><ul>
+<li><p>fix block groups when restoring from multi-device image</p></li>
+<li><p>only enlarge result image if it’s a regular file</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>check</dt><dd><ul>
+<li><p>more device extent checks and fixes</p></li>
+<li><p>can repair dir item with mismatched hash</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>mkfs: uuid tree created with proper contents</p></li>
+<li><p>fix mount point detection due to partial prefix match</p></li>
+<li><dl class="simple">
+<dt>other:</dt><dd><ul>
+<li><p>new tests</p></li>
+<li><p>libbtrfsutil: fix tests if kernel lacks support for new subvolume ioctls</p></li>
+<li><p>build fixes</p></li>
+<li><p>doc fixes</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</div></blockquote>
+<dl class="simple">
+<dt>btrfs-progs-4.20.1 (2019-01-23)</dt><dd><ul class="simple">
+<li><p>libbtrfs: fix build of external tools due to missing symbols</p></li>
+<li><p>ci: enable library test</p></li>
+</ul>
+</dd>
+<dt>btrfs-progs-4.20.2 (2019-02-25)</dt><dd><ul class="simple">
+<li><p>ci: use newer distro for builds</p></li>
+<li><p>dump-super: minor output fixup</p></li>
+<li><p>revert fix for prefix detection of receive path, this is temporary and
+unbreaks existing user setups</p></li>
+</ul>
+</dd>
+</dl>
+</section>
+<section id="btrfs-progs-4-19-2018-11-03">
+<h3>btrfs-progs-4.19 (2018-11-03)<a class="headerlink" href="#btrfs-progs-4-19-2018-11-03" title="Link to this heading"></a></h3>
+<blockquote>
+<div><ul class="simple">
+<li><p>check: support repair of fs with free-space-tree feature</p></li>
+<li><dl class="simple">
+<dt>core:</dt><dd><ul>
+<li><p>port delayed ref infrastructure from kernel</p></li>
+<li><p>support write to free space tree</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>dump-tree: new options for BFS and DFS enumeration of b-trees</p></li>
+<li><p>quota: rescan is now done automatically after ‘assign’</p></li>
+<li><p>btrfstune: incomplete fix to uuid change</p></li>
+<li><p>subvol: fix 255 char limit checks</p></li>
+<li><p>completion: complete block devices and now regular files too</p></li>
+<li><dl class="simple">
+<dt>docs:</dt><dd><ul>
+<li><p>ship uncompressed manual pages</p></li>
+<li><p>btrfsck uses a manual page link instead of symlink</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>other</dt><dd><ul>
+<li><p>improved error handling</p></li>
+<li><p>docs</p></li>
+<li><p>new tests</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</div></blockquote>
+<dl class="simple">
+<dt>btrfs-progs-4.19.1 (2018-12-05)</dt><dd><ul class="simple">
+<li><dl class="simple">
+<dt>build fixes</dt><dd><ul>
+<li><p>big-endian builds fail due to bswap helper clashes</p></li>
+<li><p>‘swap’ macro is too generic, renamed to prevent build failures</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>libbtrfs</dt><dd><ul>
+<li><p>minor version update to 1.1.0</p></li>
+<li><p>fix default search to top=0 as documented</p></li>
+<li><p>rename ‘async’ to avoid future python binding problems</p></li>
+<li><p>add support for unprivileged subvolume listing ioctls</p></li>
+<li><p>added tests, API docs</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>other</dt><dd><ul>
+<li><p>lot of typos fixed</p></li>
+<li><p>warning cleanups</p></li>
+<li><p>doc formatting updates</p></li>
+<li><p>CI tests against zstd 1.3.7</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</dd>
+</dl>
+</section>
+<section id="btrfs-progs-4-18-skipped">
+<h3>btrfs-progs-4.18 (skipped)<a class="headerlink" href="#btrfs-progs-4-18-skipped" title="Link to this heading"></a></h3>
+</section>
+<section id="btrfs-progs-4-17-2018-06-14">
+<h3>btrfs-progs-4.17 (2018-06-14)<a class="headerlink" href="#btrfs-progs-4-17-2018-06-14" title="Link to this heading"></a></h3>
+<blockquote>
+<div><ul class="simple">
+<li><dl class="simple">
+<dt>check</dt><dd><ul>
+<li><p>many lowmem mode improvements</p></li>
+<li><p>properly report qgroup mismatch errors</p></li>
+<li><p>check symlinks with append/immutable flags</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>fi usage</dt><dd><ul>
+<li><p>correctly calculate allocated/unallocated for raid10</p></li>
+<li><p>minor output updates</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>mkfs</dt><dd><ul>
+<li><p>detect ENOSPC on thinly provisioned devices</p></li>
+<li><p>fix spurious EEXIST during directory traversal</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>restore: fix relative path for restore target</p></li>
+<li><p>dump-tree: print symbolic tree names for backrefs</p></li>
+<li><p>send: fix regression preventing send -p with subvolumes mounted on “/”</p></li>
+<li><p>corrupt-tree: refactoring and command line updates</p></li>
+<li><dl class="simple">
+<dt>build</dt><dd><ul>
+<li><p>make it work with e2fsprogs &lt; 1.42 again</p></li>
+<li><p>restore support for autoconf 2.63</p></li>
+<li><p>detect if -std=gnu90 is supported</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>other</dt><dd><ul>
+<li><p>new tests</p></li>
+<li><p>cleanups</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</div></blockquote>
+<dl class="simple">
+<dt>btrfs-progs-4.17.1 (2018-08-06)</dt><dd><ul class="simple">
+<li><dl class="simple">
+<dt>check:</dt><dd><ul>
+<li><p>add ability to fix wrong ram_bytes for compressed inline files</p></li>
+<li><p>beautify progress output</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>btrfstune: allow to continue uuid change after unclean interruption</p></li>
+<li><dl class="simple">
+<dt>several fuzz fixes:</dt><dd><ul>
+<li><p>detect overlapping chunks</p></li>
+<li><p>chunk loading error handling</p></li>
+<li><p>don’t crash with unexpected root refs to extents</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>relax option parsing again to allow mixing options and non-options
+arguments</p></li>
+<li><p>fix qgroup rescan status reporting</p></li>
+<li><dl class="simple">
+<dt>build:</dt><dd><ul>
+<li><p>drop obsolete dir-test</p></li>
+<li><p>new configure option to disable building of tools</p></li>
+<li><p>add compatibility options --disable-static and --disable-shared</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>other:</dt><dd><ul>
+<li><p>cleanups and preparatory work</p></li>
+<li><p>new test images</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</dd>
+</dl>
+</section>
+<section id="btrfs-progs-4-16-2018-04-06">
+<h3>btrfs-progs-4.16 (2018-04-06)<a class="headerlink" href="#btrfs-progs-4-16-2018-04-06" title="Link to this heading"></a></h3>
+<blockquote>
+<div><ul class="simple">
+<li><dl class="simple">
+<dt>libbtrfsutil - new LGPL library to wrap userspace functionality</dt><dd><ul>
+<li><dl class="simple">
+<dt>several ‘btrfs’ commands converted to use it:</dt><dd><ul>
+<li><p>properties</p></li>
+<li><p>filesystem sync</p></li>
+<li><p>subvolume set-default/get-default/delete/show/sync</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>python bindings, tests</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>build</dt><dd><ul>
+<li><p>use configured pkg-config path</p></li>
+<li><p>CI: add python, musl/clang, built dependencies caching</p></li>
+<li><p>convert: build fix for e2fsprogs 1.44+</p></li>
+<li><p>don’t install library links with wrong permissions</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>fixes</dt><dd><ul>
+<li><p>prevent incorrect use of subvol_strip_mountpoint</p></li>
+<li><p>dump-super: don’t verify csum for unknown type</p></li>
+<li><p>convert: fix inline extent creation condition</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>check:</dt><dd><ul>
+<li><p>lowmem: fix false alert for ‘data extent backref lost for snapshot’</p></li>
+<li><p>lowmem: fix false alert for orphan inode</p></li>
+<li><p>lowmem: fix false alert for shared prealloc extents</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>mkfs:</dt><dd><ul>
+<li><p>add UUID and otime to root of FS_TREE - with the uuid, snapshots will
+be now linked to the toplevel subvol by the parent UUID</p></li>
+<li><p>don’t follow symlinks when calculating size</p></li>
+<li><p>pre-create the UUID tree</p></li>
+<li><p>fix --rootdir with selinux enabled</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>dump-tree: add option to print only children nodes of a given block</p></li>
+<li><p>image: handle missing device for RAID1</p></li>
+<li><dl class="simple">
+<dt>other</dt><dd><ul>
+<li><p>new tests</p></li>
+<li><p>test script cleanups (quoting, helpers)</p></li>
+<li><p>tool to edit superblocks</p></li>
+<li><p>updated docs</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</div></blockquote>
+<dl class="simple">
+<dt>btrfs-progs-4.16.1 (2018-04-24)</dt><dd><ul class="simple">
+<li><p>remove obsolete tools: btrfs-debug-tree, btrfs-zero-log, btrfs-show-super,
+btrfs-calc-size</p></li>
+<li><p>sb-mod: new debugging tool to edit superblock items</p></li>
+<li><p>mkfs: detect if thin-provisioned device does not have enough space</p></li>
+<li><p>check: don’t try to verify checksums on metadata dump images</p></li>
+<li><p>build: fail documentation build if xmlto is not found</p></li>
+<li><p>build: fix build of btrfs.static</p></li>
+</ul>
+</dd>
+</dl>
+</section>
+<section id="btrfs-progs-4-15-2018-02-01">
+<h3>btrfs-progs-4.15 (2018-02-01)<a class="headerlink" href="#btrfs-progs-4-15-2018-02-01" title="Link to this heading"></a></h3>
+<blockquote>
+<div><ul class="simple">
+<li><p>mkfs --rootdir reworked, does not minimize the final image but can be still
+done using a new option --shrink</p></li>
+<li><p>fix allocation of system chunk, don’t allocate from the reserved area</p></li>
+<li><dl class="simple">
+<dt>other</dt><dd><ul>
+<li><p>new and updated tests</p></li>
+<li><p>cleanups, refactoring</p></li>
+<li><p>doc updates</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</div></blockquote>
+<dl class="simple">
+<dt>btrfs-progs-4.15.1 (2018-02-16)</dt><dd><ul class="simple">
+<li><dl class="simple">
+<dt>build</dt><dd><ul>
+<li><p>fix build on musl</p></li>
+<li><p>support asciidoctor for doc generation</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>cleanups</dt><dd><ul>
+<li><p>sync some code with kernel</p></li>
+<li><p>check: move code to own directory, split to more files</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>tests</dt><dd><ul>
+<li><p>more build tests in travis</p></li>
+<li><p>tests now pass with asan and ubsan</p></li>
+<li><p>testsuite can be exported and used separately</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</dd>
+</dl>
+</section>
+<section id="btrfs-progs-4-14-2017-11-16">
+<h3>btrfs-progs-4.14 (2017-11-16)<a class="headerlink" href="#btrfs-progs-4-14-2017-11-16" title="Link to this heading"></a></h3>
+<blockquote>
+<div><ul class="simple">
+<li><p>build: libzstd now required by default</p></li>
+<li><p>check: more lowmem mode repair enhancements</p></li>
+<li><p>subvol set-default: also accept path</p></li>
+<li><p>prop set: compression accepts no/none, same as “”</p></li>
+<li><p>filesystem usage: enable for filesystem on top of a seed device</p></li>
+<li><p>rescue: new command fix-device-size</p></li>
+<li><dl class="simple">
+<dt>other</dt><dd><ul>
+<li><p>new tests</p></li>
+<li><p>cleanups and refactoring</p></li>
+<li><p>doc updates</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</div></blockquote>
+<dl class="simple">
+<dt>btrfs-progs-4.14.1 (2018-01-05)</dt><dd><ul class="simple">
+<li><p>dump-tree: print times of root items</p></li>
+<li><p>check: fix several lowmem mode bugs</p></li>
+<li><p>convert: fix rollback after balance</p></li>
+<li><dl class="simple">
+<dt>other</dt><dd><ul>
+<li><p>new and updated tests, enabled lowmem mode in CI</p></li>
+<li><p>docs updates</p></li>
+<li><p>fix travis CI build</p></li>
+<li><p>build fixes</p></li>
+<li><p>cleanups</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</dd>
+</dl>
+</section>
+<section id="btrfs-progs-4-13-2017-09-08">
+<h3>btrfs-progs-4.13 (2017-09-08)<a class="headerlink" href="#btrfs-progs-4-13-2017-09-08" title="Link to this heading"></a></h3>
+<blockquote>
+<div><ul class="simple">
+<li><p>convert: reiserfs support</p></li>
+<li><p>check: new option --force to allow check of a mounted filesystem (no repair)</p></li>
+<li><p>mkfs: --rootdir will now copy special files</p></li>
+<li><p>dump-tree: minor output changes</p></li>
+<li><p>inspect rootid: accept file as argument</p></li>
+<li><p>dev usage: don’t calculate slack space for missing devices</p></li>
+<li><p>fi du: don’t print error on EMPTY_SUBVOL (inode number 2)</p></li>
+<li><dl class="simple">
+<dt>build:</dt><dd><ul>
+<li><p>fixed support for sanitization features on gcc (tsan, asan, ubsan)</p></li>
+<li><p>fix PIE build</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>other:</dt><dd><ul>
+<li><p>misc cleanups and stability fixes</p></li>
+<li><p>travis CI enhancements</p></li>
+<li><p>new tests, fuzzed images</p></li>
+<li><p>testsuite cleanups</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</div></blockquote>
+<dl class="simple">
+<dt>btrfs-progs-4.13.1 (2017-09-25)</dt><dd><ul class="simple">
+<li><p>image: speed up generating the sanitized names, do not generate unprintable chars</p></li>
+<li><p>completion: add missing commands, better mount point detection</p></li>
+<li><p>restore: add zstd support; libzstd detected automatically, will be
+requested by default in the future, or can be configured out</p></li>
+<li><dl class="simple">
+<dt>other:</dt><dd><ul>
+<li><p>misc fixes found by sparse</p></li>
+<li><p>doc enhancements, ioctl manual page started</p></li>
+<li><p>updated and new tests</p></li>
+<li><p>build fixes</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</dd>
+<dt>btrfs-progs-4.13.2 (2017-10-06)</dt><dd><ul class="simple">
+<li><dl class="simple">
+<dt>subvol list:</dt><dd><ul>
+<li><p>don’t list toplevel subvolume among deleted (broken since 4.8.3)</p></li>
+<li><p>minor adjustments of uuid print format</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>subvol delete:</dt><dd><ul>
+<li><p>fix swapped behaviour of --commit-each and --commit-after</p></li>
+<li><p>fix potentially lost sync if subvolumes are from different filesystems</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>check: add cache for metadata blocks, should improve performance</p></li>
+<li><dl class="simple">
+<dt>other:</dt><dd><ul>
+<li><p>new tests, testsuite updates</p></li>
+<li><p>doc updates</p></li>
+<li><p>cleanups</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</dd>
+<dt>btrfs-progs-4.13.3 (2017-10-16)</dt><dd><ul class="simple">
+<li><p>check: fix --force, wrong check for a mounted block device</p></li>
+<li><p>build: fix --with-convert parsing</p></li>
+<li><p>subvol list: don’t list TOPLEVEL</p></li>
+<li><p>other: update tests</p></li>
+</ul>
+</dd>
+</dl>
+</section>
+<section id="btrfs-progs-4-12-2017-07-26">
+<h3>btrfs-progs-4.12 (2017-07-26)<a class="headerlink" href="#btrfs-progs-4-12-2017-07-26" title="Link to this heading"></a></h3>
+<blockquote>
+<div><ul class="simple">
+<li><p>subvol show: new options --rootid, --uuid to show subvol by the given spec</p></li>
+<li><p>convert: progress report fixes, found by tsan</p></li>
+<li><p>image: progress report fixes, found by tsan</p></li>
+<li><p>fix infinite looping in find-root, or when looking for free extents</p></li>
+<li><dl class="simple">
+<dt>other:</dt><dd><ul>
+<li><p>code refactoring</p></li>
+<li><p>docs updates</p></li>
+<li><p>build: ThreadSanitizer support</p></li>
+<li><p>tests: stricter checks for mounted filesystem</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</div></blockquote>
+<dl class="simple">
+<dt>btrfs-progs-4.12.1 (2017-08-25)</dt><dd><ul class="simple">
+<li><dl class="simple">
+<dt>build:</dt><dd><ul>
+<li><p>fix cross-compilation</p></li>
+<li><p>use gnu90 explicitly</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>dump-tree: more relaxed checks so -b can print block on a damaged fs</p></li>
+<li><p>convert: fix the 1MB range exclusion</p></li>
+<li><p>check: more dir_item hash checks</p></li>
+<li><dl class="simple">
+<dt>other</dt><dd><ul>
+<li><p>added missing getopt spec for some options</p></li>
+<li><p>doc fixes</p></li>
+<li><p>cleanups</p></li>
+<li><p>test updates</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</dd>
+</dl>
+</section>
+<section id="btrfs-progs-4-11-2017-05-18">
+<h3>btrfs-progs-4.11 (2017-05-18)<a class="headerlink" href="#btrfs-progs-4-11-2017-05-18" title="Link to this heading"></a></h3>
+<blockquote>
+<div><ul class="simple">
+<li><p>receive: fix handling empty stream with -e (multi-stream)</p></li>
+<li><p>send dump: fix printing long file names</p></li>
+<li><p>stability fixes for: dump-super, print-tree, check</p></li>
+<li><p>option parser updates: global options are parsed before the subcommand name
+(old xfstests will fail)</p></li>
+<li><p>new and updated tests</p></li>
+<li><p>documentation updates</p></li>
+</ul>
+</div></blockquote>
+<dl class="simple">
+<dt>btrfs-progs-4.11.1 (2017-06-30)</dt><dd><ul class="simple">
+<li><p>image: restoring from multiple devices</p></li>
+<li><p>dev stats: make --check option work</p></li>
+<li><p>check: fix false alert with extent hole on a NO_HOLE filesystem</p></li>
+<li><p>check: lowmem mode, fix false alert in case of mixed inline and compressed
+extent</p></li>
+<li><p>convert: work with large filesystems (many TB)</p></li>
+<li><p>convert: fix overwriting of eb header flags</p></li>
+<li><p>convert: do not clear NODATASUM flag in inodes when run with --no-datasum</p></li>
+<li><p>docs updates</p></li>
+<li><p>build: sync Android.mk with Makefile</p></li>
+<li><dl class="simple">
+<dt>tests:</dt><dd><ul>
+<li><p>new tests</p></li>
+<li><p>fix 008 and 009, shell quotation mistake</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</dd>
+</dl>
+</section>
+<section id="btrfs-progs-4-10-2017-03-08">
+<h3>btrfs-progs-4.10 (2017-03-08)<a class="headerlink" href="#btrfs-progs-4-10-2017-03-08" title="Link to this heading"></a></h3>
+<blockquote>
+<div><ul class="simple">
+<li><p>send: dump output fixes: missing newlines</p></li>
+<li><p>check: several fixes for the lowmem mode, improved error reporting</p></li>
+<li><dl class="simple">
+<dt>build</dt><dd><ul>
+<li><p>removed some library deps for binaries that not use them</p></li>
+<li><p>ctags, cscope</p></li>
+<li><p>split Makefile to the autotool generated part and the rest, not needed
+to autogen.sh after adding a file</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>shared code: sync easy parts with kernel sources</p></li>
+<li><dl class="simple">
+<dt>other</dt><dd><ul>
+<li><p>lots of cleanups</p></li>
+<li><p>source file reorganization: convert, mkfs, utils</p></li>
+<li><p>lots of spelling fixes in docs, other updates</p></li>
+<li><p>more tests</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</div></blockquote>
+<dl class="simple">
+<dt>btrfs-progs-4.10.1 (2017-03-17)</dt><dd><ul class="simple">
+<li><p>receive: handle subvolume in path clone</p></li>
+<li><p>convert: rollback fixed (rewrite was needed to address previous design issues)</p></li>
+<li><p>build: fix build of 3rd party tools, missing &lt;linux/sizes.h&gt;</p></li>
+<li><p>dump-tree: print log trees</p></li>
+<li><dl class="simple">
+<dt>other</dt><dd><ul>
+<li><p>new and updated tests</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</dd>
+<dt>btrfs-progs-4.10.2 (2017-03-31)</dt><dd><ul class="simple">
+<li><p>check: lowmem mode fix for false alert about lost backrefs</p></li>
+<li><p>convert: minor bugfix</p></li>
+<li><p>library: fix build, missing symbols, added tests</p></li>
+</ul>
+</dd>
+</dl>
+</section>
+<section id="btrfs-progs-4-9-2016-12-23">
+<h3>btrfs-progs-4.9 (2016-12-23)<a class="headerlink" href="#btrfs-progs-4-9-2016-12-23" title="Link to this heading"></a></h3>
+<blockquote>
+<div><ul class="simple">
+<li><p>check: many lowmem mode updates</p></li>
+<li><p>send: use splice syscall to copy buffer from kernel</p></li>
+<li><p>receive: new option to dump the stream in textual form</p></li>
+<li><dl class="simple">
+<dt>convert:</dt><dd><ul>
+<li><p>move sources to own directory</p></li>
+<li><p>prevent accounting of blocks beyond end of the device</p></li>
+<li><p>make it work with 64k sectorsize</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>mkfs: move sources to own directory</p></li>
+<li><p>defrag: warns if directory used without -r</p></li>
+<li><dl class="simple">
+<dt>dev stats:</dt><dd><ul>
+<li><p>new option to check stats for non-zero values</p></li>
+<li><p>add long option for -z</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>library: version bump to 0.1.2, added subvol_uuid_search2</p></li>
+<li><dl class="simple">
+<dt>other:</dt><dd><ul>
+<li><p>cleanups</p></li>
+<li><p>docs updates</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</div></blockquote>
+<dl class="simple">
+<dt>btrfs-progs-4.9.1 (2017-01-27)</dt><dd><ul class="simple">
+<li><dl class="simple">
+<dt>check:</dt><dd><ul>
+<li><p>use correct inode number for lost+found files</p></li>
+<li><p>lowmem mode: fix false alert on dropped leaf</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>size reports: negative numbers might appear in size reports during device
+deletes (previously in EiB units)</p></li>
+<li><p>mkfs: print device being trimmed</p></li>
+<li><p>defrag: v1 ioctl support dropped</p></li>
+<li><p>quota: print message before starting to wait for rescan</p></li>
+<li><p>qgroup show: new option to sync before printing the stats</p></li>
+<li><dl class="simple">
+<dt>other:</dt><dd><ul>
+<li><p>corrupt-block enhancements</p></li>
+<li><p>backtrace and co. cleanups</p></li>
+<li><p>doc fixes</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</dd>
+</dl>
+</section>
+<section id="btrfs-progs-4-8-2016-10-05">
+<h3>btrfs-progs-4.8 (2016-10-05)<a class="headerlink" href="#btrfs-progs-4-8-2016-10-05" title="Link to this heading"></a></h3>
+<blockquote>
+<div><ul class="simple">
+<li><p>error handling improvements all over the place</p></li>
+<li><p>new fuzzed images, test updates</p></li>
+<li><p>doc fixups</p></li>
+<li><p>minor cleanups and improvements</p></li>
+<li><p>kernel library helpers moved to own directory</p></li>
+<li><p>qgroup: fix regression leading to incorrect status after check,
+introduced in 4.7</p></li>
+</ul>
+</div></blockquote>
+<dl class="simple">
+<dt>btrfs-progs-4.8.1 (2016-10-12)</dt><dd><ul class="simple">
+<li><p>32bit builds fixed</p></li>
+<li><p>build without backtrace support fixed</p></li>
+</ul>
+</dd>
+<dt>btrfs-progs-4.8.2 (2016-10-26)</dt><dd><ul class="simple">
+<li><p>convert: also convert file attributes</p></li>
+<li><p>convert: fix wrong tree block alignment for unaligned block group</p></li>
+<li><p>check: quota verify fixes, handle reloc tree</p></li>
+<li><p>build: add stub for FIEMAP_EXTENT_SHARED, compiles on ancient kernels</p></li>
+<li><p>build: add stub for BUILD_ASSERT when ioctl.h is included</p></li>
+<li><p>dump-tree: don’t crash on unrecognized tree id for -t</p></li>
+<li><dl class="simple">
+<dt>tests:</dt><dd><ul>
+<li><p>add more ioctl tests</p></li>
+<li><p>convert: more symlink tests, attribute tests</p></li>
+<li><p>quota verify for reloc tree</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>other cleanups</p></li>
+</ul>
+</dd>
+<dt>btrfs-progs-4.8.3 (2016-11-11)</dt><dd><ul class="simple">
+<li><dl class="simple">
+<dt>check:</dt><dd><ul>
+<li><p>support for clearing space cache (v1)</p></li>
+<li><p>size reduction of inode backref structure</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>send:</dt><dd><ul>
+<li><p>fix handling of multiple snapshots (-p and -c options)</p></li>
+<li><p>transfer buffer increased (should reduce number of context switches)</p></li>
+<li><p>reuse existing file for output (-f), eg. when root cannot create files (NFS)</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>dump-tree:</dt><dd><ul>
+<li><p>print missing items for various structures</p></li>
+<li><p>new: dev stats, balance status item</p></li>
+<li><p>sync key names with kernel (the persistent items)</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>subvol show: now able to print the toplevel subvolume -- the creation time
+might be wrong though</p></li>
+<li><dl class="simple">
+<dt>mkfs:</dt><dd><ul>
+<li><p>store the creation time of toplevel root inode</p></li>
+<li><p>print UUID in the summary</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>build: travis CI for devel</p></li>
+<li><dl class="simple">
+<dt>other:</dt><dd><ul>
+<li><p>lots of cleanups and refactoring</p></li>
+<li><p>switched to on-stack path structure</p></li>
+<li><p>fixes from coverity, asan, ubsan</p></li>
+<li><p>new tests</p></li>
+<li><p>updates in testing infrastructure</p></li>
+<li><p>fixed convert test 005</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</dd>
+<dt>btrfs-progs-4.8.4 (2016-11-25)</dt><dd><ul class="simple">
+<li><p>check: support for clearing space cache v2 (free-space-tree)</p></li>
+<li><dl class="simple">
+<dt>send:</dt><dd><ul>
+<li><p>more sanity checks (with tests), cleanups</p></li>
+<li><p>fix for fstests/btrfs/038 and btrfs/117 failures</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>build:</dt><dd><ul>
+<li><p>fix compilation of standalone ioctl.h, pull NULL definition</p></li>
+<li><p>fix library link errors introduced in 4.8.3</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>tests:</dt><dd><ul>
+<li><p>add more fuzzed images from bugzilla</p></li>
+<li><p>add bogus send stream checks</p></li>
+<li><p>fixups and enhancements for CI environment builds</p></li>
+<li><p>misc refinements and updates of testing framework</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>other:</dt><dd><ul>
+<li><p>move sources for btrfs-image to own directory</p></li>
+<li><p>deprecated and not build by default: btrfs-calc-size, btrfs-show-super</p></li>
+<li><p>docs updates</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</dd>
+<dt>btrfs-progs-4.8.5 (2016-11-30)</dt><dd><ul class="simple">
+<li><p>receive: fix detection of end of stream (error reported even for valid
+streams)</p></li>
+<li><dl class="simple">
+<dt>other:</dt><dd><ul>
+<li><p>added test for the receive bug</p></li>
+<li><p>fix linking of library-test</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</dd>
+</dl>
+</section>
+<section id="btrfs-progs-4-7-2016-07-29">
+<h3>btrfs-progs-4.7 (2016-07-29)<a class="headerlink" href="#btrfs-progs-4-7-2016-07-29" title="Link to this heading"></a></h3>
+<blockquote>
+<div><ul class="simple">
+<li><p>convert: fix creating discontig extents</p></li>
+<li><p>check: speed up traversing heavily reflinked extents within a file</p></li>
+<li><p>check: verify qgroups of higher levels</p></li>
+<li><p>check: repair can now fix wrong qgroup numbers</p></li>
+<li><p>balance: new option to run in the background</p></li>
+<li><p>defrag: default extent target size changed to 32MiB</p></li>
+<li><p>du: silently skip non-btrfs dirs/files</p></li>
+<li><p>documentation updates: btrfs(5), btrfs(8), balance, subvolume, scrub,
+filesystem, convert</p></li>
+<li><dl class="simple">
+<dt>bugfixes:</dt><dd><ul>
+<li><p>unaligned access (reported for sparc64) in raid56 parity calculations</p></li>
+<li><p>use /bin/bash</p></li>
+<li><p>other stability fixes and cleanups</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>more tests</p></li>
+</ul>
+</div></blockquote>
+<dl class="simple">
+<dt>btrfs-progs-4.7.1 (2016-08-25)</dt><dd><ul class="simple">
+<li><dl class="simple">
+<dt>check:</dt><dd><ul>
+<li><p>new optional mode: optimized for low memory usage (memory/io tradeoff)</p></li>
+<li><p>--mode=lowmem, not default, still considered experimental</p></li>
+<li><p>does not work with --repair yet</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>convert: regression fix, ext2_subvol/image rw permissions</p></li>
+<li><dl class="simple">
+<dt>mkfs/convert:</dt><dd><ul>
+<li><p>two-staged creation, partially created filesystem will not be recognized</p></li>
+<li><p>improved error handling (fewer BUG_ONs)</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>convert: preparation for more filesystems to convert from</p></li>
+<li><p>documentation updates: quota, qgroup</p></li>
+<li><dl class="simple">
+<dt>other</dt><dd><ul>
+<li><p>message updates</p></li>
+<li><p>more tests</p></li>
+<li><p>more build options, enhanced debugging</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</dd>
+<dt>btrfs-progs-4.7.2 (2016-09-05)</dt><dd><ul class="simple">
+<li><dl class="simple">
+<dt>check:</dt><dd><ul>
+<li><p>urgent fix: false report of backref mismatches; do not --repair
+last unaffected version 4.6.1 (code reverted to that state)</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>fuzzing and fixes</dt><dd><ul>
+<li><p>added more sanity checks for various structures</p></li>
+<li><p>testing images added</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>build: udev compatibility: do not install .rules on version &lt; 190</p></li>
+<li><dl class="simple">
+<dt>other:</dt><dd><ul>
+<li><p>dump-super: do not crash on garbage value in csum_type</p></li>
+<li><p>minor improvements in messages and help strings</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>documentation:</dt><dd><ul>
+<li><p>filesystem features</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</dd>
+<dt>btrfs-progs-4.7.3 (2016-09-21)</dt><dd><ul class="simple">
+<li><p>fixed free space tree compat status</p></li>
+<li><p>check: low-mem mode: handle partially dropped snapshots</p></li>
+<li><p>dump-super: consolidate options for superblock copy</p></li>
+<li><p>tree-stats: check mount status</p></li>
+<li><p>subvol delete: handle verbosity option</p></li>
+<li><p>defrag: print correct error string</p></li>
+<li><p>mkfs: fix reading rotational status</p></li>
+<li><dl class="simple">
+<dt>other:</dt><dd><ul>
+<li><p>UBSAN build option</p></li>
+<li><p>documentation updates</p></li>
+<li><p>enhanced tests: convert, fuzzed images, more tools to run on fuzzed
+images</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</dd>
+</dl>
+</section>
+<section id="btrfs-progs-4-6-2016-06-10">
+<h3>btrfs-progs-4.6 (2016-06-10)<a class="headerlink" href="#btrfs-progs-4-6-2016-06-10" title="Link to this heading"></a></h3>
+<blockquote>
+<div><ul class="simple">
+<li><dl class="simple">
+<dt>convert - major rewrite:</dt><dd><ul>
+<li><p>fix a long-standing bug that led to mixing data blocks into metadata block
+groups</p></li>
+<li><p>the workaround was to do full balance after conversion, which was
+recommended practice anyway</p></li>
+<li><p>explicitly set the lowest supported version of e2fstools to 1.41</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>provide and install udev rules file that addresses problems with device
+mapper devices, renames after removal</p></li>
+<li><p>send: new option: quiet</p></li>
+<li><p>dev usage: report slack space (device size minus filesystem area on the dev)</p></li>
+<li><p>image: support DUP</p></li>
+<li><p>build: short options to enable debugging builds</p></li>
+<li><dl class="simple">
+<dt>other:</dt><dd><ul>
+<li><p>code cleanups</p></li>
+<li><p>build fixes</p></li>
+<li><p>more tests and other enhancements</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</div></blockquote>
+<dl class="simple">
+<dt>btrfs-progs-4.6.1 (2016-06-24)</dt><dd><ul class="simple">
+<li><p>filesystem resize: negative resize argument accepted again</p></li>
+<li><p>qgroup rescan: fix skipping when rescan is in progress</p></li>
+<li><p>mkfs: initialize stripesize to correct value</p></li>
+<li><p>testsuite updates, mostly convert tests</p></li>
+<li><dl class="simple">
+<dt>documentation updates</dt><dd><ul>
+<li><p>btrfs-device, btrfs-restore manual pages enhanced</p></li>
+<li><p>misc fixups</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</dd>
+</dl>
+</section>
+<section id="btrfs-progs-4-5-2016-03-20">
+<h3>btrfs-progs-4.5 (2016-03-20)<a class="headerlink" href="#btrfs-progs-4-5-2016-03-20" title="Link to this heading"></a></h3>
+<blockquote>
+<div><dl class="simple">
+<dt>New/moved commands:</dt><dd><ul class="simple">
+<li><p>btrfs-show-super -&gt; btrfs inspect-internal dump-super</p></li>
+<li><p>btrfs-debug-tree -&gt; btrfs inspect-internal dump-tree</p></li>
+</ul>
+</dd>
+<dt>New commands:</dt><dd><ul class="simple">
+<li><p>btrfs filesystem du - calculate disk usage, including shared extents</p></li>
+</ul>
+</dd>
+<dt>Enhancements:</dt><dd><ul class="simple">
+<li><p>device delete - delete by id (needs kernel support, not merged to
+4.6)</p></li>
+<li><p>check - new option to specify chunk root</p></li>
+<li><p>debug-tree/dump-tree - option -t understands human readable name of
+the tree (along numerical ids)</p></li>
+<li><p>btrfs-debugfs - can dump block group information</p></li>
+</ul>
+</dd>
+<dt>Bugfixes:</dt><dd><ul class="simple">
+<li><p>all commands should accept the option separator “--”</p></li>
+<li><p>several fixes in device scan</p></li>
+<li><p>restore works on filesystems with sectorsize &gt; 4k</p></li>
+<li><p>debug-tree/dump-tree - print compression type as string</p></li>
+<li><p>subvol sync: fix crash, memory corruption</p></li>
+<li><p>argument parsing fixes: subvol get-default, qgroup create/destroy/
+assign, inspect subvolid-resolve</p></li>
+<li><p>check for block device or regular file in several commands</p></li>
+</ul>
+</dd>
+<dt>Other:</dt><dd><ul class="simple">
+<li><p>documentation updates</p></li>
+<li><p>manual pages for the moved tools now point to btrfs-filesystem</p></li>
+<li><p>testsuite updates</p></li>
+</ul>
+</dd>
+</dl>
+</div></blockquote>
+<dl class="simple">
+<dt>btrfs-progs-4.5.1 (2016-03-31)</dt><dd><ul class="simple">
+<li><p>mkfs: allow DUP on multi-device filesystems</p></li>
+<li><p>bugfixes: build fixes, assorted other fixes</p></li>
+</ul>
+</dd>
+<dt>btrfs-progs-4.5.2 (2016-05-02)</dt><dd><ul class="simple">
+<li><p>new/moved command: btrfs-calc-stats -&gt; btrfs inspect tree-stats</p></li>
+<li><p>check: fix false alert for metadata blocks crossing stripe boundary</p></li>
+<li><p>check: catch when qgroup numbers mismatch</p></li>
+<li><p>check: detect running quota rescan and report mismatches</p></li>
+<li><p>balance start: add safety delay before doing a full balance</p></li>
+<li><p>filesystem sync: is now silent</p></li>
+<li><p>filesystem show: don’t miss filesystems with partially matching uuids</p></li>
+<li><p>dev ready: accept only one argument for device</p></li>
+<li><p>dev stats: print “devid:N” for a missing device instead of “(null)”</p></li>
+<li><dl class="simple">
+<dt>other:</dt><dd><ul>
+<li><p>lowest supported version of e2fsprogs is 1.41</p></li>
+<li><p>minor cleanups, test updates</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</dd>
+<dt>btrfs-progs-4.5.3 (2016-05-11)</dt><dd><ul class="simple">
+<li><p>ioctl: fix unaligned access in buffer from TREE_SEARCH; might cause SIGBUS
+on architectures that do not support unaligned access and do not perform
+any fixups</p></li>
+<li><p>improved validation checks of superblock and chunk-related structures</p></li>
+<li><p>subvolume sync: fix handling of -s option</p></li>
+<li><p>balance: adjust timing of safety delay countdown with --full-balance</p></li>
+<li><p>rescue super-recover: fix reversed condition check</p></li>
+<li><p>check: fix bytes_used accounting</p></li>
+<li><p>documentation updates: mount options, scrub, send, receive, select-super,
+check, mkfs</p></li>
+<li><p>testing: new fuzzed images, for superblock and chunks</p></li>
+</ul>
+</dd>
+</dl>
+</section>
+<section id="btrfs-progs-4-4-2016-01-18">
+<h3>btrfs-progs-4.4 (2016-01-18)<a class="headerlink" href="#btrfs-progs-4-4-2016-01-18" title="Link to this heading"></a></h3>
+<blockquote>
+<div><dl class="simple">
+<dt>User visible changes:</dt><dd><ul class="simple">
+<li><p>mkfs.btrfs --data dup</p></li>
+</ul>
+</dd>
+</dl>
+<p>People asked about duplicating data on a single device for a long time. There
+are no technical obstacles preventing that, so it got enabled with a warning
+about potential dangers when the device will not do the duplicated copies. See
+mkfs.btrfs section DUP PROFILES ON A SINGLE DEVICE.</p>
+<blockquote>
+<div><ul class="simple">
+<li><dl class="simple">
+<dt>support balance filters added/enhanced in linux 4.4</dt><dd><ul>
+<li><p>usage=min..max -- enhanced to take range</p></li>
+<li><p>stripes=min..max -- new, filter by stripes for raid0/10/5/6</p></li>
+<li><p>limit=min..max -- enhanced to take range</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</div></blockquote>
+<p>Note: due to backward compatibility, the range maximum for ‘usage’ is not
+inclusive as for the others, to keep the same behaviour as usage=N .</p>
+<blockquote>
+<div><ul class="simple">
+<li><p>manual pages enhanced (btrfs, mkfs, mount, filesystem, balance)</p></li>
+<li><p>error messages updates, rewordings -- some fstests may break due to that</p></li>
+<li><p>added support for free-space-tree implementation of space cache -- this
+requires kernel 4.5 and is not recommended for non-developers yet</p></li>
+<li><p>btrfs filesystem usage works with mixed blockgroups</p></li>
+</ul>
+</div></blockquote>
+<dl class="simple">
+<dt>Other:</dt><dd><ul class="simple">
+<li><p>installation to /usr/local -- this has unintentionally changed during
+conversion to autotools in 3.19</p></li>
+<li><p>check: fix a false alert where extent record has wrong metadata flag</p></li>
+<li><p>improved stability on fuzzed/crafted images when reading sys array in
+superblock</p></li>
+<li><p>build: the ‘ar’ tool is properly detected during cross-compilation</p></li>
+<li><p>debug-tree: option -t understands ids for tree root and chunk tree</p></li>
+<li><p>preparatory work for btrfs-convert rewrite</p></li>
+<li><p>sparse, gcc warning fixes</p></li>
+<li><p>more memory allocation failure handling</p></li>
+<li><p>cleanups</p></li>
+<li><p>more tests</p></li>
+</ul>
+</dd>
+<dt>Bugfixes:</dt><dd><ul class="simple">
+<li><p>chunk recovery: fix floating point exception</p></li>
+<li><p>chunk recovery: endianness bugfix during rebuild</p></li>
+<li><p>mkfs with 64K pages and nodesize reported superblock checksum mismatch</p></li>
+<li><p>check: properly reset nlink of multi-linked file</p></li>
+</ul>
+</dd>
+</dl>
+</div></blockquote>
+<dl class="simple">
+<dt>btrfs-progs-4.4.1 (2016-02-26)</dt><dd><ul class="simple">
+<li><p>find-root: don’t skip the first chunk</p></li>
+<li><p>free-space-tree compat bits fix</p></li>
+<li><p>build: target symlinks</p></li>
+<li><p>documentation updates</p></li>
+<li><p>test updates</p></li>
+</ul>
+</dd>
+</dl>
+</section>
+<section id="btrfs-progs-4-3-2015-11-06">
+<h3>btrfs-progs-4.3 (2015-11-06)<a class="headerlink" href="#btrfs-progs-4-3-2015-11-06" title="Link to this heading"></a></h3>
+<blockquote>
+<div><ul class="simple">
+<li><dl class="simple">
+<dt>mkfs</dt><dd><ul>
+<li><p>mixed mode is not forced for filesystems smaller than 1GiB</p></li>
+<li><p>mixed mode broken with mismatching sectorsize and nodesize, fixed</p></li>
+<li><p>print version info earlier</p></li>
+<li><p>print devices sorted by id</p></li>
+<li><p>do not truncate target image with --rootsize</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>filesystem usage:</dt><dd><ul>
+<li><p>don’t print global block reserve</p></li>
+<li><p>print device id</p></li>
+<li><p>minor output tuning</p></li>
+<li><p>other cleanups</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>calc-size:</dt><dd><ul>
+<li><p>div-by-zero fix on an empty filesystem</p></li>
+<li><p>fix crash</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>bugfixes:</dt><dd><ul>
+<li><p>more superblock sanity checks</p></li>
+<li><p>consistently round size of all devices down to sectorsize</p></li>
+<li><p>misc leak fixes</p></li>
+<li><p>convert: don’t try to rollback with a half-deleted ext2_saved subvolume</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>other:</dt><dd><ul>
+<li><p>check: add progress indicator</p></li>
+<li><p>scrub: enhanced error message</p></li>
+<li><p>show-super: read superblock from a given offset</p></li>
+<li><p>add README</p></li>
+<li><p>docs: update manual page for mkfs.btrfs, btrfstune, balance,
+convert and inspect-internal</p></li>
+<li><p>build: optional build with more warnings (W=…)</p></li>
+<li><p>build: better support for static checkers</p></li>
+<li><p>build: html output of documentation</p></li>
+<li><p>pretty-print: last_snapshot for root_item</p></li>
+<li><p>pretty-print: stripe dev uuid</p></li>
+<li><p>error reporting wrappers, introduced and example use</p></li>
+<li><p>refactor open_file_or_dir</p></li>
+<li><p>other docs and help updates</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>testing:</dt><dd><ul>
+<li><p>test for nodes crossing stripes</p></li>
+<li><p>test for broken ‘subvolume sync’</p></li>
+<li><p>basic tests for mkfs, raid option combinations</p></li>
+<li><p>basic tests for fuzzed images (check)</p></li>
+<li><p>command instrumentation (eg valgrind)</p></li>
+<li><p>print commands if requested</p></li>
+<li><p>add README for tests</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</div></blockquote>
+<dl class="simple">
+<dt>btrfs-progs-4.3.1 (2015-11-16)</dt><dd><ul class="simple">
+<li><dl class="simple">
+<dt>fixes</dt><dd><ul>
+<li><p>device delete: recognize ‘missing’ again</p></li>
+<li><p>mkfs: long names are not trimmed when doing ssd check</p></li>
+<li><p>support partitioned loop devices</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>other</dt><dd><ul>
+<li><p>replace several mallocs with on-stack variables</p></li>
+<li><p>more memory allocation failure handling</p></li>
+<li><p>add tests for bugs fixed</p></li>
+<li><p>cmd-device: switch to new message printing helpers</p></li>
+<li><p>minor code cleanups</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</dd>
+</dl>
+</section>
+<section id="btrfs-progs-4-2-2015-09-03">
+<h3>btrfs-progs-4.2 (2015-09-03)<a class="headerlink" href="#btrfs-progs-4-2-2015-09-03" title="Link to this heading"></a></h3>
+<blockquote>
+<div><ul class="simple">
+<li><dl class="simple">
+<dt>enhancements:</dt><dd><ul>
+<li><p>mkfs: do not create extra single chunks on multiple devices</p></li>
+<li><p>resize: try to guess the minimal size, ‘inspect min-dev-size’</p></li>
+<li><p>qgroup assign: add option to schedule rescan</p></li>
+<li><p>chunk-recover: be more verbose about the scanning process</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>fixes:</dt><dd><ul>
+<li><dl class="simple">
+<dt>check:</dt><dd><ul>
+<li><p>find stripes crossing stripe boundary -- created by convert</p></li>
+<li><p>print correct range for file hole when there are no extents
+and learn how to fix it</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>replace: more sanity checks</p></li>
+<li><p>convert: concurrency fixes related to reporting progress</p></li>
+<li><p>find-root: option -a will not skip the current root anymore</p></li>
+<li><p>subvol list: fix occasional crash</p></li>
+<li><p>do not create stripes crossing stripe boundary</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>build:</dt><dd><ul>
+<li><p>fixes for musl libc</p></li>
+<li><p>preliminary support for android (not working yet, more code changes
+needed)</p></li>
+<li><p>new EXTRA_CFLAGS and EXTRA_LDFLAGS</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>other:</dt><dd><ul>
+<li><p>lots of cleanups</p></li>
+<li><p>tests: lots of updates, new tests, framework improvements</p></li>
+<li><p>documentation updates</p></li>
+<li><p>debugging: print-tree shows stripe length</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</div></blockquote>
+<dl class="simple">
+<dt>btrfs-progs-4.2.1 (2015-09-20)</dt><dd><ul class="simple">
+<li><dl class="simple">
+<dt>fix an off-by-one error in cross-stripe boundary check</dt><dd><ul>
+<li><p>if nodesize was 64k, any metadata block was reported as crossing,
+this leads to mkfs failure for example due to “no free blocks
+found”</p></li>
+<li><p>for other nodesizes, if the end of the metadata block was 64k
+aligned, it was incorrectly reported by fsck</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>convert: don’t write uninitialized data to image</p></li>
+<li><dl class="simple">
+<dt>image:</dt><dd><ul>
+<li><p>don’t loop with option -t0</p></li>
+<li><p>don’t create threads if compression is not requested</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>other: minor cleanups</p></li>
+</ul>
+</dd>
+<dt>btrfs-progs-4.2.2 (2015-10-05)</dt><dd><ul class="simple">
+<li><p>filesystem label: use fallback if the label ioctl is not available</p></li>
+<li><p>convert: check nodesize constraints against command line features (-O)</p></li>
+<li><p>scrub: report status ‘running’ until all devices are finished</p></li>
+<li><p>device scanning might crash in some scenarios</p></li>
+<li><p>filesystem usage: print summary for non-root users</p></li>
+</ul>
+</dd>
+<dt>btrfs-progs-4.2.3 (2015-10-19)</dt><dd><ul class="simple">
+<li><p>subvol sync: make it actually work again: it’s been broken since 4.1.2,
+due to a reversed condition it returned immediately instead of waiting</p></li>
+<li><p>scanning: do not scan already discovered filesystems (minor optimization)</p></li>
+<li><p>convert: better error message in case the filesystem is not finalized</p></li>
+<li><p>restore: off-by-one symlink path check fix</p></li>
+</ul>
+</dd>
+</dl>
+</section>
+<section id="btrfs-progs-4-1-2015-06-22">
+<h3>btrfs-progs-4.1 (2015-06-22)<a class="headerlink" href="#btrfs-progs-4-1-2015-06-22" title="Link to this heading"></a></h3>
+<blockquote>
+<div><dl class="simple">
+<dt>Bugfixes:</dt><dd><ul class="simple">
+<li><p>fsck.btrfs: no bash-isms</p></li>
+<li><p>bugzilla 97171: invalid memory access (with tests)</p></li>
+<li><dl class="simple">
+<dt>receive:</dt><dd><ul>
+<li><p>cloning works with --chroot</p></li>
+<li><p>capabilities not lost</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>mkfs: do not try to register bare file images</p></li>
+<li><p>option --help accepted by the standalone utilities</p></li>
+</ul>
+</dd>
+<dt>Enhancements:</dt><dd><ul class="simple">
+<li><p>corrupt block: ability to remove csums</p></li>
+<li><dl class="simple">
+<dt>mkfs:</dt><dd><ul>
+<li><p>warn if metadata redundancy is lower than for data</p></li>
+<li><p>options to make the output quiet (only errors)</p></li>
+<li><p>mixed case names of raid profiles accepted</p></li>
+<li><p>rework the output:</p></li>
+<li><p>more comprehensive, ‘key: value’ format</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>subvol:</dt><dd><ul>
+<li><dl class="simple">
+<dt>show:</dt><dd><ul>
+<li><p>print received uuid</p></li>
+<li><p>update the output</p></li>
+<li><p>new options to specify size units</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>sync: grab all deleted ids and print them as they’re removed,
+previous implementation only checked if there are any to be
+deleted - change in command semantics</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>scrub: print timestamps in days HMS format</p></li>
+<li><dl class="simple">
+<dt>receive:</dt><dd><ul>
+<li><p>can specify mount point, do not rely on /proc</p></li>
+<li><p>can work inside subvolumes</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>send: new option to send stream without data (NO_FILE_DATA)</p></li>
+<li><p>convert: specify incompat features on the new fs</p></li>
+<li><dl class="simple">
+<dt>qgroup:</dt><dd><ul>
+<li><p>show: distinguish no limits and 0 limit value</p></li>
+<li><p>limit: ability to clear the limit</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>help for ‘btrfs’ is shorter, 1st level command overview</p></li>
+<li><p>debug tree: print key names according to their C name</p></li>
+</ul>
+</dd>
+<dt>New:</dt><dd><ul class="simple">
+<li><p>rescue zero-log</p></li>
+<li><dl class="simple">
+<dt>btrfstune:</dt><dd><ul>
+<li><p>rewrite uuid on a filesystem image</p></li>
+<li><p>new option to turn on NO_HOLES incompat feature</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</dd>
+<dt>Deprecated:</dt><dd><ul class="simple">
+<li><p>standalone btrfs-zero-log</p></li>
+</ul>
+</dd>
+<dt>Other:</dt><dd><ul class="simple">
+<li><dl class="simple">
+<dt>testing framework updates</dt><dd><ul>
+<li><p>uuid rewrite test</p></li>
+<li><p>btrfstune feature setting test</p></li>
+<li><p>zero-log tests</p></li>
+<li><p>more testing image formats</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>manual page updates</p></li>
+<li><p>ioctl.h synced with current kernel uapi version</p></li>
+<li><p>convert: preparatory works for more filesystems (reiserfs pending)</p></li>
+<li><p>use static buffers for path handling where possible</p></li>
+<li><p>add new helpers for send utils that check memory allocations,
+switch all users, deprecate old helpers</p></li>
+<li><p>Makefile: fix build dependency generation</p></li>
+<li><p>map-logical: make it work again</p></li>
+</ul>
+</dd>
+</dl>
+</div></blockquote>
+<dl class="simple">
+<dt>btrfs-progs-4.1.1 (2015-07-10) -- Do not use this version!</dt><dd><dl class="simple">
+<dt>Bugfixes:</dt><dd><ul class="simple">
+<li><p>defrag: threshold overflow fix</p></li>
+<li><dl class="simple">
+<dt>fsck:</dt><dd><ul>
+<li><p>check if items fit into the leaf space</p></li>
+<li><p>fix wrong nbytes</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>mkfs:</dt><dd><ul>
+<li><p>create only desired block groups for single device</p></li>
+<li><p>preparatory work for fix on multiple devices</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</dd>
+<dt>Enhancements:</dt><dd><ul class="simple">
+<li><p>new alias for ‘device delete’: ‘device remove’</p></li>
+</ul>
+</dd>
+<dt>Other:</dt><dd><ul class="simple">
+<li><p>fix compilation on old gcc (4.3)</p></li>
+<li><p>documentation updates</p></li>
+<li><p>debug-tree: print nbytes</p></li>
+<li><p>test: image for corrupted nbytes</p></li>
+<li><p>corrupt-block: let it kill nbytes</p></li>
+</ul>
+</dd>
+</dl>
+</dd>
+<dt>btrfs-progs-4.1.2 (2015-07-14)</dt><dd><ul class="simple">
+<li><p>urgent bugfix: mkfs creates invalid filesystem, must be recreated</p></li>
+</ul>
+</dd>
+</dl>
+</section>
+<section id="btrfs-progs-4-0-2015-04-29">
+<h3>btrfs-progs-4.0 (2015-04-29)<a class="headerlink" href="#btrfs-progs-4-0-2015-04-29" title="Link to this heading"></a></h3>
+<blockquote>
+<div><ul class="simple">
+<li><dl class="simple">
+<dt>resize:</dt><dd><ul>
+<li><p>don’t accept file as an argument (it’s confusing)</p></li>
+<li><p>print better error message in case of an error</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>restore: optionally restore metadata (time, mode, uid/gid)</p></li>
+<li><p>receive: optionally enforce chroot</p></li>
+<li><p>new rescue subcommand ‘zero-log’, same as btrfs-zero-log, but now also
+part of the main utility</p></li>
+<li><dl class="simple">
+<dt>check:</dt><dd><ul>
+<li><p>free space checks match kernel, fixes incorrect reports</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>convert: fix setting of checksum bit if --no-datasum is used</p></li>
+<li><p>fsck.btrfs: don’t print messages</p></li>
+<li><p>fix quota rescan on PPC64 (mangled ioctl number)</p></li>
+<li><p>test updates</p></li>
+<li><p>documentation: files renamed to .asciidoc, misc fixups</p></li>
+</ul>
+</div></blockquote>
+<dl class="simple">
+<dt>btrfs-progs-4.0.1 (2015-05-20)</dt><dd><ul class="simple">
+<li><dl class="simple">
+<dt>restore:</dt><dd><ul>
+<li><p>can restore symlinks, new option --symlinks</p></li>
+<li><p>long option variants added</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>convert: dropped dependency on acl.h header and libacl is not required
+for build</p></li>
+<li><p>fix for ‘check’ crash</p></li>
+<li><p>device remove error message fix</p></li>
+<li><p>preparatory works for fsid change</p></li>
+</ul>
+</dd>
+</dl>
+</section>
+</section>
+<section id="btrfs-progs-3-x-2015-03-25">
+<h2>btrfs-progs-3.x (2015-03-25)<a class="headerlink" href="#btrfs-progs-3-x-2015-03-25" title="Link to this heading"></a></h2>
+<section id="btrfs-progs-3-19-2015-03-11">
+<h3>btrfs-progs-3.19 (2015-03-11)<a class="headerlink" href="#btrfs-progs-3-19-2015-03-11" title="Link to this heading"></a></h3>
+<blockquote>
+<div><ul class="simple">
+<li><p>build converted to autotools</p></li>
+<li><dl class="simple">
+<dt>btrfs-image</dt><dd><ul>
+<li><p>restore can now run in parallel threads</p></li>
+<li><p>fixed restore of multiple image from multiple devices onto a single
+dev</p></li>
+<li><p>introduced metadump v2</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>check: make --init-csum-tree and --init-extent-tree work together</p></li>
+<li><p>find-new: option to search through all metadata even if a root was
+already found</p></li>
+<li><p>convert: show progress by default, can be turned off</p></li>
+<li><p>corrupt-block: option to work on a specific root</p></li>
+<li><p>bash completion script for all subcommands</p></li>
+</ul>
+</div></blockquote>
+<dl class="simple">
+<dt>btrfs-progs-3.19.1 (2015-03-25)</dt><dd><ul class="simple">
+<li><dl class="simple">
+<dt>convert:</dt><dd><ul>
+<li><p>new option to specify metadata block size</p></li>
+<li><p>--no-progress actually works</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>restore: properly handle the page boundary corner case</p></li>
+<li><dl class="simple">
+<dt>build fixes:</dt><dd><ul>
+<li><p>missing macro from public header, BTRFS_BUILD_VERSION</p></li>
+<li><p>wrong handling of --enable-convert</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>filesystem usage: reports correct space for degraded mounts</p></li>
+<li><dl class="simple">
+<dt>other:</dt><dd><ul>
+<li><p>mkfs: help string updates</p></li>
+<li><p>completion: added ‘usage’ subcommands</p></li>
+<li><p>cleanups in qgroup code, preparatory work</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</dd>
+</dl>
+</section>
+<section id="btrfs-progs-3-18-2014-12-30">
+<h3>btrfs-progs-3.18 (2014-12-30)<a class="headerlink" href="#btrfs-progs-3-18-2014-12-30" title="Link to this heading"></a></h3>
+<blockquote>
+<div><ul class="simple">
+<li><p>mkfs - skinny-metadata feature is now on by default, first introduced in
+kernel 3.10</p></li>
+<li><p>filesystem usage - give an overview of fs usage in a way that’s more
+comprehensible than existing ‘filesystem df’</p></li>
+<li><p>device usage - more detailed information about per-device allocations</p></li>
+<li><dl class="simple">
+<dt>check</dt><dd><ul>
+<li><p>option to set a different tree root byte number</p></li>
+<li><p>ability to link lost files to lost+found, caused by a recent kernel bug</p></li>
+<li><p>repair of severely corrupted fs (use with care)</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>convert - option to show progress</p></li>
+<li><p>subvol create - print the commit mode inline, print the global mode only
+if --verbose</p></li>
+<li><p>other updates: musl-libc support, coverity bugfixes, new test images,
+documentation</p></li>
+</ul>
+</div></blockquote>
+<dl class="simple">
+<dt>btrfs-progs-3.18.1 (2015-01-09)</dt><dd><ul class="simple">
+<li><p>minor fixes</p></li>
+<li><p>documentation updates</p></li>
+</ul>
+</dd>
+<dt>btrfs-progs-3.18.2 (2015-01-27)</dt><dd><ul class="simple">
+<li><p>qgroup show: print human readable sizes, options to say otherwise</p></li>
+<li><p>check: new option to explicitly say no to writes</p></li>
+<li><p>mkfs: message about trimming is not printed to stderr</p></li>
+<li><p>filesystem show: fixed return value</p></li>
+<li><p>tests: new infrastructure</p></li>
+<li><p>btrfstune: force flag can be used together with seeding option</p></li>
+<li><p>backtrace support is back</p></li>
+<li><p>getopt cleanups</p></li>
+<li><p>doc and help updates</p></li>
+</ul>
+</dd>
+</dl>
+</section>
+<section id="btrfs-progs-3-17-2014-10-17">
+<h3>btrfs-progs-3.17 (2014-10-17)<a class="headerlink" href="#btrfs-progs-3-17-2014-10-17" title="Link to this heading"></a></h3>
+<blockquote>
+<div><ul class="simple">
+<li><p>check: --init-csum-tree actually does something useful, rebuilds the
+whole csum tree</p></li>
+<li><p>/dev scanning for btrfs devices is gone</p></li>
+<li><p>/proc/partitions scanning is gone, blkid is used exclusively</p></li>
+<li><p>new subcommand subvolume sync</p></li>
+<li><p>filesystem df: new options to set unit format</p></li>
+<li><p>convert: allow to copy label from the origin, or specify a new one</p></li>
+</ul>
+</div></blockquote>
+<dl class="simple">
+<dt>btrfs-progs-3.17.1 (2014-11-04)</dt><dd><ul class="simple">
+<li><p>filesystem df: argument handling</p></li>
+<li><p>fix linking with libbtrfs</p></li>
+<li><p>replace: better error reporting</p></li>
+<li><p>filesystem show: fixed stall if run concurrently with balance</p></li>
+<li><p>check: fixed argument parsing for --subvol-extents</p></li>
+<li><p>filesystem df: SI prefixes corrected</p></li>
+</ul>
+</dd>
+<dt>btrfs-progs-3.17.2 (2014-11-19)</dt><dd><ul class="simple">
+<li><dl class="simple">
+<dt>check improvements</dt><dd><ul>
+<li><p>add ability to replace missing dir item/dir indexes</p></li>
+<li><p>fix missing inode items</p></li>
+<li><p>create missing root dirid</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>corrupt block: enhancements for testing fsck</p></li>
+<li><p>zero-log: able to reset a fs with bogus log tree pointer (bug_72151)</p></li>
+</ul>
+</dd>
+<dt>btrfs-progs-3.17.3 (2014-12-04)</dt><dd><ul class="simple">
+<li><p>convert: fix conversion of sparse ext* filesystems</p></li>
+<li><p>show: resolve to the correct path</p></li>
+<li><p>fsck: more verbose error for root dir problems</p></li>
+</ul>
+</dd>
+</dl>
+</section>
+<section id="btrfs-progs-3-16-2014-08-26">
+<h3>btrfs-progs-3.16 (2014-08-26)<a class="headerlink" href="#btrfs-progs-3-16-2014-08-26" title="Link to this heading"></a></h3>
+<blockquote>
+<div><ul class="simple">
+<li><p>mkfs: new option to specify UUID, drop experimental notice</p></li>
+<li><p>check: new option to verify quotas, reduced memory requirements, new
+option to print extent sharing</p></li>
+<li><p>restore: check length before decompression, more error handling, option
+to loop during restoring</p></li>
+<li><p>balance: new filter ‘limit’</p></li>
+<li><p>recover: allow to read all sb copies</p></li>
+<li><p>btrfstune: new option to force dangerous changes</p></li>
+<li><p>receive: new option to limit number of errors</p></li>
+<li><p>show-super: skip unrecognized sb, add option to force</p></li>
+<li><p>debug-tree: print tree by id</p></li>
+<li><p>documentation updates</p></li>
+</ul>
+</div></blockquote>
+<dl class="simple">
+<dt>btrfs-progs-3.16.1 (2014-09-15)</dt><dd><ul class="simple">
+<li><p>print GlobalReserve in filesystem df output</p></li>
+<li><p>new option -R in subvol list</p></li>
+<li><p>library version defines</p></li>
+<li><p>static build is fixed</p></li>
+<li><p>build without documentation is possible</p></li>
+</ul>
+</dd>
+<dt>btrfs-progs-3.16.2 (2014-10-01)</dt><dd><ul class="simple">
+<li><p>a few fixes in fsck and image tools</p></li>
+</ul>
+</dd>
+</dl>
+</section>
+<section id="btrfs-progs-3-15-skipped">
+<h3>btrfs-progs-3.15 (skipped)<a class="headerlink" href="#btrfs-progs-3-15-skipped" title="Link to this heading"></a></h3>
+</section>
+<section id="btrfs-progs-3-14-2014-04-06">
+<h3>btrfs-progs-3.14 (2014-04-06)<a class="headerlink" href="#btrfs-progs-3-14-2014-04-06" title="Link to this heading"></a></h3>
+<blockquote>
+<div><ul class="simple">
+<li><p>fsck: fixes and enhancements to --init-extent-tree mode</p></li>
+<li><p>fsck: chunk-recover updates</p></li>
+<li><p>scrub: add force option -f</p></li>
+<li><p>send: check if subvolumes are read-only</p></li>
+<li><p>subvol delete: add options to affect commit behaviour</p></li>
+<li><p>btrfs: add property command group</p></li>
+<li><p>restore: add dry-run option</p></li>
+<li><p>restore: fix restoring of compressed files</p></li>
+<li><p>mkfs: support for no-holes feature</p></li>
+<li><p>mkfs: option -r deals with hardlinks and relative paths</p></li>
+<li><p>mkfs: discard phase is interruptible</p></li>
+<li><p>documentation updates</p></li>
+</ul>
+</div></blockquote>
+<dl class="simple">
+<dt>btrfs-progs-3.14.1 (2014-04-18)</dt><dd><ul class="simple">
+<li><p>properties: fix handling of option -t</p></li>
+<li><p>restore: fix reading of compressed extents</p></li>
+<li><p>minor code and doc updates</p></li>
+</ul>
+</dd>
+<dt>btrfs-progs-3.14.2 (2014-05-29)</dt><dd><ul class="simple">
+<li><p>documentation is now written in asciidoc and there are manpages for each
+subcommand</p></li>
+<li><p>misc bugfixes</p></li>
+</ul>
+</dd>
+</dl>
+</section>
+<section id="btrfs-progs-3-13-skipped">
+<h3>btrfs-progs-3.13 (skipped)<a class="headerlink" href="#btrfs-progs-3-13-skipped" title="Link to this heading"></a></h3>
+</section>
+<section id="btrfs-progs-3-12-2013-11-25">
+<h3>btrfs-progs-3.12 (2013-11-25)<a class="headerlink" href="#btrfs-progs-3-12-2013-11-25" title="Link to this heading"></a></h3>
+<blockquote>
+<div><ul class="simple">
+<li><p>announcement, tarballs</p></li>
+<li><p>first release after 0.19 (2009/06) with a lot of changes</p></li>
+</ul>
+</div></blockquote>
+</section>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="Kernel-by-version.html" class="btn btn-neutral float-left" title="Changes (kernel/version)" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="Contributors.html" class="btn btn-neutral float-right" title="Contributors" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright .</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

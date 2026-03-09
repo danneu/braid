@@ -1,0 +1,490 @@
+<!DOCTYPE html>
+<html class="client-nojs" lang="en" dir="ltr">
+<head>
+<meta charset="UTF-8">
+<title>Changes/BtrfsTransparentCompression - Fedora Project Wiki</title>
+<script>document.documentElement.className="client-js";RLCONF={"wgBreakFrames":false,"wgSeparatorTransformTable":["",""],"wgDigitTransformTable":["",""],"wgDefaultDateFormat":"dmy","wgMonthNames":["","January","February","March","April","May","June","July","August","September","October","November","December"],"wgRequestId":"aas-3wPS-Jp0Ye8G2E5rOAAAAtc","wgCanonicalNamespace":"","wgCanonicalSpecialPageName":false,"wgNamespaceNumber":0,"wgPageName":"Changes/BtrfsTransparentCompression","wgTitle":"Changes/BtrfsTransparentCompression","wgCurRevisionId":613553,"wgRevisionId":613553,"wgArticleId":82441,"wgIsArticle":true,"wgIsRedirect":false,"wgAction":"view","wgUserName":null,"wgUserGroups":["*"],"wgCategories":["SystemWideChange","ChangeAcceptedF34"],"wgPageViewLanguage":"en","wgPageContentLanguage":"en","wgPageContentModel":"wikitext","wgRelevantPageName":"Changes/BtrfsTransparentCompression","wgRelevantArticleId":82441,"wgIsProbablyEditable":false,"wgRelevantPageIsProbablyEditable":false,"wgRestrictionEdit":[],"wgRestrictionMove":[],"wgCiteReferencePreviewsActive":true};
+RLSTATE={"site.styles":"ready","user.styles":"ready","user":"ready","user.options":"loading","mediawiki.skinning.interface":"ready","skins.fedora":"ready"};RLPAGEMODULES=["site","mediawiki.page.ready","mediawiki.toc","skins.fedora.js"];</script>
+<script>(RLQ=window.RLQ||[]).push(function(){mw.loader.impl(function(){return["user.options@12s5i",function($,jQuery,require,module){mw.user.tokens.set({"patrolToken":"+\\","watchToken":"+\\","csrfToken":"+\\"});
+}];});});</script>
+<link rel="stylesheet" href="/w/load.php?lang=en&amp;modules=mediawiki.skinning.interface%7Cskins.fedora&amp;only=styles&amp;skin=fedora">
+<script async="" src="/w/load.php?lang=en&amp;modules=startup&amp;only=scripts&amp;raw=1&amp;skin=fedora"></script>
+<meta name="ResourceLoaderDynamicStyles" content="">
+<link rel="stylesheet" href="/w/load.php?lang=en&amp;modules=site.styles&amp;only=styles&amp;skin=fedora">
+<meta name="generator" content="MediaWiki 1.43.1">
+<meta name="robots" content="max-image-preview:standard">
+<meta name="format-detection" content="telephone=no">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="search" type="application/opensearchdescription+xml" href="/w/rest.php/v1/search" title="Fedora Project Wiki (en)">
+<link rel="EditURI" type="application/rsd+xml" href="https://fedoraproject.org/w/api.php?action=rsd">
+<link rel="license" href="/wiki/Legal:Main">
+<link rel="alternate" type="application/atom+xml" title="Fedora Project Wiki Atom feed" href="/w/index.php?title=Special:RecentChanges&amp;feed=atom">
+</head>
+<body class="mediawiki ltr sitedir-ltr mw-hide-empty-elt ns-0 ns-subject page-Changes_BtrfsTransparentCompression rootpage-Changes skin-fedora action-view">		<div class="navbar navbar-expand-lg navbar-light masthead py-2 justify-content-between"><a href="/wiki/Fedora_Project_Wiki" class="navbar-brand"><img src="/w/skins/Fedora/resources/images/fedorawiki_logo.png" alt="Fedora Project Wiki" height="40px"></a><div class="navbar-nav"><form action="/w/index.php" role="search" class="mw-portlet" id="p-search"><input type="hidden" value="Special:Search" name="title"><h3><label for="searchInput">Search</label></h3><div class="input-group"><input type="search" name="search" placeholder="Search Fedora Project Wiki" aria-label="Search Fedora Project Wiki" autocapitalize="sentences" title="Search Fedora Project Wiki [f]" accesskey="f" id="searchInput" class="form-control"><span class="input-group-btn"><button id="searchGoButton" class="btn bg-white border rounded-0 rounded-end" type="submit"><i class="fa fa-search"></i></button></span></div></form></div><ul class="navbar-nav align-items-center"><li class="nav-item dropdown"><a class="nav-link dropdown-toggle" data-toggle="dropdown" href="#" role="button" data-bs-toggle="dropdown">Links</a><ul class="dropdown-menu dropdown-menu-end"><li id="n-Get-Fedora" class="mw-list-item"><a href="https://getfedora.org/" class="dropdown-item">Get Fedora</a></li><li id="n-Fedora-Docs" class="mw-list-item"><a href="https://docs.fedoraproject.org/" class="dropdown-item">Fedora Docs</a></li><li id="n-Fedora-Magazine" class="mw-list-item"><a href="https://fedoramagazine.org/" class="dropdown-item">Fedora Magazine</a></li><li id="n-What-Can-I-Do?" class="mw-list-item"><a href="https://whatcanidoforfedora.org/" class="dropdown-item">What Can I Do?</a></li></ul></li><li class="nav-item dropdown"><a class="nav-link dropdown-toggle" data-toggle="dropdown" href="#" role="button" data-bs-toggle="dropdown">CodeOfConduct</a><ul class="dropdown-menu dropdown-menu-end"><li id="n-Code-of-Conduct" class="mw-list-item"><a href="https://docs.fedoraproject.org/en-US/project/code-of-conduct/" class="dropdown-item">Code of Conduct</a></li></ul></li><li class="nav-item dropdown"><a class="nav-link dropdown-toggle" data-toggle="dropdown" href="#" role="button" data-bs-toggle="dropdown">Subprojects</a><ul class="dropdown-menu dropdown-menu-end"><li id="n-Ambassadors" class="mw-list-item"><a href="/wiki/Ambassadors" class="dropdown-item">Ambassadors</a></li><li id="n-Community-Operations" class="mw-list-item"><a href="/wiki/CommOps" class="dropdown-item">Community Operations</a></li><li id="n-Design" class="mw-list-item"><a href="/wiki/Design" class="dropdown-item">Design</a></li><li id="n-Documentation" class="mw-list-item"><a href="/wiki/DocsProject" class="dropdown-item">Documentation</a></li><li id="n-EPEL" class="mw-list-item"><a href="/wiki/EPEL" class="dropdown-item">EPEL</a></li><li id="n-Infrastructure" class="mw-list-item"><a href="/wiki/Infrastructure" class="dropdown-item">Infrastructure</a></li><li id="n-Internationalization" class="mw-list-item"><a href="/wiki/I18N" class="dropdown-item">Internationalization</a></li><li id="n-Localization" class="mw-list-item"><a href="/wiki/L10N" class="dropdown-item">Localization</a></li><li id="n-Marketing" class="mw-list-item"><a href="/wiki/Marketing" class="dropdown-item">Marketing</a></li><li id="n-Magazine" class="mw-list-item"><a href="/wiki/Magazine" class="dropdown-item">Magazine</a></li><li id="n-Package-Maintainers" class="mw-list-item"><a href="/wiki/PackageMaintainers" class="dropdown-item">Package Maintainers</a></li><li id="n-Quality-Assurance" class="mw-list-item"><a href="/wiki/QA" class="dropdown-item">Quality Assurance</a></li><li id="n-Websites" class="mw-list-item"><a href="/wiki/Websites" class="dropdown-item">Websites</a></li><li id="n-All-projects" class="mw-list-item"><a href="/wiki/Projects" class="dropdown-item">All projects</a></li></ul></li><a href="/w/index.php?title=Special:UserLogin&amp;returnto=Changes%2FBtrfsTransparentCompression" class="btn btn-primary m-l-2">Log In</a></ul></div>
+
+		<div class="bodycontent">
+			<div class="sub-header pt-4">
+				<div class="container">
+					<div class="d-flex justify-content-between align-items-center">
+						<div>
+							<h1><span class="mw-page-title-main">Changes/BtrfsTransparentCompression</span></h1>						</div>
+						<div>
+							<div class="btn-group">
+							<div class="mw-indicators">
+</div>
+							</div>
+						</div>
+					</div>
+					<div class="d-flex justify-content-between">
+						<ul class="nav nav-tabs nav-small border-0 ms-0">
+						<li class="nav-item" id="ca-nstab-main" class="selected mw-list-item"><a href="/wiki/Changes/BtrfsTransparentCompression" title="View the content page [c]" accesskey="c" class="nav-link active">Page</a></li class="nav-item"><li class="nav-item" id="ca-talk" class="new mw-list-item"><a href="/w/index.php?title=Talk:Changes/BtrfsTransparentCompression&amp;action=edit&amp;redlink=1" rel="discussion" class="new nav-link" title="Discussion about the content page (page does not exist) [t]" accesskey="t">Discussion</a></li class="nav-item">						</ul>
+						<ul class="nav nav-tabs nav-small border-0 ms-0">
+						<li class="nav-item pull-xs-right" id="ca-view" class="selected mw-list-item"><a href="/wiki/Changes/BtrfsTransparentCompression" class="nav-link active">Read</a></li class="nav-item pull-xs-right"><li class="nav-item pull-xs-right" id="ca-viewsource" class="mw-list-item"><a href="/w/index.php?title=Changes/BtrfsTransparentCompression&amp;action=edit" title="This page is protected.&#10;You can view its source [e]" accesskey="e" class="nav-link">View source</a></li class="nav-item pull-xs-right"><li class="nav-item pull-xs-right" id="ca-history" class="mw-list-item"><a href="/w/index.php?title=Changes/BtrfsTransparentCompression&amp;action=history" title="Past revisions of this page [h]" accesskey="h" class="nav-link">View history</a></li class="nav-item pull-xs-right">
+						</ul>
+					</div>
+				</div>
+			</div>
+		</div>
+
+			<div class="mw-body container pb-5" role="main">
+				<div id="siteNotice"><div id="localNotice" data-nosnippet=""><div class="sitenotice" lang="en" dir="ltr"></div></div></div><div id="siteSub">From Fedora Project Wiki</div>
+				<div class="mw-body-content">
+					<div id="contentSub"><p><div id="mw-content-subtitle"><div class="subpages">&lt; <bdi dir="ltr"><a href="/wiki/Changes" title="Changes">Changes</a></bdi></div></div></p><p></p></div><div id="mw-content-text" class="mw-body-content"><div class="mw-content-ltr mw-parser-output" lang="en" dir="ltr"><div id="toc" class="toc" role="navigation" aria-labelledby="mw-toc-heading"><input type="checkbox" role="button" id="toctogglecheckbox" class="toctogglecheckbox" style="display:none" /><div class="toctitle" lang="en" dir="ltr"><h2 id="mw-toc-heading">Contents</h2><span class="toctogglespan"><label class="toctogglelabel" for="toctogglecheckbox"></label></span></div>
+<ul>
+<li class="toclevel-1 tocsection-1"><a href="#Enable_btrfs_transparent_zstd_compression_by_default"><span class="tocnumber">1</span> <span class="toctext">Enable btrfs transparent zstd compression by default</span></a>
+<ul>
+<li class="toclevel-2 tocsection-2"><a href="#Summary"><span class="tocnumber">1.1</span> <span class="toctext">Summary</span></a></li>
+<li class="toclevel-2 tocsection-3"><a href="#Owners"><span class="tocnumber">1.2</span> <span class="toctext">Owners</span></a></li>
+<li class="toclevel-2 tocsection-4"><a href="#Current_status"><span class="tocnumber">1.3</span> <span class="toctext">Current status</span></a></li>
+<li class="toclevel-2 tocsection-5"><a href="#Detailed_description"><span class="tocnumber">1.4</span> <span class="toctext">Detailed description</span></a></li>
+<li class="toclevel-2 tocsection-6"><a href="#Feedback"><span class="tocnumber">1.5</span> <span class="toctext">Feedback</span></a>
+<ul>
+<li class="toclevel-3 tocsection-7"><a href="#Q:_How_do_I_disable_this_feature?"><span class="tocnumber">1.5.1</span> <span class="toctext">Q: How do I disable this feature?</span></a></li>
+<li class="toclevel-3 tocsection-8"><a href="#Q:_I_want_compression_only_on_&#39;/&#39;_and_not_on_&#39;/home&#39;,_can_I_just_modify_fstab?"><span class="tocnumber">1.5.2</span> <span class="toctext">Q: I want compression only on '/' and not on '/home', can I just modify fstab?</span></a></li>
+<li class="toclevel-3 tocsection-9"><a href="#Q:_Is_there_a_way_to_do_it_per_subvolume?"><span class="tocnumber">1.5.3</span> <span class="toctext">Q: Is there a way to do it per subvolume?</span></a></li>
+<li class="toclevel-3 tocsection-10"><a href="#Q:_What_about_&#39;chattr_+c&#39;_?"><span class="tocnumber">1.5.4</span> <span class="toctext">Q: What about 'chattr +c'&#160;?</span></a></li>
+<li class="toclevel-3 tocsection-11"><a href="#Q:_How_are_&#39;chattr_+c&#39;_and_&#39;btrfs_property&#39;_the_same?"><span class="tocnumber">1.5.5</span> <span class="toctext">Q: How are 'chattr +c' and 'btrfs property' the same?</span></a></li>
+<li class="toclevel-3 tocsection-12"><a href="#Q:_If_I_use_&#39;btrfs_property&#39;_to_set_compression,_what_level_is_used_for_zstd?"><span class="tocnumber">1.5.6</span> <span class="toctext">Q: If I use 'btrfs property' to set compression, what level is used for zstd?</span></a></li>
+<li class="toclevel-3 tocsection-13"><a href="#Q:_Is_it_safe_to_mix_and_match_compression_algorithms?"><span class="tocnumber">1.5.7</span> <span class="toctext">Q: Is it safe to mix and match compression algorithms?</span></a></li>
+<li class="toclevel-3 tocsection-14"><a href="#Q:_Does_compression_cause_more_fragmentation?_The_&#39;filefrag&#39;_tool_shows_a_lot_more_extents_on_compressed_files."><span class="tocnumber">1.5.8</span> <span class="toctext">Q: Does compression cause more fragmentation? The 'filefrag' tool shows a lot more extents on compressed files.</span></a></li>
+<li class="toclevel-3 tocsection-15"><a href="#Q:_Do_I_have_to_reboot_to_change_compression_options?"><span class="tocnumber">1.5.9</span> <span class="toctext">Q: Do I have to reboot to change compression options?</span></a></li>
+<li class="toclevel-3 tocsection-16"><a href="#Q:_Is_there_a_list_of_compression_related_bugs?"><span class="tocnumber">1.5.10</span> <span class="toctext">Q: Is there a list of compression related bugs?</span></a></li>
+<li class="toclevel-3 tocsection-17"><a href="#Q:_How_is_used_and_free_space_reporting_affected_by_compression?"><span class="tocnumber">1.5.11</span> <span class="toctext">Q: How is used and free space reporting affected by compression?</span></a></li>
+<li class="toclevel-3 tocsection-18"><a href="#Q:_What&#39;s_the_best_tool_to_see_how_effective_compression_is?"><span class="tocnumber">1.5.12</span> <span class="toctext">Q: What's the best tool to see how effective compression is?</span></a></li>
+<li class="toclevel-3 tocsection-19"><a href="#Q:_Why_use_zstd:1_specifically?"><span class="tocnumber">1.5.13</span> <span class="toctext">Q: Why use zstd:1 specifically?</span></a></li>
+<li class="toclevel-3 tocsection-20"><a href="#Q:_Will_/boot_be_compressed?"><span class="tocnumber">1.5.14</span> <span class="toctext">Q: Will /boot be compressed?</span></a></li>
+<li class="toclevel-3 tocsection-21"><a href="#References:"><span class="tocnumber">1.5.15</span> <span class="toctext">References:</span></a></li>
+</ul>
+</li>
+<li class="toclevel-2 tocsection-22"><a href="#Benefit_to_Fedora"><span class="tocnumber">1.6</span> <span class="toctext">Benefit to Fedora</span></a></li>
+<li class="toclevel-2 tocsection-23"><a href="#Scope"><span class="tocnumber">1.7</span> <span class="toctext">Scope</span></a></li>
+<li class="toclevel-2 tocsection-24"><a href="#Upgrade/compatibility_impact"><span class="tocnumber">1.8</span> <span class="toctext">Upgrade/compatibility impact</span></a></li>
+<li class="toclevel-2 tocsection-25"><a href="#How_to_test"><span class="tocnumber">1.9</span> <span class="toctext">How to test</span></a></li>
+<li class="toclevel-2 tocsection-26"><a href="#User_experience"><span class="tocnumber">1.10</span> <span class="toctext">User experience</span></a></li>
+<li class="toclevel-2 tocsection-27"><a href="#Dependencies"><span class="tocnumber">1.11</span> <span class="toctext">Dependencies</span></a></li>
+<li class="toclevel-2 tocsection-28"><a href="#Contingency_plan"><span class="tocnumber">1.12</span> <span class="toctext">Contingency plan</span></a></li>
+<li class="toclevel-2 tocsection-29"><a href="#Documentation"><span class="tocnumber">1.13</span> <span class="toctext">Documentation</span></a></li>
+<li class="toclevel-2 tocsection-30"><a href="#Simple_Analysis_of_btrfs_zstd_compression_level"><span class="tocnumber">1.14</span> <span class="toctext">Simple Analysis of btrfs zstd compression level</span></a>
+<ul>
+<li class="toclevel-3 tocsection-31"><a href="#Workstation_root_fs_disk_space_savings"><span class="tocnumber">1.14.1</span> <span class="toctext">Workstation root fs disk space savings</span></a>
+<ul>
+<li class="toclevel-4 tocsection-32"><a href="#tl;dr;"><span class="tocnumber">1.14.1.1</span> <span class="toctext">tl;dr;</span></a></li>
+<li class="toclevel-4 tocsection-33"><a href="#Test_Steps"><span class="tocnumber">1.14.1.2</span> <span class="toctext">Test Steps</span></a></li>
+</ul>
+</li>
+<li class="toclevel-3 tocsection-34"><a href="#/dev/urandom_copy_cpu_cost"><span class="tocnumber">1.14.2</span> <span class="toctext">/dev/urandom copy cpu cost</span></a>
+<ul>
+<li class="toclevel-4 tocsection-35"><a href="#tl;dr;_2"><span class="tocnumber">1.14.2.1</span> <span class="toctext">tl;dr;</span></a></li>
+<li class="toclevel-4 tocsection-36"><a href="#Test_Steps_2"><span class="tocnumber">1.14.2.2</span> <span class="toctext">Test Steps</span></a></li>
+<li class="toclevel-4 tocsection-37"><a href="#Results"><span class="tocnumber">1.14.2.3</span> <span class="toctext">Results</span></a></li>
+</ul>
+</li>
+<li class="toclevel-3 tocsection-38"><a href="#/dev/zero_cpu_copy_test"><span class="tocnumber">1.14.3</span> <span class="toctext">/dev/zero cpu copy test</span></a>
+<ul>
+<li class="toclevel-4 tocsection-39"><a href="#tl;dr;_3"><span class="tocnumber">1.14.3.1</span> <span class="toctext">tl;dr;</span></a></li>
+<li class="toclevel-4 tocsection-40"><a href="#Test_Steps_3"><span class="tocnumber">1.14.3.2</span> <span class="toctext">Test Steps</span></a></li>
+<li class="toclevel-4 tocsection-41"><a href="#Results_2"><span class="tocnumber">1.14.3.3</span> <span class="toctext">Results</span></a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toclevel-2 tocsection-42"><a href="#Release_Notes"><span class="tocnumber">1.15</span> <span class="toctext">Release Notes</span></a></li>
+</ul>
+</li>
+</ul>
+</div>
+
+<h1><span class="mw-headline" id="Enable_btrfs_transparent_zstd_compression_by_default">Enable btrfs transparent zstd compression by default</span></h1>
+<h2><span class="mw-headline" id="Summary">Summary</span></h2>
+<p>On variants using btrfs as the default filesystem, enable transparent compression using zstd. Compression saves space and can significantly increase the lifespan of flash-based media by reducing write amplification. It can also increase read and write performance.
+</p>
+<h2><span class="mw-headline" id="Owners">Owners</span></h2>
+<ul><li>Name: <a href="/wiki/User:Salimma" title="User:Salimma">Michel Salim</a>, <a href="/wiki/User:Dcavalca" title="User:Dcavalca">Davide Cavalca</a>, <a href="/w/index.php?title=User:Josef&amp;action=edit&amp;redlink=1" class="new" title="User:Josef (page does not exist)">Josef Bacik</a></li>
+<li>Email: michel@michel-slm.name, dcavalca@fb.com, josef@toxicpanda.com</li></ul>
+<h2><span class="mw-headline" id="Current_status">Current status</span></h2>
+<ul><li>Targeted release: <a class="external text" href="https://fedoraproject.org/w/index.php?title=Releases/34&amp;action=edit&amp;redlink=1">Fedora 34</a></li>
+<li>Last updated:   2021-04-24</li>
+<li>FESCo issue: <a class="external text" href="https://pagure.io/fesco/issue/2538">#2538</a></li>
+<li>Tracker bug: <a class="external text" href="https://bugzilla.redhat.com/show_bug.cgi?id=1916918">#1916918</a></li>
+<li>Release notes tracker: <a class="external text" href="https://pagure.io/fedora-docs/release-notes/issue/635">#635</a></li></ul>
+<h2><span class="mw-headline" id="Detailed_description">Detailed description</span></h2>
+<p>Transparent compression is a btrfs feature that allows a btrfs filesystem to apply compression on a per-file basis. Of the three supported algorithms, zstd is the one with the best compression speed and ratio. Enabling compression saves space, but it also reduces write amplification, which is important for SSDs. Depending on the workload and the hardware, compression can also result in an increase in read and write performance.
+</p><p>See <a class="external free" href="https://pagure.io/fedora-btrfs/project/issue/5">https://pagure.io/fedora-btrfs/project/issue/5</a> for details. This was originally scoped as an optimization for <a class="external free" href="https://fedoraproject.org/wiki/Changes/BtrfsByDefault">https://fedoraproject.org/wiki/Changes/BtrfsByDefault</a> during Fedora 33.
+</p>
+<h2><span class="mw-headline" id="Feedback">Feedback</span></h2>
+<h3><span id="Q:_How_do_I_disable_this_feature.3F"></span><span class="mw-headline" id="Q:_How_do_I_disable_this_feature?">Q: How do I disable this feature?</span></h3>
+<p>A: Edit '/etc/fstab' and remove the 'compress=zstd:1' mount option. Save and reboot; or <code>mount -o remount,compress=none /</code>
+</p>
+<h3><span id="Q:_I_want_compression_only_on_.27.2F.27_and_not_on_.27.2Fhome.27.2C_can_I_just_modify_fstab.3F"></span><span class="mw-headline" id="Q:_I_want_compression_only_on_'/'_and_not_on_'/home',_can_I_just_modify_fstab?">Q: I want compression only on '/' and not on '/home', can I just modify fstab?</span></h3>
+<p>A: No. The compress(-force) mount option is file system wide, it applies to the entire fs, not per subvolume or mount point.
+</p>
+<h3><span id="Q:_Is_there_a_way_to_do_it_per_subvolume.3F"></span><span class="mw-headline" id="Q:_Is_there_a_way_to_do_it_per_subvolume?">Q: Is there a way to do it per subvolume?</span></h3>
+<p>A: Yes, but there are some caveats. The 'btrfs property' command can be used to set compression per subvolume, directory, or file. Unsetting it is...tricky. The 'none' option doesn't unset compression, it prevents the compress mount option from working.
+</p>
+<h3><span id="Q:_What_about_.27chattr_.2Bc.27_.3F"></span><span class="mw-headline" id="Q:_What_about_'chattr_+c'_?">Q: What about 'chattr +c'&#160;?</span></h3>
+<p>A: This is the legacy way of setting compression before 'btrfs property' existed, and still works today. However you can't specify an algorithm like you can with 'btrfs property' so it uses the current default, zlib. And zlib also applies if you use the compress(-force) mount option without specifying an algorithm. Tip: COW stands for copy-on-write so 'chattr +C' (capitalized) means nodatacow. Whereas +c (small c) stands for compression.
+</p>
+<h3><span id="Q:_How_are_.27chattr_.2Bc.27_and_.27btrfs_property.27_the_same.3F"></span><span class="mw-headline" id="Q:_How_are_'chattr_+c'_and_'btrfs_property'_the_same?">Q: How are 'chattr +c' and 'btrfs property' the same?</span></h3>
+<p>A: Internal to Btrfs they both set a compression flag on the inode.
+</p>
+<h3><span id="Q:_If_I_use_.27btrfs_property.27_to_set_compression.2C_what_level_is_used_for_zstd.3F"></span><span class="mw-headline" id="Q:_If_I_use_'btrfs_property'_to_set_compression,_what_level_is_used_for_zstd?">Q: If I use 'btrfs property' to set compression, what level is used for zstd?</span></h3>
+<p>A: Currently the default is always used, level 3. Even if you get 'btrfs property' to set it with 'zstd:1' it will use 3.
+</p>
+<h3><span id="Q:_Is_it_safe_to_mix_and_match_compression_algorithms.3F"></span><span class="mw-headline" id="Q:_Is_it_safe_to_mix_and_match_compression_algorithms?">Q: Is it safe to mix and match compression algorithms?</span></h3>
+<p>A: Yes.
+</p>
+<h3><span id="Q:_Does_compression_cause_more_fragmentation.3F_The_.27filefrag.27_tool_shows_a_lot_more_extents_on_compressed_files."></span><span class="mw-headline" id="Q:_Does_compression_cause_more_fragmentation?_The_'filefrag'_tool_shows_a_lot_more_extents_on_compressed_files.">Q: Does compression cause more fragmentation? The 'filefrag' tool shows a lot more extents on compressed files.</span></h3>
+<p>A: No. This is a bug or missing feature. The 'filefrag' command uses FIEMAP, and this reports the Btrfs logical address in what appears to be separate, non-contiguous, 128KiB extents. This 128KiB extent is actually the maximum compression block size. The actual physical extent on disk may be contiguous, but FIEMAP currently doesn't have a way of knowing this. So that does mean the filefrag tool is not a reliable indicator of file fragmentation.
+</p>
+<h3><span id="Q:_Do_I_have_to_reboot_to_change_compression_options.3F"></span><span class="mw-headline" id="Q:_Do_I_have_to_reboot_to_change_compression_options?">Q: Do I have to reboot to change compression options?</span></h3>
+<p>A: No, you can just remount any mount point for that file system, specifying the new options, e.g. 'mount -o remount,compress=zstd:5'.
+</p>
+<h3><span id="Q:_Is_there_a_list_of_compression_related_bugs.3F"></span><span class="mw-headline" id="Q:_Is_there_a_list_of_compression_related_bugs?">Q: Is there a list of compression related bugs?</span></h3>
+<p>A: Known compression related bugs are cosmetic, i.e. they may be annoying but they're not risking your data.
+<a class="external autonumber" href="https://github.com/kdave/btrfs-progs/issues/308">[1]</a>
+<a class="external autonumber" href="https://github.com/kdave/btrfs-progs/issues/309">[2]</a>
+<a class="external autonumber" href="https://github.com/kdave/btrfs-progs/issues/328">[3]</a>
+<a class="external autonumber" href="https://github.com/kdave/btrfs-progs/issues/329">[4]</a>
+</p>
+<h3><span id="Q:_How_is_used_and_free_space_reporting_affected_by_compression.3F"></span><span class="mw-headline" id="Q:_How_is_used_and_free_space_reporting_affected_by_compression?">Q: How is used and free space reporting affected by compression?</span></h3>
+<p>A: It depends. 'df' shows the raw physical blocks that are used and free, which means it's (unknowingly) accounting for compression for used space reporting, and assuming no compression for free space. 'ls' 'du' and 'btrfs filesystem du' are looking at the logical blocks that files use which are uncompressed. Unrelated to compression, Btrfs will inline small extents for files less than 2048 bytes, and these files are always counted as 4KiB each. So 'du' can over report, possibly by quite a lot if there are many such small files.
+</p>
+<h3><span id="Q:_What.27s_the_best_tool_to_see_how_effective_compression_is.3F"></span><span class="mw-headline" id="Q:_What's_the_best_tool_to_see_how_effective_compression_is?">Q: What's the best tool to see how effective compression is?</span></h3>
+<p>A: The included 'compsize' tool pointed at a file or directory will report this.
+</p>
+<h3><span id="Q:_Why_use_zstd:1_specifically.3F"></span><span class="mw-headline" id="Q:_Why_use_zstd:1_specifically?">Q: Why use zstd:1 specifically?</span></h3>
+<p>a: <a class="external autonumber" href="https://hackmd.io/kIMJv7yHSiKoAq1MPcCMdw">[5]</a> has an analysis of the various compression levels and their impact, both in terms of CPU usage and disk space savings.
+</p>
+<h3><span id="Q:_Will_.2Fboot_be_compressed.3F"></span><span class="mw-headline" id="Q:_Will_/boot_be_compressed?">Q: Will /boot be compressed?</span></h3>
+<p>A: By default we still put <code>/boot</code> on <code>ext4</code> (though <code>/boot</code> on btrfs is possible with advanced partitioning). GRUB has <a class="external text" href="https://git.savannah.gnu.org/cgit/grub.git/commit/?id=386128648606a3aa6ae7108d1c9af52258202279">support for zstd-compressed Btrfs partitions</a> since 2018 so this should work just fine.
+</p><p>We plan a forthcoming change once <a href="/wiki/Changes/UnifyGrubConfig" title="Changes/UnifyGrubConfig">Changes/UnifyGrubConfig</a> lands to make sure that the GRUB environment is stored in a partition that it can write to.
+</p><p>Currently the hidden GRUB menu in Fedora Workstation (<a href="/wiki/Changes/HiddenGrubMenu" title="Changes/HiddenGrubMenu">Changes/HiddenGrubMenu</a>, <a href="/wiki/Changes/CleanupGnomeHiddenBootMenuIntegration" title="Changes/CleanupGnomeHiddenBootMenuIntegration">Changes/CleanupGnomeHiddenBootMenuIntegration</a>) will not work on BIOS-based systems; after UnifyGrubConfig, this might not work even on EFI systems, so we are not recommending <code>/boot</code> on btrfs for now because of this regression.
+</p>
+<h3><span class="mw-headline" id="References:">References:</span></h3>
+<p>man 5 btrfs<br />
+man btrfs property<br />
+man compsize
+</p>
+<h2><span class="mw-headline" id="Benefit_to_Fedora">Benefit to Fedora</span></h2>
+<p>Better disk space usage, reduction of write amplification, which in turn helps increase lifespan and performance on SSDs and other flash-based media. It can also increase read and write performance.
+</p>
+<h2><span class="mw-headline" id="Scope">Scope</span></h2>
+<ul><li>Proposal owners:
+<ul><li>Update anaconda to perform the installation using <code>mount -o compress=zstd:1</code></li>
+<li>Set the proper option in fstab (alternatively: set the XATTR)</li>
+<li>Update disk image build tools to enable compression:
+<ul><li>lorax</li>
+<li>appliance-tools</li>
+<li>osbuild</li>
+<li>imagefactory</li></ul></li>
+<li>[optional] Add support for <a class="external text" href="https://github.com/kdave/btrfs-progs/issues/328">setting compression level when defragmenting</a></li>
+<li>[optional] Add support for <a class="external text" href="https://github.com/kdave/btrfs-progs/issues/329">setting compression level using <code>btrfs property</code></a></li></ul></li>
+<li>Other developers:
+<ul><li>anaconda: review PRs as needed</li></ul></li>
+<li>Release engineering: <a class="external free" href="https://pagure.io/releng/issue/9920">https://pagure.io/releng/issue/9920</a></li>
+<li>Policies and guidelines: N/A</li>
+<li>Trademark approval: N/A</li></ul>
+<h2><span id="Upgrade.2Fcompatibility_impact"></span><span class="mw-headline" id="Upgrade/compatibility_impact">Upgrade/compatibility impact</span></h2>
+<p>This Change only applies to newly installed systems. See <code>How to test</code> for converting an existing system.
+</p>
+<h2><span class="mw-headline" id="How_to_test">How to test</span></h2>
+<p>Update <code>/etc/fstab</code> to add the <code>compress=zstd:1</code> mount option to <code>/</code> and <code>/home</code> mount points. Then remount (<code>mount -o remount /</code>). It's only necessary to remount one of the two mount points. All writes will now be compressed.
+</p><p>Optional: Already written data can be compressed via defragmenting option, on a per directory or file basis. It takes the form  <code>btrfs filesystem defragment -czstd -rv /path/to/dir/or/file/</code>. It's completely OK to skip this step and just allow a file system to become compressed over time via attrition. If you're using snapshots, it's advised you don't run defragment on all snapshots because defragment will unshare the shared extents between them, leading to a potentially significant increase in space consumption.
+</p><p><br />
+</p>
+<h2><span class="mw-headline" id="User_experience">User experience</span></h2>
+<p>Compression will result in file sizes (e.g.&#160;as reported by du) not matching the actual space occupied on disk. The <a class="external text" href="https://src.fedoraproject.org/rpms/compsize">compsize</a> utility can be used to examine the compression type, effective compression ration and actual size.
+</p>
+<h2><span class="mw-headline" id="Dependencies">Dependencies</span></h2>
+<p>Anaconda will need to be updated to perform the installation using <code>mount -o compress=zstd:1</code>
+</p>
+<h2><span class="mw-headline" id="Contingency_plan">Contingency plan</span></h2>
+<ul><li>Contingency mechanism: will not include PR patches if not merged upstream and will not enable</li>
+<li>Contingency deadline: Final freeze</li>
+<li>Blocks release? No</li>
+<li>Blocks product? No</li></ul>
+<h2><span class="mw-headline" id="Documentation">Documentation</span></h2>
+<p><a class="external free" href="https://btrfs.wiki.kernel.org/index.php/Compression">https://btrfs.wiki.kernel.org/index.php/Compression</a>
+</p><p><br />
+</p>
+<h2><span class="mw-headline" id="Simple_Analysis_of_btrfs_zstd_compression_level">Simple Analysis of btrfs zstd compression level</span></h2>
+<h3><span class="mw-headline" id="Workstation_root_fs_disk_space_savings">Workstation root fs disk space savings</span></h3>
+<h4><span id="tl.3Bdr.3B"></span><span class="mw-headline" id="tl;dr;">tl;dr;</span></h4>
+<p>For an installed root directory of Fedora 32, zstd:1 yields a 40% storage savings as compared to uncompressed ext4. zstd:9 yields a 43% storage savings.
+</p>
+<h4><span class="mw-headline" id="Test_Steps">Test Steps</span></h4>
+<p>1. Obtain an “installed.dir” by
+</p>
+<pre>   1. Prep the image
+       1. truncate -s 64G installed.raw
+   2. Booting the live cd (in the case F32) in a qemu-kvm 
+       1. qemu-kvm -drive file=installed.raw -cdrom $ISO -m 1G
+   3. Installing it in the graphical installer
+       1. I used regular partitions, and did not create a new one for /home
+   4. Shutting down the qemu instance3105440
+   5. Mount it to the directory
+       1. losetup -Pf installed.raw
+       2. mkdir -p installed.dir
+       3. mount /dev/loop1p2 installed.dir
+</pre>
+<p>2. Run the script below
+</p>
+<pre>#!/bin/sh
+
+set -e
+
+SIZE=16G
+
+if [ $EUID -ne 0 ]&#160;; then
+    echo "Needs to be root" &gt;&amp;2
+    exit 2
+fi
+
+for compress_level in 1 3 9&#160;; do
+    raw=zstd${compress_level}.raw
+    truncate -s $SIZE $raw
+    mkfs.btrfs -f $raw
+    dir=zstd${compress_level}.dir
+    mkdir -p $dir
+    mount -o compress=zstd:${compress_level} $raw $dir
+    perf record -g -o perf${compress_level}.data bash -c "cp -r installed.dir/* $dir&#160;; sync $dir"
+done
+&lt;/code&gt;
+
+==== Results ====
+
+zstd:1 - 40% savings
+zstd:3 - 41% savings
+zstd:9 - 43% savings
+
+This is the result from df. Ignore Use% because the installed directory is a different size.
+
+&lt;code&gt;
+Filesystem                              1K-blocks     Used Available Use% Mounted on
+/dev/loop1p3                             61665068  5458980  53043976  10% /scratch/installed.dir
+/dev/loop0                               16777216  3257192  13356936  20% /scratch/zstd1.dir
+/dev/loop2                               16777216  3197668  13415468  20% /scratch/zstd3.dir
+/dev/loop3                               16777216  3105440  13502704  19% /scratch/zstd9.dir
+</pre>
+<h3><span id=".2Fdev.2Furandom_copy_cpu_cost"></span><span class="mw-headline" id="/dev/urandom_copy_cpu_cost">/dev/urandom copy cpu cost</span></h3>
+<ul><li><ul><li>note: this test is a lot less scientific than the other one, because it’ll be CPU dependent and I had other stuff going on (chrome was open, etc). It’s likely still a reasonable proxy for CPU impact though.**</li></ul></li></ul>
+<h4><span id="tl.3Bdr.3B_2"></span><span class="mw-headline" id="tl;dr;_2">tl;dr;</span></h4>
+<p>zstd:1 added 9% and zstd:9 added 15% of system time to the baseline. 
+</p>
+<h4><span class="mw-headline" id="Test_Steps_2">Test Steps</span></h4>
+<p>1. Get a 2GB blah file that will compress very poorly
+</p>
+<pre>   1. dd if=/dev/urandom of=blah bs=256K count=8192
+</pre>
+<p>2. Run the script
+</p>
+<pre>#!/bin/sh
+
+set -e
+
+SIZE=16G
+
+if [ $EUID -ne 0 ]&#160;; then
+    echo "Needs to be root" &gt;&amp;2
+    exit 2
+fi
+
+for compress_level in 0 1 3 9&#160;; do
+    raw=zstd${compress_level}.raw
+    truncate -s $SIZE $raw    #perf record -g -o perf${compress_level}.data bash -c    #perf record -g -o perf${compress_level}.data bash -c
+    mkfs.btrfs -f $raw 2&gt;/dev/null &gt;/dev/null
+    dir=zstd${compress_level}.dir
+    mkdir -p $dir
+    if [ $compress_level -eq 0 ]&#160;; then
+        mount $raw $dir
+    else
+        mount -o compress=zstd:${compress_level} $raw $dir
+    fi
+    echo Compression Level ${compress_level}
+    time bash -c \
+         "dd if=blah of=$dir/blah&#160;; sync $dir"
+done
+</pre>
+<h4><span class="mw-headline" id="Results">Results</span></h4>
+<pre>Compression Level 0
+4194304+0 records in
+4194304+0 records out
+2147483648 bytes (2.1 GB, 2.0 GiB) copied, 13.3657 s, 161 MB/s
+
+real    0m13.386s
+user    0m2.891s
+sys     0m9.486s
+Compression Level 1
+4194304+0 records in
+4194304+0 records out
+2147483648 bytes (2.1 GB, 2.0 GiB) copied, 14.8094 s, 145 MB/s
+
+real    0m14.913s
+user    0m3.313s
+sys     0m10.380s
+Compression Level 3
+4194304+0 records in
+4194304+0 records out
+2147483648 bytes (2.1 GB, 2.0 GiB) copied, 15.1291 s, 142 MB/s
+
+real    0m15.259s
+user    0m3.261s
+sys     0m10.720s
+Compression Level 9
+4194304+0 records in
+4194304+0 records out
+2147483648 bytes (2.1 GB, 2.0 GiB) copied, 15.4792 s, 139 MB/s
+
+real    0m15.499s
+user    0m3.442s
+sys     0m10.913s
+</pre>
+<h3><span id=".2Fdev.2Fzero_cpu_copy_test"></span><span class="mw-headline" id="/dev/zero_cpu_copy_test">/dev/zero cpu copy test</span></h3>
+<h4><span id="tl.3Bdr.3B_3"></span><span class="mw-headline" id="tl;dr;_3">tl;dr;</span></h4>
+<p>Easily compressed data is a lot more expensive at higher levels. zstd:1 added 16%, zstd:9 added 82%
+</p>
+<h4><span class="mw-headline" id="Test_Steps_3">Test Steps</span></h4>
+<p>Same as above, but swap /dev/urandom for /dev/zero
+</p>
+<h4><span class="mw-headline" id="Results_2">Results</span></h4>
+<pre>Compression Level 0
+4194304+0 records in
+4194304+0 records out
+2147483648 bytes (2.1 GB, 2.0 GiB) copied, 14.1791 s, 151 MB/s
+
+real    0m14.196s
+user    0m2.971s
+sys     0m9.909s
+Compression Level 1
+4194304+0 records in
+4194304+0 records out
+2147483648 bytes (2.1 GB, 2.0 GiB) copied, 16.4391 s, 131 MB/s
+
+real    0m16.536s
+user    0m3.403s
+sys     0m11.511s
+Compression Level 3
+4194304+0 records in
+4194304+0 records out
+2147483648 bytes (2.1 GB, 2.0 GiB) copied, 14.9807 s, 143 MB/s
+
+real    0m15.094s
+user    0m3.398s
+sys     0m10.833s
+Compression Level 9
+4194304+0 records in
+4194304+0 records out
+2147483648 bytes (2.1 GB, 2.0 GiB) copied, 18.0451 s, 119 MB/s
+
+real    0m18.066s
+user    0m3.758s
+sys     0m12.173s
+</pre>
+<h2><span class="mw-headline" id="Release_Notes">Release Notes</span></h2>
+<p>Transparent compression of the filesystem using zstd is now enabled by default. Use the compsize utility to find out the actual size on disk of a given file.
+</p>
+<!-- 
+NewPP limit report
+Cached time: 20260306200215
+Cache expiry: 86400
+Reduced expiry: false
+Complications: [show‐toc]
+CPU time usage: 0.014 seconds
+Real time usage: 0.016 seconds
+Preprocessor visited node count: 166/1000000
+Post‐expand include size: 8/2097152 bytes
+Template argument size: 0/2097152 bytes
+Highest expansion depth: 2/100
+Expensive parser function count: 0/100
+Unstrip recursion depth: 0/20
+Unstrip post‐expand size: 3258/5000000 bytes
+-->
+<!--
+Transclusion expansion time report (%,ms,calls,template)
+100.00%    0.000      1 -total
+-->
+
+<!-- Saved in parser cache with key fpo?hmediawiki-en_:pcache:idhash:82441-0!canonical and timestamp 20260306200215 and revision id 613553. Rendering was triggered because: page-view
+ -->
+</div></div><div class="visualClear"></div><div class="printfooter">Retrieved from "<a dir="ltr" href="https://fedoraproject.org/w/index.php?title=Changes/BtrfsTransparentCompression&amp;oldid=613553">https://fedoraproject.org/w/index.php?title=Changes/BtrfsTransparentCompression&amp;oldid=613553</a>"</div><div id="catlinks" class="catlinks" data-mw="interface"><div id="mw-normal-catlinks" class="mw-normal-catlinks"><a href="/wiki/Special:Categories" title="Special:Categories">Categories</a>: <ul><li><a href="/wiki/Category:SystemWideChange" title="Category:SystemWideChange">SystemWideChange</a></li><li><a href="/w/index.php?title=Category:ChangeAcceptedF34&amp;action=edit&amp;redlink=1" class="new" title="Category:ChangeAcceptedF34 (page does not exist)">ChangeAcceptedF34</a></li></ul></div></div>				</div>
+			</div>
+
+			<div class="footer py-5 text-white">
+				<div class="container">
+					<div class="row footerlinks justify-content-center">
+						<div class="col-sm-3 col-4 mt-3">
+							<div>
+								<dl>
+									<dt class="text-uppercase h4"><strong>About</strong></dt>
+									<dd><a href="https://getfedora.org/">Get Fedora Linux</a></dd>
+									<dd><a href="https://getfedora.org/en/sponsors/">Sponsors</a></dd>
+									<dd><a href="https://fedoramagazine.org">Fedora Magazine</a></dd>
+									<dd><a href="https://fedoraproject.org/wiki/Legal:Main#Legal">Legal</a></dd>
+								</dl>
+							</div>
+					</div>
+					<div class="col-sm-3 col-4 mt-3">
+							<div>
+								<dl>
+									<dt class="text-uppercase h4"><strong>Support</strong></dt>
+									<dd><a href="https://fedoraproject.org/wiki/Communicating_and_getting_help">Get Help</a></dd>
+									<dd><a href="https://ask.fedoraproject.org/">Ask Fedora</a></dd>
+									<dd><a href="https://discussion.fedoraproject.org/c/ask/common-issues/">Common Issues</a></dd>
+									<dd><a href="https://developer.fedoraproject.org/">Fedora Developer Portal</a></dd>
+								</dl>
+							</div>
+					</div>
+					<div class="col-sm-3 col-4 mt-3">
+							<div>
+								<dl>
+									<dt class="text-uppercase h4"><strong>Community</strong></dt>
+									<dd><a href="https://fedoraproject.org/wiki/Join">Join Fedora</a></dd>
+									<dd><a href="https://fedoraproject.org/wiki/Overview">About Fedora</a></dd>
+									<dd><a href="http://fedoraplanet.org">Planet Fedora</a></dd>
+									<dd><a href="https://accounts.fedoraproject.org/">Fedora Accounts</a></dd>
+								</dl>
+							</div>
+					</div>
+					</div>
+					<div class="row footerlinks">
+						<div class="col-12 text-center">
+							<p class="disclaimer fw-bold">
+								This is a community maintained site.  Red Hat is not responsible for content.
+							</p>
+							<p>
+							&copy; 2026 Red Hat, Inc. and others.  Content is available under <a href-"https://creativecommons.org/licenses/by-sa/4.0/deed.en">Attribution-Share Alike 4.0 International</a> unless otherwise noted.
+							</p>
+							<p> Fedora is sponsored by Red Hat. <a href="https://www.redhat.com/en/technologies/linux-platforms/articles/relationship-between-fedora-and-rhel">Learn more about the relationship between Red Hat and Fedora »</a> </p>
+							<div class="py-3"> 
+								<img src="/w/skins/Fedora/resources/images/redhat.png" alt="Red Hat Logo" height="40px">							</div>
+						</div>
+					</div>
+				</div>
+			</div>
+
+		</body>
+		</html>
+
+		<script>(RLQ=window.RLQ||[]).push(function(){mw.log.warn("This page is using the deprecated ResourceLoader module \"mediawiki.skinning.interface\".\n[1.43] The use of the `interface-message-box` feature with SkinModule is deprecated in favor of CodexModule. Please remove this feature.More information can be found at [[mw:Manual:ResourceLoaderSkinModule]]. ");mw.config.set({"wgBackendResponseTime":84,"wgPageParseReport":{"limitreport":{"cputime":"0.014","walltime":"0.016","ppvisitednodes":{"value":166,"limit":1000000},"postexpandincludesize":{"value":8,"limit":2097152},"templateargumentsize":{"value":0,"limit":2097152},"expansiondepth":{"value":2,"limit":100},"expensivefunctioncount":{"value":0,"limit":100},"unstrip-depth":{"value":0,"limit":20},"unstrip-size":{"value":3258,"limit":5000000},"timingprofile":["100.00%    0.000      1 -total"]},"cachereport":{"timestamp":"20260306200215","ttl":86400,"transientcontent":false}}});});</script>
+</body>
+</html>

@@ -1,0 +1,299 @@
+<!-- MHonArc v2.6.24 -->
+<!--X-Subject: Re: How to replace a failed drive in btrfs RAID 1 filesystem -->
+<!--X-From-R13: jnkurnq &#60;jnkurnqNqvegpryyne.arg> -->
+<!--X-Date: Sat, 10 Mar 2018 01:41:19 &#45;0800 -->
+<!--X-Message-Id: 8b957e05&#45;ac43&#45;4299&#45;2545&#45;1385d4deff03@dirtcellar.net -->
+<!--X-Content-Type: text/plain -->
+<!--X-Reference: CAMoswehA9P+JEoLmrMcWDys8t_pgNQxjvSGsk5XHhshFo+=e&#45;Q@mail.gmail.com -->
+<!--X-Reference: 923562e4&#45;7069&#45;7541&#45;0500&#45;e16c302893dc@gmail.com -->
+<!--X-Head-End-->
+<!doctype html public "-//W3C//DTD HTML//EN">
+<html>
+<head>
+<style>
+<script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+<script>
+     (adsbygoogle = window.adsbygoogle || []).push({
+          google_ad_client: "ca-pub-3422782820843221",
+          enable_page_level_ads: true
+     });
+</script>
+<!--
+ pre {white-space: pre-wrap;}
+-->
+</style>
+<meta name="description" content="Linux BTRFS Storage: Re: How to replace a failed drive in btrfs RAID 1 filesystem">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
+<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
+<link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png">
+<link rel="manifest" href="/site.webmanifest">
+<title>Re: How to replace a failed drive in btrfs RAID 1 filesystem &mdash; Linux BTRFS</title>
+<link rel="alternate" type="application/rss+xml" title="Linux BTRFS" href="//feedproxy.google.com/LinuxBtrfs">
+</head>
+<body itemscope itemtype="//schema.org/Article" bgcolor=white vlink=green link=blue>
+<!--X-Body-Begin-->
+<!--X-User-Header-->
+<!--X-User-Header-End-->
+<!--X-TopPNI-->
+<form action="//www.google.com" id="cse-search-box" target="_blank">
+  <div>
+    <input type="hidden" name="cx" value="partner-pub-3422782820843221:9580497365" />
+    <input type="hidden" name="ie" value="UTF-8" />
+    <input type="text" name="q" size="25" />
+    <input type="submit" name="sa" value="Search" />
+  </div>
+</form>
+<script type="text/javascript" src="//www.google.com/coop/cse/brand?form=cse-search-box&amp;lang=en"></script>
+<h1>Re: How to replace a failed drive in btrfs RAID 1 filesystem</h1>
+[<a href="msg75680.html">Date Prev</a>][<a href="msg75682.html">Date Next</a>][<a href="msg75650.html">Thread Prev</a>][<a href="msg75682.html">Thread Next</a>][<a href="mail62.html#75681">Date Index</a>][<a href="thrd62.html#75681">Thread Index</a>]
+<p>&nbsp;<p>
+<script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+<!-- responsive test for archives -->
+<ins class="adsbygoogle"
+     style="display:block"
+     data-ad-client="ca-pub-3422782820843221"
+     data-ad-slot="6345952567"
+     data-ad-format="auto"></ins>
+<script>
+(adsbygoogle = window.adsbygoogle || []).push({});
+</script>
+
+<!--X-TopPNI-End-->
+<!--X-MsgBody-->
+<!--X-Subject-Header-Begin-->
+<hr>
+<!--X-Subject-Header-End-->
+<!--X-Head-of-Message-->
+<ul>
+<li><em>Subject</em>: Re: How to replace a failed drive in btrfs RAID 1 filesystem</li>
+<li><em>From</em>: waxhead &lt;waxhead@xxxxxxxxxxxxxx&gt;</li>
+<li><em>Date</em>: Sat, 10 Mar 2018 10:37:49 +0100</li>
+<li><em>In-reply-to</em>: &lt;<a href="msg75648.html">923562e4-7069-7541-0500-e16c302893dc@gmail.com</a>&gt;</li>
+<li><em>References</em>: &lt;CAMoswehA9P+JEoLmrMcWDys8t_pgNQxjvSGsk5XHhshFo+=e-Q@mail.gmail.com&gt; &lt;<a href="msg75648.html">923562e4-7069-7541-0500-e16c302893dc@gmail.com</a>&gt;</li>
+<li><em>Reply-to</em>: waxhead@xxxxxxxxxxxxxx</li>
+<li><em>User-agent</em>: Mozilla/5.0 (X11; Linux x86_64; rv:52.0) Gecko/20100101 Firefox/52.0 SeaMonkey/2.49.1</li>
+</ul>
+<!--X-Head-of-Message-End-->
+<!--X-Head-Body-Sep-Begin-->
+<hr>
+<div class="content" itemprop="articleBody">
+<!--X-Head-Body-Sep-End-->
+<!--X-Body-of-Message-->
+<pre style="margin: 0em;">
+Austin S. Hemmelgarn wrote:
+</pre><blockquote style="border-left: #5555EE solid 0.2em; margin: 0em; padding-left: 0.85em"><pre style="margin: 0em;">
+On 2018-03-09 11:02, Paul Richards wrote:
+</pre><blockquote style="border-left: #5555EE solid 0.2em; margin: 0em; padding-left: 0.85em"><pre style="margin: 0em;">
+Hello there,
+
+I have a 3 disk btrfs RAID 1 filesystem, with a single failed drive.
+Before I attempt any recovery I&#x2019;d like to ask what is the recommended
+approach?&#xA0; (The wiki docs suggest consulting here before attempting
+recovery[1].)
+
+The system is powered down currently and a replacement drive is being
+delivered soon.
+
+Should I use &#x201C;replace&#x201D;, or &#x201C;add&#x201D; and &#x201C;delete&#x201D;?
+
+Once replaced should I rebalance and/or scrub?
+
+I believe that the recovery may involve mounting in degraded mode.&#xA0; If
+I do this, how do I later get out of degraded mode, or if it&#x2019;s
+automatic how do i determine when I&#x2019;m out of degraded mode?
+
+</pre></blockquote><tt>It won't automatically mount degraded, you either have to explicitly ask 
+</tt><tt>it to, or you have to have an option to do so in your default mount 
+</tt><tt>options for the volume in /etc/fstab (which is dangerous for multiple 
+</tt><tt>reasons).
+</tt><pre style="margin: 0em;">
+
+</pre><tt>Now, as to what the best way to go about this is, there are three things 
+</tt><tt>to consider:
+</tt><pre style="margin: 0em;">
+
+</pre><tt>1. Is the failed disk still usable enough that you can get good data off 
+</tt><tt>of it in a reasonable amount of time?&#xA0; If you're replacing the disk 
+</tt><tt>because of a lot of failed sectors, you can still probably get data off 
+</tt><tt>of it, while something like a head crash isn't worth trying to get data 
+</tt><tt>back.
+</tt><tt>2. Do you have enough room in the system itself to add another disk 
+</tt><tt>without removing one?
+</tt><pre style="margin: 0em;">
+3. Is the replacement disk at least as big as the failed disk?
+
+</pre><tt>If the answer to all three is yes, then just put in the new disk, mount 
+</tt><tt>the volume normally (you don't need to mount it degraded if the failed 
+</tt><tt>disk is working this well), and use `btrfs replace` to move the data. 
+</tt><tt>This is the most efficient option in terms of both time and is also 
+</tt><tt>generally the safest (and I personally always over-spec drive-bays in 
+</tt><tt>systems we build where I work specifically so that this approach can be 
+</tt><tt>used).
+</tt><pre style="margin: 0em;">
+
+</pre><tt>If the answer to the third question is no, put in the new disk (removing 
+</tt><tt>the failed one first if the answer to the second question is no), mount 
+</tt><tt>the volume (mount it degraded if one of the first two questions is no, 
+</tt><tt>normally otherwise), then add the new disk to the volume with `btrfs 
+</tt><tt>device add` and remove the old one with `btrfs device delete` (using the 
+</tt><tt>'missing' option if you had to remove the failed disk).&#xA0; This is needed 
+</tt><tt>because the replace operation requires the new device to be at least as 
+</tt><tt>big as the old one.
+</tt><pre style="margin: 0em;">
+
+</pre><tt>If the answer to either one or two is no but the answer to three is yes, 
+</tt><tt>pull out the failed disk, put in a new one, mount the volume degraded, 
+</tt><tt>and use `btrfs replace` as well (you will need to specify the device ID 
+</tt><tt>for the now missing failed disk, which you can find by calling `btrfs 
+</tt><tt>filesystem show` on the volume).&#xA0; In the event that the replace 
+</tt><tt>operation refuses to run in this case, instead add the new disk to the 
+</tt><tt>volume with `btrfs device add` and then run `btrfs device delete 
+</tt><tt>missing` on the volume.
+</tt><pre style="margin: 0em;">
+
+</pre><tt>If you follow any of the above procedures, you don't need to balance 
+</tt><tt>(the replace operation is equivalent to a block level copy and will 
+</tt><tt>result in data being distributed exactly the same as it was before, 
+</tt><tt>while the delete operation is a special type of balance), and you 
+</tt><tt>generally don't need to scrub the volume either (though it may still be 
+</tt><tt>a good idea).&#xA0; As far as getting back from degraded mode, you can just 
+</tt><tt>remount the volume to do so, though I would generally suggest rebooting.
+</tt><pre style="margin: 0em;">
+
+Note that there are three other possible approaches to consider as well:
+
+</pre><tt>1. If you can't immediately get a new disk _and_ all the data will fit 
+</tt><tt>on the other two disks, use `btrfs device delete` to remove the failed 
+</tt><tt>disk anyway, and run with just the two until you can get a new disk. 
+</tt><tt>This is exponentially safer than running the volume degraded until you 
+</tt><tt>get a new disk, and is the only case you realistically should delete a 
+</tt><tt>device before adding the new one.&#xA0; Make sure to balance the volume after 
+</tt><tt>adding the new device.
+</tt><tt>2. Depending on the situation, it may be faster to just recreate the 
+</tt><tt>whole volume from scratch using a backup than it is to try to repair it. 
+</tt><tt> &#xA0;This is actually the absolute safest method of handling this 
+</tt><tt>situation, as it makes sure that nothing from the old volume with the 
+</tt><tt>failed disk causes problems in the future.
+</tt><tt>3. If you don't have a backup, but have some temporary storage space 
+</tt><tt>that will fit all the data from the volume, you could also use `btrfs 
+</tt><tt>restore` to extract files from the old volume to temporary storage, 
+</tt><tt>recreate the volume, and copy the data back in from the temporary storage.
+</tt><pre style="margin: 0em;">
+--
+To unsubscribe from this list: send the line &quot;unsubscribe linux-btrfs&quot; in
+the body of a message to majordomo@xxxxxxxxxxxxxxx
+More majordomo info at&#xA0; <a  rel="nofollow" href="http://vger.kernel.org/majordomo-info.html">http://vger.kernel.org/majordomo-info.html</a>
+</pre></blockquote><pre style="margin: 0em;">
+
+</pre><tt>I did a quick scan of the wiki just to see, but I did not find any good 
+</tt><tt>info about how to recover a &quot;RAID&quot; like set if degraded. Information 
+</tt><tt>about how to recover, and what profiles can be recovered from would be 
+</tt><tt>good to have (with examples) in a separate &quot;how-to&quot; on the Wiki.
+</tt><pre style="margin: 0em;">
+--
+To unsubscribe from this list: send the line &quot;unsubscribe linux-btrfs&quot; in
+the body of a message to majordomo@xxxxxxxxxxxxxxx
+More majordomo info at  <a  rel="nofollow" href="http://vger.kernel.org/majordomo-info.html">http://vger.kernel.org/majordomo-info.html</a>
+
+
+
+</pre>
+<!--X-Body-of-Message-End-->
+<!--X-MsgBody-End-->
+<!--X-Follow-Ups-->
+</div>
+<hr>
+<!--X-Follow-Ups-End-->
+<!--X-References-->
+<ul><li><strong>References</strong>:
+<ul>
+<li><strong><a name="75644" href="msg75644.html">How to replace a failed drive in btrfs RAID 1 filesystem</a></strong>
+<ul><li><em>From:</em> Paul Richards</li></ul></li>
+<li><strong><a name="75648" href="msg75648.html">Re: How to replace a failed drive in btrfs RAID 1 filesystem</a></strong>
+<ul><li><em>From:</em> Austin S. Hemmelgarn</li></ul></li>
+</ul></li></ul>
+<!--X-References-End-->
+<!--X-BotPNI-->
+<ul>
+<li>Prev by Date:
+<strong><a href="msg75680.html">Re: zerofree btrfs support?</a></strong>
+</li>
+<li>Next by Date:
+<strong><a href="msg75682.html">Re: How to replace a failed drive in btrfs RAID 1 filesystem</a></strong>
+</li>
+<li>Previous by thread:
+<strong><a href="msg75650.html">Re: How to replace a failed drive in btrfs RAID 1 filesystem</a></strong>
+</li>
+<li>Next by thread:
+<strong><a href="msg75682.html">Re: How to replace a failed drive in btrfs RAID 1 filesystem</a></strong>
+</li>
+<li>Index(es):
+<ul>
+<li><a href="mail62.html#75681"><strong>Date</strong></a></li>
+<li><a href="thrd62.html#75681"><strong>Thread</strong></a></li>
+</ul>
+</li>
+</ul>
+
+<!--X-BotPNI-End-->
+<!--X-User-Footer-->
+<center>
+<font size=-1>
+<a href=/lists/>[Index&nbsp;of&nbsp;Archives]</a>
+&nbsp;
+&nbsp;
+<a href=/lists/linux-fsdevel/>[Linux&nbsp;Filesystem&nbsp;Development]</a>
+&nbsp;
+&nbsp;
+<a href=/lists/linux-nfs/>[Linux&nbsp;NFS]</a>
+&nbsp;
+&nbsp;
+<a href=/lists/linux-nilfs/>[Linux&nbsp;NILFS]</a>
+&nbsp;
+&nbsp;
+<a href=/lists/linux-usb/>[Linux&nbsp;USB&nbsp;Devel]</a>
+&nbsp;
+&nbsp;
+<a href=/lists/linux-audio-users/>[Linux&nbsp;Audio&nbsp;Users]</a>
+&nbsp;
+&nbsp;
+<a href=https://yosemitenews.info/>[Yosemite&nbsp;News]</a>
+&nbsp;
+&nbsp;
+<a href=/lists/kernel/>[Linux&nbsp;Kernel]</a>
+&nbsp;
+&nbsp;
+<a href=/lists/linux-scsi/>[Linux&nbsp;SCSI]</a>
+</font>
+</center>
+<hr>
+<p>
+<div>
+<script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+<ins class="adsbygoogle"
+     style="display:block"
+     data-ad-format="autorelaxed"
+     data-ad-client="ca-pub-3422782820843221"
+     data-ad-slot="1424524564"></ins>
+<script>
+     (adsbygoogle = window.adsbygoogle || []).push({});
+</script>
+</div>
+<table width=100%>
+<tr>
+<td align=left>&nbsp;</td>
+<td align=right><a href=/linux><img src=/button_01.gif border=0 alt="Powered by Linux"></a></td>
+</tr>
+</table>
+<!--X-User-Footer-End-->
+<script>
+  (function(i,s,o,g,r,a,m){i['GoogleAnalyticsObject']=r;i[r]=i[r]||function(){
+  (i[r].q=i[r].q||[]).push(arguments)},i[r].l=1*new Date();a=s.createElement(o),
+  m=s.getElementsByTagName(o)[0];a.async=1;a.src=g;m.parentNode.insertBefore(a,m)
+  })(window,document,'script','//www.google-analytics.com/analytics.js','ga');
+  ga('create', 'UA-760190-1', 'auto');
+  ga('send', 'pageview');
+</script>
+</body>
+</html>

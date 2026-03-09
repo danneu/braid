@@ -1,0 +1,1071 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr" prefix="og: https://ogp.me/ns#">
+  <head><script>(function(w,i,g){w[g]=w[g]||[];if(typeof w[g].push=='function')w[g].push(i)})
+(window,'GTM-KC2PLXKJ','google_tags_first_party');</script><script>(function(w,d,s,l){w[l]=w[l]||[];(function(){w[l].push(arguments);})('set', 'developer_id.dYzg1YT', true);
+		w[l].push({'gtm.start':new Date().getTime(),event:'gtm.js'});var f=d.getElementsByTagName(s)[0],
+		j=d.createElement(s);j.async=true;j.src='/gwgtag/';
+		f.parentNode.insertBefore(j,f);
+		})(window,document,'script','dataLayer');</script>
+    <meta charset="utf-8" />
+<noscript><style>form.antibot * :not(.antibot-message) { display: none !important; }</style>
+</noscript><meta name="description" content="ZFS or Btrfs? Or the stability of ext4? I have analyzed the key differences to help you choose the right Linux filesystem for your needs" />
+<meta name="geo.position" content="&#039;44.684738097087624; 10.638225289392873&#039;" />
+<meta name="geo.region" content="IT" />
+<meta name="icbm" content="&#039;44.684738097087624, 10.638225289392873&#039;" />
+<meta name="geo.placename" content="IT Consulting Cloud and Linux Solutions | Ligabue" />
+<link rel="canonical" href="https://www.alessioligabue.it/en/blog/btrfs-zfs-ext4-comparison" />
+<meta name="author" content="Alessio Ligabue" />
+<meta name="rating" content="general" />
+<meta property="og:site_name" content="IT Consulting Cloud and Linux Solutions | Ligabue" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://www.alessioligabue.it/en/blog/btrfs-zfs-ext4-comparison" />
+<meta property="og:title" content="Linux filesystem comparison guide: btrfs vs zfs vs ext4" />
+<meta property="og:description" content="ZFS or Btrfs? Or the stability of ext4? I have analyzed the key differences to help you choose the right Linux filesystem for your needs" />
+<meta property="og:image" content="https://www.alessioligabue.it/sites/default/files/articles/filesystem-comparison-btrfs-zfs-ext4.avif" />
+<meta property="og:image:url" content="https://www.alessioligabue.it/sites/default/files/articles/filesystem-comparison-btrfs-zfs-ext4.avif" />
+<meta property="og:image:secure_url" content="https://www.alessioligabue.it/sites/default/files/articles/filesystem-comparison-btrfs-zfs-ext4.avif" />
+<meta property="og:image:type" content="image/avif" />
+<meta property="og:image:alt" content="btrfs vs zfs vs ext4 filesystem comparison - Main image" />
+<meta property="og:updated_time" content="2026-01-11T04:36:59+0100" />
+<meta property="place:location:latitude" content="44.684738097087624" />
+<meta property="place:location:longitude" content="10.638225289392873" />
+<meta property="og:see_also" content="https://www.alessioligabue.it/en" />
+<meta property="og:street_address" content="13 Via Ca Marastoni" />
+<meta property="og:locality" content="Reggio Emilia" />
+<meta property="og:region" content="Emilia Romagna" />
+<meta property="og:postal_code" content="42122" />
+<meta property="og:country_name" content="IT" />
+<meta property="article:author" content="https://www.facebook.com/alessioligab" />
+<meta property="article:publisher" content="https://www.facebook.com/ligabue.consult" />
+<meta property="fb:admins" content="100006986508781" />
+<meta name="twitter:card" content="summary" />
+<meta name="twitter:title" content="Linux filesystem comparison guide: btrfs vs zfs vs ext4" />
+<meta name="twitter:description" content="ZFS or Btrfs? Or the stability of ext4? I have analyzed the key differences to help you choose the right Linux filesystem for your needs" />
+<meta name="twitter:creator" content="@alessioligabue" />
+<meta name="twitter:creator:id" content="2831387338" />
+<meta name="twitter:image:alt" content="Linux filesystem comparison guide: btrfs vs zfs vs ext4 - Logo" />
+<meta name="twitter:image" content="https://www.alessioligabue.it/sites/default/files/articles/filesystem-comparison-btrfs-zfs-ext4.avif" />
+<meta name="MobileOptimized" content="width" />
+<meta name="HandheldFriendly" content="true" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<script type="application/ld+json">{
+    "@context": "https://schema.org",
+    "@graph": [
+        {
+            "@type": "TechArticle",
+            "@id": "https://www.alessioligabue.it/en/blog/btrfs-zfs-ext4-comparison",
+            "name": "Linux filesystem comparison guide: btrfs vs zfs vs ext4",
+            "headline": "Linux filesystem comparison guide: btrfs vs zfs vs ext4",
+            "description": "ZFS or Btrfs? Or the stability of ext4? I have analyzed the key differences to help you choose the right Linux filesystem for your needs",
+            "image": {
+                "@type": "ImageObject",
+                "representativeOfPage": "True",
+                "url": "https://www.alessioligabue.it/sites/default/files/articles/filesystem-comparison-btrfs-zfs-ext4.avif",
+                "width": "1024"
+            },
+            "datePublished": "2025-11-02T08:00:00+0100",
+            "dateModified": "2026-01-11T04:36:59+0100",
+            "author": {
+                "@type": "Person",
+                "@id": "4",
+                "name": "Alessio Ligabue",
+                "url": "https://www.alessioligabue.it/en/about-us"
+            },
+            "publisher": {
+                "@type": "LocalBusiness",
+                "@id": "https://www.alessioligabue.it",
+                "name": "IT Consulting Cloud and Linux Solutions | Ligabue",
+                "url": "https://www.alessioligabue.it",
+                "sameAs": [
+                    "https://maps.app.goo.gl/MZ6Gkce9KkYwPASKA",
+                    "https://www.facebook.com/ligabue.consult"
+                ],
+                "logo": {
+                    "@type": "ImageObject",
+                    "url": "https://www.alessioligabue.it/sites/default/files/logo-nero-su-azzuro.jpg"
+                }
+            }
+        },
+        {
+            "@type": "LocalBusiness",
+            "@id": "https://www.alessioligabue.it/en",
+            "sameAs": [
+                "https://maps.app.goo.gl/MZ6Gkce9KkYwPASKA",
+                "https://www.facebook.com/ligabue.consult"
+            ],
+            "name": "Alessio Ligabue",
+            "url": "https://www.alessioligabue.it/en",
+            "description": "IT Consulting Cloud and Linux Solutions | Ligabue",
+            "telephone": "+3905221606427",
+            "contactPoint": {
+                "@type": "ContactPoint",
+                "telephone": "+3905221606427",
+                "url": "https://www.alessioligabue.it/en",
+                "availableLanguage": [
+                    "Italian",
+                    "English"
+                ],
+                "contactType": "technical support",
+                "productSupported": [
+                    "Google Cloud Platform",
+                    "GCP",
+                    "Linux",
+                    "Proxmox",
+                    "Cloudflare",
+                    "Ansible",
+                    "Icinga"
+                ],
+                "areaServed": {
+                    "@type": "AdministrativeArea",
+                    "name": "Worldwide",
+                    "address": {
+                        "@type": "PostalAddress",
+                        "streetAddress": "13 Via Ca Marastoni",
+                        "addressLocality": "Reggio Emilia",
+                        "addressRegion": "Emilia Romagna",
+                        "postalCode": "42122",
+                        "addressCountry": "IT"
+                    },
+                    "geo": {
+                        "@type": "GeoCoordinates",
+                        "latitude": "44.6848817547539",
+                        "longitude": "10.6382926407781"
+                    }
+                }
+            },
+            "logo": {
+                "@type": "ImageObject",
+                "representativeOfPage": "True",
+                "url": "https://www.alessioligabue.it/sites/default/files/logo-nero-su-azzuro.jpg"
+            },
+            "address": {
+                "@type": "PostalAddress",
+                "streetAddress": "13 Via Ca Marastoni",
+                "addressLocality": "Reggio Emilia",
+                "addressRegion": "Emilia Romagna",
+                "postalCode": "42122",
+                "addressCountry": "IT"
+            },
+            "geo": {
+                "@type": "GeoCoordinates",
+                "latitude": "44.684738097087624",
+                "longitude": "10.638225289392873"
+            },
+            "aggregateRating": {
+                "@type": "AggregateRating",
+                "ratingValue": "5",
+                "ratingCount": "12",
+                "bestRating": "5",
+                "worstRating": "1"
+            }
+        },
+        {
+            "@type": "LocalBusiness",
+            "telephone": "+3905221606427",
+            "name": "IT Consulting Cloud and Linux Solutions | Ligabue",
+            "url": "https://www.alessioligabue.it/en",
+            "geo": {
+                "@type": "GeoCoordinates",
+                "latitude": "44.684738097087624",
+                "longitude": "10.638225289392873"
+            },
+            "description": "IT Consulting Cloud and Linux Solutions | Ligabue",
+            "address": {
+                "@type": "PostalAddress",
+                "streetAddress": "13 Via Ca Marastoni",
+                "addressLocality": "Reggio Emilia",
+                "addressRegion": "RE",
+                "postalCode": "42122",
+                "addressCountry": "IT"
+            },
+            "image": {
+                "@type": "ImageObject",
+                "representativeOfPage": "False",
+                "url": "https://www.alessioligabue.it/sites/default/files/logo-nero-su-azzuro.jpg"
+            }
+        },
+        {
+            "@type": "WebPage",
+            "@id": "https://www.alessioligabue.it/en/blog/btrfs-zfs-ext4-comparison",
+            "description": "ZFS or Btrfs? Or the stability of ext4? I have analyzed the key differences to help you choose the right Linux filesystem for your needs",
+            "breadcrumb": {
+                "@type": "BreadcrumbList",
+                "itemListElement": [
+                    {
+                        "@type": "ListItem",
+                        "position": 1,
+                        "name": "Home",
+                        "item": "https://www.alessioligabue.it/en"
+                    },
+                    {
+                        "@type": "ListItem",
+                        "position": 2,
+                        "name": "Blog Post",
+                        "item": "https://www.alessioligabue.it/en/blog"
+                    }
+                ]
+            },
+            "author": {
+                "@type": "Person",
+                "@id": "4",
+                "name": "Alessio Ligabue",
+                "url": "https://www.alessioligabue.it/en/about-us"
+            },
+            "publisher": {
+                "@type": "Person",
+                "@id": "4",
+                "name": "Alessio Ligabue",
+                "url": "https://www.alessioligabue.it/en/about-us"
+            }
+        },
+        {
+            "@type": "WebSite",
+            "@id": "https://www.alessioligabue.it/en/blog/btrfs-zfs-ext4-comparison",
+            "name": "IT Consulting Cloud and Linux Solutions | Ligabue",
+            "url": "https://www.alessioligabue.it",
+            "potentialAction": {
+                "@type": "SearchAction",
+                "target": {
+                    "@type": "EntryPoint",
+                    "urlTemplate": "https://www.alessioligabue.it/ensearch/node?keys={search_term_string}"
+                },
+                "query": "https://www.alessioligabue.it/ensearch/node?keys={search_term_string}",
+                "query-input": "required name=search_term_string"
+            },
+            "publisher": {
+                "@type": "Organization",
+                "@id": "https://www.alessioligabue.it",
+                "name": "IT Consulting Cloud and Linux Solutions | Ligabue",
+                "url": "https://www.alessioligabue.it",
+                "sameAs": [
+                    "https://maps.app.goo.gl/MZ6Gkce9KkYwPASKA",
+                    "https://www.facebook.com/ligabue.consult"
+                ],
+                "logo": {
+                    "@type": "ImageObject",
+                    "url": "https://www.alessioligabue.it/sites/default/files/logo-nero-su-azzuro.jpg"
+                }
+            },
+            "inLanguage": "en"
+        }
+    ]
+}</script>
+<link rel="icon" href="/favicon.ico" type="image/vnd.microsoft.icon" />
+<link rel="alternate" hreflang="it" href="https://www.alessioligabue.it/blog/btrfs-zfs-ext4-comparazione" />
+<link rel="alternate" hreflang="en" href="https://www.alessioligabue.it/en/blog/btrfs-zfs-ext4-comparison" />
+
+    <title>Linux filesystem comparison guide: btrfs vs zfs vs ext4</title>
+    
+    <link rel="preload" href="/sites/default/files/logo-grey-6-60.webp" as="image">
+    <link rel="preload" href="/sites/default/files/gbb-uploads/homepage-hero-wave-shorter2.avif" as="image">
+    <link rel="preload" href="/themes/gavias_tico/images/breadcrumb.avif" as="image">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="preconnect" href="https://fonts.googleapis.com" crossorigin>
+    <link rel="preconnect" href="https://static.cloudflareinsights.com" crossorigin>
+    <link rel="preconnect" href="https://assets.calendly.com" crossorigin>
+    <link rel="preconnect" href="https://calendly.com" crossorigin>
+    <link rel="preload" href="/themes/gavias_tico/fonts/fontawesome-webfont.woff2" as="font" type="font/woff2" crossorigin>
+    <link rel="preload" href="/themes/gavias_tico/fonts/icon/icon.woff2" as="font" type="font/woff2" crossorigin>
+    <link rel="preload" href="https://fonts.gstatic.com/s/opensans/v44/memvYaGs126MiZpBA-UvWbX2vVnXBbObj2OVTS-mu0SC55I.woff2" as="font"  type="font/woff2" crossorigin>
+    <link rel="preload" href="https://fonts.gstatic.com/s/raleway/v37/1Ptug8zYS_SKggPNyC0IT4ttDfA.woff2" as="font"  type="font/woff2" crossorigin>
+
+    <link rel="stylesheet" media="all" href="/sites/default/files/css/css_yHrAV32CXLO_iJN_7bJvYmshXRBO1Y8Crcsan-yI6kA.css?delta=0&amp;language=en&amp;theme=gavias_tico&amp;include=eJx1i1sOgzAMBC8UkiNVDjHIxcTIdij09H2papHan11pRgPVKYsneH0cROfQi2Iq2hbgCGfYDqCoLLm5Sz1gx81BETpFoyuGEVYCO2WWfsqNuKCmHyyCGbrFQaU61vLujOluGfZP9oX-VU69pJElA3fmO1MdD-ox0SaqseAAjT3Ybo5zymAYVsKLpefGWUpjvAHTDnAv" />
+<link rel="stylesheet" media="all" href="https://fonts.googleapis.com/css2?family=Raleway:ital,wght@0,600;0,700;0,900;1,600;1,700;1,900&amp;display=swap" />
+<link rel="stylesheet" media="all" href="https://fonts.googleapis.com/css2?family=Open+Sans:ital,wght@0,400;0,700;1,400;1,700&amp;display=swap" />
+<link rel="stylesheet" media="all" href="/sites/default/files/css/css_RYWiOZlrHIMX9yhzNLzvSxiNdtUE5gDS8Asq8E6_BIw.css?delta=3&amp;language=en&amp;theme=gavias_tico&amp;include=eJx1i1sOgzAMBC8UkiNVDjHIxcTIdij09H2papHan11pRgPVKYsneH0cROfQi2Iq2hbgCGfYDqCoLLm5Sz1gx81BETpFoyuGEVYCO2WWfsqNuKCmHyyCGbrFQaU61vLujOluGfZP9oX-VU69pJElA3fmO1MdD-ox0SaqseAAjT3Ybo5zymAYVsKLpefGWUpjvAHTDnAv" />
+
+
+    <script type="application/json" data-drupal-selector="drupal-settings-json">{"path":{"baseUrl":"\/","pathPrefix":"en\/","currentPath":"node\/376","currentPathIsAdmin":false,"isFront":false,"currentLanguage":"en"},"pluralDelimiter":"\u0003","suppressDeprecationErrors":true,"ajaxPageState":{"libraries":"eJx1i1sOgzAMBC8UkiNVDnGQi4lR7FDo6ftAqEVqf3blGS8UoygWYG-fpU6ul4oh1TYD-1Rljs1MygkbrgYVoauodEeXiQ3rYffLDbAQ6CWy9GNsxOn58YN5UEVTn6sUw5KOnTI9LcP2mX2hfyujXsLAEoE7tY2pDCf1Cq8jFZ8wQ2NzuqnhFCIouoXwpuGdHq6wnsAkqTE-AJHJeHc","theme":"gavias_tico","theme_token":null},"ajaxTrustedUrl":{"\/en\/search\/node":true,"\/en\/comment\/reply\/node\/376\/comment":true},"views":{"ajax_path":"\/en\/views\/ajax","ajaxViews":{"views_dom_id:3a878718b8259b397040767cf86134d3f4bdadc3d126723b08a128a505274b9a":{"view_name":"post_other","view_display_id":"block_1","view_args":"","view_path":"\/node\/384","view_base_path":"blogs-grid","view_dom_id":"3a878718b8259b397040767cf86134d3f4bdadc3d126723b08a128a505274b9a","pager_element":0}}},"antibot":{"forms":{"comment-form":{"id":"comment-form","key":"87rj5akCbaYbQaBBWz_9AUuM3667p3an1gQ941hGv7p"}}},"user":{"uid":0,"permissionsHash":"9893ded6156e087ff31d55f5accf6705465527d298429e11bc8eb96581a4c0e8"}}</script>
+<script src="/core/assets/vendor/jquery/jquery.min.js?v=4.0.0"></script>
+<script src="/sites/default/files/js/js_4KwXHEaFOphMJ3-LGjay75uLWJ2wNsbjoVMQRb_Zuq0.js?scope=header&amp;delta=1&amp;language=en&amp;theme=gavias_tico&amp;include=eJx1i1kOwjAMRC8UkiNVziqDiSvbKfT2VFQV_aA_M5rlQTeMbAF295Xl6RJLCVnGDOSz8ByHGXdXkazIMezJNVgQdIrE6REHUt4efzoPqsXUV-FupeeDU8JtJVh_2Km6ogwTh0YcgW5qK2FvbsHy0vBVD3d4fwDHQlYR"></script>
+
+
+    <link rel="stylesheet" href="https://www.alessioligabue.it/themes/gavias_tico/css/update.css" media="screen" />
+    <link rel="stylesheet" href="https://www.alessioligabue.it/themes/gavias_tico/css/custom.css" media="screen" />
+
+    
+
+    
+          <style class="customize"> </style>
+    
+  <script data-cfasync="false" nonce="e2e7c277-809e-44a8-9196-3a755f9716c2">try{(function(w,d){!function(bH,bI,bJ,bK){if(bH.zaraz)console.error("zaraz is loaded twice");else{bH[bJ]=bH[bJ]||{};bH[bJ].executed=[];bH.zaraz={deferred:[],listeners:[]};bH.zaraz._v="5876";bH.zaraz._n="e2e7c277-809e-44a8-9196-3a755f9716c2";bH.zaraz.q=[];bH.zaraz._f=function(bL){return async function(){var bM=Array.prototype.slice.call(arguments);bH.zaraz.q.push({m:bL,a:bM})}};for(const bN of["track","set","debug"])bH.zaraz[bN]=bH.zaraz._f(bN);bH.zaraz.init=()=>{var bO=bI.getElementsByTagName(bK)[0],bP=bI.createElement(bK),bQ=bI.getElementsByTagName("title")[0];bQ&&(bH[bJ].t=bI.getElementsByTagName("title")[0].text);bH[bJ].x=Math.random();bH[bJ].w=bH.screen.width;bH[bJ].h=bH.screen.height;bH[bJ].j=bH.innerHeight;bH[bJ].e=bH.innerWidth;bH[bJ].l=bH.location.href;bH[bJ].r=bI.referrer;bH[bJ].k=bH.screen.colorDepth;bH[bJ].n=bI.characterSet;bH[bJ].o=(new Date).getTimezoneOffset();if(bH.dataLayer)for(const bR of Object.entries(Object.entries(dataLayer).reduce((bS,bT)=>({...bS[1],...bT[1]}),{})))zaraz.set(bR[0],bR[1],{scope:"page"});bH[bJ].q=[];for(;bH.zaraz.q.length;){const bU=bH.zaraz.q.shift();bH[bJ].q.push(bU)}bP.defer=!0;for(const bV of[localStorage,sessionStorage])Object.keys(bV||{}).filter(bX=>bX.startsWith("_zaraz_")).forEach(bW=>{try{bH[bJ]["z_"+bW.slice(7)]=JSON.parse(bV.getItem(bW))}catch{bH[bJ]["z_"+bW.slice(7)]=bV.getItem(bW)}});bP.referrerPolicy="origin";bP.src="/cdn-cgi/zaraz/s.js?z="+btoa(encodeURIComponent(JSON.stringify(bH[bJ])));bO.parentNode.insertBefore(bP,bO)};["complete","interactive"].includes(bI.readyState)?zaraz.init():bH.addEventListener("DOMContentLoaded",zaraz.init)}}(w,d,"zarazData","script");window.zaraz._p=async bc=>new Promise(bd=>{if(bc){bc.e&&bc.e.forEach(be=>{try{const bf=d.querySelector("script[nonce]"),bg=bf?.nonce||bf?.getAttribute("nonce"),bh=d.createElement("script");bg&&(bh.nonce=bg);bh.innerHTML=be;bh.onload=()=>{d.head.removeChild(bh)};d.head.appendChild(bh)}catch(bi){console.error(`Error executing script: ${be}\n`,bi)}});Promise.allSettled((bc.f||[]).map(bj=>fetch(bj[0],bj[1])))}bd()});zaraz._p({"e":["(function(w,d){})(window,document)"]});})(window,document)}catch(e){throw fetch("/cdn-cgi/zaraz/t"),e;};</script></head>
+
+  
+  <body class="layout-no-sidebars page-node-376 page-node_376 node_376 not-preloader path-node node--type-article">
+
+    <a href="#main-content" class="visually-hidden focusable">
+      Skip to main content
+    </a>
+    
+      <div class="dialog-off-canvas-main-canvas" data-off-canvas-main-canvas>
+    <div class="body-page">
+	    <header id="header" class="header-v1">
+
+      <div class="topbar">
+      <div class="topbar-inner">
+        <div class="container">
+          <div class="content">  <div>
+    <div id="block-gavias-tico-topbar" class="block block-block-content block-block-content2f07e2c8-0b1d-4520-8201-4ba62df533c2 no-title">
+  
+    
+      <div class="content block-content">
+      
+            <div class="field field--name-body field--type-text-with-summary field--label-hidden field__item"><div class="pull-left text-left"><ul class="inline"><li><a href="https://www.facebook.com/ligabue.consult" rel="nofollow" target="_blank"><i class="fa fa-facebook" aria-hidden="true"></i></a></li><li><a href="https://www.linkedin.com/in/alessioligabue/" rel="nofollow" target="_blank"><i class="fa fa-linkedin" aria-hidden="true"></i></a></li><li><a href="https://gitlab.com/aleliga" rel="nofollow" target="_blank"><i class="fa fa-gitlab" aria-hidden="true"></i></a></li></ul></div><div class="pull-right text-right"><ul class="inline"><li><span><i class="fa fa-clock-o" aria-hidden="true"></i>Mon–Fri : 09:00–18:00 EU/Rome</span></li><li><a href="/cdn-cgi/l/email-protection#95fcfbf3fad5f4f9f0e6e6fcfaf9fcf2f4f7e0f0bbfce1"><span style="color:#999;"><i class="fa fa-envelope" aria-hidden="true"></i><span class="__cf_email__" data-cfemail="b2dbdcd4ddf2d3ded7c1c1dbdddedbd5d3d0c7d79cdbc6">[email&#160;protected]</span></span></a></li></ul></div></div>
+      
+    </div>
+  </div>
+
+  </div>
+</div>
+        </div>
+      </div>
+    </div>
+  
+          
+   <div class="header-main gv-sticky-menu">
+      <div class="container header-content-layout">
+         <div class="header-main-inner p-relative">
+            <div class="row">
+              <div class="col-md-3 col-sm-6 col-xs-8 branding">
+                                    <div>
+    
+      <a href="/en" title="Home" rel="home" class="site-branding-logo">
+              <img src="/sites/default/files/logo-grey-6-60.webp" alt="Home" width="180" height="60" />
+          </a>
+    
+  </div>
+
+                              </div>
+
+              <div class="col-md-9 col-sm-6 col-xs-4 p-static">
+                <div class="header-inner clearfix">
+                  <div class="main-menu">
+                    <div class="area-main-menu">
+                      <div class="area-inner">
+                          <div class="gva-offcanvas-mobile">
+                            <div class="close-offcanvas hidden"><i class="gv-icon-8"></i></div>
+                                                            <div>
+    <nav role="navigation" aria-labelledby="block-gavias-tico-mainnavigation-menu" id="block-gavias-tico-mainnavigation" class="block block-menu navigation menu--main">
+          
+  
+  <h2  class="visually-hidden block-title" id="block-gavias-tico-mainnavigation-menu"><span>Main Navigation</span></h2>
+  
+  <div class="block-content">
+                 
+<div class="gva-navigation">
+
+              <ul  class="clearfix gva_menu gva_menu_main">
+      
+                              
+            <li  class="menu-item">
+        <a href="/en">
+                    Home
+            
+        </a>
+          
+              </li>
+                         
+         
+                  
+            <li  class="menu-item menu-item--expanded  gva-mega-menu megamenu menu-grid menu-columns-3">
+        <a href="/en/services">
+                    Services
+                      <span class="icaret nav-plus fa fa-angle-down"></span>
+            
+        </a>
+          
+                                <ul class="menu sub-menu">
+                              
+            <li  class="menu-item">
+        <a href="/en/services/google-cloud-consulting">
+                    Google Cloud (GCP)
+            
+        </a>
+          
+              </li>
+                          
+            <li  class="menu-item">
+        <a href="/en/services/linux-consulting">
+                    Linux
+            
+        </a>
+          
+              </li>
+                          
+            <li  class="menu-item">
+        <a href="/en/services/proxmox-support">
+                    Proxmox
+            
+        </a>
+          
+              </li>
+                          
+            <li  class="menu-item">
+        <a href="/en/services/cloudflare-consulting">
+                    Cloudflare
+            
+        </a>
+          
+              </li>
+                          
+            <li  class="menu-item">
+        <a href="/en/services/devops-consulting">
+                    DevOps
+            
+        </a>
+          
+              </li>
+                          
+            <li  class="menu-item">
+        <a href="/en/services/nginx-consulting">
+                    NginX
+            
+        </a>
+          
+              </li>
+                          
+            <li  class="menu-item">
+        <a href="/en/services/ansible-consulting">
+                    Ansible
+            
+        </a>
+          
+              </li>
+                          
+            <li  class="menu-item">
+        <a href="/en/services/apache-webserver-consulting">
+                    Apache
+            
+        </a>
+          
+              </li>
+                          
+            <li  class="menu-item">
+        <a href="/en/services/network-monitoring">
+                    Network Monitoring
+            
+        </a>
+          
+              </li>
+                          
+            <li  class="menu-item">
+        <a href="/en/services/docker-consulting">
+                    Docker
+            
+        </a>
+          
+              </li>
+                          
+            <li  class="menu-item">
+        <a href="/en/services/cloud-consulting">
+                    Cloud
+            
+        </a>
+          
+              </li>
+        </ul>
+  
+              </li>
+                          
+            <li  class="menu-item ">
+        <a href="/en/portfolio">
+                    Portfolio
+            
+        </a>
+          
+              </li>
+                          
+            <li  class="menu-item ">
+        <a href="/en/blog">
+                    Blog
+            
+        </a>
+          
+              </li>
+                          
+            <li  class="menu-item">
+        <a href="/en/about-us">
+                    About
+            
+        </a>
+          
+              </li>
+                          
+            <li  class="menu-item">
+        <a href="/en/contact-us">
+                    Contact Us
+            
+        </a>
+          
+              </li>
+        </ul>
+  
+
+</div>
+
+
+        </div>  
+</nav>
+
+  </div>
+
+
+                                                                                      <div class="after-offcanvas hidden">
+                                  <div>
+    <div id="block-gavias-tico-businesshourfooter-2" class="block block-block-content block-block-content467317d6-ceb0-441e-aa12-ba994d1c9835">
+  
+      <h2 class="block-title" ><span>Business hour</span></h2>
+    
+      <div class="content block-content">
+      
+            <div class="field field--name-body field--type-text-with-summary field--label-hidden field__item"><p>Monday-Friday: 9 a.m.-6 p.m. EU/Rome<br>Saturday-Sunday: Closed</p><p>Emergencies: refer to contractually agreed channels.</p></div>
+      
+    </div>
+  </div>
+
+  </div>
+
+                              </div>
+                           
+                          </div>
+
+                          <div id="menu-bar" class="menu-bar hidden-lg hidden-md">
+                            <span class="one"></span>
+                            <span class="two"></span>
+                            <span class="three"></span>
+                          </div>
+
+                                                  <div class="gva-search-region search-region">
+                            <div id="block-gavias-tico-dropdownlanguagecontenuto" class="block block-dropdown-language block-dropdown-languagelanguage-content no-title">
+  
+    
+      <div class="content block-content">
+        <div class="dropbutton-wrapper" data-drupal-ajax-container>
+    <div class="dropbutton-widget"><span class="icon"><i class="fa fa-globe"></i></span><ul class="dropdown-language-item dropbutton"><li class="en"><span class="language-link active-language">EN</span></li><li class="it"><a href="/blog/btrfs-zfs-ext4-comparazione" class="language-link" hreflang="it">IT</a></li></ul></div>
+  </div>
+    </div>
+  </div>
+
+                            <span class="icon"><i class="fa fa-search"></i></span>
+                            <div class="search-content">
+                                <div>
+    <div class="search-block-form block block-search container-inline" data-drupal-selector="search-block-form" id="block-gavias-tico-searchform" role="search">
+  
+    
+      <form action="/en/search/node" method="get" id="search-block-form" accept-charset="UTF-8" class="search-form search-block-form">
+  <div class="js-form-item form-item form-type-search js-form-type-search form-item-keys js-form-item-keys form-no-label">
+      <label for="edit-keys" class="visually-hidden">Search</label>
+        <input title="Enter the terms you wish to search for." data-drupal-selector="edit-keys" type="search" id="edit-keys" name="keys" value="" size="15" maxlength="128" class="form-search" />
+
+        </div>
+<div data-drupal-selector="edit-actions" class="form-actions js-form-wrapper form-wrapper" id="edit-actions"><input class="search-form__submit button js-form-submit form-submit" data-drupal-selector="edit-submit" type="submit" id="edit-submit" value="Search" />
+</div>
+
+</form>
+
+  </div>
+
+  </div>
+
+                            </div>
+                          </div>
+                                              </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+            </div>
+         </div>
+      </div>
+   </div>
+
+</header>
+	
+   	
+	<div role="main" class="main main-page">
+	
+		<div class="clearfix"></div>
+			
+
+					<div class="help show">
+				<div class="container">
+					<div class="control-panel"><i class="fa fa-cogs"></i></div>
+					<div class="content-inner">
+						  <div>
+    <div data-drupal-messages-fallback class="hidden"></div>
+
+  </div>
+
+					</div>
+				</div>
+			</div>
+		
+				
+		<div class="clearfix"></div>
+				
+		<div class="clearfix"></div>
+		
+		<div id="content" class="content content-full">
+			<div class="container">
+				<div class="content-main-inner">
+	<div class="row">
+		
+					
+						 				 		
+							
+       
+
+		<div id="page-main-content" class="main-content col-xs-12 col-md-9 sb-r ">
+
+			<div class="main-content-inner">
+				
+				
+									<div class="content-main">
+						  <div>
+    <div id="block-gavias-tico-content" class="block block-system block-system-main-block no-title">
+  
+    
+      <div class="content block-content">
+      
+<!-- Start Display article for teaser page -->
+<!-- Start Display article for detail page -->
+
+<article data-history-node-id="376" class="node node-detail node--type-article node--view-mode-full clearfix">
+  <div class="post-block">
+      
+    <div class="post-thumbnail post-">
+              
+            <div class="field field--name-field-image field--type-image field--label-hidden field__item">  <a href="/sites/default/files/articles/filesystem-comparison-btrfs-zfs-ext4.avif">  <picture>
+                  <source srcset="/sites/default/files/styles/max_1300x1300/public/articles/filesystem-comparison-btrfs-zfs-ext4.avif 1x" media="all and (min-width: 1200px)" type="image/avif" width="1024" height="731"/>
+              <source srcset="/sites/default/files/styles/max_650x650/public/articles/filesystem-comparison-btrfs-zfs-ext4.avif 1x, /sites/default/files/styles/max_2600x2600/public/articles/filesystem-comparison-btrfs-zfs-ext4.avif 2x" media="all and (min-width: 992px)" type="image/avif" width="650" height="464"/>
+              <source srcset="/sites/default/files/styles/max_650x650/public/articles/filesystem-comparison-btrfs-zfs-ext4.avif 1x" media="all and (min-width: 768px)" type="image/avif" width="650" height="464"/>
+                  <img loading="eager" width="325" height="232" src="/sites/default/files/styles/max_325x325/public/articles/filesystem-comparison-btrfs-zfs-ext4.avif" alt="btrfs vs zfs vs ext4 filesystem comparison - Main image" style="min-height: 232px;" />
+
+  </picture>
+</a>
+</div>
+      
+        
+    </div>
+
+    <div class="post-content">
+      <span class="post-categories">
+            <div class="field field--name-field-post-category field--type-entity-reference field--label-hidden field__item"><a href="/en/cat/linux" hreflang="en">Linux</a></div>
+      </span>
+      
+         <h1 class="post-title">
+<span>Linux filesystem comparison guide: btrfs vs zfs vs ext4</span>
+</h1>
+               
+      <div class="post-meta">
+        <span class="post-created"> 
+<span><time datetime="2025-11-02T08:00:00+01:00" title="Sunday, November 2, 2025 - 08:00">Sun, 02/11/2025 - 08:00</time>
+</span>
+ </span> /
+        <span class="post-comment"> 
+          <a href="/en/blog/btrfs-zfs-ext4-comparison#comments"> Commenti</a>
+        </span>
+      </div>
+      
+              <div class="node__meta hidden">
+          
+          <span>
+            Submitted by 
+<span><span>Alessio Ligabue</span></span>
+ on 
+<span><time datetime="2025-11-02T08:00:00+01:00" title="Sunday, November 2, 2025 - 08:00">Sun, 02/11/2025 - 08:00</time>
+</span>
+          </span>
+          
+        </div>
+      
+      <div class="node__content clearfix">
+        
+            <div class="field field--name-body field--type-text-with-summary field--label-hidden field__item"><p>The choice of filesystem is one of the fundamental and most critical decisions when setting up a Linux system. It is not just a matter of "where" files are saved, but "how" they are managed, protected, and made available. Today, the battle is no longer just about speed; it is about data integrity, flexibility and advanced functionality. While <strong>ext4</strong> reigns as the trusted standard, modern Copy-on-Write (CoW) filesystems such as <strong>btrfs</strong> and <strong>ZFS</strong> have changed the rules of the game.</p><p>In this in-depth guide, we will look at the historic <strong>btrfs vs. zfs vs. ext4</strong> battle, going beyond simple benchmarks to figure out which filesystem is really best for your specific use case, whether it's an enterprise server, a home NAS, or a development laptop.</p><nav id="index"><h2>Index of Contents</h2><ul><li data-list-item-id="e01302e5f2a151ad4d4ed774f2291ee2b"><a href="#panoramic">The Three Contenders: An Overview</a><ul><li data-list-item-id="e97c58c8be39ac53e981b002549901843"><a href="#ext4">ext4: The Reliable and Universal Standard</a></li><li data-list-item-id="e7c4fe868264a23f03ec1bd63919d42c8"><a href="#btrfs">btrfs: The Linux Native Innovator</a></li><li data-list-item-id="e32079d511d1a767ba104565e23e3397e"><a href="#zfs">ZFS: The Guardian of Data Integrity</a></li></ul></li><li data-list-item-id="e04eb816679929cecfdbf923622782120"><a href="#comparison">Direct Comparison: btrfs vs. zfs vs. ext4</a><ul><li data-list-item-id="e4710d6d3140a36884f1bd68906ea4bbe"><a href="#table">Comparative Table of Features</a></li><li data-list-item-id="e421b70ebcc473e9c80e622c035e95882"><a href="#integrity">Data Integrity: Checksum and Self-Healing</a></li><li data-list-item-id="e7732d29ff6450b89b29469543e178a3b"><a href="#snapshot">Snapshot and Volume Management</a></li><li data-list-item-id="e7031548ff76237ae577eacf2dc2c0f59"><a href="#performance">Performance: The Myth of the Slow CoW</a></li><li data-list-item-id="e376eaad6dab5c1ab1b18636ce82e8f28"><a href="#stability">Stability, Maturity, and License</a></li></ul></li><li data-list-item-id="e0a4ba512f43aae6375815748bf4f46b0"><a href="#duello-cow">The Modern Duel: ZFS btrfs</a></li><li data-list-item-id="eff7fe24c4b70bb1a0e4356e80d1725c2"><a href="#cta">The Strategic Choice for Your Business</a></li><li data-list-item-id="e74d1af02a5b577729ada202c076ca42a"><a href="#scenarios">Use Scenario: Which One to Choose FOR YOU?</a></li><li data-list-item-id="e2e6ef692fe29836d4229e5afd5d18925"><a href="#faq">Frequently Asked Questions (FAQ)</a></li><li data-list-item-id="e80d37f3eede6535f207b04b28835e267"><a href="#conclusion">Conclusion: The Future is Now</a></li></ul></nav><section id="overview"><h2>The Three Contenders: An Overview</h2><p>Before we dive into the <strong>zfs vs. btrfs</strong> comparison, we need to understand our starting point: <strong>ext4</strong>.</p><h3 id="ext4">ext4: The Reliable and Universal Standard</h3><p>Ext4 (Fourth Extended Filesystem) is the successor to ext3 and is the default filesystem for the vast majority of Linux distributions. It is the workhorse, tested by millions of users and servers for over a decade. Its architecture is based on <em>journaling</em>, a mechanism that prevents filesystem corruption in the event of sudden crashes by writing a log of changes before applying them.</p><ul><li data-list-item-id="e57bca961893f403a0c556c0aebef32a7"><strong>Pros: </strong>Extremely stable, mature, fast for general-purpose workloads, light on resources (CPU and RAM), universally supported.</li><li data-list-item-id="e0bc11ff84b8ec36b31904fed7f5c4638"><strong>Contra: </strong>It lacks modern features. It has no built-in snapshots, no data checksums (protection against silent corruption), no flexible volume management. Comparing <strong>ext4 vs zfs</strong> or <strong>ext4 vs btrfs</strong> on the feature level is merciless.</li></ul></section><section id="btrfs"><h3 id="btrfs">btrfs: The Linux Native Innovator</h3><p>Btrfs (B-tree File System) is the Linux kernel's native answer to modern filesystems. It was designed from the ground up to address the shortcomings of ext4. Its key feature is <em>Copy-on-Write (CoW)</em>: when a piece of data is changed, btrfs does not overwrite the old block, but writes the change to a new block and updates the pointers. This approach is the basis for its powerful features.</p><ul><li data-list-item-id="efd548cb2495036e092fa410be0733db2"><strong>Pros: </strong>Atomic and instantaneous snapshots (great for backups and rollbacks), checksums on data and metadata (detects corruption), transparent compression, built-in RAID management, and flexible subvolumes (similar to partitions, but dynamic).</li><li data-list-item-id="eaa129db7d5341947f2bbb9565f69db45"><strong>Contra: </strong>It has had a troubled history. Although now considered stable for most uses, its RAID 5/6 implementations are still viewed with suspicion by the community. Write performance, due to CoW, can be variable, especially with databases.</li></ul></section><section id="zfs"><h3 id="zfs">ZFS: The Guardian of Data Integrity</h3><p>ZFS (Zettabyte File System) originated at Sun Microsystems (now Oracle) and is often considered the "ultimate" filesystem for data security. Like btrfs, it is a CoW filesystem, but it takes each concept to an enterprise level. It is more than a filesystem: it is a logical volume manager and a filesystem combined. Its top priority is end-to-end data integrity.</p><ul><li data-list-item-id="e149160d40e2828c55ccc79763834f63d"><strong>Pro:</strong> Unparalleled data integrity (checksums and "self-healing" if in RAID), powerful snapshots and clones, built-in compression and deduplication (removal of duplicate blocks), extremely robust RAID management (RAID-Z).</li><li data-list-item-id="e915661a98a30b96fb5649ecb4b31eb84"><strong>Contra: </strong>It is not native to the Linux kernel due to a license incompatibility (CDDL vs. GPL). It requires installation of external modules (via OpenZFS). It is notoriously demanding in terms of RAM, especially if deduplication is used (many GB of ECC RAM is recommended).</li></ul></section><hr><section id="comparison"><h2>Direct Comparison: btrfs vs zfs vs ext4</h2><p>Let's examine the key differences that drive the choice between these three titans.</p><h3 id="table">Comparative Table of Features</h3><style>
+                                                    .fs-table { width: 100%; border-collapse: collapse; margin: 20px 0; font-size: 0.9em; }
+                                                    .fs-table th, .fs-table td { border: 1px solid #ddd; padding: 12px 15px; text-align: left; }
+                                                    .fs-table th { background-color: #f4f4f4; }
+                                                    .fs-table tr:nth-child(even) { background-color: #f9f9f9; }
+                                                    .fs-table .check { color: #28a745; font-weight: bold; text-align: center; }
+                                                    .fs-table .cross { color: #dc3545; font-weight: bold; text-align: center; }
+                                                    .fs-table .partial { color: #fd7e14; font-weight: bold; text-align: center; }
+                                                </style><table class="table fs-table"><thead><tr><th>Feature</th><th>ext4</th><th>btrfs</th><th>ZFS</th></tr></thead><tbody><tr><td>Architecture</td><td>Journaling</td><td>Copy-on-Write (CoW)</td><td>Copy-on-Write (CoW)</td></tr><tr><td>Snapshot</td><td class="cross">No (only with LVM)</td><td class="check">Yes (Native)</td><td class="check">Yes (Native)</td></tr><tr><td>Checksum Data</td><td class="cross">No</td><td class="check">Yes</td><td class="check">Yes</td></tr><tr></tr><tr><td>Self-repair (Self-Healing)</td><td class="cross">No</td><td class="check">Yes (with RAID)</td><td class="check">Yes (with RAID-Z)</td></tr><tr></tr><tr><td>RAID Integrated Software</td><td class="cross">No (requires mdadm)</td><td class="partial">Yes (RAID 0, 1, 10 stable)</td><td class="check">Yes (RAID-Z 1/2/3)</td></tr><tr></tr><tr><td>Transparent Compression</td><td class="cross">No</td><td class="check">Yes (zlib, zstd, lzo)</td><td class="check">Yes (lz4, zstd, gzip)</td></tr><tr><td>Deduplication</td><td class="cross">No</td><td class="partial">Yes (experimental)</td><td class="check">Yes (requires a lot of RAM)</td></tr><tr></tr><tr><td>Native in Linux Kernel</td><td class="check">Yes</td><td class="check">Yes</td><td class="cross">No (via OpenZFS)</td></tr><tr></tr><tr><td>RAM Consumption (basic)</td><td>Low</td><td>Low/Moderate</td><td>High</td></tr></tbody></table><h3 id="integrity">Data Integrity: Checksum and Self-Healing</h3><p>Here we play the most important game between <strong>zfs vs ext4</strong>. Ext4 has no way of knowing if a bit on the disk has changed due to a hardware error (so-called <em>silent data corruption</em> or <em>bit rot</em>). It will simply read corrupted data.</p><p>Both <strong>zfs</strong> and <strong>btrfs</strong> solve this problem through <strong>checksums</strong>. Each block of data has a mathematical "signature." When the data is read, the filesystem recalculates the signature: if it does not match, the data is corrupt. If you are using a RAID configuration (such as RAID 1 or RAID-Z), ZFS and btrfs can automatically recover the correct block from the redundant copy, repairing the error on the fly (<em>self-healing</em>). ZFS is universally recognized as the leader in this field.</p><h3 id="snapshot">Snapshots and Volume Management</h3><p>Thanks to CoW, both btrfs and ZFS can create <em>snapshots</em> (snapshots) of the filesystem almost instantaneously and without taking up additional space (as long as the data does not change). This is revolutionary for backups: you can "snapshot" your system before an upgrade and, if something goes wrong, go back in seconds. Btrfs handles this via <em>subvolumes</em>, which make managing different installations (e.g., for containers) incredibly flexible.</p><h3 id="performance">Performance: The Myth of the Slow CoW</h3><p>In terms of pure performance (throughput), <strong>ext4</strong> is often the fastest, especially in workloads with many small random writes (such as databases). Its "in-place" approach has less overhead than CoW.</p><p>However, CoW (<strong>zfs btrfs</strong>) can be faster in other scenarios, such as creating copies of files (which are instantaneous) or due to compression (less data to write to slow disks). ZFS performance also benefits greatly from the cache in RAM (ARC), which, if properly configured, can make it faster than ext4 in read-intensive workloads. For consistently up-to-date technical benchmarks, we recommend consulting in-depth tests such as those regularly published by <a href="https://www.phoronix.com/reviews/Storage" data-entity-type="external" target="_blank" rel="noopener noreferrer"><strong>Phoronix</strong></a>.</p><h3 id="established">Stability, Maturity and License</h3><p><strong>ext4</strong> wins for proven stability. It's boring, in the best sense of the word. <strong>ZFS</strong> is similarly mature and stable, but its complexity and the licensing issue (which keeps it out of the main kernel) are obstacles for some. <strong>Btrfs</strong> is native to the kernel and supported by large companies (such as Meta and SUSE), but its reputation is still marred by historical bugs in RAID 5/6 functions, although single-disk or RAID 1/10 configurations have been considered robust for years.</p></section><hr><section id="duel-cow"><h2>The Modern Duel: ZFS btrfs</h2><p>The real modern choice is often between <strong>zfs vs btrfs</strong>. ZFS is older, more mature in its advanced features (especially RAID and deduplication) and is the choice of choice for enterprise storage where data integrity is law. Btrfs is more "Linux-friendly," more flexible in pool management (you can add a single disk to an existing pool more easily) and requires less RAM. As <a href="https://www.xda-developers.com/why-i-chose-btrfs-over-zfs-for-home-nas/" target="_blank" rel="noopener noreferrer"><strong>noted in some analysis</strong></a>, for a home NAS where flexibility is key, btrfs may be a winning choice.</p></section><section id="cta"><div class="cta-custom"><h2>"Bit Rot" Is Unforgiving. Is Your Infrastructure Ready?</h2><p>You've seen how <code>btrfs</code> and <code>zfs</code> can save your data thanks to self-healing, but a poor configuration is worse than not having them at all. Don't risk letting a setup error compromise your backup integrity or cause critical downtime.</p><p>Let's turn theory into practical security. We analyze your specific workloads and implement a future-proof filesystem.</p><p><a class="cta-button" href="/en/services/linux-consulting" data-entity-type="node" data-entity-uuid="c96ccb3f-dec3-4699-91b3-a98b094d30bd" data-entity-substitution="canonical" title="Linux Consultant &amp; Administrator Server Management &amp; Support"><strong>Secure Your Data Today</strong></a></p></div></section><section id="scenarios"><h2>Use Scenario: Which one to choose FOR YOU?</h2><p>Here's a quick guide to get you oriented:</p><ul><li data-list-item-id="e59fd89acf24dd8524ebdb99ad6991741"><strong>You are a Desktop/Laptop Linux user: </strong>Go with <strong>ext4</strong> if you want maximum simplicity and compatibility. Choose <strong>btrfs</strong> if you want system snapshots (for easy rollbacks of updates) and compression. Many modern distributions (such as Fedora and openSUSE) use it by default.</li><li data-list-item-id="e453f77a7751877bb2bae5f0784fa7039"><strong>You are building a home NAS (e.g. Unraid, </strong><a href="/en/blog/install-proxmox" data-entity-type="node" data-entity-uuid="21c9b537-56a7-4fa7-b834-06d363d34743" data-entity-substitution="canonical" title="How to Install Proxmox VE 9 Detailed Guide"><strong>Proxmox</strong></a><strong>):</strong> This is the <strong>btrfs vs. zfs</strong> battle. Choose <strong>ZFS</strong> if absolute integrity of your media and backups is priority #1 and you have enough RAM (minimum 8GB+). Choose <strong>btrfs</strong> if you prefer flexibility (e.g., add disks of different sizes) and want a lighter system.</li><li data-list-item-id="edf9d337220f63090e7a503d4121ee2b4"><strong>Manage an Enterprise Server or Critical Database:</strong> Choose <strong>ext4</strong> (perhaps on LVM) if your workload is I/O intensive and you need predictable and stable write performance. Choose <strong>ZFS</strong> for any file or application server where data integrity, large pool management, and corruption protection are more important than pure write speed.</li></ul></section><hr><section id="faq"><h2>Frequently Asked Questions (FAQs)</h2><h3>D: Is btrfs as stable as ZFS in 2024/2025?</h3><p>R: For single-disk configurations and RAID 1/10, yes, btrfs is considered very stable and used in production by companies like Meta. However, its RAID 5 and RAID 6 implementations still have a bad reputation and ZFS (with its RAID-Z) is considered much more mature and reliable for those parity levels.</p><h3>D: Does ZFS really consume that much RAM?</h3><p>R: Yes and no. ZFS <strong>will use a lot of RAM</strong> if available for its cache (ARC), which dramatically improves read performance. It is not "consumption," it is intelligent "usage." However, the <em>deduplication</em> function actively requires huge amounts of RAM (often 1-5GB of RAM per TB of data) to be performant. Without deduplication, ZFS can run well with 4-8GB of RAM, although more is always better.</p><h3>D: Is Ext4 obsolete? Should I migrate?</h3><p>R: No, ext4 is not obsolete. It is mature, fast and incredibly stable. It is the definition of "if it works, don't touch it." If you don't have a specific need for snapshots or data checksums, ext4 remains an excellent and secure choice for servers and desktops.</p><h3>D: Can I convert my ext4 filesystem to btrfs?</h3><p>R: Yes, there is an official tool (<code>btrfs-convert</code>) that can perform an in-place conversion from ext4 to btrfs. However, it is a delicate operation. It is VIVIOUSLY recommended to have a full backup before attempting it. Reverse conversion (from btrfs to ext4) is not so simple.</p></section><hr><section id="conclusion"><h2>Conclusion: The Future is Now</h2><p>The choice between <strong>ext4, btrfs, and zfs</strong> comes down to a trade-off between traditional stability and modern functionality.</p><p><strong>Ext4</strong> is the safe and performant choice for general purpose use. <strong>Btrfs</strong> is the flexible, native Linux innovator, ideal for modern desktops and home NAS where flexibility is critical. <strong>ZFS</strong> remains the undisputed king of data integrity, the enterprise choice for mission-critical storage where the loss of a single bit is unacceptable.</p><p>Weigh your priorities: is it speed, flexibility or absolute data integrity?</p></section></div>
+      
+      </div>
+      <div id="node-single-comment">
+        <section>
+  
+  
+
+      <h2>Add new comment</h2>
+    <form class="comment-comment-form comment-form antibot" data-drupal-selector="comment-form" data-action="/en/comment/reply/node/376/comment" action="/antibot" method="post" id="comment-form" accept-charset="UTF-8">
+  <noscript>
+  <div class="antibot-no-js antibot-message antibot-message-warning">You must have JavaScript enabled to use this form.</div>
+</noscript>
+<div class="js-form-item form-item form-type-textfield js-form-type-textfield form-item-name js-form-item-name">
+      <label for="edit-name">Your name</label>
+        <input data-drupal-selector="edit-name" type="text" id="edit-name" name="name" value="" size="30" maxlength="60" class="form-text" />
+
+        </div>
+<input autocomplete="off" data-drupal-selector="form-2wldok4-i9gmqg-5szcdccqi0thkxg5koj9mt93mfdo" type="hidden" name="form_build_id" value="form-2WlDOK4_i9GMQg_5sZcdccQI0THKxg5Koj9mT93MfDo" />
+<input data-drupal-selector="edit-comment-comment-form" type="hidden" name="form_id" value="comment_comment_form" />
+<input data-drupal-selector="edit-antibot-key" type="hidden" name="antibot_key" value="" />
+<div class="field--type-string field--name-subject field--widget-string-textfield js-form-wrapper form-wrapper" data-drupal-selector="edit-subject-wrapper" id="edit-subject-wrapper">      <div class="js-form-item form-item form-type-textfield js-form-type-textfield form-item-subject-0-value js-form-item-subject-0-value">
+      <label for="edit-subject-0-value">Subject</label>
+        <input class="js-text-full text-full form-text" data-drupal-selector="edit-subject-0-value" type="text" id="edit-subject-0-value" name="subject[0][value]" value="" size="60" maxlength="64" placeholder="" />
+
+        </div>
+
+  </div>
+<div class="field--type-text-long field--name-comment-body field--widget-text-textarea js-form-wrapper form-wrapper" data-drupal-selector="edit-comment-body-wrapper" id="edit-comment-body-wrapper">      <div class="js-text-format-wrapper js-form-item form-item">
+  <div class="js-form-item form-item form-type-textarea js-form-type-textarea form-item-comment-body-0-value js-form-item-comment-body-0-value">
+      <label for="edit-comment-body-0-value" class="js-form-required form-required">Comment</label>
+        <div>
+  <textarea class="js-text-full text-full form-textarea required resize-vertical" data-ckeditor5-host-entity-type="comment" data-ckeditor5-host-entity-bundle="comment" data-ckeditor5-host-entity-langcode="en" data-drupal-selector="edit-comment-body-0-value" id="edit-comment-body-0-value" name="comment_body[0][value]" rows="5" cols="60" placeholder="" required="required"></textarea>
+</div>
+
+        </div>
+<div class="js-filter-wrapper js-form-wrapper form-wrapper" data-drupal-selector="edit-comment-body-0-format" id="edit-comment-body-0-format"><div data-drupal-selector="edit-comment-body-0-format-help" id="edit-comment-body-0-format-help" class="js-form-wrapper form-wrapper"><a href="/en/filter/tips" target="_blank" data-drupal-selector="edit-comment-body-0-format-help-about" id="edit-comment-body-0-format-help-about">About text formats</a></div>
+<div class="js-filter-guidelines js-form-wrapper form-wrapper" data-drupal-selector="edit-comment-body-0-format-guidelines" id="edit-comment-body-0-format-guidelines"><div data-drupal-format-id="comment">
+  <h4>Comment</h4>
+  
+  
+    
+          <ul>
+              <li>Allowed HTML tags: &lt;br&gt; &lt;p&gt; &lt;code class=&quot;language-*&quot;&gt; &lt;pre&gt;</li>
+              <li>Lines and paragraphs break automatically.</li>
+              <li>Only images hosted on this site may be used in &lt;img&gt; tags.</li>
+            </ul>
+    
+    
+  
+</div>
+</div>
+</div>
+
+  </div>
+
+  </div>
+<div data-drupal-selector="edit-actions" class="form-actions js-form-wrapper form-wrapper" id="edit-actions"><input data-drupal-selector="edit-submit" type="submit" id="edit-submit" name="op" value="Save" class="button button--primary js-form-submit form-submit" />
+<input data-drupal-selector="edit-preview" type="submit" id="edit-preview" name="op" value="Preview" class="button js-form-submit form-submit" />
+</div>
+
+</form>
+
+  
+</section>
+
+      </div>
+
+    </div>
+
+  </div>
+
+</article>
+
+<!-- End Display article for detail page -->
+
+    </div>
+  </div>
+
+  </div>
+
+					</div>
+				
+							</div>
+
+		</div>
+
+		<!-- Sidebar Left -->
+				<!-- End Sidebar Left -->
+
+		<!-- Sidebar Right -->
+					
+							 
+
+			<div class="col-lg-3 col-md-3 col-sm-12 col-xs-12 sidebar sidebar-right theiaStickySidebar">
+				<div class="sidebar-inner">
+					  <div>
+    <div class="views-element-container block block-views block-views-blockcategories-post-block-2" id="block-gavias-tico-views-block-categories-post-block-2">
+  
+      <h2 class="block-title" ><span>Post Categories</span></h2>
+    
+      <div class="content block-content">
+      <div><div class="tags-list js-view-dom-id-91e3ba1750ea014f459aa033b700fb6a353f2b3cebf1ad22c04bf57f2da77ff6">
+  
+  
+  
+
+  
+  
+  
+
+  <div class="item-list">
+  
+  <ul>
+
+          <li class="view-list-item" ><div class="views-field views-field-name"><span class="field-content"><a href="/en/cat/architecture-cloud" hreflang="en">Cloud architectures</a></span></div></li>
+          <li class="view-list-item" ><div class="views-field views-field-name"><span class="field-content"><a href="/en/cat/linux" hreflang="en">Linux</a></span></div></li>
+          <li class="view-list-item" ><div class="views-field views-field-name"><span class="field-content"><a href="/en/cat/proxmox" hreflang="en">Proxmox</a></span></div></li>
+          <li class="view-list-item" ><div class="views-field views-field-name"><span class="field-content"><a href="/en/cat/network-monitor" hreflang="en">Network Monitor</a></span></div></li>
+          <li class="view-list-item" ><div class="views-field views-field-name"><span class="field-content"><a href="/en/cat/it-automation" hreflang="en">IT Automation</a></span></div></li>
+          <li class="view-list-item" ><div class="views-field views-field-name"><span class="field-content"><a href="/en/cat/training" hreflang="en">Training</a></span></div></li>
+    
+  </ul>
+
+</div>
+
+    
+
+  
+  
+
+  
+  
+</div>
+</div>
+
+    </div>
+  </div>
+<div class="views-element-container block block-views block-views-blockpost-other-block-1" id="block-gavias-tico-views-block-post-other-block-1">
+  
+      <h2 class="block-title" ><span>Recent Posts</span></h2>
+    
+      <div class="content block-content">
+      <div><div class="post-style-stick list js-view-dom-id-3a878718b8259b397040767cf86134d3f4bdadc3d126723b08a128a505274b9a">
+  
+  
+  
+
+  
+  
+  
+
+  <div class="item-list">
+  
+  <ul>
+
+          <li class="view-list-item" ><div class="views-field views-field-nothing"><div class="field-content"><div class="post-block">
+      <div class="post-image">
+              <a href="/en/blog/mysql-84-debian-13">  
+                  
+              
+              
+                  <img loading="lazy" width="325" height="178" alt="Install MySQL 8.4 in Debian 13 - Image logos" data-src="/sites/default/files/styles/max_325x325/public/articles/mysql-debian.webp.avif" class="unveil-image" />
+
+  
+</a>
+
+      </div>
+      <div class="post-content">
+            <div class="post-title"> <a href="/en/blog/mysql-84-debian-13" hreflang="en">How to Install MySQL 8.4 in Debian 13 - Complete Guide</a> </div>            
+            <div class="post-meta">
+		   <span class="post-categories"><a href="/en/cat/linux" hreflang="en">Linux</a> </span> / 
+                   <span class="post-created"><time datetime="2026-03-03T08:00:00+01:00">03 Mar 26</time>
+ </span> / 
+                  <span class="post-comment">0 comments </span>
+	     </div>
+       </div>
+</div></div></div></li>
+          <li class="view-list-item" ><div class="views-field views-field-nothing"><div class="field-content"><div class="post-block">
+      <div class="post-image">
+              <a href="/en/blog/migrating-vmware-to-proxmox-guide">  
+                  
+              
+              
+                  <img loading="lazy" width="325" height="177" alt="Migrating from VMWare to Proxmox: Strategic and Operational Guide - Migration image" data-src="/sites/default/files/styles/max_325x325/public/articles/vmware-migration-proxmox.avif" class="unveil-image" />
+
+  
+</a>
+
+      </div>
+      <div class="post-content">
+            <div class="post-title"> <a href="/en/blog/migrating-vmware-to-proxmox-guide" hreflang="en">Migrating from VMware to Proxmox: Strategic and Operational Guide</a> </div>            
+            <div class="post-meta">
+		   <span class="post-categories"><a href="/en/cat/proxmox" hreflang="en">Proxmox</a> </span> / 
+                   <span class="post-created"><time datetime="2026-02-24T08:00:00+01:00">24 Feb 26</time>
+ </span> / 
+                  <span class="post-comment">0 comments </span>
+	     </div>
+       </div>
+</div></div></div></li>
+          <li class="view-list-item" ><div class="views-field views-field-nothing"><div class="field-content"><div class="post-block">
+      <div class="post-image">
+              <a href="/en/blog/ssh-port-forwarding-tunneling">  
+                  
+              
+              
+                  <img loading="lazy" width="325" height="217" alt="SSH Secure Port Forwarding - OpenSSH Logo" data-src="/sites/default/files/styles/max_325x325/public/articles/openssh-blog.webp.avif" class="unveil-image" />
+
+  
+</a>
+
+      </div>
+      <div class="post-content">
+            <div class="post-title"> <a href="/en/blog/ssh-port-forwarding-tunneling" hreflang="en">Complete Guide to Secure SSH Port Forwarding: Tunneling and Best Practice</a> </div>            
+            <div class="post-meta">
+		   <span class="post-categories"><a href="/en/cat/linux" hreflang="en">Linux</a> </span> / 
+                   <span class="post-created"><time datetime="2026-02-17T08:00:00+01:00">17 Feb 26</time>
+ </span> / 
+                  <span class="post-comment">0 comments </span>
+	     </div>
+       </div>
+</div></div></div></li>
+          <li class="view-list-item" ><div class="views-field views-field-nothing"><div class="field-content"><div class="post-block">
+      <div class="post-image">
+              <a href="/en/blog/improve-ttfb-server">  
+                  
+              
+              
+                  <img loading="lazy" width="325" height="177" alt="Improving TTFB Server Response Time - Infographic" data-src="/sites/default/files/styles/max_325x325/public/articles/optimize-server-response-time-ttfb.webp.avif" class="unveil-image" />
+
+  
+</a>
+
+      </div>
+      <div class="post-content">
+            <div class="post-title"> <a href="/en/blog/improve-ttfb-server" hreflang="en">Improving Server Response Time (TTFB)</a> </div>            
+            <div class="post-meta">
+		   <span class="post-categories"><a href="/en/cat/architecture-cloud" hreflang="en">Cloud architectures</a> </span> / 
+                   <span class="post-created"><time datetime="2026-02-10T08:00:00+01:00">10 Feb 26</time>
+ </span> / 
+                  <span class="post-comment">0 comments </span>
+	     </div>
+       </div>
+</div></div></div></li>
+          <li class="view-list-item" ><div class="views-field views-field-nothing"><div class="field-content"><div class="post-block">
+      <div class="post-image">
+              <a href="/en/blog/waf-best-practices">  
+                  
+              
+              
+                  <img loading="lazy" width="325" height="177" alt="WAF Best Practices - Logo Article" data-src="/sites/default/files/styles/max_325x325/public/articles/waf-best-practices.webp.avif" class="unveil-image" />
+
+  
+</a>
+
+      </div>
+      <div class="post-content">
+            <div class="post-title"> <a href="/en/blog/waf-best-practices" hreflang="en">WAF Best Practices 2026: Strategic Guide to Protecting Your Web Apps</a> </div>            
+            <div class="post-meta">
+		   <span class="post-categories"><a href="/en/cat/architecture-cloud" hreflang="en">Cloud architectures</a> </span> / 
+                   <span class="post-created"><time datetime="2026-02-04T08:00:00+01:00">04 Feb 26</time>
+ </span> / 
+                  <span class="post-comment">1 comment </span>
+	     </div>
+       </div>
+</div></div></div></li>
+    
+  </ul>
+
+</div>
+
+    
+
+  
+  
+
+  
+  
+</div>
+</div>
+
+    </div>
+  </div>
+
+  </div>
+
+				</div>
+			</div>
+				<!-- End Sidebar Right -->
+		
+	</div>
+</div>
+			</div>
+		</div>
+
+		
+				
+		
+	</div>
+
+	<footer id="footer" class="footer">
+  
+     
+   <div class="footer-center">
+      <div class="container">      
+         <div class="row">
+                          <div class="footer-first col-lg-4 col-md-4 col-sm-12 col-xs-12 column">
+                  <div>
+    <div id="block-gavias-tico-contactinfo" class="block block-block-content block-block-content0c1ecc6e-1d39-4ec0-a502-2c557762945e no-title">
+  
+    
+      <div class="content block-content">
+      
+            <div class="field field--name-body field--type-text-with-summary field--label-hidden field__item"><div class="contact-info"><p><span class="description">We would like to help!</span></p><ul class="contact-info"><li><span><i class="fa fa-globe" aria-hidden="true"></i> Via Ca' Marastoni 13, Reggio Emilia, IT</span></li><li><a href="tel:+3905221606427"><i class="fa fa-mobile fa-lg" aria-hidden="true"></i> (+39) 0522 16 06 427</a></li><li><a href="/cdn-cgi/l/email-protection#d6bfb8b0b996b7bab3a5a5bfb9babfb1b7b4a3b3f8bfa2"><i class="fa fa-envelope" aria-hidden="true"></i> <span class="__cf_email__" data-cfemail="b7ded9d1d8f7d6dbd2c4c4ded8dbded0d6d5c2d299dec3">[email&#160;protected]</span></a></li></ul></div></div>
+      
+    </div>
+  </div>
+
+  </div>
+
+              </div> 
+            
+                         <div class="footer-second col-lg-2 col-md-2 col-sm-12 col-xs-12 column">
+                  <div>
+    <div id="block-gavias-tico-linkfooter" class="block block-block-content block-block-content6f99d546-26f9-4a2d-97ae-e90d541da3fb no-title">
+  
+    
+      <div class="content block-content">
+      
+            <div class="field field--name-body field--type-text-with-summary field--label-hidden field__item"><ul class="menu"><li><a href="/en">Home</a></li><li><a href="/en/services">Services</a></li><li><a href="/en/portfolio">Portfolio</a></li><li><a href="/en/blog">Blog</a></li><li><a href="/en/about-us">About Us</a></li><li><a href="/en/contact-us">Contact Us</a></li></ul></div>
+      
+    </div>
+  </div>
+
+  </div>
+
+              </div> 
+            
+            
+                     </div>   
+      </div>
+  </div>   
+
+  
+      <div class="copyright">
+      <div class="container">
+        <div class="copyright-inner">
+              <div>
+    <div id="block-gavias-tico-copyright" class="block block-block-content block-block-content6a74724d-d485-4216-a560-962e52758fde no-title">
+  
+    
+      <div class="content block-content">
+      
+            <div class="field field--name-body field--type-text-with-summary field--label-hidden field__item"><div class="text-center" style="font-size:8px;">© Copyright Alessio Ligabue 2024 | Serving customers worldwide | All Rights Reserved. VAT: IT02652240355 - CF: LGBLSS82B01H223P.</div></div>
+      
+    </div>
+  </div>
+
+  </div>
+
+        </div>   
+      </div>   
+    </div>
+  
+</footer>
+
+</div>
+
+
+  </div>
+
+    
+    <script data-cfasync="false" src="/cdn-cgi/scripts/5c5dd728/cloudflare-static/email-decode.min.js"></script><script src="/sites/default/files/js/js_ub41-QWEQgAdItEE9yrt2W9DKPdVeOuI3aLjeaZwPAs.js?scope=footer&amp;delta=0&amp;language=en&amp;theme=gavias_tico&amp;include=eJx1i1kOwjAMRC8UkiNVziqDiSvbKfT2VFQV_aA_M5rlQTeMbAF295Xl6RJLCVnGDOSz8ByHGXdXkazIMezJNVgQdIrE6REHUt4efzoPqsXUV-FupeeDU8JtJVh_2Km6ogwTh0YcgW5qK2FvbsHy0vBVD3d4fwDHQlYR"></script>
+
+
+    
+  <script defer src="https://static.cloudflareinsights.com/beacon.min.js/v8c78df7c7c0f484497ecbca7046644da1771523124516" integrity="sha512-8DS7rgIrAmghBFwoOTujcf6D9rXvH8xm8JQ1Ja01h9QX8EzXldiszufYa4IFfKdLUKTTrnSFXLDkUEOTrZQ8Qg==" data-cf-beacon='{"version":"2024.11.0","token":"b06d014db1d444579aa5edbaa1320abc","r":1,"server_timing":{"name":{"cfCacheStatus":true,"cfEdge":true,"cfExtPri":true,"cfL4":true,"cfOrigin":true,"cfSpeedBrain":true},"location_startswith":null}}' crossorigin="anonymous"></script>
+<script>(function(){function c(){var b=a.contentDocument||a.contentWindow.document;if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'9d84438c4a81bcd8',t:'MTc3MjgzMDU1Mw=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
+</html>

@@ -1,0 +1,2268 @@
+<!DOCTYPE html>
+<html dir="ltr"
+    lang="en,de" 
+    class="group/html min-h-dvh no-js
+         dark 
+         
+        
+         has-grayscale-Gray 
+    "
+    data-sx-content-api-url="https://www.ajfriesen.com/ghost/api/content/"
+    data-sx-content-api-key="fbdce46d917b762279790544c8"
+    data-prismjs-copy="Copy" 
+    data-prismjs-copy-error="Error" 
+    data-prismjs-copy-success="Copied">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="HandheldFriendly" content="True" />
+        <meta http-equiv="X-UA-Compatible" content="IE=edge">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Replacing disks in BTRFS</title>
+
+
+        <link rel="preload" as="style" href="/assets/built/main.min.css?v=d7d1c1d4c8" />
+        <link rel="preload" as="script" href="/assets/built/main.min.js?v=d7d1c1d4c8" />  
+        
+                      
+
+        <script>
+    document.documentElement.classList.remove('no-js');
+</script>
+
+<script>
+    (function() {
+        if (!CSS.supports("color: hsl(from white h s l)")) {
+            const preload = document.createElement('link');
+            preload.rel = "preload";
+            preload.as = "style";
+            preload.href= '/assets/built/legacy.min.css?v=d7d1c1d4c8';
+            document.head.appendChild(preload);
+
+            const link = document.createElement('link');
+            link.rel = "stylesheet"; 
+            link.type = "text/css";
+            link.href= '/assets/built/legacy.min.css?v=d7d1c1d4c8';
+            document.documentElement.appendChild(link);
+        }
+    })();
+</script>
+
+<script>
+    window.Spiritix = window.Spiritix || {};
+
+    // Translation
+    window.Spiritix.t = {
+        "Toggle menu": `Toggle menu`,
+        "Quick search...": `Quick search...`,
+        "Clear": `Clear`,
+        "Close": `Close`,
+        "No matches found": `No matches found`,
+        "Something went wrong, please try again.": `Something went wrong, please try again.`,
+        "Authors": `Authors`,
+        "Tags": `Tags`,
+        "Posts": `Posts`,
+    };
+
+    // Error reporting
+    window.Spiritix.safeReportError = (err) => {
+        if ("Sentry" in window) {
+            return window.Sentry.captureException(err);
+        }
+
+        if (typeof window.reportError === "function") {
+            return window.reportError(err);
+        }
+
+        console.error(err);
+    };
+
+    // Color functions
+    window.Spiritix.hexToRgb = (hex) => {
+        hex = hex.replace('#', '');
+        hex = hex.length === 3 ? hex.split().map(c => c + c).join() : hex;
+
+        return [
+            parseInt(hex.substring(0,2), 16),
+            parseInt(hex.substring(2,4), 16),
+            parseInt(hex.substring(4,6), 16),
+        ];
+    };
+
+    window.Spiritix.getContrastColor = (r, g, b) => {
+        const yiq = ((r*299) + (g*587) + (b*114)) / 1000;
+
+        return (yiq >= 138) ? '#000' : '#fff';  
+    };    
+
+    window.Spiritix.rgbToHsl = (r, g, b) => {
+        r /= 255, g /= 255, b /= 255;
+        const max = Math.max(r, g, b);
+        const min = Math.min(r, g, b);
+        const d = max - min;
+        let h, s, l = (max + min) / 2;
+
+        if (max === min) {
+            return [0, 0, l * 100];
+        } 
+        
+        s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+        switch(max) {
+            case r: h = (g - b) / d + (g < b ? 6 : 0); break;
+            case g: h = (b - r) / d + 2; break;
+            case b: h = (r - g) / d + 4; break;
+        }
+        h /= 6;
+
+        return [h * 360, s * 100, l * 100];
+    }    
+</script>
+
+<script>
+    if (localStorage && localStorage["sx-theme"]) {
+        document.documentElement.classList.toggle('dark', localStorage["sx-theme"] === 'dark');
+        document.documentElement.classList.toggle('light', localStorage["sx-theme"] === 'light');
+    } else if ("Dark" === "System") {
+        document.documentElement.classList.toggle('dark', window.matchMedia('(prefers-color-scheme: dark)').matches);        
+        document.documentElement.classList.toggle('light', window.matchMedia('(prefers-color-scheme: light)').matches);        
+    }
+</script>
+
+
+    <script>
+        (function() {
+            const hex = "#2b2e4b".trim();
+            const [r, g, b] = window.Spiritix.hexToRgb(hex);
+            const [h, s, l] = window.Spiritix.rgbToHsl(r, g, b);
+            const contrastColor = window.Spiritix.getContrastColor(r, g, b);
+
+            document.documentElement.style.setProperty('--ghost-accent-color-light-rgb', `${r} ${g} ${b}`);
+            document.documentElement.style.setProperty('--c-primary-light-hsl', `${h} ${s}% ${l}%`);
+            document.documentElement.style.setProperty('--c-primary-light-hsl-50', `${h} 100% 90%`);
+            document.documentElement.style.setProperty('--c-primary-light-hsl-950', `${h} 80% 10%`);
+            document.documentElement.style.setProperty('--color-contrast-light', contrastColor);
+
+            window.Spiritix.ghostAccentColorLightRgb = `${r} ${g} ${b}`;
+        })();
+    </script>    
+    <style>
+        :root {
+            --color-contrast: var(--color-contrast-light);
+            --ghost-accent-color-rgb: var(--ghost-accent-color-light-rgb);
+            --c-primary-hsl: var(--c-primary-light-hsl);
+            --c-primary-hsl-50: var(--c-primary-light-hsl-50);
+            --c-primary-hsl-950: var(--c-primary-light-hsl-950);
+        }
+    </style>  
+
+
+<style>
+    a[data-sx-check-external][href]:not(:where(
+        /* exclude hash only links */
+        [href^="#"],
+        /* exclude javascript only links */
+        [href^="javascript:" i],  
+        /* exclude relative but not double slash only links */
+        [href^="/"]:not([href^="//"]),
+        /* domains to exclude */
+        [href^="https://www.ajfriesen.com"],
+        [href*="//ajfriesen.com"]
+    )) svg {
+        display: inline;
+    }    
+</style>
+        
+
+
+
+
+
+
+
+
+
+
+
+
+        <link href="/assets/built/main.min.css?v=d7d1c1d4c8" rel="stylesheet" type="text/css" />
+
+        <script src="/assets/built/main.min.js?v=d7d1c1d4c8" defer data-manual></script>        
+        <script src="/assets/built/search/index.min.js?v=d7d1c1d4c8" defer type="module"></script>
+
+        
+
+        <meta name="description" content="Yak shaving continues. Replacing my SSDs in a BTRFS Raid.">
+    <link rel="icon" href="https://www.ajfriesen.com/content/images/size/w256h256/2022/08/favicon-256x256.png" type="image/png">
+    <link rel="canonical" href="https://www.ajfriesen.com/replacing-disks-in-btrfs/">
+    <meta name="referrer" content="no-referrer-when-downgrade">
+    
+    <meta property="og:site_name" content="ajfriesen">
+    <meta property="og:type" content="article">
+    <meta property="og:title" content="Replacing disks in BTRFS">
+    <meta property="og:description" content="Yak shaving continues. Replacing my SSDs in a BTRFS Raid.">
+    <meta property="og:url" content="https://www.ajfriesen.com/replacing-disks-in-btrfs/">
+    <meta property="og:image" content="https://www.ajfriesen.com/content/images/size/w1200/2024/10/PXL_20241005_084600326.jpg">
+    <meta property="article:published_time" content="2024-10-09T07:00:46.000Z">
+    <meta property="article:modified_time" content="2025-06-04T12:30:43.000Z">
+    <meta property="article:tag" content="Home Lab and Hardware">
+    <meta property="article:tag" content="Linux">
+    <meta property="article:tag" content="Self-Hosting">
+    
+    <meta property="article:publisher" content="https://www.facebook.com/andrej.friesen.10">
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="Replacing disks in BTRFS">
+    <meta name="twitter:description" content="Yak shaving continues. Replacing my SSDs in a BTRFS Raid.">
+    <meta name="twitter:url" content="https://www.ajfriesen.com/replacing-disks-in-btrfs/">
+    <meta name="twitter:image" content="https://www.ajfriesen.com/content/images/size/w1200/2024/10/PXL_20241005_084600326.jpg">
+    <meta name="twitter:label1" content="Written by">
+    <meta name="twitter:data1" content="Andrej Friesen">
+    <meta name="twitter:label2" content="Filed under">
+    <meta name="twitter:data2" content="Home Lab and Hardware, Linux, Self-Hosting">
+    <meta name="twitter:site" content="@mr_ajfriesen">
+    <meta name="twitter:creator" content="@mr_ajfriesen">
+    <meta property="og:image:width" content="1200">
+    <meta property="og:image:height" content="904">
+    
+    <script type="application/ld+json">
+{
+    "@context": "https://schema.org",
+    "@type": "Article",
+    "publisher": {
+        "@type": "Organization",
+        "name": "ajfriesen",
+        "url": "https://www.ajfriesen.com/",
+        "logo": {
+            "@type": "ImageObject",
+            "url": "https://www.ajfriesen.com/content/images/size/w256h256/2022/08/favicon-256x256.png",
+            "width": 60,
+            "height": 60
+        }
+    },
+    "author": {
+        "@type": "Person",
+        "name": "Andrej Friesen",
+        "image": {
+            "@type": "ImageObject",
+            "url": "https://www.ajfriesen.com/content/images/size/w1200/2021/06/Andrej_2000x2000.png",
+            "width": 1200,
+            "height": 1200
+        },
+        "url": "https://www.ajfriesen.com/author/andrej/",
+        "sameAs": [
+            "https://x.com/mr_ajfriesen",
+            "https://www.youtube.com/@ajfriesen",
+            "https://www.linkedin.com/in/andrej-friesen"
+        ]
+    },
+    "headline": "Replacing disks in BTRFS",
+    "url": "https://www.ajfriesen.com/replacing-disks-in-btrfs/",
+    "datePublished": "2024-10-09T07:00:46.000Z",
+    "dateModified": "2025-06-04T12:30:43.000Z",
+    "image": {
+        "@type": "ImageObject",
+        "url": "https://www.ajfriesen.com/content/images/size/w1200/2024/10/PXL_20241005_084600326.jpg",
+        "width": 1200,
+        "height": 904
+    },
+    "keywords": "Home Lab and Hardware, Linux, Self-Hosting",
+    "description": "Yak shaving continues. Replacing my SSDs in a BTRFS Raid.",
+    "mainEntityOfPage": "https://www.ajfriesen.com/replacing-disks-in-btrfs/"
+}
+    </script>
+
+    <meta name="generator" content="Ghost 6.21">
+    <link rel="alternate" type="application/rss+xml" title="ajfriesen" href="https://www.ajfriesen.com/courses/rss/">
+    <script defer src="https://cdn.jsdelivr.net/ghost/portal@~2.65/umd/portal.min.js" data-i18n="true" data-ghost="https://www.ajfriesen.com/" data-key="fbdce46d917b762279790544c8" data-api="https://www.ajfriesen.com/ghost/api/content/" data-locale="en,de" crossorigin="anonymous"></script><style id="gh-members-styles">.gh-post-upgrade-cta-content,
+.gh-post-upgrade-cta {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+    text-align: center;
+    width: 100%;
+    color: #ffffff;
+    font-size: 16px;
+}
+
+.gh-post-upgrade-cta-content {
+    border-radius: 8px;
+    padding: 40px 4vw;
+}
+
+.gh-post-upgrade-cta h2 {
+    color: #ffffff;
+    font-size: 28px;
+    letter-spacing: -0.2px;
+    margin: 0;
+    padding: 0;
+}
+
+.gh-post-upgrade-cta p {
+    margin: 20px 0 0;
+    padding: 0;
+}
+
+.gh-post-upgrade-cta small {
+    font-size: 16px;
+    letter-spacing: -0.2px;
+}
+
+.gh-post-upgrade-cta a {
+    color: #ffffff;
+    cursor: pointer;
+    font-weight: 500;
+    box-shadow: none;
+    text-decoration: underline;
+}
+
+.gh-post-upgrade-cta a:hover {
+    color: #ffffff;
+    opacity: 0.8;
+    box-shadow: none;
+    text-decoration: underline;
+}
+
+.gh-post-upgrade-cta a.gh-btn {
+    display: block;
+    background: #ffffff;
+    text-decoration: none;
+    margin: 28px 0 0;
+    padding: 8px 18px;
+    border-radius: 4px;
+    font-size: 16px;
+    font-weight: 600;
+}
+
+.gh-post-upgrade-cta a.gh-btn:hover {
+    opacity: 0.92;
+}</style><script async src="https://js.stripe.com/v3/"></script>
+    <script defer src="https://cdn.jsdelivr.net/ghost/announcement-bar@~1.1/umd/announcement-bar.min.js" data-announcement-bar="https://www.ajfriesen.com/" data-api-url="https://www.ajfriesen.com/members/api/announcement/" crossorigin="anonymous"></script>
+    <link href="https://www.ajfriesen.com/webmentions/receive/" rel="webmention">
+    <script defer src="/public/cards.min.js?v=d7d1c1d4c8"></script>
+    <link rel="stylesheet" type="text/css" href="/public/cards.min.css?v=d7d1c1d4c8">
+    <script defer src="/public/comment-counts.min.js?v=d7d1c1d4c8" data-ghost-comments-counts-api="https://www.ajfriesen.com/members/api/comments/counts/"></script>
+    <script defer src="/public/member-attribution.min.js?v=d7d1c1d4c8"></script><style>:root {--ghost-accent-color: #2b2e4b;}</style>
+    <meta name="fediverse:creator" content="@ajfriesen@techhub.social">
+
+<script async src="https://analytics.ajfriesen.com/curious-penguin" data-website-id="c1927f92-ef45-4a40-9449-555ab86d3dd8"></script>
+
+<script async defer data-domain="ajfriesen.com" src="https://plausible.ajfriesen.com/js/plausible.js"></script>
+
+                
+    </head>
+    <body class="post-template tag-home-lab tag-hash-blog-col tag-linux tag-self-hosting  min-h-dvh antialiased overflow-x-hidden text-gray-500 bg-background dark:text-gray-400 dark:bg-background-dark [&.has-modal]:h-dvh [&.has-modal]:overflow-hidden">
+        <div id="sx-tone" class=" hidden  fixed z-4999999 inset-0 bg-primary opacity-3 dark:opacity-5 pointer-events-none"></div>
+
+        <div id="sx-spotlights" class="absolute z-50 inset-0 overflow-x-hidden pointer-events-none" aria-hidden="true">
+            <div class="absolute z-50 top-0 left-0 -translate-y-1/2 -rotate-45 opacity-30 blur-2xl" aria-hidden="true">
+                <svg class="w-14 h-[1000px] text-gray-700 dark:text-gray-300" width="57" height="876" viewBox="0 0 57 876" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <path fill="url(#paint0_linear_1014_869)"  fill-rule="evenodd" clip-rule="evenodd" d="M56.1277 0.221222H0.127686V500.221H0.147339L28.1438 875.221L56.1401 500.221H56.1277V0.221222Z" />
+                    <defs>
+                        <linearGradient id="paint0_linear_1014_869" x1="28.1339" y1="0.221222" x2="28.1339" y2="875.221" gradientUnits="userSpaceOnUse">
+                            <stop stop-color="white"/>
+                            <stop offset="1" stop-color="currentColor"/>
+                        </linearGradient>
+                    </defs>                        
+                </svg>
+            </div>
+            <div class="absolute z-50 top-0 left-16 -translate-y-2/3 -rotate-45 opacity-30 blur-xl" aria-hidden="true">
+                <svg class="w-14 h-[1000px] text-gray-700 dark:text-gray-300" width="57" height="876" viewBox="0 0 57 876" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <path fill="url(#paint0_linear_1014_869)"  fill-rule="evenodd" clip-rule="evenodd" d="M56.1277 0.221222H0.127686V500.221H0.147339L28.1438 875.221L56.1401 500.221H56.1277V0.221222Z" />                  
+                </svg>
+            </div>
+            <div class="hidden xs:block absolute z-50 top-0 left-96 -translate-y-1/2 -rotate-45 opacity-30 blur-2xl" aria-hidden="true">
+                <svg class="w-14 h-[1000px] text-gray-700 dark:text-gray-300" width="57" height="876" viewBox="0 0 57 876" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <path fill="url(#paint0_linear_1014_869)"  fill-rule="evenodd" clip-rule="evenodd" d="M56.1277 0.221222H0.127686V500.221H0.147339L28.1438 875.221L56.1401 500.221H56.1277V0.221222Z" />                    
+                </svg>
+            </div>  
+        </div>
+
+
+        <div id="sx-viewport" class="min-h-dvh flex flex-col">
+            <a href="#sx-main" class="sr-only focus:not-sr-only focus-within:not-sr-only outline-hidden">
+                <span class="relative flex items-center justify-center w-full h-12 font-semibold text-gray-950 dark:text-gray-50 text-sm ring-3 ring-inset ring-accent">
+                    Skip to main content
+                </span>
+            </a>       
+
+            <header 
+    id="sx-header"
+    class="
+        sticky z-50 top-0 min-h-16 lg:h-16 flex flex-wrap flex-none items-center border-b border-transparent transition-colors duration-200
+        [&.stuck]:border-gray-950/5 [&.stuck]:bg-background/90
+        dark:[&.stuck]:border-gray-50/10 dark:[&.stuck]:bg-background-dark/70
+    "
+>
+    <nav class="outer xl:outer-xl flex items-center w-full py-1.5">
+        <div class="inner flex items-center min-h-10">
+            <a
+                id="sx-header-brand"
+                class="shrink me-4 xs:me-8 font-bold text-xl text-gray-950 dark:text-gray-50" 
+                href="https://www.ajfriesen.com" 
+                aria-label="ajfriesen"
+            >
+                    ajfriesen
+            </a>
+
+            
+    <ul id="sx-nav-lg" data-sx-nav class="hidden lg:flex ms-auto gap-2" role="list">
+             
+                <li class="relative inline-flex nth-[n+8]:hidden max-xl:nth-[n+6]:hidden" data-sx-slug="home" data-sx-current="false">
+                     
+                        <a 
+                            href="https://www.ajfriesen.com/"
+                            data-sx-slug="home"
+                            data-sx-check-external="true"
+                            class="
+                                        p-2 inline-flex items-center font-medium text-sm whitespace-nowrap transition-colors duration-200
+        text-gray-500 hover:text-gray-950 dark:text-gray-400 dark:hover:text-gray-50 from-gray-50 from-50%
+        [&.current]:text-gray-950 [&.current-parent]:text-gray-950 dark:[&.current]:text-transparent dark:[&.current-parent]:text-transparent
+        dark:[&.current]:bg-linear-to-br dark:[&.current]:bg-clip-text 
+        dark:[&.current-parent]:bg-linear-to-br dark:[&.current-parent]:bg-clip-text
+                                         
+                            "
+                        >
+                            Home
+
+                            <svg
+     class="[.sx-external&gt;&amp;]:inline hidden shrink-0 w-3 h-3 ms-0.5 -me-0.5" 
+    xmlns="http://www.w3.org/2000/svg" 
+    viewBox="0 0 16 16" 
+    width="16" 
+    height="16"    
+    fill="currentColor" 
+    focusable="false"
+    aria-hidden="true"      
+>
+  <path fill-rule="evenodd" d="M4.22 11.78a.75.75 0 0 1 0-1.06L9.44 5.5H5.75a.75.75 0 0 1 0-1.5h5.5a.75.75 0 0 1 .75.75v5.5a.75.75 0 0 1-1.5 0V6.56l-5.22 5.22a.75.75 0 0 1-1.06 0Z" clip-rule="evenodd" />
+</svg>
+                        </a>
+                </li>
+             
+                <li class="relative inline-flex nth-[n+8]:hidden max-xl:nth-[n+6]:hidden" data-sx-slug="blog" data-sx-current="false">
+                     
+                        <a 
+                            href="https://www.ajfriesen.com/blog/"
+                            data-sx-slug="blog"
+                            data-sx-check-external="true"
+                            class="
+                                        p-2 inline-flex items-center font-medium text-sm whitespace-nowrap transition-colors duration-200
+        text-gray-500 hover:text-gray-950 dark:text-gray-400 dark:hover:text-gray-50 from-gray-50 from-50%
+        [&.current]:text-gray-950 [&.current-parent]:text-gray-950 dark:[&.current]:text-transparent dark:[&.current-parent]:text-transparent
+        dark:[&.current]:bg-linear-to-br dark:[&.current]:bg-clip-text 
+        dark:[&.current-parent]:bg-linear-to-br dark:[&.current-parent]:bg-clip-text
+                                         
+                            "
+                        >
+                            Blog
+
+                            <svg
+     class="[.sx-external&gt;&amp;]:inline hidden shrink-0 w-3 h-3 ms-0.5 -me-0.5" 
+    xmlns="http://www.w3.org/2000/svg" 
+    viewBox="0 0 16 16" 
+    width="16" 
+    height="16"    
+    fill="currentColor" 
+    focusable="false"
+    aria-hidden="true"      
+>
+  <path fill-rule="evenodd" d="M4.22 11.78a.75.75 0 0 1 0-1.06L9.44 5.5H5.75a.75.75 0 0 1 0-1.5h5.5a.75.75 0 0 1 .75.75v5.5a.75.75 0 0 1-1.5 0V6.56l-5.22 5.22a.75.75 0 0 1-1.06 0Z" clip-rule="evenodd" />
+</svg>
+                        </a>
+                </li>
+             
+                <li class="relative inline-flex nth-[n+8]:hidden max-xl:nth-[n+6]:hidden" data-sx-slug="pokypow-crowdfunding" data-sx-current="false">
+                     
+                        <a 
+                            href="https://www.crowdsupply.com/ajfriesen/pokypow"
+                            data-sx-slug="pokypow-crowdfunding"
+                            data-sx-check-external="true"
+                            class="
+                                        p-2 inline-flex items-center font-medium text-sm whitespace-nowrap transition-colors duration-200
+        text-gray-500 hover:text-gray-950 dark:text-gray-400 dark:hover:text-gray-50 from-gray-50 from-50%
+        [&.current]:text-gray-950 [&.current-parent]:text-gray-950 dark:[&.current]:text-transparent dark:[&.current-parent]:text-transparent
+        dark:[&.current]:bg-linear-to-br dark:[&.current]:bg-clip-text 
+        dark:[&.current-parent]:bg-linear-to-br dark:[&.current-parent]:bg-clip-text
+                                         
+                            "
+                        >
+                            PokyPow Crowdfunding
+
+                            <svg
+     class="[.sx-external&gt;&amp;]:inline hidden shrink-0 w-3 h-3 ms-0.5 -me-0.5" 
+    xmlns="http://www.w3.org/2000/svg" 
+    viewBox="0 0 16 16" 
+    width="16" 
+    height="16"    
+    fill="currentColor" 
+    focusable="false"
+    aria-hidden="true"      
+>
+  <path fill-rule="evenodd" d="M4.22 11.78a.75.75 0 0 1 0-1.06L9.44 5.5H5.75a.75.75 0 0 1 0-1.5h5.5a.75.75 0 0 1 .75.75v5.5a.75.75 0 0 1-1.5 0V6.56l-5.22 5.22a.75.75 0 0 1-1.06 0Z" clip-rule="evenodd" />
+</svg>
+                        </a>
+                </li>
+             
+                <li class="relative inline-flex nth-[n+8]:hidden max-xl:nth-[n+6]:hidden" data-sx-slug="pokypow-posts" data-sx-current="false">
+                     
+                        <a 
+                            href="https://www.ajfriesen.com/tag/pokypow/"
+                            data-sx-slug="pokypow-posts"
+                            data-sx-check-external="true"
+                            class="
+                                        p-2 inline-flex items-center font-medium text-sm whitespace-nowrap transition-colors duration-200
+        text-gray-500 hover:text-gray-950 dark:text-gray-400 dark:hover:text-gray-50 from-gray-50 from-50%
+        [&.current]:text-gray-950 [&.current-parent]:text-gray-950 dark:[&.current]:text-transparent dark:[&.current-parent]:text-transparent
+        dark:[&.current]:bg-linear-to-br dark:[&.current]:bg-clip-text 
+        dark:[&.current-parent]:bg-linear-to-br dark:[&.current-parent]:bg-clip-text
+                                         
+                            "
+                        >
+                            PokyPow Posts
+
+                            <svg
+     class="[.sx-external&gt;&amp;]:inline hidden shrink-0 w-3 h-3 ms-0.5 -me-0.5" 
+    xmlns="http://www.w3.org/2000/svg" 
+    viewBox="0 0 16 16" 
+    width="16" 
+    height="16"    
+    fill="currentColor" 
+    focusable="false"
+    aria-hidden="true"      
+>
+  <path fill-rule="evenodd" d="M4.22 11.78a.75.75 0 0 1 0-1.06L9.44 5.5H5.75a.75.75 0 0 1 0-1.5h5.5a.75.75 0 0 1 .75.75v5.5a.75.75 0 0 1-1.5 0V6.56l-5.22 5.22a.75.75 0 0 1-1.06 0Z" clip-rule="evenodd" />
+</svg>
+                        </a>
+                </li>
+             
+                <li class="relative inline-flex nth-[n+8]:hidden max-xl:nth-[n+6]:hidden" data-sx-slug="projects" data-sx-current="false">
+                     
+                        <a 
+                            href="https://www.ajfriesen.com/projects/"
+                            data-sx-slug="projects"
+                            data-sx-check-external="true"
+                            class="
+                                        p-2 inline-flex items-center font-medium text-sm whitespace-nowrap transition-colors duration-200
+        text-gray-500 hover:text-gray-950 dark:text-gray-400 dark:hover:text-gray-50 from-gray-50 from-50%
+        [&.current]:text-gray-950 [&.current-parent]:text-gray-950 dark:[&.current]:text-transparent dark:[&.current-parent]:text-transparent
+        dark:[&.current]:bg-linear-to-br dark:[&.current]:bg-clip-text 
+        dark:[&.current-parent]:bg-linear-to-br dark:[&.current-parent]:bg-clip-text
+                                         
+                            "
+                        >
+                            Projects
+
+                            <svg
+     class="[.sx-external&gt;&amp;]:inline hidden shrink-0 w-3 h-3 ms-0.5 -me-0.5" 
+    xmlns="http://www.w3.org/2000/svg" 
+    viewBox="0 0 16 16" 
+    width="16" 
+    height="16"    
+    fill="currentColor" 
+    focusable="false"
+    aria-hidden="true"      
+>
+  <path fill-rule="evenodd" d="M4.22 11.78a.75.75 0 0 1 0-1.06L9.44 5.5H5.75a.75.75 0 0 1 0-1.5h5.5a.75.75 0 0 1 .75.75v5.5a.75.75 0 0 1-1.5 0V6.56l-5.22 5.22a.75.75 0 0 1-1.06 0Z" clip-rule="evenodd" />
+</svg>
+                        </a>
+                </li>
+             
+                <li class="relative inline-flex nth-[n+8]:hidden max-xl:nth-[n+6]:hidden" data-sx-slug="about" data-sx-current="false">
+                     
+                        <a 
+                            href="https://www.ajfriesen.com/about/"
+                            data-sx-slug="about"
+                            data-sx-check-external="true"
+                            class="
+                                        p-2 inline-flex items-center font-medium text-sm whitespace-nowrap transition-colors duration-200
+        text-gray-500 hover:text-gray-950 dark:text-gray-400 dark:hover:text-gray-50 from-gray-50 from-50%
+        [&.current]:text-gray-950 [&.current-parent]:text-gray-950 dark:[&.current]:text-transparent dark:[&.current-parent]:text-transparent
+        dark:[&.current]:bg-linear-to-br dark:[&.current]:bg-clip-text 
+        dark:[&.current-parent]:bg-linear-to-br dark:[&.current-parent]:bg-clip-text
+                                         
+                            "
+                        >
+                            About
+
+                            <svg
+     class="[.sx-external&gt;&amp;]:inline hidden shrink-0 w-3 h-3 ms-0.5 -me-0.5" 
+    xmlns="http://www.w3.org/2000/svg" 
+    viewBox="0 0 16 16" 
+    width="16" 
+    height="16"    
+    fill="currentColor" 
+    focusable="false"
+    aria-hidden="true"      
+>
+  <path fill-rule="evenodd" d="M4.22 11.78a.75.75 0 0 1 0-1.06L9.44 5.5H5.75a.75.75 0 0 1 0-1.5h5.5a.75.75 0 0 1 .75.75v5.5a.75.75 0 0 1-1.5 0V6.56l-5.22 5.22a.75.75 0 0 1-1.06 0Z" clip-rule="evenodd" />
+</svg>
+                        </a>
+                </li>
+             
+                <li class="relative inline-flex nth-[n+8]:hidden max-xl:nth-[n+6]:hidden" data-sx-slug="rss" data-sx-current="false">
+                     
+                        <a 
+                            href="https://www.ajfriesen.com/rss/"
+                            data-sx-slug="rss"
+                            data-sx-check-external="true"
+                            class="
+                                        p-2 inline-flex items-center font-medium text-sm whitespace-nowrap transition-colors duration-200
+        text-gray-500 hover:text-gray-950 dark:text-gray-400 dark:hover:text-gray-50 from-gray-50 from-50%
+        [&.current]:text-gray-950 [&.current-parent]:text-gray-950 dark:[&.current]:text-transparent dark:[&.current-parent]:text-transparent
+        dark:[&.current]:bg-linear-to-br dark:[&.current]:bg-clip-text 
+        dark:[&.current-parent]:bg-linear-to-br dark:[&.current-parent]:bg-clip-text
+                                         
+                            "
+                        >
+                            RSS
+
+                            <svg
+     class="[.sx-external&gt;&amp;]:inline hidden shrink-0 w-3 h-3 ms-0.5 -me-0.5" 
+    xmlns="http://www.w3.org/2000/svg" 
+    viewBox="0 0 16 16" 
+    width="16" 
+    height="16"    
+    fill="currentColor" 
+    focusable="false"
+    aria-hidden="true"      
+>
+  <path fill-rule="evenodd" d="M4.22 11.78a.75.75 0 0 1 0-1.06L9.44 5.5H5.75a.75.75 0 0 1 0-1.5h5.5a.75.75 0 0 1 .75.75v5.5a.75.75 0 0 1-1.5 0V6.56l-5.22 5.22a.75.75 0 0 1-1.06 0Z" clip-rule="evenodd" />
+</svg>
+                        </a>
+                </li>
+
+        <li class="relative inline-flex xl:nth-[-n+8]:hidden max-xl:nth-[-n+6]:hidden">
+            <button 
+                id="sx-nav-more-toggle"
+                data-sx-dropdown-toggle 
+                aria-label="Toggle menu" 
+                class="peer p-1.5 -ms-0.5 -me-2.5 text-gray-500 hover:text-gray-950 [&.open]:text-gray-950 transition-colors duration-200
+                    dark:text-gray-400 dark:hover:text-gray-50 dark:[&.open]:text-gray-50
+                    [&.current]:text-gray-950 [&.current-parent]:text-gray-950 dark:[&.current]:text-gray-50 dark:[&.current-parent]:text-gray-50
+                "
+            >
+                <svg 
+   class="relative top-px w-6 h-6" 
+  xmlns="http://www.w3.org/2000/svg" 
+  viewBox="0 0 24 24" 
+  width="24" 
+  height="24" 
+  fill="none" 
+  stroke="currentColor" 
+  stroke-width="1.5" 
+  focusable="false"
+  aria-hidden="true"     
+>
+  <path stroke-linecap="round" stroke-linejoin="round" d="M6.75 12a.75.75 0 11-1.5 0 .75.75 0 011.5 0zM12.75 12a.75.75 0 11-1.5 0 .75.75 0 011.5 0zM18.75 12a.75.75 0 11-1.5 0 .75.75 0 011.5 0z" />
+</svg>
+            </button>   
+
+            <ul data-sx-dropdown 
+                role="list"
+                class="hidden peer-[.open]:block absolute z-50 top-14 -end-4 w-60 max-h-[calc(100vh-(--spacing(24)))] 
+                    overflow-y-auto backdrop-blur-sm bg-white/90 ring-1 ring-gray-900/5 shadow-pretty rounded-xl 
+                    dark:bg-background-dark/80 dark:ring-white/5 dark:ring-inset dark:shadow-lg dark:shadow-black/60
+                " 
+            >
+                <li class="py-2 px-3 grid grid-cols-1 gap-1 dark:bg-white/5 rounded-inherit">
+                            <div class="hidden nth-[n+8]:block max-xl:nth-[n+6]:block" data-sx-slug="home" data-sx-current="false">    
+                                                 
+                                    <a 
+                                        href="https://www.ajfriesen.com/" 
+                                        data-sx-slug="home" 
+                                        class="px-3 py-2 w-full inline-block font-medium text-sm text-gray-500 hover:text-gray-950 transition-colors duration-200
+                                            dark:text-gray-400 dark:hover:text-gray-50 [&.current]:text-gray-950 [&.current-parent]:text-gray-950 dark:[&.current]:text-gray-50 dark:[&.current-parent]:text-gray-50
+                                                     
+                                        "
+                                    >
+                                        Home<!--
+                                        --><svg
+     class="[.sx-external&gt;&amp;]:inline hidden relative top-1 shrink-0 w-3 h-3 ms-0.5 -me-0.5 align-top" 
+    xmlns="http://www.w3.org/2000/svg" 
+    viewBox="0 0 16 16" 
+    width="16" 
+    height="16"    
+    fill="currentColor" 
+    focusable="false"
+    aria-hidden="true"      
+>
+  <path fill-rule="evenodd" d="M4.22 11.78a.75.75 0 0 1 0-1.06L9.44 5.5H5.75a.75.75 0 0 1 0-1.5h5.5a.75.75 0 0 1 .75.75v5.5a.75.75 0 0 1-1.5 0V6.56l-5.22 5.22a.75.75 0 0 1-1.06 0Z" clip-rule="evenodd" />
+</svg>
+
+                                    </a>   
+                            </div>
+                            <div class="hidden nth-[n+8]:block max-xl:nth-[n+6]:block" data-sx-slug="blog" data-sx-current="false">    
+                                                 
+                                    <a 
+                                        href="https://www.ajfriesen.com/blog/" 
+                                        data-sx-slug="blog" 
+                                        class="px-3 py-2 w-full inline-block font-medium text-sm text-gray-500 hover:text-gray-950 transition-colors duration-200
+                                            dark:text-gray-400 dark:hover:text-gray-50 [&.current]:text-gray-950 [&.current-parent]:text-gray-950 dark:[&.current]:text-gray-50 dark:[&.current-parent]:text-gray-50
+                                                     
+                                        "
+                                    >
+                                        Blog<!--
+                                        --><svg
+     class="[.sx-external&gt;&amp;]:inline hidden relative top-1 shrink-0 w-3 h-3 ms-0.5 -me-0.5 align-top" 
+    xmlns="http://www.w3.org/2000/svg" 
+    viewBox="0 0 16 16" 
+    width="16" 
+    height="16"    
+    fill="currentColor" 
+    focusable="false"
+    aria-hidden="true"      
+>
+  <path fill-rule="evenodd" d="M4.22 11.78a.75.75 0 0 1 0-1.06L9.44 5.5H5.75a.75.75 0 0 1 0-1.5h5.5a.75.75 0 0 1 .75.75v5.5a.75.75 0 0 1-1.5 0V6.56l-5.22 5.22a.75.75 0 0 1-1.06 0Z" clip-rule="evenodd" />
+</svg>
+
+                                    </a>   
+                            </div>
+                            <div class="hidden nth-[n+8]:block max-xl:nth-[n+6]:block" data-sx-slug="pokypow-crowdfunding" data-sx-current="false">    
+                                                 
+                                    <a 
+                                        href="https://www.crowdsupply.com/ajfriesen/pokypow" 
+                                        data-sx-slug="pokypow-crowdfunding" 
+                                        class="px-3 py-2 w-full inline-block font-medium text-sm text-gray-500 hover:text-gray-950 transition-colors duration-200
+                                            dark:text-gray-400 dark:hover:text-gray-50 [&.current]:text-gray-950 [&.current-parent]:text-gray-950 dark:[&.current]:text-gray-50 dark:[&.current-parent]:text-gray-50
+                                                     
+                                        "
+                                    >
+                                        PokyPow Crowdfunding<!--
+                                        --><svg
+     class="[.sx-external&gt;&amp;]:inline hidden relative top-1 shrink-0 w-3 h-3 ms-0.5 -me-0.5 align-top" 
+    xmlns="http://www.w3.org/2000/svg" 
+    viewBox="0 0 16 16" 
+    width="16" 
+    height="16"    
+    fill="currentColor" 
+    focusable="false"
+    aria-hidden="true"      
+>
+  <path fill-rule="evenodd" d="M4.22 11.78a.75.75 0 0 1 0-1.06L9.44 5.5H5.75a.75.75 0 0 1 0-1.5h5.5a.75.75 0 0 1 .75.75v5.5a.75.75 0 0 1-1.5 0V6.56l-5.22 5.22a.75.75 0 0 1-1.06 0Z" clip-rule="evenodd" />
+</svg>
+
+                                    </a>   
+                            </div>
+                            <div class="hidden nth-[n+8]:block max-xl:nth-[n+6]:block" data-sx-slug="pokypow-posts" data-sx-current="false">    
+                                                 
+                                    <a 
+                                        href="https://www.ajfriesen.com/tag/pokypow/" 
+                                        data-sx-slug="pokypow-posts" 
+                                        class="px-3 py-2 w-full inline-block font-medium text-sm text-gray-500 hover:text-gray-950 transition-colors duration-200
+                                            dark:text-gray-400 dark:hover:text-gray-50 [&.current]:text-gray-950 [&.current-parent]:text-gray-950 dark:[&.current]:text-gray-50 dark:[&.current-parent]:text-gray-50
+                                                     
+                                        "
+                                    >
+                                        PokyPow Posts<!--
+                                        --><svg
+     class="[.sx-external&gt;&amp;]:inline hidden relative top-1 shrink-0 w-3 h-3 ms-0.5 -me-0.5 align-top" 
+    xmlns="http://www.w3.org/2000/svg" 
+    viewBox="0 0 16 16" 
+    width="16" 
+    height="16"    
+    fill="currentColor" 
+    focusable="false"
+    aria-hidden="true"      
+>
+  <path fill-rule="evenodd" d="M4.22 11.78a.75.75 0 0 1 0-1.06L9.44 5.5H5.75a.75.75 0 0 1 0-1.5h5.5a.75.75 0 0 1 .75.75v5.5a.75.75 0 0 1-1.5 0V6.56l-5.22 5.22a.75.75 0 0 1-1.06 0Z" clip-rule="evenodd" />
+</svg>
+
+                                    </a>   
+                            </div>
+                            <div class="hidden nth-[n+8]:block max-xl:nth-[n+6]:block" data-sx-slug="projects" data-sx-current="false">    
+                                                 
+                                    <a 
+                                        href="https://www.ajfriesen.com/projects/" 
+                                        data-sx-slug="projects" 
+                                        class="px-3 py-2 w-full inline-block font-medium text-sm text-gray-500 hover:text-gray-950 transition-colors duration-200
+                                            dark:text-gray-400 dark:hover:text-gray-50 [&.current]:text-gray-950 [&.current-parent]:text-gray-950 dark:[&.current]:text-gray-50 dark:[&.current-parent]:text-gray-50
+                                                     
+                                        "
+                                    >
+                                        Projects<!--
+                                        --><svg
+     class="[.sx-external&gt;&amp;]:inline hidden relative top-1 shrink-0 w-3 h-3 ms-0.5 -me-0.5 align-top" 
+    xmlns="http://www.w3.org/2000/svg" 
+    viewBox="0 0 16 16" 
+    width="16" 
+    height="16"    
+    fill="currentColor" 
+    focusable="false"
+    aria-hidden="true"      
+>
+  <path fill-rule="evenodd" d="M4.22 11.78a.75.75 0 0 1 0-1.06L9.44 5.5H5.75a.75.75 0 0 1 0-1.5h5.5a.75.75 0 0 1 .75.75v5.5a.75.75 0 0 1-1.5 0V6.56l-5.22 5.22a.75.75 0 0 1-1.06 0Z" clip-rule="evenodd" />
+</svg>
+
+                                    </a>   
+                            </div>
+                            <div class="hidden nth-[n+8]:block max-xl:nth-[n+6]:block" data-sx-slug="about" data-sx-current="false">    
+                                                 
+                                    <a 
+                                        href="https://www.ajfriesen.com/about/" 
+                                        data-sx-slug="about" 
+                                        class="px-3 py-2 w-full inline-block font-medium text-sm text-gray-500 hover:text-gray-950 transition-colors duration-200
+                                            dark:text-gray-400 dark:hover:text-gray-50 [&.current]:text-gray-950 [&.current-parent]:text-gray-950 dark:[&.current]:text-gray-50 dark:[&.current-parent]:text-gray-50
+                                                     
+                                        "
+                                    >
+                                        About<!--
+                                        --><svg
+     class="[.sx-external&gt;&amp;]:inline hidden relative top-1 shrink-0 w-3 h-3 ms-0.5 -me-0.5 align-top" 
+    xmlns="http://www.w3.org/2000/svg" 
+    viewBox="0 0 16 16" 
+    width="16" 
+    height="16"    
+    fill="currentColor" 
+    focusable="false"
+    aria-hidden="true"      
+>
+  <path fill-rule="evenodd" d="M4.22 11.78a.75.75 0 0 1 0-1.06L9.44 5.5H5.75a.75.75 0 0 1 0-1.5h5.5a.75.75 0 0 1 .75.75v5.5a.75.75 0 0 1-1.5 0V6.56l-5.22 5.22a.75.75 0 0 1-1.06 0Z" clip-rule="evenodd" />
+</svg>
+
+                                    </a>   
+                            </div>
+                            <div class="hidden nth-[n+8]:block max-xl:nth-[n+6]:block" data-sx-slug="rss" data-sx-current="false">    
+                                                 
+                                    <a 
+                                        href="https://www.ajfriesen.com/rss/" 
+                                        data-sx-slug="rss" 
+                                        class="px-3 py-2 w-full inline-block font-medium text-sm text-gray-500 hover:text-gray-950 transition-colors duration-200
+                                            dark:text-gray-400 dark:hover:text-gray-50 [&.current]:text-gray-950 [&.current-parent]:text-gray-950 dark:[&.current]:text-gray-50 dark:[&.current-parent]:text-gray-50
+                                                     
+                                        "
+                                    >
+                                        RSS<!--
+                                        --><svg
+     class="[.sx-external&gt;&amp;]:inline hidden relative top-1 shrink-0 w-3 h-3 ms-0.5 -me-0.5 align-top" 
+    xmlns="http://www.w3.org/2000/svg" 
+    viewBox="0 0 16 16" 
+    width="16" 
+    height="16"    
+    fill="currentColor" 
+    focusable="false"
+    aria-hidden="true"      
+>
+  <path fill-rule="evenodd" d="M4.22 11.78a.75.75 0 0 1 0-1.06L9.44 5.5H5.75a.75.75 0 0 1 0-1.5h5.5a.75.75 0 0 1 .75.75v5.5a.75.75 0 0 1-1.5 0V6.56l-5.22 5.22a.75.75 0 0 1-1.06 0Z" clip-rule="evenodd" />
+</svg>
+
+                                    </a>   
+                            </div>
+                </li>
+            </ul>                     
+        </li>
+    </ul>
+
+
+
+
+            <div id="sx-header-buttons" 
+                class="flex flex-row-reverse items-center ms-auto gap-3.5 xs:flex-row lg:me-0 lg:ps-4 lg:pe-0 lg:gap-4 border-gray-950/10 dark:border-gray-50/15 
+                     me-3.5 xs:pe-3.5 lg:ms-4 xs:border-e lg:border-e-0 lg:border-s 
+                "
+            >
+                <button 
+                    data-sx-theme-toggle
+                    title="Change theme" 
+                    aria-label="Change theme"
+                    class="flex-none p-1.5 -mx-1.5 text-gray-500 hover:text-gray-950 dark:text-gray-400 dark:hover:text-gray-50 transition-colors"
+                >
+                    <svg 
+   class="dark:hidden w-5 h-5" 
+  xmlns="http://www.w3.org/2000/svg" 
+  viewBox="0 0 24 24" 
+  width="24" 
+  height="24" 
+  fill="none" 
+  stroke="currentColor"
+  stroke-width="2" 
+  focusable="false"
+  aria-hidden="true"      
+>
+  <path stroke-linecap="round" stroke-linejoin="round" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" />
+</svg>
+                    <svg 
+  class="hidden dark:block w-5 h-5"
+  xmlns="http://www.w3.org/2000/svg" 
+  viewBox="0 0 24 24" 
+  width="24" 
+  height="24"     
+  fill="none" 
+  stroke="currentColor" 
+  stroke-width="1.5"
+  stroke-linecap="round" 
+  stroke-linejoin="round"
+  focusable="false"
+  aria-hidden="true"        
+>
+  <path stroke="none" d="M0 0h24v24H0z" fill="none"></path>
+  <path d="M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 0 7.92 12.446a9 9 0 1 1 -8.313 -12.454z"></path>
+  <path d="M17 4a2 2 0 0 0 2 2a2 2 0 0 0 -2 2a2 2 0 0 0 -2 -2a2 2 0 0 0 2 -2"></path>
+</svg>                </button>
+                
+                <button 
+                    data-ghost-search 
+                    title="Quick search..." 
+                    aria-label="Quick search..."
+                    class="flex-none p-1.5 -mx-1.5 text-gray-500 hover:text-gray-950 dark:text-gray-400 dark:hover:text-gray-50 transition-colors"
+                >
+                    <svg 
+     class="w-5 h-5" 
+    xmlns="http://www.w3.org/2000/svg" 
+    viewBox="0 0 24 24" 
+    width="24" 
+    height="24" 
+    fill="none" 
+    stroke="currentColor" 
+    stroke-width="1.5" 
+    stroke-linecap="round" 
+    stroke-linejoin="round" 
+    focusable="false"
+    aria-hidden="true"       
+>
+    <circle cx="11" cy="11" r="8"></circle>
+    <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+</svg>                </button>
+
+                    <button 
+                         data-portal="signin"                             
+                        class="hidden xs:block py-1.5 font-medium text-sm whitespace-nowrap text-gray-500 hover:text-gray-950 dark:text-gray-400 dark:hover:text-gray-50 transition-colors duration-200"
+                    >
+                         Sign In 
+                    </button>
+
+                    <button                             
+                         data-portal="signup" 
+                        class="relative inline-flex justify-center items-center px-4 py-2.5 rounded-full border border-transparent
+                            font-medium text-sm leading-none bg-primary shadow-primary text-primary-contrast hover:opacity-80 transition-opacity duration-200
+                            from-gray-50 from-50% dark:border-gray-50/10 dark:bg-transparent dark:bg-linear-to-br dark:bg-clip-text dark:text-transparent dark:shadow-none dark:hover:opacity-100          
+                        "
+                    >
+                        <span> Subscribe </span>
+
+                        <span class="hidden dark:block absolute -inset-px -z-10 rounded-full bg-linear-to-br from-white from-0% to-30%"></span>
+                        <span class="hidden dark:block not-supports-relative-colors:hidden! absolute -inset-px -z-10 rounded-full drop-shadow-white-sm animation-state-paused [:hover>&]:animation-state-running opacity-0 [:hover>&]:opacity-100 transition-opacity duration-500">
+                            <span class="absolute inset-0 rounded-full -z-10 transition-opacity duration-500 bg-conic-white-sm animate-rotate-angle animation-state-inherit"></span>
+                        </span> 
+                        <span class="hidden dark:block absolute inset-0 -z-10 rounded-full bg-background-dark"></span>
+                        <span class="hidden dark:block absolute -inset-px -z-10 rounded-full bg-radial-[90%_90%_at_0%_0%] from-white transition-opacity duration-1000 opacity-25 [:hover>&]:opacity-40"></span>                
+                    </button>
+            </div>
+
+            <button 
+                id="sx-mobile-menu-toggle" 
+                class="lg:hidden p-1.5 -mx-2 flex-none flex items-center justify-center 
+                    
+                " 
+                title="Toggle menu" 
+                aria-label="Toggle menu"                
+            >
+                
+<svg 
+     class="w-5 h-5 text-gray-500 hover:text-gray-950 dark:text-gray-400 dark:hover:text-gray-50 -rotate-180 transition-colors duration-200" 
+    
+    xmlns="http://www.w3.org/2000/svg" 
+    viewBox="0 0 20 20" 
+    width="20" 
+    height="20"    
+    fill="currentColor" 
+    focusable="false"
+    aria-hidden="true"      
+>
+  <path fill-rule="evenodd" d="M2 4.75A.75.75 0 0 1 2.75 4h14.5a.75.75 0 0 1 0 1.5H2.75A.75.75 0 0 1 2 4.75Zm0 10.5a.75.75 0 0 1 .75-.75h14.5a.75.75 0 0 1 0 1.5H2.75a.75.75 0 0 1-.75-.75ZM2 10a.75.75 0 0 1 .75-.75h7.5a.75.75 0 0 1 0 1.5h-7.5A.75.75 0 0 1 2 10Z" clip-rule="evenodd" />
+</svg>
+            </button>
+        </div>
+    </nav>
+
+    <div data-sx-breadcrumbs class="outer xl:outer-xl hidden relative top-px lg:[.has-breadcrumbs>&]:hidden [.has-breadcrumbs>&]:flex items-center w-full h-10 text-2xs border-y border-gray-950/5 dark:border-gray-50/5">
+        <div class="inner flex items-center">
+            <button data-sx-breadcrumbs-button class="flex items-center overflow-hidden min-w-0 w-full" aria-label="Toggle menu">
+                <span class="flex-none flex items-center justify-center h-8 w-8 -ms-2 me-0.5">
+                    
+<svg 
+     class="flex-none h-5 w-5 text-gray-500 hover:text-gray-950 dark:text-gray-400 dark:hover:text-gray-50 transition-colors" 
+    
+    xmlns="http://www.w3.org/2000/svg" 
+    viewBox="0 0 20 20" 
+    width="20" 
+    height="20"    
+    fill="currentColor" 
+    focusable="false"
+    aria-hidden="true"      
+>
+  <path fill-rule="evenodd" d="M2 4.75A.75.75 0 0 1 2.75 4h14.5a.75.75 0 0 1 0 1.5H2.75A.75.75 0 0 1 2 4.75Zm0 10.5a.75.75 0 0 1 .75-.75h14.5a.75.75 0 0 1 0 1.5H2.75a.75.75 0 0 1-.75-.75ZM2 10a.75.75 0 0 1 .75-.75h7.5a.75.75 0 0 1 0 1.5h-7.5A.75.75 0 0 1 2 10Z" clip-rule="evenodd" />
+</svg>
+                </span>
+
+                <span data-sx-breadcrumbs-section hidden class="inline-flex flex-none max-w-1/2 truncate text-gray-500 dark:text-gray-400">
+                    <span data-sx-breadcrumbs-section-text class="truncate"></span>
+                    <span class="mx-2">/</span>
+                </span>
+                <span data-sx-breadcrumbs-current hidden class="truncate font-medium text-gray-950 dark:text-gray-50"></span>
+            </button>
+        </div>
+    </div>        
+
+    <div class="hidden [.stuck>&]:block absolute inset-0 -z-50 backdrop-blur-sm"></div>
+
+    <div class="hidden dark:[.stuck>&]:block outer xl:outer-xl absolute -bottom-px start-0 w-full h-px pointer-events-none">
+        <div class="inner">
+            <div class="w-1/2 xs:w-1/3 md:w-1/4 lg:w-1/8 h-px bg-linear-to-r from-white/0 via-white/30 -translate-x-1/8"></div>
+        </div>        
+    </div>
+</header>
+
+<nav id="sx-mobile-menu" class="invisible flex lg:hidden fixed inset-0 -z-10 [&.open]:visible [&.open]:z-3999999">
+    <div data-sx-mobile-menu-close class="fixed inset-0 bg-black/20 dark:bg-black/50 backdrop-blur-xs"></div>
+
+    <div class="fixed top-0 end-0 bottom-0 w-full max-w-xs shadow-lg bg-gray-50 dark:bg-gray-950 border-s border-gray-950/5 dark:border-gray-50/5 transition ease-out translate-x-full [.open>&]:translate-x-0 ">
+        <div class="relative ps-9 pe-16 pb-6 pt-14 h-full overflow-y-scroll overflow-x-hidden">
+            <button data-sx-mobile-menu-close aria-label="Close" class="fixed flex items-center justify-center top-4 end-3 p-2 text-gray-400 hover:text-gray-700 dark:hover:text-gray-200">
+                
+<svg
+    class="h-5 w-5"
+    style=""
+    xmlns="http://www.w3.org/2000/svg" 
+    viewBox="0 0 24 24" 
+    width="24" 
+    height="24"    
+    fill="none" 
+    stroke="currentColor" 
+    stroke-width="1.5"
+    stroke-linecap="round" 
+    stroke-linejoin="round"
+    focusable="false"
+    aria-hidden="true"      
+>
+    <path stroke="none" d="M0 0h24v24H0z" fill="none"/>
+    <path d="M14 12l-10 0" />
+    <path d="M14 12l-4 4" />
+    <path d="M14 12l-4 -4" />
+    <path d="M20 4l0 16" />
+</svg>            </button>
+
+            <div class="grid grid-cols-1 min-h-full">
+                    <ul id="sx-nav-sm" data-sx-nav class="flex flex-col space-y-2 -mx-3.5">
+             
+                <li data-sx-slug="home" data-sx-current="false">
+                     
+                        <a 
+                            href="https://www.ajfriesen.com/" 
+                            data-sx-slug="home" 
+                            class="px-3 py-2 inline-block font-medium text-sm text-gray-500 hover:text-gray-950
+                                dark:text-gray-400 dark:hover:text-gray-50 [&.current]:text-gray-950 [&.current-parent]:text-gray-950 dark:[&.current]:text-gray-50 dark:[&.current-parent]:text-gray-50
+                                         
+                            "
+                        >
+                            Home<!--
+                            --><svg
+     class="[.sx-external&gt;&amp;]:inline hidden relative top-1 shrink-0 w-3 h-3 ms-0.5 -me-0.5 align-top" 
+    xmlns="http://www.w3.org/2000/svg" 
+    viewBox="0 0 16 16" 
+    width="16" 
+    height="16"    
+    fill="currentColor" 
+    focusable="false"
+    aria-hidden="true"      
+>
+  <path fill-rule="evenodd" d="M4.22 11.78a.75.75 0 0 1 0-1.06L9.44 5.5H5.75a.75.75 0 0 1 0-1.5h5.5a.75.75 0 0 1 .75.75v5.5a.75.75 0 0 1-1.5 0V6.56l-5.22 5.22a.75.75 0 0 1-1.06 0Z" clip-rule="evenodd" />
+</svg>
+
+                        </a>
+                </li>
+             
+                <li data-sx-slug="blog" data-sx-current="false">
+                     
+                        <a 
+                            href="https://www.ajfriesen.com/blog/" 
+                            data-sx-slug="blog" 
+                            class="px-3 py-2 inline-block font-medium text-sm text-gray-500 hover:text-gray-950
+                                dark:text-gray-400 dark:hover:text-gray-50 [&.current]:text-gray-950 [&.current-parent]:text-gray-950 dark:[&.current]:text-gray-50 dark:[&.current-parent]:text-gray-50
+                                         
+                            "
+                        >
+                            Blog<!--
+                            --><svg
+     class="[.sx-external&gt;&amp;]:inline hidden relative top-1 shrink-0 w-3 h-3 ms-0.5 -me-0.5 align-top" 
+    xmlns="http://www.w3.org/2000/svg" 
+    viewBox="0 0 16 16" 
+    width="16" 
+    height="16"    
+    fill="currentColor" 
+    focusable="false"
+    aria-hidden="true"      
+>
+  <path fill-rule="evenodd" d="M4.22 11.78a.75.75 0 0 1 0-1.06L9.44 5.5H5.75a.75.75 0 0 1 0-1.5h5.5a.75.75 0 0 1 .75.75v5.5a.75.75 0 0 1-1.5 0V6.56l-5.22 5.22a.75.75 0 0 1-1.06 0Z" clip-rule="evenodd" />
+</svg>
+
+                        </a>
+                </li>
+             
+                <li data-sx-slug="pokypow-crowdfunding" data-sx-current="false">
+                     
+                        <a 
+                            href="https://www.crowdsupply.com/ajfriesen/pokypow" 
+                            data-sx-slug="pokypow-crowdfunding" 
+                            class="px-3 py-2 inline-block font-medium text-sm text-gray-500 hover:text-gray-950
+                                dark:text-gray-400 dark:hover:text-gray-50 [&.current]:text-gray-950 [&.current-parent]:text-gray-950 dark:[&.current]:text-gray-50 dark:[&.current-parent]:text-gray-50
+                                         
+                            "
+                        >
+                            PokyPow Crowdfunding<!--
+                            --><svg
+     class="[.sx-external&gt;&amp;]:inline hidden relative top-1 shrink-0 w-3 h-3 ms-0.5 -me-0.5 align-top" 
+    xmlns="http://www.w3.org/2000/svg" 
+    viewBox="0 0 16 16" 
+    width="16" 
+    height="16"    
+    fill="currentColor" 
+    focusable="false"
+    aria-hidden="true"      
+>
+  <path fill-rule="evenodd" d="M4.22 11.78a.75.75 0 0 1 0-1.06L9.44 5.5H5.75a.75.75 0 0 1 0-1.5h5.5a.75.75 0 0 1 .75.75v5.5a.75.75 0 0 1-1.5 0V6.56l-5.22 5.22a.75.75 0 0 1-1.06 0Z" clip-rule="evenodd" />
+</svg>
+
+                        </a>
+                </li>
+             
+                <li data-sx-slug="pokypow-posts" data-sx-current="false">
+                     
+                        <a 
+                            href="https://www.ajfriesen.com/tag/pokypow/" 
+                            data-sx-slug="pokypow-posts" 
+                            class="px-3 py-2 inline-block font-medium text-sm text-gray-500 hover:text-gray-950
+                                dark:text-gray-400 dark:hover:text-gray-50 [&.current]:text-gray-950 [&.current-parent]:text-gray-950 dark:[&.current]:text-gray-50 dark:[&.current-parent]:text-gray-50
+                                         
+                            "
+                        >
+                            PokyPow Posts<!--
+                            --><svg
+     class="[.sx-external&gt;&amp;]:inline hidden relative top-1 shrink-0 w-3 h-3 ms-0.5 -me-0.5 align-top" 
+    xmlns="http://www.w3.org/2000/svg" 
+    viewBox="0 0 16 16" 
+    width="16" 
+    height="16"    
+    fill="currentColor" 
+    focusable="false"
+    aria-hidden="true"      
+>
+  <path fill-rule="evenodd" d="M4.22 11.78a.75.75 0 0 1 0-1.06L9.44 5.5H5.75a.75.75 0 0 1 0-1.5h5.5a.75.75 0 0 1 .75.75v5.5a.75.75 0 0 1-1.5 0V6.56l-5.22 5.22a.75.75 0 0 1-1.06 0Z" clip-rule="evenodd" />
+</svg>
+
+                        </a>
+                </li>
+             
+                <li data-sx-slug="projects" data-sx-current="false">
+                     
+                        <a 
+                            href="https://www.ajfriesen.com/projects/" 
+                            data-sx-slug="projects" 
+                            class="px-3 py-2 inline-block font-medium text-sm text-gray-500 hover:text-gray-950
+                                dark:text-gray-400 dark:hover:text-gray-50 [&.current]:text-gray-950 [&.current-parent]:text-gray-950 dark:[&.current]:text-gray-50 dark:[&.current-parent]:text-gray-50
+                                         
+                            "
+                        >
+                            Projects<!--
+                            --><svg
+     class="[.sx-external&gt;&amp;]:inline hidden relative top-1 shrink-0 w-3 h-3 ms-0.5 -me-0.5 align-top" 
+    xmlns="http://www.w3.org/2000/svg" 
+    viewBox="0 0 16 16" 
+    width="16" 
+    height="16"    
+    fill="currentColor" 
+    focusable="false"
+    aria-hidden="true"      
+>
+  <path fill-rule="evenodd" d="M4.22 11.78a.75.75 0 0 1 0-1.06L9.44 5.5H5.75a.75.75 0 0 1 0-1.5h5.5a.75.75 0 0 1 .75.75v5.5a.75.75 0 0 1-1.5 0V6.56l-5.22 5.22a.75.75 0 0 1-1.06 0Z" clip-rule="evenodd" />
+</svg>
+
+                        </a>
+                </li>
+             
+                <li data-sx-slug="about" data-sx-current="false">
+                     
+                        <a 
+                            href="https://www.ajfriesen.com/about/" 
+                            data-sx-slug="about" 
+                            class="px-3 py-2 inline-block font-medium text-sm text-gray-500 hover:text-gray-950
+                                dark:text-gray-400 dark:hover:text-gray-50 [&.current]:text-gray-950 [&.current-parent]:text-gray-950 dark:[&.current]:text-gray-50 dark:[&.current-parent]:text-gray-50
+                                         
+                            "
+                        >
+                            About<!--
+                            --><svg
+     class="[.sx-external&gt;&amp;]:inline hidden relative top-1 shrink-0 w-3 h-3 ms-0.5 -me-0.5 align-top" 
+    xmlns="http://www.w3.org/2000/svg" 
+    viewBox="0 0 16 16" 
+    width="16" 
+    height="16"    
+    fill="currentColor" 
+    focusable="false"
+    aria-hidden="true"      
+>
+  <path fill-rule="evenodd" d="M4.22 11.78a.75.75 0 0 1 0-1.06L9.44 5.5H5.75a.75.75 0 0 1 0-1.5h5.5a.75.75 0 0 1 .75.75v5.5a.75.75 0 0 1-1.5 0V6.56l-5.22 5.22a.75.75 0 0 1-1.06 0Z" clip-rule="evenodd" />
+</svg>
+
+                        </a>
+                </li>
+             
+                <li data-sx-slug="rss" data-sx-current="false">
+                     
+                        <a 
+                            href="https://www.ajfriesen.com/rss/" 
+                            data-sx-slug="rss" 
+                            class="px-3 py-2 inline-block font-medium text-sm text-gray-500 hover:text-gray-950
+                                dark:text-gray-400 dark:hover:text-gray-50 [&.current]:text-gray-950 [&.current-parent]:text-gray-950 dark:[&.current]:text-gray-50 dark:[&.current-parent]:text-gray-50
+                                         
+                            "
+                        >
+                            RSS<!--
+                            --><svg
+     class="[.sx-external&gt;&amp;]:inline hidden relative top-1 shrink-0 w-3 h-3 ms-0.5 -me-0.5 align-top" 
+    xmlns="http://www.w3.org/2000/svg" 
+    viewBox="0 0 16 16" 
+    width="16" 
+    height="16"    
+    fill="currentColor" 
+    focusable="false"
+    aria-hidden="true"      
+>
+  <path fill-rule="evenodd" d="M4.22 11.78a.75.75 0 0 1 0-1.06L9.44 5.5H5.75a.75.75 0 0 1 0-1.5h5.5a.75.75 0 0 1 .75.75v5.5a.75.75 0 0 1-1.5 0V6.56l-5.22 5.22a.75.75 0 0 1-1.06 0Z" clip-rule="evenodd" />
+</svg>
+
+                        </a>
+                </li>
+
+            <li class="mt-auto xs:hidden">
+                <button 
+                     data-portal="signin"                             
+                    class="px-3 py-2 inline-block font-medium text-sm text-gray-500 hover:text-gray-950
+                        dark:text-gray-400 dark:hover:text-gray-50 [&.current]:text-gray-950 [&.current-parent]:text-gray-950 dark:[&.current]:text-gray-50 dark:[&.current-parent]:text-gray-50
+                        w-full text-start 
+                    "
+                >
+                     Sign In 
+                </button>
+            </li>        
+    </ul>
+
+
+
+            </div>
+        </div>
+    </div>
+</nav> 
+
+            <main id="sx-main" tabindex="-1" class="flex-none outline-hidden">
+                
+        
+
+<div class="absolute -z-10 top-10 start-0 w-full h-70 bg-grid-gray-950 dark:bg-grid-gray-50 bg-grid-size-10 dark:bg-grid-size-10 lg:bg-grid-size-15 dark:lg:bg-grid-size-15 mask-radial mask-position-to-80% opacity-5 dark:opacity-10 pointer-events-none"></div>
+
+
+<div id="sx-hero" 
+    class="relative outer xl:outer-xl outline-hidden max-w-none py-16 sm:py-20 md:py-28
+         is-txt-center 
+         
+        
+        post tag-home-lab tag-hash-blog-col tag-linux tag-self-hosting        
+    "
+>
+    <div class="inner max-w-5xl grid gap-10 xl:gap-16 items-center
+            
+             sm:text-center 
+        "
+    > 
+        <div class="w-full">
+                <div class="inline-flex items-center">
+                        <a href="https://www.ajfriesen.com/tag/home-lab/" class="badge mb-3 inline-flex no-underline" data-sx-text="Home Lab and Hardware">
+                            Home Lab and Hardware
+                        </a> 
+
+                </div>
+
+            <h1 class="animate-slide-down -my-3 max-w-3xl text-4xl xl:text-5xl text-pretty font-bold tracking-tight leading-tighter
+                     mx-auto 
+                    
+                                
+                "
+            >
+                <span class="inline-flex py-3 text-gray-950 dark:bg-linear-to-br from-gray-100 from-50% to-background-dark dark:bg-clip-text dark:text-transparent">
+                    Replacing disks in BTRFS
+                </span>
+            </h1>     
+
+
+                <p class="                animate-slide-up max-w-2xl text-lg text-gray-600 dark:text-gray-400
+                 mx-auto 
+                 mt-6   
+                     
+ text-pretty">
+                    Yak shaving continues. Replacing my SSDs in a BTRFS Raid.
+                </p>            
+                     
+                <p class="mt-4 text-sm text-gray-500 dark:text-gray-400/80">
+                    <time class="capitalize" datetime="2024-10-09">Oct 9, 2024</time>
+                    <span class="mx-1.5 opacity-80 first:hidden last:hidden">·</span>
+
+                        <a href="https://www.ajfriesen.com/author/andrej/" title="Andrej Friesen" class="no-underline text-inherit">
+                            By Andrej Friesen
+                        </a>
+                        <span class="mx-1.5 opacity-80 first:hidden last:hidden">·</span>
+
+                        <span>6 min read</span>
+                </p>                
+        </div>
+
+
+        <figure class="hidden w-full max-w-5xl mx-auto animate-slide-up  has-links has-figcaption 
+                
+                                  
+                             !block  
+            "
+        >
+            <div class="relative rounded-xl overflow-hidden 
+                        aspect-16/9
+                                    "
+            >
+                            <picture>
+                                <source
+                                    type="image/avif"                                
+                                    data-sizes="auto"
+                                    data-srcset="/content/images/size/w100/format/avif/2024/10/PXL_20241005_084600326.jpg 100w,
+/content/images/size/w400/format/avif/2024/10/PXL_20241005_084600326.jpg 400w,
+/content/images/size/w800/format/avif/2024/10/PXL_20241005_084600326.jpg 800w,
+/content/images/size/w1200/format/avif/2024/10/PXL_20241005_084600326.jpg 1200w,
+/content/images/size/w1600/format/avif/2024/10/PXL_20241005_084600326.jpg 1600w,
+/content/images/size/w2400/format/avif/2024/10/PXL_20241005_084600326.jpg 2400w"
+                                    srcset="/content/images/size/w30/format/avif/2024/10/PXL_20241005_084600326.jpg"
+                                    src="/content/images/size/w2400/format/avif/2024/10/PXL_20241005_084600326.jpg"
+                                />
+                                <source
+                                    type="image/webp"                                
+                                    data-sizes="auto"
+                                    data-srcset="/content/images/size/w100/format/webp/2024/10/PXL_20241005_084600326.jpg 100w,
+/content/images/size/w400/format/webp/2024/10/PXL_20241005_084600326.jpg 400w,
+/content/images/size/w800/format/webp/2024/10/PXL_20241005_084600326.jpg 800w,
+/content/images/size/w1200/format/webp/2024/10/PXL_20241005_084600326.jpg 1200w,
+/content/images/size/w1600/format/webp/2024/10/PXL_20241005_084600326.jpg 1600w,
+/content/images/size/w2400/format/webp/2024/10/PXL_20241005_084600326.jpg 2400w"
+                                    srcset="/content/images/size/w30/format/webp/2024/10/PXL_20241005_084600326.jpg"
+                                    src="/content/images/size/w2400/format/webp/2024/10/PXL_20241005_084600326.jpg"
+                                />
+                                <img
+                                    class="lazyload absolute inset-0 w-full h-full object-cover bg-gray-100 dark:bg-gray-900 [&.lazyloaded]:bg-transparent!"
+                                    data-sizes="auto"
+                                    data-srcset="/content/images/size/w100/2024/10/PXL_20241005_084600326.jpg 100w,
+/content/images/size/w400/2024/10/PXL_20241005_084600326.jpg 400w,
+/content/images/size/w800/2024/10/PXL_20241005_084600326.jpg 800w,
+/content/images/size/w1200/2024/10/PXL_20241005_084600326.jpg 1200w,
+/content/images/size/w1600/2024/10/PXL_20241005_084600326.jpg 1600w,
+/content/images/size/w2400/2024/10/PXL_20241005_084600326.jpg 2400w"
+                                    srcset="/content/images/size/w30/2024/10/PXL_20241005_084600326.jpg"
+                                    src="/content/images/size/w2400/2024/10/PXL_20241005_084600326.jpg"
+                                    alt="Replacing disks in BTRFS"
+                                />
+                            </picture>
+            </div>
+                <figcaption><span style="white-space: pre-wrap;">New SSDs arrived!</span></figcaption>
+        </figure>
+    </div>
+</div>
+
+<div class="outer xl:outer-xl">
+    <div class="inner">
+
+        <div class="max-w-5xl mx-auto grid gap-0 xl:gap-20 grid-cols-1 xl:grid-cols-[auto_--spacing(56)]">
+            <div class="w-full min-w-0 max-w-3xl sm:mx-auto xl:mx-0">
+                <div data-sx-toc-src>
+                    <h2 id="___TOCBOT___" class="sr-only m-0">
+                        <span aria-hidden="true">Replacing disks in BTRFS</span>
+                    </h2>  
+
+                    <div class="content">
+                        <p>Hey nerds 👋</p><p>As you may have read in the last blog post <a href="https://www.ajfriesen.com/first-disk-failure/">My first disk failure with BTRFS</a> I lost an SSD. Here is the follow-up on what I had to do to replace those SSDs with my new M2 NVMEs.</p><h1 id="adding-the-disksproxmox-annoyance">Adding the disks - Proxmox annoyance</h1><p>For myself I will document, where I put which SSD since I will not remember this, when the next will fail.</p><p>Here a short diagram of my mainboard, the <strong>MSI PRO Z690-A DDR4</strong>. </p><figure class="kg-card kg-image-card kg-card-hascaption"><img src="https://www.ajfriesen.com/content/images/2024/10/Screenshot-2024-10-05-at-10.24.56.png" class="kg-image" alt="" loading="lazy" width="1176" height="1404" srcset="https://www.ajfriesen.com/content/images/size/w600/2024/10/Screenshot-2024-10-05-at-10.24.56.png 600w, https://www.ajfriesen.com/content/images/size/w1000/2024/10/Screenshot-2024-10-05-at-10.24.56.png 1000w, https://www.ajfriesen.com/content/images/2024/10/Screenshot-2024-10-05-at-10.24.56.png 1176w" sizes="(min-width: 720px) 720px"><figcaption><span style="white-space: pre-wrap;">MSI PRO Z690-A DDR4 board layout</span></figcaption></figure><p>The slots below were already populated for Proxmox VM storage. Now I have added the 2 new ones as well. I checked the board docs before as well to verify I do not lose speed or something on the GPU. So here are my slots with the serial of the mapped SSD.</p><ul><li><code>M2_1: 70B005D6</code> pass through nas VM</li><li><code>M2_2: 70B00681</code> pass through nas VM</li><li><code>M2_3: S69ENF0W951426J</code> proxmox</li><li><code>M2_4: S69ENF0W951396Z</code> proxmox</li></ul><div class="kg-card kg-callout-card kg-callout-card-grey"><div class="kg-callout-emoji">⁉️</div><div class="kg-callout-text"><b><strong style="white-space: pre-wrap;">Side Quest:</strong></b><br>I lost one of the screws from the NVME drive and could not find it anymore in the case. I had to disassemble almost everything until I was able to find it. What hassle 😅</div></div><p>Since I disabled everything I thought noting down the HDDs serial from the top is a good idea for future me as well (pass through nas VM):</p><ul><li><code>ZS800MA1</code></li><li><code>ZLW279PA</code></li><li><code>ZLW22PX8</code></li><li><code>8DKW17XH</code></li></ul><p>Adding those disks has already caused some problems with Proxmox. My NAS VM no longer boots. Figured it out quickly. Adding PCIe devices changes the numbering of some of them. My HBA card, which is passed through did have a new PCIe number and therefore was not found anymore. Adjusting that and adding the 2 new NVME drives did the trick.</p><p>My HBA was <code>0000:06:00</code> before. Now I added the 2 new NVMe drives they got </p><ul><li><code>0000:02:00</code></li><li><code>0000:03:00</code></li></ul><p>Now my HBA has <code>0000:08:00</code>, okay whatever. Changed it and everything is good.</p><figure class="kg-card kg-image-card kg-card-hascaption"><img src="https://www.ajfriesen.com/content/images/2024/10/Screenshot-2024-10-06-at-14.22.51.png" class="kg-image" alt="" loading="lazy" width="672" height="248" srcset="https://www.ajfriesen.com/content/images/size/w600/2024/10/Screenshot-2024-10-06-at-14.22.51.png 600w, https://www.ajfriesen.com/content/images/2024/10/Screenshot-2024-10-06-at-14.22.51.png 672w"><figcaption><span style="white-space: pre-wrap;">Proxmox Hardware list for PCI devices</span></figcaption></figure><p>I would love to give those PCI Devices custom names. I will not remember what is what in a week or two. Did not find an option, though.</p><p>After that was settled, I could boot my NAS VM again.</p><h2 id="removing-my-old-disksa-problem">Removing my old disks - A problem</h2><p>Now let's tackle the actual issue. Trying to replace my old SSD and my backup HDD from the raid.</p><p>Adding devices was easy. I created a LUKS container again and added those drives to the <code>/etc/crypttab</code> for automatic encryption at boot time. Then a simple <code>btrfs device add</code> to the raid.</p><p>Now, removing was not that trivial. I could not remove my old disk with <code>btrfs device remove</code></p><pre><code>sudo btrfs device remove /dev/mapper/ssd-backup /ssdraid/
+ERROR: error removing device '/dev/mapper/ssd-backup': Input/output error</code></pre><p>A <code>scrub</code> showed me that I have two uncorrectable errors:</p><pre><code>sudo btrfs scrub status /ssdraid
+UUID:             cc6d1c26-d69e-4c75-b0cd-3edddf3ffb00
+Scrub started:    Sun Oct  6 07:49:28 2024
+Status:           finished
+Duration:         0:00:29
+Total to scrub:   64.08GiB
+Rate:             2.21GiB/s
+Error summary:    csum=2
+  Corrected:      0
+  Uncorrectable:  2
+  Unverified:     0</code></pre><p>Looking at the <code>dmesg -T</code> output, I could see the checksum errors. Looks like inluxdb index files are corrupted. I guess that happened because the container was running while the filesystem ran full. But that is just a guess.</p><figure class="kg-card kg-code-card"><pre><code>[Sun Oct  6 07:49:32 2024] BTRFS warning (device dm-4): checksum error at logical 1500790784 on dev /dev/mapper/ssd_raid-1, physical 1500790784, root 257, inode 3305984, offset 0, length 4096, links 1 (path: influx/influx-data/engine/data/d397af7b60aa91c2/autogen/531/index/3/L3-00000008.tsi)
+[Sun Oct  6 07:49:32 2024] BTRFS error (device dm-4): bdev /dev/mapper/ssd_raid-1 errs: wr 0, rd 0, flush 0, corrupt 29155121, gen 0
+[Sun Oct  6 07:49:33 2024] BTRFS error (device dm-4): unable to fixup (regular) error at logical 1500790784 on dev /dev/mapper/ssd_raid-1
+[Sun Oct  6 07:49:33 2024] BTRFS info (device dm-4): scrub: finished on devid 1 with status: 0
+[Sun Oct  6 07:49:38 2024] BTRFS warning (device dm-4): checksum error at logical 1500790784 on dev /dev/mapper/ssd-backup, physical 1479819264, root 257, inode 3305984, offset 0, length 4096, links 1 (path: influx/influx-data/engine/data/d397af7b60aa91c2/autogen/531/index/3/L3-00000008.tsi)
+[Sun Oct  6 07:49:38 2024] BTRFS error (device dm-4): bdev /dev/mapper/ssd-backup errs: wr 0, rd 0, flush 0, corrupt 45896582, gen 0
+[Sun Oct  6 07:49:38 2024] BTRFS error (device dm-4): unable to fixup (regular) error at logical 1500790784 on dev /dev/mapper/ssd-backup
+[Sun Oct  6 07:49:43 2024] BTRFS info (device dm-4): scrub: finished on devid 2 with status: 0</code></pre><figcaption><p><code spellcheck="false" style="white-space: pre-wrap;"><span>dmesg -T</span></code><span style="white-space: pre-wrap;"> from the scrub</span></p></figcaption></figure><p>After finding those errors, I also checked the filesystem with <code>btrfs device check</code> on all devices, but the filesystem itself was totally okay. It was just that one file.</p><h3 id="fixing-influxdb-index">Fixing <code>influxdb</code> index</h3><p>After some research, I figured out how to do that. At least I believe that fixed everything. First, I deleted the file and then recreated the index again:</p><pre><code>docker exec -it influx influxd inspect build-tsi --data-path  /var/lib/influxdb2
+?
+You are currently running as root. This will build your
+index files with root ownership and will be inaccessible
+if you run influxd as a non-root user. You should run
+build-tsi as the same user you are running influxd.
+Are you sure you want to continue? Yes
+2024-10-06T08:26:58.730759Z     info    Rebuilding bucket       {"log_id": "0s4EryDW000", "name": "engine"}
+2024-10-06T08:26:58.944877Z     info    Rebuilding retention policy     {"log_id": "0s4EryDW000", "db_instance": "engine", "db_rp": "data"}
+2024-10-06T08:26:58.944917Z     info    Rebuilding retention policy     {"log_id": "0s4EryDW000", "db_instance": "engine", "db_rp": "replicationq"}
+2024-10-06T08:26:58.944932Z     info    Rebuilding retention policy     {"log_id": "0s4EryDW000", "db_instance": "engine", "db_rp": "wal"}</code></pre><p>Checking the filesystem on the path <code>influx/influx-data/engine/data/d397af7b60aa91c2/autogen/531/index/3/</code> did show me new files.</p><p>A proper backup or snapshots would have been nice! Need to think about my non-existing backup strategy. 😅</p><h3 id="actually-removing-my-disks">Actually removing my disks</h3><p>Now, the removal of the old disks did work without any issues.</p><pre><code>sudo btrfs filesystem show /ssdraid/
+Label: none  uuid: cc6d1c26-d69e-4c75-b0cd-3edddf3ffb00
+        Total devices 2 FS bytes used 32.11GiB
+        devid    3 size 1.82TiB used 34.03GiB path /dev/mapper/m2_1
+        devid    4 size 1.82TiB used 34.03GiB path /dev/mapper/m2_2</code></pre><p>A final scrub to see if the errors are gone:</p><pre><code>sudo btrfs scrub status /ssdraid/
+UUID:             cc6d1c26-d69e-4c75-b0cd-3edddf3ffb00
+Scrub started:    Sun Oct  6 12:33:48 2024
+Status:           finished
+Duration:         0:00:19
+Total to scrub:   64.39GiB
+Rate:             3.39GiB/s
+Error summary:    no errors found</code></pre><p>And a double check on the device stats as well:</p><pre><code>sudo btrfs device stats /ssdraid/
+[/dev/mapper/m2_1].write_io_errs    0
+[/dev/mapper/m2_1].read_io_errs     0
+[/dev/mapper/m2_1].flush_io_errs    0
+[/dev/mapper/m2_1].corruption_errs  0
+[/dev/mapper/m2_1].generation_errs  0
+[/dev/mapper/m2_2].write_io_errs    0
+[/dev/mapper/m2_2].read_io_errs     0
+[/dev/mapper/m2_2].flush_io_errs    0
+[/dev/mapper/m2_2].corruption_errs  0
+[/dev/mapper/m2_2].generation_errs  0</code></pre><p>Nice. My fast raid is running again and even faster.</p><h1 id="conclusion">Conclusion</h1><p>One thing I know for sure: This was Yak shaving at its best.</p><div class="kg-card kg-callout-card kg-callout-card-blue"><div class="kg-callout-emoji">🐂</div><div class="kg-callout-text"><b><strong style="white-space: pre-wrap;">Yak Shaving</strong></b><br>Any apparently&nbsp;useless activity&nbsp;which, by allowing one to overcome intermediate difficulties, allows one to solve a larger problem.</div></div><figure class="kg-card kg-image-card"><img src="https://www.ajfriesen.com/content/images/2024/10/giphy--1-.gif" class="kg-image" alt="" loading="lazy" width="400" height="506"></figure><p>Problems often happen at the same time (disk full + corruption). Then you try to solve the initial problem but need to solve a bunch of other sometimes unrelated problems (Proxmox PCIe device numbering, PiKVM display output for MSI board, etc). If you do not know what work looks like in it, that is it. 100%! 😄</p><p>Anyway, I hope you had some fun. I know I did.</p><p>Let me hear from you if you encountered some Yak shaving yourself in your home lab. I can't be the only one!</p><p>Have a great day! 👋</p>
+                    </div>
+                </div>
+
+                <div class="mt-12">
+    <div class="mb-6">
+        <h2 class="text-2xl tracking-tight leading-tight font-bold text-gray-950 dark:text-gray-50">
+            About the author
+        </h2>
+    </div>
+
+    <div class="grid grid-cols-1 gap-4">
+            <div class="w-full p-4 sm:p-8 rounded-xl sm:rounded-2xl bg-white dark:bg-white/5 ring-1 ring-inset ring-gray-950/10 dark:ring-gray-50/5">
+                <a href="https://www.ajfriesen.com/author/andrej/" class="mb-4 flex-none flex items-center">
+                        <img
+                            class="me-3 w-8 h-8 object-cover rounded-full"
+                            src="/content/images/size/w100/2021/06/Andrej_2000x2000.png"
+                            alt="Andrej Friesen"
+                            loading="lazy"
+                        />
+
+                    <span class="font-medium text-base text-gray-900 dark:text-gray-50">Andrej Friesen</span>
+                </a>
+
+                    <p class="mb-4 has-links text-base text-gray-700 dark:text-gray-400">Hey,
+
+I am Andrej and I run this blog.</p>
+
+                <div class="flex flex-wrap items-center gap-3 text-gray-500 dark:text-gray-400">
+                    <a href="https://www.ajfriesen.com/author/andrej/" class="me-auto flex-none inline-flex items-center text-xs text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100 transition-colors duration-200">
+                        View profile
+                        <svg
+    class="relative top-px ms-0.5 w-3.5 h-3.5 opacity-80 [:hover&gt;&amp;]:translate-x-1 transition-transform duration-150"
+    style=""
+    xmlns="http://www.w3.org/2000/svg" 
+    viewBox="0 0 24 24" 
+    width="24" 
+    height="24"    
+    fill="none" 
+    stroke="currentColor" 
+    stroke-width="1.5"
+    focusable="false"
+    aria-hidden="true"    
+>
+  <path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7" />
+</svg>                    </a>
+
+                    <div class="inline-flex flex-wrap items-center gap-4">
+
+                            <a href="https://x.com/mr_ajfriesen" target="_blank" title="X (Twitter)" class="flex-none inline-flex items-center text-xs text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100 transition-colors duration-200">
+                                
+<svg 
+    class="flex-none w-4 h-4 "
+    xmlns="http://www.w3.org/2000/svg" 
+    viewBox="0 0 24 24" 
+    width="24" 
+    height="24" 
+    fill="currentColor"
+    focusable="false"
+    aria-hidden="true"       
+>
+    <path d="M18.901 1.153h3.68l-8.04 9.19L24 22.846h-7.406l-5.8-7.584-6.638 7.584H.474l8.6-9.83L0 1.154h7.594l5.243 6.932ZM17.61 20.644h2.039L6.486 3.24H4.298Z"/>
+</svg>                            </a>
+
+
+                            <a href="https://www.linkedin.com/in/andrej-friesen" target="_blank" title="LinkedIn" class="flex-none inline-flex items-center text-xs text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100 transition-colors duration-200">
+                                
+<svg 
+    class="flex-none w-4 h-4"
+    xmlns="http://www.w3.org/2000/svg"
+    viewBox="0 0 24 24" 
+    width="24" 
+    height="24" 
+    fill="currentColor"
+    focusable="false"
+    aria-hidden="true"     
+>
+    <path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433c-1.144 0-2.063-.926-2.063-2.065 0-1.138.92-2.063 2.063-2.063 1.14 0 2.064.925 2.064 2.063 0 1.139-.925 2.065-2.064 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z"/>
+</svg>                            </a>
+
+
+
+
+
+                            <a href="https://www.youtube.com/@ajfriesen" target="_blank" title="Youtube" class="flex-none inline-flex items-center text-xs text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100 transition-colors duration-200">
+                                
+<svg 
+    class="flex-none w-4 h-4"
+    xmlns="http://www.w3.org/2000/svg"
+    viewBox="0 0 24 24" 
+    width="24" 
+    height="24"
+    fill="currentColor" 
+    focusable="false"
+    aria-hidden="true"      
+>
+    <path d="M23.498 6.186a3.016 3.016 0 0 0-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.017 3.017 0 0 0 .502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 0 0 2.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.015 3.015 0 0 0 2.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814zM9.545 15.568V8.432L15.818 12l-6.273 3.568z"/>
+</svg>                            </a>
+
+                    </div>
+                </div>
+            </div>
+    </div>
+</div>
+                <div class="mt-8 flex flex-wrap items-center justify-between gap-x-4 gap-y-5 js-toc-ignore">
+        <div data-sx-updated-on class="flex-none max-w-full text-xs text-gray-500 dark:text-gray-400">
+            Updated on Jun 4, 2025
+        </div>
+
+
+    <div class="flex flex-none gap-2">
+            <button data-sx-comments-toggle="6700f7545c58eb0001b1141f" class="relative flex-none px-2 py-1 text-xs text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-400 font-medium flex items-center rounded-full bg-white shadow-pretty dark:bg-transparent dark:shadow-none transition-colors duration-200">
+                <div class="absolute -inset-px -z-10 dark:bg-white/5 dark:[:hover>&]:bg-white/10 rounded-full border border-gray-950/5 dark:border-gray-50/5 transition-colors duration-200"></div>
+                
+<svg
+    class="w-4 h-4 me-1 opacity-70"
+    style=""
+    xmlns="http://www.w3.org/2000/svg" 
+    viewBox="0 0 24 24" 
+    width="24" 
+    height="24"    
+    fill="none" 
+    stroke-width="1.5" 
+    stroke="currentColor"
+    stroke-linecap="round" stroke-linejoin="round"
+    focusable="false"
+    aria-hidden="true"      
+>
+  <path stroke-linecap="round" stroke-linejoin="round" d="M12 20.25c4.97 0 9-3.694 9-8.25s-4.03-8.25-9-8.25S3 7.444 3 12c0 2.104.859 4.023 2.273 5.48.432.447.74 1.04.586 1.641a4.483 4.483 0 0 1-.923 1.785A5.969 5.969 0 0 0 6 21c1.282 0 2.47-.402 3.445-1.087.81.22 1.668.337 2.555.337Z" />
+</svg>
+
+                Comments
+                <div data-sx-comments-count hidden class="absolute top-1/2 end-1 -translate-y-5.75 flex flex-none items-center justify-center min-w-4 rounded-full bg-primary text-primary-contrast text-3xs leading-3 px-1 py-0.5 drop-shadow-primary-sm pointer-events-none">
+                    <script
+    data-ghost-comment-count="6700f7545c58eb0001b1141f"
+    data-ghost-comment-count-empty=""
+    data-ghost-comment-count-singular=""
+    data-ghost-comment-count-plural=""
+    data-ghost-comment-count-tag="script"
+    data-ghost-comment-count-class-name=""
+    data-ghost-comment-count-autowrap="false"
+>
+</script>
+                </div>
+            </button>
+
+        <div class="flex-none relative">
+            <button data-sx-share class="peer relative flex-none px-2 py-1 text-xs text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-400 font-medium flex items-center rounded-full bg-white shadow-pretty dark:bg-transparent dark:shadow-none transition-colors duration-200">
+                <div class="absolute -inset-px -z-10 dark:bg-white/5 dark:[:hover>&]:bg-white/10 rounded-full border border-gray-950/5 dark:border-gray-50/5 transition-colors duration-200"></div>
+                
+<svg
+    class="w-3.5 h-3.5 me-1 opacity-80"
+    style=""
+    xmlns="http://www.w3.org/2000/svg" 
+    viewBox="0 0 24 24" 
+    width="24" 
+    height="24"    
+    fill="none" 
+    stroke="currentColor" 
+    stroke-width="1.5"
+    stroke-linecap="round"  stroke-linejoin="round" 
+    focusable="false"
+    aria-hidden="true"    
+>
+  <path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/>
+  <polyline points="16 6 12 2 8 6"/>
+  <line x1="12" y1="2" x2="12" y2="15"/>
+</svg>                Share
+            </button>
+            <div data-sx-share-dropdown class="hidden peer-[.open]:grid absolute z-50 top-14 -end-4 w-60
+                    gap-2 p-2 backdrop-blur-sm bg-white/90 ring-1 ring-gray-900/5 shadow-pretty rounded-xl 
+                    dark:bg-background-dark/80 dark:ring-white/5 dark:ring-inset dark:shadow-lg
+                "
+            >
+                <div class="absolute inset-0 -z-10 dark:bg-white/5 rounded-xl pointer-events-none"></div>
+
+                <button data-sx-share-copy="https://www.ajfriesen.com/replacing-disks-in-btrfs/" class="p-2 w-full flex items-center text-sm font-medium leading-6 text-gray-500 hover:text-gray-950 dark:text-gray-400 dark:hover:text-gray-50 transition-colors duration-200">
+                    <span class="flex items-center">
+<svg
+    class="w-5 h-5 me-3"
+    style=""
+    xmlns="http://www.w3.org/2000/svg" 
+    viewBox="0 0 24 24" 
+    width="24" 
+    height="24"    
+    fill="none" 
+    stroke-width="1.5" 
+    stroke="currentColor"
+    focusable="false"
+    aria-hidden="true"      
+>
+  <path stroke-linecap="round" stroke-linejoin="round" d="M13.19 8.688a4.5 4.5 0 0 1 1.242 7.244l-4.5 4.5a4.5 4.5 0 0 1-6.364-6.364l1.757-1.757m13.35-.622 1.757-1.757a4.5 4.5 0 0 0-6.364-6.364l-4.5 4.5a4.5 4.5 0 0 0 1.242 7.244" />
+</svg>
+ Copy link</span>
+                </button>
+                <a href="https://x.com/intent/tweet?url=https%3A%2F%2Fwww.ajfriesen.com%2Freplacing-disks-in-btrfs%2F&text=Replacing%20disks%20in%20BTRFS"
+                    class="p-2 w-full flex items-center text-sm font-medium leading-6 text-gray-500 hover:text-gray-950 dark:text-gray-400 dark:hover:text-gray-50 transition-colors duration-200"
+                    target="_blank"
+                >                                            
+                    
+<svg 
+    class="w-5 h-5 me-3"
+    xmlns="http://www.w3.org/2000/svg" 
+    viewBox="0 0 24 24" 
+    width="24" 
+    height="24" 
+    fill="currentColor"
+    focusable="false"
+    aria-hidden="true"       
+>
+    <path d="M18.901 1.153h3.68l-8.04 9.19L24 22.846h-7.406l-5.8-7.584-6.638 7.584H.474l8.6-9.83L0 1.154h7.594l5.243 6.932ZM17.61 20.644h2.039L6.486 3.24H4.298Z"/>
+</svg> Share to X
+                </a>
+                <a href="https://www.facebook.com/sharer/sharer.php?u=https%3A%2F%2Fwww.ajfriesen.com%2Freplacing-disks-in-btrfs%2F" 
+                    class="p-2 w-full flex items-center text-sm font-medium leading-6 text-gray-500 hover:text-gray-950 dark:text-gray-400 dark:hover:text-gray-50 transition-colors duration-200"
+                    target="_blank"
+                >
+                    
+<svg 
+    class="w-5 h-5 me-3"
+    xmlns="http://www.w3.org/2000/svg" 
+    viewBox="0 0 24 24" 
+    width="24" 
+    height="24"  
+    fill="currentColor"
+    focusable="false"
+    aria-hidden="true"      
+>
+    <path d="M9.101 23.691v-7.98H6.627v-3.667h2.474v-1.58c0-4.085 1.848-5.978 5.858-5.978.401 0 .955.042 1.468.103a8.68 8.68 0 0 1 1.141.195v3.325a8.623 8.623 0 0 0-.653-.036 26.805 26.805 0 0 0-.733-.009c-.707 0-1.259.096-1.675.309a1.686 1.686 0 0 0-.679.622c-.258.42-.374.995-.374 1.752v1.297h3.919l-.386 2.103-.287 1.564h-3.246v8.245C19.396 23.238 24 18.179 24 12.044c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.628 3.874 10.35 9.101 11.647Z"/>
+</svg> Share to Facebook
+                </a>                                            
+                <a href="https://www.linkedin.com/sharing/share-offsite/?url=https%3A%2F%2Fwww.ajfriesen.com%2Freplacing-disks-in-btrfs%2F"
+                    class="p-2 w-full flex items-center text-sm font-medium leading-6 text-gray-500 hover:text-gray-950 dark:text-gray-400 dark:hover:text-gray-50 transition-colors duration-200"
+                    target="_blank"
+                >
+                    
+<svg 
+    class="w-5 h-5 me-3"
+    xmlns="http://www.w3.org/2000/svg"
+    viewBox="0 0 24 24" 
+    width="24" 
+    height="24" 
+    fill="currentColor"
+    focusable="false"
+    aria-hidden="true"     
+>
+    <path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433c-1.144 0-2.063-.926-2.063-2.065 0-1.138.92-2.063 2.063-2.063 1.14 0 2.064.925 2.064 2.063 0 1.139-.925 2.065-2.064 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z"/>
+</svg> Share to Linkedin
+                </a>                                            
+            </div>
+            <div data-sx-share-success class="hidden absolute z-50
+                    ps-1 pe-1.5 py-0.5 text-3xs text-gray-50 dark:text-gray-950 font-medium [&.open]:flex items-center rounded-full shadow-pretty transition-colors duration-200
+                    backdrop-blur-sm bg-background-dark/80
+                    dark:bg-gray-300 dark:shadow-lg
+                "
+            >
+                
+<svg
+    class="w-3.5 h-3.5 me-0.5 opacity-80"
+    style=""
+    xmlns="http://www.w3.org/2000/svg" 
+    viewBox="0 0 16 16" 
+    width="16" 
+    height="16"    
+    fill="currentColor" 
+    focusable="false"
+    aria-hidden="true"      
+>
+  <path fill-rule="evenodd" d="M12.416 3.376a.75.75 0 0 1 .208 1.04l-5 7.5a.75.75 0 0 1-1.154.114l-3-3a.75.75 0 0 1 1.06-1.06l2.353 2.353 4.493-6.74a.75.75 0 0 1 1.04-.207Z" clip-rule="evenodd" />
+</svg> Copied
+            </div>                                        
+        </div>
+    </div>
+</div>            </div>
+
+            <aside  class="hidden xl:block flex-none w-56">
+                <div class="invisible sticky top-26 mt-0.5 w-full grid grid-cols-1 gap-7">
+                    <div data-sx-toc-container hidden="true" class="invisible">
+                        <div class="flex mb-3 relative">
+                            <h2 class="text-2xs uppercase font-semibold tracking-wider text-gray-900 dark:text-gray-100">
+                                On this page
+                            </h2>
+
+                            <button data-sx-toc-top aria-label="Back to top" title="Back to top" 
+                                class="absolute -top-1.5 -end-1.5 flex items-center justify-center rounded-sm p-1.5 hover:bg-gray-900/5 dark:hover:bg-gray-50/10 transition-colors duration-200"
+                            >
+                                
+<svg
+    class="w-3 h-3 text-gray-500 dark:text-gray-400"
+    style=""
+    xmlns="http://www.w3.org/2000/svg" 
+    viewBox="0 0 16 16" 
+    width="16" 
+    height="16"    
+    fill="currentColor" 
+    focusable="false"
+    aria-hidden="true"      
+>
+  <path fill-rule="evenodd" d="M8 14a.75.75 0 0 1-.75-.75V4.56L4.03 7.78a.75.75 0 0 1-1.06-1.06l4.5-4.5a.75.75 0 0 1 1.06 0l4.5 4.5a.75.75 0 0 1-1.06 1.06L8.75 4.56v8.69A.75.75 0 0 1 8 14Z" clip-rule="evenodd" />
+</svg>
+                            </button>
+                        </div>
+
+                        <nav data-sx-toc-target class="-my-1.5 relative text-xs leading-4 text-gray-500 dark:text-gray-400 dark:[&_.current]:text-gray-300">
+                        </nav>
+                    </div>
+
+                    <div class="not-has-[a]:hidden">
+                                <div class="hidden first:block">
+                                    <div class="flex mb-3 relative">
+                                        <h2 class="text-2xs uppercase font-semibold tracking-wider text-gray-900 dark:text-gray-100">
+                                            Related posts
+                                        </h2>
+                                    </div>
+                                    <div class="grid grid-cols-1 gap-3">
+
+                                                                                                        <a href="https://www.ajfriesen.com/pikvm-msi-z690-a/" class="nth-[n+4]:hidden flex flex-col text-xs font-medium leading-4 -tracking-xs text-gray-600 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-300 transition-colors duration-200"> 
+                                                                <div class="line-clamp-2">
+                                                                    How to use PiKVM with an MSI Z690-A Board
+                                                                </div>
+
+                                                                <time class="mt-1.5 capitalize text-2xs font-normal tracking-normal text-gray-500 dark:text-gray-400/75 hover:text-gray-500 dark:hover:text-gray-400/75">
+                                                                    Feb 23, 2025
+                                                                </time>
+                                                            </a>
+                                                            <a href="https://www.ajfriesen.com/first-disk-failure/" class="nth-[n+4]:hidden flex flex-col text-xs font-medium leading-4 -tracking-xs text-gray-600 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-300 transition-colors duration-200"> 
+                                                                <div class="line-clamp-2">
+                                                                    My first disk failure with BTRFS
+                                                                </div>
+
+                                                                <time class="mt-1.5 capitalize text-2xs font-normal tracking-normal text-gray-500 dark:text-gray-400/75 hover:text-gray-500 dark:hover:text-gray-400/75">
+                                                                    Oct 3, 2024
+                                                                </time>
+                                                            </a>
+                                                            <a href="https://www.ajfriesen.com/thoughts-on-first-time-proxmox-use/" class="nth-[n+4]:hidden flex flex-col text-xs font-medium leading-4 -tracking-xs text-gray-600 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-300 transition-colors duration-200"> 
+                                                                <div class="line-clamp-2">
+                                                                    Thoughts on first-time Proxmox use
+                                                                </div>
+
+                                                                <time class="mt-1.5 capitalize text-2xs font-normal tracking-normal text-gray-500 dark:text-gray-400/75 hover:text-gray-500 dark:hover:text-gray-400/75">
+                                                                    May 19, 2024
+                                                                </time>
+                                                            </a>
+
+                                                            <a href="https://www.ajfriesen.com/home-assistant-meetup-2026-02-22/" class="nth-[n+4]:hidden flex flex-col text-xs font-medium leading-4 -tracking-xs text-gray-600 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-300 transition-colors duration-200">
+                                                                <div class="line-clamp-2">
+                                                                    Home Assistant Meetup 2026.02.21 Colgone/Hürth
+                                                                </div>
+
+                                                                <time class="mt-1.5 capitalize text-2xs font-normal tracking-normal text-gray-500 dark:text-gray-400/75 hover:text-gray-500 dark:hover:text-gray-400/75">
+                                                                    Feb 24, 2026
+                                                                </time>
+                                                            </a>
+                                                            <a href="https://www.ajfriesen.com/pokypow-update/" class="nth-[n+4]:hidden flex flex-col text-xs font-medium leading-4 -tracking-xs text-gray-600 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-300 transition-colors duration-200">
+                                                                <div class="line-clamp-2">
+                                                                    PokyPow Update
+                                                                </div>
+
+                                                                <time class="mt-1.5 capitalize text-2xs font-normal tracking-normal text-gray-500 dark:text-gray-400/75 hover:text-gray-500 dark:hover:text-gray-400/75">
+                                                                    Feb 5, 2026
+                                                                </time>
+                                                            </a>
+                                                            <a href="https://www.ajfriesen.com/2025-review/" class="nth-[n+4]:hidden flex flex-col text-xs font-medium leading-4 -tracking-xs text-gray-600 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-300 transition-colors duration-200">
+                                                                <div class="line-clamp-2">
+                                                                    2025 Review
+                                                                </div>
+
+                                                                <time class="mt-1.5 capitalize text-2xs font-normal tracking-normal text-gray-500 dark:text-gray-400/75 hover:text-gray-500 dark:hover:text-gray-400/75">
+                                                                    Feb 1, 2026
+                                                                </time>
+                                                            </a>
+                                    </div>
+                                </div>                                
+                    </div>
+                    
+                    <div class="not-has-[a]:hidden">
+
+                    </div>
+                </div>
+            </aside>
+        </div>
+
+        <div class="max-w-5xl mx-auto">
+            <div class="my-20 lg:mb-5">
+                        <div class="hidden first:flex flex-col sm:flex-row sm:space-x-8 js-toc-ignore">
+                                            <a href="https://www.ajfriesen.com/missed-comments-mailcow-wit-h-ghost/" class="flex flex-col basis-1/2 min-w-0 no-underline">
+                                            <div class="ps-5 mb-1 text-2xs font-normal text-gray-500 dark:text-gray-400 [:hover>&]:text-gray-700 dark:[:hover>&]:text-gray-300 truncate transition-colors duration-200">
+                                                Previous
+                                            </div>
+
+                                            <div class="relative w-full flex">
+                                                <div class="ps-5 text-pretty text-xs font-medium text-gray-700 dark:text-gray-300 line-clamp-2">
+                                                    Missed Comments - Mailcow with Ghost
+                                                </div>
+                                                
+
+<svg
+    class="absolute start-0 top-0.5 mt-px w-3.5 h-3.5 flex-none text-gray-500 dark:text-gray-400 [:hover&gt;*&gt;&amp;]:-translate-x-1 transition-transform duration-150"
+    style=""
+    xmlns="http://www.w3.org/2000/svg" 
+    viewBox="0 0 24 24" 
+    width="24" 
+    height="24"    
+    fill="none" 
+    stroke="currentColor" 
+    stroke-width="1.5"
+    focusable="false"
+    aria-hidden="true"    
+>
+  <path stroke-linecap="round" stroke-linejoin="round" d="M15.75 19.5 8.25 12l7.5-7.5" />
+</svg>
+                                            </div>
+                                        </a> 
+
+                                        <a href="https://www.ajfriesen.com/pc-switch-goes-pokypow/" class="flex flex-col basis-1/2 min-w-0 no-underline text-end mt-8 sm:mt-0 [.invisible~&]:mt-0">
+                                            <div class="pe-5 mb-1 text-2xs font-normal text-gray-500 dark:text-gray-400 [:hover>&]:text-gray-700 dark:[:hover>&]:text-gray-300 truncate transition-colors duration-200">
+                                                Next
+                                            </div>
+
+                                            <div class="relative w-full flex justify-end">
+                                                <div class="pe-5 text-pretty text-xs font-medium text-gray-700 dark:text-gray-300 line-clamp-2">
+                                                    pc-switch renamed to PokyPow and other small updates
+                                                </div>
+                                                <svg
+    class="absolute end-0 top-0.5 mt-px w-3.5 h-3.5 flex-none text-gray-500 dark:text-gray-400 [:hover&gt;*&gt;&amp;]:translate-x-1 transition-transform duration-150"
+    style=""
+    xmlns="http://www.w3.org/2000/svg" 
+    viewBox="0 0 24 24" 
+    width="24" 
+    height="24"    
+    fill="none" 
+    stroke="currentColor" 
+    stroke-width="1.5"
+    focusable="false"
+    aria-hidden="true"    
+>
+  <path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7" />
+</svg>                                            </div>
+                                        </a>
+                        </div>
+            </div>
+        </div>
+    </div>
+</div>    
+        <div data-sx-comments="6700f7545c58eb0001b1141f" class="invisible flex fixed inset-0 -z-10 not-[&.open]:pointer-events-none [&.open]:visible [&.open]:z-3999999">
+        <div data-sx-comments-close class="fixed inset-0 bg-black/20 dark:bg-black/50 backdrop-blur-xs"></div>
+
+        <div class="fixed top-0 end-0 bottom-0 w-full max-w-md shadow-lg bg-gray-50 dark:bg-gray-950 border-s border-gray-950/5 dark:border-gray-50/5 transition ease-out translate-x-full [.open>&]:translate-x-0">
+            <div class="relative px-outer pb-6 pt-14 h-full overflow-y-scroll overflow-x-hidden">
+                <button data-sx-comments-close aria-label="Close" class="fixed flex items-center justify-center top-4 end-3 p-2 text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 bg-gray-50 dark:bg-gray-950 rounded-md">
+                    
+<svg
+    class="h-5 w-5"
+    style=""
+    xmlns="http://www.w3.org/2000/svg" 
+    viewBox="0 0 24 24" 
+    width="24" 
+    height="24"    
+    fill="none" 
+    stroke="currentColor" 
+    stroke-width="1.5"
+    stroke-linecap="round" 
+    stroke-linejoin="round"
+    focusable="false"
+    aria-hidden="true"      
+>
+    <path stroke="none" d="M0 0h24v24H0z" fill="none"/>
+    <path d="M14 12l-10 0" />
+    <path d="M14 12l-4 4" />
+    <path d="M14 12l-4 -4" />
+    <path d="M20 4l0 16" />
+</svg>                </button>
+
+                <div class="dark:hidden grid grid-cols-1 min-h-full text-gray-800 dark:text-gray-400">
+                    
+        <script defer src="https://cdn.jsdelivr.net/ghost/comments-ui@~1.3/umd/comments-ui.min.js" data-locale="en,de" data-ghost-comments="https://www.ajfriesen.com/" data-api="https://www.ajfriesen.com/ghost/api/content/" data-admin="https://www.ajfriesen.com/ghost/" data-key="fbdce46d917b762279790544c8" data-title="null" data-count="true" data-post-id="6700f7545c58eb0001b1141f" data-color-scheme="light" data-avatar-saturation="60" data-accent-color="#2b2e4b" data-comments-enabled="all" data-publication="ajfriesen" crossorigin="anonymous"></script>
+    
+                </div>
+
+                <div class="hidden dark:grid grid-cols-1 min-h-full text-gray-800 dark:text-gray-400">
+                    
+        <script defer src="https://cdn.jsdelivr.net/ghost/comments-ui@~1.3/umd/comments-ui.min.js" data-locale="en,de" data-ghost-comments="https://www.ajfriesen.com/" data-api="https://www.ajfriesen.com/ghost/api/content/" data-admin="https://www.ajfriesen.com/ghost/" data-key="fbdce46d917b762279790544c8" data-title="null" data-count="true" data-post-id="6700f7545c58eb0001b1141f" data-color-scheme="dark" data-avatar-saturation="60" data-accent-color="#2b2e4b" data-comments-enabled="all" data-publication="ajfriesen" crossorigin="anonymous"></script>
+    
+                </div>
+            </div>
+        </div>
+    </div> 
+
+            </main>
+
+            <footer id="sx-footer" class=" no-space-top  flex-none mt-auto">
+    <div class="outer xl:outer-xl pb-28 pt-20 mt-20 border-t border-gray-950/5 dark:border-gray-50/5 [.no-space-top>&]:mt-0">
+        <div class="inner">
+            <div class="grid gap-10  lg:grid-cols-[1fr_auto] ">
+                <div class="mb-6  lg:[:has([data-sx-slug])>&]:col-span-2 ">
+                    <a id="sx-footer-brand" class="flex-none inline-flex font-bold text-xl text-gray-950 dark:text-gray-50" href="https://www.ajfriesen.com" aria-label="ajfriesen">
+                            ajfriesen
+                    </a>
+
+                        <div id="sx-footer-description" class="mt-2 text-base max-w-md text-pretty">
+                            I write about Linux 🐧, Self-Hosting 🧑‍💻, Home Lab 🖥️, DIY Electronics 🔌, Home Automation 🤖, Nerd Stuff🤓
+                        </div>
+                                    </div>
+
+                        <nav id="sx-nav-footer" data-sx-nav class="w-full grid gap-10 grid-cols-[repeat(auto-fill,minmax(140px,1fr))] not-has-[li]:hidden">
+        </nav>
+
+
+   
+
+                        <div id="sx-footer-subscription" class="flex-none lg:max-w-sm lg:ms-auto pt-10 lg:pt-0 border-t lg:border-none border-gray-900/5 dark:border-gray-50/5">
+                                <h2 class="mb-4 text-sm font-medium text-pretty text-gray-950 dark:text-gray-50">
+                                    Subscribe to our newsletter
+                                </h2>
+                                <p class="mb-4 text-sm text-pretty">
+                                    Get the latest posts and updates delivered to your inbox. <br> No spam. Unsubscribe anytime.
+                                </p>
+                            <button data-portal="signup" class="flex items-center ps-5 pe-1 rounded-full h-12 w-full max-w-md lg:min-w-80 text-sm text-gray-500 bg-white shadow-xs ring-1 ring-inset ring-gray-950/10 dark:text-gray-400 dark:bg-white/5 dark:ring-white/10 dark:shadow-none">
+                                <span aria-hidden="true" class="text-start truncate pe-2">Enter your email</span>
+                                <span class="[:hover>&]:opacity-80 dark:[:hover>&]:opacity-100 relative flex items-center ms-auto h-10 px-6 rounded-full bg-primary shadow-primary ring-inset ring-gray-950/10 dark:ring-1 dark:ring-white/10 dark:bg-white/5 dark:shadow-none transition-opacity duration-200">
+                                    <span class="hidden dark:block [:hover>*>&]:opacity-10 absolute inset-0 rounded-full bg-radial-[50%_100%_at_50%_100%] from-white/20 transition-opacity duration-1000"></span>
+
+                                    <span class="text-primary-contrast font-medium dark:bg-linear-to-br from-gray-50 from-50% dark:bg-clip-text dark:text-transparent">
+                                        Subscribe
+                                    </span>
+                                </span>
+                            </button>                          
+                        </div>
+            </div>
+
+
+            <div class="mt-10 pt-10 lg:pt-0 border-t lg:border-0 border-gray-900/5 dark:border-gray-50/5 lg:has-data-sx-slug:pt-10">
+                <div class="has-data-sx-slug:-my-1.5">
+                            <ul id="sx-nav-footer-flat" data-sx-nav class="flex flex-col xs:flex-row gap-3.5 gap-y-1.5 flex-wrap">
+                        <li data-sx-slug="contact" class="inline-flex">
+                            <a href="https://www.ajfriesen.com/contact/" class="inline-block text-sm xs:text-xs leading-6 hover:text-gray-950 dark:hover:text-gray-50 transition-colors duration-200">
+                                Contact<!--
+                                --><svg
+     class="[.sx-external&gt;&amp;]:inline hidden relative top-1.5 shrink-0 w-3 h-3 ms-0.5 -me-0.5 align-top" 
+    xmlns="http://www.w3.org/2000/svg" 
+    viewBox="0 0 16 16" 
+    width="16" 
+    height="16"    
+    fill="currentColor" 
+    focusable="false"
+    aria-hidden="true"      
+>
+  <path fill-rule="evenodd" d="M4.22 11.78a.75.75 0 0 1 0-1.06L9.44 5.5H5.75a.75.75 0 0 1 0-1.5h5.5a.75.75 0 0 1 .75.75v5.5a.75.75 0 0 1-1.5 0V6.56l-5.22 5.22a.75.75 0 0 1-1.06 0Z" clip-rule="evenodd" />
+</svg>
+
+                            </a>
+                        </li>                    
+                        <li data-sx-slug="datenschutzerklarung" class="inline-flex">
+                            <a href="https://www.ajfriesen.com/data-and-privacy/" class="inline-block text-sm xs:text-xs leading-6 hover:text-gray-950 dark:hover:text-gray-50 transition-colors duration-200">
+                                Datenschutzerklärung<!--
+                                --><svg
+     class="[.sx-external&gt;&amp;]:inline hidden relative top-1.5 shrink-0 w-3 h-3 ms-0.5 -me-0.5 align-top" 
+    xmlns="http://www.w3.org/2000/svg" 
+    viewBox="0 0 16 16" 
+    width="16" 
+    height="16"    
+    fill="currentColor" 
+    focusable="false"
+    aria-hidden="true"      
+>
+  <path fill-rule="evenodd" d="M4.22 11.78a.75.75 0 0 1 0-1.06L9.44 5.5H5.75a.75.75 0 0 1 0-1.5h5.5a.75.75 0 0 1 .75.75v5.5a.75.75 0 0 1-1.5 0V6.56l-5.22 5.22a.75.75 0 0 1-1.06 0Z" clip-rule="evenodd" />
+</svg>
+
+                            </a>
+                        </li>                    
+                        <li data-sx-slug="impressum" class="inline-flex">
+                            <a href="https://www.ajfriesen.com/impressum/" class="inline-block text-sm xs:text-xs leading-6 hover:text-gray-950 dark:hover:text-gray-50 transition-colors duration-200">
+                                Impressum<!--
+                                --><svg
+     class="[.sx-external&gt;&amp;]:inline hidden relative top-1.5 shrink-0 w-3 h-3 ms-0.5 -me-0.5 align-top" 
+    xmlns="http://www.w3.org/2000/svg" 
+    viewBox="0 0 16 16" 
+    width="16" 
+    height="16"    
+    fill="currentColor" 
+    focusable="false"
+    aria-hidden="true"      
+>
+  <path fill-rule="evenodd" d="M4.22 11.78a.75.75 0 0 1 0-1.06L9.44 5.5H5.75a.75.75 0 0 1 0-1.5h5.5a.75.75 0 0 1 .75.75v5.5a.75.75 0 0 1-1.5 0V6.56l-5.22 5.22a.75.75 0 0 1-1.06 0Z" clip-rule="evenodd" />
+</svg>
+
+                            </a>
+                        </li>                    
+                        <li data-sx-slug="transparancy" class="inline-flex">
+                            <a href="https://www.ajfriesen.com/transparency/" class="inline-block text-sm xs:text-xs leading-6 hover:text-gray-950 dark:hover:text-gray-50 transition-colors duration-200">
+                                Transparancy<!--
+                                --><svg
+     class="[.sx-external&gt;&amp;]:inline hidden relative top-1.5 shrink-0 w-3 h-3 ms-0.5 -me-0.5 align-top" 
+    xmlns="http://www.w3.org/2000/svg" 
+    viewBox="0 0 16 16" 
+    width="16" 
+    height="16"    
+    fill="currentColor" 
+    focusable="false"
+    aria-hidden="true"      
+>
+  <path fill-rule="evenodd" d="M4.22 11.78a.75.75 0 0 1 0-1.06L9.44 5.5H5.75a.75.75 0 0 1 0-1.5h5.5a.75.75 0 0 1 .75.75v5.5a.75.75 0 0 1-1.5 0V6.56l-5.22 5.22a.75.75 0 0 1-1.06 0Z" clip-rule="evenodd" />
+</svg>
+
+                            </a>
+                        </li>                    
+        </ul>
+
+
+  
+                </div>
+
+                <div class="grid sm:grid-cols-[1fr_auto] gap-4 lg:flex lg:gap-5 mt-3.5 max-sm:mt-6">
+                    <div class="max-sm:order-last text-xs sm:leading-6 me-auto">
+                            <span id="sx-footer-copy">
+                                <a href="https://www.ajfriesen.com" class="hover:text-gray-950 dark:hover:text-gray-50 transition-colors">ajfriesen</a> 
+                                &copy; 2026
+                            </span>
+                        <span id="sx-footer-published-with">
+                            <span class="mx-1">·</span>
+                            Published with <a class='font-medium hover:text-gray-950 dark:hover:text-gray-50 transition-colors' href='https://ghost.org/' target='_blank' rel='noopener'>Ghost</a> and <a class='font-medium hover:text-gray-950 dark:hover:text-gray-50 transition-colors' href='https://spiritix.co/themes/bright' target='_blank' rel='noopener'>Spiritix</a>
+                        </span>
+                    </div>
+
+                    <span class="sm:max-lg:row-start-1 sm:max-lg:col-start-1 sm:max-lg:col-span-2 inline-flex flex-wrap items-center gap-2 md:gap-4 -ms-1 -my-1 md:ms-0 md:my-0 md:py-1 md:pe-4 lg:ms-auto lg:border-e border-gray-950/10 dark:border-white/10 text-gray-400 not-has-[a]:hidden">
+                            <a data-sx-social-link class="p-1 md:p-0" href="https://x.com/mr_ajfriesen" title="X (Formerly Twitter)" aria-label="X (Formerly Twitter)" target="_blank">
+        
+<svg 
+    class="w-4 h-4 hover:text-gray-950 dark:hover:text-gray-50 transition-colors duration-200"
+    xmlns="http://www.w3.org/2000/svg" 
+    viewBox="0 0 24 24" 
+    width="24" 
+    height="24" 
+    fill="currentColor"
+    focusable="false"
+    aria-hidden="true"       
+>
+    <path d="M18.901 1.153h3.68l-8.04 9.19L24 22.846h-7.406l-5.8-7.584-6.638 7.584H.474l8.6-9.83L0 1.154h7.594l5.243 6.932ZM17.61 20.644h2.039L6.486 3.24H4.298Z"/>
+</svg>    </a>
+
+    <a data-sx-social-link class="p-1 md:p-0" href="https://www.facebook.com/andrej.friesen.10" title="Facebook" aria-label="Facebook" target="_blank">
+        
+<svg 
+    class="w-4 h-4 hover:text-gray-950 dark:hover:text-gray-50 transition-colors duration-200"
+    xmlns="http://www.w3.org/2000/svg" 
+    viewBox="0 0 24 24" 
+    width="24" 
+    height="24"  
+    fill="currentColor"
+    focusable="false"
+    aria-hidden="true"      
+>
+    <path d="M9.101 23.691v-7.98H6.627v-3.667h2.474v-1.58c0-4.085 1.848-5.978 5.858-5.978.401 0 .955.042 1.468.103a8.68 8.68 0 0 1 1.141.195v3.325a8.623 8.623 0 0 0-.653-.036 26.805 26.805 0 0 0-.733-.009c-.707 0-1.259.096-1.675.309a1.686 1.686 0 0 0-.679.622c-.258.42-.374.995-.374 1.752v1.297h3.919l-.386 2.103-.287 1.564h-3.246v8.245C19.396 23.238 24 18.179 24 12.044c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.628 3.874 10.35 9.101 11.647Z"/>
+</svg>    </a>
+
+                <a data-sx-social-link class="p-1 md:p-0" href="https://discord.com/invite/hHtuXUz6Vq" title="Discord" aria-label="Discord" target="_blank">
+                    
+<svg 
+    class="w-4 h-4 hover:text-gray-950 dark:hover:text-gray-50 transition-colors duration-200"
+    xmlns="http://www.w3.org/2000/svg"
+    viewBox="0 0 24 24" 
+    width="24" 
+    height="24"
+    fill="currentColor" 
+    focusable="false"
+    aria-hidden="true"      
+>
+    <path d="M20.317 4.3698a19.7913 19.7913 0 00-4.8851-1.5152.0741.0741 0 00-.0785.0371c-.211.3753-.4447.8648-.6083 1.2495-1.8447-.2762-3.68-.2762-5.4868 0-.1636-.3933-.4058-.8742-.6177-1.2495a.077.077 0 00-.0785-.037 19.7363 19.7363 0 00-4.8852 1.515.0699.0699 0 00-.0321.0277C.5334 9.0458-.319 13.5799.0992 18.0578a.0824.0824 0 00.0312.0561c2.0528 1.5076 4.0413 2.4228 5.9929 3.0294a.0777.0777 0 00.0842-.0276c.4616-.6304.8731-1.2952 1.226-1.9942a.076.076 0 00-.0416-.1057c-.6528-.2476-1.2743-.5495-1.8722-.8923a.077.077 0 01-.0076-.1277c.1258-.0943.2517-.1923.3718-.2914a.0743.0743 0 01.0776-.0105c3.9278 1.7933 8.18 1.7933 12.0614 0a.0739.0739 0 01.0785.0095c.1202.099.246.1981.3728.2924a.077.077 0 01-.0066.1276 12.2986 12.2986 0 01-1.873.8914.0766.0766 0 00-.0407.1067c.3604.698.7719 1.3628 1.225 1.9932a.076.076 0 00.0842.0286c1.961-.6067 3.9495-1.5219 6.0023-3.0294a.077.077 0 00.0313-.0552c.5004-5.177-.8382-9.6739-3.5485-13.6604a.061.061 0 00-.0312-.0286zM8.02 15.3312c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9555-2.4189 2.157-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.9555 2.4189-2.1569 2.4189zm7.9748 0c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9554-2.4189 2.1569-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.946 2.4189-2.1568 2.4189Z"/>
+</svg>                </a>
+                <a data-sx-social-link class="p-1 md:p-0" href="https://github.com/ajfriesen" title="Github" aria-label="Github" target="_blank">
+                    
+<svg 
+    class="w-4 h-4 hover:text-gray-950 dark:hover:text-gray-50 transition-colors duration-200"
+    xmlns="http://www.w3.org/2000/svg"
+    viewBox="0 0 24 24" 
+    width="24" 
+    height="24" 
+    fill="currentColor"
+    focusable="false"
+    aria-hidden="true"     
+>
+    <path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"/>
+</svg>                </a>
+                <a data-sx-social-link class="p-1 md:p-0" href="https://www.linkedin.com/in/andrej-friesen/" title="LinkedIn" aria-label="LinkedIn" target="_blank">
+                    
+<svg 
+    class="w-4 h-4 hover:text-gray-950 dark:hover:text-gray-50 transition-colors duration-200"
+    xmlns="http://www.w3.org/2000/svg"
+    viewBox="0 0 24 24" 
+    width="24" 
+    height="24" 
+    fill="currentColor"
+    focusable="false"
+    aria-hidden="true"     
+>
+    <path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433c-1.144 0-2.063-.926-2.063-2.065 0-1.138.92-2.063 2.063-2.063 1.14 0 2.064.925 2.064 2.063 0 1.139-.925 2.065-2.064 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z"/>
+</svg>                </a>
+                <a data-sx-social-link class="p-1 md:p-0" href="https://techhub.social/@ajfriesen" title="Mastodon" aria-label="Mastodon" target="_blank">
+                    
+<svg 
+    class="w-4 h-4 hover:text-gray-950 dark:hover:text-gray-50 transition-colors duration-200"
+    xmlns="http://www.w3.org/2000/svg"
+    viewBox="0 0 24 24" 
+    width="24" 
+    height="24" 
+    fill="currentColor"
+    focusable="false"
+    aria-hidden="true"     
+>
+    <path d="M23.268 5.313c-.35-2.578-2.617-4.61-5.304-5.004C17.51.242 15.792 0 11.813 0h-.03c-3.98 0-4.835.242-5.288.309C3.882.692 1.496 2.518.917 5.127.64 6.412.61 7.837.661 9.143c.074 1.874.088 3.745.26 5.611.118 1.24.325 2.47.62 3.68.55 2.237 2.777 4.098 4.96 4.857 2.336.792 4.849.923 7.256.38.265-.061.527-.132.786-.213.585-.184 1.27-.39 1.774-.753a.057.057 0 0 0 .023-.043v-1.809a.052.052 0 0 0-.02-.041.053.053 0 0 0-.046-.01 20.282 20.282 0 0 1-4.709.545c-2.73 0-3.463-1.284-3.674-1.818a5.593 5.593 0 0 1-.319-1.433.053.053 0 0 1 .066-.054c1.517.363 3.072.546 4.632.546.376 0 .75 0 1.125-.01 1.57-.044 3.224-.124 4.768-.422.038-.008.077-.015.11-.024 2.435-.464 4.753-1.92 4.989-5.604.008-.145.03-1.52.03-1.67.002-.512.167-3.63-.024-5.545zm-3.748 9.195h-2.561V8.29c0-1.309-.55-1.976-1.67-1.976-1.23 0-1.846.79-1.846 2.35v3.403h-2.546V8.663c0-1.56-.617-2.35-1.848-2.35-1.112 0-1.668.668-1.67 1.977v6.218H4.822V8.102c0-1.31.337-2.35 1.011-3.12.696-.77 1.608-1.164 2.74-1.164 1.311 0 2.302.5 2.962 1.498l.638 1.06.638-1.06c.66-.999 1.65-1.498 2.96-1.498 1.13 0 2.043.395 2.74 1.164.675.77 1.012 1.81 1.012 3.12z"/>
+</svg>                </a>
+                <a data-sx-social-link class="p-1 md:p-0" href="https://www.youtube.com/@ajfriesen" title="Youtube" aria-label="Youtube" target="_blank">
+                    
+<svg 
+    class="w-4 h-4 hover:text-gray-950 dark:hover:text-gray-50 transition-colors duration-200"
+    xmlns="http://www.w3.org/2000/svg"
+    viewBox="0 0 24 24" 
+    width="24" 
+    height="24"
+    fill="currentColor" 
+    focusable="false"
+    aria-hidden="true"      
+>
+    <path d="M23.498 6.186a3.016 3.016 0 0 0-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.017 3.017 0 0 0 .502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 0 0 2.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.015 3.015 0 0 0 2.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814zM9.545 15.568V8.432L15.818 12l-6.273 3.568z"/>
+</svg>                </a>
+                    </span>
+
+                    <button data-sx-theme-toggle class="max-sm:order-first sm:max-lg:col-start-2 me-auto sm:ms-auto sm:me-0 lg:-ms-0.5 inline-flex flex-none items-center h-6 max-w-fit rounded-full text-gray-400 ring-1 ring-gray-950/10 dark:ring-white/10 bg-gray-100 hover:bg-gray-950/5 dark:bg-transparent dark:hover:bg-white/5 transition-colors duration-200" title="Change theme" aria-label="Change theme">
+                        <span class="inline-flex flex-none items-center justify-center w-6 h-6 rounded-full ring-1 ring-gray-950/10 dark:ring-transparent bg-white dark:bg-transparent shadow-xs dark:shadow-none">
+                            <svg 
+   class="w-4 h-4 text-gray-950 dark:text-gray-400" 
+  xmlns="http://www.w3.org/2000/svg" 
+  viewBox="0 0 24 24" 
+  width="24" 
+  height="24" 
+  fill="none" 
+  stroke="currentColor"
+  stroke-width="2" 
+  focusable="false"
+  aria-hidden="true"      
+>
+  <path stroke-linecap="round" stroke-linejoin="round" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" />
+</svg>
+                        </span>
+                        <span class="inline-flex flex-none items-center justify-center w-6 h-6 rounded-full ring-1 ring-transparent dark:ring-white/10 dark:bg-white/10">
+                            <svg 
+  class="w-4 h-4 dark:text-gray-50"
+  xmlns="http://www.w3.org/2000/svg" 
+  viewBox="0 0 24 24" 
+  width="24" 
+  height="24"     
+  fill="none" 
+  stroke="currentColor" 
+  stroke-width="2"
+  stroke-linecap="round" 
+  stroke-linejoin="round"
+  focusable="false"
+  aria-hidden="true"        
+>
+  <path stroke="none" d="M0 0h24v24H0z" fill="none"></path>
+  <path d="M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 0 7.92 12.446a9 9 0 1 1 -8.313 -12.454z"></path>
+  <path d="M17 4a2 2 0 0 0 2 2a2 2 0 0 0 -2 2a2 2 0 0 0 -2 -2a2 2 0 0 0 2 -2"></path>
+</svg>                        </span>
+                    </button>                    
+                </div>        
+            </div>
+        </div>
+    </div>
+</footer>        </div>
+
+        <div class="pswp" tabindex="-1" role="dialog" aria-hidden="true" data-error-msg="The image could not be loaded.">
+    <div class="pswp__bg"></div>
+
+    <div class="pswp__scroll-wrap">
+        <div class="pswp__container">
+            <div class="pswp__item"></div>
+            <div class="pswp__item"></div>
+            <div class="pswp__item"></div>
+        </div>
+
+        <div class="pswp__ui pswp__ui--hidden">
+            <div class="pswp__top-bar">
+                <div class="pswp__counter"></div>
+
+                <button class="pswp__button pswp__button--close" title="Close (Esc)"></button>
+
+                <!-- Preloader -->
+                <!-- element will get class pswp__preloader--active when preloader is running -->
+                <div class="pswp__preloader" aria-label="Loading">
+                    <svg 
+    class="m-1.5 text-white opacity-100 w-8 h-8"
+    version="1.1" 
+    xmlns="http://www.w3.org/2000/svg" 
+    xmlns:xlink="http://www.w3.org/1999/xlink" 
+    x="0px"
+    y="0px" 
+    width="40px" 
+    height="40px" 
+    viewBox="0 0 40 40" 
+    enable-background="new 0 0 40 40" 
+    xml:space="preserve"
+    focusable="false"
+    aria-hidden="true"       
+>
+    <path opacity="0.2" fill="currentColor" d="M20.201,5.169c-8.254,0-14.946,6.692-14.946,14.946c0,8.255,6.692,14.946,14.946,14.946
+s14.946-6.691,14.946-14.946C35.146,11.861,28.455,5.169,20.201,5.169z M20.201,31.749c-6.425,0-11.634-5.208-11.634-11.634
+c0-6.425,5.209-11.634,11.634-11.634c6.425,0,11.633,5.209,11.633,11.634C31.834,26.541,26.626,31.749,20.201,31.749z" />
+    <path fill="currentColor" d="M26.013,10.047l1.654-2.866c-2.198-1.272-4.743-2.012-7.466-2.012h0v3.312h0
+C22.32,8.481,24.301,9.057,26.013,10.047z">
+        <animateTransform attributeType="xml" attributeName="transform" type="rotate" from="0 20 20" to="360 20 20"
+            dur="0.5s" repeatCount="indefinite" />
+    </path>
+</svg>                </div>                
+            </div>
+
+            <div class="pswp__share-modal pswp__share-modal--hidden pswp__single-tap">
+                <div class="pswp__share-tooltip"></div>
+            </div>
+
+            <button class="pswp__button pswp__button--arrow--left" title="Previous (arrow left)"></button>
+            <button class="pswp__button pswp__button--arrow--right" title="Next (arrow right)"></button>
+
+            <div class="pswp__caption">
+                <div class="pswp__caption__center"></div>
+            </div>
+        </div>
+    </div>
+</div>
+        
+
+        
+
+             
+
+        <div id="sx-lazy-script" data-src="/assets/built/lazy.min.js?v=d7d1c1d4c8"></div>        
+    </body>
+</html>

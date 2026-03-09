@@ -1,0 +1,315 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="./">
+<head>
+  <meta charset="utf-8" />
+  <meta name="readthedocs-addons-api-version" content="1"><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>btrfs-restore(8) &mdash; BTRFS  documentation</title>
+      <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="_static/css/theme.css?v=9edc463e" />
+
+  
+      <script src="_static/jquery.js?v=5d32c60e"></script>
+      <script src="_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="_static/documentation_options.js?v=8a448e45"></script>
+      <script src="_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="_static/js/theme.js"></script>
+    <script src="_static/js/versions.js"></script>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="next" title="btrfs-scrub(8)" href="btrfs-scrub.html" />
+    <link rel="prev" title="btrfs-rescue(8)" href="btrfs-rescue.html" />
+    <link href="_static/style.css" rel="stylesheet" type="text/css">
+
+<script async type="text/javascript" src="/_/static/javascript/readthedocs-addons.js"></script><meta name="readthedocs-project-slug" content="btrfs" /><meta name="readthedocs-version-slug" content="latest" /><meta name="readthedocs-resolver-filename" content="/btrfs-restore.html" /><meta name="readthedocs-http-status" content="200" /></head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="index.html" class="icon icon-home">
+            BTRFS
+          </a>
+              <div class="switch-menus">
+                <div class="version-switch"></div>
+                <div class="language-switch"></div>
+              </div>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Overview</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="Introduction.html">Introduction</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Status.html">Status</a></li>
+<li class="toctree-l1 current"><a class="reference internal" href="man-index.html">Manual pages</a><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="btrfs.html">btrfs(8)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="btrfs-man5.html">btrfs(5)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="btrfs-balance.html">btrfs-balance(8)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="btrfs-check.html">btrfs-check(8)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="btrfs-convert.html">btrfs-convert(8)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="btrfs-device.html">btrfs-device(8)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="btrfs-filesystem.html">btrfs-filesystem(8)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="btrfs-find-root.html">btrfs-find-root(8)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="btrfs-image.html">btrfs-image(8)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="btrfs-inspect-internal.html">btrfs-inspect-internal(8)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="btrfs-ioctl.html">btrfs-ioctl(2)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="btrfs-map-logical.html">btrfs-map-logical(8)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="btrfs-property.html">btrfs-property(8)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="btrfs-qgroup.html">btrfs-qgroup(8)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="btrfs-quota.html">btrfs-quota(8)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="btrfs-receive.html">btrfs-receive(8)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="btrfs-replace.html">btrfs-replace(8)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="btrfs-rescue.html">btrfs-rescue(8)</a></li>
+<li class="toctree-l2 current"><a class="current reference internal" href="#">btrfs-restore(8)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#synopsis">SYNOPSIS</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#description">DESCRIPTION</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#options">OPTIONS</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#exit-status">EXIT STATUS</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#availability">AVAILABILITY</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#see-also">SEE ALSO</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="btrfs-scrub.html">btrfs-scrub(8)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="btrfs-select-super.html">btrfs-select-super(8)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="btrfs-send.html">btrfs-send(8)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="btrfs-subvolume.html">btrfs-subvolume(8)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="btrfstune.html">btrfstune(8)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="fsck.btrfs.html">fsck.btrfs(8)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="mkfs.btrfs.html">mkfs.btrfs(8)</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="Administration.html">Administration</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Hardware.html">Hardware considerations</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Feature-by-version.html">Changes (feature/version)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Kernel-by-version.html">Changes (kernel/version)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="CHANGES.html">Changes (btrfs-progs)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Contributors.html">Contributors</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Glossary.html">Glossary</a></li>
+<li class="toctree-l1"><a class="reference internal" href="INSTALL.html">Installation instructions</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Source-repositories.html">Source repositories</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Interoperability.html">Interoperability</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Features</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="Common-features.html">Common Linux features</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Custom-ioctls.html">Custom ioctls</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Auto-repair.html">Auto-repair on read</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Balance.html">Balance</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Compression.html">Compression</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Checksumming.html">Checksumming</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Convert.html">Convert</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Deduplication.html">Deduplication</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Defragmentation.html">Defragmentation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Inline-files.html">Inline files</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Qgroups.html">Quota groups</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Reflink.html">Reflink</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Resize.html">Resize</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Scrub.html">Scrub</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Seeding-device.html">Seeding device</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Send-receive.html">Send/receive</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Subpage.html">Subpage support</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Subvolumes.html">Subvolumes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Swapfile.html">Swapfile</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Tree-checker.html">Tree checker</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Trim.html">Trim/discard</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Volume-management.html">Volume management</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Zoned-mode.html">Zoned mode</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Developer documentation</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="dev/Development-notes.html">Development notes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/Developer-s-FAQ.html">Developer’s FAQ</a></li>
+<li class="toctree-l1"><a class="reference internal" href="DocConventions.html">Conventions and style for documentation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/Experimental.html">Experimental features</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/dev-btrfs-design.html">Btrfs design</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/dev-btrees.html">Btrees</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/On-disk-format.html">On-disk Format</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/dev-send-stream.html">Send stream format</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/dev-json.html">JSON output</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/dev-internal-apis.html">Internal APIs</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/ReleaseChecklist.html">Release checklist</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/GithubReviewWorkflow.html">Pull request review workflow</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/CmdLineConventions.html">Command line, formatting, UI guidelines</a></li>
+<li class="toctree-l1"><a class="reference internal" href="btrfs-ioctl.html">btrfs-ioctl(2)</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">TODO</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="trouble-index.html">Troubleshooting pages</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="index.html">BTRFS</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="man-index.html">Manual pages</a></li>
+      <li class="breadcrumb-item active">btrfs-restore(8)</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="_sources/btrfs-restore.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="btrfs-restore-8">
+<h1>btrfs-restore(8)<a class="headerlink" href="#btrfs-restore-8" title="Link to this heading"></a></h1>
+<section id="synopsis">
+<h2>SYNOPSIS<a class="headerlink" href="#synopsis" title="Link to this heading"></a></h2>
+<p><strong>btrfs restore</strong> [options] &lt;device&gt; &lt;path&gt; | -l &lt;device&gt;</p>
+</section>
+<section id="description">
+<h2>DESCRIPTION<a class="headerlink" href="#description" title="Link to this heading"></a></h2>
+<p><strong class="command">btrfs restore</strong> is used to try to salvage files from a damaged filesystem and
+restore them into <em>path</em> or just list the subvolume tree roots. The filesystem
+image is not modified.</p>
+<p>If the filesystem is damaged and cannot be repaired by the other tools
+(<a class="reference internal" href="btrfs-check.html"><span class="doc">btrfs-check(8)</span></a> or <a class="reference internal" href="btrfs-rescue.html"><span class="doc">btrfs-rescue(8)</span></a>),
+<strong class="command">btrfs restore</strong> could be used to
+retrieve file data, as far as the metadata are readable. The checks done by
+restore are less strict and the process is usually able to get far enough to
+retrieve data from the whole filesystem. This comes at a cost that some data
+might be incomplete or from older versions if they’re available.</p>
+<p>There are several options to attempt restoration of various file metadata type.
+You can try a dry run first to see how well the process goes and use further
+options to extend the set of restored metadata.</p>
+<p>For images with damaged tree structures, there are several options to point the
+process to some spare copy.</p>
+</section>
+<section id="options">
+<h2>OPTIONS<a class="headerlink" href="#options" title="Link to this heading"></a></h2>
+<dl class="simple">
+<dt>-s|--snapshots</dt><dd><p>get also snapshots that are skipped by default</p>
+</dd>
+<dt>-x|--xattr</dt><dd><p>get extended attributes</p>
+</dd>
+<dt>-m|--metadata</dt><dd><p>restore owner, mode and times for files and directories</p>
+</dd>
+<dt>-S|--symlinks</dt><dd><p>restore symbolic links as well as normal files</p>
+</dd>
+<dt>-i|--ignore-errors</dt><dd><p>ignore errors during restoration and continue</p>
+</dd>
+<dt>-o|--overwrite</dt><dd><p>overwrite directories/files in <em>path</em>, e.g. for repeated runs</p>
+</dd>
+</dl>
+<dl class="option-list">
+<dt><kbd><span class="option">-t <var>&lt;bytenr&gt;</var></span></kbd></dt>
+<dd><p>use <em>bytenr</em> to read the root tree</p>
+</dd>
+<dt><kbd><span class="option">-f <var>&lt;bytenr&gt;</var></span></kbd></dt>
+<dd><p>only restore files that are under specified subvolume root pointed by <em>bytenr</em></p>
+</dd>
+</dl>
+<dl class="simple">
+<dt>-u|--super &lt;mirror&gt;</dt><dd><p>use given superblock mirror identified by &lt;mirror&gt;, it can be 0,1 or 2</p>
+</dd>
+<dt>-r|--root &lt;rootid&gt;</dt><dd><p>only restore files that are under a specified subvolume whose objectid is <em>rootid</em></p>
+</dd>
+</dl>
+<dl class="option-list">
+<dt><kbd><span class="option">-d</span></kbd></dt>
+<dd><p>find directory</p>
+</dd>
+</dl>
+<dl class="simple">
+<dt>-l|--list-roots</dt><dd><p>list subvolume tree roots, can be used as argument for <em>-r</em></p>
+</dd>
+<dt>-D|--dry-run</dt><dd><p>dry run (only list files that would be recovered)</p>
+</dd>
+</dl>
+<dl class="option-list">
+<dt><kbd><span class="option">--path-regex <var>&lt;regex&gt;</var></span></kbd></dt>
+<dd><p>restore only filenames matching a regular expression (<a class="reference external" href="https://man7.org/linux/man-pages/man7/regex.7.html">regex(7)</a>)
+with a mandatory format</p>
+<p><code class="docutils literal notranslate"><span class="pre">^/(|home(|/username(|/Desktop(|/.*))))$</span></code></p>
+<p>The format is not very comfortable and restores all files in the
+directories in the whole path, so this is not useful for restoring
+single file in a deep hierarchy.</p>
+</dd>
+<dt><kbd><span class="option">-c</span></kbd></dt>
+<dd><p>ignore case (<em>--path-regex</em> only)</p>
+</dd>
+</dl>
+<dl class="simple">
+<dt>-v|--verbose</dt><dd><p>(deprecated) alias for global <em>-v</em> option</p>
+</dd>
+</dl>
+<p><code class="docutils literal notranslate"><span class="pre">Global</span> <span class="pre">options</span></code></p>
+<dl class="simple">
+<dt>-v|--verbose</dt><dd><p>be verbose and print what is being restored</p>
+</dd>
+</dl>
+</section>
+<section id="exit-status">
+<h2>EXIT STATUS<a class="headerlink" href="#exit-status" title="Link to this heading"></a></h2>
+<p><strong>btrfs restore</strong> returns a zero exit status if it succeeds. Non zero is
+returned in case of failure.</p>
+</section>
+<section id="availability">
+<h2>AVAILABILITY<a class="headerlink" href="#availability" title="Link to this heading"></a></h2>
+<p><strong>btrfs</strong> is part of btrfs-progs.  Please refer to the documentation at
+<a class="reference external" href="https://btrfs.readthedocs.io">https://btrfs.readthedocs.io</a>.</p>
+</section>
+<section id="see-also">
+<h2>SEE ALSO<a class="headerlink" href="#see-also" title="Link to this heading"></a></h2>
+<p><a class="reference internal" href="btrfs-check.html"><span class="doc">btrfs-check(8)</span></a>,
+<a class="reference internal" href="btrfs-rescue.html"><span class="doc">btrfs-rescue(8)</span></a>,
+<a class="reference internal" href="mkfs.btrfs.html"><span class="doc">mkfs.btrfs(8)</span></a></p>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="btrfs-rescue.html" class="btn btn-neutral float-left" title="btrfs-rescue(8)" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="btrfs-scrub.html" class="btn btn-neutral float-right" title="btrfs-scrub(8)" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright .</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

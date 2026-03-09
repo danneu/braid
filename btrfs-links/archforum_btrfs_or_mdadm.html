@@ -1,0 +1,733 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en" dir="ltr">
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+<title>[SOLVED] Raid1 - btrfs or mdadm? / Newbie Corner / Arch Linux Forums</title>
+<link rel="stylesheet" type="text/css" href="style/ArchLinux.css" />
+<link rel="canonical" href="viewtopic.php?id=285266" title="Page 1" />
+<link rel="alternate" type="application/atom+xml" href="extern.php?action=feed&amp;tid=285266&amp;type=atom" title="Atom topic feed" />
+    <link rel="stylesheet" media="screen" href="style/ArchLinux/arch.css?v=5"/>
+        <link rel="stylesheet" media="screen" href="style/ArchLinux/archnavbar.css?v=5"/>
+    
+<link rel="shortcut icon" href="style/ArchLinux/favicon.ico" />
+</head>
+
+<body>
+<div id="archnavbar" class="anb-forum">
+	<div id="archnavbarlogo"><h1><a href="http://archlinux.org/">Arch Linux</a></h1></div>
+	<div id="archnavbarmenu">
+		<ul id="archnavbarlist">
+			<li id="anb-home"><a href="http://archlinux.org/">Home</a></li><li id="anb-packages"><a href="http://archlinux.org/packages/">Packages</a></li><li id="anb-forums" class="anb-selected"><a href="https://bbs.archlinux.org/">Forums</a></li><li id="anb-wiki"><a href="https://wiki.archlinux.org/">Wiki</a></li><li id="anb-gitlab"><a href="https://gitlab.archlinux.org/archlinux">GitLab</a></li><li id="anb-security"><a href="https://security.archlinux.org/">Security</a></li><li id="anb-aur"><a href="https://aur.archlinux.org/">AUR</a></li><li id="anb-download"><a href="http://archlinux.org/download/">Download</a></li>		</ul>
+	</div>
+</div>
+
+
+<div id="punviewtopic" class="pun">
+<div class="top-box"></div>
+<div class="punwrap">
+
+<div id="brdheader" class="block">
+	<div class="box">
+		<div id="brdmenu" class="inbox">
+			<ul>
+				<li id="navindex" class="isactive"><a href="index.php">Index</a></li>
+				<li id="navrules"><a href="misc.php?action=rules">Rules</a></li>
+				<li id="navsearch"><a href="search.php">Search</a></li>
+				<li id="navregister"><a href="register.php">Register</a></li>
+				<li id="navlogin"><a href="login.php">Login</a></li>
+			</ul>
+		</div>
+		<div id="brdwelcome" class="inbox">
+			<p class="conl">You are not logged in.</p>
+			<ul class="conr">
+				<li><span>Topics: <a href="search.php?action=show_recent" title="Find topics with recent posts.">Active</a> | <a href="search.php?action=show_unanswered" title="Find topics with no replies.">Unanswered</a></span></li>
+			</ul>
+			<div class="clearer"></div>
+		</div>
+	</div>
+</div>
+
+
+
+<div id="brdmain">
+<div class="linkst">
+	<div class="inbox crumbsplus">
+		<ul class="crumbs">
+			<li><a href="index.php">Index</a></li>
+			<li><span>»&#160;</span><a href="viewforum.php?id=23">Newbie Corner</a></li>
+			<li><span>»&#160;</span><strong><a href="viewtopic.php?id=285266">[SOLVED] Raid1 - btrfs or mdadm?</a></strong></li>
+		</ul>
+		<div class="pagepost">
+			<p class="pagelink conl"><span class="pages-label">Pages: </span><strong class="item1">1</strong></p>
+		</div>
+		<div class="clearer"></div>
+	</div>
+</div>
+
+<div id="p2096095" class="blockpost rowodd firstpost blockpost1">
+	<h2><span><span class="conr">#1</span> <a href="viewtopic.php?pid=2096095#p2096095">2023-04-22 10:45:35</a></span></h2>
+	<div class="box">
+		<div class="inbox">
+			<div class="postbody">
+				<div class="postleft">
+					<dl>
+						<dt><strong>vecino</strong></dt>
+						<dd class="usertitle"><strong>Member</strong></dd>
+						<dd class="postavatar"><img src="https://bbs.archlinux.org/img/avatars/147965.png?m=1677481351" width="51" height="51" alt="" /></dd>
+						<dd><span>Registered: 2022-12-10</span></dd>
+						<dd><span>Posts: 139</span></dd>
+					</dl>
+				</div>
+				<div class="postright">
+					<h3>[SOLVED] Raid1 - btrfs or mdadm?</h3>
+					<div class="postmsg">
+						<p>Hi, I would like to ask more experienced users / admins what you think about Raid1. I want to switch to btrfs filesystem, because for example the snapshots option with grub-btrfs is great.</p><p>I would like to know the opinion of others what you think is a better, more stable option and why?</p><p><strong>1) Is it better to use &quot;good old&quot; mdadm with btrfs fs?</strong></p><p>or</p><p><strong>2) Use the native raid support directly in brtfs?</strong></p><p>I tried both options in my virtual setup and both have some advantages and disadvantages. I don&#039;t know what to choose.</p><p>Please give me your opinion. Pros and cons.</p><br /><p>Thanks</p>
+						<p class="postedit"><em>Last edited by vecino (2023-05-23 15:32:45)</em></p>
+					</div>
+				</div>
+			</div>
+		</div>
+		<div class="inbox">
+			<div class="postfoot clearb">
+				<div class="postfootleft"><p><span>Offline</span></p></div>
+			</div>
+		</div>
+	</div>
+</div>
+
+<div id="p2096096" class="blockpost roweven">
+	<h2><span><span class="conr">#2</span> <a href="viewtopic.php?pid=2096096#p2096096">2023-04-22 11:02:56</a></span></h2>
+	<div class="box">
+		<div class="inbox">
+			<div class="postbody">
+				<div class="postleft">
+					<dl>
+						<dt><strong>schard</strong></dt>
+						<dd class="usertitle"><strong>Forum Moderator</strong></dd>
+						<dd class="postavatar"><img src="https://bbs.archlinux.org/img/avatars/100638.png?m=1687514991" width="80" height="80" alt="" /></dd>
+						<dd><span>From: Hannover</span></dd>
+						<dd><span>Registered: 2016-05-06</span></dd>
+						<dd><span>Posts: 2,550</span></dd>
+						<dd class="usercontacts"><span class="website"><a href="https://www.richard-neumann.de/" rel="nofollow">Website</a></span></dd>
+					</dl>
+				</div>
+				<div class="postright">
+					<h3>Re: [SOLVED] Raid1 - btrfs or mdadm?</h3>
+					<div class="postmsg">
+						<p>I have zero experience with btrfs.<br />In the company I work for, we had an office server where I used RAID1 on two SSDs with mdadm.<br />The FS I used was ext4.<br />It worked fine for us (until we migrated to an online nextcloud solution due to everyone working from home during Covid).<br />Just always remember, RAID (1) is not a backup. It just reduces the risk of total system failure in case one of the drives fail.</p>
+						<p class="postedit"><em>Last edited by schard (2023-04-22 11:03:47)</em></p>
+					</div>
+					<div class="postsignature postmsg"><hr /><p><em>Inofficial first vice president of the Rust Evangelism Strike Force</em></p></div>
+				</div>
+			</div>
+		</div>
+		<div class="inbox">
+			<div class="postfoot clearb">
+				<div class="postfootleft"><p><span>Offline</span></p></div>
+			</div>
+		</div>
+	</div>
+</div>
+
+<div id="p2096099" class="blockpost rowodd">
+	<h2><span><span class="conr">#3</span> <a href="viewtopic.php?pid=2096099#p2096099">2023-04-22 11:50:34</a></span></h2>
+	<div class="box">
+		<div class="inbox">
+			<div class="postbody">
+				<div class="postleft">
+					<dl>
+						<dt><strong>3beb6e7c46a615a</strong></dt>
+						<dd class="usertitle"><strong>Member</strong></dd>
+						<dd><span>Registered: 2021-03-27</span></dd>
+						<dd><span>Posts: 165</span></dd>
+					</dl>
+				</div>
+				<div class="postright">
+					<h3>Re: [SOLVED] Raid1 - btrfs or mdadm?</h3>
+					<div class="postmsg">
+						<p>I use btrfs raid1 just because I find it easier to deal with one level of abstraction instead of two, and because it&#039;s possible to convert every filesystem to raid online.</p>
+					</div>
+				</div>
+			</div>
+		</div>
+		<div class="inbox">
+			<div class="postfoot clearb">
+				<div class="postfootleft"><p><span>Offline</span></p></div>
+			</div>
+		</div>
+	</div>
+</div>
+
+<div id="p2096217" class="blockpost roweven">
+	<h2><span><span class="conr">#4</span> <a href="viewtopic.php?pid=2096217#p2096217">2023-04-23 10:46:26</a></span></h2>
+	<div class="box">
+		<div class="inbox">
+			<div class="postbody">
+				<div class="postleft">
+					<dl>
+						<dt><strong>vecino</strong></dt>
+						<dd class="usertitle"><strong>Member</strong></dd>
+						<dd class="postavatar"><img src="https://bbs.archlinux.org/img/avatars/147965.png?m=1677481351" width="51" height="51" alt="" /></dd>
+						<dd><span>Registered: 2022-12-10</span></dd>
+						<dd><span>Posts: 139</span></dd>
+					</dl>
+				</div>
+				<div class="postright">
+					<h3>Re: [SOLVED] Raid1 - btrfs or mdadm?</h3>
+					<div class="postmsg">
+						<p>@schard - &quot;RAID (1) is not a backup&quot; ... Yes, I am fully aware of that. I&#039;m dealing with a router where data is almost worthless... and all I care about is that if one of the two drives fails, the router keeps routing.</p><p>@lunaryorn - For example, have you noticed that btrfs is more susceptible to power outages? Yes I have the system backed up on a UPS battery, but it can still happen. On the other hand, it&#039;s actually a feature of btrfs that it will eventually repair the data from the other drive. Have you ever solved such problems?</p><p>Furthermore, you need to remember to add &quot;degraded&quot; to the boot loader in the btrfs raid, so that the system boots atomically even with one disk if the other fails.</p><div class="codebox"><pre><code>GRUB_CMDLINE_LINUX=&quot;rootflags=subvol=/@,degraded&quot;</code></pre></div>
+					</div>
+				</div>
+			</div>
+		</div>
+		<div class="inbox">
+			<div class="postfoot clearb">
+				<div class="postfootleft"><p><span>Offline</span></p></div>
+			</div>
+		</div>
+	</div>
+</div>
+
+<div id="p2096241" class="blockpost rowodd">
+	<h2><span><span class="conr">#5</span> <a href="viewtopic.php?pid=2096241#p2096241">2023-04-23 14:51:35</a></span></h2>
+	<div class="box">
+		<div class="inbox">
+			<div class="postbody">
+				<div class="postleft">
+					<dl>
+						<dt><strong>3beb6e7c46a615a</strong></dt>
+						<dd class="usertitle"><strong>Member</strong></dd>
+						<dd><span>Registered: 2021-03-27</span></dd>
+						<dd><span>Posts: 165</span></dd>
+					</dl>
+				</div>
+				<div class="postright">
+					<h3>Re: [SOLVED] Raid1 - btrfs or mdadm?</h3>
+					<div class="postmsg">
+						<p>I don&#039;t think it&#039;s a good idea to add &quot;degraded&quot; to rootflags unconditionally.&#160; This flag forces &quot;mount&quot; to ignore all raid-level constraints, which can silently hide configuration errors as well as real file system corruption.&#160; If your disk array is degraded to a state where it refuses to mount without degraded I think you should absolutely not blindly mount it and boot from it.&#160; </p><p>But for a router I&#039;d probably not use RAID anyways.&#160; Instead I&#039;d just use in two cheap SD cards, one as readonly rootfs device and the other one for select persistent data, and with a bit of clever mounting and some glue you can have a system which only writes to disk very infrequently and only small amounts of data.&#160; Even cheap SD cards survive something like 3000 full write cycles and realistically don&#039;t wear out from reading, so even if you mount your rootfs writable once a week for updates you&#039;re unlikely to see a disk failure for years.&#160; And if keep data in tmpfs mostly, only write to the persistent data device selectively, aggressively unmount the data disk if unused, and use a flash-storage aware file system, wear leveling will probably keep that disk alive longer than the router itself, and even if it fails you&#039;ll still have a bootable system.&#160; &#160;With pluggable storage you can also implement simple A/B update schemes by buying an additional SD card for updates.</p><p>This setup is likely an order of magnitude cheaper than a full raid setup, and still more reliable. For instance a power outage will by design never corrupt a read-only file system, so in worst case you&#039;ll have a corrupted data filesystem which comes down to a &quot;factory reset&quot; but keeps your router functional.</p>
+					</div>
+				</div>
+			</div>
+		</div>
+		<div class="inbox">
+			<div class="postfoot clearb">
+				<div class="postfootleft"><p><span>Offline</span></p></div>
+			</div>
+		</div>
+	</div>
+</div>
+
+<div id="p2096252" class="blockpost roweven">
+	<h2><span><span class="conr">#6</span> <a href="viewtopic.php?pid=2096252#p2096252">2023-04-23 16:33:33</a></span></h2>
+	<div class="box">
+		<div class="inbox">
+			<div class="postbody">
+				<div class="postleft">
+					<dl>
+						<dt><strong>vecino</strong></dt>
+						<dd class="usertitle"><strong>Member</strong></dd>
+						<dd class="postavatar"><img src="https://bbs.archlinux.org/img/avatars/147965.png?m=1677481351" width="51" height="51" alt="" /></dd>
+						<dd><span>Registered: 2022-12-10</span></dd>
+						<dd><span>Posts: 139</span></dd>
+					</dl>
+				</div>
+				<div class="postright">
+					<h3>Re: [SOLVED] Raid1 - btrfs or mdadm?</h3>
+					<div class="postmsg">
+						<p>I got my information from Wiki: <a href="https://wiki.archlinux.org/title/btrfs" rel="nofollow">https://wiki.archlinux.org/title/btrfs</a></p><div class="codebox"><pre><code>If your root resides on the array, you must also add rootflags=degraded to your kernel parameters.</code></pre></div><p>Without this parameter, if one of the two disks fails, the system will not boot and manual intervention is required:</p><div class="codebox"><pre><code>mount /dev/sdaX /new_root -o subvol=@,degraded</code></pre></div><p> And only then the system will boot with only one disk.</p><p>Or it can be handled through HOOK: <a href="https://github.com/yafengabc/btrfs-autodegraded" rel="nofollow">https://github.com/yafengabc/btrfs-autodegraded</a> (It&#039;s 9 years old but it works - tried and tested).</p><br /><p>The router is built on Supermicro ITX HW with SSD drives. I will not put SD cards in it. <img src="https://bbs.archlinux.org/img/smilies/smile.png" width="15" height="15" alt="smile" /></p><p>On these routers we have been using it for many years to our satisfaction only we have it on mdadm and the disks have Ext4 filesystem. Now I would like to convert it to BTRFS Raid.</p><p>So what do you think is the best practice in 2023? I found a lot of articles, but they are quite old.</p>
+					</div>
+				</div>
+			</div>
+		</div>
+		<div class="inbox">
+			<div class="postfoot clearb">
+				<div class="postfootleft"><p><span>Offline</span></p></div>
+			</div>
+		</div>
+	</div>
+</div>
+
+<div id="p2096253" class="blockpost rowodd">
+	<h2><span><span class="conr">#7</span> <a href="viewtopic.php?pid=2096253#p2096253">2023-04-23 16:46:20</a></span></h2>
+	<div class="box">
+		<div class="inbox">
+			<div class="postbody">
+				<div class="postleft">
+					<dl>
+						<dt><strong>ewaller</strong></dt>
+						<dd class="usertitle"><strong>Administrator</strong></dd>
+						<dd class="postavatar"><img src="https://bbs.archlinux.org/img/avatars/27289.jpg?m=1572193439" width="80" height="80" alt="" /></dd>
+						<dd><span>From: Pasadena, CA</span></dd>
+						<dd><span>Registered: 2009-07-13</span></dd>
+						<dd><span>Posts: 20,585</span></dd>
+					</dl>
+				</div>
+				<div class="postright">
+					<h3>Re: [SOLVED] Raid1 - btrfs or mdadm?</h3>
+					<div class="postmsg">
+						<div class="quotebox"><cite>lunaryorn wrote:</cite><blockquote><div><p>Sorry, I thought you were building your own home router from scratch.</p><p>If it&#039;s for some kind of appliance then I don&#039;t really understand what you&#039;re asking for. If dmraid is a successful setup satisfying your demands then why change? Just because you can? And if you can&#039;t</p></div></blockquote></div><p>If you were wondering where your post went, you hit &#039;report&#039;, not &#039;reply&#039;.&#160; It happens</p>
+					</div>
+					<div class="postsignature postmsg"><hr /><p>Nothing is too wonderful to be true, if it be consistent with the laws of nature -- <em>Michael Faraday</em><br />The shortest way to ruin a country is to give power to demagogues.— <em>Dionysius of Halicarnassus</em><br />---<br /><a href="http://www.catb.org/~esr/faqs/smart-questions.html" rel="nofollow">How to Ask Questions the Smart Way</a></p></div>
+				</div>
+			</div>
+		</div>
+		<div class="inbox">
+			<div class="postfoot clearb">
+				<div class="postfootleft"><p><span>Offline</span></p></div>
+			</div>
+		</div>
+	</div>
+</div>
+
+<div id="p2096256" class="blockpost roweven">
+	<h2><span><span class="conr">#8</span> <a href="viewtopic.php?pid=2096256#p2096256">2023-04-23 17:04:02</a></span></h2>
+	<div class="box">
+		<div class="inbox">
+			<div class="postbody">
+				<div class="postleft">
+					<dl>
+						<dt><strong>3beb6e7c46a615a</strong></dt>
+						<dd class="usertitle"><strong>Member</strong></dd>
+						<dd><span>Registered: 2021-03-27</span></dd>
+						<dd><span>Posts: 165</span></dd>
+					</dl>
+				</div>
+				<div class="postright">
+					<h3>Re: [SOLVED] Raid1 - btrfs or mdadm?</h3>
+					<div class="postmsg">
+						<p>Eek, damn.&#160; I&#039;m sorry for the noise. </p><div class="quotebox"><cite>vecino wrote:</cite><blockquote><div><p>I got my information from Wiki: <a href="https://wiki.archlinux.org/title/btrfs" rel="nofollow">https://wiki.archlinux.org/title/btrfs</a></p><div class="codebox"><pre><code>If your root resides on the array, you must also add rootflags=degraded to your kernel parameters.</code></pre></div><p>Without this parameter, if one of the two disks fails, the system will not boot and manual intervention is required:</p><div class="codebox"><pre><code>mount /dev/sdaX /new_root -o subvol=@,degraded</code></pre></div><p> And only then the system will boot with only one disk.</p></div></blockquote></div><p>These quotes come from a <a href="https://wiki.archlinux.org/title/Btrfs#BTRFS:_open_ctree_failed" rel="nofollow">section about a specific issue from 2014</a> which advises degraded as a workaround to make the system boot at all. I would not understand these quotes as a general recommendation to add &quot;degraded&quot;. Personally I think that&#039;s a dangerous thing to do.</p><div class="quotebox"><cite>vecino wrote:</cite><blockquote><div><p>The router is built on Supermicro ITX HW with SSD drives. I will not put SD cards in it. <img src="https://bbs.archlinux.org/img/smilies/smile.png" width="15" height="15" alt="smile" /></p></div></blockquote></div><p>As quoted, I&#039;m sorry, I answered under the impression that you were looking to build your own home router from scratch.&#160; </p><p>If you already have an appliance with a specific successful setup based on dmraid I&#039;m not sure what you&#039;re looking for here with this broad open question.&#160; I&#039;d assume you have a certain set of requirements, and then your current setup either fulfils these so there&#039;d not be a reason to change, or it doesn&#039;t, but then you&#039;d have specific criteria to evaluate btrfs raid against.</p><p>Perhaps it&#039;d help if you could outline why specifically you&#039;d like to migrate to btrfs, so as to give specific criteria you&#039;re looking for.</p>
+					</div>
+				</div>
+			</div>
+		</div>
+		<div class="inbox">
+			<div class="postfoot clearb">
+				<div class="postfootleft"><p><span>Offline</span></p></div>
+			</div>
+		</div>
+	</div>
+</div>
+
+<div id="p2096257" class="blockpost rowodd">
+	<h2><span><span class="conr">#9</span> <a href="viewtopic.php?pid=2096257#p2096257">2023-04-23 17:12:08</a></span></h2>
+	<div class="box">
+		<div class="inbox">
+			<div class="postbody">
+				<div class="postleft">
+					<dl>
+						<dt><strong>vecino</strong></dt>
+						<dd class="usertitle"><strong>Member</strong></dd>
+						<dd class="postavatar"><img src="https://bbs.archlinux.org/img/avatars/147965.png?m=1677481351" width="51" height="51" alt="" /></dd>
+						<dd><span>Registered: 2022-12-10</span></dd>
+						<dd><span>Posts: 139</span></dd>
+					</dl>
+				</div>
+				<div class="postright">
+					<h3>Re: [SOLVED] Raid1 - btrfs or mdadm?</h3>
+					<div class="postmsg">
+						<p>@lunaryorn As I wrote in my first post. I want to use Btrfs Snapshots and why use unnecessarily mdadm when Btrfs can raid natively. And I like to try new things. Trying new things improves us.</p><div class="quotebox"><cite>lunaryorn wrote:</cite><blockquote><div><p>Personally I think that&#039;s a dangerous thing to do.</p></div></blockquote></div><p>Well yeah, but as I described above, without the &quot;degraded&quot; parameter, if one disk fails, the system with one disk won&#039;t boot without my intervention. With degraded it does - I&#039;m trying to simulate this in a virtual machine. </p><p>I want an ordinary router with snapshots, if there is a problem after an update, so that I can boot via grub-btrfs <a href="https://github.com/Antynea/grub-btrfs" rel="nofollow">https://github.com/Antynea/grub-btrfs</a> and make a fix from a snapshot.</p><p>I&#039;m only writing here because I&#039;m toying with the idea of scrapping mdadm radid and using native directly in btrfs nothing more.</p><p>I just want to know the opinions and experiences of more experienced admins than me.</p><p>Here&#039;s the advice to use degraded on the Proxmox forum: <a href="https://forum.proxmox.com/threads/system-did-not-find-btrfs-root-after-removing-one-disk.108223/" rel="nofollow">https://forum.proxmox.com/threads/syste … sk.108223/</a> it&#039;s Debian, but it&#039;s from 2022.</p>
+						<p class="postedit"><em>Last edited by vecino (2023-04-23 17:53:08)</em></p>
+					</div>
+				</div>
+			</div>
+		</div>
+		<div class="inbox">
+			<div class="postfoot clearb">
+				<div class="postfootleft"><p><span>Offline</span></p></div>
+			</div>
+		</div>
+	</div>
+</div>
+
+<div id="p2096262" class="blockpost roweven">
+	<h2><span><span class="conr">#10</span> <a href="viewtopic.php?pid=2096262#p2096262">2023-04-23 18:21:11</a></span></h2>
+	<div class="box">
+		<div class="inbox">
+			<div class="postbody">
+				<div class="postleft">
+					<dl>
+						<dt><strong>3beb6e7c46a615a</strong></dt>
+						<dd class="usertitle"><strong>Member</strong></dd>
+						<dd><span>Registered: 2021-03-27</span></dd>
+						<dd><span>Posts: 165</span></dd>
+					</dl>
+				</div>
+				<div class="postright">
+					<h3>Re: [SOLVED] Raid1 - btrfs or mdadm?</h3>
+					<div class="postmsg">
+						<div class="quotebox"><cite>vecino wrote:</cite><blockquote><div><p>@lunaryorn As I wrote in my first post. I want to use Btrfs Snapshots and why use unnecessarily mdadm when Btrfs can raid natively. And I like to try new things. Trying new things improves us.</p></div></blockquote></div><p>Then just try it <img src="https://bbs.archlinux.org/img/smilies/smile.png" width="15" height="15" alt="smile" />&#160; Just do make sure you understand the differences, e.g. how btrfs raid1 is different from mdadm raid1, and whether that has any impact on your requirements.</p><div class="quotebox"><cite>vecino wrote:</cite><blockquote><div><div class="quotebox"><cite>lunaryorn wrote:</cite><blockquote><div><p>Personally I think that&#039;s a dangerous thing to do.</p></div></blockquote></div><p>Well yeah, but as I described above, without the &quot;degraded&quot; parameter, if one disk fails, the system with one disk won&#039;t boot without my intervention. With degraded it does - I&#039;m trying to simulate this in a virtual machine.</p></div></blockquote></div><p>It&#039;ll then also silently mount read-write if both disks fail partially, e.g. if both SSDs begin to wear out near their end of life.&#160; &#160;If you write to a btrfs filesystem where all underlying devices are unhealthy you&#039;d definitely risk data loss I believe.</p><div class="quotebox"><blockquote><div><p>I want an ordinary router with snapshots, if there is a problem after an update, so that I can boot via grub-btrfs <a href="https://github.com/Antynea/grub-btrfs" rel="nofollow">https://github.com/Antynea/grub-btrfs</a> and make a fix from a snapshot.</p></div></blockquote></div><p>Mmh, this sounds more like a home router again.&#160; In an appliance I&#039;d have expected A/B updates with automatic rollback (e.g. using failed boot counting as in systemd-boot).</p><div class="quotebox"><blockquote><div><p>Here&#039;s the advice to use degraded on the Proxmox forum: <a href="https://forum.proxmox.com/threads/system-did-not-find-btrfs-root-after-removing-one-disk.108223/" rel="nofollow">https://forum.proxmox.com/threads/syste … sk.108223/</a> it&#039;s Debian, but it&#039;s from 2022.</p></div></blockquote></div><p>Which ends up saying that you should not do this by default.</p>
+						<p class="postedit"><em>Last edited by 3beb6e7c46a615a (2023-04-23 18:23:04)</em></p>
+					</div>
+				</div>
+			</div>
+		</div>
+		<div class="inbox">
+			<div class="postfoot clearb">
+				<div class="postfootleft"><p><span>Offline</span></p></div>
+			</div>
+		</div>
+	</div>
+</div>
+
+<div id="p2096265" class="blockpost rowodd">
+	<h2><span><span class="conr">#11</span> <a href="viewtopic.php?pid=2096265#p2096265">2023-04-23 18:37:08</a></span></h2>
+	<div class="box">
+		<div class="inbox">
+			<div class="postbody">
+				<div class="postleft">
+					<dl>
+						<dt><strong>vecino</strong></dt>
+						<dd class="usertitle"><strong>Member</strong></dd>
+						<dd class="postavatar"><img src="https://bbs.archlinux.org/img/avatars/147965.png?m=1677481351" width="51" height="51" alt="" /></dd>
+						<dd><span>Registered: 2022-12-10</span></dd>
+						<dd><span>Posts: 139</span></dd>
+					</dl>
+				</div>
+				<div class="postright">
+					<h3>Re: [SOLVED] Raid1 - btrfs or mdadm?</h3>
+					<div class="postmsg">
+						<div class="quotebox"><cite>lunaryorn wrote:</cite><blockquote><div><p>Mmh, this sounds more like a home router again.&#160; In an appliance I&#039;d have expected A/B updates with automatic rollback (e.g. using failed boot counting as in systemd-boot).</p></div></blockquote></div><p>Please, any tip on wiki / or howto where I can read how to do it? I would like to learn something new. No this is not a home router, but yes it&#039;s probably not a pro solution, but it does what it&#039;s supposed to do and that&#039;s the most important thing.</p><p>I&#039;ll try to test it - I&#039;m trying to simulate different situations and so far it&#039;s behaving well.</p>
+					</div>
+				</div>
+			</div>
+		</div>
+		<div class="inbox">
+			<div class="postfoot clearb">
+				<div class="postfootleft"><p><span>Offline</span></p></div>
+			</div>
+		</div>
+	</div>
+</div>
+
+<div id="p2096267" class="blockpost roweven">
+	<h2><span><span class="conr">#12</span> <a href="viewtopic.php?pid=2096267#p2096267">2023-04-23 18:43:00</a></span></h2>
+	<div class="box">
+		<div class="inbox">
+			<div class="postbody">
+				<div class="postleft">
+					<dl>
+						<dt><strong>3beb6e7c46a615a</strong></dt>
+						<dd class="usertitle"><strong>Member</strong></dd>
+						<dd><span>Registered: 2021-03-27</span></dd>
+						<dd><span>Posts: 165</span></dd>
+					</dl>
+				</div>
+				<div class="postright">
+					<h3>Re: [SOLVED] Raid1 - btrfs or mdadm?</h3>
+					<div class="postmsg">
+						<p>See <a href="https://btrfs.readthedocs.io/" rel="nofollow">https://btrfs.readthedocs.io/</a> and specifically <a href="https://btrfs.readthedocs.io/en/latest/mkfs.btrfs.html#block-groups-chunks-raid" rel="nofollow">https://btrfs.readthedocs.io/en/latest/ … hunks-raid</a> for how btrfs profiles work.</p>
+					</div>
+				</div>
+			</div>
+		</div>
+		<div class="inbox">
+			<div class="postfoot clearb">
+				<div class="postfootleft"><p><span>Offline</span></p></div>
+			</div>
+		</div>
+	</div>
+</div>
+
+<div id="p2096269" class="blockpost rowodd">
+	<h2><span><span class="conr">#13</span> <a href="viewtopic.php?pid=2096269#p2096269">2023-04-23 18:49:06</a></span></h2>
+	<div class="box">
+		<div class="inbox">
+			<div class="postbody">
+				<div class="postleft">
+					<dl>
+						<dt><strong>vecino</strong></dt>
+						<dd class="usertitle"><strong>Member</strong></dd>
+						<dd class="postavatar"><img src="https://bbs.archlinux.org/img/avatars/147965.png?m=1677481351" width="51" height="51" alt="" /></dd>
+						<dd><span>Registered: 2022-12-10</span></dd>
+						<dd><span>Posts: 139</span></dd>
+					</dl>
+				</div>
+				<div class="postright">
+					<h3>Re: [SOLVED] Raid1 - btrfs or mdadm?</h3>
+					<div class="postmsg">
+						<p>Ok thank you</p>
+					</div>
+				</div>
+			</div>
+		</div>
+		<div class="inbox">
+			<div class="postfoot clearb">
+				<div class="postfootleft"><p><span>Offline</span></p></div>
+			</div>
+		</div>
+	</div>
+</div>
+
+<div id="p2096574" class="blockpost roweven">
+	<h2><span><span class="conr">#14</span> <a href="viewtopic.php?pid=2096574#p2096574">2023-04-25 17:57:59</a></span></h2>
+	<div class="box">
+		<div class="inbox">
+			<div class="postbody">
+				<div class="postleft">
+					<dl>
+						<dt><strong>vecino</strong></dt>
+						<dd class="usertitle"><strong>Member</strong></dd>
+						<dd class="postavatar"><img src="https://bbs.archlinux.org/img/avatars/147965.png?m=1677481351" width="51" height="51" alt="" /></dd>
+						<dd><span>Registered: 2022-12-10</span></dd>
+						<dd><span>Posts: 139</span></dd>
+					</dl>
+				</div>
+				<div class="postright">
+					<h3>Re: [SOLVED] Raid1 - btrfs or mdadm?</h3>
+					<div class="postmsg">
+						<p>@lunaryorn<br />Please are you using HOOKS or MODULES <ins>btrfs</ins> in /etc/mkinitcpio.conf ? Or <ins>systemd</ins> instead of <ins>udev</ins> ? I don&#039;t quite know what is the right solution.</p><br /><p>From <a href="https://wiki.archlinux.org/title/btrfs" rel="nofollow">https://wiki.archlinux.org/title/btrfs</a></p><div class="codebox"><pre><code>A workaround is to remove btrfs from the HOOKS array in /etc/mkinitcpio.conf and instead add btrfs to the MODULES array. Then regenerate the initramfs and reboot.
+
+Another possible workaround is to remove the udev hook in mkinitcpio.conf and replace it with the systemd hook. In this case, btrfs should not be in the HOOKS or MODULES arrays.</code></pre></div>
+						<p class="postedit"><em>Last edited by vecino (2023-04-25 18:10:41)</em></p>
+					</div>
+				</div>
+			</div>
+		</div>
+		<div class="inbox">
+			<div class="postfoot clearb">
+				<div class="postfootleft"><p><span>Offline</span></p></div>
+			</div>
+		</div>
+	</div>
+</div>
+
+<div id="p2096584" class="blockpost rowodd">
+	<h2><span><span class="conr">#15</span> <a href="viewtopic.php?pid=2096584#p2096584">2023-04-25 19:13:20</a></span></h2>
+	<div class="box">
+		<div class="inbox">
+			<div class="postbody">
+				<div class="postleft">
+					<dl>
+						<dt><strong>3beb6e7c46a615a</strong></dt>
+						<dd class="usertitle"><strong>Member</strong></dd>
+						<dd><span>Registered: 2021-03-27</span></dd>
+						<dd><span>Posts: 165</span></dd>
+					</dl>
+				</div>
+				<div class="postright">
+					<h3>Re: [SOLVED] Raid1 - btrfs or mdadm?</h3>
+					<div class="postmsg">
+						<p>I use a systemd-based initrd.</p>
+					</div>
+				</div>
+			</div>
+		</div>
+		<div class="inbox">
+			<div class="postfoot clearb">
+				<div class="postfootleft"><p><span>Offline</span></p></div>
+			</div>
+		</div>
+	</div>
+</div>
+
+<div id="p2097030" class="blockpost roweven">
+	<h2><span><span class="conr">#16</span> <a href="viewtopic.php?pid=2097030#p2097030">2023-04-29 08:13:22</a></span></h2>
+	<div class="box">
+		<div class="inbox">
+			<div class="postbody">
+				<div class="postleft">
+					<dl>
+						<dt><strong>vecino</strong></dt>
+						<dd class="usertitle"><strong>Member</strong></dd>
+						<dd class="postavatar"><img src="https://bbs.archlinux.org/img/avatars/147965.png?m=1677481351" width="51" height="51" alt="" /></dd>
+						<dd><span>Registered: 2022-12-10</span></dd>
+						<dd><span>Posts: 139</span></dd>
+					</dl>
+				</div>
+				<div class="postright">
+					<h3>Re: [SOLVED] Raid1 - btrfs or mdadm?</h3>
+					<div class="postmsg">
+						<p>I don&#039;t like to bother, but could you please take a look at my mkinitcpio.conf file ? Is it ok like this or should it look different ?</p><div class="codebox"><pre><code># MODULES
+MODULES=(btrfs)
+ 
+# BINARIES
+BINARIES=()
+ 
+# FILES
+FILES=()
+ 
+# HOOKS
+HOOKS=(base udev autodetect modconf kms keyboard keymap block filesystems fsck btrfs-autodegraded grub-btrfs-overlayfs)</code></pre></div><p>HOOK btrfs-autodegraded = <a href="https://github.com/yafengabc/btrfs-autodegraded" rel="nofollow">https://github.com/yafengabc/btrfs-autodegraded</a></p><br /><p>I read <a href="https://wiki.archlinux.org/title/btrfs" rel="nofollow">https://wiki.archlinux.org/title/btrfs</a> but it is not clear to me what is the best option in 2023.</p><div class="quotebox"><cite>Wiki Btrfs wrote:</cite><blockquote><div><p>The solution is to remove btrfs from the HOOKS field in the /etc/mkinitcpio.conf file and add btrfs to the MODULES field instead. Then regenerate initramfs and restart the computer.<br />Another possible solution is to remove the udev hook in the mkinitcpio.conf file and replace it with the systemd hook. In this case, btrfs should not be in the HOOKS or MODULES fields.</p></div></blockquote></div><p>Thanks</p>
+					</div>
+				</div>
+			</div>
+		</div>
+		<div class="inbox">
+			<div class="postfoot clearb">
+				<div class="postfootleft"><p><span>Offline</span></p></div>
+			</div>
+		</div>
+	</div>
+</div>
+
+<div id="p2097038" class="blockpost rowodd">
+	<h2><span><span class="conr">#17</span> <a href="viewtopic.php?pid=2097038#p2097038">2023-04-29 10:30:04</a></span></h2>
+	<div class="box">
+		<div class="inbox">
+			<div class="postbody">
+				<div class="postleft">
+					<dl>
+						<dt><strong>3beb6e7c46a615a</strong></dt>
+						<dd class="usertitle"><strong>Member</strong></dd>
+						<dd><span>Registered: 2021-03-27</span></dd>
+						<dd><span>Posts: 165</span></dd>
+					</dl>
+				</div>
+				<div class="postright">
+					<h3>Re: [SOLVED] Raid1 - btrfs or mdadm?</h3>
+					<div class="postmsg">
+						<p>As said above, I use a systemd-based initramfs; I do not know how to setup btrfs raid with a classic initrd.&#160; And also as said, I&#039;d never use &quot;degraded&quot; automatically.</p>
+					</div>
+				</div>
+			</div>
+		</div>
+		<div class="inbox">
+			<div class="postfoot clearb">
+				<div class="postfootleft"><p><span>Offline</span></p></div>
+			</div>
+		</div>
+	</div>
+</div>
+
+<div id="p2097041" class="blockpost roweven">
+	<h2><span><span class="conr">#18</span> <a href="viewtopic.php?pid=2097041#p2097041">2023-04-29 10:43:29</a></span></h2>
+	<div class="box">
+		<div class="inbox">
+			<div class="postbody">
+				<div class="postleft">
+					<dl>
+						<dt><strong>vecino</strong></dt>
+						<dd class="usertitle"><strong>Member</strong></dd>
+						<dd class="postavatar"><img src="https://bbs.archlinux.org/img/avatars/147965.png?m=1677481351" width="51" height="51" alt="" /></dd>
+						<dd><span>Registered: 2022-12-10</span></dd>
+						<dd><span>Posts: 139</span></dd>
+					</dl>
+				</div>
+				<div class="postright">
+					<h3>Re: [SOLVED] Raid1 - btrfs or mdadm?</h3>
+					<div class="postmsg">
+						<p>Ok please imagine a situation where for example you schedule a reboot after a kernel update for example at 3:00 in the morning ... at that moment one of the two disks fails and if I didn&#039;t use the HOOK with btrfs-autodegraded, the machine just wouldn&#039;t boot and would wait for me to physically access it / or connect via IPMI and make a repair. </p><p>This is actually the main reason in my case why I use raid1 at all. I don&#039;t care about the data on those drives they are worthless to me ... I just care about ensuring the reliability of the router, if one of the drives fails it keeps going without my intervention. And later I&#039;ll replace the faulty disk with a new one to make the array complete.</p><p>Anyway, thank you, we all have our own point of view. Systemd-based initramfs is still a big unknown for me as a new user and I&#039;m using classic initrd for now.</p>
+					</div>
+				</div>
+			</div>
+		</div>
+		<div class="inbox">
+			<div class="postfoot clearb">
+				<div class="postfootleft"><p><span>Offline</span></p></div>
+			</div>
+		</div>
+	</div>
+</div>
+
+<div id="p2098210" class="blockpost rowodd">
+	<h2><span><span class="conr">#19</span> <a href="viewtopic.php?pid=2098210#p2098210">2023-05-06 11:58:17</a></span></h2>
+	<div class="box">
+		<div class="inbox">
+			<div class="postbody">
+				<div class="postleft">
+					<dl>
+						<dt><strong>vecino</strong></dt>
+						<dd class="usertitle"><strong>Member</strong></dd>
+						<dd class="postavatar"><img src="https://bbs.archlinux.org/img/avatars/147965.png?m=1677481351" width="51" height="51" alt="" /></dd>
+						<dd><span>Registered: 2022-12-10</span></dd>
+						<dd><span>Posts: 139</span></dd>
+					</dl>
+				</div>
+				<div class="postright">
+					<h3>Re: [SOLVED] Raid1 - btrfs or mdadm?</h3>
+					<div class="postmsg">
+						<p>Please allow me one last question ... if I also want to use systemd within /etc/mkinitcpio.conf is this correct? Or should I do something different? Thank you<br /> </p><div class="codebox"><pre><code>MODULES=()
+
+BINARIES=()
+
+FILES=()
+
+HOOKS=(base systemd autodetect modconf block filesystems fsck)</code></pre></div><p><a href="https://wiki.archlinux.org/title/mkinitcpio" rel="nofollow">https://wiki.archlinux.org/title/mkinitcpio</a></p>
+					</div>
+				</div>
+			</div>
+		</div>
+		<div class="inbox">
+			<div class="postfoot clearb">
+				<div class="postfootleft"><p><span>Offline</span></p></div>
+			</div>
+		</div>
+	</div>
+</div>
+
+<div class="postlinksb">
+	<div class="inbox crumbsplus">
+		<div class="pagepost">
+			<p class="pagelink conl"><span class="pages-label">Pages: </span><strong class="item1">1</strong></p>
+		</div>
+		<ul class="crumbs">
+			<li><a href="index.php">Index</a></li>
+			<li><span>»&#160;</span><a href="viewforum.php?id=23">Newbie Corner</a></li>
+			<li><span>»&#160;</span><strong><a href="viewtopic.php?id=285266">[SOLVED] Raid1 - btrfs or mdadm?</a></strong></li>
+		</ul>
+		<div class="clearer"></div>
+	</div>
+</div>
+</div>
+
+<div id="brdfooter" class="block">
+	<h2><span>Board footer</span></h2>
+	<div class="box">
+		<div id="brdfooternav" class="inbox">
+			<div class="conl">
+				<form id="qjump" method="get" action="viewforum.php">
+					<div><label><span>Jump to<br /></span>
+					<select name="id" onchange="window.location=('viewforum.php?id='+this.options[this.selectedIndex].value)">
+						<optgroup label="Technical Issues and Assistance">
+							<option value="23" selected="selected">Newbie Corner</option>
+							<option value="17">Installation</option>
+							<option value="22">Kernel &amp; Hardware</option>
+							<option value="18">Applications &amp; Desktop Environments</option>
+							<option value="31">Laptop Issues</option>
+							<option value="8">Networking, Server, and Protection</option>
+							<option value="32">Multimedia and Games</option>
+							<option value="51">Arch Linux Guided Installer</option>
+							<option value="50">System Administration</option>
+							<option value="35">Other Architectures</option>
+						</optgroup>
+						<optgroup label="Arch-centric">
+							<option value="24">Announcements, Package &amp; Security Advisories</option>
+							<option value="1">Arch Discussion</option>
+							<option value="13">Forum &amp; Wiki discussion</option>
+						</optgroup>
+						<optgroup label="Pacman Upgrades, Packaging &amp; AUR">
+							<option value="44">Pacman &amp; Package Upgrade Issues</option>
+							<option value="49">[testing] Repo Forum</option>
+							<option value="4">Creating &amp; Modifying Packages</option>
+							<option value="38">AUR Issues, Discussion &amp; PKGBUILD Requests</option>
+						</optgroup>
+						<optgroup label="Contributions &amp; Discussion">
+							<option value="20">GNU/Linux Discussion</option>
+							<option value="27">Community Contributions</option>
+							<option value="33">Programming &amp; Scripting</option>
+							<option value="30">Other Languages</option>
+							<option value="47">Artwork and Screenshots</option>
+						</optgroup>
+					</select></label>
+					<input type="submit" value=" Go " accesskey="g" />
+					</div>
+				</form>
+			</div>
+			<div class="conr">
+				<p id="feedlinks"><span class="atom"><a href="extern.php?action=feed&amp;tid=285266&amp;type=atom">Atom topic feed</a></span></p>
+				<p id="poweredby">Powered by <a href="http://fluxbb.org/">FluxBB</a></p>
+			</div>
+			<div class="clearer"></div>
+		</div>
+	</div>
+</div>
+
+
+
+</div>
+<div class="end-box"></div>
+</div>
+
+</body>
+</html>

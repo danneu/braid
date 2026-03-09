@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html class="client-nojs" lang="en" dir="ltr">
+<head>
+<meta charset="UTF-8">
+<title>Changes/LUKSEncryptionSectorSize - Fedora Project Wiki</title>
+<script>document.documentElement.className="client-js";RLCONF={"wgBreakFrames":false,"wgSeparatorTransformTable":["",""],"wgDigitTransformTable":["",""],"wgDefaultDateFormat":"dmy","wgMonthNames":["","January","February","March","April","May","June","July","August","September","October","November","December"],"wgRequestId":"aas-8L6eMMa17-l9V17wlgAAApM","wgCanonicalNamespace":"","wgCanonicalSpecialPageName":false,"wgNamespaceNumber":0,"wgPageName":"Changes/LUKSEncryptionSectorSize","wgTitle":"Changes/LUKSEncryptionSectorSize","wgCurRevisionId":619480,"wgRevisionId":619480,"wgArticleId":83260,"wgIsArticle":true,"wgIsRedirect":false,"wgAction":"view","wgUserName":null,"wgUserGroups":["*"],"wgCategories":["ChangeAcceptedF35","SelfContainedChange"],"wgPageViewLanguage":"en","wgPageContentLanguage":"en","wgPageContentModel":"wikitext","wgRelevantPageName":"Changes/LUKSEncryptionSectorSize","wgRelevantArticleId":83260,"wgIsProbablyEditable":false,"wgRelevantPageIsProbablyEditable":false,"wgRestrictionEdit":[],"wgRestrictionMove":[],"wgCiteReferencePreviewsActive":true};
+RLSTATE={"site.styles":"ready","user.styles":"ready","user":"ready","user.options":"loading","mediawiki.skinning.interface":"ready","skins.fedora":"ready"};RLPAGEMODULES=["site","mediawiki.page.ready","mediawiki.toc","skins.fedora.js"];</script>
+<script>(RLQ=window.RLQ||[]).push(function(){mw.loader.impl(function(){return["user.options@12s5i",function($,jQuery,require,module){mw.user.tokens.set({"patrolToken":"+\\","watchToken":"+\\","csrfToken":"+\\"});
+}];});});</script>
+<link rel="stylesheet" href="/w/load.php?lang=en&amp;modules=mediawiki.skinning.interface%7Cskins.fedora&amp;only=styles&amp;skin=fedora">
+<script async="" src="/w/load.php?lang=en&amp;modules=startup&amp;only=scripts&amp;raw=1&amp;skin=fedora"></script>
+<meta name="ResourceLoaderDynamicStyles" content="">
+<link rel="stylesheet" href="/w/load.php?lang=en&amp;modules=site.styles&amp;only=styles&amp;skin=fedora">
+<meta name="generator" content="MediaWiki 1.43.1">
+<meta name="robots" content="max-image-preview:standard">
+<meta name="format-detection" content="telephone=no">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="search" type="application/opensearchdescription+xml" href="/w/rest.php/v1/search" title="Fedora Project Wiki (en)">
+<link rel="EditURI" type="application/rsd+xml" href="https://fedoraproject.org/w/api.php?action=rsd">
+<link rel="license" href="/wiki/Legal:Main">
+<link rel="alternate" type="application/atom+xml" title="Fedora Project Wiki Atom feed" href="/w/index.php?title=Special:RecentChanges&amp;feed=atom">
+</head>
+<body class="mediawiki ltr sitedir-ltr mw-hide-empty-elt ns-0 ns-subject page-Changes_LUKSEncryptionSectorSize rootpage-Changes skin-fedora action-view">		<div class="navbar navbar-expand-lg navbar-light masthead py-2 justify-content-between"><a href="/wiki/Fedora_Project_Wiki" class="navbar-brand"><img src="/w/skins/Fedora/resources/images/fedorawiki_logo.png" alt="Fedora Project Wiki" height="40px"></a><div class="navbar-nav"><form action="/w/index.php" role="search" class="mw-portlet" id="p-search"><input type="hidden" value="Special:Search" name="title"><h3><label for="searchInput">Search</label></h3><div class="input-group"><input type="search" name="search" placeholder="Search Fedora Project Wiki" aria-label="Search Fedora Project Wiki" autocapitalize="sentences" title="Search Fedora Project Wiki [f]" accesskey="f" id="searchInput" class="form-control"><span class="input-group-btn"><button id="searchGoButton" class="btn bg-white border rounded-0 rounded-end" type="submit"><i class="fa fa-search"></i></button></span></div></form></div><ul class="navbar-nav align-items-center"><li class="nav-item dropdown"><a class="nav-link dropdown-toggle" data-toggle="dropdown" href="#" role="button" data-bs-toggle="dropdown">Links</a><ul class="dropdown-menu dropdown-menu-end"><li id="n-Get-Fedora" class="mw-list-item"><a href="https://getfedora.org/" class="dropdown-item">Get Fedora</a></li><li id="n-Fedora-Docs" class="mw-list-item"><a href="https://docs.fedoraproject.org/" class="dropdown-item">Fedora Docs</a></li><li id="n-Fedora-Magazine" class="mw-list-item"><a href="https://fedoramagazine.org/" class="dropdown-item">Fedora Magazine</a></li><li id="n-What-Can-I-Do?" class="mw-list-item"><a href="https://whatcanidoforfedora.org/" class="dropdown-item">What Can I Do?</a></li></ul></li><li class="nav-item dropdown"><a class="nav-link dropdown-toggle" data-toggle="dropdown" href="#" role="button" data-bs-toggle="dropdown">CodeOfConduct</a><ul class="dropdown-menu dropdown-menu-end"><li id="n-Code-of-Conduct" class="mw-list-item"><a href="https://docs.fedoraproject.org/en-US/project/code-of-conduct/" class="dropdown-item">Code of Conduct</a></li></ul></li><li class="nav-item dropdown"><a class="nav-link dropdown-toggle" data-toggle="dropdown" href="#" role="button" data-bs-toggle="dropdown">Subprojects</a><ul class="dropdown-menu dropdown-menu-end"><li id="n-Ambassadors" class="mw-list-item"><a href="/wiki/Ambassadors" class="dropdown-item">Ambassadors</a></li><li id="n-Community-Operations" class="mw-list-item"><a href="/wiki/CommOps" class="dropdown-item">Community Operations</a></li><li id="n-Design" class="mw-list-item"><a href="/wiki/Design" class="dropdown-item">Design</a></li><li id="n-Documentation" class="mw-list-item"><a href="/wiki/DocsProject" class="dropdown-item">Documentation</a></li><li id="n-EPEL" class="mw-list-item"><a href="/wiki/EPEL" class="dropdown-item">EPEL</a></li><li id="n-Infrastructure" class="mw-list-item"><a href="/wiki/Infrastructure" class="dropdown-item">Infrastructure</a></li><li id="n-Internationalization" class="mw-list-item"><a href="/wiki/I18N" class="dropdown-item">Internationalization</a></li><li id="n-Localization" class="mw-list-item"><a href="/wiki/L10N" class="dropdown-item">Localization</a></li><li id="n-Marketing" class="mw-list-item"><a href="/wiki/Marketing" class="dropdown-item">Marketing</a></li><li id="n-Magazine" class="mw-list-item"><a href="/wiki/Magazine" class="dropdown-item">Magazine</a></li><li id="n-Package-Maintainers" class="mw-list-item"><a href="/wiki/PackageMaintainers" class="dropdown-item">Package Maintainers</a></li><li id="n-Quality-Assurance" class="mw-list-item"><a href="/wiki/QA" class="dropdown-item">Quality Assurance</a></li><li id="n-Websites" class="mw-list-item"><a href="/wiki/Websites" class="dropdown-item">Websites</a></li><li id="n-All-projects" class="mw-list-item"><a href="/wiki/Projects" class="dropdown-item">All projects</a></li></ul></li><a href="/w/index.php?title=Special:UserLogin&amp;returnto=Changes%2FLUKSEncryptionSectorSize" class="btn btn-primary m-l-2">Log In</a></ul></div>
+
+		<div class="bodycontent">
+			<div class="sub-header pt-4">
+				<div class="container">
+					<div class="d-flex justify-content-between align-items-center">
+						<div>
+							<h1><span class="mw-page-title-main">Changes/LUKSEncryptionSectorSize</span></h1>						</div>
+						<div>
+							<div class="btn-group">
+							<div class="mw-indicators">
+</div>
+							</div>
+						</div>
+					</div>
+					<div class="d-flex justify-content-between">
+						<ul class="nav nav-tabs nav-small border-0 ms-0">
+						<li class="nav-item" id="ca-nstab-main" class="selected mw-list-item"><a href="/wiki/Changes/LUKSEncryptionSectorSize" title="View the content page [c]" accesskey="c" class="nav-link active">Page</a></li class="nav-item"><li class="nav-item" id="ca-talk" class="new mw-list-item"><a href="/w/index.php?title=Talk:Changes/LUKSEncryptionSectorSize&amp;action=edit&amp;redlink=1" rel="discussion" class="new nav-link" title="Discussion about the content page (page does not exist) [t]" accesskey="t">Discussion</a></li class="nav-item">						</ul>
+						<ul class="nav nav-tabs nav-small border-0 ms-0">
+						<li class="nav-item pull-xs-right" id="ca-view" class="selected mw-list-item"><a href="/wiki/Changes/LUKSEncryptionSectorSize" class="nav-link active">Read</a></li class="nav-item pull-xs-right"><li class="nav-item pull-xs-right" id="ca-viewsource" class="mw-list-item"><a href="/w/index.php?title=Changes/LUKSEncryptionSectorSize&amp;action=edit" title="This page is protected.&#10;You can view its source [e]" accesskey="e" class="nav-link">View source</a></li class="nav-item pull-xs-right"><li class="nav-item pull-xs-right" id="ca-history" class="mw-list-item"><a href="/w/index.php?title=Changes/LUKSEncryptionSectorSize&amp;action=history" title="Past revisions of this page [h]" accesskey="h" class="nav-link">View history</a></li class="nav-item pull-xs-right">
+						</ul>
+					</div>
+				</div>
+			</div>
+		</div>
+
+			<div class="mw-body container pb-5" role="main">
+				<div id="siteNotice"><div id="localNotice" data-nosnippet=""><div class="sitenotice" lang="en" dir="ltr"></div></div></div><div id="siteSub">From Fedora Project Wiki</div>
+				<div class="mw-body-content">
+					<div id="contentSub"><p><div id="mw-content-subtitle"><div class="subpages">&lt; <bdi dir="ltr"><a href="/wiki/Changes" title="Changes">Changes</a></bdi></div></div></p><p></p></div><div id="mw-content-text" class="mw-body-content"><div class="mw-content-ltr mw-parser-output" lang="en" dir="ltr"><div id="toc" class="toc" role="navigation" aria-labelledby="mw-toc-heading"><input type="checkbox" role="button" id="toctogglecheckbox" class="toctogglecheckbox" style="display:none" /><div class="toctitle" lang="en" dir="ltr"><h2 id="mw-toc-heading">Contents</h2><span class="toctogglespan"><label class="toctogglelabel" for="toctogglecheckbox"></label></span></div>
+<ul>
+<li class="toclevel-1 tocsection-1"><a href="#Optimal_LUKS_Encryption_Sector_Size"><span class="tocnumber">1</span> <span class="toctext">Optimal LUKS Encryption Sector Size</span></a>
+<ul>
+<li class="toclevel-2 tocsection-2"><a href="#Summary"><span class="tocnumber">1.1</span> <span class="toctext">Summary</span></a></li>
+<li class="toclevel-2 tocsection-3"><a href="#Owner"><span class="tocnumber">1.2</span> <span class="toctext">Owner</span></a></li>
+<li class="toclevel-2 tocsection-4"><a href="#Current_status"><span class="tocnumber">1.3</span> <span class="toctext">Current status</span></a></li>
+<li class="toclevel-2 tocsection-5"><a href="#Detailed_Description"><span class="tocnumber">1.4</span> <span class="toctext">Detailed Description</span></a></li>
+<li class="toclevel-2 tocsection-6"><a href="#Feedback"><span class="tocnumber">1.5</span> <span class="toctext">Feedback</span></a></li>
+<li class="toclevel-2 tocsection-7"><a href="#Benefit_to_Fedora"><span class="tocnumber">1.6</span> <span class="toctext">Benefit to Fedora</span></a></li>
+<li class="toclevel-2 tocsection-8"><a href="#Scope"><span class="tocnumber">1.7</span> <span class="toctext">Scope</span></a></li>
+<li class="toclevel-2 tocsection-9"><a href="#Upgrade/compatibility_impact"><span class="tocnumber">1.8</span> <span class="toctext">Upgrade/compatibility impact</span></a></li>
+<li class="toclevel-2 tocsection-10"><a href="#How_To_Test"><span class="tocnumber">1.9</span> <span class="toctext">How To Test</span></a></li>
+<li class="toclevel-2 tocsection-11"><a href="#User_Experience"><span class="tocnumber">1.10</span> <span class="toctext">User Experience</span></a></li>
+<li class="toclevel-2 tocsection-12"><a href="#Dependencies"><span class="tocnumber">1.11</span> <span class="toctext">Dependencies</span></a></li>
+<li class="toclevel-2 tocsection-13"><a href="#Contingency_Plan"><span class="tocnumber">1.12</span> <span class="toctext">Contingency Plan</span></a></li>
+<li class="toclevel-2 tocsection-14"><a href="#Documentation"><span class="tocnumber">1.13</span> <span class="toctext">Documentation</span></a></li>
+<li class="toclevel-2 tocsection-15"><a href="#Release_Notes"><span class="tocnumber">1.14</span> <span class="toctext">Release Notes</span></a></li>
+</ul>
+</li>
+</ul>
+</div>
+
+<h1><span class="mw-headline" id="Optimal_LUKS_Encryption_Sector_Size">Optimal LUKS Encryption Sector Size</span></h1>
+<h2><span class="mw-headline" id="Summary">Summary</span></h2>
+<p>Autodetect optimal encryption sector size during Fedora installation with LUKS/dm-crypt encryption. On devices with 4k (physical) sector size, this will make sure we use 4096 sector size which is optimal for these devices.
+</p>
+<h2><span class="mw-headline" id="Owner">Owner</span></h2>
+<ul><li>Name: <a href="/wiki/User:Okozina" title="User:Okozina">Ondrej Kozina</a>, <a href="/wiki/User:Vtrefny" title="User:Vtrefny">Vojtech Trefny</a></li>
+<li>Email: okozina AT redhat.com, vtrefny AT redhat.com</li></ul>
+<h2><span class="mw-headline" id="Current_status">Current status</span></h2>
+<ul><li>Targeted release: <a href="/wiki/Releases/35" class="mw-redirect" title="Releases/35"> Fedora Linux 35 </a></li>
+<li>Last updated:   2021-07-14</li>
+<li>FESCo issue: <a class="external text" href="https://pagure.io/fesco/issue/2638">#2638</a></li>
+<li>Tracker bug: <a class="external text" href="https://bugzilla.redhat.com/show_bug.cgi?id=1982417">#1982417</a></li>
+<li>Release notes tracker: <a class="external text" href="https://pagure.io/fedora-docs/release-notes/issue/716">#716</a></li></ul>
+<h2><span class="mw-headline" id="Detailed_Description">Detailed Description</span></h2>
+<p>Anaconda installer (or to be more precise, the libraries Anaconda uses for storage configuration) currently sets sector size for LUKS devices to 512 regardless the of actual physical sector size of the underlying disk device. The latest cryptsetup release added an option to let cryptsetup automatically detect the optimal sector size based on the (physical) sector size of the backing device. By using this new option we can make sure that Anaconda uses the optimal sector size for newly created LUKS devices during installation. This means we will use sector size of 4096 for devices with 4k physical sector size increasing IO performance with these devices.
+</p>
+<h2><span class="mw-headline" id="Feedback">Feedback</span></h2>
+<h2><span class="mw-headline" id="Benefit_to_Fedora">Benefit to Fedora</span></h2>
+<p>With this change we will make sure to use the right encryption sector size for the disk Fedora is installed on. For disks with 4k physical sector size, this could mean a small performance gain when using 4096 encryption size instead of (currently default) 512.
+</p>
+<h2><span class="mw-headline" id="Scope">Scope</span></h2>
+<ul><li>Proposal owners: Changes for both cryptsetup and libblockdev (low-level storage library used by Anaconda) are already merged (<a class="external text" href="https://gitlab.com/cryptsetup/cryptsetup/-/merge_requests/135">cryptsetup</a>) or submitted (<a class="external text" href="https://github.com/storaged-project/libblockdev/pull/638">libblockdev</a>) upstream. We only need to package new versions of these two projects for Fedora 35. No changes will be needed in Anaconda.</li></ul>
+<ul><li>Other developers: No work from other developers is needed.</li></ul>
+<ul><li>Release engineering: <a class="external text" href="https://pagure.io/releng/issues">#Releng issue number</a></li></ul>
+<ul><li>Policies and guidelines: N/A (not needed for this Change)</li></ul>
+<ul><li>Trademark approval: N/A (not needed for this Change)</li></ul>
+<ul><li>Alignment with Objectives:</li></ul>
+<h2><span id="Upgrade.2Fcompatibility_impact"></span><span class="mw-headline" id="Upgrade/compatibility_impact">Upgrade/compatibility impact</span></h2>
+<p>Upgraded systems will not be affected by this change, this affects only new LUKS containers created during Fedora installation.
+</p><p>Support for specifying custom sector size is one of the features available in LUKS2 (<a href="/wiki/Changes/SwitchCryptsetupDefaultToLUKS2" title="Changes/SwitchCryptsetupDefaultToLUKS2">default since Fedora 30</a>), no additional changes or special support is needed when working with LUKS2 devices with sector sizes different than 512.
+</p>
+<h2><span class="mw-headline" id="How_To_Test">How To Test</span></h2>
+<p>Disk with 4k physical sectors is required for testing this change. You can check block size of your drive using <code>blockdev</code> from <code>util-linux</code> package:
+</p>
+<pre>  # blockdev --getpbsz /dev/nvme0n1 
+  4096
+</pre>
+<p>This can be also tested in a virtual machine. You can configure any disk to appear as 4k block size disk in libvirt by adding the following option to the disk XML specification:
+</p>
+<pre>  &lt;blockio logical_block_size="4096" physical_block_size="4096"/&gt;
+</pre>
+<p>Install Fedora with disk encryption enabled. Using automatic partition with <b>Encrypt my data</b> enabled is enough for testing.
+</p><p>In the installed system use <code>cryptsetup luksDump /dev/&lt;device&gt;</code> to check that correct sector size was selected for your device (4096 for disks with 4096 physical sector size):
+</p>
+<pre>  # cryptsetup luksDump /dev/nvme0n1p1 
+  LUKS header information
+  Version:        2
+  ...
+  Data segments:
+    0: crypt
+          offset: 16777216 [bytes]
+          length: (whole device)
+          cipher: aes-xts-plain64
+          <b>sector: 4096 [bytes]</b>
+</pre>
+<h2><span class="mw-headline" id="User_Experience">User Experience</span></h2>
+<p>Fedora users shouldn't notice the change, other than a small IO performance boost (IO testing on a 4k sectors NVMe shows around 2-3&#160;% gain when using 4k sectors instead of 512 sectors).
+</p>
+<h2><span class="mw-headline" id="Dependencies">Dependencies</span></h2>
+<p>None.
+</p>
+<h2><span class="mw-headline" id="Contingency_Plan">Contingency Plan</span></h2>
+<ul><li>Contingency mechanism: Keep existing behaviour (512 sector size for all devices)</li>
+<li>Contingency deadline: Beta Freeze</li>
+<li>Blocks release? No</li></ul>
+<h2><span class="mw-headline" id="Documentation">Documentation</span></h2>
+<h2><span class="mw-headline" id="Release_Notes">Release Notes</span></h2>
+<!-- 
+NewPP limit report
+Cached time: 20260306112155
+Cache expiry: 86400
+Reduced expiry: false
+Complications: [show‐toc]
+CPU time usage: 0.006 seconds
+Real time usage: 0.007 seconds
+Preprocessor visited node count: 111/1000000
+Post‐expand include size: 8/2097152 bytes
+Template argument size: 0/2097152 bytes
+Highest expansion depth: 2/100
+Expensive parser function count: 0/100
+Unstrip recursion depth: 0/20
+Unstrip post‐expand size: 0/5000000 bytes
+-->
+<!--
+Transclusion expansion time report (%,ms,calls,template)
+100.00%    0.000      1 -total
+-->
+
+<!-- Saved in parser cache with key fpo?hmediawiki-en_:pcache:idhash:83260-0!canonical and timestamp 20260306112155 and revision id 619480. Rendering was triggered because: page-view
+ -->
+</div></div><div class="visualClear"></div><div class="printfooter">Retrieved from "<a dir="ltr" href="https://fedoraproject.org/w/index.php?title=Changes/LUKSEncryptionSectorSize&amp;oldid=619480">https://fedoraproject.org/w/index.php?title=Changes/LUKSEncryptionSectorSize&amp;oldid=619480</a>"</div><div id="catlinks" class="catlinks" data-mw="interface"><div id="mw-normal-catlinks" class="mw-normal-catlinks"><a href="/wiki/Special:Categories" title="Special:Categories">Categories</a>: <ul><li><a href="/w/index.php?title=Category:ChangeAcceptedF35&amp;action=edit&amp;redlink=1" class="new" title="Category:ChangeAcceptedF35 (page does not exist)">ChangeAcceptedF35</a></li><li><a href="/wiki/Category:SelfContainedChange" title="Category:SelfContainedChange">SelfContainedChange</a></li></ul></div></div>				</div>
+			</div>
+
+			<div class="footer py-5 text-white">
+				<div class="container">
+					<div class="row footerlinks justify-content-center">
+						<div class="col-sm-3 col-4 mt-3">
+							<div>
+								<dl>
+									<dt class="text-uppercase h4"><strong>About</strong></dt>
+									<dd><a href="https://getfedora.org/">Get Fedora Linux</a></dd>
+									<dd><a href="https://getfedora.org/en/sponsors/">Sponsors</a></dd>
+									<dd><a href="https://fedoramagazine.org">Fedora Magazine</a></dd>
+									<dd><a href="https://fedoraproject.org/wiki/Legal:Main#Legal">Legal</a></dd>
+								</dl>
+							</div>
+					</div>
+					<div class="col-sm-3 col-4 mt-3">
+							<div>
+								<dl>
+									<dt class="text-uppercase h4"><strong>Support</strong></dt>
+									<dd><a href="https://fedoraproject.org/wiki/Communicating_and_getting_help">Get Help</a></dd>
+									<dd><a href="https://ask.fedoraproject.org/">Ask Fedora</a></dd>
+									<dd><a href="https://discussion.fedoraproject.org/c/ask/common-issues/">Common Issues</a></dd>
+									<dd><a href="https://developer.fedoraproject.org/">Fedora Developer Portal</a></dd>
+								</dl>
+							</div>
+					</div>
+					<div class="col-sm-3 col-4 mt-3">
+							<div>
+								<dl>
+									<dt class="text-uppercase h4"><strong>Community</strong></dt>
+									<dd><a href="https://fedoraproject.org/wiki/Join">Join Fedora</a></dd>
+									<dd><a href="https://fedoraproject.org/wiki/Overview">About Fedora</a></dd>
+									<dd><a href="http://fedoraplanet.org">Planet Fedora</a></dd>
+									<dd><a href="https://accounts.fedoraproject.org/">Fedora Accounts</a></dd>
+								</dl>
+							</div>
+					</div>
+					</div>
+					<div class="row footerlinks">
+						<div class="col-12 text-center">
+							<p class="disclaimer fw-bold">
+								This is a community maintained site.  Red Hat is not responsible for content.
+							</p>
+							<p>
+							&copy; 2026 Red Hat, Inc. and others.  Content is available under <a href-"https://creativecommons.org/licenses/by-sa/4.0/deed.en">Attribution-Share Alike 4.0 International</a> unless otherwise noted.
+							</p>
+							<p> Fedora is sponsored by Red Hat. <a href="https://www.redhat.com/en/technologies/linux-platforms/articles/relationship-between-fedora-and-rhel">Learn more about the relationship between Red Hat and Fedora »</a> </p>
+							<div class="py-3"> 
+								<img src="/w/skins/Fedora/resources/images/redhat.png" alt="Red Hat Logo" height="40px">							</div>
+						</div>
+					</div>
+				</div>
+			</div>
+
+		</body>
+		</html>
+
+		<script>(RLQ=window.RLQ||[]).push(function(){mw.log.warn("This page is using the deprecated ResourceLoader module \"mediawiki.skinning.interface\".\n[1.43] The use of the `interface-message-box` feature with SkinModule is deprecated in favor of CodexModule. Please remove this feature.More information can be found at [[mw:Manual:ResourceLoaderSkinModule]]. ");mw.config.set({"wgBackendResponseTime":103,"wgPageParseReport":{"limitreport":{"cputime":"0.006","walltime":"0.007","ppvisitednodes":{"value":111,"limit":1000000},"postexpandincludesize":{"value":8,"limit":2097152},"templateargumentsize":{"value":0,"limit":2097152},"expansiondepth":{"value":2,"limit":100},"expensivefunctioncount":{"value":0,"limit":100},"unstrip-depth":{"value":0,"limit":20},"unstrip-size":{"value":0,"limit":5000000},"timingprofile":["100.00%    0.000      1 -total"]},"cachereport":{"timestamp":"20260306112155","ttl":86400,"transientcontent":false}}});});</script>
+</body>
+</html>

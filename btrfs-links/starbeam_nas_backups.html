@@ -1,0 +1,1067 @@
+<!DOCTYPE HTML>
+<html>
+	<head>
+		<meta charset="utf-8" />
+		<meta name=viewport content="width=device-width, initial-scale=1" />
+		<title>NAS Backups, Part 2: Btrfs send / receive | Stardust | Starbeamrainbowlabs</title>
+		
+		<link rel="icon" href="/favicon.ico" />
+		<link rel="shortcut icon" href="/favicon.ico" />
+		
+		<link rel="alternate" type="application/atom+xml" title="Stardust Blog Atom Feed" href="/blog/feed.php" />
+		
+		<meta name="theme-color" content="#5135b6" />
+		
+				<meta property="og:title" content="NAS Backups, Part 2: Btrfs send / receive" />
+		<meta property="og:description" content="Hey there! In the first post of this series, I talked about my plan for a backup NAS to complement my main NAS. In this part, I'm going to show the pa.... (click to read more)" />
+		<meta property="og:type" content="article" />
+		<meta property="og:image" content="http://starbeamrainbowlabs.com/favicon.png" />
+		<meta property="og:image:url" content="http://starbeamrainbowlabs.com/favicon.png" />
+		<meta property="og:image:secure_url" content="https://starbeamrainbowlabs.com/favicon.png" />
+		<meta property="og:url" content="https://starbeamrainbowlabs.com/blog/article.php?article=posts%2F472-nas-backups-part-2-btrfs-send-recieve.html" />
+		<meta property="article:author" content="https://starbeamrainbowlabs.com/" />
+		<meta property="article:published_time" content="2021-08-18T09:00:55+01:00" />
+		<meta property="article:tag" content="Backups, Server, Terminal, Projects, Storage" />
+		<meta property="twitter:card" content="summary" />
+		<meta property="twitter:site" content="@SBRLabs" />
+		<meta property="twitter:title" content="NAS Backups, Part 2: Btrfs send / receive" />
+		<meta property="twitter:description" content="Hey there! In the first post of this series, I talked about my plan for a backup NAS to complement my main NAS. In this part, I'm going to show the pa.... (click to read more)" />
+		<meta property="twitter:image" content="https://starbeamrainbowlabs.com/favicon.png" />
+		
+		<link rel="alternate" type="application/json+oembed" href="https://starbeamrainbowlabs.com/blog/oembed.php?format=json&url=https%3A%2F%2Fstarbeamrainbowlabs.com%2Fblog%2Farticle.php%3Farticle%3Dposts%252F472-nas-backups-part-2-btrfs-send-recieve.html" />
+
+	</head>
+	<body class="language-clike">
+		
+<!-- <a href="http://starbeamrainbowlabs.com/stealthpackager.php">Cookies.....</a> -->
+
+<h1 class="centretext"><a href="/">
+	<img src="/images/heading.svg" alt="Starbeamrainbowlabs" />
+</a></h1>
+
+		
+		<h2 class="blogtitle centretext"><a href="/blog/">
+			Stardust
+			<br />
+			<small class="block centretext">Blog</small>
+		</a></h2>
+		<article class='post' data-post-title='NAS Backups, Part 2: Btrfs send / receive' itemscope itemtype='http://schema.org/BlogPosting'>
+			<a id='posts%2F472-nas-backups-part-2-btrfs-send-recieve.html'></a>
+<div itemprop='articleBody'><!--
+Release on  | 18th August 2021 at 9:00am
+Author      | Starbeamrainbowlabs
+Tags        | Backups, Server, Terminal, Projects, Storage
+-->
+<a itemprop='mainEntityOfPage' href='https://starbeamrainbowlabs.com/blog/article.php?article=posts%2F472-nas-backups-part-2-btrfs-send-recieve.html' class='invisilink'><h2 itemprop='headline'>NAS Backups, Part 2: Btrfs send / receive</h2></a>
+<p>Hey there! In the <a href="https://starbeamrainbowlabs.com/blog/article.php?article=posts%2F468-Btrfs-backup-NAS.html">first post of this series</a>, I talked about my plan for a backup NAS to complement my <a href="https://starbeamrainbowlabs.com/blog/article.php?article=posts/449-nas-4-snapshotting.html">main NAS</a>. In this part, I'm going to show the pair of scripts I've developed to take care of backing up btrfs snapshots.</p>
+<p>The first script is called <code>snapshot-send.sh</code>, and it:</p>
+<ol>
+<li>Calculates which snapshot it is that requires sending</li>
+<li>Uses SSH to remote into the backup NAS</li>
+<li>Pipes the output of <code>btrfs send</code> to <code>snapshot-receive.sh</code> on the backup NAS that is called with <code>sudo</code></li>
+</ol>
+<p>Note there that while <code>sudo</code> is used for calling <code>snapshot-receive.sh</code>, the account it uses to SSH into the backup NAS, it doesn't have completely unrestricted <code>sudo</code> access. Instead, a <code>sudo</code> rule is used to restrict it to allow only specific commands to be called (without a password, as this is intended to be a completely automated and unattended system).</p>
+<p>The second script is called <code>snapshot-receive.sh</code>, and it receives the output of <code>btrfs send</code> and pipes it to <code>btrfs receive</code>. It also has some extra logic to delete old snapshots and stuff like that.</p>
+<p>Both of these are designed to be command line programs in their own right with a simple CLI, and useful error / help messages to assist in understanding it when I come back to it to fix an issue or extend it after many months.</p>
+<h3>snapshot-send.sh</h3>
+<p>As described above, snapshot-send.sh sends btrfs snapshot to a remote host via SSH and the <code>snapshot-receive.sh</code> script.</p>
+<p>Before we continue and look at it in detail, it is important to note that <code>snapshot-send.sh</code> depends on <a href="https://github.com/mmehnert/btrfs-snapshot-rotation.git"><code>btrfs-snapshot-rotation</code></a>. If you haven't already done so, you should set that up first before setting up my scripts here.</p>
+<p>If you have <code>btrfs-snapshot-rotation</code> setup correctly, you should have something like this in your crontab:</p>
+<pre><code class="language-cron"># Btrfs automatic snapshots
+0 * * * *       cronic /root/btrfs-snapshot-rotation/btrfs-snapshot /mnt/some_btrfs_filesystem/main /mnt/some_btrfs_filesystem/main/.snapshots hourly 8
+0 2 * * *       cronic /root/btrfs-snapshot-rotation/btrfs-snapshot /mnt/some_btrfs_filesystem/main /mnt/some_btrfs_filesystem/main/.snapshots daily 4
+0 2 * * 7       cronic /root/btrfs-snapshot-rotation/btrfs-snapshot /mnt/some_btrfs_filesystem/main /mnt/some_btrfs_filesystem/main/.snapshots weekly 4</code></pre>
+<p>I use <a href="https://habilis.net/cronic/"><code>cronic</code></a> there to reduce unnecessary emails. I also have a subvolume there for the snapshots:</p>
+<pre><code class="language-bash">sudo btrfs subvolume create /mnt/some_btrfs_filesystem/main/.snapshots</code></pre>
+<p>Because Btrfs does not take take a snapshot of any child subvolumes when it takes a snapshot, I can use this to keep all my snapshots organised and associated with the subvolume they are snapshots of.</p>
+<p>If done right, <code>ls /mnt/some_btrfs_filesystem/main/.snapshots</code> should result in something like this:</p>
+<pre><code>2021-07-25T02:00:01+00:00-@weekly  2021-08-17T07:00:01+00:00-@hourly
+2021-08-01T02:00:01+00:00-@weekly  2021-08-17T08:00:01+00:00-@hourly
+2021-08-08T02:00:01+00:00-@weekly  2021-08-17T09:00:01+00:00-@hourly
+2021-08-14T02:00:01+00:00-@daily   2021-08-17T10:00:01+00:00-@hourly
+2021-08-15T02:00:01+00:00-@daily   2021-08-17T11:00:01+00:00-@hourly
+2021-08-15T02:00:01+00:00-@weekly  2021-08-17T12:00:01+00:00-@hourly
+2021-08-16T02:00:01+00:00-@daily   2021-08-17T13:00:01+00:00-@hourly
+2021-08-17T02:00:01+00:00-@daily   last_sent_@daily.txt
+2021-08-17T06:00:01+00:00-@hourly</code></pre>
+<p>Ignore the <code>last_sent_@daily.txt</code> there for now - it's created by <code>snapshot-send.sh</code> so that it can remember the name of the snapshot it last sent. We'll talk about it later.</p>
+<p>With that out of the way, let's start going through <code>snapshot-send.sh</code>! First up is the CLI and associated error handling:</p>
+<pre><code class="language-bash">#!/usr/bin/env bash
+set -e;
+
+dir_source="${1}";
+tag_source="${2}";
+tag_dest="${3}";
+loc_ssh_key="${4}";
+remote_host="${5}";
+
+if [[ -z "${remote_host}" ]]; then
+    echo "This script sends btrfs snapshots to a remote host via SSH.
+The script snapshot-receive must be present on the remote host in the PATH for this to work.
+It pairs well with btrfs-snapshot-rotation: https://github.com/mmehnert/btrfs-snapshot-rotation
+Usage:
+    snapshot-send.sh &lt;snapshot_dir&gt; &lt;source_tag_name&gt; &lt;dest_tag_name&gt; &lt;ssh_key&gt; &lt;user@example.com&gt;
+
+Where:
+    &lt;snapshot_dir&gt; is the path to the directory containing the snapshots
+    &lt;source_tag_name&gt; is the tag name to look for (see btrfs-snapshot-rotation).
+    &lt;dest_tag_name&gt; is the tag name to use when sending to the remote. This must be unique across all snapshot rotations sent.
+    &lt;ssh_key&gt; is the path to the ssh private key
+    &lt;user@example.com&gt; is the user@host to connect to via SSH" &gt;&amp;2;
+    exit 0;
+fi
+
+# $EUID = effective uid
+if [[ "${EUID}" -ne 0 ]]; then
+    echo "Error: This script must be run as root (currently running as effective uid ${EUID})" &gt;&amp;2;
+    exit 5;
+fi
+
+if [[ ! -e "${loc_ssh_key}" ]]; then
+    echo "Error: When looking for the ssh key, no file was found at '${loc_ssh_key}' (have you checked the spelling and file permissions?)." &gt;&amp;2;
+    exit 1;
+fi
+if [[ ! -d "${dir_source}" ]]; then
+    echo "Error: No source directory located at '${dir_source}' (have you checked the spelling and permissions?)" &gt;&amp;2;
+    exit 2;
+fi
+
+###############################################################################</code></pre>
+<p>Pretty simple stuff. <code>snapshot-send.sh</code> is called like so:</p>
+<pre><code class="language-bash">snapshot-send.sh /absolute/path/to/snapshot_dir SOURCE_TAG DEST_TAG_NAME path/to/ssh_key user@example.com</code></pre>
+<p>A few things to unpack here.</p>
+<ul>
+<li><code>/absolute/path/to/snapshot_dir</code> is the path to the directory (i.e. btrfs subvolume) containing the snapshots we want to read, as described above.</li>
+<li><code>SOURCE_TAG</code>: Given the directory (subvolume) name of a snapshot (e.g. <code>2021-08-17T02:00:01+00:00-@daily</code>), then the source tag is the bit at the end after the at sign <code>@</code> - e.g. <code>daily</code>.</li>
+<li><code>DEST_TAG_NAME</code>: The tag name to give the snapshot on the backup NAS. Useful, because you might have multiple subvolumes you snapshot with btrfs-snapshot-rotation and they all might have snapshots with the <code>daily</code> tag.</li>
+<li><code>path/to/ssh_key</code>: The path to the (unencrypted!) SSH key to use to SSH into the remote backup NAS.</li>
+<li><code>user@example.com</code>: The user and hostname of the backup NAS to SSH into.</li>
+</ul>
+<p>This is a good time to sort out the remote user we're going to SSH into (we'll sort out <code>snapshot-receive.sh</code> and the sudo rules in the next section below).</p>
+<p>Assuming that you already have a Btrfs filesystem setup and automounting on boot on the remote NAS, do this:</p>
+<pre class="language-bash" data-host="backup-nas"><code>
+sudo useradd --system --home /absolute/path/to/btrfs-filesystem/backups backups
+sudo groupadd backup-senders
+sudo usermod -a -G backup-senders backups
+cd /absolute/path/to/btrfs-filesystem/backups
+sudo mkdir .ssh
+sudo touch .ssh/authorized_keys
+sudo chown -R backups:backups .ssh
+sudo chmod -R u=rwX,g=rX,o-rwx .ssh
+</code></pre>
+<p>Then, on the main NAS, generate the SSH key:</p>
+<pre class="language-bash" data-user="root" data-host="main-nas"><code>
+mkdir -p /root/backups &amp;&amp; cd /root/backups
+ssh-keygen -t ed25519 -C backups@main-nas -f /root/backups/ssh_key_backup_nas_ed25519
+</code></pre>
+<p>Then, copy the generated SSH public key to the <code>authorized_keys</code> file on the backup NAS (located at <code>/absolute/path/to/btrfs-filesystem/backups/.ssh/authorized_keys</code>).</p>
+<p>Now that's sorted, let's continue with <code>snapshot-send.sh</code>. Next up are a few miscellaneous functions:</p>
+<pre><code class="language-bash">
+# The filepath to the last sent text file that contains the name of the snapshot that was last sent to the remote.
+# If this file doesn't exist, then we send a full snapshot to start with.
+# We need to keep track of this because we need this information to know which
+# snapshot we need to parent the latest snapshot from to send snapshots incrementally.
+filepath_last_sent="${dir_source}/last_sent_@${tag_source}.txt";
+
+## Logs a message to stderr.
+# $*    The message to log.
+log_msg() {
+    echo "[ $(date +%Y-%m-%dT%H:%M:%S) ] remote/${HOSTNAME}: &gt;&gt;&gt; ${*}";
+}
+
+## Lists all the currently available snapshots for the current source tag.
+list_snapshots() {
+    find "${dir_source}" -maxdepth 1 ! -path "${dir_source}" -name "*@${tag_source}" -type d;
+}
+
+## Returns an exit code of 0 if we've sent a snapshot, or 1 if we haven't.
+have_sent() {
+    if [[ ! -f "${filepath_last_sent}" ]]; then
+        return 1;
+    else
+        return 0;
+    fi
+}
+
+## Fetches the directory name of the last snapshot sent to the remote with the given tag name.
+last_sent() {
+    if [[ -f "${filepath_last_sent}" ]]; then
+        cat "${filepath_last_sent}";
+    fi
+}
+
+# Runs snapshot-receive on the remote host.
+do_ssh() {
+    ssh -o "ServerAliveInterval=900" -i "${loc_ssh_key}" "${remote_host}" sudo snapshot-receive "${tag_dest}";
+}</code></pre>
+<p>Particularly of note is the <code>filepath_last_sent</code> variable - this is set to the path to that text file I mentioned earlier.</p>
+<p>Other than that it's all pretty well commented, so let's continue on. Next, we need to determine the name of the latest snapshot:</p>
+<pre><code class="language-bash">latest_snapshot="$(list_snapshots | sort | tail -n1)";
+latest_snapshot_dirname="$(dirname "${latest_snapshot}")";</code></pre>
+<p>With this information in hand we can compare it to the last snapshot name we sent. We store this in the text file mentioned above - the path to which is stored in the <code>filepath_last_sent</code> variable.</p>
+<pre><code class="language-bash">if [[ "$(dirname "${latest_snapshot_dirname}")" == "$(cat "${filepath_last_sent}")" ]]; then
+    if [[ -z "${FORCE_SEND}" ]]; then
+        echo "We've sent the latest snapshot '${latest_snapshot_dirname}' already and the FORCE_SEND environment variable is empty or not specified, skipping";
+        exit 0;
+    else
+        echo "We've sent it already, but sending it again since the FORCE_SEND environment variable is specified";
+    fi
+fi</code></pre>
+<p>If the latest snapshot has the same name as the one we last send, we exit out - unless the <code>FORCE_SEND</code> environment variable is specified (to allow for an easy way to fix stuff if it goes wrong on the other end).</p>
+<p>Now, we can actually send the snapshot to the remote:</p>
+<pre><code class="language-bash">
+if ! have_sent; then
+    log_msg "Sending initial snapshot $(dirname "${latest_snapshot}")";
+    btrfs send "${latest_snapshot}" | do_ssh;
+else
+    parent_snapshot="${dir_source}/$(last_sent)";
+    if [[ ! -d "${parent_snapshot}" ]]; then
+        echo "Error: Failed to locate parent snapshot at '${parent_snapshot}'" &gt;&amp;2;
+        exit 3;
+    fi
+
+    log_msg "Sending incremental snapshot $(dirname "${latest_snapshot}") parent $(last_sent)";
+    btrfs send -p "${parent_snapshot}" "${latest_snapshot}" | do_ssh;
+fi</code></pre>
+<p><code>have_sent</code> simply determines if we have previously sent a snapshot before. We know this by checking the <code>filepath_last_sent</code> text file.</p>
+<p>If we haven't, then we send a full snapshot rather than an incremental one. If we're sending an incremental one, then we find the parent snapshot (i.e. the one we last sent). If we can't find it, we generate an error (it's because of this that you need to store at least 2 snapshots at a time with btrfs-snapshot-rotation).</p>
+<p>After sending a snapshot, we need to update the <code>filepath_last_sent</code> text file:</p>
+<pre><code class="language-bash">log_msg "Updating state information";
+basename "${latest_snapshot}" &gt;"${filepath_last_sent}";
+log_msg "Snapshot sent successfully";</code></pre>
+<p>....and that concludes <code>snapshot-send.sh</code>! Once you've finished reading this blog post and testing your setup, put your <code>snapshot-send.sh</code> calls in a script in <code>/etc/cron.daily</code> or something.</p>
+<h3>snapshot-receive.sh</h3>
+<p>Next up is the receiving end of the system. The CLI for this script is much simpler, on account of sudo rules only allowing exact and specific commands (no wildcards or regex of any kind). I put <code>snapshot-receive.sh</code> in <code>/usr/local/sbin</code> and called it <code>snapshot-receive</code>.</p>
+<p>Let's get started:</p>
+<pre><code class="language-bash">#!/usr/bin/env bash
+
+# This script wraps btrfs receive so that it can be called by non-root users.
+# It should be saved to '/usr/local/sbin/snapshot-receive' (without quotes, of course).
+# The following entry needs to be put in the sudoers file:
+# 
+# %backup-senders   ALL=(ALL) NOPASSWD: /usr/local/sbin/snapshot-receive TAG_NAME
+# 
+# ....replacing TAG_NAME with the name of tag you want to allow. You'll need 1 line in your sudoers file per tag you want to allow.
+# Edit your sudoers file like this:
+# sudo visudo
+
+# The ABSOLUTE path to the target directory to receive to.
+target_dir="CHANGE_ME";
+
+# The maximum number of backups to keep.
+max_backups="7";
+
+# Allow only alphanumeric characters in the tag
+tag="$(echo "${1}" | tr -cd '[:alnum:]-_')";</code></pre>
+<p><code>snapshot-receive.sh</code> only takes a single argument, and that's the tag it should use for the snapshot being received:</p>
+<pre class="language-bash" data-host="backup-nas"><code>
+sudo snapshot-receive DEST_TAG_NAME
+</code></pre>
+<p>The target directory it should save snapshots to is stored as a variable at the top of the file (the <code>target_dir</code> there). You should change this based on your specific setup. It goes without saying, but the target directory needs to be a directory on a btrfs filesystem (preferable raid1, though as I've said before btrfs raid1 is a misnomer). We also ensure that the tag contains only safe characters for security.</p>
+<p><code>max_backups</code> is the maximum number of snapshots to keep. Any older snapshots will be deleted.</p>
+<p>Next, ime error handling:</p>
+<pre><code class="language-bash">###############################################################################
+
+# $EUID = effective uid
+if [[ "${EUID}" -ne 0 ]]; then
+    echo "Error: This script must be run as root (currently running as effective uid ${EUID})" &gt;&amp;2;
+    exit 5;
+fi
+
+if [[ -z "${tag}" ]]; then
+    echo "Error: No tag specified. It should be specified as the 1st and only argument, and may only contain alphanumeric characters." &gt;&amp;2;
+    echo "Example:" &gt;&amp;2;
+    echo "    snapshot-receive TAG_NAME_HERE" &gt;&amp;2;
+    exit 4;
+fi</code></pre>
+<p>Nothing too exciting. Continuing on, a pair of useful helper functions:</p>
+<pre><code class="language-bash">
+###############################################################################
+
+## Logs a message to stderr.
+# $*    The message to log.
+log_msg() {
+    echo "[ $(date +%Y-%m-%dT%H:%M:%S) ] remote/${HOSTNAME}: &gt;&gt;&gt; ${*}";
+}
+
+list_backups() {
+    find "${target_dir}/${tag}" -maxdepth 1 ! -path "${target_dir}/${tag}" -type d;
+}</code></pre>
+<p><code>list_backups</code> lists the snapshots with the given tag, and <code>log_msg</code> logs messages to <code>stdout</code> (not <code>stderr</code> unless there's an error, because otherwise <code>cronic</code> will dutifully send you an email every time the scripts execute). Next up, more error handling:</p>
+<pre><code class="language-bash">###############################################################################
+
+if [[ "${target_dir}" == "CHANGE_ME" ]]; then
+    echo "Error: target_dir was not changed from the default value." &gt;&amp;2;
+    exit 1;
+fi
+
+if [[ ! -d "${target_dir}" ]]; then
+    echo "Error: No directory was found at '${target_dir}'." &gt;&amp;2;
+    exit 2;
+fi
+
+if [[ ! -d "${target_dir}/${tag}" ]]; then
+    log_msg "Creating new directory at ${target_dir}/${tag}";
+    mkdir "${target_dir}/${tag}";
+fi</code></pre>
+<p>We check:</p>
+<ul>
+<li>That the target directory was changed from the default <code>CHANGE_ME</code> value</li>
+<li>That the target directory exists</li>
+</ul>
+<p>We also create a subdirectory for the given tag if it doesn't exist already.</p>
+<p>With the preamble completed, we can actually receive the snapshot:</p>
+<pre><code class="language-bash">log_msg "Launching btrfs in chroot mode";
+
+time nice ionice -c Idle btrfs receive --chroot "${target_dir}/${tag}";</code></pre>
+<p>We use <code>nice</code> and <code>ionice</code> to reduce the priority of the receive to the lowest possible level. If you're using a Raspberry Pi (I have a Raspberry Pi 4 with 4GB RAM) like I am, this is important for stability (Pis tend to fall over otherwise). Don't worry if you experience some system crashes on your Pi when transferring the first snapshot - I've found that incremental snapshots don't cause the same issue.</p>
+<p>We also use the <code>chroot</code> option there for increased security.</p>
+<p>Now that the snapshot is transferred, we can delete old snapshots if we have too many:</p>
+<pre><code class="language-bash">backups_count="$(echo -e "$(list_backups)" | wc -l)";
+
+log_msg "Btrfs finished, we now have ${backups_count} backups:";
+list_backups;
+
+while [[ "${backups_count}" -gt "${max_backups}" ]]; do
+    oldest_backup="$(list_backups | sort | head -n1)";
+    log_msg "Maximum number backups is ${max_backups}, requesting removal of backup for $(dirname "${oldest_backup}")";
+
+    btrfs subvolume delete "${oldest_backup}";
+
+    backups_count="$(echo -e "$(list_backups)" | wc -l)";
+done
+
+log_msg "Done, any removed backups will be deleted in the background";</code></pre>
+<p>Sorted! The only thing left to do here is to setup those <code>sudo</code> rules. Let's do that now. Execute <code>sudoedit /etc/sudoers</code>, and enter the following:</p>
+<pre><code class="language-sudo">%backup-senders ALL=(ALL) NOPASSWD: /usr/local/sbin/snapshot-receive TAG_NAME</code></pre>
+<p>Replace <code>TAG_NAME</code> with the <code>DEST_TAG_NAME</code> you're using. You'll need 1 entry in <code>/etc/sudoers</code> for each <code>DEST_TAG_NAME</code> you're using.</p>
+<p>We assign the rights to the <code>backup-senders</code> group we created earlier, of which the user we are going to SSH in with is a member. This make  the system more flexible should we want to extend it later.</p>
+<p><strong>Warning:</strong> A mistake in <code>/etc/sudoers</code> can leave you unable to use <code>sudo</code>! Make sure you have a root shell open in the background and that you test <code>sudo</code> again after making changes to ensure you haven't made a mistake.</p>
+<p>That completes the setup of <code>snapshot-receive.sh</code>.</p>
+<h3>Conclusion</h3>
+<p>With <code>snapshot-send.sh</code> and <code>snapshot-receive.sh</code>, we now have a system for transferring snapshots from 1 host to another via SSH. If combined with full disk encryption (e.g. with LUKS), this provides a secure backup system with a number of desirable qualities:</p>
+<ul>
+<li>The main NAS can't access the backups on the backup NAS (in case fo ransomware)</li>
+<li>Backups are encrypted during transfer (via SSH)</li>
+<li>Backups are encrypted at rest (LUKS)</li>
+</ul>
+<p>To further secure the backup NAS, one could:</p>
+<ul>
+<li>Disable SSH password login</li>
+<li>Automatically start / shutdown the backup NAS (though with full disk encryption when it boots up it would require manual intervention)</li>
+</ul>
+<p>At the bottom of this post I've included the full scripts for you to copy and paste.</p>
+<p>As it turns out, there will be 1 more post in this series, which will cover generating multiple streams of backups (e.g. weekly, monthly) from a single stream of e.g. daily backups on my backup NAS.</p>
+<h3>Sources and further reading</h3>
+<ul>
+<li><a href="https://btrfs.wiki.kernel.org/index.php/FAQ#Does_Btrfs_support_encryption.3F">Btrfs and encryption</a></li>
+</ul>
+<h3>Full scripts</h3>
+<h4>snapshot-send.sh</h4>
+<pre><code class="language-bash">#!/usr/bin/env bash
+set -e;
+
+dir_source="${1}";
+tag_source="${2}";
+tag_dest="${3}";
+loc_ssh_key="${4}";
+remote_host="${5}";
+
+if [[ -z "${remote_host}" ]]; then
+    echo "This script sends btrfs snapshots to a remote host via SSH.
+The script snapshot-receive must be present on the remote host in the PATH for this to work.
+It pairs well with btrfs-snapshot-rotation: https://github.com/mmehnert/btrfs-snapshot-rotation
+Usage:
+    snapshot-send.sh &lt;snapshot_dir&gt; &lt;source_tag_name&gt; &lt;dest_tag_name&gt; &lt;ssh_key&gt; &lt;user@example.com&gt;
+
+Where:
+    &lt;snapshot_dir&gt; is the path to the directory containing the snapshots
+    &lt;source_tag_name&gt; is the tag name to look for (see btrfs-snapshot-rotation).
+    &lt;dest_tag_name&gt; is the tag name to use when sending to the remote. This must be unique across all snapshot rotations sent.
+    &lt;ssh_key&gt; is the path to the ssh private key
+    &lt;user@example.com&gt; is the user@host to connect to via SSH" &gt;&amp;2;
+    exit 0;
+fi
+
+# $EUID = effective uid
+if [[ "${EUID}" -ne 0 ]]; then
+    echo "Error: This script must be run as root (currently running as effective uid ${EUID})" &gt;&amp;2;
+    exit 5;
+fi
+
+if [[ ! -e "${loc_ssh_key}" ]]; then
+    echo "Error: When looking for the ssh key, no file was found at '${loc_ssh_key}' (have you checked the spelling and file permissions?)." &gt;&amp;2;
+    exit 1;
+fi
+if [[ ! -d "${dir_source}" ]]; then
+    echo "Error: No source directory located at '${dir_source}' (have you checked the spelling and permissions?)" &gt;&amp;2;
+    exit 2;
+fi
+
+###############################################################################
+
+# The filepath to the last sent text file that contains the name of the snapshot that was last sent to the remote.
+# If this file doesn't exist, then we send a full snapshot to start with.
+# We need to keep track of this because we need this information to know which
+# snapshot we need to parent the latest snapshot from to send snapshots incrementally.
+filepath_last_sent="${dir_source}/last_sent_@${tag_source}.txt";
+
+## Logs a message to stderr.
+# $*    The message to log.
+log_msg() {
+    echo "[ $(date +%Y-%m-%dT%H:%M:%S) ] remote/${HOSTNAME}: &gt;&gt;&gt; ${*}";
+}
+
+## Lists all the currently available snapshots for the current source tag.
+list_snapshots() {
+    find "${dir_source}" -maxdepth 1 ! -path "${dir_source}" -name "*@${tag_source}" -type d;
+}
+
+## Returns an exit code of 0 if we've sent a snapshot, or 1 if we haven't.
+have_sent() {
+    if [[ ! -f "${filepath_last_sent}" ]]; then
+        return 1;
+    else
+        return 0;
+    fi
+}
+
+## Fetches the directory name of the last snapshot sent to the remote with the given tag name.
+last_sent() {
+    if [[ -f "${filepath_last_sent}" ]]; then
+        cat "${filepath_last_sent}";
+    fi
+}
+
+do_ssh() {
+    ssh -o "ServerAliveInterval=900" -i "${loc_ssh_key}" "${remote_host}" sudo snapshot-receive "${tag_dest}";
+}
+
+latest_snapshot="$(list_snapshots | sort | tail -n1)";
+latest_snapshot_dirname="$(dirname "${latest_snapshot}")";
+
+if [[ "$(dirname "${latest_snapshot_dirname}")" == "$(cat "${filepath_last_sent}")" ]]; then
+    if [[ -z "${FORCE_SEND}" ]]; then
+        echo "We've sent the latest snapshot '${latest_snapshot_dirname}' already and the FORCE_SEND environment variable is empty or not specified, skipping";
+        exit 0;
+    else
+        echo "We've sent it already, but sending it again since the FORCE_SEND environment variable is specified";
+    fi
+fi
+
+if ! have_sent; then
+    log_msg "Sending initial snapshot $(dirname "${latest_snapshot}")";
+    btrfs send "${latest_snapshot}" | do_ssh;
+else
+    parent_snapshot="${dir_source}/$(last_sent)";
+    if [[ ! -d "${parent_snapshot}" ]]; then
+        echo "Error: Failed to locate parent snapshot at '${parent_snapshot}'" &gt;&amp;2;
+        exit 3;
+    fi
+
+    log_msg "Sending incremental snapshot $(dirname "${latest_snapshot}") parent $(last_sent)";
+    btrfs send -p "${parent_snapshot}" "${latest_snapshot}" | do_ssh;
+fi
+
+
+log_msg "Updating state information";
+basename "${latest_snapshot}" &gt;"${filepath_last_sent}";
+log_msg "Snapshot sent successfully";</code></pre>
+<h4>snapshot-receive.sh</h4>
+<pre><code class="language-bash">#!/usr/bin/env bash
+
+# This script wraps btrfs receive so that it can be called by non-root users.
+# It should be saved to '/usr/local/sbin/snapshot-receive' (without quotes, of course).
+# The following entry needs to be put in the sudoers file:
+# 
+# %backup-senders   ALL=(ALL) NOPASSWD: /usr/local/sbin/snapshot-receive TAG_NAME
+# 
+# ....replacing TAG_NAME with the name of tag you want to allow. You'll need 1 line in your sudoers file per tag you want to allow.
+# Edit your sudoers file like this:
+# sudo visudo
+
+# The ABSOLUTE path to the target directory to receive to.
+target_dir="CHANGE_ME";
+
+# The maximum number of backups to keep.
+max_backups="7";
+
+# Allow only alphanumeric characters in the tag
+tag="$(echo "${1}" | tr -cd '[:alnum:]-_')";
+
+###############################################################################
+
+# $EUID = effective uid
+if [[ "${EUID}" -ne 0 ]]; then
+    echo "Error: This script must be run as root (currently running as effective uid ${EUID})" &gt;&amp;2;
+    exit 5;
+fi
+
+if [[ -z "${tag}" ]]; then
+    echo "Error: No tag specified. It should be specified as the 1st and only argument, and may only contain alphanumeric characters." &gt;&amp;2;
+    echo "Example:" &gt;&amp;2;
+    echo "    snapshot-receive TAG_NAME_HERE" &gt;&amp;2;
+    exit 4;
+fi
+
+###############################################################################
+
+## Logs a message to stderr.
+# $*    The message to log.
+log_msg() {
+    echo "[ $(date +%Y-%m-%dT%H:%M:%S) ] remote/${HOSTNAME}: &gt;&gt;&gt; ${*}";
+}
+
+list_backups() {
+    find "${target_dir}/${tag}" -maxdepth 1 ! -path "${target_dir}/${tag}" -type d;
+}
+
+###############################################################################
+
+if [[ "${target_dir}" == "CHANGE_ME" ]]; then
+    echo "Error: target_dir was not changed from the default value." &gt;&amp;2;
+    exit 1;
+fi
+
+if [[ ! -d "${target_dir}" ]]; then
+    echo "Error: No directory was found at '${target_dir}'." &gt;&amp;2;
+    exit 2;
+fi
+
+if [[ ! -d "${target_dir}/${tag}" ]]; then
+    log_msg "Creating new directory at ${target_dir}/${tag}";
+    mkdir "${target_dir}/${tag}";
+fi
+
+log_msg "Launching btrfs in chroot mode";
+
+time nice ionice -c Idle btrfs receive --chroot "${target_dir}/${tag}";
+
+backups_count="$(echo -e "$(list_backups)" | wc -l)";
+
+log_msg "Btrfs finished, we now have ${backups_count} backups:";
+list_backups;
+
+while [[ "${backups_count}" -gt "${max_backups}" ]]; do
+    oldest_backup="$(list_backups | sort | head -n1)";
+    log_msg "Maximum number backups is ${max_backups}, requesting removal of backup for $(dirname "${oldest_backup}")";
+
+    btrfs subvolume delete "${oldest_backup}";
+
+    backups_count="$(echo -e "$(list_backups)" | wc -l)";
+done
+
+log_msg "Done, any removed backups will be deleted in the background";</code></pre><span style='display: none;' itemprop='image' itemscope itemtype='https://schema.org/ImageObject'><meta itemprop='url' content='http://starbeamrainbowlabs.com/favicon.png' /><meta itemprop='width' content='256' /><meta itemprop='height' content='256' /></span>
+</div><meta itemprop='commentCount' content='0' /><meta itemprop='datePublished' content='2021-08-18T09:00:00+01:00' /><meta itemprop='dateModified' content='2021-08-18T09:00:55+01:00' />
+			<footer class='small-panel centretext'>
+<span class='small-spacing small-panel'>				by <span itemprop='author publisher' itemscope itemtype='http://schema.org/Person'><span itemprop='name'>Starbeamrainbowlabs</span><meta itemprop='image' content='https://starbeamrainbowlabs.com/favicon-small.png' /></span></span><wbr /><span class='small-spacing small-panel'><span class='oi' data-glyph='clock' title='Published on' aria-hidden='true'></span>
+			<span title='Wednesday 18th of August 2021 at 09:00am BST' style='cursor:help;'>18-8-2021 at 09:00 am</span></span><wbr /><span class='small-spacing small-panel'><span class='oi' data-glyph='tag' title='Tags' aria-hidden='true'></span><a href='//starbeamrainbowlabs.com/blog/?tags=Backups'>Backups</a>, <a href='//starbeamrainbowlabs.com/blog/?tags=Server'>Server</a>, <a href='//starbeamrainbowlabs.com/blog/?tags=Terminal'>Terminal</a>, <a href='//starbeamrainbowlabs.com/blog/?tags=Projects'>Projects</a>, <a href='//starbeamrainbowlabs.com/blog/?tags=Storage'>Storage</a></span><wbr /><span class='small-spacing small-panel'><a itemprop='url' href='https://starbeamrainbowlabs.com/blog/article.php?article=posts%2F472-nas-backups-part-2-btrfs-send-recieve.html'><span class='oi' data-glyph='link-intact' title='Permanent Link' aria-hidden='true'></span>Permanent Link</a></span><wbr /><span class='small-spacing small-panel'><span class='oi' data-glyph='monitor' title='Views'></span>3151 views<img class='icon nomargin' src='https://starbeamrainbowlabs.com/blog/viewtracker.php?action=record&format=image&post-id=posts%2F472-nas-backups-part-2-btrfs-send-recieve.html' alt='View tracking image. Download it to increment the view counter!' /></span><wbr /><span class='small-spacing small-panel'><a href='https://starbeamrainbowlabs.com/blog/article.php?article=posts%2F472-nas-backups-part-2-btrfs-send-recieve.html#comments' itemprop='discussionUrl'><span class='oi' data-glyph='comment-square' title='Comments' aria-hidden='true'></span>0 comments</a></span><wbr /><span class='small-spacing small-panel'><span class='oi' data-glyph='people' title='Share' aria-hidden='true'></span>Share via:
+<a href='https://starbeamrainbowlabs.com/share2fediverse/#text=NAS%20Backups%2C%20Part%202%3A%20Btrfs%20send%20%2F%20receive%20-%20Blog%20post%0Ahttps%3A%2F%2Fstarbeamrainbowlabs.com%2Fblog%2Farticle.php%3Farticle%3Dposts%252F472-nas-backups-part-2-btrfs-send-recieve.html' target='_blank'><img src='https://starbeamrainbowlabs.com/images/logos/fediverse.svg' class='icon' title='Share on the Fediverse' alt='Share this post on the Fediverse' /></a>
+<a href='https://twitter.com/share?url=https%3A%2F%2Fstarbeamrainbowlabs.com%2Fblog%2Farticle.php%3Farticle%3Dposts%252F472-nas-backups-part-2-btrfs-send-recieve.html&text=NAS%20Backups%2C%20Part%202%3A%20Btrfs%20send%20%2F%20receive%20-%20Blog%20post&via=SBRLabs' target='_blank'><img src='https://starbeamrainbowlabs.com/images/logos/twitter.svg' class='icon' title='Share via Twitter' alt='Share this post via Twitter' /></a>
+<a href='https://facebook.com/sharer/sharer.php?u=https%3A%2F%2Fstarbeamrainbowlabs.com%2Fblog%2Farticle.php%3Farticle%3Dposts%252F472-nas-backups-part-2-btrfs-send-recieve.html' target='_blank'><img src='https://starbeamrainbowlabs.com/images/logos/facebook.svg' class='icon' title='Share via Facebook' alt='Share this post via Facebook' /></a>
+<a href='http://www.addtoany.com/add_to/evernote?linkurl=https%3A%2F%2Fstarbeamrainbowlabs.com%2Fblog%2Farticle.php%3Farticle%3Dposts%252F472-nas-backups-part-2-btrfs-send-recieve.html&title=NAS%20Backups%2C%20Part%202%3A%20Btrfs%20send%20%2F%20receive' target='_blank'><img src='https://starbeamrainbowlabs.com/images/logos/evernote.svg' class='icon' title='Share via Evernote' alt='Share this article via Evernote' /></a>
+<a href='mailto:?Subject=Stardust%20Blog%20Post%3A%20NAS%20Backups%2C%20Part%202%3A%20Btrfs%20send%20%2F%20receive&amp;Body=https%3A%2F%2Fstarbeamrainbowlabs.com%2Fblog%2Farticle.php%3Farticle%3Dposts%252F472-nas-backups-part-2-btrfs-send-recieve.html'><img src='https://starbeamrainbowlabs.com/images/logos/mail.svg' class='icon' title='Share by Email' alt='Share by Email' /></a></span><wbr />			</footer>
+		</article>
+
+		
+		<details class='tag-cloud small-panel'>
+<summary title='Click to toggle tag cloud'><h2>Tag Cloud</h2></summary>
+	<span class='tag small-panel' title='9 Posts' style='font-size: 1.268rem; opacity: 0.791;'><a href='/blog?tags=3d'>3d</a></span>
+	<span class='tag small-panel' title='2 Posts' style='font-size: 0.919rem; opacity: 0.691;'><a href='/blog?tags=3d%20printing'>3d printing</a></span>
+	<span class='tag small-panel' title='4 Posts' style='font-size: 1.067rem; opacity: 0.733;'><a href='/blog?tags=account'>account</a></span>
+	<span class='tag small-panel' title='35 Posts' style='font-size: 1.639rem; opacity: 0.897;'><a href='/blog?tags=algorithms'>algorithms</a></span>
+	<span class='tag small-panel' title='5 Posts' style='font-size: 1.120rem; opacity: 0.748;'><a href='/blog?tags=android'>android</a></span>
+	<span class='tag small-panel' title='23 Posts' style='font-size: 1.521rem; opacity: 0.863;'><a href='/blog?tags=announcement'>announcement</a></span>
+	<span class='tag small-panel' title='11 Posts' style='font-size: 1.321rem; opacity: 0.806;'><a href='/blog?tags=architecture'>architecture</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=archives'>archives</a></span>
+	<span class='tag small-panel' title='15 Posts' style='font-size: 1.404rem; opacity: 0.830;'><a href='/blog?tags=arduino'>arduino</a></span>
+	<span class='tag small-panel' title='17 Posts' style='font-size: 1.438rem; opacity: 0.839;'><a href='/blog?tags=artificial%20intelligence'>artificial intelligence</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=artix'>artix</a></span>
+	<span class='tag small-panel' title='2 Posts' style='font-size: 0.919rem; opacity: 0.691;'><a href='/blog?tags=assembly'>assembly</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=async'>async</a></span>
+	<span class='tag small-panel' title='3 Posts' style='font-size: 1.002rem; opacity: 0.715;'><a href='/blog?tags=audio'>audio</a></span>
+	<span class='tag small-panel' title='4 Posts' style='font-size: 1.067rem; opacity: 0.733;'><a href='/blog?tags=automation'>automation</a></span>
+	<span class='tag small-panel' title='7 Posts' style='font-size: 1.203rem; opacity: 0.772;'><a href='/blog?tags=backups'>backups</a></span>
+	<span class='tag small-panel' title='39 Posts' style='font-size: 1.670rem; opacity: 0.906;'><a href='/blog?tags=bash'>bash</a></span>
+	<span class='tag small-panel' title='2 Posts' style='font-size: 0.919rem; opacity: 0.691;'><a href='/blog?tags=batch'>batch</a></span>
+	<span class='tag small-panel' title='2 Posts' style='font-size: 0.919rem; opacity: 0.691;'><a href='/blog?tags=blender'>blender</a></span>
+	<span class='tag small-panel' title='2 Posts' style='font-size: 0.919rem; opacity: 0.691;'><a href='/blog?tags=blog'>blog</a></span>
+	<span class='tag small-panel' title='3 Posts' style='font-size: 1.002rem; opacity: 0.715;'><a href='/blog?tags=bookmarklet'>bookmarklet</a></span>
+	<span class='tag small-panel' title='4 Posts' style='font-size: 1.067rem; opacity: 0.733;'><a href='/blog?tags=booting'>booting</a></span>
+	<span class='tag small-panel' title='4 Posts' style='font-size: 1.067rem; opacity: 0.733;'><a href='/blog?tags=bug%20hunting'>bug hunting</a></span>
+	<span class='tag small-panel' title='63 Posts' style='font-size: 1.806rem; opacity: 0.945;'><a href='/blog?tags=c%20sharp'>c sharp</a></span>
+	<span class='tag small-panel' title='7 Posts' style='font-size: 1.203rem; opacity: 0.772;'><a href='/blog?tags=c%2B%2B'>c++</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=challenge'>challenge</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=chrome%20os'>chrome os</a></span>
+	<span class='tag small-panel' title='16 Posts' style='font-size: 1.422rem; opacity: 0.835;'><a href='/blog?tags=cluster'>cluster</a></span>
+	<span class='tag small-panel' title='20 Posts' style='font-size: 1.483rem; opacity: 0.852;'><a href='/blog?tags=code'>code</a></span>
+	<span class='tag small-panel' title='4 Posts' style='font-size: 1.067rem; opacity: 0.733;'><a href='/blog?tags=codepen'>codepen</a></span>
+	<span class='tag small-panel' title='5 Posts' style='font-size: 1.120rem; opacity: 0.748;'><a href='/blog?tags=coding%20conundrums'>coding conundrums</a></span>
+	<span class='tag small-panel' title='5 Posts' style='font-size: 1.120rem; opacity: 0.748;'><a href='/blog?tags=coding%20conundrums%20evolved'>coding conundrums evolved</a></span>
+	<span class='tag small-panel' title='8 Posts' style='font-size: 1.237rem; opacity: 0.782;'><a href='/blog?tags=command%20line'>command line</a></span>
+	<span class='tag small-panel' title='13 Posts' style='font-size: 1.365rem; opacity: 0.819;'><a href='/blog?tags=compilers'>compilers</a></span>
+	<span class='tag small-panel' title='3 Posts' style='font-size: 1.002rem; opacity: 0.715;'><a href='/blog?tags=compiling'>compiling</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=compression'>compression</a></span>
+	<span class='tag small-panel' title='3 Posts' style='font-size: 1.002rem; opacity: 0.715;'><a href='/blog?tags=conference'>conference</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=conferences'>conferences</a></span>
+	<span class='tag small-panel' title='2 Posts' style='font-size: 0.919rem; opacity: 0.691;'><a href='/blog?tags=containerisation'>containerisation</a></span>
+	<span class='tag small-panel' title='6 Posts' style='font-size: 1.164rem; opacity: 0.761;'><a href='/blog?tags=css'>css</a></span>
+	<span class='tag small-panel' title='4 Posts' style='font-size: 1.067rem; opacity: 0.733;'><a href='/blog?tags=dailyprogrammer'>dailyprogrammer</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=data%20analysis'>data analysis</a></span>
+	<span class='tag small-panel' title='11 Posts' style='font-size: 1.321rem; opacity: 0.806;'><a href='/blog?tags=debugging'>debugging</a></span>
+	<span class='tag small-panel' title='2 Posts' style='font-size: 0.919rem; opacity: 0.691;'><a href='/blog?tags=defining%20ai'>defining ai</a></span>
+	<span class='tag small-panel' title='10 Posts' style='font-size: 1.295rem; opacity: 0.799;'><a href='/blog?tags=demystification'>demystification</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=distributed%20computing'>distributed computing</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=dns'>dns</a></span>
+	<span class='tag small-panel' title='2 Posts' style='font-size: 0.919rem; opacity: 0.691;'><a href='/blog?tags=docker'>docker</a></span>
+	<span class='tag small-panel' title='2 Posts' style='font-size: 0.919rem; opacity: 0.691;'><a href='/blog?tags=documentation'>documentation</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=downtime'>downtime</a></span>
+	<span class='tag small-panel' title='2 Posts' style='font-size: 0.919rem; opacity: 0.691;'><a href='/blog?tags=electronics'>electronics</a></span>
+	<span class='tag small-panel' title='2 Posts' style='font-size: 0.919rem; opacity: 0.691;'><a href='/blog?tags=email'>email</a></span>
+	<span class='tag small-panel' title='4 Posts' style='font-size: 1.067rem; opacity: 0.733;'><a href='/blog?tags=embedded%20systems'>embedded systems</a></span>
+	<span class='tag small-panel' title='4 Posts' style='font-size: 1.067rem; opacity: 0.733;'><a href='/blog?tags=encryption'>encryption</a></span>
+	<span class='tag small-panel' title='15 Posts' style='font-size: 1.404rem; opacity: 0.830;'><a href='/blog?tags=es6%20features'>es6 features</a></span>
+	<span class='tag small-panel' title='2 Posts' style='font-size: 0.919rem; opacity: 0.691;'><a href='/blog?tags=ethics'>ethics</a></span>
+	<span class='tag small-panel' title='8 Posts' style='font-size: 1.237rem; opacity: 0.782;'><a href='/blog?tags=event'>event</a></span>
+	<span class='tag small-panel' title='4 Posts' style='font-size: 1.067rem; opacity: 0.733;'><a href='/blog?tags=experiment'>experiment</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=external'>external</a></span>
+	<span class='tag small-panel' title='8 Posts' style='font-size: 1.237rem; opacity: 0.782;'><a href='/blog?tags=first%20impressions'>first impressions</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=freeside'>freeside</a></span>
+	<span class='tag small-panel' title='11 Posts' style='font-size: 1.321rem; opacity: 0.806;'><a href='/blog?tags=future'>future</a></span>
+	<span class='tag small-panel' title='2 Posts' style='font-size: 0.919rem; opacity: 0.691;'><a href='/blog?tags=game'>game</a></span>
+	<span class='tag small-panel' title='8 Posts' style='font-size: 1.237rem; opacity: 0.782;'><a href='/blog?tags=github'>github</a></span>
+	<span class='tag small-panel' title='2 Posts' style='font-size: 0.919rem; opacity: 0.691;'><a href='/blog?tags=github%20gist'>github gist</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=gitlab'>gitlab</a></span>
+	<span class='tag small-panel' title='11 Posts' style='font-size: 1.321rem; opacity: 0.806;'><a href='/blog?tags=graphics'>graphics</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=guide'>guide</a></span>
+	<span class='tag small-panel' title='13 Posts' style='font-size: 1.365rem; opacity: 0.819;'><a href='/blog?tags=hardware'>hardware</a></span>
+	<span class='tag small-panel' title='2 Posts' style='font-size: 0.919rem; opacity: 0.691;'><a href='/blog?tags=hardware%20meetup'>hardware meetup</a></span>
+	<span class='tag small-panel' title='9 Posts' style='font-size: 1.268rem; opacity: 0.791;'><a href='/blog?tags=holiday'>holiday</a></span>
+	<span class='tag small-panel' title='7 Posts' style='font-size: 1.203rem; opacity: 0.772;'><a href='/blog?tags=holidays'>holidays</a></span>
+	<span class='tag small-panel' title='6 Posts' style='font-size: 1.164rem; opacity: 0.761;'><a href='/blog?tags=html'>html</a></span>
+	<span class='tag small-panel' title='2 Posts' style='font-size: 0.919rem; opacity: 0.691;'><a href='/blog?tags=html5'>html5</a></span>
+	<span class='tag small-panel' title='10 Posts' style='font-size: 1.295rem; opacity: 0.799;'><a href='/blog?tags=html5%20canvas'>html5 canvas</a></span>
+	<span class='tag small-panel' title='2 Posts' style='font-size: 0.919rem; opacity: 0.691;'><a href='/blog?tags=infrastructure'>infrastructure</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=interfaces'>interfaces</a></span>
+	<span class='tag small-panel' title='9 Posts' style='font-size: 1.268rem; opacity: 0.791;'><a href='/blog?tags=internet'>internet</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=interoperability'>interoperability</a></span>
+	<span class='tag small-panel' title='2 Posts' style='font-size: 0.919rem; opacity: 0.691;'><a href='/blog?tags=io.js'>io.js</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=jabber'>jabber</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=jam'>jam</a></span>
+	<span class='tag small-panel' title='67 Posts' style='font-size: 1.823rem; opacity: 0.950;'><a href='/blog?tags=javascript'>javascript</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=js%20bin'>js bin</a></span>
+	<span class='tag small-panel' title='6 Posts' style='font-size: 1.164rem; opacity: 0.761;'><a href='/blog?tags=labs'>labs</a></span>
+	<span class='tag small-panel' title='2 Posts' style='font-size: 0.919rem; opacity: 0.691;'><a href='/blog?tags=latex'>latex</a></span>
+	<span class='tag small-panel' title='28 Posts' style='font-size: 1.576rem; opacity: 0.879;'><a href='/blog?tags=learning'>learning</a></span>
+	<span class='tag small-panel' title='4 Posts' style='font-size: 1.067rem; opacity: 0.733;'><a href='/blog?tags=library'>library</a></span>
+	<span class='tag small-panel' title='124 Posts' style='font-size: 2.000rem; opacity: 1.000;'><a href='/blog?tags=linux'>linux</a></span>
+	<span class='tag small-panel' title='4 Posts' style='font-size: 1.067rem; opacity: 0.733;'><a href='/blog?tags=lora'>lora</a></span>
+	<span class='tag small-panel' title='2 Posts' style='font-size: 0.919rem; opacity: 0.691;'><a href='/blog?tags=low%20level'>low level</a></span>
+	<span class='tag small-panel' title='5 Posts' style='font-size: 1.120rem; opacity: 0.748;'><a href='/blog?tags=lua'>lua</a></span>
+	<span class='tag small-panel' title='17 Posts' style='font-size: 1.438rem; opacity: 0.839;'><a href='/blog?tags=maintenance'>maintenance</a></span>
+	<span class='tag small-panel' title='3 Posts' style='font-size: 1.002rem; opacity: 0.715;'><a href='/blog?tags=manjaro'>manjaro</a></span>
+	<span class='tag small-panel' title='2 Posts' style='font-size: 0.919rem; opacity: 0.691;'><a href='/blog?tags=minetest'>minetest</a></span>
+	<span class='tag small-panel' title='16 Posts' style='font-size: 1.422rem; opacity: 0.835;'><a href='/blog?tags=network'>network</a></span>
+	<span class='tag small-panel' title='40 Posts' style='font-size: 1.677rem; opacity: 0.908;'><a href='/blog?tags=networking'>networking</a></span>
+	<span class='tag small-panel' title='9 Posts' style='font-size: 1.268rem; opacity: 0.791;'><a href='/blog?tags=nibriboard'>nibriboard</a></span>
+	<span class='tag small-panel' title='11 Posts' style='font-size: 1.321rem; opacity: 0.806;'><a href='/blog?tags=node.js'>node.js</a></span>
+	<span class='tag small-panel' title='2 Posts' style='font-size: 0.919rem; opacity: 0.691;'><a href='/blog?tags=open%20source'>open source</a></span>
+	<span class='tag small-panel' title='8 Posts' style='font-size: 1.237rem; opacity: 0.782;'><a href='/blog?tags=operating%20systems'>operating systems</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=optimisation'>optimisation</a></span>
+	<span class='tag small-panel' title='2 Posts' style='font-size: 0.919rem; opacity: 0.691;'><a href='/blog?tags=outreach'>outreach</a></span>
+	<span class='tag small-panel' title='7 Posts' style='font-size: 1.203rem; opacity: 0.772;'><a href='/blog?tags=own%20your%20code'>own your code</a></span>
+	<span class='tag small-panel' title='8 Posts' style='font-size: 1.237rem; opacity: 0.782;'><a href='/blog?tags=pepperminty%20wiki'>pepperminty wiki</a></span>
+	<span class='tag small-panel' title='6 Posts' style='font-size: 1.164rem; opacity: 0.761;'><a href='/blog?tags=performance'>performance</a></span>
+	<span class='tag small-panel' title='39 Posts' style='font-size: 1.670rem; opacity: 0.906;'><a href='/blog?tags=phd'>phd</a></span>
+	<span class='tag small-panel' title='3 Posts' style='font-size: 1.002rem; opacity: 0.715;'><a href='/blog?tags=photos'>photos</a></span>
+	<span class='tag small-panel' title='29 Posts' style='font-size: 1.586rem; opacity: 0.882;'><a href='/blog?tags=php'>php</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=pixelbot'>pixelbot</a></span>
+	<span class='tag small-panel' title='2 Posts' style='font-size: 0.919rem; opacity: 0.691;'><a href='/blog?tags=portable'>portable</a></span>
+	<span class='tag small-panel' title='2 Posts' style='font-size: 0.919rem; opacity: 0.691;'><a href='/blog?tags=privacy'>privacy</a></span>
+	<span class='tag small-panel' title='19 Posts' style='font-size: 1.469rem; opacity: 0.848;'><a href='/blog?tags=problem%20solving'>problem solving</a></span>
+	<span class='tag small-panel' title='11 Posts' style='font-size: 1.321rem; opacity: 0.806;'><a href='/blog?tags=programming%20problems'>programming problems</a></span>
+	<span class='tag small-panel' title='2 Posts' style='font-size: 0.919rem; opacity: 0.691;'><a href='/blog?tags=project'>project</a></span>
+	<span class='tag small-panel' title='37 Posts' style='font-size: 1.655rem; opacity: 0.901;'><a href='/blog?tags=projects'>projects</a></span>
+	<span class='tag small-panel' title='18 Posts' style='font-size: 1.454rem; opacity: 0.844;'><a href='/blog?tags=prolog'>prolog</a></span>
+	<span class='tag small-panel' title='6 Posts' style='font-size: 1.164rem; opacity: 0.761;'><a href='/blog?tags=protocol'>protocol</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=protocols'>protocols</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=pseudo%203d'>pseudo 3d</a></span>
+	<span class='tag small-panel' title='11 Posts' style='font-size: 1.321rem; opacity: 0.806;'><a href='/blog?tags=python'>python</a></span>
+	<span class='tag small-panel' title='2 Posts' style='font-size: 0.919rem; opacity: 0.691;'><a href='/blog?tags=reddit'>reddit</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=redis'>redis</a></span>
+	<span class='tag small-panel' title='6 Posts' style='font-size: 1.164rem; opacity: 0.761;'><a href='/blog?tags=reference'>reference</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=release'>release</a></span>
+	<span class='tag small-panel' title='32 Posts' style='font-size: 1.614rem; opacity: 0.890;'><a href='/blog?tags=releases'>releases</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=rendering'>rendering</a></span>
+	<span class='tag small-panel' title='9 Posts' style='font-size: 1.268rem; opacity: 0.791;'><a href='/blog?tags=research'>research</a></span>
+	<span class='tag small-panel' title='11 Posts' style='font-size: 1.321rem; opacity: 0.806;'><a href='/blog?tags=resource'>resource</a></span>
+	<span class='tag small-panel' title='31 Posts' style='font-size: 1.605rem; opacity: 0.887;'><a href='/blog?tags=review'>review</a></span>
+	<span class='tag small-panel' title='2 Posts' style='font-size: 0.919rem; opacity: 0.691;'><a href='/blog?tags=rust'>rust</a></span>
+	<span class='tag small-panel' title='3 Posts' style='font-size: 1.002rem; opacity: 0.715;'><a href='/blog?tags=searching'>searching</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=secrets'>secrets</a></span>
+	<span class='tag small-panel' title='19 Posts' style='font-size: 1.469rem; opacity: 0.848;'><a href='/blog?tags=security'>security</a></span>
+	<span class='tag small-panel' title='10 Posts' style='font-size: 1.295rem; opacity: 0.799;'><a href='/blog?tags=series%20list'>series list</a></span>
+	<span class='tag small-panel' title='49 Posts' style='font-size: 1.734rem; opacity: 0.924;'><a href='/blog?tags=server'>server</a></span>
+	<span class='tag small-panel' title='10 Posts' style='font-size: 1.295rem; opacity: 0.799;'><a href='/blog?tags=software'>software</a></span>
+	<span class='tag small-panel' title='4 Posts' style='font-size: 1.067rem; opacity: 0.733;'><a href='/blog?tags=sorting'>sorting</a></span>
+	<span class='tag small-panel' title='3 Posts' style='font-size: 1.002rem; opacity: 0.715;'><a href='/blog?tags=source%20code%20control'>source code control</a></span>
+	<span class='tag small-panel' title='4 Posts' style='font-size: 1.067rem; opacity: 0.733;'><a href='/blog?tags=statistics'>statistics</a></span>
+	<span class='tag small-panel' title='7 Posts' style='font-size: 1.203rem; opacity: 0.772;'><a href='/blog?tags=storage'>storage</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=svg'>svg</a></span>
+	<span class='tag small-panel' title='2 Posts' style='font-size: 0.919rem; opacity: 0.691;'><a href='/blog?tags=systemquery'>systemquery</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=talks'>talks</a></span>
+	<span class='tag small-panel' title='5 Posts' style='font-size: 1.120rem; opacity: 0.748;'><a href='/blog?tags=technical'>technical</a></span>
+	<span class='tag small-panel' title='61 Posts' style='font-size: 1.797rem; opacity: 0.942;'><a href='/blog?tags=terminal'>terminal</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=textures'>textures</a></span>
+	<span class='tag small-panel' title='2 Posts' style='font-size: 0.919rem; opacity: 0.691;'><a href='/blog?tags=thoughts'>thoughts</a></span>
+	<span class='tag small-panel' title='2 Posts' style='font-size: 0.919rem; opacity: 0.691;'><a href='/blog?tags=three%20thing%20game'>three thing game</a></span>
+	<span class='tag small-panel' title='4 Posts' style='font-size: 1.067rem; opacity: 0.733;'><a href='/blog?tags=three.js'>three.js</a></span>
+	<span class='tag small-panel' title='9 Posts' style='font-size: 1.268rem; opacity: 0.791;'><a href='/blog?tags=tool'>tool</a></span>
+	<span class='tag small-panel' title='72 Posts' style='font-size: 1.844rem; opacity: 0.955;'><a href='/blog?tags=tutorial'>tutorial</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=twitter'>twitter</a></span>
+	<span class='tag small-panel' title='7 Posts' style='font-size: 1.203rem; opacity: 0.772;'><a href='/blog?tags=ubuntu'>ubuntu</a></span>
+	<span class='tag small-panel' title='69 Posts' style='font-size: 1.832rem; opacity: 0.952;'><a href='/blog?tags=university'>university</a></span>
+	<span class='tag small-panel' title='35 Posts' style='font-size: 1.639rem; opacity: 0.897;'><a href='/blog?tags=update'>update</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=updates'>updates</a></span>
+	<span class='tag small-panel' title='6 Posts' style='font-size: 1.164rem; opacity: 0.761;'><a href='/blog?tags=upgrade'>upgrade</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=version%20control'>version control</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=virtual%20reality'>virtual reality</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=virtualisation'>virtualisation</a></span>
+	<span class='tag small-panel' title='29 Posts' style='font-size: 1.586rem; opacity: 0.882;'><a href='/blog?tags=visual'>visual</a></span>
+	<span class='tag small-panel' title='30 Posts' style='font-size: 1.596rem; opacity: 0.884;'><a href='/blog?tags=web'>web</a></span>
+	<span class='tag small-panel' title='34 Posts' style='font-size: 1.631rem; opacity: 0.895;'><a href='/blog?tags=website'>website</a></span>
+	<span class='tag small-panel' title='2 Posts' style='font-size: 0.919rem; opacity: 0.691;'><a href='/blog?tags=windows'>windows</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=windows%2010'>windows 10</a></span>
+	<span class='tag small-panel' title='2 Posts' style='font-size: 0.919rem; opacity: 0.691;'><a href='/blog?tags=worldeditadditions'>worldeditadditions</a></span>
+	<span class='tag small-panel' title='4 Posts' style='font-size: 1.067rem; opacity: 0.733;'><a href='/blog?tags=xmpp'>xmpp</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=xslt'>xslt</a></span>
+
+</details><!-- type: log -->
+		
+		<article class="panel">
+			<a href="/blog/archive/" style="text-decoration: none;">
+				<h2>Archive</h2>
+			</a>
+		</article>
+		
+		<aside>
+			<h2 id="comments">Comments</h2>
+			<hr />
+			<em class='block centre'>(no comments yet)</em>
+			<hr />
+			<h3 id="sendcomment">Leave a comment</h3>
+<form method="post" action="postcomment.php">
+	<span>
+		<label for="namebox">Name: </label>
+		<input type="text" id="namebox" name="name" placeholder="e.g. Guest, Anonymous, etc." required />
+		<span><span class="help" title="Type your name here. Never use your real name! Posts using a real name will get deleted or altered!">?</span></span>
+	</span>
+	<!-- Hidden field containing a key that allows the comment to be posted. Prefilled by the server. Don't change this unless you know what you are doing! It is to help prevent spam. Email me for more info. -->
+	<input type="hidden" name="key" value="wG0IbO81SCxLZNKf7yji5qaa6TChQyDimn3lDUFeodtJjtPOX-FGFuYv7HnfZWLbSN8=" />
+	
+	<span>
+		<!--
+			Todo:
+			done.... :D
+			
+			Complex things todo:
+			Set up an 'unsubscribe' function
+			(for now we will do it manually)
+		-->
+		<label for="email">Email Address:</label>
+		<input type="email" id="email" name="email" placeholder="(optional, leave blank if you want) e.g. someone@example.com" />
+		<span><span class="help" title="Entering an email address is optional. If you do, your email address will never be given to anyone else, and you will not receive spam. The only emails you will receive are those notifying you of replies to your comment.">?</span></span>
+	</span>
+	<div style="display: none;">
+		Mess with this field at your own risk. It is here to catch spambots, and so altering it could cause <em>anything</em> to happen!
+		<input type="url" name="website" value="" />
+	</div>
+	<span>
+		<label for="commentbox">Comment: </label>
+		<div>
+			<textarea id="commentbox" name="comment" maxlength="2000" onkeyup="updatecharlimit()" required></textarea>
+			<div id="comment-char-limit" class="meter" title="Character limit: 0 / 2000">
+				<div style="width: 0%;"></div>
+			</div>
+		</div>
+		<span><span class="help" title="Type your comment here. Please read the commenting rules before posting.">?</span></span>
+		<script>
+			function updatecharlimit()
+			{
+				var chars = document.getElementById("commentbox").value.length,
+					meter = document.getElementById("comment-char-limit");
+				
+				meter.setAttribute("title", "Character limit: " + chars + " / 2000");
+				meter.querySelector("div").style.width = ((chars / 2000) * 100) + "%";
+			}
+		</script>
+	</span>
+	<h4>Commenting FAQ</h4>
+	<details>
+		<summary>What are the commenting rules?</summary>
+		<ul>
+			<li><strong>Never</strong> use your real name.</li>
+			<li>Do not give away any personal informtion.</li>
+			<li>Criticism is welcome, but it must be constructive.</li>
+			<li>No abuse or inappropriate content of any kind will be tolerated.</li>
+			<li>Do not spam.</li>
+		</ul>
+		<p>
+			Any comments that are seen to not follow these rules will probably be deleted. It may also result in a ban for the offending user such that they are unable to view the site for an arbitrary length of time.
+		</p>
+		<p>
+			These rules may also be amended without notice, so please check them often.
+		</p>
+	</details>
+	<details>
+		<summary>How can I format my comments?</summary>
+		
+		Basic markdown can be used to format your comments:
+		
+		<table>
+			<tr>
+				<th style="width: 20%;">Type this</th>
+				<th style="width: 15%;">To get this</th>
+				<th style="width: 65%;">Notes</th>
+			</tr>
+			<tr>
+				<td><code>*bold text*</code></td>
+				<td><strong>bold text</strong></td>
+				<td>-</td>
+			</tr>
+			<tr>
+				<td><code>_italics text_</code></td>
+				<td><em>italics text</em></td>
+				<td>-</td>
+			</tr>
+			<tr>
+				<td><code>~~deleted text~~</code></td>
+				<td><del>deleted</del></td>
+				<td>-</td>
+			</tr>
+			<tr>
+				<td><code>`code text`</code></td>
+				<td><code>code text</code></td>
+				<td>Inserts some monospaced code. It is preferred that large blocks of code are linked to using a service such as <a href='//pastebin.com'>Pastebin</a>, <a href='//gist.github.com/'>Github Gists</a> or <a href='//ideone.com/'>Ideone</a>.</td>
+			</tr>
+			<tr>
+				<td><code>&gt; Quote</code></td>
+				<td><blockquote>Quote</blockquote></td>
+				<td>-</td>
+			</tr>
+			<tr>
+				<td><code>[display text](//google.com)</code></td>
+				<td><a href='//google.com' target="_blank" rel="nofollow">display text</a></td>
+				<td>Inserts a hyperlink. Please use responsibly. <code>[rel=nofollow]</code> is in use and spam will be deleted.</td>
+			</tr>
+			<tr>
+				<td><code><br />---<br /><br /></code></td>
+				<td><hr /></td>
+				<td>Inserts a horizontal line. The previous line must be blank.</td>
+			</tr>
+		</table>
+		
+		All HTML will be escaped with HTML entities such that code in <code>&lt;code&gt;</code> blocks will be visible, and for security reasons.
+		
+		The maximum number of characters allowed is 2000.
+	</details>
+	<details>
+		<summary>What is my email address used for?</summary>
+		<!--<strong>Note: This describes a feature that has not yet been implemented. If you have any comments / questions / suggestions, please post them in the comments above.</strong>-->
+		<p>
+			Your email address, should you choose to provide it, is used to send you notifications of replies to your comment(s). It is used to display your <a href="//gravatar.com/">Gravatar</a>.
+		</p>
+		<p>
+			Your email address will be kept securely on the server, and nobody else will be given your email address. You will not receive any spam either.
+		</p>
+		<p>
+			If you do not wish to recieve emails anymore, please contact me (you can find my email address at the bottom of every page) and I will prevent emails from being sent to your email address. I will eventually write an automated system to handle this, but for now I will deal with requests manually. I should get back to you within 48 hours. Note that your (gr)avatar will also disappear and be replaced by an identicon.
+		</p>
+	</details>
+	<!-- These two fields are automatically set by the server so that it knows where to post the comment -->
+	<input type="hidden" name="articleid" id="articleid" value="cG9zdHMlMkY0NzItbmFzLWJhY2t1cHMtcGFydC0yLWJ0cmZzLXNlbmQtcmVjaWV2ZS5odG1s" />
+	<input type="hidden" name="commentid" id="commentid" value="" />
+	<input type="submit" name="submit" value="Post Comment" />
+</form>
+
+<link rel="stylesheet" href="/blog/comment_sendkey.php" />
+		</aside>
+		
+		<footer class="centretext" style="margin-top: 10vmin;" itemscope itemtype="https://schema.org/WPFooter">
+	<!-- Don't follow this link please. It is a spam trap. -->
+	<a href="http://starbeamrainbowlabs.com/stealthpackager.php" rel="nofollow"></a>
+	
+	<p>
+		Built by Starbeamrainbowlabs. Feedback can be sent to <span class="etalk">feedback at starbeamrainbowlabs dot com</span>. Comments can be made on all blog posts. Some icons from the awesome <a href="//useiconic.com/open">Open Iconic</a> icon set.
+	</p>
+	<!--
+		 ___ _ _     ___         _             ___           
+		| _ |_) |_  | __|__ _ __| |_ ___ _ _  | __|__ _ __ _ 
+		| _ \ |  _| | _|/ _` (_-<  _/ -_) '_| | _|/ _` / _` |
+		|___/_|\__| |___\__,_/__/\__\___|_|   |___\__, \__, |
+		                                           |___/|___/ 
+	-->
+	<ul class="binary">
+		<li><input class="bit" type="checkbox" data-index="0" /></li>
+<li><input class="bit" type="checkbox" data-index="1" /></li>
+<li><input class="bit" type="checkbox" data-index="2" /></li>
+<li><input class="bit" type="checkbox" data-index="3" /></li>
+	</ul>
+	<p>
+		<a href="/privacy.php">Privacy Policy</a> | 
+		<a href="/terms.php">Terms of Service</a> | 
+		<a href="/rights.php" rel="license">Licensing Information</a>
+	</p>
+	<p>
+		Blog post content available under<br />
+		<a href="//creativecommons.org/licenses/by-sa/4.0/" rel="license">
+			<img src="/images/cc-by-sa.svg" alt="Creative Commons Attribution-ShareAlike 4.0" title="Creative Commons Attribution-ShareAlike 4.0" />
+		</a>
+	</p>
+	<p>
+		Design &copy; Mythdael 2026. More information available on the <a href="/rights.php">licensing page</a>.
+	</p>
+	<p>
+		<!-- Feeds -->
+		<a href="/blog/feed.php" rel="alternate" title="Atom 1.0 Feed - Blog Posts"><img style="max-width: 24px; vertical-align: middle; margin-bottom: 3px;" src="/images/placeholder/?width=32&amp;height=32" data-src="/blog/feedicon.svg" alt="Atom Feed - Blog Posts" title="Atom Feed - Blog Posts" /></a>
+		<a href="/blog/feed.comments.php" title="Atom 1.0 Feed - Recent Comments"><img class="small-icon" style="margin-bottom: 3px;" src="/images/placeholder/?width=32&amp;height=32" data-src="/blog/commentsfeedicon.svg" title="Atom Feed - Comments" alt="Atom Feed - Comments" /></a>
+		<a rel="me" href="//twitter.com/SBRLabs" target="_blank" title="Starbeamrainbowlabs on Twitter"><img class="small-icon" style="margin-bottom: 3px;" src="/images/logos/twitter.svg" alt="Follow Starbeamrainbowlabs on Twitter" /></a>
+		<a rel="me" href="//reddit.com/r/StardustBlog/" target="_blank" title="Stardust Blog on Reddit"><img class="small-icon" style="margin-bottom: 3px;" src="/images/logos/reddit.png" alt="Subscribe to the Stardust Blog on Reddit" /></a>
+		<a rel="me" href="https://www.facebook.com/Stardust-Blog-395966260738394/" target="_blank" title="Stardust Blog on Facebook"><img class="small-icon" style="margin-bottom: 3px;" src="/images/logos/facebook.svg" alt="Subscribe to the Stardust Blog on Facebook" /></a>
+		<!-- Secure your connection -->
+				<!-- High Visibility mode -->
+		<span class='oi clickable x-large' style="position: relative; top: 8px;" data-glyph='image' title='Toggle High Visibility Mode' aria-hidden='true' onclick="togglehighvis();"></span>
+	</p>
+	<p>
+		<img src="/images/placeholder/?width=32&amp;height=48" data-src="/images/logos/html5.png" alt="Built with HTML5" class="large-icon" />
+		<img src="/images/placeholder/?width=32&amp;height=48" data-src="/images/logos/css3.svg" alt="Built with CSS3" class="large-icon" />
+		<img src="/images/placeholder/?width=32&amp;height=48" data-src="/images/logos/javascript.png" alt="Built with Javascript" class="large-icon" />
+	</p>
+	
+	<!-- ASDS: Advanced spam detection system -->
+	<!-- From projecthoneypot.org -->
+	<!-- For bot eyes only! -->
+	<div data-mode="stealth"><a href="/stealthpackager.php">ASDS</a></div>
+</footer>
+
+<div class="artbymythdael" title="Art by Mythdael">Art by Mythdael</div>
+
+
+
+<!--
+	   ___ ___ ___ 
+	  / __/ __/ __|
+	 | (__\__ \__ \
+	  \___|___/___/
+	
+-->
+		<link rel="stylesheet" href="/theme/core.min.css" />
+		<link rel="stylesheet" href="/theme/main.min.css" />
+		<link rel="stylesheet" href="/theme/comments.min.css" />
+		<link rel="stylesheet" href="/theme/bit.min.css" />
+		<link rel="stylesheet" href="/libraries/prism.min.css" />
+		<link rel="stylesheet" href="/theme/tagcloud.min.css" />
+		<link rel="stylesheet" href="/theme/openiconic/open-iconic.min.css" />
+<!--
+Open Iconic Usage
+- - - - - - - - -
+<span class="oi" data-glyph="icon-name" title="icon name" aria-hidden="true"></span>
+-->
+<!--
+     _                          _      _   
+  _ | |__ ___ ____ _ ___ __ _ _(_)_ __| |_ 
+ | || / _` \ V / _` (_-</ _| '_| | '_ \  _|
+  \__/\__,_|\_/\__,_/__/\__|_| |_| .__/\__|
+                                 |_|       
+-->
+		<script src="/javascript/bit.min.js"></script>
+		<script src="/javascript/accessibility.min.js"></script>
+		<script src="/libraries/prism.min.js"></script>
+		<script src="/libraries/smoothscroll.min.js"></script>
+		<script src="/libraries/SnoozeSquad.min.js"></script>
+
+<script>
+	window.snoozeSquad = new SnoozeSquad({
+		range: 2
+	});
+
+	// An array of code block languages for a hack below.
+	window.languages = {"text": "Plain Text","css":"CSS","clike":"C-like","javascript":"JavaScript","abap":"ABAP","actionscript":"ActionScript","apacheconf":"Apache Configuration","apl":"APL","applescript":"AppleScript","asciidoc":"AsciiDoc","aspnet":"ASP.NET (C#)","autoit":"AutoIt","autohotkey":"AutoHotkey","basic":"BASIC","csharp":"C#","cpp":"C++","coffeescript":"CoffeeScript","css-extras":"CSS Extras","fsharp":"F#","glsl":"GLSL","html": "HTML","http":"HTTP","inform7":"Inform 7","json":"JSON","latex":"LaTeX","lolcode":"LOLCODE","matlab":"MATLAB","mel":"MEL","nasm":"NASM","nginx":"nginx","nsis":"NSIS","objectivec":"Objective-C","ocaml":"OCaml","parigp":"PARI/GP","php":"PHP","php-extras":"PHP Extras","powershell":"PowerShell",prolog:"Prolog","jsx":"React JSX","rest":"reST (reStructuredText)","sas":"SAS","sass":"Sass (Sass)","scss":"Sass (Scss)","sql":"SQL","typescript":"TypeScript","vhdl":"VHDL","vim":"vim","wiki":"Wiki markup","yaml":"YAML"}
+	
+	// Tell Prism where to find all the grammar files
+	Prism.plugins.autoloader.languages_path = "/libraries/prism-grammars/";
+	// A small hack to:
+	// 1. Make all <pre>s have line numbers (unless they have the "no-lines" class) (Note: "no-line-numbers" doesn't work here as the line-numbers class will activate anyway
+	// 2. Add the language display to the data-language attribute so that we can display it with CSS
+	[].forEach.call(document.querySelectorAll("pre"), function(el) {
+		if(!el.classList.contains("no-numbers")) el.classList.add("line-numbers");
+	});
+	[].forEach.call(document.querySelectorAll("pre, code"), function(el) {
+		// el.dataset.manual = "true";
+	})
+	window.addEventListener("load", function() {
+		[].forEach.call(document.querySelectorAll("pre"), function(el) {
+			var languageName = el.className.match(/language-([^\s]+)/i);
+			if(languageName == null) return;
+			
+			languageName = languageName[1];
+			
+			if(typeof window.languages[languageName] == "string")
+				languageName = window.languages[languageName];
+			el.dataset.language = languageName;
+		});
+		
+		updatehighvis();
+	});
+	
+</script>
+
+<!-- LaTEX support for the blog -->
+<script type="text/x-mathjax-config">
+  MathJax.Hub.Config({
+    tex2jax: {
+      inlineMath: [ ['$','$'], ["\\(","\\)"] ],
+      displayMath: [ ['$$','$$'], ["\\[","\\]"] ],
+      processEscapes: true,
+      skipTags: ["script","noscript","style","textarea","pre","code"]
+    }
+  });
+</script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mathjax/2.7.5/MathJax.js?config=TeX-MML-AM_CHTML" async></script>
+
+<!-- 1772830410.8724 -->
+<!-- Took 0.00042605400085449 second(s) to generate -->
+
+		
+		<script>
+			function reply(commentid)
+			{
+				var commentidfield = document.getElementById("commentid");
+				commentidfield.value = commentid;
+				document.getElementById("sendcomment").innerHTML = "Leave a Reply";
+				location.hash = "#sendcomment";
+				document.getElementById("namebox").focus();
+			}
+			
+			function updatetextarea(event)
+			{
+				var textarea = document.getElementById("commentbox"),
+					chars = textarea.value.length;
+				
+				if(chars > 2000)
+				{
+					console.log("Too many characters!");
+					event.stopPropagation();
+					event.preventDefault();
+					return false;
+				}
+				else
+					console.log("characters: " + chars);
+			}
+			
+			window.addEventListener("load", function(event) {
+				document.getElementById("commentbox").addEventListener("keypress", updatetextarea);
+			});
+		</script>
+	</body>
+</html>

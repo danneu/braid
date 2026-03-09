@@ -1,0 +1,1867 @@
+<!DOCTYPE html>
+<html lang="en-us" data-lang-code="en-us" data-user-country="mx">
+<head>
+	<meta charset="utf-8">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<meta name="author" content="Synology Inc.">
+	<meta name="nonce" content="188c1fdca79d927f6e812133173fc41d3a4e57074de521020274caa9bb29af7d">
+
+	<title>How Btrfs protects your company's data | Synology Inc.</title>
+	<meta name="description" content="The next-generation file system Btrfs ensures a high level of data integrity while taking advantage of flexible, efficient data protection and recovery tools. Btrfs is available on selected Synology NAS models.">
+	<meta property="og:title" content="How Btrfs protects your company's data | Synology Inc." />
+	<meta property="og:description" content="The next-generation file system Btrfs ensures a high level of data integrity while taking advantage of flexible, efficient data protection and recovery tools. Btrfs is available on selected Synology NAS models." />
+	<meta name="twitter:title" content="How Btrfs protects your company's data | Synology Inc.">
+	<meta name="twitter:description" content="The next-generation file system Btrfs ensures a high level of data integrity while taking advantage of flexible, efficient data protection and recovery tools. Btrfs is available on selected Synology NAS models.">
+	<meta property="og:image:width" content="1200">
+	<meta property="og:image:height" content="628">
+
+			<meta property="og:type" content="website">
+		<meta property="og:url" content="https://www.synology.com/">
+		<meta property="og:image" content="https://fileres.synology.com/images/common/meta-tag-preview-image/img_synology.jpg">
+		<meta property="og:image:secure_url" content="https://fileres.synology.com/images/common/meta-tag-preview-image/img_synology.jpg"/>
+		<meta property="og:image:type" content="image/jpg">
+
+		<meta name="twitter:card" content="summary_large_image">
+		<meta name="twitter:image" content="https://fileres.synology.com/images/common/meta-tag-preview-image/img_synology.jpg">
+		<meta name="twitter:image:width" content="1200">
+		<meta name="twitter:image:height" content="628">
+		<meta name="twitter:image:alt" content="Synology Inc.">
+	
+	<base href="https://www.synology.com/" />
+	<link id="favicon" rel="shortcut icon" href="https://fileres.synology.com/images/common/favicon/syno/favicon.ico">
+
+	<link rel="icon" type="image/png" sizes="144x144" href="https://fileres.synology.com/images/common/favicon/syno/icon-144x144.png">
+	<link rel="icon" type="image/png" sizes="96x96" href="https://fileres.synology.com/images/common/favicon/syno/icon-96x96.png">
+	<link rel="icon" type="image/png" sizes="64x64" href="https://fileres.synology.com/images/common/favicon/syno/icon-64x64.png">
+	<link rel="icon" type="image/png" sizes="32x32" href="https://fileres.synology.com/images/common/favicon/syno/icon-32x32.png">
+	<link rel="icon" type="image/png" sizes="16x16" href="https://fileres.synology.com/images/common/favicon/syno/icon-16x16.png">
+
+	<link rel="apple-touch-icon" sizes="180x180" href="https://fileres.synology.com/images/common/favicon/syno/icon-180x180.png">
+	<link rel="apple-touch-icon" sizes="167x167" href="https://fileres.synology.com/images/common/favicon/syno/icon-167x167.png">
+	<link rel="apple-touch-icon" sizes="152x152" href="https://fileres.synology.com/images/common/favicon/syno/icon-152x152.png">
+	<link rel="apple-touch-icon" sizes="120x120" href="https://fileres.synology.com/images/common/favicon/syno/icon-120x120.png">
+
+	<script src="/js/vendor/vue.global.js"></script>
+	<script src="/js/vendor/jquery.js"></script>
+	<script src="/js/syno/dom_vue.js"></script>
+
+	<link rel="preload" as="style" href="https://www.synology.com/build/assets/css/synoec_item_relative.LxkGGDLI.css" /><link rel="preload" as="style" href="https://www.synology.com/build/assets/css/syno.BIz3jVMZ.css" /><link rel="modulepreload" as="script" href="https://www.synology.com/build/assets/js/syno_app.FmXJb7F_.js" /><link rel="modulepreload" as="script" href="https://www.synology.com/build/assets/js/general-components.DdGQ3YNP.js" /><link rel="modulepreload" as="script" href="https://www.synology.com/build/assets/js/chunks/vue.esm-bundler.BimJhcwx.js" /><link rel="modulepreload" as="script" href="https://www.synology.com/build/assets/js/chunks/_plugin-vue_export-helper.BCo6x5W8.js" /><link rel="modulepreload" as="script" href="https://www.synology.com/build/assets/js/chunks/synoec_item_relative.vue_vue_type_style_index_0_scoped_fbd945ec_lang.zS4e9WhW.js" /><link rel="stylesheet" href="https://www.synology.com/build/assets/css/synoec_item_relative.LxkGGDLI.css" /><link rel="stylesheet" href="https://www.synology.com/build/assets/css/syno.BIz3jVMZ.css" /><script type="module" src="https://www.synology.com/build/assets/js/syno_app.FmXJb7F_.js"></script><script type="module" src="https://www.synology.com/build/assets/js/general-components.DdGQ3YNP.js"></script>
+	<link rel="preload" as="style" href="https://www.synology.com/build/assets/css/index.BvvuCVlE.css" /><link rel="preload" as="style" href="https://www.synology.com/build/assets/css/main.Brsasp3R.css" /><link rel="modulepreload" as="script" href="https://www.synology.com/build/assets/js/main.BZeiXRzp.js" /><link rel="modulepreload" as="script" href="https://www.synology.com/build/assets/js/chunks/vue.esm-bundler.BimJhcwx.js" /><link rel="modulepreload" as="script" href="https://www.synology.com/build/assets/js/translate.BzvSeT7C.js" /><link rel="modulepreload" as="script" href="https://www.synology.com/build/assets/js/chunks/index.Z1fZrGLG.js" /><link rel="modulepreload" as="script" href="https://www.synology.com/build/assets/js/frame-type.CwwvDBxw.js" /><link rel="modulepreload" as="script" href="https://www.synology.com/build/assets/js/visible.BVylQLiG.js" /><link rel="modulepreload" as="script" href="https://www.synology.com/build/assets/js/chunks/_plugin-vue_export-helper.BCo6x5W8.js" /><link rel="modulepreload" as="script" href="https://www.synology.com/build/assets/js/ask.CJuUkszd.js" /><link rel="modulepreload" as="script" href="https://www.synology.com/build/assets/js/question-list.B27OhGMd.js" /><link rel="modulepreload" as="script" href="https://www.synology.com/build/assets/js/google-analysis.Bzkmkkxw.js" /><link rel="modulepreload" as="script" href="https://www.synology.com/build/assets/js/chunks/index.apDr-WnP.js" /><link rel="modulepreload" as="script" href="https://www.synology.com/build/assets/js/translate.CIecexaw.js" /><link rel="modulepreload" as="script" href="https://www.synology.com/build/assets/js/chunks/index.5KD_igdj.js" /><link rel="modulepreload" as="script" href="https://www.synology.com/build/assets/js/chunks/_commonjsHelpers.lGe4XDVY.js" /><link rel="modulepreload" as="script" href="https://www.synology.com/build/assets/js/ask.CqqNhwuY.js" /><link rel="modulepreload" as="script" href="https://www.synology.com/build/assets/js/resource-identity.DHJFy5tE.js" /><link rel="modulepreload" as="script" href="https://www.synology.com/build/assets/js/question.Br8G45pI.js" /><link rel="stylesheet" href="https://www.synology.com/build/assets/css/index.BvvuCVlE.css" /><link rel="stylesheet" href="https://www.synology.com/build/assets/css/main.Brsasp3R.css" /><script type="module" src="https://www.synology.com/build/assets/js/main.BZeiXRzp.js"></script>
+
+	
+	<script src="js/vendor/dsygno/dsygno-v2.21.0.js"></script>
+
+		<link rel="stylesheet" href="js/vendor/dsygno/dsygno-v2.21.0.css?v=563cef">
+	<link rel="stylesheet" href="js/vendor/dsygno/dsygno-v3.44.1.css?v=563cef">
+	<link rel="stylesheet" href="js/vendor/dsygno/dsygno-vue-v3.44.1.css?v=563cef">
+
+
+
+		<link rel="preload" as="style" href="https://www.synology.com/build/assets/css/btrfs.ywIGCiUv.css" /><link rel="stylesheet" href="https://www.synology.com/build/assets/css/btrfs.ywIGCiUv.css" />
+	<style></style>
+</head>
+<body class="clearfix en-us">
+	<div id="gtm_wrap"><noscript><!--insert by cookie banner--></noscript></div>
+	<div id="root" class="clearfix">
+		<div class="syno-skipnav-container">
+	<s-skip-nav
+	  text1="skip_nav.content"
+	  target1="#main"
+	
+	  text2="skip_nav.footer"
+	  target2="#footer"
+	
+	  text3="skip_nav.supportMenu"
+	  target3="s-widget"
+	></s-skip-nav>
+</div>
+
+<div class="syno-navbar-container">
+	<s-navbar
+		id="syno-navbar"
+		lang="en-us"
+		data="[{&quot;l&quot;:&quot;d1&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Products&quot;,&quot;id&quot;:&quot;prod:product&quot;,&quot;type&quot;:&quot;product&quot;,&quot;q1Title&quot;:&quot;View all hardware products&quot;,&quot;q1Url&quot;:&quot;\/products&quot;,&quot;q2Title&quot;:&quot;View all software products&quot;,&quot;q2Url&quot;:&quot;\/products-a-z&quot;},&quot;m&quot;:[{&quot;l&quot;:&quot;d2&quot;,&quot;p&quot;:{&quot;id&quot;:&quot;prod:product_layer2&quot;},&quot;m&quot;:[{&quot;l&quot;:&quot;d3&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Tower Servers&quot;,&quot;id&quot;:&quot;prod:tower&quot;},&quot;m&quot;:[{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;DS Series&quot;,&quot;url&quot;:&quot;\/products?product_line=ds_j%2Cds_plus%2Cds_value%2Cds_xs&quot;,&quot;id&quot;:&quot;prod:tower_ds&quot;,&quot;featTitle&quot;:&quot;DS Series&quot;,&quot;featDesc&quot;:&quot;Versatile data management platforms tailored for edge and in-office environments.&quot;,&quot;featImg&quot;:&quot;img_DS&quot;,&quot;featImgAlt&quot;:&quot;Image of Synology DS Series&quot;},&quot;m&quot;:[{&quot;l&quot;:&quot;d5&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Try our online NAS Selector&quot;,&quot;url&quot;:&quot;\/support\/nas_selector&quot;,&quot;id&quot;:&quot;prod:tower_ds_q1&quot;}},{&quot;l&quot;:&quot;d5&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Find compatible spare parts&quot;,&quot;url&quot;:&quot;\/products\/spare_parts&quot;,&quot;id&quot;:&quot;prod:tower_ds_q2&quot;}}]}]},{&quot;l&quot;:&quot;d3&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Rackmount Servers&quot;,&quot;id&quot;:&quot;prod:rackmount&quot;},&quot;m&quot;:[{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;FS Series&quot;,&quot;url&quot;:&quot;\/products?product_line=fs&quot;,&quot;id&quot;:&quot;prod:rackmount_fs&quot;,&quot;featTitle&quot;:&quot;FS Series&quot;,&quot;featDesc&quot;:&quot;All-flash storage optimized for enterprise workloads, including virtualization, databases, and high-performance applications.&quot;,&quot;featImg&quot;:&quot;img_FS&quot;,&quot;featImgAlt&quot;:&quot;Image of Synology FS Series&quot;},&quot;m&quot;:[{&quot;l&quot;:&quot;d5&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Try our online NAS Selector&quot;,&quot;url&quot;:&quot;\/support\/nas_selector&quot;,&quot;id&quot;:&quot;prod:rackmount_fs_q1&quot;}},{&quot;l&quot;:&quot;d5&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Find compatible spare parts&quot;,&quot;url&quot;:&quot;\/products\/spare_parts&quot;,&quot;id&quot;:&quot;prod:rackmount_fs_q2&quot;}}]},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;HD Series&quot;,&quot;url&quot;:&quot;\/products?product_line=hd&quot;,&quot;id&quot;:&quot;prod:rackmount_hd&quot;,&quot;featTitle&quot;:&quot;HD Series&quot;,&quot;featDesc&quot;:&quot;Petabyte-scale storage designed for managing massive unstructured datasets.&quot;,&quot;featImg&quot;:&quot;img_HD&quot;,&quot;featImgAlt&quot;:&quot;Image of Synology HD Series&quot;},&quot;m&quot;:[{&quot;l&quot;:&quot;d5&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Try our online NAS Selector&quot;,&quot;url&quot;:&quot;\/support\/nas_selector&quot;,&quot;id&quot;:&quot;prod:rackmount_hd_q1&quot;}},{&quot;l&quot;:&quot;d5&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Find compatible spare parts&quot;,&quot;url&quot;:&quot;\/products\/spare_parts&quot;,&quot;id&quot;:&quot;prod:rackmount_hd_q2&quot;}}]},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;SA Series&quot;,&quot;url&quot;:&quot;\/products?product_line=sa&quot;,&quot;id&quot;:&quot;prod:rackmount_sa&quot;,&quot;featTitle&quot;:&quot;SA Series&quot;,&quot;featDesc&quot;:&quot;Highly scalable storage solutions to meet growing data demands.&quot;,&quot;featImg&quot;:&quot;img_SA&quot;,&quot;featImgAlt&quot;:&quot;Image of Synology SA Series&quot;},&quot;m&quot;:[{&quot;l&quot;:&quot;d5&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Try our online NAS Selector&quot;,&quot;url&quot;:&quot;\/support\/nas_selector&quot;,&quot;id&quot;:&quot;prod:rackmount_sa_q1&quot;}},{&quot;l&quot;:&quot;d5&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Find compatible spare parts&quot;,&quot;url&quot;:&quot;\/products\/spare_parts&quot;,&quot;id&quot;:&quot;prod:rackmount_sa_q2&quot;}}]},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;RS Series&quot;,&quot;url&quot;:&quot;\/products?product_line=rs_plus%2Crs_xs&quot;,&quot;id&quot;:&quot;prod:rackmount_rs&quot;,&quot;featTitle&quot;:&quot;RS Series&quot;,&quot;featDesc&quot;:&quot;High-performance storage platforms designed for versatile data management in any environment.&quot;,&quot;featImg&quot;:&quot;img_RS&quot;,&quot;featImgAlt&quot;:&quot;Image of Synology RS Series&quot;},&quot;m&quot;:[{&quot;l&quot;:&quot;d5&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Try our online NAS Selector&quot;,&quot;url&quot;:&quot;\/support\/nas_selector&quot;,&quot;id&quot;:&quot;prod:rackmount_rs_q1&quot;}},{&quot;l&quot;:&quot;d5&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Find compatible spare parts&quot;,&quot;url&quot;:&quot;\/products\/spare_parts&quot;,&quot;id&quot;:&quot;prod:rackmount_rs_q2&quot;}}]},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;UC Series&quot;,&quot;url&quot;:&quot;\/products?product_line=uc&quot;,&quot;id&quot;:&quot;prod:rackmount_uc&quot;,&quot;featTitle&quot;:&quot;UC Series&quot;,&quot;featDesc&quot;:&quot;Reliable, high-availability SAN systems purpose-built for iSCSI and Fibre Channel deployments.&quot;,&quot;featImg&quot;:&quot;img_UC&quot;,&quot;featImgAlt&quot;:&quot;Image of Synology UC Series&quot;},&quot;m&quot;:[{&quot;l&quot;:&quot;d5&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Try our online NAS Selector&quot;,&quot;url&quot;:&quot;\/support\/nas_selector&quot;,&quot;id&quot;:&quot;prod:rackmount_uc_q1&quot;}},{&quot;l&quot;:&quot;d5&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Find compatible spare parts&quot;,&quot;url&quot;:&quot;\/products\/spare_parts&quot;,&quot;id&quot;:&quot;prod:rackmount_uc_q2&quot;}}]}]},{&quot;l&quot;:&quot;d3&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Storage Device&quot;,&quot;id&quot;:&quot;prod:storageMedia&quot;},&quot;m&quot;:[{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;HDD &amp;amp; SSD&quot;,&quot;url&quot;:&quot;\/products\/accessories?category%5B%5D=storage_drives&quot;,&quot;id&quot;:&quot;prod:storageMedia_hdd&quot;,&quot;featTitle&quot;:&quot;HDD &amp;amp; SSD&quot;,&quot;featDesc&quot;:&quot;Storage media purpose-built for Synology systems, delivering high performance, reliability, and a seamless storage management experience.&quot;,&quot;featImg&quot;:&quot;img_HD_SSD&quot;,&quot;featImgAlt&quot;:&quot;Image of Synology HDDs&quot;},&quot;m&quot;:[{&quot;l&quot;:&quot;d5&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Product Compatibility&quot;,&quot;url&quot;:&quot;\/compatibility&quot;,&quot;id&quot;:&quot;prod:storageMedia_hdd_q1&quot;}}]}]},{&quot;l&quot;:&quot;d3&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Expansion &amp;amp; Accessories&quot;,&quot;id&quot;:&quot;prod:expansion&quot;},&quot;m&quot;:[{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Expansion Units&quot;,&quot;url&quot;:&quot;\/products\/accessories?category%5B%5D=expansion_units&quot;,&quot;id&quot;:&quot;prod:expansion_unit&quot;,&quot;featTitle&quot;:&quot;Expansion Units&quot;,&quot;featDesc&quot;:&quot;Compatible units for added storage to your entire storage system.&quot;,&quot;featImg&quot;:&quot;img_Expansion&quot;,&quot;featImgAlt&quot;:&quot;Image of Synology expanion units&quot;},&quot;m&quot;:[{&quot;l&quot;:&quot;d5&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Product Compatibility&quot;,&quot;url&quot;:&quot;\/compatibility&quot;,&quot;id&quot;:&quot;prod:expansion_unit_q1&quot;}}]},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Add-in Cards&quot;,&quot;url&quot;:&quot;\/products\/accessories?category%5B%5D=add_in_cards&quot;,&quot;id&quot;:&quot;prod:expansion_network&quot;,&quot;featTitle&quot;:&quot;Add-in cards&quot;,&quot;featDesc&quot;:&quot;A selection of 10GbE, 25GbE, and SSD adapter cards for performance acceleration.&quot;,&quot;featImg&quot;:&quot;img_Network&quot;,&quot;featImgAlt&quot;:&quot;Image of Synology network interface cards&quot;},&quot;m&quot;:[{&quot;l&quot;:&quot;d5&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Product Compatibility&quot;,&quot;url&quot;:&quot;\/compatibility&quot;,&quot;id&quot;:&quot;prod:expansion_network_q1&quot;}}]},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Memory Modules&quot;,&quot;url&quot;:&quot;\/products\/accessories?category%5B%5D=rams&quot;,&quot;id&quot;:&quot;prod:expansion_memory&quot;,&quot;featTitle&quot;:&quot;Memory Modules&quot;,&quot;featDesc&quot;:&quot;Compatible RAM modules for for Synology systems.&quot;,&quot;featImg&quot;:&quot;img_Memory&quot;,&quot;featImgAlt&quot;:&quot;Image of Synology memory modules&quot;},&quot;m&quot;:[{&quot;l&quot;:&quot;d5&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Product Compatibility&quot;,&quot;url&quot;:&quot;\/compatibility&quot;,&quot;id&quot;:&quot;prod:expansion_memory_q1&quot;}}]},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Licenses &amp;amp; Services&quot;,&quot;url&quot;:&quot;\/products\/accessories?tab=nas&amp;category=licenses&quot;,&quot;id&quot;:&quot;prod:expansion_license&quot;,&quot;featTitle&quot;:&quot;Licenses &amp;amp; Services&quot;,&quot;featDesc&quot;:&quot;License packs and integrated services that enhance your experience with Synology NAS devices.&quot;,&quot;featImg&quot;:&quot;img_Licenses&quot;,&quot;featImgAlt&quot;:&quot;Illustration of Synology surveillance device license pack&quot;}}]},{&quot;l&quot;:&quot;d3&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Data Protection Appliance&quot;,&quot;id&quot;:&quot;prod:dataProtect&quot;},&quot;m&quot;:[{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;ActiveProtect Appliance&quot;,&quot;url&quot;:&quot;\/products\/ActiveProtectAppliance&quot;,&quot;id&quot;:&quot;prod:dataProtect_activeProtect&quot;,&quot;featTitle&quot;:&quot;ActiveProtect Appliance&quot;,&quot;featDesc&quot;:&quot;Purpose-built backup and recovery appliances to streamline and unify your business data protection.&quot;,&quot;featImg&quot;:&quot;img_ActiveProtect&quot;,&quot;featImgAlt&quot;:&quot;Image of Synology ActiveProtect Appliance&quot;},&quot;m&quot;:[{&quot;l&quot;:&quot;d5&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;ActiveProtect Licensing&quot;,&quot;url&quot;:&quot;\/products\/ActiveProtect-License-Pack&quot;,&quot;id&quot;:&quot;prod:dataProtect_activeProtect_q1&quot;}},{&quot;l&quot;:&quot;d5&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;ActiveProtect Accessories&quot;,&quot;url&quot;:&quot;\/products\/accessories?tab=dp&quot;,&quot;id&quot;:&quot;prod:dataProtect_activeProtect_q2&quot;}}]}]},{&quot;l&quot;:&quot;d3&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Video Surveillance&quot;,&quot;id&quot;:&quot;prod:onpromise&quot;},&quot;m&quot;:[{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Synology Cameras&quot;,&quot;url&quot;:&quot;\/products\/cameras&quot;,&quot;id&quot;:&quot;prod:onpromise_camera&quot;,&quot;featTitle&quot;:&quot;Synology Cameras&quot;,&quot;featDesc&quot;:&quot;Versatile AI cameras designed for smart surveillance around the clock.&quot;,&quot;featImg&quot;:&quot;img_Cameras&quot;,&quot;featImgAlt&quot;:&quot;Image of Synology cameras&quot;},&quot;m&quot;:[{&quot;l&quot;:&quot;d5&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;IP camera support list&quot;,&quot;url&quot;:&quot;\/compatibility\/camera&quot;,&quot;id&quot;:&quot;prod:onpromise_camera_q1&quot;}},{&quot;l&quot;:&quot;d5&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Try our online NVR Selector&quot;,&quot;url&quot;:&quot;\/support\/nvr_selector&quot;,&quot;id&quot;:&quot;prod:onpromise_camera_q2&quot;}}]},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Deep Learning NVR Series&quot;,&quot;url&quot;:&quot;\/products?product_line=dva_nvr&quot;,&quot;id&quot;:&quot;prod:onpromise_nvr&quot;,&quot;featTitle&quot;:&quot;Deep Learning NVR series&quot;,&quot;featDesc&quot;:&quot;Advanced AI-driven video analytics systems designed for scalable surveillance deployments.&quot;,&quot;featImg&quot;:&quot;img_DVA&quot;,&quot;featImgAlt&quot;:&quot;Image of Synology NVR&quot;},&quot;m&quot;:[{&quot;l&quot;:&quot;d5&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;IP camera support list&quot;,&quot;url&quot;:&quot;\/compatibility\/camera&quot;,&quot;id&quot;:&quot;prod:onpromise_nvr_q1&quot;}},{&quot;l&quot;:&quot;d5&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Try our online NVR Selector&quot;,&quot;url&quot;:&quot;\/support\/nvr_selector&quot;,&quot;id&quot;:&quot;prod:onpromise_nvr_q2&quot;}}]},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Synology NAS NVRs&quot;,&quot;url&quot;:&quot;\/products&quot;,&quot;id&quot;:&quot;prod:vidsurv_nasNVR&quot;,&quot;featTitle&quot;:&quot;Synology NAS NVRs&quot;,&quot;featDesc&quot;:&quot;Find the best fit for your deployment from any of our on-premises storage solutions.&quot;,&quot;featImg&quot;:&quot;img_NVRs&quot;,&quot;featImgAlt&quot;:&quot;Image of Synology NAS NVR model&quot;},&quot;m&quot;:[{&quot;l&quot;:&quot;d5&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;IP camera support list&quot;,&quot;url&quot;:&quot;\/compatibility\/camera&quot;,&quot;id&quot;:&quot;prod:vidsurv_nasNVR_q1&quot;}},{&quot;l&quot;:&quot;d5&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Try our online NVR Selector&quot;,&quot;url&quot;:&quot;\/support\/nvr_selector&quot;,&quot;id&quot;:&quot;prod:vidsurv_nasNVR_q2&quot;}}]},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;VisualStation&quot;,&quot;url&quot;:&quot;\/products\/VS600HD&quot;,&quot;id&quot;:&quot;prod:onpromise_visualStation&quot;,&quot;featTitle&quot;:&quot;VisualStation&quot;,&quot;featDesc&quot;:&quot;Compact PC-less surveillance client optimized for high-resolution TV-wall monitoring.&quot;,&quot;featImg&quot;:&quot;img_VS600HD&quot;,&quot;featImgAlt&quot;:&quot;Image of Synology VisualStation&quot;},&quot;m&quot;:[{&quot;l&quot;:&quot;d5&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;IP camera support list&quot;,&quot;url&quot;:&quot;\/compatibility\/camera&quot;,&quot;id&quot;:&quot;prod:onpromise_visualStation_q1&quot;}},{&quot;l&quot;:&quot;d5&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Try our online NVR Selector&quot;,&quot;url&quot;:&quot;\/support\/nvr_selector&quot;,&quot;id&quot;:&quot;prod:onpromise_visualStation_q2&quot;}}]}]},{&quot;l&quot;:&quot;d3&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Personal Data Management&quot;,&quot;id&quot;:&quot;prod:PDM&quot;},&quot;m&quot;:[{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;BeeStation&quot;,&quot;url&quot;:&quot;https:\/\/bee.synology.com\/BeeStation&quot;,&quot;id&quot;:&quot;prod:PDM_beeStation&quot;,&quot;featTitle&quot;:&quot;BeeStation&quot;,&quot;featDesc&quot;:&quot;Personal cloud storage device for everyone to store, sync, and share files and photos.&quot;,&quot;featImg&quot;:&quot;img_BeeStation&quot;,&quot;featImgAlt&quot;:&quot;Image of Synology BeeStation&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;BeeDrive&quot;,&quot;url&quot;:&quot;https:\/\/bee.synology.com\/BeeDrive&quot;,&quot;id&quot;:&quot;prod:PDM_beeDrive&quot;,&quot;featTitle&quot;:&quot;BeeDrive&quot;,&quot;featDesc&quot;:&quot;AI powered portable SSD with automatic backup and intelligent file discovery.&quot;,&quot;featImg&quot;:&quot;img_BeeDrive&quot;,&quot;featImgAlt&quot;:&quot;Image of Synology BeeDrive&quot;}}]},{&quot;l&quot;:&quot;d3&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Networking&quot;,&quot;id&quot;:&quot;prod:network&quot;,&quot;hide&quot;:&quot;es-mx,zh-cn&quot;},&quot;m&quot;:[{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Synology Routers&quot;,&quot;url&quot;:&quot;\/products\/routers&quot;,&quot;id&quot;:&quot;prod:network_wrx&quot;,&quot;featTitle&quot;:&quot;Synology Routers&quot;,&quot;featDesc&quot;:&quot;Routers that make advanced network functionality available to everyone.&quot;,&quot;featImg&quot;:&quot;img_WRX560&quot;,&quot;featImgAlt&quot;:&quot;Image of Synology Routers&quot;},&quot;m&quot;:[{&quot;l&quot;:&quot;d5&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Synology Router Manager&quot;,&quot;url&quot;:&quot;\/srm&quot;,&quot;id&quot;:&quot;prod:network_synorouter_q1&quot;}}]}]}]}]},{&quot;l&quot;:&quot;d1&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Solutions&quot;,&quot;id&quot;:&quot;sol:solution&quot;,&quot;type&quot;:&quot;solution&quot;},&quot;m&quot;:[{&quot;l&quot;:&quot;d2&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Storage &amp;amp; Data Management&quot;,&quot;id&quot;:&quot;sol:sStorage&quot;},&quot;m&quot;:[{&quot;l&quot;:&quot;d3&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Storage Overview&quot;,&quot;url&quot;:&quot;\/dsm\/solution\/enterprise-storage&quot;,&quot;id&quot;:&quot;sol:sStorage_overview&quot;},&quot;m&quot;:[{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;All-Flash Storage&quot;,&quot;url&quot;:&quot;\/products?product_line=fs&quot;,&quot;id&quot;:&quot;sol:sStorage_scene_allFlash&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Petabyte Storage&quot;,&quot;url&quot;:&quot;\/dsm\/solution\/petabyte-scale&quot;,&quot;id&quot;:&quot;sol:sStorage_scene_petabyte&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;S3 Compatible Object Storage&quot;,&quot;url&quot;:&quot;https:\/\/c2.synology.com\/object-storage\/overview&quot;,&quot;id&quot;:&quot;sol:sStorage_scene_s3&quot;,&quot;hide&quot;:&quot;zh-cn&quot;}}]},{&quot;l&quot;:&quot;d3&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Data Management&quot;,&quot;id&quot;:&quot;sol:data_management&quot;},&quot;m&quot;:[{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;DiskStation Manager&quot;,&quot;url&quot;:&quot;\/dsm&quot;,&quot;id&quot;:&quot;sol:data_management_dsm&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Synology Drive&quot;,&quot;url&quot;:&quot;\/dsm\/feature\/drive&quot;,&quot;id&quot;:&quot;sol:sStorage_datamanagement_drive&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Hybrid Share&quot;,&quot;url&quot;:&quot;\/dsm\/feature\/hybrid-share&quot;,&quot;id&quot;:&quot;sol:sStorage_datamanagement_hybridShare&quot;,&quot;hide&quot;:&quot;zh-cn&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Active Insight&quot;,&quot;url&quot;:&quot;\/dsm\/feature\/active-insight\/overview&quot;,&quot;id&quot;:&quot;sol:nas_service_activeInsight&quot;}}]},{&quot;l&quot;:&quot;d3&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;By Scenario&quot;,&quot;id&quot;:&quot;sol:sStorage_scene&quot;},&quot;m&quot;:[{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Storage for Virtualization&quot;,&quot;url&quot;:&quot;\/dsm\/feature\/storage_virtualization&quot;,&quot;id&quot;:&quot;sol:sStorage_scene_virtual&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Storage for Kubernetes&quot;,&quot;url&quot;:&quot;\/dsm\/solution\/kubernetes&quot;,&quot;id&quot;:&quot;sol:sStorage_scene_k8s&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Immutability &amp;amp; Ransomware Protection&quot;,&quot;url&quot;:&quot;\/dsm\/solution\/ransomware&quot;,&quot;id&quot;:&quot;sol:sStorage_scene_immutability&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Data Retention &amp;amp; Compliance&quot;,&quot;url&quot;:&quot;\/dsm\/solution\/data-integrity-and-compliance&quot;,&quot;id&quot;:&quot;sol:sStorage_scene_dataRetention&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Data infrastructure for AI&quot;,&quot;url&quot;:&quot;\/dsm\/solution\/ai-infrastructure&quot;,&quot;id&quot;:&quot;sol:sStorage_scene_ai_infrastructure&quot;,&quot;show&quot;:&quot;en-global&quot;}}]}]},{&quot;l&quot;:&quot;d2&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Data Protection&quot;,&quot;id&quot;:&quot;sol:sDataProtect&quot;},&quot;m&quot;:[{&quot;l&quot;:&quot;d3&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Data Protection Overview&quot;,&quot;url&quot;:&quot;\/backup\/overview&quot;,&quot;id&quot;:&quot;sol:sDataProtect_overview&quot;}},{&quot;l&quot;:&quot;d3&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;On-premise Data Protection&quot;,&quot;id&quot;:&quot;sol:sDataProtect_purposeBuilt&quot;},&quot;m&quot;:[{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;ActiveProtect&quot;,&quot;url&quot;:&quot;\/products\/ActiveProtectAppliance&quot;,&quot;id&quot;:&quot;sol:backup_solution_appliance&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Active Backup Suite&quot;,&quot;url&quot;:&quot;\/dsm\/feature\/active_backup_suite&quot;,&quot;id&quot;:&quot;sol:sDataProtect_dsm_ab&quot;}}]},{&quot;l&quot;:&quot;d3&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Backup as a Service&quot;,&quot;id&quot;:&quot;sol:sDataProtect_backup&quot;,&quot;hide&quot;:&quot;zh-cn&quot;},&quot;m&quot;:[{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;C2 Backup&quot;,&quot;url&quot;:&quot;https:\/\/c2.synology.com\/backup\/business\/overview&quot;,&quot;id&quot;:&quot;sol:sDataProtect_backup_c2&quot;}}]},{&quot;l&quot;:&quot;d3&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Enterprise Backup Storage&quot;,&quot;id&quot;:&quot;sol:sDataProtect_dsm&quot;},&quot;m&quot;:[{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Secure Backup Repository&quot;,&quot;url&quot;:&quot;\/backup\/storage&quot;,&quot;id&quot;:&quot;sol:sDataProtect_dsm_secure&quot;}}]},{&quot;l&quot;:&quot;d3&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;By Workload&quot;,&quot;id&quot;:&quot;sol:sDataProtect_workload&quot;},&quot;m&quot;:[{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;PCs &amp;amp; Macs&quot;,&quot;url&quot;:&quot;\/backup\/solution\/pc-and-mac&quot;,&quot;id&quot;:&quot;sol:backup_workload_pcMac&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Windows &amp;amp; Linux Servers&quot;,&quot;url&quot;:&quot;\/backup\/solution\/physical-servers&quot;,&quot;id&quot;:&quot;sol:backup_workload_windowsLinux&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Databases&quot;,&quot;url&quot;:&quot;\/backup\/solution\/database&quot;,&quot;id&quot;:&quot;sol:backup_workload_databases&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;VMware &amp;amp; Hyper-V&quot;,&quot;url&quot;:&quot;\/backup\/solution\/virtual-machines&quot;,&quot;id&quot;:&quot;sol:backup_workload_vmHyper&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Microsoft 365&quot;,&quot;url&quot;:&quot;\/backup\/solution\/microsoft365-data-backup-and-recovery&quot;,&quot;id&quot;:&quot;sol:backup_workload_microsoft365&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Google Workspace&quot;,&quot;url&quot;:&quot;\/dsm\/feature\/active_backup_google_workspace&quot;,&quot;id&quot;:&quot;sol:backup_workload_google&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;File Servers&quot;,&quot;url&quot;:&quot;\/backup\/solution\/file-servers&quot;,&quot;id&quot;:&quot;sol:backup_workload_fileServers&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Synology Systems&quot;,&quot;url&quot;:&quot;\/dsm\/solution\/synology-system-backup&quot;,&quot;id&quot;:&quot;sol:sDataProtect_workload_synoSystem&quot;}}]},{&quot;l&quot;:&quot;d3&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;By Scenario&quot;,&quot;id&quot;:&quot;sol:sDataProtect_scene&quot;},&quot;m&quot;:[{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Ransomware Protection&quot;,&quot;url&quot;:&quot;\/dsm\/solution\/ransomware&quot;,&quot;id&quot;:&quot;sol:sDataProtect_scene_ransomware&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;3-2-1 backup&quot;,&quot;url&quot;:&quot;\/dsm\/solution\/data_backup&quot;,&quot;id&quot;:&quot;sol:sDataProtect_scene_backup321&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Multi-site Protection Management&quot;,&quot;url&quot;:&quot;\/dsm\/solution\/cross-office_file_sharing&quot;,&quot;id&quot;:&quot;sol:sDataProtect_scene_multiSite&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Immutable Data Protection&quot;,&quot;url&quot;:&quot;\/dsm\/solution\/data-integrity-and-compliance&quot;,&quot;id&quot;:&quot;sol:sDataProtect_scene_immutable&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Direct-to-Cloud Backup&quot;,&quot;url&quot;:&quot;https:\/\/c2.synology.com\/backup\/business\/windows&quot;,&quot;id&quot;:&quot;sol:sDataProtect_scene_d2c&quot;,&quot;hide&quot;:&quot;zh-cn&quot;}}]}]},{&quot;l&quot;:&quot;d2&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Business Productivity&quot;,&quot;id&quot;:&quot;sol:productivity&quot;},&quot;m&quot;:[{&quot;l&quot;:&quot;d3&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Synology Office Suite&quot;,&quot;url&quot;:&quot;\/dsm\/overview\/productivity&quot;,&quot;id&quot;:&quot;sol:productivity_office&quot;},&quot;m&quot;:[{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Drive&quot;,&quot;url&quot;:&quot;\/dsm\/feature\/drive&quot;,&quot;id&quot;:&quot;sol:productivity_office_drive&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Office&quot;,&quot;url&quot;:&quot;\/dsm\/feature\/office&quot;,&quot;id&quot;:&quot;sol:productivity_office_office&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;MailPlus&quot;,&quot;url&quot;:&quot;\/dsm\/feature\/mailplus&quot;,&quot;id&quot;:&quot;sol:productivity_office_mailplus&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Chat&quot;,&quot;url&quot;:&quot;\/dsm\/feature\/chat&quot;,&quot;id&quot;:&quot;sol:productivity_office_chat&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Calendar&quot;,&quot;url&quot;:&quot;\/dsm\/feature\/calendar&quot;,&quot;id&quot;:&quot;sol:productivity_office_calendar&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Contacts&quot;,&quot;url&quot;:&quot;\/dsm\/feature\/contacts&quot;,&quot;id&quot;:&quot;sol:productivity_office_contact&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Note Station&quot;,&quot;url&quot;:&quot;\/dsm\/feature\/note_station&quot;,&quot;id&quot;:&quot;sol:productivity_office_note&quot;}}]},{&quot;l&quot;:&quot;d3&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;By Scenario&quot;,&quot;id&quot;:&quot;sol:productivity_scene&quot;},&quot;m&quot;:[{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Private Cloud File Management&quot;,&quot;url&quot;:&quot;\/dsm\/overview\/file&quot;,&quot;id&quot;:&quot;sol:productivity_scene_privateCloud&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Multi-site File Synchronization&quot;,&quot;url&quot;:&quot;\/dsm\/solution\/cross-office_file_sharing&quot;,&quot;id&quot;:&quot;sol:productivity_scene_multisite&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Anywhere File Access&quot;,&quot;url&quot;:&quot;dsm\/solution\/data-access&quot;,&quot;id&quot;:&quot;sol:productivity_scene_anywhere&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Mass Deployment for Drive Client&quot;,&quot;url&quot;:&quot;https:\/\/kb.synology.com\/en-us\/UG\/Synology_Drive_Client_Mass_Deployment_Guide\/1&quot;,&quot;id&quot;:&quot;sol:productivity_scene_mass&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Productivity Integrations &amp;amp; API&quot;,&quot;url&quot;:&quot;https:\/\/office-suite-api.synology.com\/&quot;,&quot;id&quot;:&quot;sol:productivity_scene_api&quot;,&quot;hide&quot;:&quot;zh-cn&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;AI Integrations&quot;,&quot;url&quot;:&quot;\/dsm\/feature\/productivityai&quot;,&quot;id&quot;:&quot;sol:productivity_scene_ai&quot;}}]}]},{&quot;l&quot;:&quot;d2&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Video Surveillance&quot;,&quot;id&quot;:&quot;sol:vidSvs&quot;},&quot;m&quot;:[{&quot;l&quot;:&quot;d3&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Surveillance Solution Overview&quot;,&quot;url&quot;:&quot;\/surveillance&quot;,&quot;id&quot;:&quot;sol:vidSvs_overview&quot;},&quot;m&quot;:[{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Surveillance Station&quot;,&quot;url&quot;:&quot;\/surveillance&quot;,&quot;id&quot;:&quot;sol:vidSvs_onprem_ss&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Surveillance Device License Pack&quot;,&quot;url&quot;:&quot;\/products\/Device_License_Pack&quot;,&quot;id&quot;:&quot;sol:vidSvs_onprem_license&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;C2 Backup for Surveillance&quot;,&quot;url&quot;:&quot;https:\/\/c2.synology.com\/surveillance\/overview&quot;,&quot;id&quot;:&quot;sol:vidSvs_rec_c2&quot;,&quot;hide&quot;:&quot;zh-cn&quot;}}]},{&quot;l&quot;:&quot;d3&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;By Scenario&quot;,&quot;id&quot;:&quot;sol:vidSvs_scene&quot;},&quot;m&quot;:[{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Multi-site Surveillance&quot;,&quot;url&quot;:&quot;vms\/solution\/surveillance-multi-site&quot;,&quot;id&quot;:&quot;sol:solutions_surveillance_multi_site_surveillance&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Building Management&quot;,&quot;url&quot;:&quot;\/vms\/solution\/surveillance_office_building&quot;,&quot;id&quot;:&quot;sol:solutions_surveillance_office_building_svs&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Replacing Analog DVR&quot;,&quot;url&quot;:&quot;\/vms\/solution\/dvr-nvr-surveillance&quot;,&quot;id&quot;:&quot;sol:vidSvs_scene_dvr&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Face Recognition&quot;,&quot;url&quot;:&quot;\/vms\/solution\/surveillance_face_recognition&quot;,&quot;id&quot;:&quot;sol:solutions_surveillance_face_recognition&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Surveillance Integrations&quot;,&quot;url&quot;:&quot;\/surveillance\/feature\/3rd-party&quot;,&quot;id&quot;:&quot;sol:vidSvs_scene_integrate&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Technology Partner Finder&quot;,&quot;url&quot;:&quot;tech-partner?solution=surveillance&quot;,&quot;id&quot;:&quot;sol:vidSvs_scene_license&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Mobile monitoring&quot;,&quot;url&quot;:&quot;\/surveillance\/feature\/mobile&quot;,&quot;id&quot;:&quot;sol:vidSvs_scene_mob&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Backup Recordings to Cloud&quot;,&quot;url&quot;:&quot;https:\/\/c2.synology.com\/surveillance\/overview&quot;,&quot;id&quot;:&quot;sol:vidSvs_scene_dualRec&quot;,&quot;hide&quot;:&quot;zh-cn&quot;}}]}]},{&quot;l&quot;:&quot;d2&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Cloud&quot;,&quot;id&quot;:&quot;sol:cloud&quot;,&quot;hide&quot;:&quot;zh-cn&quot;},&quot;m&quot;:[{&quot;l&quot;:&quot;d3&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Synology C2 Overview&quot;,&quot;url&quot;:&quot;https:\/\/c2.synology.com&quot;,&quot;id&quot;:&quot;sol:cloud_overview&quot;}},{&quot;l&quot;:&quot;d3&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Hybrid Cloud Solutions&quot;,&quot;id&quot;:&quot;sol:cloud_hybrid&quot;},&quot;m&quot;:[{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;C2 Storage for Hyper Backup&quot;,&quot;url&quot;:&quot;https:\/\/c2.synology.com\/storage\/nas&quot;,&quot;id&quot;:&quot;sol:cloud_hybrid_backup&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;C2 Storage for Hybrid Share&quot;,&quot;url&quot;:&quot;https:\/\/c2.synology.com\/storage\/hybrid&quot;,&quot;id&quot;:&quot;sol:cloud_hybrid_share&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;C2 Backup for Surveillance&quot;,&quot;url&quot;:&quot;https:\/\/c2.synology.com\/surveillance\/overview&quot;,&quot;id&quot;:&quot;sol:cloud_c2Svs&quot;}}]},{&quot;l&quot;:&quot;d3&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Cloud Solutions&quot;,&quot;id&quot;:&quot;sol:cloud_solution&quot;},&quot;m&quot;:[{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;C2 Identity&quot;,&quot;url&quot;:&quot;https:\/\/c2.synology.com\/identity\/overview&quot;,&quot;id&quot;:&quot;sol:cloud_solution_identity&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;C2 Password&quot;,&quot;url&quot;:&quot;https:\/\/c2.synology.com\/password\/overview&quot;,&quot;id&quot;:&quot;sol:cloud_solution_password&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;C2 Backup&quot;,&quot;url&quot;:&quot;https:\/\/c2.synology.com\/backup\/business\/overview&quot;,&quot;id&quot;:&quot;hm:cloud_solution_backup&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;C2 Transfer&quot;,&quot;url&quot;:&quot;https:\/\/c2.synology.com\/transfer\/overview&quot;,&quot;id&quot;:&quot;sol:cloud_solution_transfer&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;C2 Object Storage&quot;,&quot;url&quot;:&quot;https:\/\/c2.synology.com\/object-storage\/overview&quot;,&quot;id&quot;:&quot;sol:cloud_solution_objStorage&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;C2 Backup for Surveillance&quot;,&quot;url&quot;:&quot;https:\/\/c2.synology.com\/surveillance\/overview&quot;,&quot;id&quot;:&quot;sol:cloud_hybrid_sv&quot;}}]},{&quot;l&quot;:&quot;d3&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;By Scenario&quot;,&quot;id&quot;:&quot;sol:cloud_scene&quot;},&quot;m&quot;:[{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Direct-to-Cloud Backup&quot;,&quot;url&quot;:&quot;https:\/\/c2.synology.com\/backup\/business\/overview&quot;,&quot;id&quot;:&quot;sol:cloud_scene_d2c&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Secure File Transfer&quot;,&quot;url&quot;:&quot;https:\/\/c2.synology.com\/transfer\/overview&quot;,&quot;id&quot;:&quot;sol:cloud_scene_secure&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Multi-site Collaboration&quot;,&quot;url&quot;:&quot;https:\/\/c2.synology.com\/storage\/hybrid&quot;,&quot;id&quot;:&quot;sol:cloud_scene_multiSite&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;S3 Compatible Cloud Storage&quot;,&quot;url&quot;:&quot;https:\/\/c2.synology.com\/object-storage\/overview&quot;,&quot;id&quot;:&quot;sol:cloud_scene_s3&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Identity and Access Management as a Service&quot;,&quot;url&quot;:&quot;https:\/\/c2.synology.com\/identity\/overview&quot;,&quot;id&quot;:&quot;sol:cloud_scene_identity&quot;}}]}]}]},{&quot;l&quot;:&quot;d1&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Support&quot;,&quot;id&quot;:&quot;sup:support&quot;},&quot;m&quot;:[{&quot;l&quot;:&quot;d2&quot;,&quot;p&quot;:{&quot;id&quot;:&quot;sup:support_layer2&quot;},&quot;m&quot;:[{&quot;l&quot;:&quot;d3&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Support&quot;,&quot;id&quot;:&quot;sup:support_layer3&quot;},&quot;m&quot;:[{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Knowledge Center&quot;,&quot;url&quot;:&quot;https:\/\/kb.synology.com\/en-us&quot;,&quot;id&quot;:&quot;sup:knowledge_center&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Product Support Lifecycle&quot;,&quot;url&quot;:&quot;\/products\/status&quot;,&quot;id&quot;:&quot;sup:support_supportLifecycle&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Synology Service Status&quot;,&quot;url&quot;:&quot;\/support\/synology_service&quot;,&quot;id&quot;:&quot;sup:support_services_serviceStatus&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Contact Support&quot;,&quot;url&quot;:&quot;\/company\/contact_us&quot;,&quot;id&quot;:&quot;sup:support_services_contactSupport&quot;}}]},{&quot;l&quot;:&quot;d3&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Resources&quot;,&quot;id&quot;:&quot;sup:res&quot;},&quot;m&quot;:[{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Download Center&quot;,&quot;url&quot;:&quot;\/support\/download&quot;,&quot;id&quot;:&quot;sup:res_downloadCenter&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Developer Tools&quot;,&quot;url&quot;:&quot;\/support\/developer&quot;,&quot;id&quot;:&quot;sup:res_developerTools&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Video Tutorials&quot;,&quot;url&quot;:&quot;\/knowledgebase\/DSM\/video&quot;,&quot;id&quot;:&quot;sup:res_videoTutorials&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Extended Warranty Plus&quot;,&quot;url&quot;:&quot;\/dsm\/solution\/extended-warranty-plus&quot;,&quot;id&quot;:&quot;sup:res_warranty&quot;,&quot;hide&quot;:&quot;en-br,es-mx,ko-kr,en-au,en-in,en-id,en-my,en-nz,en-ph,en-sg,en-vn,vi-vn,th-th,zh-tw,ja-jp,zh-hk,tr-tr,ru-ru,en-af,en-me,zh-cn&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;EW201, EW202&quot;,&quot;url&quot;:&quot;\/products\/Extended_Warranty&quot;,&quot;id&quot;:&quot;sup:sup_res_ew&quot;,&quot;show&quot;:&quot;zh-hk,zh-tw,ko-kr,en-in,en-id,en-my,en-ph,en-sg,th-th,en-me,vi-vn,en-au,en-nz,en-af,ja-jp,ru-ru,tr-tr,zh-cn&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Synology Beta Program&quot;,&quot;url&quot;:&quot;\/beta&quot;,&quot;id&quot;:&quot;sup:sup_res_beta&quot;}}]},{&quot;l&quot;:&quot;d3&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Tools&quot;,&quot;id&quot;:&quot;sup:tool&quot;},&quot;m&quot;:[{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;NAS Selector&quot;,&quot;url&quot;:&quot;\/support\/nas_selector&quot;,&quot;id&quot;:&quot;sup:tool_nas&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;RAID Calculator&quot;,&quot;url&quot;:&quot;\/support\/RAID_calculator&quot;,&quot;id&quot;:&quot;sup:tool_raid&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Product Compatibility&quot;,&quot;url&quot;:&quot;\/compatibility&quot;,&quot;id&quot;:&quot;sup:tool_capability&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;NVR Selector&quot;,&quot;url&quot;:&quot;\/support\/nvr_selector&quot;,&quot;id&quot;:&quot;sup:tool_nvr&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Performance Metrics&quot;,&quot;url&quot;:&quot;\/products\/performance&quot;,&quot;id&quot;:&quot;sup:tool_perf&quot;}}]},{&quot;l&quot;:&quot;d3&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Where to Buy&quot;,&quot;id&quot;:&quot;sup:sales_where_to_buy&quot;},&quot;m&quot;:[{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Synology Store&quot;,&quot;url&quot;:&quot;\/products\/store&quot;,&quot;id&quot;:&quot;sup:wtb_store&quot;,&quot;show&quot;:&quot;en-ca,en-us,es-es,fr-fr,hu-hu,pl-pl,sv-se,en-ro,cs-cz,da-dk,de-de,it-it,nl-nl,en-uk,en-eu&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Partners &amp;amp; Resellers&quot;,&quot;url&quot;:&quot;\/wheretobuy&quot;,&quot;id&quot;:&quot;sup:wtb_partner&quot;}}]}]}]},{&quot;l&quot;:&quot;d1&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;About Us&quot;,&quot;id&quot;:&quot;comp:company&quot;},&quot;m&quot;:[{&quot;l&quot;:&quot;d2&quot;,&quot;p&quot;:{&quot;id&quot;:&quot;comp:company_layer2&quot;},&quot;m&quot;:[{&quot;l&quot;:&quot;d3&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Company&quot;,&quot;id&quot;:&quot;comp:company_layer3&quot;},&quot;m&quot;:[{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;About Synology&quot;,&quot;url&quot;:&quot;\/company&quot;,&quot;id&quot;:&quot;comp:company_about&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Newsroom&quot;,&quot;url&quot;:&quot;\/company\/news&quot;,&quot;id&quot;:&quot;comp:company_news&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Customer Stories&quot;,&quot;url&quot;:&quot;\/company\/case_study&quot;,&quot;id&quot;:&quot;comp:company_customer_stories&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Blog&quot;,&quot;url&quot;:&quot;https:\/\/blog.synology.com\/&quot;,&quot;id&quot;:&quot;comp:company_company_more_from_synology_blog&quot;,&quot;hide&quot;:&quot;zh-cn&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;ESG&quot;,&quot;url&quot;:&quot;\/company\/esg&quot;,&quot;id&quot;:&quot;comp:company_esg&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Careers&quot;,&quot;url&quot;:&quot;\/company\/career&quot;,&quot;id&quot;:&quot;comp:meta_company_career&quot;}}]},{&quot;l&quot;:&quot;d3&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Security&quot;,&quot;id&quot;:&quot;comp:solution_security&quot;},&quot;m&quot;:[{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Security Overview&quot;,&quot;url&quot;:&quot;\/security&quot;,&quot;id&quot;:&quot;comp:security_security_overview&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Synology Secure Development Life Cycle&quot;,&quot;url&quot;:&quot;security\/sdl&quot;,&quot;id&quot;:&quot;comp:trust_center_security_sdlc&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Supply Chain Risk Management&quot;,&quot;url&quot;:&quot;security\/scrm&quot;,&quot;id&quot;:&quot;comp:trust_center_security_scrm&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Synology Bounty Program&quot;,&quot;url&quot;:&quot;\/security\/bounty_program&quot;,&quot;id&quot;:&quot;comp:synology_bounty_program&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Security Advisory&quot;,&quot;url&quot;:&quot;\/security\/advisory&quot;,&quot;id&quot;:&quot;comp:solution_security_advisory&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Compliance Certifications&quot;,&quot;url&quot;:&quot;\/compliance-and-regulatory&quot;,&quot;id&quot;:&quot;comp:compliance_and_regulatory&quot;,&quot;hide&quot;:&quot;zh-cn&quot;}}]},{&quot;l&quot;:&quot;d3&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Partners&quot;,&quot;id&quot;:&quot;comp:partner&quot;},&quot;m&quot;:[{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Become a Partner&quot;,&quot;url&quot;:&quot;partner-with-synology&quot;,&quot;id&quot;:&quot;comp:support_support_become_a_partner&quot;}},{&quot;l&quot;:&quot;d4&quot;,&quot;p&quot;:{&quot;text&quot;:&quot;Contact Us&quot;,&quot;url&quot;:&quot;\/company\/contact_us&quot;,&quot;id&quot;:&quot;comp:partner_contact&quot;}}]}]}]}]"
+		sign-in-text="Sign In"
+		sign-in-url="https://account.synology.com"
+		store-text="Store"
+		store-url="products/store"
+		ai-text="Synology AI Advisor"
+		alt-search-toggle="搜尋 synology.com"
+		alt-search-label="Search"
+		alt-search-submit="送出搜尋"
+		alt-hamburger="選單"
+		alt-more-info="進入更多資訊"
+		img-root="/img/header/"
+			>
+		<syno-navbar-ec
+			slot="ec"
+			lang="en-us"
+			website-mode="production"
+			is-china-cdn="false"
+		></syno-navbar-ec>
+			</s-navbar>
+</div>
+
+
+		<main id="main" class="dsm">
+										
+<div id="btrfs">
+	<section>
+		<div id="intro" class="section">
+			<menu>
+				<div class="container-1080">
+					<ul class="dsm_menu clearfix">
+						<li class="floatleft"><a rel="noopener noreferrer" class="title" href="dsm">DSM</a></li>
+			            <li class="floatright"><a rel="noopener noreferrer" class="title program" href="dsm/review">See reviews</a></li>
+					</ul>
+					<hr>
+				</div>
+			</menu>
+			<div class="container-960 center">
+				<h1>How Btrfs protects your company's data</h1>
+				<h2 class="subtitle">Next-generation file system delivers data integrity and efficient snapshots</h3>
+				<p>When dealing with large-scale data storage, businesses require a solution that prevents data corruption, while providing flexible backup tools. The next-generation Btrfs file system brings these tools to Synology NAS servers, allowing businesses and organizations to reduce maintenance overhead and efficiently store their data.</p>
+			</div>
+		</div>
+	</section>
+
+	<section>
+		<div id="what_is_Btrfs" class="section">
+			<div class="container-1080">
+				<div class="pure-g autopad-36">
+					<div class="pure-u-1-1 pure-u-md-1-1 pure-u-lg-9-24 align-middle">
+						<h2><span>What is Btrfs?</span></h2>
+					</div>
+					<div class="pure-u-1-1 pure-u-md-1-1 pure-u-lg-15-24 align-middle">
+						<p>Btrfs is a modern file system developed by multiple parties and now supported by select Synology NAS models. Btrfs was designed to address obstacles often encountered in enterprise storage systems, such as fault tolerance, management, and data protection.</p>
+					</div>
+				</div>
+			</div>
+		</div>
+	</section>
+
+	<section>
+		<div id="What_the_benefits" class="section">
+			<div class="container-1080">
+				<h2 class="center">What are the benefits of Btrfs?</h2>
+				<h3 class="subtitle center margin_bottom50">Implementing Btrfs volumes on Synology NAS delivers various benefits for enterprise users.</h3>
+				<div class="pure-g autopad">
+					<div class="pure-u-1-1 pure-u-md-1-1 pure-u-lg-5-24">
+						<div class="center">
+							<img src="img/dsm/btrfs/benefits_icon_01.png" alt="">
+						</div>
+					</div>
+					<div class="pure-u-1-1 pure-u-md-1-1 pure-u-lg-19-24">
+						<h4>Metadata mirroring and increased data availability</h4>
+						<p class="margin_bottom30">In any storage system, keeping metadata intact is critical as it includes important information, such as folder structures, filenames, access permissions, and the location of each file. Btrfs stores two copies of metadata on a volume, allowing for data recovery if the hard drive is damaged or suffers from bad sectors.</p>
+					</div>
+				</div>
+				<div class="pure-g autopad">
+					<div class="pure-u-1-1 pure-u-md-1-1 pure-u-lg-5-24">
+						<div class="center">
+							<img src="img/dsm/btrfs/benefits_icon_02.png" alt="">
+						</div>
+					</div>
+					<div class="pure-u-1-1 pure-u-md-1-1 pure-u-lg-19-24">
+						<h4>Btrfs file self-healing</h4>
+						<p class="margin_bottom30">Traditional storage systems might experience errors that go completely unnoticed which result in corrupt data being provided to applications with no warning or error messages. In order to avoid these types of errors, Btrfs provides checksums for data and metadata, generates two copies of metadata, and then verifies the checksums during each read process. Once discovering a mismatch  (silent data corruption), the Btrfs file system is able to auto-detect corrupted files (silent data corruption) with mirrored metadata, and recover broken data using the supported RAID volumes, including RAID 1, RAID 5, RAID 6, RAID 10, F1, and SHR.</p>
+					</div>
+				</div>
+				<div class="pure-g autopad">
+					<div class="pure-u-1-1 pure-u-md-1-1 pure-u-lg-5-24">
+						<div class="center">
+							<img src="img/dsm/btrfs/benefits_icon_03.png" alt="">
+						</div>
+					</div>
+					<div class="pure-u-1-1 pure-u-md-1-1 pure-u-lg-19-24">
+						<h4>Snapshots and data protection</h4>
+						<p class="margin_bottom30">The Btrfs file system introduces a powerful snapshot feature allowing you to create a point-in-time copy of an entire shared folder. That way, if human error results in a lost or corrupt database, you can quickly restore the data back to the previous time at which the snapshot was captured.</p>
+					</div>
+				</div>
+				<div class="pure-g autopad">
+					<div class="pure-u-1-1 pure-u-md-1-1 pure-u-lg-5-24">
+					</div>
+					<div class="pure-u-1-1 pure-u-md-1-1 pure-u-lg-19-24">
+						<div class="pure-g autopad-36">
+							<div class="pure-u-1-1 pure-u-md-1-1 pure-u-lg-1-2">
+								<h4>Low impact, big benefit</h4>
+								<p>Taking a snapshot consumes only a small amount of additional storage space, while exerting little impact on system performance thanks to Btrfs's copy-on-write architecture.</p>
+							</div>
+							<div class="pure-u-1-1 pure-u-md-1-1 pure-u-lg-1-2">
+								<h4>Frequent, scheduled backup</h4>
+								<p>Automatically create point-in-time copies of data up to every 5 minutes without affecting performance, guaranteeing granular data backup and recovery.</p>
+							</div>
+						</div>
+						<div class="pure-g autopad-36">
+							<div class="pure-u-1-1 pure-u-md-1-1 pure-u-lg-1-2">
+								<h4>Customizable retention policy</h4>
+								<p>Retain up to 256 hourly, daily, or weekly recovery points according to your individual needs. Smart retention options automatically delete unneeded versions.</p>
+							</div>
+							<div class="pure-u-1-1 pure-u-md-1-1 pure-u-lg-1-2">
+								<h4>Instantaneous snapshots</h4>
+								<p>Capture snapshots instantly and backup data without worrying about files being modified or deleted during the backup process.</p>
+							</div>
+						</div>
+						<div class="pure-g autopad-36">
+							<div class="pure-u-1-1 pure-u-md-1-1 pure-u-lg-1-2">
+								<h4>Self-service recovery</h4>
+								<p>Employees can view earlier versions of files and restore them to a previous state by themselves using File Station or Windows File Explorer.</p>
+							</div>
+							<div class="pure-u-1-1 pure-u-md-1-1 pure-u-lg-1-2">
+								<h4>Instant SMB/AFP server-side copy</h4>
+								<p>Compared with the traditional server-side copy, which requires processing time, Btrfs fast-clone technology allows instant file copy to be achieved on File Station, SMB and AFP protocols if the source and destination are both on the same Btrfs volume.</p>
+							</div>
+						</div>
+					</div>
+				</div>
+			</div>
+		</div>
+	</section>
+
+	<section>
+		<div id="additional_benefits" class="section">
+			<div class="container-1080">
+				<h2 class="center">Additional benefits of Btrfs</h2>
+				<h3 class="subtitle center margin_bottom50">Using the Btrfs file system on your Synology NAS brings a wide variety of benefits to DiskStation Manager and Synology packages.</h3>
+				<div class="margin_bottom50">
+					<div class="pure-g autopad-60">
+						<div class="pure-u-1-1 pure-u-lg-1-2 align-middle">
+							<h4>Efficient Drive storage</h4>
+							<p>Compared to ext4 volumes, Btrfs does not require double the storage space for Drive's file versioning and history data. You can retain historical versions of files when using Drive — without worrying about consuming too much storage space.</p>
+						</div>
+						<div class="pure-u-1-1 pure-u-lg-1-2 align-middle">
+							<div class="center">
+								<img class="additional_benefits_01" src="img/dsm/btrfs/additional_benefits_01.png" srcset="img/dsm/btrfs/additional_benefits_01@2x.png 2x" alt="Efficient Drive storage">
+							</div>
+						</div>
+					</div>
+				</div>
+				<div class="margin_bottom50">
+					<div class="pure-g autopad-60 reverse-lg">
+						<div class="pure-u-1-1 pure-u-lg-1-2 align-middle">
+							<h4>Data consistency of backups</h4>
+							<p>Traditional backup methods require time to copy data from one place to another, potentially leading to inconsistent data if files are modified during the backup process. Btrfs solves this issue by taking a snapshot before the backup process starts, and then copying the snapshot data to the backup destination — with no need to worry about files being modified, moved, or deleted.</p>
+						</div>
+						<div class="pure-u-1-1 pure-u-lg-1-2 align-middle">
+							<div class="center">
+								<img src="img/dsm/btrfs/additional_benefits_02.gif" alt="Data consistency of backups">
+							</div>
+						</div>
+					</div>
+				</div>
+				<div class="margin_bottom50">
+				<div class="pure-g autopad-60">
+					<div class="pure-u-1-1 pure-u-md-1-2 align-middle">
+						<h4>Quotas for shared folders</h4>
+						<p>Specify a storage limit for individuals shared folders, so your storage space will not be consumed by a particular shared folder. This is helpful for controlling available storage space when multiple teams or departments store files on the same Synology NAS server.</p>
+					</div>
+					<div class="pure-u-1-1 pure-u-md-1-2 hide-mobile align-middle">
+						<div class="center">
+							<img src="img/dsm/btrfs/additional_benefits_03.png" alt="Quotas for shared folders">
+						</div>
+					</div>
+				</div>
+				</div>
+				<div class="pure-g autopad-60 reverse-lg">
+					<div class="pure-u-1-1 pure-u-md-1-2 align-middle">
+						<h4>Clone entire shared folders</h4>
+						<p>With Btrfs, you can simply select a shared folder and make a clone of all the contents nearly instantaneously. This is useful when testing updates to websites or databases and you need a quick clone.</p>
+					</div>
+					<div class="pure-u-1-1 pure-u-md-1-2 align-middle">
+						<div class="center">
+							<img src="img/dsm/btrfs/additional_benefits_04.png" alt="Clone entire shared folders">
+						</div>
+					</div>
+				</div>
+			</div>
+		</div>
+	</section>
+
+	<section>
+		<div id="faqs" class="section">
+			<div class="container-1080">
+				<h2 class="center margin_bottom50">Frequently Asked Questions</h2>
+
+				<h3 class="h4">Do I need to configure anything special to take advantage of the data integrity features of Btrfs?</h3>
+				<p>Metadata mirroring and checksums are enabled by default on all Btrfs volumes. However, copy-on-write and checksums need to be separately enabled for files.</p>
+
+				<hr>
+
+				<h3 class="h4">How do I create a Btrfs volume?</h3>
+				<p>Open <b>Storage Manager</b> and create a new volume. You will be prompted to choose a file system (btrfs or ext4) during the creation process.</p>
+					<a rel="noopener noreferrer" href="knowledgebase/DSM/help/DSM/StorageManager/volume_create_volume" target="blank">
+						Learn how to create a volume <i class="fa fa-angle-right"></i>
+					</a>
+
+				<hr>
+
+				<h3 class="h4">Where can I create and restore file from snapshots?</h3>
+				<p>Snapshot Replication (available on Synology NAS models that support Btrfs) includes options to take snapshots on demand or configure schedules and retention policies. You can browse and restore snapshots using Snapshot Replication, File Station, Windows File Explorer, or other file protocols.</p>
+					<a rel="noopener noreferrer" href="knowledgebase/DSM/help/SnapshotReplication/data_protection_mgr" target="blank">
+						Learn more about Snapshot Replication <i class="fa fa-angle-right"></i>
+					</a>
+
+				<hr>
+
+				<h3 class="h4">How can I clone a shared folder on a Btrfs volume?</h3>
+				<p>Open <b>Control Panel</b> and go to the <b>Shared Folder</b> tab. Then click the arrow on the create button and select <b>Clone</b> to clone a shared folder.</p>
+			</div>
+		</div>
+	</section>
+
+	<section>
+		<div id="more" class="section">
+			<div class="container-1080">
+				<h2 class="center">Would you like to know more?</h2>
+				<h3 class="subtitle center margin_bottom80">See the links below for technical details regarding Btrfs and integration with Synology NAS.</h3>
+				<div class="pure-g autopad">
+					<div class="pure-u-1-1 pure-u-md-1-2">
+						<div class="center">
+							<img src="img/dsm/btrfs/more_icon_01.png" alt="">
+						</div>
+						<h4 class="center">Data Protection White Paper</h4>
+						<p class="center">Get technical details regarding the wide variety of data backup and protection tools provided by Synology NAS.</p>
+						<p class="center"><a rel="noopener noreferrer" href="https://global.synologydownload.com/download/Document/Software/WhitePaper/Firmware/DSM/All/enu/Synology_Data_Protection_White_Paper.pdf" target="_blank">See the white paper</a></p>
+					</div>
+					<div class="pure-u-1-1 pure-u-md-1-2">
+						<div class="center">
+							<img src="img/dsm/btrfs/more_icon_02.png" alt="">
+						</div>
+						<h4 class="center">Get started</h4>
+						<p class="center">Do you already have a Synology NAS with Btrfs? See how to use all the features with DSM Help</p>
+						<p class="center"><a rel="noopener noreferrer" href="knowledgebase/DSM/help/SnapshotReplication/data_protection_mgr" target="_blank">Go to DSM Help</a></p>
+					</div>
+				</div>
+				<hr>
+				<div id="applied_models">
+					<h4>Applied Models</h4>
+											<div id="FS-series" class="series">
+							<span class="series_name">FS series:</span>
+							<span class="series_model">
+								<ul>
+									<li>FS6400, FS3600, FS3410, FS3400, FS3017, FS2500, FS2017, FS1018</li>
+								</ul>
+							</span>
+						</div>
+											<div id="HD-series" class="series">
+							<span class="series_name">HD series:</span>
+							<span class="series_model">
+								<ul>
+									<li>HD6500</li>
+								</ul>
+							</span>
+						</div>
+											<div id="SA-series" class="series">
+							<span class="series_name">SA series:</span>
+							<span class="series_model">
+								<ul>
+									<li>SA6400, SA3610, SA3600, SA3410, SA3400D, SA3400, SA3200D</li>
+								</ul>
+							</span>
+						</div>
+											<div id="UC-series" class="series">
+							<span class="series_name">UC series:</span>
+							<span class="series_model">
+								<ul>
+									<li>UC3400, UC3200</li>
+								</ul>
+							</span>
+						</div>
+											<div id="25-series" class="series">
+							<span class="series_name">25 series:</span>
+							<span class="series_model">
+								<ul>
+									<li>RS2825RP+, DS1825+, DS1525+, DS925+, DS725+, DS425+, DS225+</li>
+								</ul>
+							</span>
+						</div>
+											<div id="24-series" class="series">
+							<span class="series_name">24 series:</span>
+							<span class="series_model">
+								<ul>
+									<li>DS224+, DS124</li>
+								</ul>
+							</span>
+						</div>
+											<div id="23-series" class="series">
+							<span class="series_name">23 series:</span>
+							<span class="series_model">
+								<ul>
+									<li>RS2423RP+, RS2423+, DS1823xs+, DS923+, DS723+, DS423+, DS423, DS223, DS223j</li>
+								</ul>
+							</span>
+						</div>
+											<div id="22-series" class="series">
+							<span class="series_name">22 series:</span>
+							<span class="series_model">
+								<ul>
+									<li>RS822RP+, RS822+, RS422+, DS3622xs+, DS2422+, DS1522+, DVA1622</li>
+								</ul>
+							</span>
+						</div>
+											<div id="21-series" class="series">
+							<span class="series_name">21 series:</span>
+							<span class="series_model">
+								<ul>
+									<li>RS4021xs+, RS3621xs+, RS3621RPxs, RS2821RP+, RS2421RP+, RS2421+, RS1221RP+, RS1221+, DS1821+, DS1621xs+, DS1621+, DVA3221</li>
+								</ul>
+							</span>
+						</div>
+											<div id="20-series" class="series">
+							<span class="series_name">20 series:</span>
+							<span class="series_model">
+								<ul>
+									<li>RS820RP+, RS820+, DS1520+, DS920+, DS720+, DS620slim, DS420+, DS220+</li>
+								</ul>
+							</span>
+						</div>
+											<div id="19-series" class="series">
+							<span class="series_name">19 series:</span>
+							<span class="series_model">
+								<ul>
+									<li>RS1619xs+, RS1219+, RS819, DS2419+II, DS2419+, DS1819+, DS1019+, DVA3219</li>
+								</ul>
+							</span>
+						</div>
+											<div id="18-series" class="series">
+							<span class="series_name">18 series:</span>
+							<span class="series_model">
+								<ul>
+									<li>RS3618xs, RS2818RP+, RS2418RP+, RS2418+, RS818RP+, RS818+, DS3018xs, DS1618+, DS918+, DS718+, DS418, DS418play, DS218+, DS218</li>
+								</ul>
+							</span>
+						</div>
+											<div id="17-series" class="series">
+							<span class="series_name">17 series:</span>
+							<span class="series_model">
+								<ul>
+									<li>RS18017xs+, RS4017xs+, RS3617xs+, RS3617RPxs, RS3617xs, DS3617xsII, DS3617xs, DS1817+, DS1517+</li>
+								</ul>
+							</span>
+						</div>
+											<div id="16-series" class="series">
+							<span class="series_name">16 series:</span>
+							<span class="series_model">
+								<ul>
+									<li>RS18016xs+, RS2416RP+, RS2416+, DS916+, DS716+II, DS716+, DS416play, DS216+II, DS216+</li>
+								</ul>
+							</span>
+						</div>
+											<div id="15-series" class="series">
+							<span class="series_name">15 series:</span>
+							<span class="series_model">
+								<ul>
+									<li>RS815RP+, RS815+, RC18015xs+, DS3615xs, DS2415+, DS1815+, DS1515+, DS415+</li>
+								</ul>
+							</span>
+						</div>
+											<div id="14-series" class="series">
+							<span class="series_name">14 series:</span>
+							<span class="series_model">
+								<ul>
+									<li>RS3614xs+, RS3614RPxs, RS3614xs, RS2414RP+, RS2414+, RS814RP+, RS814+</li>
+								</ul>
+							</span>
+						</div>
+											<div id="13-series" class="series">
+							<span class="series_name">13 series:</span>
+							<span class="series_model">
+								<ul>
+									<li>RS10613xs+, RS3413xs+, DS2413+, DS1813+, DS1513+, DS713+</li>
+								</ul>
+							</span>
+						</div>
+											<div id="12-series" class="series">
+							<span class="series_name">12 series:</span>
+							<span class="series_model">
+								<ul>
+									<li>RS3412RPxs, RS3412xs, RS2212RP+, RS2212+, RS812RP+, RS812+, DS3612xs, DS1812+, DS1512+, DS412+</li>
+								</ul>
+							</span>
+						</div>
+											<div id="11-series" class="series">
+							<span class="series_name">11 series:</span>
+							<span class="series_model">
+								<ul>
+									<li>RS3411RPxs, RS3411xs, DS3611xs</li>
+								</ul>
+							</span>
+						</div>
+									</div>
+			</div>
+		</div>
+	</section>
+</div>
+			
+		</main>
+
+				
+				
+		<footer>
+
+<s-section
+	id="footer-tools"
+	class="footer-tools"
+	color="gray-9"
+	bg-color="white"
+	no-min-h
+>
+	<s-container containerless max-w="1760">
+		<div class="footer-tools__wrapper">
+							<s-link
+					class="footer-tools__link ga-click-nas_selector"
+					href="support/nas_selector"
+					alt="NAS Selector"
+				>
+					<div class="footer-tools__img">
+						<s-img
+							src="https://fileres.synology.com/images/www/home/footer/icon_nas"
+							ext="png"
+							width="48"
+							height="48"
+							alt=""
+						></s-img>
+					</div>
+
+					<s-text
+						class="footer-tools__title"
+						tag="p"
+						color="gray-9"
+						align="center"
+					>
+						NAS Selector
+					</s-text>
+				</s-link>
+							<s-link
+					class="footer-tools__link ga-click-raid_calculator"
+					href="support/RAID_calculator"
+					alt="RAID Calculator"
+				>
+					<div class="footer-tools__img">
+						<s-img
+							src="https://fileres.synology.com/images/www/home/footer/icon_raid"
+							ext="png"
+							width="48"
+							height="48"
+							alt=""
+						></s-img>
+					</div>
+
+					<s-text
+						class="footer-tools__title"
+						tag="p"
+						color="gray-9"
+						align="center"
+					>
+						RAID Calculator
+					</s-text>
+				</s-link>
+							<s-link
+					class="footer-tools__link ga-click-nvr_selector"
+					href="support/nvr_selector"
+					alt="NVR Selector"
+				>
+					<div class="footer-tools__img">
+						<s-img
+							src="https://fileres.synology.com/images/www/home/footer/icon_nvr"
+							ext="png"
+							width="48"
+							height="48"
+							alt=""
+						></s-img>
+					</div>
+
+					<s-text
+						class="footer-tools__title"
+						tag="p"
+						color="gray-9"
+						align="center"
+					>
+						NVR Selector
+					</s-text>
+				</s-link>
+							<s-link
+					class="footer-tools__link ga-click-knowledge_center"
+					href="https://kb.synology.com/en-us/"
+					alt="Knowledge Center"
+				>
+					<div class="footer-tools__img">
+						<s-img
+							src="https://fileres.synology.com/images/www/home/footer/icon_knowledge"
+							ext="png"
+							width="48"
+							height="48"
+							alt=""
+						></s-img>
+					</div>
+
+					<s-text
+						class="footer-tools__title"
+						tag="p"
+						color="gray-9"
+						align="center"
+					>
+						Knowledge Center
+					</s-text>
+				</s-link>
+							<s-link
+					class="footer-tools__link ga-click-downloads"
+					href="support/download"
+					alt="Downloads"
+				>
+					<div class="footer-tools__img">
+						<s-img
+							src="https://fileres.synology.com/images/www/home/footer/icon_downloads"
+							ext="png"
+							width="48"
+							height="48"
+							alt=""
+						></s-img>
+					</div>
+
+					<s-text
+						class="footer-tools__title"
+						tag="p"
+						color="gray-9"
+						align="center"
+					>
+						Downloads
+					</s-text>
+				</s-link>
+							<s-link
+					class="footer-tools__link ga-click-newsletter"
+					href="/subscribe-newsletter"
+					alt="Newsletter"
+				>
+					<div class="footer-tools__img">
+						<s-img
+							src="https://fileres.synology.com/images/www/home/footer/icon_newsletter"
+							ext="png"
+							width="48"
+							height="48"
+							alt=""
+						></s-img>
+					</div>
+
+					<s-text
+						class="footer-tools__title"
+						tag="p"
+						color="gray-9"
+						align="center"
+					>
+						Newsletter
+					</s-text>
+				</s-link>
+					</div>
+	</s-container>
+</s-section>
+
+<div id="footer">
+	<div class="container">
+		<div class="pure-g autopad">
+			<div class="links pure-u-1-1">
+				<div class="pure-g autopad-60-h">
+																	<div class="pure-u-1-1 pure-u-lg-1-4 footer_menu_pad_fix">
+							<div class="h4 title" data-toggle-ft-menu>
+								Company
+								<span class="btn_toggle_x"></span>
+							</div>
+							<ul class="footer_menu_item_mobile">
+																															<li>
+									<a class="ga-click-footer-menu-company_about" href="company">
+										<span>About Synology</span>
+									</a>
+								</li>
+																																																														<li>
+									<a class="ga-click-footer-menu-company_synology_blog" href="https://blog.synology.com/" target="_blank">
+										<span>Blog</span>
+									</a>
+								</li>
+																																							<li>
+									<a class="ga-click-footer-menu-company_news" href="company/news">
+										<span>Newsroom</span>
+									</a>
+								</li>
+																																							<li>
+									<a class="ga-click-footer-menu-company_media" href="company/reviews">
+										<span>Media Coverage</span>
+									</a>
+								</li>
+																																							<li>
+									<a class="ga-click-footer-menu-company_customer_stories" href="company/case_study">
+										<span>Customer Stories</span>
+									</a>
+								</li>
+																																							<li>
+									<a class="ga-click-footer-menu-company_office_location" href="company/office_location">
+										<span>Office Locations</span>
+									</a>
+								</li>
+																																							<li>
+									<a class="ga-click-footer-menu-company_ESG" href="company/esg">
+										<span>ESG</span>
+									</a>
+								</li>
+																						</ul>
+						</div>
+																	<div class="pure-u-1-1 pure-u-lg-1-4 footer_menu_pad_fix">
+							<div class="h4 title" data-toggle-ft-menu>
+								Sales
+								<span class="btn_toggle_x"></span>
+							</div>
+							<ul class="footer_menu_item_mobile">
+																															<li>
+									<a class="ga-click-footer-menu-sales_where_to_buy" href="wheretobuy">
+										<span>Where to Buy</span>
+									</a>
+								</li>
+																																							<li>
+									<a class="ga-click-footer-menu-sales_online_shop" href="products/store">
+										<span>Synology Store</span>
+									</a>
+								</li>
+																																							<li>
+									<a class="ga-click-footer-menu-sales_contact_us" href="company/contact_us">
+										<span>Contact Us</span>
+									</a>
+								</li>
+																																							<li>
+									<a class="ga-click-footer-menu-sales_become_partner" href="partner-with-synology">
+										<span>Become a Partner</span>
+									</a>
+								</li>
+																																																														<li>
+									<a class="ga-click-footer-menu-sales_schedule_demo" href="form/inquiry/demo">
+										<span>Schedule a demo</span>
+									</a>
+								</li>
+																						</ul>
+						</div>
+																	<div class="pure-u-1-1 pure-u-lg-1-4 footer_menu_pad_fix">
+							<div class="h4 title" data-toggle-ft-menu>
+								Compatibility
+								<span class="btn_toggle_x"></span>
+							</div>
+							<ul class="footer_menu_item_mobile">
+																															<li>
+									<a class="ga-click-footer-menu-hcl_hdd" href="compatibility?search_by=drives">
+										<span>HDD/SSD</span>
+									</a>
+								</li>
+																																							<li>
+									<a class="ga-click-footer-menu-hcl_camera" href="compatibility/camera">
+										<span>IP Cameras</span>
+									</a>
+								</li>
+																																							<li>
+									<a class="ga-click-footer-menu-hcl_network_card" href="compatibility?search_by=category&category=network_interface_cards&p=1">
+										<span>Network Cards</span>
+									</a>
+								</li>
+																																							<li>
+									<a class="ga-click-footer-menu-hcl_surveillance_devices" href="compatibility/surveillance_devices">
+										<span>I/O Modules, IP Speakers, Access Controllers</span>
+									</a>
+								</li>
+																																							<li>
+									<a class="ga-click-footer-menu-hcl_other" href="compatibility?search_by=category">
+										<span>Other Devices</span>
+									</a>
+								</li>
+																						</ul>
+						</div>
+																	<div class="pure-u-1-1 pure-u-lg-1-4 footer_menu_pad_fix">
+							<div class="h4 title" data-toggle-ft-menu>
+								Resources
+								<span class="btn_toggle_x"></span>
+							</div>
+							<ul class="footer_menu_item_mobile">
+																															<li>
+									<a class="ga-click-footer-menu-products_az" href="products-a-z">
+										<span>Products A-Z</span>
+									</a>
+								</li>
+																																							<li>
+									<a class="ga-click-footer-menu-resource_beta_program" href="beta">
+										<span>Beta Program</span>
+									</a>
+								</li>
+																																							<li>
+									<a class="ga-click-footer-menu-resource_bounty_program" href="security/bounty_program">
+										<span>Bounty Program</span>
+									</a>
+								</li>
+																																							<li>
+									<a class="ga-click-footer-menu-resource_synology_community" href="https://community.synology.com/enu" target="_blank">
+										<span>Community</span>
+									</a>
+								</li>
+																																							<li>
+									<a class="ga-click-footer-menu-synology_events" href="https://event.synology.com/en-us" target="_blank">
+										<span>Events</span>
+									</a>
+								</li>
+																																							<li>
+									<a class="ga-click-footer-menu-resource_subscribe_to_newsletter" href="/subscribe-newsletter">
+										<span>Subscribe to Newsletter</span>
+									</a>
+								</li>
+																						</ul>
+						</div>
+									</div>
+			</div>
+			<div class="copyright pure-u-1-1">
+				<div class="pure-g autopad">
+					<div class="pure-u-1-1 pure-u-lg-3-5 pure-u-xl-2-3">
+
+						
+						<span>Copyright © 2026 Synology Inc. All rights reserved.</span>
+						<span class="terms_wrap">
+							<a href="company/legal/terms_conditions" title="Terms &amp; Conditions" class="terms">Terms &amp; Conditions</a>
+							 | <a href="https://www.synology.com/en-us/company/legal/privacy" title="Privacy">Privacy</a>
+							 | <a href="#" class="open_cookie_preference">Cookie Preference</a>
+							 						</span>
+
+						
+					</div>
+					<div class="pure-u-1-1 pure-u-lg-2-5 pure-u-xl-1-3 footer-sm-nav-wrapper">
+						<div class="footer-sm-nav">
+							<ul class="social_links">
+
+								
+								
+								
+								
+								
+
+																											<li>
+											<a
+												href="https://www.facebook.com/synology?ref=nf"
+												target="_blank"
+												title="Facebook"
+												rel="noopener"
+											>
+																				<svg width="17" height="16" viewBox="0 0 17 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-label="Facebook icon">
+										<g clip-path="url(#clip0_7697_6967)">
+										<path d="M16.7336 8C16.7336 3.58176 13.1519 0 8.73364 0C4.3154 0 0.733643 3.58176 0.733643 8C0.733643 11.7517 3.31668 14.8998 6.80116 15.7645V10.4448H5.15156V8H6.80116V6.94656C6.80116 4.22368 8.03348 2.9616 10.7068 2.9616C11.2136 2.9616 12.0882 3.06112 12.446 3.16032V5.37632C12.2572 5.35648 11.9292 5.34656 11.5218 5.34656C10.2101 5.34656 9.70324 5.84352 9.70324 7.13536V8H12.3164L11.8674 10.4448H9.70324V15.9414C13.6645 15.463 16.734 12.0902 16.734 8H16.7336Z" fill="#2E3742"/>
+										<path d="M11.8675 10.4446L12.3164 7.99983H9.70329V7.13519C9.70329 5.84335 10.2102 5.34639 11.5219 5.34639C11.9292 5.34639 12.2572 5.35631 12.446 5.37615V3.16015C12.0883 3.06063 11.2137 2.96143 10.7068 2.96143C8.03353 2.96143 6.80121 4.22351 6.80121 6.94639V7.99983H5.15161V10.4446H6.80121V15.7643C7.42009 15.9179 8.06745 15.9998 8.73369 15.9998C9.06169 15.9998 9.38521 15.9797 9.70297 15.9413V10.4446H11.8671H11.8675Z" fill="white"/>
+										</g>
+										<defs>
+										<clipPath id="clip0_7697_6967">
+										<rect width="16" height="16" fill="white" transform="translate(0.737549)"/>
+										</clipPath>
+										</defs>
+									</svg>
+								
+											</a>
+										</li>
+																																				<li>
+											<a
+												href="https://twitter.com/synology"
+												target="_blank"
+												title="Twitter"
+												rel="noopener"
+											>
+																				<svg width="15" height="14" viewBox="0 0 15 14" fill="none" xmlns="http://www.w3.org/2000/svg" aria-label="Twitter icon">
+										<g clip-path="url(#clip0_7697_6971)">
+										<path d="M8.88611 5.925L13.9832 0H12.7754L8.34954 5.14459L4.81464 0H0.737549L6.08302 7.77954L0.737549 13.9928H1.94547L6.61927 8.55995L10.3524 13.9928H14.4295L8.88581 5.925H8.88611ZM7.23169 7.84808L6.69008 7.07341L2.38071 0.909309H4.23601L7.71372 5.88394L8.25533 6.6586L12.776 13.1249H10.9206L7.23169 7.84837V7.84808Z" fill="#2E3742"/>
+										</g>
+										<defs>
+										<clipPath id="clip0_7697_6971">
+										<rect width="13.6919" height="14" fill="white" transform="translate(0.737549)"/>
+										</clipPath>
+										</defs>
+									</svg>
+								
+											</a>
+										</li>
+																																				<li>
+											<a
+												href="https://www.youtube.com/user/synologyinc"
+												target="_blank"
+												title="YouTube"
+												rel="noopener"
+											>
+																				<svg width="19" height="14" viewBox="0 0 19 14" fill="none" xmlns="http://www.w3.org/2000/svg" aria-label="YouTube icon">
+										<g clip-path="url(#clip0_7697_6973)">
+										<path d="M18.6137 2.5301C18.3997 1.7306 17.7714 1.1023 16.9719 0.888288C15.5227 0.5 9.71521 0.5 9.71521 0.5C9.71521 0.5 3.90771 0.5 2.46004 0.888288C1.66053 1.1023 1.03224 1.7306 0.81822 2.5301C0.429932 3.97778 0.429932 7 0.429932 7C0.429932 7 0.429932 10.0222 0.81822 11.4699C1.03224 12.2694 1.66053 12.8977 2.46004 13.1117C3.90771 13.5 9.71521 13.5 9.71521 13.5C9.71521 13.5 15.5227 13.5 16.9704 13.1117C17.7699 12.8977 18.3982 12.2694 18.6122 11.4699C19.0005 10.0222 19.0005 7 19.0005 7C19.0005 7 19.0005 3.97778 18.6122 2.5301H18.6137Z" fill="#2E3742"/>
+										<path d="M7.85767 9.7854L12.6837 7.00012L7.85767 4.21484V9.7854Z" fill="white"/>
+										</g>
+										<defs>
+										<clipPath id="clip0_7697_6973">
+										<rect width="18.5706" height="13" fill="white" transform="translate(0.429443 0.5)"/>
+										</clipPath>
+										</defs>
+									</svg>
+								
+											</a>
+										</li>
+																																				<li>
+											<a
+												href="https://www.instagram.com/synology.official/"
+												target="_blank"
+												title="Instagram"
+												rel="noopener"
+											>
+																				<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-label="Instagram icon">
+										<g clip-path="url(#clip0_7697_6976)">
+										<path d="M4.68673 0.0559501C3.83553 0.0961101 3.25425 0.23195 2.74609 0.43163C2.22017 0.63659 1.77441 0.91163 1.33089 1.35675C0.887373 1.80187 0.614253 2.24795 0.410733 2.77467C0.213773 3.28395 0.080333 3.86571 0.042733 4.71739C0.00513298 5.56907 -0.00318703 5.84283 0.000972972 8.01531C0.00513297 10.1878 0.014733 10.4601 0.056013 11.3135C0.096653 12.1646 0.232013 12.7457 0.431693 13.254C0.636973 13.78 0.911693 14.2256 1.35697 14.6692C1.80225 15.1129 2.24801 15.3854 2.77601 15.5892C3.28481 15.7859 3.86673 15.92 4.71825 15.9572C5.56977 15.9945 5.84385 16.0032 8.01569 15.999C10.1875 15.9948 10.461 15.9852 11.3143 15.9448C12.1675 15.9043 12.7456 15.768 13.2541 15.5692C13.78 15.3635 14.2259 15.0892 14.6693 14.6438C15.1127 14.1984 15.3856 13.752 15.589 13.2249C15.7861 12.7161 15.92 12.1342 15.957 11.2833C15.9943 10.4294 16.0031 10.1568 15.9989 7.98459C15.9947 5.81243 15.985 5.54011 15.9445 4.68699C15.904 3.83387 15.7685 3.25451 15.569 2.74587C15.3634 2.21995 15.089 1.77467 14.6439 1.33067C14.1987 0.88667 13.752 0.61387 13.2251 0.41099C12.716 0.21403 12.1344 0.0797901 11.2829 0.0429901C10.4314 0.00619009 10.1573 -0.00324991 7.98465 0.000910089C5.81201 0.00507009 5.54001 0.0143501 4.68673 0.0559501ZM4.78017 14.518C4.00017 14.4841 3.57665 14.3545 3.29441 14.246C2.92065 14.102 2.65441 13.928 2.37313 13.6494C2.09185 13.3708 1.91905 13.1036 1.77313 12.7307C1.66353 12.4484 1.53153 12.0254 1.49505 11.2454C1.45537 10.4024 1.44705 10.1492 1.44241 8.01339C1.43777 5.87755 1.44593 5.62475 1.48289 4.78139C1.51617 4.00203 1.64657 3.57803 1.75489 3.29595C1.89889 2.92171 2.07233 2.65595 2.35153 2.37483C2.63073 2.09371 2.89713 1.92059 3.27041 1.77467C3.55233 1.66459 3.97537 1.53371 4.75505 1.49659C5.59873 1.45659 5.85153 1.44859 7.98705 1.44395C10.1226 1.43931 10.376 1.44731 11.22 1.48443C11.9994 1.51835 12.4235 1.64747 12.7053 1.75643C13.0792 1.90043 13.3453 2.07339 13.6264 2.35307C13.9075 2.63275 14.0808 2.89819 14.2267 3.27227C14.337 3.55339 14.4679 3.97627 14.5047 4.75643C14.5448 5.60011 14.5539 5.85307 14.5578 7.98843C14.5616 10.1238 14.5541 10.3774 14.5171 11.2204C14.4831 12.0004 14.3538 12.4241 14.2451 12.7067C14.1011 13.0803 13.9275 13.3467 13.6482 13.6276C13.3688 13.9086 13.1027 14.0817 12.7293 14.2276C12.4477 14.3376 12.0242 14.4688 11.2451 14.5059C10.4015 14.5456 10.1487 14.5539 8.01233 14.5585C5.87601 14.5632 5.62401 14.5545 4.78033 14.518M11.3019 3.72427C11.3022 3.91415 11.3589 4.09968 11.4646 4.25738C11.5704 4.41508 11.7206 4.53788 11.8961 4.61023C12.0717 4.68259 12.2647 4.70126 12.4509 4.66389C12.6371 4.62651 12.808 4.53476 12.942 4.40025C13.076 4.26573 13.1671 4.09449 13.2038 3.90819C13.2405 3.72189 13.2212 3.52888 13.1482 3.35359C13.0751 3.1783 12.9518 3.0286 12.7937 2.92342C12.6356 2.81823 12.4499 2.76229 12.26 2.76267C12.0055 2.76318 11.7615 2.86477 11.5819 3.04509C11.4022 3.22542 11.3015 3.46972 11.3019 3.72427ZM3.89233 8.00795C3.89681 10.2768 5.73937 12.1118 8.00769 12.1075C10.276 12.1032 12.1123 10.2608 12.108 7.99195C12.1037 5.72315 10.2607 3.88763 7.99201 3.89211C5.72337 3.89659 3.88801 5.73947 3.89233 8.00795ZM5.33329 8.00507C5.33225 7.47764 5.48763 6.96175 5.77979 6.52263C6.07194 6.08352 6.48775 5.74089 6.97462 5.53809C7.4615 5.33529 7.99759 5.28142 8.51508 5.38329C9.03258 5.48516 9.50824 5.7382 9.88193 6.11041C10.2556 6.48262 10.5105 6.95728 10.6145 7.47437C10.7184 7.99145 10.6666 8.52775 10.4658 9.01542C10.2649 9.5031 9.92391 9.92026 9.48595 10.2142C9.04799 10.508 8.53272 10.6655 8.00529 10.6665C7.65508 10.6672 7.30816 10.599 6.98433 10.4656C6.66051 10.3323 6.36612 10.1364 6.118 9.88928C5.86987 9.64213 5.67286 9.34852 5.53822 9.02523C5.40358 8.70193 5.33394 8.35528 5.33329 8.00507Z" fill="#2E3742"/>
+										</g>
+										<defs>
+										<clipPath id="clip0_7697_6976">
+										<rect width="16" height="16" fill="white"/>
+										</clipPath>
+										</defs>
+									</svg>
+								
+											</a>
+										</li>
+																	
+							</ul>
+
+															
+																																																																																																																
+																
+								<s-locale-picker data="{&quot;isChina&quot;:false,&quot;userCountry&quot;:&quot;mx&quot;,&quot;lang&quot;:&quot;en-us&quot;,&quot;strings&quot;:{&quot;langTitle&quot;:&quot;Please select your preferred language&quot;},&quot;langList&quot;:{&quot;Global - English&quot;:&quot;en-global&quot;,&quot;Africa - English&quot;:&quot;en-af&quot;,&quot;Australia - English&quot;:&quot;en-au&quot;,&quot;Brazil - English&quot;:&quot;en-br&quot;,&quot;Canada - English&quot;:&quot;en-ca&quot;,&quot;Danmark - Dansk&quot;:&quot;da-dk&quot;,&quot;Deutschland - Deutsch&quot;:&quot;de-de&quot;,&quot;Espa\u00f1a - Espa\u00f1ol&quot;:&quot;es-es&quot;,&quot;Europe - English&quot;:&quot;en-eu&quot;,&quot;France - Fran\u00e7ais&quot;:&quot;fr-fr&quot;,&quot;India - English&quot;:&quot;en-in&quot;,&quot;Indonesia - English&quot;:&quot;en-id&quot;,&quot;Italia - Italiano&quot;:&quot;it-it&quot;,&quot;Magyarorsz\u00e1g - Magyar&quot;:&quot;hu-hu&quot;,&quot;Malaysia - English&quot;:&quot;en-my&quot;,&quot;Middle East - English&quot;:&quot;en-me&quot;,&quot;M\u00e9xico - Espa\u00f1ol&quot;:&quot;es-mx&quot;,&quot;Nederland - Nederlands&quot;:&quot;nl-nl&quot;,&quot;New Zealand - English&quot;:&quot;en-nz&quot;,&quot;Philippines - English&quot;:&quot;en-ph&quot;,&quot;Polska - Polski&quot;:&quot;pl-pl&quot;,&quot;Romania - English&quot;:&quot;en-ro&quot;,&quot;Singapore - English&quot;:&quot;en-sg&quot;,&quot;Sverige - Svenska&quot;:&quot;sv-se&quot;,&quot;T\u00fcrkiye - T\u00fcrk\u00e7e&quot;:&quot;tr-tr&quot;,&quot;United Kingdom - English&quot;:&quot;en-uk&quot;,&quot;United States - English&quot;:&quot;en-us&quot;,&quot;Vi\u1ec7t Nam - Ti\u1ebfng Vi\u1ec7t&quot;:&quot;vi-vn&quot;,&quot;\u010cesk\u00e1 republika - \u010ce\u0161tina&quot;:&quot;cs-cz&quot;,&quot;\u0420\u043e\u0441\u0441\u0438\u044f - \u0420\u0443\u0441\u0441\u043a\u0438\u0439&quot;:&quot;ru-ru&quot;,&quot;\u0e44\u0e17\u0e22 - \u0e44\u0e17\u0e22&quot;:&quot;th-th&quot;,&quot;\u53f0\u7063 - \u7e41\u9ad4\u4e2d\u6587&quot;:&quot;zh-tw&quot;,&quot;\u65e5\u672c - \u65e5\u672c\u8a9e&quot;:&quot;ja-jp&quot;,&quot;\u9999\u6e2f\u7279\u5225\u884c\u653f\u5340 - \u7e41\u9ad4\u4e2d\u6587&quot;:&quot;zh-hk&quot;,&quot;\ub300\ud55c\ubbfc\uad6d - \ud55c\uad6d\uc5b4&quot;:&quot;ko-kr&quot;},&quot;langCateTable&quot;:{&quot;area_americas&quot;:&quot;Americas&quot;,&quot;area_asia&quot;:&quot;Asia Pacific&quot;,&quot;area_europe&quot;:&quot;Europe&quot;,&quot;area_region&quot;:&quot;Region&quot;},&quot;langCateNameTable&quot;:{&quot;area_americas&quot;:[&quot;Brazil - English&quot;,&quot;Canada - English&quot;,&quot;M\u00e9xico - Espa\u00f1ol&quot;,&quot;United States - English&quot;],&quot;area_asia&quot;:[&quot;Australia - English&quot;,&quot;India - English&quot;,&quot;Indonesia - English&quot;,&quot;Malaysia - English&quot;,&quot;New Zealand - English&quot;,&quot;Philippines - English&quot;,&quot;Singapore - English&quot;,&quot;Vi\u1ec7t Nam - Ti\u1ebfng Vi\u1ec7t&quot;,&quot;\u0e44\u0e17\u0e22 - \u0e44\u0e17\u0e22&quot;,&quot;\u53f0\u7063 - \u7e41\u9ad4\u4e2d\u6587&quot;,&quot;\u65e5\u672c - \u65e5\u672c\u8a9e&quot;,&quot;\u9999\u6e2f\u7279\u5225\u884c\u653f\u5340 - \u7e41\u9ad4\u4e2d\u6587&quot;,&quot;\ub300\ud55c\ubbfc\uad6d - \ud55c\uad6d\uc5b4&quot;],&quot;area_europe&quot;:[&quot;Danmark - Dansk&quot;,&quot;Deutschland - Deutsch&quot;,&quot;Espa\u00f1a - Espa\u00f1ol&quot;,&quot;France - Fran\u00e7ais&quot;,&quot;Italia - Italiano&quot;,&quot;Magyarorsz\u00e1g - Magyar&quot;,&quot;Nederland - Nederlands&quot;,&quot;Polska - Polski&quot;,&quot;Romania - English&quot;,&quot;Sverige - Svenska&quot;,&quot;T\u00fcrkiye - T\u00fcrk\u00e7e&quot;,&quot;United Kingdom - English&quot;,&quot;\u010cesk\u00e1 republika - \u010ce\u0161tina&quot;,&quot;\u0420\u043e\u0441\u0441\u0438\u044f - \u0420\u0443\u0441\u0441\u043a\u0438\u0439&quot;],&quot;area_region&quot;:[&quot;Africa - English&quot;,&quot;Europe - English&quot;,&quot;Global - English&quot;,&quot;Middle East - English&quot;]}}">
+									<div class="footer-sm-nav__locale">
+										<svg width="22" height="22" viewBox="0 0 22 22" fill="none" xmlns="http://www.w3.org/2000/svg" aria-label="Language icon">
+											<circle cx="11" cy="11" r="7.5" stroke="#2E3742"/>
+											<path d="M14.5 11C14.5 13.1483 14.0635 15.0686 13.3812 16.4332C12.6839 17.8278 11.8132 18.5 11 18.5C10.1868 18.5 9.31607 17.8278 8.61879 16.4332C7.93646 15.0686 7.5 13.1483 7.5 11C7.5 8.85165 7.93646 6.93141 8.61879 5.56675C9.31607 4.17219 10.1868 3.5 11 3.5C11.8132 3.5 12.6839 4.17219 13.3812 5.56675C14.0635 6.93141 14.5 8.85165 14.5 11Z" stroke="#2E3742"/>
+											<line x1="4" y1="8.5" x2="18" y2="8.5" stroke="#2E3742"/>
+											<line x1="4" y1="13.5" x2="18" y2="13.5" stroke="#2E3742"/>
+										</svg> United States - English</div>
+								</s-locale-picker>
+							</div>
+											</div>
+				</div>
+			</div>
+		</div>
+	</div>
+</div>
+
+
+<script nonce="188c1fdca79d927f6e812133173fc41d3a4e57074de521020274caa9bb29af7d" >
+	$(document).ready(function() {
+		SYNO_WEB.footer();
+
+		$(".open_cookie_preference").on("click", function(e) {
+			e.preventDefault();
+			e.stopPropagation();
+			SYNO_COOKIE_ELEMENT.showDialog()
+		});
+	});
+</script>
+
+                
+        
+        
+        
+        
+        
+                            
+                  
+        
+        
+        
+        
+                  
+        
+                  
+        
+        
+        
+                  
+        
+        
+                  
+        
+        
+          
+  <s-widget
+    color="#0067e6"
+    use-back-to-top="true"
+    widget-title="How can we help?"
+    widget-tooltips="Help center"
+    widget-list="[{&quot;title&quot;:&quot;LiveChat&quot;,&quot;desc&quot;:&quot;Get help from our technical support engineers.&quot;,&quot;url&quot;:&quot;https:\/\/secure-fra.livechatinc.com\/licence\/5914341\/v2\/open_chat.cgi?groups=49&amp;license_id=5914341&amp;url=synology.com\/en-us&quot;,&quot;icon&quot;:&quot;https:\/\/gallery.synology.com\/images\/common\/icons\/widgets\/livechat.svg&quot;,&quot;target&quot;:&quot;_blank&quot;},{&quot;title&quot;:&quot;Technical Support&quot;,&quot;desc&quot;:&quot;Get help with technical issues by filling support ticket.&quot;,&quot;url&quot;:&quot;https:\/\/account.synology.com\/en-us\/support&quot;,&quot;icon&quot;:&quot;https:\/\/gallery.synology.com\/images\/common\/icons\/widgets\/technical.svg&quot;,&quot;target&quot;:&quot;_blank&quot;},{&quot;title&quot;:&quot;Knowledge Center&quot;,&quot;desc&quot;:&quot;Read the frequently asked questions and latest tutorials.&quot;,&quot;url&quot;:&quot;https:\/\/kb.synology.com\/en-us&quot;,&quot;icon&quot;:&quot;https:\/\/gallery.synology.com\/images\/common\/icons\/widgets\/support.svg&quot;,&quot;target&quot;:&quot;_blank&quot;},{&quot;title&quot;:&quot;Hotline: +1 425 296 3177&quot;,&quot;desc&quot;:&quot;Hours of operation: 24\/7 including holidays.&quot;,&quot;url&quot;:&quot;https:\/\/www.synology.com\/en-us\/company\/office_location&quot;,&quot;icon&quot;:&quot;https:\/\/gallery.synology.com\/images\/common\/icons\/widgets\/hotline.svg&quot;}]"
+    use-livechat=""
+    livechat-icon="https://gallery.synology.com/images/common/icons/widgets/livechat.svg"
+    livechat-title="LiveChat"
+    livechat-desc-active="Get help from our technical support engineers."
+    livechat-desc-disable="Currently unavailable. We'll get back to you between 9:00 AM - 18:00 PM."
+    sprite="https://fileres.synology.com/images/common/icons/widgets/sprite.png"
+    contact-tooltips="Request a consultation"
+  >
+  </s-widget>
+  <style>
+    #chat-widget-container { display: none; }
+    #livechat-eye-catcher-img { display: none !important;}
+    .chat-widget-container--active { display: block !important; }
+    .chat-widget-container--hide { opacity: 0 !important; }
+    .chat-widget-container--show {
+      transform-origin: 100% 100%;
+      animation: chat-widget-show .2s ease-in-out forwards;
+    }
+    @keyframes chat-widget-show {
+      from {
+        transform: scale(0);
+      }
+      to {
+        transform: scale(1);
+      }
+    }
+  </style>
+<style>
+  .chat-widget-container-customize-size { width: 600px!important; height: 750px!important; }
+</style>
+</footer>
+	</div>
+	<div id="mask"></div>
+
+	<script src="/js/vendor-legacy.concat.js"></script>
+
+	
+
+	<script src="js/vendor/dsygno/dsygno-v3.44.1.js?v=8f0475"></script>
+	<script src="js/vendor/dsygno/dsygno-vue-v3.44.1.js?v=8f0475"></script>
+	<script nonce="188c1fdca79d927f6e812133173fc41d3a4e57074de521020274caa9bb29af7d" >
+		// 註冊 DSygno Vue 組件到全域 DOM_VUE
+		if (window.DOM_VUE && window.DsygnoVueLib) {
+			window.DOM_VUE.component('s-dropdown-v2', window.DsygnoVueLib.SDropdownV2);
+		}
+	</script>
+	
+					<script nonce="188c1fdca79d927f6e812133173fc41d3a4e57074de521020274caa9bb29af7d" >
+window.console = (window.console || {});
+window.console.log = function() {};
+window.console.trace = function() {};
+console.info("%cStop!", "color: red; font-weight: bold; font-size: 50px;");
+console.info("%cThis is a console for developers. If someone has asked you to open this " + "window, they are likely trying to compromise your account.", "color: red;");
+console.info("%cPlease close this window now.", "color: blue;");
+</script>	
+		<template id="ip-banner_template">
+	<div class="ip-banner" :class="{ hide: info.hide }">
+		<div class="s-containerless">
+			<div class="ip-banner__desc-box">
+				<span v-text="info.descr"></span>
+			</div>
+			<div class="ip-banner__btn-box select2-container-custom__wrapper">
+				<s-select
+					v-model="recommend_lang"
+					:options="options_for_sselect"
+					:disabled="info.dropdown_disabled"
+					:use_search="false"
+					:teleport="false"
+					size="s"
+				></s-select>
+
+				<a class="ip-banner__btn-box__btn-continue-wrapper" :href="info.langs[recommend_lang].url" @click="close" title="Continue">
+					<s-btn
+					  id="ip-banner-btn-box-btn-continue"
+					  class="ip-banner__btn-box__btn-continue"
+					  color="white"
+					  bg-color="#000"
+					  size="l"
+					>
+					  Continuar
+					</s-btn>
+				</a>
+				<a class="btn-close" @click="close"></a>
+			</div>
+		</div>
+	</div>
+</template>
+
+<script nonce="188c1fdca79d927f6e812133173fc41d3a4e57074de521020274caa9bb29af7d" >
+	DOM_VUE.component('ip-banner', {
+		template: "#ip-banner_template",
+		props: ['info'],
+		data: function() {
+			return {
+				recommend_lang: this.info.recommend,
+				timer: null,
+			}
+		},
+
+		computed: {
+			options_for_sselect: function() {
+				const langsByCat = this.info.langs_by_category;
+				const areaStrings = this.info.area_strings;
+
+				if (!langsByCat || !areaStrings) {
+					return [];
+				}
+
+				return Object.keys(langsByCat).map(group => {
+					return {
+						label: areaStrings[group],
+						options: langsByCat[group].map(lang => ({
+							label: lang,
+							value: lang
+						}))
+					};
+				});
+			}
+		},
+
+		mounted: function() {
+			var vm = this;
+			vm.setPlaceholder();
+
+			SYNO_HELPER.on("scroll", {
+				key: "ip_banner",
+				el: "#ip_banner_holder",
+			}, vm.onScroll);
+
+			SYNO_HELPER.on("resize", {
+				key: "ip_banner",
+				el: "#ip_banner_holder",
+			}, vm.onResize);
+
+			this.timer = setInterval(function() {
+				vm.onScroll();
+			}, 500);
+		},
+		methods: {
+			setPlaceholder: function() {
+				$("#ip_banner_holder").height($(this.$el).outerHeight());
+				$("#ip_banner_holder_footer").height(0);
+			},
+			onScroll: function() {
+				var el = $(this.$el);
+				var cookie_el = $(".syno_cookie_element");
+				var offset = (cookie_el.length && (cookie_el.css("top") == "0px")) ? cookie_el.height() : 0;
+
+				el.css({ top: offset, bottom: 'auto' });
+			},
+			onResize: function() {
+				this.onScroll();
+				this.setPlaceholder();
+			},
+			close: function() {
+				SYNO_HELPER.off("scroll", this.onScroll);
+				SYNO_HELPER.off("resize", this.onResize);
+				clearInterval(this.timer);
+
+				localStorage.setItem(this.info.storage_key, new Date().getTime());
+
+				setTimeout(function() {
+					$("#ip_banner_holder").remove();
+				}, 10);
+				// this.$destroy();
+			},
+		},
+	});
+
+	$(document).ready(function() {
+		var info = {"langs":{"Brazil - English":{"url":"https:\/\/www.synology.com\/en-br\/dsm\/Btrfs","lang_display":"Brazil - English"},"Canada - English":{"url":"https:\/\/www.synology.com\/en-ca\/dsm\/Btrfs","lang_display":"Canada - English"},"M\u00e9xico - Espa\u00f1ol":{"url":"https:\/\/www.synology.com\/es-mx\/dsm\/Btrfs","lang_display":"M\u00e9xico - Espa\u00f1ol"},"United States - English":{"url":"https:\/\/www.synology.com\/en-us\/dsm\/Btrfs","lang_display":"United States - English"},"Australia - English":{"url":"https:\/\/www.synology.com\/en-au\/dsm\/Btrfs","lang_display":"Australia - English"},"India - English":{"url":"https:\/\/www.synology.com\/en-in\/dsm\/Btrfs","lang_display":"India - English"},"Indonesia - English":{"url":"https:\/\/www.synology.com\/en-id\/dsm\/Btrfs","lang_display":"Indonesia - English"},"Malaysia - English":{"url":"https:\/\/www.synology.com\/en-my\/dsm\/Btrfs","lang_display":"Malaysia - English"},"New Zealand - English":{"url":"https:\/\/www.synology.com\/en-nz\/dsm\/Btrfs","lang_display":"New Zealand - English"},"Philippines - English":{"url":"https:\/\/www.synology.com\/en-ph\/dsm\/Btrfs","lang_display":"Philippines - English"},"Singapore - English":{"url":"https:\/\/www.synology.com\/en-sg\/dsm\/Btrfs","lang_display":"Singapore - English"},"Vi\u1ec7t Nam - Ti\u1ebfng Vi\u1ec7t":{"url":"https:\/\/www.synology.com\/vi-vn\/dsm\/Btrfs","lang_display":"Vi\u1ec7t Nam - Ti\u1ebfng Vi\u1ec7t"},"\u0e44\u0e17\u0e22 - \u0e44\u0e17\u0e22":{"url":"https:\/\/www.synology.com\/th-th\/dsm\/Btrfs","lang_display":"\u0e44\u0e17\u0e22 - \u0e44\u0e17\u0e22"},"\u53f0\u7063 - \u7e41\u9ad4\u4e2d\u6587":{"url":"https:\/\/www.synology.com\/zh-tw\/dsm\/Btrfs","lang_display":"\u53f0\u7063 - \u7e41\u9ad4\u4e2d\u6587"},"\u65e5\u672c - \u65e5\u672c\u8a9e":{"url":"https:\/\/www.synology.com\/ja-jp\/dsm\/Btrfs","lang_display":"\u65e5\u672c - \u65e5\u672c\u8a9e"},"\u9999\u6e2f\u7279\u5225\u884c\u653f\u5340 - \u7e41\u9ad4\u4e2d\u6587":{"url":"https:\/\/www.synology.com\/zh-hk\/dsm\/Btrfs","lang_display":"\u9999\u6e2f\u7279\u5225\u884c\u653f\u5340 - \u7e41\u9ad4\u4e2d\u6587"},"\ub300\ud55c\ubbfc\uad6d - \ud55c\uad6d\uc5b4":{"url":"https:\/\/www.synology.com\/ko-kr\/dsm\/Btrfs","lang_display":"\ub300\ud55c\ubbfc\uad6d - \ud55c\uad6d\uc5b4"},"Danmark - Dansk":{"url":"https:\/\/www.synology.com\/da-dk\/dsm\/Btrfs","lang_display":"Danmark - Dansk"},"Deutschland - Deutsch":{"url":"https:\/\/www.synology.com\/de-de\/dsm\/Btrfs","lang_display":"Deutschland - Deutsch"},"Espa\u00f1a - Espa\u00f1ol":{"url":"https:\/\/www.synology.com\/es-es\/dsm\/Btrfs","lang_display":"Espa\u00f1a - Espa\u00f1ol"},"France - Fran\u00e7ais":{"url":"https:\/\/www.synology.com\/fr-fr\/dsm\/Btrfs","lang_display":"France - Fran\u00e7ais"},"Italia - Italiano":{"url":"https:\/\/www.synology.com\/it-it\/dsm\/Btrfs","lang_display":"Italia - Italiano"},"Magyarorsz\u00e1g - Magyar":{"url":"https:\/\/www.synology.com\/hu-hu\/dsm\/Btrfs","lang_display":"Magyarorsz\u00e1g - Magyar"},"Nederland - Nederlands":{"url":"https:\/\/www.synology.com\/nl-nl\/dsm\/Btrfs","lang_display":"Nederland - Nederlands"},"Polska - Polski":{"url":"https:\/\/www.synology.com\/pl-pl\/dsm\/Btrfs","lang_display":"Polska - Polski"},"Romania - English":{"url":"https:\/\/www.synology.com\/en-ro\/dsm\/Btrfs","lang_display":"Romania - English"},"Sverige - Svenska":{"url":"https:\/\/www.synology.com\/sv-se\/dsm\/Btrfs","lang_display":"Sverige - Svenska"},"T\u00fcrkiye - T\u00fcrk\u00e7e":{"url":"https:\/\/www.synology.com\/tr-tr\/dsm\/Btrfs","lang_display":"T\u00fcrkiye - T\u00fcrk\u00e7e"},"United Kingdom - English":{"url":"https:\/\/www.synology.com\/en-uk\/dsm\/Btrfs","lang_display":"United Kingdom - English"},"\u010cesk\u00e1 republika - \u010ce\u0161tina":{"url":"https:\/\/www.synology.com\/cs-cz\/dsm\/Btrfs","lang_display":"\u010cesk\u00e1 republika - \u010ce\u0161tina"},"\u0420\u043e\u0441\u0441\u0438\u044f - \u0420\u0443\u0441\u0441\u043a\u0438\u0439":{"url":"https:\/\/www.synology.com\/ru-ru\/dsm\/Btrfs","lang_display":"\u0420\u043e\u0441\u0441\u0438\u044f - \u0420\u0443\u0441\u0441\u043a\u0438\u0439"},"Africa - English":{"url":"https:\/\/www.synology.com\/en-af\/dsm\/Btrfs","lang_display":"Africa - English"},"Europe - English":{"url":"https:\/\/www.synology.com\/en-eu\/dsm\/Btrfs","lang_display":"Europe - English"},"Global - English":{"url":"https:\/\/www.synology.com\/en-global\/dsm\/Btrfs","lang_display":"Global - English"},"Middle East - English":{"url":"https:\/\/www.synology.com\/en-me\/dsm\/Btrfs","lang_display":"Middle East - English"}},"langs_by_category":{"area_americas":["Brazil - English","Canada - English","M\u00e9xico - Espa\u00f1ol","United States - English"],"area_asia":["Australia - English","India - English","Indonesia - English","Malaysia - English","New Zealand - English","Philippines - English","Singapore - English","Vi\u1ec7t Nam - Ti\u1ebfng Vi\u1ec7t","\u0e44\u0e17\u0e22 - \u0e44\u0e17\u0e22","\u53f0\u7063 - \u7e41\u9ad4\u4e2d\u6587","\u65e5\u672c - \u65e5\u672c\u8a9e","\u9999\u6e2f\u7279\u5225\u884c\u653f\u5340 - \u7e41\u9ad4\u4e2d\u6587","\ub300\ud55c\ubbfc\uad6d - \ud55c\uad6d\uc5b4"],"area_europe":["Danmark - Dansk","Deutschland - Deutsch","Espa\u00f1a - Espa\u00f1ol","France - Fran\u00e7ais","Italia - Italiano","Magyarorsz\u00e1g - Magyar","Nederland - Nederlands","Polska - Polski","Romania - English","Sverige - Svenska","T\u00fcrkiye - T\u00fcrk\u00e7e","United Kingdom - English","\u010cesk\u00e1 republika - \u010ce\u0161tina","\u0420\u043e\u0441\u0441\u0438\u044f - \u0420\u0443\u0441\u0441\u043a\u0438\u0439"],"area_region":["Africa - English","Europe - English","Global - English","Middle East - English"]},"hide":false,"recommend":"M\u00e9xico - Espa\u00f1ol","dropdown_disabled":false,"descr":"Parece que hay una p\u00e1gina m\u00e1s localizada disponible para su ubicaci\u00f3n.","button_text":"Continuar","area_strings":{"area_americas":"Am\u00e9rica","area_asia":"Asia Pac\u00edfico","area_europe":"Europa","area_region":"Regi\u00f3n"}};
+		info.storage_key = 'ip_banner_setup';
+
+		if (localStorage && localStorage.getItem(info.storage_key)) {
+			var gap = new Date().getTime() - parseInt(localStorage.getItem(info.storage_key), 10);
+			if (gap < 2*24*60*60*1000) {
+				localStorage.setItem(info.storage_key, new Date().getTime());
+				info.hide = true;
+			}
+		}
+
+		if (info.hide) {
+			return;
+		}
+
+		$("body").prepend('<div id="ip_banner_holder"><ip-banner :info="info"></ip-banner></div>');
+		var vm = DOM_VUE.createApp({
+			el: "#ip_banner_holder",
+			data: {
+				info: info,
+			}
+		})
+	});
+</script>	
+<template id="syno-checkbox_template">
+	<label class="syno-btn-checkbox btn btn-sm" :class="labelStyle">
+		<i :class="iconStyle" v-if="icon"></i>
+		<slot></slot>
+		<input type="checkbox" :name="name" :value="opt" :checked="checked" :disabled="disabled" @change="$emit('update:modelValue', !modelValue)">
+	</label>
+</template>
+
+<script nonce="188c1fdca79d927f6e812133173fc41d3a4e57074de521020274caa9bb29af7d" >
+	DOM_VUE.component('syno-checkbox', {
+		template: "#syno-checkbox_template",
+		props: {
+			name: null,
+			modelValue: null,
+			opt: null,
+			disabled: {
+				type: Boolean,
+				default: false,
+			},
+			classNormal: {
+				type: String,
+				default: 'btn-outline-primary'
+			},
+			classChecked: {
+				type: String,
+				default: 'btn-primary active'
+			},
+			classDisabled: {
+				type: String,
+				default: 'btn-outline-secondary disabled'
+			},
+			icon: {
+				type: Boolean,
+				default: true
+			},
+			iconNormal: {
+				type: String,
+				default: 'fa fa-minus'
+			},
+			iconChecked: {
+				type: String,
+				default: 'fa fa-check'
+			},
+		},
+		computed: {
+			checked: function() {
+				return this.modelValue;
+			},
+			labelStyle: function() {
+				if (this.disabled) {
+					return this.classDisabled;
+				} else if (this.checked) {
+					return this.classChecked;
+				}
+				return this.classNormal;
+			},
+			iconStyle: function() {
+				return (this.checked) ? this.iconChecked : this.iconNormal;
+			}
+		}
+	});
+</script>
+
+
+<template id="syno-radio_template">
+  <label class="syno-btn-radio btn" :class="labelStyle">
+    <i :class="iconStyle" v-if="icon"></i>
+    <slot></slot>
+    <input
+      type="radio"
+      :name="name"
+      :value="opt"
+      :checked="checked"
+      :disabled="disabled"
+      @change="$emit('update:modelValue', opt)"
+    />
+  </label>
+</template>
+
+<script nonce="188c1fdca79d927f6e812133173fc41d3a4e57074de521020274caa9bb29af7d" >
+  DOM_VUE.component("syno-radio", {
+    template: "#syno-radio_template",
+    props: {
+      name: null,
+      modelValue: null,
+      opt: null,
+      disabled: {
+        type: Boolean,
+        default: false,
+      },
+      classNormal: {
+        type: String,
+        default: "btn-outline-primary",
+      },
+      classChecked: {
+        type: String,
+        default: "btn-primary active",
+      },
+      classDisabled: {
+        type: String,
+        default: "btn-outline-secondary disabled",
+      },
+      icon: {
+        type: Boolean,
+        default: false,
+      },
+      iconNormal: {
+        type: String,
+        default: "fa ",
+      },
+      iconChecked: {
+        type: String,
+        default: "fa fa-circle",
+      },
+    },
+    computed: {
+      checked: function () {
+        return this.modelValue == this.opt;
+      },
+      labelStyle: function () {
+        if (this.disabled) {
+          return this.classDisabled;
+        } else if (this.checked) {
+          return this.classChecked;
+        }
+        return this.classNormal;
+      },
+      iconStyle: function () {
+        return this.checked ? this.iconChecked : this.iconNormal;
+      },
+    },
+  });
+</script>
+
+
+<script nonce="188c1fdca79d927f6e812133173fc41d3a4e57074de521020274caa9bb29af7d" >
+window.SELECT2_OPT = Object.assign({}, window.SELECT2_OPT);
+
+(function() {
+	const DIACRITICS = $.fn.select2.amd.require('select2/diacritics');
+
+	function stripDiacritics(text) {
+		// Used 'uni range + named function' from http://jsperf.com/diacritics/18
+		function match(a) {
+			return DIACRITICS[a] || a;
+		}
+	
+		return text.replace(/[^\u0000-\u007E]/g, match);
+	}
+
+	function matchCore(text, term) {
+		var text = stripDiacritics(text).toUpperCase();
+		var term = stripDiacritics(term).toUpperCase();
+		
+		return (text.indexOf(term) > -1)
+	}
+
+	function matcher(params, data) {
+		// Always return the object if there is nothing to compare
+		if (params.term == null || params.term.trim() === '') {
+			return data;
+		}
+
+		// Do a recursive check for options with children
+		if (data.children && data.children.length > 0) {
+			// Clone the data object if there are children
+			// This is required as we modify the object to remove any non-matches
+			var match = $.extend(true, {}, data);
+			
+			// If optgroup contains term, return all children
+			if (matchCore(data.text, params.term)) {
+				return match;
+			}
+
+			// Check each child of the option
+			for (var c = data.children.length - 1; c >= 0; c--) {
+				var child = data.children[c];
+
+				var matches = matcher(params, child);
+
+				// If there wasn't a match, remove the object in the array
+				if (matches == null) {
+					match.children.splice(c, 1);
+				}
+			}
+
+			// If any children matched, return the new object
+			if (match.children.length > 0) {
+				return match;
+			}
+
+			// If there were no matching children, check just the plain object
+			return matcher(params, match);
+		}
+
+		// Check if the text contains the term
+		if (matchCore(data.text, params.term)) {
+			return data;
+		}
+
+		// If it doesn't contain the term, don't return anything
+		return null;
+	}
+	
+	window.SELECT2_OPT.matcher = matcher;
+})();
+</script>
+<script nonce="188c1fdca79d927f6e812133173fc41d3a4e57074de521020274caa9bb29af7d" >
+	DOM_VUE.component('select2', {
+		template: '<select><slot></slot></select>',
+		props: {
+			modelValue: null,
+			options: null,
+			placeholder: {
+				type: String,
+				default: "Find your Synology product"
+			},
+			label_search: {
+				type: String,
+				default: "Enter Product's Model Name"
+			},
+			label_select: {
+				type: String,
+				default: "Select a product"
+			},
+			label_no_result: {
+				type: String,
+				default: '',
+			},
+			show_search: {
+				type: String,
+				default: 'true'
+			},
+			dropdown_style: {
+				type: String,
+				default: ''
+			},
+			placeholder_search: {
+				type: String,
+				default: ''
+			}
+		},
+		computed: {
+			opt: function() {
+				var vm = this;
+				var ret = {
+					data: this.options,
+					placeholder: this.placeholder,
+					minimumResultsForSearch: ('true' == this.show_search) ? 1 : Infinity,
+					matcher: SELECT2_OPT.matcher,
+				}
+
+				if (vm.label_no_result) {
+					ret.language = {
+						noResults: function() {
+							return vm.label_no_result;
+						}
+					}
+				}
+				return ret;
+			}
+		},
+		mounted: function () {
+			this.init();
+		},
+		watch: {
+			modelValue: function (value) {
+				// update value
+				$(this.$el).val(value).trigger('change');
+			},
+		},
+		methods: {
+			init() {
+				var vm = this;
+				$(this.$el)
+					// init select2
+					.select2(this.opt)
+					.val(this.modelValue)
+					.trigger('change')
+					.on('change', function () {
+						vm.$emit('update:modelValue', this.value);
+					})
+					.on("select2:open", function() {
+						setTimeout(() => {
+							$(".select2-dropdown .area_hint").remove();
+							if (vm.label_search) {
+								$(".select2-search--dropdown").prepend('<span class="area_hint">'+vm.label_search+'</span>');
+							}
+							if (vm.label_select) {
+								$(".select2-results").prepend('<span class="area_hint">'+vm.label_select+'</span>');
+							}
+							if(vm.dropdown_style){
+								$(".select2-dropdown").addClass(vm.dropdown_style);
+								$("body").addClass('body--' + vm.dropdown_style);
+							}
+							if(vm.placeholder_search){
+								$(".select2-search__field").attr('placeholder', vm.placeholder_search);
+							}
+						}, 0);
+					})
+					.on("select2:close", function() {
+						if(!$(".select2-dropdown").hasClass(vm.dropdown_style)){
+							$(".select2-dropdown").removeClass(vm.dropdown_style);
+							$("body").removeClass('body--' + vm.dropdown_style);
+						}
+					});
+					$(this.$el).next('.select2').find(".select2-selection__rendered").attr({'title': vm.placeholder });
+			},
+		},
+		unmounted: function () {
+			$(this.$el).off().select2('destroy')
+		}
+	});
+</script>
+<script nonce="188c1fdca79d927f6e812133173fc41d3a4e57074de521020274caa9bb29af7d" >
+	DOM_VUE.component('select2-plain', {
+		template: '<select><slot></slot></select>',
+		props: {
+			modelValue: null,
+			placeholder: {
+				type: String,
+				default: "Please select"
+			},
+			label_select: {
+				type: String,
+				default: null
+			},
+			dropdown_style: {
+				type: String,
+				default: ''
+			},
+			width: {
+				type: String,
+				default: null
+			}
+		},
+		mounted: function () {
+			var vm = this;
+			this.forceupdate();
+			$(this.$el)
+				// init select2
+				.val(this.modelValue)
+				.trigger('change')
+				.on('change', function () {
+					vm.$emit('update:modelValue', this.value)
+				})
+				.on("select2:open", function() {
+					$(".select2-dropdown .area_hint").remove();
+					if (vm.label_select) {
+						$(".select2-results").prepend('<span class="area_hint">'+vm.label_select+'</span>');
+					}
+					if(vm.dropdown_style){
+						$(".select2-dropdown").addClass(vm.dropdown_style);
+					}
+				})
+				.on("select2:close", function() {
+					if(!$(".select2-dropdown").hasClass(vm.dropdown_style)){
+						$(".select2-dropdown").removeClass(vm.dropdown_style);
+					}
+				});
+
+		},
+		methods: {
+			forceupdate: function() {
+				var param = {
+					placeholder: this.placeholder,
+					minimumResultsForSearch: -1,
+				}
+				if (this.width) {
+					param.width = this.width;
+				}
+				$(this.$el).select2(param);
+			}
+		},
+		watch: {
+			modelValue: function (value) {
+				// update value
+				$(this.$el).val(value).trigger('change');
+			},
+			options: function (options) {
+				var vm = this;
+				$(this.$el).empty().select2(this.opt).val(this.modelValue)
+				.trigger('change')
+				.on('change', function () {
+					vm.$emit('update:modelValue', this.value);
+				})
+				.on("select2:open", function() {
+					if(vm.dropdown_style){
+						$(".select2-dropdown").addClass(vm.dropdown_style);
+					}
+				})
+				.on("select2:close", function() {
+					if(!$(".select2-dropdown").hasClass(vm.dropdown_style)){
+						$(".select2-dropdown").removeClass(vm.dropdown_style);
+					}
+				});
+			}
+		},
+		unmounted: function () {
+			$(this.$el).off().select2('destroy')
+		}
+	});
+</script>
+
+<script nonce="188c1fdca79d927f6e812133173fc41d3a4e57074de521020274caa9bb29af7d" >
+DOM_VUE.component('s-select', {
+    template: `
+        <s-dropdown-v2 v-bind="sDropdownV2Props" @update:modelValue="onUpdate">
+            <template #control-icon v-if="useControlIcon && $slots['control-icon']">
+                <slot name="control-icon"></slot>
+            </template>
+        </s-dropdown-v2>
+    `,
+    props: {
+        modelValue: {
+            type: [String, Number, Array],
+            default: null
+        },
+        options: {
+            type: [Array, Object],
+            default: () => []
+        },
+        multiple: {
+            type: Boolean,
+            default: false
+        },
+        disabled: {
+            type: Boolean,
+            default: false
+        },
+        required: {
+            type: Boolean,
+            default: false
+        },
+        use_search: {
+            type: Boolean,
+            default: true
+        },
+        teleport: {
+            type: Boolean,
+            default: true
+        },
+        name: {
+            type: String,
+            default: undefined
+        },
+        id: {
+            type: String,
+            default: undefined
+        },
+        ariaLabel: {
+            type: String,
+            default: undefined
+        },
+        placeholder: {
+            type: String,
+            default: "Please select"
+        },
+        placeholder_search: {
+            type: String,
+            default: undefined
+        },
+        labels: {
+            type: Object,
+            default: () => ({})
+        },
+        useCombobox: {
+            type: Boolean,
+            default: false
+        },
+        useControlIcon: {
+            type: Boolean,
+            default: false
+        },
+        type: {
+            type: String,
+            default: undefined
+        },
+        size: {
+            type: String,
+            default: undefined
+        },
+        theme: {
+            type: String,
+            default: undefined
+        },
+        rounded: {
+            type: Boolean,
+            default: false
+        },
+        use_include_all_option: {
+            type: Boolean,
+            default: true
+        },
+    },
+    watch: {
+        modelValue: function(newValue, oldValue) {
+            // Watch for modelValue changes from parent
+        }
+    },
+    computed: {
+        sDropdownV2Props() {
+            const defaultLabels = {"search":"Please select","no_result":"No results.","all":"All","selected_count":"@num@  selected"};
+
+            const finalLabels = { ...defaultLabels, ...this.labels };
+
+            let normalizedOptions = this._normalizeInputOptions(this.options);
+
+
+
+            if (this.use_include_all_option && this.multiple && normalizedOptions.length > 0) {
+                const allOption = { label: finalLabels.all, value: 'all' };
+                const divider = { label: '', value: `divider-${Math.random().toString(36).substring(2, 9)}`, isDivider: true };
+                normalizedOptions.unshift(allOption, divider);
+            }
+
+            const propsToPass = {
+                modelValue: this.modelValue,
+                'use-multi': this.multiple,
+                'use-filter': this.use_search,
+                'use-combobox': this.useCombobox,
+                'use-control-icon': this.useControlIcon,
+                'option-selected-string': finalLabels.selected_count,
+                'filter-placeholder': this.placeholder_search || finalLabels.search,
+                options: normalizedOptions,
+                placeholder: this.placeholder,
+                disabled: this.disabled,
+                id: this.id,
+                name: this.name,
+                teleport: this.teleport,
+                required: this.required,
+                'aria-label': this.ariaLabel,
+                type: this.type,
+                size: this.size,
+                theme: this.theme,
+                rounded: this.rounded,
+            };
+
+
+
+            return propsToPass;
+        }
+    },
+    methods: {
+        onUpdate(value) {
+            const valueToEmit = typeof value === 'undefined' ? null : value;
+
+            if (valueToEmit !== this.modelValue) {
+                this.$emit('update:modelValue', valueToEmit);
+            }
+        },
+        _normalizeInputOptions(options) {
+            if (!options) return [];
+
+            const normalizeSingleItem = (item) => {
+                if (typeof item === 'object' && item !== null && 'value' in item) {
+                    return { ...item, label: String(item.label) };
+                }
+                return { label: String(item), value: item };
+            };
+
+            if (Array.isArray(options)) {
+                const result = [];
+
+                options.forEach(item => {
+                    // 處理 optgroup 格式 (有 options 屬性的物件)
+                    if (typeof item === 'object' && item !== null && 'options' in item) {
+                        const groupName = item.label;
+
+                        // 將 optgroup 中的每個選項加上 group 屬性
+                        const groupOptions = this._normalizeInputOptions(item.options);
+                        groupOptions.forEach(option => {
+                            result.push({
+                                ...option,
+                                group: groupName
+                            });
+                        });
+                    } else {
+                        // 處理一般選項
+                        result.push(normalizeSingleItem(item));
+                    }
+                });
+
+                return result;
+            } else if (typeof options === 'object' && options !== null) {
+                return Object.keys(options).map(key => {
+                    return { label: String(options[key]), value: key };
+                });
+            }
+            return [];
+        }
+    },
+});
+</script>	<script nonce="188c1fdca79d927f6e812133173fc41d3a4e57074de521020274caa9bb29af7d" >
+	$(document).ready(function() {
+		
+		SYNO_COOKIE_ELEMENT.run({
+			cookie_name: "syno_confirm_v6_www_answer",
+			cookie_domain: "synology.com",
+			is_europe: false,
+			cookie_types: [
+				'necessary',
+				'performance',
+				'functionality',
+				'targeting',
+			],
+			strings: {"header_title":"We value your privacy","header_p":"We use cookies to personalize your use of our site. This includes third-party cookies for that we use for advertising and site analytics. See our <a href=\"\/company\/legal\/privacy\" target=\"_blank\">Privacy Statement<\/a> and <a href=\"\/company\/legal\/cookie_policy\" target=\"_blank\">Cookie Policy<\/a> for more information on how we collect and use data.","dialog_title":"Cookie Policy","dialog_p":"Synology uses cookies, which are text files placed on your device, to enable certain website features, personalization, and also for us to improve our content and marketing campaigns. How Synology uses cookies is defined in our <a href=\"\/company\/legal\/cookie_policy\" target=\"_blank\">Cookie Policy<\/a>.<p>","dialog_p_updated":"We have implemented additional cookies to further improve your browsing experience on this website. Access the Cookie Options to modify your preferences, or read our <a href=\"https:\/\/www.synology.com\/company\/legal\/cookie_policy\" target=\"_blank\">Cookie Policy<\/a> for more information.","learn_more":"Learn more","cookie_necessary_title":"Strictly necessary cookies","cookie_necessary_p":"Certain website functionalities require cookies to work. These include account authentication and security measures that prevent attacks against our website.","cookie_performance_title":"Performance cookies","cookie_performance_p":"We use cookies to collect analytical data on how users interact with our website to make the content better and more user-friendly.","cookie_mouseflow_p":"Enable Mouseflow, a website analytics tool that anonymously track page content, clicks\/taps, cursor movements, scrolling, keystroke activity and other metadata.","cookie_functionality_title":"Functionality cookies","cookie_functionality_p":"These cookies are used to remember customization features, like the language we should display the website to you in.","cookie_targeting_title":"Targeting cookies or advertising cookies","cookie_targeting_p":"These cookies are used to deliver more relevant advertisements based on your interests.","label_always_active":"Always active","dialog_footnote":"You can change your settings through Cookie Preferences, located at the footer of the webpage.","btn_option":"Cookie Options","btn_accept":"Accept All","btn_agree":"Agree","btn_save":"Save","btn_ok":"OK"},
+			callback: function(ret) {
+									if (ret.performance == true) {
+						otherTrackers();
+					}
+							}
+		});
+
+											SYNO_COOKIE_ELEMENT.addGTM('GTM-PNPJHJ2');
+					
+		function otherTrackers() {
+												_linkedin_partner_id = "445724";
+					window._linkedin_data_partner_ids = window._linkedin_data_partner_ids || [];
+					window._linkedin_data_partner_ids.push(_linkedin_partner_id);
+					(function(){var s = document.getElementsByTagName("script")[0];
+					var b = document.createElement("script");
+					b.type = "text/javascript";b.async = true;
+					b.src = "https://snap.licdn.com/li.lms-analytics/insight.min.js";
+					s.parentNode.insertBefore(b, s);})();
+				
+									!function(e,t,n,s,u,a){e.twq||(s=e.twq=function(){s.exe?s.exe.apply(s,arguments):s.queue.push(arguments);
+					},s.version='1.1',s.queue=[],u=t.createElement(n),u.async=!0,u.src='//static.ads-twitter.com/uwt.js',
+					a=t.getElementsByTagName(n)[0],a.parentNode.insertBefore(u,a))}(window,document,'script');
+					// Insert Twitter Pixel ID and Standard Event data below
+					twq('init','o1cc0');
+					twq('track','PageView');
+				
+									!function(w,d){if(!w.rdt){var p=w.rdt=function(){p.sendEvent?p.sendEvent.apply(p,arguments):p.callQueue.push(arguments)};p.callQueue=[];var t=d.createElement("script");t.src="https://www.redditstatic.com/ads/pixel.js",t.async=!0;var s=d.getElementsByTagName("script")[0];s.parentNode.insertBefore(t,s)}}(window,document);rdt('init','t2_1c71dpoc');rdt('track', 'PageVisit');
+					rdt('track', 'ViewContent');
+				
+									(function(w,d,t,r,u){var f,n,i;w[u]=w[u]||[],f=function(){var o={ti:"25077134"};o.q=w[u],w[u]=new UET(o),w[u].push("pageLoad")},n=d.createElement(t),n.src=r,n.async=1,n.onload=n.onreadystatechange=function(){var s=this.readyState;s&&s!=="loaded"&&s!=="complete"||(f(),n.onload=n.onreadystatechange=null)},i=d.getElementsByTagName(t)[0],i.parentNode.insertBefore(n,i)})(window,document,"script","//bat.bing.com/bat.js","uetq");
+							
+			
+			
+						window._mfq = window._mfq || [];
+			(function() {
+				var mf = document.createElement("script");
+				mf.type = "text/javascript"; mf.defer = true;
+				mf.src = "//cdn.mouseflow.com/projects/97c2b08c-605f-4a11-ad5e-29154f475d84.js";
+				document.getElementsByTagName("head")[0].appendChild(mf);
+			})();
+					}
+
+				window.LC_API = window.LC_API || {};
+		LC_API.on_chat_window_opened = function(e) {
+			if (window.dataLayer) { dataLayer.push({ event: "livechat_window_opened" }); }
+			document.getElementById('chat-widget-container').classList.add("chat-widget-container-customize-size");
+		}
+		LC_API.on_chat_window_minimized = function() {
+			document.getElementById('chat-widget-container').classList.remove("chat-widget-container-customize-size");
+		};
+		LC_API.on_chat_window_hidden = function() {
+			document.getElementById('chat-widget-container').classList.remove("chat-widget-container-customize-size");
+		};
+		LC_API.on_message = function(e) {
+			if (window.dataLayer) { dataLayer.push({ event: "livechat_message" }); }
+		}
+		LC_API.on_chat_started = function() {
+			if (window.dataLayer) { dataLayer.push({ event: "livechat_chat_started" }); }
+		}
+		LC_API.on_prechat_survey_submitted = function() {
+			if (window.dataLayer) { dataLayer.push({ event: "livechat_prechat_survey_submitted" }); }
+		}
+		SYNO_COOKIE_ELEMENT.addLiveChat('5914341');
+
+	});
+
+</script>			<div id="ai-modal"></div>
+<script nonce="188c1fdca79d927f6e812133173fc41d3a4e57074de521020274caa9bb29af7d"  type="module">
+window.SYNO_AI.init({
+    consent: {
+        enabled: false,
+        cookieDomain: "synology.com",
+        cookieKey: 'aia_consent',
+    },
+    lang: "en-us",
+    apiUrl: "https:\/\/www-ai.synology.com",
+});
+</script>
+	</body>
+</html>

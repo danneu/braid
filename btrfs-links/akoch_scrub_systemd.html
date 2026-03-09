@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <title>BTRFS Scrubbing via Systemd Timers</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet" href="../../theme/css/flexboxgrid2.css">
+    <link rel="stylesheet" href="../../theme/css/style.css">
+    <link rel="stylesheet" href="../../theme/fontawesome-5.12.0/css/fontawesome.min.css">
+    <link rel="stylesheet" href="../../theme/fontawesome-5.12.0/css/regular.min.css">
+    <link rel="stylesheet" href="../../theme/fontawesome-5.12.0/css/solid.min.css">
+    <link rel="stylesheet" href="../../theme/css/pygments-manni.css">
+    <meta name="tags" content="linux, setup, systemd, btrfs">
+</head>
+
+<body>
+
+<div id="header">
+    <div class="row">
+        <div class="col-sm">
+            <h3><a href="../..">blog.alexanderkoch.net</a></h3>
+        </div>
+        <div class="col-sm" id="nav">
+            <nav>
+                <ul>
+                    <li><a href="/pages/about.html">About</a></li>
+                    <li><a href="/tags.html">Tags</a></li>
+                    <li><a href="/tag/project.html">Projects</a></li>
+                    <li><a href="/pages/rigs.html">Rigs</a></li>
+                </ul>
+            </nav>
+        </div>
+    </div>
+	<div class="row center-sm">
+		<div class="pageheader col-xs-12 col-sm-10 col-md-7 col-lg-5">
+		<h1>BTRFS Scrubbing via Systemd Timers</h1>
+		<p class="postmeta">
+			<span class="timestamp">
+			<i class="far fa-calendar-alt"></i>
+			Sun 28 June 2015
+			</span>
+			<span class="tags">
+				<i class="fas fa-tags"></i>
+<a href="../../tag/linux.html">linux</a>, <a href="../../tag/setup.html">setup</a>, <a href="../../tag/systemd.html">systemd</a>, <a href="../../tag/btrfs.html">btrfs</a>			</span>
+		</p>
+		</div>
+	</div>
+</div>
+
+<div id="content">
+	<div class="row center-sm">
+		<div class="contents col-xs-12 col-sm-10 col-md-7 col-lg-5">
+		<article>
+			<p>Having discovered that systemd can even be used as a replacement for
+Cron, I'm migrating most of my maintenance scripts to systemd Timers.</p>
+<p>Here's how to have your BTRFS volumes scrubbed using parameterized units:</p>
+<h2>Service Unit</h2>
+<div class="highlight"><pre><span></span><code><span class="c1">#/etc/systemd/system/btrfs-scrub@.service</span>
+
+<span class="k">[Unit]</span>
+<span class="na">Description</span><span class="o">=</span><span class="s">Scrub BTRFS filesystem (%i)</span>
+
+<span class="k">[Service]</span>
+<span class="na">Type</span><span class="o">=</span><span class="s">simple</span>
+<span class="na">EnvironmentFile</span><span class="o">=</span><span class="s">/etc/conf.d/btrfs-scrub-%i</span>
+<span class="na">ExecStart</span><span class="o">=</span><span class="s">/usr/bin/btrfs scrub start -B $mountpoint</span>
+</code></pre></div>
+
+<h2>Timer Unit</h2>
+<div class="highlight"><pre><span></span><code><span class="c1">#/etc/systemd/system/btrfs-scrub@.timer</span>
+
+<span class="k">[Unit]</span>
+<span class="na">Description</span><span class="o">=</span><span class="s">Trigger BTRFS scrub on filesystem (%i)</span>
+
+<span class="k">[Timer]</span>
+<span class="na">OnCalendar</span><span class="o">=</span><span class="s">monthly</span>
+<span class="na">Persistent</span><span class="o">=</span><span class="s">true</span>
+
+<span class="k">[Install]</span>
+<span class="na">WantedBy</span><span class="o">=</span><span class="s">timers.target</span>
+</code></pre></div>
+
+<h2>Usage</h2>
+<p>In order to have a volume (e.g. your home partition) scrubbed you simply
+activate the timer...</p>
+<div class="highlight"><pre><span></span><code>$ systemctl enable btrfs-scrub@home.timer
+</code></pre></div>
+
+<p>... and specify the mount point in the corresponding configuration file,
+in this case <code>/etc/conf.d/btrfs-scrub-home</code>:</p>
+<div class="highlight"><pre><span></span><code>mountpoint=/home
+</code></pre></div>
+
+<p>The configuration file seems a bit superfluous here, but AFAIK there's
+no way to supply filesystem paths via <code>service@</code>-suffix.</p>
+<p><strong>Note that these units do not include any form of notification in case
+of a scrubbing fail!</strong> I personally don't need this as my logs are
+monitored using <a href="../../2015/06/journalcheck-logcheck-for-journald.html">journalcheck</a>.</p>
+<p><strong>Update 2015-07-12:</strong> Changed unit type to 'simple' to make it
+compatible with long-running machines.</p>
+		</article>
+		(updated on Sun 12 July 2015)
+		</div>
+	</div>
+</div>
+
+<footer>
+    &copy; 2020 Alexander Koch
+</footer>
+
+</body>
+
+</html>

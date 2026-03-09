@@ -1,0 +1,1622 @@
+<!DOCTYPE html>
+
+<html class="no-js" lang="en-US">
+
+	<head profile="http://gmpg.org/xfn/11">
+		
+		<meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" >
+		<link rel="shortcut icon" href="https://fedoramagazine.org/wp-content/themes/fedoramagazine-1.18/favicon.ico" />
+		<meta name='robots' content='index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1' />
+<script>document.documentElement.className = document.documentElement.className.replace("no-js","js");</script>
+<!-- Jetpack Site Verification Tags -->
+<meta name="google-site-verification" content="0VLV2JI6fXqQIJHGXnxgPbK_yrF3xxuzQI0-cpSdxoA" />
+
+	<!-- This site is optimized with the Yoast SEO plugin v27.1.1 - https://yoast.com/product/yoast-seo-wordpress/ -->
+	<title>Working with Btrfs - Subvolumes - Fedora Magazine</title>
+	<meta name="description" content="This article is part of a series of articles that takes a closer look at Btrfs, the default filesystem for Fedora variants since Fedora 33." />
+	<link rel="canonical" href="https://fedoramagazine.org/working-with-btrfs-subvolumes/" />
+	<meta property="og:locale" content="en_US" />
+	<meta property="og:type" content="article" />
+	<meta property="og:title" content="Working with Btrfs - Subvolumes - Fedora Magazine" />
+	<meta property="og:description" content="This article is part of a series of articles that takes a closer look at Btrfs, the default filesystem for Fedora variants since Fedora 33." />
+	<meta property="og:url" content="https://fedoramagazine.org/working-with-btrfs-subvolumes/" />
+	<meta property="og:site_name" content="Fedora Magazine" />
+	<meta property="article:publisher" content="https://www.facebook.com/TheFedoraProject" />
+	<meta property="article:published_time" content="2022-12-02T08:05:00+00:00" />
+	<meta property="article:modified_time" content="2023-01-27T23:39:38+00:00" />
+	<meta property="og:image" content="https://fedoramagazine.org/wp-content/uploads/2022/09/working_w_btrfs_subvolumes.jpg" />
+	<meta property="og:image:width" content="1890" />
+	<meta property="og:image:height" content="800" />
+	<meta property="og:image:type" content="image/jpeg" />
+	<meta name="author" content="Andreas Hartmann" />
+	<meta name="twitter:card" content="summary_large_image" />
+	<meta name="twitter:creator" content="@fedora" />
+	<meta name="twitter:site" content="@fedora" />
+	<meta name="twitter:label1" content="Written by" />
+	<meta name="twitter:data1" content="Andreas Hartmann" />
+	<meta name="twitter:label2" content="Est. reading time" />
+	<meta name="twitter:data2" content="12 minutes" />
+	<script type="application/ld+json" class="yoast-schema-graph">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","@id":"https://fedoramagazine.org/working-with-btrfs-subvolumes/#article","isPartOf":{"@id":"https://fedoramagazine.org/working-with-btrfs-subvolumes/"},"author":[{"@id":"https://fedoramagazine.org/#/schema/person/d2e6b98c12c9ac4c25a967b68a381a0c"}],"headline":"Working with Btrfs &#8211; Subvolumes","datePublished":"2022-12-02T08:05:00+00:00","dateModified":"2023-01-27T23:39:38+00:00","mainEntityOfPage":{"@id":"https://fedoramagazine.org/working-with-btrfs-subvolumes/"},"wordCount":2166,"commentCount":18,"publisher":{"@id":"https://fedoramagazine.org/#organization"},"image":{"@id":"https://fedoramagazine.org/working-with-btrfs-subvolumes/#primaryimage"},"thumbnailUrl":"https://fedoramagazine.org/wp-content/uploads/2022/09/working_w_btrfs_subvolumes.jpg","keywords":["btrfs"],"articleSection":["Fedora Project community"],"inLanguage":"en-US","potentialAction":[{"@type":"CommentAction","name":"Comment","target":["https://fedoramagazine.org/working-with-btrfs-subvolumes/#respond"]}]},{"@type":["WebPage","AboutPage"],"@id":"https://fedoramagazine.org/working-with-btrfs-subvolumes/","url":"https://fedoramagazine.org/working-with-btrfs-subvolumes/","name":"Working with Btrfs - Subvolumes - Fedora Magazine","isPartOf":{"@id":"https://fedoramagazine.org/#website"},"primaryImageOfPage":{"@id":"https://fedoramagazine.org/working-with-btrfs-subvolumes/#primaryimage"},"image":{"@id":"https://fedoramagazine.org/working-with-btrfs-subvolumes/#primaryimage"},"thumbnailUrl":"https://fedoramagazine.org/wp-content/uploads/2022/09/working_w_btrfs_subvolumes.jpg","datePublished":"2022-12-02T08:05:00+00:00","dateModified":"2023-01-27T23:39:38+00:00","description":"This article is part of a series of articles that takes a closer look at Btrfs, the default filesystem for Fedora variants since Fedora 33.","breadcrumb":{"@id":"https://fedoramagazine.org/working-with-btrfs-subvolumes/#breadcrumb"},"inLanguage":"en-US","potentialAction":[{"@type":"ReadAction","target":["https://fedoramagazine.org/working-with-btrfs-subvolumes/"]}]},{"@type":"ImageObject","inLanguage":"en-US","@id":"https://fedoramagazine.org/working-with-btrfs-subvolumes/#primaryimage","url":"https://fedoramagazine.org/wp-content/uploads/2022/09/working_w_btrfs_subvolumes.jpg","contentUrl":"https://fedoramagazine.org/wp-content/uploads/2022/09/working_w_btrfs_subvolumes.jpg","width":1890,"height":800,"caption":"Photo by Heliberto Arias on Unsplash"},{"@type":"BreadcrumbList","@id":"https://fedoramagazine.org/working-with-btrfs-subvolumes/#breadcrumb","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"https://fedoramagazine.org/"},{"@type":"ListItem","position":2,"name":"Fedora Project community","item":"https://fedoramagazine.org/category/fedora-project/"},{"@type":"ListItem","position":3,"name":"Working with Btrfs &#8211; Subvolumes"}]},{"@type":"WebSite","@id":"https://fedoramagazine.org/#website","url":"https://fedoramagazine.org/","name":"Fedora Magazine","description":"Guides, information, and news about the Fedora operating system for users, developers, system administrators, and community members.","publisher":{"@id":"https://fedoramagazine.org/#organization"},"potentialAction":[{"@type":"SearchAction","target":{"@type":"EntryPoint","urlTemplate":"https://fedoramagazine.org/?s={search_term_string}"},"query-input":{"@type":"PropertyValueSpecification","valueRequired":true,"valueName":"search_term_string"}}],"inLanguage":"en-US"},{"@type":"Organization","@id":"https://fedoramagazine.org/#organization","name":"Fedora Project","url":"https://fedoramagazine.org/","logo":{"@type":"ImageObject","inLanguage":"en-US","@id":"https://fedoramagazine.org/#/schema/logo/image/","url":"https://fedoramagazine.org/wp-content/uploads/2020/09/fmag-ribbon.png","contentUrl":"https://fedoramagazine.org/wp-content/uploads/2020/09/fmag-ribbon.png","width":317,"height":180,"caption":"Fedora Project"},"image":{"@id":"https://fedoramagazine.org/#/schema/logo/image/"},"sameAs":["https://www.facebook.com/TheFedoraProject","https://x.com/fedora","https://www.instagram.com/thefedoraproject/","https://www.youtube.com/channel/UCnIfca4LPFVn8-FjpPVc1ow"]},{"@type":"Person","@id":"https://fedoramagazine.org/#/schema/person/d2e6b98c12c9ac4c25a967b68a381a0c","name":"Andreas Hartmann","image":{"@type":"ImageObject","inLanguage":"en-US","@id":"https://fedoramagazine.org/#/schema/person/image/724c938756eb61299f94d34c255cf2bb","url":"https://secure.gravatar.com/avatar/e0e0e157ed1412be98c563b02f6a88680da22a47343b9e8dc7d3a339eb026b63?s=96&d=retro&r=g","contentUrl":"https://secure.gravatar.com/avatar/e0e0e157ed1412be98c563b02f6a88680da22a47343b9e8dc7d3a339eb026b63?s=96&d=retro&r=g","caption":"Andreas Hartmann"},"description":"Engineering student, Linux enthusiast, OSS developer.","sameAs":["http://hartan.id.fedoraproject.org/"],"url":"https://fedoramagazine.org/author/hartan/"}]}</script>
+	<!-- / Yoast SEO plugin. -->
+
+
+<link rel='dns-prefetch' href='//stats.wp.com' />
+<link rel='dns-prefetch' href='//widgets.wp.com' />
+<link rel='dns-prefetch' href='//s0.wp.com' />
+<link rel='dns-prefetch' href='//0.gravatar.com' />
+<link rel='dns-prefetch' href='//1.gravatar.com' />
+<link rel='dns-prefetch' href='//2.gravatar.com' />
+<link rel="alternate" type="application/rss+xml" title="Fedora Magazine &raquo; Feed" href="https://fedoramagazine.org/feed/" />
+<link rel="alternate" type="application/rss+xml" title="Fedora Magazine &raquo; Comments Feed" href="https://fedoramagazine.org/comments/feed/" />
+<link rel="alternate" type="application/rss+xml" title="Fedora Magazine &raquo; Working with Btrfs &#8211; Subvolumes Comments Feed" href="https://fedoramagazine.org/working-with-btrfs-subvolumes/feed/" />
+<link rel="alternate" title="oEmbed (JSON)" type="application/json+oembed" href="https://fedoramagazine.org/wp-json/oembed/1.0/embed?url=https%3A%2F%2Ffedoramagazine.org%2Fworking-with-btrfs-subvolumes%2F" />
+<link rel="alternate" title="oEmbed (XML)" type="text/xml+oembed" href="https://fedoramagazine.org/wp-json/oembed/1.0/embed?url=https%3A%2F%2Ffedoramagazine.org%2Fworking-with-btrfs-subvolumes%2F&#038;format=xml" />
+<style id='wp-img-auto-sizes-contain-inline-css' type='text/css'>
+img:is([sizes=auto i],[sizes^="auto," i]){contain-intrinsic-size:3000px 1500px}
+/*# sourceURL=wp-img-auto-sizes-contain-inline-css */
+</style>
+<style id='wp-emoji-styles-inline-css' type='text/css'>
+
+	img.wp-smiley, img.emoji {
+		display: inline !important;
+		border: none !important;
+		box-shadow: none !important;
+		height: 1em !important;
+		width: 1em !important;
+		margin: 0 0.07em !important;
+		vertical-align: -0.1em !important;
+		background: none !important;
+		padding: 0 !important;
+	}
+/*# sourceURL=wp-emoji-styles-inline-css */
+</style>
+<style id='wp-block-library-inline-css' type='text/css'>
+:root{--wp-block-synced-color:#7a00df;--wp-block-synced-color--rgb:122,0,223;--wp-bound-block-color:var(--wp-block-synced-color);--wp-editor-canvas-background:#ddd;--wp-admin-theme-color:#007cba;--wp-admin-theme-color--rgb:0,124,186;--wp-admin-theme-color-darker-10:#006ba1;--wp-admin-theme-color-darker-10--rgb:0,107,160.5;--wp-admin-theme-color-darker-20:#005a87;--wp-admin-theme-color-darker-20--rgb:0,90,135;--wp-admin-border-width-focus:2px}@media (min-resolution:192dpi){:root{--wp-admin-border-width-focus:1.5px}}.wp-element-button{cursor:pointer}:root .has-very-light-gray-background-color{background-color:#eee}:root .has-very-dark-gray-background-color{background-color:#313131}:root .has-very-light-gray-color{color:#eee}:root .has-very-dark-gray-color{color:#313131}:root .has-vivid-green-cyan-to-vivid-cyan-blue-gradient-background{background:linear-gradient(135deg,#00d084,#0693e3)}:root .has-purple-crush-gradient-background{background:linear-gradient(135deg,#34e2e4,#4721fb 50%,#ab1dfe)}:root .has-hazy-dawn-gradient-background{background:linear-gradient(135deg,#faaca8,#dad0ec)}:root .has-subdued-olive-gradient-background{background:linear-gradient(135deg,#fafae1,#67a671)}:root .has-atomic-cream-gradient-background{background:linear-gradient(135deg,#fdd79a,#004a59)}:root .has-nightshade-gradient-background{background:linear-gradient(135deg,#330968,#31cdcf)}:root .has-midnight-gradient-background{background:linear-gradient(135deg,#020381,#2874fc)}:root{--wp--preset--font-size--normal:16px;--wp--preset--font-size--huge:42px}.has-regular-font-size{font-size:1em}.has-larger-font-size{font-size:2.625em}.has-normal-font-size{font-size:var(--wp--preset--font-size--normal)}.has-huge-font-size{font-size:var(--wp--preset--font-size--huge)}.has-text-align-center{text-align:center}.has-text-align-left{text-align:left}.has-text-align-right{text-align:right}.has-fit-text{white-space:nowrap!important}#end-resizable-editor-section{display:none}.aligncenter{clear:both}.items-justified-left{justify-content:flex-start}.items-justified-center{justify-content:center}.items-justified-right{justify-content:flex-end}.items-justified-space-between{justify-content:space-between}.screen-reader-text{border:0;clip-path:inset(50%);height:1px;margin:-1px;overflow:hidden;padding:0;position:absolute;width:1px;word-wrap:normal!important}.screen-reader-text:focus{background-color:#ddd;clip-path:none;color:#444;display:block;font-size:1em;height:auto;left:5px;line-height:normal;padding:15px 23px 14px;text-decoration:none;top:5px;width:auto;z-index:100000}html :where(.has-border-color){border-style:solid}html :where([style*=border-top-color]){border-top-style:solid}html :where([style*=border-right-color]){border-right-style:solid}html :where([style*=border-bottom-color]){border-bottom-style:solid}html :where([style*=border-left-color]){border-left-style:solid}html :where([style*=border-width]){border-style:solid}html :where([style*=border-top-width]){border-top-style:solid}html :where([style*=border-right-width]){border-right-style:solid}html :where([style*=border-bottom-width]){border-bottom-style:solid}html :where([style*=border-left-width]){border-left-style:solid}html :where(img[class*=wp-image-]){height:auto;max-width:100%}:where(figure){margin:0 0 1em}html :where(.is-position-sticky){--wp-admin--admin-bar--position-offset:var(--wp-admin--admin-bar--height,0px)}@media screen and (max-width:600px){html :where(.is-position-sticky){--wp-admin--admin-bar--position-offset:0px}}
+
+/*# sourceURL=wp-block-library-inline-css */
+</style>
+<style id='wp-block-heading-inline-css' type='text/css'>
+h1:where(.wp-block-heading).has-background,h2:where(.wp-block-heading).has-background,h3:where(.wp-block-heading).has-background,h4:where(.wp-block-heading).has-background,h5:where(.wp-block-heading).has-background,h6:where(.wp-block-heading).has-background{padding:1.25em 2.375em}h1.has-text-align-left[style*=writing-mode]:where([style*=vertical-lr]),h1.has-text-align-right[style*=writing-mode]:where([style*=vertical-rl]),h2.has-text-align-left[style*=writing-mode]:where([style*=vertical-lr]),h2.has-text-align-right[style*=writing-mode]:where([style*=vertical-rl]),h3.has-text-align-left[style*=writing-mode]:where([style*=vertical-lr]),h3.has-text-align-right[style*=writing-mode]:where([style*=vertical-rl]),h4.has-text-align-left[style*=writing-mode]:where([style*=vertical-lr]),h4.has-text-align-right[style*=writing-mode]:where([style*=vertical-rl]),h5.has-text-align-left[style*=writing-mode]:where([style*=vertical-lr]),h5.has-text-align-right[style*=writing-mode]:where([style*=vertical-rl]),h6.has-text-align-left[style*=writing-mode]:where([style*=vertical-lr]),h6.has-text-align-right[style*=writing-mode]:where([style*=vertical-rl]){rotate:180deg}
+/*# sourceURL=https://fedoramagazine.org/wp-includes/blocks/heading/style.min.css */
+</style>
+<style id='wp-block-list-inline-css' type='text/css'>
+ol,ul{box-sizing:border-box}:root :where(.wp-block-list.has-background){padding:1.25em 2.375em}
+/*# sourceURL=https://fedoramagazine.org/wp-includes/blocks/list/style.min.css */
+</style>
+<style id='wp-block-paragraph-inline-css' type='text/css'>
+.is-small-text{font-size:.875em}.is-regular-text{font-size:1em}.is-large-text{font-size:2.25em}.is-larger-text{font-size:3em}.has-drop-cap:not(:focus):first-letter{float:left;font-size:8.4em;font-style:normal;font-weight:100;line-height:.68;margin:.05em .1em 0 0;text-transform:uppercase}body.rtl .has-drop-cap:not(:focus):first-letter{float:none;margin-left:.1em}p.has-drop-cap.has-background{overflow:hidden}:root :where(p.has-background){padding:1.25em 2.375em}:where(p.has-text-color:not(.has-link-color)) a{color:inherit}p.has-text-align-left[style*="writing-mode:vertical-lr"],p.has-text-align-right[style*="writing-mode:vertical-rl"]{rotate:180deg}
+/*# sourceURL=https://fedoramagazine.org/wp-includes/blocks/paragraph/style.min.css */
+</style>
+<style id='wp-block-preformatted-inline-css' type='text/css'>
+.wp-block-preformatted{box-sizing:border-box;white-space:pre-wrap}:where(.wp-block-preformatted.has-background){padding:1.25em 2.375em}
+/*# sourceURL=https://fedoramagazine.org/wp-includes/blocks/preformatted/style.min.css */
+</style>
+
+<style id='classic-theme-styles-inline-css' type='text/css'>
+/*! This file is auto-generated */
+.wp-block-button__link{color:#fff;background-color:#32373c;border-radius:9999px;box-shadow:none;text-decoration:none;padding:calc(.667em + 2px) calc(1.333em + 2px);font-size:1.125em}.wp-block-file__button{background:#32373c;color:#fff;text-decoration:none}
+/*# sourceURL=/wp-includes/css/classic-themes.min.css */
+</style>
+<style id='global-styles-inline-css' type='text/css'>
+:root{--wp--preset--aspect-ratio--square: 1;--wp--preset--aspect-ratio--4-3: 4/3;--wp--preset--aspect-ratio--3-4: 3/4;--wp--preset--aspect-ratio--3-2: 3/2;--wp--preset--aspect-ratio--2-3: 2/3;--wp--preset--aspect-ratio--16-9: 16/9;--wp--preset--aspect-ratio--9-16: 9/16;--wp--preset--color--black: #000000;--wp--preset--color--cyan-bluish-gray: #abb8c3;--wp--preset--color--white: #ffffff;--wp--preset--color--pale-pink: #f78da7;--wp--preset--color--vivid-red: #cf2e2e;--wp--preset--color--luminous-vivid-orange: #ff6900;--wp--preset--color--luminous-vivid-amber: #fcb900;--wp--preset--color--light-green-cyan: #7bdcb5;--wp--preset--color--vivid-green-cyan: #00d084;--wp--preset--color--pale-cyan-blue: #8ed1fc;--wp--preset--color--vivid-cyan-blue: #0693e3;--wp--preset--color--vivid-purple: #9b51e0;--wp--preset--gradient--vivid-cyan-blue-to-vivid-purple: linear-gradient(135deg,rgb(6,147,227) 0%,rgb(155,81,224) 100%);--wp--preset--gradient--light-green-cyan-to-vivid-green-cyan: linear-gradient(135deg,rgb(122,220,180) 0%,rgb(0,208,130) 100%);--wp--preset--gradient--luminous-vivid-amber-to-luminous-vivid-orange: linear-gradient(135deg,rgb(252,185,0) 0%,rgb(255,105,0) 100%);--wp--preset--gradient--luminous-vivid-orange-to-vivid-red: linear-gradient(135deg,rgb(255,105,0) 0%,rgb(207,46,46) 100%);--wp--preset--gradient--very-light-gray-to-cyan-bluish-gray: linear-gradient(135deg,rgb(238,238,238) 0%,rgb(169,184,195) 100%);--wp--preset--gradient--cool-to-warm-spectrum: linear-gradient(135deg,rgb(74,234,220) 0%,rgb(151,120,209) 20%,rgb(207,42,186) 40%,rgb(238,44,130) 60%,rgb(251,105,98) 80%,rgb(254,248,76) 100%);--wp--preset--gradient--blush-light-purple: linear-gradient(135deg,rgb(255,206,236) 0%,rgb(152,150,240) 100%);--wp--preset--gradient--blush-bordeaux: linear-gradient(135deg,rgb(254,205,165) 0%,rgb(254,45,45) 50%,rgb(107,0,62) 100%);--wp--preset--gradient--luminous-dusk: linear-gradient(135deg,rgb(255,203,112) 0%,rgb(199,81,192) 50%,rgb(65,88,208) 100%);--wp--preset--gradient--pale-ocean: linear-gradient(135deg,rgb(255,245,203) 0%,rgb(182,227,212) 50%,rgb(51,167,181) 100%);--wp--preset--gradient--electric-grass: linear-gradient(135deg,rgb(202,248,128) 0%,rgb(113,206,126) 100%);--wp--preset--gradient--midnight: linear-gradient(135deg,rgb(2,3,129) 0%,rgb(40,116,252) 100%);--wp--preset--font-size--small: 13px;--wp--preset--font-size--medium: 20px;--wp--preset--font-size--large: 36px;--wp--preset--font-size--x-large: 42px;--wp--preset--spacing--20: 0.44rem;--wp--preset--spacing--30: 0.67rem;--wp--preset--spacing--40: 1rem;--wp--preset--spacing--50: 1.5rem;--wp--preset--spacing--60: 2.25rem;--wp--preset--spacing--70: 3.38rem;--wp--preset--spacing--80: 5.06rem;--wp--preset--shadow--natural: 6px 6px 9px rgba(0, 0, 0, 0.2);--wp--preset--shadow--deep: 12px 12px 50px rgba(0, 0, 0, 0.4);--wp--preset--shadow--sharp: 6px 6px 0px rgba(0, 0, 0, 0.2);--wp--preset--shadow--outlined: 6px 6px 0px -3px rgb(255, 255, 255), 6px 6px rgb(0, 0, 0);--wp--preset--shadow--crisp: 6px 6px 0px rgb(0, 0, 0);}:where(.is-layout-flex){gap: 0.5em;}:where(.is-layout-grid){gap: 0.5em;}body .is-layout-flex{display: flex;}.is-layout-flex{flex-wrap: wrap;align-items: center;}.is-layout-flex > :is(*, div){margin: 0;}body .is-layout-grid{display: grid;}.is-layout-grid > :is(*, div){margin: 0;}:where(.wp-block-columns.is-layout-flex){gap: 2em;}:where(.wp-block-columns.is-layout-grid){gap: 2em;}:where(.wp-block-post-template.is-layout-flex){gap: 1.25em;}:where(.wp-block-post-template.is-layout-grid){gap: 1.25em;}.has-black-color{color: var(--wp--preset--color--black) !important;}.has-cyan-bluish-gray-color{color: var(--wp--preset--color--cyan-bluish-gray) !important;}.has-white-color{color: var(--wp--preset--color--white) !important;}.has-pale-pink-color{color: var(--wp--preset--color--pale-pink) !important;}.has-vivid-red-color{color: var(--wp--preset--color--vivid-red) !important;}.has-luminous-vivid-orange-color{color: var(--wp--preset--color--luminous-vivid-orange) !important;}.has-luminous-vivid-amber-color{color: var(--wp--preset--color--luminous-vivid-amber) !important;}.has-light-green-cyan-color{color: var(--wp--preset--color--light-green-cyan) !important;}.has-vivid-green-cyan-color{color: var(--wp--preset--color--vivid-green-cyan) !important;}.has-pale-cyan-blue-color{color: var(--wp--preset--color--pale-cyan-blue) !important;}.has-vivid-cyan-blue-color{color: var(--wp--preset--color--vivid-cyan-blue) !important;}.has-vivid-purple-color{color: var(--wp--preset--color--vivid-purple) !important;}.has-black-background-color{background-color: var(--wp--preset--color--black) !important;}.has-cyan-bluish-gray-background-color{background-color: var(--wp--preset--color--cyan-bluish-gray) !important;}.has-white-background-color{background-color: var(--wp--preset--color--white) !important;}.has-pale-pink-background-color{background-color: var(--wp--preset--color--pale-pink) !important;}.has-vivid-red-background-color{background-color: var(--wp--preset--color--vivid-red) !important;}.has-luminous-vivid-orange-background-color{background-color: var(--wp--preset--color--luminous-vivid-orange) !important;}.has-luminous-vivid-amber-background-color{background-color: var(--wp--preset--color--luminous-vivid-amber) !important;}.has-light-green-cyan-background-color{background-color: var(--wp--preset--color--light-green-cyan) !important;}.has-vivid-green-cyan-background-color{background-color: var(--wp--preset--color--vivid-green-cyan) !important;}.has-pale-cyan-blue-background-color{background-color: var(--wp--preset--color--pale-cyan-blue) !important;}.has-vivid-cyan-blue-background-color{background-color: var(--wp--preset--color--vivid-cyan-blue) !important;}.has-vivid-purple-background-color{background-color: var(--wp--preset--color--vivid-purple) !important;}.has-black-border-color{border-color: var(--wp--preset--color--black) !important;}.has-cyan-bluish-gray-border-color{border-color: var(--wp--preset--color--cyan-bluish-gray) !important;}.has-white-border-color{border-color: var(--wp--preset--color--white) !important;}.has-pale-pink-border-color{border-color: var(--wp--preset--color--pale-pink) !important;}.has-vivid-red-border-color{border-color: var(--wp--preset--color--vivid-red) !important;}.has-luminous-vivid-orange-border-color{border-color: var(--wp--preset--color--luminous-vivid-orange) !important;}.has-luminous-vivid-amber-border-color{border-color: var(--wp--preset--color--luminous-vivid-amber) !important;}.has-light-green-cyan-border-color{border-color: var(--wp--preset--color--light-green-cyan) !important;}.has-vivid-green-cyan-border-color{border-color: var(--wp--preset--color--vivid-green-cyan) !important;}.has-pale-cyan-blue-border-color{border-color: var(--wp--preset--color--pale-cyan-blue) !important;}.has-vivid-cyan-blue-border-color{border-color: var(--wp--preset--color--vivid-cyan-blue) !important;}.has-vivid-purple-border-color{border-color: var(--wp--preset--color--vivid-purple) !important;}.has-vivid-cyan-blue-to-vivid-purple-gradient-background{background: var(--wp--preset--gradient--vivid-cyan-blue-to-vivid-purple) !important;}.has-light-green-cyan-to-vivid-green-cyan-gradient-background{background: var(--wp--preset--gradient--light-green-cyan-to-vivid-green-cyan) !important;}.has-luminous-vivid-amber-to-luminous-vivid-orange-gradient-background{background: var(--wp--preset--gradient--luminous-vivid-amber-to-luminous-vivid-orange) !important;}.has-luminous-vivid-orange-to-vivid-red-gradient-background{background: var(--wp--preset--gradient--luminous-vivid-orange-to-vivid-red) !important;}.has-very-light-gray-to-cyan-bluish-gray-gradient-background{background: var(--wp--preset--gradient--very-light-gray-to-cyan-bluish-gray) !important;}.has-cool-to-warm-spectrum-gradient-background{background: var(--wp--preset--gradient--cool-to-warm-spectrum) !important;}.has-blush-light-purple-gradient-background{background: var(--wp--preset--gradient--blush-light-purple) !important;}.has-blush-bordeaux-gradient-background{background: var(--wp--preset--gradient--blush-bordeaux) !important;}.has-luminous-dusk-gradient-background{background: var(--wp--preset--gradient--luminous-dusk) !important;}.has-pale-ocean-gradient-background{background: var(--wp--preset--gradient--pale-ocean) !important;}.has-electric-grass-gradient-background{background: var(--wp--preset--gradient--electric-grass) !important;}.has-midnight-gradient-background{background: var(--wp--preset--gradient--midnight) !important;}.has-small-font-size{font-size: var(--wp--preset--font-size--small) !important;}.has-medium-font-size{font-size: var(--wp--preset--font-size--medium) !important;}.has-large-font-size{font-size: var(--wp--preset--font-size--large) !important;}.has-x-large-font-size{font-size: var(--wp--preset--font-size--x-large) !important;}
+/*# sourceURL=global-styles-inline-css */
+</style>
+
+<link rel='stylesheet' id='foobox-free-min-css' href='https://fedoramagazine.org/wp-content/plugins/foobox-image-lightbox/free/css/foobox.free.min.css?ver=2.7.41' type='text/css' media='all' />
+<link rel='stylesheet' id='bodhi-svgs-attachment-css' href='https://fedoramagazine.org/wp-content/plugins/svg-support/css/svgs-attachment.css' type='text/css' media='all' />
+<style id='jetpack_likes-inline-css' type='text/css'>
+#jp-post-flair{padding-top:.5em}#content div.sharedaddy,#main div.sharedaddy,div.sharedaddy{clear:both}div.sharedaddy h3.sd-title{display:inline-block;font-size:9pt;font-weight:700;line-height:1.2;margin:0 0 1em}div.sharedaddy h3.sd-title:before{border-top:1px solid #dcdcde;content:"";display:block;margin-bottom:1em;min-width:30px;width:100%}div.jetpack-likes-widget-wrapper{min-height:50px;position:relative;width:100%}div.jetpack-likes-widget-wrapper .sd-link-color{font-size:12px}div.jetpack-comment-likes-widget-wrapper{min-height:31px;position:relative;width:100%}div.jetpack-comment-likes-widget-wrapper iframe{margin-bottom:0}#likes-other-gravatars{background-color:#fff;border:1px solid #dcdcde;border-radius:4px;box-shadow:none;display:none;height:auto;max-height:240px;min-width:220px;overflow:auto;padding:9px 12px 10px;position:absolute;z-index:1000}#likes-other-gravatars *{line-height:normal}#likes-other-gravatars .likes-text{color:#101517;font-size:12px;font-weight:500;padding-bottom:8px}#likes-other-gravatars li,#likes-other-gravatars ul{list-style-type:none;margin:0;padding:0;text-indent:0}#likes-other-gravatars li:before{content:""}#likes-other-gravatars ul.wpl-avatars{display:block;max-height:190px;overflow:auto}#likes-other-gravatars ul.wpl-avatars li{float:none;height:28px;margin:0 0 4px;width:196px}#likes-other-gravatars ul.wpl-avatars li a{align-items:center;border-bottom:none!important;display:flex;gap:8px;margin:0 2px 0 0;text-decoration:none}#likes-other-gravatars ul.wpl-avatars li a span{color:#2c3338;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}#likes-other-gravatars ul.wpl-avatars li a img{background:none;border:none;border-radius:50%;box-sizing:border-box;margin:0!important;padding:1px!important;position:static}div.sd-box{border-top:1px solid #00000021}.jetpack-likes-widget-loaded iframe,.jetpack-likes-widget-loading .likes-widget-placeholder,.jetpack-likes-widget-unloaded .likes-widget-placeholder{display:block}.jetpack-likes-widget-loaded .likes-widget-placeholder,.jetpack-likes-widget-loading iframe,.jetpack-likes-widget-unloaded iframe{display:none}.comment-likes-widget,.entry-content .post-likes-widget,.post-likes-widget{border-width:0;margin:0}.comment-likes-widget-placeholder,.post-likes-widget-placeholder{border-width:0;margin:0;position:relative}.comment-likes-widget-placeholder{display:flex;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Oxygen-Sans,Ubuntu,Cantarell,Helvetica Neue,sans-serif;height:18px;position:absolute}.comment-likes-widget-placeholder:before{background-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='none' d='M0 0h24v24H0z'/%3E%3Cpath fill='%232ea2cc' d='m12 2 2.582 6.953L22 9.257l-5.822 4.602L18.18 21 12 16.89 5.82 21l2.002-7.14L2 9.256l7.418-.304'/%3E%3C/svg%3E");background-repeat:no-repeat;background-size:16px 16px;color:#2ea2cc;content:"";display:inline-block;height:16px;padding-right:5px;position:relative;top:3px;width:16px}.post-likes-widget-placeholder .button{display:none}.comment-likes-widget-placeholder .loading,.post-likes-widget-placeholder .loading{color:#999;font-size:12px}.comment-likes-widget-placeholder .loading{align-self:center;color:#4e4e4e;margin-top:4px;padding-left:5px}div.sharedaddy.sd-like-enabled .sd-like h3{display:none}div.sharedaddy.sd-like-enabled .sd-like .post-likes-widget{float:none;position:absolute;top:0;width:100%}.comment-likes-widget{width:100%}.cs-rating,.pd-rating{display:block!important}.sd-gplus .sd-title{display:none}@media print{.jetpack-likes-widget-wrapper{display:none}}
+/*# sourceURL=https://fedoramagazine.org/wp-content/plugins/jetpack/_inc/build/likes/style.min.css */
+</style>
+<link rel='stylesheet' id='jetpack-subscriptions-css' href='https://fedoramagazine.org/wp-content/plugins/jetpack/_inc/build/subscriptions/subscriptions.min.css?ver=15.6' type='text/css' media='all' />
+<link rel='stylesheet' id='codecolorer-css' href='https://fedoramagazine.org/wp-content/plugins/codecolorer/codecolorer.css?ver=0.10.1' type='text/css' media='screen' />
+<link rel='stylesheet' id='rowling_google_fonts-css' href='//fonts.googleapis.com/css?family=Lato%3A400%2C700%2C900%2C400italic%2C700italic%7CMerriweather%3A700%2C900%2C400italic&#038;ver=6.9.1' type='text/css' media='all' />
+<link rel='stylesheet' id='rowling_fontawesome-css' href='https://fedoramagazine.org/wp-content/themes/fedoramagazine-1.18/fa/css/all.css?ver=6.9.1' type='text/css' media='all' />
+<link rel='stylesheet' id='rowling_style-css' href='https://fedoramagazine.org/wp-content/themes/fedoramagazine-1.18/style.css?ver=6.9.1' type='text/css' media='all' />
+<script type="text/javascript" src="https://fedoramagazine.org/wp-includes/js/jquery/jquery.min.js?ver=3.7.1" id="jquery-core-js"></script>
+<script type="text/javascript" src="https://fedoramagazine.org/wp-includes/js/jquery/jquery-migrate.min.js?ver=3.4.1" id="jquery-migrate-js"></script>
+<script type="text/javascript" id="bodhi_svg_inline-js-extra">
+/* <![CDATA[ */
+var svgSettings = {"skipNested":""};
+//# sourceURL=bodhi_svg_inline-js-extra
+/* ]]> */
+</script>
+<script type="text/javascript" src="https://fedoramagazine.org/wp-content/plugins/svg-support/js/min/svgs-inline-min.js" id="bodhi_svg_inline-js"></script>
+<script type="text/javascript" id="bodhi_svg_inline-js-after">
+/* <![CDATA[ */
+cssTarget={"Bodhi":"img.style-svg","ForceInlineSVG":"style-svg"};ForceInlineSVGActive="false";frontSanitizationEnabled=false;
+//# sourceURL=bodhi_svg_inline-js-after
+/* ]]> */
+</script>
+<script type="text/javascript" src="https://fedoramagazine.org/wp-content/themes/fedoramagazine-1.18/js/flexslider.js?ver=1" id="rowling_flexslider-js"></script>
+<script type="text/javascript" src="https://fedoramagazine.org/wp-content/themes/fedoramagazine-1.18/js/doubletaptogo.js?ver=1" id="rowling_doubletap-js"></script>
+<script type="text/javascript" id="foobox-free-min-js-before">
+/* <![CDATA[ */
+/* Run FooBox FREE (v2.7.41) */
+var FOOBOX = window.FOOBOX = {
+	ready: true,
+	disableOthers: false,
+	o: {wordpress: { enabled: true }, countMessage:'image %index of %total', captions: { dataTitle: ["captionTitle","title"], dataDesc: ["captionDesc","description"] }, rel: '', excludes:'.fbx-link,.nofoobox,.nolightbox,a[href*="pinterest.com/pin/create/button/"]', affiliate : { enabled: false }},
+	selectors: [
+		".gallery", ".wp-block-gallery", ".wp-caption", ".wp-block-image", "a:has(img[class*=wp-image-])", ".foobox"
+	],
+	pre: function( $ ){
+		// Custom JavaScript (Pre)
+		
+	},
+	post: function( $ ){
+		// Custom JavaScript (Post)
+		
+		// Custom Captions Code
+		
+	},
+	custom: function( $ ){
+		// Custom Extra JS
+		
+	}
+};
+//# sourceURL=foobox-free-min-js-before
+/* ]]> */
+</script>
+<script type="text/javascript" src="https://fedoramagazine.org/wp-content/plugins/foobox-image-lightbox/free/js/foobox.free.min.js?ver=2.7.41" id="foobox-free-min-js"></script>
+<link rel="https://api.w.org/" href="https://fedoramagazine.org/wp-json/" /><link rel="alternate" title="JSON" type="application/json" href="https://fedoramagazine.org/wp-json/wp/v2/posts/36919" /><link rel="EditURI" type="application/rsd+xml" title="RSD" href="https://fedoramagazine.org/xmlrpc.php?rsd" />
+<link rel='shortlink' href='https://wp.me/p3XX0v-9Bt' />
+	<style>img#wpstats{display:none}</style>
+		<link rel="me" href="https://fosstodon.org/@fedora" />
+      
+	      <!-- Customizer CSS --> 
+	      
+	      <style type="text/css">
+	           	           
+	           	           	           	           	           
+	           	           	           	           	           	           	           	           	           
+	           	           	           	           	           	           	           	           	           	           	           	           	           
+	           	           	           	           	           	           
+	           	           	           	           	           	           	           	           	           	           	           
+	           	           
+	           	           				
+			   	           
+	           	           	           	           	           	           	           	           	           	           	           	           	           	           
+	           	           
+	           	           				
+				
+	      </style> 
+	      
+	      <!--/Customizer CSS-->
+	      
+      	
+	</head>
+	
+	<body class="wp-singular post-template-default single single-post postid-36919 single-format-standard wp-theme-fedoramagazine-118 has-featured-image">
+		
+				
+		<div class="search-container">
+			
+			<div class="section-inner">
+			
+				<form method="get" class="search-form" id="search-form" action="https://fedoramagazine.org/">
+	<input type="search" class="search-field" placeholder="Search Fedora Magazine" name="s" id="s" /> 
+	<button type="submit" class="search-button"><div class="fa fw fa-search"></div></button>
+</form>			
+			</div><!-- .section-inner -->
+			
+		</div><!-- .search-container -->
+		
+		<div class="header-wrapper">
+		
+			<div class="header">
+					
+				<div class="section-inner">
+										<div class="magazine-sitelogo">
+						<a href='https://fedoramagazine.org/'>
+							<img width="250px" src="https://fedoramagazine.org/wp-content/themes/fedoramagazine-1.18/images/fmag-ribbon.png" />
+						</a>
+					</div>
+											
+							<ul class="social-menu">
+								
+								<li id="menu-item-37855" class="menu-item menu-item-type-custom menu-item-object-custom menu-item-37855"><a href="https://fosstodon.org/@fedora"><span class="screen-reader-text">fosstodon</span></a></li>
+<li id="menu-item-20774" class="menu-item menu-item-type-custom menu-item-object-custom menu-item-20774"><a href="https://www.facebook.com/TheFedoraProject"><span class="screen-reader-text">Meta</span></a></li>
+<li id="menu-item-20775" class="menu-item menu-item-type-custom menu-item-object-custom menu-item-20775"><a href="https://www.instagram.com/thefedoraproject"><span class="screen-reader-text">Instagram</span></a></li>
+<li id="menu-item-20773" class="menu-item menu-item-type-custom menu-item-object-custom menu-item-20773"><a href="https://twitter.com/fedora"><span class="screen-reader-text">Twitter</span></a></li>
+<li id="menu-item-35841" class="menu-item menu-item-type-custom menu-item-object-custom menu-item-35841"><a href="https://www.youtube.com/fedoraproject/videos"><span class="screen-reader-text">YouTube</span></a></li>
+<li id="menu-item-35842" class="menu-item menu-item-type-custom menu-item-object-custom menu-item-35842"><a href="https://chat.fedoraproject.org/"><span class="screen-reader-text">Chat</span></a></li>
+<li id="menu-item-35843" class="menu-item menu-item-type-custom menu-item-object-custom menu-item-35843"><a href="https://discussion.fedoraproject.org/"><span class="screen-reader-text">Discourse</span></a></li>
+<li id="menu-item-29030" class="menu-item menu-item-type-custom menu-item-object-custom menu-item-29030"><a href="https://fedoramagazine.org/feed/" title="						"><span class="screen-reader-text">RSS Feed</span></a></li>
+								
+							</ul><!-- .social-menu -->
+						
+						<div class="clear"></div>				
+									
+				</div><!-- .section-inner -->
+				
+			</div><!-- .header -->
+			
+					</div><!-- .header-wrapper -->
+<div class="wrapper section-inner">
+	
+	<div class="content">
+												        
+				
+			<div id="post-36919" class="single post-36919 post type-post status-publish format-standard has-post-thumbnail hentry category-fedora-project tag-btrfs post_series-working-with-btrfs">
+				
+				<div class="post-header">
+													
+											
+						<h1 class="post-title">Working with Btrfs &#8211; Subvolumes</h1>					    
+										
+					<div class="post-meta">
+
+						<span class="resp">Posted</span>
+						<span class="post-meta-author">
+						by						<a href="https://fedoramagazine.org/author/hartan/" title="Posts by Andreas Hartmann" class="author url fn" rel="author">Andreas Hartmann</a>						</span>
+						<span class="post-meta-date">on <a href="https://fedoramagazine.org/working-with-btrfs-subvolumes/">December 2, 2022</a></span> 
+						
+					</div><!-- .post-meta -->
+					
+				</div><!-- .post-header -->
+				
+						
+					<div class="post-image">
+							
+						<img width="816" height="345" src="https://fedoramagazine.org/wp-content/uploads/2022/09/working_w_btrfs_subvolumes-816x345.jpg" class="attachment-post-image size-post-image wp-post-image" alt="" decoding="async" fetchpriority="high" srcset="https://fedoramagazine.org/wp-content/uploads/2022/09/working_w_btrfs_subvolumes-816x345.jpg 816w, https://fedoramagazine.org/wp-content/uploads/2022/09/working_w_btrfs_subvolumes-300x127.jpg 300w, https://fedoramagazine.org/wp-content/uploads/2022/09/working_w_btrfs_subvolumes-1024x433.jpg 1024w, https://fedoramagazine.org/wp-content/uploads/2022/09/working_w_btrfs_subvolumes-768x325.jpg 768w, https://fedoramagazine.org/wp-content/uploads/2022/09/working_w_btrfs_subvolumes-1536x650.jpg 1536w, https://fedoramagazine.org/wp-content/uploads/2022/09/working_w_btrfs_subvolumes-472x200.jpg 472w, https://fedoramagazine.org/wp-content/uploads/2022/09/working_w_btrfs_subvolumes.jpg 1890w" sizes="(max-width: 816px) 100vw, 816px" />						
+												
+							<p class="post-image-caption"><span class="fa fw fa-camera"></span>Photo by <a href="https://unsplash.com/@helibertoarias?utm_source=unsplash&utm_medium=referral&utm_content=creditCopyText">Heliberto Arias</a> on <a href="https://unsplash.com/s/photos/hdd?utm_source=unsplash&utm_medium=referral&utm_content=creditCopyText">Unsplash</a></p>
+														
+												
+					</div><!-- .post-image -->
+						
+								
+				<div class="clear"></div>
+				
+				<div class="related-posts">
+
+	<div class="widget magazine_postseries_widget"><div class="widget-content">                        <p class="related-posts-title">in this series  <i class="fa fa-arrow-right" aria-hidden="true"></i></p>
+                                        
+                <a class="related-post" href="https://fedoramagazine.org/working-with-btrfs-general-concepts/">
+                                <img width="400" height="200" src="https://fedoramagazine.org/wp-content/uploads/2022/07/working_w_btrfs_general-400x200.jpg" class="attachment-post-image-thumb size-post-image-thumb wp-post-image" alt="" decoding="async" /><h3 class="title">1. Working with Btrfs – General Concepts</h3>
+                                      </a><a class="related-post" href="https://fedoramagazine.org/working-with-btrfs-subvolumes/">
+                                <img width="400" height="200" src="https://fedoramagazine.org/wp-content/uploads/2022/09/working_w_btrfs_subvolumes-400x200.jpg" class="attachment-post-image-thumb size-post-image-thumb wp-post-image" alt="" decoding="async" /><h3 class="title">2. Working with Btrfs - Subvolumes</h3>
+                                      </a><a class="related-post" href="https://fedoramagazine.org/working-with-btrfs-snapshots/">
+                                <img width="400" height="200" src="https://fedoramagazine.org/wp-content/uploads/2022/09/working_w_btrfs_snapshots-400x200.jpg" class="attachment-post-image-thumb size-post-image-thumb wp-post-image" alt="" decoding="async" loading="lazy" /><h3 class="title">3. Working with Btrfs - Snapshots</h3>
+                                      </a><a class="related-post" href="https://fedoramagazine.org/working-with-btrfs-compression/">
+                                <img width="400" height="200" src="https://fedoramagazine.org/wp-content/uploads/2023/01/working_w_btrfs_compression-400x200.jpg" class="attachment-post-image-thumb size-post-image-thumb wp-post-image" alt="" decoding="async" loading="lazy" /><h3 class="title">4. Working with Btrfs - Compression</h3>
+                                      </a></div><div class="clear"></div></div>
+</div>						
+				<div class="post-inner">
+	
+					<div class="post-content">
+					
+						
+<p>This article is part of a series of articles that takes a closer look at Btrfs, the default filesystem for Fedora Workstation and Fedora Silverblue since Fedora Linux 33.<br /><br />In case you missed it, here&#8217;s the previous article from the series: <a href="https://fedoramagazine.org/working-with-btrfs-general-concepts/" target="_blank" rel="noreferrer noopener">https://fedoramagazine.org/working-with-btrfs-general-concepts/</a></p>
+
+
+
+<span id="more-36919"></span>
+
+
+
+<h2 class="wp-block-heading">Introduction</h2>
+
+
+
+<p>Subvolumes allow for the partitioning of a Btrfs filesystem into separate sub-filesystems. This means that you can mount subvolumes from a Btrfs filesystem as if they were independent filesystems. In addition, you can, for example, define the maximum space a subvolume may take up via qgroups (We&#8217;ll talk about this in another article in this series), or use subvolumes to specifically include or exclude files from snapshots (We&#8217;ll talk about this, too, in another article in this series). Every default Fedora Workstation and Fedora Silverblue installation since Fedora Linux 33 makes use of subvolumes. In this article we will explore how it works.</p>
+
+
+
+<p>Below you will find a lot of examples related to subvolumes. If you want to follow along, you must have access to some Btrfs filesystem and root access. You can verify whether your <em>/home/</em> directory is Btrfs via the following command:</p>
+
+
+
+<pre class="wp-block-preformatted">$ findmnt -no FSTYPE /home
+btrfs</pre>
+
+
+
+<p>This command will output the name of the filesystem of your <em>/home/</em> directory. If it says <em>btrfs</em>, you&#8217;re all set. Let&#8217;s create a new directory to perform some experiments in:</p>
+
+
+
+<pre class="wp-block-preformatted">$ mkdir ~/btrfs-subvolume-test
+$ cd ~/btrfs-subvolume-test</pre>
+
+
+
+<p>In the text below, you will find lots of command outputs in boxes such as shown above. Please keep in mind while reading/comparing command outputs that the <strong>box contents are wrapped at the end of the line</strong>. This makes it difficult to recognize long lines that are broken across multiple lines for readability. When in doubt, try to resize your browser window and see how the text behaves!</p>
+
+
+
+<p></p>
+
+
+
+<h2 class="wp-block-heading">Creating and playing with subvolumes</h2>
+
+
+
+<p>We can create a Btrfs subvolume with the following command:</p>
+
+
+
+<pre class="wp-block-preformatted">$ sudo btrfs subvolume create first
+Create subvolume './first'</pre>
+
+
+
+<p>When we inspect the current directory we will see that it now has a new folder named <em>first</em>. Note the first character <em>d</em> in the output below:</p>
+
+
+
+<pre class="wp-block-preformatted">$ ls -l
+total 0
+drwxr-xr-x. 1 root root 0 Oct 15 18:09 first</pre>
+
+
+
+<p>We can handle this like any regular folder: We can rename it, move it, create new files and folders inside, etc. Note that the folder belongs to root, so we must be root to do these things.</p>
+
+
+
+<p>If it acts like a folder and looks like a folder, how do we know whether it&#8217;s a Btrfs subvolume? We can use the <em>btrfs</em> tools to list all subvolumes:</p>
+
+
+
+<pre class="wp-block-preformatted">$ sudo btrfs subvolume list .
+ID 256 gen 30 top level 5 path home
+ID 257 gen 30 top level 5 path root
+ID 258 gen 25 top level 257 path root/var/lib/machines
+ID 259 gen 29 top level 256 path hartan/btrfs-subvolume-test/first</pre>
+
+
+
+<p>If you&#8217;re on a recent and unmodified Fedora Linux installation you will likely see the same output as above. We will inspect <em>home</em> and <em>root</em> as well as the meaning of all the numbers later. For now, we see that there is a subvolume at the path we specified. We can limit the output to the subvolumes below our current location:</p>
+
+
+
+<pre class="wp-block-preformatted">$ sudo btrfs subvolume list -o .
+ID 259 gen 29 top level 256 path home/hartan/btrfs-subvolume-test/first</pre>
+
+
+
+<p>Let&#8217;s rename the subvolume:</p>
+
+
+
+<pre class="wp-block-preformatted">$ sudo mv first second
+$ sudo btrfs subvolume list -o .
+ID 259 gen 29 top level 256 path home/hartan/btrfs-subvolume-test/second</pre>
+
+
+
+<p>We can also nest subvolumes:</p>
+
+
+
+<pre class="wp-block-preformatted">$ sudo btrfs subvolume create second/third
+Create subvolume 'second/third'
+$ sudo btrfs subvolume list .
+ID 256 gen 34 top level 5 path home
+ID 257 gen 37 top level 5 path root
+ID 258 gen 25 top level 257 path root/var/lib/machines
+ID 259 gen 37 top level 256 path hartan/btrfs-subvolume-test/second
+ID 260 gen 37 top level 259 path hartan/btrfs-subvolume-test/second/third</pre>
+
+
+
+<p>And we can also remove subvolumes, either like we remove folders:</p>
+
+
+
+<pre class="wp-block-preformatted">$ sudo rm -r second/third</pre>
+
+
+
+<p>or via special Btrfs commands:</p>
+
+
+
+<pre class="wp-block-preformatted">$ sudo btrfs subvolume delete second
+Delete subvolume (no-commit): '/home/hartan/btrfs-subvolume-test/second'</pre>
+
+
+
+<p></p>
+
+
+
+<h2 class="wp-block-heading">Handling Btrfs subvolumes like separate filesystems</h2>
+
+
+
+<p>The introduction mentioned that Btrfs subvolumes act like separate filesystems. This means that we can mount subvolumes and pass some mount options to them. First we will create a small folder structure to get a better understanding of what happens:</p>
+
+
+
+<pre class="wp-block-preformatted">$ mkdir -p a a/1 a/1/b
+$ sudo btrfs subvolume create a/2
+Create subvolume 'a/2'
+$ sudo touch a/1/c a/1/b/d a/2/e</pre>
+
+
+
+<p>Here&#8217;s what the structure looks like:</p>
+
+
+
+<pre class="wp-block-preformatted">$ tree
+.
+└── a
+    ├── 1
+    │&nbsp;&nbsp; ├── b
+    │&nbsp;&nbsp; │&nbsp;&nbsp; └── d
+    │&nbsp;&nbsp; └── c
+    └── 2
+        └── e
+
+4 directories, 3 files</pre>
+
+
+
+<p>Verify that there is now a new Btrfs subvolume:</p>
+
+
+
+<pre class="wp-block-preformatted">$ sudo btrfs subvolume list -o .
+ID 261 gen 41 top level 256 path home/hartan/btrfs-subvolume-test/a/2</pre>
+
+
+
+<p>To mount the subvolume we must know the path of the block device where the Btrfs filesystem subvolume resides. The following command tells us:</p>
+
+
+
+<pre class="wp-block-preformatted">$ findmnt -vno SOURCE /home/
+/dev/vda3</pre>
+
+
+
+<p>Now we can mount the subvolume. Make sure you replace the arguments with the values for your PC:</p>
+
+
+
+<pre class="wp-block-preformatted">$ sudo mount -o subvol=home/hartan/btrfs-subvolume-test/a/2 /dev/vda3 a/1/b</pre>
+
+
+
+<p>Observe that we use the <em>-o</em> flag to give additional options to the mount program. In this case we tell it to mount the subvolume with name <em>home/hartan/btrfs-subvolume-test/a/2</em> from the btrfs filesystem on device <em>/dev/vda3</em>. This is a Btrfs-specific option and isn&#8217;t available in other filesystems.</p>
+
+
+
+<p>We see that the directory structure has changed:</p>
+
+
+
+<pre class="wp-block-preformatted">$ tree
+.
+└── a
+    ├── 1
+    │&nbsp;&nbsp; ├── b
+    │&nbsp;&nbsp; │&nbsp;&nbsp; └── e
+    │&nbsp;&nbsp; └── c
+    └── 2
+        └── e
+
+4 directories, 3 files</pre>
+
+
+
+<p>Note that the file <em>e</em> exists twice now and <em>d</em> is gone. We are now able to access the same Btrfs subvolume by two different paths. All changes we perform in either of the paths are immediately reflected in all other locations:</p>
+
+
+
+<pre class="wp-block-preformatted">$ sudo touch a/1/b/x
+$ ls -lA a/2
+total 0
+-rw-r--r--. 1 root root 0 Oct 15 18:14 e
+-rw-r--r--. 1 root root 0 Oct 15 18:16 x</pre>
+
+
+
+<p>Let&#8217;s play some more with the mount options. For example we can mount the subvolume as read-only under <em>a/1/b</em> like this (Insert arguments for your PC!):</p>
+
+
+
+<pre class="wp-block-preformatted">$ sudo umount a/1/b
+$ sudo mount -o subvol=home/hartan/btrfs-subvolume-test/a/2,ro /dev/vda3 a/1/b</pre>
+
+
+
+<p>We use the same command as above, except that we add <em>ro</em> at the end. Now we can no longer create files via this mount:</p>
+
+
+
+<pre class="wp-block-preformatted">$ sudo touch a/1/b/y
+touch: cannot touch 'a/1/b/y': Read-only file system</pre>
+
+
+
+<p>but accessing the subvolume directly still works like before:</p>
+
+
+
+<pre class="wp-block-preformatted">$ sudo touch a/2/y
+$ tree
+.
+└── a
+    ├── 1
+    │&nbsp;&nbsp; ├── b
+    │&nbsp;&nbsp; │&nbsp;&nbsp; ├── e
+    │&nbsp;&nbsp; │&nbsp;&nbsp; ├── x
+    │&nbsp;&nbsp; │&nbsp;&nbsp; └── y
+    │&nbsp;&nbsp; └── c
+    └── 2
+        ├── e
+        ├── x
+        └── y
+
+4 directories, 7 files</pre>
+
+
+
+<p>Don&#8217;t forget to clean up before we move on:</p>
+
+
+
+<pre class="wp-block-preformatted">$ sudo rm -rf a
+rm: cannot remove 'a/1/b/e': Read-only file system
+rm: cannot remove 'a/1/b/x': Read-only file system
+rm: cannot remove 'a/1/b/y': Read-only file system</pre>
+
+
+
+<p>Oh no, what happened? Well, since we mounted the subvolume <em>read-only</em> above, we cannot delete it. A deletion from a filesystems&#8217; perspective is a write operation: To delete <strong><em>a/1/b/e</em>,</strong> we remove the directory entry for <em><strong>e</strong></em> from the directory contents of its parent directory, <em><strong>a/1/b</strong></em> in this case. In other words, we must <em>write</em> to <strong><em>a/1/b</em> </strong>to tell it that <em><strong>e</strong></em> doesn&#8217;t exist any longer. So first we unmount the subvolume again, and then we remove the folder:</p>
+
+
+
+<pre class="wp-block-preformatted">$ sudo umount a/1/b
+$ sudo rm -rf a
+$ tree
+.
+
+0 directories, 0 files</pre>
+
+
+
+<p></p>
+
+
+
+<h2 class="wp-block-heading">Subvolume IDs</h2>
+
+
+
+<p>Remember the first output of the <em>subvolume list</em> subcommand? That contained a lot of numbers, so let&#8217;s see what that is all about. I copied the output here to take another look:</p>
+
+
+
+<pre class="wp-block-preformatted">ID 256 gen 30 top level 5 path home
+ID 257 gen 30 top level 5 path root
+ID 258 gen 25 top level 257 path root/var/lib/machines
+ID 259 gen 29 top level 256 path hartan/btrfs-subvolume-test/first</pre>
+
+
+
+<p>We see there are three columns of numbers, each prefixed with a few letters to describe what they do. The first column of numbers is a subvolumes ID. Subvolume IDs are unique in a Btrfs filesystem and as such uniquely identify subvolumes. This means that the subvolume named <em>home</em> can also be referred to by its ID <strong>256</strong>. In the mount command above we wrote:</p>
+
+
+
+<pre class="wp-block-preformatted">$ sudo mount -o subvol=hartan/...</pre>
+
+
+
+<p>Another perfectly legal option is to use subvolume IDs:</p>
+
+
+
+<pre class="wp-block-preformatted">$ sudo mount -o subvolid=...</pre>
+
+
+
+<p>Subvolume IDs start at <strong>256</strong> and increase by 1 for every created subvolume. There is however one exception to this: The filesystem root always has the subvolume name <em>/</em> and the subvolume ID 5. That is right, even the root of a Btrfs filesystem is technically a subvolume. This is just implicitly known, hence it doesn&#8217;t show up in the output of <em>btrfs subvolume list</em>. If you mount a Btrfs filesystem without the <em>subvol</em> or <em>subvolid</em> argument, the root subvolume with <em>subvolid=5</em> is assumed as default. Below we&#8217;ll see an example of when one may want to explicitly mount the filesystem root.</p>
+
+
+
+<p>The second column of numbers is the generation counter and incremented on every Btrfs transaction. This is mostly an internal counter and won&#8217;t be discussed further here.</p>
+
+
+
+<p>Finally, the third column of numbers is the subvolume ID of the subvolumes <em>parent</em>. In the output above we see that both subvolume <em>home</em> and <em>root</em> have 5 as their parent subvolume ID. Remember that ID 5 has a special meaning: It is the filesystem root. So we know that <em>home</em> and <em>root</em> are children to the root subvolume. <em>hartan/btrfs-subvolume-test/first </em>on the other hand is a child of the subvolume with ID 256, which in our case is <em>home</em>.</p>
+
+
+
+<p>In the next section we have a look at where the subvolumes <em>root</em> and <em>home</em> come from.</p>
+
+
+
+<p></p>
+
+
+
+<h2 class="wp-block-heading">Inspecting default subvolumes in Fedora Linux</h2>
+
+
+
+<p>When you create a new Btrfs filesystem from scratch, there will be no subvolumes in it (Except of course for the root subvolume). So where do the <em>home</em> and <em>root</em> subvolumes in Fedora Linux come from?</p>
+
+
+
+<p>These are created by the installer at install time. Traditional installations would often include a separate filesystem partition for the <em>/</em> and <em>/home</em> directories. During boot, these are then appropriately mounted to assemble one full filesystem. But there is an issue with this approach: Unless you use technologies such as <em>lvm</em>, it is very hard to change a partitions size at some point in the future. As a consequence you may end up in a situation where either your <em>/</em> or <em>/home</em> runs out of space, while the respective other partition has lots of unused, free space left.</p>
+
+
+
+<p>Since Btrfs subvolumes are all part of the same filesystem, they will share the space that the underlying filesystem offers. Remember when we created the subvolumes above? We never told Btrfs how big they are: A subvolume can take up all the space the filesystem has, by default nothing keeps it from doing so. However, we <em>could</em> dynamically impose size limits via Btrfs qgroups, which can also be modified during runtime (And we&#8217;ll see how in a later article in this series).</p>
+
+
+
+<p>Another advantage of separating <em>/</em> and <em>/home</em> is that we can take <em>snapshots</em> separately. A subvolume is a boundary for snapshots, and snapshots will never contain the contents of other subvolumes below the subvolume that the snapshot is taken of. More details on snapshots follow in the next article in this series.</p>
+
+
+
+<p>Enough of the theory! Let&#8217;s see what this is all about. First ensure that your root filesystem is in fact of type Btrfs:</p>
+
+
+
+<pre class="wp-block-preformatted">$ findmnt -no FSTYPE /
+btrfs</pre>
+
+
+
+<p>And then get the partition it resides on:</p>
+
+
+
+<pre class="wp-block-preformatted">$ findmnt -vno SOURCE /
+/dev/vda3</pre>
+
+
+
+<p>Remember we can mount the filesystem root by its special subvolume ID 5 (Adapt the filesystem partition!):</p>
+
+
+
+<pre class="wp-block-preformatted">$ mkdir fedora-rootsubvol
+$ sudo mount -o subvolid=5 /dev/vda3 ./fedora-rootsubvol
+$ ls fedora-rootsubvol/
+home  root</pre>
+
+
+
+<p>And there are the subvolumes of our Fedora Linux installation! But how does Fedora Linux know that the subvolume <em>root</em> belongs to <em>/</em>, and <em>home</em> belongs to <em>/home</em>?</p>
+
+
+
+<p>The file <em>/etc/fstab</em> contains so-called static information about the filesystem. In simple terms, during booting your system reads this file, line by line, and mounts all the filesystems listed there. On my system, the file looks like this:</p>
+
+
+
+<pre class="wp-block-preformatted">$ cat /etc/fstab
+# [ ... ]
+# /etc/fstab
+# Created by anaconda on Sat Oct 15 12:01:57 2022
+# [ ... ]
+#
+UUID=5e4e42bb-4f2f-4f0e-895f-d1a46ea47807 /                       btrfs   subvol=root,compress=zstd:1 0 0
+UUID=e3a798a8-b8f2-40ca-9da7-5e292a6412aa /boot                   ext4    defaults        1 2
+UUID=5e4e42bb-4f2f-4f0e-895f-d1a46ea47807 /home                   btrfs   subvol=home,compress=zstd:1 0 0</pre>
+
+
+
+<p>(Note that the &#8220;UUID&#8221; lines above have been wrapped into two lines)</p>
+
+
+
+<p>The <em>UUID</em> at the beginning of each line is simply a means to identify disks and filesystem partitions in your system (roughly equivalent to <em>/dev/vda3</em> as I used above). The second column is the path in the filesystem tree where this filesystem should be mounted. The third column is the filesystem type. We see that the entries for <em>/</em> and <em>/home</em> are of type <em>btrfs</em>, just what we expect! Finally, in the fourth column we see the magic: These are the mount options, and there it says to mount <em>/</em> with the option <em>subvol=root</em>. That is exactly the subvolume we saw in the output of <em>btrfs subvolume list /</em> all the time!</p>
+
+
+
+<p>With this information, we can reconstruct the call to <em>mount</em> that creates this filesystem entry:</p>
+
+
+
+<pre class="wp-block-preformatted">$ sudo mount -o subvol=root,compress=zstd:1 UUID=5e4e42bb-4f2f-4f0e-895f-d1a46ea47807 /</pre>
+
+
+
+<pre class="wp-block-preformatted">(again, the line above has been wrapped into two)</pre>
+
+
+
+<p>And that is how Fedora Linux uses Btrfs subvolumes! If you&#8217;re curious as to why Fedora Linux decided to use Btrfs as the default filesystem, refer to the change proposal linked below <a href="#sources">[1]</a>.</p>
+
+
+
+<p></p>
+
+
+
+<h2 class="wp-block-heading">More on Btrfs subvolumes</h2>
+
+
+
+<p>The Btrfs wiki has additional information on subvolumes and most importantly on the mount options that can be applied to Btrfs subvolumes. Some options, like <em>compress</em> can only be applied on a filesystem-wide level and thus affect all subvolumes of a Btrfs filesystem. You can find the entry linked below <a href="#sources">[2]</a>.</p>
+
+
+
+<p>If you find it confusing to tell which directories are plain directories and which are subvolumes, you can feel free to adopt a special naming convention for your subvolumes. For example, you could prefix your subvolume names with an &#8220;@&#8221; to make them easily distinguishable.</p>
+
+
+
+<p>Now that you know that subvolumes behave like filesystems, one may ask how best to place a subvolume in a certain location. Say you want a Btrfs subvolume under <em>~/games</em>, where your home directory (<em>~</em>) is itself a subvolume, how can you achieve that? Given the example above, you may use a command like <em>sudo btrfs subvolume create ~/games</em>. This way, you create so-called <em>nested</em> subvolumes: Inside your subvolume <em>~</em>, there is now a subvolume <em>games</em>. That is a perfectly fine way to approach this situation.</p>
+
+
+
+<p>Another valid solution is to do what Fedora does by default: Create all subvolumes under the root subvolume (i.e. such that their parent subvolume ID is 5), and mount them into the appropriate locations. The Btrfs wiki has an overview of these approaches along with a short discussion about their respective implications on filesystem management <a href="#sources">[5]</a>.</p>
+
+
+
+<p></p>
+
+
+
+<h2 class="wp-block-heading">Conclusion</h2>
+
+
+
+<p>In this article we discovered Btrfs subvolumes, which act like separate Btrfs filesystems inside a Btrfs filesystem. We learned how to create, mount and delete subvolumes. Finally, we explored how Fedora Linux makes use of subvolumes &#8211; without us noticing at all.</p>
+
+
+
+<p>The next articles in this series will deal with:</p>
+
+
+
+<ul class="wp-block-list"><li>Snapshots &#8211; Going back in time</li><li>Compression &#8211; Transparently saving storage space</li><li>Qgroups &#8211; Limiting your filesystem size</li><li>RAID &#8211; Replace your mdadm configuration</li></ul>
+
+
+
+<p>If there are other topics related to Btrfs that you want to know more about, have a look at the Btrfs Wiki <a href="#sources">[3]</a> and Docs <a href="#sources">[4]</a>. Don&#8217;t forget to check out the first article of this series, if you haven&#8217;t already! If you feel that there is something missing from this article series, let us know in the comments below. See you in the next article!</p>
+
+
+
+<p></p>
+
+
+
+<h2 class="wp-block-heading" id="sources">Sources</h2>
+
+
+
+<p>[1]: <a href="https://fedoraproject.org/wiki/Changes/BtrfsByDefault#Benefit_to_Fedora" target="_blank" rel="noreferrer noopener">https://fedoraproject.org/wiki/Changes/BtrfsByDefault#Benefit_to_Fedora</a><br />[2]: <a href="https://btrfs.readthedocs.io/en/latest/Subvolumes.html" target="_blank" rel="noreferrer noopener">https://btrfs.readthedocs.io/en/latest/Subvolumes.html</a><br />[3]: <a href="https://btrfs.wiki.kernel.org/index.php/Main_Page" target="_blank" rel="noreferrer noopener">https://btrfs.wiki.kernel.org/index.php/Main_Page</a><br />[4]: <a href="https://btrfs.readthedocs.io/en/latest/Introduction.html" target="_blank" rel="noreferrer noopener">https://btrfs.readthedocs.io/en/latest/Introduction.html</a><br />[5]: <a href="https://btrfs.wiki.kernel.org/index.php/SysadminGuide#Layout" target="_blank" rel="noreferrer noopener">https://btrfs.wiki.kernel.org/index.php/SysadminGuide#Layout</a></p>
+<div class='sharedaddy sd-block sd-like jetpack-likes-widget-wrapper jetpack-likes-widget-unloaded' id='like-post-wrapper-58617187-36919-69ab3e1a92fa1' data-src='https://widgets.wp.com/likes/?ver=15.6#blog_id=58617187&amp;post_id=36919&amp;origin=fedoramagazine.org&amp;obj_id=58617187-36919-69ab3e1a92fa1' data-name='like-post-frame-58617187-36919-69ab3e1a92fa1' data-title='Like or Reblog'><h3 class="sd-title">Like this:</h3><div class='likes-widget-placeholder post-likes-widget-placeholder' style='height: 55px;'><span class='button'><span>Like</span></span> <span class="loading">Loading...</span></div><span class='sd-text-color'></span><a class='sd-link-color'></a></div>						
+											
+					</div>
+					
+					<div class="clear"></div>
+
+											<div class="post-catertags">
+															<span class="post-categories">
+									<a href="https://fedoramagazine.org/category/fedora-project/" rel="category tag">Fedora Project community</a>								</span>
+							
+															<span class="post-tags">
+									<a href="https://fedoramagazine.org/tag/btrfs/" rel="tag">btrfs</a>								</span>
+													</div>
+										
+
+														<div class="post-author">
+									<a class="avatar" href="https://fedoramagazine.org/author/hartan/"></a>
+										<img alt='' src='https://secure.gravatar.com/avatar/e0e0e157ed1412be98c563b02f6a88680da22a47343b9e8dc7d3a339eb026b63?s=96&#038;d=retro&#038;r=g' srcset='https://secure.gravatar.com/avatar/e0e0e157ed1412be98c563b02f6a88680da22a47343b9e8dc7d3a339eb026b63?s=192&#038;d=retro&#038;r=g 2x' class='avatar avatar-96 photo' height='96' width='96' loading='lazy' decoding='async'/>									</a><!-- .avatar -->
+									<h4 class="title"><a href="https://fedoramagazine.org/author/hartan/">Andreas Hartmann</a></h4>
+
+									<p>Engineering student, Linux enthusiast, OSS developer.</p>
+								</div>
+								
+					
+														
+				</div><!-- .post-inner -->
+				
+				<div class="clear"></div>
+				
+			</div><!-- .post -->
+			
+			
+	<div class="comments-container">
+
+		<div class="comments-inner">
+		
+			<a name="comments"></a>
+			
+			<div class="comments-title-container">
+			
+				<h3 class="comments-title">
+				
+					<span class="fa fw fa-comment"></span>
+					18 Comments					
+				</h3>
+				
+								
+				<div class="clear"></div>
+			
+			</div>
+		
+			<div class="comments">
+		
+				<ol class="commentlist">
+				    		<li class="comment even thread-even depth-1" id="li-comment-542758">
+		
+			<div id="comment-542758" class="comment">
+				
+				<img alt='' src='https://secure.gravatar.com/avatar/9a9e5ab8dc81b02a2b78cef9930ff0bb6211c755372c1993712744a03e98cc78?s=160&#038;d=retro&#038;r=g' srcset='https://secure.gravatar.com/avatar/9a9e5ab8dc81b02a2b78cef9930ff0bb6211c755372c1993712744a03e98cc78?s=320&#038;d=retro&#038;r=g 2x' class='avatar avatar-160 photo' height='160' width='160' loading='lazy' decoding='async'/>				
+								
+				<div class="comment-inner">
+				
+					<div class="comment-header">
+												
+						<h4>Esc</h4>
+					
+					</div><!-- .comment-header -->
+					
+					<div class="comment-content post-content">
+				
+						<p>Thanks, super</p>
+						
+					</div><!-- .comment-content -->
+					
+					<div class="comment-meta">
+						
+						<div class="fleft">
+							<div class="fa fw fa-clock-o"></div><a class="comment-date-link" href="https://fedoramagazine.org/working-with-btrfs-subvolumes/#comment-542758" title="December 2, 2022 at 17:15">December 2, 2022</a>
+													</div>
+						
+												
+						<div class="clear"></div>
+						
+					</div><!-- .comment-meta -->
+									
+				</div><!-- .comment-inner -->
+											
+			</div><!-- .comment-## -->
+					
+		</li><!-- #comment-## -->
+		<li class="comment odd alt thread-odd thread-alt depth-1" id="li-comment-542785">
+		
+			<div id="comment-542785" class="comment">
+				
+				<img alt='' src='https://secure.gravatar.com/avatar/91df1f5a3e5c98006ff31df905b19723a7b097dce861e0a0aecabed2b2588ed9?s=160&#038;d=retro&#038;r=g' srcset='https://secure.gravatar.com/avatar/91df1f5a3e5c98006ff31df905b19723a7b097dce861e0a0aecabed2b2588ed9?s=320&#038;d=retro&#038;r=g 2x' class='avatar avatar-160 photo' height='160' width='160' loading='lazy' decoding='async'/>				
+								
+				<div class="comment-inner">
+				
+					<div class="comment-header">
+												
+						<h4>Stephen</h4>
+					
+					</div><!-- .comment-header -->
+					
+					<div class="comment-content post-content">
+				
+						<p>Excellent write up, keep them coming!</p>
+						
+					</div><!-- .comment-content -->
+					
+					<div class="comment-meta">
+						
+						<div class="fleft">
+							<div class="fa fw fa-clock-o"></div><a class="comment-date-link" href="https://fedoramagazine.org/working-with-btrfs-subvolumes/#comment-542785" title="December 3, 2022 at 00:03">December 3, 2022</a>
+													</div>
+						
+												
+						<div class="clear"></div>
+						
+					</div><!-- .comment-meta -->
+									
+				</div><!-- .comment-inner -->
+											
+			</div><!-- .comment-## -->
+					
+		</li><!-- #comment-## -->
+		<li class="comment even thread-even depth-1" id="li-comment-542790">
+		
+			<div id="comment-542790" class="comment">
+				
+				<img alt='' src='https://secure.gravatar.com/avatar/271dd9a633302c1bc6bb03ef30bb7737258f36b554638acbdb1acf7cbc4fcab9?s=160&#038;d=retro&#038;r=g' srcset='https://secure.gravatar.com/avatar/271dd9a633302c1bc6bb03ef30bb7737258f36b554638acbdb1acf7cbc4fcab9?s=320&#038;d=retro&#038;r=g 2x' class='avatar avatar-160 photo' height='160' width='160' loading='lazy' decoding='async'/>				
+								
+				<div class="comment-inner">
+				
+					<div class="comment-header">
+												
+						<h4>Kory</h4>
+					
+					</div><!-- .comment-header -->
+					
+					<div class="comment-content post-content">
+				
+						<p>Great write up. I learned a lot!</p>
+						
+					</div><!-- .comment-content -->
+					
+					<div class="comment-meta">
+						
+						<div class="fleft">
+							<div class="fa fw fa-clock-o"></div><a class="comment-date-link" href="https://fedoramagazine.org/working-with-btrfs-subvolumes/#comment-542790" title="December 3, 2022 at 03:03">December 3, 2022</a>
+													</div>
+						
+												
+						<div class="clear"></div>
+						
+					</div><!-- .comment-meta -->
+									
+				</div><!-- .comment-inner -->
+											
+			</div><!-- .comment-## -->
+					
+		</li><!-- #comment-## -->
+		<li class="comment odd alt thread-odd thread-alt depth-1" id="li-comment-542890">
+		
+			<div id="comment-542890" class="comment">
+				
+				<img alt='' src='https://secure.gravatar.com/avatar/5ae00ad9fe21299ed807e9b5e25c16f77d6fdfb82e847088a442d53984263b39?s=160&#038;d=retro&#038;r=g' srcset='https://secure.gravatar.com/avatar/5ae00ad9fe21299ed807e9b5e25c16f77d6fdfb82e847088a442d53984263b39?s=320&#038;d=retro&#038;r=g 2x' class='avatar avatar-160 photo' height='160' width='160' loading='lazy' decoding='async'/>				
+								
+				<div class="comment-inner">
+				
+					<div class="comment-header">
+												
+						<h4>msandy</h4>
+					
+					</div><!-- .comment-header -->
+					
+					<div class="comment-content post-content">
+				
+						<p>I think this is the first time i actually am starting to understand what subvolumes are and how they relate to snapshots.  I love these articles I always get excited when i see them show in my inbox.</p>
+						
+					</div><!-- .comment-content -->
+					
+					<div class="comment-meta">
+						
+						<div class="fleft">
+							<div class="fa fw fa-clock-o"></div><a class="comment-date-link" href="https://fedoramagazine.org/working-with-btrfs-subvolumes/#comment-542890" title="December 5, 2022 at 05:28">December 5, 2022</a>
+													</div>
+						
+												
+						<div class="clear"></div>
+						
+					</div><!-- .comment-meta -->
+									
+				</div><!-- .comment-inner -->
+											
+			</div><!-- .comment-## -->
+					
+		</li><!-- #comment-## -->
+		<li class="comment even thread-even depth-1" id="li-comment-542908">
+		
+			<div id="comment-542908" class="comment">
+				
+				<img alt='' src='https://secure.gravatar.com/avatar/0aaf0403080421193ac601e2a3fa211a523f613335c45964341027e0f74d60b7?s=160&#038;d=retro&#038;r=g' srcset='https://secure.gravatar.com/avatar/0aaf0403080421193ac601e2a3fa211a523f613335c45964341027e0f74d60b7?s=320&#038;d=retro&#038;r=g 2x' class='avatar avatar-160 photo' height='160' width='160' loading='lazy' decoding='async'/>				
+								
+				<div class="comment-inner">
+				
+					<div class="comment-header">
+												
+						<h4>Jesse</h4>
+					
+					</div><!-- .comment-header -->
+					
+					<div class="comment-content post-content">
+				
+						<p>too bad it still doesn&#8217;t support RAID 5/6  properly.</p>
+						
+					</div><!-- .comment-content -->
+					
+					<div class="comment-meta">
+						
+						<div class="fleft">
+							<div class="fa fw fa-clock-o"></div><a class="comment-date-link" href="https://fedoramagazine.org/working-with-btrfs-subvolumes/#comment-542908" title="December 5, 2022 at 12:55">December 5, 2022</a>
+													</div>
+						
+												
+						<div class="clear"></div>
+						
+					</div><!-- .comment-meta -->
+									
+				</div><!-- .comment-inner -->
+											
+			</div><!-- .comment-## -->
+					
+		</li><!-- #comment-## -->
+		<li class="comment odd alt thread-odd thread-alt depth-1" id="li-comment-542911">
+		
+			<div id="comment-542911" class="comment">
+				
+				<img alt='' src='https://secure.gravatar.com/avatar/fc457f9ab04f904c2519c31674ccf3494bedddbb34a7fbbc91b9799e93983494?s=160&#038;d=retro&#038;r=g' srcset='https://secure.gravatar.com/avatar/fc457f9ab04f904c2519c31674ccf3494bedddbb34a7fbbc91b9799e93983494?s=320&#038;d=retro&#038;r=g 2x' class='avatar avatar-160 photo' height='160' width='160' loading='lazy' decoding='async'/>				
+								
+				<div class="comment-inner">
+				
+					<div class="comment-header">
+												
+						<h4><a href="http://isnic.is" class="url" rel="ugc external nofollow">Jens</a></h4>
+					
+					</div><!-- .comment-header -->
+					
+					<div class="comment-content post-content">
+				
+						<p>Is Andreas Hartmann from Geesthacht, Germany?</p>
+						
+					</div><!-- .comment-content -->
+					
+					<div class="comment-meta">
+						
+						<div class="fleft">
+							<div class="fa fw fa-clock-o"></div><a class="comment-date-link" href="https://fedoramagazine.org/working-with-btrfs-subvolumes/#comment-542911" title="December 5, 2022 at 13:44">December 5, 2022</a>
+													</div>
+						
+												
+						<div class="clear"></div>
+						
+					</div><!-- .comment-meta -->
+									
+				</div><!-- .comment-inner -->
+											
+			</div><!-- .comment-## -->
+					
+		</li><!-- #comment-## -->
+		<li class="comment even thread-even depth-1" id="li-comment-542919">
+		
+			<div id="comment-542919" class="comment">
+				
+				<img alt='' src='https://secure.gravatar.com/avatar/65984aced08e9d94f75e0af3a46852f844a6c6f7aaaca44572f4b647a0ffb1ad?s=160&#038;d=retro&#038;r=g' srcset='https://secure.gravatar.com/avatar/65984aced08e9d94f75e0af3a46852f844a6c6f7aaaca44572f4b647a0ffb1ad?s=320&#038;d=retro&#038;r=g 2x' class='avatar avatar-160 photo' height='160' width='160' loading='lazy' decoding='async'/>				
+								
+				<div class="comment-inner">
+				
+					<div class="comment-header">
+												
+						<h4>Tomasz</h4>
+					
+					</div><!-- .comment-header -->
+					
+					<div class="comment-content post-content">
+				
+						<p>Very interested in the RAID article and how you propose to replace mdadm.</p>
+						
+					</div><!-- .comment-content -->
+					
+					<div class="comment-meta">
+						
+						<div class="fleft">
+							<div class="fa fw fa-clock-o"></div><a class="comment-date-link" href="https://fedoramagazine.org/working-with-btrfs-subvolumes/#comment-542919" title="December 5, 2022 at 16:28">December 5, 2022</a>
+													</div>
+						
+												
+						<div class="clear"></div>
+						
+					</div><!-- .comment-meta -->
+									
+				</div><!-- .comment-inner -->
+											
+			</div><!-- .comment-## -->
+					
+		</li><!-- #comment-## -->
+		<li class="comment odd alt thread-odd thread-alt depth-1" id="li-comment-542963">
+		
+			<div id="comment-542963" class="comment">
+				
+				<img alt='' src='https://secure.gravatar.com/avatar/11c83366982dd534d5c316b3cd8d9a8aefc6bc97ac2854e9c8c6d01fbeb6f25c?s=160&#038;d=retro&#038;r=g' srcset='https://secure.gravatar.com/avatar/11c83366982dd534d5c316b3cd8d9a8aefc6bc97ac2854e9c8c6d01fbeb6f25c?s=320&#038;d=retro&#038;r=g 2x' class='avatar avatar-160 photo' height='160' width='160' loading='lazy' decoding='async'/>				
+								
+				<div class="comment-inner">
+				
+					<div class="comment-header">
+												
+						<h4><a href="https://bitlife.online" class="url" rel="ugc external nofollow">bitlife</a></h4>
+					
+					</div><!-- .comment-header -->
+					
+					<div class="comment-content post-content">
+				
+						<p>Keep the articles coming; they are excellent!</p>
+						
+					</div><!-- .comment-content -->
+					
+					<div class="comment-meta">
+						
+						<div class="fleft">
+							<div class="fa fw fa-clock-o"></div><a class="comment-date-link" href="https://fedoramagazine.org/working-with-btrfs-subvolumes/#comment-542963" title="December 6, 2022 at 07:50">December 6, 2022</a>
+													</div>
+						
+												
+						<div class="clear"></div>
+						
+					</div><!-- .comment-meta -->
+									
+				</div><!-- .comment-inner -->
+											
+			</div><!-- .comment-## -->
+					
+		</li><!-- #comment-## -->
+		<li class="comment even thread-even depth-1" id="li-comment-543004">
+		
+			<div id="comment-543004" class="comment">
+				
+				<img alt='' src='https://secure.gravatar.com/avatar/2270864c8aa62684a838597d133863de3702f96b4870afb4f6f21f60757ba1dd?s=160&#038;d=retro&#038;r=g' srcset='https://secure.gravatar.com/avatar/2270864c8aa62684a838597d133863de3702f96b4870afb4f6f21f60757ba1dd?s=320&#038;d=retro&#038;r=g 2x' class='avatar avatar-160 photo' height='160' width='160' loading='lazy' decoding='async'/>				
+								
+				<div class="comment-inner">
+				
+					<div class="comment-header">
+												
+						<h4>cmurf</h4>
+					
+					</div><!-- .comment-header -->
+					
+					<div class="comment-content post-content">
+				
+						<p>🥳 Great!</p>
+						
+					</div><!-- .comment-content -->
+					
+					<div class="comment-meta">
+						
+						<div class="fleft">
+							<div class="fa fw fa-clock-o"></div><a class="comment-date-link" href="https://fedoramagazine.org/working-with-btrfs-subvolumes/#comment-543004" title="December 7, 2022 at 00:56">December 7, 2022</a>
+													</div>
+						
+												
+						<div class="clear"></div>
+						
+					</div><!-- .comment-meta -->
+									
+				</div><!-- .comment-inner -->
+											
+			</div><!-- .comment-## -->
+					
+		</li><!-- #comment-## -->
+		<li class="comment odd alt thread-odd thread-alt depth-1" id="li-comment-543123">
+		
+			<div id="comment-543123" class="comment">
+				
+				<img alt='' src='https://secure.gravatar.com/avatar/f261b3fa416f25edf4993049ad97faef459fdb56f40d33d8fef3350730c3cfbe?s=160&#038;d=retro&#038;r=g' srcset='https://secure.gravatar.com/avatar/f261b3fa416f25edf4993049ad97faef459fdb56f40d33d8fef3350730c3cfbe?s=320&#038;d=retro&#038;r=g 2x' class='avatar avatar-160 photo' height='160' width='160' loading='lazy' decoding='async'/>				
+								
+				<div class="comment-inner">
+				
+					<div class="comment-header">
+												
+						<h4>condor</h4>
+					
+					</div><!-- .comment-header -->
+					
+					<div class="comment-content post-content">
+				
+						<p>This is a perfectly timed article! It&#8217;s the ideal time of year for some recreational<br />
+reading.  Keep it up!</p>
+						
+					</div><!-- .comment-content -->
+					
+					<div class="comment-meta">
+						
+						<div class="fleft">
+							<div class="fa fw fa-clock-o"></div><a class="comment-date-link" href="https://fedoramagazine.org/working-with-btrfs-subvolumes/#comment-543123" title="December 9, 2022 at 08:36">December 9, 2022</a>
+													</div>
+						
+												
+						<div class="clear"></div>
+						
+					</div><!-- .comment-meta -->
+									
+				</div><!-- .comment-inner -->
+											
+			</div><!-- .comment-## -->
+					
+		</li><!-- #comment-## -->
+		<li class="comment even thread-even depth-1" id="li-comment-543209">
+		
+			<div id="comment-543209" class="comment">
+				
+				<img alt='' src='https://secure.gravatar.com/avatar/041739514b771de3a1a2984f31c14e354ba31fbf9fde183928ece129923004e9?s=160&#038;d=retro&#038;r=g' srcset='https://secure.gravatar.com/avatar/041739514b771de3a1a2984f31c14e354ba31fbf9fde183928ece129923004e9?s=320&#038;d=retro&#038;r=g 2x' class='avatar avatar-160 photo' height='160' width='160' loading='lazy' decoding='async'/>				
+								
+				<div class="comment-inner">
+				
+					<div class="comment-header">
+												
+						<h4>robbers alice</h4>
+					
+					</div><!-- .comment-header -->
+					
+					<div class="comment-content post-content">
+				
+						<p>I didn’t have any expectations concerning that title, but the more I was astonished. The author did a great job. I spent a few minutes reading and checking the facts. Everything is very clear and understandable. I like posts that fill in your knowledge gaps. This one is of the sort.</p>
+						
+					</div><!-- .comment-content -->
+					
+					<div class="comment-meta">
+						
+						<div class="fleft">
+							<div class="fa fw fa-clock-o"></div><a class="comment-date-link" href="https://fedoramagazine.org/working-with-btrfs-subvolumes/#comment-543209" title="December 10, 2022 at 19:10">December 10, 2022</a>
+													</div>
+						
+												
+						<div class="clear"></div>
+						
+					</div><!-- .comment-meta -->
+									
+				</div><!-- .comment-inner -->
+											
+			</div><!-- .comment-## -->
+					
+		</li><!-- #comment-## -->
+		<li class="comment odd alt thread-odd thread-alt depth-1" id="li-comment-543498">
+		
+			<div id="comment-543498" class="comment">
+				
+				<img alt='' src='https://secure.gravatar.com/avatar/0a5764e35543b011ee50d8677b65ab08ec5765bc5936d5c9bbc8f7da3195d56f?s=160&#038;d=retro&#038;r=g' srcset='https://secure.gravatar.com/avatar/0a5764e35543b011ee50d8677b65ab08ec5765bc5936d5c9bbc8f7da3195d56f?s=320&#038;d=retro&#038;r=g 2x' class='avatar avatar-160 photo' height='160' width='160' loading='lazy' decoding='async'/>				
+								
+				<div class="comment-inner">
+				
+					<div class="comment-header">
+												
+						<h4>shay</h4>
+					
+					</div><!-- .comment-header -->
+					
+					<div class="comment-content post-content">
+				
+						<p>Seems really complicated I think I&#8217;ll go back to FAT32</p>
+						
+					</div><!-- .comment-content -->
+					
+					<div class="comment-meta">
+						
+						<div class="fleft">
+							<div class="fa fw fa-clock-o"></div><a class="comment-date-link" href="https://fedoramagazine.org/working-with-btrfs-subvolumes/#comment-543498" title="December 17, 2022 at 13:01">December 17, 2022</a>
+													</div>
+						
+												
+						<div class="clear"></div>
+						
+					</div><!-- .comment-meta -->
+									
+				</div><!-- .comment-inner -->
+											
+			</div><!-- .comment-## -->
+					
+		<ul class="children">
+		<li class="comment even depth-2" id="li-comment-544150">
+		
+			<div id="comment-544150" class="comment">
+				
+				<img alt='' src='https://secure.gravatar.com/avatar/a43f85fc2ad4390aa09a577e7fab4d6e07f6198afdde7b14531453111cabecad?s=160&#038;d=retro&#038;r=g' srcset='https://secure.gravatar.com/avatar/a43f85fc2ad4390aa09a577e7fab4d6e07f6198afdde7b14531453111cabecad?s=320&#038;d=retro&#038;r=g 2x' class='avatar avatar-160 photo' height='160' width='160' loading='lazy' decoding='async'/>				
+								
+				<div class="comment-inner">
+				
+					<div class="comment-header">
+												
+						<h4><a href="https://github.com/gungwald" class="url" rel="ugc external nofollow">Bill Chatfield</a></h4>
+					
+					</div><!-- .comment-header -->
+					
+					<div class="comment-content post-content">
+				
+						<p>Haha! I agree. It&#8217;s too complicated.</p>
+						
+					</div><!-- .comment-content -->
+					
+					<div class="comment-meta">
+						
+						<div class="fleft">
+							<div class="fa fw fa-clock-o"></div><a class="comment-date-link" href="https://fedoramagazine.org/working-with-btrfs-subvolumes/#comment-544150" title="December 31, 2022 at 15:34">December 31, 2022</a>
+													</div>
+						
+												
+						<div class="clear"></div>
+						
+					</div><!-- .comment-meta -->
+									
+				</div><!-- .comment-inner -->
+											
+			</div><!-- .comment-## -->
+					
+		</li><!-- #comment-## -->
+</ul><!-- .children -->
+</li><!-- #comment-## -->
+		<li class="comment odd alt thread-even depth-1" id="li-comment-543524">
+		
+			<div id="comment-543524" class="comment">
+				
+				<img alt='' src='https://secure.gravatar.com/avatar/b2c732f4ed2c299619d953b0f47703f16371e4b7deea5a96590fd27b0f7ac8a8?s=160&#038;d=retro&#038;r=g' srcset='https://secure.gravatar.com/avatar/b2c732f4ed2c299619d953b0f47703f16371e4b7deea5a96590fd27b0f7ac8a8?s=320&#038;d=retro&#038;r=g 2x' class='avatar avatar-160 photo' height='160' width='160' loading='lazy' decoding='async'/>				
+								
+				<div class="comment-inner">
+				
+					<div class="comment-header">
+												
+						<h4>Kohlrak</h4>
+					
+					</div><!-- .comment-header -->
+					
+					<div class="comment-content post-content">
+				
+						<p>Any way to easily move it to Ext4 or something? I didn&#8217;t realize how slow it would be and now programs like Steam or anything else that does alot of file access will slow to a crawl and programs go to swap  and become unresponsive.</p>
+						
+					</div><!-- .comment-content -->
+					
+					<div class="comment-meta">
+						
+						<div class="fleft">
+							<div class="fa fw fa-clock-o"></div><a class="comment-date-link" href="https://fedoramagazine.org/working-with-btrfs-subvolumes/#comment-543524" title="December 18, 2022 at 03:34">December 18, 2022</a>
+													</div>
+						
+												
+						<div class="clear"></div>
+						
+					</div><!-- .comment-meta -->
+									
+				</div><!-- .comment-inner -->
+											
+			</div><!-- .comment-## -->
+					
+		<ul class="children">
+		<li class="comment byuser comment-author-glb even depth-2" id="li-comment-543530">
+		
+			<div id="comment-543530" class="comment">
+				
+				<img alt='' src='https://secure.gravatar.com/avatar/dd52115e6794e724652c3b026b5cd2248057d94d819d7df5f53c348ca42f10e2?s=160&#038;d=retro&#038;r=g' srcset='https://secure.gravatar.com/avatar/dd52115e6794e724652c3b026b5cd2248057d94d819d7df5f53c348ca42f10e2?s=320&#038;d=retro&#038;r=g 2x' class='avatar avatar-160 photo' height='160' width='160' loading='lazy' decoding='async'/>				
+								
+				<div class="comment-inner">
+				
+					<div class="comment-header">
+												
+						<h4><a href="http://glb.id.fedoraproject.org/" class="url" rel="ugc external nofollow">Gregory Bartholomew</a></h4>
+					
+					</div><!-- .comment-header -->
+					
+					<div class="comment-content post-content">
+				
+						<p>If there is a specific directory under which all the high I/O occurs, you might get better performance with something like &#8220;sudo chattr +C &lt;path-to-directory&gt;&#8221;. See <a href="https://wiki.archlinux.org/title/Btrfs#Disabling_CoW" target="_blank" rel="noopener nofollow ugc">here</a> for more info about disabling Btrfs&#8217; CoW.</p>
+						
+					</div><!-- .comment-content -->
+					
+					<div class="comment-meta">
+						
+						<div class="fleft">
+							<div class="fa fw fa-clock-o"></div><a class="comment-date-link" href="https://fedoramagazine.org/working-with-btrfs-subvolumes/#comment-543530" title="December 18, 2022 at 07:14">December 18, 2022</a>
+													</div>
+						
+												
+						<div class="clear"></div>
+						
+					</div><!-- .comment-meta -->
+									
+				</div><!-- .comment-inner -->
+											
+			</div><!-- .comment-## -->
+					
+		<ul class="children">
+		<li class="comment odd alt depth-3" id="li-comment-543566">
+		
+			<div id="comment-543566" class="comment">
+				
+				<img alt='' src='https://secure.gravatar.com/avatar/b2c732f4ed2c299619d953b0f47703f16371e4b7deea5a96590fd27b0f7ac8a8?s=160&#038;d=retro&#038;r=g' srcset='https://secure.gravatar.com/avatar/b2c732f4ed2c299619d953b0f47703f16371e4b7deea5a96590fd27b0f7ac8a8?s=320&#038;d=retro&#038;r=g 2x' class='avatar avatar-160 photo' height='160' width='160' loading='lazy' decoding='async'/>				
+								
+				<div class="comment-inner">
+				
+					<div class="comment-header">
+												
+						<h4>Kohlrak</h4>
+					
+					</div><!-- .comment-header -->
+					
+					<div class="comment-content post-content">
+				
+						<p>Thank you.</p>
+						
+					</div><!-- .comment-content -->
+					
+					<div class="comment-meta">
+						
+						<div class="fleft">
+							<div class="fa fw fa-clock-o"></div><a class="comment-date-link" href="https://fedoramagazine.org/working-with-btrfs-subvolumes/#comment-543566" title="December 19, 2022 at 03:27">December 19, 2022</a>
+													</div>
+						
+												
+						<div class="clear"></div>
+						
+					</div><!-- .comment-meta -->
+									
+				</div><!-- .comment-inner -->
+											
+			</div><!-- .comment-## -->
+					
+		</li><!-- #comment-## -->
+</ul><!-- .children -->
+</li><!-- #comment-## -->
+</ul><!-- .children -->
+</li><!-- #comment-## -->
+		<li class="comment even thread-odd thread-alt depth-1" id="li-comment-544057">
+		
+			<div id="comment-544057" class="comment">
+				
+				<img alt='' src='https://secure.gravatar.com/avatar/0de3001bbbdde16c624d390a213b05cdfd885315e87ebf3e241084b81d3f4ced?s=160&#038;d=retro&#038;r=g' srcset='https://secure.gravatar.com/avatar/0de3001bbbdde16c624d390a213b05cdfd885315e87ebf3e241084b81d3f4ced?s=320&#038;d=retro&#038;r=g 2x' class='avatar avatar-160 photo' height='160' width='160' loading='lazy' decoding='async'/>				
+								
+				<div class="comment-inner">
+				
+					<div class="comment-header">
+												
+						<h4>Geno</h4>
+					
+					</div><!-- .comment-header -->
+					
+					<div class="comment-content post-content">
+				
+						<p>This is great! Can&#8217;t wait for the next in the series 😀</p>
+						
+					</div><!-- .comment-content -->
+					
+					<div class="comment-meta">
+						
+						<div class="fleft">
+							<div class="fa fw fa-clock-o"></div><a class="comment-date-link" href="https://fedoramagazine.org/working-with-btrfs-subvolumes/#comment-544057" title="December 29, 2022 at 20:03">December 29, 2022</a>
+													</div>
+						
+												
+						<div class="clear"></div>
+						
+					</div><!-- .comment-meta -->
+									
+				</div><!-- .comment-inner -->
+											
+			</div><!-- .comment-## -->
+					
+		</li><!-- #comment-## -->
+		<li class="comment odd alt thread-even depth-1" id="li-comment-544151">
+		
+			<div id="comment-544151" class="comment">
+				
+				<img alt='' src='https://secure.gravatar.com/avatar/a43f85fc2ad4390aa09a577e7fab4d6e07f6198afdde7b14531453111cabecad?s=160&#038;d=retro&#038;r=g' srcset='https://secure.gravatar.com/avatar/a43f85fc2ad4390aa09a577e7fab4d6e07f6198afdde7b14531453111cabecad?s=320&#038;d=retro&#038;r=g 2x' class='avatar avatar-160 photo' height='160' width='160' loading='lazy' decoding='async'/>				
+								
+				<div class="comment-inner">
+				
+					<div class="comment-header">
+												
+						<h4><a href="https://github.com/gungwald" class="url" rel="ugc external nofollow">Bill Chatfield</a></h4>
+					
+					</div><!-- .comment-header -->
+					
+					<div class="comment-content post-content">
+				
+						<p>This is a really good article. I appreciate the author&#8217;s work in writing it. But I feel there are too many complicated commands for something that should be happening automatically. That&#8217;s a problem with btrfs. The article is great though.</p>
+						
+					</div><!-- .comment-content -->
+					
+					<div class="comment-meta">
+						
+						<div class="fleft">
+							<div class="fa fw fa-clock-o"></div><a class="comment-date-link" href="https://fedoramagazine.org/working-with-btrfs-subvolumes/#comment-544151" title="December 31, 2022 at 15:37">December 31, 2022</a>
+													</div>
+						
+												
+						<div class="clear"></div>
+						
+					</div><!-- .comment-meta -->
+									
+				</div><!-- .comment-inner -->
+											
+			</div><!-- .comment-## -->
+					
+		</li><!-- #comment-## -->
+				</ol>
+				
+										
+								
+			</div><!-- .comments -->
+			
+		</div><!-- .comments-inner -->
+		
+	</div><!-- .comments-container -->
+	
+
+
+	<p class="no-comments"><span class="fa fw fa-times"></span>Comments are Closed</p>
+	
+
+										                        
+		    
+	
+	</div><!-- .content -->
+	
+	<div class="sidebar">
+
+	<div class="widget widget_search sidebarwidget"><div class="widget-content"><form method="get" class="search-form" id="search-form" action="https://fedoramagazine.org/">
+	<input type="search" class="search-field" placeholder="Search Fedora Magazine" name="s" id="s" /> 
+	<button type="submit" class="search-button"><div class="fa fw fa-search"></div></button>
+</form></div><div class="clear"></div></div><div class="widget widget_text sidebarwidget"><div class="widget-content">			<div class="textwidget"><p><img loading="lazy" decoding="async" class="alignnone size-medium wp-image-42716" src="https://fedoramagazine.org/wp-content/uploads/2025/10/Fedora_Linux_43_Mag-300x127.jpg" alt="" width="300" height="127" srcset="https://fedoramagazine.org/wp-content/uploads/2025/10/Fedora_Linux_43_Mag-300x127.jpg 300w, https://fedoramagazine.org/wp-content/uploads/2025/10/Fedora_Linux_43_Mag-1024x433.jpg 1024w, https://fedoramagazine.org/wp-content/uploads/2025/10/Fedora_Linux_43_Mag-768x325.jpg 768w, https://fedoramagazine.org/wp-content/uploads/2025/10/Fedora_Linux_43_Mag-1536x650.jpg 1536w, https://fedoramagazine.org/wp-content/uploads/2025/10/Fedora_Linux_43_Mag-816x345.jpg 816w, https://fedoramagazine.org/wp-content/uploads/2025/10/Fedora_Linux_43_Mag-472x200.jpg 472w, https://fedoramagazine.org/wp-content/uploads/2025/10/Fedora_Linux_43_Mag.jpg 1890w" sizes="auto, (max-width: 300px) 100vw, 300px" /></p>
+<p><a href="https://fedoraproject.org/" target="_blank" rel="noopener">Fedora Linux 43 is available now</a>. Read the <a href="https://fedoramagazine.org/announcing-fedora-linux-43">release announcement</a> for all the details.</p>
+</div>
+		</div><div class="clear"></div></div><div class="widget widget_blog_subscription jetpack_subscription_widget sidebarwidget"><div class="widget-content"><h3 class="widget-title">Subscribe to Fedora Magazine via Email</h3>
+			<div class="wp-block-jetpack-subscriptions__container">
+			<form action="#" method="post" accept-charset="utf-8" id="subscribe-blog-blog_subscription-5"
+				data-blog="58617187"
+				data-post_access_level="everybody" >
+									<p id="subscribe-email">
+						<label id="jetpack-subscribe-label"
+							class="screen-reader-text"
+							for="subscribe-field-blog_subscription-5">
+							Email Address						</label>
+						<input type="email" name="email" autocomplete="email" required="required"
+																					value=""
+							id="subscribe-field-blog_subscription-5"
+							placeholder="Email Address"
+						/>
+					</p>
+
+					<p id="subscribe-submit"
+											>
+						<input type="hidden" name="action" value="subscribe"/>
+						<input type="hidden" name="source" value="https://fedoramagazine.org/working-with-btrfs-subvolumes/"/>
+						<input type="hidden" name="sub-type" value="widget"/>
+						<input type="hidden" name="redirect_fragment" value="subscribe-blog-blog_subscription-5"/>
+						<input type="hidden" id="_wpnonce" name="_wpnonce" value="b27796a948" /><input type="hidden" name="_wp_http_referer" value="/working-with-btrfs-subvolumes/" />						<button type="submit"
+															class="wp-block-button__link"
+																					name="jetpack_subscriptions_widget"
+						>
+							Subscribe						</button>
+					</p>
+							</form>
+							<div class="wp-block-jetpack-subscriptions__subscount">
+					Join 10.6K other subscribers				</div>
+						</div>
+			
+</div><div class="clear"></div></div><div class="widget widget_text sidebarwidget"><div class="widget-content"><h3 class="widget-title">Contribute to the Magazine</h3>			<div class="textwidget"><p>Fedora Magazine is looking for contributors!</p>
+<ul>
+<li><a href="https://docs.fedoraproject.org/en-US/fedora-magazine/writing-a-pitch/">Propose a new article</a></li>
+<li><a href="https://docs.fedoraproject.org/en-US/fedora-magazine/contributing/">Become a writer</a></li>
+<li><a href="https://docs.fedoraproject.org/en-US/fedora-magazine/editorial/">Become an editor</a></li>
+</ul>
+</div>
+		</div><div class="clear"></div></div>
+</div>	
+	<div class="clear"></div>
+	
+</div><!-- .wrapper -->
+		
+<div class="credits">
+			
+	<div class="section-inner">
+		
+			
+		<p>			
+			The opinions expressed on this website are those of each author, 
+			not of the author's employer or of Red Hat. Fedora Magazine aspires to 
+			publish all content under a Creative Commons license but may not be able 
+			to do so in all cases. You are responsible for ensuring that you have the 
+			necessary permission to reuse any work on this site. The Fedora logo is a 
+			trademark of Red Hat, Inc. <a href="/terms-and-conditions">Terms and Conditions</a>
+		</p>
+		
+	</div><!-- .section-inner -->
+	
+</div><!-- .credits -->
+
+<script type="speculationrules">
+{"prefetch":[{"source":"document","where":{"and":[{"href_matches":"/*"},{"not":{"href_matches":["/wp-*.php","/wp-admin/*","/wp-content/uploads/*","/wp-content/*","/wp-content/plugins/*","/wp-content/themes/fedoramagazine-1.18/*","/*\\?(.+)"]}},{"not":{"selector_matches":"a[rel~=\"nofollow\"]"}},{"not":{"selector_matches":".no-prefetch, .no-prefetch a"}}]},"eagerness":"conservative"}]}
+</script>
+<script type="text/javascript" src="https://fedoramagazine.org/wp-content/themes/fedoramagazine-1.18/js/global.js?ver=6.9.1" id="rowling_global-js"></script>
+<script type="text/javascript" src="https://fedoramagazine.org/wp-includes/js/comment-reply.min.js?ver=6.9.1" id="comment-reply-js" async="async" data-wp-strategy="async" fetchpriority="low"></script>
+<script type="text/javascript" id="jetpack-stats-js-before">
+/* <![CDATA[ */
+_stq = window._stq || [];
+_stq.push([ "view", {"v":"ext","blog":"58617187","post":"36919","tz":"0","srv":"fedoramagazine.org","j":"1:15.6"} ]);
+_stq.push([ "clickTrackerInit", "58617187", "36919" ]);
+//# sourceURL=jetpack-stats-js-before
+/* ]]> */
+</script>
+<script type="text/javascript" src="https://stats.wp.com/e-202610.js" id="jetpack-stats-js" defer="defer" data-wp-strategy="defer"></script>
+<script type="text/javascript" src="https://fedoramagazine.org/wp-content/plugins/jetpack/_inc/build/likes/queuehandler.min.js?ver=15.6" id="jetpack_likes_queuehandler-js"></script>
+<script id="wp-emoji-settings" type="application/json">
+{"baseUrl":"https://s.w.org/images/core/emoji/17.0.2/72x72/","ext":".png","svgUrl":"https://s.w.org/images/core/emoji/17.0.2/svg/","svgExt":".svg","source":{"concatemoji":"https://fedoramagazine.org/wp-includes/js/wp-emoji-release.min.js?ver=6.9.1"}}
+</script>
+<script type="module">
+/* <![CDATA[ */
+/*! This file is auto-generated */
+const a=JSON.parse(document.getElementById("wp-emoji-settings").textContent),o=(window._wpemojiSettings=a,"wpEmojiSettingsSupports"),s=["flag","emoji"];function i(e){try{var t={supportTests:e,timestamp:(new Date).valueOf()};sessionStorage.setItem(o,JSON.stringify(t))}catch(e){}}function c(e,t,n){e.clearRect(0,0,e.canvas.width,e.canvas.height),e.fillText(t,0,0);t=new Uint32Array(e.getImageData(0,0,e.canvas.width,e.canvas.height).data);e.clearRect(0,0,e.canvas.width,e.canvas.height),e.fillText(n,0,0);const a=new Uint32Array(e.getImageData(0,0,e.canvas.width,e.canvas.height).data);return t.every((e,t)=>e===a[t])}function p(e,t){e.clearRect(0,0,e.canvas.width,e.canvas.height),e.fillText(t,0,0);var n=e.getImageData(16,16,1,1);for(let e=0;e<n.data.length;e++)if(0!==n.data[e])return!1;return!0}function u(e,t,n,a){switch(t){case"flag":return n(e,"\ud83c\udff3\ufe0f\u200d\u26a7\ufe0f","\ud83c\udff3\ufe0f\u200b\u26a7\ufe0f")?!1:!n(e,"\ud83c\udde8\ud83c\uddf6","\ud83c\udde8\u200b\ud83c\uddf6")&&!n(e,"\ud83c\udff4\udb40\udc67\udb40\udc62\udb40\udc65\udb40\udc6e\udb40\udc67\udb40\udc7f","\ud83c\udff4\u200b\udb40\udc67\u200b\udb40\udc62\u200b\udb40\udc65\u200b\udb40\udc6e\u200b\udb40\udc67\u200b\udb40\udc7f");case"emoji":return!a(e,"\ud83e\u1fac8")}return!1}function f(e,t,n,a){let r;const o=(r="undefined"!=typeof WorkerGlobalScope&&self instanceof WorkerGlobalScope?new OffscreenCanvas(300,150):document.createElement("canvas")).getContext("2d",{willReadFrequently:!0}),s=(o.textBaseline="top",o.font="600 32px Arial",{});return e.forEach(e=>{s[e]=t(o,e,n,a)}),s}function r(e){var t=document.createElement("script");t.src=e,t.defer=!0,document.head.appendChild(t)}a.supports={everything:!0,everythingExceptFlag:!0},new Promise(t=>{let n=function(){try{var e=JSON.parse(sessionStorage.getItem(o));if("object"==typeof e&&"number"==typeof e.timestamp&&(new Date).valueOf()<e.timestamp+604800&&"object"==typeof e.supportTests)return e.supportTests}catch(e){}return null}();if(!n){if("undefined"!=typeof Worker&&"undefined"!=typeof OffscreenCanvas&&"undefined"!=typeof URL&&URL.createObjectURL&&"undefined"!=typeof Blob)try{var e="postMessage("+f.toString()+"("+[JSON.stringify(s),u.toString(),c.toString(),p.toString()].join(",")+"));",a=new Blob([e],{type:"text/javascript"});const r=new Worker(URL.createObjectURL(a),{name:"wpTestEmojiSupports"});return void(r.onmessage=e=>{i(n=e.data),r.terminate(),t(n)})}catch(e){}i(n=f(s,u,c,p))}t(n)}).then(e=>{for(const n in e)a.supports[n]=e[n],a.supports.everything=a.supports.everything&&a.supports[n],"flag"!==n&&(a.supports.everythingExceptFlag=a.supports.everythingExceptFlag&&a.supports[n]);var t;a.supports.everythingExceptFlag=a.supports.everythingExceptFlag&&!a.supports.flag,a.supports.everything||((t=a.source||{}).concatemoji?r(t.concatemoji):t.wpemoji&&t.twemoji&&(r(t.twemoji),r(t.wpemoji)))});
+//# sourceURL=https://fedoramagazine.org/wp-includes/js/wp-emoji-loader.min.js
+/* ]]> */
+</script>
+	<iframe src='https://widgets.wp.com/likes/master.html?ver=20260306#ver=20260306' scrolling='no' id='likes-master' name='likes-master' style='display:none;'></iframe>
+	<div id='likes-other-gravatars' role="dialog" aria-hidden="true" tabindex="-1"><div class="likes-text"><span>%d</span></div><ul class="wpl-avatars sd-like-gravatars"></ul></div>
+	
+</body>
+</html>

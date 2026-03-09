@@ -1,0 +1,541 @@
+<!DOCTYPE html>
+<html lang="en-US" class="no-js">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<link rel="profile" href="https://gmpg.org/xfn/11">
+		<link rel="pingback" href="https://www.dont-panic.cc/capi/xmlrpc.php">
+		<script>
+(function(html){html.className = html.className.replace(/\bno-js\b/,'js')})(document.documentElement);
+//# sourceURL=twentysixteen_javascript_detection
+</script>
+<title>Btrfs raid1 vs. mdadm raid1 &#8211; Capi&#039;s Corner</title>
+<meta name='robots' content='max-image-preview:large' />
+<link rel='dns-prefetch' href='//www.dont-panic.cc' />
+<link rel="alternate" type="application/rss+xml" title="Capi&#039;s Corner &raquo; Feed" href="https://www.dont-panic.cc/capi/feed/" />
+<link rel="alternate" type="application/rss+xml" title="Capi&#039;s Corner &raquo; Comments Feed" href="https://www.dont-panic.cc/capi/comments/feed/" />
+<link rel="alternate" type="application/rss+xml" title="Capi&#039;s Corner &raquo; Btrfs raid1 vs. mdadm raid1 Comments Feed" href="https://www.dont-panic.cc/capi/2023/10/19/btrfs-raid1-vs-mdadm-raid1/feed/" />
+<link rel="alternate" title="oEmbed (JSON)" type="application/json+oembed" href="https://www.dont-panic.cc/capi/wp-json/oembed/1.0/embed?url=https%3A%2F%2Fwww.dont-panic.cc%2Fcapi%2F2023%2F10%2F19%2Fbtrfs-raid1-vs-mdadm-raid1%2F" />
+<link rel="alternate" title="oEmbed (XML)" type="text/xml+oembed" href="https://www.dont-panic.cc/capi/wp-json/oembed/1.0/embed?url=https%3A%2F%2Fwww.dont-panic.cc%2Fcapi%2F2023%2F10%2F19%2Fbtrfs-raid1-vs-mdadm-raid1%2F&#038;format=xml" />
+<style id='wp-img-auto-sizes-contain-inline-css'>
+img:is([sizes=auto i],[sizes^="auto," i]){contain-intrinsic-size:3000px 1500px}
+/*# sourceURL=wp-img-auto-sizes-contain-inline-css */
+</style>
+<style id='wp-block-library-inline-css'>
+:root{--wp-block-synced-color:#7a00df;--wp-block-synced-color--rgb:122,0,223;--wp-bound-block-color:var(--wp-block-synced-color);--wp-editor-canvas-background:#ddd;--wp-admin-theme-color:#007cba;--wp-admin-theme-color--rgb:0,124,186;--wp-admin-theme-color-darker-10:#006ba1;--wp-admin-theme-color-darker-10--rgb:0,107,160.5;--wp-admin-theme-color-darker-20:#005a87;--wp-admin-theme-color-darker-20--rgb:0,90,135;--wp-admin-border-width-focus:2px}@media (min-resolution:192dpi){:root{--wp-admin-border-width-focus:1.5px}}.wp-element-button{cursor:pointer}:root .has-very-light-gray-background-color{background-color:#eee}:root .has-very-dark-gray-background-color{background-color:#313131}:root .has-very-light-gray-color{color:#eee}:root .has-very-dark-gray-color{color:#313131}:root .has-vivid-green-cyan-to-vivid-cyan-blue-gradient-background{background:linear-gradient(135deg,#00d084,#0693e3)}:root .has-purple-crush-gradient-background{background:linear-gradient(135deg,#34e2e4,#4721fb 50%,#ab1dfe)}:root .has-hazy-dawn-gradient-background{background:linear-gradient(135deg,#faaca8,#dad0ec)}:root .has-subdued-olive-gradient-background{background:linear-gradient(135deg,#fafae1,#67a671)}:root .has-atomic-cream-gradient-background{background:linear-gradient(135deg,#fdd79a,#004a59)}:root .has-nightshade-gradient-background{background:linear-gradient(135deg,#330968,#31cdcf)}:root .has-midnight-gradient-background{background:linear-gradient(135deg,#020381,#2874fc)}:root{--wp--preset--font-size--normal:16px;--wp--preset--font-size--huge:42px}.has-regular-font-size{font-size:1em}.has-larger-font-size{font-size:2.625em}.has-normal-font-size{font-size:var(--wp--preset--font-size--normal)}.has-huge-font-size{font-size:var(--wp--preset--font-size--huge)}.has-text-align-center{text-align:center}.has-text-align-left{text-align:left}.has-text-align-right{text-align:right}.has-fit-text{white-space:nowrap!important}#end-resizable-editor-section{display:none}.aligncenter{clear:both}.items-justified-left{justify-content:flex-start}.items-justified-center{justify-content:center}.items-justified-right{justify-content:flex-end}.items-justified-space-between{justify-content:space-between}.screen-reader-text{border:0;clip-path:inset(50%);height:1px;margin:-1px;overflow:hidden;padding:0;position:absolute;width:1px;word-wrap:normal!important}.screen-reader-text:focus{background-color:#ddd;clip-path:none;color:#444;display:block;font-size:1em;height:auto;left:5px;line-height:normal;padding:15px 23px 14px;text-decoration:none;top:5px;width:auto;z-index:100000}html :where(.has-border-color){border-style:solid}html :where([style*=border-top-color]){border-top-style:solid}html :where([style*=border-right-color]){border-right-style:solid}html :where([style*=border-bottom-color]){border-bottom-style:solid}html :where([style*=border-left-color]){border-left-style:solid}html :where([style*=border-width]){border-style:solid}html :where([style*=border-top-width]){border-top-style:solid}html :where([style*=border-right-width]){border-right-style:solid}html :where([style*=border-bottom-width]){border-bottom-style:solid}html :where([style*=border-left-width]){border-left-style:solid}html :where(img[class*=wp-image-]){height:auto;max-width:100%}:where(figure){margin:0 0 1em}html :where(.is-position-sticky){--wp-admin--admin-bar--position-offset:var(--wp-admin--admin-bar--height,0px)}@media screen and (max-width:600px){html :where(.is-position-sticky){--wp-admin--admin-bar--position-offset:0px}}
+
+/*# sourceURL=wp-block-library-inline-css */
+</style>
+<style id='wp-block-heading-inline-css'>
+h1:where(.wp-block-heading).has-background,h2:where(.wp-block-heading).has-background,h3:where(.wp-block-heading).has-background,h4:where(.wp-block-heading).has-background,h5:where(.wp-block-heading).has-background,h6:where(.wp-block-heading).has-background{padding:1.25em 2.375em}h1.has-text-align-left[style*=writing-mode]:where([style*=vertical-lr]),h1.has-text-align-right[style*=writing-mode]:where([style*=vertical-rl]),h2.has-text-align-left[style*=writing-mode]:where([style*=vertical-lr]),h2.has-text-align-right[style*=writing-mode]:where([style*=vertical-rl]),h3.has-text-align-left[style*=writing-mode]:where([style*=vertical-lr]),h3.has-text-align-right[style*=writing-mode]:where([style*=vertical-rl]),h4.has-text-align-left[style*=writing-mode]:where([style*=vertical-lr]),h4.has-text-align-right[style*=writing-mode]:where([style*=vertical-rl]),h5.has-text-align-left[style*=writing-mode]:where([style*=vertical-lr]),h5.has-text-align-right[style*=writing-mode]:where([style*=vertical-rl]),h6.has-text-align-left[style*=writing-mode]:where([style*=vertical-lr]),h6.has-text-align-right[style*=writing-mode]:where([style*=vertical-rl]){rotate:180deg}
+/*# sourceURL=https://www.dont-panic.cc/capi/wp-includes/blocks/heading/style.min.css */
+</style>
+<style id='wp-block-image-inline-css'>
+.wp-block-image>a,.wp-block-image>figure>a{display:inline-block}.wp-block-image img{box-sizing:border-box;height:auto;max-width:100%;vertical-align:bottom}@media not (prefers-reduced-motion){.wp-block-image img.hide{visibility:hidden}.wp-block-image img.show{animation:show-content-image .4s}}.wp-block-image[style*=border-radius] img,.wp-block-image[style*=border-radius]>a{border-radius:inherit}.wp-block-image.has-custom-border img{box-sizing:border-box}.wp-block-image.aligncenter{text-align:center}.wp-block-image.alignfull>a,.wp-block-image.alignwide>a{width:100%}.wp-block-image.alignfull img,.wp-block-image.alignwide img{height:auto;width:100%}.wp-block-image .aligncenter,.wp-block-image .alignleft,.wp-block-image .alignright,.wp-block-image.aligncenter,.wp-block-image.alignleft,.wp-block-image.alignright{display:table}.wp-block-image .aligncenter>figcaption,.wp-block-image .alignleft>figcaption,.wp-block-image .alignright>figcaption,.wp-block-image.aligncenter>figcaption,.wp-block-image.alignleft>figcaption,.wp-block-image.alignright>figcaption{caption-side:bottom;display:table-caption}.wp-block-image .alignleft{float:left;margin:.5em 1em .5em 0}.wp-block-image .alignright{float:right;margin:.5em 0 .5em 1em}.wp-block-image .aligncenter{margin-left:auto;margin-right:auto}.wp-block-image :where(figcaption){margin-bottom:1em;margin-top:.5em}.wp-block-image.is-style-circle-mask img{border-radius:9999px}@supports ((-webkit-mask-image:none) or (mask-image:none)) or (-webkit-mask-image:none){.wp-block-image.is-style-circle-mask img{border-radius:0;-webkit-mask-image:url('data:image/svg+xml;utf8,<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg"><circle cx="50" cy="50" r="50"/></svg>');mask-image:url('data:image/svg+xml;utf8,<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg"><circle cx="50" cy="50" r="50"/></svg>');mask-mode:alpha;-webkit-mask-position:center;mask-position:center;-webkit-mask-repeat:no-repeat;mask-repeat:no-repeat;-webkit-mask-size:contain;mask-size:contain}}:root :where(.wp-block-image.is-style-rounded img,.wp-block-image .is-style-rounded img){border-radius:9999px}.wp-block-image figure{margin:0}.wp-lightbox-container{display:flex;flex-direction:column;position:relative}.wp-lightbox-container img{cursor:zoom-in}.wp-lightbox-container img:hover+button{opacity:1}.wp-lightbox-container button{align-items:center;backdrop-filter:blur(16px) saturate(180%);background-color:#5a5a5a40;border:none;border-radius:4px;cursor:zoom-in;display:flex;height:20px;justify-content:center;opacity:0;padding:0;position:absolute;right:16px;text-align:center;top:16px;width:20px;z-index:100}@media not (prefers-reduced-motion){.wp-lightbox-container button{transition:opacity .2s ease}}.wp-lightbox-container button:focus-visible{outline:3px auto #5a5a5a40;outline:3px auto -webkit-focus-ring-color;outline-offset:3px}.wp-lightbox-container button:hover{cursor:pointer;opacity:1}.wp-lightbox-container button:focus{opacity:1}.wp-lightbox-container button:focus,.wp-lightbox-container button:hover,.wp-lightbox-container button:not(:hover):not(:active):not(.has-background){background-color:#5a5a5a40;border:none}.wp-lightbox-overlay{box-sizing:border-box;cursor:zoom-out;height:100vh;left:0;overflow:hidden;position:fixed;top:0;visibility:hidden;width:100%;z-index:100000}.wp-lightbox-overlay .close-button{align-items:center;cursor:pointer;display:flex;justify-content:center;min-height:40px;min-width:40px;padding:0;position:absolute;right:calc(env(safe-area-inset-right) + 16px);top:calc(env(safe-area-inset-top) + 16px);z-index:5000000}.wp-lightbox-overlay .close-button:focus,.wp-lightbox-overlay .close-button:hover,.wp-lightbox-overlay .close-button:not(:hover):not(:active):not(.has-background){background:none;border:none}.wp-lightbox-overlay .lightbox-image-container{height:var(--wp--lightbox-container-height);left:50%;overflow:hidden;position:absolute;top:50%;transform:translate(-50%,-50%);transform-origin:top left;width:var(--wp--lightbox-container-width);z-index:9999999999}.wp-lightbox-overlay .wp-block-image{align-items:center;box-sizing:border-box;display:flex;height:100%;justify-content:center;margin:0;position:relative;transform-origin:0 0;width:100%;z-index:3000000}.wp-lightbox-overlay .wp-block-image img{height:var(--wp--lightbox-image-height);min-height:var(--wp--lightbox-image-height);min-width:var(--wp--lightbox-image-width);width:var(--wp--lightbox-image-width)}.wp-lightbox-overlay .wp-block-image figcaption{display:none}.wp-lightbox-overlay button{background:none;border:none}.wp-lightbox-overlay .scrim{background-color:#fff;height:100%;opacity:.9;position:absolute;width:100%;z-index:2000000}.wp-lightbox-overlay.active{visibility:visible}@media not (prefers-reduced-motion){.wp-lightbox-overlay.active{animation:turn-on-visibility .25s both}.wp-lightbox-overlay.active img{animation:turn-on-visibility .35s both}.wp-lightbox-overlay.show-closing-animation:not(.active){animation:turn-off-visibility .35s both}.wp-lightbox-overlay.show-closing-animation:not(.active) img{animation:turn-off-visibility .25s both}.wp-lightbox-overlay.zoom.active{animation:none;opacity:1;visibility:visible}.wp-lightbox-overlay.zoom.active .lightbox-image-container{animation:lightbox-zoom-in .4s}.wp-lightbox-overlay.zoom.active .lightbox-image-container img{animation:none}.wp-lightbox-overlay.zoom.active .scrim{animation:turn-on-visibility .4s forwards}.wp-lightbox-overlay.zoom.show-closing-animation:not(.active){animation:none}.wp-lightbox-overlay.zoom.show-closing-animation:not(.active) .lightbox-image-container{animation:lightbox-zoom-out .4s}.wp-lightbox-overlay.zoom.show-closing-animation:not(.active) .lightbox-image-container img{animation:none}.wp-lightbox-overlay.zoom.show-closing-animation:not(.active) .scrim{animation:turn-off-visibility .4s forwards}}@keyframes show-content-image{0%{visibility:hidden}99%{visibility:hidden}to{visibility:visible}}@keyframes turn-on-visibility{0%{opacity:0}to{opacity:1}}@keyframes turn-off-visibility{0%{opacity:1;visibility:visible}99%{opacity:0;visibility:visible}to{opacity:0;visibility:hidden}}@keyframes lightbox-zoom-in{0%{transform:translate(calc((-100vw + var(--wp--lightbox-scrollbar-width))/2 + var(--wp--lightbox-initial-left-position)),calc(-50vh + var(--wp--lightbox-initial-top-position))) scale(var(--wp--lightbox-scale))}to{transform:translate(-50%,-50%) scale(1)}}@keyframes lightbox-zoom-out{0%{transform:translate(-50%,-50%) scale(1);visibility:visible}99%{visibility:visible}to{transform:translate(calc((-100vw + var(--wp--lightbox-scrollbar-width))/2 + var(--wp--lightbox-initial-left-position)),calc(-50vh + var(--wp--lightbox-initial-top-position))) scale(var(--wp--lightbox-scale));visibility:hidden}}
+/*# sourceURL=https://www.dont-panic.cc/capi/wp-includes/blocks/image/style.min.css */
+</style>
+<style id='wp-block-image-theme-inline-css'>
+:root :where(.wp-block-image figcaption){color:#555;font-size:13px;text-align:center}.is-dark-theme :root :where(.wp-block-image figcaption){color:#ffffffa6}.wp-block-image{margin:0 0 1em}
+/*# sourceURL=https://www.dont-panic.cc/capi/wp-includes/blocks/image/theme.min.css */
+</style>
+<style id='wp-block-tag-cloud-inline-css'>
+.wp-block-tag-cloud{box-sizing:border-box}.wp-block-tag-cloud.aligncenter{justify-content:center;text-align:center}.wp-block-tag-cloud a{display:inline-block;margin-right:5px}.wp-block-tag-cloud span{display:inline-block;margin-left:5px;text-decoration:none}:root :where(.wp-block-tag-cloud.is-style-outline){display:flex;flex-wrap:wrap;gap:1ch}:root :where(.wp-block-tag-cloud.is-style-outline a){border:1px solid;font-size:unset!important;margin-right:0;padding:1ch 2ch;text-decoration:none!important}
+/*# sourceURL=https://www.dont-panic.cc/capi/wp-includes/blocks/tag-cloud/style.min.css */
+</style>
+<style id='wp-block-group-inline-css'>
+.wp-block-group{box-sizing:border-box}:where(.wp-block-group.wp-block-group-is-layout-constrained){position:relative}
+/*# sourceURL=https://www.dont-panic.cc/capi/wp-includes/blocks/group/style.min.css */
+</style>
+<style id='wp-block-group-theme-inline-css'>
+:where(.wp-block-group.has-background){padding:1.25em 2.375em}
+/*# sourceURL=https://www.dont-panic.cc/capi/wp-includes/blocks/group/theme.min.css */
+</style>
+<style id='wp-block-paragraph-inline-css'>
+.is-small-text{font-size:.875em}.is-regular-text{font-size:1em}.is-large-text{font-size:2.25em}.is-larger-text{font-size:3em}.has-drop-cap:not(:focus):first-letter{float:left;font-size:8.4em;font-style:normal;font-weight:100;line-height:.68;margin:.05em .1em 0 0;text-transform:uppercase}body.rtl .has-drop-cap:not(:focus):first-letter{float:none;margin-left:.1em}p.has-drop-cap.has-background{overflow:hidden}:root :where(p.has-background){padding:1.25em 2.375em}:where(p.has-text-color:not(.has-link-color)) a{color:inherit}p.has-text-align-left[style*="writing-mode:vertical-lr"],p.has-text-align-right[style*="writing-mode:vertical-rl"]{rotate:180deg}
+/*# sourceURL=https://www.dont-panic.cc/capi/wp-includes/blocks/paragraph/style.min.css */
+</style>
+
+<style id='classic-theme-styles-inline-css'>
+/*! This file is auto-generated */
+.wp-block-button__link{color:#fff;background-color:#32373c;border-radius:9999px;box-shadow:none;text-decoration:none;padding:calc(.667em + 2px) calc(1.333em + 2px);font-size:1.125em}.wp-block-file__button{background:#32373c;color:#fff;text-decoration:none}
+/*# sourceURL=/wp-includes/css/classic-themes.min.css */
+</style>
+<style id='global-styles-inline-css'>
+:root{--wp--preset--aspect-ratio--square: 1;--wp--preset--aspect-ratio--4-3: 4/3;--wp--preset--aspect-ratio--3-4: 3/4;--wp--preset--aspect-ratio--3-2: 3/2;--wp--preset--aspect-ratio--2-3: 2/3;--wp--preset--aspect-ratio--16-9: 16/9;--wp--preset--aspect-ratio--9-16: 9/16;--wp--preset--color--black: #000000;--wp--preset--color--cyan-bluish-gray: #abb8c3;--wp--preset--color--white: #fff;--wp--preset--color--pale-pink: #f78da7;--wp--preset--color--vivid-red: #cf2e2e;--wp--preset--color--luminous-vivid-orange: #ff6900;--wp--preset--color--luminous-vivid-amber: #fcb900;--wp--preset--color--light-green-cyan: #7bdcb5;--wp--preset--color--vivid-green-cyan: #00d084;--wp--preset--color--pale-cyan-blue: #8ed1fc;--wp--preset--color--vivid-cyan-blue: #0693e3;--wp--preset--color--vivid-purple: #9b51e0;--wp--preset--color--dark-gray: #1a1a1a;--wp--preset--color--medium-gray: #686868;--wp--preset--color--light-gray: #e5e5e5;--wp--preset--color--blue-gray: #4d545c;--wp--preset--color--bright-blue: #007acc;--wp--preset--color--light-blue: #9adffd;--wp--preset--color--dark-brown: #402b30;--wp--preset--color--medium-brown: #774e24;--wp--preset--color--dark-red: #640c1f;--wp--preset--color--bright-red: #ff675f;--wp--preset--color--yellow: #ffef8e;--wp--preset--gradient--vivid-cyan-blue-to-vivid-purple: linear-gradient(135deg,rgb(6,147,227) 0%,rgb(155,81,224) 100%);--wp--preset--gradient--light-green-cyan-to-vivid-green-cyan: linear-gradient(135deg,rgb(122,220,180) 0%,rgb(0,208,130) 100%);--wp--preset--gradient--luminous-vivid-amber-to-luminous-vivid-orange: linear-gradient(135deg,rgb(252,185,0) 0%,rgb(255,105,0) 100%);--wp--preset--gradient--luminous-vivid-orange-to-vivid-red: linear-gradient(135deg,rgb(255,105,0) 0%,rgb(207,46,46) 100%);--wp--preset--gradient--very-light-gray-to-cyan-bluish-gray: linear-gradient(135deg,rgb(238,238,238) 0%,rgb(169,184,195) 100%);--wp--preset--gradient--cool-to-warm-spectrum: linear-gradient(135deg,rgb(74,234,220) 0%,rgb(151,120,209) 20%,rgb(207,42,186) 40%,rgb(238,44,130) 60%,rgb(251,105,98) 80%,rgb(254,248,76) 100%);--wp--preset--gradient--blush-light-purple: linear-gradient(135deg,rgb(255,206,236) 0%,rgb(152,150,240) 100%);--wp--preset--gradient--blush-bordeaux: linear-gradient(135deg,rgb(254,205,165) 0%,rgb(254,45,45) 50%,rgb(107,0,62) 100%);--wp--preset--gradient--luminous-dusk: linear-gradient(135deg,rgb(255,203,112) 0%,rgb(199,81,192) 50%,rgb(65,88,208) 100%);--wp--preset--gradient--pale-ocean: linear-gradient(135deg,rgb(255,245,203) 0%,rgb(182,227,212) 50%,rgb(51,167,181) 100%);--wp--preset--gradient--electric-grass: linear-gradient(135deg,rgb(202,248,128) 0%,rgb(113,206,126) 100%);--wp--preset--gradient--midnight: linear-gradient(135deg,rgb(2,3,129) 0%,rgb(40,116,252) 100%);--wp--preset--font-size--small: 13px;--wp--preset--font-size--medium: 20px;--wp--preset--font-size--large: 36px;--wp--preset--font-size--x-large: 42px;--wp--preset--spacing--20: 0.44rem;--wp--preset--spacing--30: 0.67rem;--wp--preset--spacing--40: 1rem;--wp--preset--spacing--50: 1.5rem;--wp--preset--spacing--60: 2.25rem;--wp--preset--spacing--70: 3.38rem;--wp--preset--spacing--80: 5.06rem;--wp--preset--shadow--natural: 6px 6px 9px rgba(0, 0, 0, 0.2);--wp--preset--shadow--deep: 12px 12px 50px rgba(0, 0, 0, 0.4);--wp--preset--shadow--sharp: 6px 6px 0px rgba(0, 0, 0, 0.2);--wp--preset--shadow--outlined: 6px 6px 0px -3px rgb(255, 255, 255), 6px 6px rgb(0, 0, 0);--wp--preset--shadow--crisp: 6px 6px 0px rgb(0, 0, 0);}:where(.is-layout-flex){gap: 0.5em;}:where(.is-layout-grid){gap: 0.5em;}body .is-layout-flex{display: flex;}.is-layout-flex{flex-wrap: wrap;align-items: center;}.is-layout-flex > :is(*, div){margin: 0;}body .is-layout-grid{display: grid;}.is-layout-grid > :is(*, div){margin: 0;}:where(.wp-block-columns.is-layout-flex){gap: 2em;}:where(.wp-block-columns.is-layout-grid){gap: 2em;}:where(.wp-block-post-template.is-layout-flex){gap: 1.25em;}:where(.wp-block-post-template.is-layout-grid){gap: 1.25em;}.has-black-color{color: var(--wp--preset--color--black) !important;}.has-cyan-bluish-gray-color{color: var(--wp--preset--color--cyan-bluish-gray) !important;}.has-white-color{color: var(--wp--preset--color--white) !important;}.has-pale-pink-color{color: var(--wp--preset--color--pale-pink) !important;}.has-vivid-red-color{color: var(--wp--preset--color--vivid-red) !important;}.has-luminous-vivid-orange-color{color: var(--wp--preset--color--luminous-vivid-orange) !important;}.has-luminous-vivid-amber-color{color: var(--wp--preset--color--luminous-vivid-amber) !important;}.has-light-green-cyan-color{color: var(--wp--preset--color--light-green-cyan) !important;}.has-vivid-green-cyan-color{color: var(--wp--preset--color--vivid-green-cyan) !important;}.has-pale-cyan-blue-color{color: var(--wp--preset--color--pale-cyan-blue) !important;}.has-vivid-cyan-blue-color{color: var(--wp--preset--color--vivid-cyan-blue) !important;}.has-vivid-purple-color{color: var(--wp--preset--color--vivid-purple) !important;}.has-black-background-color{background-color: var(--wp--preset--color--black) !important;}.has-cyan-bluish-gray-background-color{background-color: var(--wp--preset--color--cyan-bluish-gray) !important;}.has-white-background-color{background-color: var(--wp--preset--color--white) !important;}.has-pale-pink-background-color{background-color: var(--wp--preset--color--pale-pink) !important;}.has-vivid-red-background-color{background-color: var(--wp--preset--color--vivid-red) !important;}.has-luminous-vivid-orange-background-color{background-color: var(--wp--preset--color--luminous-vivid-orange) !important;}.has-luminous-vivid-amber-background-color{background-color: var(--wp--preset--color--luminous-vivid-amber) !important;}.has-light-green-cyan-background-color{background-color: var(--wp--preset--color--light-green-cyan) !important;}.has-vivid-green-cyan-background-color{background-color: var(--wp--preset--color--vivid-green-cyan) !important;}.has-pale-cyan-blue-background-color{background-color: var(--wp--preset--color--pale-cyan-blue) !important;}.has-vivid-cyan-blue-background-color{background-color: var(--wp--preset--color--vivid-cyan-blue) !important;}.has-vivid-purple-background-color{background-color: var(--wp--preset--color--vivid-purple) !important;}.has-black-border-color{border-color: var(--wp--preset--color--black) !important;}.has-cyan-bluish-gray-border-color{border-color: var(--wp--preset--color--cyan-bluish-gray) !important;}.has-white-border-color{border-color: var(--wp--preset--color--white) !important;}.has-pale-pink-border-color{border-color: var(--wp--preset--color--pale-pink) !important;}.has-vivid-red-border-color{border-color: var(--wp--preset--color--vivid-red) !important;}.has-luminous-vivid-orange-border-color{border-color: var(--wp--preset--color--luminous-vivid-orange) !important;}.has-luminous-vivid-amber-border-color{border-color: var(--wp--preset--color--luminous-vivid-amber) !important;}.has-light-green-cyan-border-color{border-color: var(--wp--preset--color--light-green-cyan) !important;}.has-vivid-green-cyan-border-color{border-color: var(--wp--preset--color--vivid-green-cyan) !important;}.has-pale-cyan-blue-border-color{border-color: var(--wp--preset--color--pale-cyan-blue) !important;}.has-vivid-cyan-blue-border-color{border-color: var(--wp--preset--color--vivid-cyan-blue) !important;}.has-vivid-purple-border-color{border-color: var(--wp--preset--color--vivid-purple) !important;}.has-vivid-cyan-blue-to-vivid-purple-gradient-background{background: var(--wp--preset--gradient--vivid-cyan-blue-to-vivid-purple) !important;}.has-light-green-cyan-to-vivid-green-cyan-gradient-background{background: var(--wp--preset--gradient--light-green-cyan-to-vivid-green-cyan) !important;}.has-luminous-vivid-amber-to-luminous-vivid-orange-gradient-background{background: var(--wp--preset--gradient--luminous-vivid-amber-to-luminous-vivid-orange) !important;}.has-luminous-vivid-orange-to-vivid-red-gradient-background{background: var(--wp--preset--gradient--luminous-vivid-orange-to-vivid-red) !important;}.has-very-light-gray-to-cyan-bluish-gray-gradient-background{background: var(--wp--preset--gradient--very-light-gray-to-cyan-bluish-gray) !important;}.has-cool-to-warm-spectrum-gradient-background{background: var(--wp--preset--gradient--cool-to-warm-spectrum) !important;}.has-blush-light-purple-gradient-background{background: var(--wp--preset--gradient--blush-light-purple) !important;}.has-blush-bordeaux-gradient-background{background: var(--wp--preset--gradient--blush-bordeaux) !important;}.has-luminous-dusk-gradient-background{background: var(--wp--preset--gradient--luminous-dusk) !important;}.has-pale-ocean-gradient-background{background: var(--wp--preset--gradient--pale-ocean) !important;}.has-electric-grass-gradient-background{background: var(--wp--preset--gradient--electric-grass) !important;}.has-midnight-gradient-background{background: var(--wp--preset--gradient--midnight) !important;}.has-small-font-size{font-size: var(--wp--preset--font-size--small) !important;}.has-medium-font-size{font-size: var(--wp--preset--font-size--medium) !important;}.has-large-font-size{font-size: var(--wp--preset--font-size--large) !important;}.has-x-large-font-size{font-size: var(--wp--preset--font-size--x-large) !important;}
+/*# sourceURL=global-styles-inline-css */
+</style>
+
+<link rel='stylesheet' id='twentysixteen-fonts-css' href='https://www.dont-panic.cc/capi/wp-content/themes/twentysixteen/fonts/merriweather-plus-montserrat-plus-inconsolata.css?ver=20230328' media='all' />
+<link rel='stylesheet' id='genericons-css' href='https://www.dont-panic.cc/capi/wp-content/themes/twentysixteen/genericons/genericons.css?ver=20251101' media='all' />
+<link rel='stylesheet' id='twentysixteen-style-css' href='https://www.dont-panic.cc/capi/wp-content/themes/twentysixteen/style.css?ver=20251202' media='all' />
+<link rel='stylesheet' id='twentysixteen-block-style-css' href='https://www.dont-panic.cc/capi/wp-content/themes/twentysixteen/css/blocks.css?ver=20240817' media='all' />
+<link rel='stylesheet' id='embed-google-fonts-open-sans-css' href='https://www.dont-panic.cc/capi/wp-content/cache/embed-google-fonts/open-sans/_font.css?ver=1770561989' media='all' />
+<link rel='stylesheet' id='embed-google-fonts-noto-serif-css' href='https://www.dont-panic.cc/capi/wp-content/cache/embed-google-fonts/noto-serif/_font.css?ver=1770566923' media='all' />
+<script src="https://www.dont-panic.cc/capi/wp-content/plugins/hyphenator/Hyphenator.js?ver=5.1.5" id="hyphenator-js"></script>
+<script src="https://www.dont-panic.cc/capi/wp-content/plugins/hyphenator/patterns/en-us.js?ver=5.1.5" id="hyphenator-en-us-js"></script>
+<script src="https://www.dont-panic.cc/capi/wp-includes/js/jquery/jquery.min.js?ver=3.7.1" id="jquery-core-js"></script>
+<script src="https://www.dont-panic.cc/capi/wp-includes/js/jquery/jquery-migrate.min.js?ver=3.4.1" id="jquery-migrate-js"></script>
+<script id="twentysixteen-script-js-extra">
+var screenReaderText = {"expand":"expand child menu","collapse":"collapse child menu"};
+//# sourceURL=twentysixteen-script-js-extra
+</script>
+<script src="https://www.dont-panic.cc/capi/wp-content/themes/twentysixteen/js/functions.js?ver=20230629" id="twentysixteen-script-js" defer data-wp-strategy="defer"></script>
+<link rel="https://api.w.org/" href="https://www.dont-panic.cc/capi/wp-json/" /><link rel="alternate" title="JSON" type="application/json" href="https://www.dont-panic.cc/capi/wp-json/wp/v2/posts/576" /><link rel="EditURI" type="application/rsd+xml" title="RSD" href="https://www.dont-panic.cc/capi/xmlrpc.php?rsd" />
+<meta name="generator" content="WordPress 6.9.1" />
+<link rel="canonical" href="https://www.dont-panic.cc/capi/2023/10/19/btrfs-raid1-vs-mdadm-raid1/" />
+<link rel='shortlink' href='https://www.dont-panic.cc/capi/?p=576' />
+<script type="text/javascript">
+	Hyphenator.config( {"classname":"entry-content","intermediatestate":"visible","remoteloading":false,"defaultlanguage":"en-us"} );
+	Hyphenator.run();
+</script>
+		<style id="wp-custom-css">
+			.post p {
+  text-align: justify;
+}
+.post blockquote p {
+	text-align: left;
+}
+blockquote {
+	background: #e0e0e0;
+	line-height: 1.1;
+	padding-top: 10px;
+	padding-bottom: 10px;
+}
+blockquote code {
+	background: #e0e0e0;
+	color: black;
+	font-style: normal;
+	font-size: 85%;
+	padding: 0;
+}
+div.entry-content p {
+	margin-bottom: 0.75em
+}
+div.entry-content ul {
+	margin-left: 1.0em;
+}		</style>
+		</head>
+
+<body class="wp-singular post-template-default single single-post postid-576 single-format-standard wp-embed-responsive wp-theme-twentysixteen">
+<div id="page" class="site">
+	<div class="site-inner">
+		<a class="skip-link screen-reader-text" href="#content">
+			Skip to content		</a>
+
+		<header id="masthead" class="site-header">
+			<div class="site-header-main">
+				<div class="site-branding">
+											<p class="site-title"><a href="https://www.dont-panic.cc/capi/" rel="home" >Capi&#039;s Corner</a></p>
+												<p class="site-description">Development, Network, Security, Ideas &amp; Opinions</p>
+									</div><!-- .site-branding -->
+
+									<button id="menu-toggle" class="menu-toggle">Menu</button>
+
+					<div id="site-header-menu" class="site-header-menu">
+													<nav id="site-navigation" class="main-navigation" aria-label="Primary Menu">
+								<div class="menu-main-menu-container"><ul id="menu-main-menu" class="primary-menu"><li id="menu-item-493" class="menu-item menu-item-type-custom menu-item-object-custom menu-item-home menu-item-493"><a href="https://www.dont-panic.cc/capi">Home</a></li>
+<li id="menu-item-494" class="menu-item menu-item-type-post_type menu-item-object-page menu-item-494"><a href="https://www.dont-panic.cc/capi/about-me/">About Me</a></li>
+<li id="menu-item-495" class="menu-item menu-item-type-post_type menu-item-object-page menu-item-495"><a href="https://www.dont-panic.cc/capi/contact/">Contact / Imprint</a></li>
+</ul></div>							</nav><!-- .main-navigation -->
+						
+											</div><!-- .site-header-menu -->
+							</div><!-- .site-header-main -->
+
+					</header><!-- .site-header -->
+
+		<div id="content" class="site-content">
+
+<div id="primary" class="content-area">
+	<main id="main" class="site-main">
+		
+<article id="post-576" class="post-576 post type-post status-publish format-standard hentry category-computer category-sysadmin tag-btrfs tag-raid">
+	<header class="entry-header">
+		<h1 class="entry-title">Btrfs raid1 vs. mdadm raid1</h1>	</header><!-- .entry-header -->
+
+	
+	
+	<div class="entry-content">
+		
+<p><strong>RAID is about up-time.</strong> Or about the chance to avoid having to restore from backup if you are lucky. <strong>RAID is not a backup</strong>, though. There are also no backups, just successful or failed restores. (Those are the most important proverbs that come to my mind right now.)</p>
+
+
+
+<p>Given that I&#8217;m obsessed with backups, but also &#8220;lazy&#8221; in the sense that I want to avoid having to actually restore from my backups, I&#8217;ve been using RAID1 in my data store for at least 15 years now. For the first 12 years of them, I&#8217;ve been using ext3/4 on top of <a rel="noreferrer noopener" href="https://raid.wiki.kernel.org/index.php/A_guide_to_mdadm" target="_blank">mdadm</a> managed RAID1. About 3-4 years ago, I switched most of my storage to <a rel="noreferrer noopener" href="https://btrfs.wiki.kernel.org/" data-type="URL" data-id="https://btrfs.wiki.kernel.org/" target="_blank">Btrfs</a>, using the filesystem&#8217;s built-in <a rel="noreferrer noopener" href="https://btrfs.wiki.kernel.org/index.php/Using_Btrfs_with_Multiple_Devices" data-type="URL" data-id="https://btrfs.wiki.kernel.org/index.php/Using_Btrfs_with_Multiple_Devices" target="_blank">RAID1</a> mode. </p>
+
+
+
+<p>In this article I want to give a short reasoning for this. I initially wanted this article to kick-off a mini-series on blog-posts on Btrfs features that you might find usable, but due to some discussion on Mastodon, I already previously posted my article about <a href="https://www.dont-panic.cc/capi/2022/11/22/speeding-up-btrfs-raid1-with-lvm-cache/" data-type="post" data-id="620">speeding up Btrfs RAID 1 up using LVM cache</a>. You should check that one out as well. </p>
+
+
+
+<span id="more-576"></span>
+
+
+
+<p>Btrfs still has the reputation of being experimental and to sometimes lose your data. From my personal experience, if you avoid doing things that are marked as &#8220;experimental&#8221; in the documentation, I cannot agree with this. For the past years, it has proven to be quite stable in my setup and the advantages of the filesystem outweigh the additional complexity for me personally. <strong>Btrfs is not a zero maintenance filesystem.</strong> While you can set it up once and then forget about it, the most benefits require some maintenance by the admin to really prove valuable. This will be part of a <a href="https://www.dont-panic.cc/capi/tag/btrfs/" data-type="URL" data-id="https://www.dont-panic.cc/capi/tag/btrfs/">later blog-post in the Btrfs series</a>.</p>
+
+
+
+<h2 class="wp-block-heading">Side-note: Btrfs vs. ZFS</h2>
+
+
+
+<p>ZFS enthusiasts (correctly) will point out, that all I write here is also available on ZFS and that ZFS is much more mature and that it is easier to administrate. I guess that&#8217;s true for many things. However, I wanted to use a &#8220;native&#8221; Linux filesystem, one that&#8217;s available from the kernel directly and does not rely on workarounds due to licensing. <a rel="noreferrer noopener" href="https://zfsonlinux.org/" data-type="URL" data-id="https://zfsonlinux.org/" target="_blank">ZFS-on-Linux</a> (and <a rel="noreferrer noopener" href="https://openzfs.org/" data-type="URL" data-id="https://openzfs.org/" target="_blank">OpenZFS</a>) is an awesome project, and one day I&#8217;ll try it. For now, the <a href="https://github.com/openzfs/zfs/issues/405">missing support</a> for <code><a rel="noreferrer noopener" href="https://btrfs.wiki.kernel.org/index.php/Deduplication" target="_blank">cp --reflink=always</a></code> is something that&#8217;s holding me back, but that&#8217;s for another blog-post.</p>
+
+
+
+<h2 class="wp-block-heading">Why Btrfs RAID1 is superior to mdadm for some use-cases</h2>
+
+
+
+<h3 class="wp-block-heading">Bit-Rot Detection</h3>
+
+
+
+<p>Btrfs is what&#8217;s called a <strong>copy-on-write filesystem</strong>. I don&#8217;t want to explain this too much here, the Btrfs wiki does a well-enough job on this. Basically blocks are not overwritten in place but copied elsewhere on change, <em>by default</em>. As part of this, a checksum for the data-block is calculated. This <strong>checksum</strong> is verified on read. Therefore the filesystem can detect errors, caused by &#8220;bit rot&#8221; of the hard-disk or other factors that lead to data corruption.</p>
+
+
+
+<p>And this is a huge advantage over default mdadm raid1&#8217;s already. First of all, MD operates on the block device level. It has no knowledge about the meaning of the data it returns. While this separation of concern is good and well-established, it also brings the problem that MD cannot determine if there is anything wrong with the data it read. And it will return the data of one of the mirrors, more or less random. If there was bit-rot on the device, MD will not notice. There are maintenance tasks for MD (analyze, repair), that you can trigger so that both sides of the mirror are compared and differences are fixed, but this basically just overwrites data on the non-main devices with data from the main-device, if a difference is found.</p>
+
+
+
+<p>For Btrfs on the other hand, if a checksum error is found, the filesystem will attempt to retrieve a valid copy from the other side of the mirror. So <strong>the checksum can be used to determine the valid copy of the data</strong>, and the valid copy <strong>can be used to repair the corrupted side</strong> of the mirror.</p>
+
+
+
+<p>To be fair, there is <a rel="noreferrer noopener" href="https://www.kernel.org/doc/html/latest/admin-guide/device-mapper/dm-integrity.html" data-type="URL" data-id="https://www.kernel.org/doc/html/latest/admin-guide/device-mapper/dm-integrity.html" target="_blank"><code><strong>dm-integrity</strong></code></a>, which allows DM mirrors to also include integrity information. I have not experimented with that so much, since for my use-cases Btrfs provides a lot of advantages beyond this aspect. I&#8217;d be very interested to get comments from users of dm-integrity, if this works well for them, though.</p>
+
+
+
+<p><strong>Bit-rot detection also works for single-disk</strong> use-cases, but of course without the possibility to repair from an unaffected copy. But at least you know when you have to restore from backup.</p>
+
+
+
+<h3 class="wp-block-heading">Different-sized Disks</h3>
+
+
+
+<p><strong>For mdadm, a RAID1 can consist only of equally sized disks</strong> (or partitions). So if you have three disks with e.g. 1TB, 1TB, and 2TB, you can set up a 3-disk RAID1 with the <strong>capacity of 1TB</strong> maximum. This RAID1 will survive the failure of 2 devices, since there are three copies of the data distributed over 3 different disks.</p>
+
+
+
+<figure class="wp-block-image size-full"><a href="https://www.dont-panic.cc/capi/wp-content/uploads/2022/01/mdadm-raid1.png"><img fetchpriority="high" decoding="async" width="731" height="278" src="https://www.dont-panic.cc/capi/wp-content/uploads/2022/01/mdadm-raid1.png" alt="" class="wp-image-591" srcset="https://www.dont-panic.cc/capi/wp-content/uploads/2022/01/mdadm-raid1.png 731w, https://www.dont-panic.cc/capi/wp-content/uploads/2022/01/mdadm-raid1-300x114.png 300w" sizes="(max-width: 709px) 85vw, (max-width: 909px) 67vw, (max-width: 984px) 61vw, (max-width: 1362px) 45vw, 600px" /></a><figcaption class="wp-element-caption">Disk layout for a MD RAID1, using 3 disks with 2 partitions each. Mirrors operate on the partition level.</figcaption></figure>
+
+
+
+<p><strong>On Btrfs, RAID1 means that every data is available with one additional copy</strong>, on two different disks. And since it&#8217;s not a mirror on the block-device layer, it actually does not care about on-disk positions, just that the copies have to be on two different devices. As a consequence, <strong>Btrfs RAID1 can consist of many different devices with different capacity</strong>, as long as the <strong>capacity of the largest device is less or equal to the sum of all other devices</strong>. Therefore in the above example, the 3 disks would result in <strong>capacity of ~1.5TB</strong> of available disk space. <strong>The RAID1 however would only survive the loss of a single disk!</strong> (See Pitfalls section below.)</p>
+
+
+
+<figure class="wp-block-image size-full is-resized"><a href="https://www.dont-panic.cc/capi/wp-content/uploads/2023/10/btrfs-raid1-3disks.png"><img decoding="async" width="704" height="293" src="https://www.dont-panic.cc/capi/wp-content/uploads/2023/10/btrfs-raid1-3disks.png" alt="" class="wp-image-704" style="aspect-ratio:2.4027303754266214;width:630px;height:auto" srcset="https://www.dont-panic.cc/capi/wp-content/uploads/2023/10/btrfs-raid1-3disks.png 704w, https://www.dont-panic.cc/capi/wp-content/uploads/2023/10/btrfs-raid1-3disks-300x125.png 300w" sizes="(max-width: 709px) 85vw, (max-width: 909px) 67vw, (max-width: 984px) 61vw, (max-width: 1362px) 45vw, 600px" /></a><figcaption class="wp-element-caption">Btrfs allocates data in chunks and ensures that there two copies of every chunk which are distributed over two disks in RAID1c2 mode. In RAID1c3 mode it would have 3 copies of every chunk distributed over three disks. (See pitfalls section below.)</figcaption></figure>
+
+
+
+<h2 class="wp-block-heading">Btrfs RAID Pitfalls</h2>
+
+
+
+<h3 class="wp-block-heading">Handling of degraded RAID</h3>
+
+
+
+<p>While RAID is about uptime, Btrfs raid has a corner case, where it actually reduces uptime: <strong>by default Btrfs refuses to mount degraded arrays</strong>, i.e. if a device failed, even only intermittent. And there are some very good reasons for it, because if you force degraded mounts, you may end up without redundancy, if you don&#8217;t handle the temporarily failed disk correctly (spoiler for future blog-post: you need a <code>btrfs balance</code> in this case).</p>
+
+
+
+<p>An mdadm raid1 will mount in degraded state, ZFS will mount in degraded state, and both of them will start a &#8220;resync&#8221; (mdadm) or &#8220;resilvering&#8221; (ZFS) in case the missing device is suddenly available again (e.g. SATA cable was loose).</p>
+
+
+
+<p><strong>From a pure uptime perspective</strong>, automatic resync/resilvering or even running in degraded mode is what is wanted. You want the RAID to be available as much as possible. You for sure don&#8217;t want it to block a server coming back up after a reboot.</p>
+
+
+
+<p>From a <strong>data-integrity point-of-view</strong>, it may arguably be better that a mount fails in such a scenario. While the &#8220;resync&#8221; or &#8220;resilvering&#8221; is running, you are actually running without redundancy. If the good disk fails before it is finished, you have a problem. So you might prefer to know that you are currently in a situation without redundancy. So I personally prefer to be hands-on in this situation, since <strong><em>for my personal use-case</em> data-integrity &gt; uptime</strong>. </p>
+
+
+
+<p>Your mileage may vary, and in this case, a hardware RAID or ZFS&#8217; approach may be better suited. And of course you could always run Btrfs on top of another (software) RAID if you just want the other cool filesystem features but not the RAID handling. But in this case recovery in case of bit-rot depends on the handling of the underlying RAID implementation (maybe dm-integrity will help).</p>
+
+
+
+<h3 class="wp-block-heading">Btrfs RAID1 == 2 Copies!</h3>
+
+
+
+<p>This is basically the other perspective on what I mentioned as an &#8220;advantage&#8221; above for more than two disks: while in madm having more disks increases redundancy, this is not the case for Btrfs RAID1! I repeat: <strong>Btrfs1 redundancy is not  increased by adding additional drives!</strong> You always get <strong>two copies</strong> of the data, and <strong>it can tolerate the loss of a single drive</strong>. Lose more than a single drive, and you lost your array, and most likely all data on it.</p>
+
+
+
+<p>If you want more than one copy, you can have 3 or 4 copies by using the RAID level <code><strong>raid1c3</strong></code> and <code><strong>raid1c4</strong></code>. Since metadata is crucial to not be corrupted to be able to salvage anything off of Btrfs, I personally use raid1c3 for metadata and raid1c2 (the default &#8220;raid1&#8221;) for data.</p>
+
+
+
+<h3 class="wp-block-heading">RAID5/RAID6 are highly experimental! You may (will?) lose data!</h3>
+
+
+
+<p><strong><a rel="noreferrer noopener" href="https://btrfs.wiki.kernel.org/index.php/RAID56" target="_blank">The Btrfs wiki has a scaring warning about RAID5/RAID6.</a></strong> While it seems that with well-enough care (metadata in raid1c3 and only data in raid5/raid6) and knowing what to do in case of failed disks, it is possible to use Btrfs in this mode in the meantime, I personally only stick to RAID1 since I can tolerate the additional loss in capacity.</p>
+	</div><!-- .entry-content -->
+
+	<footer class="entry-footer">
+		<span class="byline"><span class="screen-reader-text">Author </span><span class="author vcard"><a class="url fn n" href="https://www.dont-panic.cc/capi/author/capi/">Martin Carpella</a></span></span><span class="posted-on"><span class="screen-reader-text">Posted on </span><a href="https://www.dont-panic.cc/capi/2023/10/19/btrfs-raid1-vs-mdadm-raid1/" rel="bookmark"><time class="entry-date published" datetime="2023-10-19T20:10:31+02:00">October 19, 2023</time><time class="updated" datetime="2023-10-19T20:47:28+02:00">October 19, 2023</time></a></span><span class="cat-links"><span class="screen-reader-text">Categories </span><a href="https://www.dont-panic.cc/capi/category/computer/" rel="category tag">computer</a>, <a href="https://www.dont-panic.cc/capi/category/computer/sysadmin/" rel="category tag">sysadmin</a></span><span class="tags-links"><span class="screen-reader-text">Tags </span><a href="https://www.dont-panic.cc/capi/tag/btrfs/" rel="tag">btrfs</a>, <a href="https://www.dont-panic.cc/capi/tag/raid/" rel="tag">raid</a></span>			</footer><!-- .entry-footer -->
+</article><!-- #post-576 -->
+
+<div id="comments" class="comments-area">
+
+	
+	
+		<div id="respond" class="comment-respond">
+		<h2 id="reply-title" class="comment-reply-title">Leave a Reply <small><a rel="nofollow" id="cancel-comment-reply-link" href="/capi/2023/10/19/btrfs-raid1-vs-mdadm-raid1/#respond" style="display:none;">Cancel reply</a></small></h2><form action="https://www.dont-panic.cc/capi/wp-comments-post.php" method="post" id="commentform" class="comment-form"><p class="comment-notes"><span id="email-notes">Your email address will not be published.</span> <span class="required-field-message">Required fields are marked <span class="required">*</span></span></p><p class="comment-form-comment"><label for="comment">Comment <span class="required">*</span></label> <textarea id="comment" name="comment" cols="45" rows="8" maxlength="65525" required></textarea></p><p class="comment-form-author"><label for="author">Name</label> <input id="author" name="author" type="text" value="" size="30" maxlength="245" autocomplete="name" /></p>
+<p class="comment-form-email"><label for="email">Email</label> <input id="email" name="email" type="email" value="" size="30" maxlength="100" aria-describedby="email-notes" autocomplete="email" /></p>
+<p class="comment-form-url"><label for="url">Website</label> <input id="url" name="url" type="url" value="" size="30" maxlength="200" autocomplete="url" /></p>
+<p class="form-submit"><input name="submit" type="submit" id="submit" class="submit" value="Post Comment" /> <input type='hidden' name='comment_post_ID' value='576' id='comment_post_ID' />
+<input type='hidden' name='comment_parent' id='comment_parent' value='0' />
+</p><p style="display: none;"><input type="hidden" id="akismet_comment_nonce" name="akismet_comment_nonce" value="a9fadff974" /></p><p style="display: none !important;" class="akismet-fields-container" data-prefix="ak_"><label>&#916;<textarea name="ak_hp_textarea" cols="45" rows="8" maxlength="100"></textarea></label><input type="hidden" id="ak_js_1" name="ak_js" value="194"/><script>document.getElementById( "ak_js_1" ).setAttribute( "value", ( new Date() ).getTime() );</script></p></form>	</div><!-- #respond -->
+	<p class="akismet_comment_form_privacy_notice">This site uses Akismet to reduce spam. <a href="https://akismet.com/privacy/" target="_blank" rel="nofollow noopener">Learn how your comment data is processed.</a></p>
+</div><!-- .comments-area -->
+
+	<nav class="navigation post-navigation" aria-label="Posts">
+		<h2 class="screen-reader-text">Post navigation</h2>
+		<div class="nav-links"><div class="nav-previous"><a href="https://www.dont-panic.cc/capi/2023/10/16/all-bluesky-content-is-public/" rel="prev"><span class="meta-nav" aria-hidden="true">Previous</span> <span class="screen-reader-text">Previous post:</span> <span class="post-title">All Bluesky content is public</span></a></div><div class="nav-next"><a href="https://www.dont-panic.cc/capi/2023/12/11/get-rid-of-windows-11-file-explorers-start-backup-advertisement/" rel="next"><span class="meta-nav" aria-hidden="true">Next</span> <span class="screen-reader-text">Next post:</span> <span class="post-title">Get rid of Windows 11 File Explorer&#8217;s &#8220;Start Backup&#8221; advertisement</span></a></div></div>
+	</nav>
+	</main><!-- .site-main -->
+
+	
+</div><!-- .content-area -->
+
+
+	<aside id="secondary" class="sidebar widget-area">
+		<section id="block-14" class="widget widget_block"><h1>About the author</h1>
+<p>
+<img decoding="async" src="https://www.dont-panic.cc/capi/wp-content/uploads/2023/10/me-1024x683.jpg" style="align: left; width:100px; float:left">
+I'm a software engineer, currently focused on Java, but used a large variety of other languages. I use Windows day-to-day, but I'm a Linux enthusiast. I'm obsessed with monitoring and backups.
+</p></section><section id="archives-2" class="widget widget_archive"><h2 class="widget-title">Archives</h2>		<label class="screen-reader-text" for="archives-dropdown-2">Archives</label>
+		<select id="archives-dropdown-2" name="archive-dropdown">
+			
+			<option value="">Select Month</option>
+				<option value='https://www.dont-panic.cc/capi/2024/08/'> August 2024 &nbsp;(1)</option>
+	<option value='https://www.dont-panic.cc/capi/2024/07/'> July 2024 &nbsp;(1)</option>
+	<option value='https://www.dont-panic.cc/capi/2024/06/'> June 2024 &nbsp;(1)</option>
+	<option value='https://www.dont-panic.cc/capi/2024/05/'> May 2024 &nbsp;(2)</option>
+	<option value='https://www.dont-panic.cc/capi/2023/12/'> December 2023 &nbsp;(1)</option>
+	<option value='https://www.dont-panic.cc/capi/2023/10/'> October 2023 &nbsp;(3)</option>
+	<option value='https://www.dont-panic.cc/capi/2023/06/'> June 2023 &nbsp;(3)</option>
+	<option value='https://www.dont-panic.cc/capi/2022/11/'> November 2022 &nbsp;(1)</option>
+	<option value='https://www.dont-panic.cc/capi/2022/01/'> January 2022 &nbsp;(1)</option>
+	<option value='https://www.dont-panic.cc/capi/2019/10/'> October 2019 &nbsp;(1)</option>
+	<option value='https://www.dont-panic.cc/capi/2018/02/'> February 2018 &nbsp;(1)</option>
+	<option value='https://www.dont-panic.cc/capi/2014/07/'> July 2014 &nbsp;(1)</option>
+	<option value='https://www.dont-panic.cc/capi/2014/06/'> June 2014 &nbsp;(1)</option>
+	<option value='https://www.dont-panic.cc/capi/2014/05/'> May 2014 &nbsp;(1)</option>
+	<option value='https://www.dont-panic.cc/capi/2012/10/'> October 2012 &nbsp;(1)</option>
+	<option value='https://www.dont-panic.cc/capi/2011/12/'> December 2011 &nbsp;(1)</option>
+	<option value='https://www.dont-panic.cc/capi/2011/01/'> January 2011 &nbsp;(1)</option>
+	<option value='https://www.dont-panic.cc/capi/2010/12/'> December 2010 &nbsp;(2)</option>
+	<option value='https://www.dont-panic.cc/capi/2010/02/'> February 2010 &nbsp;(1)</option>
+	<option value='https://www.dont-panic.cc/capi/2009/11/'> November 2009 &nbsp;(1)</option>
+	<option value='https://www.dont-panic.cc/capi/2009/08/'> August 2009 &nbsp;(1)</option>
+	<option value='https://www.dont-panic.cc/capi/2009/06/'> June 2009 &nbsp;(1)</option>
+	<option value='https://www.dont-panic.cc/capi/2009/02/'> February 2009 &nbsp;(2)</option>
+	<option value='https://www.dont-panic.cc/capi/2009/01/'> January 2009 &nbsp;(1)</option>
+	<option value='https://www.dont-panic.cc/capi/2008/12/'> December 2008 &nbsp;(3)</option>
+	<option value='https://www.dont-panic.cc/capi/2008/10/'> October 2008 &nbsp;(2)</option>
+	<option value='https://www.dont-panic.cc/capi/2008/09/'> September 2008 &nbsp;(6)</option>
+	<option value='https://www.dont-panic.cc/capi/2008/06/'> June 2008 &nbsp;(1)</option>
+	<option value='https://www.dont-panic.cc/capi/2008/05/'> May 2008 &nbsp;(2)</option>
+	<option value='https://www.dont-panic.cc/capi/2008/03/'> March 2008 &nbsp;(2)</option>
+	<option value='https://www.dont-panic.cc/capi/2008/02/'> February 2008 &nbsp;(1)</option>
+	<option value='https://www.dont-panic.cc/capi/2007/12/'> December 2007 &nbsp;(2)</option>
+	<option value='https://www.dont-panic.cc/capi/2007/11/'> November 2007 &nbsp;(2)</option>
+	<option value='https://www.dont-panic.cc/capi/2007/10/'> October 2007 &nbsp;(12)</option>
+	<option value='https://www.dont-panic.cc/capi/2007/08/'> August 2007 &nbsp;(1)</option>
+	<option value='https://www.dont-panic.cc/capi/2007/07/'> July 2007 &nbsp;(7)</option>
+	<option value='https://www.dont-panic.cc/capi/2007/06/'> June 2007 &nbsp;(8)</option>
+	<option value='https://www.dont-panic.cc/capi/2007/04/'> April 2007 &nbsp;(2)</option>
+	<option value='https://www.dont-panic.cc/capi/2007/01/'> January 2007 &nbsp;(3)</option>
+	<option value='https://www.dont-panic.cc/capi/2006/12/'> December 2006 &nbsp;(1)</option>
+	<option value='https://www.dont-panic.cc/capi/2006/11/'> November 2006 &nbsp;(1)</option>
+	<option value='https://www.dont-panic.cc/capi/2006/08/'> August 2006 &nbsp;(1)</option>
+	<option value='https://www.dont-panic.cc/capi/2006/06/'> June 2006 &nbsp;(3)</option>
+	<option value='https://www.dont-panic.cc/capi/2006/05/'> May 2006 &nbsp;(2)</option>
+	<option value='https://www.dont-panic.cc/capi/2006/04/'> April 2006 &nbsp;(5)</option>
+	<option value='https://www.dont-panic.cc/capi/2006/03/'> March 2006 &nbsp;(1)</option>
+	<option value='https://www.dont-panic.cc/capi/2006/02/'> February 2006 &nbsp;(1)</option>
+	<option value='https://www.dont-panic.cc/capi/2006/01/'> January 2006 &nbsp;(2)</option>
+	<option value='https://www.dont-panic.cc/capi/2005/12/'> December 2005 &nbsp;(6)</option>
+	<option value='https://www.dont-panic.cc/capi/2005/09/'> September 2005 &nbsp;(5)</option>
+	<option value='https://www.dont-panic.cc/capi/2005/06/'> June 2005 &nbsp;(3)</option>
+	<option value='https://www.dont-panic.cc/capi/2005/05/'> May 2005 &nbsp;(4)</option>
+
+		</select>
+
+			<script>
+( ( dropdownId ) => {
+	const dropdown = document.getElementById( dropdownId );
+	function onSelectChange() {
+		setTimeout( () => {
+			if ( 'escape' === dropdown.dataset.lastkey ) {
+				return;
+			}
+			if ( dropdown.value ) {
+				document.location.href = dropdown.value;
+			}
+		}, 250 );
+	}
+	function onKeyUp( event ) {
+		if ( 'Escape' === event.key ) {
+			dropdown.dataset.lastkey = 'escape';
+		} else {
+			delete dropdown.dataset.lastkey;
+		}
+	}
+	function onClick() {
+		delete dropdown.dataset.lastkey;
+	}
+	dropdown.addEventListener( 'keyup', onKeyUp );
+	dropdown.addEventListener( 'click', onClick );
+	dropdown.addEventListener( 'change', onSelectChange );
+})( "archives-dropdown-2" );
+
+//# sourceURL=WP_Widget_Archives%3A%3Awidget
+</script>
+</section><section id="categories-2" class="widget widget_categories"><h2 class="widget-title">Categories</h2><nav aria-label="Categories">
+			<ul>
+					<li class="cat-item cat-item-8"><a href="https://www.dont-panic.cc/capi/category/advocacy/">advocacy</a> (6)
+</li>
+	<li class="cat-item cat-item-6"><a href="https://www.dont-panic.cc/capi/category/computer/">computer</a> (106)
+<ul class='children'>
+	<li class="cat-item cat-item-4"><a href="https://www.dont-panic.cc/capi/category/computer/development/">development</a> (26)
+</li>
+	<li class="cat-item cat-item-9"><a href="https://www.dont-panic.cc/capi/category/computer/games/">games</a> (1)
+</li>
+	<li class="cat-item cat-item-13"><a href="https://www.dont-panic.cc/capi/category/computer/hardware/">hardware</a> (7)
+</li>
+	<li class="cat-item cat-item-3"><a href="https://www.dont-panic.cc/capi/category/computer/internet/">internet</a> (35)
+</li>
+	<li class="cat-item cat-item-7"><a href="https://www.dont-panic.cc/capi/category/computer/security/">security</a> (11)
+</li>
+	<li class="cat-item cat-item-5"><a href="https://www.dont-panic.cc/capi/category/computer/software/">software</a> (42)
+</li>
+	<li class="cat-item cat-item-10"><a href="https://www.dont-panic.cc/capi/category/computer/sysadmin/">sysadmin</a> (33)
+</li>
+</ul>
+</li>
+	<li class="cat-item cat-item-2"><a href="https://www.dont-panic.cc/capi/category/general-stuff/">general stuff</a> (13)
+</li>
+	<li class="cat-item cat-item-231"><a href="https://www.dont-panic.cc/capi/category/science/">science</a> (1)
+</li>
+			</ul>
+
+			</nav></section><section id="block-17" class="widget widget_block">
+<div class="wp-block-group"><div class="wp-block-group__inner-container is-layout-constrained wp-block-group-is-layout-constrained">
+<h2 class="wp-block-heading widget-title">Top Tags</h2>
+
+
+<p class="is-style-default wp-block-tag-cloud"><a href="https://www.dont-panic.cc/capi/tag/net/" class="tag-cloud-link tag-link-23 tag-link-position-1" style="font-size: 11.756097560976pt;" aria-label=".net (4 items)">.net</a>
+<a href="https://www.dont-panic.cc/capi/tag/administration/" class="tag-cloud-link tag-link-20 tag-link-position-2" style="font-size: 10.048780487805pt;" aria-label="administration (3 items)">administration</a>
+<a href="https://www.dont-panic.cc/capi/tag/advocacy/" class="tag-cloud-link tag-link-228 tag-link-position-3" style="font-size: 11.756097560976pt;" aria-label="advocacy (4 items)">advocacy</a>
+<a href="https://www.dont-panic.cc/capi/tag/amazon/" class="tag-cloud-link tag-link-167 tag-link-position-4" style="font-size: 10.048780487805pt;" aria-label="amazon (3 items)">amazon</a>
+<a href="https://www.dont-panic.cc/capi/tag/apache/" class="tag-cloud-link tag-link-141 tag-link-position-5" style="font-size: 8pt;" aria-label="apache (2 items)">apache</a>
+<a href="https://www.dont-panic.cc/capi/tag/backup/" class="tag-cloud-link tag-link-145 tag-link-position-6" style="font-size: 10.048780487805pt;" aria-label="backup (3 items)">backup</a>
+<a href="https://www.dont-panic.cc/capi/tag/blog/" class="tag-cloud-link tag-link-129 tag-link-position-7" style="font-size: 8pt;" aria-label="blog (2 items)">blog</a>
+<a href="https://www.dont-panic.cc/capi/tag/blogging/" class="tag-cloud-link tag-link-123 tag-link-position-8" style="font-size: 10.048780487805pt;" aria-label="blogging (3 items)">blogging</a>
+<a href="https://www.dont-panic.cc/capi/tag/browser/" class="tag-cloud-link tag-link-71 tag-link-position-9" style="font-size: 10.048780487805pt;" aria-label="browser (3 items)">browser</a>
+<a href="https://www.dont-panic.cc/capi/tag/bug/" class="tag-cloud-link tag-link-45 tag-link-position-10" style="font-size: 11.756097560976pt;" aria-label="bug (4 items)">bug</a>
+<a href="https://www.dont-panic.cc/capi/tag/bugzilla/" class="tag-cloud-link tag-link-88 tag-link-position-11" style="font-size: 10.048780487805pt;" aria-label="bugzilla (3 items)">bugzilla</a>
+<a href="https://www.dont-panic.cc/capi/tag/cygwin/" class="tag-cloud-link tag-link-171 tag-link-position-12" style="font-size: 8pt;" aria-label="cygwin (2 items)">cygwin</a>
+<a href="https://www.dont-panic.cc/capi/tag/development/" class="tag-cloud-link tag-link-225 tag-link-position-13" style="font-size: 18.756097560976pt;" aria-label="development (12 items)">development</a>
+<a href="https://www.dont-panic.cc/capi/tag/encryption/" class="tag-cloud-link tag-link-183 tag-link-position-14" style="font-size: 10.048780487805pt;" aria-label="encryption (3 items)">encryption</a>
+<a href="https://www.dont-panic.cc/capi/tag/free/" class="tag-cloud-link tag-link-85 tag-link-position-15" style="font-size: 8pt;" aria-label="free (2 items)">free</a>
+<a href="https://www.dont-panic.cc/capi/tag/git/" class="tag-cloud-link tag-link-131 tag-link-position-16" style="font-size: 15.170731707317pt;" aria-label="git (7 items)">git</a>
+<a href="https://www.dont-panic.cc/capi/tag/google/" class="tag-cloud-link tag-link-124 tag-link-position-17" style="font-size: 11.756097560976pt;" aria-label="google (4 items)">google</a>
+<a href="https://www.dont-panic.cc/capi/tag/hardware/" class="tag-cloud-link tag-link-230 tag-link-position-18" style="font-size: 10.048780487805pt;" aria-label="hardware (3 items)">hardware</a>
+<a href="https://www.dont-panic.cc/capi/tag/hong-kong/" class="tag-cloud-link tag-link-195 tag-link-position-19" style="font-size: 14.317073170732pt;" aria-label="hong kong (6 items)">hong kong</a>
+<a href="https://www.dont-panic.cc/capi/tag/howto/" class="tag-cloud-link tag-link-36 tag-link-position-20" style="font-size: 16.024390243902pt;" aria-label="howto (8 items)">howto</a>
+<a href="https://www.dont-panic.cc/capi/tag/internet/" class="tag-cloud-link tag-link-224 tag-link-position-21" style="font-size: 13.121951219512pt;" aria-label="internet (5 items)">internet</a>
+<a href="https://www.dont-panic.cc/capi/tag/java/" class="tag-cloud-link tag-link-21 tag-link-position-22" style="font-size: 11.756097560976pt;" aria-label="java (4 items)">java</a>
+<a href="https://www.dont-panic.cc/capi/tag/jungledisk/" class="tag-cloud-link tag-link-166 tag-link-position-23" style="font-size: 10.048780487805pt;" aria-label="jungledisk (3 items)">jungledisk</a>
+<a href="https://www.dont-panic.cc/capi/tag/library/" class="tag-cloud-link tag-link-41 tag-link-position-24" style="font-size: 10.048780487805pt;" aria-label="library (3 items)">library</a>
+<a href="https://www.dont-panic.cc/capi/tag/linux/" class="tag-cloud-link tag-link-48 tag-link-position-25" style="font-size: 18.243902439024pt;" aria-label="linux (11 items)">linux</a>
+<a href="https://www.dont-panic.cc/capi/tag/mysql/" class="tag-cloud-link tag-link-87 tag-link-position-26" style="font-size: 8pt;" aria-label="mysql (2 items)">mysql</a>
+<a href="https://www.dont-panic.cc/capi/tag/network/" class="tag-cloud-link tag-link-186 tag-link-position-27" style="font-size: 8pt;" aria-label="network (2 items)">network</a>
+<a href="https://www.dont-panic.cc/capi/tag/openmoko/" class="tag-cloud-link tag-link-111 tag-link-position-28" style="font-size: 8pt;" aria-label="openmoko (2 items)">openmoko</a>
+<a href="https://www.dont-panic.cc/capi/tag/privacy/" class="tag-cloud-link tag-link-94 tag-link-position-29" style="font-size: 8pt;" aria-label="privacy (2 items)">privacy</a>
+<a href="https://www.dont-panic.cc/capi/tag/registry-hack/" class="tag-cloud-link tag-link-30 tag-link-position-30" style="font-size: 10.048780487805pt;" aria-label="registry-hack (3 items)">registry-hack</a>
+<a href="https://www.dont-panic.cc/capi/tag/rss/" class="tag-cloud-link tag-link-127 tag-link-position-31" style="font-size: 8pt;" aria-label="rss (2 items)">rss</a>
+<a href="https://www.dont-panic.cc/capi/tag/s3/" class="tag-cloud-link tag-link-168 tag-link-position-32" style="font-size: 10.048780487805pt;" aria-label="s3 (3 items)">s3</a>
+<a href="https://www.dont-panic.cc/capi/tag/scuttle/" class="tag-cloud-link tag-link-105 tag-link-position-33" style="font-size: 8pt;" aria-label="scuttle (2 items)">scuttle</a>
+<a href="https://www.dont-panic.cc/capi/tag/security/" class="tag-cloud-link tag-link-227 tag-link-position-34" style="font-size: 19.951219512195pt;" aria-label="security (14 items)">security</a>
+<a href="https://www.dont-panic.cc/capi/tag/software/" class="tag-cloud-link tag-link-226 tag-link-position-35" style="font-size: 22pt;" aria-label="software (19 items)">software</a>
+<a href="https://www.dont-panic.cc/capi/tag/spam/" class="tag-cloud-link tag-link-121 tag-link-position-36" style="font-size: 8pt;" aria-label="spam (2 items)">spam</a>
+<a href="https://www.dont-panic.cc/capi/tag/subversion/" class="tag-cloud-link tag-link-102 tag-link-position-37" style="font-size: 10.048780487805pt;" aria-label="subversion (3 items)">subversion</a>
+<a href="https://www.dont-panic.cc/capi/tag/sysadmin/" class="tag-cloud-link tag-link-229 tag-link-position-38" style="font-size: 10.048780487805pt;" aria-label="sysadmin (3 items)">sysadmin</a>
+<a href="https://www.dont-panic.cc/capi/tag/troubleshooting/" class="tag-cloud-link tag-link-56 tag-link-position-39" style="font-size: 17.560975609756pt;" aria-label="troubleshooting (10 items)">troubleshooting</a>
+<a href="https://www.dont-panic.cc/capi/tag/ubuntu/" class="tag-cloud-link tag-link-47 tag-link-position-40" style="font-size: 10.048780487805pt;" aria-label="ubuntu (3 items)">ubuntu</a>
+<a href="https://www.dont-panic.cc/capi/tag/url-shortening/" class="tag-cloud-link tag-link-206 tag-link-position-41" style="font-size: 11.756097560976pt;" aria-label="url-shortening (4 items)">url-shortening</a>
+<a href="https://www.dont-panic.cc/capi/tag/vacation/" class="tag-cloud-link tag-link-196 tag-link-position-42" style="font-size: 14.317073170732pt;" aria-label="vacation (6 items)">vacation</a>
+<a href="https://www.dont-panic.cc/capi/tag/video/" class="tag-cloud-link tag-link-178 tag-link-position-43" style="font-size: 10.048780487805pt;" aria-label="video (3 items)">video</a>
+<a href="https://www.dont-panic.cc/capi/tag/vista/" class="tag-cloud-link tag-link-53 tag-link-position-44" style="font-size: 13.121951219512pt;" aria-label="vista (5 items)">vista</a>
+<a href="https://www.dont-panic.cc/capi/tag/vmware/" class="tag-cloud-link tag-link-26 tag-link-position-45" style="font-size: 10.048780487805pt;" aria-label="vmware (3 items)">vmware</a>
+<a href="https://www.dont-panic.cc/capi/tag/web20/" class="tag-cloud-link tag-link-76 tag-link-position-46" style="font-size: 10.048780487805pt;" aria-label="web2.0 (3 items)">web2.0</a>
+<a href="https://www.dont-panic.cc/capi/tag/wiki/" class="tag-cloud-link tag-link-62 tag-link-position-47" style="font-size: 13.121951219512pt;" aria-label="wiki (5 items)">wiki</a>
+<a href="https://www.dont-panic.cc/capi/tag/windows/" class="tag-cloud-link tag-link-14 tag-link-position-48" style="font-size: 21.317073170732pt;" aria-label="windows (17 items)">windows</a>
+<a href="https://www.dont-panic.cc/capi/tag/wordpress/" class="tag-cloud-link tag-link-122 tag-link-position-49" style="font-size: 8pt;" aria-label="wordpress (2 items)">wordpress</a>
+<a href="https://www.dont-panic.cc/capi/tag/workaround/" class="tag-cloud-link tag-link-55 tag-link-position-50" style="font-size: 10.048780487805pt;" aria-label="workaround (3 items)">workaround</a></p></div></div>
+</section><section id="meta-2" class="widget widget_meta"><h2 class="widget-title">Meta</h2><nav aria-label="Meta">
+		<ul>
+						<li><a href="https://www.dont-panic.cc/capi/wp-login.php">Log in</a></li>
+			<li><a href="https://www.dont-panic.cc/capi/feed/">Entries feed</a></li>
+			<li><a href="https://www.dont-panic.cc/capi/comments/feed/">Comments feed</a></li>
+
+			<li><a href="https://wordpress.org/">WordPress.org</a></li>
+		</ul>
+
+		</nav></section>	</aside><!-- .sidebar .widget-area -->
+
+		</div><!-- .site-content -->
+
+		<footer id="colophon" class="site-footer">
+							<nav class="main-navigation" aria-label="Footer Primary Menu">
+					<div class="menu-main-menu-container"><ul id="menu-main-menu-1" class="primary-menu"><li class="menu-item menu-item-type-custom menu-item-object-custom menu-item-home menu-item-493"><a href="https://www.dont-panic.cc/capi">Home</a></li>
+<li class="menu-item menu-item-type-post_type menu-item-object-page menu-item-494"><a href="https://www.dont-panic.cc/capi/about-me/">About Me</a></li>
+<li class="menu-item menu-item-type-post_type menu-item-object-page menu-item-495"><a href="https://www.dont-panic.cc/capi/contact/">Contact / Imprint</a></li>
+</ul></div>				</nav><!-- .main-navigation -->
+			
+			
+			<div class="site-info">
+								<span class="site-title"><a href="https://www.dont-panic.cc/capi/" rel="home">Capi&#039;s Corner</a></span>
+								<a href="https://wordpress.org/" class="imprint">
+					Proudly powered by WordPress				</a>
+			</div><!-- .site-info -->
+		</footer><!-- .site-footer -->
+	</div><!-- .site-inner -->
+</div><!-- .site -->
+
+<script type="speculationrules">
+{"prefetch":[{"source":"document","where":{"and":[{"href_matches":"/capi/*"},{"not":{"href_matches":["/capi/wp-*.php","/capi/wp-admin/*","/capi/wp-content/uploads/*","/capi/wp-content/*","/capi/wp-content/plugins/*","/capi/wp-content/themes/twentysixteen/*","/capi/*\\?(.+)"]}},{"not":{"selector_matches":"a[rel~=\"nofollow\"]"}},{"not":{"selector_matches":".no-prefetch, .no-prefetch a"}}]},"eagerness":"conservative"}]}
+</script>
+<!-- Matomo -->
+<script>
+  var _paq = window._paq = window._paq || [];
+  /* tracker methods like "setCustomDimension" should be called before "trackPageView" */
+  _paq.push(['setVisitorCookieTimeout', '34186669']);
+_paq.push(['setSessionCookieTimeout', '1800']);
+_paq.push(['setReferralCookieTimeout', '15778463']);
+_paq.push(['trackPageView']);
+  _paq.push(['enableLinkTracking']);
+  (function() {
+    var u="//www.dont-panic.cc/capi/wp-content/plugins/wp-piwik/proxy/"
+    _paq.push(['setTrackerUrl', u+'matomo.php']);
+    _paq.push(['setSiteId', '1']);
+    var d=document, g=d.createElement('script'), s=d.getElementsByTagName('script')[0];
+    g.async=true; g.src=u+'matomo.php'; s.parentNode.insertBefore(g,s);
+  })();
+</script>
+<!-- End Matomo Code -->
+<script src="https://www.dont-panic.cc/capi/wp-includes/js/comment-reply.min.js?ver=6.9.1" id="comment-reply-js" async data-wp-strategy="async" fetchpriority="low"></script>
+<script defer src="https://www.dont-panic.cc/capi/wp-content/plugins/akismet/_inc/akismet-frontend.js?ver=1764366999" id="akismet-frontend-js"></script>
+</body>
+</html>

@@ -1,0 +1,2034 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>A short history of btrfs [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="A short history of btrfs">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content=" You probably have heard of the cool new kid on the file system block, btrfs (pronounced 'butte [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/341621/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><ins data-revive-zoneid="12072" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script></div>
+<div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/342892/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/newaccount"><b>Register</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>A short history of btrfs</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>Ready to give LWN a try?</b>
+<p>
+With a subscription to LWN, you can stay current with what is happening in the Linux and free-software community and take advantage of subscriber-only site features.  We are pleased to offer you <b><a href="https://lwn.net/Promo/nst-trial1/claim">a free trial subscription</a></b>, no credit card required, so that you can see for yourself.  Please, join us!
+</blockquote>
+<div class="GAByline">
+           <p>July 22, 2009</p>
+           <p>This article was contributed by Valerie Aurora</p>
+           </div>
+<p>
+You probably have heard of the cool new kid on the file system block,
+<a href="http://btrfs.wiki.kernel.org">btrfs</a> (pronounced
+"butter-eff-ess") - after all, Linus Torvalds is using it as his root
+file system on one of his laptops.  But you might not know much
+about it beyond a few high-level keywords - copy-on-write, checksums,
+writable snapshots - and a few sensational rumors and stories - the
+<a href="http://www.phoronix.com/scan.php?page=article&item=btrfs_benchmarks&num=1">Phoronix
+benchmarks</a>, btrfs is a ZFS ripoff, btrfs is a secret plan for
+Oracle domination of Linux, etc.  When it comes to file systems, it's
+hard to tell truth from rumor from vile slander: the code is so
+complex, the personalities are so exaggerated, and the users are so
+angry when they lose their data.  You can't even settle things with a
+battle of the benchmarks: file system workloads vary so wildly that
+you can make a plausible argument for why any benchmark is either
+totally irrelevant or crucially important.
+</p>
+
+<p>
+In this article, we'll take a behind-the-scenes look at the design and
+development of btrfs on many levels - technical, political, personal -
+and trace it from its origins at a workshop to its current position as
+Linus's root file system.  Knowing the background and motivation for
+each step will help you understand why btrfs was started, how it
+works, and where it's going in the future.  By the end, you should be
+able to hand-wave your way through a description of btrfs's on-disk
+format.
+</p>
+
+<b>Disclaimer</b>:
+I have two huge disclaimers to make: One, I worked on ZFS for several
+years while at Sun.  Two, I have already been subpoenaed and deposed
+for the various Sun/NetApp patent lawsuits and I'd like to avoid
+giving them any excuse to subpoena me again.  I'll do my best to be
+fair, honest, and scrupulously correct.
+</p>
+<p>
+<h4>btrfs: Pre-history</h4>
+
+<p>
+Imagine you are a Linux file system developer.  It's 2007, and you are
+at the <a href="http://www.usenix.org/event/lsf07/">Linux Storage and
+File systems workshop</a>.  Things are looking dim for Linux file
+systems: Reiserfs, plagued with quality issues and an unsustainable
+funding model, has just lost all credibility with the arrest of Hans
+Reiser a few months ago.  ext4 is still in development; in fact, it
+isn't even <a href="http://lkml.org/lkml/2006/6/28/454">called ext4
+yet</a>.  Fundamentally, ext4 is just a straightforward extension of
+a 30-year-old format and is light-years behind the competition in
+terms of features.  At the same time, companies are clamping down on
+funding for Linux development; IBM's Linux division is coming to the
+end of its grace period and needs to show profitability now.  Other
+companies are catching wind of an upcoming recession and are cutting
+research across the board.  They want projects with time to results
+measured in months, not years.
+</p>
+
+<p>
+Ever hopeful, the file systems developers are meeting anyway.  Since
+the workshop is co-located
+with <a href="http://www.usenix.org/event/fast07/">USENIX FAST
+'07</a>, several researchers from academia and industry are presenting
+their ideas to the workshop.  One of them is Ohad Rodeh.  He's
+invented a kind
+of <a href="https://btrfs.wiki.kernel.org/images-btrfs/6/68/Btree_TOS.pdf">btree
+that is copy-on-write (COW) friendly [PDF]</a>.  To start
+with, <a href="http://en.wikipedia.org/wiki/B-tree">btrees</a> in
+their native form are wildly incompatible with COW.  The leaves of the
+tree are linked together, so when the location of one leaf changes
+(via a write - which implies a copy to a new block), the link in the
+adjacent leaf changes, which triggers another copy-on-write and
+location change, which changes the link in the next leaf... The result
+is that the entire btree, from top to bottom, has to be rewritten
+every time one leaf is changed.
+</p>
+
+<p>
+Rodeh's btrees are different: first, he got rid of the links between
+leaves of the tree - which also "throws out a lot of the existing
+b-tree literature", as he says in
+his <a href="https://btrfs.wiki.kernel.org/images-btrfs/6/63/LinuxFS_Workshop.pdf">slides [PDF]</a>
+- but keeps enough btree traits to be useful. (This is a fairly
+standard form of btrees in file systems, sometimes called "B+trees".)
+He added some algorithms for traversing the btree that take advantage
+of reference counts to limit the amount of the tree that has to be
+traversed when deleting a snapshot, as well as a few other things,
+like proactive split and merge of interior nodes so that inserts and
+deletes don't require any backtracking.  The result is a simple,
+robust, generic data structure which very efficiently tracks extents
+(groups of contiguous data blocks)
+in a COW file system.  Rodeh successfully prototyped the system some
+years ago, but he's done with that area of research and just wants
+someone to take his COW-friendly btrees and put them to good use.
+</p>
+
+<h4>btrfs: The beginning</h4>
+
+<p>
+Chris Mason took these COW-friendly btrees and ran with them.  Back in
+the day, Chris worked on Reiserfs, where he learned a lot about what
+to do and what not to do in a file system.  Reiserfs had some cool
+features - small file packing, btrees for fast lookup, flexible layout
+- but the implementation tended to be haphazard and ad hoc.  Code
+paths proliferated wildly, and along with them potential bugs.
+</p>
+
+<p>
+Chris had an insight: What if everything in the file system - inodes,
+file data, directory entries, bitmaps, the works - was an item in a
+copy-on-write btree?  All reads and writes to storage would go through
+the same code path, one that packed the items into btree nodes and
+leaves without knowing or caring about the item type.  Then you only
+have to write the code once and you get checksums, reference counting
+(for snapshots), compression, fragmentation, etc., for anything in the
+file system.
+</p>
+
+<p>
+Chris came up with the
+following <a href="http://btrfs.wiki.kernel.org/index.php/Btrfs_design">basic
+structure for btrfs</a> ("btrfs" comes from "btree file system").
+Btrfs consists of three types of on-disk structures: block headers,
+keys, and items, currently defined as follows:
+</p>
+<blockquote>
+<pre>
+struct btrfs_header {
+    u8 csum[32];
+    u8 fsid[16];
+    __le64 blocknr;
+    __le64 flags;
+
+    u8 chunk_tree_uid[16];
+    __le64 generation;
+    __le64 owner;
+    __le32 nritems;
+    u8 level;
+}
+
+struct btrfs_disk_key {
+    __le64 objectid;
+    u8 type;
+    __le64 offset;
+}
+
+struct btrfs_item {
+    struct btrfs_disk_key key;
+    __le32 offset;
+    __le32 size;
+}
+</pre>
+</blockquote>
+<p>
+Inside the btree (that is, the "branches" of the tree, as opposed to
+the leaves at the bottom of the tree), nodes consist only of keys and
+block headers.  The keys tell you where to go looking for the item you
+want, and the block headers tell you where the next node or leaf in
+the btree is located on disk.
+</p>
+
+<p>
+<img src="https://static.lwn.net/images/ns/kernel/btrfs/btrfs-block.png" width=142 height=172
+alt="[Btrfs block structure]" align="right" hspace=3 vspace=3>
+
+The leaves of the btree contain items, which are a combination of keys
+and data.  Similarly to reiserfs, the items and data are packed in
+extremely space-efficient way: the item headers (that is, the item
+structure described above) are packed together starting at the
+beginning of the block, and the data associated with each item is
+packed together starting at the end of the block.  So item headers and
+data grow towards each other, as shown in the diagram to the right.
+
+<p>
+Besides being code efficient, this scheme is space and time efficient
+as well.  Normally, file systems put only one kind of data - bitmaps,
+or inodes, or directory entries - in any given file system block.
+This wastes disk space, since unused space in one kind of block can't
+be used for any other purpose, and it wastes time, since getting to
+one particular piece of file data requires reading several different
+kinds of metadata, all located in different blocks in the file system.
+In btrfs, items are packed together (or pushed out to leaves) in
+arrangements that optimize both access time and disk space.  You can
+see the difference in these (very schematic, very simplified) diagrams.
+Old-school filesystems tend to organize data like this:
+</p>
+<p>
+<blockquote>
+<img src="https://static.lwn.net/images/ns/kernel/btrfs/oldskool.png" width=477 height=358
+alt="[Old-school]">
+</blockquote>
+<p>
+Btrfs, instead, creates a disk layout which looks more like:
+</p>
+<p>
+<blockquote>
+<img src="https://static.lwn.net/images/ns/kernel/btrfs/newskool.png" width=476 height=227 alt="[new school]">
+</blockquote>
+<p>
+In both diagrams, red blocks denote wasted disk space and red arrows denote seeks.
+</p>
+
+<p>
+Each kind of metadata and data in the file system - a directory entry,
+an inode, an extended attribute, file data itself - is stored as a
+particular type of item.  If we go back to the definition of an item,
+we see that its first element is a key:
+</p>
+
+<blockquote>
+<pre>
+struct btrfs_disk_key {
+    __le64 objectid;
+    u8 type;
+    __le64 offset;
+}
+</pre>
+</blockquote>
+<p>
+Let's start with the <code>objectid</code> field.  Each object in the
+file system - generally an inode - has a unique objectid.  This is
+fairly standard practice - it's the equivalent of inode numbers.  What
+makes btrfs interesting is that the objectid makes up the most
+significant bits of the item key - what we use to look up an item in
+the btree - and the lower bits are different kinds of items related to
+that objectid.  This results in grouping together all the information
+associated with a particular objectid.  If you allocate adjacent
+objectids, then all the items from those objectids are also allocated
+close together.  The <code>&lt;objectid, type&gt;</code> pair automatically
+groups related data close to each other regardless of the actual
+content of the data, as opposed to the classical file system approach,
+which writes separate optimized allocators for each kind of file
+system data.
+</p>
+
+The <code>type</code> field tells you what kind of data is stored in
+the item.  Is it the inode?  Is it a directory entry?  Is it an extent
+telling you where the file data is on disk?  Is it the file data
+itself?  With the combination of objectid and the type, you can look
+up any file system data you need in the btree.
+</p>
+
+<p>
+We should take a quick look at the structure of the btree nodes and
+leaves themselves.  Each node and leaf is an extent in the btree -
+nodes are extents full of <code>&lt;key, block header&gt;</code> pairs, and
+leaves contain items.  Large file data is stored outside of the btree
+leaves, with the item describing the extent kept in the leaf
+itself. (What constitutes a "large" file is tunable based on the
+workload.) Each extent describing part of the btree has a checksum and
+a reference count, which permits writable snapshots.  Each extent also
+includes an explicit back reference to each of the extents that refer
+to it.
+</p>
+
+<p>
+Back references give btrfs a major advantage over every other file
+system in its class because now we can quickly and efficiently migrate
+data, incrementally check and repair the file system, and check the
+correctness of reference counts during normal operation.  The proof is
+that btrfs already supports fast, efficient device removal and
+shrinking of the available storage for a file system.  Many other file
+systems list "shrink file system" as a feature, but it usually ends up
+implemented inefficiently and slowly and several years late - or not
+at all.  For example, ext3/4 can shrink a file system - by traversing
+the entire file system searching for data located in the area of the
+device being removed.  It's a slow, fraught, bug-prone process.  ZFS
+still <a href="http://bugs.opensolaris.org/view_bug.do?bug_id=4852783">can't
+shrink a file system</a>.
+</p>
+
+<p>
+The result is beautifully generic and elegant: Everything on disk is a
+btree containing reference counted, checksummed extents of items,
+organized by <code>&lt;objectid, type&gt;</code> keys.  A great deal of the
+btrfs code doesn't care at all what is stored in the items, it just
+knows how to add or remove them from the btree.  Optimizing disk
+layout is simple: allocate things with similar keys close together.
+</p>
+
+<h4>btrfs: The politics</h4>
+
+<p>
+At the same time that Chris was figuring out the technical design of
+btrfs, he was also figuring out how to fund the development of btrfs
+in both the short and the long term.  Chris had recently moved from
+SUSE to a special Linux group at Oracle, one that employs several
+high-level Linux storage developers, including Martin K. Petersen,
+Zach Brown, and Jens Axboe.  Oracle funds a lot of Linux development,
+some of it obviously connected to the Oracle database (OCFS2,
+DIF/DIX), and some of it less so (generic block layer work, syslets).
+Here's how Chris put it in a recent
+<a href="http://www.linux-foundation.org/weblogs/amanda/2009/06/22/a-conversation-with-chris-mason-on-btrfs-the-next-generation-file-system-for-linux/">interview</a>
+with <a href="http://www.linux-foundation.org/weblogs/amanda/">Amanda
+McPherson from the Linux Foundation</a>:
+</p>
+
+<blockquote>
+<p>
+<b>Amanda:</b> Why did you start this project? Why is Oracle supporting this
+project so prominently?
+</p>
+
+<p>
+<b>Chris</b>: I started Btrfs soon after joining Oracle.  I had a
+unique opportunity to take a detailed look at the features missing
+from Linux, and felt that Btrfs was the best way to solve them.
+</p>
+
+<p>
+Linux is a very important platform for Oracle.  We use it heavily for
+our internal operations, and it has a broad customer base for us.  We
+want to keep Linux strong as a data center operating system, and
+innovating in storage is a natural way for Oracle to contribute.
+</p>
+</blockquote>
+
+<p>
+In other words, Oracle likes having Linux as a platform, and is
+willing to invest development effort in it even if it's not directly
+related to Oracle database performance.  Look at it this way: how many
+operating systems are written and funded in large part by your
+competitors?  While it is tempting to have an operating system
+entirely under your control - like Solaris - it also means that you
+have to pay for most of the development on that platform.  In the end,
+Oracle believes it is in its own interest to use its in-house
+expertise to help keep Linux strong.
+</p>
+
+<p>
+After a few months of hacking and design discussions with Zach Brown
+and many others,
+Chris <a href="http://lkml.org/lkml/2007/6/12/242">posted btrfs for
+review</a>.  From there on out, you can trace the history of btrfs
+like any other open source project through the mailing lists and
+source code history.  Btrfs is now in the mainline kernel and
+developers from Red Hat, SUSE, Intel, IBM, HP, Fujitsu, etc. are all
+working on it.  Btrfs is a true open source project - not just in the
+license, but also in the community.
+</p>
+
+<h4>btrfs: A brief comparison with ZFS</h4>
+
+<p>
+People often ask about the relationship between btrfs and
+ZFS.  From one point of view, the two file systems are very similar: they are copy-on-write
+checksummed file systems with multi-device support and writable
+snapshots.  From other points of view, they are wildly different: file
+system architecture, development model, maturity, license, and host
+operating system, among other things.  Rather than answer individual
+questions, I'll give a short history of ZFS development and compare
+and contrast btrfs and ZFS on a few key items.
+</p>
+
+<p>
+When ZFS first got started, the outlook for file systems in Solaris
+was rather dim as well.  Logging UFS was already nearing the end of
+its rope in terms of file system size and performance.  UFS was so far
+behind that many Solaris customers paid substantial sums of money to
+Veritas to run VxFS instead.  Solaris needed a new file system, and it
+needed it soon.
+</p>
+
+<p>
+Jeff Bonwick decided to solve the problem and started the ZFS project
+inside Sun.  His organizing metaphor was that of the virtual memory
+subsystem - why can't disk be as easy to administer and use as memory?
+The central on-disk data structure was the slab - a chunk of disk
+divided up into the same size blocks, like that in
+the <a href="http://en.wikipedia.org/wiki/Slab_allocation">SLAB kernel
+memory allocator</a>, which he also created.  Instead of extents, ZFS would use
+one block pointer per block, but each object would use a different
+block size - e.g., 512 bytes, or 128KB - depending on the size of the
+object.  Block addresses would be translated through a
+virtual-memory-like mechanism, so that blocks could be relocated
+without the knowledge of upper layers.  All file system data and
+metadata would be kept in objects.  And all changes to the file system
+would be described in terms of changes to objects, which would be
+written in a copy-on-write fashion.
+</p>
+
+<p>
+In summary, btrfs organizes everything on disk into a btree of extents
+containing items and data.  ZFS organizes everything on disk into a
+tree of block pointers, with different block sizes depending on the
+object size.  btrfs checksums and reference-counts extents, ZFS
+checksums and reference-counts variable-sized blocks.  Both file
+systems write out changes to disk using copy-on-write - extents or
+blocks in use are never overwritten in place, they are always copied
+somewhere else first.
+</p>
+
+<p>
+So, while the feature list of the two file systems looks quite
+similar, the implementations are completely different.  It's a bit
+like <a href="http://txtwriter.com/Backgrounders/Evolution/EVpage14.html">convergent
+evolution between marsupials and placental mammals</a> - a marsupial mouse and a
+placental mouse look nearly identical on the outside, but their
+internal implementations are quite a bit different!
+</p>
+
+<p>
+In my opinion, the basic architecture of btrfs is more suitable to
+storage than that of ZFS.  One of the major problems with the ZFS
+approach - "slabs" of blocks of a particular size - is fragmentation.
+Each object can contain blocks of only one size, and each slab can
+only contain blocks of one size.  You can easily end up with, for example, a file of
+64K blocks that needs to grow one more block, but no 64K blocks are
+available, even if the file system is full off nearly empty slabs of
+512 byte blocks, 4K blocks, 128K blocks, etc.  To solve this problem,
+we (the ZFS developers) invented ways to create big blocks out of little blocks ("gang
+blocks") and other unpleasant workarounds.  In our defense, at the
+time btrees and extents seemed fundamentally incompatible with
+copy-on-write, and the virtual memory metaphor served us well in many
+other respects.
+</p>
+
+<p>
+In contrast, the items-in-a-btree approach is extremely space
+efficient and flexible.  Defragmentation is an ongoing process -
+repacking the items efficiently is part of the normal code path
+preparing extents to be written to disk.  Doing checksums, reference
+counting, and other assorted metadata busy-work on a per-extent basis
+reduces overhead and makes new features (such as fast reverse mapping
+from an extent to everything that references it) possible.
+</p>
+
+<p>
+Now for some personal predictions (based purely on public
+information - I don't have any insider knowledge).  Btrfs will be the
+default file system on Linux within two years.  Btrfs as a project
+won't (and can't, at this point) be canceled by Oracle.  If all the
+intellectual property issues are worked out (a big if), ZFS will be
+ported to Linux, but it will have less than a few percent of the
+installed base of btrfs.  Check back in two years and see if I got any
+of these predictions right!
+</p>
+
+<h4>Btrfs: What's next?</h4>
+
+<p>
+Btrfs is heading for 1.0, a little more than 2 years since the first
+announcement.  This is much faster than many file systems veterans -
+including myself - 
+expected, especially given that during most of that
+time, btrfs had only one full-time developer.  Btrfs is not ready for
+production use - that is, storing and serving data you would be upset
+about losing - but it is ready for widespread testing - e.g., on your
+backed-up-nightly laptop, or your experimental netbook that you
+reinstall every few weeks anyway.
+</p>
+
+<p>
+Be aware that there was a recent flag day in the btrfs on-disk format:
+A commit shortly after the 2.6.30 release changed the on disk format
+in a way that isn't compatible with older kernels.  If you create your
+btrfs file system using the old, 2.6.30 or earlier kernel and tools,
+and boot into a newer kernel with the new format, you won't be able to
+use your file system with a 2.6.30 or older kernel any longer.  Linus
+Torvalds <a href="http://www.mail-archive.com/linux-btrfs@vger.kernel.org/msg02500.html">found
+this out the hard way.</a>  But if this does happen to you, don't
+panic - you can
+find <a href="http://btrfs.wiki.kernel.org/index.php/Rescue_me">rescue
+images and other helpful information</a> on the the btrfs wiki.
+</p><br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Btrfs">Btrfs</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Filesystems-Btrfs">Filesystems/Btrfs</a></td></tr>
+            <tr><td><a href="/Archives/GuestIndex/">GuestArticles</a></td><td><a href="/Archives/GuestIndex/#Aurora_Henson_Valerie">Aurora (Henson), Valerie</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/342892/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        <p><a name="Comments"></a>
+<a name="CommAnchor342958"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A short history of btrfs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 23, 2009 3:01 UTC (Thu)
+                               by <b>kjp</b> (guest, #39639)
+                              [<a href="/Articles/342958/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+This is a fantastic article and the b-tree pdfs are great.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/342958/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor342979"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A short history of btrfs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 23, 2009 6:36 UTC (Thu)
+                               by <b>burki99</b> (subscriber, #17149)
+                              [<a href="/Articles/342979/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+A huge thanks for this write-up - a real eye-opener for someone using Linux but not following LKML!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/342979/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor343014"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A short history of btrfs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 23, 2009 13:01 UTC (Thu)
+                               by <b>airman</b> (subscriber, #7341)
+                              [<a href="/Articles/343014/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Yes, thanks a lot Val for this information.<br>
+<p>
+If btrfs is to be the standard fs in 2 years, maybe another article about the user side of the story will be useful in time (tools, procedures, changes of philosophy from ext3 for everyday administation...). Or some btrfs user guide exists already? (Could not google any, though)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/343014/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor344921"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A short history of btrfs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 2, 2009 8:59 UTC (Sun)
+                               by <b>jamaica</b> (guest, #59964)
+                              [<a href="/Articles/344921/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Heise wrote an article about btrfs in a style like: I got up this morning, formated a btrfs partition, used this command to do that and that command to do this.<br>
+<p>
+The articel is available in german <a rel="nofollow" href="http://www.heise.de/open/Das-Dateisystem-Btrfs--/artikel/141341">http://www.heise.de/open/Das-Dateisystem-Btrfs--/artikel/...</a><br>
+and english <a rel="nofollow" href="http://www.h-online.com/open/The-Btrfs-file-system--/features/113738">http://www.h-online.com/open/The-Btrfs-file-system--/feat...</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/344921/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor342962"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A short history of btrfs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 23, 2009 4:09 UTC (Thu)
+                               by <b>mjg59</b> (subscriber, #23239)
+                              [<a href="/Articles/342962/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I'm really only posting this because I so rarely get the opportunity to say anything about biology, but: marsupials are also mammals, just not placental ones. I have absolutely no complaints about the technical content, though!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/342962/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor342970"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A short history of btrfs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 23, 2009 5:28 UTC (Thu)
+                               by <b>johnflux</b> (guest, #58833)
+                              [<a href="/Articles/342970/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Really interesting.<br>
+<p>
+Could the author add the COW stuff to Wikipedia?  It would be good to have the 'B tree' and 'B+ tree' articles have a copy of your explanation on the problem with doing COW, and the solution.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/342970/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor342983"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A short history of btrfs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 23, 2009 7:26 UTC (Thu)
+                               by <b>jgarzik</b> (guest, #8364)
+                              [<a href="/Articles/342983/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+How old is this article?<br>
+<p>
+"it isn't even called ext4 yet" is wrong, and links to a 2-year-old message as supporting evidence.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/342983/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor342984"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A short history of btrfs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 23, 2009 7:27 UTC (Thu)
+                               by <b>jgarzik</b> (guest, #8364)
+                              [<a href="/Articles/342984/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Nevermind, I'm an idiot.  You were talking about pre-history.<br>
+<p>
+Where's that 3am caffeine...<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/342984/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor343005"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A short history of btrfs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 23, 2009 11:38 UTC (Thu)
+                               by <b>BlueLightning</b> (subscriber, #38978)
+                              [<a href="/Articles/343005/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Superb article, as always. Thanks very much!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/343005/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor343003"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A short history of btrfs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 23, 2009 11:42 UTC (Thu)
+                               by <b>MisterIO</b> (guest, #36192)
+                              [<a href="/Articles/343003/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+So it's not exact to say(like it's said in the wikipedia page <a href="http://en.wikipedia.org/wiki/Btrfs">http://en.wikipedia.org/wiki/Btrfs</a>) that the max number of files is 2^64, because on that space(objectid) you need to put metadata info too, am I right? Isn't objectid an upperbound on the number of inodes?<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/343003/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor343015"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A short history of btrfs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 23, 2009 13:12 UTC (Thu)
+                               by <b>masoncl</b> (subscriber, #47138)
+                              [<a href="/Articles/343015/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Thanks for writing this up Val!<br>
+<p>
+Almost all of the metadata goes in under the objectid of a given file or directory.  There are <br>
+exceptions like file data checksums and the records about which extents are allocated, but they <br>
+go into their own dedicated btree.<br>
+<p>
+The end result is that almost all of the 2^64 space can be used for inodes.  There are a few <br>
+special inodes, like one that is used to prevent orphan inodes after a crash, so we  carve out the <br>
+last 256 inode numbers for specialized metadata.  We also carve out the first 256 inode numbers <br>
+for special use by the backref code.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/343015/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor343020"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A short history of btrfs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 23, 2009 13:17 UTC (Thu)
+                               by <b>MisterIO</b> (guest, #36192)
+                              [<a href="/Articles/343020/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Thanks for the explanation.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/343020/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor343035"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A short history of btrfs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 23, 2009 14:34 UTC (Thu)
+                               by <b>jengelh</b> (subscriber, #33263)
+                              [<a href="/Articles/343035/">Link</a>] (10 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt;the Phoronix benchmarks,</font><br>
+<p>
+You gotta be kiddin' me, Phoronix. Putting up measurements of CPU-bound tasks (read: compression) in a filesystems benchmark<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/343035/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor343040"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A short history of btrfs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 23, 2009 14:51 UTC (Thu)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/343040/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Phoronix's benchmarks appear to consist of 'do random stuff, some of which is real-world, some of which isn't, and take an average to see which is best', apparently in the hope that if they pick enough benchmarks the good ones will exceed the crap ones in number.<br>
+<p>
+i.e. they have iozone benchmarks in there... but then they have compression, and I've seen them look at things like 'how long it takes to boot' and even game frame rates (!?) in filesystem benchmarks before.<br>
+<p>
+So I treat Phoronix benchmarks largely as a source of amusement these days. Sometimes (rarely) they might tell us things we don't already know...<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/343040/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor343051"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A short history of btrfs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 23, 2009 15:26 UTC (Thu)
+                               by <b>dlang</b> (guest, #313)
+                              [<a href="/Articles/343051/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+they just announced that they are about to start using a new version of their benchmarks, so this is the perfect time to jump in and try to improve things.<br>
+<p>
+<a href="http://www.phoronix.com/scan.php?page=article&amp;item=pts_20_details&amp;num=1">http://www.phoronix.com/scan.php?page=article&amp;item=pt...</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/343051/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor343137"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">error bars</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 23, 2009 22:11 UTC (Thu)
+                               by <b>tialaramex</b> (subscriber, #21167)
+                              [<a href="/Articles/343137/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Still no error bars on their charts. Yes, the error bars would probably mean most results found nothing. That's a good thing!<br>
+<p>
+I'd like to see more investigation. I think that would follow from narrowing results down to only those that were significant. If you find 500 tiny differences between two things, most of which are just measurement noise, you have no reason to investigate further. But if you make one big significant finding you can do a whole article about what it means - why is the Frooqux significantly faster ? Is it the same on an AMD machine ? In OpenSolaris ? With a different network card ?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/343137/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor343149"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">error bars</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 23, 2009 22:31 UTC (Thu)
+                               by <b>dlang</b> (guest, #313)
+                              [<a href="/Articles/343149/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+you need to tell them, not us ;-)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/343149/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor343227"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A short history of btrfs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 24, 2009 7:34 UTC (Fri)
+                               by <b>nix</b> (subscriber, #2304)
+                              [<a href="/Articles/343227/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      Hard: I still don't have email thanks to the implosion of Zetnet, sorry, 
+Breathe, sorry, they went bust and cut all their *other* customers off 
+from their IMAP mailservers, the new company is called Breathe now.
+<p>
+Moving to <a href="http://www.aaisp.net.uk/">a decent ISP</a> as soon as 
+BT get around to it... but that's a week away, plus another week for the 
+new MX record to propagate around. Three weeks without properly-working 
+email, sigh.
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/343227/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor343240"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A short history of btrfs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 24, 2009 9:44 UTC (Fri)
+                               by <b>dlang</b> (guest, #313)
+                              [<a href="/Articles/343240/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+they do have a comment section on their website<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/343240/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+<a name="CommAnchor343083"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A short history of btrfs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 23, 2009 16:59 UTC (Thu)
+                               by <b>kjp</b> (guest, #39639)
+                              [<a href="/Articles/343083/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Uh, having the cpu loaded will find problems if the FS code itself is too cpu hoggy....<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/343083/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor343084"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A short history of btrfs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 23, 2009 17:04 UTC (Thu)
+                               by <b>jengelh</b> (subscriber, #33263)
+                              [<a href="/Articles/343084/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Uh, extracting a tarball with lots of files and watching the %sy time is likely to do the same.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/343084/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor343428"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A short history of btrfs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 25, 2009 21:20 UTC (Sat)
+                               by <b>bronson</b> (guest, #4806)
+                              [<a href="/Articles/343428/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+So, you're going to arrange some way of recording average %sy time as a single number (there are lots of different ways of doing this), then somehow graph it that makes sense to regular people?<br>
+<p>
+Just timing a file decompression is a lot easier for all involved, no?  It's not a great benchmark, true, but it will quickly and reliably tell you if one FS requires more CPU than another.  And that's the most important thing.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/343428/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor343091"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">The problem is not with benchmark itself...</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 23, 2009 17:50 UTC (Thu)
+                               by <b>khim</b> (subscriber, #9252)
+                              [<a href="/Articles/343091/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <blockquote>Uh, having the cpu loaded will find problems if the FS code 
+itself is too cpu hoggy....</blockquote>
+
+<p>The problem is not with low-level CPU bound benchmark but with average 
+taken from many different benchmarks without a case or thought. In the end 
+you are getting average temperature of hospice patients: some are having 
+high 
+fever, some are in morgue already, so in the end average temperature is 
+useless.</p>
+
+<p>If you plan to mix a lot of different benchmarks you must be ready to 
+carefully study the results, separate expected results from unexpected 
+ones, 
+cluster them in groups (by relevance to this or that real-word task), etc. 
+Ortherwise it's just pointless race where winner is more-or-less 
+random.</p>
+
+<p>And it's also pointless to try to fix the situation by adding more 
+benchmarks to the mix: when you mix a lot of differend kinds of food - you 
+are getting pile of garbage as a result and if you'll add some more dishes 
+- you'll just get a bigger pile of garbage.</p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/343091/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor343222"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A short history of btrfs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 24, 2009 7:07 UTC (Fri)
+                               by <b>PaulWay</b> (guest, #45600)
+                              [<a href="/Articles/343222/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Echoing the other positive comments, this is a really great article.  Awesome writing, Val!<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/343222/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor343306"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A short history of btrfs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 24, 2009 19:03 UTC (Fri)
+                               by <b>Bayes</b> (guest, #52258)
+                              [<a href="/Articles/343306/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Great article! Thanks for the B+ trees lesson, very interesting stuff.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/343306/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor343314"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A short history of btrfs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 24, 2009 20:23 UTC (Fri)
+                               by <b>jlokier</b> (guest, #52227)
+                              [<a href="/Articles/343314/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I'm intrigued by the idea that "btrees and extents seemed fundamentally incompatible with copy-on-write" so recently.<br>
+<p>
+B+Trees are an old technique, fairly traditional by now.  Next-leaf links never did make much sense - as Ohad Rodeh's PDF explains, they don't help you prefetch in parallel.  (By the way, Microsoft patented previous-leaf links!)  Omitting them is cheap if you have enough memory to keep all blocks on the path from leaf to root in memory, which we certainly do these days - the path is bounded by tree depth and so quite small.  Like all tree structures with only child links, copy-on-write is straightforward: Functional programming languages have always implemented copy-on-write for tree structures.  What the PDF calls lazy reference counting (compared with, say, WAFL's method), would be called ordinary reference counting when describing a simple tree data structure in memory.<br>
+<p>
+Btrfs is clearly a big step forward in Linux filesystems, and there is undoubtedly a lot of other design in it which is not covered by the academic papers.  I'm looking forward to using it, especially the reflink feature and snapshots.<br>
+<p>
+But I'm really surprised that the underlying tree structure and algorithms turn out to be new, or at least not well described in open literature already.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/343314/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor343410"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Free space management?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 25, 2009 16:01 UTC (Sat)
+                               by <b>Yenya</b> (subscriber, #52846)
+                              [<a href="/Articles/343410/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+How do COW btree-based filesystems manage the free disk space? I presume it is not in the btree itself, because for allocation of the new block it would be necessary to - well - allocate a COW block for the new version of (at least) the btree leaf.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/343410/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor343429"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Free space management?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 25, 2009 21:28 UTC (Sat)
+                               by <b>bronson</b> (guest, #4806)
+                              [<a href="/Articles/343429/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Good question.  Last I heard, btrfs just keeps writing data toward the end of the disk until it runs out of disk.  Then it panics.<br>
+<p>
+This appears to have been fixed, and doesn't invovled anything so crufty as a vacuum running in the background, but I can't find specifics.  Does anybody have up to date info?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/343429/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor343526"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Free space management?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 27, 2009 14:38 UTC (Mon)
+                               by <b>masoncl</b> (subscriber, #47138)
+                              [<a href="/Articles/343526/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+In general, the allocator is going to be one of the most complex parts of a cow based <br>
+filesystem.  Log structured filesystems have segments, where they force reasonably sized <br>
+units of the disk to become free and then allocate out of that.<br>
+<p>
+Btrfs uses a btree to record which extents are in use, and free space is anything that isn't <br>
+recorded in that btree.  So if it says we have an extent allocated from [16-20k ] and one at <br>
+[24-28k], then we have 4k free from 20k to 24k.<br>
+<p>
+The part where btrfs gets complex in a hurry is that every extent in use in the filesystem is <br>
+recorded in this btree, including the extents that make up that btree.  All of the btrees in <br>
+btrfs are managed with COW.<br>
+<p>
+This doesn't spiral out of control because COW is strictly done as copy on write.  Meaning <br>
+that as long as we haven't yet written a block we are allowed to keep changing it.  The end <br>
+result is that we allocate blocks to hold new copies of the btree blocks and then are able to <br>
+make a number of modifications to those new blocks before they get written to disk.<br>
+<p>
+As extents are freed we are able to reuse them, so we don't just keep walking to the end of <br>
+the drive.  Btrfs does still have problems with ENOSPC, but this is mostly an accounting <br>
+problem of making sure there are enough free extents to make all of the btree modifications <br>
+we've promised we're going to make.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/343526/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor343629"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Free space management?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 27, 2009 22:02 UTC (Mon)
+                               by <b>Yenya</b> (subscriber, #52846)
+                              [<a href="/Articles/343629/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Thanks for the explanation!<br>
+<p>
+BTW, where should I post issues with BTRFS? I have a testing BTRFS over 8 drives (both data and metadata mirrored), and recently one of the drives died. Now when I want to access the BTRFS volume, add a new drive, or whatever, it crashes on me (2.6.30, I think; I can compile any kernel<br>
+you point me at, though). Is the kernel bugzilla the right place?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/343629/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor343640"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Free space management?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 27, 2009 23:01 UTC (Mon)
+                               by <b>masoncl</b> (subscriber, #47138)
+                              [<a href="/Articles/343640/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Both the kernel.org bugzilla and the btrfs mailing list are good resources (linux-<br>
+btrfs@vger.kernel.org)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/343640/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor346179"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Free space management?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 10, 2009 14:05 UTC (Mon)
+                               by <b>Yenya</b> (subscriber, #52846)
+                              [<a href="/Articles/346179/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+FWIW, I have reported this as <a href="http://bugzilla.kernel.org/show_bug.cgi?id=13957">http://bugzilla.kernel.org/show_bug.cgi?id=13957</a>. However, I can no longer use this HW for testing, sorry.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/346179/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor343465"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A short history of btrfs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 26, 2009 19:23 UTC (Sun)
+                               by <b>eparis123</b> (guest, #59739)
+                              [<a href="/Articles/343465/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Thanks a lot for this article.<br>
+<p>
+The explanations and the linked pdfs were all outrageous. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/343465/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor344370"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A short history of btrfs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 30, 2009 8:00 UTC (Thu)
+                               by <b>alkby</b> (guest, #59504)
+                              [<a href="/Articles/344370/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I don't get one thing about this COW thing. Why it's so good ? That's convenient for snapshots, but <br>
+if I don't use snapshots and have huge files and often rewrite their pieces then they'll become <br>
+highly fragmented, right ?<br>
+<p>
+Imagine a database data file that is organized as a btree itself. Some database rows will be <br>
+updated, and most DBMS do that in-place. So our modern COW filesystem will gradually <br>
+fragment that data file. And when DBMS will do, say a range scan in btree it will expect mostly <br>
+linear (and fast) disk IO, while in fact it will get random (and dead slow) IO. Maybe I've missed <br>
+something important here?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/344370/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor345086"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A short history of btrfs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 4, 2009 0:51 UTC (Tue)
+                               by <b>wmf</b> (guest, #33791)
+                              [<a href="/Articles/345086/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+COW is also crash-safe without the overhead of journaling.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/345086/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor345186"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A short history of btrfs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 4, 2009 15:41 UTC (Tue)
+                               by <b>topher</b> (guest, #2223)
+                              [<a href="/Articles/345186/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <blockquote><em>Some database rows will be updated, and most DBMS do that in-place.</em></blockquote>
+
+This is actually incorrect.  There are almost no databases that actually do that anymore.  All modern (decent) databases will create a new row when performing an update, and then mark the old row as deleted internally.  This is significantly safer, performs better, and allows you to support other important transactional features.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/345186/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor344488"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A short history of btrfs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 30, 2009 16:15 UTC (Thu)
+                               by <b>joib</b> (subscriber, #8541)
+                              [<a href="/Articles/344488/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Great article, thanks!<br>
+<p>
+Though I'm a bit confused why the SLAB allocator style approach in ZFS would be such a problem from a fragmentation standpoint. In the VM, SLAB was introduced to reduce fragmentation in the first place, after all. Not to mention, many user-space malloc() implementation use somewhat similar strategies to cope with arbitrary sized requests, e.g. the Doug Lea allocator in glibc malloc maintains lists of objects in increasing size of powers-of-two all the way up to the mmap limit, and each allocation is rounded up to the nearest power-of-2, all this mainly to reduce fragmentation (or something like that, it's been a while since I looked into it). Heck, back in fs land, one thing that ext4 got from Lustre was having separate large- and small-file areas on disk, to reduce fragmentation, and it wouldn't surprise me if btrfs did something similar as well. <br>
+<p>
+Anyway, from the article it naively sounds like the real problem is that the SLAB's are pre-allocated, perhaps even at fs creation time, rather than as needed from free space, which again naively would do away with a lot of the requirement to coalesce or split objects?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/344488/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor344867"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A short history of btrfs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 1, 2009 17:27 UTC (Sat)
+                               by <b>graydon</b> (guest, #5009)
+                              [<a href="/Articles/344867/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <p>A couple points. I'm not expert enough to be sure these answer your question:</p>
+<ul>
+<li>As far as I know, slab allocators are based on a regional grouping: "this entire range of memory is dedicated to objects of size N bytes", say. The Lea allocator keeps a freelist <em>that can hold</em> objects of N bytes, but there's nothing saying those objects are either allocated from an N-byte-object slab initially, nor that they're <em>exactly</em> N bytes. Just that that's the right power-of-two freelist to put them on. It also coalesces adjacent allocations into larger blocks and moves them to larger freelists whenever it can.</li>
+<li>Furthermore -- here I am getting more sketchy in my understanding -- I <em>think</em> that the design of a slab-like allocator implies having a certain degree of co-operation from your allocation client. The client has to be willing to ask for memory from slabs, and the memory it asks for has to (commonly) be in slab-entry-sized units. This is fine -- actually a correct design observation that slab allocation was invented to take advantage of -- when your client is a kernel with a fixed-at-compile-time assortment of struct sizes it's going to be (mostly) allocating. It is not really a correct design observation for things like "general-purpose mallocs" or "general-purpose filesystems", where the clients are unknown and aren't interested in confining themselves to slab-appropriate behavior.</li>
+</ul>
+<p>IOW I think both are <em>trying</em> to "reduce fragmentation", but with a different assumed type of workload: a slab allocator eliminates external fragmentation almost entirely <em>if the client can co-operate</em>, but a more general allocator like Lea malloc lacks that co-operation promise, and so takes a simpler approach that (on average) keeps both internal and external fragmentation "under control", but with less of a guarantee about it.</p>
+<p>I believe, if I'm reading correctly, that btrfs will be more in the Lea-malloc camp: possibly subject to more external fragmentation (say if you let a bunch of leaves from the middle of blocks drop to 0-refcount), but possibly less internally fragmenting than ZFS (due to the absence of slab size-grouping), so better on average for the general workload of a filesystem. Allocators are always tuned to workload assumptions.</p>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/344867/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor344527"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Solid-state drives</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 31, 2009 1:03 UTC (Fri)
+                               by <b>TRS-80</b> (guest, #1804)
+                              [<a href="/Articles/344527/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      What's btrfs' SSD story? ZFS gets some amazing performance improvements if you add an SSD for the ZIL or as L2ARC, does the btrfs architecture have any similar parts that could be farmed out to an SSD?
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/344527/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor344895"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Solid-state drives</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 2, 2009 0:08 UTC (Sun)
+                               by <b>cjb</b> (guest, #40354)
+                              [<a href="/Articles/344895/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; What's btrfs' SSD story? ZFS gets some amazing performance improvements if you add an SSD for the ZIL or as L2ARC, does the btrfs architecture have any similar parts that could be farmed out to an SSD?</font><br>
+<p>
+Yes.  There are a couple of ideas here -- one (as yet unimplemented) is that you could use the SSD as a caching frontend to larger, slower media behind it.  Another is that you could use exclusively the SSD to store metadata items; btrfs doesn't care how far away from data you put its metadata, or even if they end up on the same device.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/344895/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor344897"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Solid-state drives</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 2, 2009 1:02 UTC (Sun)
+                               by <b>dlang</b> (guest, #313)
+                              [<a href="/Articles/344897/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+the idea of allowing the metadata to exist on different media is both very interesting and very scary.<br>
+<p>
+on the interesting side, the fact that you can now buy _very_ high speed drives (up to 64G of battery backed ram fast enough that it needs multiple SATA cables to saturate it) means that variations on the space allocation policies can lead to very significant speed-ups.<br>
+<p>
+however, on the scary side, you have the fact that you now need all these different drives to remain operational and available or you run the risk of loosing everything.<br>
+<p>
+a follow-up for after btrfs gets going solidly and reliably would be to look into a multi-drive version that could maintain multiple copies of metadata on different drives<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/344897/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor345058"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Solid-state drives</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 3, 2009 20:31 UTC (Mon)
+                               by <b>SEJeff</b> (guest, #51588)
+                              [<a href="/Articles/345058/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+If you raid drives with btrfs it lets you raid the metadata. Actually, doesn't it do this by default now?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/345058/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor345059"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Solid-state drives</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 3, 2009 20:41 UTC (Mon)
+                               by <b>dlang</b> (guest, #313)
+                              [<a href="/Articles/345059/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+what I was thinking of is the ability to use different levels of raid for different types of data.<br>
+say raid1 for metadata, raid0 for any files in /tmp, raid5/6 for everything else.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/345059/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor345061"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Solid-state drives</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 3, 2009 21:01 UTC (Mon)
+                               by <b>SEJeff</b> (guest, #51588)
+                              [<a href="/Articles/345061/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+btrfs already supports exactly what you asked:<br>
+<a href="http://btrfs.wiki.kernel.org/index.php/Using_Btrfs_with_Multiple_Devices#Multiple_Devices">http://btrfs.wiki.kernel.org/index.php/Using_Btrfs_with_M...</a><br>
+<p>
+By default data is striped accross multiple disks and metadata is mirrored. You can even mirror metadata on a single disk to prevent bad blocks from corrupting your data. Chris and company did a great job in designing this beast.<br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/345061/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor344704"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A short history of btrfs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 31, 2009 11:16 UTC (Fri)
+                               by <b>sitaram</b> (guest, #5959)
+                              [<a href="/Articles/344704/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Val joins Jon and others in being yet another reason to subscribe to LWN.<br>
+<p>
+Thanks very much indeed -- you write well...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/344704/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor344859"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A short history of btrfs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 1, 2009 13:11 UTC (Sat)
+                               by <b>Trelane</b> (subscriber, #56877)
+                              [<a href="/Articles/344859/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Seconded. *This* is why I ponied up for LWN instead of e.g. Ars Technica. (That, and the commenters aren't all MSFT or Apple zealots).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/344859/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor344886"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A short history of btrfs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 1, 2009 21:39 UTC (Sat)
+                               by <b>efexis</b> (guest, #26355)
+                              [<a href="/Articles/344886/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Have you seen the comparitive difference in TCO of your average Linux zealot compared to your average Windows or Apple zealot? I'm sure there's a microsoft advert out there somewhere about it :-)<br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/344886/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor345981"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">2 years before bytfs is the default filesystem?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 8, 2009 4:08 UTC (Sat)
+                               by <b>tytso</b> (subscriber, #9993)
+                              [<a href="/Articles/345981/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+For community distributions?   Maybe.   Time will tell.   I'm supportive of btrfs, and helped to rally industry support for it behind the scenes, but I'm also realistic about how long it takes to bring a file system to production status.  Sun had around two dozen engineers (from what I could tell) working five years (2000-2005) before ZFS was released --- and then it was another three years or so before system administrators really trusted it for critical production systems at least in an enterprise data center.  Consider the following report by a system administrator in 2007: <a href="http://forestlaw.blogspot.com/2007/03/solaris-zfs-not-ready-for-production.html">http://forestlaw.blogspot.com/2007/03/solaris-zfs-not-rea...</a><br>
+<p>
+&lt;i&gt;Btrfs is heading for 1.0, a little more than 2 years since the first announcement. This is much faster than many file systems veterans - including myself - expected, especially given that during most of that time, btrfs had only one full-time developer. &lt;/i&gt;<br>
+<p>
+Actually, from what I can tell, btrfs is a bit behind schedule.  It was supposed to be format-stable by December 2008, and it's not quite format stable yet.   Last I heard it still panic'ed on ENOSPC.  And its userspace tools are still quite primitive at this point in time.<br>
+<p>
+Can it be ready for community distributions in two years; probably, but a lot of work needs to be put into it between now and then.  And from developers beyond just those at Oracle.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/345981/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor346182"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">2 years before bytfs is the default filesystem?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 10, 2009 14:51 UTC (Mon)
+                               by <b>stanrbt</b> (guest, #60166)
+                              [<a href="/Articles/346182/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Quite a spiteful &amp; exposing comment, I think. What is evolution ? Improvement of processes. In other words it is not only possible to build &amp; construct much faster and more efficiently today than say 10 years ago, it is mandatory if we are really trying to improve/advance/develop.<br>
+<p>
+Maybe tytso is getting old ? Maybe he does not have the needed analytical skills to understand that Oracle is currently the only IT company which has resources to act pro-actively in this environment, everyone else is acting re-actively and things in the industry worsen by the day.<br>
+<p>
+It is not the amount of money you throw at a project which makes it successful. Sure, you need some "minimum amount of money" but the approach &amp; the skills you apply are much more important. The "approach" part is the critical one.<br>
+<p>
+I absolutely agree that the success of btrfs depends on much more than just Oracle's muscle but this is what Leadership is all about - give the example, break the ice, change the reality. All of us can talk spiteful rubbish.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/346182/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor346186"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">2 years before bytfs is the default filesystem?</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 10, 2009 15:23 UTC (Mon)
+                               by <b>stanrbt</b> (guest, #60166)
+                              [<a href="/Articles/346186/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+And I forgot to add that the Linux "leadership" can help speed up the maturing of btrfs, the question is do you want to do so ? <br>
+<p>
+Or do you prefer to play the "Cat on a hot tin roof" game ? Please do not try digging in the IBM/Microsoft way - evolution will swipe you away since you are lacking their backers.<br>
+<p>
+Just to avoid any speculation - I have nothing to do with Oracle. I am simply a manager who has been crazy about open source for a looong time (not just squeezing money out of it). Not many of us around, right ? Have you ever wondered why ?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/346186/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor347126"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A short history of btrfs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 14, 2009 8:22 UTC (Fri)
+                               by <b>bill_mcgonigle</b> (guest, #60249)
+                              [<a href="/Articles/347126/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Great article.  It was just the right mix of history, details and refresher for a lapsed CS geek to understand btrfs.  The comparison with ZFS cleared up quite a bit of confusion I had in that area.<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/347126/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor453984"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">&quot;Check back in two years and see if I got any of these predictions right! &quot;</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 3, 2011 18:24 UTC (Wed)
+                               by <b>tjwoods</b> (guest, #77672)
+                              [<a href="/Articles/453984/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It's two years later now... I'd love to see an update of this article with a review of how btrfs is progressing.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/453984/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor695255"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">A short history of btrfs</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 24, 2016 17:09 UTC (Sun)
+                               by <b>joel_unix</b> (guest, #109897)
+                              [<a href="/Articles/695255/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+A correction to the article. It is better to be explicit about the fact that its "B+trees" you're talking about when you say "leaves of the tree are linked together".<br>
+RE:<br>
+"To start with, btrees in their native form are wildly incompatible with COW. The leaves of the tree are linked together"<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/695255/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+
+</div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<ins data-revive-zoneid="12085" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2009, Eklektix, Inc.<BR>
+            
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

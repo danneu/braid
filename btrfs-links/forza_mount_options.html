@@ -1,0 +1,474 @@
+<!DOCTYPE html>
+<html class="client-nojs" lang="en-GB" dir="ltr">
+<head>
+<meta charset="UTF-8">
+<title>Btrfs mount options | Forza's Ramblings</title>
+<script>document.documentElement.className="client-js";RLCONF={"wgBreakFrames":false,"wgSeparatorTransformTable":["",""],"wgDigitTransformTable":["",""],"wgDefaultDateFormat":"dmy","wgMonthNames":["","January","February","March","April","May","June","July","August","September","October","November","December"],"wgRequestId":"3b455a2f8a32344bf3bad33e","wgCanonicalNamespace":"","wgCanonicalSpecialPageName":false,"wgNamespaceNumber":0,"wgPageName":"Btrfs/Mount_Options","wgTitle":"Btrfs/Mount Options","wgCurRevisionId":2156,"wgRevisionId":2156,"wgArticleId":176,"wgIsArticle":true,"wgIsRedirect":false,"wgAction":"view","wgUserName":null,"wgUserGroups":["*"],"wgCategories":["Btrfs"],"wgPageViewLanguage":"en-gb","wgPageContentLanguage":"en-gb","wgPageContentModel":"wikitext","wgRelevantPageName":"Btrfs/Mount_Options","wgRelevantArticleId":176,"wgIsProbablyEditable":true,"wgRelevantPageIsProbablyEditable":true,"wgRestrictionEdit":[],"wgRestrictionMove":[],"wgCiteReferencePreviewsActive":true,"wgVisualEditor":{"pageLanguageCode":"en-GB","pageLanguageDir":"ltr","pageVariantFallbacks":"en-gb"},"wgEditSubmitButtonLabelPublish":false};
+RLSTATE={"site.styles":"ready","user.styles":"ready","user":"ready","user.options":"loading","skins.timeless":"ready","ext.visualEditor.desktopArticleTarget.noscript":"ready"};RLPAGEMODULES=["mediawiki.page.media","site","mediawiki.page.ready","mediawiki.toc","skins.timeless.js","ext.visualEditor.desktopArticleTarget.init","ext.visualEditor.targetLoader","ext.moderation.notify","ext.moderation.ve","ext.moderation.ajaxhook","ext.moderation.notify.desktop","ext.purge"];</script>
+<script>(RLQ=window.RLQ||[]).push(function(){mw.loader.impl(function(){return["user.options@12s5i",function($,jQuery,require,module){mw.user.tokens.set({"patrolToken":"+\\","watchToken":"+\\","csrfToken":"+\\"});
+}];});});</script>
+<link rel="stylesheet" href="/mediawiki/load.php?lang=en-gb&amp;modules=ext.visualEditor.desktopArticleTarget.noscript%7Cskins.timeless&amp;only=styles&amp;skin=timeless">
+<script async="" src="/mediawiki/load.php?lang=en-gb&amp;modules=startup&amp;only=scripts&amp;raw=1&amp;skin=timeless"></script>
+<!--[if IE]><link rel="stylesheet" href="/mediawiki/skins/Timeless/resources/IE9fixes.css?ffe73" media="screen"><![endif]-->
+<meta name="ResourceLoaderDynamicStyles" content="">
+<link rel="stylesheet" href="/mediawiki/load.php?lang=en-gb&amp;modules=site.styles&amp;only=styles&amp;skin=timeless">
+<meta name="generator" content="MediaWiki 1.43.1">
+<meta name="robots" content="max-image-preview:standard">
+<meta name="format-detection" content="telephone=no">
+<meta name="description" content="A description of common Btrfs mount options and how to use them.">
+<meta name="keywords" content="Btrfs, mount, options, usage, atime, space_cache, recovery">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes, minimum-scale=0.25, maximum-scale=5.0">
+<link rel="alternate" type="application/x-wiki" title="Edit" href="/mediawiki/index.php?title=Btrfs/Mount_Options&amp;action=edit">
+<link rel="search" type="application/opensearchdescription+xml" href="/mediawiki/rest.php/v1/search" title="Forza&#039;s ramblings (en-gb)">
+<link rel="EditURI" type="application/rsd+xml" href="https://wiki.tnonline.net/mediawiki/api.php?action=rsd">
+<link rel="canonical" href="https://wiki.tnonline.net/w/Btrfs/Mount_Options">
+<link rel="license" href="https://creativecommons.org/licenses/by-sa/4.0/">
+<link rel="alternate" type="application/atom+xml" title="Forza&#039;s ramblings Atom feed" href="/mediawiki/index.php?title=Special:RecentChanges&amp;feed=atom">
+<meta property="og:title" content="Btrfs mount options | Forza&#039;s Ramblings">
+<meta property="og:url" content="https://wiki.tnonline.net/w/Btrfs/Mount_Options">
+<meta property="og:description" content="A description of common Btrfs mount options and how to use them.">
+<meta property="og:image" content="https://wiki.tnonline.net/mediawiki/resources/assets/forza_logo.png">
+<meta property="article:tag" content="Btrfs, mount, options, usage, atime, space_cache, recovery">
+<meta property="og:locale" content="en_GB">
+<meta property="article:modified_time" content="2025-06-05">
+<meta property="article:published_time" content="2021-08-14">
+<meta property="og:site_name" content="Forza&#039;s Ramblings">
+<meta property="og:type" content="website">
+<script type="application/ld+json">{"@context":"http:\/\/schema.org","@type":"website","name":"Btrfs mount options | Forza's Ramblings","headline":"Btrfs mount options | Forza's Ramblings","mainEntityOfPage":"Btrfs\/Mount Options","identifier":"https:\/\/wiki.tnonline.net\/w\/Btrfs\/Mount_Options","url":"https:\/\/wiki.tnonline.net\/w\/Btrfs\/Mount_Options","description":"A description of common Btrfs mount options and how to use them.","keywords":"Btrfs, mount, options, usage, atime, space_cache, recovery","dateModified":"2025-06-05","datePublished":"2021-08-14","image":{"@type":"ImageObject","url":"https:\/\/wiki.tnonline.net\/mediawiki\/resources\/assets\/forza_logo.png"},"author":{"@type":"Organization","name":"Forza's ramblings","url":"https:\/\/wiki.tnonline.net","logo":{"@type":"ImageObject","url":"https:\/\/wiki.tnonline.net\/mediawiki\/resources\/assets\/forza_logo.png","caption":"Forza's ramblings"}},"publisher":{"@type":"Organization","name":"Forza's ramblings","url":"https:\/\/wiki.tnonline.net","logo":{"@type":"ImageObject","url":"https:\/\/wiki.tnonline.net\/mediawiki\/resources\/assets\/forza_logo.png","caption":"Forza's ramblings"}},"potentialAction":{"@type":"SearchAction","target":"https:\/\/wiki.tnonline.net\/mediawiki\/index.php?title=Special:Search&search={search_term}","query-input":"required name=search_term"}}</script>
+</head>
+<body class="mediawiki ltr sitedir-ltr mw-hide-empty-elt ns-0 ns-subject mw-editable page-Btrfs_Mount_Options rootpage-Btrfs_Mount_Options skin-timeless action-view skin--responsive"><a href="https://wiki.tnonline.net/cdn-cgi/content?id=0SWrNjl.3nCXp1ER5q4.y_K.uJy0yZMYbJIGlXkPT6c-1772830313.879611-1.0.1.1-nMyb5qAJDHsmv5WtEpFCm.mb6_R.UHNzqU11LvNs0fg" aria-hidden="true" rel="nofollow noopener" style="display: none !important; visibility: hidden !important"></a><div id="mw-wrapper"><div id="mw-header-container" class="ts-container"><div id="mw-header" class="ts-inner"><div id="user-tools"><div id="personal"><h2><span>Anonymous</span></h2><div id="personal-inner" class="dropdown"><div role="navigation" class="mw-portlet" id="p-personal" title="User menu" aria-labelledby="p-personal-label"><h3 id="p-personal-label" lang="en-GB" dir="ltr">Not logged in</h3><div class="mw-portlet-body"><ul lang="en-GB" dir="ltr"><li id="pt-anontalk" class="mw-list-item"><a href="/w/Special:MyTalk" title="Discussion about edits from this IP address [n]" accesskey="n"><span>Talk</span></a></li><li id="pt-anoncontribs" class="mw-list-item"><a href="/w/Special:MyContributions" title="A list of edits made from this IP address [y]" accesskey="y"><span>Contributions</span></a></li><li id="pt-createaccount" class="mw-list-item"><a href="/mediawiki/index.php?title=Special:CreateAccount&amp;returnto=Btrfs%2FMount+Options" title="You are encouraged to create an account and log in; however, it is not mandatory"><span>Create account</span></a></li><li id="pt-login" class="mw-list-item"><a href="/mediawiki/index.php?title=Special:UserLogin&amp;returnto=Btrfs%2FMount+Options" title="You are encouraged to log in; however, it is not mandatory [o]" accesskey="o"><span>Log in</span></a></li></ul></div></div></div></div></div><div id="p-logo-text" class="mw-portlet" role="banner"><a id="p-banner" class="mw-wiki-title long" href="/w/Main_Page">Forza&#039;s ramblings</a></div><div class="mw-portlet" id="p-search"><h3 lang="en-GB" dir="ltr"><label for="searchInput">Search</label></h3><form action="/mediawiki/index.php" id="searchform"><div id="simpleSearch"><div id="searchInput-container"><input type="search" name="search" placeholder="Search Forza&#039;s ramblings" aria-label="Search Forza&#039;s ramblings" autocapitalize="sentences" title="Search Forza&#039;s ramblings [f]" accesskey="f" id="searchInput"></div><input type="hidden" value="Special:Search" name="title"><input class="searchButton mw-fallbackSearchButton" type="submit" name="fulltext" title="Search the pages for this text" id="mw-searchButton" value="Search"><input class="searchButton" type="submit" name="go" title="Go to a page with this exact name if it exists" id="searchButton" value="Go"></div></form></div></div><div class="visualClear"></div></div><div id="mw-header-hack" class="color-bar"><div class="color-middle-container"><div class="color-middle"></div></div><div class="color-left"></div><div class="color-right"></div></div><div id="mw-header-nav-hack"><div class="color-bar"><div class="color-middle-container"><div class="color-middle"></div></div><div class="color-left"></div><div class="color-right"></div></div></div><div id="menus-cover"></div><div id="mw-content-container" class="ts-container"><div id="mw-content-block" class="ts-inner"><div id="mw-content-wrapper"><div id="mw-content"><div id="content" class="mw-body" role="main"><div class="mw-indicators">
+</div>
+<h1 id="firstHeading" class="firstHeading mw-first-heading"><span class="mw-page-title-main">Btrfs/Mount Options</span></h1><div id="bodyContentOuter"><div id="siteSub">From Forza's ramblings</div><div id="mw-page-header-links"><div role="navigation" class="mw-portlet tools-inline" id="p-namespaces" aria-labelledby="p-namespaces-label"><h3 id="p-namespaces-label" lang="en-GB" dir="ltr">Namespaces</h3><div class="mw-portlet-body"><ul lang="en-GB" dir="ltr"><li id="ca-nstab-main" class="selected mw-list-item"><a href="/w/Btrfs/Mount_Options" title="View the content page [c]" accesskey="c"><span>Page</span></a></li><li id="ca-talk" class="new mw-list-item"><a href="/mediawiki/index.php?title=Talk:Btrfs/Mount_Options&amp;action=edit&amp;redlink=1" rel="discussion" class="new" title="Discussion about the content page (page does not exist) [t]" accesskey="t"><span>Discussion</span></a></li></ul></div></div><div role="navigation" class="mw-portlet tools-inline" id="p-more" aria-labelledby="p-more-label"><h3 id="p-more-label" lang="en-GB" dir="ltr">More</h3><div class="mw-portlet-body"><ul lang="en-GB" dir="ltr"><li id="ca-more" class="dropdown-toggle mw-list-item"><span>More</span></li></ul></div></div><div role="navigation" class="mw-portlet tools-inline" id="p-views" aria-labelledby="p-views-label"><h3 id="p-views-label" lang="en-GB" dir="ltr">Page actions</h3><div class="mw-portlet-body"><ul lang="en-GB" dir="ltr"><li id="ca-view" class="selected mw-list-item"><a href="/w/Btrfs/Mount_Options"><span>Read</span></a></li><li id="ca-ve-edit" class="mw-list-item"><a href="/mediawiki/index.php?title=Btrfs/Mount_Options&amp;veaction=edit" title="Edit this page [v]" accesskey="v"><span>Edit</span></a></li><li id="ca-edit" class="collapsible mw-list-item"><a href="/mediawiki/index.php?title=Btrfs/Mount_Options&amp;action=edit" title="Edit the source code of this page [e]" accesskey="e"><span>Edit source</span></a></li><li id="ca-history" class="mw-list-item"><a href="/mediawiki/index.php?title=Btrfs/Mount_Options&amp;action=history" title="Past revisions of this page [h]" accesskey="h"><span>History</span></a></li><li id="ca-purge" class="mw-list-item"><a href="#"><span>Purge</span></a></li></ul></div></div></div><div class="visualClear"></div><div id="bodyContent"><div id="contentSub"><div id="mw-content-subtitle"></div></div><div id="mw-content-text" class="mw-body-content"><div class="mw-content-ltr mw-parser-output" lang="en-GB" dir="ltr"><div id="toc" class="toc" role="navigation" aria-labelledby="mw-toc-heading"><input type="checkbox" role="button" id="toctogglecheckbox" class="toctogglecheckbox" style="display:none" /><div class="toctitle" lang="en-GB" dir="ltr"><h2 id="mw-toc-heading">Contents</h2><span class="toctogglespan"><label class="toctogglelabel" for="toctogglecheckbox"></label></span></div>
+<ul>
+<li class="toclevel-1 tocsection-1"><a href="#Mounting_a_Btrfs_filesystem"><span class="tocnumber">1</span> <span class="toctext">Mounting a Btrfs filesystem</span></a>
+<ul>
+<li class="toclevel-2 tocsection-2"><a href="#Btrfs_mount_options"><span class="tocnumber">1.1</span> <span class="toctext">Btrfs mount options</span></a></li>
+<li class="toclevel-2 tocsection-3"><a href="#fstab"><span class="tocnumber">1.2</span> <span class="toctext">fstab</span></a></li>
+<li class="toclevel-2 tocsection-4"><a href="#fstab_example"><span class="tocnumber">1.3</span> <span class="toctext">fstab example</span></a></li>
+</ul>
+</li>
+<li class="toclevel-1 tocsection-5"><a href="#Special_Considerations"><span class="tocnumber">2</span> <span class="toctext">Special Considerations</span></a>
+<ul>
+<li class="toclevel-2 tocsection-6"><a href="#Multi_device_filesystems"><span class="tocnumber">2.1</span> <span class="toctext">Multi device filesystems</span></a></li>
+<li class="toclevel-2 tocsection-7"><a href="#Cloned_filesystems_-_duplicate_UUID"><span class="tocnumber">2.2</span> <span class="toctext">Cloned filesystems - duplicate UUID</span></a></li>
+<li class="toclevel-2 tocsection-8"><a href="#Read_only_mounts"><span class="tocnumber">2.3</span> <span class="toctext">Read only mounts</span></a></li>
+<li class="toclevel-2 tocsection-9"><a href="#Access_time_updates_-_atime"><span class="tocnumber">2.4</span> <span class="toctext">Access time updates - atime</span></a></li>
+<li class="toclevel-2 tocsection-10"><a href="#flushoncommit,_commit"><span class="tocnumber">2.5</span> <span class="toctext">flushoncommit, commit</span></a></li>
+</ul>
+</li>
+</ul>
+</div>
+
+<h2><span class="mw-headline" id="Mounting_a_Btrfs_filesystem">Mounting a Btrfs filesystem</span><span class="mw-editsection"><span class="mw-editsection-bracket">[</span><a href="/mediawiki/index.php?title=Btrfs/Mount_Options&amp;veaction=edit&amp;section=1" title="Edit section: Mounting a Btrfs filesystem" class="mw-editsection-visualeditor">edit</a><span class="mw-editsection-divider"> | </span><a href="/mediawiki/index.php?title=Btrfs/Mount_Options&amp;action=edit&amp;section=1" title="Edit section&#039;s source code: Mounting a Btrfs filesystem">edit source</a><span class="mw-editsection-bracket">]</span></span></h2>
+<figure class="mw-default-size mw-halign-right" typeof="mw:File/Thumb"><a href="/w/File:Mount_Pleasant_Radio_Telescope.jpg" class="mw-file-description"><img alt="Picture of a radio telescope on top of a hill with cloudy sky." src="https://upload.wikimedia.org/wikipedia/commons/thumb/5/52/Mount_Pleasant_Radio_Telescope.jpg/300px-Mount_Pleasant_Radio_Telescope.jpg" decoding="async" width="300" height="199" class="mw-file-element" srcset="https://upload.wikimedia.org/wikipedia/commons/thumb/5/52/Mount_Pleasant_Radio_Telescope.jpg/450px-Mount_Pleasant_Radio_Telescope.jpg 1.5x, https://upload.wikimedia.org/wikipedia/commons/thumb/5/52/Mount_Pleasant_Radio_Telescope.jpg/600px-Mount_Pleasant_Radio_Telescope.jpg 2x" /></a><figcaption>The 26m Radio Telescope at Mount Pleasant Radio Observatory, Tasmania, Australia</figcaption></figure>
+<p>Btrfs has several mount options that controls how the filesystem behaves. Some are used in recovery situations and some are used for performance or quality tradeoffs.
+</p><p>Except for the <code>subvol</code> and <code>subvolid</code>, all mount options affect the whole filesystem, and not the individual subvolume mounts. This means, for example, that specifying <code>compress=zstd</code> on the first mount, all subsequent mounts, including other subvolumes, will inherit the compression option.
+</p><p>Generic Linux VFS mount options like <code>atime/noatime</code>, <code>auto/noauto</code>, <code>dev/nodev</code>, and others, do apply per mount point. See the chapter about filesystem independent mount options in the <a class="external text" href="https://linux.die.net/man/8/mount">mount  man page</a>.
+</p><p>The basic mount command is <code>mount -o &lt;options&gt; &lt;device&gt; &lt;path&gt;</code>
+</p>
+<pre># mount -o compress=zstd,subvol=@homes /dev/sdc1 /home</pre>
+<h3><span class="mw-headline" id="Btrfs_mount_options">Btrfs mount options</span><span class="mw-editsection"><span class="mw-editsection-bracket">[</span><a href="/mediawiki/index.php?title=Btrfs/Mount_Options&amp;veaction=edit&amp;section=2" title="Edit section: Btrfs mount options" class="mw-editsection-visualeditor">edit</a><span class="mw-editsection-divider"> | </span><a href="/mediawiki/index.php?title=Btrfs/Mount_Options&amp;action=edit&amp;section=2" title="Edit section&#039;s source code: Btrfs mount options">edit source</a><span class="mw-editsection-bracket">]</span></span></h3>
+<p>The full documentation of the various btrfs mount options are available in the official Btrfs <a class="external text" href="https://btrfs.readthedocs.io/en/latest/Administration.html#mount-options">administration docs</a>.
+</p>
+<table class="wikitable" style="width: 100%;">
+<caption>Btrfs Mount Options
+</caption>
+<tbody><tr>
+<th>Option</th>
+<th>Description</th>
+<th>Default Value
+</th></tr>
+<tr>
+<td>acl, noacl</td>
+<td>Enable/disable POSIX Access Control Lists (ACLs)</td>
+<td>on
+</td></tr>
+<tr>
+<td><a href="/w/Btrfs/Defrag" title="Btrfs/Defrag">autodefrag</a>, noautodefrag</td>
+<td>Enable automatic file defragmentation. Small random writes into files are detected and queued up for defragmentation.</td>
+<td>off
+</td></tr>
+<tr>
+<td>atime, strictatime, relatime, noatime</td>
+<td>noatime is useful to use use by default because atime updates increases metadata writes. Atimes are especially costly performance-wise when you have many snapshots.</td>
+<td>relatime
+</td></tr>
+<tr>
+<td>barrier, nobarrier</td>
+<td>Ensure IO write operations are stored permanently</td>
+<td>on
+</td></tr>
+<tr>
+<td>commit=&lt;seconds&gt;</td>
+<td>Set interval of periodic transaction commit</td>
+<td>30
+</td></tr>
+<tr>
+<td>compress, compress=&lt;type[:level]&gt;, compress-force, compress-force=&lt;type[:level]&gt;</td>
+<td>Control file data compression? Available algorithms are zlib, lzo and zstd.</td>
+<td>off
+</td></tr>
+<tr>
+<td>datacow, nodatacow</td>
+<td>Enable/disable data copy-on-write for newly created files. nodatacow also implies nodatasum.</td>
+<td>on
+</td></tr>
+<tr>
+<td>datasum, nodatasum</td>
+<td>Enable/disable data checksumming for newly created files</td>
+<td>on
+</td></tr>
+<tr>
+<td>device=&lt;devicepath&gt;</td>
+<td>Specify path to a device scanned for Btrfs filesystem</td>
+<td>-
+</td></tr>
+<tr>
+<td>discard, discard=sync, discard=async, nodiscard</td>
+<td>Enable discarding of freed file blocks</td>
+<td>async (since 6.2)
+</td></tr>
+<tr>
+<td>flushoncommit, noflushoncommit</td>
+<td>Force data dirtied by write in prior transaction to commit</td>
+<td>off
+</td></tr>
+<tr>
+<td>max_inline=&lt;bytes&gt;</td>
+<td>Specify maximum space that can be inlined in metadata b-tree leaf</td>
+<td>min(2048, page size)
+</td></tr>
+<tr>
+<td>metadata_ratio=&lt;value&gt;</td>
+<td>Specify metadata chunk allocation frequency</td>
+<td>0 (internal logic)
+</td></tr>
+<tr>
+<td>skip_balance</td>
+<td>Skip automatic resume of an interrupted balance operation</td>
+<td>off
+</td></tr>
+<tr>
+<td><a href="/w/Btrfs/Space_Cache" title="Btrfs/Space Cache">space_cache</a>, space_cache=&lt;version&gt;, nospace_cache</td>
+<td>Options to control the free space cache</td>
+<td>Default depends on mkfs time, space_cache=v2 since btrfs-progs 5.15.
+</td></tr>
+<tr>
+<td>ssd, ssd_spread, nossd, nossd_spread</td>
+<td>Options to control SSD allocation schemes</td>
+<td>SSD autodetected
+</td></tr>
+<tr>
+<td>subvol=&lt;path&gt;</td>
+<td>Mount subvolume from path rather than the toplevel subvolume</td>
+<td>'/'
+</td></tr>
+<tr>
+<td>subvolid=&lt;subvolid&gt;</td>
+<td>Mount subvolume specified by subvolid number</td>
+<td>5
+</td></tr>
+<tr>
+<td colspan="3"><i>NOTE: If both subvolid and subvol are specified, they must point at the same subvolume, otherwise the mount will fail.</i>
+</td></tr>
+<tr>
+<td>thread_pool=&lt;number&gt;</td>
+<td>Number of worker threads to start</td>
+<td>Number of CPU threads +2, but not more than 8
+</td></tr>
+<tr>
+<td>user_subvol_rm_allowed</td>
+<td>Allow subvolumes to be deleted by their respective owner</td>
+<td>off
+</td></tr></tbody></table>
+<table class="wikitable" style="width: 100%;">
+<caption>Recovery Btrfs Mount Options
+</caption>
+<tbody><tr>
+<th>Option</th>
+<th>Description</th>
+<th>Default Value
+</th></tr>
+<tr>
+<td><a href="/w/Btrfs/Space_Cache" title="Btrfs/Space Cache">clear_cache</a></td>
+<td>Force clearing and rebuilding of free space cache</td>
+<td>-
+</td></tr>
+<tr>
+<td>degraded</td>
+<td>Is used to mount a filesystem  that has a missing device, within RAID profile constraints</td>
+<td>off
+</td></tr>
+<tr>
+<td>nologreplay</td>
+<td>Disable tree log replay on mount</td>
+<td>off
+</td></tr>
+<tr>
+<td>norecovery</td>
+<td>Skip data recovery at mount time</td>
+<td>off
+</td></tr>
+<tr>
+<td>rescan_uuid_tree</td>
+<td>Force check and rebuild procedure of the UUID tree</td>
+<td>off
+</td></tr>
+<tr>
+<td>rescue=&lt;option,option,...&gt;</td>
+<td>Modes allowing mount with damaged filesystem structures</td>
+<td>
+<ul><li>usebackuproot (since: 5.9, replaces standalone option usebackuproot)</li>
+<li>nologreplay (since: 5.9, replaces standalone option nologreplay)</li>
+<li>ignorebadroots, ibadroots (since: 5.11)</li>
+<li>ignoredatacsums, idatacsums (since: 5.11)</li>
+<li>all (since: 5.9)</li></ul>
+</td></tr>
+<tr>
+<td>treelog, notreelog</td>
+<td>Enable tree logging used for fsync and O_SYNC writes</td>
+<td>on
+</td></tr>
+<tr>
+<td>usebackuproot</td>
+<td>Enable autorecovery attempts if a bad tree root is found</td>
+<td>off
+</td></tr>
+<tr>
+<td colspan="3"><b>WARNING! These are advanced options and can cause further data loss unless used carefully. Ask for <a class="external text" href="http://Category:Btrfs#Help">help</a> before attempting recovery.</b>
+</td></tr></tbody></table>
+<table class="wikitable" style="width: 100%;">
+<caption>Debugging and Developer Btrfs Mount Options
+</caption>
+<tbody><tr>
+<th>Option</th>
+<th>Description</th>
+<th>Default Value
+</th></tr>
+<tr>
+<td>enospc_debug, noenospc_debug</td>
+<td>Enable verbose output for some ENOSPC conditions</td>
+<td>off
+</td></tr>
+<tr>
+<td>check_int, check_int_data, check_int_print_mask=&lt;value&gt;</td>
+<td>Debugging options for integrity checking</td>
+<td>off
+</td></tr>
+<tr>
+<td>fatal_errors=&lt;action&gt;</td>
+<td>Action to take on encountering a fatal error</td>
+<td>bug
+</td></tr>
+<tr>
+<td>fragment=&lt;type&gt;</td>
+<td>Debugging helper to intentionally fragment block groups</td>
+<td>off
+</td></tr>
+<tr>
+<td colspan="3"><b>WARNING! These are developer options that should not be used on regular filesystems.</b>
+</td></tr></tbody></table>
+<table class="wikitable" style="width: 100%;">
+<caption>Deprecated Btrfs Mount Options
+</caption>
+<tbody><tr>
+<th>Option</th>
+<th>Description</th>
+<th>Default Value
+</th></tr>
+<tr>
+<td>recovery</td>
+<td>Enable data recovery at mount time</td>
+<td>off (deprecated since kernel 4.5)
+</td></tr></tbody></table>
+<table class="wikitable" style="width: 100%;">
+<caption>Removed Btrfs Mount Options
+</caption>
+<tbody><tr>
+<th>Option</th>
+<th>Description</th>
+<th>Default Value
+</th></tr>
+<tr>
+<td>inode_cache, noinode_cache</td>
+<td>Enable/disable inode cache</td>
+<td>off (removed since kernel 5.11)
+</td></tr></tbody></table>
+<h3><span class="mw-headline" id="fstab">fstab</span><span class="mw-editsection"><span class="mw-editsection-bracket">[</span><a href="/mediawiki/index.php?title=Btrfs/Mount_Options&amp;veaction=edit&amp;section=3" title="Edit section: fstab" class="mw-editsection-visualeditor">edit</a><span class="mw-editsection-divider"> | </span><a href="/mediawiki/index.php?title=Btrfs/Mount_Options&amp;action=edit&amp;section=3" title="Edit section&#039;s source code: fstab">edit source</a><span class="mw-editsection-bracket">]</span></span></h3>
+<p><code>/etc/fstab</code> is the standard configuration file for mounting filesystems on Linux. It is used to define what filesystems get mounted where, and also any mount options that are needed. One exception is perhaps portable USB drives as many desktop environments handle those automatically.
+</p><p>The format for <a class="external text" href="https://en.m.wikipedia.org/wiki/Fstab">fstab</a> is one line per mount point. Each line consists of the following 6 sections, in order:
+</p>
+<pre># device-spec     mount-point     fs-type     options     dump pass</pre>
+<table class="wikitable" style="width: 100%;">
+
+<tbody><tr>
+<th>Column
+</th>
+<th>Description
+</th></tr>
+<tr>
+<td>device-spec
+</td>
+<td>Specifies the device to be mounted. Can be &lt;/dev/path&gt;, UUID=&lt;fs uuid&gt;, or LABEL=&lt;fs label&gt;
+</td></tr>
+<tr>
+<td>mount-point
+</td>
+<td>The directory where the device will be mounted.
+</td></tr>
+<tr>
+<td>fs-type
+</td>
+<td>Specifies the file system type, for example btrfs, xfs or ext4.
+</td></tr>
+<tr>
+<td>options
+</td>
+<td>Defines mount options. If no specific options are needed, 'default' can be used as placeholder.
+</td></tr>
+<tr>
+<td>dump
+</td>
+<td>Used by the <a class="external text" href="https://en.m.wikipedia.org/wiki/Dump_(Unix)">dump</a> program. Not used by Btrfs and should be 0.
+</td></tr>
+<tr>
+<td>pass
+</td>
+<td>Specifies the order in which filesystem checks are performed during boot. Use 0 with Btrfs (see <a href="/w/Btrfs/Scrub" title="Btrfs/Scrub">Btrfs/scrub</a>).
+<p>0 = do not check<br />
+1 = check immediately during boot<br />
+2 = check after boot
+</p>
+</td></tr></tbody></table>
+<h3><span class="mw-headline" id="fstab_example">fstab example</span><span class="mw-editsection"><span class="mw-editsection-bracket">[</span><a href="/mediawiki/index.php?title=Btrfs/Mount_Options&amp;veaction=edit&amp;section=4" title="Edit section: fstab example" class="mw-editsection-visualeditor">edit</a><span class="mw-editsection-divider"> | </span><a href="/mediawiki/index.php?title=Btrfs/Mount_Options&amp;action=edit&amp;section=4" title="Edit section&#039;s source code: fstab example">edit source</a><span class="mw-editsection-bracket">]</span></span></h3>
+<p>This is fstab on one of my machines. The disk is an SSD so I use <code>compress-force=zstd:2</code> as this reduces the reduce amount of data written to the disk, increasing its life span.
+</p><p>Notice the use of the <code>subvol</code> mount option and how it is used to mount different subvolumes.
+</p>
+<pre style="margin-bottom: 0; border-bottom:none; padding-bottom:0.8em; font-weight:bold;">/etc/fstab</pre>
+<pre style="margin-top: 0; border-top-style:dashed; padding-top: 0.8em;"># root filesystem
+UUID=446d32cb-a6da-45f0-9246-1483ad3420e0   /               btrfs   compress-force=zstd:2,noatime,subvol=volume/root            0 0
+
+# /home subvol
+UUID=446d32cb-a6da-45f0-9246-1483ad3420e0   /home           btrfs   compress-force=zstd:2,noatime,subvol=volume/home            0 0
+
+# A subvol for /var/tmp that is not being backed up.
+UUID=446d32cb-a6da-45f0-9246-1483ad3420e0   /var/tmp        btrfs   compress-force=zstd:2,noatime,noexec,subvol=volume/var_tmp  0 0
+
+# Btrfs filesystem toplevel
+UUID=446d32cb-a6da-45f0-9246-1483ad3420e0   /mnt/rootvol/   btrfs   compress-force=zstd:2,noatime,subvolid=5                    0 0
+
+# Use a ramdisk for temp files
+tmpfs                                       /tmp            tmpfs   rw,nosuid,noexec,nodev,size=4G,mode=1777                    0 0
+</pre>
+<p><code>/mnt/rootvol</code> is where the filesystem top level volume mounted. From here it is possible to access all snapshots and subvolumes directly, as shown in the tree list below.
+</p><p>The structure I use is a <b>flat</b> structure (all subvols are in one directory) that separates subvolumes and snapshots. It makes it easy to manage with backup software such as <a class="external text" href="https://digint.ch/btrbk/">btrbk</a>.
+</p>
+<pre style="margin-bottom: 0; border-bottom:none; padding-bottom:0.8em; font-weight:bold;"># tree -d -L 2 /mnt/rootvol/</pre>
+<pre style="margin-top: 0; border-top-style:dashed; padding-top: 0.8em;">/mnt/rootvol/
+├── snapshots
+│&#160;&#160; ├── home.20240101T1801
+│&#160;&#160; ├── home.20240101T1901
+...
+│&#160;&#160; ├── root.20240101T1801
+│&#160;&#160; ├── root.20240101T1901
+│&#160;&#160; ├── www.20240101T1801
+│&#160;&#160; └── www.20240101T1901
+└── volume
+    ├── boinc
+    ├── home
+    ├── home_root
+    ├── jabber
+    ├── mail
+    ├── mysql
+    ├── preview
+    ├── redis
+    ├── repos
+    ├── root
+    ├── src
+    ├── unifi
+    ├── var_cache
+    ├── var_db
+    ├── var_log
+    ├── var_tmp
+    └── www
+</pre>
+<p>Many distributions prefix subvolume names with <code>@</code> to make it is easier to distinguish them from normal directories. The symbol <code>@</code> doesn't have any inherent meaning in Btrfs and Btrfs does not impose any specific restrictions on a naming scheme, which makes it easy to adapt to your own specific needs.
+</p><p>This is is the fstab of a Debian machine running inside a QEMU virtual machine.
+</p>
+<pre style="margin-bottom: 0; border-bottom:none; padding-bottom:0.8em; font-weight:bold;">/etc/fstab</pre>
+<pre style="margin-top: 0; border-top-style:dashed; padding-top: 0.8em;">UUID=32234b01-c599-4eaf-a6b2-fafd35034062       /               btrfs   noatime,discard=async,subvol=@rootfs 0 0
+UUID=32234b01-c599-4eaf-a6b2-fafd35034062       /home           btrfs   noatime,discard=async,subvol=@home   0 0
+UUID=32234b01-c599-4eaf-a6b2-fafd35034062       /mnt/rootvol    btrfs   noatime,discard=async                0 0
+LABEL=swap          none                        swap            sw,discard                                   0 0
+apt_cache           /var/cache/apt/archives     virtiofs        noatime,noexec,nodev,nosuid                  0 0
+</pre>
+<p>Take a moment to read up on flat vs nested subvolume layouts over at <a href="/w/Btrfs/Getting_Started#Subvolumes" title="Btrfs/Getting Started">Btrfs/Getting_Started#Subvolumes</a>
+</p>
+<h2><span class="mw-headline" id="Special_Considerations">Special Considerations</span><span class="mw-editsection"><span class="mw-editsection-bracket">[</span><a href="/mediawiki/index.php?title=Btrfs/Mount_Options&amp;veaction=edit&amp;section=5" title="Edit section: Special Considerations" class="mw-editsection-visualeditor">edit</a><span class="mw-editsection-divider"> | </span><a href="/mediawiki/index.php?title=Btrfs/Mount_Options&amp;action=edit&amp;section=5" title="Edit section&#039;s source code: Special Considerations">edit source</a><span class="mw-editsection-bracket">]</span></span></h2>
+<h3><span class="mw-headline" id="Multi_device_filesystems">Multi device filesystems</span><span class="mw-editsection"><span class="mw-editsection-bracket">[</span><a href="/mediawiki/index.php?title=Btrfs/Mount_Options&amp;veaction=edit&amp;section=6" title="Edit section: Multi device filesystems" class="mw-editsection-visualeditor">edit</a><span class="mw-editsection-divider"> | </span><a href="/mediawiki/index.php?title=Btrfs/Mount_Options&amp;action=edit&amp;section=6" title="Edit section&#039;s source code: Multi device filesystems">edit source</a><span class="mw-editsection-bracket">]</span></span></h3>
+<p>Btrfs automatically assembles all the required devices with the same FS UUID so it is not necessary to specify each device during mount or in fstab. You can use any of the devices as mount device.
+</p>
+<pre style="margin-bottom: 0; border-bottom:none; padding-bottom:0.8em; font-weight:bold;">Create a RAID mirrored filesystem on sdb1 and sdb2</pre>
+<pre style="margin-top: 0; border-top-style:dashed; padding-top: 0.8em;">mkfs.btrfs -L my-volume -d raid1 /dev/sdb1 /dev/sdc1
+</pre>
+<pre style="margin-bottom: 0; border-bottom:none; padding-bottom:0.8em; font-weight:bold;">Mount it using either sdb1 or sdc1</pre>
+<pre style="margin-top: 0; border-top-style:dashed; padding-top: 0.8em;">mount /dev/sdc1 /mnt/btrfs
+# or
+mount /dev/sdb1 /mnt/btrfs
+</pre>
+<p>There are some corner cases. For example if the initramfs does not scan for devices before attempting to mount root filesystem. In such cases it may help to use the <code>device</code> mount option on the kernel command line to force Btrfs to consider them.
+</p>
+<h3><span class="mw-headline" id="Cloned_filesystems_-_duplicate_UUID">Cloned filesystems - duplicate UUID</span><span class="mw-editsection"><span class="mw-editsection-bracket">[</span><a href="/mediawiki/index.php?title=Btrfs/Mount_Options&amp;veaction=edit&amp;section=7" title="Edit section: Cloned filesystems - duplicate UUID" class="mw-editsection-visualeditor">edit</a><span class="mw-editsection-divider"> | </span><a href="/mediawiki/index.php?title=Btrfs/Mount_Options&amp;action=edit&amp;section=7" title="Edit section&#039;s source code: Cloned filesystems - duplicate UUID">edit source</a><span class="mw-editsection-bracket">]</span></span></h3>
+<p>Btrfs considers all devices with the same FS UUID as part of the same filesystem. It maintains an internal list of member device's UUIDs. While this is an integral part of Btrfs multi-device support, it needs special consideration if you want to clone a device using tools like <code>dd</code> or <code>ddrescue</code>.
+</p><p>When cloning a device, identical device UUIDs will confuse Btrfs. If the filesystem is already mounted, Btrfs will issue a warning in the kernel log (dmesg) when duplicate UUIDs are detected. If you try to mount the filesystem, the cloned device might get used instead of the original one - leading to data corruption.
+</p><p>It is better to use <a href="/w/Btrfs/Replacing_a_disk" title="Btrfs/Replacing a disk">btrfs device replace</a>, which will handle UUIDs correctly.
+</p>
+<h3><span class="mw-headline" id="Read_only_mounts">Read only mounts</span><span class="mw-editsection"><span class="mw-editsection-bracket">[</span><a href="/mediawiki/index.php?title=Btrfs/Mount_Options&amp;veaction=edit&amp;section=8" title="Edit section: Read only mounts" class="mw-editsection-visualeditor">edit</a><span class="mw-editsection-divider"> | </span><a href="/mediawiki/index.php?title=Btrfs/Mount_Options&amp;action=edit&amp;section=8" title="Edit section&#039;s source code: Read only mounts">edit source</a><span class="mw-editsection-bracket">]</span></span></h3>
+<p>The read only <code>ro</code> mount option is a VFS mount option. This means it only prevents writes and changes from user space through that specific mount point. The Btrfs filesystem will still make changes such as logreplay and delayed transactions during mount.
+</p><p>Since Btrfs allows for multiple mount points, another mount point - even using the same subvolume, can be mounted as read-write.
+</p>
+<h3><span class="mw-headline" id="Access_time_updates_-_atime">Access time updates - atime</span><span class="mw-editsection"><span class="mw-editsection-bracket">[</span><a href="/mediawiki/index.php?title=Btrfs/Mount_Options&amp;veaction=edit&amp;section=9" title="Edit section: Access time updates - atime" class="mw-editsection-visualeditor">edit</a><span class="mw-editsection-divider"> | </span><a href="/mediawiki/index.php?title=Btrfs/Mount_Options&amp;action=edit&amp;section=9" title="Edit section&#039;s source code: Access time updates - atime">edit source</a><span class="mw-editsection-bracket">]</span></span></h3>
+<p>Access times, or atime, is a timestamp of when a file was last accessed. On <code>ext2/3/4</code>, this is a relatively cheap operation, but with Btrfs it is very expensive because of the copy-on-write <code>CoW</code> nature. When atime is updated, Btrfs has to make a new metadata extent to store the new timestamp. This problem is compounded if there are many snapshots, as all references have to be updated as well.
+</p><p>Until relatively recently, Linux updated this timestamp on each and every access. Now it uses <code>relatime</code>, which updates atimes based on last modification time. This will still have a negative impact when using snapshots.
+</p><p>Most people do not need access time updates, and would benefit from the extra performance of using the <code>noatime</code> mount option.
+</p>
+<h3><span id="flushoncommit.2C_commit"></span><span class="mw-headline" id="flushoncommit,_commit">flushoncommit, commit</span><span class="mw-editsection"><span class="mw-editsection-bracket">[</span><a href="/mediawiki/index.php?title=Btrfs/Mount_Options&amp;veaction=edit&amp;section=10" title="Edit section: flushoncommit, commit" class="mw-editsection-visualeditor">edit</a><span class="mw-editsection-divider"> | </span><a href="/mediawiki/index.php?title=Btrfs/Mount_Options&amp;action=edit&amp;section=10" title="Edit section&#039;s source code: flushoncommit, commit">edit source</a><span class="mw-editsection-bracket">]</span></span></h3>
+<p>In a copy-on-write (COW) filesystem like Btrfs, when a file is modified, the changes are not written directly to the existing data blocks. Instead, a new set of blocks (extents) is created to store the modified data, leaving the original data intact. This process ensures that the original data remains unchanged until the new data is successfully written. Only after the new data is written, the file's metadata is updated to point to the new blocks.
+</p><p>Now, let's consider the scenario where a partial write occurs, such as an application saving modifications to a document, and a crash happens during this process. If a crash occurs before the new data blocks are completely written, the filesystem remains in a consistent state. This is because the original data blocks are still intact, and the file metadata still points to them. The partially written new data blocks are not yet linked to the file.
+</p><p>Many operations in Btrfs are atomic transactions, such as when the metadata is updated to point to the new data or when a snapshot is made. Depending on the load on the filesystem, a transaction can last quite a long time. If a crash happens, Btrfs will roll back to the previous commit.
+</p><p>The <code>flushoncommit</code> option forces data dirtied by a write in a prior transaction to commit as part of the current commit. This ensures that writes don't span multiple commit periods (see the <code>commit</code> mount option, reducing the amount of data lost during a rollback after a crash. In very extreme cases, such transactions can otherwise span minutes or hours. <code>flushoncommit</code> can negatively affect performance, but it reduces the time writes remain uncommitted.
+</p><p><code>commit=&lt;seconds&gt;</code> option sets the interval of periodic transaction commit when data is synchronized to permanent storage. The value is specified in seconds and determines how frequently Btrfs commits changes to disk. Higher interval values lead to a larger amount of unwritten data, which could have consequences in the event of a system crash, as uncommitted data will be lost after a crash.
+</p><p>Note that this is the periodic commit interval. Btrfs can still make commits more frequently, as needed.
+</p>
+<!-- 
+NewPP limit report
+Cached time: 20260306024709
+Cache expiry: 86400
+Reduced expiry: false
+Complications: [show‐toc]
+CPU time usage: 0.048 seconds
+Real time usage: 0.417 seconds
+Preprocessor visited node count: 340/1000000
+Post‐expand include size: 3302/2097152 bytes
+Template argument size: 2015/2097152 bytes
+Highest expansion depth: 4/100
+Expensive parser function count: 0/100
+Unstrip recursion depth: 0/20
+Unstrip post‐expand size: 624/5000000 bytes
+-->
+<!--
+Transclusion expansion time report (%,ms,calls,template)
+100.00%    3.338      1 -total
+ 35.58%    1.188     25 Template:Ic
+ 22.11%    0.738      5 Template:Hc
+ 14.62%    0.488      2 Template:Bc
+-->
+
+<!-- Saved in parser cache with key my_wiki:pcache:idhash:176-0!canonical and timestamp 20260306024709 and revision id 2156. Rendering was triggered because: page-view
+ -->
+</div></div><div class="printfooter">
+Retrieved from "<a dir="ltr" href="https://wiki.tnonline.net/mediawiki/index.php?title=Btrfs/Mount_Options&amp;oldid=2156">https://wiki.tnonline.net/mediawiki/index.php?title=Btrfs/Mount_Options&amp;oldid=2156</a>"</div>
+<div class="visualClear"></div></div></div></div></div><div id="content-bottom-stuff"><div id="catlinks" class="catlinks" data-mw="interface"><div id="mw-normal-catlinks" class="mw-normal-catlinks"><a href="/w/Special:Categories" title="Special:Categories">Category</a>: <ul><li><a href="/w/Category:Btrfs" title="Category:Btrfs">Btrfs</a></li></ul></div><div class="after-portlet after-portlet-category-normal"><br /><hr /><a href="/w/Category:Btrfs" title="Category:Btrfs">Btrfs</a></div></div></div></div><div id="mw-site-navigation"><div id="p-logo" class="mw-portlet" role="banner"><a class="mw-wiki-logo timeless-logo" href="/w/Main_Page" title="Visit the main page"><img alt="Forza&#039;s ramblings" decoding="auto" src="/mediawiki/resources/assets/forza_logo.png"></a></div><div id="site-navigation" class="sidebar-chunk"><h2><span>Navigation</span></h2><div class="sidebar-inner"><div role="navigation" class="mw-portlet" id="p-navigation" aria-labelledby="p-navigation-label"><h3 id="p-navigation-label" lang="en-GB" dir="ltr">Navigation</h3><div class="mw-portlet-body"><ul lang="en-GB" dir="ltr"><li id="n-mainpage-description" class="mw-list-item"><a href="/w/Main_Page" title="Visit the main page [z]" accesskey="z"><span>Main page</span></a></li><li id="n-Forza&#039;s-Blog" class="mw-list-item"><a href="/w/Blog"><span>Forza&#039;s Blog</span></a></li><li id="n-Btrfs-Filesystem" class="mw-list-item"><a href="/w/Category:Btrfs"><span>Btrfs Filesystem</span></a></li><li id="n-Photography" class="mw-list-item"><a href="/w/Category:Photographs"><span>Photography</span></a></li><li id="n-recentchanges" class="mw-list-item"><a href="/w/Special:RecentChanges" title="A list of recent changes in the wiki [r]" accesskey="r"><span>Recent changes</span></a></li><li id="n-randompage" class="mw-list-item"><a href="/w/Special:Random" title="Load a random page [x]" accesskey="x"><span>Random page</span></a></li><li id="n-help-mediawiki" class="mw-list-item"><a href="https://www.mediawiki.org/wiki/Special:MyLanguage/Help:Contents"><span>Help about MediaWiki</span></a></li></ul></div></div></div></div><div id="site-tools" class="sidebar-chunk"><h2><span>Wiki tools</span></h2><div class="sidebar-inner"><div role="navigation" class="mw-portlet" id="p-tb" aria-labelledby="p-tb-label"><h3 id="p-tb-label" lang="en-GB" dir="ltr">Wiki tools</h3><div class="mw-portlet-body"><ul lang="en-GB" dir="ltr"><li id="t-specialpages" class="mw-list-item"><a href="/w/Special:SpecialPages" title="A list of all special pages [q]" accesskey="q"><span>Special pages</span></a></li></ul></div></div></div></div></div><div id="mw-related-navigation"><div id="page-tools" class="sidebar-chunk"><h2><span>Page tools</span></h2><div class="sidebar-inner"><div role="navigation" class="mw-portlet emptyPortlet" id="p-cactions" title="More options" aria-labelledby="p-cactions-label"><h3 id="p-cactions-label" lang="en-GB" dir="ltr">Page tools</h3><div class="mw-portlet-body"><ul lang="en-GB" dir="ltr"></ul></div></div><div role="navigation" class="mw-portlet emptyPortlet" id="p-userpagetools" aria-labelledby="p-userpagetools-label"><h3 id="p-userpagetools-label" lang="en-GB" dir="ltr">User page tools</h3><div class="mw-portlet-body"><ul lang="en-GB" dir="ltr"></ul></div></div><div role="navigation" class="mw-portlet" id="p-pagemisc" aria-labelledby="p-pagemisc-label"><h3 id="p-pagemisc-label" lang="en-GB" dir="ltr">More</h3><div class="mw-portlet-body"><ul lang="en-GB" dir="ltr"><li id="t-whatlinkshere" class="mw-list-item"><a href="/w/Special:WhatLinksHere/Btrfs/Mount_Options" title="A list of all wiki pages that link here [j]" accesskey="j"><span>What links here</span></a></li><li id="t-recentchangeslinked" class="mw-list-item"><a href="/w/Special:RecentChangesLinked/Btrfs/Mount_Options" rel="nofollow" title="Recent changes in pages linked from this page [k]" accesskey="k"><span>Related changes</span></a></li><li id="t-print" class="mw-list-item"><a href="javascript:print();" rel="alternate" title="Printable version of this page [p]" accesskey="p"><span>Printable version</span></a></li><li id="t-permalink" class="mw-list-item"><a href="/mediawiki/index.php?title=Btrfs/Mount_Options&amp;oldid=2156" title="Permanent link to this revision of this page"><span>Permanent link</span></a></li><li id="t-info" class="mw-list-item"><a href="/mediawiki/index.php?title=Btrfs/Mount_Options&amp;action=info" title="More information about this page"><span>Page information</span></a></li><li id="t-pagelog" class="mw-list-item"><a href="/mediawiki/index.php?title=Special:Log&amp;page=Btrfs%2FMount+Options"><span>Page logs</span></a></li></ul></div></div></div></div><div id="catlinks-sidebar" class="sidebar-chunk"><h2><span>Categories</span></h2><div class="sidebar-inner"><div id="sidebar-normal-catlinks" class="mw-normal-catlinks"><div role="navigation" class="mw-portlet" id="p-normal-catlinks" aria-labelledby="p-normal-catlinks-label"><h3 id="p-normal-catlinks-label" lang="en-GB" dir="ltr">Categories</h3><div class="mw-portlet-body"><ul><li><a href="/w/Category:Btrfs" title="Category:Btrfs">Btrfs</a></li></ul></div></div></div></div></div></div><div class="visualClear"></div></div></div><div id="mw-footer-container" class="mw-footer-container ts-container"><div id="mw-footer" class="mw-footer ts-inner" role="contentinfo" lang="en-GB" dir="ltr"><ul id="footer-icons"><li id="footer-copyrightico" class="footer-icons"><a href="https://creativecommons.org/licenses/by-sa/4.0/" class="cdx-button cdx-button--fake-button cdx-button--size-large cdx-button--fake-button--enabled"><img src="/mediawiki/resources/assets/licenses/cc-by-sa.png" alt="Creative Commons Attribution-ShareAlike" width="88" height="31" loading="lazy"></a></li><li id="footer-poweredbyico" class="footer-icons"><a href="https://www.mediawiki.org/" class="cdx-button cdx-button--fake-button cdx-button--size-large cdx-button--fake-button--enabled"><img src="/mediawiki/resources/assets/poweredby_mediawiki.svg" alt="Powered by MediaWiki" width="88" height="31" loading="lazy"></a></li></ul><div id="footer-list"><ul id="footer-info"><li id="footer-info-lastmod"> This page was last modified on 5 June 2025, at 16:01.</li><li id="footer-info-copyright">Content is available under <a class="external" href="https://creativecommons.org/licenses/by-sa/4.0/">Creative Commons Attribution-ShareAlike</a> unless otherwise noted.</li><li id="footer-info-viewcount">This page has been accessed 40,619 times.</li></ul><ul id="footer-places"><li id="footer-places-privacy"><a href="/w/Forza%27s_ramblings:Privacy_policy">Privacy policy</a></li><li id="footer-places-about"><a href="/w/Forza%27s_ramblings:About">About Forza&#039;s ramblings</a></li><li id="footer-places-disclaimers"><a href="/w/Forza%27s_ramblings:General_disclaimer">Disclaimers</a></li></ul></div><div class="visualClear"></div></div></div></div><script>(RLQ=window.RLQ||[]).push(function(){mw.config.set({"wgBackendResponseTime":43,"wgPageParseReport":{"limitreport":{"cputime":"0.048","walltime":"0.417","ppvisitednodes":{"value":340,"limit":1000000},"postexpandincludesize":{"value":3302,"limit":2097152},"templateargumentsize":{"value":2015,"limit":2097152},"expansiondepth":{"value":4,"limit":100},"expensivefunctioncount":{"value":0,"limit":100},"unstrip-depth":{"value":0,"limit":20},"unstrip-size":{"value":624,"limit":5000000},"timingprofile":["100.00%    3.338      1 -total"," 35.58%    1.188     25 Template:Ic"," 22.11%    0.738      5 Template:Hc"," 14.62%    0.488      2 Template:Bc"]},"cachereport":{"timestamp":"20260306024709","ttl":86400,"transientcontent":false}}});});</script>
+<script>(function(){function c(){var b=a.contentDocument||a.contentWindow.document;if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'9d843db5bc2fbfb8',t:'MTc3MjgzMDMxMw=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
+</html>

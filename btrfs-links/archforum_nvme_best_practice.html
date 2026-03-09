@@ -1,0 +1,523 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en" dir="ltr">
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+<title>[SOLVED] Btrfs best practice - M.2 NVMe SSD (2024) / Newbie Corner / Arch Linux Forums</title>
+<link rel="stylesheet" type="text/css" href="style/ArchLinux.css" />
+<link rel="canonical" href="viewtopic.php?id=294472" title="Page 1" />
+<link rel="alternate" type="application/atom+xml" href="extern.php?action=feed&amp;tid=294472&amp;type=atom" title="Atom topic feed" />
+    <link rel="stylesheet" media="screen" href="style/ArchLinux/arch.css?v=5"/>
+        <link rel="stylesheet" media="screen" href="style/ArchLinux/archnavbar.css?v=5"/>
+    
+<link rel="shortcut icon" href="style/ArchLinux/favicon.ico" />
+</head>
+
+<body>
+<div id="archnavbar" class="anb-forum">
+	<div id="archnavbarlogo"><h1><a href="http://archlinux.org/">Arch Linux</a></h1></div>
+	<div id="archnavbarmenu">
+		<ul id="archnavbarlist">
+			<li id="anb-home"><a href="http://archlinux.org/">Home</a></li><li id="anb-packages"><a href="http://archlinux.org/packages/">Packages</a></li><li id="anb-forums" class="anb-selected"><a href="https://bbs.archlinux.org/">Forums</a></li><li id="anb-wiki"><a href="https://wiki.archlinux.org/">Wiki</a></li><li id="anb-gitlab"><a href="https://gitlab.archlinux.org/archlinux">GitLab</a></li><li id="anb-security"><a href="https://security.archlinux.org/">Security</a></li><li id="anb-aur"><a href="https://aur.archlinux.org/">AUR</a></li><li id="anb-download"><a href="http://archlinux.org/download/">Download</a></li>		</ul>
+	</div>
+</div>
+
+
+<div id="punviewtopic" class="pun">
+<div class="top-box"></div>
+<div class="punwrap">
+
+<div id="brdheader" class="block">
+	<div class="box">
+		<div id="brdmenu" class="inbox">
+			<ul>
+				<li id="navindex" class="isactive"><a href="index.php">Index</a></li>
+				<li id="navrules"><a href="misc.php?action=rules">Rules</a></li>
+				<li id="navsearch"><a href="search.php">Search</a></li>
+				<li id="navregister"><a href="register.php">Register</a></li>
+				<li id="navlogin"><a href="login.php">Login</a></li>
+			</ul>
+		</div>
+		<div id="brdwelcome" class="inbox">
+			<p class="conl">You are not logged in.</p>
+			<ul class="conr">
+				<li><span>Topics: <a href="search.php?action=show_recent" title="Find topics with recent posts.">Active</a> | <a href="search.php?action=show_unanswered" title="Find topics with no replies.">Unanswered</a></span></li>
+			</ul>
+			<div class="clearer"></div>
+		</div>
+	</div>
+</div>
+
+
+
+<div id="brdmain">
+<div class="linkst">
+	<div class="inbox crumbsplus">
+		<ul class="crumbs">
+			<li><a href="index.php">Index</a></li>
+			<li><span>»&#160;</span><a href="viewforum.php?id=23">Newbie Corner</a></li>
+			<li><span>»&#160;</span><strong><a href="viewtopic.php?id=294472">[SOLVED] Btrfs best practice - M.2 NVMe SSD (2024)</a></strong></li>
+		</ul>
+		<div class="pagepost">
+			<p class="pagelink conl"><span class="pages-label">Pages: </span><strong class="item1">1</strong></p>
+		</div>
+		<div class="clearer"></div>
+	</div>
+</div>
+
+<div id="p2161679" class="blockpost rowodd firstpost blockpost1">
+	<h2><span><span class="conr">#1</span> <a href="viewtopic.php?pid=2161679#p2161679">2024-04-01 14:41:08</a></span></h2>
+	<div class="box">
+		<div class="inbox">
+			<div class="postbody">
+				<div class="postleft">
+					<dl>
+						<dt><strong>vecino</strong></dt>
+						<dd class="usertitle"><strong>Member</strong></dd>
+						<dd class="postavatar"><img src="https://bbs.archlinux.org/img/avatars/147965.png?m=1677481351" width="51" height="51" alt="" /></dd>
+						<dd><span>Registered: 2022-12-10</span></dd>
+						<dd><span>Posts: 139</span></dd>
+					</dl>
+				</div>
+				<div class="postright">
+					<h3>[SOLVED] Btrfs best practice - M.2 NVMe SSD (2024)</h3>
+					<div class="postmsg">
+						<p>Hi, I&#039;ve been interested in BTRFS for quite a long time and love using it. I admit that I don&#039;t follow the latest trends much, but I want to ask if the same recommendations apply in 2024 or if something has changed?</p><p>I repeatedly follow <a href="https://wiki.archlinux.org/title/btrfs" rel="nofollow">Arch WiKi - Btrfs</a> and found an interesting test recently where someone tested different situations and drives. I&#039;m exclusively using NVMe drives at the moment so I&#039;m wondering if I should change something like compression or maybe other parameters for the mount.</p><p>If I understand the results of this test correctly: <a href="https://gist.github.com/braindevices/fde49c6a8f6b9aaf563fb977562aafec" rel="nofollow">https://gist.github.com/braindevices/fd … 77562aafec</a> , I should exclusively use <strong>lzo</strong> with NVMe? Yes?</p><div class="codebox"><pre><code>zstd:1 still has huge penalty on I/O speed on modern PC system. The compression is way slower than decompression.
+The tests on relatively slow SATA SSD show no obvious performance drop because the bottle neck is still disk I/O.
+On NVME SSD the penalty become far serious. Thus we should only use lzo to reduce the size on NVME-SSD.</code></pre></div><br /><p>Could you please give me some recommendations? What could I do better? My current setup:</p><div class="codebox"><pre><code># mount -t btrfs
+/dev/sda2 on / type btrfs (rw,noatime,compress=zstd:3,ssd,discard=async,space_cache=v2,commit=120,subvol=/@)
+/dev/sda2 on /.snapshots type btrfs (rw,noatime,compress=zstd:3,ssd,discard=async,space_cache=v2,commit=120,subvol=/@snapshots)</code></pre></div><div class="codebox"><pre><code># cat /etc/mkinitcpio.conf
+MODULES=(btrfs)
+BINARIES=(/usr/bin/btrfs)
+FILES=()
+HOOKS=(systemd autodetect keyboard modconf block filesystems grub-btrfs-overlayfs)</code></pre></div><p>I am mainly interested in your real observations and experiences from real use.</p><p>Thanks</p>
+						<p class="postedit"><em>Last edited by vecino (2024-04-05 20:09:32)</em></p>
+					</div>
+				</div>
+			</div>
+		</div>
+		<div class="inbox">
+			<div class="postfoot clearb">
+				<div class="postfootleft"><p><span>Offline</span></p></div>
+			</div>
+		</div>
+	</div>
+</div>
+
+<div id="p2161894" class="blockpost roweven">
+	<h2><span><span class="conr">#2</span> <a href="viewtopic.php?pid=2161894#p2161894">2024-04-02 08:15:26</a></span></h2>
+	<div class="box">
+		<div class="inbox">
+			<div class="postbody">
+				<div class="postleft">
+					<dl>
+						<dt><strong>impossibleveins23</strong></dt>
+						<dd class="usertitle"><strong>Member</strong></dd>
+						<dd><span>From: Israel</span></dd>
+						<dd><span>Registered: 2022-06-18</span></dd>
+						<dd><span>Posts: 171</span></dd>
+					</dl>
+				</div>
+				<div class="postright">
+					<h3>Re: [SOLVED] Btrfs best practice - M.2 NVMe SSD (2024)</h3>
+					<div class="postmsg">
+						<p>I&#039;m using BTRFS with zstd on M2 NVME as my daily drivers for years on &quot;not so recent&quot; laptops.<br />Not really a test, but I didn&#039;t notice any access excess resource utilization due to filesystem.<br />If write performance are critical for you then go for lzo or fully disable compression.</p><p>If you plan to use snapshots, I can recommend you to create additional subvolumes (/home, /var/log, /../pkg, /.../docker...).</p><p>BTW You can replace or disable the compression (will be applied to future file writes).</p>
+					</div>
+					<div class="postsignature postmsg"><hr /><p>* Good formatted problem description will cause good and quick solution <img src="https://bbs.archlinux.org/img/smilies/smile.png" width="15" height="15" alt="smile" /><br />* Please don&#039;t forget to mark as [SOLVED].</p></div>
+				</div>
+			</div>
+		</div>
+		<div class="inbox">
+			<div class="postfoot clearb">
+				<div class="postfootleft"><p><span>Offline</span></p></div>
+			</div>
+		</div>
+	</div>
+</div>
+
+<div id="p2162210" class="blockpost rowodd">
+	<h2><span><span class="conr">#3</span> <a href="viewtopic.php?pid=2162210#p2162210">2024-04-03 15:57:45</a></span></h2>
+	<div class="box">
+		<div class="inbox">
+			<div class="postbody">
+				<div class="postleft">
+					<dl>
+						<dt><strong>vecino</strong></dt>
+						<dd class="usertitle"><strong>Member</strong></dd>
+						<dd class="postavatar"><img src="https://bbs.archlinux.org/img/avatars/147965.png?m=1677481351" width="51" height="51" alt="" /></dd>
+						<dd><span>Registered: 2022-12-10</span></dd>
+						<dd><span>Posts: 139</span></dd>
+					</dl>
+				</div>
+				<div class="postright">
+					<h3>Re: [SOLVED] Btrfs best practice - M.2 NVMe SSD (2024)</h3>
+					<div class="postmsg">
+						<p>@impossibleveins23: Thanks for the response.</p><p>I know that the standard recommendation for subvolumes is this:</p><div class="codebox"><pre><code>/				/@
+/.snapshots			/@.snapshots
+/home				/@home
+/var/cache/pacman/pkg		/@pkg
+/var/log			/@log</code></pre></div><p>Do you think it&#039;s a good idea to make a subvolume for the whole <strong>/var</strong> or is it not a good idea?</p><p>I also read somewhere that it is recommended to set compress-force for small files. For example: <strong>compress-force=zstd:3</strong> - is this a good idea?</p>
+						<p class="postedit"><em>Last edited by vecino (2024-04-03 15:59:36)</em></p>
+					</div>
+				</div>
+			</div>
+		</div>
+		<div class="inbox">
+			<div class="postfoot clearb">
+				<div class="postfootleft"><p><span>Offline</span></p></div>
+			</div>
+		</div>
+	</div>
+</div>
+
+<div id="p2162308" class="blockpost roweven">
+	<h2><span><span class="conr">#4</span> <a href="viewtopic.php?pid=2162308#p2162308">2024-04-03 20:31:46</a></span></h2>
+	<div class="box">
+		<div class="inbox">
+			<div class="postbody">
+				<div class="postleft">
+					<dl>
+						<dt><strong>impossibleveins23</strong></dt>
+						<dd class="usertitle"><strong>Member</strong></dd>
+						<dd><span>From: Israel</span></dd>
+						<dd><span>Registered: 2022-06-18</span></dd>
+						<dd><span>Posts: 171</span></dd>
+					</dl>
+				</div>
+				<div class="postright">
+					<h3>Re: [SOLVED] Btrfs best practice - M.2 NVMe SSD (2024)</h3>
+					<div class="postmsg">
+						<p>* In my case I wanted to subvolume within /var for use cases like Docker. If don&#039;t need this granularity, start with @var and you can always mount the root volume, create a snapshot and mount in within /var afterwards. <br />* Regarding compression, can&#039;t say much I also use zstd with default 3. I guess if you have weak hardware or specific IO requirements, you can investigate more. Perhaps start <a href="https://btrfs.readthedocs.io/en/latest/Compression.html" rel="nofollow">here</a>.</p>
+					</div>
+					<div class="postsignature postmsg"><hr /><p>* Good formatted problem description will cause good and quick solution <img src="https://bbs.archlinux.org/img/smilies/smile.png" width="15" height="15" alt="smile" /><br />* Please don&#039;t forget to mark as [SOLVED].</p></div>
+				</div>
+			</div>
+		</div>
+		<div class="inbox">
+			<div class="postfoot clearb">
+				<div class="postfootleft"><p><span>Offline</span></p></div>
+			</div>
+		</div>
+	</div>
+</div>
+
+<div id="p2162369" class="blockpost rowodd">
+	<h2><span><span class="conr">#5</span> <a href="viewtopic.php?pid=2162369#p2162369">2024-04-04 06:07:41</a></span></h2>
+	<div class="box">
+		<div class="inbox">
+			<div class="postbody">
+				<div class="postleft">
+					<dl>
+						<dt><strong>vecino</strong></dt>
+						<dd class="usertitle"><strong>Member</strong></dd>
+						<dd class="postavatar"><img src="https://bbs.archlinux.org/img/avatars/147965.png?m=1677481351" width="51" height="51" alt="" /></dd>
+						<dd><span>Registered: 2022-12-10</span></dd>
+						<dd><span>Posts: 139</span></dd>
+					</dl>
+				</div>
+				<div class="postright">
+					<h3>Re: [SOLVED] Btrfs best practice - M.2 NVMe SSD (2024)</h3>
+					<div class="postmsg">
+						<p>Yes I read btrfs.readthedocs.io/en/latest - I&#039;m trying to find the information myself, but I didn&#039;t find the answers to my questions there. I guess I understand that it depends on a lot of circumstances and usage.</p>
+					</div>
+				</div>
+			</div>
+		</div>
+		<div class="inbox">
+			<div class="postfoot clearb">
+				<div class="postfootleft"><p><span>Offline</span></p></div>
+			</div>
+		</div>
+	</div>
+</div>
+
+<div id="p2162381" class="blockpost roweven">
+	<h2><span><span class="conr">#6</span> <a href="viewtopic.php?pid=2162381#p2162381">2024-04-04 07:57:15</a></span></h2>
+	<div class="box">
+		<div class="inbox">
+			<div class="postbody">
+				<div class="postleft">
+					<dl>
+						<dt><strong>impossibleveins23</strong></dt>
+						<dd class="usertitle"><strong>Member</strong></dd>
+						<dd><span>From: Israel</span></dd>
+						<dd><span>Registered: 2022-06-18</span></dd>
+						<dd><span>Posts: 171</span></dd>
+					</dl>
+				</div>
+				<div class="postright">
+					<h3>Re: [SOLVED] Btrfs best practice - M.2 NVMe SSD (2024)</h3>
+					<div class="postmsg">
+						<p>It depends on your use case.<br />If you have many duplicate files (e.g. File Server), maybe using dedup is the way.</p><p>Bear in mind that you can always switch compression (will affect future files).</p>
+					</div>
+					<div class="postsignature postmsg"><hr /><p>* Good formatted problem description will cause good and quick solution <img src="https://bbs.archlinux.org/img/smilies/smile.png" width="15" height="15" alt="smile" /><br />* Please don&#039;t forget to mark as [SOLVED].</p></div>
+				</div>
+			</div>
+		</div>
+		<div class="inbox">
+			<div class="postfoot clearb">
+				<div class="postfootleft"><p><span>Offline</span></p></div>
+			</div>
+		</div>
+	</div>
+</div>
+
+<div id="p2162454" class="blockpost rowodd">
+	<h2><span><span class="conr">#7</span> <a href="viewtopic.php?pid=2162454#p2162454">2024-04-04 13:30:31</a></span></h2>
+	<div class="box">
+		<div class="inbox">
+			<div class="postbody">
+				<div class="postleft">
+					<dl>
+						<dt><strong>vecino</strong></dt>
+						<dd class="usertitle"><strong>Member</strong></dd>
+						<dd class="postavatar"><img src="https://bbs.archlinux.org/img/avatars/147965.png?m=1677481351" width="51" height="51" alt="" /></dd>
+						<dd><span>Registered: 2022-12-10</span></dd>
+						<dd><span>Posts: 139</span></dd>
+					</dl>
+				</div>
+				<div class="postright">
+					<h3>Re: [SOLVED] Btrfs best practice - M.2 NVMe SSD (2024)</h3>
+					<div class="postmsg">
+						<p>Thank you</p>
+					</div>
+				</div>
+			</div>
+		</div>
+		<div class="inbox">
+			<div class="postfoot clearb">
+				<div class="postfootleft"><p><span>Offline</span></p></div>
+			</div>
+		</div>
+	</div>
+</div>
+
+<div id="p2162668" class="blockpost roweven">
+	<h2><span><span class="conr">#8</span> <a href="viewtopic.php?pid=2162668#p2162668">2024-04-05 12:21:18</a></span></h2>
+	<div class="box">
+		<div class="inbox">
+			<div class="postbody">
+				<div class="postleft">
+					<dl>
+						<dt><strong>vecino</strong></dt>
+						<dd class="usertitle"><strong>Member</strong></dd>
+						<dd class="postavatar"><img src="https://bbs.archlinux.org/img/avatars/147965.png?m=1677481351" width="51" height="51" alt="" /></dd>
+						<dd><span>Registered: 2022-12-10</span></dd>
+						<dd><span>Posts: 139</span></dd>
+					</dl>
+				</div>
+				<div class="postright">
+					<h3>Re: [SOLVED] Btrfs best practice - M.2 NVMe SSD (2024)</h3>
+					<div class="postmsg">
+						<p>The system automatically creates the following subvolumes for me within Btrfs:</p><div class="codebox"><pre><code>ID 258 gen 383799 top level 256 path var/lib/portables
+ID 259 gen 383799 top level 256 path var/lib/machines</code></pre></div><p>I&#039;ve learned that this is normal and systemd creates them. Can I remove them by default? Or set them not to be created at all (within a subvolume)?</p>
+					</div>
+				</div>
+			</div>
+		</div>
+		<div class="inbox">
+			<div class="postfoot clearb">
+				<div class="postfootleft"><p><span>Offline</span></p></div>
+			</div>
+		</div>
+	</div>
+</div>
+
+<div id="p2162719" class="blockpost rowodd">
+	<h2><span><span class="conr">#9</span> <a href="viewtopic.php?pid=2162719#p2162719">2024-04-05 15:21:10</a></span></h2>
+	<div class="box">
+		<div class="inbox">
+			<div class="postbody">
+				<div class="postleft">
+					<dl>
+						<dt><strong>impossibleveins23</strong></dt>
+						<dd class="usertitle"><strong>Member</strong></dd>
+						<dd><span>From: Israel</span></dd>
+						<dd><span>Registered: 2022-06-18</span></dd>
+						<dd><span>Posts: 171</span></dd>
+					</dl>
+				</div>
+				<div class="postright">
+					<h3>Re: [SOLVED] Btrfs best practice - M.2 NVMe SSD (2024)</h3>
+					<div class="postmsg">
+						<p>No idea. I don&#039;t have them. And didn&#039;t know systemd create subvolumes. <br />Probably no need unless you want a separate subvolume for VMs.</p>
+					</div>
+					<div class="postsignature postmsg"><hr /><p>* Good formatted problem description will cause good and quick solution <img src="https://bbs.archlinux.org/img/smilies/smile.png" width="15" height="15" alt="smile" /><br />* Please don&#039;t forget to mark as [SOLVED].</p></div>
+				</div>
+			</div>
+		</div>
+		<div class="inbox">
+			<div class="postfoot clearb">
+				<div class="postfootleft"><p><span>Offline</span></p></div>
+			</div>
+		</div>
+	</div>
+</div>
+
+<div id="p2162759" class="blockpost roweven">
+	<h2><span><span class="conr">#10</span> <a href="viewtopic.php?pid=2162759#p2162759">2024-04-05 18:26:06</a></span></h2>
+	<div class="box">
+		<div class="inbox">
+			<div class="postbody">
+				<div class="postleft">
+					<dl>
+						<dt><strong>vecino</strong></dt>
+						<dd class="usertitle"><strong>Member</strong></dd>
+						<dd class="postavatar"><img src="https://bbs.archlinux.org/img/avatars/147965.png?m=1677481351" width="51" height="51" alt="" /></dd>
+						<dd><span>Registered: 2022-12-10</span></dd>
+						<dd><span>Posts: 139</span></dd>
+					</dl>
+				</div>
+				<div class="postright">
+					<h3>Re: [SOLVED] Btrfs best practice - M.2 NVMe SSD (2024)</h3>
+					<div class="postmsg">
+						<p>I found an explanation here. The subvolumes can simply be deleted. </p><p><a href="https://bbs.archlinux.org/viewtopic.php?id=274289" rel="nofollow">https://bbs.archlinux.org/viewtopic.php?id=274289</a><br /><a href="https://bbs.archlinux.org/viewtopic.php?id=260291" rel="nofollow">https://bbs.archlinux.org/viewtopic.php?id=260291</a></p>
+					</div>
+				</div>
+			</div>
+		</div>
+		<div class="inbox">
+			<div class="postfoot clearb">
+				<div class="postfootleft"><p><span>Offline</span></p></div>
+			</div>
+		</div>
+	</div>
+</div>
+
+<div id="p2162762" class="blockpost rowodd">
+	<h2><span><span class="conr">#11</span> <a href="viewtopic.php?pid=2162762#p2162762">2024-04-05 18:32:39</a></span></h2>
+	<div class="box">
+		<div class="inbox">
+			<div class="postbody">
+				<div class="postleft">
+					<dl>
+						<dt><strong>impossibleveins23</strong></dt>
+						<dd class="usertitle"><strong>Member</strong></dd>
+						<dd><span>From: Israel</span></dd>
+						<dd><span>Registered: 2022-06-18</span></dd>
+						<dd><span>Posts: 171</span></dd>
+					</dl>
+				</div>
+				<div class="postright">
+					<h3>Re: [SOLVED] Btrfs best practice - M.2 NVMe SSD (2024)</h3>
+					<div class="postmsg">
+						<p>I guess I don&#039;t have these subvolumes because I have the dirs according to <a href="https://github.com/systemd/systemd/issues/853" rel="nofollow">this</a>.</p>
+					</div>
+					<div class="postsignature postmsg"><hr /><p>* Good formatted problem description will cause good and quick solution <img src="https://bbs.archlinux.org/img/smilies/smile.png" width="15" height="15" alt="smile" /><br />* Please don&#039;t forget to mark as [SOLVED].</p></div>
+				</div>
+			</div>
+		</div>
+		<div class="inbox">
+			<div class="postfoot clearb">
+				<div class="postfootleft"><p><span>Offline</span></p></div>
+			</div>
+		</div>
+	</div>
+</div>
+
+<div id="p2162791" class="blockpost roweven">
+	<h2><span><span class="conr">#12</span> <a href="viewtopic.php?pid=2162791#p2162791">2024-04-05 20:02:32</a></span></h2>
+	<div class="box">
+		<div class="inbox">
+			<div class="postbody">
+				<div class="postleft">
+					<dl>
+						<dt><strong>vecino</strong></dt>
+						<dd class="usertitle"><strong>Member</strong></dd>
+						<dd class="postavatar"><img src="https://bbs.archlinux.org/img/avatars/147965.png?m=1677481351" width="51" height="51" alt="" /></dd>
+						<dd><span>Registered: 2022-12-10</span></dd>
+						<dd><span>Posts: 139</span></dd>
+					</dl>
+				</div>
+				<div class="postright">
+					<h3>Re: [SOLVED] Btrfs best practice - M.2 NVMe SSD (2024)</h3>
+					<div class="postmsg">
+						<p>Yes! That&#039;s exactly what I&#039;m looking for. Just manually create the folders when installing and then systemd will not create a subfolder for var/lib/portables and var/lib/machines.</p><p>Maybe it will help someone too.</p><div class="codebox"><pre><code>mkdir -p /mnt/{efi,var/log,var/cache/pacman/pkg,root,.snapshots,var/lib/portables,var/lib/machines}</code></pre></div><p>@impossibleveins23 Thanks! <img src="https://bbs.archlinux.org/img/smilies/smile.png" width="15" height="15" alt="smile" /></p>
+						<p class="postedit"><em>Last edited by vecino (2024-04-05 20:03:58)</em></p>
+					</div>
+				</div>
+			</div>
+		</div>
+		<div class="inbox">
+			<div class="postfoot clearb">
+				<div class="postfootleft"><p><span>Offline</span></p></div>
+			</div>
+		</div>
+	</div>
+</div>
+
+<div class="postlinksb">
+	<div class="inbox crumbsplus">
+		<div class="pagepost">
+			<p class="pagelink conl"><span class="pages-label">Pages: </span><strong class="item1">1</strong></p>
+		</div>
+		<ul class="crumbs">
+			<li><a href="index.php">Index</a></li>
+			<li><span>»&#160;</span><a href="viewforum.php?id=23">Newbie Corner</a></li>
+			<li><span>»&#160;</span><strong><a href="viewtopic.php?id=294472">[SOLVED] Btrfs best practice - M.2 NVMe SSD (2024)</a></strong></li>
+		</ul>
+		<div class="clearer"></div>
+	</div>
+</div>
+</div>
+
+<div id="brdfooter" class="block">
+	<h2><span>Board footer</span></h2>
+	<div class="box">
+		<div id="brdfooternav" class="inbox">
+			<div class="conl">
+				<form id="qjump" method="get" action="viewforum.php">
+					<div><label><span>Jump to<br /></span>
+					<select name="id" onchange="window.location=('viewforum.php?id='+this.options[this.selectedIndex].value)">
+						<optgroup label="Technical Issues and Assistance">
+							<option value="23" selected="selected">Newbie Corner</option>
+							<option value="17">Installation</option>
+							<option value="22">Kernel &amp; Hardware</option>
+							<option value="18">Applications &amp; Desktop Environments</option>
+							<option value="31">Laptop Issues</option>
+							<option value="8">Networking, Server, and Protection</option>
+							<option value="32">Multimedia and Games</option>
+							<option value="51">Arch Linux Guided Installer</option>
+							<option value="50">System Administration</option>
+							<option value="35">Other Architectures</option>
+						</optgroup>
+						<optgroup label="Arch-centric">
+							<option value="24">Announcements, Package &amp; Security Advisories</option>
+							<option value="1">Arch Discussion</option>
+							<option value="13">Forum &amp; Wiki discussion</option>
+						</optgroup>
+						<optgroup label="Pacman Upgrades, Packaging &amp; AUR">
+							<option value="44">Pacman &amp; Package Upgrade Issues</option>
+							<option value="49">[testing] Repo Forum</option>
+							<option value="4">Creating &amp; Modifying Packages</option>
+							<option value="38">AUR Issues, Discussion &amp; PKGBUILD Requests</option>
+						</optgroup>
+						<optgroup label="Contributions &amp; Discussion">
+							<option value="20">GNU/Linux Discussion</option>
+							<option value="27">Community Contributions</option>
+							<option value="33">Programming &amp; Scripting</option>
+							<option value="30">Other Languages</option>
+							<option value="47">Artwork and Screenshots</option>
+						</optgroup>
+					</select></label>
+					<input type="submit" value=" Go " accesskey="g" />
+					</div>
+				</form>
+			</div>
+			<div class="conr">
+				<p id="feedlinks"><span class="atom"><a href="extern.php?action=feed&amp;tid=294472&amp;type=atom">Atom topic feed</a></span></p>
+				<p id="poweredby">Powered by <a href="http://fluxbb.org/">FluxBB</a></p>
+			</div>
+			<div class="clearer"></div>
+		</div>
+	</div>
+</div>
+
+
+
+</div>
+<div class="end-box"></div>
+</div>
+
+</body>
+</html>

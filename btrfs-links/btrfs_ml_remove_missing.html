@@ -1,0 +1,324 @@
+<!-- MHonArc v2.6.24 -->
+<!--X-Subject: Re: How to remove missing device on RAID1? -->
+<!--X-From-R13: Ylyr [naan &#60;2oyhrfpNtznvy.pbz> -->
+<!--X-Date: Wed, 21 Oct 2015 12:14:24 &#45;0700 -->
+<!--X-Message-Id: CAM9fjH7WYUZHd4cZYB+cyT&#45;4QBpx8oikJ&#45;N27ymWDrbQfgiW4w@mail.gmail.com -->
+<!--X-Content-Type: text/plain -->
+<!--X-Reference: CAM9fjH6M2yqSiqXbT4DBvHbQGq9Cdw&#45;wzMvsYkztPSsQG=PLqQ@mail.gmail.com -->
+<!--X-Reference: pan$55e2$eeada9c5$c7289131$4f093ca1@cox.net -->
+<!--X-Reference: CAM9fjH6pcwZKWryNrJay_N98wmXWVXXqo3HJuupbJRE3MC9YKQ@mail.gmail.com -->
+<!--X-Reference: BLU436&#45;SMTP11853633E0AF118E66934D6A9390@phx.gbl -->
+<!--X-Reference: BLU437&#45;SMTP66AE7103C3A5471C154844A9390@phx.gbl -->
+<!--X-Head-End-->
+<!doctype html public "-//W3C//DTD HTML//EN">
+<html>
+<head>
+<style>
+<script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+<script>
+     (adsbygoogle = window.adsbygoogle || []).push({
+          google_ad_client: "ca-pub-3422782820843221",
+          enable_page_level_ads: true
+     });
+</script>
+<!--
+ pre {white-space: pre-wrap;}
+-->
+</style>
+<meta name="description" content="Linux BTRFS Storage: Re: How to remove missing device on RAID1?">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
+<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
+<link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png">
+<link rel="manifest" href="/site.webmanifest">
+<title>Re: How to remove missing device on RAID1? &mdash; Linux BTRFS</title>
+<link rel="alternate" type="application/rss+xml" title="Linux BTRFS" href="//feedproxy.google.com/LinuxBtrfs">
+</head>
+<body itemscope itemtype="//schema.org/Article" bgcolor=white vlink=green link=blue>
+<!--X-Body-Begin-->
+<!--X-User-Header-->
+<!--X-User-Header-End-->
+<!--X-TopPNI-->
+<form action="//www.google.com" id="cse-search-box" target="_blank">
+  <div>
+    <input type="hidden" name="cx" value="partner-pub-3422782820843221:9580497365" />
+    <input type="hidden" name="ie" value="UTF-8" />
+    <input type="text" name="q" size="25" />
+    <input type="submit" name="sa" value="Search" />
+  </div>
+</form>
+<script type="text/javascript" src="//www.google.com/coop/cse/brand?form=cse-search-box&amp;lang=en"></script>
+<h1>Re: How to remove missing device on RAID1?</h1>
+[<a href="msg48433.html">Date Prev</a>][<a href="msg48435.html">Date Next</a>][<a href="msg48395.html">Thread Prev</a>][<a href="msg48409.html">Thread Next</a>][<a href="mail103.html#48434">Date Index</a>][<a href="thrd103.html#48434">Thread Index</a>]
+<p>&nbsp;<p>
+<script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+<!-- responsive test for archives -->
+<ins class="adsbygoogle"
+     style="display:block"
+     data-ad-client="ca-pub-3422782820843221"
+     data-ad-slot="6345952567"
+     data-ad-format="auto"></ins>
+<script>
+(adsbygoogle = window.adsbygoogle || []).push({});
+</script>
+
+<!--X-TopPNI-End-->
+<!--X-MsgBody-->
+<!--X-Subject-Header-Begin-->
+<hr>
+<!--X-Subject-Header-End-->
+<!--X-Head-of-Message-->
+<ul>
+<li><em>Subject</em>: Re: How to remove missing device on RAID1?</li>
+<li><em>From</em>: Kyle Manna &lt;<a href="mailto:2bluesc@DOMAIN.HIDDEN">2bluesc@xxxxxxxxx</a>&gt;</li>
+<li><em>Date</em>: Wed, 21 Oct 2015 12:14:10 -0700</li>
+<li><em>Cc</em>: linux-btrfs &lt;<a href="mailto:linux-btrfs@DOMAIN.HIDDEN">linux-btrfs@xxxxxxxxxxxxxxx</a>&gt;</li>
+<li><em>In-reply-to</em>: &lt;<a href="msg48395.html">BLU437-SMTP66AE7103C3A5471C154844A9390@phx.gbl</a>&gt;</li>
+</ul>
+<!--X-Head-of-Message-End-->
+<!--X-Head-Body-Sep-Begin-->
+<hr>
+<div class="content" itemprop="articleBody">
+<!--X-Head-Body-Sep-End-->
+<!--X-Body-of-Message-->
+<pre>Hi Henk,
+
+This trick/hack worked great for me.  After the rebalance was
+complete, a sparse file + loop device, `btrfs replace` and `btrfs
+delete` worked as expected.  Thanks.
+
+In other news, I did hit a btrfs bug 3 times while attempting to
+balance.  I've added my comments @
+<a  rel="nofollow" href="https://bugzilla.kernel.org/show_bug.cgi?id=105681#c14">https://bugzilla.kernel.org/show_bug.cgi?id=105681#c14</a>
+&#x1427;
+
+On Tue, Oct 20, 2015 at 3:46 PM, Henk Slager &lt;hslager@xxxxxxxxxxx&gt; wrote:
+&gt;<i> copy-paste error corrected</i>
+&gt;<i> On Wed, Oct 21, 2015 at 12:40 AM, Henk Slager &lt;hslager@xxxxxxxxxxx&gt; wrote:</i>
+&gt;<i>&gt; I had a similar issue some time ago, around the time kernel 4.1.6 was</i>
+&gt;<i>&gt; just there.</i>
+&gt;<i>&gt; In case you don't want to wait for new disk or decide to just run the</i>
+&gt;<i>&gt; filesystem with 1 disk less or maybe later on replace 1 of the still</i>
+&gt;<i>&gt; healthy disks with a double/bigger sized one and use current/older</i>
+&gt;<i>&gt; kernel+tools, you could do this (assuming the filesystem is not too</i>
+&gt;<i>&gt; full of course):</i>
+&gt;<i>&gt; - mount degraded</i>
+&gt;<i> - btrfs balance start -f -v -sdevid=1 -mdevid=1 -mdevid=1 &lt;mountpoint&gt;</i>
+&gt;<i>&gt;   (where missing disk has devid 1)</i>
+&gt;<i>&gt; After completion the (virtual/missing) device shall be fully unallocated</i>
+&gt;<i>&gt; - create /dev/loopX with sparse file of same size as missing disk on</i>
+&gt;<i>&gt; some other filesystem</i>
+&gt;<i>&gt; - btrfs replace start 1 /dev/loopX &lt;mountpoint&gt;</i>
+&gt;<i>&gt; - remove /dev/loopX from the filesystem</i>
+&gt;<i>&gt; - remount filesystyem without degraded</i>
+&gt;<i>&gt; And remove /dev/loopX</i>
+&gt;<i>&gt;</i>
+&gt;<i>&gt;</i>
+&gt;<i>&gt; On Tue, Oct 20, 2015 at 11:48 PM, Kyle Manna &lt;2bluesc@xxxxxxxxx&gt; wrote:</i>
+&gt;<i>&gt;&gt; Thanks for the follow-up Duncan, that makes sense.  I assumed I was</i>
+&gt;<i>&gt;&gt; doing something wrong.</i>
+&gt;<i>&gt;&gt;</i>
+&gt;<i>&gt;&gt; I downloaded the devel branch of of btrfs-progs and got it running</i>
+&gt;<i>&gt;&gt; before I saw the need for a kernel patch and decided to wait.</i>
+&gt;<i>&gt;&gt;</i>
+&gt;<i>&gt;&gt; For anyone following this later, I needed to use the following to get</i>
+&gt;<i>&gt;&gt; the missing device ID:</i>
+&gt;<i>&gt;&gt;</i>
+&gt;<i>&gt;&gt; btrfs device usage &lt;path&gt;</i>
+&gt;<i>&gt;&gt; &#x1427;</i>
+&gt;<i>&gt;&gt;</i>
+&gt;<i>&gt;&gt; On Tue, Oct 20, 2015 at 1:58 PM, Duncan &lt;1i5t5.duncan@xxxxxxx&gt; wrote:</i>
+&gt;<i>&gt;&gt;&gt; Kyle Manna posted on Tue, 20 Oct 2015 10:24:48 -0700 as excerpted:</i>
+&gt;<i>&gt;&gt;&gt;</i>
+&gt;<i>&gt;&gt;&gt;&gt; Hi all,</i>
+&gt;<i>&gt;&gt;&gt;&gt;</i>
+&gt;<i>&gt;&gt;&gt;&gt; I have a collection of three (was 4) 1-2TB devices with data and</i>
+&gt;<i>&gt;&gt;&gt;&gt; metadata in a RAID1 mirror.  Last night I was struck by the Click of</i>
+&gt;<i>&gt;&gt;&gt;&gt; Death on an old Samsung drive.</i>
+&gt;<i>&gt;&gt;&gt;&gt;</i>
+&gt;<i>&gt;&gt;&gt;&gt; I removed the device from the system, rebooted and mounted the volume</i>
+&gt;<i>&gt;&gt;&gt;&gt; with `-o degraded` and the file system seems fine and usable.  I'm</i>
+&gt;<i>&gt;&gt;&gt;&gt; waiting on a replacement, drive but want to remove the old drive and</i>
+&gt;<i>&gt;&gt;&gt;&gt; re-balance in the meantime.</i>
+&gt;<i>&gt;&gt;&gt;&gt;</i>
+&gt;<i>&gt;&gt;&gt;&gt; How do I remove the missing device?  I tried the `btrfs device delete</i>
+&gt;<i>&gt;&gt;&gt;&gt; missing /mnt` but was greeted with &quot;ERROR: missing is not a block</i>
+&gt;<i>&gt;&gt;&gt;&gt; device&quot;.  A quick look at that btrfs-progs git repo shows that</i>
+&gt;<i>&gt;&gt;&gt;&gt; `stat(&quot;missing&quot;)` is called, which of course fails since missing isn't a</i>
+&gt;<i>&gt;&gt;&gt;&gt; block device.  Nothing other then `btrfs replace` seemed intuitive and</i>
+&gt;<i>&gt;&gt;&gt;&gt; all the docs mention the older command.  What's the move?</i>
+&gt;<i>&gt;&gt;&gt;&gt;</i>
+&gt;<i>&gt;&gt;&gt;&gt; Thanks!</i>
+&gt;<i>&gt;&gt;&gt;&gt; - Kyle</i>
+&gt;<i>&gt;&gt;&gt;&gt;</i>
+&gt;<i>&gt;&gt;&gt;&gt; Versions:</i>
+&gt;<i>&gt;&gt;&gt;&gt; Kernel: 4.2.3-1-ARCH</i>
+&gt;<i>&gt;&gt;&gt;&gt; btrfs-progs: 4.2.2-1 &#x1427;</i>
+&gt;<i>&gt;&gt;&gt;</i>
+&gt;<i>&gt;&gt;&gt; I believe the current advice given here (that you were likely trying to</i>
+&gt;<i>&gt;&gt;&gt; follow, wrapped link)...</i>
+&gt;<i>&gt;&gt;&gt;</i>
+&gt;<i>&gt;&gt;&gt; <a  rel="nofollow" href="https://btrfs.wiki.kernel.org/index.php/">https://btrfs.wiki.kernel.org/index.php/</a></i>
+&gt;<i>&gt;&gt;&gt; Using_Btrfs_with_Multiple_Devices#Replacing_failed_devices</i>
+&gt;<i>&gt;&gt;&gt;</i>
+&gt;<i>&gt;&gt;&gt; ... is dated and no longer works due to code change some time in the past.</i>
+&gt;<i>&gt;&gt;&gt;</i>
+&gt;<i>&gt;&gt;&gt; There's a set of (very) recent patches, to the kernel and userspace both</i>
+&gt;<i>&gt;&gt;&gt; (I just updated userspace and it's in the git devel-branch v4.2.3-49-</i>
+&gt;<i>&gt;&gt;&gt; g4db87a1 I just built, kernelspace, I don't see it in linus-mainline yet,</i>
+&gt;<i>&gt;&gt;&gt; so I'd guess it's in the btrfs-integration patches, to land in the v4.4</i>
+&gt;<i>&gt;&gt;&gt; commit window if not in 4.3 as it's getting late in the cycle for that.</i>
+&gt;<i>&gt;&gt;&gt;</i>
+&gt;<i>&gt;&gt;&gt; btrfs fi show &lt;path&gt;</i>
+&gt;<i>&gt;&gt;&gt;</i>
+&gt;<i>&gt;&gt;&gt; That will list the btrfs component devices together with their devids.</i>
+&gt;<i>&gt;&gt;&gt;</i>
+&gt;<i>&gt;&gt;&gt; Then use the appropriate devid like so:</i>
+&gt;<i>&gt;&gt;&gt;</i>
+&gt;<i>&gt;&gt;&gt; btrfs dev del &lt;devid&gt; &lt;path&gt;</i>
+&gt;<i>&gt;&gt;&gt;</i>
+&gt;<i>&gt;&gt;&gt; The -progs commit is d462081f, by Anand Jain, titled:</i>
+&gt;<i>&gt;&gt;&gt;</i>
+&gt;<i>&gt;&gt;&gt; btrfs-progs: Introduce device delete by devid</i>
+&gt;<i>&gt;&gt;&gt;</i>
+&gt;<i>&gt;&gt;&gt; According to it, the required kernel commit (title only listed) is</i>
+&gt;<i>&gt;&gt;&gt; similar:</i>
+&gt;<i>&gt;&gt;&gt;</i>
+&gt;<i>&gt;&gt;&gt; Btrfs: Introduce device delete by devid</i>
+&gt;<i>&gt;&gt;&gt;</i>
+&gt;<i>&gt;&gt;&gt; You can probably find them on-list if you wish to cherry-pick them into a</i>
+&gt;<i>&gt;&gt;&gt; current version.</i>
+&gt;<i>&gt;&gt;&gt;</i>
+&gt;<i>&gt;&gt;&gt; --</i>
+&gt;<i>&gt;&gt;&gt; Duncan - List replies preferred.   No HTML msgs.</i>
+&gt;<i>&gt;&gt;&gt; &quot;Every nonfree program has a lord, a master --</i>
+&gt;<i>&gt;&gt;&gt; and if you use the program, he is your master.&quot;  Richard Stallman</i>
+&gt;<i>&gt;&gt;&gt;</i>
+&gt;<i>&gt;&gt;&gt; --</i>
+&gt;<i>&gt;&gt;&gt; To unsubscribe from this list: send the line &quot;unsubscribe linux-btrfs&quot; in</i>
+&gt;<i>&gt;&gt;&gt; the body of a message to majordomo@xxxxxxxxxxxxxxx</i>
+&gt;<i>&gt;&gt;&gt; More majordomo info at  <a  rel="nofollow" href="http://vger.kernel.org/majordomo-info.html">http://vger.kernel.org/majordomo-info.html</a></i>
+&gt;<i>&gt;&gt; --</i>
+&gt;<i>&gt;&gt; To unsubscribe from this list: send the line &quot;unsubscribe linux-btrfs&quot; in</i>
+&gt;<i>&gt;&gt; the body of a message to majordomo@xxxxxxxxxxxxxxx</i>
+&gt;<i>&gt;&gt; More majordomo info at  <a  rel="nofollow" href="http://vger.kernel.org/majordomo-info.html">http://vger.kernel.org/majordomo-info.html</a></i>
+&gt;<i>&gt; --</i>
+&gt;<i>&gt; To unsubscribe from this list: send the line &quot;unsubscribe linux-btrfs&quot; in</i>
+&gt;<i>&gt; the body of a message to majordomo@xxxxxxxxxxxxxxx</i>
+&gt;<i>&gt; More majordomo info at  <a  rel="nofollow" href="http://vger.kernel.org/majordomo-info.html">http://vger.kernel.org/majordomo-info.html</a></i>
+&gt;<i> --</i>
+&gt;<i> To unsubscribe from this list: send the line &quot;unsubscribe linux-btrfs&quot; in</i>
+&gt;<i> the body of a message to majordomo@xxxxxxxxxxxxxxx</i>
+&gt;<i> More majordomo info at  <a  rel="nofollow" href="http://vger.kernel.org/majordomo-info.html">http://vger.kernel.org/majordomo-info.html</a></i>
+--
+To unsubscribe from this list: send the line &quot;unsubscribe linux-btrfs&quot; in
+the body of a message to majordomo@xxxxxxxxxxxxxxx
+More majordomo info at  <a  rel="nofollow" href="http://vger.kernel.org/majordomo-info.html">http://vger.kernel.org/majordomo-info.html</a>
+
+
+
+</pre>
+<!--X-Body-of-Message-End-->
+<!--X-MsgBody-End-->
+<!--X-Follow-Ups-->
+</div>
+<hr>
+<!--X-Follow-Ups-End-->
+<!--X-References-->
+<ul><li><strong>References</strong>:
+<ul>
+<li><strong><a name="48383" href="msg48383.html">How to remove missing device on RAID1?</a></strong>
+<ul><li><em>From:</em> Kyle Manna</li></ul></li>
+<li><strong><a name="48390" href="msg48390.html">Re: How to remove missing device on RAID1?</a></strong>
+<ul><li><em>From:</em> Duncan</li></ul></li>
+<li><strong><a name="48393" href="msg48393.html">Re: How to remove missing device on RAID1?</a></strong>
+<ul><li><em>From:</em> Kyle Manna</li></ul></li>
+<li><strong><a name="48394" href="msg48394.html">Re: How to remove missing device on RAID1?</a></strong>
+<ul><li><em>From:</em> Henk Slager</li></ul></li>
+<li><strong><a name="48395" href="msg48395.html">Re: How to remove missing device on RAID1?</a></strong>
+<ul><li><em>From:</em> Henk Slager</li></ul></li>
+</ul></li></ul>
+<!--X-References-End-->
+<!--X-BotPNI-->
+<ul>
+<li>Prev by Date:
+<strong><a href="msg48433.html">Re: Btrfs/RAID5 became unmountable after SATA cable fault</a></strong>
+</li>
+<li>Next by Date:
+<strong><a href="msg48435.html">btrfs-balance causes system-freeze on full disk</a></strong>
+</li>
+<li>Previous by thread:
+<strong><a href="msg48395.html">Re: How to remove missing device on RAID1?</a></strong>
+</li>
+<li>Next by thread:
+<strong><a href="msg48409.html">Re: How to remove missing device on RAID1?</a></strong>
+</li>
+<li>Index(es):
+<ul>
+<li><a href="mail103.html#48434"><strong>Date</strong></a></li>
+<li><a href="thrd103.html#48434"><strong>Thread</strong></a></li>
+</ul>
+</li>
+</ul>
+
+<!--X-BotPNI-End-->
+<!--X-User-Footer-->
+<center>
+<font size=-1>
+<a href=/lists/>[Index&nbsp;of&nbsp;Archives]</a>
+&nbsp;
+&nbsp;
+<a href=/lists/linux-fsdevel/>[Linux&nbsp;Filesystem&nbsp;Development]</a>
+&nbsp;
+&nbsp;
+<a href=/lists/linux-nfs/>[Linux&nbsp;NFS]</a>
+&nbsp;
+&nbsp;
+<a href=/lists/linux-nilfs/>[Linux&nbsp;NILFS]</a>
+&nbsp;
+&nbsp;
+<a href=/lists/linux-usb/>[Linux&nbsp;USB&nbsp;Devel]</a>
+&nbsp;
+&nbsp;
+<a href=/lists/linux-audio-users/>[Linux&nbsp;Audio&nbsp;Users]</a>
+&nbsp;
+&nbsp;
+<a href=https://yosemitenews.info/>[Yosemite&nbsp;News]</a>
+&nbsp;
+&nbsp;
+<a href=/lists/kernel/>[Linux&nbsp;Kernel]</a>
+&nbsp;
+&nbsp;
+<a href=/lists/linux-scsi/>[Linux&nbsp;SCSI]</a>
+</font>
+</center>
+<hr>
+<p>
+<div>
+<script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+<ins class="adsbygoogle"
+     style="display:block"
+     data-ad-format="autorelaxed"
+     data-ad-client="ca-pub-3422782820843221"
+     data-ad-slot="1424524564"></ins>
+<script>
+     (adsbygoogle = window.adsbygoogle || []).push({});
+</script>
+</div>
+<table width=100%>
+<tr>
+<td align=left>&nbsp;</td>
+<td align=right><a href=/linux><img src=/button_01.gif border=0 alt="Powered by Linux"></a></td>
+</tr>
+</table>
+<!--X-User-Footer-End-->
+<script>
+  (function(i,s,o,g,r,a,m){i['GoogleAnalyticsObject']=r;i[r]=i[r]||function(){
+  (i[r].q=i[r].q||[]).push(arguments)},i[r].l=1*new Date();a=s.createElement(o),
+  m=s.getElementsByTagName(o)[0];a.async=1;a.src=g;m.parentNode.insertBefore(a,m)
+  })(window,document,'script','//www.google-analytics.com/analytics.js','ga');
+  ga('create', 'UA-760190-1', 'auto');
+  ga('send', 'pageview');
+</script>
+</body>
+</html>

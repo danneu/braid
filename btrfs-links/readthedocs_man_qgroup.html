@@ -1,0 +1,478 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="./">
+<head>
+  <meta charset="utf-8" />
+  <meta name="readthedocs-addons-api-version" content="1"><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>btrfs-qgroup(8) &mdash; BTRFS  documentation</title>
+      <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="_static/css/theme.css?v=9edc463e" />
+
+  
+      <script src="_static/jquery.js?v=5d32c60e"></script>
+      <script src="_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="_static/documentation_options.js?v=8a448e45"></script>
+      <script src="_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="_static/js/theme.js"></script>
+    <script src="_static/js/versions.js"></script>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="next" title="btrfs-quota(8)" href="btrfs-quota.html" />
+    <link rel="prev" title="btrfs-property(8)" href="btrfs-property.html" />
+    <link href="_static/style.css" rel="stylesheet" type="text/css">
+
+<script async type="text/javascript" src="/_/static/javascript/readthedocs-addons.js"></script><meta name="readthedocs-project-slug" content="btrfs" /><meta name="readthedocs-version-slug" content="latest" /><meta name="readthedocs-resolver-filename" content="/btrfs-qgroup.html" /><meta name="readthedocs-http-status" content="200" /></head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="index.html" class="icon icon-home">
+            BTRFS
+          </a>
+              <div class="switch-menus">
+                <div class="version-switch"></div>
+                <div class="language-switch"></div>
+              </div>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Overview</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="Introduction.html">Introduction</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Status.html">Status</a></li>
+<li class="toctree-l1 current"><a class="reference internal" href="man-index.html">Manual pages</a><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="btrfs.html">btrfs(8)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="btrfs-man5.html">btrfs(5)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="btrfs-balance.html">btrfs-balance(8)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="btrfs-check.html">btrfs-check(8)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="btrfs-convert.html">btrfs-convert(8)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="btrfs-device.html">btrfs-device(8)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="btrfs-filesystem.html">btrfs-filesystem(8)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="btrfs-find-root.html">btrfs-find-root(8)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="btrfs-image.html">btrfs-image(8)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="btrfs-inspect-internal.html">btrfs-inspect-internal(8)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="btrfs-ioctl.html">btrfs-ioctl(2)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="btrfs-map-logical.html">btrfs-map-logical(8)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="btrfs-property.html">btrfs-property(8)</a></li>
+<li class="toctree-l2 current"><a class="current reference internal" href="#">btrfs-qgroup(8)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#synopsis">SYNOPSIS</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#description">DESCRIPTION</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#qgroup">QGROUP</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#subcommand">SUBCOMMAND</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#special-paths">SPECIAL PATHS</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#quota-rescan">QUOTA RESCAN</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#examples">EXAMPLES</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#make-a-parent-group-that-has-two-quota-group-children">Make a parent group that has two quota group children</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="#exit-status">EXIT STATUS</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#availability">AVAILABILITY</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#see-also">SEE ALSO</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="btrfs-quota.html">btrfs-quota(8)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="btrfs-receive.html">btrfs-receive(8)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="btrfs-replace.html">btrfs-replace(8)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="btrfs-rescue.html">btrfs-rescue(8)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="btrfs-restore.html">btrfs-restore(8)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="btrfs-scrub.html">btrfs-scrub(8)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="btrfs-select-super.html">btrfs-select-super(8)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="btrfs-send.html">btrfs-send(8)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="btrfs-subvolume.html">btrfs-subvolume(8)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="btrfstune.html">btrfstune(8)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="fsck.btrfs.html">fsck.btrfs(8)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="mkfs.btrfs.html">mkfs.btrfs(8)</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="Administration.html">Administration</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Hardware.html">Hardware considerations</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Feature-by-version.html">Changes (feature/version)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Kernel-by-version.html">Changes (kernel/version)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="CHANGES.html">Changes (btrfs-progs)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Contributors.html">Contributors</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Glossary.html">Glossary</a></li>
+<li class="toctree-l1"><a class="reference internal" href="INSTALL.html">Installation instructions</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Source-repositories.html">Source repositories</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Interoperability.html">Interoperability</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Features</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="Common-features.html">Common Linux features</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Custom-ioctls.html">Custom ioctls</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Auto-repair.html">Auto-repair on read</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Balance.html">Balance</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Compression.html">Compression</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Checksumming.html">Checksumming</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Convert.html">Convert</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Deduplication.html">Deduplication</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Defragmentation.html">Defragmentation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Inline-files.html">Inline files</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Qgroups.html">Quota groups</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Reflink.html">Reflink</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Resize.html">Resize</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Scrub.html">Scrub</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Seeding-device.html">Seeding device</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Send-receive.html">Send/receive</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Subpage.html">Subpage support</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Subvolumes.html">Subvolumes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Swapfile.html">Swapfile</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Tree-checker.html">Tree checker</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Trim.html">Trim/discard</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Volume-management.html">Volume management</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Zoned-mode.html">Zoned mode</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Developer documentation</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="dev/Development-notes.html">Development notes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/Developer-s-FAQ.html">Developer’s FAQ</a></li>
+<li class="toctree-l1"><a class="reference internal" href="DocConventions.html">Conventions and style for documentation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/Experimental.html">Experimental features</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/dev-btrfs-design.html">Btrfs design</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/dev-btrees.html">Btrees</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/On-disk-format.html">On-disk Format</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/dev-send-stream.html">Send stream format</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/dev-json.html">JSON output</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/dev-internal-apis.html">Internal APIs</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/ReleaseChecklist.html">Release checklist</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/GithubReviewWorkflow.html">Pull request review workflow</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/CmdLineConventions.html">Command line, formatting, UI guidelines</a></li>
+<li class="toctree-l1"><a class="reference internal" href="btrfs-ioctl.html">btrfs-ioctl(2)</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">TODO</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="trouble-index.html">Troubleshooting pages</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="index.html">BTRFS</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="man-index.html">Manual pages</a></li>
+      <li class="breadcrumb-item active">btrfs-qgroup(8)</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="_sources/btrfs-qgroup.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="btrfs-qgroup-8">
+<h1>btrfs-qgroup(8)<a class="headerlink" href="#btrfs-qgroup-8" title="Link to this heading"></a></h1>
+<section id="synopsis">
+<h2>SYNOPSIS<a class="headerlink" href="#synopsis" title="Link to this heading"></a></h2>
+<p><strong>btrfs qgroup</strong> &lt;subcommand&gt; &lt;args&gt;</p>
+</section>
+<section id="description">
+<h2>DESCRIPTION<a class="headerlink" href="#description" title="Link to this heading"></a></h2>
+<p><strong>btrfs qgroup</strong> is used to control quota group (qgroup) of a btrfs filesystem.</p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>To use qgroup you need to enable quota first using <strong class="command">btrfs quota enable</strong>
+command, see <a class="reference internal" href="btrfs-quota.html"><span class="doc">btrfs-quota(8)</span></a>.</p>
+</div>
+</section>
+<section id="qgroup">
+<h2>QGROUP<a class="headerlink" href="#qgroup" title="Link to this heading"></a></h2>
+<p>Quota groups or qgroup in btrfs make a tree hierarchy, the leaf qgroups are
+attached to subvolumes. The size limits are set per qgroup and apply when any
+limit is reached in tree that contains a given subvolume.</p>
+<p>The limits are separated between <em>shared</em> and <em>exclusive</em> and reflect the extent
+ownership. For example a fresh snapshot shares almost all the blocks with the
+original subvolume, new writes to either subvolume will raise towards the
+exclusive limit. Extent sharing is also result of <em>reflink</em> or <em>deduplication</em>.</p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>Qgroup limit only works when qgroup is in a consistent state.
+If some workload marks qgroup inconsistent (like assigning a qgroup to another
+qgroup), the limit will no longer work until the inconsistent flag is cleared
+by <strong class="command">btrfs quota rescan</strong>.</p>
+</div>
+<p>The qgroup identifiers conform to <em>level/id</em> where level 0 is reserved to the
+qgroups associated with subvolumes. Such qgroups are created automatically.</p>
+<p>The qgroup hierarchy is built by commands <strong class="command">btrfs qgroup create</strong> and
+<strong class="command">btrfs qgroup assign</strong>.</p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>If the qgroup of a subvolume is destroyed, quota related to the subvolume
+will not be functional until qgroup <em>0/&lt;subvolume id&gt;</em> is created again.</p>
+</div>
+</section>
+<section id="subcommand">
+<h2>SUBCOMMAND<a class="headerlink" href="#subcommand" title="Link to this heading"></a></h2>
+<dl>
+<dt>assign [options] &lt;src&gt; &lt;dst&gt; &lt;path&gt;</dt><dd><p>Assign qgroup <em>src</em> as the child qgroup of <em>dst</em> in the btrfs filesystem
+identified by <em>path</em>.</p>
+<p><code class="docutils literal notranslate"><span class="pre">Options</span></code></p>
+<dl class="option-list">
+<dt><kbd><span class="option">--rescan</span></kbd></dt>
+<dd><p>(default since: 4.19) Automatically schedule quota rescan if the new qgroup
+assignment would lead to quota inconsistency. See <em>QUOTA RESCAN</em> for more
+information.</p>
+</dd>
+<dt><kbd><span class="option">--no-rescan</span></kbd></dt>
+<dd><p>Explicitly ask not to do a rescan, even if the assignment will make the quotas
+inconsistent. This may be useful for repeated calls where the rescan would add
+unnecessary overhead.</p>
+</dd>
+</dl>
+</dd>
+<dt>create &lt;qgroupid&gt; &lt;path&gt;</dt><dd><p>Create a subvolume quota group.</p>
+<p>For the <em>0/&lt;subvolume id&gt;</em> qgroup, a qgroup can be created even before the
+subvolume is created.</p>
+</dd>
+<dt>destroy &lt;qgroupid&gt; &lt;path&gt;</dt><dd><p>Destroy a qgroup.</p>
+<p>If a qgroup is not isolated, meaning it is a parent or child qgroup, then it
+can only be destroyed after the relationship is removed.</p>
+</dd>
+<dt>clear-stale &lt;path&gt;</dt><dd><p>Clear all stale qgroups whose subvolume does not exist anymore, this is the
+level 0 qgroup like <em>0/subvolid</em>. Higher level qgroups are not deleted even
+if they don’t have any child qgroups as they are always created by the
+user and their deletion should be verified first.</p>
+</dd>
+<dt>limit [options] &lt;size&gt;|none [&lt;qgroupid&gt;] &lt;path&gt;</dt><dd><p>Limit the size of a qgroup to <em>size</em> or no limit in the btrfs filesystem
+identified by <em>path</em>.</p>
+<p>If <em>qgroupid</em> is not given, qgroup of the subvolume identified by <em>path</em>
+is used if possible.</p>
+<p><code class="docutils literal notranslate"><span class="pre">Options</span></code></p>
+<dl class="option-list">
+<dt><kbd><span class="option">-c</span></kbd></dt>
+<dd><p>limit amount of data after compression. This is the default, it is currently not
+possible to turn off this option.</p>
+</dd>
+<dt><kbd><span class="option">-e</span></kbd></dt>
+<dd><p>limit space exclusively assigned to this qgroup.</p>
+</dd>
+</dl>
+</dd>
+<dt>remove &lt;src&gt; &lt;dst&gt; &lt;path&gt;</dt><dd><p>Remove the relationship between child qgroup <em>src</em> and parent qgroup <em>dst</em> in
+the btrfs filesystem identified by <em>path</em>.</p>
+<p><code class="docutils literal notranslate"><span class="pre">Options</span></code></p>
+<dl class="option-list">
+<dt><kbd><span class="option">--rescan</span></kbd></dt>
+<dd><p>(default since: 4.19) Automatically schedule quota rescan if the removed qgroup
+relation would lead to quota inconsistency. See <em>QUOTA RESCAN</em> for more
+information.</p>
+</dd>
+<dt><kbd><span class="option">--no-rescan</span></kbd></dt>
+<dd><p>Explicitly ask not to do a rescan, even if the removal will make the quotas
+inconsistent. This may be useful for repeated calls where the rescan would add
+unnecessary overhead.</p>
+</dd>
+</dl>
+</dd>
+<dt>show [options] &lt;path&gt;</dt><dd><p>Show all qgroups in the btrfs filesystem identified by &lt;path&gt;.</p>
+<p><code class="docutils literal notranslate"><span class="pre">Options</span></code></p>
+<dl class="option-list">
+<dt><kbd><span class="option">-p</span></kbd></dt>
+<dd><p>print parent qgroup id.</p>
+</dd>
+<dt><kbd><span class="option">-c</span></kbd></dt>
+<dd><p>print child qgroup id.</p>
+</dd>
+<dt><kbd><span class="option">-r</span></kbd></dt>
+<dd><p>print limit of referenced size of qgroup.</p>
+</dd>
+<dt><kbd><span class="option">-e</span></kbd></dt>
+<dd><p>print limit of exclusive size of qgroup.</p>
+</dd>
+<dt><kbd><span class="option">-F</span></kbd></dt>
+<dd><p>list all qgroups which impact the given path(include ancestral qgroups)</p>
+</dd>
+<dt><kbd><span class="option">-f</span></kbd></dt>
+<dd><p>list all qgroups which impact the given path(exclude ancestral qgroups)</p>
+</dd>
+<dt><kbd><span class="option">--raw</span></kbd></dt>
+<dd><p>raw numbers in bytes, without the <em>B</em> suffix.</p>
+</dd>
+<dt><kbd><span class="option">--human-readable</span></kbd></dt>
+<dd><p>print human friendly numbers, base 1024, this is the default</p>
+</dd>
+<dt><kbd><span class="option">--iec</span></kbd></dt>
+<dd><p>select the 1024 base for the following options, according to the IEC standard.</p>
+</dd>
+<dt><kbd><span class="option">--si</span></kbd></dt>
+<dd><p>select the 1000 base for the following options, according to the SI standard.</p>
+</dd>
+<dt><kbd><span class="option">--kbytes</span></kbd></dt>
+<dd><p>show sizes in KiB, or kB with --si.</p>
+</dd>
+<dt><kbd><span class="option">--mbytes</span></kbd></dt>
+<dd><p>show sizes in MiB, or MB with --si.</p>
+</dd>
+<dt><kbd><span class="option">--gbytes</span></kbd></dt>
+<dd><p>show sizes in GiB, or GB with --si.</p>
+</dd>
+<dt><kbd><span class="option">--tbytes</span></kbd></dt>
+<dd><p>show sizes in TiB, or TB with --si.</p>
+</dd>
+</dl>
+<dl>
+<dt>--sort=[+/-]&lt;attr&gt;[,[+/-]&lt;attr&gt;]…</dt><dd><p>list qgroups in order of &lt;attr&gt;.</p>
+<p>&lt;attr&gt; can be one or more of qgroupid,rfer,excl,max_rfer,max_excl.</p>
+<p>Prefix <em>+</em> means ascending order and <em>-</em> means descending order of <em>attr</em>.
+If no prefix is given, use ascending order by default.</p>
+<p>If multiple <em>attr</em> values are given, use comma to separate.</p>
+</dd>
+</dl>
+<dl class="option-list">
+<dt><kbd><span class="option">--sync</span></kbd></dt>
+<dd><p>To retrieve information after updating the state of qgroups,
+force sync of the filesystem identified by <em>path</em> before getting information.</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</section>
+<section id="special-paths">
+<h2>SPECIAL PATHS<a class="headerlink" href="#special-paths" title="Link to this heading"></a></h2>
+<p>For <strong class="command">btrfs qgroup show</strong> command, the <code class="file docutils literal notranslate"><span class="pre">path</span></code> column can print
+special values:</p>
+<dl class="simple">
+<dt><cite>&lt;toplevel&gt;</cite></dt><dd><p>The toplevel subvolume.</p>
+</dd>
+<dt><cite>&lt;under deletion&gt;</cite></dt><dd><p>The subvolume has been deleted (its directory removed), but the
+subvolume metadata not not yet fully cleaned.</p>
+</dd>
+<dt><cite>&lt;squota space holder&gt;</cite></dt><dd><p>For <em>simple quota</em> mode only.
+By its design, a fully deleted subvolume may still have accounting on
+it, so even if the subvolume is gone, the numbers are still here for
+future accounting.</p>
+</dd>
+<dt><cite>&lt;stale&gt;</cite></dt><dd><p>The qgroup has no corresponding subvolume anymore, and the qgroup
+can be cleaned up under most cases.
+The only exception is that, if the qgroup numbers are inconsistent and
+the qgroup numbers are not all zeros, some older kernels may refuse to
+delete such qgroups until a full rescan.</p>
+</dd>
+</dl>
+</section>
+<section id="quota-rescan">
+<h2>QUOTA RESCAN<a class="headerlink" href="#quota-rescan" title="Link to this heading"></a></h2>
+<p>The rescan reads all extent sharing metadata and updates the respective qgroups
+accordingly.</p>
+<p>The information consists of bytes owned exclusively (<em>excl</em>) or shared/referenced
+to (<em>rfer</em>). There’s no explicit information about which extents are shared or
+owned exclusively.  This means when qgroup relationship changes, extent owners
+change and qgroup numbers are no longer consistent unless we do a full rescan.</p>
+<p>However there are cases where we can avoid a full rescan, if a subvolume whose
+<em>rfer</em> number equals its <em>excl</em> number, which means all bytes are exclusively
+owned, then assigning/removing this subvolume only needs to add/subtract <em>rfer</em>
+number from its parent qgroup. This can speed up the rescan.</p>
+</section>
+<section id="examples">
+<h2>EXAMPLES<a class="headerlink" href="#examples" title="Link to this heading"></a></h2>
+<section id="make-a-parent-group-that-has-two-quota-group-children">
+<h3>Make a parent group that has two quota group children<a class="headerlink" href="#make-a-parent-group-that-has-two-quota-group-children" title="Link to this heading"></a></h3>
+<p>Given the following filesystem mounted at <code class="file docutils literal notranslate"><span class="pre">/mnt/my-vault</span></code></p>
+<div class="highlight-none notranslate"><div class="highlight"><pre><span></span>Label: none  uuid: 60d2ab3b-941a-4f22-8d1a-315f329797b2
+       Total devices 1 FS bytes used 128.00KiB
+       devid    1 size 5.00GiB used 536.00MiB path /dev/vdb
+</pre></div>
+</div>
+<p>Enable quota and create subvolumes.  Check subvolume ids.</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>$<span class="w"> </span><span class="nb">cd</span><span class="w"> </span>/mnt/my-vault
+$<span class="w"> </span>btrfs<span class="w"> </span>quota<span class="w"> </span><span class="nb">enable</span><span class="w"> </span>.
+$<span class="w"> </span>btrfs<span class="w"> </span>subvolume<span class="w"> </span>create<span class="w"> </span>a
+$<span class="w"> </span>btrfs<span class="w"> </span>subvolume<span class="w"> </span>create<span class="w"> </span>b
+$<span class="w"> </span>btrfs<span class="w"> </span>subvolume<span class="w"> </span>list<span class="w"> </span>.
+
+ID<span class="w"> </span><span class="m">261</span><span class="w"> </span>gen<span class="w"> </span><span class="m">61</span><span class="w"> </span>top<span class="w"> </span>level<span class="w"> </span><span class="m">5</span><span class="w"> </span>path<span class="w"> </span>a
+ID<span class="w"> </span><span class="m">262</span><span class="w"> </span>gen<span class="w"> </span><span class="m">62</span><span class="w"> </span>top<span class="w"> </span>level<span class="w"> </span><span class="m">5</span><span class="w"> </span>path<span class="w"> </span>b
+</pre></div>
+</div>
+<p>Create qgroup and set limit to 10MiB.</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>$<span class="w"> </span>btrfs<span class="w"> </span>qgroup<span class="w"> </span>create<span class="w"> </span><span class="m">1</span>/100<span class="w"> </span>.
+$<span class="w"> </span>btrfs<span class="w"> </span>qgroup<span class="w"> </span>limit<span class="w"> </span>10M<span class="w"> </span><span class="m">1</span>/100<span class="w"> </span>.
+$<span class="w"> </span>btrfs<span class="w"> </span>qgroup<span class="w"> </span>assign<span class="w"> </span><span class="m">0</span>/261<span class="w"> </span><span class="m">1</span>/100<span class="w"> </span>.
+$<span class="w"> </span>btrfs<span class="w"> </span>qgroup<span class="w"> </span>assign<span class="w"> </span><span class="m">0</span>/262<span class="w"> </span><span class="m">1</span>/100<span class="w"> </span>.
+</pre></div>
+</div>
+<p>And check qgroups.</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>$<span class="w"> </span>btrfs<span class="w"> </span>qgroup<span class="w"> </span>show<span class="w"> </span>.
+
+qgroupid<span class="w">         </span>rfer<span class="w">         </span>excl
+--------<span class="w">         </span>----<span class="w">         </span>----
+<span class="m">0</span>/5<span class="w">          </span><span class="m">16</span>.00KiB<span class="w">     </span><span class="m">16</span>.00KiB
+<span class="m">0</span>/261<span class="w">        </span><span class="m">16</span>.00KiB<span class="w">     </span><span class="m">16</span>.00KiB
+<span class="m">0</span>/262<span class="w">        </span><span class="m">16</span>.00KiB<span class="w">     </span><span class="m">16</span>.00KiB
+<span class="m">1</span>/100<span class="w">        </span><span class="m">32</span>.00KiB<span class="w">     </span><span class="m">32</span>.00KiB
+</pre></div>
+</div>
+</section>
+</section>
+<section id="exit-status">
+<h2>EXIT STATUS<a class="headerlink" href="#exit-status" title="Link to this heading"></a></h2>
+<p><strong>btrfs qgroup</strong> returns a zero exit status if it succeeds. Non zero is
+returned in case of failure.</p>
+</section>
+<section id="availability">
+<h2>AVAILABILITY<a class="headerlink" href="#availability" title="Link to this heading"></a></h2>
+<p><strong>btrfs</strong> is part of btrfs-progs.  Please refer to the documentation at
+<a class="reference external" href="https://btrfs.readthedocs.io">https://btrfs.readthedocs.io</a>.</p>
+</section>
+<section id="see-also">
+<h2>SEE ALSO<a class="headerlink" href="#see-also" title="Link to this heading"></a></h2>
+<p><a class="reference internal" href="btrfs-quota.html"><span class="doc">btrfs-quota(8)</span></a>,
+<a class="reference internal" href="btrfs-subvolume.html"><span class="doc">btrfs-subvolume(8)</span></a>,
+<a class="reference internal" href="mkfs.btrfs.html"><span class="doc">mkfs.btrfs(8)</span></a></p>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="btrfs-property.html" class="btn btn-neutral float-left" title="btrfs-property(8)" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="btrfs-quota.html" class="btn btn-neutral float-right" title="btrfs-quota(8)" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright .</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

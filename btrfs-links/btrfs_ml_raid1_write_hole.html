@@ -1,0 +1,514 @@
+<!-- MHonArc v2.6.24 -->
+<!--X-Subject: Re: raid56 write hole -->
+<!--X-From-R13: Dbyyb eb &#60;ebyybqebvqNtznvy.pbz> -->
+<!--X-Date: Fri, 1 May 2020 06:58:16 &#45;0700 -->
+<!--X-Message-Id: CAAhjAp0xitJN0S7T9DPEO84ELAYyWi1&#45;k7ZRZSd1vddT4ozbTA@mail.gmail.com -->
+<!--X-Content-Type: text/plain -->
+<!--X-Reference: CAAhjAp1zrjrizrswo3BF1&#45;cTXArpZ5XFUPbd&#45;OR_Nu1N05pdSQ@mail.gmail.com -->
+<!--X-Reference: 20200501023029.GD10769@hungrycats.org -->
+<!--X-Head-End-->
+<!doctype html public "-//W3C//DTD HTML//EN">
+<html>
+<head>
+<style>
+<script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+<script>
+     (adsbygoogle = window.adsbygoogle || []).push({
+          google_ad_client: "ca-pub-3422782820843221",
+          enable_page_level_ads: true
+     });
+</script>
+<!--
+ pre {white-space: pre-wrap;}
+-->
+</style>
+<meta name="description" content="Linux BTRFS Storage: Re: raid56 write hole">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
+<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
+<link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png">
+<link rel="manifest" href="/site.webmanifest">
+<title>Re: raid56 write hole &mdash; Linux BTRFS</title>
+<link rel="alternate" type="application/rss+xml" title="Linux BTRFS" href="//feedproxy.google.com/LinuxBtrfs">
+</head>
+<body itemscope itemtype="//schema.org/Article" bgcolor=white vlink=green link=blue>
+<!--X-Body-Begin-->
+<!--X-User-Header-->
+<!--X-User-Header-End-->
+<!--X-TopPNI-->
+<form action="//www.google.com" id="cse-search-box" target="_blank">
+  <div>
+    <input type="hidden" name="cx" value="partner-pub-3422782820843221:9580497365" />
+    <input type="hidden" name="ie" value="UTF-8" />
+    <input type="text" name="q" size="25" />
+    <input type="submit" name="sa" value="Search" />
+  </div>
+</form>
+<script type="text/javascript" src="//www.google.com/coop/cse/brand?form=cse-search-box&amp;lang=en"></script>
+<h1>Re: raid56 write hole</h1>
+[<a href="msg100950.html">Date Prev</a>][<a href="msg100952.html">Date Next</a>][<a href="msg100923.html">Thread Prev</a>][<a href="msg100968.html">Thread Next</a>][<a href="mail24.html#100951">Date Index</a>][<a href="thrd24.html#100951">Thread Index</a>]
+<p>&nbsp;<p>
+<script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+<!-- responsive test for archives -->
+<ins class="adsbygoogle"
+     style="display:block"
+     data-ad-client="ca-pub-3422782820843221"
+     data-ad-slot="6345952567"
+     data-ad-format="auto"></ins>
+<script>
+(adsbygoogle = window.adsbygoogle || []).push({});
+</script>
+
+<!--X-TopPNI-End-->
+<!--X-MsgBody-->
+<!--X-Subject-Header-Begin-->
+<hr>
+<!--X-Subject-Header-End-->
+<!--X-Head-of-Message-->
+<ul>
+<li><em>Subject</em>: Re: raid56 write hole</li>
+<li><em>From</em>: Rollo ro &lt;rollodroid@xxxxxxxxx&gt;</li>
+<li><em>Date</em>: Fri, 1 May 2020 15:57:20 +0200</li>
+<li><em>Cc</em>: linux-btrfs@xxxxxxxxxxxxxxx</li>
+<li><em>In-reply-to</em>: &lt;<a href="msg100923.html">20200501023029.GD10769@hungrycats.org</a>&gt;</li>
+<li><em>References</em>: &lt;<a href="msg100898.html">CAAhjAp1zrjrizrswo3BF1-cTXArpZ5XFUPbd-OR_Nu1N05pdSQ@mail.gmail.com</a>&gt; &lt;<a href="msg100923.html">20200501023029.GD10769@hungrycats.org</a>&gt;</li>
+</ul>
+<!--X-Head-of-Message-End-->
+<!--X-Head-Body-Sep-Begin-->
+<hr>
+<div class="content" itemprop="articleBody">
+<!--X-Head-Body-Sep-End-->
+<!--X-Body-of-Message-->
+<pre>Am Fr., 1. Mai 2020 um 04:30 Uhr schrieb Zygo Blaxell
+&lt;ce3g8jdj@xxxxxxxxxxxxxxxxxxxxx&gt;:
+&gt;<i></i>
+&gt;<i> On Thu, Apr 30, 2020 at 07:00:43PM +0200, Rollo ro wrote:</i>
+&gt;<i> &gt; Hi, I read about the write hole and want to share my thoughts. I'm not</i>
+&gt;<i> &gt; sure if I got it in full depth but as far as I understand, the issue</i>
+&gt;<i> &gt; is about superblocks on disks, the superblocks containing addresses of</i>
+&gt;<i> &gt; tree roots and if the trees are changed using copy on write, we have a</i>
+&gt;<i> &gt; new root and it's address needs to be written into the superblock.</i>
+&gt;<i> &gt; That leads to inconsistent data if one address is updated but another</i>
+&gt;<i> &gt; one is not. Is this about right?</i>
+&gt;<i></i>
+&gt;<i> Nope.  See Wikipedia, or google for &quot;write hole&quot;.  When people say</i>
+&gt;<i> &quot;write hole&quot;, especially in a btrfs context, they are almost always</i>
+&gt;<i> talking about raid5.</i>
+&gt;<i></i>
+&gt;<i> btrfs's raid1 write hole is handled by btrfs cow update write ordering</i>
+&gt;<i> (assuming the drives have working write ordering, and that a write to</i>
+&gt;<i> any individual sector on a disk does not change the content of any other</i>
+&gt;<i> sector on that or any other disk).  The update ordering assumes the</i>
+&gt;<i> drive can reorder writes between barriers, so it trivially handles the</i>
+&gt;<i> raid1 cases.  Any updates that fail to land on one disk or the other are</i>
+&gt;<i> not part of the filesystem after a crash, because the transaction that</i>
+&gt;<i> contains them did not complete.  Superblocks are updated on the opposite</i>
+&gt;<i> side of the barrier, so we know all disks have the new filesystem tree</i>
+&gt;<i> on disk before any superblock points to it (and of course the old tree</i>
+&gt;<i> is still there, so if the superblock is not updated that's OK too).</i>
+
+Thanks for your detailled reply! I understood the COW thing, where
+both the old and new state is valid and it only takes to switch over
+to the new root. It's all about this &quot;switch over&quot;. Even with correct
+working barriers, it's possible than one drive finished and another
+drive could not finish because of a crash or whatever, right? In that
+case, if we assume raid 1, will BTRFS use the old state on all drives?
+
+&gt;<i></i>
+&gt;<i> The write hole problem on btrfs arises because updates to raid5 parity</i>
+&gt;<i> blocks use read-modify-write, i.e. they do an update in place with no</i>
+&gt;<i> journal, while the CoW layer relies on the raid profile layer to never</i>
+&gt;<i> do that.  This can be fixed either way, i.e. make the raid5 layer do</i>
+&gt;<i> stripe update journalling, or make the CoW layer not modify existing</i>
+&gt;<i> raid5 stripes.  Both options have significant IO costs that are paid at</i>
+&gt;<i> different times (much later in the second case, as something like garbage</i>
+&gt;<i> collection has to run periodically).  mdadm's raid5 implementation picked</i>
+&gt;<i> the first option.  ZFS picked the second option (in the sense that their</i>
+&gt;<i> RAIDZ stripes are immutable and always exactly the width of any data</i>
+&gt;<i> they write, so they never modify an existing stripe).  btrfs has taken</i>
+&gt;<i> 7 years to not implement either solution yet.</i>
+&gt;<i></i>
+&gt;<i> ZFS pushed the parity into the CoW layer, so it's handled in a manner</i>
+&gt;<i> similar to the way btrfs handles filesystem compression.  This could be</i>
+&gt;<i> done on btrfs too, but the result would be an entirely new RAID scheme</i>
+&gt;<i> that would be used instead of the current btrfs raid5/6 implementation</i>
+&gt;<i> (the latter would be deprecated).  Doing it this way could work in</i>
+&gt;<i> parallel with the existing raid profiles, so it could be used to implement</i>
+&gt;<i> something that looks like raid5+1 and other layered redundancy schemes.</i>
+&gt;<i></i>
+&gt;<i> There's currently a bug which occurs after data has been corrupted by</i>
+&gt;<i> any cause, including write hole:  btrfs updates parity without checking</i>
+&gt;<i> the csums of all the other data blocks in the stripe first, so btrfs</i>
+&gt;<i> propagates data corruption to parity blocks, and the parity blocks cannot</i>
+&gt;<i> be used to reconstruct the damaged data later.  This is a distinct problem</i>
+&gt;<i> from the write hole, but it means that given identical disk behavior,</i>
+&gt;<i> btrfs's raid1* implementations would recover from all detectable errors</i>
+&gt;<i> while btrfs's raid5/6 implementation will fail to correct some errors.</i>
+
+Yes I read about that. It's neccessary to do a second scrub for now.
+
+&gt;<i></i>
+&gt;<i> &gt; (I'm not sure whether we are talking</i>
+&gt;<i> &gt; here about a discrepancy between two root adresses in one superblock,</i>
+&gt;<i> &gt; or between two superblocks on different disks or possibly both)</i>
+&gt;<i> &gt;</i>
+&gt;<i> &gt; In my opinion, it's mandatory to have a consistent filesystem at _any_</i>
+&gt;<i> &gt; point in time, so it can't be relied on flush to write all new</i>
+&gt;<i> &gt; addresses!</i>
+&gt;<i> &gt;</i>
+&gt;<i> &gt; I propose that the superblock should not contain the one single root</i>
+&gt;<i> &gt; address for each tree that is hopefully correct, but it should contain</i>
+&gt;<i> &gt; an array of addresses of tree root _candidates_.</i>
+&gt;<i></i>
+&gt;<i> I invite you to look at the existing btrfs on-disk structures.</i>
+
+I looked again and see that there is a backup. But if a superblock
+write fails, also the backup could be broken. And if the backup points
+to another address it's not clear which one is correct.
+
+&gt;<i></i>
+&gt;<i> &gt; Also, the addresses</i>
+&gt;<i> &gt; in the superblocks are written on filesystem creation, but not in</i>
+&gt;<i> &gt; usual operation anymore. In usual operation, when we want to switch to</i>
+&gt;<i> &gt; a new tree version, only _one_ of the root candidates is written with</i>
+&gt;<i> &gt; new content, so there will be the latest root but also some older</i>
+&gt;<i> &gt; roots. Now the point is, if there is a power outage or crash during</i>
+&gt;<i> &gt; flush, we have all information needed to roll back to the last</i>
+&gt;<i> &gt; consistent version.</i>
+&gt;<i></i>
+&gt;<i> There are already multiple superblocks on btrfs, and they each hold</i>
+&gt;<i> several candidates.  The &quot;usebackuproot&quot; mount option can try to use one.</i>
+
+This is much like I intended, but I'd described an automatic
+negotiation of which one to use. Is &quot;usebackuproot&quot; able to use a
+combination of a standard and backup root?
+
+&gt;<i></i>
+&gt;<i> &gt; We just need to find out which root candidate to use.</i>
+&gt;<i></i>
+&gt;<i> Don't even need to do that--during a transaction commit, either root is</i>
+&gt;<i> valid (nothing's committed to disk until btrfs returns to userspace).</i>
+
+Does that mean that further writes are paused until the transaction is
+finished on a per-drive basis, or per-array? Also, as I understand,
+this doesn't cover crash or power outage,right?
+
+&gt;<i></i>
+&gt;<i> &gt; (This is why I</i>
+&gt;<i> &gt; call them candidates) To achieve that, the root candidates have an</i>
+&gt;<i> &gt; additional attribute that's something like a version counter and we</i>
+&gt;<i> &gt; also have a version counter variable in RAM. On a transition we</i>
+&gt;<i> &gt; overwrite the oldest root candidate for each tree with all needed</i>
+&gt;<i> &gt; information, it's counter with our current counter variable, and a</i>
+&gt;<i> &gt; checksum. The counter variable is incremented after that. At some</i>
+&gt;<i> &gt; point it will overflow, hence we need to consider that when we search</i>
+&gt;<i> &gt; the latest one. Let's say we use 8 candidates, then the superblock</i>
+&gt;<i> &gt; will contain something like:</i>
+&gt;<i> &gt;</i>
+&gt;<i> &gt; LogicalAdress_t AddressRootCandidatesMetaData[8]</i>
+&gt;<i> &gt; LogicalAdress_t AddressRootCandidatesData[8]</i>
+&gt;<i> &gt;</i>
+&gt;<i> &gt; (just as an example)</i>
+&gt;<i> &gt;</i>
+&gt;<i> &gt; While mounting, we read all '8 x number of trees x disks' root</i>
+&gt;<i> &gt; candidates, lookup their version counters and check ZFS checksums.</i>
+&gt;<i> &gt; We have a struct like</i>
+&gt;<i> &gt;</i>
+&gt;<i> &gt; typedef struct</i>
+&gt;<i> &gt; {</i>
+&gt;<i> &gt;     uint8_t Version;</i>
+&gt;<i> &gt;     CheckResult_te CeckResult; /* enum INVALID = 0, VALID = 1 */</i>
+&gt;<i> &gt; } VersionWithCheckResult_t</i>
+&gt;<i> &gt;</i>
+&gt;<i> &gt; and build an array with that:</i>
+&gt;<i> &gt;</i>
+&gt;<i> &gt; enum {ARRAY_SIZE = 8};</i>
+&gt;<i> &gt; VersionWithCheckResult_t VersionWithCheckResult[ARRAY_SIZE];</i>
+&gt;<i> &gt;</i>
+&gt;<i> &gt; and write it in a loop. For example we get:</i>
+&gt;<i> &gt;</i>
+&gt;<i> &gt; {3, VALID}, {4, VALID}, {253, VALID}, {254, VALID}, {255, VALID}, {0,</i>
+&gt;<i> &gt; VALID}, {1, VALID}, {2, VALID}</i>
+&gt;<i> &gt; (-&gt; Second entry is the most recent valid one)</i>
+&gt;<i> &gt;</i>
+&gt;<i> &gt; We'd like to get this from all disks for all trees, but there was a</i>
+&gt;<i> &gt; crash so some disks may have not written the new root candidate at</i>
+&gt;<i> &gt; all:</i>
+&gt;<i> &gt;</i>
+&gt;<i> &gt; {3, VALID}, {252, VALID}, {253, VALID}, {254, VALID}, {255, VALID},</i>
+&gt;<i> &gt; {0, VALID}, {1, VALID}, {2, VALID}</i>
+&gt;<i> &gt; (-&gt; First entry is the most recent valid one, as the second entry has</i>
+&gt;<i> &gt; not been updated)</i>
+&gt;<i> &gt;</i>
+&gt;<i> &gt; or even left a corrupted one, which we will recognize by the checksum:</i>
+&gt;<i> &gt; (-&gt; First entry is the most recent valid one, as the second entry has</i>
+&gt;<i> &gt; been corrupted)</i>
+&gt;<i> &gt;</i>
+&gt;<i> &gt; {3, VALID}, {123, INVALID}, {253, VALID}, {254, VALID}, {255, VALID},</i>
+&gt;<i> &gt; {0, VALID}, {1, VALID}, {2, VALID}</i>
+&gt;<i> &gt;</i>
+&gt;<i> &gt; Then we walk through that array, first searching the first valid</i>
+&gt;<i> &gt; entry, and then look if there are more recent, valid entries, like:</i>
+&gt;<i> &gt;</i>
+&gt;<i> &gt; uint8_t IndexOfMostRecentValidEntry = 0xFF;</i>
+&gt;<i> &gt; uint8_t i = 0;</i>
+&gt;<i> &gt; while ((i &lt; ARRAY_SIZE) &amp;&amp; (IndexOfMostRecentValidEntry == 0xFF))</i>
+&gt;<i> &gt; {</i>
+&gt;<i> &gt;     if (VersionWithCheckResult[i].CheckResult == VALID)</i>
+&gt;<i> &gt;     {</i>
+&gt;<i> &gt;         IndexOfMostRecentValidEntry = i;</i>
+&gt;<i> &gt;     }</i>
+&gt;<i> &gt; }</i>
+&gt;<i> &gt;</i>
+&gt;<i> &gt; for (i = 0, i &lt; ARRAY_SIZE, i++)</i>
+&gt;<i> &gt; {</i>
+&gt;<i> &gt;     uint8_t IndexNext = CalcIndexNext(IndexOfMostRecentValidEntry); /*</i>
+&gt;<i> &gt; Function calculates next index with respect to wrap around */</i>
+&gt;<i> &gt;     uint8_t MoreRecentExpectedVersion =</i>
+&gt;<i> &gt; VersionWithCheckResult[IndexOfMostRecentValidEntry].Version + 1u; /*</i>
+&gt;<i> &gt; Overflows from 0xFF to 0 just like on-disk version numbers */</i>
+&gt;<i> &gt;     if ((VersionWithCheckResult[IndexNext].Version ==</i>
+&gt;<i> &gt; MoreRecentExpectedVersion) &amp;&amp;</i>
+&gt;<i> &gt; (VersionWithCheckResult[IndexNext].CheckResult == VALID))</i>
+&gt;<i> &gt;     {</i>
+&gt;<i> &gt;         IndexOfMostRecentValidEntry = IndexNext;</i>
+&gt;<i> &gt;     }</i>
+&gt;<i> &gt; }</i>
+&gt;<i> &gt;</i>
+&gt;<i> &gt; Then we build another array that will be aligned to the entry we found:</i>
+&gt;<i> &gt;</i>
+&gt;<i> &gt; VersionWithCheckResultSorted[ARRAY_SIZE] = {0}; /* All elements inited</i>
+&gt;<i> &gt; as 0 (INVALID) */</i>
+&gt;<i> &gt; uint8_t Index = IndexOfMostRecentValidEntry;</i>
+&gt;<i> &gt; for (i = 0, i &lt; ARRAY_SIZE, i++)</i>
+&gt;<i> &gt; {</i>
+&gt;<i> &gt;     VersionWithCheckResultSorted[i] = VersionWithCheckResult[Index];</i>
+&gt;<i> &gt;     Index = CalcIndexPrevious(Index); /* Function calculates previous</i>
+&gt;<i> &gt; index with respect to wrap around */;</i>
+&gt;<i> &gt; }</i>
+&gt;<i> &gt;</i>
+&gt;<i> &gt; With the 3 example datasets from above, we get:</i>
+&gt;<i> &gt;</i>
+&gt;<i> &gt; {4, VALID}, {3, VALID}, {2, VALID}, {1, VALID}, {0, VALID}, {255,</i>
+&gt;<i> &gt; VALID}, {254, VALID}, {253, VALID}</i>
+&gt;<i> &gt; {3, VALID}, {2, VALID}, {1, VALID}, {0, VALID}, {255, VALID}, {254,</i>
+&gt;<i> &gt; VALID}, {253, VALID}, {252, VALID},</i>
+&gt;<i> &gt; {3, VALID}, {2, VALID}, {1, VALID}, {0, VALID}, {255, VALID}, {254,</i>
+&gt;<i> &gt; VALID}, {253, VALID}, {123, INVALID},</i>
+&gt;<i> &gt;</i>
+&gt;<i> &gt; Now the versions are prioritized from left to right. It's easy to</i>
+&gt;<i> &gt; figure out that the latest version we can use is 3. We just fall back</i>
+&gt;<i> &gt; to the latest version for that we found a valid root candidate for</i>
+&gt;<i> &gt; every tree. In this example, it's index = 0 in the superblock array.</i>
+&gt;<i> &gt; So we use that to mount and set the counter variable to 1 for the next</i>
+&gt;<i> &gt; writes.</i>
+&gt;<i> &gt;</i>
+&gt;<i> &gt; As a consequence, there is no write hole, because we always fall back</i>
+&gt;<i> &gt; to the latest state that is consistently available and discard the</i>
+&gt;<i> &gt; last write if it has not been finished correctly for all trees.</i>
+&gt;<i> &gt;</i>
+&gt;<i> &gt; notes:</i>
+&gt;<i> &gt; - It's required that also the parity data is organized as COW trees. I</i>
+&gt;<i> &gt; don't know if it's done that way now.</i>
+&gt;<i></i>
+&gt;<i> It is not, which is the reason why btrfs has a raid5 write hole.</i>
+
+I guess it should, to have the consitency. But there are more options
+that you explained above.
+
+&gt;<i></i>
+&gt;<i> The on-disk layout is identical to mdadm raid5/6 with no journal or PPL,</i>
+&gt;<i> so btrfs will fail in most of the same ways if you run single-device</i>
+&gt;<i> btrfs on top of a mdadm raid5.</i>
+
+That's interesting!! Because as far as I know, some NAS like Synology
+use exactly that to workaround the write hole. So this doesn't work?
+
+&gt;<i> dup metadata on mdadm-raid5 might give</i>
+&gt;<i> you a second roll of the dice to keep your data on every crash and power</i>
+&gt;<i> failure, but it's categorically inferior to btrfs raid1 metadata which</i>
+&gt;<i> doesn't roll dice in the first place.</i>
+
+Raid 1 rolls some other dice, though. This is more a hardware related
+issue. I observed that a known-bad drive from my old NAS takes down
+the other drive that is connected to the same SATA controller. I did
+excessive testing with the good drive alone, using badblocks, watched
+SMART parameters, watched kernel messages. Whatever I do with the
+drive alone, it just works without any problems. So I'm sure the drive
+is good. With both the good and bad drive connected, I get problems on
+both drives, like reduced SATA speed, fall back to USMA133, link down,
+IO errors etc, which has led to data loss multiple times until now.
+There is effectively no redundany in that case. As far as I figured
+yet, it will work best with raid 1 and limit to one drive per SATA
+controller. An option that takes into account the SATA controllers
+would be great, so that raid 1 does not save the data on two drives
+that are on one controller. So for now, I'll be limited to 4 drives
+and if I need more, I'll probalby get an additional PCIe SATA card.
+
+&gt;<i></i>
+&gt;<i> &gt; - For now I assumed that a root candidate is properly written or not.</i>
+&gt;<i> &gt; One could think of skipping one position and go to the next canditate</i>
+&gt;<i> &gt; in case of a recognized write error, but this is not covered in this</i>
+&gt;<i> &gt; example. Hence, if there is an invalid entry, the lookup loop does not</i>
+&gt;<i> &gt; look for further valid entries.</i>
+&gt;<i></i>
+&gt;<i> btrfs will try other disks, but the kernel will only try one superblock</i>
+&gt;<i> per disk.</i>
+&gt;<i></i>
+&gt;<i> There is a utility to recover other superblocks so you can recover from</i>
+&gt;<i> the one-in-a-billion chance that the only sector that gets corrupted on</i>
+&gt;<i> the last write before a system crash or power failure on an otherwise</i>
+&gt;<i> working disk happens to be the one that holds the primary superblock.</i>
+
+I'd like to have things like that considered as standard use cases
+that are just handled correctly, which is possible in theory. I think
+it's wrong to consider this an one-in-billion chance. As my tests
+show, things can go wrong easily and often with broken hardware. Also,
+a backup does not really help. Of cause I better have a backup when my
+btrfs NAS fails, but the point is, that if I have two copies and one
+has a chance of 99,99999999% to survive for a specific time, and the
+other one only 5%, it doesn't improve the overall chance
+significantly. Hence, every storage needs to be robust, otherwise you
+can just discard it from the equation. With my current setup, btrfs
+shows to be highly unreliable, I think this is much caused by the fact
+that I get frequent 2 disk errors and my distro doesn't have the
+latest btrfs version so I can't use r1c3 for metadata. Sure I'm using
+old drives, but if I come up with the real build and good drives, one
+of them will possibly have the same error some day. I'm glad that I
+recognized to better not use both channels of a SATA controller.
+People say that an array rebuild puts stress on the drives which can
+lead to another drive failure. Maybe much of this is caused by a SATA
+controller problem like I described. I didn't know that utility, so I
+can't tell whether I would have been able to recover with that. I
+already wiped everything and started over.
+
+&gt;<i></i>
+&gt;<i> &gt; - All data that all 8 root canditates point to need to be kept because</i>
+&gt;<i> &gt; we don't know which one will be used on the next mount. The data can</i>
+&gt;<i> &gt; be discarded after a root candidate has been overwritten.</i>
+&gt;<i> &gt; - ARRAY_SIZE basically could be 2. I just thought we could have some more</i>
+&gt;<i></i>
+&gt;<i> You only need two candidates if you have working write ordering.  If you</i>
+&gt;<i> don't have working write ordering, or you want ARRAY_SIZE &gt; 2, you have</i>
+&gt;<i> to teach the transaction logic to keep more than two trees intact at</i>
+&gt;<i> any time.  People have attempted this, it's not trivial.  Right now</i>
+
+Yes, using 8 was just an example.
+
+&gt;<i> there are 3 root backups in each superblock and there's no guarantee that</i>
+&gt;<i> 2 of them still point to an intact tree.</i>
+
+Of cause there is never a 100% guarantee, but I think it should be
+expected that a write can be aborted any time and still leave a valid,
+mountable filesystem by design. A huge part of that is done using the
+COW tree concept, but not at the top level of the tree, as it seems,
+as it requires manual action to repair.
+
+&gt;<i></i>
+&gt;<i> &gt; What do you think?</i>
+
+
+</pre>
+<!--X-Body-of-Message-End-->
+<!--X-MsgBody-End-->
+<!--X-Follow-Ups-->
+</div>
+<hr>
+<ul><li><strong>Follow-Ups</strong>:
+<ul>
+<li><strong><a name="100968" href="msg100968.html">Re: raid56 write hole</a></strong>
+<ul><li><em>From:</em> Zygo Blaxell</li></ul></li>
+</ul></li></ul>
+<!--X-Follow-Ups-End-->
+<!--X-References-->
+<ul><li><strong>References</strong>:
+<ul>
+<li><strong><a name="100898" href="msg100898.html">raid56 write hole</a></strong>
+<ul><li><em>From:</em> Rollo ro</li></ul></li>
+<li><strong><a name="100923" href="msg100923.html">Re: raid56 write hole</a></strong>
+<ul><li><em>From:</em> Zygo Blaxell</li></ul></li>
+</ul></li></ul>
+<!--X-References-End-->
+<!--X-BotPNI-->
+<ul>
+<li>Prev by Date:
+<strong><a href="msg100950.html">Re: [PATCH 3/3] btrfs: free alien device due to device add</a></strong>
+</li>
+<li>Next by Date:
+<strong><a href="msg100952.html">Re: [PATCH 2/3] btrfs: include non-missing as a qualifier for the latest_bdev</a></strong>
+</li>
+<li>Previous by thread:
+<strong><a href="msg100923.html">Re: raid56 write hole</a></strong>
+</li>
+<li>Next by thread:
+<strong><a href="msg100968.html">Re: raid56 write hole</a></strong>
+</li>
+<li>Index(es):
+<ul>
+<li><a href="mail24.html#100951"><strong>Date</strong></a></li>
+<li><a href="thrd24.html#100951"><strong>Thread</strong></a></li>
+</ul>
+</li>
+</ul>
+
+<!--X-BotPNI-End-->
+<!--X-User-Footer-->
+<center>
+<font size=-1>
+<a href=/lists/>[Index&nbsp;of&nbsp;Archives]</a>
+&nbsp;
+&nbsp;
+<a href=/lists/linux-fsdevel/>[Linux&nbsp;Filesystem&nbsp;Development]</a>
+&nbsp;
+&nbsp;
+<a href=/lists/linux-nfs/>[Linux&nbsp;NFS]</a>
+&nbsp;
+&nbsp;
+<a href=/lists/linux-nilfs/>[Linux&nbsp;NILFS]</a>
+&nbsp;
+&nbsp;
+<a href=/lists/linux-usb/>[Linux&nbsp;USB&nbsp;Devel]</a>
+&nbsp;
+&nbsp;
+<a href=/lists/linux-audio-users/>[Linux&nbsp;Audio&nbsp;Users]</a>
+&nbsp;
+&nbsp;
+<a href=https://yosemitenews.info/>[Yosemite&nbsp;News]</a>
+&nbsp;
+&nbsp;
+<a href=/lists/kernel/>[Linux&nbsp;Kernel]</a>
+&nbsp;
+&nbsp;
+<a href=/lists/linux-scsi/>[Linux&nbsp;SCSI]</a>
+</font>
+</center>
+<hr>
+<p>
+<div>
+<script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+<ins class="adsbygoogle"
+     style="display:block"
+     data-ad-format="autorelaxed"
+     data-ad-client="ca-pub-3422782820843221"
+     data-ad-slot="1424524564"></ins>
+<script>
+     (adsbygoogle = window.adsbygoogle || []).push({});
+</script>
+</div>
+<table width=100%>
+<tr>
+<td align=left>&nbsp;</td>
+<td align=right><a href=/linux><img src=/button_01.gif border=0 alt="Powered by Linux"></a></td>
+</tr>
+</table>
+<!--X-User-Footer-End-->
+<script>
+  (function(i,s,o,g,r,a,m){i['GoogleAnalyticsObject']=r;i[r]=i[r]||function(){
+  (i[r].q=i[r].q||[]).push(arguments)},i[r].l=1*new Date();a=s.createElement(o),
+  m=s.getElementsByTagName(o)[0];a.async=1;a.src=g;m.parentNode.insertBefore(a,m)
+  })(window,document,'script','//www.google-analytics.com/analytics.js','ga');
+  ga('create', 'UA-760190-1', 'auto');
+  ga('send', 'pageview');
+</script>
+</body>
+</html>

@@ -1,0 +1,193 @@
+<!DOCTYPE html><html class=no-js lang=en data-site-url=https://it-notes.dragas.net><head><meta charset=UTF-8><meta name=viewport content="width=device-width, initial-scale=1.0"><meta http-equiv=X-UA-Compatible content="ie=edge"><meta name=robots content=index,follow><meta name=author content="Stefano Marinelli"><meta name=keywords content="BSD, FreeBSD, OpenBSD, NetBSD, Unix, System Administration, Technology"><link rel="shortcut icon" href=https://it-notes.dragas.net/favicon.ico><script>
+        var link = document.createElement('link');
+        link.rel = 'preload';
+        link.as = 'script';
+        link.href = 'https://it-notes.dragas.net/assets/js/main.js';
+        document.head.appendChild(link);
+    </script><noscript><style>
+            body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Ubuntu', 'Cantarell', 'Noto Sans', Arial, sans-serif; }
+        </style></noscript><meta name=theme-color content=#ffffff media="(prefers-color-scheme: light)"><meta name=theme-color content=#0F192A media="(prefers-color-scheme: dark)"><link rel=manifest href=https://it-notes.dragas.net/manifest.json><title>BTRFS Best Practices - IT Notes</title><meta name=description content><meta name=author content="Stefano Marinelli"><meta property=og:site_name content="IT Notes"><meta property=og:locale content=en><meta property=og:title content="BTRFS Best Practices"><meta property=og:description content><meta content=https://it-notes.dragas.net/2018/10/13/btrfs-best-pratices/ property=og:url><meta property=og:type content=article><meta property=og:image content="https://images.unsplash.com/photo-1528396590868-b89fcd81a8fa?ixlib=rb-0.3.5&q=80&fm=jpg&crop=entropy&cs=tinysrgb&w=1080&fit=max&ixid=eyJhcHBfaWQiOjExNzczfQ&s=d367a97a06e762df9a8b45a91301a4fa"><meta name=twitter:card content=summary_large_image><meta name=twitter:title content="BTRFS Best Practices"><meta name=twitter:description content><meta name=twitter:image content="https://images.unsplash.com/photo-1528396590868-b89fcd81a8fa?ixlib=rb-0.3.5&q=80&fm=jpg&crop=entropy&cs=tinysrgb&w=1080&fit=max&ixid=eyJhcHBfaWQiOjExNzczfQ&s=d367a97a06e762df9a8b45a91301a4fa"><link rel=icon href=https://it-notes.dragas.net/favicon.ico><link rel=icon type=image/png sizes=32x32 href=https://it-notes.dragas.net/assets/img/favicon-32x32.png><link rel=icon type=image/png sizes=16x16 href=https://it-notes.dragas.net/assets/img/favicon-16x16.png><link rel=alternate type=application/rss+xml title="IT Notes" href=https://it-notes.dragas.net/feed.xml><link rel=stylesheet href=https://it-notes.dragas.net/assets/css/main.css><style>
+        /* Minimal fallback styles for text browsers */
+        body { 
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Ubuntu', 'Cantarell', 'Noto Sans', Arial, sans-serif; 
+            line-height: 1.6; 
+        }
+        h1, h2, h3 { margin: 1em 0 0.5em; }
+        a { text-decoration: underline; }
+        ul, ol { margin: 1em 0; padding-left: 2em; }
+        .sr-only { position: absolute; left: -10000px; width: 1px; height: 1px; overflow: hidden; }
+        
+        /* Override monospace only for truly text-only browsers */
+        @media (max-device-width: 1px) {
+            body { font-family: monospace !important; }
+        }
+    </style><script type=application/ld+json>
+    {
+        "@context": "https://schema.org",
+        "@type": "BlogPosting",
+        "name": "IT Notes",
+        "url": "https://it-notes.dragas.net",
+        "description": "Scattered IT Notes - by Stefano Marinelli",
+        "author": {
+            "@type": "Person",
+            "name": "Stefano Marinelli"
+        }
+    }
+    </script><link rel=me href=https://mastodon.bsd.cafe/@stefano><link rel=me href=https://snac.it-notes.dragas.net/itnotes><link rel=me href=https://mastodon.illumos.cafe/@stefano><link rel=me href=https://fedihome.stefanomarinelli.it/stefano><meta name=fediverse:creator content=@stefano@bsd.cafe><meta name=fediverse:creator content=@stefano@illumos.cafe><meta name=fediverse:creator content=@stefano@fedihome.stefanomarinelli.it><script type=application/ld+json>
+{
+  "@context": "https://schema.org",
+  "@type": "BlogPosting",
+  "mainEntityOfPage": {
+    "@type": "WebPage",
+    "@id": "https://it-notes.dragas.net/2018/10/13/btrfs-best-pratices/"
+  },
+  "headline": "BTRFS Best Practices",
+  "description": "",
+  "image": "https://images.unsplash.com/photo-1528396590868-b89fcd81a8fa?ixlib=rb-0.3.5&amp;q=80&amp;fm=jpg&amp;crop=entropy&amp;cs=tinysrgb&amp;w=1080&amp;fit=max&amp;ixid=eyJhcHBfaWQiOjExNzczfQ&amp;s=d367a97a06e762df9a8b45a91301a4fa",
+  "author": {
+    "@type": "Person",
+    "name": "Stefano Marinelli"
+  },
+  "publisher": {
+    "@type": "Organization",
+    "name": "IT Notes",
+    "logo": {
+      "@type": "ImageObject",
+      "url": "https://it-notes.dragas.net/assets/img/logo.png"
+    }
+  },
+  "datePublished": "2018-10-13",
+  "dateModified": "2018-10-13",
+  "wordCount": "2447",
+  "articleBody": "I&#39;ve been using BTRFS for years and have encountered few problems. Some of them are small and can be avoided with some smart improvements. The following advice is based on my experience. You can find posts online arguing against these options, so your mileage may vary. Fragmentation, speed and compression If using rotating disks, employ the space_cache and autodefrag options. The latter can slow down writes but will keep the disk in a usable state for a long time. Otherwise, fragmentation..."
+}
+</script><script data-goatcounter=https://goat.dragas.net/count async src=//it-notes.dragas.net/count.js></script><noscript><img src="https://goat.dragas.net/count?p=/2018/10/13/btrfs-best-pratices/" alt></noscript></head><body><a href=#main class=skip-link accesskey=s>Skip to main content [Access Key: S]</a><noscript><div class=noscript-message role=banner><p><strong>Notice:</strong> This site works best with JavaScript enabled, but all content is accessible without it. <a href=#main>Skip to main content</a></p></div></noscript><header class=site-header><div class=container><div class=site-header-inner><a href=https://it-notes.dragas.net class=site-logo><span class=bsd-logo>IT Notes</span></a><nav class=main-nav role=navigation aria-label="Main site navigation"><button class=menu-toggle aria-expanded=false aria-controls=main-menu aria-label="Toggle main navigation menu" title="Open/close navigation menu"><span class=menu-toggle-icon aria-hidden=true></span><span class=sr-only>Open navigation menu</span></button><ul id=main-menu class=menu><li class=menu-item><a class=menu-link href=https://it-notes.dragas.net title="Return to homepage">Home</a></li><li class=menu-item><a class=menu-link href=https://it-notes.dragas.net/archives/ title="Browse post archives by date">Archives</a></li><li class=menu-item><a class=menu-link href=https://it-notes.dragas.net/categories/ title="Browse posts by category">Categories</a></li><li class=menu-item><a class=menu-link href=https://it-notes.dragas.net/tags/ title="Browse posts by tag">Tags</a></li><li class=menu-item><a class=menu-link href=https://it-notes.dragas.net/series/ title=Series>Series</a></li><li class=menu-item><a class=menu-link href=https://it-notes.dragas.net/under-the-hood/ title="Under The Hood">Under The Hood</a></li><li class=menu-item><a class=menu-link href=https://it-notes.dragas.net/professional-services/ title="Professional Services">Professional Services</a></li><li class=menu-item><a class=menu-link href=https://it-notes.dragas.net/about-me/ title=About>About</a></li></ul></nav><div class=header-right><div class=search-form><form action=https://it-notes.dragas.net/search/ method=get role=search aria-label="Search the website"><label for=search class=sr-only>Search articles and pages</label><input type=search id=search name=q placeholder=Search title="Enter search terms" aria-describedby=search-help autocomplete=off spellcheck=false><span id=search-help class=sr-only> Enter keywords to search articles and pages </span><button type=submit class=search-button aria-label="Submit search query" title="Search the website"><span class=sr-only>Submit search</span><svg xmlns=http://www.w3.org/2000/svg width=20 height=20 viewbox="0 0 24 24" fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round role=img aria-hidden=true><circle cx=11 cy=11 r=8></circle><line x1=21 y1=21 x2=16.65 y2=16.65></line></svg></button></form></div><template id=dark-mode-icon-light><svg xmlns=http://www.w3.org/2000/svg width=20 height=20 viewbox="0 0 24 24" fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><circle cx=12 cy=12 r=5></circle><line x1=12 y1=1 x2=12 y2=3></line><line x1=12 y1=21 x2=12 y2=23></line><line x1=4.22 y1=4.22 x2=5.64 y2=5.64></line><line x1=18.36 y1=18.36 x2=19.78 y2=19.78></line><line x1=1 y1=12 x2=3 y2=12></line><line x1=21 y1=12 x2=23 y2=12></line><line x1=4.22 y1=19.78 x2=5.64 y2=18.36></line><line x1=18.36 y1=5.64 x2=19.78 y2=4.22></line></svg></template><template id=dark-mode-icon-dark><svg xmlns=http://www.w3.org/2000/svg width=20 height=20 viewbox="0 0 24 24" fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg></template></div></div></div></header><main id=main class=main role=main><article class="post single-post" role=article itemscope itemtype=https://schema.org/BlogPosting><div class=reading-progress-container><div class=reading-progress-bar id=reading-progress-bar></div></div><div class=post-banner><img src="https://images.unsplash.com/photo-1528396590868-b89fcd81a8fa?ixlib=rb-0.3.5&q=80&fm=jpg&crop=entropy&cs=tinysrgb&w=1080&fit=max&ixid=eyJhcHBfaWQiOjExNzczfQ&s=d367a97a06e762df9a8b45a91301a4fa" alt="BTRFS Best Practices - Featured image" loading=lazy itemprop=image aria-describedby decoding=async></div><div class=container><header class=post-header role=banner><h1 class=post-title id=post-title itemprop=headline>BTRFS Best Practices</h1><div class=bsd-systems role=group aria-label="BSD Operating System Tags"></div><div class=post-reading-time role=complementary aria-label="Estimated reading time"><svg xmlns=http://www.w3.org/2000/svg width=16 height=16 viewbox="0 0 24 24" fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><circle cx=12 cy=12 r=10></circle><polyline points="12 6 12 12 16 14"></polyline></svg><span>3 min read</span></div><div class=post-meta-block role=group aria-label="Article metadata"><div class=post-date-line><time datetime=2018-10-13 class=post-date itemprop=datePublished> 13/10/2018 05:30:00 </time></div><div class=post-author-line itemprop=author itemscope itemtype=https://schema.org/Person> by <span itemprop=name>Stefano Marinelli</span></div><div class=post-categories-line role=group aria-label="Article categories"> Categories: <a href=https://it-notes.dragas.net/categories/linux/ class="category-link
+"> linux</a>, <a href=https://it-notes.dragas.net/categories/filesystems/ class="category-link
+"> filesystems</a>, <a href=https://it-notes.dragas.net/categories/btrfs/ class="category-link
+"> btrfs</a>, <a href=https://it-notes.dragas.net/categories/zfs/ class="category-link
+"> zfs</a> </div><div class=post-tags-line role=group aria-label="Article tags"> Tags: <a href=https://it-notes.dragas.net/tags/linux/ class=tag-link>linux</a>, <a href=https://it-notes.dragas.net/tags/filesystems/ class=tag-link>filesystems</a>, <a href=https://it-notes.dragas.net/tags/btrfs/ class=tag-link>btrfs</a>, <a href=https://it-notes.dragas.net/tags/zfs/ class=tag-link>zfs</a> </div></div></header><div class=post-content itemprop=articleBody><p>I've been using BTRFS for years and have encountered few problems. Some of them are small and can be avoided with some smart improvements. The following advice is based on my experience.</p><p>You can find posts online arguing against these options, so your mileage may vary.</p><h2>Fragmentation, speed and compression</h2><p>If using rotating disks, employ the <em>space_cache</em> and <em>autodefrag</em> options. The latter can slow down writes but will keep the disk in a usable state for a long time. Otherwise, fragmentation may become a problem.</p><p>Generally speaking, I use compression. Modern CPUs are much faster than rotating disks, so compressing data before writing saves space and often improves speed.</p><h2>Filesystem stats and status</h2><p>Periodically, check the file system status with the command "<em>btrfs fi df [mountpoint]</em>." Here's an example:</p><pre class=highlight><code>Data, RAID1: total=1.42TiB, used=1.40TiB
+System, RAID1: total=32.00MiB, used=256.00KiB
+Metadata, RAID1: total=12.00GiB, used=4.68GiB
+GlobalReserve, single: total=512.00MiB, used=0.00B
+</code></pre><p>The numbers are quite similar (except for metadata), so no action is needed. Sometimes they're different, and you might encounter a strange situation: you see a lot of free space, but you can't write anymore as the disk appears to be full.</p><p>This can happen when the total (allocated) reaches the disk's space, but the used amount is lower. You have space, but you can't use it. A balance will fix this issue.</p><h2>Perform some manual operations</h2><p>Ideally, professional file systems should auto-heal and auto-clean. For example, ZFS autoscrubs data periodically. BTRFS still lacks some of these automatic operations, so it's recommended to perform some maintenance. I run them via <em>cron</em>.</p><p>My daily job looks like this:</p><blockquote><p>/bin/btrfs fi ba start -dusage=50 -dlimit=2 -musage=50 -mlimit=4 mountpoint</p></blockquote><p>This operation checks and rebalances only a subset of blocks that meet specific conditions. This ensures that the operation only lasts a few minutes. Scheduling it daily will, over time, result in a clean situation.</p><p>My weekly job looks like this:</p><blockquote><p>/bin/btrfs scrub start -B -d -c 2 -n 4 mountpoint</p></blockquote><p>This command performs a <em>scrub</em>, checking blocks and detecting (and, if possible, correcting) errors. It's a longer operation, so I don't perform it daily.</p><p>I've been using BTRFS since 2012, and thanks to these operations, it still rocks.Its capabilities have helped me in many situations.</p><p>I also use BTRFS for my Linux desktop PCs to have snapshots and consistent backups.</p></div><footer class=post-footer role=contentinfo><div class=post-tags role=group aria-label="Related tags"><h3>Tags:</h3><div class=tags-list><a href=https://it-notes.dragas.net/tags/linux/ class=tag-link>linux</a> <a href=https://it-notes.dragas.net/tags/filesystems/ class=tag-link>filesystems</a> <a href=https://it-notes.dragas.net/tags/btrfs/ class=tag-link>btrfs</a> <a href=https://it-notes.dragas.net/tags/zfs/ class=tag-link>zfs</a> </div></div></footer></div></article><div class=container><nav class=post-navigation role=navigation aria-label="Post navigation"><a href=https://it-notes.dragas.net/2019/08/29/rotating-docker-log-files/ class=prev-post rel=prev><span class=nav-label>&larr; Next Post</span><span class=nav-title>Rotating Docker log files</span></a><a href=https://it-notes.dragas.net/2018/09/16/proxmox-enable-and-use-watchdog-to-reboot-stuck-servers/ class=next-post rel=next><span class=nav-label>Previous Post &rarr;</span><span class=nav-title>Proxmox - Enable and use Watchdog to reboot stuck servers</span></a></nav></div><section class=related-posts role=complementary aria-labelledby=related-posts-title><h3 class=section-title id=related-posts-title>You may also like</h3><div class=related-grid><article class=related-card itemscope itemtype=https://schema.org/BlogPosting><div class=related-content><h2 class=post-title><a href=https://it-notes.dragas.net/2024/11/15/migrating-windows-vms-from-bios-kvm-to-uefi-bhyve/ itemprop=url><span itemprop=headline>Migrating Windows VMs from Proxmox BIOS/KVM to FreeBSD UEFI/bhyve</span></a></h2><div class=post-meta><time datetime=2024-11-15 itemprop=datePublished> 15/11/2024 10:57:00 </time><span class=post-author itemprop=author itemscope itemtype=https://schema.org/Person> by <span itemprop=name>Stefano Marinelli</span></span></div><div class=post-excerpt itemprop=description><p>I share my experience migrating a client’s Windows BIOS VMs from Proxmox to FreeBSD/uefi, using bhyve and ZFS.</p></div><a href=https://it-notes.dragas.net/2024/11/15/migrating-windows-vms-from-bios-kvm-to-uefi-bhyve/ class=read-more>Read More</a></div></article><article class=related-card itemscope itemtype=https://schema.org/BlogPosting><div class=related-content><h2 class=post-title><a href=https://it-notes.dragas.net/2024/10/21/from-proxmox-to-freebsd-story-of-a-migration/ itemprop=url><span itemprop=headline>From Proxmox to FreeBSD - Story of a Migration</span></a></h2><div class=post-meta><time datetime=2024-10-21 itemprop=datePublished> 21/10/2024 07:33:00 </time><span class=post-author itemprop=author itemscope itemtype=https://schema.org/Person> by <span itemprop=name>Stefano Marinelli</span></span></div><div class=post-excerpt itemprop=description><p>I share my experience migrating a client’s VMs from Proxmox to FreeBSD, using bhyve and ZFS.</p></div><a href=https://it-notes.dragas.net/2024/10/21/from-proxmox-to-freebsd-story-of-a-migration/ class=read-more>Read More</a></div></article><article class=related-card itemscope itemtype=https://schema.org/BlogPosting><div class=related-content><h2 class=post-title><a href=https://it-notes.dragas.net/2023/10/25/migrating-from-an-old-linux-server-to-a-new-freebsd-machine/ itemprop=url><span itemprop=headline>Migrating from an Old Linux Server to a New FreeBSD Machine</span></a></h2><div class=post-meta><time datetime=2023-10-25 itemprop=datePublished> 25/10/2023 16:39:37 </time><span class=post-author itemprop=author itemscope itemtype=https://schema.org/Person> by <span itemprop=name>Stefano Marinelli</span></span></div><div class=post-excerpt itemprop=description><p>Explore the seamless migration of an old Linux server (1690 days uptime!) to a new FreeBSD machine, detailing the use of mfsBSD, BastilleBSD, Borg Backup, and bhyve for improved efficiency and manageability</p></div><a href=https://it-notes.dragas.net/2023/10/25/migrating-from-an-old-linux-server-to-a-new-freebsd-machine/ class=read-more>Read More</a></div></article></div></section></div></main><footer class=site-footer role=contentinfo><div class=container><div class=site-footer-inner><div class=footer-widgets><div class=footer-widget><h3 class=widget-title>About</h3><p>Scattered IT Notes - by Stefano Marinelli</p><div class=bsd-footer-logos><p><a href=https://2025.eurobsdcon.org/ rel=external><img src=https://it-notes.dragas.net/banner_zagreb.png alt="EuroBSDCon 2025" title="The BSD Conference" width=300></a></p><p>EuroBSDCon 2025 - Zagreb, Croatia; September 25-28, 2025.</p></div></div><div class=footer-widget><h3 class=widget-title>Categories</h3><ul class=footer-categories><li><a href=https://it-notes.dragas.net/categories/server/ >server</a></li><li><a href=https://it-notes.dragas.net/categories/freebsd/ >freebsd</a></li><li><a href=https://it-notes.dragas.net/categories/hosting/ >hosting</a></li><li><a href=https://it-notes.dragas.net/categories/ownyourdata/ >ownyourdata</a></li><li><a href=https://it-notes.dragas.net/categories/tutorial/ >tutorial</a></li><li><a href=https://it-notes.dragas.net/categories/linux/ >linux</a></li><li><a href=https://it-notes.dragas.net/categories/data/ >data</a></li><li><a href=https://it-notes.dragas.net/categories/networking/ >networking</a></li><li><a href=https://it-notes.dragas.net/categories/zfs/ >zfs</a></li><li><a href=https://it-notes.dragas.net/categories/jail/ >jail</a></li><li><a href=https://it-notes.dragas.net/categories/container/ >container</a></li><li><a href=https://it-notes.dragas.net/categories/filesystems/ >filesystems</a></li><li><a href=https://it-notes.dragas.net/categories/series/ >series</a></li><li><a href=https://it-notes.dragas.net/categories/web/ >web</a></li><li><a href=https://it-notes.dragas.net/categories/backup/ >backup</a></li><li><a href=https://it-notes.dragas.net/categories/ >View All Categories</a></li></ul></div><div class=footer-widget><h3 class=widget-title>Links</h3><ul class=footer-links><li><a href=https://it-notes.dragas.net>Home</a></li><li><a href=https://it-notes.dragas.net/archives/ >Archives</a></li><li><a href=https://it-notes.dragas.net/tags/ >Tags</a></li><li><a href=https://it-notes.dragas.net/categories/ >Categories</a></li><li><a href=https://it-notes.dragas.net/series/ >Series</a></li><li><a href=https://it-notes.dragas.net/under-the-hood/ >Under The Hood</a></li><li><a href=https://it-notes.dragas.net/professional-services/ >Professional Services</a></li><li><a href=https://it-notes.dragas.net/about-me/ >About</a></li><li><a href=https://it-notes.dragas.net/feed.xml>RSS</a></li></ul></div></div><div class=footer-bottom><p class=copyright> &copy; 2026 IT Notes. All rights reserved. </p><p class=powered-by> Generated with <a href=https://itnblog.dragas.net target=_blank rel="noopener noreferrer">ITNBlog</a> on 02/03/2026 07:18:54 UTC </p></div></div></div></footer><button id=scroll-to-top class=scroll-to-top aria-label="Scroll to top"><svg xmlns=http://www.w3.org/2000/svg width=24 height=24 viewbox="0 0 24 24" fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><polyline points="18 15 12 9 6 15"></polyline></svg></button><script>
+        // Mark HTML as having JS support
+        document.documentElement.classList.add('js');
+        document.documentElement.classList.remove('no-js');
+        if (document.body) {
+            document.body.classList.add('js');
+            document.body.classList.remove('no-js');
+        }
+    </script><script src=https://it-notes.dragas.net/assets/js/main.js defer></script><noscript><style>
+            /* Ensure navigation works without JS */
+            .main-nav .menu { 
+                display: flex !important; 
+                flex-wrap: wrap !important;
+                gap: 0.5rem !important;
+                justify-content: center !important;
+            }
+            .menu-toggle { display: none !important; }
+            .search-form { display: block !important; position: static !important; }
+            .dark-mode-toggle { display: none !important; }
+            .scroll-to-top { display: none !important; }
+            
+            /* Hide JS-dependent elements */
+            [id*="template"], template { display: none !important; }
+            .js-only { display: none !important; }
+            
+            /* CSS-only dark mode support when JS is disabled */
+            @media (prefers-color-scheme: dark) {
+                :root {
+                    --color-text: #f9fafb !important;
+                    --color-text-light: #d1d5db !important;
+                    --color-text-lighter: #9ca3af !important;
+                    --color-border: #374151 !important;
+                    --color-background: #0F192A !important;
+                    --color-background-light: #1f2937 !important;
+                    --color-background-dark: #111827 !important;
+                }
+                
+                .site-header {
+                    background-color: var(--color-background) !important;
+                }
+                
+                pre, code {
+                    background-color: #1e293b !important;
+                    color: #e2e8f0 !important;
+                }
+                
+                blockquote {
+                    background-color: var(--color-background-light) !important;
+                }
+            }
+            
+            /* Graceful degradation for images */
+            img {
+                max-width: 100% !important;
+                height: auto !important;
+            }
+            
+            img::after {
+                content: "[Image: " attr(alt) "]" !important;
+                display: block !important;
+                padding: 1rem !important;
+                background: #f5f5f5 !important;
+                border: 1px solid #ddd !important;
+                color: #666 !important;
+                font-style: italic !important;
+                text-align: center !important;
+            }
+            
+            /* Ensure SVG icons have text alternatives */
+            svg + .sr-only {
+                position: static !important;
+                width: auto !important;
+                height: auto !important;
+                margin: 0 !important;
+                overflow: visible !important;
+                clip: auto !important;
+                white-space: normal !important;
+                font-size: 0.9rem !important;
+            }
+            
+            /* Compact header for no-JS */
+            .site-header {
+                padding: 0.5rem 0 !important;
+                margin-bottom: 1rem !important;
+                background-color: var(--color-background) !important;
+            }
+            
+            .site-header-inner {
+                min-height: 40px !important;
+                gap: 0.5rem !important;
+            }
+            
+            .menu-item a {
+                padding: 0.5rem 0.75rem !important;
+                font-size: 0.85rem !important;
+                white-space: nowrap !important;
+            }
+            
+            /* Responsive adjustments for no-JS */
+            @media (max-width: 767px) {
+                .main-nav .menu {
+                    justify-content: flex-start !important;
+                    gap: 0.25rem !important;
+                }
+                
+                .menu-item a {
+                    padding: 0.4rem 0.6rem !important;
+                    font-size: 0.8rem !important;
+                }
+                
+                .site-header-inner {
+                    flex-wrap: wrap !important;
+                    gap: 0.25rem !important;
+                }
+                
+                .main-nav {
+                    order: 3;
+                    flex-basis: 100% !important;
+                    margin: 0.25rem 0 0 0 !important;
+                }
+            }
+        </style></noscript></body></html>

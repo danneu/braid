@@ -1,0 +1,475 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="./">
+<head>
+  <meta charset="utf-8" />
+  <meta name="readthedocs-addons-api-version" content="1"><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Hardware considerations &mdash; BTRFS  documentation</title>
+      <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="_static/css/theme.css?v=9edc463e" />
+
+  
+      <script src="_static/jquery.js?v=5d32c60e"></script>
+      <script src="_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="_static/documentation_options.js?v=8a448e45"></script>
+      <script src="_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="_static/js/theme.js"></script>
+    <script src="_static/js/versions.js"></script>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="next" title="Changes (feature/version)" href="Feature-by-version.html" />
+    <link rel="prev" title="Administration" href="Administration.html" />
+    <link href="_static/style.css" rel="stylesheet" type="text/css">
+
+<script async type="text/javascript" src="/_/static/javascript/readthedocs-addons.js"></script><meta name="readthedocs-project-slug" content="btrfs" /><meta name="readthedocs-version-slug" content="latest" /><meta name="readthedocs-resolver-filename" content="/Hardware.html" /><meta name="readthedocs-http-status" content="200" /></head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="index.html" class="icon icon-home">
+            BTRFS
+          </a>
+              <div class="switch-menus">
+                <div class="version-switch"></div>
+                <div class="language-switch"></div>
+              </div>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Overview</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="Introduction.html">Introduction</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Status.html">Status</a></li>
+<li class="toctree-l1"><a class="reference internal" href="man-index.html">Manual pages</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Administration.html">Administration</a></li>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Hardware considerations</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#storage-model">Storage model</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#when-things-go-wrong">When things go wrong</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#main-memory">Main memory</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#direct-memory-access-dma">Direct memory access (DMA)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#rotational-disks-hdd">Rotational disks (HDD)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#solid-state-drives-ssd">Solid state drives (SSD)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#nvm-express-non-volatile-memory-nvme">NVM express, non-volatile memory (NVMe)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#drive-firmware">Drive firmware</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#sd-flash-cards">SD flash cards</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#hardware-as-the-main-source-of-filesystem-corruptions">Hardware as the main source of filesystem corruptions</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="Feature-by-version.html">Changes (feature/version)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Kernel-by-version.html">Changes (kernel/version)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="CHANGES.html">Changes (btrfs-progs)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Contributors.html">Contributors</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Glossary.html">Glossary</a></li>
+<li class="toctree-l1"><a class="reference internal" href="INSTALL.html">Installation instructions</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Source-repositories.html">Source repositories</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Interoperability.html">Interoperability</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Features</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="Common-features.html">Common Linux features</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Custom-ioctls.html">Custom ioctls</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Auto-repair.html">Auto-repair on read</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Balance.html">Balance</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Compression.html">Compression</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Checksumming.html">Checksumming</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Convert.html">Convert</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Deduplication.html">Deduplication</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Defragmentation.html">Defragmentation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Inline-files.html">Inline files</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Qgroups.html">Quota groups</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Reflink.html">Reflink</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Resize.html">Resize</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Scrub.html">Scrub</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Seeding-device.html">Seeding device</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Send-receive.html">Send/receive</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Subpage.html">Subpage support</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Subvolumes.html">Subvolumes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Swapfile.html">Swapfile</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Tree-checker.html">Tree checker</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Trim.html">Trim/discard</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Volume-management.html">Volume management</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Zoned-mode.html">Zoned mode</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Developer documentation</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="dev/Development-notes.html">Development notes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/Developer-s-FAQ.html">Developer’s FAQ</a></li>
+<li class="toctree-l1"><a class="reference internal" href="DocConventions.html">Conventions and style for documentation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/Experimental.html">Experimental features</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/dev-btrfs-design.html">Btrfs design</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/dev-btrees.html">Btrees</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/On-disk-format.html">On-disk Format</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/dev-send-stream.html">Send stream format</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/dev-json.html">JSON output</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/dev-internal-apis.html">Internal APIs</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/ReleaseChecklist.html">Release checklist</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/GithubReviewWorkflow.html">Pull request review workflow</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/CmdLineConventions.html">Command line, formatting, UI guidelines</a></li>
+<li class="toctree-l1"><a class="reference internal" href="btrfs-ioctl.html">btrfs-ioctl(2)</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">TODO</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="trouble-index.html">Troubleshooting pages</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="index.html">BTRFS</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">Hardware considerations</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="_sources/Hardware.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="hardware-considerations">
+<h1>Hardware considerations<a class="headerlink" href="#hardware-considerations" title="Link to this heading"></a></h1>
+<section id="storage-model">
+<h2>Storage model<a class="headerlink" href="#storage-model" title="Link to this heading"></a></h2>
+<p><em>A storage model is a model that captures key physical aspects of data
+structure in a data store. A filesystem is the logical structure organizing
+data on top of the storage device.</em></p>
+<p>The filesystem assumes several features or limitations of the storage device
+and utilizes them or applies measures to guarantee reliability. BTRFS in
+particular is based on a COW (copy on write) mode of writing, i.e. not updating
+data in place but rather writing a new copy to a different location and then
+atomically switching the pointers.</p>
+<p>In an ideal world, the device does what it promises. The filesystem assumes
+that this may not be true so additional mechanisms are applied to either detect
+misbehaving hardware or get valid data by other means. The devices may (and do)
+apply their own detection and repair mechanisms but we won’t assume any.</p>
+<p>The following assumptions about storage devices are considered (sorted by
+importance, numbers are for further reference):</p>
+<ol class="arabic simple">
+<li><p>atomicity of reads and writes of blocks/sectors (the smallest unit of data
+the device presents to the upper layers)</p></li>
+<li><p>there’s a flush command that instructs the device to forcibly order writes
+before and after the command; alternatively there’s a barrier command that
+facilitates the ordering but may not flush the data</p></li>
+<li><p>data sent to write to a given device offset will be written without further
+changes to the data and to the offset</p></li>
+<li><p>writes can be reordered by the device, unless explicitly serialized by the
+flush command</p></li>
+<li><p>reads and writes can be freely reordered and interleaved</p></li>
+</ol>
+<p>The consistency model of BTRFS builds on these assumptions. The logical data
+updates are grouped, into a generation, written on the device, serialized by
+the flush command and then the super block is written ending the generation.
+All logical links among metadata comprising a consistent view of the data may
+not cross the generation boundary.</p>
+</section>
+<section id="when-things-go-wrong">
+<h2>When things go wrong<a class="headerlink" href="#when-things-go-wrong" title="Link to this heading"></a></h2>
+<p><strong>No or partial atomicity of block reads/writes (1)</strong></p>
+<ul class="simple">
+<li><p><em>Problem</em>: a partial block contents is written (<em>torn write</em>), e.g. due to a
+power glitch or other electronics failure during the read/write</p></li>
+<li><p><em>Detection</em>: checksum mismatch on read</p></li>
+<li><p><em>Repair</em>: use another copy or rebuild from multiple blocks using some encoding
+scheme</p></li>
+</ul>
+<p><strong>The flush command does not flush (2)</strong></p>
+<p>This is perhaps the most serious problem and impossible to mitigate by
+filesystem without limitations and design restrictions. What could happen in
+the worst case is that writes from one generation bleed to another one, while
+still letting the filesystem consider the generations isolated. Crash at any
+point would leave data on the device in an inconsistent state without any hint
+what exactly got written, what is missing and leading to stale metadata link
+information.</p>
+<p>Devices usually honor the flush command, but for performance reasons may do
+internal caching, where the flushed data are not yet persistently stored. A
+power failure could lead to a similar scenario as above, although it’s less
+likely that later writes would be written before the cached ones. This is
+beyond what a filesystem can take into account. Devices or controllers are
+usually equipped with batteries or capacitors to write the cache contents even
+after power is cut. (<em>Battery backed write cache</em>)</p>
+<p><strong>Data get silently changed on write (3)</strong></p>
+<p>Such thing should not happen frequently, but still can happen spuriously due
+the complex internal workings of devices or physical effects of the storage
+media itself.</p>
+<ul class="simple">
+<li><p><em>Problem</em>: while the data are written atomically, the contents get changed</p></li>
+<li><p><em>Detection</em>: checksum mismatch on read</p></li>
+<li><p><em>Repair</em>: use another copy or rebuild from multiple blocks using some
+encoding scheme</p></li>
+</ul>
+<p><strong>Data get silently written to another offset (3)</strong></p>
+<p>This would be another serious problem as the filesystem has no information
+when it happens. For that reason the measures have to be done ahead of time.
+This problem is also commonly called <em>ghost write</em>.</p>
+<p>The metadata blocks have the checksum embedded in the blocks, so a correct
+atomic write would not corrupt the checksum. It’s likely that after reading
+such block the data inside would not be consistent with the rest. To rule that
+out there’s embedded block number in the metadata block. It’s the logical
+block number because this is what the logical structure expects and verifies.</p>
+<p>The following is based on information publicly available, user feedback,
+community discussions or bug report analyses. It’s not complete and further
+research is encouraged when in doubt.</p>
+</section>
+<section id="main-memory">
+<h2>Main memory<a class="headerlink" href="#main-memory" title="Link to this heading"></a></h2>
+<p>The data structures and raw data blocks are temporarily stored in computer
+memory before they get written to the device. It is critical that memory is
+reliable because even simple bit flips can have vast consequences and lead to
+damaged structures, not only in the filesystem but in the whole operating
+system.</p>
+<p>Based on experience in the community, memory bit flips are more common than one
+would think. When it happens, it’s reported by the tree-checker or by a checksum
+mismatch after reading blocks. There are some very obvious instances of bit
+flips that happen, e.g. in an ordered sequence of keys in metadata blocks. We can
+easily infer from the other data what values get damaged and how. However, fixing
+that is not straightforward and would require cross-referencing data from the
+entire filesystem to see the scope.</p>
+<p>If available, ECC memory should lower the chances of bit flips, but this
+type of memory is not available in all cases. A memory test should be performed
+in case there’s a visible bit flip pattern, though this may not detect a faulty
+memory module because the actual load of the system could be the factor making
+the problems appear. In recent years attacks on how the memory modules operate
+have been demonstrated (<em>rowhammer</em>) achieving specific bits to be flipped.
+While these were targeted, this shows that a series of reads or writes can
+affect unrelated parts of memory.</p>
+<p>Block group profiles with redundancy (like RAID1) will not protect against
+memory errors as the blocks are first stored in memory before they are written
+to the devices from the same source.</p>
+<p>A filesystem mounted read-only will not affect the underlying block device in
+almost 100% (with highly unlikely exceptions). The exception is a tree-log that
+needs to be replayed during mount (and before the read-only mount takes place),
+working memory is needed for that and that can be affected by bit flips.
+There’s a theoretical case where bit flip changes the filesystem status from
+read-only to read-write.</p>
+<p>Further reading:</p>
+<ul class="simple">
+<li><p><a class="reference external" href="https://en.wikipedia.org/wiki/Row_hammer">https://en.wikipedia.org/wiki/Row_hammer</a></p></li>
+<li><p>memory overclocking, XMP, potential risks</p></li>
+</ul>
+<p>What to do:</p>
+<ul class="simple">
+<li><p>run <em>memtest</em>, note that sometimes memory errors happen only when the system
+is under heavy load that the default memtest cannot trigger</p></li>
+<li><p>memory errors may appear as filesystem going read-only due to “pre write”
+check, that verify meta data before they get written but fail some basic
+consistency checks</p></li>
+<li><p>newly built systems should be tested before being put to production use,
+ideally start a IO/CPU load that will be run on such system later; namely
+systems that will utilize overclocking or special performance features</p></li>
+</ul>
+</section>
+<section id="direct-memory-access-dma">
+<h2>Direct memory access (DMA)<a class="headerlink" href="#direct-memory-access-dma" title="Link to this heading"></a></h2>
+<p>Another class of errors is related to DMA (direct memory access) performed
+by device drivers. While this could be considered a software error, the
+data transfers that happen without CPU assistance may accidentally corrupt
+other pages. Storage devices utilize DMA for performance reasons, the
+filesystem structures and data pages are passed back and forth, making
+errors possible in case page life time is not properly tracked.</p>
+<p>There are lots of quirks (device-specific workarounds) in Linux kernel
+drivers (regarding not only DMA) that are added when found. The quirks
+may avoid specific errors or disable some features to avoid worse problems.</p>
+<p>What to do:</p>
+<ul class="simple">
+<li><p>use up-to-date kernel (recent releases or maintained long term support versions)</p></li>
+<li><p>as this may be caused by faulty drivers, keep the systems up-to-date</p></li>
+</ul>
+</section>
+<section id="rotational-disks-hdd">
+<h2>Rotational disks (HDD)<a class="headerlink" href="#rotational-disks-hdd" title="Link to this heading"></a></h2>
+<p>Rotational HDDs typically fail at the level of individual sectors or small clusters.
+Read failures are caught on the levels below the filesystem and are returned to
+the user as <em>EIO - Input/output error</em>. Reading the blocks repeatedly may
+return the data eventually, but this is better done by specialized tools and
+filesystem takes the result of the lower layers. Rewriting the sectors may
+trigger internal remapping but this inevitably leads to data loss.</p>
+<p>Disk firmware is technically software but from the filesystem perspective is
+part of the hardware. IO requests are processed, and caching or various
+other optimizations are performed, which may lead to bugs under high load or
+unexpected physical conditions or unsupported use cases.</p>
+<p>Disks are connected by cables with two ends, both of which can cause problems
+when not attached properly. Data transfers are protected by checksums and the
+lower layers try hard to transfer the data correctly or not at all. The errors
+from badly-connecting cables may manifest as large amount of failed read or
+write requests, or as short error bursts depending on physical conditions.</p>
+<p>What to do:</p>
+<ul class="simple">
+<li><p>check <strong>smartctl</strong> for potential issues</p></li>
+</ul>
+</section>
+<section id="solid-state-drives-ssd">
+<h2>Solid state drives (SSD)<a class="headerlink" href="#solid-state-drives-ssd" title="Link to this heading"></a></h2>
+<p>The mechanism of information storage is different from HDDs and this affects
+the failure mode as well. The data are stored in cells grouped in large blocks
+with limited number of resets and other write constraints. The firmware tries
+to avoid unnecessary resets and performs optimizations to maximize the storage
+media lifetime. The known techniques are deduplication (blocks with same
+fingerprint/hash are mapped to same physical block), compression or internal
+remapping and garbage collection of used memory cells. Due to the additional
+processing there are measures to verify the data e.g. by ECC codes.</p>
+<p>The observations of failing SSDs show that the whole electronic fails at once
+or affects a lot of data (e.g. stored on one chip). Recovering such data
+may need specialized equipment and reading data repeatedly does not help as
+it’s possible with HDDs.</p>
+<p>There are several technologies of the memory cells with different
+characteristics and price. The lifetime is directly affected by the type and
+frequency of data written.  Writing “too much” distinct data (e.g. encrypted)
+may render the internal deduplication ineffective and lead to a lot of rewrites
+and increased wear of the memory cells.</p>
+<p>There are several technologies and manufacturers so it’s hard to describe them
+but there are some that exhibit similar behaviour:</p>
+<ul class="simple">
+<li><p>expensive SSD will use more durable memory cells and is optimized for
+reliability and high load</p></li>
+<li><p>cheap SSD is projected for a lower load (“desktop user”) and is optimized for
+cost, it may employ the optimizations and/or extended error reporting
+partially or not at all</p></li>
+</ul>
+<p>It’s not possible to reliably determine the expected lifetime of an SSD due to
+lack of information about how it works or due to lack of reliable stats provided
+by the device.</p>
+<p>Metadata writes tend to be the biggest component of lifetime writes to a SSD,
+so there is some value in reducing them. Depending on the device class (high
+end/low end) the features like DUP block group profiles may affect the
+reliability in both ways:</p>
+<ul class="simple">
+<li><p><em>high end</em> are typically more reliable and using <em>single</em> for data and
+metadata could be suitable to reduce device wear</p></li>
+<li><p><em>low end</em> could lack ability to identify errors so an additional redundancy
+at the filesystem level (checksums, <em>DUP</em>) could help</p></li>
+</ul>
+<p>Only users who consume 50 to 100% of the SSD’s actual lifetime writes need to be
+concerned by the write amplification of btrfs DUP metadata. Most users will be
+far below 50% of the actual lifetime, or will write the drive to death and
+discover how many writes 100% of the actual lifetime was. SSD firmware often
+adds its own write multipliers that can be arbitrary and unpredictable and
+dependent on application behavior, and these will typically have far greater
+effect on SSD lifespan than DUP metadata. It’s more or less impossible to
+predict when a SSD will run out of lifetime writes to within a factor of two, so
+it’s hard to justify wear reduction as a benefit.</p>
+<p>Further reading:</p>
+<ul class="simple">
+<li><p><a class="reference external" href="https://www.snia.org/educational-library/ssd-and-deduplication-end-spinning-disk-2012">https://www.snia.org/educational-library/ssd-and-deduplication-end-spinning-disk-2012</a></p></li>
+<li><p><a class="reference external" href="https://www.snia.org/educational-library/realities-solid-state-storage-2013-2013">https://www.snia.org/educational-library/realities-solid-state-storage-2013-2013</a></p></li>
+<li><p><a class="reference external" href="https://www.snia.org/educational-library/ssd-performance-primer-2013">https://www.snia.org/educational-library/ssd-performance-primer-2013</a></p></li>
+<li><p><a class="reference external" href="https://www.snia.org/educational-library/how-controllers-maximize-ssd-life-2013">https://www.snia.org/educational-library/how-controllers-maximize-ssd-life-2013</a></p></li>
+</ul>
+<p>What to do:</p>
+<ul class="simple">
+<li><p>run <strong>smartctl</strong> or self-tests to look for potential issues</p></li>
+<li><p>keep the firmware up-to-date</p></li>
+</ul>
+</section>
+<section id="nvm-express-non-volatile-memory-nvme">
+<h2>NVM express, non-volatile memory (NVMe)<a class="headerlink" href="#nvm-express-non-volatile-memory-nvme" title="Link to this heading"></a></h2>
+<p>NVMe is a type of persistent memory usually connected over a system bus (PCIe)
+or similar interface and the speeds are an order of magnitude faster than SSD.
+It is also a non-rotating type of storage, and is not typically connected by a
+cable. It’s not a SCSI type device either but rather a complete specification
+for logical device interface.</p>
+<p>In a way the errors could be compared to a combination of SSD class and regular
+memory. Errors may exhibit as random bit flips or IO failures. There are tools
+to access the internal log (<strong>nvme log</strong> and <strong>nvme-cli</strong>) for a more detailed
+analysis.</p>
+<p>There are separate error detection and correction steps performed e.g. on the
+bus level and in most cases never making in to the filesystem level. Once this
+happens it could mean there’s some systematic error like overheating or bad
+physical connection of the device. You may want to run self-tests (using
+<strong>smartctl</strong>).</p>
+<ul class="simple">
+<li><p><a class="reference external" href="https://en.wikipedia.org/wiki/NVM_Express">https://en.wikipedia.org/wiki/NVM_Express</a></p></li>
+<li><p><a class="reference external" href="https://www.smartmontools.org/wiki/NVMe_Support">https://www.smartmontools.org/wiki/NVMe_Support</a></p></li>
+</ul>
+</section>
+<section id="drive-firmware">
+<h2>Drive firmware<a class="headerlink" href="#drive-firmware" title="Link to this heading"></a></h2>
+<p>Firmware is technically still software but embedded into the hardware. As all
+software has bugs, so does firmware. Storage devices can update the firmware
+and fix known bugs. In some cases the it’s possible to avoid certain bugs by
+quirks (device-specific workarounds) in Linux kernel.</p>
+<p>A faulty firmware can cause wide range of corruptions from small and localized
+to large affecting lots of data. Self-repair capabilities may not be sufficient.</p>
+<p>What to do:</p>
+<ul class="simple">
+<li><p>check for firmware updates in case there are known problems, note that
+updating firmware can be risky on itself</p></li>
+<li><p>use up-to-date kernel (recent releases or maintained long term support versions)</p></li>
+</ul>
+</section>
+<section id="sd-flash-cards">
+<h2>SD flash cards<a class="headerlink" href="#sd-flash-cards" title="Link to this heading"></a></h2>
+<p>There are a lot of devices with low power consumption and thus using storage
+media based on low power consumption too, typically flash memory stored on
+a chip enclosed in a detachable card package. An improperly inserted card may be
+damaged by electrical spikes when the device is turned on or off. The chips
+storing data in turn may be damaged permanently. All types of flash memory
+have a limited number of rewrites, so the data are internally translated by FTL
+(flash translation layer). This is implemented in firmware (technically a
+software) and prone to bugs that manifest as hardware errors.</p>
+<p>Adding redundancy like using DUP profiles for both data and metadata can help
+in some cases but a full backup might be the best option once problems appear
+and replacing the card could be required as well.</p>
+</section>
+<section id="hardware-as-the-main-source-of-filesystem-corruptions">
+<h2>Hardware as the main source of filesystem corruptions<a class="headerlink" href="#hardware-as-the-main-source-of-filesystem-corruptions" title="Link to this heading"></a></h2>
+<p><strong>If you use unreliable hardware and don’t know about that, don’t blame the
+filesystem when it tells you.</strong></p>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="Administration.html" class="btn btn-neutral float-left" title="Administration" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="Feature-by-version.html" class="btn btn-neutral float-right" title="Changes (feature/version)" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright .</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

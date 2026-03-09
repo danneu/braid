@@ -1,0 +1,381 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en" dir="ltr">
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+<title>[SOLVED]Question about btrfs-scrub@.timer / System Administration / Arch Linux Forums</title>
+<link rel="stylesheet" type="text/css" href="style/ArchLinux.css" />
+<link rel="canonical" href="viewtopic.php?id=281342" title="Page 1" />
+<link rel="alternate" type="application/atom+xml" href="extern.php?action=feed&amp;tid=281342&amp;type=atom" title="Atom topic feed" />
+    <link rel="stylesheet" media="screen" href="style/ArchLinux/arch.css?v=5"/>
+        <link rel="stylesheet" media="screen" href="style/ArchLinux/archnavbar.css?v=5"/>
+    
+<link rel="shortcut icon" href="style/ArchLinux/favicon.ico" />
+</head>
+
+<body>
+<div id="archnavbar" class="anb-forum">
+	<div id="archnavbarlogo"><h1><a href="http://archlinux.org/">Arch Linux</a></h1></div>
+	<div id="archnavbarmenu">
+		<ul id="archnavbarlist">
+			<li id="anb-home"><a href="http://archlinux.org/">Home</a></li><li id="anb-packages"><a href="http://archlinux.org/packages/">Packages</a></li><li id="anb-forums" class="anb-selected"><a href="https://bbs.archlinux.org/">Forums</a></li><li id="anb-wiki"><a href="https://wiki.archlinux.org/">Wiki</a></li><li id="anb-gitlab"><a href="https://gitlab.archlinux.org/archlinux">GitLab</a></li><li id="anb-security"><a href="https://security.archlinux.org/">Security</a></li><li id="anb-aur"><a href="https://aur.archlinux.org/">AUR</a></li><li id="anb-download"><a href="http://archlinux.org/download/">Download</a></li>		</ul>
+	</div>
+</div>
+
+
+<div id="punviewtopic" class="pun">
+<div class="top-box"></div>
+<div class="punwrap">
+
+<div id="brdheader" class="block">
+	<div class="box">
+		<div id="brdmenu" class="inbox">
+			<ul>
+				<li id="navindex" class="isactive"><a href="index.php">Index</a></li>
+				<li id="navrules"><a href="misc.php?action=rules">Rules</a></li>
+				<li id="navsearch"><a href="search.php">Search</a></li>
+				<li id="navregister"><a href="register.php">Register</a></li>
+				<li id="navlogin"><a href="login.php">Login</a></li>
+			</ul>
+		</div>
+		<div id="brdwelcome" class="inbox">
+			<p class="conl">You are not logged in.</p>
+			<ul class="conr">
+				<li><span>Topics: <a href="search.php?action=show_recent" title="Find topics with recent posts.">Active</a> | <a href="search.php?action=show_unanswered" title="Find topics with no replies.">Unanswered</a></span></li>
+			</ul>
+			<div class="clearer"></div>
+		</div>
+	</div>
+</div>
+
+
+
+<div id="brdmain">
+<div class="linkst">
+	<div class="inbox crumbsplus">
+		<ul class="crumbs">
+			<li><a href="index.php">Index</a></li>
+			<li><span>»&#160;</span><a href="viewforum.php?id=50">System Administration</a></li>
+			<li><span>»&#160;</span><strong><a href="viewtopic.php?id=281342">[SOLVED]Question about btrfs-scrub@.timer</a></strong></li>
+		</ul>
+		<div class="pagepost">
+			<p class="pagelink conl"><span class="pages-label">Pages: </span><strong class="item1">1</strong></p>
+		</div>
+		<div class="clearer"></div>
+	</div>
+</div>
+
+<div id="p2068485" class="blockpost rowodd firstpost blockpost1">
+	<h2><span><span class="conr">#1</span> <a href="viewtopic.php?pid=2068485#p2068485">2022-11-16 23:12:35</a></span></h2>
+	<div class="box">
+		<div class="inbox">
+			<div class="postbody">
+				<div class="postleft">
+					<dl>
+						<dt><strong>jimmyg</strong></dt>
+						<dd class="usertitle"><strong>Member</strong></dd>
+						<dd><span>Registered: 2022-06-14</span></dd>
+						<dd><span>Posts: 41</span></dd>
+					</dl>
+				</div>
+				<div class="postright">
+					<h3>[SOLVED]Question about btrfs-scrub@.timer</h3>
+					<div class="postmsg">
+						<p>Hi there</p><p>I&#039;m looking to set up a btrfs-scrub timer using systemd and I am just looking for some clarification.</p><p>I have 1 nvme device with 2 partitions - an efi partition and a second partition for my arch installation. The btrfs partition has 7 subvolumes and each of these has its own mountpoint, all pretty standard. </p><p>So I read the wiki page <a href="https://wiki.archlinux.org/title/btrfs#Scrub" rel="nofollow">https://wiki.archlinux.org/title/btrfs#Scrub</a>. It explains I need to set up a btrfs-scrub@.timer for each mountpoint so does this mean I must create 7x btrfs-scrub@.timers for each of these? The thing is i&#039;ve read elsewhere that when btrfs scrub is started it will scrub the entire device regardless of my subvolumes and their mountpoints.</p><p>I did read another interesting article <a href="https://www.ordinatechnic.com/distribution-specific-guides/arch-linux/an-arch-linux-installation-on-a-btrfs-filesystem-with-snapper-for-system-snapshots-and-rollbacks" rel="nofollow">https://www.ordinatechnic.com/distribut … -rollbacks</a>. It focuses on an Arch installation using btrfs but towards the end it explains a way of using systemd btrfs-scrub timers which I thought might work well for me. </p><p>As with the Arch wiki article it uses systemd-escape to find the names of the unit files and then uses this to make a single btrfs-scrub timer using the uuid or device name, so for example I could just use </p><div class="codebox"><pre><code>sudo systemd-escape --template=btrfs-scrub@.timer --path /dev/nvme0n1p2</code></pre></div><p>then</p><div class="codebox"><pre><code>sudo systemctl enable btrfs-scrub@dev-nvme0n1p2.timer</code></pre></div><p>Should I do it this way or should I make scrub timers for each mount point, I&#039;m a bit unsure. </p><p>Thanks for any help you can give.</p>
+						<p class="postedit"><em>Last edited by jimmyg (2022-11-18 12:31:36)</em></p>
+					</div>
+				</div>
+			</div>
+		</div>
+		<div class="inbox">
+			<div class="postfoot clearb">
+				<div class="postfootleft"><p><span>Offline</span></p></div>
+			</div>
+		</div>
+	</div>
+</div>
+
+<div id="p2068489" class="blockpost roweven">
+	<h2><span><span class="conr">#2</span> <a href="viewtopic.php?pid=2068489#p2068489">2022-11-17 00:08:59</a></span></h2>
+	<div class="box">
+		<div class="inbox">
+			<div class="postbody">
+				<div class="postleft">
+					<dl>
+						<dt><strong>V1del</strong></dt>
+						<dd class="usertitle"><strong>Forum Moderator</strong></dd>
+						<dd class="postavatar"><img src="https://bbs.archlinux.org/img/avatars/64676.png?m=1572193435" width="56" height="80" alt="" /></dd>
+						<dd><span>Registered: 2012-10-16</span></dd>
+						<dd><span>Posts: 25,064</span></dd>
+					</dl>
+				</div>
+				<div class="postright">
+					<h3>Re: [SOLVED]Question about btrfs-scrub@.timer</h3>
+					<div class="postmsg">
+						<p>According to the link that&#039;s linked as an expansion in that wiki section and the upstream docs, a btrfs scrub does indeed cover the entire filesystem so should only be ran once on a given file system. So there should&#160; not be a need for a scrub for each subvolume.</p><p>For the question whether you need to create multiple timer units if that were something you&#039;d need to do, then no you do not since the @ signifies a templated service, so the &quot;multiple timers/services&quot; will implicitly be created by passing an instance variable (the string after the @) to the service unit, note the blue box in: <a href="https://wiki.archlinux.org/title/Systemd#Using_units" rel="nofollow">https://wiki.archlinux.org/title/Systemd#Using_units</a></p>
+						<p class="postedit"><em>Last edited by V1del (2022-11-17 00:10:26)</em></p>
+					</div>
+				</div>
+			</div>
+		</div>
+		<div class="inbox">
+			<div class="postfoot clearb">
+				<div class="postfootleft"><p><span>Offline</span></p></div>
+			</div>
+		</div>
+	</div>
+</div>
+
+<div id="p2068494" class="blockpost rowodd">
+	<h2><span><span class="conr">#3</span> <a href="viewtopic.php?pid=2068494#p2068494">2022-11-17 01:07:41</a></span></h2>
+	<div class="box">
+		<div class="inbox">
+			<div class="postbody">
+				<div class="postleft">
+					<dl>
+						<dt><strong>jimmyg</strong></dt>
+						<dd class="usertitle"><strong>Member</strong></dd>
+						<dd><span>Registered: 2022-06-14</span></dd>
+						<dd><span>Posts: 41</span></dd>
+					</dl>
+				</div>
+				<div class="postright">
+					<h3>Re: [SOLVED]Question about btrfs-scrub@.timer</h3>
+					<div class="postmsg">
+						<p>Hi and thanks for your reply, that has helped a lot. </p><p>So if i make a timer unit using this command </p><div class="codebox"><pre><code>sudo systemctl enable btrfs-scrub@dev-nvme0n1p2.timer</code></pre></div><p>that should be all I need?</p>
+					</div>
+				</div>
+			</div>
+		</div>
+		<div class="inbox">
+			<div class="postfoot clearb">
+				<div class="postfootleft"><p><span>Offline</span></p></div>
+			</div>
+		</div>
+	</div>
+</div>
+
+<div id="p2068500" class="blockpost roweven">
+	<h2><span><span class="conr">#4</span> <a href="viewtopic.php?pid=2068500#p2068500">2022-11-17 02:10:32</a></span></h2>
+	<div class="box">
+		<div class="inbox">
+			<div class="postbody">
+				<div class="postleft">
+					<dl>
+						<dt><strong>V1del</strong></dt>
+						<dd class="usertitle"><strong>Forum Moderator</strong></dd>
+						<dd class="postavatar"><img src="https://bbs.archlinux.org/img/avatars/64676.png?m=1572193435" width="56" height="80" alt="" /></dd>
+						<dd><span>Registered: 2012-10-16</span></dd>
+						<dd><span>Posts: 25,064</span></dd>
+					</dl>
+				</div>
+				<div class="postright">
+					<h3>Re: [SOLVED]Question about btrfs-scrub@.timer</h3>
+					<div class="postmsg">
+						<p>That&#039;s the way I&#039;m interpreting things yes.</p>
+					</div>
+				</div>
+			</div>
+		</div>
+		<div class="inbox">
+			<div class="postfoot clearb">
+				<div class="postfootleft"><p><span>Offline</span></p></div>
+			</div>
+		</div>
+	</div>
+</div>
+
+<div id="p2068546" class="blockpost rowodd">
+	<h2><span><span class="conr">#5</span> <a href="viewtopic.php?pid=2068546#p2068546">2022-11-17 11:28:59</a></span></h2>
+	<div class="box">
+		<div class="inbox">
+			<div class="postbody">
+				<div class="postleft">
+					<dl>
+						<dt><strong>Raynman</strong></dt>
+						<dd class="usertitle"><strong>Member</strong></dd>
+						<dd><span>Registered: 2011-10-22</span></dd>
+						<dd><span>Posts: 1,539</span></dd>
+					</dl>
+				</div>
+				<div class="postright">
+					<h3>Re: [SOLVED]Question about btrfs-scrub@.timer</h3>
+					<div class="postmsg">
+						<p>`btrfs scrub start` should accept a device (but the man page says it has to be mounted anyway). It looks like that wouldn&#039;t work with this timer/service combo with these conditions:</p><div class="codebox"><pre><code>ConditionPathIsMountPoint=%f
+RequiresMountsFor=%f</code></pre></div>
+					</div>
+				</div>
+			</div>
+		</div>
+		<div class="inbox">
+			<div class="postfoot clearb">
+				<div class="postfootleft"><p><span>Offline</span></p></div>
+			</div>
+		</div>
+	</div>
+</div>
+
+<div id="p2068618" class="blockpost roweven">
+	<h2><span><span class="conr">#6</span> <a href="viewtopic.php?pid=2068618#p2068618">2022-11-17 16:01:38</a></span></h2>
+	<div class="box">
+		<div class="inbox">
+			<div class="postbody">
+				<div class="postleft">
+					<dl>
+						<dt><strong>jimmyg</strong></dt>
+						<dd class="usertitle"><strong>Member</strong></dd>
+						<dd><span>Registered: 2022-06-14</span></dd>
+						<dd><span>Posts: 41</span></dd>
+					</dl>
+				</div>
+				<div class="postright">
+					<h3>Re: [SOLVED]Question about btrfs-scrub@.timer</h3>
+					<div class="postmsg">
+						<p>Hi thx for ur reply</p><p>I have my top-level mounted as:</p><div class="codebox"><pre><code>UUID=1fbf4b28-0d0c-468b-a96e-fe5a77e7eae8       /btrfs          btrfs           rw,noatime,nodiratime,compress-force=zstd:1,discard=async,space_cache=v2,subvol=/    0 0</code></pre></div><p>perhaps I should use its mountpoint for the timer unit:</p><div class="codebox"><pre><code>sudo systemctl enable btrfs-scrub@btrfs.timer</code></pre></div><p>rather than using the device path?</p>
+					</div>
+				</div>
+			</div>
+		</div>
+		<div class="inbox">
+			<div class="postfoot clearb">
+				<div class="postfootleft"><p><span>Offline</span></p></div>
+			</div>
+		</div>
+	</div>
+</div>
+
+<div id="p2068622" class="blockpost rowodd">
+	<h2><span><span class="conr">#7</span> <a href="viewtopic.php?pid=2068622#p2068622">2022-11-17 16:34:41</a></span></h2>
+	<div class="box">
+		<div class="inbox">
+			<div class="postbody">
+				<div class="postleft">
+					<dl>
+						<dt><strong>V1del</strong></dt>
+						<dd class="usertitle"><strong>Forum Moderator</strong></dd>
+						<dd class="postavatar"><img src="https://bbs.archlinux.org/img/avatars/64676.png?m=1572193435" width="56" height="80" alt="" /></dd>
+						<dd><span>Registered: 2012-10-16</span></dd>
+						<dd><span>Posts: 25,064</span></dd>
+					</dl>
+				</div>
+				<div class="postright">
+					<h3>Re: [SOLVED]Question about btrfs-scrub@.timer</h3>
+					<div class="postmsg">
+						<p>That will from the service&#039;s logistics certainly work better, but you could just test whether one or the other would lead to a trigger by either trying to start the service and checking the output or what you should also be able to do is </p><div class="codebox"><pre><code>systemd-analyze condition ConditionPathIsMountPoint=/btrfs ConditionPathIsMountPoint=/dev/nvme0n1p2</code></pre></div><p> (... I&#039;d provide the output of that myself, but all linuxes I currently have access to don&#039;t yet have a new enough systemd)</p>
+						<p class="postedit"><em>Last edited by V1del (2022-11-17 16:36:58)</em></p>
+					</div>
+				</div>
+			</div>
+		</div>
+		<div class="inbox">
+			<div class="postfoot clearb">
+				<div class="postfootleft"><p><span>Offline</span></p></div>
+			</div>
+		</div>
+	</div>
+</div>
+
+<div id="p2068629" class="blockpost roweven">
+	<h2><span><span class="conr">#8</span> <a href="viewtopic.php?pid=2068629#p2068629">2022-11-17 16:53:52</a></span></h2>
+	<div class="box">
+		<div class="inbox">
+			<div class="postbody">
+				<div class="postleft">
+					<dl>
+						<dt><strong>jimmyg</strong></dt>
+						<dd class="usertitle"><strong>Member</strong></dd>
+						<dd><span>Registered: 2022-06-14</span></dd>
+						<dd><span>Posts: 41</span></dd>
+					</dl>
+				</div>
+				<div class="postright">
+					<h3>Re: [SOLVED]Question about btrfs-scrub@.timer</h3>
+					<div class="postmsg">
+						<p>wow thats extremely useful. It immediately showed me ConditionPathIsMountPoint=/dev/nvme0n1p2 failed which tells me what I needed. ty so much.</p>
+					</div>
+				</div>
+			</div>
+		</div>
+		<div class="inbox">
+			<div class="postfoot clearb">
+				<div class="postfootleft"><p><span>Offline</span></p></div>
+			</div>
+		</div>
+	</div>
+</div>
+
+<div class="postlinksb">
+	<div class="inbox crumbsplus">
+		<div class="pagepost">
+			<p class="pagelink conl"><span class="pages-label">Pages: </span><strong class="item1">1</strong></p>
+		</div>
+		<ul class="crumbs">
+			<li><a href="index.php">Index</a></li>
+			<li><span>»&#160;</span><a href="viewforum.php?id=50">System Administration</a></li>
+			<li><span>»&#160;</span><strong><a href="viewtopic.php?id=281342">[SOLVED]Question about btrfs-scrub@.timer</a></strong></li>
+		</ul>
+		<div class="clearer"></div>
+	</div>
+</div>
+</div>
+
+<div id="brdfooter" class="block">
+	<h2><span>Board footer</span></h2>
+	<div class="box">
+		<div id="brdfooternav" class="inbox">
+			<div class="conl">
+				<form id="qjump" method="get" action="viewforum.php">
+					<div><label><span>Jump to<br /></span>
+					<select name="id" onchange="window.location=('viewforum.php?id='+this.options[this.selectedIndex].value)">
+						<optgroup label="Technical Issues and Assistance">
+							<option value="23">Newbie Corner</option>
+							<option value="17">Installation</option>
+							<option value="22">Kernel &amp; Hardware</option>
+							<option value="18">Applications &amp; Desktop Environments</option>
+							<option value="31">Laptop Issues</option>
+							<option value="8">Networking, Server, and Protection</option>
+							<option value="32">Multimedia and Games</option>
+							<option value="51">Arch Linux Guided Installer</option>
+							<option value="50" selected="selected">System Administration</option>
+							<option value="35">Other Architectures</option>
+						</optgroup>
+						<optgroup label="Arch-centric">
+							<option value="24">Announcements, Package &amp; Security Advisories</option>
+							<option value="1">Arch Discussion</option>
+							<option value="13">Forum &amp; Wiki discussion</option>
+						</optgroup>
+						<optgroup label="Pacman Upgrades, Packaging &amp; AUR">
+							<option value="44">Pacman &amp; Package Upgrade Issues</option>
+							<option value="49">[testing] Repo Forum</option>
+							<option value="4">Creating &amp; Modifying Packages</option>
+							<option value="38">AUR Issues, Discussion &amp; PKGBUILD Requests</option>
+						</optgroup>
+						<optgroup label="Contributions &amp; Discussion">
+							<option value="20">GNU/Linux Discussion</option>
+							<option value="27">Community Contributions</option>
+							<option value="33">Programming &amp; Scripting</option>
+							<option value="30">Other Languages</option>
+							<option value="47">Artwork and Screenshots</option>
+						</optgroup>
+					</select></label>
+					<input type="submit" value=" Go " accesskey="g" />
+					</div>
+				</form>
+			</div>
+			<div class="conr">
+				<p id="feedlinks"><span class="atom"><a href="extern.php?action=feed&amp;tid=281342&amp;type=atom">Atom topic feed</a></span></p>
+				<p id="poweredby">Powered by <a href="http://fluxbb.org/">FluxBB</a></p>
+			</div>
+			<div class="clearer"></div>
+		</div>
+	</div>
+</div>
+
+
+
+</div>
+<div class="end-box"></div>
+</div>
+
+</body>
+</html>

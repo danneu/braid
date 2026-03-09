@@ -1,0 +1,489 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../">
+<head>
+  <meta charset="utf-8" />
+  <meta name="readthedocs-addons-api-version" content="1"><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Btrfs design &mdash; BTRFS  documentation</title>
+      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=9edc463e" />
+
+  
+      <script src="../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../_static/documentation_options.js?v=8a448e45"></script>
+      <script src="../_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="../_static/js/theme.js"></script>
+    <script src="../_static/js/versions.js"></script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+    <link rel="next" title="Btrees" href="dev-btrees.html" />
+    <link rel="prev" title="Experimental features" href="Experimental.html" />
+    <link href="../_static/style.css" rel="stylesheet" type="text/css">
+
+<script async type="text/javascript" src="/_/static/javascript/readthedocs-addons.js"></script><meta name="readthedocs-project-slug" content="btrfs" /><meta name="readthedocs-version-slug" content="latest" /><meta name="readthedocs-resolver-filename" content="/dev/dev-btrfs-design.html" /><meta name="readthedocs-http-status" content="200" /></head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../index.html" class="icon icon-home">
+            BTRFS
+          </a>
+              <div class="switch-menus">
+                <div class="version-switch"></div>
+                <div class="language-switch"></div>
+              </div>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Overview</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../Introduction.html">Introduction</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../Status.html">Status</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../man-index.html">Manual pages</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../Administration.html">Administration</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../Hardware.html">Hardware considerations</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../Feature-by-version.html">Changes (feature/version)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../Kernel-by-version.html">Changes (kernel/version)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../CHANGES.html">Changes (btrfs-progs)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../Contributors.html">Contributors</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../Glossary.html">Glossary</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../INSTALL.html">Installation instructions</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../Source-repositories.html">Source repositories</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../Interoperability.html">Interoperability</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Features</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../Common-features.html">Common Linux features</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../Custom-ioctls.html">Custom ioctls</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../Auto-repair.html">Auto-repair on read</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../Balance.html">Balance</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../Compression.html">Compression</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../Checksumming.html">Checksumming</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../Convert.html">Convert</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../Deduplication.html">Deduplication</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../Defragmentation.html">Defragmentation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../Inline-files.html">Inline files</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../Qgroups.html">Quota groups</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../Reflink.html">Reflink</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../Resize.html">Resize</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../Scrub.html">Scrub</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../Seeding-device.html">Seeding device</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../Send-receive.html">Send/receive</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../Subpage.html">Subpage support</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../Subvolumes.html">Subvolumes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../Swapfile.html">Swapfile</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../Tree-checker.html">Tree checker</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../Trim.html">Trim/discard</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../Volume-management.html">Volume management</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../Zoned-mode.html">Zoned mode</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Developer documentation</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="Development-notes.html">Development notes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Developer-s-FAQ.html">Developer’s FAQ</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../DocConventions.html">Conventions and style for documentation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Experimental.html">Experimental features</a></li>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Btrfs design</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#btree-data-structures">Btree data structures</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#filesystem-data-structures">Filesystem data structures</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#inodes">Inodes</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#files">Files</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#directories">Directories</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#reference-counted-extents">Reference counted extents</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#extent-block-groups">Extent block groups</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#explicit-back-references">Explicit back references</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#file-extent-backrefs">File extent backrefs</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#snapshots-and-subvolumes">Snapshots and subvolumes</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#btree-roots">Btree Roots</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#copy-on-write-logging">Copy on write logging</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#references">References</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="dev-btrees.html">Btrees</a></li>
+<li class="toctree-l1"><a class="reference internal" href="On-disk-format.html">On-disk Format</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev-send-stream.html">Send stream format</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev-json.html">JSON output</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev-internal-apis.html">Internal APIs</a></li>
+<li class="toctree-l1"><a class="reference internal" href="ReleaseChecklist.html">Release checklist</a></li>
+<li class="toctree-l1"><a class="reference internal" href="GithubReviewWorkflow.html">Pull request review workflow</a></li>
+<li class="toctree-l1"><a class="reference internal" href="CmdLineConventions.html">Command line, formatting, UI guidelines</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../btrfs-ioctl.html">btrfs-ioctl(2)</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">TODO</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../trouble-index.html">Troubleshooting pages</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../index.html">BTRFS</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">Btrfs design</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../_sources/dev/dev-btrfs-design.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="btrfs-design">
+<h1>Btrfs design<a class="headerlink" href="#btrfs-design" title="Link to this heading"></a></h1>
+<p>Btrfs is implemented with simple and well known concepts and constructs. The
+copy-on-write architecture is based on white paper from Ohad Rodeh (IBM research,
+presentation <a class="reference external" href="https://www.usenix.org/event/lsf07/tech/rodeh.pdf">slides</a>,
+2006 article <a class="reference external" href="https://dl.acm.org/doi/10.1145/1326542.1326544">B-trees, shadowing, and clones</a>).</p>
+<section id="btree-data-structures">
+<h2>Btree data structures<a class="headerlink" href="#btree-data-structures" title="Link to this heading"></a></h2>
+<p>The Btrfs btree provides a generic facility to store a variety of data
+types. Internally it only knows about three data structures: keys,
+items, and a block header:</p>
+<div class="highlight-none notranslate"><div class="highlight"><pre><span></span>struct btrfs_header {
+        u8 csum[32];
+        u8 fsid[16];
+        __le64 bytenr;
+        __le64 flags;
+
+        u8 chunk_tree_uid[16];
+        __le64 generation;
+        __le64 owner;
+        __le32 nritems;
+        u8 level;
+}
+</pre></div>
+</div>
+<div class="highlight-none notranslate"><div class="highlight"><pre><span></span>struct btrfs_disk_key {
+       __le64 objectid;
+       u8 type;
+       __le64 offset;
+}
+</pre></div>
+</div>
+<div class="highlight-none notranslate"><div class="highlight"><pre><span></span>struct btrfs_item {
+       struct btrfs_disk_key key;
+       __le32 offset;
+       __le32 size;
+}
+</pre></div>
+</div>
+<p>Upper nodes of the trees contain only [ key, block pointer ] pairs. Tree
+leaves are broken up into two sections that grow toward each other.
+Leaves have an array of fixed sized items, and an area where item data
+are stored. The offset and size fields in the item indicate where in the
+leaf the item data can be found. Example:</p>
+<img alt="Leaf structure" src="../_images/Leaf-structure.png" />
+<p>Item data is of variable size, and various filesystem data structures are
+defined as different types of item data. The type field in struct
+btrfs_disk_key indicates the type of data stored in the item.</p>
+<p>The block header contains a checksum for the block contents, the UUID of
+the filesystem that owns the block, the level of the block in the tree,
+and the block number where this block is supposed to live. These fields
+allow the contents of the metadata to be verified when the data is read.
+Everything that points to a btree block also stores the generation field
+it expects that block to have. This allows Btrfs to detect phantom or
+misplaced writes on the media.</p>
+<p>The checksum of the lower node is not stored in the node pointer to simplify
+the FS writeback code. The generation number will be known at the time the
+block is inserted into the btree, but the checksum is only calculated before
+writing the block to disk. Using the generation allows Btrfs to detect phantom
+writes without having to find and update the upper node each time the lower
+node checksum is updated.</p>
+<p>The generation field corresponds to the transaction id that allocated
+the block, which enables easy incremental backups and is used by the
+copy on write transaction subsystem.</p>
+</section>
+<section id="filesystem-data-structures">
+<h2>Filesystem data structures<a class="headerlink" href="#filesystem-data-structures" title="Link to this heading"></a></h2>
+<p>Each object in the filesystem has an objectid, which is allocated
+dynamically on creation. A free objectid is simply a hole in the key
+space of the filesystem btree; objectids that don’t already exist in the
+tree. The objectid makes up the most significant bits of the key,
+allowing all of the items for a given filesystem object to be logically
+grouped together in the btree.</p>
+<p>The offset field of the key stores additional information depending on the key
+and its associated item.  For file extents, this would be the byte offset of
+the start of the extent in the file. The type field stores the item type
+information.</p>
+</section>
+<section id="inodes">
+<h2>Inodes<a class="headerlink" href="#inodes" title="Link to this heading"></a></h2>
+<p>Inodes are stored in struct btrfs_inode_item. Inode items are always the lowest
+valued key for a given object, and they store the stat data for files and
+directories. The inode structure is relatively small, and does not contain
+embedded file data or extended attribute data. These things are stored in other
+item types.</p>
+</section>
+<section id="files">
+<h2>Files<a class="headerlink" href="#files" title="Link to this heading"></a></h2>
+<p>Small files that occupy less than one leaf block may be packed into the
+btree leaf inside the extent item. In this case the key offset is the byte
+offset of the data in the file, and the size field of struct btrfs_item
+indicates how much data is stored. The inline file must fit completely to the
+extent item, the limit is either <em>nodesize</em> or host machine page size.</p>
+<p>Larger files are stored in extents. The struct btrfs_file_extent_item
+records a generation number for the extent and a [ disk block, disk num
+blocks ] pair to record the area of disk corresponding to the file.
+Extents also store the logical offset and the number of blocks used by
+this extent record into the extent on disk. This allows Btrfs to satisfy
+a rewrite into the middle of an extent without having to read the old
+file data first. For example, writing 1MB into the middle of a existing
+128MB extent may result in three extent records:</p>
+<p><code class="docutils literal notranslate"><span class="pre">[ old extent: bytes 0-64MB ], [ new extent 1MB ], [ old extent: bytes 65MB – 128MB]</span></code></p>
+<p>File data checksums are stored in a dedicated btree in a struct
+btrfs_csum_item. The offset of the key corresponds to the byte number of
+the extent. The data is checksummed after compression is done and it reflects
+the bytes sent to the disk.</p>
+<p>A single item may store a number of checksums. struct btrfs_csum_items
+are only used for file extents. File data inline in the btree is covered
+by the checksum at the start of the btree block.</p>
+</section>
+<section id="directories">
+<h2>Directories<a class="headerlink" href="#directories" title="Link to this heading"></a></h2>
+<p>Directories are indexed in two different ways. For filename lookup,
+there is an index comprised of keys:</p>
+<table class="docutils align-default">
+<tbody>
+<tr class="row-odd"><td><p>Directory Objectid</p></td>
+<td><p>BTRFS_DIR_ITEM_KEY</p></td>
+<td><p>64 bit filename hash</p></td>
+</tr>
+</tbody>
+</table>
+<p>The directory hash used is crc32c. Hash collisions are handled.</p>
+<p>The second directory index is used by readdir to return data in inode
+number order. This more closely resembles the order of blocks on disk
+and generally provides better performance for reading data in bulk
+(backups, copies, etc). Also, it allows fast checking that a given inode
+is linked into a directory when verifying inode link counts. This index
+uses an additional set of keys:</p>
+<table class="docutils align-default">
+<tbody>
+<tr class="row-odd"><td><p>Directory Objectid</p></td>
+<td><p>BTRFS_DIR_INDEX_KEY</p></td>
+<td><p>Inode Sequence number</p></td>
+</tr>
+</tbody>
+</table>
+<p>The inode sequence number comes from the directory. It is increased each
+time a new file or directory is added.</p>
+</section>
+<section id="reference-counted-extents">
+<h2>Reference counted extents<a class="headerlink" href="#reference-counted-extents" title="Link to this heading"></a></h2>
+<p>Reference counting is the basis for the snapshotting subsystems. For
+every extent allocated to a btree or a file, Btrfs records the number of
+references in a struct btrfs_extent_item. The trees that hold these
+items also serve as the allocation map for blocks that are in use on the
+filesystem. Some trees are not reference counted and are only protected
+by a copy on write logging. However, the same type of extent items are
+used for all allocated blocks on the disk.</p>
+<p>A reasonably comprehensive description of the way that references work
+can be found in <a class="reference external" href="http://www.spinics.net/lists/linux-btrfs/msg33415.html">this email from Josef
+Bacik</a>.</p>
+</section>
+<section id="extent-block-groups">
+<h2>Extent block groups<a class="headerlink" href="#extent-block-groups" title="Link to this heading"></a></h2>
+<p>Extent block groups allow allocator optimizations by breaking the disk up into
+chunks of 256MB, 1GiB or more. For each chunk, they record information about
+the number of blocks available.</p>
+<p>Block groups have a flag that indicates if they are preferred for data or
+metadata allocations. At mkfs time the initial set of block groups is created
+and more are added on demand depending on the workload. In the special <em>mixed</em>
+mode a block group can be used both data and metadata, but this cause a lot of
+fragmentation due to different sizes and update patterns.</p>
+</section>
+<section id="explicit-back-references">
+<h2>Explicit back references<a class="headerlink" href="#explicit-back-references" title="Link to this heading"></a></h2>
+<p>Back references have three main goals:</p>
+<ul class="simple">
+<li><p>Differentiate between all holders of references to an extent so that
+when a reference is dropped we can make sure it was a valid reference
+before freeing the extent.</p></li>
+<li><p>Provide enough information to quickly find the holders of an extent
+if we notice a given block is corrupted or bad, or it can be used to look up
+files that the block belongs to.</p></li>
+<li><p>Make it easy to migrate blocks for FS shrinking or storage pool
+maintenance. This is actually the same as #2, but with a slightly
+different use case.</p></li>
+</ul>
+<section id="file-extent-backrefs">
+<h3>File extent backrefs<a class="headerlink" href="#file-extent-backrefs" title="Link to this heading"></a></h3>
+<p>File extents can be referenced by:</p>
+<ul class="simple">
+<li><p>Multiple snapshots, subvolumes, or different generations in one
+subvolume</p></li>
+<li><p>Different files inside a single subvolume</p></li>
+<li><p>Different offsets inside a file</p></li>
+</ul>
+</section>
+</section>
+<section id="snapshots-and-subvolumes">
+<h2>Snapshots and subvolumes<a class="headerlink" href="#snapshots-and-subvolumes" title="Link to this heading"></a></h2>
+<p>Subvolume is a named btree that holds files and directories.  They have inodes
+inside the tree of tree roots and can have non-root owners and groups.
+All of the blocks and file extents inside of subvolumes are reference counted
+to allow snapshotting. Up to 2<sup>64</sup> subvolumes may be created on the FS.</p>
+<p>Snapshots are identical to subvolumes, but their root block is initially
+shared with another subvolume. When the snapshot is taken, the reference
+count on the root block is increased, and the copy on write transaction
+system ensures changes made in either the snapshot or the source
+subvolume are private to that root. Snapshots are writable, and they can
+be snapshotted again any number of times. If read only snapshots are
+desired, a flag is set and no new writes are allowed.</p>
+</section>
+<section id="btree-roots">
+<h2>Btree Roots<a class="headerlink" href="#btree-roots" title="Link to this heading"></a></h2>
+<p>Each Btrfs filesystem consists of a number of tree roots. A freshly
+formatted filesystem will have roots for:</p>
+<ul class="simple">
+<li><p>The tree of tree roots</p></li>
+<li><p>The tree of allocated extents</p></li>
+<li><p>The default subvolume tree</p></li>
+</ul>
+<p>The tree of tree roots records the root block for the extent tree and
+the root blocks and names for each subvolume and snapshot tree. As
+transactions commit, the root block pointers are updated in this tree to
+reference the new roots created by the transaction, and then the new
+root block of this tree is recorded in the FS super block.</p>
+<p>The tree of tree roots acts as a directory of all the other trees on the
+filesystem, and it has directory items recording the names of all
+snapshots and subvolumes in the FS. Each snapshot or subvolume has an
+objectid in the tree of tree roots, and at least one corresponding
+struct btrfs_root_item. Directory items in the tree map names of
+snapshots and subvolumes to these root items. Because the root item key
+is updated with every transaction commit, the directory items reference
+a generation number of (u64)-1, which tells the lookup code to find the
+most recent root available.</p>
+<p>The extent trees are used to manage allocated space on the devices. The
+space available can be divided between a number of extent trees to
+reduce lock contention and give different allocation policies to
+different block ranges.</p>
+<p>The diagram below depicts a collection of tree roots. The super block
+points to the root tree, and the root tree points to the extent trees
+and subvolumes. The root tree also has a directory to map subvolume
+names to struct btrfs_root_items in the root tree. This filesystem has
+one subvolume named ‘default’ (created by mkfs), and one snapshot of
+‘default’ named ‘snap’ (created by the admin some time later). In this
+example, ‘default’ has not changed since the snapshot was created and so
+both point tree to the same root block on disk.</p>
+<img alt="Copy-Design-r.png" src="../_images/Copy-Design-r.png" />
+</section>
+<section id="copy-on-write-logging">
+<h2>Copy on write logging<a class="headerlink" href="#copy-on-write-logging" title="Link to this heading"></a></h2>
+<p>Data and metadata in Btrfs are protected with copy on write logging
+(COW). Once the transaction that allocated the space on disk is
+committed, any new writes to that logical address in the file or btree
+will go to a newly allocated block, and block pointers in the btrees and
+super blocks will be updated to reflect the new location.</p>
+<p>Some of the btrfs trees do not use reference counting for their
+allocated space. This includes the root tree, and the extent tree. As
+blocks are replaced in these trees, the old blocks are freed in the extent
+tree. These blocks are not reused for other purposes until the
+transaction that freed them commits.</p>
+<p>All subvolume (and snapshot) trees are reference counted. When a COW
+operation is performed on a btree node, the reference count of all the
+blocks it points to is increased by one. For leaves, the reference
+counts of any file extents in the leaf are increased by one. When the
+transaction commits, a new root pointer is inserted in the root tree for
+each new subvolume root. The key used has the form:</p>
+<table class="docutils align-default">
+<tbody>
+<tr class="row-odd"><td><p>Subvolume inode number</p></td>
+<td><p>BTRFS_ROOT_ITEM_KEY</p></td>
+<td><p>Transaction ID</p></td>
+</tr>
+</tbody>
+</table>
+<p>The updated btree blocks are all flushed to disk, and then the super
+block is updated to point to the new root tree. Once the super block has
+been properly written to disk, the transaction is considered complete.
+At this time the root tree has two pointers for each subvolume changed
+during the transaction. One item points to the new tree and one points
+to the tree that existed at the start of the last transaction.</p>
+<p>Any time after the commit finishes, the older subvolume root items may
+be removed. The reference count on the subvolume root block is lowered
+by one. If the reference count reaches zero, the block is freed and the
+reference count on any nodes the root points to is lowered by one. If a
+tree node or leaf can be freed, it is traversed to free the nodes or
+extents below it in the tree in a depth first fashion.</p>
+<p>The traversal and freeing of the tree may be done in pieces by inserting
+a progress record in the root tree. The progress record indicates the
+last key and level touched by the traversal so the current transaction
+can commit and the traversal can resume in the next transaction. If the
+system crashes before the traversal completes, the progress record is
+used to safely delete the root on the next mount.</p>
+</section>
+<section id="references">
+<h2>References<a class="headerlink" href="#references" title="Link to this heading"></a></h2>
+<ul class="simple">
+<li><p>BTRFS: The Linux B-Tree Filesystem describing the overall concepts and
+architecture, appeared in ACM Transactions on Storage, August 2013. Includes a
+detailed comparison with ZFS. There is a free ACM authorized link, from O.
+Rodeh’s [1] page. Otherwise, try IBM Research link</p></li>
+<li><p>Original COW B-tree: Source code in C that implements the COW B-tree algorithms
+repository (<a class="reference external" href="https://github.com/orodeh/bt">https://github.com/orodeh/bt</a>). Written by Ohad Rodeh at IBM
+Research in 2006, and released under a BSD license. This is a reference
+implementation, that works in user space.</p></li>
+</ul>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="Experimental.html" class="btn btn-neutral float-left" title="Experimental features" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="dev-btrees.html" class="btn btn-neutral float-right" title="Btrees" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright .</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

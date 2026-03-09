@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    
+      <title>btrbk is awesome :: ./techtipsy</title>
+    
+    <meta http-equiv="content-type" content="text/html; charset=utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="I like having a safety net whenever I&rsquo;m doing something potentially destructive, which is why I use the btrfs file system for my operating system and my data. Snapshots are one half of my &ldquo;whoops, there goes all my work&rdquo; strategy (backups are the other half).
+I&rsquo;ve written about how I use snapshots on btrfs using snapper, but lately I&rsquo;ve become annoyed with it.
+Snapshots: probably invented by a developer who owns a cat. Shortcomings of snapper snapper is great while you&rsquo;re on the happy path, but when you wander off of it, it gets a bit frustrating. This is 100% my own personal experience and I cannot rule out any PEBCAK scenarios, but it&rsquo;s how I felt using the tool.
+"/>
+<meta name="keywords" content=""/>
+<meta name="robots" content="noodp"/>
+<link rel="canonical" href="https://ounapuu.ee/posts/2022/07/09/btrbk-is-awesome/" />
+
+<link rel="alternate" type="application/rss+xml"
+      title="ounapuu.ee all posts feed"
+      href="/index.xml">
+
+
+<link rel="stylesheet" href="https://ounapuu.ee/assets/style.css">
+
+
+<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
+<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
+<link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png">
+<link rel="manifest" href="/site.webmanifest">
+
+
+
+  <meta name="twitter:card" content="summary">
+  <meta name="twitter:title" content="btrbk is awesome">
+  <meta name="twitter:description" content="I ramble about a tool that is great for taking regular snapshots on the btrfs filesystem.">
+
+
+
+<meta property="og:url" content="https://ounapuu.ee/posts/2022/07/09/btrbk-is-awesome/">
+  <meta property="og:site_name" content="./techtipsy">
+  <meta property="og:title" content="btrbk is awesome">
+  <meta property="og:description" content="I ramble about a tool that is great for taking regular snapshots on the btrfs filesystem.">
+  <meta property="og:locale" content="en">
+  <meta property="og:type" content="article">
+    <meta property="article:section" content="posts">
+    <meta property="article:published_time" content="2022-07-09T16:00:00+03:00">
+    <meta property="article:modified_time" content="2022-07-09T16:00:00+03:00">
+    <meta property="article:tag" content="Btrfs">
+    <meta property="article:tag" content="Linux">
+    <meta property="article:tag" content="Backup">
+    <meta property="article:tag" content="Btrbk">
+
+
+
+
+
+
+  </head>
+  <body class="dark-theme">
+    <div class="container">
+      <header class="header">
+  <span class="header__inner">
+    <a href="/" class="logo" style="text-decoration: none;">
+  
+    <span class="logo__mark"><svg xmlns="http://www.w3.org/2000/svg" class="greater-icon" viewBox="0 0 44 44">
+  <path fill="none" d="M15 8l14.729 14.382L15 35.367"/>
+</svg>
+</span>
+    <span class="logo__text">./techtipsy</span>
+  
+</a>
+
+    <span class="header__right">
+      
+        <nav class="menu">
+  <ul class="menu__inner">
+    
+      
+        
+          <li><a href="/posts">Posts</a></li>
+        
+      
+        
+          <li><a href="/tags">Tags</a></li>
+        
+      
+        
+          <li><a href="/misc/archive">The Archive</a></li>
+        
+      
+      
+    
+      <li>
+          <a id="rsslink" href="/index.xml">
+              RSS
+              <img src="/rss.png" class="rss" width="128px" height="128px" alt="RSS">
+          </a>
+      </li>
+  </ul>
+</nav>
+
+      
+    </span>
+  </span>
+</header>
+
+
+      <div class="content">
+        
+  
+  
+
+  <div class="post">
+    <h1 class="post-title"><a href="https://ounapuu.ee/posts/2022/07/09/btrbk-is-awesome/">btrbk is awesome</a></h1>
+    <div class="post-meta">
+      
+        <span class="post-date">
+          2022-07-09
+        </span>
+
+        
+          
+        
+      
+
+      
+      
+      <span class="post-tags">
+        
+          #<a href="https://ounapuu.ee/tags/btrfs/">btrfs</a>&nbsp;
+        
+          #<a href="https://ounapuu.ee/tags/linux/">linux</a>&nbsp;
+        
+          #<a href="https://ounapuu.ee/tags/backup/">backup</a>&nbsp;
+        
+          #<a href="https://ounapuu.ee/tags/btrbk/">btrbk</a>&nbsp;
+        
+        </span>
+      
+    </div>
+
+
+
+    
+
+    <div class="post-content">
+      
+      <p>I like having a safety net whenever I&rsquo;m doing something potentially destructive,
+which is why I use the <code>btrfs</code> file system for my operating system and my data.
+Snapshots are one half of my &ldquo;whoops, there goes all my work&rdquo; strategy (backups
+are the other half).</p>
+<p><a href="/posts/2022/04/05/btrfs-snapshots/">I&rsquo;ve written about how I use snapshots on btrfs using snapper,</a>
+but lately I&rsquo;ve become annoyed with it.</p>
+
+
+
+
+
+
+
+  
+
+
+
+
+<figure class="center" >
+    
+    <a href="/posts/2022/07/09/btrbk-is-awesome/media/image.jpg">
+        <img style="max-width: 100%; width: auto; height: auto; border-radius: 8px;"
+             src="/posts/2022/07/09/btrbk-is-awesome/media/image_hu_f59324dda827e0eb.jpg"
+             width="1280"
+             height="669"
+             alt="Snapshots: probably invented by a developer who owns a cat."
+        >
+    </a>
+    <figcaption class="center">
+      Snapshots: probably invented by a developer who owns a cat.
+    </figcaption>
+    
+</figure>
+
+<h3 id="shortcomings-of-snapper">Shortcomings of <code>snapper</code></h3>
+<p><code>snapper</code> is great while you&rsquo;re on the happy path, but when you wander off of
+it, it gets a bit frustrating. This is 100% my own personal experience and I
+cannot rule out any PEBCAK scenarios, but it&rsquo;s how I felt using the tool.</p>
+<p>The snapshots are on the same subvolume, such as <code>/home/.snapshots</code>, which means
+that I have to specifically exclude the <code>.snapshots</code> folder in every tool and
+script that I use for making backups. Without that change, the tools ended up
+scanning the folder and eating up a lot of resources, mainly the CPU and storage.</p>
+<p>Backing up snapshots to something like an external backup SSD wasn&rsquo;t something
+that <code>snapper</code> supported out of the box as well, meaning that for offline
+backups I still had to resort to a good old <code>rsync</code> copy. It&rsquo;s inconvenient and
+I won&rsquo;t have a backup that also contained recent snapshots, but it was
+manageable.</p>
+<p>I also reinstalled Fedora Linux on my ThinkPad recently to see how well my
+Ansible playbooks hold up (quite decently!) and found that setting up <code>snapper</code>
+is a bit of a pain. I tried to set up <code>snapper</code> again, but it wasn&rsquo;t as
+straightforward as I was hoping for, with it not properly picking up the
+configuration file changes. At the end, it just ran into weird errors
+when I tried it to prune some snapshots according to the policy I set up. Since
+I was running out of disk space, I just gave up, uninstalled <code>snapper</code> and
+destroyed the snapshots manually.</p>
+<p>After all that (and a recommendation by a friend) I decided to bite the bullet
+and try out <a href="https://github.com/digint/btrbk">btrbk</a>.</p>
+<h3 id="btrbk">btrbk</h3>
+<p>Setting up <code>btrbk</code> on Fedora Linux 36 was a breeze. Install it via <code>dnf install  btrbk</code>, copy your configuration to <code>/etc/btrbk/</code>, make sure that the directory
+used for snapshots exists with <code>mkdir /btrbk_snapshots</code> and you&rsquo;re good to go!
+<code>btrbk</code> is just a huge Perl script, so no fancy dependencies are needed.</p>
+<p>My <code>btrfs</code> filesystem has three subvolumes: <code>/</code>, <code>/home</code> and <code>/storage</code>. Data
+stored on these subvolumes has different levels of importance, which is also
+reflected in the snapshot retention policies.</p>
+<p>The configuration on my setup is the following:</p>
+<pre tabindex="0"><code>timestamp_format        long
+
+volume /
+  snapshot_dir /btrbk_snapshots
+  subvolume /
+    snapshot_preserve_min   12h
+    snapshot_preserve       24h
+  subvolume /home
+    snapshot_preserve_min   48h
+    snapshot_preserve       7d
+  subvolume /storage
+    snapshot_preserve_min   6h
+    snapshot_preserve       7d
+</code></pre><p>To take the snapshots, I&rsquo;ve set up a systemd timer that runs every 5 minutes and
+runs the following command:</p>
+<pre tabindex="0"><code>btrbk -c /etc/btrbk/btrbk.conf run --progress
+</code></pre><p>A successful run will have output like this:</p>
+<pre tabindex="0"><code>--------------------------------------------------------------------------------
+Backup Summary (btrbk command line client, version 0.32.1)
+    Date:   Sat Jul  9 14:00:00 2022
+    Config: /etc/btrbk/btrbk.conf
+Legend:
+    ===  up-to-date subvolume (source snapshot)
+    +++  created subvolume (source snapshot)
+    ---  deleted subvolume
+    ***  received subvolume (non-incremental)
+    &gt;&gt;&gt;  received subvolume (incremental)
+--------------------------------------------------------------------------------
+/
++++ /btrbk_snapshots/ROOT.20220709T1400
+--- /btrbk_snapshots/ROOT.20220708T1300
+/home
++++ /btrbk_snapshots/home.20220709T1400
+/storage
++++ /btrbk_snapshots/storage.20220709T1400
+--- /btrbk_snapshots/storage.20220709T0745
+--- /btrbk_snapshots/storage.20220709T0750
+--- /btrbk_snapshots/storage.20220709T0755
+</code></pre><p>I love how the output is very concise about what it just did.</p>
+<p>To make a backup of my drive to an external SSD that&rsquo;s also a <code>btrfs</code> filesystem,
+I created a separate config at <code>/etc/btrbk/backup-to-ext-drive.conf</code>:</p>
+<pre tabindex="0"><code>timestamp_format        long
+
+target_preserve_min    no
+target_preserve        7d
+
+volume /
+  snapshot_dir /btrbk_snapshots
+  target /mnt/backup/T430
+  subvolume /
+  subvolume /home
+  subvolume /storage
+</code></pre><p>In this example, <code>/mnt/backup/T430</code> is a <code>btrfs</code> subvolume itself.</p>
+<p>Instead of running <code>rsync</code>, my backup script contains the line:</p>
+<pre tabindex="0"><code>btrbk -c /etc/btrbk/backup-to-ext-drive.conf run --progress
+</code></pre><p>I love how the default behaviour in <code>btrbk</code> is to keep snapshots separate from
+the subvolumes themselves. Making a full copy of <code>/home</code> or any other filesystem
+doesn&rsquo;t require me to always exclude the <code>.snapshots</code> directory, which is nice.</p>
+<p>The snapshot names themselves are also human readable. If I accidentally messed
+up and my changes from an hour ago were lost, I&rsquo;d just have to go to
+<code>/btrbk_snapshots</code>, look up a snapshot from an hour ago, and copy whatever I
+need from the snapshot. This has already saved my butt at least once.</p>
+<h3 id="conclusion">Conclusion</h3>
+<p>It&rsquo;s not often that a piece of software gets me that excited, but <code>btrbk</code> has
+somehow managed to do it. It&rsquo;s a single script that has all the example use
+cases documented in its README and the functionality does exactly what I want.</p>
+<p>That&rsquo;s all I really need from software.</p>
+<p>Huge thanks to <a href="https://digint.ch/">Digital Integrity GmbH</a> for building,
+maintaining and sharing this tool with the world!</p>
+
+    </div>
+    
+      
+        <div class="pagination__title">
+    <span class="pagination__title-h">Subscribe for more tech tips!</span>
+    <hr />
+</div>
+<p>Subscribe to new posts via <a href="/index.xml">the RSS feed.</a></p>
+<p>Not sure what RSS is, or how to get started? <a href="https://aboutfeeds.com/">Check this guide!</a></p>
+<p>You can reach me via <a href="mailto:ihavesomethoughtsonyourblog@ounapuu.ee">e-mail</a> or <a href="https://www.linkedin.com/in/%F0%9F%94%A5-herman-%C3%B5unapuu-600516152/">LinkedIn.</a></p>
+<p>If you liked this post, consider sharing it!</p>
+      
+    
+    
+      
+        <div class="pagination">
+          <div class="pagination__title">
+            <span class="pagination__title-h">Random tech tips!</span>
+            <hr />
+          </div>
+          <div class="pagination__buttons">
+            
+            <span class="button">
+              <a href="https://ounapuu.ee/posts/2023/03/06/way-way-back/">I looked at this site on the Wayback Machine</a>
+            </span>
+            
+            <span class="button">
+              <a href="https://ounapuu.ee/posts/2025/04/08/how-i-trashed-a-laptop/">About the time I trashed my mother&#39;s laptop</a>
+            </span>
+            
+            <span class="button">
+              <a href="https://ounapuu.ee/posts/2022/02/02/asrock-x570m-pro4-overview/">ASRock X570M Pro4 motherboard overview</a>
+            </span>
+            
+            <span class="button">
+              <a href="https://ounapuu.ee/posts/2025/02/10/roll-your-own-feature-toggles/">Feature toggles: just roll your own!</a>
+            </span>
+            
+            <span class="button">
+              <a href="https://ounapuu.ee/posts/2025/01/15/backups-without-disk/">Backing up another PC with a single Ethernet cable</a>
+            </span>
+            
+          </div>
+        </div>
+      
+    
+    </div>
+
+      </div>
+
+      
+        <footer class="footer">
+    <div class="footer__inner">
+        <a href="/" class="logo" style="text-decoration: none;">
+  
+    <span class="logo__mark"><svg xmlns="http://www.w3.org/2000/svg" class="greater-icon" viewBox="0 0 44 44">
+  <path fill="none" d="M15 8l14.729 14.382L15 35.367"/>
+</svg>
+</span>
+    <span class="logo__text">./techtipsy</span>
+  
+</a>
+
+        <p>© 2026</p>
+        <p><a href="https://github.com/panr/hugo-theme-hello-friend">Theme</a> originally created by <a href="https://radoslawkoziel.pl" target="_blank" rel="noopener">Radosław Kozieł</a>, heavily modified by me.</p>
+        <p>This website is hosted on <a href="/posts/2024/06/24/back-to-roots/">a home server</a>, so it might go offline
+            sometimes.</p>
+        <p>Powered by <a href="https://gohugo.io" target="_blank" rel="noopener">Hugo</a> and my stubbornness.</p>
+    </div>
+</footer>
+
+
+      
+    </div>
+  </body>
+</html>

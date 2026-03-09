@@ -1,0 +1,614 @@
+<!DOCTYPE html>
+<html lang="en-US" id="html">
+<head >
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Best Affordable DIY NAS with Btrfs Raid1 on Ubuntu Server - northerncoder.ca</title>
+
+<!-- The SEO Framework by Sybre Waaijer -->
+<meta name="robots" content="max-snippet:-1,max-image-preview:large,max-video-preview:-1" />
+<link rel="canonical" href="https://northerncoder.ca/best-affordable-diy-nas-with-btrfs-raid1-on-ubuntu-server/" />
+<meta name="description" content="If you have an old PC laying around, you could setup a simple and affordable NAS (Network Attached Storage) to hold your precious data with functionality…" />
+<meta property="og:type" content="article" />
+<meta property="og:locale" content="en_US" />
+<meta property="og:site_name" content="northerncoder.ca" />
+<meta property="og:title" content="Best Affordable DIY NAS with Btrfs Raid1 on Ubuntu Server" />
+<meta property="og:description" content="If you have an old PC laying around, you could setup a simple and affordable NAS (Network Attached Storage) to hold your precious data with functionality equivalent to expensive standalone NAS devices." />
+<meta property="og:url" content="https://northerncoder.ca/best-affordable-diy-nas-with-btrfs-raid1-on-ubuntu-server/" />
+<meta property="og:image" content="https://northerncoder.ca/wp-content/uploads/2020/11/pc-scaled.jpg" />
+<meta property="og:image:width" content="2560" />
+<meta property="og:image:height" content="1920" />
+<meta property="article:published_time" content="2020-12-14" />
+<meta property="article:modified_time" content="2021-01-14" />
+<meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:title" content="Best Affordable DIY NAS with Btrfs Raid1 on Ubuntu Server" />
+<meta name="twitter:description" content="If you have an old PC laying around, you could setup a simple and affordable NAS (Network Attached Storage) to hold your precious data with functionality equivalent to expensive standalone NAS devices." />
+<meta name="twitter:image" content="https://northerncoder.ca/wp-content/uploads/2020/11/pc-scaled.jpg" />
+<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"WebSite","@id":"https://northerncoder.ca/#/schema/WebSite","url":"https://northerncoder.ca/","name":"northerncoder.ca","description":"Front end web development, and tech projects","inLanguage":"en-US","potentialAction":{"@type":"SearchAction","target":{"@type":"EntryPoint","urlTemplate":"https://northerncoder.ca/search/{search_term_string}/"},"query-input":"required name=search_term_string"},"publisher":{"@type":"Organization","@id":"https://northerncoder.ca/#/schema/Organization","name":"northerncoder.ca","url":"https://northerncoder.ca/"}},{"@type":"WebPage","@id":"https://northerncoder.ca/best-affordable-diy-nas-with-btrfs-raid1-on-ubuntu-server/","url":"https://northerncoder.ca/best-affordable-diy-nas-with-btrfs-raid1-on-ubuntu-server/","name":"Best Affordable DIY NAS with Btrfs Raid1 on Ubuntu Server - northerncoder.ca","description":"If you have an old PC laying around, you could setup a simple and affordable NAS (Network Attached Storage) to hold your precious data with functionality…","inLanguage":"en-US","isPartOf":{"@id":"https://northerncoder.ca/#/schema/WebSite"},"breadcrumb":{"@type":"BreadcrumbList","@id":"https://northerncoder.ca/#/schema/BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"item":"https://northerncoder.ca/","name":"northerncoder.ca"},{"@type":"ListItem","position":2,"item":"https://northerncoder.ca/category/tech/","name":"Category: Tech"},{"@type":"ListItem","position":3,"name":"Best Affordable DIY NAS with Btrfs Raid1 on Ubuntu Server"}]},"potentialAction":{"@type":"ReadAction","target":"https://northerncoder.ca/best-affordable-diy-nas-with-btrfs-raid1-on-ubuntu-server/"},"datePublished":"2020-12-14","dateModified":"2021-01-14","author":{"@type":"Person","@id":"https://northerncoder.ca/#/schema/Person/76ebb519e7db9c42db2d34be6a1da031","name":"northerncoder"}}]}</script>
+<!-- / The SEO Framework by Sybre Waaijer | 4.42ms meta | 0.07ms boot -->
+
+<link rel='dns-prefetch' href='//northerncoder.ca' />
+<link rel='dns-prefetch' href='//fonts.googleapis.com' />
+<link rel="alternate" type="application/rss+xml" title="northerncoder.ca &raquo; Feed" href="https://northerncoder.ca/feed/" />
+<link rel="alternate" type="application/rss+xml" title="northerncoder.ca &raquo; Comments Feed" href="https://northerncoder.ca/comments/feed/" />
+<link rel="alternate" type="application/rss+xml" title="northerncoder.ca &raquo; Best Affordable DIY NAS with Btrfs Raid1 on Ubuntu Server Comments Feed" href="https://northerncoder.ca/best-affordable-diy-nas-with-btrfs-raid1-on-ubuntu-server/feed/" />
+<link rel="alternate" title="oEmbed (JSON)" type="application/json+oembed" href="https://northerncoder.ca/wp-json/oembed/1.0/embed?url=https%3A%2F%2Fnortherncoder.ca%2Fbest-affordable-diy-nas-with-btrfs-raid1-on-ubuntu-server%2F" />
+<link rel="alternate" title="oEmbed (XML)" type="text/xml+oembed" href="https://northerncoder.ca/wp-json/oembed/1.0/embed?url=https%3A%2F%2Fnortherncoder.ca%2Fbest-affordable-diy-nas-with-btrfs-raid1-on-ubuntu-server%2F&#038;format=xml" />
+<style id='wp-img-auto-sizes-contain-inline-css' type='text/css'>
+img:is([sizes=auto i],[sizes^="auto," i]){contain-intrinsic-size:3000px 1500px}
+/*# sourceURL=wp-img-auto-sizes-contain-inline-css */
+</style>
+<link rel='stylesheet' id='minimum-pro-theme-css' href='https://northerncoder.ca/wp-content/themes/minimum-pro/style.css?ver=3.0.1' type='text/css' media='all' />
+<style id='wp-emoji-styles-inline-css' type='text/css'>
+
+	img.wp-smiley, img.emoji {
+		display: inline !important;
+		border: none !important;
+		box-shadow: none !important;
+		height: 1em !important;
+		width: 1em !important;
+		margin: 0 0.07em !important;
+		vertical-align: -0.1em !important;
+		background: none !important;
+		padding: 0 !important;
+	}
+/*# sourceURL=wp-emoji-styles-inline-css */
+</style>
+<link rel='stylesheet' id='wp-block-library-css' href='https://northerncoder.ca/wp-includes/css/dist/block-library/style.min.css?ver=6.9' type='text/css' media='all' />
+<style id='wp-block-heading-inline-css' type='text/css'>
+h1:where(.wp-block-heading).has-background,h2:where(.wp-block-heading).has-background,h3:where(.wp-block-heading).has-background,h4:where(.wp-block-heading).has-background,h5:where(.wp-block-heading).has-background,h6:where(.wp-block-heading).has-background{padding:1.25em 2.375em}h1.has-text-align-left[style*=writing-mode]:where([style*=vertical-lr]),h1.has-text-align-right[style*=writing-mode]:where([style*=vertical-rl]),h2.has-text-align-left[style*=writing-mode]:where([style*=vertical-lr]),h2.has-text-align-right[style*=writing-mode]:where([style*=vertical-rl]),h3.has-text-align-left[style*=writing-mode]:where([style*=vertical-lr]),h3.has-text-align-right[style*=writing-mode]:where([style*=vertical-rl]),h4.has-text-align-left[style*=writing-mode]:where([style*=vertical-lr]),h4.has-text-align-right[style*=writing-mode]:where([style*=vertical-rl]),h5.has-text-align-left[style*=writing-mode]:where([style*=vertical-lr]),h5.has-text-align-right[style*=writing-mode]:where([style*=vertical-rl]),h6.has-text-align-left[style*=writing-mode]:where([style*=vertical-lr]),h6.has-text-align-right[style*=writing-mode]:where([style*=vertical-rl]){rotate:180deg}
+/*# sourceURL=https://northerncoder.ca/wp-includes/blocks/heading/style.min.css */
+</style>
+<style id='wp-block-image-inline-css' type='text/css'>
+.wp-block-image>a,.wp-block-image>figure>a{display:inline-block}.wp-block-image img{box-sizing:border-box;height:auto;max-width:100%;vertical-align:bottom}@media not (prefers-reduced-motion){.wp-block-image img.hide{visibility:hidden}.wp-block-image img.show{animation:show-content-image .4s}}.wp-block-image[style*=border-radius] img,.wp-block-image[style*=border-radius]>a{border-radius:inherit}.wp-block-image.has-custom-border img{box-sizing:border-box}.wp-block-image.aligncenter{text-align:center}.wp-block-image.alignfull>a,.wp-block-image.alignwide>a{width:100%}.wp-block-image.alignfull img,.wp-block-image.alignwide img{height:auto;width:100%}.wp-block-image .aligncenter,.wp-block-image .alignleft,.wp-block-image .alignright,.wp-block-image.aligncenter,.wp-block-image.alignleft,.wp-block-image.alignright{display:table}.wp-block-image .aligncenter>figcaption,.wp-block-image .alignleft>figcaption,.wp-block-image .alignright>figcaption,.wp-block-image.aligncenter>figcaption,.wp-block-image.alignleft>figcaption,.wp-block-image.alignright>figcaption{caption-side:bottom;display:table-caption}.wp-block-image .alignleft{float:left;margin:.5em 1em .5em 0}.wp-block-image .alignright{float:right;margin:.5em 0 .5em 1em}.wp-block-image .aligncenter{margin-left:auto;margin-right:auto}.wp-block-image :where(figcaption){margin-bottom:1em;margin-top:.5em}.wp-block-image.is-style-circle-mask img{border-radius:9999px}@supports ((-webkit-mask-image:none) or (mask-image:none)) or (-webkit-mask-image:none){.wp-block-image.is-style-circle-mask img{border-radius:0;-webkit-mask-image:url('data:image/svg+xml;utf8,<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg"><circle cx="50" cy="50" r="50"/></svg>');mask-image:url('data:image/svg+xml;utf8,<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg"><circle cx="50" cy="50" r="50"/></svg>');mask-mode:alpha;-webkit-mask-position:center;mask-position:center;-webkit-mask-repeat:no-repeat;mask-repeat:no-repeat;-webkit-mask-size:contain;mask-size:contain}}:root :where(.wp-block-image.is-style-rounded img,.wp-block-image .is-style-rounded img){border-radius:9999px}.wp-block-image figure{margin:0}.wp-lightbox-container{display:flex;flex-direction:column;position:relative}.wp-lightbox-container img{cursor:zoom-in}.wp-lightbox-container img:hover+button{opacity:1}.wp-lightbox-container button{align-items:center;backdrop-filter:blur(16px) saturate(180%);background-color:#5a5a5a40;border:none;border-radius:4px;cursor:zoom-in;display:flex;height:20px;justify-content:center;opacity:0;padding:0;position:absolute;right:16px;text-align:center;top:16px;width:20px;z-index:100}@media not (prefers-reduced-motion){.wp-lightbox-container button{transition:opacity .2s ease}}.wp-lightbox-container button:focus-visible{outline:3px auto #5a5a5a40;outline:3px auto -webkit-focus-ring-color;outline-offset:3px}.wp-lightbox-container button:hover{cursor:pointer;opacity:1}.wp-lightbox-container button:focus{opacity:1}.wp-lightbox-container button:focus,.wp-lightbox-container button:hover,.wp-lightbox-container button:not(:hover):not(:active):not(.has-background){background-color:#5a5a5a40;border:none}.wp-lightbox-overlay{box-sizing:border-box;cursor:zoom-out;height:100vh;left:0;overflow:hidden;position:fixed;top:0;visibility:hidden;width:100%;z-index:100000}.wp-lightbox-overlay .close-button{align-items:center;cursor:pointer;display:flex;justify-content:center;min-height:40px;min-width:40px;padding:0;position:absolute;right:calc(env(safe-area-inset-right) + 16px);top:calc(env(safe-area-inset-top) + 16px);z-index:5000000}.wp-lightbox-overlay .close-button:focus,.wp-lightbox-overlay .close-button:hover,.wp-lightbox-overlay .close-button:not(:hover):not(:active):not(.has-background){background:none;border:none}.wp-lightbox-overlay .lightbox-image-container{height:var(--wp--lightbox-container-height);left:50%;overflow:hidden;position:absolute;top:50%;transform:translate(-50%,-50%);transform-origin:top left;width:var(--wp--lightbox-container-width);z-index:9999999999}.wp-lightbox-overlay .wp-block-image{align-items:center;box-sizing:border-box;display:flex;height:100%;justify-content:center;margin:0;position:relative;transform-origin:0 0;width:100%;z-index:3000000}.wp-lightbox-overlay .wp-block-image img{height:var(--wp--lightbox-image-height);min-height:var(--wp--lightbox-image-height);min-width:var(--wp--lightbox-image-width);width:var(--wp--lightbox-image-width)}.wp-lightbox-overlay .wp-block-image figcaption{display:none}.wp-lightbox-overlay button{background:none;border:none}.wp-lightbox-overlay .scrim{background-color:#fff;height:100%;opacity:.9;position:absolute;width:100%;z-index:2000000}.wp-lightbox-overlay.active{visibility:visible}@media not (prefers-reduced-motion){.wp-lightbox-overlay.active{animation:turn-on-visibility .25s both}.wp-lightbox-overlay.active img{animation:turn-on-visibility .35s both}.wp-lightbox-overlay.show-closing-animation:not(.active){animation:turn-off-visibility .35s both}.wp-lightbox-overlay.show-closing-animation:not(.active) img{animation:turn-off-visibility .25s both}.wp-lightbox-overlay.zoom.active{animation:none;opacity:1;visibility:visible}.wp-lightbox-overlay.zoom.active .lightbox-image-container{animation:lightbox-zoom-in .4s}.wp-lightbox-overlay.zoom.active .lightbox-image-container img{animation:none}.wp-lightbox-overlay.zoom.active .scrim{animation:turn-on-visibility .4s forwards}.wp-lightbox-overlay.zoom.show-closing-animation:not(.active){animation:none}.wp-lightbox-overlay.zoom.show-closing-animation:not(.active) .lightbox-image-container{animation:lightbox-zoom-out .4s}.wp-lightbox-overlay.zoom.show-closing-animation:not(.active) .lightbox-image-container img{animation:none}.wp-lightbox-overlay.zoom.show-closing-animation:not(.active) .scrim{animation:turn-off-visibility .4s forwards}}@keyframes show-content-image{0%{visibility:hidden}99%{visibility:hidden}to{visibility:visible}}@keyframes turn-on-visibility{0%{opacity:0}to{opacity:1}}@keyframes turn-off-visibility{0%{opacity:1;visibility:visible}99%{opacity:0;visibility:visible}to{opacity:0;visibility:hidden}}@keyframes lightbox-zoom-in{0%{transform:translate(calc((-100vw + var(--wp--lightbox-scrollbar-width))/2 + var(--wp--lightbox-initial-left-position)),calc(-50vh + var(--wp--lightbox-initial-top-position))) scale(var(--wp--lightbox-scale))}to{transform:translate(-50%,-50%) scale(1)}}@keyframes lightbox-zoom-out{0%{transform:translate(-50%,-50%) scale(1);visibility:visible}99%{visibility:visible}to{transform:translate(calc((-100vw + var(--wp--lightbox-scrollbar-width))/2 + var(--wp--lightbox-initial-left-position)),calc(-50vh + var(--wp--lightbox-initial-top-position))) scale(var(--wp--lightbox-scale));visibility:hidden}}
+/*# sourceURL=https://northerncoder.ca/wp-includes/blocks/image/style.min.css */
+</style>
+<style id='wp-block-list-inline-css' type='text/css'>
+ol,ul{box-sizing:border-box}:root :where(.wp-block-list.has-background){padding:1.25em 2.375em}
+/*# sourceURL=https://northerncoder.ca/wp-includes/blocks/list/style.min.css */
+</style>
+<style id='wp-block-group-inline-css' type='text/css'>
+.wp-block-group{box-sizing:border-box}:where(.wp-block-group.wp-block-group-is-layout-constrained){position:relative}
+/*# sourceURL=https://northerncoder.ca/wp-includes/blocks/group/style.min.css */
+</style>
+<style id='wp-block-paragraph-inline-css' type='text/css'>
+.is-small-text{font-size:.875em}.is-regular-text{font-size:1em}.is-large-text{font-size:2.25em}.is-larger-text{font-size:3em}.has-drop-cap:not(:focus):first-letter{float:left;font-size:8.4em;font-style:normal;font-weight:100;line-height:.68;margin:.05em .1em 0 0;text-transform:uppercase}body.rtl .has-drop-cap:not(:focus):first-letter{float:none;margin-left:.1em}p.has-drop-cap.has-background{overflow:hidden}:root :where(p.has-background){padding:1.25em 2.375em}:where(p.has-text-color:not(.has-link-color)) a{color:inherit}p.has-text-align-left[style*="writing-mode:vertical-lr"],p.has-text-align-right[style*="writing-mode:vertical-rl"]{rotate:180deg}
+/*# sourceURL=https://northerncoder.ca/wp-includes/blocks/paragraph/style.min.css */
+</style>
+<style id='global-styles-inline-css' type='text/css'>
+:root{--wp--preset--aspect-ratio--square: 1;--wp--preset--aspect-ratio--4-3: 4/3;--wp--preset--aspect-ratio--3-4: 3/4;--wp--preset--aspect-ratio--3-2: 3/2;--wp--preset--aspect-ratio--2-3: 2/3;--wp--preset--aspect-ratio--16-9: 16/9;--wp--preset--aspect-ratio--9-16: 9/16;--wp--preset--color--black: #000000;--wp--preset--color--cyan-bluish-gray: #abb8c3;--wp--preset--color--white: #ffffff;--wp--preset--color--pale-pink: #f78da7;--wp--preset--color--vivid-red: #cf2e2e;--wp--preset--color--luminous-vivid-orange: #ff6900;--wp--preset--color--luminous-vivid-amber: #fcb900;--wp--preset--color--light-green-cyan: #7bdcb5;--wp--preset--color--vivid-green-cyan: #00d084;--wp--preset--color--pale-cyan-blue: #8ed1fc;--wp--preset--color--vivid-cyan-blue: #0693e3;--wp--preset--color--vivid-purple: #9b51e0;--wp--preset--gradient--vivid-cyan-blue-to-vivid-purple: linear-gradient(135deg,rgb(6,147,227) 0%,rgb(155,81,224) 100%);--wp--preset--gradient--light-green-cyan-to-vivid-green-cyan: linear-gradient(135deg,rgb(122,220,180) 0%,rgb(0,208,130) 100%);--wp--preset--gradient--luminous-vivid-amber-to-luminous-vivid-orange: linear-gradient(135deg,rgb(252,185,0) 0%,rgb(255,105,0) 100%);--wp--preset--gradient--luminous-vivid-orange-to-vivid-red: linear-gradient(135deg,rgb(255,105,0) 0%,rgb(207,46,46) 100%);--wp--preset--gradient--very-light-gray-to-cyan-bluish-gray: linear-gradient(135deg,rgb(238,238,238) 0%,rgb(169,184,195) 100%);--wp--preset--gradient--cool-to-warm-spectrum: linear-gradient(135deg,rgb(74,234,220) 0%,rgb(151,120,209) 20%,rgb(207,42,186) 40%,rgb(238,44,130) 60%,rgb(251,105,98) 80%,rgb(254,248,76) 100%);--wp--preset--gradient--blush-light-purple: linear-gradient(135deg,rgb(255,206,236) 0%,rgb(152,150,240) 100%);--wp--preset--gradient--blush-bordeaux: linear-gradient(135deg,rgb(254,205,165) 0%,rgb(254,45,45) 50%,rgb(107,0,62) 100%);--wp--preset--gradient--luminous-dusk: linear-gradient(135deg,rgb(255,203,112) 0%,rgb(199,81,192) 50%,rgb(65,88,208) 100%);--wp--preset--gradient--pale-ocean: linear-gradient(135deg,rgb(255,245,203) 0%,rgb(182,227,212) 50%,rgb(51,167,181) 100%);--wp--preset--gradient--electric-grass: linear-gradient(135deg,rgb(202,248,128) 0%,rgb(113,206,126) 100%);--wp--preset--gradient--midnight: linear-gradient(135deg,rgb(2,3,129) 0%,rgb(40,116,252) 100%);--wp--preset--font-size--small: 13px;--wp--preset--font-size--medium: 20px;--wp--preset--font-size--large: 36px;--wp--preset--font-size--x-large: 42px;--wp--preset--spacing--20: 0.44rem;--wp--preset--spacing--30: 0.67rem;--wp--preset--spacing--40: 1rem;--wp--preset--spacing--50: 1.5rem;--wp--preset--spacing--60: 2.25rem;--wp--preset--spacing--70: 3.38rem;--wp--preset--spacing--80: 5.06rem;--wp--preset--shadow--natural: 6px 6px 9px rgba(0, 0, 0, 0.2);--wp--preset--shadow--deep: 12px 12px 50px rgba(0, 0, 0, 0.4);--wp--preset--shadow--sharp: 6px 6px 0px rgba(0, 0, 0, 0.2);--wp--preset--shadow--outlined: 6px 6px 0px -3px rgb(255, 255, 255), 6px 6px rgb(0, 0, 0);--wp--preset--shadow--crisp: 6px 6px 0px rgb(0, 0, 0);}:where(.is-layout-flex){gap: 0.5em;}:where(.is-layout-grid){gap: 0.5em;}body .is-layout-flex{display: flex;}.is-layout-flex{flex-wrap: wrap;align-items: center;}.is-layout-flex > :is(*, div){margin: 0;}body .is-layout-grid{display: grid;}.is-layout-grid > :is(*, div){margin: 0;}:where(.wp-block-columns.is-layout-flex){gap: 2em;}:where(.wp-block-columns.is-layout-grid){gap: 2em;}:where(.wp-block-post-template.is-layout-flex){gap: 1.25em;}:where(.wp-block-post-template.is-layout-grid){gap: 1.25em;}.has-black-color{color: var(--wp--preset--color--black) !important;}.has-cyan-bluish-gray-color{color: var(--wp--preset--color--cyan-bluish-gray) !important;}.has-white-color{color: var(--wp--preset--color--white) !important;}.has-pale-pink-color{color: var(--wp--preset--color--pale-pink) !important;}.has-vivid-red-color{color: var(--wp--preset--color--vivid-red) !important;}.has-luminous-vivid-orange-color{color: var(--wp--preset--color--luminous-vivid-orange) !important;}.has-luminous-vivid-amber-color{color: var(--wp--preset--color--luminous-vivid-amber) !important;}.has-light-green-cyan-color{color: var(--wp--preset--color--light-green-cyan) !important;}.has-vivid-green-cyan-color{color: var(--wp--preset--color--vivid-green-cyan) !important;}.has-pale-cyan-blue-color{color: var(--wp--preset--color--pale-cyan-blue) !important;}.has-vivid-cyan-blue-color{color: var(--wp--preset--color--vivid-cyan-blue) !important;}.has-vivid-purple-color{color: var(--wp--preset--color--vivid-purple) !important;}.has-black-background-color{background-color: var(--wp--preset--color--black) !important;}.has-cyan-bluish-gray-background-color{background-color: var(--wp--preset--color--cyan-bluish-gray) !important;}.has-white-background-color{background-color: var(--wp--preset--color--white) !important;}.has-pale-pink-background-color{background-color: var(--wp--preset--color--pale-pink) !important;}.has-vivid-red-background-color{background-color: var(--wp--preset--color--vivid-red) !important;}.has-luminous-vivid-orange-background-color{background-color: var(--wp--preset--color--luminous-vivid-orange) !important;}.has-luminous-vivid-amber-background-color{background-color: var(--wp--preset--color--luminous-vivid-amber) !important;}.has-light-green-cyan-background-color{background-color: var(--wp--preset--color--light-green-cyan) !important;}.has-vivid-green-cyan-background-color{background-color: var(--wp--preset--color--vivid-green-cyan) !important;}.has-pale-cyan-blue-background-color{background-color: var(--wp--preset--color--pale-cyan-blue) !important;}.has-vivid-cyan-blue-background-color{background-color: var(--wp--preset--color--vivid-cyan-blue) !important;}.has-vivid-purple-background-color{background-color: var(--wp--preset--color--vivid-purple) !important;}.has-black-border-color{border-color: var(--wp--preset--color--black) !important;}.has-cyan-bluish-gray-border-color{border-color: var(--wp--preset--color--cyan-bluish-gray) !important;}.has-white-border-color{border-color: var(--wp--preset--color--white) !important;}.has-pale-pink-border-color{border-color: var(--wp--preset--color--pale-pink) !important;}.has-vivid-red-border-color{border-color: var(--wp--preset--color--vivid-red) !important;}.has-luminous-vivid-orange-border-color{border-color: var(--wp--preset--color--luminous-vivid-orange) !important;}.has-luminous-vivid-amber-border-color{border-color: var(--wp--preset--color--luminous-vivid-amber) !important;}.has-light-green-cyan-border-color{border-color: var(--wp--preset--color--light-green-cyan) !important;}.has-vivid-green-cyan-border-color{border-color: var(--wp--preset--color--vivid-green-cyan) !important;}.has-pale-cyan-blue-border-color{border-color: var(--wp--preset--color--pale-cyan-blue) !important;}.has-vivid-cyan-blue-border-color{border-color: var(--wp--preset--color--vivid-cyan-blue) !important;}.has-vivid-purple-border-color{border-color: var(--wp--preset--color--vivid-purple) !important;}.has-vivid-cyan-blue-to-vivid-purple-gradient-background{background: var(--wp--preset--gradient--vivid-cyan-blue-to-vivid-purple) !important;}.has-light-green-cyan-to-vivid-green-cyan-gradient-background{background: var(--wp--preset--gradient--light-green-cyan-to-vivid-green-cyan) !important;}.has-luminous-vivid-amber-to-luminous-vivid-orange-gradient-background{background: var(--wp--preset--gradient--luminous-vivid-amber-to-luminous-vivid-orange) !important;}.has-luminous-vivid-orange-to-vivid-red-gradient-background{background: var(--wp--preset--gradient--luminous-vivid-orange-to-vivid-red) !important;}.has-very-light-gray-to-cyan-bluish-gray-gradient-background{background: var(--wp--preset--gradient--very-light-gray-to-cyan-bluish-gray) !important;}.has-cool-to-warm-spectrum-gradient-background{background: var(--wp--preset--gradient--cool-to-warm-spectrum) !important;}.has-blush-light-purple-gradient-background{background: var(--wp--preset--gradient--blush-light-purple) !important;}.has-blush-bordeaux-gradient-background{background: var(--wp--preset--gradient--blush-bordeaux) !important;}.has-luminous-dusk-gradient-background{background: var(--wp--preset--gradient--luminous-dusk) !important;}.has-pale-ocean-gradient-background{background: var(--wp--preset--gradient--pale-ocean) !important;}.has-electric-grass-gradient-background{background: var(--wp--preset--gradient--electric-grass) !important;}.has-midnight-gradient-background{background: var(--wp--preset--gradient--midnight) !important;}.has-small-font-size{font-size: var(--wp--preset--font-size--small) !important;}.has-medium-font-size{font-size: var(--wp--preset--font-size--medium) !important;}.has-large-font-size{font-size: var(--wp--preset--font-size--large) !important;}.has-x-large-font-size{font-size: var(--wp--preset--font-size--x-large) !important;}
+/*# sourceURL=global-styles-inline-css */
+</style>
+
+<style id='classic-theme-styles-inline-css' type='text/css'>
+/*! This file is auto-generated */
+.wp-block-button__link{color:#fff;background-color:#32373c;border-radius:9999px;box-shadow:none;text-decoration:none;padding:calc(.667em + 2px) calc(1.333em + 2px);font-size:1.125em}.wp-block-file__button{background:#32373c;color:#fff;text-decoration:none}
+/*# sourceURL=/wp-includes/css/classic-themes.min.css */
+</style>
+<link rel='stylesheet' id='foobox-free-min-css' href='https://northerncoder.ca/wp-content/plugins/foobox-image-lightbox/free/css/foobox.free.min.css?ver=2.7.41' type='text/css' media='all' />
+<link rel='stylesheet' id='dashicons-css' href='https://northerncoder.ca/wp-includes/css/dashicons.min.css?ver=6.9' type='text/css' media='all' />
+<link rel='stylesheet' id='minimum-google-fonts-css' href='https://fonts.googleapis.com/css?family=Open+Sans%3A400%2C600%2C800&#038;ver=3.0.1' type='text/css' media='all' />
+<link rel='stylesheet' id='simple-social-icons-font-css' href='https://northerncoder.ca/wp-content/plugins/simple-social-icons/css/style.css?ver=4.0.0' type='text/css' media='all' />
+<script type="text/javascript" src="https://northerncoder.ca/wp-includes/js/jquery/jquery.min.js?ver=3.7.1" id="jquery-core-js"></script>
+<script type="text/javascript" src="https://northerncoder.ca/wp-includes/js/jquery/jquery-migrate.min.js?ver=3.4.1" id="jquery-migrate-js"></script>
+<script type="text/javascript" src="https://northerncoder.ca/wp-content/themes/minimum-pro/js/responsive-menu.js?ver=1.0.0" id="minimum-responsive-menu-js"></script>
+<script type="text/javascript" id="foobox-free-min-js-before">
+/* <![CDATA[ */
+/* Run FooBox FREE (v2.7.41) */
+var FOOBOX = window.FOOBOX = {
+	ready: true,
+	disableOthers: false,
+	o: {wordpress: { enabled: true }, countMessage:'image %index of %total', captions: { dataTitle: ["captionTitle","title"], dataDesc: ["captionDesc","description"] }, rel: '', excludes:'.fbx-link,.nofoobox,.nolightbox,a[href*="pinterest.com/pin/create/button/"]', affiliate : { enabled: false }, error: "Could not load the item"},
+	selectors: [
+		".gallery", ".wp-block-gallery", ".wp-caption", ".wp-block-image", "a:has(img[class*=wp-image-])", ".foobox"
+	],
+	pre: function( $ ){
+		// Custom JavaScript (Pre)
+		
+	},
+	post: function( $ ){
+		// Custom JavaScript (Post)
+		
+		// Custom Captions Code
+		
+	},
+	custom: function( $ ){
+		// Custom Extra JS
+		
+	}
+};
+//# sourceURL=foobox-free-min-js-before
+/* ]]> */
+</script>
+<script type="text/javascript" src="https://northerncoder.ca/wp-content/plugins/foobox-image-lightbox/free/js/foobox.free.min.js?ver=2.7.41" id="foobox-free-min-js"></script>
+<link rel="https://api.w.org/" href="https://northerncoder.ca/wp-json/" /><link rel="alternate" title="JSON" type="application/json" href="https://northerncoder.ca/wp-json/wp/v2/posts/345" /><link rel="EditURI" type="application/rsd+xml" title="RSD" href="https://northerncoder.ca/xmlrpc.php?rsd" />
+<script src="https://swetrix.org/swetrix.js" defer></script><link rel="icon" href="https://northerncoder.ca/wp-content/themes/minimum-pro/images/favicon.ico" />
+<script async src="https://www.googletagmanager.com/gtag/js?id=G-YBEYR9LYK3"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'G-YBEYR9LYK3');
+</script>
+<!-- Matomo -->
+<script type="text/javascript">
+  var _paq = window._paq = window._paq || [];
+  /* tracker methods like "setCustomDimension" should be called before "trackPageView" */
+  _paq.push(['trackPageView']);
+  _paq.push(['enableLinkTracking']);
+  (function() {
+    var u="//mato.northerncoder.ca/";
+    _paq.push(['setTrackerUrl', u+'matomo.php']);
+    _paq.push(['setSiteId', '1']);
+    var d=document, g=d.createElement('script'), s=d.getElementsByTagName('script')[0];
+    g.type='text/javascript'; g.async=true; g.src=u+'matomo.js'; s.parentNode.insertBefore(g,s);
+  })();
+</script>
+<!-- End Matomo Code -->
+<style>body { background-color: #fafafa; }</style>
+		<style type="text/css" id="wp-custom-css">
+			.h3Header {
+	font-size: 16px;
+	font-weight: 600;
+}
+.syntaxhighlighter table td.code {
+	border: 0!important
+}		</style>
+		</head>
+<body class="wp-singular post-template-default single single-post postid-345 single-format-standard custom-background wp-theme-genesis wp-child-theme-minimum-pro content-sidebar genesis-breadcrumbs-visible genesis-footer-widgets-hidden" itemscope itemtype="https://schema.org/WebPage"><div class="site-container"><header class="site-header" itemscope itemtype="https://schema.org/WPHeader"><div class="wrap"><div class="title-area"><p class="site-title" itemprop="headline"><a href="https://northerncoder.ca/">northerncoder.ca</a></p></div><div class="widget-area header-widget-area"><section id="nav_menu-2" class="widget widget_nav_menu"><div class="widget-wrap"><nav class="nav-header" itemscope itemtype="https://schema.org/SiteNavigationElement"><ul id="menu-menu-1" class="menu genesis-nav-menu"><li id="menu-item-7" class="menu-item menu-item-type-custom menu-item-object-custom menu-item-home menu-item-7"><a href="https://northerncoder.ca/" itemprop="url"><span itemprop="name">Home</span></a></li>
+<li id="menu-item-9" class="menu-item menu-item-type-taxonomy menu-item-object-category menu-item-9"><a href="https://northerncoder.ca/category/code/" itemprop="url"><span itemprop="name">Code</span></a></li>
+<li id="menu-item-10" class="menu-item menu-item-type-taxonomy menu-item-object-category current-post-ancestor current-menu-parent current-post-parent menu-item-10"><a href="https://northerncoder.ca/category/tech/" itemprop="url"><span itemprop="name">Tech</span></a></li>
+</ul></nav></div></section>
+</div></div></header><div class="site-tagline"><div class="wrap"><div class="site-tagline-left"><p class="site-description" itemprop="description">Front end web development, and tech projects</p></div><div class="site-tagline-right"></div></div></div><div class="site-inner"><div class="wrap"><div class="content-sidebar-wrap"><main class="content"><div class="breadcrumb" itemscope itemtype="https://schema.org/BreadcrumbList">You are here: <span class="breadcrumb-link-wrap" itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem"><a class="breadcrumb-link" href="https://northerncoder.ca/" itemprop="item"><span class="breadcrumb-link-text-wrap" itemprop="name">Home</span></a><meta itemprop="position" content="1"></span> <span aria-label="breadcrumb separator">/</span> <span class="breadcrumb-link-wrap" itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem"><a class="breadcrumb-link" href="https://northerncoder.ca/category/tech/" itemprop="item"><span class="breadcrumb-link-text-wrap" itemprop="name">Tech</span></a><meta itemprop="position" content="2"></span> <span aria-label="breadcrumb separator">/</span> Best Affordable DIY NAS with Btrfs Raid1 on Ubuntu Server</div><article class="post-345 post type-post status-publish format-standard has-post-thumbnail category-tech tag-linux tag-nas tag-ubuntu entry" aria-label="Best Affordable DIY NAS with Btrfs Raid1 on Ubuntu Server" itemscope itemtype="https://schema.org/CreativeWork"><header class="entry-header"><h1 class="entry-title" itemprop="headline">Best Affordable DIY NAS with Btrfs Raid1 on Ubuntu Server</h1>
+<p class="entry-meta"><time class="entry-time" itemprop="datePublished" datetime="2020-12-14T15:41:00-05:00">December 14, 2020</time>   </p></header><div class="entry-content" itemprop="text">
+<p>If you have an old PC laying around, you could setup a simple and affordable NAS (Network Attached Storage) to hold your precious data with  functionality equivalent to expensive standalone NAS devices. You will need 2 similar sized hard disks to store the data in a mirror, and old PC and some time to follow the steps below.</p>
+
+
+
+<figure class="wp-block-image size-large"><a href="https://northerncoder.ca/wp-content/uploads/2020/11/pc-scaled.jpg"><img decoding="async" width="1024" height="768" src="https://northerncoder.ca/wp-content/uploads/2020/11/pc-1024x768.jpg" alt="" class="wp-image-486" srcset="https://northerncoder.ca/wp-content/uploads/2020/11/pc-1024x768.jpg 1024w, https://northerncoder.ca/wp-content/uploads/2020/11/pc-300x225.jpg 300w, https://northerncoder.ca/wp-content/uploads/2020/11/pc-150x113.jpg 150w, https://northerncoder.ca/wp-content/uploads/2020/11/pc-768x576.jpg 768w, https://northerncoder.ca/wp-content/uploads/2020/11/pc-1536x1152.jpg 1536w, https://northerncoder.ca/wp-content/uploads/2020/11/pc-2048x1536.jpg 2048w" sizes="(max-width: 1024px) 100vw, 1024px" /></a></figure>
+
+
+
+<h3 class="h3Header wp-block-heading">Hardware Required</h3>
+
+
+
+<ul class="wp-block-list"><li>Old PC (Celeron D 2.8, PSU, 4GB ram, gigabit ethernet)</li><li>16 GB usb stick (used for installing Ubuntu, only 4gb is needed)</li><li>2x 3GB Western Digital Red Drives (setup in Raid 1 mirror with Btrfs)</li><li>500gb boot drive (ext4)</li><li>optional (USB dock for cold storage backup to 2gb WD Green drive)</li></ul>
+
+
+
+<p>Here are the steps I took to get a simple Ubuntu Server setup, a 2 drive raid 1 mirror (using Btrfs for checksum data integrity), samba share to all devices in the house, CUPS printer sharing an old Brother Laserjet.</p>
+
+
+
+<p>I am duplicating this setup on a Raspberry Pi 4b during my holiday break and plan to get rid of this old noisy Celeron PC.  You can read about my <a href="/build-a-raspberry-pi4-nas-server-with-ubuntu/">Raspberry Pi NAS build here</a>.</p>
+
+
+
+<h2 class="wp-block-heading"> 1) Create a Ubuntu Live Boot USB stick</h2>
+
+
+
+<p>Download latest <a href="https://ubuntu.com/download/server" target="_blank" rel="noreferrer noopener nofollow">Ubuntu Server image iso</a> (Click on option 3 button)<br>Download <a href="https://rufus.ie/" target="_blank" rel="noreferrer noopener nofollow">Rufus app for Windows</a> to burn that iso to your USB Stick.<br>When the ubuntu boot disk is created, pop that into your old PC and boot it up.</p>
+
+
+
+<p>Imporant to note &#8211; Press F2 to go into your BIOS and configure some settings. What I did was disable the unnecessary IDE controller, prioritize the USB stick as the first in the boot sequence, and set CPU fan speed profile to silent. I also made sure the bios saw the 2x WD Red drives, the 500gb boot drive, the USB stick, and the 4 GB of ram. You can also disable the boot logo so you can see any errors that may occur.</p>
+
+
+
+<h2 class="wp-block-heading">2) Install Ubuntu Server</h2>
+
+
+
+<p> There are quite a few steps to the installation but most are self explanatory. When it gets to the Storage section, I created an EXT4 partition on the 500gb drive that would be the boot drive. Default is to create an LVM but you don&#8217;t need that if you don&#8217;t plan to resize your boot partition later. You can also create a Btrfs partition on your media drives but they can also be done later.</p>
+
+
+
+<p>Once the install is finished you should be sitting at a login prompt. If you prefer to do the rest of the configuration on your main PC you can connect to your server via a SSH. </p>
+
+
+
+<p>Find your servers ip address: </p>
+
+
+<div class="wp-block-syntaxhighlighter-code "><pre class="brush: plain; title: ; notranslate" title="">
+ip addr show
+</pre></div>
+
+
+<p>Use a terminal app like <a href="https://www.putty.org/" target="_blank" rel="noreferrer noopener nofollow">Putty</a>  or <a href="https://cmder.net/" target="_blank" rel="noreferrer noopener nofollow">Cmder</a> to connect to your ip. <br>In Cmder I type the following (replace the ip with what you saw in the previous step)</p>
+
+
+<div class="wp-block-syntaxhighlighter-code "><pre class="brush: plain; title: ; notranslate" title="">
+ssh 192.168.1.103 
+</pre></div>
+
+
+<figure class="wp-block-image size-large is-resized"><a href="https://northerncoder.ca/wp-content/uploads/2020/11/image-1.png"><img decoding="async" src="https://northerncoder.ca/wp-content/uploads/2020/11/image-1-1024x599.png" alt="" class="wp-image-358" width="580" height="339" srcset="https://northerncoder.ca/wp-content/uploads/2020/11/image-1-1024x599.png 1024w, https://northerncoder.ca/wp-content/uploads/2020/11/image-1-300x176.png 300w, https://northerncoder.ca/wp-content/uploads/2020/11/image-1-150x88.png 150w, https://northerncoder.ca/wp-content/uploads/2020/11/image-1-768x449.png 768w, https://northerncoder.ca/wp-content/uploads/2020/11/image-1.png 1051w" sizes="(max-width: 580px) 100vw, 580px" /></a><figcaption>Logged into your server and ready to setup the drives</figcaption></figure>
+
+
+
+<h2 class="wp-block-heading">3) Setup Btrfs 2 disk Raid 1 mirror</h2>
+
+
+
+<p>You don&#8217;t have to set up a raid if you really don&#8217;t want to. You could just format a single disk to ext4 and call it a day. The benefit of using <strong>Btrfs</strong> in a mirror configuration is it copies/mirrors data onto two drives redundantly. That way if one of your drives kicks the bucket, you could take the problem drive out and keep working uninterupted, and rebuild the mirror again once you get a replacement hard disk later. <strong>Btrfs</strong> also does constant checksums over your data, while silently correcting any errors/bad sectors it encounters ensuring your data stays <strong>protected from bit rot</strong>. Btrfs also supports <strong>snapshots</strong> so you could go back to a previous state but I don&#8217;t see myself using that myself.</p>
+
+
+
+<p>Ubuntu should have Btrfs built in but in case it doesn&#8217;t you can install it:</p>
+
+
+<div class="wp-block-syntaxhighlighter-code "><pre class="brush: plain; title: ; notranslate" title="">
+sudo apt-get install btrfs-tools
+</pre></div>
+
+
+<p>List all the disks, partitions and filesystems found:</p>
+
+
+<div class="wp-block-syntaxhighlighter-code "><pre class="brush: plain; title: ; notranslate" title="">
+sudo lsblk -o NAME,FSTYPE,SIZE,MOUNTPOINT,LABEL
+</pre></div>
+
+
+<figure class="wp-block-image size-large"><img loading="lazy" decoding="async" width="571" height="279" src="https://northerncoder.ca/wp-content/uploads/2020/11/image-2.png" alt="" class="wp-image-373" srcset="https://northerncoder.ca/wp-content/uploads/2020/11/image-2.png 571w, https://northerncoder.ca/wp-content/uploads/2020/11/image-2-300x147.png 300w, https://northerncoder.ca/wp-content/uploads/2020/11/image-2-150x73.png 150w" sizes="auto, (max-width: 571px) 100vw, 571px" /></figure>
+
+
+
+<p>If you look at the file sizes you should be able to identify which drives are the large media drives we will setup for the raid. For me it was <strong>sda</strong> and <strong>sdc</strong> and in the above image you can see I already have a btrfs partitions for them which I created during the Ubuntu install. If you didn&#8217;t create the partitions in the Ubuntu installation we can do it now:</p>
+
+
+
+<div class="wp-block-group"><div class="wp-block-group__inner-container is-layout-flow wp-block-group-is-layout-flow">
+<h3 class="h3Header wp-block-heading">Create the btrfs partitions (if you didn&#8217;t already during the Ubuntu install)</h3>
+
+
+<div class="wp-block-syntaxhighlighter-code "><pre class="brush: plain; title: ; notranslate" title="">
+fdisk /dev/sda
+</pre></div>
+
+
+<ul class="wp-block-list"><li>at the prompt:</li><li>press <code>'<strong>o</strong>'</code> to create an empty new partition</li><li>press <code>'<strong>n</strong>' </code>to add a new partition</li><li>press <code>'<strong>p</strong>'</code> for primary and then <code>&lt;<strong>enter</strong>&gt; </code>for default values for sector sizes etc.</li><li>press <code><strong>'w'</strong></code> to write to disk and exit fdisk</li><li>repeat this for the second disk (in my case <strong><code>/dev/sdc</code></strong>)</li></ul>
+
+
+
+<h3 class="h3Header wp-block-heading">Create the file system on the new partition and label it Nas:</h3>
+
+
+<div class="wp-block-syntaxhighlighter-code "><pre class="brush: plain; title: ; notranslate" title="">
+mkfs.btrfs -L &quot;Nas&quot; /dev/sda -f 
+mkfs.btrfs /dev/sdc
+</pre></div></div></div>
+
+
+
+<p>Here we create the btrfs file system on the first disk (sda) and -f to force it in case there was already an existing partition on it to overwrite. I didn&#8217;t add a label to the second disk. </p>
+
+
+
+<h3 class="h3Header wp-block-heading">Mount your partition, create a subvolume, then mount the subvolume </h3>
+
+
+<div class="wp-block-syntaxhighlighter-code "><pre class="brush: plain; title: ; notranslate" title="">
+mkdir /mnt/nas
+mount /dev/sda /mnt/nas
+cd /mnt/nas
+btrfs subvolume create mediapool
+cd 
+umount /dev/sda
+mount -o compress=zlib,subvol=mediapool,autodefrag,noatime /dev/sda /mnt/nas
+</pre></div>
+
+
+<ul class="wp-block-list"><li>Make a new directory called <code>/mnt/nas</code></li><li>This mounts the disk so it is available when you navigate to <code>/mnt/nas</code></li><li>Go into that directory /mnt/nas</li><li>Creates a subvolume called &#8216;mediapool&#8217;. Name it anything you like.</li><li>Go out of that folder so we can unmount the disk</li><li>Now finally we remount directly to the subvolume we created instead of the disk this time.</li><li>The options I have enabled are <strong>zlib</strong> compression (suitable for hds, use lzo for SSDs) noatime prevents storing last access time data to increase performance, autodefrag lets btrfs defrag when it needs to in the background</li></ul>
+
+
+
+<h3 class="h3Header wp-block-heading">Add the second disk to the pool</h3>
+
+
+<div class="wp-block-syntaxhighlighter-code "><pre class="brush: plain; title: ; notranslate" title="">
+btrfs device add -f /dev/sdc /mnt/nas
+</pre></div>
+
+
+<p>Convert the pool to Raid1 and balance the files over the 2 disks</p>
+
+
+<div class="wp-block-syntaxhighlighter-code "><pre class="brush: plain; title: ; notranslate" title="">
+btrfs filesystem balance start -dconvert=raid1 -mconvert=raid1 /mnt/nas
+</pre></div>
+
+
+<p>and that is it, we can verify by checking :</p>
+
+
+<div class="wp-block-syntaxhighlighter-code "><pre class="brush: plain; title: ; notranslate" title="">
+btrfs filesystem show /mnt/nas
+</pre></div>
+
+
+<p>While you should be able to access your drives now with everything working, you will find that after a reboot the mounted folders have gone. We need to modify <code>/etc/fstab</code> to automatically mount on reboot</p>
+
+
+
+<h3 class="h3Header wp-block-heading">Modify /etc/fstab to automatically mount the drives on boot</h3>
+
+
+<div class="wp-block-syntaxhighlighter-code "><pre class="brush: plain; title: ; notranslate" title="">
+blkid /dev/sda
+btrfs subvolume list /mnt/nas
+nano /etc/fstab
+</pre></div>
+
+
+<p>The first line lets us find the UUID of the drive (c2afdb43&#8230;.)<br>Second line we can find the subvolume ID (mine was 257)<br> /etc/sda. </p>
+
+
+
+<p>Make a note of it as we will be adding the two in the fstab config file:</p>
+
+
+<div class="wp-block-syntaxhighlighter-code "><pre class="brush: plain; title: ; notranslate" title="">
+UUID=c2afdb43-2cc6-4837-88ea-150fa96997ab       /mnt/nas        btrfs compress=zlib,subvolid=257,subvol=mediapool,autodefrag,noatime      0 0
+</pre></div>
+
+
+<p><code>ctrl + o</code> to save, <code>Ctrl + x</code> to exit the editor.</p>
+
+
+
+<p>So thats it. We have created a secure storage space to save your important data. The next step is to share this on your home network to other devices (other windows pcs etc). To do that we will set up a samba share:</p>
+
+
+
+<h2 class="wp-block-heading" id="sambashare">4) Setup Samba to share files with Windows systems</h2>
+
+
+
+<h3 class="h3Header wp-block-heading">Install the samba drivers</h3>
+
+
+<div class="wp-block-syntaxhighlighter-code "><pre class="brush: plain; title: ; notranslate" title="">
+apt install samba-common samba smbclient
+</pre></div>
+
+
+<h3 class="h3Header wp-block-heading">Configure Ubuntu firewall to allow Samba through</h3>
+
+
+<div class="wp-block-syntaxhighlighter-code "><pre class="brush: plain; title: ; notranslate" title="">
+ufw allow samba
+</pre></div>
+
+
+<h3 class="h3Header wp-block-heading">Configure /etc/samba/smb.conf</h3>
+
+
+
+<p>There are a few settings to setup for simple folder that we want to share and those settings need to be in smb.conf. First make a copy before of the config file before we start changing it, then use <code>Nano</code> to open the text editor.</p>
+
+
+<div class="wp-block-syntaxhighlighter-code "><pre class="brush: plain; title: ; notranslate" title="">
+cp /etc/samba/smb.conf /etc/samba/smb.conf.bak   //create a backup
+sudo nano /etc/samba/smb.conf
+</pre></div>
+
+
+<ul class="wp-block-list"><li>Use the arrow keys to move around,</li><li><code>Ctrl + o</code> (then press enter to save the file), </li><li><code>Ctrl + x</code> (to quit the editor)</li></ul>
+
+
+
+<p>I will provide my <a href="https://northerncoder.ca/wp-content/uploads/2020/11/smb.txt" target="_blank" rel="noreferrer noopener nofollow">smb.conf file to download</a> if you think you find it easier to start with that.</p>
+
+
+
+<p>The key items you need in the config are:</p>
+
+
+<div class="wp-block-syntaxhighlighter-code "><pre class="brush: plain; title: ; notranslate" title="">
+workgroup = WORKGROUP
+&#x5B;global]
+    netbios name = yourservername
+&#x5B;nas]
+    path = /mnt/nas
+    available = yes
+    valid users = yoursambausername
+    read only = no
+    browseable = yes
+    public = yes
+    writable = yes
+</pre></div>
+
+
+<p>remove unnecessary shares</p>
+
+
+<div class="wp-block-syntaxhighlighter-code "><pre class="brush: plain; title: ; notranslate" title="">
+#&#x5B;homes]
+#    comment = Home Directories
+#    valid users = %S, %D%w%S
+#    browseable = No
+#    read only = No
+#    inherit acls = Yes
+</pre></div>
+
+
+<h3 class="h3Header wp-block-heading">Create a samba user</h3>
+
+
+<div class="wp-block-syntaxhighlighter-code "><pre class="brush: plain; title: ; notranslate" title="">
+smbpasswd -a yoursambausername
+New SMB password:
+Retype new SMB password:
+Added user yoursambausername
+</pre></div>
+
+
+<h3 class="h3Header wp-block-heading">Test the config</h3>
+
+
+
+<p>Typing the command <code>testparm</code> will show your configuration settings. If you notice something missing here that you are sure you added in the configuration file, there is probably a typo somewhere to fix.</p>
+
+
+
+<h3 class="h3Header wp-block-heading">Start Samba and NetBios Name Services</h3>
+
+
+<div class="wp-block-syntaxhighlighter-code "><pre class="brush: plain; title: ; notranslate" title="">
+systemctl enable smbd
+systemctl start smbd
+systemctl enable nmbd
+systemctl start nmbd
+</pre></div>
+
+
+<h3 class="h3Header wp-block-heading">Assign user rights to the shared NAS folder</h3>
+
+
+
+<p>This is the final step of the puzzle. If you dont assign rights you might be pulling your hair out like I was, being able to see the nas folder but unable to save/write any changes to it.</p>
+
+
+<div class="wp-block-syntaxhighlighter-code "><pre class="brush: plain; title: ; notranslate" title="">
+chown -R yoursambauser:yoursambauser /mnt/nas
+</pre></div>
+
+
+<p><strong>Thats it! Congratulations</strong>, go over to your Windows PC and navigate to your ip in file explorer <code>\\192.168.1.103</code> and you should see your shared folder waiting for you!</p>
+
+
+
+<p>Optional, you can add a usb printer to the server and share that for every device in your home (win/mac/iphone/ipads). <a href="/setup-a-cups-print-server-on-ubuntu/">Setup a CUPS Print Server on Ubuntu</a><br></p>
+
+
+
+<p>Resources:<br>Btrfs commands : <a href="https://www.funtoo.org/BTRFS_Fun" target="_blank" rel="noreferrer noopener nofollow">BTRFS Fun &#8211; Funtoo</a><br>Fdisk commands : <a href="https://www.tecmint.com/fdisk-commands-to-manage-linux-disk-partitions/" target="_blank" rel="noreferrer noopener nofollow">10 fdisk Commands to Manage Linux Disk Partitions (tecmint.com)</a><br>Btrfs manual mounting : <a href="https://btrfs.wiki.kernel.org/index.php/Manpage/btrfs(5)" target="_blank" rel="noreferrer noopener nofollow">Manpage/btrfs(5) &#8211; btrfs Wiki (kernel.org)</a><br>Raid types visualized : <a href="https://www.thegeekstuff.com/2010/08/raid-levels-tutorial/" target="_blank" rel="noreferrer noopener nofollow">RAID 0, RAID 1, RAID 5, RAID 10 Explained with Diagrams (thegeekstuff.com)</a></p>
+</div><footer class="entry-footer"></footer></article></main><aside class="sidebar sidebar-primary widget-area" role="complementary" aria-label="Primary Sidebar" itemscope itemtype="https://schema.org/WPSideBar"><section id="ai_widget-2" class="widget block-widget"><div class="widget-wrap"><div class='code-block code-block-1' style='margin: 8px 0; clear: both;'>
+
+<script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+<!-- Northerncoder ad -->
+<ins class="adsbygoogle"
+     style="display:inline-block;width:300px;height:250px"
+     data-ad-client="ca-pub-7403162530147343"
+     data-ad-slot="4514963889"
+     data-ad-format="auto"
+     data-full-width-responsive="true"></ins>
+<script>
+     (adsbygoogle = window.adsbygoogle || []).push({});
+</script></div>
+</div></section>
+<section id="text-2" class="widget widget_text"><div class="widget-wrap"><h4 class="widget-title widgettitle">About Northern Coder</h4>
+			<div class="textwidget">I'm a front end developer constantly juggling the latest trends and distractions.  I needed somewhere to write down to remember all the things I pick up here or there.  So here we are.</div>
+		</div></section>
+<section id="search-3" class="widget widget_search"><div class="widget-wrap"><h4 class="widget-title widgettitle">Find it here</h4>
+<form class="search-form" method="get" action="https://northerncoder.ca/" role="search" itemprop="potentialAction" itemscope itemtype="https://schema.org/SearchAction"><input class="search-form-input" type="search" name="s" id="searchform-1" placeholder="Search this website" itemprop="query-input"><input class="search-form-submit" type="submit" value="Search"><meta content="https://northerncoder.ca/?s={s}" itemprop="target"></form></div></section>
+
+		<section id="recent-posts-3" class="widget widget_recent_entries"><div class="widget-wrap">
+		<h4 class="widget-title widgettitle">Recent Posts</h4>
+
+		<ul>
+											<li>
+					<a href="https://northerncoder.ca/how-to-enable-tls-for-postgres-in-dokploy-step-by-step/">How to Enable TLS for Postgres in Dokploy (Step-by-Step)</a>
+									</li>
+											<li>
+					<a href="https://northerncoder.ca/a-cautionary-tale-for-youtube-creators-especially-parents/">A Cautionary Tale for YouTube Creators — Especially Parents</a>
+									</li>
+											<li>
+					<a href="https://northerncoder.ca/thunderbird-phantom-folder-issue-imap/">Thunderbird phantom folder issue &#8211; imap</a>
+									</li>
+											<li>
+					<a href="https://northerncoder.ca/update-your-feature-branch-with-latest-commits-from-main-branch-in-git/">Update your feature branch with latest commits from main branch in Git</a>
+									</li>
+											<li>
+					<a href="https://northerncoder.ca/setup-a-cups-print-server-on-ubuntu/">Setup a CUPS Print Server on Ubuntu</a>
+									</li>
+					</ul>
+
+		</div></section>
+</aside></div></div></div><footer class="site-footer" itemscope itemtype="https://schema.org/WPFooter"><div class="wrap"><p>Copyright &#xA9;&nbsp;2026  · <a href="https://northerncoder.ca/wp-login.php">Log in</a> · <a href="/privacy-policy/"> Privacy Policy</a>
+
+
+
+</p></div></footer></div><script type="speculationrules">
+{"prefetch":[{"source":"document","where":{"and":[{"href_matches":"/*"},{"not":{"href_matches":["/wp-*.php","/wp-admin/*","/wp-content/uploads/*","/wp-content/*","/wp-content/plugins/*","/wp-content/themes/minimum-pro/*","/wp-content/themes/genesis/*","/*\\?(.+)"]}},{"not":{"selector_matches":"a[rel~=\"nofollow\"]"}},{"not":{"selector_matches":".no-prefetch, .no-prefetch a"}}]},"eagerness":"conservative"}]}
+</script>
+<script>
+  document.addEventListener('DOMContentLoaded', function () {
+    swetrix.init('NqHNXE1Wqns9',{
+		apiURL: 'https://api.viewly.net/log'
+	})
+	  
+    swetrix.trackViews()
+  })
+</script>
+
+<noscript>
+  <img src="https://api.viewly.net/log/noscript?pid=NqHNXE1Wqns9" alt="" referrerpolicy="no-referrer-when-downgrade" />
+</noscript><style type="text/css" media="screen"></style><script type="text/javascript" src="https://northerncoder.ca/wp-content/plugins/syntaxhighlighter/syntaxhighlighter3/scripts/shCore.js?ver=3.0.9b" id="syntaxhighlighter-core-js"></script>
+<script type="text/javascript" src="https://northerncoder.ca/wp-content/plugins/syntaxhighlighter/syntaxhighlighter3/scripts/shBrushPlain.js?ver=3.0.9b" id="syntaxhighlighter-brush-plain-js"></script>
+<script type='text/javascript'>
+	(function(){
+		var corecss = document.createElement('link');
+		var themecss = document.createElement('link');
+		var corecssurl = "https://northerncoder.ca/wp-content/plugins/syntaxhighlighter/syntaxhighlighter3/styles/shCore.css?ver=3.0.9b";
+		if ( corecss.setAttribute ) {
+				corecss.setAttribute( "rel", "stylesheet" );
+				corecss.setAttribute( "type", "text/css" );
+				corecss.setAttribute( "href", corecssurl );
+		} else {
+				corecss.rel = "stylesheet";
+				corecss.href = corecssurl;
+		}
+		document.head.appendChild( corecss );
+		var themecssurl = "https://northerncoder.ca/wp-content/plugins/syntaxhighlighter/syntaxhighlighter3/styles/shThemeDefault.css?ver=3.0.9b";
+		if ( themecss.setAttribute ) {
+				themecss.setAttribute( "rel", "stylesheet" );
+				themecss.setAttribute( "type", "text/css" );
+				themecss.setAttribute( "href", themecssurl );
+		} else {
+				themecss.rel = "stylesheet";
+				themecss.href = themecssurl;
+		}
+		document.head.appendChild( themecss );
+	})();
+	SyntaxHighlighter.config.strings.expandSource = '+ expand source';
+	SyntaxHighlighter.config.strings.help = '?';
+	SyntaxHighlighter.config.strings.alert = 'SyntaxHighlighter\n\n';
+	SyntaxHighlighter.config.strings.noBrush = 'Can\'t find brush for: ';
+	SyntaxHighlighter.config.strings.brushNotHtmlScript = 'Brush wasn\'t configured for html-script option: ';
+	SyntaxHighlighter.defaults['gutter'] = false;
+	SyntaxHighlighter.defaults['light'] = true;
+	SyntaxHighlighter.defaults['pad-line-numbers'] = true;
+	SyntaxHighlighter.defaults['wrap-lines'] = false;
+	SyntaxHighlighter.all();
+
+	// Infinite scroll support
+	if ( typeof( jQuery ) !== 'undefined' ) {
+		jQuery( function( $ ) {
+			$( document.body ).on( 'post-load', function() {
+				SyntaxHighlighter.highlight();
+			} );
+		} );
+	}
+</script>
+<script type="text/javascript" src="https://northerncoder.ca/wp-includes/js/comment-reply.min.js?ver=6.9" id="comment-reply-js" async="async" data-wp-strategy="async" fetchpriority="low"></script>
+<script id="wp-emoji-settings" type="application/json">
+{"baseUrl":"https://s.w.org/images/core/emoji/17.0.2/72x72/","ext":".png","svgUrl":"https://s.w.org/images/core/emoji/17.0.2/svg/","svgExt":".svg","source":{"concatemoji":"https://northerncoder.ca/wp-includes/js/wp-emoji-release.min.js?ver=6.9"}}
+</script>
+<script type="module">
+/* <![CDATA[ */
+/*! This file is auto-generated */
+const a=JSON.parse(document.getElementById("wp-emoji-settings").textContent),o=(window._wpemojiSettings=a,"wpEmojiSettingsSupports"),s=["flag","emoji"];function i(e){try{var t={supportTests:e,timestamp:(new Date).valueOf()};sessionStorage.setItem(o,JSON.stringify(t))}catch(e){}}function c(e,t,n){e.clearRect(0,0,e.canvas.width,e.canvas.height),e.fillText(t,0,0);t=new Uint32Array(e.getImageData(0,0,e.canvas.width,e.canvas.height).data);e.clearRect(0,0,e.canvas.width,e.canvas.height),e.fillText(n,0,0);const a=new Uint32Array(e.getImageData(0,0,e.canvas.width,e.canvas.height).data);return t.every((e,t)=>e===a[t])}function p(e,t){e.clearRect(0,0,e.canvas.width,e.canvas.height),e.fillText(t,0,0);var n=e.getImageData(16,16,1,1);for(let e=0;e<n.data.length;e++)if(0!==n.data[e])return!1;return!0}function u(e,t,n,a){switch(t){case"flag":return n(e,"\ud83c\udff3\ufe0f\u200d\u26a7\ufe0f","\ud83c\udff3\ufe0f\u200b\u26a7\ufe0f")?!1:!n(e,"\ud83c\udde8\ud83c\uddf6","\ud83c\udde8\u200b\ud83c\uddf6")&&!n(e,"\ud83c\udff4\udb40\udc67\udb40\udc62\udb40\udc65\udb40\udc6e\udb40\udc67\udb40\udc7f","\ud83c\udff4\u200b\udb40\udc67\u200b\udb40\udc62\u200b\udb40\udc65\u200b\udb40\udc6e\u200b\udb40\udc67\u200b\udb40\udc7f");case"emoji":return!a(e,"\ud83e\u1fac8")}return!1}function f(e,t,n,a){let r;const o=(r="undefined"!=typeof WorkerGlobalScope&&self instanceof WorkerGlobalScope?new OffscreenCanvas(300,150):document.createElement("canvas")).getContext("2d",{willReadFrequently:!0}),s=(o.textBaseline="top",o.font="600 32px Arial",{});return e.forEach(e=>{s[e]=t(o,e,n,a)}),s}function r(e){var t=document.createElement("script");t.src=e,t.defer=!0,document.head.appendChild(t)}a.supports={everything:!0,everythingExceptFlag:!0},new Promise(t=>{let n=function(){try{var e=JSON.parse(sessionStorage.getItem(o));if("object"==typeof e&&"number"==typeof e.timestamp&&(new Date).valueOf()<e.timestamp+604800&&"object"==typeof e.supportTests)return e.supportTests}catch(e){}return null}();if(!n){if("undefined"!=typeof Worker&&"undefined"!=typeof OffscreenCanvas&&"undefined"!=typeof URL&&URL.createObjectURL&&"undefined"!=typeof Blob)try{var e="postMessage("+f.toString()+"("+[JSON.stringify(s),u.toString(),c.toString(),p.toString()].join(",")+"));",a=new Blob([e],{type:"text/javascript"});const r=new Worker(URL.createObjectURL(a),{name:"wpTestEmojiSupports"});return void(r.onmessage=e=>{i(n=e.data),r.terminate(),t(n)})}catch(e){}i(n=f(s,u,c,p))}t(n)}).then(e=>{for(const n in e)a.supports[n]=e[n],a.supports.everything=a.supports.everything&&a.supports[n],"flag"!==n&&(a.supports.everythingExceptFlag=a.supports.everythingExceptFlag&&a.supports[n]);var t;a.supports.everythingExceptFlag=a.supports.everythingExceptFlag&&!a.supports.flag,a.supports.everything||((t=a.source||{}).concatemoji?r(t.concatemoji):t.wpemoji&&t.twemoji&&(r(t.twemoji),r(t.wpemoji)))});
+//# sourceURL=https://northerncoder.ca/wp-includes/js/wp-emoji-loader.min.js
+/* ]]> */
+</script>
+
+		<script defer src="https://static.cloudflareinsights.com/beacon.min.js/v8c78df7c7c0f484497ecbca7046644da1771523124516" integrity="sha512-8DS7rgIrAmghBFwoOTujcf6D9rXvH8xm8JQ1Ja01h9QX8EzXldiszufYa4IFfKdLUKTTrnSFXLDkUEOTrZQ8Qg==" data-cf-beacon='{"version":"2024.11.0","token":"09adea54651e4f5e970dcd0e3df9f84c","r":1,"server_timing":{"name":{"cfCacheStatus":true,"cfEdge":true,"cfExtPri":true,"cfL4":true,"cfOrigin":true,"cfSpeedBrain":true},"location_startswith":null}}' crossorigin="anonymous"></script>
+</body></html>
+
+<!-- Performance optimized by Redis Object Cache. Learn more: https://wprediscache.com -->

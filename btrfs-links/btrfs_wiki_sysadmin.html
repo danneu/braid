@@ -1,0 +1,488 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr" class="client-nojs">
+<head>
+<title>SysadminGuide - btrfs Wiki</title>
+<meta charset="UTF-8" />
+<meta name="generator" content="MediaWiki 1.19.24" />
+<link rel="shortcut icon" href="../favicon.ico" />
+<link rel="search" type="application/opensearchdescription+xml" href="../opensearch_desc.php" title="btrfs Wiki (en)" />
+<link rel="EditURI" type="application/rsd+xml" href="https://btrfs.wiki.kernel.org/api.php?action=rsd" />
+<link rel="alternate" type="application/atom+xml" title="btrfs Wiki Atom feed" href="https://btrfs.wiki.kernel.org/index.php?title=Special:RecentChanges&amp;feed=atom" />
+<link rel="stylesheet" href="../load.php%3Fdebug=false&amp;lang=en&amp;modules=mediawiki.legacy.commonPrint,shared|skins.monobook&amp;only=styles&amp;skin=monobook&amp;*.css" />
+<!--[if IE 6]><link rel="stylesheet" href="/skins/monobook/IE60Fixes.css?303" media="screen" /><![endif]-->
+<!--[if IE 7]><link rel="stylesheet" href="/skins/monobook/IE70Fixes.css?303" media="screen" /><![endif]--><meta name="ResourceLoaderDynamicStyles" content="" />
+<style>a:lang(ar),a:lang(ckb),a:lang(fa),a:lang(kk-arab),a:lang(mzn),a:lang(ps),a:lang(ur){text-decoration:none}a.new,#quickbar a.new{color:#ba0000}
+
+/* cache key: korg_mediawiki_btrfs:resourceloader:filter:minify-css:7:c88e2bcd56513749bec09a7e29cb3ffa */
+</style>
+
+<script src="../load.php%3Fdebug=false&amp;lang=en&amp;modules=startup&amp;only=scripts&amp;skin=monobook&amp;*"></script>
+<script>if(window.mw){
+mw.config.set({"wgCanonicalNamespace":"","wgCanonicalSpecialPageName":false,"wgNamespaceNumber":0,"wgPageName":"SysadminGuide","wgTitle":"SysadminGuide","wgCurRevisionId":33681,"wgArticleId":1612,"wgIsArticle":true,"wgAction":"view","wgUserName":null,"wgUserGroups":["*"],"wgCategories":["UserDoc"],"wgBreakFrames":false,"wgPageContentLanguage":"en","wgSeparatorTransformTable":["",""],"wgDigitTransformTable":["",""],"wgRelevantPageName":"SysadminGuide","wgRestrictionEdit":[],"wgRestrictionMove":[]});
+}</script><script>if(window.mw){
+mw.loader.implement("user.options",function($){mw.user.options.set({"ccmeonemails":0,"cols":80,"date":"default","diffonly":0,"disablemail":0,"disablesuggest":0,"editfont":"default","editondblclick":0,"editsection":1,"editsectiononrightclick":0,"enotifminoredits":0,"enotifrevealaddr":0,"enotifusertalkpages":1,"enotifwatchlistpages":0,"extendwatchlist":0,"externaldiff":0,"externaleditor":0,"fancysig":0,"forceeditsummary":0,"gender":"unknown","hideminor":0,"hidepatrolled":0,"highlightbroken":1,"imagesize":2,"justify":0,"math":1,"minordefault":0,"newpageshidepatrolled":0,"nocache":0,"noconvertlink":0,"norollbackdiff":0,"numberheadings":0,"previewonfirst":0,"previewontop":1,"quickbar":5,"rcdays":7,"rclimit":50,"rememberpassword":0,"rows":25,"searchlimit":20,"showhiddencats":0,"showjumplinks":1,"shownumberswatching":1,"showtoc":1,"showtoolbar":1,"skin":"monobook","stubthreshold":0,"thumbsize":2,"underline":2,"uselivepreview":0,"usenewrc":0,"watchcreations":0,"watchdefault":0,"watchdeletion":
+0,"watchlistdays":3,"watchlisthideanons":0,"watchlisthidebots":0,"watchlisthideliu":0,"watchlisthideminor":0,"watchlisthideown":0,"watchlisthidepatrolled":0,"watchmoves":0,"wllimit":250,"variant":"en","language":"en","searchNs0":true,"searchNs1":false,"searchNs2":false,"searchNs3":false,"searchNs4":false,"searchNs5":false,"searchNs6":false,"searchNs7":false,"searchNs8":false,"searchNs9":false,"searchNs10":false,"searchNs11":false,"searchNs12":false,"searchNs13":false,"searchNs14":false,"searchNs15":false});;},{},{});mw.loader.implement("user.tokens",function($){mw.user.tokens.set({"editToken":"+\\","watchToken":false});;},{},{});
+
+/* cache key: korg_mediawiki_btrfs:resourceloader:filter:minify-js:7:74a832f2292f1f4d40d425d223444e78 */
+}</script>
+<script>if(window.mw){
+mw.loader.load(["mediawiki.page.startup","mediawiki.legacy.wikibits","mediawiki.legacy.ajax"]);
+}</script>
+</head>
+<body class="mediawiki ltr sitedir-ltr ns-0 ns-subject page-SysadminGuide skin-monobook action-view">
+<div id="globalWrapper">
+<div id="column-content"><div id="content">
+	<a id="top"></a>
+	
+	<h1 id="firstHeading" class="firstHeading"><span dir="auto">SysadminGuide</span></h1>
+	<div id="bodyContent" class="mw-body">
+		<div id="siteSub">From btrfs Wiki</div>
+		<div id="contentSub"></div>
+		<div id="jump-to-nav" class="mw-jump">Jump to: <a href="SysadminGuide.html#column-one">navigation</a>, <a href="SysadminGuide.html#searchInput">search</a></div>
+		<!-- start content -->
+<div id="mw-content-text" lang="en" dir="ltr" class="mw-content-ltr"><div class="warningbox" id="archived-warning"><h1>OBSOLETE CONTENT</h1><p>This wiki has been archived and the content is no longer updated.</p></div><div class="visualClear"></div><p>This page is intended to give a slightly deeper insight into what the various Btrfs features are doing behind the scenes.
+</p>
+<table id="toc" class="toc"><tr><td><div id="toctitle"><h2>Contents</h2></div>
+<ul>
+<li class="toclevel-1 tocsection-1"><a href="SysadminGuide.html#Btrfs_introduction_in_a_talk"><span class="tocnumber">1</span> <span class="toctext">Btrfs introduction in a talk</span></a></li>
+<li class="toclevel-1 tocsection-2"><a href="SysadminGuide.html#Data_usage_and_allocation"><span class="tocnumber">2</span> <span class="toctext">Data usage and allocation</span></a>
+<ul>
+<li class="toclevel-2 tocsection-3"><a href="SysadminGuide.html#RAID_and_data_replication"><span class="tocnumber">2.1</span> <span class="toctext">RAID and data replication</span></a></li>
+<li class="toclevel-2 tocsection-4"><a href="SysadminGuide.html#Balancing"><span class="tocnumber">2.2</span> <span class="toctext">Balancing</span></a>
+<ul>
+<li class="toclevel-3 tocsection-5"><a href="SysadminGuide.html#With_Striped_Profiles"><span class="tocnumber">2.2.1</span> <span class="toctext">With Striped Profiles</span></a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toclevel-1 tocsection-6"><a href="SysadminGuide.html#Copy_on_Write_.28CoW.29"><span class="tocnumber">3</span> <span class="toctext">Copy on Write (CoW)</span></a></li>
+<li class="toclevel-1 tocsection-7"><a href="SysadminGuide.html#Subvolumes"><span class="tocnumber">4</span> <span class="toctext">Subvolumes</span></a>
+<ul>
+<li class="toclevel-2 tocsection-8"><a href="SysadminGuide.html#Description"><span class="tocnumber">4.1</span> <span class="toctext">Description</span></a></li>
+<li class="toclevel-2 tocsection-9"><a href="SysadminGuide.html#Layout"><span class="tocnumber">4.2</span> <span class="toctext">Layout</span></a>
+<ul>
+<li class="toclevel-3 tocsection-10"><a href="SysadminGuide.html#Flat"><span class="tocnumber">4.2.1</span> <span class="toctext">Flat</span></a></li>
+<li class="toclevel-3 tocsection-11"><a href="SysadminGuide.html#Nested"><span class="tocnumber">4.2.2</span> <span class="toctext">Nested</span></a></li>
+<li class="toclevel-3 tocsection-12"><a href="SysadminGuide.html#Mixed"><span class="tocnumber">4.2.3</span> <span class="toctext">Mixed</span></a></li>
+</ul>
+</li>
+<li class="toclevel-2 tocsection-13"><a href="SysadminGuide.html#When_To_Make_Subvolumes"><span class="tocnumber">4.3</span> <span class="toctext">When To Make Subvolumes</span></a></li>
+<li class="toclevel-2 tocsection-14"><a href="SysadminGuide.html#Snapshots"><span class="tocnumber">4.4</span> <span class="toctext">Snapshots</span></a>
+<ul>
+<li class="toclevel-3 tocsection-15"><a href="SysadminGuide.html#Managing_Snapshots"><span class="tocnumber">4.4.1</span> <span class="toctext">Managing Snapshots</span></a></li>
+</ul>
+</li>
+<li class="toclevel-2 tocsection-16"><a href="SysadminGuide.html#Special_Cases"><span class="tocnumber">4.5</span> <span class="toctext">Special Cases</span></a></li>
+</ul>
+</li>
+<li class="toclevel-1 tocsection-17"><a href="SysadminGuide.html#Btrfs_on_top_of_dmcrypt"><span class="tocnumber">5</span> <span class="toctext">Btrfs on top of dmcrypt</span></a></li>
+</ul>
+</td></tr></table>
+<h1> <span class="mw-headline" id="Btrfs_introduction_in_a_talk"> Btrfs introduction in a talk </span></h1>
+<p>If you'd like an overview with pointers to the more useful features and cookbooks, you can try 
+<a rel="nofollow" class="external text" href="http://marc.merlins.org/perso/btrfs/post_2014-05-21_My-Btrfs-Talk-at-Linuxcon-JP-2014.html">Marc MERLIN's Btrfs talk at Linuxcon JP 2014</a>.
+</p>
+<h1> <span class="mw-headline" id="Data_usage_and_allocation"> Data usage and allocation </span></h1>
+<p>Btrfs, at its lowest level, manages a pool of raw storage, from which it allocates space for different internal purposes. This pool is made up of all of the block devices that the <u>volume</u> (and any subvolumes) lives on, and the size of the pool is the "total" value reported by the ordinary <tt>df</tt> command. As the volume needs storage to hold file data, or volume metadata, it allocates <u>chunks</u> of this raw storage, typically in 1GiB lumps, for use by the higher levels of the filesystem. The allocation of these chunks is what you see as the output from <tt>btrfs filesystem usage</tt>. The extents belonging to many files may be placed within a chunk, and files may span across more than one chunk. A chunk is simply a piece of storage that Btrfs can use to put data on.
+The most important function of a chunk is that it has a <u>profile</u> that is how it is replicated within or across a member device.
+</p><p>Terminology: space is <u>allocated</u> to chunks, and space is <u>used</u> by blocks. A chunk with no used blocks in it is unallocated; a chunk with 1 or more used blocks in it is allocated. All chunks can be allocated even if not all space is used.
+</p>
+<h2> <span class="mw-headline" id="RAID_and_data_replication"> RAID and data replication </span></h2>
+<p>Btrfs's "RAID" implementation bears only passing resemblance to traditional RAID implementations. Instead, Btrfs replicates data on a per-chunk basis. If the filesystem is configured to use "RAID-1", for example, chunks are allocated in pairs, with each chunk of the pair being taken from a different block device. Data written to such a chunk pair will be duplicated across both chunks.
+</p><p>Stripe-based "RAID" levels (RAID-0, RAID-10) work in a similar way, allocating as many chunks as can fit across the drives with free space, and then perform striping of data at a level smaller than a chunk. So, for a RAID-10 filesystem on 4 disks, data may be stored like this:
+</p>
+<pre>Storing file: 01234567...89
+
+Block devices:  /dev/sda   /dev/sdb   /dev/sdc   /dev/sdd
+
+Chunks:          +-A1-+  +-A2-+  +-A3-+  +-A4-+
+                 | 0  |  | 1  |  | 0  |  | 1  | }
+                 | 2  |  | 3  |  | 2  |  | 3  | } stripes within a chunk
+                 | 4  |  | 5  |  | 4  |  | 5  | }
+                 | 6  |  | 7  |  | 6  |  | 7  | }
+                 |... |  |... |  |... |  |... | }
+                 +----+  +----+  +----+  +----+
+
+                 +-B3-+  +-B2-+  +-B4-+  +-B1-+   a second set of chunks may be needed for large files.
+                 | 8  |  | 9  |  | 9  |  | 8  |
+                 +----+  +----+  +----+  +----+
+</pre>
+<p>Note that chunks within a RAID grouping are not necessarily always allocated to the same devices (B1-B4 are reordered in the example above). This allows Btrfs to do data duplication on block devices with varying sizes, and still use as much of the raw space as possible. With RAID-1 and RAID-10, only two copies of each byte of data are written, regardless of how many block devices are actually in use on the filesystem.
+</p>
+<h2> <span class="mw-headline" id="Balancing"> Balancing </span></h2>
+<p>A Btrfs balance operation rewrites things at the level of chunks. It runs through all chunks on the filesystem, and writes them out again, discarding and freeing up the original chunks when the new copies have been written. This has the effect that if data is missing a replication copy (e.g. from a missing/dead disk), new replicas are created. The balance operation also has the effect of re-running the allocation process for all of the data on the filesystem, thus more effectively "balancing" the data allocation over the underlying disk storage.
+</p><p>All filesystems for best performance should have some minimum percentage of free space, usally 5-10%. Btrfs, using a two-level space manager (chunks and blocks within chunks) plus being based on (nearly) copy-on-write, benefits from more space to be kept free, around 10-15%, and in particular from having at least one or a few chunks fully unallocated.
+</p><p>It is <em>quite useful</em> to <tt>balance</tt> periodically any Btrfs volume subject to updates, to prevent the allocation of every chunk in the volume. Usually it is enough to balance periodically only the chunks that are just 50% used or 70% used and this is quick, for example as:
+</p>
+<pre><tt>btrfs balance start -musage=50 -dusage=50 ...</tt>
+</pre>
+<p><b>Q</b> - what kernel threads do this operation?
+</p>
+<h3> <span class="mw-headline" id="With_Striped_Profiles"> With Striped Profiles </span></h3>
+<p>After adding a device to a raid0/5/6/10 volume, only newly written data will be striped across all drives in the array, while existing data will remain striped across the originally present devices.
+As an example, if you wrote 10GiB to two devices in raid0, added another device, and then wrote an additional 100GiB, you would end up with (approx)
+</p>
+<pre>:~$ btrfs fi show &lt;path&gt;
+    devid    1 size 100.00GiB used 38.33GiB path /dev/sda1
+    devid    2 size 100.00GiB used 38.33GiB path /dev/sdb1
+    devid    3 size 100.00GiB used 33.33GiB path /dev/sdc1
+</pre>
+<p>It's not immediately clear how much data is striped across all 3 devices, and how much is striped across only 2 (especially in real-world scenarios, where multiple add/remove/resize operations may have taken place over multiple months). Note how in the command below, despite the full 38.33GiB using the the same profile (RAID0), there are 2 separate entries. This means each of the two entries are striped across a different number of devices.
+</p>
+<pre>:~$ btrfs device usage &lt;path&gt;
+    /dev/sda1, ID: 1
+       Data,RAID0:            33.33GiB
+       Data,RAID0:            5.00GiB
+       ...
+    /dev/sdb1, ID: 2
+       Data,RAID0:            33.33GiB
+       Data,RAID0:            5.00GiB
+       ...
+    /dev/sdc1, ID: 3
+       Data,RAID0:            33.33GiB
+       ...
+</pre>
+<p>You can view how many devices each chunk is striped across using the commands below:
+</p>
+<pre># Data + Metadata Chunks
+btrfs inspect-internal dump-tree -d /dev/&lt;device&gt; | grep num_stripes
+</pre>
+<pre># Data Only Chunks
+btrfs inspect-internal dump-tree -d /dev/&lt;device&gt; | grep "type DATA" -A2 | grep num_stripes
+</pre>
+<p>By using the steps below, we can balance chunks only if they aren't properly striped across all devices, making the balancing process much faster. In our above example, this would allow us to only balance the 10GiB which required it, instead of the full 110GiB. We first find any chunks striped across only 2 devices (using <code>grep "num_stripes 2"</code>). Then we make note of the addresses where they are stored, and run a balance only within that range. Make sure to check your math (using the "length" value of the chunks) to ensure the address range is contiguous, otherwise you may end up balancing chunks you don't need to.
+</p>
+<pre># Find the chunks with only 2 stripes
+:~$ btrfs inspect-internal dump-tree -d /dev/&lt;device&gt; | grep "num_stripes 2" -B3
+    item 2 key (FIRST_CHUNK_TREE CHUNK_ITEM 9236593770496) itemoff 15719 itemsize 368
+        length 1073741824 owner 2 stripe_len 65536 type DATA|RAID0
+        io_align 65536 io_width 65536 sector_size 4096
+        num_stripes 2 sub_stripes 1
+--
+    item 3 key (FIRST_CHUNK_TREE CHUNK_ITEM 9245183705088) itemoff 15351 itemsize 368
+        length 1073741824 owner 2 stripe_len 65536 type DATA|RAID0
+        io_align 65536 io_width 65536 sector_size 4096
+        num_stripes 2 sub_stripes 1
+--
+&lt;Etc Etc&gt;
+--
+    item 10 key (FIRST_CHUNK_TREE CHUNK_ITEM 9305313247232) itemoff 12775 itemsize 368
+        length 1073741824 owner 2 stripe_len 65536 type DATA|RAID0
+        io_align 65536 io_width 65536 sector_size 4096
+        num_stripes 2 sub_stripes 1
+
+# Balance the range
+:~$ btrfs balance start -dvrange=9236593770496..9305313247232 /media/user/&lt;volume&gt;
+</pre>
+<h1> <span class="mw-headline" id="Copy_on_Write_.28CoW.29"> Copy on Write (CoW) </span></h1>
+<ul><li> The CoW operation is used on <u>all</u> writes to the filesystem (unless turned off, see below).
+</li><li> This makes it much easier to implement lazy copies, where the copy is initially just a reference to the original, but as the copy (or the original) is changed, the two versions diverge from each other in the expected way.
+</li><li> If you just write a file that didn’t exist before, then the data is written to empty space, and some of the metadata blocks that make up the filesystem are CoWed. In a "normal" filesystem, if you then go back and overwrite a piece of that file, then the piece you’re writing is put directly over the data it is replacing. In a CoW filesystem, the new data is written to a piece of free space on the disk, and only then is the file’s metadata changed to refer to the new data. At that point, the old data that was replaced can be freed up because nothing points to it any more.
+</li><li> If you make a snapshot (or a cp --reflink=always) of a piece of data, you end up with two files that both reference the same data. If you modify one of those files, the CoW operation I described above still happens: the new data is written elsewhere, and the file’s metadata is updated to point at it, but the original data is kept, because it’s still referenced by the other file.
+<ul><li> This leads to fragmentation in heavily updated-in-place files like VM images and database stores.
+</li><li> Note that this happens even if the data is not shared, because data is stored in segments, and only the newly updated part of a segment is subject to CoW.
+</li></ul>
+</li><li> If you mount the filesystem with <code>nodatacow</code>, or use <code>chattr +C</code> on the file, then it only does the CoW operation for data if there’s more than one copy referenced.
+</li><li> Some people insist that Btrfs does "Redirect-on-write" rather than "Copy-on-write" because Btrfs is based on a scheme for redirect-based updates of B-trees by Ohad Rodeh, and because understanding the code is easier with that mindset.
+</li></ul>
+<h1> <span class="mw-headline" id="Subvolumes"> Subvolumes </span></h1>
+<h2> <span class="mw-headline" id="Description"> Description </span></h2>
+<p>A Btrfs subvolume is an independently mountable POSIX filetree  and <b>not a block device</b> (and cannot be treated as one). Most other POSIX filesystems have a single mountable root, Btrfs has an independent mountable root for the volume (top level subvolume) and for each subvolume; a Btrfs volume can contain more than a single filetree, it can contain a forest of filetrees. A Btrfs subvolume can be thought of as a POSIX file namespace.
+</p><p>A subvolume in Btrfs is <b>not</b> similar to a LVM logical volume or a ZFS subvolume. With LVM, a logical volume is a block device in its own right (which could for example contain any other filesystem or container like dm-crypt, MD RAID, etc.), this is not the case with Btrfs.
+</p><p>A Btrfs subvolume root directory differs from a directory in that each subvolume defines a distinct <u>inode</u> number space (distinct inodes in different subvolumes can have the same inumber) and each inode under a subvolume has a distinct <u>device number</u> (as reported by <tt>stat</tt>(2)).
+Each subvolume root can be accessed as implicitly mounted via the volume (top level subvolume) root, if that is mounted, or it can be mounted in its own right.
+</p><p>So, given a filesystem structure like this:
+</p>
+<pre>toplevel            (volume root directory)
++-- dir_1           (normal directory)
+|   +-- file_2      (normal file)
+|   \-- file_3      (normal file)
+\-- subvol_a        (subvolume root directory)
+    +-- subvol_b    (subvolume root directory, nested below subvol_a)
+    |   \-- file_4  (normal file)
+    \-- file_5      (normal file)
+</pre>
+<p>The top-level subvolume (with Btrfs id 5) (which one can think of as the root of the volume) can be mounted, and the full filesystem structure will be seen at the mount point; alternatively any other subvolume can be mounted (with the mount options <tt>subvol</tt> or <tt>subvolid</tt>, for example <tt>subvol=subvol_a</tt>) and only anything below that subvolume (in the above example the subvolume <tt>subvol_b</tt>, its contents, and file <tt>file_4</tt>) will be visible at the mount point.
+</p><p>Subvolumes can be nested and each subvolume (except the top-level subvolume) has a parent subvolume.
+Mounting a subvolume also makes any of its nested child subvolumes available at their respective location relative to the mount-point.
+</p><p>A Btrfs filesystem has a <u>default subvolume</u>, which is initially set to be the top-level subvolume and which is mounted if no <tt>subvol</tt> or <tt>subvolid</tt> option is specified.
+</p><p>Changing the default subvolume with <tt>btrfs subvolume default</tt> will make the top level of the filesystem inaccessible, except by use of the <tt>subvol=/</tt> or <tt>subvolid=5</tt> mount options.
+</p><p>Subvolumes can be moved around in the filesystem.
+</p>
+<h2> <span class="mw-headline" id="Layout"> Layout </span></h2>
+<p>There are several <i>basic</i> schemas to layout subvolumes (including snapshots) as well as mixtures thereof.
+</p>
+<h3> <span class="mw-headline" id="Flat"> Flat </span></h3>
+<p>Subvolumes are children of the top level subvolume (ID 5), typically directly below in the hierarchy or below some directories belonging to the top level subvolume, but especially not nested below other subvolumes, for example:
+</p>
+<pre>toplevel         (volume root directory, not to be mounted by default)
+  +-- root       (subvolume root directory, to be mounted at /)
+  +-- home       (subvolume root directory, to be mounted at /home)
+  +-- var        (directory)
+  |   \-- www    (subvolume root directory, to be mounted at /var/www)
+  \-- postgres   (subvolume root directory, to be mounted at /var/lib/postgresql)
+</pre>
+<p>Here, the toplevel mountable root directory should not normally be visible to the system.
+Of course, the <tt>www</tt> subvolume could have also been placed directly below the top level subvolume (without an intermediate directory) and the <tt>postgres</tt> subvolume could have also been placed at a directory <tt>var/lib/postgresql</tt>; these are just examples and the actual layout depends largely on personal taste.
+All subvolumes are however direct children of the top level subvolume in this scheme.
+</p><p>This has several implications (advantages and disadvantages):
+</p>
+<ul><li> Management of snapshots (especially rolling them) may be considered easier as the effective layout is more directly visible.
+</li><li> All subvolumes need to be mounted manually (e.g. via fstab) to their desired locations, e.g. in the above example this would look like:
+</li></ul>
+<pre>LABEL=the-btrfs-fs-device   /                    btrfs subvol=/root,defaults,noatime  0  0
+LABEL=the-btrfs-fs-device   /home                btrfs subvol=/home,defaults,noatime  0  0
+LABEL=the-btrfs-fs-device   /var/www             btrfs subvol=/var/www,noatime        0  0
+LABEL=the-btrfs-fs-device   /var/lib/postgresql  btrfs subvol=/postgres,noatime       0  0
+</pre>
+<ul><li> Each of these <a href="FAQ.html#Can_I_mount_subvolumes_with_different_mount_options.3F" title="FAQ">subvolumes/mountpoints can be mounted with some options being different</a>.
+</li></ul>
+<dl><dd>This means however as well, that any typically useful mount options (for example <tt>noatime</tt>) need to be specified again for each mountpoint.
+</dd></dl>
+<ul><li> Everything in the volume that's not beneath a subvolume that has been mounted, is not accessible or even visible. This may be beneficial for security, especially when being used with snapshots, see below.
+</li></ul>
+<h3> <span class="mw-headline" id="Nested"> Nested </span></h3>
+<p>Subvolumes are located anywhere in the file hierarchy, typically at their desired locations (that is where one would manually mount them at in the flat schema), especially below other subvolumes that are not the top-level subvolume, for example:
+</p>
+<pre>toplevel                  (volume root directory, to be mounted at /)
++-- home                  (subvolume root directory)
++-- var                   (subvolume root directory)
+    +-- www               (subvolume root directory)
+    +-- lib               (directory)
+         \-- postgresql   (subvolume root directory)
+</pre>
+<p>This has several implications (advantages and disadvantages):
+</p>
+<ul><li> Management of snapshots (especially rolling them) may be considered more difficult as the effective layout isn't directly visible.
+</li><li> Subvolumes don't need to be mounted manually (or via fstab) to their desired locations, they "appear automatically" at their respective locations.
+</li><li> For each of these subvolumes the mount options of their mountpoint applies.
+</li><li> Everything is visible. Of course one could only mount a subvolume, but then important parts of the filesystem (in this example much of the system's "main" filesystem) would be missing as well. This may have disadvantages for security, especially when being used with snapshots, see below.
+</li></ul>
+<p>The above layout, which obviously serves as the system's "main" filesystem, places data directly within the top-level subvolume (namely everything for example /usr, that's not in a child subvolume) 
+This makes changing the structure (for example to something more flat) more difficult, which is why it's generally suggested to place the actual data in a subvolume (that is not the top-level subvolume), in the above example, a better layout would be the following:
+</p>
+<pre>toplevel                        (volume root directory, not mounted)
+  \-- root                      (subvolume root directory, to be mounted at /)
+      +-- home                  (subvolume root directory)
+      +-- var                   (subvolume root directory)
+          +-- www               (subvolume root directory)
+          +-- lib               (directory)
+               \-- postgresql   (subvolume root directory)
+</pre>
+<h3> <span class="mw-headline" id="Mixed"> Mixed </span></h3>
+<p>Of course the above two basic schemas can be mixed at personal convenience, e.g. the base structure may follow a flat layout, with certain parts of the filesystem, being placed in nested subvolumes.
+But care must be taken when snapshots should be made (nested subvolumes are not part of a snapshot, and as of now, there are no recursive snapshots) as well when those are rotated, where the nested subvolumes would then need to be manually moved (either the "current" versions or a snapshot thereof).
+</p>
+<h2> <span class="mw-headline" id="When_To_Make_Subvolumes"> When To Make Subvolumes </span></h2>
+<p>This is a not exhaustive list of typical guidelines where/when to make subvolumes, rather than keeping things in the same subvolume.
+</p>
+<ul><li> Nested subvolumes are not going to be part of snapshots created from their parent subvolume. So one typical reason is to exclude certain parts of the filesystem from being snapshot.
+</li></ul>
+<dl><dd>A typical example could be a directory which contains just builds of software (in other words, nothing precious) that use up much space. Having those being part of the snapshot may be useless, as they can be easily regenerated from source.
+</dd></dl>
+<ul><li> "Split" of areas which are "complete" and/or "consistent" in themselves.
+</li></ul>
+<dl><dd> Examples would be "/home", "/var/www", or "/var/lib/postgresql/", which are usually more or less "independent" of the other other parts of system, at least with respect to a certain state.
+</dd><dd> In contrast, splitting parts of the system which "belong together" or depend on a certain state of each other into different subvolumes, may be a bad idea, at least when snapshots are being made.
+</dd><dd> For example, "/etc", many parts of "/var/" (especially "/var/lib"), "/usr", "/lib", "/bin/", etc. are typically closely related, at least by being managed from the package management system, which assumes them to be all in the same state. If these were not, because being snapshot at different times, the package manager may assume packages to be installed at a certain version, which would apply for e.g. "/usr" but not for "/bin" or "/etc". It's obvious that this means tickling the dragon.
+</dd><dd> One reason for "splitting" of areas into subvolumes may be the usage Btrfs’ send/receive feature (for example for snapshots and backups or simply for moving/copying data):
+</dd><dd> When making a snapshot on the local system, having more in the subvolume than just the actually desired data (e.g. the whole system's "main" filesystem instead of just "/var/lib/postgresql") doesn't matter too much. This is at least more or less the case when CoW is used, since then all data is just ref-linked, which means it’s fast and doesn’t cost much more space (there may be however other implications, for example with respect to fragmentation).
+</dd><dd> But when that data shall be sent/received to other Btrfs filesystems this "undesired" data makes a big difference and not just only that it needs to be transferred there at least once (Btrfs’ send/receive feature works on subvolumes), which may already be bad, for security and privacy reasons.
+</dd><dd> If send/receive of the desired data shall happen more often, typically for backups, then even when btrfs-send’s -p or -c features would be used for incremental transfers, the undesired data would need to be transferred at least once (assuming it would never change again on the source system, which is unlikely).
+</dd></dl>
+<ul><li> Split of areas which need special properties / mount options.
+</li></ul>
+<h2> <span class="mw-headline" id="Snapshots"> Snapshots </span></h2>
+<p>A snapshot is simply a subvolume that shares its data (and metadata) with some other subvolume, using Btrfs's COW capabilities.
+</p><p>Once a [writable] snapshot is made, there is no difference in status between the original subvolume, and the new snapshot subvolume. To roll back to a snapshot, unmount the modified original subvolume, use mv to rename the old subvolume to a temporary location, and then again to rename the snapshot to the original name. You can then remount the subvolume.
+</p><p>At this point, the original subvolume may be deleted if wished. Since a snapshot is a subvolume, snapshots of snapshots are also possible.
+</p><p><b>Beware:</b> Care must be taken when snapshots are created that are then visible to any user (e.g. when they're created in a nested layout) as this may have security implications.
+Of course, the snapshot will have the same permissions as the subvolume from which it was created at the time it was, but these permissions may be tightened later on, while those of the snapshot wouldn't change, possibly allowing access to files that shouldn't be accessible anymore.
+Similarly, especially on the system's "main" filesystem, the snapshot would contain any files (for example setuid programs) of the state when it was created. In the meantime however, security updates may have been rolled out on the original subvolume, but when the snapshot is accessible (and for example the vulnerable setuid has been accessible before) a user could still invoke it.
+</p>
+<h3> <span class="mw-headline" id="Managing_Snapshots"> Managing Snapshots </span></h3>
+<p>One typical structure for managing snapshots (particularly on a system's "main" filesystem) is based on the to flat schema from above.
+The top-level subvolume is mostly left empty except for subvolumes. It can be mounted temporarily while subvolume operations are being done and unmounted again afterwards. Alternatively an empty "snapshot" subvolume can be created (which in turn contains the actual snapshots) and permanently mounted at a convenient directory path.
+</p><p>The actual structure could look like this:
+</p>
+<pre> toplevel                   (volume root directory, not mounted)
+   +-- root                 (subvolume root directory, to be mounted at /)
+   +-- home                 (subvolume root directory, to be mounted at /home)
+   \-- snapshots            (directory)
+       +-- root             (directory)
+           +-- 2015-01-01   (root directory of snapshot of subvolume "root")
+           +-- 2015-06-01   (root directory of snapshot of subvolume "root")
+       \-- home             (directory)
+           \-- 2015-01-01   (root directory of snapshot of subvolume "home")
+           \-- 2015-12-01   (root directory of snapshot of subvolume "home")
+</pre>
+<p>or even flatter, like this:
+</p>
+<pre>  toplevel                        (volume root directory)
+   +-- root                       (subvolume root directory, mounted at /)
+   |   +-- bin                    (directory)
+   |   +-- usr                    (directory)
+   +-- root_snapshot_2015-01-01   (root directory of snapshot of subvolume "root")
+   |   +-- bin                    (directory)
+   |   +-- usr                    (directory)
+   +-- root_snapshot_2015-06-01   (root directory of snapshot of subvolume "root")
+   |   +-- bin                    (directory)
+   |   +-- usr                    (directory)
+   +-- home                       (subvolume root directory, mounted at /home)
+   +-- home_snapshot_2015-01-01   (root directory of snapshot of subvolume "home")
+   +-- home_snapshot_2015-12-01   (root directory of snapshot of subvolume "home")
+</pre>
+<p><br />
+A corresponding fstab could look like this:
+</p>
+<pre> LABEL=the-btrfs-fs-device   /                    subvol=/root,defaults,noatime      0  0
+ LABEL=the-btrfs-fs-device   /home                subvol=/home,defaults,noatime      0  0
+ LABEL=the-btrfs-fs-device   /root/btrfs-top-lvl  subvol=/,defaults,noauto,noatime   0  0
+</pre>
+<p><br />
+Creating a ro-snapshot would work for example like this:
+</p>
+<pre># mount /root/btrfs-top-lvl
+# btrfs subvolume snapshot -r /root/btrfs-top-lvl/home /root/btrfs-top-lvl/snapshots/home/2015-12-01
+# umount /root/btrfs-top-lvl
+</pre>
+<p>Rolling back a snapshot would work for example like this:
+</p>
+<pre># mount /root/btrfs-top-lvl
+# umount /home
+</pre>
+<p>now either the snapshot could be directly mounted at /home (which would be temporary, unless fstab is adapted as well):
+</p>
+<pre># mount -o subvol=/snapshots/home/2015-12-01,defaults,noatime LABEL=the-btrfs-fs-device /home
+</pre>
+<p>or the subvolume itself could be moved and then mounted again
+</p>
+<pre># mv /root/btrfs-top-lvl/home /root/btrfs-top-lvl/home.tmp     #or it could  have been deleted see below
+# mv /root/btrfs-top-lvl/snapshots/home/2015-12-01 /root/btrfs-top-lvl/home
+# mount /home
+</pre>
+<p>finally, the top-level subvolume could be unmounted:
+</p>
+<pre># umount /root/btrfs-top-lvl
+</pre>
+<p>The careful reader may have noticed, that for the rollback, a rw-snapshot was used, which is in the above example of course necessary, as a read-only /home wouldn't be desired.
+If a ro-snapshot would have been created (with -r), then one would have simply made another snapshot of that, this time of course rw, for example:
+</p>
+<pre>…
+# btrfs subvolume delete /root/btrfs-top-lvl/home
+# btrfs subvolume snapshot /root/btrfs-top-lvl/snapshots/home/2015-01-01 /root/btrfs-top-lvl/home
+…
+</pre>
+<h2> <span class="mw-headline" id="Special_Cases"> Special Cases </span></h2>
+<ul><li> Read-only subvolumes cannot be moved.
+</li></ul>
+<dl><dd>As mentioned above, subvolumes can be moved, though there are exceptions, namely read-only subvolumes, which cannot be moved from their parent directory (which may be a subvolume itself), because the snapshot's ".." file is pointed to by that, but cannot be changed because of being read-only.
+</dd><dd>Consider the following example:
+</dd></dl>
+<pre> …
+ +-- foo               (directory, optionally a subvolume)
+ +-- bar               (directory, optionally a subvolume)
+ |   \-- ro-snapshot   (ro-snapshot)
+ …
+</pre>
+<dl><dd>It wouldn't be possible to move ro-snapshot to foo, as this would need to modify ro-snapshot`s ".." file.
+</dd><dd>Moving bar (including anything below it) to foo, works however.
+</dd></dl>
+<h1> <span class="mw-headline" id="Btrfs_on_top_of_dmcrypt"> Btrfs on top of dmcrypt </span></h1>
+<p>As of Linux kernel 3.2, it is now considered safe to have Btrfs on top of dmcrypt (before that, there are risks of corruption during unclean shutdowns).
+</p><p>With multi-device setups, <a rel="nofollow" class="external text" href="https://github.com/gebi/keyctl_keyscript">decrypt_keyctl</a> may be used to unlock all disks at once. You can also look at this <a rel="nofollow" class="external text" href="http://marc.merlins.org/perso/btrfs/post_2014-04-27_Btrfs-Multi-Device-Dmcrypt.html">start-btrfs-dmcrypt from Marc MERLIN</a> that shows you how to manually bring up a Btrfs dmcrypted array.
+</p>
+<pre># cryptsetup -c aes-xts-plain -s 256 luksFormat /dev/sda3
+# cryptsetup luksOpen /dev/sda3 luksroot
+# mkfs.btrfs /dev/mapper/luksroot
+# mount -o noatime,ssd,compress=lzo /dev/mapper/luksroot /mnt
+</pre>
+<!-- 
+NewPP limit report
+Preprocessor node count: 67/1000000
+Post‐expand include size: 0/2097152 bytes
+Template argument size: 0/2097152 bytes
+Expensive parser function count: 0/100
+-->
+
+<!-- Saved in parser cache with key korg_mediawiki_btrfs:pcache:idhash:1612-0!*!0!!en!*!* and timestamp 20230310160004 -->
+</div><div class="printfooter">
+Retrieved from "<a href="https://btrfs.wiki.kernel.org/index.php?title=SysadminGuide&amp;oldid=33681">https://btrfs.wiki.kernel.org/index.php?title=SysadminGuide&amp;oldid=33681</a>"</div>
+		<div id='catlinks' class='catlinks'><div id="mw-normal-catlinks" class="mw-normal-catlinks"><a href="https://btrfs.wiki.kernel.org/index.php/Special:Categories" title="Special:Categories">Category</a>: <ul><li><a href="./Category:UserDoc.html" title="Category:UserDoc">UserDoc</a></li></ul></div></div>		<!-- end content -->
+				<div class="visualClear"></div>
+	</div>
+</div></div>
+<div id="column-one">
+	<div id="p-cactions" class="portlet">
+		<h5>Views</h5>
+		<div class="pBody">
+			<ul>
+				<li id="ca-nstab-main" class="selected"><a href="SysadminGuide.html" primary="1" context="subject" title="View the content page [c]" accesskey="c">Page</a></li>
+				<li id="ca-talk"><a href="https://btrfs.wiki.kernel.org/index.php/Talk:SysadminGuide" primary="1" context="talk" title="Discussion about the content page [t]" accesskey="t">Discussion</a></li>
+				<li id="ca-viewsource"><a href="https://btrfs.wiki.kernel.org/index.php?title=SysadminGuide&amp;action=edit" primary="1" title="This page is protected.&#10;You can view its source [e]" accesskey="e">View source</a></li>
+				<li id="ca-history"><a href="https://btrfs.wiki.kernel.org/index.php?title=SysadminGuide&amp;action=history" rel="archives" title="Past revisions of this page [h]" accesskey="h">History</a></li>
+			</ul>
+		</div>
+	</div>
+	<div class="portlet" id="p-personal">
+		<h5>Personal tools</h5>
+		<div class="pBody">
+			<ul>
+				<li id="pt-login"><a href="https://btrfs.wiki.kernel.org/index.php?title=Special:UserLogin&amp;returnto=SysadminGuide" title="You are encouraged to log in; however, it is not mandatory [o]" accesskey="o">Log in / create account</a></li>
+			</ul>
+		</div>
+	</div>
+	<div class="portlet" id="p-logo">
+<a href="Main_Page.html" style="background-image: url(../skins/common/images-btrfs/wiki.png);" title="Visit the main page"></a>
+	</div>
+	<div class="generated-sidebar portlet" id="p-navigation">
+		<h5>Navigation</h5>
+		<div class='pBody'>
+			<ul>
+				<li id="n-mainpage-description"><a href="Main_Page.html" title="Visit the main page [z]" accesskey="z">Main page</a></li>
+				<li id="n-recentchanges"><a href="https://btrfs.wiki.kernel.org/index.php/Special:RecentChanges" title="A list of recent changes in the wiki [r]" accesskey="r">Recent changes</a></li>
+				<li id="n-randompage"><a href="https://btrfs.wiki.kernel.org/index.php/Special:Random" title="Load a random page [x]" accesskey="x">Random page</a></li>
+			</ul>
+		</div>
+	</div>
+	<div id="p-search" class="portlet">
+		<h5><label for="searchInput">Search</label></h5>
+		<div id="searchBody" class="pBody">
+			<form action="https://btrfs.wiki.kernel.org/index.php" id="searchform">
+				<input type='hidden' name="title" value="Special:Search"/>
+				<input type="search" name="search" title="Search btrfs Wiki [f]" accesskey="f" id="searchInput" />
+				<input type="submit" name="go" value="Go" title="Go to a page with this exact name if exists" id="searchGoButton" class="searchButton" />&#160;
+				<input type="submit" name="fulltext" value="Search" title="Search the pages for this text" id="mw-searchButton" class="searchButton" />
+			</form>
+		</div>
+	</div>
+	<div class="portlet" id="p-tb">
+		<h5>Tools</h5>
+		<div class="pBody">
+			<ul>
+				<li id="t-whatlinkshere"><a href="https://btrfs.wiki.kernel.org/index.php/Special:WhatLinksHere/SysadminGuide" title="A list of all wiki pages that link here [j]" accesskey="j">What links here</a></li>
+				<li id="t-recentchangeslinked"><a href="https://btrfs.wiki.kernel.org/index.php/Special:RecentChangesLinked/SysadminGuide" title="Recent changes in pages linked from this page [k]" accesskey="k">Related changes</a></li>
+				<li id="t-specialpages"><a href="https://btrfs.wiki.kernel.org/index.php/Special:SpecialPages" title="A list of all special pages [q]" accesskey="q">Special pages</a></li>
+				<li><a href="https://btrfs.wiki.kernel.org/index.php?title=SysadminGuide&amp;printable=yes" rel="alternate">Printable version</a></li>
+				<li id="t-permalink"><a href="https://btrfs.wiki.kernel.org/index.php?title=SysadminGuide&amp;oldid=33681" title="Permanent link to this revision of the page">Permanent link</a></li>
+			</ul>
+		</div>
+	</div>
+</div><!-- end of the left (by default at least) column -->
+<div class="visualClear"></div>
+<div id="footer">
+	<div id="f-poweredbyico">
+		<a href="https://www.mediawiki.org/"><img src="../skins/common/images/poweredby_mediawiki_88x31.png" alt="Powered by MediaWiki" width="88" height="31" /></a>
+	</div>
+	<ul id="f-list">
+		<li id="lastmod"> This page was last modified on 25 May 2022, at 15:42.</li>
+		<li id="privacy"><a href="https://btrfs.wiki.kernel.org/index.php/btrfs_Wiki:Privacy_policy" title="btrfs Wiki:Privacy policy">Privacy policy</a></li>
+		<li id="about"><a href="https://btrfs.wiki.kernel.org/index.php/btrfs_Wiki:About" title="btrfs Wiki:About">About btrfs Wiki</a></li>
+		<li id="disclaimer"><a href="https://btrfs.wiki.kernel.org/index.php/btrfs_Wiki:General_disclaimer" title="btrfs Wiki:General disclaimer">Disclaimers</a></li>
+	</ul>
+</div>
+</div>
+<script>if(window.mw){
+mw.loader.load(["mediawiki.user","mediawiki.page.ready"], null, true);
+}</script>
+<!-- Served in 0.106 secs. --></body></html>

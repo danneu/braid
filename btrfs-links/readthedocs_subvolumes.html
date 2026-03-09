@@ -1,0 +1,370 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="./">
+<head>
+  <meta charset="utf-8" />
+  <meta name="readthedocs-addons-api-version" content="1"><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Subvolumes &mdash; BTRFS  documentation</title>
+      <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="_static/css/theme.css?v=9edc463e" />
+
+  
+      <script src="_static/jquery.js?v=5d32c60e"></script>
+      <script src="_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="_static/documentation_options.js?v=8a448e45"></script>
+      <script src="_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="_static/js/theme.js"></script>
+    <script src="_static/js/versions.js"></script>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="next" title="Swapfile" href="Swapfile.html" />
+    <link rel="prev" title="Subpage support" href="Subpage.html" />
+    <link href="_static/style.css" rel="stylesheet" type="text/css">
+
+<script async type="text/javascript" src="/_/static/javascript/readthedocs-addons.js"></script><meta name="readthedocs-project-slug" content="btrfs" /><meta name="readthedocs-version-slug" content="latest" /><meta name="readthedocs-resolver-filename" content="/Subvolumes.html" /><meta name="readthedocs-http-status" content="200" /></head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="index.html" class="icon icon-home">
+            BTRFS
+          </a>
+              <div class="switch-menus">
+                <div class="version-switch"></div>
+                <div class="language-switch"></div>
+              </div>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Overview</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="Introduction.html">Introduction</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Status.html">Status</a></li>
+<li class="toctree-l1"><a class="reference internal" href="man-index.html">Manual pages</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Administration.html">Administration</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Hardware.html">Hardware considerations</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Feature-by-version.html">Changes (feature/version)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Kernel-by-version.html">Changes (kernel/version)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="CHANGES.html">Changes (btrfs-progs)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Contributors.html">Contributors</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Glossary.html">Glossary</a></li>
+<li class="toctree-l1"><a class="reference internal" href="INSTALL.html">Installation instructions</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Source-repositories.html">Source repositories</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Interoperability.html">Interoperability</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Features</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="Common-features.html">Common Linux features</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Custom-ioctls.html">Custom ioctls</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Auto-repair.html">Auto-repair on read</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Balance.html">Balance</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Compression.html">Compression</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Checksumming.html">Checksumming</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Convert.html">Convert</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Deduplication.html">Deduplication</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Defragmentation.html">Defragmentation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Inline-files.html">Inline files</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Qgroups.html">Quota groups</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Reflink.html">Reflink</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Resize.html">Resize</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Scrub.html">Scrub</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Seeding-device.html">Seeding device</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Send-receive.html">Send/receive</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Subpage.html">Subpage support</a></li>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Subvolumes</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#subvolume-flags">Subvolume flags</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#nested-subvolumes">Nested subvolumes</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#case-study-system-root-layouts">Case study: system root layouts</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#mount-options">Mount options</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#inode-numbers">Inode numbers</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#performance">Performance</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="Swapfile.html">Swapfile</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Tree-checker.html">Tree checker</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Trim.html">Trim/discard</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Volume-management.html">Volume management</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Zoned-mode.html">Zoned mode</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Developer documentation</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="dev/Development-notes.html">Development notes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/Developer-s-FAQ.html">Developer’s FAQ</a></li>
+<li class="toctree-l1"><a class="reference internal" href="DocConventions.html">Conventions and style for documentation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/Experimental.html">Experimental features</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/dev-btrfs-design.html">Btrfs design</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/dev-btrees.html">Btrees</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/On-disk-format.html">On-disk Format</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/dev-send-stream.html">Send stream format</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/dev-json.html">JSON output</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/dev-internal-apis.html">Internal APIs</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/ReleaseChecklist.html">Release checklist</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/GithubReviewWorkflow.html">Pull request review workflow</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/CmdLineConventions.html">Command line, formatting, UI guidelines</a></li>
+<li class="toctree-l1"><a class="reference internal" href="btrfs-ioctl.html">btrfs-ioctl(2)</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">TODO</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="trouble-index.html">Troubleshooting pages</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="index.html">BTRFS</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">Subvolumes</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="_sources/Subvolumes.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="subvolumes">
+<h1>Subvolumes<a class="headerlink" href="#subvolumes" title="Link to this heading"></a></h1>
+<p>A BTRFS subvolume is a part of filesystem with its own independent
+file/directory hierarchy and inode number namespace. Subvolumes can share file
+extents. A snapshot is also subvolume, but with a given initial content of the
+original subvolume. A subvolume has always inode number 256 (see more in
+<a class="reference external" href="Subvolumes.html#subvolume-inode-numbers">Inode numbers</a>).</p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>A subvolume in BTRFS is not like an LVM logical volume, which is block-level
+snapshot while BTRFS subvolumes are file extent-based.</p>
+</div>
+<p>A subvolume looks like a normal directory, with some additional operations
+described below. Subvolumes can be renamed or moved, nesting subvolumes is not
+restricted but has some implications regarding snapshotting. The numeric id
+(called <em>subvolid</em> or <em>rootid</em>) of the subvolume is persistent and cannot be
+changed.</p>
+<p>A subvolume in BTRFS can be accessed in two ways:</p>
+<ul class="simple">
+<li><p>like any other directory that is accessible to the user</p></li>
+<li><p>like a separately mounted filesystem (options <em>subvol</em> or <em>subvolid</em>)</p></li>
+</ul>
+<p>In the latter case the parent directory is not visible and accessible. This is
+similar to a bind mount, and in fact the subvolume mount does exactly that.</p>
+<p>A freshly created filesystem is also a subvolume, called <em>top-level</em>,
+internally has an id 5. This subvolume cannot be removed or replaced by another
+subvolume. This is also the subvolume that will be mounted by default, unless
+the default subvolume has been changed (see <a class="reference internal" href="btrfs-subvolume.html#man-subvolume-set-default"><span class="std std-ref">btrfs subvolume set-default</span></a>).</p>
+<p>A snapshot is a subvolume like any other, with given initial content. By
+default, snapshots are created read-write. File modifications in a snapshot
+do not affect the files in the original subvolume.</p>
+<p>Subvolumes can be given capacity limits, through the qgroups/quota facility, but
+otherwise share the single storage pool of the whole btrfs filesystem. They may
+even share data between themselves (through deduplication or snapshotting).</p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>A snapshot is not a backup: snapshots work by use of BTRFS’ copy-on-write
+behaviour. A snapshot and the original it was taken from initially share all
+of the same data blocks. If that data is damaged in some way (cosmic rays,
+bad disk sector, accident with dd to the disk), then the snapshot and the
+original will both be damaged. Snapshots are useful to have local online
+“copies” of the filesystem that can be referred back to, or to implement a
+form of deduplication, or to fix the state of a filesystem for making a full
+backup without anything changing underneath it. They do not in themselves
+make your data any safer.</p>
+</div>
+<section id="subvolume-flags">
+<h2>Subvolume flags<a class="headerlink" href="#subvolume-flags" title="Link to this heading"></a></h2>
+<p>The subvolume flag currently implemented is the <em>ro</em> property (read-only
+status). Read-write subvolumes have that set to <em>false</em>, snapshots as <em>true</em>.
+In addition to that, a plain snapshot will also have last change generation and
+creation generation equal.</p>
+<p>Read-only snapshots are building blocks of incremental send (see
+<a class="reference internal" href="btrfs-send.html"><span class="doc">btrfs-send(8)</span></a>) and the whole use case relies on unmodified snapshots where
+the relative changes are generated from. Thus, changing the subvolume flags
+from read-only to read-write will break the assumptions and may lead to
+unexpected changes in the resulting incremental stream.</p>
+<p>A snapshot that was created by send/receive will be read-only, with different
+last change generation, and with set <em>received_uuid</em> which identifies
+the subvolume on the filesystem that produced the stream. The use case relies
+on matching data on both sides. Changing the subvolume to read-write after it
+has been received requires to reset the <em>received_uuid</em>. As this is a notable
+change and could potentially break the incremental send use case, performing
+it by <a class="reference internal" href="btrfs-property.html#man-property-set"><span class="std std-ref">btrfs property set</span></a> requires force if that is
+really desired by user.</p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>The safety checks have been implemented in 5.14.2, any subvolumes previously
+received (with a valid <em>received_uuid</em>) and read-write status may exist and
+could still lead to problems with send/receive. You can use <a class="reference internal" href="btrfs-subvolume.html#man-subvolume-show"><span class="std std-ref">btrfs subvolume show</span></a>
+to identify them. Flipping the flags to read-only and back to
+read-write will reset the <em>received_uuid</em> manually.  There may exist a
+convenience tool in the future.</p>
+</div>
+</section>
+<section id="nested-subvolumes">
+<h2>Nested subvolumes<a class="headerlink" href="#nested-subvolumes" title="Link to this heading"></a></h2>
+<p>There are no restrictions for subvolume creation, so it’s up to the user how to
+organize them, whether to have a flat layout (all subvolumes are direct
+descendants of the toplevel one), or nested.</p>
+<p>What should be mentioned early is that a snapshotting is not recursive, so a
+subvolume or a snapshot is effectively a barrier and no files in the nested subvolumes
+appear in the snapshot. Instead, there’s a stub subvolume, also sometimes called
+<em>empty subvolume</em>, with the same name as original subvolume and with inode number 2.
+This can be used intentionally but could be confusing in case of nested layouts.</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>$<span class="w"> </span>btrfs<span class="w"> </span>subvolume<span class="w"> </span>create<span class="w"> </span>subvol1
+$<span class="w"> </span>btrfs<span class="w"> </span>subvolume<span class="w"> </span>create<span class="w"> </span>subvol1/subvol2
+$<span class="w"> </span>btrfs<span class="w"> </span>subvolume<span class="w"> </span>snapshot<span class="w"> </span>subvol1<span class="w"> </span>snap1
+$<span class="w"> </span>find<span class="w"> </span>-ls
+<span class="m">121093</span><span class="w">  </span><span class="m">0</span><span class="w">  </span>drwxr-xr-x<span class="w">  </span><span class="m">1</span><span class="w">  </span>user<span class="w">  </span>users<span class="w">    </span><span class="m">24</span><span class="w">  </span>Jul<span class="w"> </span><span class="m">30</span><span class="w">  </span><span class="m">12</span>:34<span class="w">  </span>.
+<span class="w">   </span><span class="m">256</span><span class="w">  </span><span class="m">0</span><span class="w">  </span>drwxr-xr-x<span class="w">  </span><span class="m">1</span><span class="w">  </span>user<span class="w">  </span>users<span class="w">    </span><span class="m">14</span><span class="w">  </span>Jul<span class="w"> </span><span class="m">30</span><span class="w">  </span><span class="m">12</span>:34<span class="w">  </span>./subvol1
+<span class="w">   </span><span class="m">256</span><span class="w">  </span><span class="m">0</span><span class="w">  </span>drwxr-xr-x<span class="w">  </span><span class="m">1</span><span class="w">  </span>user<span class="w">  </span>users<span class="w">     </span><span class="m">0</span><span class="w">  </span>Jul<span class="w"> </span><span class="m">30</span><span class="w">  </span><span class="m">12</span>:34<span class="w">  </span>./subvol1/subvol2
+<span class="w">   </span><span class="m">257</span><span class="w">  </span><span class="m">0</span><span class="w">  </span>-rw-r--r--<span class="w">  </span><span class="m">1</span><span class="w">  </span>user<span class="w">  </span>users<span class="w">     </span><span class="m">0</span><span class="w">  </span>Jul<span class="w"> </span><span class="m">30</span><span class="w">  </span><span class="m">12</span>:34<span class="w">  </span>./subvol1/subvol2/file
+<span class="w">   </span><span class="m">256</span><span class="w">  </span><span class="m">0</span><span class="w">  </span>drwxr-xr-x<span class="w">  </span><span class="m">1</span><span class="w">  </span>user<span class="w">  </span>users<span class="w">    </span><span class="m">14</span><span class="w">  </span>Jul<span class="w"> </span><span class="m">30</span><span class="w">  </span><span class="m">12</span>:34<span class="w">  </span>./snap1
+<span class="w">     </span><span class="m">2</span><span class="w">  </span><span class="m">0</span><span class="w">  </span>drwxr-xr-x<span class="w">  </span><span class="m">1</span><span class="w">  </span>user<span class="w">  </span>users<span class="w">     </span><span class="m">0</span><span class="w">  </span>Jul<span class="w"> </span><span class="m">30</span><span class="w">  </span><span class="m">12</span>:34<span class="w">  </span>./snap1/subvol2
+</pre></div>
+</div>
+<p>The numbers in the first columns are inode numbers, 256 is for a regular
+subvolume (or snapshot), 2 is the <em>empty subvolume</em>. The snapshotted directory
+representing <em>subvol2</em> does not contain the <em>file</em>.</p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>The <em>empty subvolume</em> will not be sent (<a class="reference internal" href="btrfs-send.html"><span class="doc">btrfs-send(8)</span></a>) and thus will not be created on
+the receive side (<a class="reference internal" href="btrfs-receive.html"><span class="doc">btrfs-receive(8)</span></a>).</p>
+</div>
+<section id="case-study-system-root-layouts">
+<h3>Case study: system root layouts<a class="headerlink" href="#case-study-system-root-layouts" title="Link to this heading"></a></h3>
+<p>There are two ways how the system root directory and subvolume layout could be
+organized. The interesting use case for root is to allow rollbacks to previous
+version, as one atomic step. If the entire filesystem hierarchy starting in <code class="file docutils literal notranslate"><span class="pre">/</span></code>
+is in one subvolume, taking snapshot will encompass all files. This is easy for
+the snapshotting part but has undesirable consequences for rollback. For example,
+log files would get rolled back too, or any data that are stored on the root
+filesystem but are not meant to be rolled back either (database files, VM
+images, …).</p>
+<p>Here we could utilize the snapshotting barrier mentioned above, making each directory
+that stores data to be preserved across rollbacks its own subvolume. This
+could be e.g. <code class="file docutils literal notranslate"><span class="pre">/var</span></code>. Further more fine-grained partitioning could be done, e.g.
+adding separate subvolumes for <code class="file docutils literal notranslate"><span class="pre">/var/log</span></code>, <code class="file docutils literal notranslate"><span class="pre">/var/cache</span></code> etc.</p>
+<p>The fact that there are separate subvolumes requires separate actions to take the
+snapshots (here, it gets disconnected from the system root snapshots). This needs
+to be taken care of by system tools, installers, together with selection of which
+directories are highly recommended to be separate subvolumes.</p>
+</section>
+</section>
+<section id="mount-options">
+<h2>Mount options<a class="headerlink" href="#mount-options" title="Link to this heading"></a></h2>
+<p>Mount options are of two kinds, generic (that are handled by VFS layer) and
+specific, handled by the filesystem. The following list shows which are
+applicable to individual subvolume mounts, while there are more options that
+always affect the whole filesystem:</p>
+<ul class="simple">
+<li><p>Generic: noatime/relatime/…, nodev, nosuid, ro, rw, dirsync</p></li>
+<li><p>Filesystem-specific: compress, autodefrag, nodatacow, nodatasum</p></li>
+</ul>
+<p>Examples of whole filesystem options are e.g. <em>space_cache</em>, <em>rescue</em>, <em>device</em>,
+<em>skip_balance</em>, etc. The exceptional options are <em>subvol</em> and <em>subvolid</em> that
+are actually used for mounting a given subvolume and can be specified only once
+for the mount.</p>
+<p>Subvolumes belong to a single filesystem and, as implemented now, all share the
+same specific mount options. Also, changes done by remount have immediate effect. This
+may change in the future.</p>
+<p>Mounting a read-write snapshot as read-only is possible and will not change the
+<em>ro</em> property and flag of the subvolume.</p>
+<p>The name of the mounted subvolume is stored in file <code class="file docutils literal notranslate"><span class="pre">/proc/self/mountinfo</span></code> in
+the 4th column:</p>
+<div class="highlight-none notranslate"><div class="highlight"><pre><span></span>27 21 0:19 /subv1 /mnt rw,relatime - btrfs /dev/sda rw,space_cache
+           ^^^^^^
+</pre></div>
+</div>
+</section>
+<section id="inode-numbers">
+<span id="subvolume-inode-numbers"></span><h2>Inode numbers<a class="headerlink" href="#inode-numbers" title="Link to this heading"></a></h2>
+<p>A directory representing a subvolume has always inode number 256 (sometimes
+also called a root of the subvolume):</p>
+<div class="highlight-none notranslate"><div class="highlight"><pre><span></span>$ ls -lis
+total 0
+389111 0 drwxr-xr-x 1 user users 0 Jan 20 12:13 dir
+389110 0 -rw-r--r-- 1 user users 0 Jan 20 12:13 file
+   256 0 drwxr-xr-x 1 user users 0 Jan 20 12:13 snap1
+   256 0 drwxr-xr-x 1 user users 0 Jan 20 12:13 subv1
+</pre></div>
+</div>
+<p>If a subvolume is nested and then a snapshot is taken, then the cloned
+directory entry representing the subvolume becomes empty and the inode has
+number 2. All other files and directories in the target snapshot preserve their
+original inode numbers.</p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>Inode number is not a filesystem-wide unique identifier, some applications
+assume that. Please use the <em>subvolumeid:inodenumber</em> pair for that purpose.
+The subvolume id can be read by <a class="reference internal" href="btrfs-inspect-internal.html#man-inspect-rootid"><span class="std std-ref">btrfs inspect-internal rootid</span></a>
+or by the ioctl <a class="reference internal" href="btrfs-ioctl.html#btrfs-ioc-ino-lookup"><span class="std std-ref">BTRFS_IOC_INO_LOOKUP</span></a>.</p>
+</div>
+</section>
+<section id="performance">
+<h2>Performance<a class="headerlink" href="#performance" title="Link to this heading"></a></h2>
+<p>Subvolume creation needs to flush dirty data that belong to the subvolume and this
+step may take some time. Otherwise, once there’s nothing else to do, the snapshot
+is instantaneous and only creates a new tree root copy in the metadata.</p>
+<p>Snapshot deletion has two phases: first its directory is deleted and the
+subvolume is added to a queuing list, then the list is processed one by one and the
+data related to the subvolume get deleted. This is usually called <em>cleaning</em> and
+can take some time depending on the amount of shared blocks (can be a lot of
+metadata updates), and the number of currently queued deleted subvolumes.</p>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="Subpage.html" class="btn btn-neutral float-left" title="Subpage support" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="Swapfile.html" class="btn btn-neutral float-right" title="Swapfile" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright .</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

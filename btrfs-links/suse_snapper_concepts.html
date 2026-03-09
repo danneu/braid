@@ -1,0 +1,390 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!DOCTYPE html>
+<html lang="en" xml:lang="en" xmlns="http://www.w3.org/1999/xhtml"><head><title>The Basic Concepts of Snapper | SUSE Linux Enterprise Server 15 SP7</title><meta charset="utf-8"/><meta content="width=device-width, initial-scale=1.0, user-scalable=yes" name="viewport"/><link href="static/css/style-new.css" rel="stylesheet" type="text/css"/>
+<link href="http://purl.org/dc/elements/1.1/" rel="schema.dc"/><link href="http://purl.org/dc/terms/" rel="schema.dcterms"/>
+<meta content="2024-11-11" name="dcterms.modified"/><meta content="2024-11-11" name="dcterms.created"/><meta content="The Basic Concepts of Snapper | SUSE Linux Enterprise …" name="title"/>
+<meta content="A basic overview of Snapper that describes the tool, its supported interfaces and main tasks, and presents default settings." name="description"/>
+<meta content="SUSE Linux Enterprise Server" name="product-name"/>
+<meta content="15 SP7" name="product-number"/>
+<meta content="The Basic Concepts of Snapper" name="book-title"/>
+<meta content="https://bugzilla.suse.com/enter_bug.cgi" name="tracker-url"/>
+<meta content="bsc" name="tracker-type"/>
+<meta content="daria.vladykina@suse.com" name="tracker-bsc-assignee"/>
+<meta content="Documentation" name="tracker-bsc-component"/>
+<meta content="SUSE Linux Enterprise Server 15 SP6" name="tracker-bsc-product"/>
+<meta content="SUSE" name="publisher"/><meta content="daria.vladykina@suse.com" name="dc.creator"/>
+<meta content="https://documentation.suse.com/smart/systems-management/html/snapper-basic-concepts/index.html" property="og:url"/>
+<meta content="https://documentation.suse.com/smart/systems-management/html/snapper-basic-concepts/https://documentation.suse.com/smart/systems-management/html/snapper-basic-concepts/document.jpg" property="og:image"/>
+<meta content="DAPS 4.0.beta12 (https://opensuse.github.io/daps) using SUSE XSL Stylesheets 2.95.30 (based on DocBook XSL Stylesheets 1.79.2) - chunked" name="generator"/>
+<meta content="The basic concepts of Snapper" property="og:title"/>
+<meta content="Snapper basic overview: interfaces, default settings" property="og:description"/>
+<meta content="article" property="og:type"/>
+<meta content="summary" name="twitter:card"/>
+<meta content="https://documentation.suse.com/smart/systems-management/html/snapper-basic-concepts/document.jpg" name="twitter:image"/>
+<meta content="The basic concepts of Snapper" name="twitter:title"/>
+<meta content="Snapper basic overview: interfaces, default settings" name="twitter:description"/>
+<meta content="@SUSE" name="twitter:site"/>
+<script type="application/ld+json">{
+    "@context": "https://schema.org",
+    "@type": ["TechArticle"],
+    "image": "https://www.suse.com/assets/img/suse-white-logo-green.svg",
+    "name": "The basic concepts of Snapper | SUSE Linux Enterprise Server 15 SP7",
+     "isPartOf": {
+      "@type": "CreativeWorkSeries",
+      "name": "Products &amp; Solutions"
+    },
+    
+    "inLanguage": "en",
+    
+
+    "headline": "The basic concepts of Snapper",
+  
+    "description": "A basic overview of Snapper that describes the tool, its supported interfaces and main tasks, and presents default settings.",
+      
+    "author": [
+      {
+        "@type": "Corporation",
+        "name": "SUSE Product &amp; Solution Documentation Team",
+        "url": "https://documentation.suse.com"
+      }
+    ],
+      
+    "dateModified": "2024-11-11T00:00+02:00",
+      
+    "datePublished": "2024-11-11T00:00+02:00",
+      
+
+    "about": [
+      {
+        "@type": "Thing",
+        "name": "Backup &amp; Recovery"
+      },
+      {
+        "@type": "Thing",
+        "name": "Administration"
+      }
+    ],
+  
+    "mentions": [
+      
+      { "@type": "SoftwareApplication",
+        "name": "SUSE Linux Enterprise Server",
+        "softwareVersion": "15 SP7",
+        "applicationCategory": "Operating System",
+        "operatingSystem": "Linux",
+        "processorRequirements": "AMD64/Intel 64, AArch64, POWER, IBM Z"
+        
+      }
+      ,
+      
+      { "@type": "SoftwareApplication",
+        "name": "SUSE Linux Micro",
+        "softwareVersion": "6.1",
+        "applicationCategory": "Operating System",
+        "operatingSystem": "Linux",
+        "processorRequirements": "AMD64/Intel 64, AArch64, POWER, IBM Z"
+        
+      }
+      
+    ],
+    
+    "sameAs": [
+          "https://www.facebook.com/SUSEWorldwide/about",
+          "https://www.youtube.com/channel/UCHTfqIzPKz4f_dri36lAQGA",
+          "https://twitter.com/SUSE",
+          "https://www.linkedin.com/company/suse"
+    ],
+    "publisher": {
+      "@type": "Corporation",
+      "name": "SUSE",
+      "url": "https://documentation.suse.com",
+      "logo": {
+        "@type": "ImageObject",
+        "url": "https://www.suse.com/assets/img/suse-white-logo-green.svg"
+      }
+    }
+  }</script>
+<!--SUSE Header head--><script type="module">
+     import { defineCustomElements, setAssetPath } from 'https://d12w0ryu9hjsx8.cloudfront.net/shared-header/1.10/shared-header.esm.js';
+     defineCustomElements();
+     setAssetPath("https://d12w0ryu9hjsx8.cloudfront.net/shared-header/1.10/assets");
+   </script>
+<link href="doc-gfdl-license.html" rel="next" title="A. GNU Free Documentation License"/><link as="style" href="https://documentation.suse.com/docserv/res/fonts/suse/suse.css" onload="this.rel='stylesheet'" rel="preload" type="text/css"/><script src="static/js/script-purejs.js" type="text/javascript"> </script><script src="static/js/highlight.js" type="text/javascript"> </script><script>hljs.highlightAll();</script><script type="text/javascript">
+if (window.location.protocol.toLowerCase() != 'file:') {
+  var externalScript1 = document.createElement("script");
+  externalScript1.src = "/docserv/res/extra.js";
+  document.head.appendChild(externalScript1);
+}
+      </script><link href="https://documentation.suse.com/smart/systems-management/html/snapper-basic-concepts/index.html" rel="canonical"/><link href="https://documentation.suse.com/smart/systems-management/html/snapper-basic-concepts/index.html" hreflang="x-default" rel="alternate"/><link href="https://documentation.suse.com/smart/systems-management/html/snapper-basic-concepts/index.html" hreflang="en-us" rel="alternate"/></head><body class="wide offline js-off"><!-- SUSE Header --><shared-header enable-search="false" language="en" languages='{      "en": { "label": "English", "url": "https://documentation.suse.com/en-us/" },      "de": { "label": "Deutsch", "url": "https://documentation.suse.com/de-de/" },      "fr": { "label": "Français", "url": "https://documentation.suse.com/fr-fr/" },      "es": { "label": "Español", "url": "https://documentation.suse.com/es-es/" },      "zh_CN": { "label": "中文", "url": "https://documentation.suse.com/zh-cn/" },      "pt_BR": { "label": "Português Brasileiro", "url": "https://documentation.suse.com/pt-br/" }     }'> </shared-header><div class="crumbs"><div class="growth-inhibitor"><a class="crumb overview-link" href="/" title="documentation.suse.com"></a><a class="crumb" href="index.html">The Basic Concepts of Snapper</a></div></div><main id="_content"><nav class="side-toc" id="_side-toc-overall" tabindex="0"><div class="side-title">The Basic Concepts of Snapper</div> </nav><button id="_open-side-toc-overall" title="Contents"> </button><article class="documentation"><button id="_unfold-side-toc-page">On this page</button><section class="article" data-id-title="The Basic Concepts of Snapper" id="snapper-basic-concepts" xml:lang="en"><div class="titlepage"><div><div class="big-version-info"><span class="productname">SUSE Linux Enterprise Server</span> 15 SP7</div><div><h1 class="title">The Basic Concepts of Snapper</h1></div><div class="date"><span class="imprint-label">Publication Date: </span>05 Mar 2026</div><div><div class="abstract"><div class="variablelist"><dl class="variablelist"><dt id="id-1.1.12.1.1"><span class="term">WHAT?</span></dt><dd><p>
+              This article describes the basic concepts of the Snapper
+              tool that is used to create and manage Btrfs file system snapshots.
+            </p></dd><dt id="id-1.1.12.1.2"><span class="term">WHY?</span></dt><dd><p>
+              This article provides a basic overview of Snapper,
+              its supported interfaces and main purposes. It also informs about
+              default settings for snapshots on <span class="phrase"><span class="phrase">SUSE Linux Enterprise Server</span></span>.
+            </p></dd><dt id="id-1.1.12.1.3"><span class="term">EFFORT</span></dt><dd><p>
+              It takes up to 20 minutes to understand Snapper and its default setup.
+              </p></dd><dt id="id-1.1.12.1.4"><span class="term">REQUIREMENTS</span></dt><dd><div class="itemizedlist"><ul class="itemizedlist"><li class="listitem"><p>
+<code class="systemitem">root</code> or <code class="command">sudo</code> privileges
+                  </p></li><li class="listitem"><p>
+                    Snapper needs to be installed. It is available on <span class="phrase"><span class="phrase">SUSE Linux Enterprise Server</span></span> by default.
+                  </p></li><li class="listitem"><p>
+                    A root partition (<code class="filename">/</code>) size of at least 16 GB. The size
+                    of the root partition depends on the product. We strongly recommend 50 GB or more.
+                  </p></li></ul></div></dd></dl></div><div class="admonition note normal" id="id-1.1.12.2"><img alt="Note" class="symbol" src="static/images/icon-note.svg" title="Note"/><div class="admon-title">Note</div><p>This article is the first installment of the series of articles
+            about Snapper. In the subsequent articles, we cover common use cases such
+            as undoing changes, rolling back the system, manually creating and managing
+            snapshots, automatic snapshot cleanup, and more. Each article builds upon the
+            knowledge gained from the previous ones, providing a progressively
+            enhanced understanding of the Snapper tool.</p></div></div></div><div><div class="titlepage-revhistory"><a aria-label="Revision History: The Basic Concepts of Snapper" href="rh-snapper-basic-concepts.html" hreflang="en" target="_blank">Revision History: The Basic Concepts of Snapper</a></div></div></div></div><section class="sect1" data-id-title="Essential concepts of Btrfs subvolumes and snapshots" id="snapper-about-snapshots" xml:lang="en"><div class="titlepage"><div><div><div class="title-container"><h2 class="title"><span class="title-number-name"><span class="title-number">1 </span><span class="title-name">Essential concepts of Btrfs subvolumes and snapshots</span></span> <a class="permalink" href="index.html#snapper-about-snapshots" title="Permalink">#</a></h2><div class="icons"><a class="icon-reportbug" target="_blank" title="Report an issue"> </a></div></div></div></div></div><p>Btrfs subvolumes are separately mountable file systems within a physical 
+    partition. The Btrfs file system is set up with subvolumes by default. 
+    Snapshots in Btrfs are a type of subvolume that shares data with another 
+    subvolume. They are created using the copy-on-write capabilities of Btrfs, 
+    which allows them to be quickly created with minimal disk space usage. 
+    Snapshots can be used to capture the state of a file system at a particular 
+    point in time and to roll back to a previous state if needed.   
+  </p><p>A Btrfs subvolume has its own independent file and directory hierarchy.
+    Unlike LVM logical volumes, which operate at the block level, Btrfs 
+    subvolumes are file extent-based. A snapshot is also considered a subvolume,
+    carrying the initial content of the original subvolume. Subvolumes appear 
+    as directories and can be manipulated like any other directory, including 
+    being renamed or moved.</p><p>
+    One of the primary purposes of subvolumes is to be explicitly included or 
+    excluded from snapshots. When using a snapshot to roll back the system, we 
+    need to ensure that data such as users' home directories, Web and FTP 
+    server contents or log files do not get lost or overwritten during a rollback. 
+    This is achieved by excluding certain Btrfs subvolumes from snapshots. 
+    Find more information and the list of excluded subvolumes in 
+    <a class="xref" href="index.html#snapper-subvolumes" title="3.3. Subvolumes excluded from snapshots">Section 3.3, “Subvolumes excluded from snapshots”</a>.
+  </p></section><section class="sect1" data-id-title="What is Snapper?" id="snapper-basic-concept" xml:lang="en"><div class="titlepage"><div><div><div class="title-container"><h2 class="title"><span class="title-number-name"><span class="title-number">2 </span><span class="title-name">What is Snapper?</span></span> <a class="permalink" href="index.html#snapper-basic-concept" title="Permalink">#</a></h2><div class="icons"><a class="icon-reportbug" target="_blank" title="Report an issue"> </a></div></div></div></div></div><p>Snapper is a tool that helps create and manage file system snapshots.
+    File system snapshots allow keeping a copy of the state of a file system
+    at a certain point of time. Snapper can create and compare snapshots, revert
+    between snapshots, and supports automatic snapshot timelines. Snapper never
+    modifies the content of snapshots.</p><p>The standard setup of Snapper is designed to allow rolling back system
+    changes. However, you can also use it to create on-disk backups of user data.
+    As the basis for this functionality, Snapper uses two types of file systems:</p><div class="itemizedlist"><ul class="itemizedlist"><li class="listitem"><p>
+        Btrfs, a copy-on-write file system for Linux that natively supports
+        file system snapshots of subvolumes.
+       </p></li><li class="listitem"><p>
+        Thinly provisioned LVM volumes formatted with XFS.
+       </p></li></ul></div><div class="admonition note normal" id="id-1.3.5"><img alt="Note" class="symbol" src="static/images/icon-note.svg" title="Note"/><div class="admon-title">Note</div><p>
+        You can also boot from <code class="literal">Btrfs</code> snapshots. 
+       </p></div><section class="sect2" data-id-title="What can Snapper do?" id="snapper-basic-tasks"><div class="titlepage"><div><div><div class="title-container"><h3 class="title"><span class="title-number-name"><span class="title-number">2.1 </span><span class="title-name">What can Snapper do?</span></span> <a class="permalink" href="index.html#snapper-basic-tasks" title="Permalink">#</a></h3><div class="icons"><a class="icon-reportbug" target="_blank" title="Report an issue"> </a></div></div></div></div></div><p>Snapper has a command-line interface and a YaST interface.
+      Both the command-line interface and the YaST interface can be used
+      interchangeably, allowing you to create, delete and compare
+      snapshots, as well as undo changes made between snapshots.</p><p>
+      Using Snapper, you can perform the following tasks:</p><div class="itemizedlist"><ul class="itemizedlist"><li class="listitem"><p>
+          Undo system changes made by <code class="command">zypper</code> and YaST. 
+         </p></li><li class="listitem"><p>
+          Restore files from previous snapshots. 
+         </p></li><li class="listitem"><p>
+          Do a system rollback by booting from a snapshot. 
+         </p></li><li class="listitem"><p>
+          Manually create and manage snapshots, within the running system. 
+         </p></li><li class="listitem"><p>
+          Perform automatic snapshot cleanup.  
+          </p></li></ul></div></section><section class="sect2" data-id-title="Types of snapshots" id="snapshot-types"><div class="titlepage"><div><div><div class="title-container"><h3 class="title"><span class="title-number-name"><span class="title-number">2.2 </span><span class="title-name">Types of snapshots</span></span> <a class="permalink" href="index.html#snapshot-types" title="Permalink">#</a></h3><div class="icons"><a class="icon-reportbug" target="_blank" title="Report an issue"> </a></div></div></div></div></div><p>There are two aspects according to which snapshots can be classified: 
+     snapshot-triggering events and the time of snapshot creation.</p><div class="variablelist"><div class="title-container"><div class="variablelist-title-wrap"><div class="variablelist-title"><span class="title-number-name"><span class="title-name">Snapshot types based on triggering events </span></span><a class="permalink" href="index.html#id-1.3.7.3" title="Permalink">#</a></div></div><div class="icons"><a class="icon-reportbug" target="_blank" title="Report an issue"> </a></div></div><p>Although snapshots themselves do not differ in a technical sense, we 
+      distinguish between three types of snapshots, based on the events that trigger them.</p><dl class="variablelist"><dt id="id-1.3.7.3.3"><span class="term">Installation snapshots</span></dt><dd><p>
+        Whenever one or more packages are installed with YaST or Zypper,
+        three snapshots are created:</p><div class="itemizedlist"><ul class="itemizedlist"><li class="listitem"><p>Snapshot <code class="literal">0 single</code>
+        is created automatically and always refers to the current system, as 
+        indicated in the <code class="literal">Description</code> column. This snapshot 
+        captures the state of the system right after the installation process 
+        has concluded.</p></li><li class="listitem"><p>Snapshot <code class="literal">1 single</code> for root partition 
+        (/) is taken automatically with the name <code class="literal">first root filesystem</code>.
+        This snapshot is taken after the first set of system updates or 
+        configurations.</p></li><li class="listitem"><p>Snapshot <code class="literal">2 single</code> is taken automatically
+        with the name <code class="literal">after installation</code>. This snapshot is created 
+        towards the end of the installation process and marked as <code class="literal">important</code>.
+        It represents the state of the system after all initial setup has been 
+        completed.</p></li></ul></div><p>Old snapshots are automatically deleted. By default, the last ten 
+        important snapshots and the last ten <span class="quote">“<span class="quote">regular</span>”</span> ones 
+        (including administration snapshots) are kept. Installation snapshots 
+        are enabled by default. To manually disable installation snapshots, uninstall
+        the package <span class="package">snapper-zypp-plugin</span>.</p></dd><dt id="id-1.3.7.3.4"><span class="term">Administration snapshots</span></dt><dd><p>
+       Whenever you make changes to the system using Zypper or YaST, a 
+       pair of snapshots is created: one prior to the system change 
+       (<span class="quote">“<span class="quote">pre</span>”</span>) and the other one after the system change 
+       (<span class="quote">“<span class="quote">post</span>”</span>). Old snapshots are automatically deleted.
+       By default, the last ten important snapshots and the last ten 
+       <span class="quote">“<span class="quote">regular</span>”</span> snapshots (including installation snapshots) 
+       are kept. Administration snapshots are enabled by default.    
+      </p></dd><dt id="id-1.3.7.3.5"><span class="term">Timeline snapshots</span></dt><dd><p>
+     A single snapshot is created every hour. Using the YaST OS installation 
+     method (default), timeline snapshots are enabled, except for the 
+     root file system. You can configure timeline snapshots to be taken 
+     at different intervals: hourly, daily, weekly, monthly and yearly.
+     Old snapshots are automatically deleted. By default, the first snapshot 
+     of the last ten days, months and years is kept. 
+    </p></dd></dl></div><div class="admonition important normal" data-id-title="Exception for installation and administration snapshot types" id="id-1.3.7.4"><img alt="Important" class="symbol" src="static/images/icon-important.svg" title="Important"/><div class="admon-title">Important: Exception for installation and administration snapshot types</div><p>Installation and administration snapshot types do not apply to transactional 
+      systems.</p></div><div class="admonition note normal" id="id-1.3.7.5"><img alt="Note" class="symbol" src="static/images/icon-note.svg" title="Note"/><div class="admon-title">Note</div><p>Timeline and administration snapshots can be enabled or disabled independently.</p></div><div class="variablelist"><div class="title-container"><div class="variablelist-title-wrap"><div class="variablelist-title"><span class="title-number-name"><span class="title-name">Snapshot types based on the time of creation </span></span><a class="permalink" href="index.html#id-1.3.7.6" title="Permalink">#</a></div></div><div class="icons"><a class="icon-reportbug" target="_blank" title="Report an issue"> </a></div></div><p>
+      Among administration and installation snapshots, Snapper recognizes 
+      three different types: pre, post and single. These do not differ physically,
+      but Snapper handles them differently.</p><dl class="variablelist"><dt id="id-1.3.7.6.3"><span class="term"><code class="literal">pre</code>
+</span></dt><dd><p>
+       Snapshot of a file system <span><em class="emphasis">before</em></span> a modification.
+       Each <code class="literal">pre</code> snapshot corresponds to a
+       <code class="literal">post</code> snapshot.
+       For example, this is used for automatic YaST/Zypper snapshots.
+      </p></dd><dt id="id-1.3.7.6.4"><span class="term"><code class="literal">post</code>
+</span></dt><dd><p>
+       Snapshot of a file system <span><em class="emphasis">after</em></span> a modification.
+       Each <code class="literal">post</code> snapshot corresponds to a
+       <code class="literal">pre</code> snapshot.
+       For example, this is used for automatic YaST/Zypper snapshots.
+      </p></dd><dt id="id-1.3.7.6.5"><span class="term"><code class="literal">single</code>
+</span></dt><dd><p>
+       Stand-alone snapshot. For example, this is used for automatic hourly snapshots.
+       This is the default type when creating snapshots.
+      </p></dd></dl></div><p>This is the list of snapshots directly after a fresh installation of a system 
+  with a root partition &gt; 16 GB:</p><div class="verbatim-wrap"><pre class="screen"># | Type   | Pre # | Date                     | User | Used Space | Cleanup | Description           | Userdata     
+-----+--------+-------+--------------------------+------+------------+---------+-----------------------+--------------
+0  | single |       |                          | root |            |         | current               |              
+1  | single |       | Thu Mar 24 12:14:34 2022 | root |  32.44 MiB |         | first root filesystem |              
+2  | single |       | Thu Mar 24 12:25:55 2022 | root | 280.40 MiB | number  | after installation    | important=yes
+45 | pre    |       | Mon Apr 25 17:58:45 2022 | root |  27.52 MiB | number  | zypp(zypper)          | important=yes
+46 | post   |    45 | Mon Apr 25 18:00:07 2022 | root |  39.04 MiB | number  |                       | important=yes</pre></div></section><section class="sect2" data-id-title="Snapshot creation" id="snapper-snapshot-creation"><div class="titlepage"><div><div><div class="title-container"><h3 class="title"><span class="title-number-name"><span class="title-number">2.3 </span><span class="title-name">Snapshot creation</span></span> <a class="permalink" href="index.html#snapper-snapshot-creation" title="Permalink">#</a></h3><div class="icons"><a class="icon-reportbug" target="_blank" title="Report an issue"> </a></div></div></div></div></div><p>
+   When a snapshot is created, both the snapshot and the original point to the
+   same blocks in the file system. So, initially a snapshot does not occupy
+   additional disk space. If data in the original file system is modified,
+   changed data blocks are copied while the old data blocks are kept for the
+   snapshot. Therefore, a snapshot occupies the same amount of space as the
+   data modified. So, over time, the amount of space a snapshot allocates
+   constantly grows. As a consequence, deleting files from a
+   <code class="literal">Btrfs</code> file system containing snapshots may
+   <span><em class="emphasis">not</em></span> free disk space!</p><div class="admonition note normal" data-id-title="Snapshot location" id="id-1.3.8.3"><img alt="Note" class="symbol" src="static/images/icon-note.svg" title="Note"/><div class="admon-title">Note: Snapshot location</div><p>
+      Snapshots always reside on the same partition or subvolume on which the
+      snapshot has been taken. It is not possible to store snapshots on a
+      different partition or subvolume.
+     </p></div><p>
+     As a result, partitions containing snapshots need to be larger than
+     partitions not containing snapshots. The exact amount depends strongly on the
+     number of snapshots you keep and the amount of data modifications. As a rule
+     of thumb, give partitions twice as much space as you normally would.
+     To prevent disks from running out of space, old snapshots are automatically
+     cleaned up.
+    </p></section></section><section class="sect1" data-id-title="Snapper default setup" id="snapper-default-setup" xml:lang="en"><div class="titlepage"><div><div><div class="title-container"><h2 class="title"><span class="title-number-name"><span class="title-number">3 </span><span class="title-name">Snapper default setup</span></span> <a class="permalink" href="index.html#snapper-default-setup" title="Permalink">#</a></h2><div class="icons"><a class="icon-reportbug" target="_blank" title="Report an issue"> </a></div></div></div><div><div class="abstract"><p>
+        Learn about the default setup of Snapper and its default settings.
+       </p></div></div></div></div><p>Snapper is set up as an undo and recovery tool for system
+    changes. By default, the root partition (<code class="filename">/</code>) of 
+    <span class="phrase"><span class="phrase">SUSE Linux Enterprise Server</span></span> is formatted with <code class="literal">Btrfs</code>. Taking snapshots
+    is automatically enabled if the root partition (<code class="filename">/</code>) 
+    is big enough (more than approximately 16 GB). 
+    By default, snapshots are disabled on partitions other than <code class="filename">/</code>.</p><div class="admonition important normal" id="id-1.4.3"><img alt="Important" class="symbol" src="static/images/icon-important.svg" title="Important"/><div class="admon-title">Important</div><p>We do not recommend activating snapshots manually after the system 
+        has been installed with snapshots. Enabling Snapper after the installation 
+        results in a different setup compared to what is described here.</p></div><div class="admonition tip normal" data-id-title="Checking root partition size" id="id-1.4.4"><img alt="Tip" class="symbol" src="static/images/icon-tip.svg" title="Tip"/><div class="admon-title">Tip: Checking root partition size</div><p>The size of the root partition is product-specific. To find out the disk 
+    space that the root partition occupies, run:</p><div class="verbatim-wrap"><pre class="screen"><code class="prompt user">&gt; </code><code class="command">df -h</code></pre></div></div><section class="sect2" data-id-title="Snapper default settings" id="snapper-default-settings"><div class="titlepage"><div><div><div class="title-container"><h3 class="title"><span class="title-number-name"><span class="title-number">3.1 </span><span class="title-name">Snapper default settings</span></span> <a class="permalink" href="index.html#snapper-default-settings" title="Permalink">#</a></h3><div class="icons"><a class="icon-reportbug" target="_blank" title="Report an issue"> </a></div></div></div></div></div><p>By default, Snapper on <span class="phrase"><span class="phrase">SUSE Linux Enterprise Server</span></span> is automatically configured during 
+      system installation if the following requirements are met:</p><div class="itemizedlist"><ul class="itemizedlist"><li class="listitem"><p>Root partition size: &gt; 16 GB</p></li><li class="listitem"><p>Root partition file system: Btrfs</p></li></ul></div><p>Snapshots are created for the root partition only, and certain 
+  directories are excluded by means of subvolumes. For the list of excluded subvolumes, 
+  see <a class="xref" href="index.html#snapper-subvolumes" title="3.3. Subvolumes excluded from snapshots">Section 3.3, “Subvolumes excluded from snapshots”</a>.<span class="phrase"> For detailed information about the types
+  of snapshots, the time and occasions of their creation, see <a class="xref" href="index.html#snapshot-types" title="2.2. Types of snapshots">Section 2.2, “Types of snapshots”</a>.</span></p><p>Snapper provides automatic snapshot cleanup algorithms to prevent running 
+        out of space on the root partition. These algorithms differentiate 
+        between timeline snapshots and <span><em class="emphasis">numbered</em></span> snapshots 
+        (administration plus installation snapshot pairs). The cleanup behavior can 
+        be configured based on the following criteria:</p><div class="itemizedlist"><ul class="itemizedlist"><li class="listitem"><p>Number limit: The system can be set to automatically delete old snapshots 
+        when a certain count of snapshots is reached.</p></li><li class="listitem"><p>Age limit: Old snapshots can be deleted if they exceed a certain age, while 
+        still preserving a number of snapshots for each time period (hourly, daily, monthly, yearly).</p></li><li class="listitem"><p><code class="literal">Pre</code> and <code class="literal">post</code> snapshot pairs: 
+          <code class="literal">pre</code> and <code class="literal">post</code> snapshot pairs that do not 
+          differ can be automatically deleted.</p></li></ul></div><p>For numbered snapshots, which include administration and installation snapshot 
+          pairs, the cleanup is controlled by parameters such as <code class="literal">NUMBER_CLEANUP</code>,
+        <code class="literal">NUMBER_LIMIT</code>, <code class="literal">NUMBER_LIMIT_IMPORTANT</code>, and <code class="literal">NUMBER_MIN_AGE</code>. 
+          The default values are 2–10 for <code class="literal">NUMBER_LIMIT</code> and 4–10 for
+          <code class="literal">NUMBER_LIMIT_IMPORTANT</code>, meaning that only the youngest snapshots are kept.</p><p>For timeline snapshots, the cleanup is based on the number of snapshots to keep for 
+          each type (hourly, daily, weekly, monthly, yearly). For example, the last 24 hourly
+          snapshots, the first daily snapshot from the last seven days, the first snapshot 
+          made on the last day of the month for the last twelve months, and so forth. The parameters 
+          include <code class="literal">TIMELINE_CLEANUP</code>, <code class="literal">TIMELINE_MIN_AGE</code> and 
+          interval parameters such as <code class="literal">TIMELINE_LIMIT_DAILY</code>, 
+          <code class="literal">TIMELINE_LIMIT_HOURLY</code> and so on.</p><p>You can roll back to an existing snapshot at any time by booting from 
+        the respective snapshot and making it active afterwards.</p><div class="admonition note normal" data-id-title="Disabling Snapper automatically and manually" id="id-1.4.5.10"><img alt="Note" class="symbol" src="static/images/icon-note.svg" title="Note"/><div class="admon-title">Note: Disabling Snapper automatically and manually</div><p>If your root partition is smaller than 16 GB, the automatic creation 
+          of snapshots as described above is disabled by default. In this case, 
+          you can manually create snapshots. Keep an 
+          eye on the available disk space.</p><p>To disable automatic snapshots even if your root partition is sufficiently 
+          sized, disable snapshots manually during the installation in the partition setup 
+          step.</p></div></section><section class="sect2" data-id-title="Snapper on root" id="snapper-on-root"><div class="titlepage"><div><div><div class="title-container"><h3 class="title"><span class="title-number-name"><span class="title-number">3.2 </span><span class="title-name">Snapper on root</span></span> <a class="permalink" href="index.html#snapper-on-root" title="Permalink">#</a></h3><div class="icons"><a class="icon-reportbug" target="_blank" title="Report an issue"> </a></div></div></div></div></div><p>When Snapper is configured to operate on root, every Btrfs subvolume is
+         excluded by default.</p><p>The default behavior of Snapper is defined in a configuration file that 
+         is specific for each partition or Btrfs subvolume. These configuration files reside
+         under <code class="filename">/etc/snapper/configs/</code>.</p><div class="admonition warning normal" data-id-title="Enabling Snapper in the installed system" id="id-1.4.6.4"><img alt="Warning" class="symbol" src="static/images/icon-warning.svg" title="Warning"/><div class="admon-title">Warning: Enabling Snapper in the installed system</div><p>
+            If you disabled Snapper during the installation, it is possible to enable it later.
+            However, enabling Snapper after the installation results in differences
+            in the subvolume layout and variables, among other things. We strongly recommend
+            deciding whether you need snapshots in your system <span><em class="emphasis">before</em></span>
+            starting the installation.
+          </p></div></section><section class="sect2" data-id-title="Subvolumes excluded from snapshots" id="snapper-subvolumes"><div class="titlepage"><div><div><div class="title-container"><h3 class="title"><span class="title-number-name"><span class="title-number">3.3 </span><span class="title-name">Subvolumes excluded from snapshots</span></span> <a class="permalink" href="index.html#snapper-subvolumes" title="Permalink">#</a></h3><div class="icons"><a class="icon-reportbug" target="_blank" title="Report an issue"> </a></div></div></div></div></div><p>The primary use case for snapshots is to roll back the system 
+          to a previous state. Therefore, there are certain subvolumes (directories)
+          for which snapshotting is disabled.</p><p>The following list contains directories that are excluded from snapshots. 
+            Depending on your product and architecture, not all of them may be available
+            on your system.
+          </p><div class="variablelist"><dl class="variablelist"><dt id="id-1.4.7.4.1"><span class="term"><code class="filename">/boot/grub2/i386-pc</code>,
+             <code class="filename">/boot/grub2/x86_64-efi</code>,
+             <code class="filename">/boot/grub2/powerpc-ieee1275</code>,
+             <code class="filename">/boot/grub2/s390x-emu</code>
+</span></dt><dd><p>
+              A rollback of the boot loader configuration is not supported. The
+              directories listed above are architecture-specific. The first two
+              directories are present on AMD64/Intel 64 machines, the latter two are
+              on IBM POWER and on IBM Z, respectively.
+             </p></dd><dt id="id-1.4.7.4.2"><span class="term"><code class="filename">/home</code>
+</span></dt><dd><p>
+              If <code class="filename">/home</code> does not reside on a separate partition, it
+              is excluded to avoid the loss of user-created data on rollbacks.
+             </p></dd><dt id="id-1.4.7.4.3"><span class="term"><code class="filename">/opt</code>, <code class="filename">/usr/local</code>
+</span></dt><dd><p>
+              These directories are used when manually installing third-party products.
+              They are excluded to avoid uninstalling these installations on rollbacks.
+            </p></dd><dt id="id-1.4.7.4.4"><span class="term"><code class="filename">/srv</code>
+</span></dt><dd><p>
+              Contains data for Web and FTP servers. It is excluded to avoid data loss on
+              rollbacks.
+             </p></dd><dt id="id-1.4.7.4.5"><span class="term"><code class="filename">/tmp</code>
+</span></dt><dd><p>
+              All directories containing temporary files and caches are excluded from
+              snapshots.
+             </p></dd><dt id="id-1.4.7.4.6"><span class="term"><code class="filename">/var</code>
+</span></dt><dd><p>
+              This directory contains many variable files, including logs, temporary
+              caches, third-party products in <code class="filename">/var/opt</code>, and is the
+              default location for virtual machine images and databases. Therefore, this
+              subvolume is created to exclude all of this variable data from snapshots
+              and has copy-on-write disabled.
+             </p></dd><dt id="id-1.4.7.4.7"><span class="term"><code class="filename">/run</code>
+</span></dt><dd><p>
+              This directory contains application runtime data and is excluded from
+              snapshots to reduce the size of the snapshot and to avoid including 
+              potentially sensitive information.
+             </p></dd></dl></div><div class="admonition tip normal" id="id-1.4.7.5"><img alt="Tip" class="symbol" src="static/images/icon-tip.svg" title="Tip"/><div class="admon-title">Tip</div><p>
+              The list of subvolumes is product-specific. To see what subvolumes 
+              are created under <code class="filename">/</code> and 
+              therefore see which directories are excluded from the 
+              default snapshots behavior, run:</p><div class="verbatim-wrap"><pre class="screen"><code class="prompt user">&gt; </code><code class="command">sudo</code> btrfs subvolume list /</pre></div></div><div class="admonition note normal" data-id-title="Why is there a space limit?" id="id-1.4.7.6"><img alt="Note" class="symbol" src="static/images/icon-note.svg" title="Note"/><div class="admon-title">Note: Why is there a space limit?</div><p>
+        When creating a snapshot, no physical data copies are created. A snapshot only consists of 
+        pointers to the respective data blocks. As long as the snapshot remains consistent with 
+        the current system, it occupies almost no additional disk space (apart from the metadata 
+        it contains). However, if a file is modified on the system, the changed data is recorded
+        in the snapshot. Over time, as more changes accumulate and the snapshot diverges from 
+        the live system, the snapshot's size increases accordingly.</p><p>To prevent disks from running full (and the system becoming inoperable as a result), we 
+        recommend having a minimal root file system size. The required size depends on system usage:</p><div class="itemizedlist"><ul class="itemizedlist"><li class="listitem"><p>The frequency of snapshot creation</p></li><li class="listitem"><p>The duration for which snapshots are retained</p></li><li class="listitem"><p>The rate of changes to the system</p></li></ul></div><p>In general, the more snapshots you have, the longer they are kept, and the more 
+          frequently the system changes, the larger the root partition needs to be.</p></div></section></section><section class="sect1" data-id-title="For more information" id="snapper-basic-concepts-more-info" xml:lang="en"><div class="titlepage"><div><div><div class="title-container"><h2 class="title"><span class="title-number-name"><span class="title-number">4 </span><span class="title-name">For more information</span></span> <a class="permalink" href="index.html#snapper-basic-concepts-more-info" title="Permalink">#</a></h2><div class="icons"><a class="icon-reportbug" target="_blank" title="Report an issue"> </a></div></div></div></div></div><p>
+  For more information on the Btrfs file system, refer 
+  to <a class="link" href="https://documentation.suse.com/sles/15-SP5/html/SLES-all/cha-filesystems.html#sec-filesystems-major-btrfs" target="_blank">https://documentation.suse.com/sles/15-SP5/html/SLES-all/cha-filesystems.html#sec-filesystems-major-btrfs</a>
+  and <a class="link" href="https://wiki.archlinux.org/title/btrfs" target="_blank">https://wiki.archlinux.org/title/btrfs</a>.
+  </p><p>For more information on LVM volumes, refer to 
+  <a class="link" href="https://documentation.suse.com/sles/15-SP5/html/SLES-all/part-lvm.html" target="_blank">https://documentation.suse.com/sles/15-SP5/html/SLES-all/part-lvm.html</a>.</p></section><section class="sect1" data-id-title="Legal Notice" id="legal-disclaimer"><div class="titlepage"><div><div><div class="title-container"><h2 class="title"><span class="title-number-name"><span class="title-number">5 </span><span class="title-name">Legal Notice</span></span> <a class="permalink" href="index.html#legal-disclaimer" title="Permalink">#</a></h2><div class="icons"><a class="icon-reportbug" target="_blank" title="Report an issue"> </a></div></div></div></div></div><p> Copyright© 2006–2026
+ SUSE LLC and contributors.
+  All rights reserved. </p><p>
+    Permission is granted to copy, distribute and/or modify this document under the terms of the
+    GNU Free Documentation License, Version 1.2 or (at your option) version 1.3; with the Invariant
+    Section being this copyright notice and license. A copy of the license version 1.2 is included
+    in the section entitled <span class="quote">“<span class="quote">GNU Free Documentation License</span>”</span>.
+  </p><p>
+    For SUSE trademarks, see <a class="link" href="https://www.suse.com/company/legal/" target="_blank">https://www.suse.com/company/legal/</a>. All other
+    third-party trademarks are the property of their respective owners. Trademark symbols (®, ™
+    etc.) denote trademarks of SUSE and its affiliates. Asterisks (*) denote third-party
+    trademarks.
+  </p><p>
+    All information found in this book has been compiled with utmost attention to detail. However,
+    this does not guarantee complete accuracy.  Neither SUSE LLC, its affiliates, the authors, nor
+    the translators shall be held liable for possible errors or the consequences thereof.
+  </p></section></section><nav class="bottom-pagination"><div> </div><div><a class="pagination-link next" href="doc-gfdl-license.html"><span class="pagination-relation">Next</span><span class="pagination-label"><span class="title-number">Appendix A </span>GNU Free Documentation License</span></a> </div></nav></article><aside class="side-toc" id="_side-toc-page"><div class="side-title">On this page</div><div class="toc"><ul><li><span class="section"><a href="index.html#snapper-about-snapshots"><span class="title-number">1 </span><span class="title-name">Essential concepts of Btrfs subvolumes and snapshots</span></a></span></li><li><span class="section"><a href="index.html#snapper-basic-concept"><span class="title-number">2 </span><span class="title-name">What is Snapper?</span></a></span></li><li><span class="section"><a href="index.html#snapper-default-setup"><span class="title-number">3 </span><span class="title-name">Snapper default setup</span></a></span></li><li><span class="section"><a href="index.html#snapper-basic-concepts-more-info"><span class="title-number">4 </span><span class="title-name">For more information</span></a></span></li><li><span class="section"><a href="index.html#legal-disclaimer"><span class="title-number">5 </span><span class="title-name">Legal Notice</span></a></span></li><li><span class="appendix"><a href="doc-gfdl-license.html"><span class="title-number">A </span><span class="title-name">GNU Free Documentation License</span></a></span></li></ul></div><div class="side-title">Share this page</div><ul class="share"><li><a href="#" id="_share-mail" title="E-Mail"> </a></li><li><a href="#" id="_print-button" title="Print this page"> </a></li></ul> </aside></main><footer id="_footer"><div class="growth-inhibitor"><div class="copy"><span class="copy__rights">© SUSE  2026</span></div></div></footer>
+<script src="static/js/language-switcher.js" type="text/javascript"> </script></body></html>

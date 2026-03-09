@@ -1,0 +1,1245 @@
+<!DOCTYPE html>
+<html class="client-nojs vector-feature-language-in-header-enabled vector-feature-language-in-main-page-header-disabled vector-feature-page-tools-pinned-disabled vector-feature-toc-pinned-clientpref-1 vector-feature-main-menu-pinned-disabled vector-feature-limited-width-clientpref-1 vector-feature-limited-width-content-enabled vector-feature-custom-font-size-clientpref-0 vector-feature-appearance-pinned-clientpref-1 vector-feature-night-mode-disabled skin-theme-clientpref-day vector-sticky-header-enabled vector-toc-available" lang="en" dir="ltr">
+<head>
+<meta charset="UTF-8">
+<title>Yubikey based Full Disk Encryption (FDE) on NixOS - Official NixOS Wiki</title>
+<script>(function(){var className="client-js vector-feature-language-in-header-enabled vector-feature-language-in-main-page-header-disabled vector-feature-page-tools-pinned-disabled vector-feature-toc-pinned-clientpref-1 vector-feature-main-menu-pinned-disabled vector-feature-limited-width-clientpref-1 vector-feature-limited-width-content-enabled vector-feature-custom-font-size-clientpref-0 vector-feature-appearance-pinned-clientpref-1 vector-feature-night-mode-disabled skin-theme-clientpref-day vector-sticky-header-enabled vector-toc-available";var cookie=document.cookie.match(/(?:^|; )mediawikimwclientpreferences=([^;]+)/);if(cookie){cookie[1].split('%2C').forEach(function(pref){className=className.replace(new RegExp('(^| )'+pref.replace(/-clientpref-\w+$|[^\w-]+/g,'')+'-clientpref-\\w+( |$)'),'$1'+pref+'$2');});}document.documentElement.className=className;}());RLCONF={"wgBreakFrames":false,"wgSeparatorTransformTable":["",""],"wgDigitTransformTable":["",""],"wgDefaultDateFormat":"dmy","wgMonthNames":["","January","February","March","April","May","June","July","August","September","October","November","December"],"wgRequestId":"4415512a9dd69bb13823b501","wgCanonicalNamespace":"","wgCanonicalSpecialPageName":false,"wgNamespaceNumber":0,"wgPageName":"Yubikey_based_Full_Disk_Encryption_(FDE)_on_NixOS","wgTitle":"Yubikey based Full Disk Encryption (FDE) on NixOS","wgCurRevisionId":30146,"wgRevisionId":30146,"wgArticleId":524,"wgIsArticle":true,"wgIsRedirect":false,"wgAction":"view","wgUserName":null,"wgUserGroups":["*"],"wgCategories":["NixOS","Security"],"wgPageViewLanguage":"en","wgPageContentLanguage":"en","wgPageContentModel":"wikitext","wgRelevantPageName":"Yubikey_based_Full_Disk_Encryption_(FDE)_on_NixOS","wgRelevantArticleId":524,"wgIsProbablyEditable":false,"wgRelevantPageIsProbablyEditable":false,"wgRestrictionEdit":[],"wgRestrictionMove":[],"wgRedirectedFrom":"Luks-based_FDE_with_Yubikey_PBA_and_btrfs_on_UEFI_NixOS","wgConfirmEditCaptchaNeededForGenericEdit":false,"wgMFDisplayWikibaseDescriptions":{"search":false,"watchlist":false,"tagline":false},"wgULSAcceptLanguageList":[],"wgVisualEditor":{"pageLanguageCode":"en","pageLanguageDir":"ltr","pageVariantFallbacks":"en"},"wgInternalRedirectTargetUrl":"/wiki/Yubikey_based_Full_Disk_Encryption_(FDE)_on_NixOS","wgULSPosition":"personal","wgULSisCompactLinksEnabled":false,"wgVector2022LanguageInHeader":true,"wgULSisLanguageSelectorEmpty":false,"wgEditSubmitButtonLabelPublish":false};
+RLSTATE={"site.styles":"ready","user.styles":"ready","user":"ready","user.options":"loading","ext.pygments":"ready","skins.vector.search.codex.styles":"ready","skins.vector.styles":"ready","skins.vector.icons":"ready","ext.uls.pt":"ready","ext.visualEditor.desktopArticleTarget.noscript":"ready"};RLPAGEMODULES=["mediawiki.action.view.redirect","ext.pygments.view","site","mediawiki.page.ready","mediawiki.toc","skins.vector.js","ext.uls.interface","ext.visualEditor.desktopArticleTarget.init","ext.visualEditor.targetLoader"];</script>
+<script>(RLQ=window.RLQ||[]).push(function(){mw.loader.impl(function(){return["user.options@12s5i",function($,jQuery,require,module){mw.user.tokens.set({"patrolToken":"+\\","watchToken":"+\\","csrfToken":"+\\"});
+}];});});</script>
+<link rel="stylesheet" href="/w/load.php?lang=en&amp;modules=ext.pygments%7Cext.uls.pt%7Cext.visualEditor.desktopArticleTarget.noscript%7Cskins.vector.icons%2Cstyles%7Cskins.vector.search.codex.styles&amp;only=styles&amp;skin=vector-2022">
+<script async="" src="/w/load.php?lang=en&amp;modules=startup&amp;only=scripts&amp;raw=1&amp;skin=vector-2022"></script>
+<meta name="ResourceLoaderDynamicStyles" content="">
+<link rel="stylesheet" href="/w/load.php?lang=en&amp;modules=site.styles&amp;only=styles&amp;skin=vector-2022">
+<meta name="generator" content="MediaWiki 1.45.0">
+<meta name="robots" content="max-image-preview:standard">
+<meta name="format-detection" content="telephone=no">
+<meta name="description" content="This page is a minimalistic guide for setting up LUKS-based full disk encryption with Yubikey pre-boot authentication (PBA) on a UEFI system. The YubiKey PBA in NixOS currently utilizes YubiKey&#039;s (HMAC-SHA1) challenge response mode. Two-factor authentication using a (secret) user passphrase as an additional...">
+<meta name="viewport" content="width=1120">
+<link rel="search" type="application/opensearchdescription+xml" href="/w/rest.php/v1/search" title="Official NixOS Wiki (en)">
+<link rel="EditURI" type="application/rsd+xml" href="https://wiki.nixos.org/w/api.php?action=rsd">
+<link rel="canonical" href="https://wiki.nixos.org/wiki/Yubikey_based_Full_Disk_Encryption_(FDE)_on_NixOS">
+<link rel="alternate" type="application/atom+xml" title="Official NixOS Wiki Atom feed" href="/w/index.php?title=Special:RecentChanges&amp;feed=atom">
+</head>
+<body class="skin--responsive skin-vector skin-vector-search-vue mediawiki ltr sitedir-ltr mw-hide-empty-elt ns-0 ns-subject page-Yubikey_based_Full_Disk_Encryption_FDE_on_NixOS rootpage-Yubikey_based_Full_Disk_Encryption_FDE_on_NixOS skin-vector-2022 action-view"><a class="mw-jump-link" href="#bodyContent">Jump to content</a>
+<div class="vector-header-container">
+	<header class="vector-header mw-header no-font-mode-scale">
+		<div class="vector-header-start">
+			<nav class="vector-main-menu-landmark" aria-label="Site">
+				
+<div id="vector-main-menu-dropdown" class="vector-dropdown vector-main-menu-dropdown vector-button-flush-left vector-button-flush-right"  title="Main menu" >
+	<input type="checkbox" id="vector-main-menu-dropdown-checkbox" role="button" aria-haspopup="true" data-event-name="ui.dropdown-vector-main-menu-dropdown" class="vector-dropdown-checkbox "  aria-label="Main menu"  >
+	<label id="vector-main-menu-dropdown-label" for="vector-main-menu-dropdown-checkbox" class="vector-dropdown-label cdx-button cdx-button--fake-button cdx-button--fake-button--enabled cdx-button--weight-quiet cdx-button--icon-only " aria-hidden="true"  ><span class="vector-icon mw-ui-icon-menu mw-ui-icon-wikimedia-menu"></span>
+
+<span class="vector-dropdown-label-text">Main menu</span>
+	</label>
+	<div class="vector-dropdown-content">
+
+
+				<div id="vector-main-menu-unpinned-container" class="vector-unpinned-container">
+		
+<div id="vector-main-menu" class="vector-main-menu vector-pinnable-element">
+	<div
+	class="vector-pinnable-header vector-main-menu-pinnable-header vector-pinnable-header-unpinned"
+	data-feature-name="main-menu-pinned"
+	data-pinnable-element-id="vector-main-menu"
+	data-pinned-container-id="vector-main-menu-pinned-container"
+	data-unpinned-container-id="vector-main-menu-unpinned-container"
+>
+	<div class="vector-pinnable-header-label">Main menu</div>
+	<button class="vector-pinnable-header-toggle-button vector-pinnable-header-pin-button" data-event-name="pinnable-header.vector-main-menu.pin">move to sidebar</button>
+	<button class="vector-pinnable-header-toggle-button vector-pinnable-header-unpin-button" data-event-name="pinnable-header.vector-main-menu.unpin">hide</button>
+</div>
+
+	
+<div id="p-navigation" class="vector-menu mw-portlet mw-portlet-navigation"  >
+	<div class="vector-menu-heading">
+		Navigation
+	</div>
+	<div class="vector-menu-content">
+		
+		<ul class="vector-menu-content-list">
+			
+			<li id="n-Home" class="mw-list-item"><a href="/wiki/Main_Page"><span>Home</span></a></li>
+		</ul>
+		
+	</div>
+</div>
+
+	
+<div id="p-Ecosystem" class="vector-menu mw-portlet mw-portlet-Ecosystem"  >
+	<div class="vector-menu-heading">
+		Ecosystem
+	</div>
+	<div class="vector-menu-content">
+		
+		<ul class="vector-menu-content-list">
+			
+			<li id="n-Overview" class="mw-list-item"><a href="/wiki/Nix_Ecosystem"><span>Overview</span></a></li><li id="n-NixOS" class="mw-list-item"><a href="/wiki/NixOS"><span>NixOS</span></a></li><li id="n-Package-Manager" class="mw-list-item"><a href="/wiki/Nix_Package_Manager"><span>Package Manager</span></a></li><li id="n-Nix-Language" class="mw-list-item"><a href="/wiki/Nix_Expression_Language"><span>Nix Language</span></a></li><li id="n-Nixpkgs" class="mw-list-item"><a href="/wiki/Nixpkgs"><span>Nixpkgs</span></a></li><li id="n-Hydra" class="mw-list-item"><a href="/wiki/Hydra"><span>Hydra</span></a></li><li id="n-Applications" class="mw-list-item"><a href="/wiki/Applications"><span>Applications</span></a></li>
+		</ul>
+		
+	</div>
+</div>
+
+<div id="p-Topics" class="vector-menu mw-portlet mw-portlet-Topics"  >
+	<div class="vector-menu-heading">
+		Topics
+	</div>
+	<div class="vector-menu-content">
+		
+		<ul class="vector-menu-content-list">
+			
+			<li id="n-Software" class="mw-list-item"><a href="/wiki/Category:Software"><span>Software</span></a></li><li id="n-Hardware" class="mw-list-item"><a href="/wiki/Category:Hardware"><span>Hardware</span></a></li><li id="n-Desktop" class="mw-list-item"><a href="/wiki/Category:Desktop"><span>Desktop</span></a></li><li id="n-Server" class="mw-list-item"><a href="/wiki/Category:Server"><span>Server</span></a></li><li id="n-Community" class="mw-list-item"><a href="/wiki/Category:Community"><span>Community</span></a></li>
+		</ul>
+		
+	</div>
+</div>
+
+<div id="p-Learn_NixOS" class="vector-menu mw-portlet mw-portlet-Learn_NixOS"  >
+	<div class="vector-menu-heading">
+		Learn NixOS
+	</div>
+	<div class="vector-menu-content">
+		
+		<ul class="vector-menu-content-list">
+			
+			<li id="n-Overview" class="mw-list-item"><a href="/wiki/Resource_Overview"><span>Overview</span></a></li><li id="n-Guides" class="mw-list-item"><a href="/wiki/Category:Guide"><span>Guides</span></a></li><li id="n-Tutorials" class="mw-list-item"><a href="/wiki/Category:Tutorial"><span>Tutorials</span></a></li><li id="n-References" class="mw-list-item"><a href="/wiki/Category:Reference"><span>References</span></a></li><li id="n-Cookbooks" class="mw-list-item"><a href="/wiki/Category:Cookbook"><span>Cookbooks</span></a></li>
+		</ul>
+		
+	</div>
+</div>
+
+<div id="p-Wiki" class="vector-menu mw-portlet mw-portlet-Wiki"  >
+	<div class="vector-menu-heading">
+		Wiki
+	</div>
+	<div class="vector-menu-content">
+		
+		<ul class="vector-menu-content-list">
+			
+			<li id="n-Contribute" class="mw-list-item"><a href="/wiki/Contributing"><span>Contribute</span></a></li><li id="n-Manual-of-Style" class="mw-list-item"><a href="/wiki/Manual_of_Style"><span>Manual of Style</span></a></li><li id="n-recentchanges" class="mw-list-item"><a href="/wiki/Special:RecentChanges" title="A list of recent changes in the wiki [r]" accesskey="r"><span>Recent changes</span></a></li><li id="n-randompage" class="mw-list-item"><a href="/wiki/Special:Random" title="Load a random page [x]" accesskey="x"><span>Random page</span></a></li>
+		</ul>
+		
+	</div>
+</div>
+
+</div>
+
+				</div>
+
+	</div>
+</div>
+
+		</nav>
+			
+<a href="/wiki/Main_Page" class="mw-logo">
+	<img class="mw-logo-icon" src="/nixos.png" alt="" aria-hidden="true" height="50" width="50">
+	<span class="mw-logo-container skin-invert">
+		<strong class="mw-logo-wordmark">Official NixOS Wiki</strong>
+	</span>
+</a>
+
+		</div>
+		<div class="vector-header-end">
+			
+<div id="p-search" role="search" class="vector-search-box-vue  vector-search-box-collapses vector-search-box-show-thumbnail vector-search-box-auto-expand-width vector-search-box">
+	<a href="/wiki/Special:Search" class="cdx-button cdx-button--fake-button cdx-button--fake-button--enabled cdx-button--weight-quiet cdx-button--icon-only search-toggle" title="Search Official NixOS Wiki [f]" accesskey="f"><span class="vector-icon mw-ui-icon-search mw-ui-icon-wikimedia-search"></span>
+
+<span>Search</span>
+	</a>
+	<div class="vector-typeahead-search-container">
+		<div class="cdx-typeahead-search cdx-typeahead-search--show-thumbnail cdx-typeahead-search--auto-expand-width">
+			<form action="/w/index.php" id="searchform" class="cdx-search-input cdx-search-input--has-end-button">
+				<div id="simpleSearch" class="cdx-search-input__input-wrapper"  data-search-loc="header-moved">
+					<div class="cdx-text-input cdx-text-input--has-start-icon">
+						<input
+							class="cdx-text-input__input mw-searchInput" autocomplete="off"
+							 type="search" name="search" placeholder="Search Official NixOS Wiki" aria-label="Search Official NixOS Wiki" autocapitalize="sentences" spellcheck="false" title="Search Official NixOS Wiki [f]" accesskey="f" id="searchInput"
+							>
+						<span class="cdx-text-input__icon cdx-text-input__start-icon"></span>
+					</div>
+					<input type="hidden" name="title" value="Special:Search">
+				</div>
+				<button class="cdx-button cdx-search-input__end-button">Search</button>
+			</form>
+		</div>
+	</div>
+</div>
+
+			<nav class="vector-user-links vector-user-links-wide" aria-label="Personal tools">
+	<div class="vector-user-links-main">
+	
+<div id="p-vector-user-menu-preferences" class="vector-menu mw-portlet"  >
+	<div class="vector-menu-content">
+		
+		<ul class="vector-menu-content-list">
+			<li id="ca-uls" class="mw-list-item active user-links-collapsible-item"><a data-mw="interface" href="#" class="uls-trigger cdx-button cdx-button--fake-button cdx-button--fake-button--enabled cdx-button--weight-quiet"><span class="vector-icon mw-ui-icon-wikimedia-language mw-ui-icon-wikimedia-wikimedia-language"></span>
+
+<span>English</span></a>
+</li>
+
+			
+		</ul>
+		
+	</div>
+</div>
+
+	
+<div id="p-vector-user-menu-userpage" class="vector-menu mw-portlet emptyPortlet"  >
+	<div class="vector-menu-content">
+		
+		<ul class="vector-menu-content-list">
+			
+			
+		</ul>
+		
+	</div>
+</div>
+
+	<nav class="vector-appearance-landmark" aria-label="Appearance">
+		
+<div id="vector-appearance-dropdown" class="vector-dropdown "  title="Change the appearance of the page&#039;s font size, width, and color" >
+	<input type="checkbox" id="vector-appearance-dropdown-checkbox" role="button" aria-haspopup="true" data-event-name="ui.dropdown-vector-appearance-dropdown" class="vector-dropdown-checkbox "  aria-label="Appearance"  >
+	<label id="vector-appearance-dropdown-label" for="vector-appearance-dropdown-checkbox" class="vector-dropdown-label cdx-button cdx-button--fake-button cdx-button--fake-button--enabled cdx-button--weight-quiet cdx-button--icon-only " aria-hidden="true"  ><span class="vector-icon mw-ui-icon-appearance mw-ui-icon-wikimedia-appearance"></span>
+
+<span class="vector-dropdown-label-text">Appearance</span>
+	</label>
+	<div class="vector-dropdown-content">
+
+
+			<div id="vector-appearance-unpinned-container" class="vector-unpinned-container">
+				
+			</div>
+		
+	</div>
+</div>
+
+	</nav>
+	
+<div id="p-vector-user-menu-notifications" class="vector-menu mw-portlet emptyPortlet"  >
+	<div class="vector-menu-content">
+		
+		<ul class="vector-menu-content-list">
+			
+			
+		</ul>
+		
+	</div>
+</div>
+
+	
+<div id="p-vector-user-menu-overflow" class="vector-menu mw-portlet"  >
+	<div class="vector-menu-content">
+		
+		<ul class="vector-menu-content-list">
+			<li id="pt-createaccount-2" class="user-links-collapsible-item mw-list-item user-links-collapsible-item"><a data-mw="interface" href="/w/index.php?title=Special:CreateAccount&amp;returnto=Yubikey+based+Full+Disk+Encryption+%28FDE%29+on+NixOS" title="You are encouraged to create an account and log in; however, it is not mandatory" class=""><span>Create account</span></a>
+</li>
+<li id="pt-login-2" class="user-links-collapsible-item mw-list-item user-links-collapsible-item"><a data-mw="interface" href="/w/index.php?title=Special:UserLogin&amp;returnto=Yubikey+based+Full+Disk+Encryption+%28FDE%29+on+NixOS" title="You are encouraged to log in; however, it is not mandatory [o]" accesskey="o" class=""><span>Log in</span></a>
+</li>
+
+			
+		</ul>
+		
+	</div>
+</div>
+
+	</div>
+	
+<div id="vector-user-links-dropdown" class="vector-dropdown vector-user-menu vector-button-flush-right vector-user-menu-logged-out user-links-collapsible-item"  title="More options" >
+	<input type="checkbox" id="vector-user-links-dropdown-checkbox" role="button" aria-haspopup="true" data-event-name="ui.dropdown-vector-user-links-dropdown" class="vector-dropdown-checkbox "  aria-label="Personal tools"  >
+	<label id="vector-user-links-dropdown-label" for="vector-user-links-dropdown-checkbox" class="vector-dropdown-label cdx-button cdx-button--fake-button cdx-button--fake-button--enabled cdx-button--weight-quiet cdx-button--icon-only " aria-hidden="true"  ><span class="vector-icon mw-ui-icon-ellipsis mw-ui-icon-wikimedia-ellipsis"></span>
+
+<span class="vector-dropdown-label-text">Personal tools</span>
+	</label>
+	<div class="vector-dropdown-content">
+
+
+		
+<div id="p-personal" class="vector-menu mw-portlet mw-portlet-personal user-links-collapsible-item"  title="User menu" >
+	<div class="vector-menu-content">
+		
+		<ul class="vector-menu-content-list">
+			
+			<li id="pt-createaccount" class="user-links-collapsible-item mw-list-item"><a href="/w/index.php?title=Special:CreateAccount&amp;returnto=Yubikey+based+Full+Disk+Encryption+%28FDE%29+on+NixOS" title="You are encouraged to create an account and log in; however, it is not mandatory"><span class="vector-icon mw-ui-icon-userAdd mw-ui-icon-wikimedia-userAdd"></span> <span>Create account</span></a></li><li id="pt-login" class="user-links-collapsible-item mw-list-item"><a href="/w/index.php?title=Special:UserLogin&amp;returnto=Yubikey+based+Full+Disk+Encryption+%28FDE%29+on+NixOS" title="You are encouraged to log in; however, it is not mandatory [o]" accesskey="o"><span class="vector-icon mw-ui-icon-logIn mw-ui-icon-wikimedia-logIn"></span> <span>Log in</span></a></li>
+		</ul>
+		
+	</div>
+</div>
+
+	
+	</div>
+</div>
+
+</nav>
+
+		</div>
+	</header>
+</div>
+<div class="mw-page-container">
+	<div class="mw-page-container-inner">
+		<div class="vector-sitenotice-container">
+			<div id="siteNotice"></div>
+		</div>
+		<div class="vector-column-start">
+			<div class="vector-main-menu-container">
+		<div id="mw-navigation">
+			<nav id="mw-panel" class="vector-main-menu-landmark" aria-label="Site">
+				<div id="vector-main-menu-pinned-container" class="vector-pinned-container">
+				
+				</div>
+		</nav>
+		</div>
+	</div>
+	<div class="vector-sticky-pinned-container">
+				<nav id="mw-panel-toc" aria-label="Contents" data-event-name="ui.sidebar-toc" class="mw-table-of-contents-container vector-toc-landmark">
+					<div id="vector-toc-pinned-container" class="vector-pinned-container">
+					<div id="vector-toc" class="vector-toc vector-pinnable-element">
+	<div
+	class="vector-pinnable-header vector-toc-pinnable-header vector-pinnable-header-pinned"
+	data-feature-name="toc-pinned"
+	data-pinnable-element-id="vector-toc"
+	
+	
+>
+	<h2 class="vector-pinnable-header-label">Contents</h2>
+	<button class="vector-pinnable-header-toggle-button vector-pinnable-header-pin-button" data-event-name="pinnable-header.vector-toc.pin">move to sidebar</button>
+	<button class="vector-pinnable-header-toggle-button vector-pinnable-header-unpin-button" data-event-name="pinnable-header.vector-toc.unpin">hide</button>
+</div>
+
+
+	<ul class="vector-toc-contents" id="mw-panel-toc-list">
+		<li id="toc-mw-content-text"
+			class="vector-toc-list-item vector-toc-level-1">
+			<a href="#" class="vector-toc-link">
+				<div class="vector-toc-text">Beginning</div>
+			</a>
+		</li>
+		<li id="toc-Encrypting_Multiple_drives"
+		class="vector-toc-list-item vector-toc-level-1 vector-toc-list-item-expanded">
+		<a class="vector-toc-link" href="#Encrypting_Multiple_drives">
+			<div class="vector-toc-text">
+				<span class="vector-toc-numb">1</span>
+				<span>Encrypting Multiple drives</span>
+			</div>
+		</a>
+		
+		<ul id="toc-Encrypting_Multiple_drives-sublist" class="vector-toc-list">
+		</ul>
+	</li>
+	<li id="toc-Requirements"
+		class="vector-toc-list-item vector-toc-level-1 vector-toc-list-item-expanded">
+		<a class="vector-toc-link" href="#Requirements">
+			<div class="vector-toc-text">
+				<span class="vector-toc-numb">2</span>
+				<span>Requirements</span>
+			</div>
+		</a>
+		
+		<ul id="toc-Requirements-sublist" class="vector-toc-list">
+		</ul>
+	</li>
+	<li id="toc-Setup"
+		class="vector-toc-list-item vector-toc-level-1 vector-toc-list-item-expanded">
+		<a class="vector-toc-link" href="#Setup">
+			<div class="vector-toc-text">
+				<span class="vector-toc-numb">3</span>
+				<span>Setup</span>
+			</div>
+		</a>
+		
+			<button aria-controls="toc-Setup-sublist" class="cdx-button cdx-button--weight-quiet cdx-button--icon-only vector-toc-toggle">
+				<span class="vector-icon mw-ui-icon-wikimedia-expand"></span>
+				<span>Toggle Setup subsection</span>
+			</button>
+		
+		<ul id="toc-Setup-sublist" class="vector-toc-list">
+			<li id="toc-Modern_Setup"
+			class="vector-toc-list-item vector-toc-level-2">
+			<a class="vector-toc-link" href="#Modern_Setup">
+				<div class="vector-toc-text">
+					<span class="vector-toc-numb">3.1</span>
+					<span>Modern Setup</span>
+				</div>
+			</a>
+			
+			<ul id="toc-Modern_Setup-sublist" class="vector-toc-list">
+			</ul>
+		</li>
+		<li id="toc-Automatic_Setup"
+			class="vector-toc-list-item vector-toc-level-2">
+			<a class="vector-toc-link" href="#Automatic_Setup">
+				<div class="vector-toc-text">
+					<span class="vector-toc-numb">3.2</span>
+					<span>Automatic Setup</span>
+				</div>
+			</a>
+			
+			<ul id="toc-Automatic_Setup-sublist" class="vector-toc-list">
+			</ul>
+		</li>
+		<li id="toc-Manual_Setup"
+			class="vector-toc-list-item vector-toc-level-2">
+			<a class="vector-toc-link" href="#Manual_Setup">
+				<div class="vector-toc-text">
+					<span class="vector-toc-numb">3.3</span>
+					<span>Manual Setup</span>
+				</div>
+			</a>
+			
+			<ul id="toc-Manual_Setup-sublist" class="vector-toc-list">
+			</ul>
+		</li>
+	</ul>
+	</li>
+	<li id="toc-Set_up_the_YubiKey"
+		class="vector-toc-list-item vector-toc-level-1 vector-toc-list-item-expanded">
+		<a class="vector-toc-link" href="#Set_up_the_YubiKey">
+			<div class="vector-toc-text">
+				<span class="vector-toc-numb">4</span>
+				<span>Set up the YubiKey</span>
+			</div>
+		</a>
+		
+		<ul id="toc-Set_up_the_YubiKey-sublist" class="vector-toc-list">
+		</ul>
+	</li>
+	<li id="toc-Partitioning"
+		class="vector-toc-list-item vector-toc-level-1 vector-toc-list-item-expanded">
+		<a class="vector-toc-link" href="#Partitioning">
+			<div class="vector-toc-text">
+				<span class="vector-toc-numb">5</span>
+				<span>Partitioning</span>
+			</div>
+		</a>
+		
+			<button aria-controls="toc-Partitioning-sublist" class="cdx-button cdx-button--weight-quiet cdx-button--icon-only vector-toc-toggle">
+				<span class="vector-icon mw-ui-icon-wikimedia-expand"></span>
+				<span>Toggle Partitioning subsection</span>
+			</button>
+		
+		<ul id="toc-Partitioning-sublist" class="vector-toc-list">
+			<li id="toc-Setup_the_LUKS_device"
+			class="vector-toc-list-item vector-toc-level-2">
+			<a class="vector-toc-link" href="#Setup_the_LUKS_device">
+				<div class="vector-toc-text">
+					<span class="vector-toc-numb">5.1</span>
+					<span>Setup the LUKS device</span>
+				</div>
+			</a>
+			
+			<ul id="toc-Setup_the_LUKS_device-sublist" class="vector-toc-list">
+			</ul>
+		</li>
+		<li id="toc-LVM_setup_(optional)"
+			class="vector-toc-list-item vector-toc-level-2">
+			<a class="vector-toc-link" href="#LVM_setup_(optional)">
+				<div class="vector-toc-text">
+					<span class="vector-toc-numb">5.2</span>
+					<span>LVM setup (optional)</span>
+				</div>
+			</a>
+			
+			<ul id="toc-LVM_setup_(optional)-sublist" class="vector-toc-list">
+			</ul>
+		</li>
+		<li id="toc-Btrfs_setup_(optional)"
+			class="vector-toc-list-item vector-toc-level-2">
+			<a class="vector-toc-link" href="#Btrfs_setup_(optional)">
+				<div class="vector-toc-text">
+					<span class="vector-toc-numb">5.3</span>
+					<span>Btrfs setup (optional)</span>
+				</div>
+			</a>
+			
+			<ul id="toc-Btrfs_setup_(optional)-sublist" class="vector-toc-list">
+			</ul>
+		</li>
+	</ul>
+	</li>
+	<li id="toc-NixOS_installation"
+		class="vector-toc-list-item vector-toc-level-1 vector-toc-list-item-expanded">
+		<a class="vector-toc-link" href="#NixOS_installation">
+			<div class="vector-toc-text">
+				<span class="vector-toc-numb">6</span>
+				<span>NixOS installation</span>
+			</div>
+		</a>
+		
+			<button aria-controls="toc-NixOS_installation-sublist" class="cdx-button cdx-button--weight-quiet cdx-button--icon-only vector-toc-toggle">
+				<span class="vector-icon mw-ui-icon-wikimedia-expand"></span>
+				<span>Toggle NixOS installation subsection</span>
+			</button>
+		
+		<ul id="toc-NixOS_installation-sublist" class="vector-toc-list">
+			<li id="toc-Headless_setup_note"
+			class="vector-toc-list-item vector-toc-level-2">
+			<a class="vector-toc-link" href="#Headless_setup_note">
+				<div class="vector-toc-text">
+					<span class="vector-toc-numb">6.1</span>
+					<span>Headless setup note</span>
+				</div>
+			</a>
+			
+			<ul id="toc-Headless_setup_note-sublist" class="vector-toc-list">
+			</ul>
+		</li>
+	</ul>
+	</li>
+	<li id="toc-Maintenance"
+		class="vector-toc-list-item vector-toc-level-1 vector-toc-list-item-expanded">
+		<a class="vector-toc-link" href="#Maintenance">
+			<div class="vector-toc-text">
+				<span class="vector-toc-numb">7</span>
+				<span>Maintenance</span>
+			</div>
+		</a>
+		
+		<ul id="toc-Maintenance-sublist" class="vector-toc-list">
+		</ul>
+	</li>
+</ul>
+</div>
+
+					</div>
+		</nav>
+			</div>
+		</div>
+		<div class="mw-content-container">
+			<main id="content" class="mw-body">
+				<header class="mw-body-header vector-page-titlebar no-font-mode-scale">
+					<nav aria-label="Contents" class="vector-toc-landmark">
+						
+<div id="vector-page-titlebar-toc" class="vector-dropdown vector-page-titlebar-toc vector-button-flush-left"  title="Table of Contents" >
+	<input type="checkbox" id="vector-page-titlebar-toc-checkbox" role="button" aria-haspopup="true" data-event-name="ui.dropdown-vector-page-titlebar-toc" class="vector-dropdown-checkbox "  aria-label="Toggle the table of contents"  >
+	<label id="vector-page-titlebar-toc-label" for="vector-page-titlebar-toc-checkbox" class="vector-dropdown-label cdx-button cdx-button--fake-button cdx-button--fake-button--enabled cdx-button--weight-quiet cdx-button--icon-only " aria-hidden="true"  ><span class="vector-icon mw-ui-icon-listBullet mw-ui-icon-wikimedia-listBullet"></span>
+
+<span class="vector-dropdown-label-text">Toggle the table of contents</span>
+	</label>
+	<div class="vector-dropdown-content">
+
+
+							<div id="vector-page-titlebar-toc-unpinned-container" class="vector-unpinned-container">
+			</div>
+		
+	</div>
+</div>
+
+					</nav>
+					<h1 id="firstHeading" class="firstHeading mw-first-heading"><span class="mw-page-title-main">Yubikey based Full Disk Encryption (FDE) on NixOS</span></h1>
+				</header>
+				<div class="vector-page-toolbar vector-feature-custom-font-size-clientpref--excluded">
+					<div class="vector-page-toolbar-container">
+						<div id="left-navigation">
+							<nav aria-label="Namespaces">
+								
+<div id="p-associated-pages" class="vector-menu vector-menu-tabs mw-portlet mw-portlet-associated-pages"  >
+	<div class="vector-menu-content">
+		
+		<ul class="vector-menu-content-list">
+			
+			<li id="ca-nstab-main" class="selected vector-tab-noicon mw-list-item"><a href="/wiki/Yubikey_based_Full_Disk_Encryption_(FDE)_on_NixOS" title="View the content page [c]" accesskey="c"><span>Page</span></a></li><li id="ca-talk" class="vector-tab-noicon mw-list-item"><a href="/wiki/Talk:Yubikey_based_Full_Disk_Encryption_(FDE)_on_NixOS" rel="discussion" title="Discussion about the content page [t]" accesskey="t"><span>Discussion</span></a></li>
+		</ul>
+		
+	</div>
+</div>
+
+								
+<div id="vector-variants-dropdown" class="vector-dropdown emptyPortlet"  >
+	<input type="checkbox" id="vector-variants-dropdown-checkbox" role="button" aria-haspopup="true" data-event-name="ui.dropdown-vector-variants-dropdown" class="vector-dropdown-checkbox " aria-label="Change language variant"   >
+	<label id="vector-variants-dropdown-label" for="vector-variants-dropdown-checkbox" class="vector-dropdown-label cdx-button cdx-button--fake-button cdx-button--fake-button--enabled cdx-button--weight-quiet" aria-hidden="true"  ><span class="vector-dropdown-label-text">English</span>
+	</label>
+	<div class="vector-dropdown-content">
+
+
+					
+<div id="p-variants" class="vector-menu mw-portlet mw-portlet-variants emptyPortlet"  >
+	<div class="vector-menu-content">
+		
+		<ul class="vector-menu-content-list">
+			
+			
+		</ul>
+		
+	</div>
+</div>
+
+				
+	</div>
+</div>
+
+							</nav>
+						</div>
+						<div id="right-navigation" class="vector-collapsible">
+							<nav aria-label="Views">
+								
+<div id="p-views" class="vector-menu vector-menu-tabs mw-portlet mw-portlet-views"  >
+	<div class="vector-menu-content">
+		
+		<ul class="vector-menu-content-list">
+			
+			<li id="ca-view" class="selected vector-tab-noicon mw-list-item"><a href="/wiki/Yubikey_based_Full_Disk_Encryption_(FDE)_on_NixOS"><span>Read</span></a></li><li id="ca-viewsource" class="vector-tab-noicon mw-list-item"><a href="/w/index.php?title=Yubikey_based_Full_Disk_Encryption_(FDE)_on_NixOS&amp;action=edit" title="This page is protected.&#10;You can view its source [e]" accesskey="e"><span>View source</span></a></li><li id="ca-history" class="vector-tab-noicon mw-list-item"><a href="/w/index.php?title=Yubikey_based_Full_Disk_Encryption_(FDE)_on_NixOS&amp;action=history" title="Past revisions of this page [h]" accesskey="h"><span>View history</span></a></li>
+		</ul>
+		
+	</div>
+</div>
+
+							</nav>
+				
+							<nav class="vector-page-tools-landmark" aria-label="Page tools">
+								
+<div id="vector-page-tools-dropdown" class="vector-dropdown vector-page-tools-dropdown"  >
+	<input type="checkbox" id="vector-page-tools-dropdown-checkbox" role="button" aria-haspopup="true" data-event-name="ui.dropdown-vector-page-tools-dropdown" class="vector-dropdown-checkbox "  aria-label="Tools"  >
+	<label id="vector-page-tools-dropdown-label" for="vector-page-tools-dropdown-checkbox" class="vector-dropdown-label cdx-button cdx-button--fake-button cdx-button--fake-button--enabled cdx-button--weight-quiet" aria-hidden="true"  ><span class="vector-dropdown-label-text">Tools</span>
+	</label>
+	<div class="vector-dropdown-content">
+
+
+									<div id="vector-page-tools-unpinned-container" class="vector-unpinned-container">
+						
+<div id="vector-page-tools" class="vector-page-tools vector-pinnable-element">
+	<div
+	class="vector-pinnable-header vector-page-tools-pinnable-header vector-pinnable-header-unpinned"
+	data-feature-name="page-tools-pinned"
+	data-pinnable-element-id="vector-page-tools"
+	data-pinned-container-id="vector-page-tools-pinned-container"
+	data-unpinned-container-id="vector-page-tools-unpinned-container"
+>
+	<div class="vector-pinnable-header-label">Tools</div>
+	<button class="vector-pinnable-header-toggle-button vector-pinnable-header-pin-button" data-event-name="pinnable-header.vector-page-tools.pin">move to sidebar</button>
+	<button class="vector-pinnable-header-toggle-button vector-pinnable-header-unpin-button" data-event-name="pinnable-header.vector-page-tools.unpin">hide</button>
+</div>
+
+	
+<div id="p-cactions" class="vector-menu mw-portlet mw-portlet-cactions emptyPortlet vector-has-collapsible-items"  title="More options" >
+	<div class="vector-menu-heading">
+		Actions
+	</div>
+	<div class="vector-menu-content">
+		
+		<ul class="vector-menu-content-list">
+			
+			<li id="ca-more-view" class="selected vector-more-collapsible-item mw-list-item"><a href="/wiki/Yubikey_based_Full_Disk_Encryption_(FDE)_on_NixOS"><span>Read</span></a></li><li id="ca-more-viewsource" class="vector-more-collapsible-item mw-list-item"><a href="/w/index.php?title=Yubikey_based_Full_Disk_Encryption_(FDE)_on_NixOS&amp;action=edit"><span>View source</span></a></li><li id="ca-more-history" class="vector-more-collapsible-item mw-list-item"><a href="/w/index.php?title=Yubikey_based_Full_Disk_Encryption_(FDE)_on_NixOS&amp;action=history"><span>View history</span></a></li>
+		</ul>
+		
+	</div>
+</div>
+
+<div id="p-tb" class="vector-menu mw-portlet mw-portlet-tb"  >
+	<div class="vector-menu-heading">
+		General
+	</div>
+	<div class="vector-menu-content">
+		
+		<ul class="vector-menu-content-list">
+			
+			<li id="t-whatlinkshere" class="mw-list-item"><a href="/wiki/Special:WhatLinksHere/Yubikey_based_Full_Disk_Encryption_(FDE)_on_NixOS" title="A list of all wiki pages that link here [j]" accesskey="j"><span>What links here</span></a></li><li id="t-recentchangeslinked" class="mw-list-item"><a href="/wiki/Special:RecentChangesLinked/Yubikey_based_Full_Disk_Encryption_(FDE)_on_NixOS" rel="nofollow" title="Recent changes in pages linked from this page [k]" accesskey="k"><span>Related changes</span></a></li><li id="t-print" class="mw-list-item"><a href="javascript:print();" rel="alternate" title="Printable version of this page [p]" accesskey="p"><span>Printable version</span></a></li><li id="t-permalink" class="mw-list-item"><a href="/w/index.php?title=Yubikey_based_Full_Disk_Encryption_(FDE)_on_NixOS&amp;oldid=30146" title="Permanent link to this revision of this page"><span>Permanent link</span></a></li><li id="t-info" class="mw-list-item"><a href="/w/index.php?title=Yubikey_based_Full_Disk_Encryption_(FDE)_on_NixOS&amp;action=info" title="More information about this page"><span>Page information</span></a></li>
+		</ul>
+		
+	</div>
+</div>
+
+</div>
+
+									</div>
+				
+	</div>
+</div>
+
+							</nav>
+						</div>
+					</div>
+				</div>
+				<div class="vector-column-end no-font-mode-scale">
+					<div class="vector-sticky-pinned-container">
+						<nav class="vector-page-tools-landmark" aria-label="Page tools">
+							<div id="vector-page-tools-pinned-container" class="vector-pinned-container">
+				
+							</div>
+		</nav>
+						<nav class="vector-appearance-landmark" aria-label="Appearance">
+							<div id="vector-appearance-pinned-container" class="vector-pinned-container">
+				<div id="vector-appearance" class="vector-appearance vector-pinnable-element">
+	<div
+	class="vector-pinnable-header vector-appearance-pinnable-header vector-pinnable-header-pinned"
+	data-feature-name="appearance-pinned"
+	data-pinnable-element-id="vector-appearance"
+	data-pinned-container-id="vector-appearance-pinned-container"
+	data-unpinned-container-id="vector-appearance-unpinned-container"
+>
+	<div class="vector-pinnable-header-label">Appearance</div>
+	<button class="vector-pinnable-header-toggle-button vector-pinnable-header-pin-button" data-event-name="pinnable-header.vector-appearance.pin">move to sidebar</button>
+	<button class="vector-pinnable-header-toggle-button vector-pinnable-header-unpin-button" data-event-name="pinnable-header.vector-appearance.unpin">hide</button>
+</div>
+
+
+</div>
+
+							</div>
+		</nav>
+					</div>
+				</div>
+				<div id="bodyContent" class="vector-body" aria-labelledby="firstHeading" data-mw-ve-target-container>
+					<div class="vector-body-before-content">
+							<div class="mw-indicators">
+		</div>
+
+						<div id="siteSub" class="noprint">From Official NixOS Wiki</div>
+					</div>
+					<div id="contentSub"><div id="mw-content-subtitle"><span class="mw-redirectedfrom">(Redirected from <a href="/w/index.php?title=Luks-based_FDE_with_Yubikey_PBA_and_btrfs_on_UEFI_NixOS&amp;redirect=no" class="mw-redirect" title="Luks-based FDE with Yubikey PBA and btrfs on UEFI NixOS">Luks-based FDE with Yubikey PBA and btrfs on UEFI NixOS</a>)</span></div></div>
+					
+					
+					<div id="mw-content-text" class="mw-body-content"><div class="mw-content-ltr mw-parser-output" lang="en" dir="ltr"><p>This page is a minimalistic guide for setting up LUKS-based full disk encryption with <a href="/wiki/Yubikey" title="Yubikey">Yubikey</a> pre-boot authentication (PBA) on a <a href="/wiki/UEFI" title="UEFI">UEFI</a> system. The YubiKey PBA in NixOS currently utilizes YubiKey's <a rel="nofollow" class="external text" href="https://docs.yubico.com/yesdk/users-manual/application-otp/challenge-response.html">(HMAC-SHA1) challenge response mode</a>. Two-factor authentication using a (secret) user passphrase as an additional layer of security is also available (and is recommended for more security). 
+</p><p>In the 19.03 release (and prior) this method will change the LUKS authentication key on each boot that passes the LVM mount stage by altering a salt value contained on the boot partition.
+</p><p>This guide was tested to work on NixOS 25.05.
+</p><p>This guide utilizes this <a rel="nofollow" class="external text" href="https://github.com/sgillespie/nixos-yubikey-luks">nix-shell expression</a> which provides the environment for setting up LUKS-based full disk encryption with YubiKey PBA.
+</p>
+<meta property="mw:PageProp/toc" />
+<div class="mw-heading mw-heading3"><h3 id="Encrypting_Multiple_drives">Encrypting Multiple drives</h3></div>
+<p>If you intend to encrypt multiple drives following this guide, be advised that the file mentioned in steps 6 and 7 is per-drive and using the same file for two drives will result in an un-bootable system. Instead you should create a small partition (a tiny FAT32 partition will do) on every secondary drive and follow the same steps you would for the salt file on those. Obviously you will also need to encrypt the other drives like you would the main drive. See <a rel="nofollow" class="external text" href="https://discourse.nixos.org/t/yubikey-2fa-fde-with-multiple-drives/10046">this post</a> for some more (somewhat outdated) information.
+</p>
+<div class="mw-heading mw-heading2"><h2 id="Requirements">Requirements</h2></div>
+<ul><li>A NixOS live system booted in <a href="/wiki/UEFI" title="UEFI">UEFI</a> mode on the target machine. (i.e. Booting from an installation medium)</li>
+<li>A YubiKey with <strong>challenge response mode support</strong> into the target machine for the <b>non modern setup</b>.</li></ul>
+<div class="box" style="--box-color-impl: var(--border-color-warning); --box-background-impl: var(--background-color-warning-subtle); --box-text-color-impl: var(--box-text-color, var(--box-color-impl)); --box-text-weight-impl: var(--box-text-weight, 500); --box-border-color-impl: var(--border-color-warning); --box-border-size-impl: var(--box-border-size, 1px); --box-border-radius-impl: var(--box-border-radius, 0.5rem); --box-padding-impl: 1.2rem; --box-margin-impl: 0.6rem 0; --box-wiki-content-padding-top: calc(var(--box-padding-impl) - 1em); --box-wiki-content-padding-bottom: calc(var(--box-padding-impl) - 0.8em); --box-wiki-content-padding: var(--box-wiki-content-padding-top) var(--box-padding-impl) var(--box-wiki-content-padding-bottom) var(--box-padding-impl); display: flex; background: var(--box-background-impl); color: var(--box-color-impl); padding: var(--box-padding-impl); margin: var(--box-margin-impl); border: var(--box-border-size-impl) solid var(--box-border-color-impl); border-radius: var(--box-border-radius-impl);">
+  <div class="box-content" style="flex-grow: 1;"><div style="display: flex; align-items: center; gap: 0.6rem;"><div style="color: var(--border-color-warning); font-size: 260%; line-height: 100%;"><span style="font-family: Noto Emoji, monospace; font-variant-emoji: text;">⚠&#xfe0e;</span></div><div style="color: var(--notice-text-color-impl); font-weight: var(--notice-text-weight-impl);"><b>Warning:</b> Make sure to obtain a YubiKey which supports <strong>challenge response mode</strong>. As of 2025, only YubiKey 5 Series and YubiKey 5 FIPS Series support it. YubiKey Bio Series and Security Key Series <strong>do not</strong>.</div></div></div>
+</div>
+<div class="mw-heading mw-heading2"><h2 id="Setup">Setup</h2></div>
+<p>Install the packages required by the next steps to the live system and make two bash helper functions available.
+</p>
+<div class="mw-heading mw-heading3"><h3 id="Modern_Setup">Modern Setup</h3></div>
+<p>You <b>do not</b> need a YubiKey with challenge response mode support for this, any key that supports FIDO or WebAuthn can work with this (including the Bio Series and the Security Series). This is specifically for FIDO. 
+</p><p>Using <code>systemd-cryptenroll</code> and <code>systemd-initrd</code>, it is much easier and faster to setup. Just fill in where it wants you to put the device and filesystem type.
+</p>
+<div class="mw-highlight mw-highlight-lang-nix mw-content-ltr" dir="ltr"><pre><span></span><span class="p">{</span>
+  boot<span class="o">.</span><span class="ss">initrd</span> <span class="o">=</span> <span class="p">{</span>
+    systemd<span class="o">.</span><span class="ss">enable</span> <span class="o">=</span> <span class="no">true</span><span class="p">;</span>  
+    luks<span class="o">.</span><span class="ss">fido2Support</span> <span class="o">=</span> <span class="no">false</span><span class="p">;</span>  
+    luks<span class="o">.</span>devices<span class="o">.</span><span class="s2">&quot;put-device-here&quot;</span> <span class="o">=</span> <span class="p">{</span>
+      <span class="ss">device</span> <span class="o">=</span> <span class="s2">&quot;put-device-here&quot;</span><span class="p">;</span>
+      <span class="ss">crypttabExtraOpts</span> <span class="o">=</span> <span class="p">[</span><span class="s2">&quot;fido2-device=auto&quot;</span><span class="p">];</span>  
+    <span class="p">};</span>
+  <span class="p">};</span>
+  fileSystems<span class="o">.</span><span class="s2">&quot;/&quot;</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="ss">device</span> <span class="o">=</span> <span class="s2">&quot;/dev/mapper/put-device-here&quot;</span><span class="p">;</span>
+    <span class="ss">fsType</span> <span class="o">=</span> <span class="s2">&quot;put-fs-here&quot;</span><span class="p">;</span>
+  <span class="p">};</span>
+<span class="p">}</span>
+</pre></div>
+<p>Enroll your Yubikey: <code>systemd-cryptenroll --fido2-device=auto put-device-here</code>. Additional customization can be done like user presence, pin, and user verification (for bio-metric models). Credit to this <a rel="nofollow" class="external autonumber" href="https://discourse.nixos.org/t/fde-using-systemd-cryptenroll-with-fido2-key/47762#accepted-label">[1]</a>
+</p><p><br />
+</p>
+<div class="mw-heading mw-heading3"><h3 id="Automatic_Setup">Automatic Setup</h3></div>
+<p>Enter the nix-shell expression defined by this <a rel="nofollow" class="external text" href="https://github.com/sgillespie/nixos-yubikey-luks">repository</a>.
+</p>
+<div class="mw-highlight mw-highlight-lang-console mw-content-ltr" dir="ltr"><pre><span></span><span class="gp">$ </span>nix-shell<span class="w"> </span>https://github.com/sgillespie/nixos-yubikey-luks/archive/master.tar.gz
+</pre></div>
+<p>Now go to <a href="#Set_up_the_YubiKey">#Set up the YubiKey</a>.
+</p>
+<div class="mw-heading mw-heading3"><h3 id="Manual_Setup">Manual Setup</h3></div>
+<p>Alternatively, you can manually set up the dependencies.
+</p><p>Packages:
+</p>
+<ul><li>A C compiler, e.g. <code><a rel="nofollow" class="external text" href="https://search.nixos.org/packages?show=gcc">gcc</a></code></li>
+<li>The <code><a rel="nofollow" class="external text" href="https://search.nixos.org/packages?show=YubiKey-Personalization">YubiKey-Personalization</a></code> command line tool</li>
+<li><code><a rel="nofollow" class="external text" href="https://search.nixos.org/packages?show=OpenSSL">OpenSSL</a></code></li></ul>
+<div class="mw-highlight mw-highlight-lang-console mw-content-ltr" dir="ltr"><pre><span></span><span class="gp">$ </span>nix-shell<span class="w"> </span>-p<span class="w"> </span>gcc<span class="w"> </span>yubikey-personalization<span class="w"> </span>openssl
+</pre></div>
+<p>Helper functions:
+</p>
+<ul><li>Convert a raw binary string to a hexadecimal string</li>
+<li>Convert a hexadecimal string to a raw binary string</li></ul>
+<p>Note that you can copy and paste these functions into the bash shell directly to define them.
+</p>
+<div class="mw-highlight mw-highlight-lang-bash mw-content-ltr" dir="ltr"><pre><span></span>rbtohex<span class="o">()</span><span class="w"> </span><span class="o">{</span>
+<span class="w">    </span><span class="o">(</span><span class="w"> </span>od<span class="w"> </span>-An<span class="w"> </span>-vtx1<span class="w"> </span><span class="p">|</span><span class="w"> </span>tr<span class="w"> </span>-d<span class="w"> </span><span class="s1">&#39; \n&#39;</span><span class="w"> </span><span class="o">)</span>
+<span class="o">}</span>
+
+hextorb<span class="o">()</span><span class="w"> </span><span class="o">{</span>
+<span class="w">    </span><span class="o">(</span><span class="w"> </span>tr<span class="w"> </span><span class="s1">&#39;[:lower:]&#39;</span><span class="w"> </span><span class="s1">&#39;[:upper:]&#39;</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>sed<span class="w"> </span>-e<span class="w"> </span><span class="s1">&#39;s/\([0-9A-F]\{2\}\)/\\\\\\x\1/gI&#39;</span><span class="p">|</span><span class="w"> </span>xargs<span class="w"> </span><span class="nb">printf</span><span class="w"> </span><span class="o">)</span>
+<span class="o">}</span>
+</pre></div>
+<p>We need to compile OpenSSL's key derivation function, which is the same one as run on start up. To compile, run the following command.
+</p><p><b>Note:</b> <i>Because this will put the program in the current directory (rather than your PATH), replace pbkdf2-sha512 commands with ./pbkdf2-sha512. </i>
+</p>
+<div class="mw-highlight mw-highlight-lang-bash mw-content-ltr" dir="ltr"><pre><span></span>cc<span class="w"> </span>-O3<span class="w"> </span><span class="se">\</span>
+<span class="w">   </span>-I<span class="k">$(</span>nix-build<span class="w"> </span><span class="s2">&quot;&lt;nixpkgs&gt;&quot;</span><span class="w"> </span>--no-build-output<span class="w"> </span>-A<span class="w"> </span>openssl.dev<span class="k">)</span>/include<span class="w"> </span><span class="se">\</span>
+<span class="w">   </span>-L<span class="k">$(</span>nix-build<span class="w"> </span><span class="s2">&quot;&lt;nixpkgs&gt;&quot;</span><span class="w"> </span>--no-build-output<span class="w"> </span>-A<span class="w"> </span>openssl.out<span class="k">)</span>/lib<span class="w"> </span><span class="se">\</span>
+<span class="w">   </span><span class="k">$(</span>nix<span class="w"> </span><span class="nb">eval</span><span class="w"> </span><span class="s2">&quot;(with import &lt;nixpkgs&gt; {}; pkgs.path)&quot;</span><span class="k">)</span>/nixos/modules/system/boot/pbkdf2-sha512.c<span class="w"> </span><span class="se">\</span>
+<span class="w">   </span>-o<span class="w"> </span>./pbkdf2-sha512<span class="w"> </span>-lcrypto
+</pre></div>
+<p>If the newlines in the above snippet are problematic for your terminal, you can use the snippet below. It is the same command but as one line. 
+</p>
+<div class="mw-highlight mw-highlight-lang-bash mw-content-ltr" dir="ltr"><pre><span></span>cc<span class="w"> </span>-O3<span class="w"> </span>-I<span class="k">$(</span>nix-build<span class="w"> </span><span class="s2">&quot;&lt;nixpkgs&gt;&quot;</span><span class="w"> </span>--no-build-output<span class="w"> </span>-A<span class="w"> </span>openssl.dev<span class="k">)</span>/include<span class="w"> </span>-L<span class="k">$(</span>nix-build<span class="w"> </span><span class="s2">&quot;&lt;nixpkgs&gt;&quot;</span><span class="w"> </span>--no-build-output<span class="w"> </span>-A<span class="w"> </span>openssl.out<span class="k">)</span>/lib<span class="w"> </span><span class="k">$(</span>nix<span class="w"> </span><span class="nb">eval</span><span class="w"> </span><span class="s2">&quot;(with import &lt;nixpkgs&gt; {}; pkgs.path)&quot;</span><span class="k">)</span>/nixos/modules/system/boot/pbkdf2-sha512.c<span class="w"> </span>-o<span class="w"> </span>./pbkdf2-sha512<span class="w"> </span>-lcrypto
+</pre></div>
+<div class="mw-heading mw-heading2"><h2 id="Set_up_the_YubiKey">Set up the YubiKey</h2></div>
+<p><b>Step 1</b>: Program the YubiKey's Configuration Slot 2 in Challenge-Response mode (HMAC-SHA1) if you haven't done yet.
+</p>
+<div class="box" style="--box-color-impl: var(--border-color-warning); --box-background-impl: var(--background-color-warning-subtle); --box-text-color-impl: var(--box-text-color, var(--box-color-impl)); --box-text-weight-impl: var(--box-text-weight, 500); --box-border-color-impl: var(--border-color-warning); --box-border-size-impl: var(--box-border-size, 1px); --box-border-radius-impl: var(--box-border-radius, 0.5rem); --box-padding-impl: 1.2rem; --box-margin-impl: 0.6rem 0; --box-wiki-content-padding-top: calc(var(--box-padding-impl) - 1em); --box-wiki-content-padding-bottom: calc(var(--box-padding-impl) - 0.8em); --box-wiki-content-padding: var(--box-wiki-content-padding-top) var(--box-padding-impl) var(--box-wiki-content-padding-bottom) var(--box-padding-impl); display: flex; background: var(--box-background-impl); color: var(--box-color-impl); padding: var(--box-padding-impl); margin: var(--box-margin-impl); border: var(--box-border-size-impl) solid var(--box-border-color-impl); border-radius: var(--box-border-radius-impl);">
+  <div class="box-content" style="flex-grow: 1;"><div style="display: flex; align-items: center; gap: 0.6rem;"><div style="color: var(--border-color-warning); font-size: 260%; line-height: 100%;"><span style="font-family: Noto Emoji, monospace; font-variant-emoji: text;">⚠&#xfe0e;</span></div><div style="color: var(--notice-text-color-impl); font-weight: var(--notice-text-weight-impl);"><b>Warning:</b> This will overwrite existing configuration.</div></div></div>
+</div>
+<div class="box" style="--box-color-impl: var(--border-color-warning); --box-background-impl: var(--background-color-warning-subtle); --box-text-color-impl: var(--box-text-color, var(--box-color-impl)); --box-text-weight-impl: var(--box-text-weight, 500); --box-border-color-impl: var(--border-color-warning); --box-border-size-impl: var(--box-border-size, 1px); --box-border-radius-impl: var(--box-border-radius, 0.5rem); --box-padding-impl: 1.2rem; --box-margin-impl: 0.6rem 0; --box-wiki-content-padding-top: calc(var(--box-padding-impl) - 1em); --box-wiki-content-padding-bottom: calc(var(--box-padding-impl) - 0.8em); --box-wiki-content-padding: var(--box-wiki-content-padding-top) var(--box-padding-impl) var(--box-wiki-content-padding-bottom) var(--box-padding-impl); display: flex; background: var(--box-background-impl); color: var(--box-color-impl); padding: var(--box-padding-impl); margin: var(--box-margin-impl); border: var(--box-border-size-impl) solid var(--box-border-color-impl); border-radius: var(--box-border-radius-impl);">
+  <div class="box-content" style="flex-grow: 1;"><div style="display: flex; align-items: center; gap: 0.6rem;"><div style="color: var(--border-color-warning); font-size: 260%; line-height: 100%;"><span style="font-family: Noto Emoji, monospace; font-variant-emoji: text;">⚠&#xfe0e;</span></div><div style="color: var(--notice-text-color-impl); font-weight: var(--notice-text-weight-impl);"><b>Warning:</b> If you have a YubiKey VIP, Slot 1 should contain a Symantec VIP credential by default, which can only be programmed during manufacture.</div></div></div>
+</div>
+<div class="mw-highlight mw-highlight-lang-console mw-content-ltr" dir="ltr"><pre><span></span><span class="gp"># </span><span class="nv">SLOT</span><span class="o">=</span><span class="m">2</span>
+<span class="gp"># </span>ykpersonalize<span class="w"> </span>-<span class="s2">&quot;</span><span class="nv">$SLOT</span><span class="s2">&quot;</span><span class="w"> </span>-ochal-resp<span class="w"> </span>-ochal-hmac<span class="w"> </span><span class="c1"># This will overwrite existing configuration!</span>
+</pre></div>
+<p>Alternatively, YubiKey Personalization Tool (GUI) <code><a rel="nofollow" class="external text" href="https://search.nixos.org/packages?show=yubikey-personalization-gui">yubikey-personalization-gui</a></code> may be suitable for more complicated operations, such as programming multiple keys at the same time or setting configuration protection.
+</p><p><b>Step 2</b>: Gather the initial salt for the PBA (set its length to what you find time-feasible on your machine).
+</p>
+<div class="mw-highlight mw-highlight-lang-console mw-content-ltr" dir="ltr"><pre><span></span><span class="gp"># </span><span class="nv">SALT_LENGTH</span><span class="o">=</span><span class="m">16</span>
+<span class="gp"># </span><span class="nv">SALT</span><span class="o">=</span><span class="s2">&quot;</span><span class="k">$(</span>dd<span class="w"> </span><span class="k">if</span><span class="o">=</span>/dev/random<span class="w"> </span><span class="nv">bs</span><span class="o">=</span><span class="m">1</span><span class="w"> </span><span class="nv">count</span><span class="o">=</span><span class="nv">$SALT_LENGTH</span><span class="w"> </span><span class="m">2</span>&gt;/dev/null<span class="w"> </span><span class="p">|</span><span class="w"> </span>rbtohex<span class="k">)</span><span class="s2">&quot;</span>
+</pre></div>
+<p><b>Step 3</b>: Get the user passphrase used as the second factor in the PBA.
+</p><p>If you plan on using a user password during the boot process (instead of an unassisted boot), enter a user password. Your choice here will change the command you run in step 8.
+</p>
+<div class="mw-highlight mw-highlight-lang-console mw-content-ltr" dir="ltr"><pre><span></span><span class="gp"># </span><span class="nb">read</span><span class="w"> </span>-s<span class="w"> </span>USER_PASSPHRASE
+</pre></div>
+<div class="box" style="--box-color-impl: var(--border-color-warning); --box-background-impl: var(--background-color-warning-subtle); --box-text-color-impl: var(--box-text-color, var(--box-color-impl)); --box-text-weight-impl: var(--box-text-weight, 500); --box-border-color-impl: var(--border-color-warning); --box-border-size-impl: var(--box-border-size, 1px); --box-border-radius-impl: var(--box-border-radius, 0.5rem); --box-padding-impl: 1.2rem; --box-margin-impl: 0.6rem 0; --box-wiki-content-padding-top: calc(var(--box-padding-impl) - 1em); --box-wiki-content-padding-bottom: calc(var(--box-padding-impl) - 0.8em); --box-wiki-content-padding: var(--box-wiki-content-padding-top) var(--box-padding-impl) var(--box-wiki-content-padding-bottom) var(--box-padding-impl); display: flex; background: var(--box-background-impl); color: var(--box-color-impl); padding: var(--box-padding-impl); margin: var(--box-margin-impl); border: var(--box-border-size-impl) solid var(--box-border-color-impl); border-radius: var(--box-border-radius-impl);">
+  <div class="box-content" style="flex-grow: 1;"><div style="display: flex; align-items: center; gap: 0.6rem;"><div style="color: var(--border-color-warning); font-size: 260%; line-height: 100%;"><span style="font-family: Noto Emoji, monospace; font-variant-emoji: text;">⚠&#xfe0e;</span></div><div style="color: var(--notice-text-color-impl); font-weight: var(--notice-text-weight-impl);"><b>Warning:</b> Make very sure, that <code>$USER_PASSPHRASE</code> contains the correct user passphrase, or you will not be able to access your system after shutting down the live system.</div></div></div>
+</div>
+<p><br />
+<b>Step 4</b>: Calculate the initial challenge and response to the YubiKey.
+</p>
+<div class="mw-highlight mw-highlight-lang-console mw-content-ltr" dir="ltr"><pre><span></span><span class="gp"># </span><span class="nv">CHALLENGE</span><span class="o">=</span><span class="s2">&quot;</span><span class="k">$(</span><span class="nb">echo</span><span class="w"> </span>-n<span class="w"> </span><span class="nv">$SALT</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>openssl<span class="w"> </span>dgst<span class="w"> </span>-binary<span class="w"> </span>-sha512<span class="w"> </span><span class="p">|</span><span class="w"> </span>rbtohex<span class="k">)</span><span class="s2">&quot;</span>
+<span class="gp"># </span><span class="nv">RESPONSE</span><span class="o">=</span><span class="k">$(</span>ykchalresp<span class="w"> </span>-2<span class="w"> </span>-x<span class="w"> </span><span class="nv">$CHALLENGE</span><span class="w"> </span><span class="m">2</span>&gt;/dev/null<span class="k">)</span>
+</pre></div>
+<p><b>Step 5</b>: Derive the Luks slot key from the two factors.
+</p><p>Set the length of the Luks slot key and the cipher appropriately.
+</p><p>As an example, we will use AES-256, so we set the Luks device slot key length to 512 bit.
+</p><p>Set the iteration count used for PBKDF2 to a high value still time-feasible for your machine.
+</p>
+<div class="mw-highlight mw-highlight-lang-console mw-content-ltr" dir="ltr"><pre><span></span><span class="gp"># </span><span class="nv">KEY_LENGTH</span><span class="o">=</span><span class="m">512</span>
+<span class="gp"># </span><span class="nv">ITERATIONS</span><span class="o">=</span><span class="m">1000000</span>
+</pre></div>
+<p>If you choose to authenticate with a user password, use the following line to generate the luks key.
+</p>
+<div class="mw-highlight mw-highlight-lang-console mw-content-ltr" dir="ltr"><pre><span></span><span class="gp"># </span><span class="nv">LUKS_KEY</span><span class="o">=</span><span class="s2">&quot;</span><span class="k">$(</span><span class="nb">echo</span><span class="w"> </span>-n<span class="w"> </span><span class="nv">$USER_PASSPHRASE</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>pbkdf2-sha512<span class="w"> </span><span class="k">$((</span><span class="nv">$KEY_LENGTH</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="m">8</span><span class="k">))</span><span class="w"> </span><span class="nv">$ITERATIONS</span><span class="w"> </span><span class="nv">$RESPONSE</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>rbtohex<span class="k">)</span><span class="s2">&quot;</span>
+</pre></div>
+<p>If you choose to authenticate without a user passphrase (not recommended), use this instead of the line above
+</p>
+<div class="mw-highlight mw-highlight-lang-console mw-content-ltr" dir="ltr"><pre><span></span><span class="gp"># </span><span class="nv">LUKS_KEY</span><span class="o">=</span><span class="s2">&quot;</span><span class="k">$(</span><span class="nb">echo</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>pbkdf2-sha512<span class="w"> </span><span class="k">$((</span><span class="nv">$KEY_LENGTH</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="m">8</span><span class="k">))</span><span class="w"> </span><span class="nv">$ITERATIONS</span><span class="w"> </span><span class="nv">$RESPONSE</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>rbtohex<span class="k">)</span><span class="s2">&quot;</span>
+</pre></div>
+<p>To test if the key is programmed correctly, you can challenge the yubikey and check that the response is the expected response previously generated (<code>echo $RESPONSE</code>).
+</p>
+<div class="mw-heading mw-heading2"><h2 id="Partitioning">Partitioning</h2></div>
+<p>Create a GPT partition table and two partitions on the target disk.
+</p>
+<ul><li>Partition 1: This will be the EFI system partition: FAT32 etc., EF00 Linux filesystem (boot/esp), &gt;100MB</li>
+<li>Partition 2: This will be the Luks-encrypted partition, aka the "luks device": 8300 Linux filesystem, Rest of your disk</li></ul>
+<p>See <a rel="nofollow" class="external text" href="https://nixos.org/manual/nixos/stable/#sec-installation-manual-partitioning-UEFI"><span style="font-family: Noto Emoji, monospace; font-variant-emoji: text;">📖&#xfe0e;</span>&#160;sec-installation-manual-partitioning-UEFI</a> for details. For example in <code><a rel="nofollow" class="external text" href="https://search.nixos.org/packages?show=parted">parted</a></code>:
+</p>
+<div class="mw-highlight mw-highlight-lang-console mw-content-ltr" dir="ltr"><pre><span></span><span class="gp"># </span>sudo<span class="w"> </span>parted<span class="w"> </span>/dev/sda
+<span class="go">GNU Parted 3.6</span>
+<span class="go">Using /dev/sda</span>
+<span class="go">Welcome to GNU Parted! Type &#39;help&#39; to view a list of commands.</span>
+<span class="gp gp-VirtualEnv">(parted)</span> <span class="go">mklabel gpt</span>
+<span class="gp gp-VirtualEnv">(parted)</span> <span class="go">mkpart ESP fat32 1MB 512MB</span>
+<span class="gp gp-VirtualEnv">(parted)</span> <span class="go">set 1 esp on</span>
+<span class="gp gp-VirtualEnv">(parted)</span> <span class="go">mkpart primary 512MB 100%</span>
+<span class="gp gp-VirtualEnv">(parted)</span> <span class="go">print</span>
+<span class="go">Model:</span>
+<span class="go">Disk /dev/sda:</span>
+<span class="go">Sector size (logical/physical):</span>
+<span class="go">Partition Table: gpt</span>
+<span class="go">Disk Flags: </span>
+
+<span class="go">Number  Start   End    Size   File system  Name     Flags</span>
+<span class="go"> 1      1049kB  512MB  511MB  fat32        ESP      boot, esp</span>
+<span class="go"> 2      512MB   512GB  512GB               primary</span>
+<span class="gp gp-VirtualEnv">(parted)</span> <span class="go">quit</span>
+</pre></div>
+<p>In the following we will use variables for identification, so set them to match your partition setup, e.g. like this:
+</p>
+<div class="mw-highlight mw-highlight-lang-console mw-content-ltr" dir="ltr"><pre><span></span><span class="gp"># </span><span class="nv">EFI_PART</span><span class="o">=</span>/dev/sda1
+<span class="gp"># </span><span class="nv">LUKS_PART</span><span class="o">=</span>/dev/sda2
+</pre></div>
+<p>If you use an nvme drive your partition names will be something like /dev/nvme0n1p1 instead of /dev/sda1.
+</p>
+<div class="mw-heading mw-heading3"><h3 id="Setup_the_LUKS_device">Setup the LUKS device</h3></div>
+<p><b>Step 6</b>: Create the necessary filesystem on the efi system partition, which will store the current salt for the PBA, and mount it.
+</p>
+<div class="mw-highlight mw-highlight-lang-console mw-content-ltr" dir="ltr"><pre><span></span><span class="gp"># </span>sudo<span class="w"> </span>mkfs.vfat<span class="w"> </span>-F<span class="w"> </span><span class="m">32</span><span class="w"> </span><span class="s2">&quot;</span><span class="nv">$EFI_PART</span><span class="s2">&quot;</span><span class="w"> </span><span class="c1"># format with FAT32 if you haven&#39;t</span>
+<span class="gp"># </span><span class="nv">EFI_MNT</span><span class="o">=</span>/mnt/boot
+<span class="gp"># </span>sudo<span class="w"> </span>mkdir<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$EFI_MNT</span><span class="s2">&quot;</span><span class="w"> </span><span class="c1"># make mount point</span>
+<span class="gp"># </span>sudo<span class="w"> </span>mount<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$EFI_PART</span><span class="s2">&quot;</span><span class="w"> </span><span class="s2">&quot;</span><span class="nv">$EFI_MNT</span><span class="s2">&quot;</span><span class="w"> </span><span class="c1"># mount to store salt and iteration later</span>
+</pre></div>
+<p><br />
+<b>Step 7</b>: Decide where on the efi system partition to store the salt and prepare the directory layout accordingly.
+</p>
+<div class="mw-highlight mw-highlight-lang-console mw-content-ltr" dir="ltr"><pre><span></span><span class="gp"># </span><span class="nv">STORAGE</span><span class="o">=</span>/crypt-storage/default
+<span class="gp"># </span>mkdir<span class="w"> </span>-p<span class="w"> </span><span class="s2">&quot;</span><span class="k">$(</span>dirname<span class="w"> </span><span class="nv">$EFI_MNT$STORAGE</span><span class="k">)</span><span class="s2">&quot;</span>
+</pre></div>
+<p><br />
+<b>Step 8</b>: Store the salt and iteration count to the EFI systems partition.
+</p>
+<div class="mw-highlight mw-highlight-lang-console mw-content-ltr" dir="ltr"><pre><span></span><span class="gp"># </span><span class="nb">echo</span><span class="w"> </span>-ne<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$SALT</span><span class="s2">\n</span><span class="nv">$ITERATIONS</span><span class="s2">&quot;</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>sudo<span class="w"> </span>tee<span class="w"> </span><span class="nv">$EFI_MNT$STORAGE</span>
+</pre></div>
+<p><br />
+<b>Step 9</b>: Create the LUKS device.
+</p>
+<ul><li>Set the cipher used by LUKS appropriately</li>
+<li>Set the hash used by LUKS appropriately</li></ul>
+<div class="mw-highlight mw-highlight-lang-console mw-content-ltr" dir="ltr"><pre><span></span><span class="gp"># </span><span class="nv">CIPHER</span><span class="o">=</span>aes-xts-plain64
+<span class="gp"># </span><span class="nv">HASH</span><span class="o">=</span>sha512
+<span class="gp"># </span><span class="nb">echo</span><span class="w"> </span>-n<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$LUKS_KEY</span><span class="s2">&quot;</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>hextorb<span class="w"> </span><span class="p">|</span><span class="w"> </span>sudo<span class="w"> </span>cryptsetup<span class="w"> </span>luksFormat<span class="w"> </span>--cipher<span class="o">=</span><span class="s2">&quot;</span><span class="nv">$CIPHER</span><span class="s2">&quot;</span><span class="w"> </span>--key-size<span class="o">=</span><span class="s2">&quot;</span><span class="nv">$KEY_LENGTH</span><span class="s2">&quot;</span><span class="w"> </span>--hash<span class="o">=</span><span class="s2">&quot;</span><span class="nv">$HASH</span><span class="s2">&quot;</span><span class="w"> </span>--key-file<span class="o">=</span>-<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$LUKS_PART</span><span class="s2">&quot;</span>
+</pre></div>
+<p><br />
+<b>Step 10</b>: Open the LUKS device.
+</p><p>Open the LUKS device.
+</p>
+<div class="mw-highlight mw-highlight-lang-console mw-content-ltr" dir="ltr"><pre><span></span><span class="gp"># </span><span class="nv">LUKSROOT</span><span class="o">=</span>encrypted
+<span class="gp"># </span><span class="nb">echo</span><span class="w"> </span>-n<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$LUKS_KEY</span><span class="s2">&quot;</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>hextorb<span class="w"> </span><span class="p">|</span><span class="w"> </span>sudo<span class="w"> </span>cryptsetup<span class="w"> </span>luksOpen<span class="w"> </span><span class="nv">$LUKS_PART</span><span class="w"> </span><span class="nv">$LUKSROOT</span><span class="w"> </span>--key-file<span class="o">=</span>-
+</pre></div>
+<p>We can now access the volume at <code>/dev/mapper/$LUKSROOT</code>. For example, to format it as <a href="/wiki/Ext4" title="Ext4">ext4</a>
+</p>
+<div class="mw-highlight mw-highlight-lang-console mw-content-ltr" dir="ltr"><pre><span></span><span class="gp"># </span>sudo<span class="w"> </span>mkfs.ext4<span class="w"> </span>/dev/mapper/<span class="nv">$LUKSROOT</span>
+</pre></div>
+<p>Now go to <a href="#NixOS_installation">#NixOS_installation</a>.
+</p>
+<div class="mw-heading mw-heading3"><h3 id="LVM_setup_(optional)"><span id="LVM_setup_.28optional.29"></span>LVM setup (optional)</h3></div>
+<p>The following is one of many methods for setting up the LVM partition. For more information on creating logical volumes, see <a href="/wiki/LVM" title="LVM">LVM</a>.
+</p><p><b>Step 1</b>: Setup the LUKS device as a physical volume.
+</p><p>The physical volume map can then be created.
+</p>
+<div class="mw-highlight mw-highlight-lang-console mw-content-ltr" dir="ltr"><pre><span></span><span class="gp"># </span>pvcreate<span class="w"> </span><span class="s2">&quot;/dev/mapper/</span><span class="nv">$LUKSROOT</span><span class="s2">&quot;</span>
+</pre></div>
+<p><br />
+<b>Step 2</b>: Setup a volume group on the LUKS device.
+</p><p>Set the name for the volume group appropriately
+</p>
+<div class="mw-highlight mw-highlight-lang-console mw-content-ltr" dir="ltr"><pre><span></span><span class="gp"># </span><span class="nv">VGNAME</span><span class="o">=</span>partitions
+<span class="gp"># </span>vgcreate<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$VGNAME</span><span class="s2">&quot;</span><span class="w"> </span><span class="s2">&quot;/dev/mapper/</span><span class="nv">$LUKSROOT</span><span class="s2">&quot;</span>
+</pre></div>
+<p><br />
+<b>Step 3</b>: Setup two logical volumes on the Luks device.
+</p>
+<ul><li>Volume 1: This will be the swap partition: choose appropriate size, 2GB for example</li>
+<li>Volume 2: This will be the main btrfs volume, of which all filesystem partitions will be subvolumes: Rest of the free space</li></ul>
+<div class="mw-highlight mw-highlight-lang-console mw-content-ltr" dir="ltr"><pre><span></span><span class="gp"># </span>lvcreate<span class="w"> </span>-L<span class="w"> </span>2G<span class="w"> </span>-n<span class="w"> </span>swap<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$VGNAME</span><span class="s2">&quot;</span>
+<span class="gp"># </span><span class="nv">FSROOT</span><span class="o">=</span>fsroot
+<span class="gp"># </span>lvcreate<span class="w"> </span>-l<span class="w"> </span><span class="m">100</span>%FREE<span class="w"> </span>-n<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$FSROOT</span><span class="s2">&quot;</span><span class="w"> </span><span class="s2">&quot;</span><span class="nv">$VGNAME</span><span class="s2">&quot;</span>
+
+<span class="gp"># </span>vgchange<span class="w"> </span>-ay
+</pre></div>
+<p><br />
+<b>Step 4</b>: Create the <a href="/wiki/Swap" title="Swap">swap</a> filesystem.
+</p>
+<div class="mw-highlight mw-highlight-lang-console mw-content-ltr" dir="ltr"><pre><span></span><span class="gp"># </span>mkswap<span class="w"> </span>-L<span class="w"> </span>swap<span class="w"> </span>/dev/partitions/swap
+</pre></div>
+<p><br />
+</p>
+<div class="mw-heading mw-heading3"><h3 id="Btrfs_setup_(optional)"><span id="Btrfs_setup_.28optional.29"></span>Btrfs setup (optional)</h3></div>
+<p>These steps can mostly be followed the same for other filesystem types except calls to the <a href="/wiki/Btrfs" title="Btrfs">btrfs</a> command can be ignored.
+</p><p><b>Step 1</b>: Create the main btrfs volume's filesystem.
+</p>
+<div class="mw-highlight mw-highlight-lang-console mw-content-ltr" dir="ltr"><pre><span></span><span class="gp"># </span>mkfs.btrfs<span class="w"> </span>-L<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$FSROOT</span><span class="s2">&quot;</span><span class="w"> </span><span class="s2">&quot;/dev/partitions/</span><span class="nv">$FSROOT</span><span class="s2">&quot;</span>
+</pre></div>
+<p>Should the above fail, you might have encountered a bug that can be solved with doing the following, then attempting the above again:
+</p>
+<div class="mw-highlight mw-highlight-lang-console mw-content-ltr" dir="ltr"><pre><span></span><span class="gp"># </span>mkdir<span class="w"> </span>/mnt-root
+<span class="gp"># </span>touch<span class="w"> </span>/mnt-root/nix-store.squashfs
+</pre></div>
+<p><br />
+<b>Step 2</b>: Mount the main btrfs volume.
+</p>
+<div class="mw-highlight mw-highlight-lang-console mw-content-ltr" dir="ltr"><pre><span></span><span class="gp"># </span>mount<span class="w"> </span><span class="s2">&quot;/dev/partitions/</span><span class="nv">$FSROOT</span><span class="s2">&quot;</span><span class="w"> </span>/mnt
+</pre></div>
+<p><br />
+<b>Step 3</b>: Create the subvolumes, for example "root" and "home".
+</p>
+<div class="mw-highlight mw-highlight-lang-console mw-content-ltr" dir="ltr"><pre><span></span><span class="gp"># </span><span class="nb">cd</span><span class="w"> </span>/mnt
+<span class="gp"># </span>btrfs<span class="w"> </span>subvolume<span class="w"> </span>create<span class="w"> </span>root
+<span class="gp"># </span>btrfs<span class="w"> </span>subvolume<span class="w"> </span>create<span class="w"> </span>home
+</pre></div>
+<p><br />
+<b>Step 4</b>: Create mountpoints on the root subvolume and finalise things for NixOS installation.
+</p>
+<div class="mw-highlight mw-highlight-lang-console mw-content-ltr" dir="ltr"><pre><span></span><span class="gp"># </span>umount<span class="w"> </span>/mnt
+<span class="gp"># </span>mount<span class="w"> </span>-o<span class="w"> </span><span class="nv">subvol</span><span class="o">=</span>root<span class="w"> </span><span class="s2">&quot;/dev/partitions/</span><span class="nv">$FSROOT</span><span class="s2">&quot;</span><span class="w"> </span>/mnt
+
+<span class="gp"># </span>mkdir<span class="w"> </span>/mnt/home
+<span class="gp"># </span>mount<span class="w"> </span>-o<span class="w"> </span><span class="nv">subvol</span><span class="o">=</span>home<span class="w"> </span><span class="s2">&quot;/dev/partitions/</span><span class="nv">$FSROOT</span><span class="s2">&quot;</span><span class="w"> </span>/mnt/home
+
+<span class="gp"># </span>mkdir<span class="w"> </span>/mnt/boot
+<span class="gp"># </span>mount<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$EFI_PART</span><span class="s2">&quot;</span><span class="w"> </span>/mnt/boot
+
+<span class="gp"># </span>swapon<span class="w"> </span>/dev/partitions/swap
+</pre></div>
+<div class="mw-heading mw-heading2"><h2 id="NixOS_installation">NixOS installation</h2></div>
+<p>See <a rel="nofollow" class="external text" href="https://nixos.org/manual/nixos/stable/#sec-installation-manual-installing"><span style="font-family: Noto Emoji, monospace; font-variant-emoji: text;">📖&#xfe0e;</span>&#160;sec-installation-manual-installing</a> for details.
+</p><p><b>Step 1</b>: Mount drives.
+</p>
+<div class="mw-highlight mw-highlight-lang-console mw-content-ltr" dir="ltr"><pre><span></span><span class="gp"># </span>sudo<span class="w"> </span>umount<span class="w"> </span><span class="nv">$EFI_PART</span>
+<span class="gp"># </span>sudo<span class="w"> </span>mount<span class="w"> </span><span class="s2">&quot;/dev/mapper/</span><span class="nv">$LUKSROOT</span><span class="s2">&quot;</span><span class="w"> </span>/mnt<span class="w"> </span><span class="c1"># mount luks device first</span>
+<span class="gp"># </span>sudo<span class="w"> </span>mkdir<span class="w"> </span>/mnt/boot<span class="w"> </span><span class="c1"># create mount point</span>
+<span class="gp"># </span>sudo<span class="w"> </span>mount<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$EFI_PART</span><span class="s2">&quot;</span><span class="w"> </span>/mnt/boot<span class="w"> </span><span class="c1"># mount efi partition next</span>
+</pre></div>
+<p><b>Step 2</b>: Generate (hardware) config.
+</p>
+<div class="mw-highlight mw-highlight-lang-console mw-content-ltr" dir="ltr"><pre><span></span><span class="gp"># </span>sudo<span class="w"> </span>nixos-generate-config<span class="w"> </span>--root<span class="w"> </span>/mnt
+</pre></div>
+<p><b>Step 3</b>: Modify config.
+</p><p>Replace anything that looks like a Bash variable with the value that it currently holds for in your shell and modify as needed.
+</p>
+<div class="mw-highlight mw-highlight-lang-console mw-content-ltr" dir="ltr"><pre><span></span><span class="go">sudo nano /mnt/etc/nixos/configuration.nix</span>
+</pre></div>
+<div><div style="background-color: var(--background-color-neutral-subtle); line-height: 1.3; font-family: monospace; padding: 0.5em 1em; border-top-left-radius: 0.3rem; border-top-right-radius: 0.3rem; border: 1px solid var(--border-color-muted); border-bottom: 0; margin-bottom: -1em; display: flow-root;"><span style="font-size: 120%; font-weight: 900; color: #5277C3;"><span style="font-family: Noto Emoji, monospace; font-variant-emoji: text;">❄&#xfe0e;</span></span>&#160;/mnt/etc/nixos/configuration.nix</div><div class="mw-highlight mw-highlight-lang-nix mw-content-ltr mw-highlight-copy" dir="ltr"><pre><span></span><span class="c1"># Minimal list of modules to use the EFI system partition and the YubiKey</span>
+boot<span class="o">.</span>initrd<span class="o">.</span><span class="ss">kernelModules</span> <span class="o">=</span> <span class="p">[</span> <span class="s2">&quot;vfat&quot;</span> <span class="s2">&quot;nls_cp437&quot;</span> <span class="s2">&quot;nls_iso8859-1&quot;</span> <span class="s2">&quot;usbhid&quot;</span> <span class="p">];</span>
+
+<span class="c1"># Enable support for the YubiKey PBA</span>
+boot<span class="o">.</span>initrd<span class="o">.</span>luks<span class="o">.</span><span class="ss">yubikeySupport</span> <span class="o">=</span> <span class="no">true</span><span class="p">;</span>
+
+<span class="c1"># Configuration to use your Luks device</span>
+boot<span class="o">.</span>initrd<span class="o">.</span>luks<span class="o">.</span><span class="ss">devices</span> <span class="o">=</span> <span class="p">{</span>
+  <span class="s2">&quot;$LUKSROOT&quot;</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="c1"># device = &quot;$LUKS_PART&quot;; # This should be automatically set in hardware-configuration.nix</span>
+    <span class="c1"># preLVM = true; # You may want to set this to false if you need to start a network service first</span>
+    <span class="ss">yubikey</span> <span class="o">=</span> <span class="p">{</span>
+      <span class="ss">slot</span> <span class="o">=</span> <span class="err">$</span>SLOT<span class="p">;</span> <span class="c1"># The slot to use, must be signed integer</span>
+      <span class="ss">twoFactor</span> <span class="o">=</span> <span class="no">true</span><span class="p">;</span> <span class="c1"># Set to false if you did not set up a user password.</span>
+      <span class="ss">gracePeriod</span> <span class="o">=</span> <span class="mi">30</span><span class="p">;</span> <span class="c1"># Time in seconds to wait for YubiKey to be inserted.</span>
+      <span class="ss">keyLength</span> <span class="o">=</span> <span class="mi">64</span><span class="p">;</span> <span class="c1"># Set to $KEY_LENGTH/8</span>
+      <span class="ss">saltLength</span> <span class="o">=</span> <span class="mi">16</span><span class="p">;</span> <span class="c1"># Set to $SALT_LENGTH</span>
+      <span class="ss">storage</span> <span class="o">=</span> <span class="p">{</span>
+        <span class="ss">device</span> <span class="o">=</span> <span class="s2">&quot;$EFI_PART&quot;</span><span class="p">;</span>
+      <span class="p">};</span>
+    <span class="p">};</span>
+  <span class="p">};</span> 
+<span class="p">};</span>
+</pre></div></div>
+<div class="box" style="--box-color-impl: var(--color-progressive); --box-background-impl: ; --box-text-color-impl: var(--box-text-color, var(--box-color-impl)); --box-text-weight-impl: var(--box-text-weight, 500); --box-border-color-impl: var(--color-progressive); --box-border-size-impl: var(--box-border-size, 1px); --box-border-radius-impl: var(--box-border-radius, 0.5rem); --box-padding-impl: 0.6rem; --box-margin-impl: 0.6rem 0; --box-wiki-content-padding-top: calc(var(--box-padding-impl) - 1em); --box-wiki-content-padding-bottom: calc(var(--box-padding-impl) - 0.8em); --box-wiki-content-padding: var(--box-wiki-content-padding-top) var(--box-padding-impl) var(--box-wiki-content-padding-bottom) var(--box-padding-impl); display: flex; background: var(--box-background-impl); color: var(--box-color-impl); padding: var(--box-padding-impl); margin: var(--box-margin-impl); border: var(--box-border-size-impl) solid var(--box-border-color-impl); border-radius: var(--box-border-radius-impl);">
+  <div class="box-content" style="flex-grow: 1;"><div style="display: flex; align-items: center; gap: 0.6rem;"><div style="color: var(--notice-text-color-impl); font-weight: var(--notice-text-weight-impl);"><b>Note:</b> More options are available (See <code><a rel="nofollow" class="external text" href="https://search.nixos.org/options?show=boot.initrd.luks.devices.%3Cname%3E.yubikey">boot.initrd.luks.devices.&lt;name&gt;.yubikey</a></code>).</div></div></div>
+</div>
+<p><b>Step 4</b>: Install NixOS.
+</p>
+<div class="mw-highlight mw-highlight-lang-console mw-content-ltr" dir="ltr"><pre><span></span><span class="gp"># </span>sudo<span class="w"> </span>nixos-install
+</pre></div>
+<div class="mw-heading mw-heading3"><h3 id="Headless_setup_note">Headless setup note</h3></div>
+<p>If you have set up your system to not use a user password and attempt to boot the system, you may find the system stalls with the following message:
+</p><p>"Gathering entropy for new salt (please enter random keys to generate entropy if this blocks for long)..."
+</p><p>If you see this message and no more dots appear after a while, you have run into a situation where the random number generator does not have enough entropy stored up. You can mitigate this by starting a network interface (assuming the device is on a network), which should fill the entropy pool and allow the computer to boot headless. Below is an example configuration that has been tested to work in a headless configuration.
+</p>
+<div><div style="background-color: var(--background-color-neutral-subtle); line-height: 1.3; font-family: monospace; padding: 0.5em 1em; border-top-left-radius: 0.3rem; border-top-right-radius: 0.3rem; border: 1px solid var(--border-color-muted); border-bottom: 0; margin-bottom: -1em; display: flow-root;"><span style="font-size: 120%; font-weight: 900; color: #5277C3;"><span style="font-family: Noto Emoji, monospace; font-variant-emoji: text;">❄&#xfe0e;</span></span>&#160;/mnt/etc/nixos/configuration.nix</div><div class="mw-highlight mw-highlight-lang-nix mw-content-ltr mw-highlight-copy" dir="ltr"><pre><span></span><span class="ss">boot</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="c1"># Used to make this device dhcp enabled during boot.</span>
+    <span class="ss">kernelParams</span> <span class="o">=</span> <span class="p">[</span>
+      <span class="s2">&quot;ip=:::::eth0:dhcp&quot;</span> <span class="c1"># Change to the appropriate IP kernel command.</span>
+    <span class="p">];</span>
+
+    <span class="ss">initrd</span> <span class="o">=</span> <span class="p">{</span>
+      network<span class="o">.</span><span class="ss">enable</span> <span class="o">=</span> <span class="no">true</span><span class="p">;</span>
+
+      <span class="c1"># This is the driver for a particular ethernet card. See `boot.network.enable` for more details.</span>
+      <span class="ss">availableKernelModules</span> <span class="o">=</span> <span class="p">[</span><span class="s2">&quot;alx&quot;</span><span class="p">];</span> 
+
+      <span class="ss">kernelModules</span> <span class="o">=</span> <span class="p">[</span><span class="s2">&quot;vfat&quot;</span> <span class="s2">&quot;nls_cp437&quot;</span> <span class="s2">&quot;nls_iso8859-1&quot;</span> <span class="s2">&quot;usbhid&quot;</span> <span class="s2">&quot;alx&quot;</span><span class="p">];</span>
+      <span class="ss">luks</span> <span class="o">=</span> <span class="p">{</span>
+        <span class="ss">cryptoModules</span> <span class="o">=</span> <span class="p">[</span> <span class="s2">&quot;aes&quot;</span> <span class="s2">&quot;xts&quot;</span> <span class="s2">&quot;sha512&quot;</span> <span class="p">];</span>
+        <span class="ss">yubikeySupport</span> <span class="o">=</span> <span class="no">true</span><span class="p">;</span>
+        <span class="ss">devices</span> <span class="o">=</span> <span class="p">[</span> <span class="p">{</span>
+          <span class="ss">name</span> <span class="o">=</span> <span class="s2">&quot;$LUKSROOT&quot;</span><span class="p">;</span>
+          <span class="ss">device</span> <span class="o">=</span> <span class="s2">&quot;$LUKS_PART&quot;</span><span class="p">;</span>
+          <span class="ss">preLVM</span> <span class="o">=</span> <span class="no">false</span><span class="p">;</span>
+          <span class="ss">yubikey</span> <span class="o">=</span> <span class="p">{</span>
+            <span class="ss">slot</span> <span class="o">=</span> <span class="err">$</span>SLOT<span class="p">;</span>
+            <span class="ss">twoFactor</span> <span class="o">=</span> <span class="no">false</span><span class="p">;</span>
+            <span class="ss">storage</span> <span class="o">=</span> <span class="p">{</span>
+              <span class="ss">device</span> <span class="o">=</span> <span class="s2">&quot;$EFI_PART&quot;</span><span class="p">;</span>
+            <span class="p">};</span>
+          <span class="p">};</span>
+        <span class="p">}</span> <span class="p">];</span>
+      <span class="p">};</span>
+    <span class="p">};</span>
+  <span class="p">};</span>
+</pre></div></div>
+<p>Finally, clean up and you should be ready to reboot into your new system.
+</p>
+<div class="mw-heading mw-heading2"><h2 id="Maintenance">Maintenance</h2></div>
+<p>Prerequisite: You'll need the environment, defined in <a href="#Automatic_Setup">#Automatic Setup</a>.
+</p><p>To modify your LUKS setup, <code>$LUKS_KEY</code>, which was generated in <a href="#Setup_the_LUKS_device">#Setup_the_LUKS_device</a>, may be needed. 
+The following commands (values from above assumed, replace them to match your configuration) will help you in generating the LUKS key.
+</p>
+<div class="mw-highlight mw-highlight-lang-console mw-content-ltr" dir="ltr"><pre><span></span><span class="gp"># </span><span class="nv">KEY_LENGTH</span><span class="o">=</span><span class="m">512</span>
+<span class="gp"># </span><span class="nv">ITERATIONS</span><span class="o">=</span><span class="m">1000000</span>
+<span class="gp"># </span><span class="nv">SALT</span><span class="o">=</span><span class="k">$(</span>head<span class="w"> </span>-n1<span class="w"> </span>/boot/crypt-storage/default<span class="k">)</span>
+<span class="gp"># </span><span class="nb">read</span><span class="w"> </span>-s<span class="w"> </span>USER_PASSPHRASE
+<span class="gp"># </span><span class="nv">CHALLENGE</span><span class="o">=</span><span class="k">$(</span><span class="nb">echo</span><span class="w"> </span>-n<span class="w"> </span><span class="nv">$SALT</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>tr<span class="w"> </span>-d<span class="w"> </span><span class="s1">&#39;\n&#39;</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>openssl<span class="w"> </span>dgst<span class="w"> </span>-binary<span class="w"> </span>-sha512<span class="w"> </span><span class="p">|</span><span class="w"> </span>rbtohex<span class="k">)</span>
+<span class="gp"># </span><span class="nv">RESPONSE</span><span class="o">=</span><span class="s2">&quot;</span><span class="k">$(</span>sudo<span class="w"> </span>ykchalresp<span class="w"> </span>-2<span class="w"> </span>-x<span class="w"> </span><span class="nv">$CHALLENGE</span><span class="w"> </span><span class="m">2</span>&gt;/dev/null<span class="k">)</span><span class="s2">&quot;</span>
+<span class="gp"># </span><span class="nv">LUKS_KEY</span><span class="o">=</span><span class="s2">&quot;</span><span class="k">$(</span><span class="nb">echo</span><span class="w"> </span>-n<span class="w"> </span><span class="nv">$USER_PASSPHRASE</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>pbkdf2-sha512<span class="w"> </span><span class="k">$((</span><span class="nv">$KEY_LENGTH</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="m">8</span><span class="k">))</span><span class="w"> </span><span class="nv">$ITERATIONS</span><span class="w"> </span><span class="nv">$RESPONSE</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>rbtohex<span class="k">)</span><span class="s2">&quot;</span>
+</pre></div>
+<p>Now, you can pass <code>$LUKS_KEY</code> via stdin to any <code>cryptsetup</code> command with <code>--key-file=-</code> option. 
+</p><p>For instance, if you want to add another key to your setup:
+</p>
+<div class="mw-highlight mw-highlight-lang-bash mw-content-ltr" dir="ltr"><pre><span></span><span class="nb">echo</span><span class="w"> </span>-n<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$LUKS_KEY</span><span class="s2">&quot;</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>hextorb<span class="w"> </span><span class="p">|</span><span class="w"> </span>cryptsetup<span class="w"> </span>luksAddKey<span class="w"> </span>/dev/nvme0n1p2<span class="w"> </span>--key-file<span class="o">=</span>-
+</pre></div> 
+<!-- 
+NewPP limit report
+Cached time: 20260306025147
+Cache expiry: 86400
+Reduced expiry: false
+Complications: [show‐toc]
+CPU time usage: 0.157 seconds
+Real time usage: 0.358 seconds
+Preprocessor visited node count: 872/1000000
+Revision size: 18579/2097152 bytes
+Post‐expand include size: 33879/2097152 bytes
+Template argument size: 9081/2097152 bytes
+Highest expansion depth: 11/100
+Expensive parser function count: 38/100
+Unstrip recursion depth: 0/20
+Unstrip post‐expand size: 33108/5000000 bytes
+-->
+<!--
+Transclusion expansion time report (%,ms,calls,template)
+100.00%  247.407      1 -total
+  5.63%   13.935      5 Template:Notice
+  5.31%   13.145      4 Template:Warning
+  4.87%   12.040      2 Template:File
+  4.39%   10.869      5 Template:Box
+  2.28%    5.649      1 Template:Note
+  1.85%    4.566      2 Template:Code
+  1.73%    4.282      8 Template:Unicon
+  1.08%    2.684      2 Template:Manual
+  0.86%    2.118      2 Template:File/icon
+-->
+
+<!-- Saved in parser cache with key mediawiki:pcache:524:|%23|:idhash:canonical and timestamp 20260306025147 and revision id 30146. Rendering was triggered because: page_view
+ -->
+</div>
+<div class="printfooter" data-nosnippet="">Retrieved from "<a dir="ltr" href="https://wiki.nixos.org/w/index.php?title=Yubikey_based_Full_Disk_Encryption_(FDE)_on_NixOS&amp;oldid=30146">https://wiki.nixos.org/w/index.php?title=Yubikey_based_Full_Disk_Encryption_(FDE)_on_NixOS&amp;oldid=30146</a>"</div></div>
+					<div id="catlinks" class="catlinks" data-mw="interface"><div id="mw-normal-catlinks" class="mw-normal-catlinks"><a href="/wiki/Special:Categories" title="Special:Categories">Categories</a>: <ul><li><a href="/wiki/Category:NixOS" title="Category:NixOS">NixOS</a></li><li><a href="/wiki/Category:Security" title="Category:Security">Security</a></li></ul></div></div>
+				</div>
+			</main>
+			
+		</div>
+		<div class="mw-footer-container">
+			
+<footer id="footer" class="mw-footer" >
+	<ul id="footer-info">
+	<li id="footer-info-lastmod"> This page was last edited on 25 February 2026, at 17:49.</li>
+</ul>
+
+	<ul id="footer-places">
+	<li id="footer-places-privacy"><a href="/wiki/Official_NixOS_Wiki:Privacy_policy">Privacy policy</a></li>
+	<li id="footer-places-about"><a href="/wiki/Official_NixOS_Wiki:About">About the NixOS Wiki</a></li>
+	<li id="footer-places-disclaimers"><a href="/wiki/Official_NixOS_Wiki:General_disclaimer"> </a></li>
+	<li id="footer-places-mobileview"><a href="https://wiki.nixos.org/w/index.php?title=Yubikey_based_Full_Disk_Encryption_(FDE)_on_NixOS&amp;mobileaction=toggle_view_mobile" class="noprint stopMobileRedirectToggle">Mobile view</a></li>
+</ul>
+
+	<ul id="footer-icons" class="noprint">
+	<li id="footer-poweredbyico"><a href="https://www.mediawiki.org/" class="cdx-button cdx-button--fake-button cdx-button--size-large cdx-button--fake-button--enabled"><picture><source media="(min-width: 500px)" srcset="/w/resources/assets/poweredby_mediawiki.svg" width="88" height="31"><img src="/w/resources/assets/mediawiki_compact.svg" alt="Powered by MediaWiki" lang="en" width="25" height="25" loading="lazy"></picture></a></li>
+</ul>
+
+</footer>
+
+		</div>
+	</div> 
+</div> 
+<div class="vector-header-container vector-sticky-header-container no-font-mode-scale">
+	<div id="vector-sticky-header" class="vector-sticky-header">
+		<div class="vector-sticky-header-start">
+			<div class="vector-sticky-header-icon-start vector-button-flush-left vector-button-flush-right" aria-hidden="true">
+				<button class="cdx-button cdx-button--weight-quiet cdx-button--icon-only vector-sticky-header-search-toggle" tabindex="-1" data-event-name="ui.vector-sticky-search-form.icon"><span class="vector-icon mw-ui-icon-search mw-ui-icon-wikimedia-search"></span>
+
+<span>Search</span>
+			</button>
+		</div>
+			
+		<div role="search" class="vector-search-box-vue  vector-search-box-show-thumbnail vector-search-box">
+			<div class="vector-typeahead-search-container">
+				<div class="cdx-typeahead-search cdx-typeahead-search--show-thumbnail">
+					<form action="/w/index.php" id="vector-sticky-search-form" class="cdx-search-input cdx-search-input--has-end-button">
+						<div  class="cdx-search-input__input-wrapper"  data-search-loc="header-moved">
+							<div class="cdx-text-input cdx-text-input--has-start-icon">
+								<input
+									class="cdx-text-input__input mw-searchInput" autocomplete="off"
+									
+									type="search" name="search" placeholder="Search Official NixOS Wiki">
+								<span class="cdx-text-input__icon cdx-text-input__start-icon"></span>
+							</div>
+							<input type="hidden" name="title" value="Special:Search">
+						</div>
+						<button class="cdx-button cdx-search-input__end-button">Search</button>
+					</form>
+				</div>
+			</div>
+		</div>
+		<div class="vector-sticky-header-context-bar">
+				<nav aria-label="Contents" class="vector-toc-landmark">
+						
+					<div id="vector-sticky-header-toc" class="vector-dropdown mw-portlet mw-portlet-sticky-header-toc vector-sticky-header-toc vector-button-flush-left"  >
+						<input type="checkbox" id="vector-sticky-header-toc-checkbox" role="button" aria-haspopup="true" data-event-name="ui.dropdown-vector-sticky-header-toc" class="vector-dropdown-checkbox "  aria-label="Toggle the table of contents"  >
+						<label id="vector-sticky-header-toc-label" for="vector-sticky-header-toc-checkbox" class="vector-dropdown-label cdx-button cdx-button--fake-button cdx-button--fake-button--enabled cdx-button--weight-quiet cdx-button--icon-only " aria-hidden="true"  ><span class="vector-icon mw-ui-icon-listBullet mw-ui-icon-wikimedia-listBullet"></span>
+
+<span class="vector-dropdown-label-text">Toggle the table of contents</span>
+						</label>
+						<div class="vector-dropdown-content">
+					
+						<div id="vector-sticky-header-toc-unpinned-container" class="vector-unpinned-container">
+						</div>
+					
+						</div>
+					</div>
+			</nav>
+				<div class="vector-sticky-header-context-bar-primary" aria-hidden="true" ><span class="mw-page-title-main">Yubikey based Full Disk Encryption (FDE) on NixOS</span></div>
+			</div>
+		</div>
+		<div class="vector-sticky-header-end" aria-hidden="true">
+			<div class="vector-sticky-header-icons">
+				<a href="#" class="cdx-button cdx-button--fake-button cdx-button--fake-button--enabled cdx-button--weight-quiet cdx-button--icon-only" id="ca-talk-sticky-header" tabindex="-1" data-event-name="talk-sticky-header"><span class="vector-icon mw-ui-icon-speechBubbles mw-ui-icon-wikimedia-speechBubbles"></span>
+
+<span></span>
+			</a>
+			<a href="#" class="cdx-button cdx-button--fake-button cdx-button--fake-button--enabled cdx-button--weight-quiet cdx-button--icon-only" id="ca-subject-sticky-header" tabindex="-1" data-event-name="subject-sticky-header"><span class="vector-icon mw-ui-icon-article mw-ui-icon-wikimedia-article"></span>
+
+<span></span>
+			</a>
+			<a href="#" class="cdx-button cdx-button--fake-button cdx-button--fake-button--enabled cdx-button--weight-quiet cdx-button--icon-only" id="ca-history-sticky-header" tabindex="-1" data-event-name="history-sticky-header"><span class="vector-icon mw-ui-icon-wikimedia-history mw-ui-icon-wikimedia-wikimedia-history"></span>
+
+<span></span>
+			</a>
+			<a href="#" class="cdx-button cdx-button--fake-button cdx-button--fake-button--enabled cdx-button--weight-quiet cdx-button--icon-only mw-watchlink" id="ca-watchstar-sticky-header" tabindex="-1" data-event-name="watch-sticky-header"><span class="vector-icon mw-ui-icon-wikimedia-star mw-ui-icon-wikimedia-wikimedia-star"></span>
+
+<span></span>
+			</a>
+			<a href="#" class="cdx-button cdx-button--fake-button cdx-button--fake-button--enabled cdx-button--weight-quiet cdx-button--icon-only reading-lists-bookmark" id="ca-bookmark-sticky-header" tabindex="-1" data-event-name="watch-sticky-bookmark"><span class="vector-icon mw-ui-icon-wikimedia-bookmarkOutline mw-ui-icon-wikimedia-wikimedia-bookmarkOutline"></span>
+
+<span></span>
+			</a>
+			<a href="#" class="cdx-button cdx-button--fake-button cdx-button--fake-button--enabled cdx-button--weight-quiet cdx-button--icon-only" id="ca-edit-sticky-header" tabindex="-1" data-event-name="wikitext-edit-sticky-header"><span class="vector-icon mw-ui-icon-wikimedia-wikiText mw-ui-icon-wikimedia-wikimedia-wikiText"></span>
+
+<span></span>
+			</a>
+			<a href="#" class="cdx-button cdx-button--fake-button cdx-button--fake-button--enabled cdx-button--weight-quiet cdx-button--icon-only" id="ca-ve-edit-sticky-header" tabindex="-1" data-event-name="ve-edit-sticky-header"><span class="vector-icon mw-ui-icon-wikimedia-edit mw-ui-icon-wikimedia-wikimedia-edit"></span>
+
+<span></span>
+			</a>
+			<a href="#" class="cdx-button cdx-button--fake-button cdx-button--fake-button--enabled cdx-button--weight-quiet cdx-button--icon-only" id="ca-viewsource-sticky-header" tabindex="-1" data-event-name="ve-edit-protected-sticky-header"><span class="vector-icon mw-ui-icon-wikimedia-editLock mw-ui-icon-wikimedia-wikimedia-editLock"></span>
+
+<span></span>
+			</a>
+		</div>
+			<div class="vector-sticky-header-buttons">
+				<button class="cdx-button cdx-button--weight-quiet mw-interlanguage-selector" id="p-lang-btn-sticky-header" tabindex="-1" data-event-name="ui.dropdown-p-lang-btn-sticky-header"><span class="vector-icon mw-ui-icon-wikimedia-language mw-ui-icon-wikimedia-wikimedia-language"></span>
+
+<span>Add languages</span>
+			</button>
+			<a href="#" class="cdx-button cdx-button--fake-button cdx-button--fake-button--enabled cdx-button--weight-quiet cdx-button--action-progressive" id="ca-addsection-sticky-header" tabindex="-1" data-event-name="addsection-sticky-header"><span class="vector-icon mw-ui-icon-speechBubbleAdd-progressive mw-ui-icon-wikimedia-speechBubbleAdd-progressive"></span>
+
+<span>Add topic</span>
+			</a>
+		</div>
+			<div class="vector-sticky-header-icon-end">
+				<div class="vector-user-links">
+				</div>
+			</div>
+		</div>
+	</div>
+</div>
+<div class="mw-portlet mw-portlet-dock-bottom emptyPortlet" id="p-dock-bottom">
+	<ul>
+		
+	</ul>
+</div>
+<script>(RLQ=window.RLQ||[]).push(function(){mw.config.set({"wgBackendResponseTime":163,"wgPageParseReport":{"limitreport":{"cputime":"0.157","walltime":"0.358","ppvisitednodes":{"value":872,"limit":1000000},"revisionsize":{"value":18579,"limit":2097152},"postexpandincludesize":{"value":33879,"limit":2097152},"templateargumentsize":{"value":9081,"limit":2097152},"expansiondepth":{"value":11,"limit":100},"expensivefunctioncount":{"value":38,"limit":100},"unstrip-depth":{"value":0,"limit":20},"unstrip-size":{"value":33108,"limit":5000000},"timingprofile":["100.00%  247.407      1 -total","  5.63%   13.935      5 Template:Notice","  5.31%   13.145      4 Template:Warning","  4.87%   12.040      2 Template:File","  4.39%   10.869      5 Template:Box","  2.28%    5.649      1 Template:Note","  1.85%    4.566      2 Template:Code","  1.73%    4.282      8 Template:Unicon","  1.08%    2.684      2 Template:Manual","  0.86%    2.118      2 Template:File/icon"]},"cachereport":{"timestamp":"20260306025147","ttl":86400,"transientcontent":false}}});});</script>
+</body>
+</html>

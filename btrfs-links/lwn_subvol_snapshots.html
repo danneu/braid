@@ -1,0 +1,1803 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Btrfs: Subvolumes and snapshots [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Btrfs: Subvolumes and snapshots">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="The previous installment in LWN's ongoing series on the Btrfs filesystem covered multiple devic [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/578767/">Return to the Kernel page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><ins data-revive-zoneid="12072" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script></div>
+<div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/579009/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/newaccount"><b>Register</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Btrfs: Subvolumes and snapshots</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>Benefits for LWN subscribers</b>
+<p>
+The primary benefit from <a href="/Promo/nst-nag5/subscribe">subscribing to LWN</a>
+       is helping to keep us publishing, but, beyond that, subscribers get
+       immediate access to all site content and access to a number of extra
+       site features.  Please sign up today!
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>January 6, 2014</br>
+           <hr>
+<a href="/Articles/576276/">LWN's guide to Btrfs</a>
+</div>
+The <a href="/Articles/577961/">previous installment</a> in LWN's ongoing
+series on the Btrfs filesystem covered multiple device handling: various
+ways of setting up a single filesystem on a set of physical devices.
+Another interesting aspect of Btrfs can be thought of as working in the
+opposite manner: subvolumes allow the creation of multiple filesystems on a
+single device (or array of devices).  Subvolumes create a number of
+interesting possibilities not supported by other Linux filesystems.  This
+article will discuss how to use the subvolume feature and the associated
+snapshot mechanism.
+<p>
+<h4>Subvolume basics</h4>
+<p>
+A typical Unix-style filesystem contains a single directory tree with a
+single root.  By default, a Btrfs filesystem is organized in the same way.
+Subvolumes change that picture by creating alternative roots that function
+as independent filesystems in their own right.  This can be illustrated
+with a simple example:
+<p>
+<pre>
+    # mkfs.btrfs /dev/sdb5
+    # mount /dev/sdb5 /mnt/1
+    # cd /mnt/1
+    # touch a
+</pre>
+<p>
+Thus far, we have a mundane btrfs filesystem with a single empty file
+(called "<tt>a</tt>") on it.  To create a subvolume and create a file
+within it, one can type:
+<p>
+<pre>
+    # btrfs subvolume create subv
+    # touch subv/b
+    # tree
+    .
+    ├── a
+    └── subv
+	└── b
+
+    1 directory, 2 files
+</pre>
+<p>
+The subvolume has been created with the name <tt>subv</tt>; thus far, the
+operation looks nearly indistinguishable from having simply created a
+directory by that name.  But there are some differences that pop up if one
+looks for them.  For example:
+<p>
+<pre>
+    # ln a subv/
+    ln: failed to create hard link ‘subv/a’ =&gt; ‘a’: Invalid cross-device link
+</pre>
+<p>
+So, even though <tt>subv</tt> looks like an ordinary subdirectory, the
+filesystem treats it as if it were on a separate physical device; moving
+into <tt>subv</tt> is like crossing an ordinary Unix mount point, even
+though it's still housed within the original btrfs filesystem.  The
+subvolume can also be mounted independently:
+<p>
+<pre>
+    # btrfs subvolume list /mnt/1
+    ID 257 gen 8 top level 5 path subv
+    # mount -o subvolid=257 /dev/sdb5 /mnt/2
+    # tree /mnt/2
+    /mnt/2
+    └── b
+
+    0 directories, 1 file
+</pre>
+<p>
+The end result is that each subvolume can be treated as its own
+filesystem.  It is entirely possible to create a whole series of subvolumes
+and mount each separately, ending up with a set of independent filesystems
+all sharing the underlying storage device.  Once the subvolumes have been
+created, there is no need to mount the "root" device at all if only the
+subvolumes are of interest.
+<p>
+Btrfs will normally mount the root volume unless explicitly told to do
+otherwise with the <tt>subvolid=</tt> mount option.  But that is simply a
+default; if one wanted the new subvolume to be mounted by default instead,
+one could run:
+<p>
+<pre>
+    btrfs subvolume set-default 257 /mnt/1
+</pre>
+<p>
+Thereafter, mounting <tt>/dev/sdb5</tt> with no <tt>subvolid=</tt> option
+will mount the subvolume <tt>subv</tt>.  The root volume has a subvolume ID
+of zero, so mounting with <tt>subvolid=0</tt> will mount the root.
+<p>
+Subvolumes can be made to go away with:
+<p>
+<pre>
+    btrfs subvolume delete <i>path</i>
+</pre>
+<p>
+For ordinary subvolumes (as opposed to snapshots, described below), the
+subvolume indicated by <tt><i>path</i></tt> must be empty before it can be
+deleted.
+<p>
+<h4>Snapshots</h4>
+<p>
+
+A snapshot in Btrfs is a special type of subvolume — one which
+contains a copy of the current state of some other subvolume.  If we return
+to our simple filesystem created above:
+<p>
+<pre>
+    # btrfs subvolume snapshot /mnt/1 /mnt/1/snapshot
+    # tree /mnt/1
+    /mnt/1
+    ├── a
+    ├── snapshot
+    │   ├── a
+    │   └── subv
+    └── subv
+        └── b
+
+    3 directories, 3 files
+</pre>
+<p>
+The <tt>snapshot</tt> subcommand creates a snapshot of the given subvolume
+(the <tt>/mnt/1</tt> root volume in this case), placing that snapshot under
+the requested name (<tt>/mnt/1/snapshot</tt>) in that subvolume.  As a
+result, we now have a new subvolume called <tt>snapshot</tt> which appears to
+contain a full copy of everything that was in the filesystem previously.
+But, of course, Btrfs is a copy-on-write filesystem, so there is no need to
+actually copy all of that data; the snapshot simply has a reference to the
+current root of the filesystem.  If anything is changed — in <i>either</i>
+the main volume or the snapshot — a copy of the relevant data will be made,
+so the other copy will remain unchanged.  
+<p>
+Note also that the contents of the existing subvolume (<tt>subv</tt>) do
+not appear in the snapshot.  If a snapshot of a subvolume is desired,
+that must be created separately.
+<p>
+Snapshots clearly have a useful backup function.  If, for example, one has
+a Linux system using Btrfs, one can create a snapshot prior to installing a
+set of distribution updates.  If the updates go well, the snapshot can
+simply be deleted.  (Deletion is done with "<tt>btrfs subvolume
+delete</tt>" as above, but snapshots are not expected to be empty before
+being deleted).  Should the update go badly, instead, the snapshot can be
+made the default subvolume and, after a reboot, everything is as it was
+before.
+<p>
+Snapshots can also be used to implement a simple "time machine"
+functionality.  While working on this article series, your editor set aside
+a Btrfs partition to contain a copy of <tt>/home</tt>.  On occasion, a
+simple script runs:
+<p>
+<pre>
+    rsync -aix --delete /home /home-backup
+    btrfs subvolume snapshot /home-backup /home-backup/ss/`date +%y-%m-%d_%H-%M`
+</pre>
+<p>
+The <tt>rsync</tt> command makes <tt>/home-backup</tt> look identical to
+<tt>/home</tt>; a snapshot is then made of that state of affairs.  Over
+time, the result is the creation of a directory full of timestamped
+snapshots; returning to the state of <tt>/home</tt> at any given time is a
+simple matter of going into the proper snapshot.  Of course, if
+<tt>/home</tt> is also on a Btrfs filesystem, one could make regular
+snapshots without the <tt>rsync</tt> step, but the redundancy that comes
+with a backup drive would be lost.
+<p>
+One can quickly get used to having this kind of resource available.  This
+also seems like an area that is just waiting for the development of some
+higher-level tools.  Some projects are already underway; see <a
+href="http://en.opensuse.org/Portal:Snapper">Snapper</a> or <a
+href="https://github.com/jonhiggs/btrfs-time-machine">btrfs-time-machine</a>,
+for example.  There is also an "<a href="/Articles/484470/">autosnap</a>"
+feature that has been posted in the past, though it does not seem to have
+seen any development recently.
+For now, most snapshot users are most likely
+achieving the desired functionality through their own sets of <i>ad hoc</i>
+scripts.
+<p>
+
+<h4>Subvolume quotas</h4>
+<p>
+It typically will not take long before one starts to wonder how much disk
+space is used by each subvolume.  A naive use of a tool like <tt>du</tt>
+may or may not produce a useful answer; it is slow and unable to take into
+account the sharing of data between subvolumes (snapshots in particular).
+Beyond that, in many situations, it would be nice to be able to divide a
+volume into subvolumes but not to allow any given subvolume to soak up all
+of the available storage space.
+These needs can be met through the Btrfs subvolume quota group mechanism.
+<p>
+Before getting into quotas, though, a couple of caveats are worth
+mentioning.  One is that "quotas" in this sense are not normal, per-user
+disk quotas; those can be managed on Btrfs just like with any other
+filesystem.  Btrfs subvolume quotas, instead, track and regulate usage by
+subvolumes, with no regard for the ownership of the files that actually
+take up the space.  The other thing worth bearing in mind is that the quota
+mechanism is relatively new.  The management tools are on the rudimentary
+side, there seem to be some performance issues associated with quotas, and
+there's still a sharp edge or two in there waiting for unlucky
+users.
+<p>
+By default, Btrfs filesystems do not have quotas enabled.  To turn this
+feature on, run:
+<p>
+<pre>
+    # btrfs quota enable <i>path</i>
+</pre>
+<p>
+A bit more work is required to retrofit quotas into an older Btrfs
+filesystem; see <a
+href="https://btrfs.wiki.kernel.org/index.php/Quota_support">this wiki
+page</a> for details.  Once quotas are established, one can look at actual
+usage with:
+<p>
+<pre>
+    # btrfs qgroup show /home-backup
+    qgroupid rfer        excl       
+    -------- ----        ----       
+    0/5      21184458752 49152      
+    0/277    21146079232 2872635392 
+    0/281    20667858944 598929408  
+    0/282    20731035648 499802112  
+    0/284    20733419520 416395264  
+    0/286    20765806592 661327872  
+    0/288    20492754944 807755776  
+    0/290    20672286720 427991040  
+    0/292    20718280704 466567168  
+    0/294    21184458752 49152      
+</pre>
+<p>
+This command was run in the time-machine partition described above, where
+all of the subvolumes are snapshots.  The <b>qgroupid</b> is the ID
+number (actually a pair of numbers — see below)  associated with the quota
+group governing each subvolume, 
+<b>rfer</b> is the total amount of data referred to in the subvolume, and
+<b>excl</b> is the amount of data that is not shared with any other
+subvolume.  In short, "rfer" approximates what "<tt>du</tt>" would indicate
+for the amount of space used in a subvolume, while "excl" tells how much
+space would be freed by deleting the subvolume.
+<p>
+...or, something approximately like that.  In this case, the subvolume
+marked <tt>0/5</tt> is the root volume, which cannot be deleted.
+"<tt>0/294</tt>" is the most recently created snapshot; it differs little
+from the current state of the filesystem, so there is not much data that is
+unique to the snapshot itself.  If one were to delete a number of files
+from the main filesystem, the amount of "excl" data in that last snapshot
+would increase (since those files still exist in the snapshot) while the
+amount of free space in the filesystem as a whole would not increase.
+<p>
+Limits can be applied to subvolumes with a command like:
+<p>
+<pre>
+    # btrfs qgroup limit 30M /mnt/1/subv
+</pre>
+<p>
+One can then test the limit with:
+<p>
+<pre>
+    # dd if=/dev/zero of=/mnt/1/subv/junk bs=10k
+    dd: error writing ‘junk’: Disk quota exceeded
+    2271+0 records in
+    2270+0 records out
+    23244800 bytes (23 MB) copied, 0.0334957 s, 694 MB/s
+</pre>
+<p>
+One immediate conclusion that can be drawn is that the limits are somewhat
+approximate at best; in this case, a limit of 30MB was requested, but the
+enforcement 
+kicked in rather sooner than that.  This happens even though the system
+appears to have a clear understanding of both the limit and current usage:
+<p>
+<pre>
+    # btrfs qgroup show -r /mnt/1
+    qgroupid rfer     excl     max_rfer 
+    -------- ----     ----     -------- 
+    0/5      16384    16384    0        
+    0/257    23261184 23261184 31457280 
+</pre>
+<p>
+The <tt>0/257</tt> line corresponds to the subvolume of interest; the
+current usage is shown as being rather less than the limit, but writes were
+limited anyway.
+<p>
+There is another interesting complication with subvolume quotas, as
+demonstrated by:
+<p>
+<pre>
+    # rm /mnt/1/subv/junk
+    rm: cannot remove ‘/mnt/1/subv/junk’: Disk quota exceeded
+</pre>
+<p>
+In a copy-on-write world, even deleting data requires allocating space, for
+a while at least.  A
+user in this situation would appear to be stuck; little can be done until
+somebody raises the limit for at least as long as it takes to remove some
+files.  This particular problem has been <a
+href="http://www.spinics.net/lists/linux-btrfs/msg19499.html">known to the
+Btrfs developers</a> since 2012, but there does not yet appear
+to be a fix in the works.
+<p>
+The quota group is somewhat more flexible than has been shown so far; it
+can, for example, organize quotas in hierarchies that apply limits at
+multiple levels.  Imagine one had a Btrfs filesystem to be used for home
+directories, among other things.  Each user's home could be set up as a
+separate subvolume with something like this:
+<p>
+<pre>
+    # cd /mnt/1
+    # btrfs subvolume create home 
+    # btrfs subvolume create home/user1
+    # btrfs subvolume create home/user2
+    # btrfs subvolume create home/user3
+</pre>
+<p>
+By default, each subvolume is in its own quota group, so each user's usage
+can be limited easily enough.  But if there are other hierarchies in the
+same Btrfs filesystem, it might be nice to limit the usage of <tt>home</tt>
+as a whole.  One would start by creating a new quota group:
+<p>
+<pre>
+    # btrfs qgroup create 1/1 home
+</pre>
+<p>
+Quota group IDs are, as we have seen, a pair of numbers; the first of those
+numbers corresponds to the group's level in the hierarchy.  At the leaf
+level, that number is zero; IDs at that level have the subvolume ID as the
+second number of the pair.  All higher levels are created by the
+administrator, with the second number being arbitrary.
+<p>
+The assembly of the hierarchy is done by assigning the bottom-level groups
+to the new higher-level groups.  In this case, the subvolumes created for
+the user-level directories have IDs 258, 259, and 260 (as seen with
+<tt>btrfs subvolume list</tt>), so the assignment is done with:
+<p>
+<pre>
+    # btrfs qgroup assign 0/258 1/1 .
+    # btrfs qgroup assign 0/259 1/1 .
+    # btrfs qgroup assign 0/260 1/1 .
+</pre>
+<p>
+Limits can then be applied with:
+<p>
+<pre>
+    # btrfs qgroup limit 5M 0/258 .
+    # btrfs qgroup limit 5M 0/259 .
+    # btrfs qgroup limit 5M 0/260 .
+    # btrfs qgroup limit 10M 1/1 .
+</pre>
+<p>
+With this setup, any individual user can use up to 5MB of space within
+their own subvolume.  But users as a whole will be limited to 10MB of space
+within the <tt>home</tt> subvolume, so if <tt>user1</tt> and <tt>user2</tt>
+use their full quotas, <tt>user3</tt> will be entirely out of luck.  After
+creating exactly such a situation, querying the quota status on the
+filesystem shows:
+<p>
+<pre>
+    # btrfs qgroup show -r .
+    qgroupid rfer     excl     max_rfer 
+    -------- ----     ----     -------- 
+    0/5      16384    16384    0        
+    0/257    16384    16384    0        
+    0/258    5189632  5189632  5242880  
+    0/259    5189632  5189632  5242880  
+    0/260    16384    16384    5242880  
+    1/1      10346496 10346496 10485760 
+</pre>
+<p>
+We see that the first two user subvolumes have exhausted their quotas; that
+is also true of the upper-level quota group (<tt>1/1</tt>) that we created
+for <tt>home</tt> as a whole.  As far as your editor can tell, there is no
+way to query the shape of the hierarchy; one simply needs to know how that
+hierarchy was built to work with it effectively.
+<p>
+As can be seen, subvolume quota support still shows signs of being
+relatively new code; there is still a fair amount of work to be done before
+it is truly ready for production use.  Subvolume and snapshot support in
+general, though, has been around for years and is in relatively good
+shape.  All told, subvolumes offer a highly useful feature set; in the
+future, we may well wonder how we ran our systems without them.
+<p>
+At this point, our survey of the major features of the Btrfs filesystem is
+complete.  The next (and final) installment in this series will cover a
+number of loose ends, the send/receive feature, and more.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Btrfs-LWNs_guide_to">Btrfs/LWN's guide to</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Filesystems-Btrfs">Filesystems/Btrfs</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/579009/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        <p><a name="Comments"></a>
+<a name="CommAnchor579367"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Deleting subvolumes</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 6, 2014 19:48 UTC (Mon)
+                               by <b>fishface60</b> (subscriber, #88700)
+                              [<a href="/Articles/579367/">Link</a>] (7 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; For ordinary subvolumes (as opposed to snapshots, described below),</font><br>
+<font class="QuotedText">&gt; the subvolume indicated by path must be empty before it can be deleted.</font><br>
+<p>
+This is not the case, you are perfectly able to delete all kinds of<br>
+subvolumes, not just snapshots<br>
+<p>
+    ~$ btrfs sub cre foo<br>
+    Create subvolume './foo'<br>
+    ~$ cd foo<br>
+    ~/foo$ echo asdf &gt;bar<br>
+    ~/foo$ cd ..<br>
+    ~$ btrfs sub del foo<br>
+    Delete subvolume '/home/&lt;name&gt;/foo'<br>
+    ~$ ls foo<br>
+    ls: cannot access foo: No such file or directory<br>
+<p>
+To be able to delete subvolumes without being root you need to add<br>
+`user_subvol_rm_allowed` to your fstab.<br>
+<p>
+You can also mount a subvolume by path, rather than just by ID too, with<br>
+`mount -o subvol=$path $device $mountpoint`.<br>
+<p>
+Another handy feature is read-only snapshots, so you can keep your backups from being tampered with.<br>
+<p>
+    ~$ btrfs sub cre foo<br>
+    Create subvolume './foo'<br>
+    ~$ cd foo<br>
+    ~/foo$ echo hello &gt;file<br>
+    ~/foo$ cd ..<br>
+    ~$ btrfs sub sna -r foo bar<br>
+    Create a readonly snapshot of 'foo' in './bar'<br>
+    ~$ cd bar<br>
+    ~/bar$ echo goodbye &gt;file<br>
+    bash: file: Read-only file system<br>
+<p>
+You also need more priviliges to delete read-only snapshots:<br>
+<p>
+    ~$ btrfs sub del bar<br>
+    Delete subvolume '/home/&lt;user&gt;/bar'<br>
+    ERROR: cannot delete '/home/&lt;user&gt;/bar' - Read-only file system<br>
+    ~$ sudo btrfs sub del bar<br>
+    [sudo] password for &lt;user&gt;: <br>
+    Delete subvolume '/home/&lt;user&gt;/bar'<br>
+    ~$ ls bar<br>
+    ls: cannot access bar: No such file or directory<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/579367/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor579369"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Deleting subvolumes</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 6, 2014 20:18 UTC (Mon)
+                               by <b>dlang</b> (guest, #313)
+                              [<a href="/Articles/579369/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+what's the advantage of using subvolumes rather than just independent filesystems?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/579369/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor579370"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Deleting subvolumes</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 6, 2014 20:20 UTC (Mon)
+                               by <b>dlang</b> (guest, #313)
+                              [<a href="/Articles/579370/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+oops, I saw the comment in "unread comments" and didn't notice it was to a new article. I'll go read the article now. sorry for the noise.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/579370/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor579372"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Deleting subvolumes</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 6, 2014 20:26 UTC (Mon)
+                               by <b>zlynx</b> (guest, #2285)
+                              [<a href="/Articles/579372/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+To do it with ordinary file systems you need free raw blocks. It almost requires the use of LVM, in fact. <br>
+<p>
+Also, snapshots aren't as easy to create our manage. <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/579372/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor579402"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Deleting subvolumes</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 7, 2014 8:38 UTC (Tue)
+                               by <b>smurf</b> (subscriber, #17840)
+                              [<a href="/Articles/579402/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Plus, if you do it with LVW and copy-on-write, you never know when you're going to run out of disk space. A random I/O error during some metadata operation will leave your file system in an inconsistent state. Btrfs might have problems deleting files when your FS is full, but it will not corrupt its structure.<br>
+<p>
+Plus, with btrfs subvolumes you *can* delete files from snapshots and actually free some space (like the large download which you no longer need). No such luck with LVM.<br>
+<p>
+Plus, creating a snapshot with LVM requires a consistent FS state. How do you assert that (and keep it until the snapshot command returns), on a live system, if you can't unmount?<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/579402/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor579413"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Deleting subvolumes</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 7, 2014 10:50 UTC (Tue)
+                               by <b>Yenya</b> (subscriber, #52846)
+                              [<a href="/Articles/579413/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It is filesystem-dependent, but it can be done. See<br>
+<p>
+<a href="http://linux.die.net/man/8/xfs_freeze">http://linux.die.net/man/8/xfs_freeze</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/579413/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor579443"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Deleting subvolumes</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 7, 2014 17:02 UTC (Tue)
+                               by <b>zlynx</b> (guest, #2285)
+                              [<a href="/Articles/579443/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I think that all of the supported file systems in RedHat Server do a live freeze during LVM snapshot, so that isn't really a problem. It might be a problem for your application performance, if you can't stand an unresponsive filesystem for a few seconds.<br>
+<p>
+I know that ext3, ext4 and xfs all work fine after a LVM snap.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/579443/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor580782"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Deleting subvolumes</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 16, 2014 16:41 UTC (Thu)
+                               by <b>arielb1@mail.tau.ac.il</b> (guest, #94131)
+                              [<a href="/Articles/580782/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Isn't the filesystem-on-disk always in a consistent state for crash safety anyways? You just need to take a point in the block scheduler - the child FS will be in the same state as after "all calls to schedule_new_block(or whatever) hang, scheduler writes all blocks to disk, system crashes" - which is valid (by crash safety).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/580782/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor579371"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs: Subvolumes and snapshots</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 6, 2014 20:25 UTC (Mon)
+                               by <b>dlang</b> (guest, #313)
+                              [<a href="/Articles/579371/">Link</a>] (9 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Am I correct in thinking that when you remove one subvolume it can cause another subvolume to grow drastically if they were sharing data.<br>
+<p>
+for example, if you have a series of snapshots and delete a snapshot in the middle, (almost) all that data will be needed by the older snapshots, which will then show a lot more usage.<br>
+<p>
+What happens if this puts the older snapshot over it's quota? will the removal of the snapshot fail?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/579371/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor579676"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs: Subvolumes and snapshots</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 8, 2014 22:35 UTC (Wed)
+                               by <b>and</b> (guest, #2883)
+                              [<a href="/Articles/579676/">Link</a>] (7 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Am I correct in thinking that when you remove one subvolume it can cause another subvolume to grow drastically if they were sharing data.</font><br>
+<p>
+If I understood this correctly, deleting a subvolume will always free the exclusive data of this subvolume and in no case grow other subvolumes or change their quota. What _can_ happen is that some data is no longer shared and thus deleting one subvolume can increase the exclusive data of another subvolume.<br>
+<p>
+(This just lead me to wondering how to find the minimal set of subvolumes must be deleted to free a predefined amount of space. Smells like an NP complete problem.)<br>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/579676/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor579678"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs: Subvolumes and snapshots</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 8, 2014 22:40 UTC (Wed)
+                               by <b>dlang</b> (guest, #313)
+                              [<a href="/Articles/579678/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+hmm, so if the quota includes shared data, then the quota for a snapshot must be as large as the filesystem that it's backing up as all the data will initially be shared.<br>
+<p>
+At this point, putting a quota on a snapshot seems worthless.<br>
+<p>
+what am I missing?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/579678/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor579680"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs: Subvolumes and snapshots</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 8, 2014 23:09 UTC (Wed)
+                               by <b>and</b> (guest, #2883)
+                              [<a href="/Articles/579680/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; hmm, so if the quota includes shared data, then the quota for a snapshot must be as large as the filesystem that it's backing up as all the data will initially be shared.</font><br>
+<p>
+Well, the quota needs to be at least as large as the space used at the time when the snapshot is created. I can't see how shared data could be accounted for other than that: in the model which I think you have in mind, shared data would be either attributed to a single subvolume or proportionally to all which contain it. both possibilities are undesirable for the reason you mentioned and also because the amount of exclusive space used by one subvolume can increase by writing to or deleting a file in another subvolume. Causing the first subvolume to go over its quota in this case would constitute _really_ unexpected behavior, IMO.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/579680/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor579690"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs: Subvolumes and snapshots</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 8, 2014 23:25 UTC (Wed)
+                               by <b>dlang</b> (guest, #313)
+                              [<a href="/Articles/579690/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+people who use snapshots are actually quite used to having the usage of one snapshot go up when they delete a newer snapshot.<br>
+<p>
+requiring that the quota allow for the full space means that quota is going to be useless for preventing the disk from filling up.<br>
+<p>
+instead of being able to say something like "I want snapshots, but I don't want them to consume more than 10% of my space" with it either refusing to create new snapshots of deleting older snapshots when it fills up, you are instead going to have to set the quota for a snapshot very large and the sum of the quotas is going to be much larger than your total space.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/579690/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor579796"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs: Subvolumes and snapshots</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 9, 2014 19:13 UTC (Thu)
+                               by <b>iabervon</b> (subscriber, #722)
+                              [<a href="/Articles/579796/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The policy "I want snapshots, but I don't want them to take up more than 10% of my total space" is a complete disaster if applied as a limit. Your OS upgrades would fail for lack of space, even if you have plenty of free space, if you replace files accounting for 10% of your total space. (That is, you don't want to be prevented from unsharing things in your root subvolume, but that's the only operation that increases the amount of space used by snapshots-- creating a new snapshot takes pretty much no new space.)<br>
+<p>
+What you actually want is a garbage collection policy, rather than a limit policy; in order to generate free space, the filesystem is allowed to delete some unmounted subvolumes in a particular order. So this goal is pretty far in implementation from what "quota" means in other filesystems.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/579796/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor579813"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs: Subvolumes and snapshots</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 9, 2014 20:45 UTC (Thu)
+                               by <b>dlang</b> (guest, #313)
+                              [<a href="/Articles/579813/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; The policy "I want snapshots, but I don't want them to take up more than 10% of my total space" is a complete disaster if applied as a limit. Your OS upgrades would fail for lack of space, even if you have plenty of free space,</font><br>
+<p>
+for almost all the systems I run, the OS is far less than 10% of the total disk space. The majority of the space is used by data files, or software outside of the distro.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/579813/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor579815"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs: Subvolumes and snapshots</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 9, 2014 20:55 UTC (Thu)
+                               by <b>iabervon</b> (subscriber, #722)
+                              [<a href="/Articles/579815/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Even so, that's still: "You can't delete that brain image, because then it would count toward snapshots you weren't prevented from making."<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/579815/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor579818"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs: Subvolumes and snapshots</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 9, 2014 21:14 UTC (Thu)
+                               by <b>dlang</b> (guest, #313)
+                              [<a href="/Articles/579818/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Even so, that's still: "You can't delete that brain image, because then it would count toward snapshots you weren't prevented from making."</font><br>
+<p>
+In theory you may be correct, but having used snapshots for over a decade, in practice, on non-toy sized filesystems, it just isn't a problem.<br>
+<p>
+just like the OS isn't larger than 10% of the filesystem, neither is any individual item on it.<br>
+<p>
+On existing sytems, the quota is not per snapshot, but for all snapshots combined. They also have a policy for what to do when you try and create a snapshot and there isn't space, which is usually to delete the oldest snapshot until there is space.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/579818/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor582551"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs: Subvolumes and snapshots</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 27, 2014 0:07 UTC (Mon)
+                               by <b>rodgerd</b> (guest, #58896)
+                              [<a href="/Articles/582551/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Consider a real-world example with LVM+XFS from a month ago: I needed to do a P2V which required an extra half terabyte of space in one of my partitions.  I did the lvextend -L +500G / xfs_grow dance, did the migration.<br>
+<p>
+However, the growth was only temporary: once I'd finished the P2V I was actually only needing about another 100G above the original filesytem.  I was a bit stuck here, because you can't shrink XFS.  Even if it had been ext*, though, I'd have had to do an offline resize, then an LVM resize (taking care to not over-shrink and destroy the filesystem!).  Either way it would (and did) require an outage.<br>
+<p>
+If btrfs I could have grown the quota, done the work, thrown the excess files away, and then shrunk the quota again.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/582551/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor579378"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs: Subvolumes and snapshots</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 6, 2014 23:24 UTC (Mon)
+                               by <b>ppisa</b> (subscriber, #67307)
+                              [<a href="/Articles/579378/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+User is able to resolve quota exceed problem (tested/required to resolove our students problems - homes as subvolumes on Btrfs and server over NFS to 40 stations). The solution is truncate some of huge files. I.e.<br>
+<p>
+  echo 1 &gt;/user/xy/too_fat_file<br>
+<p>
+or<br>
+<p>
+  truncate -s 0 /user/xy/too_fat_file<br>
+<p>
+which worked for regular user even over NFS.<br>
+<p>
+The problem we found was that user is not able to log into graphical/X session (Xfce) because required pipes cannot be created in his/her home.<br>
+<p>
+Text console login over PAM and with mount of subvolume over NFS works without problems and user can trim/truncate offending file.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/579378/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor579433"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs: Subvolumes and snapshots</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 7, 2014 15:08 UTC (Tue)
+                               by <b>zzxtty</b> (guest, #45175)
+                              [<a href="/Articles/579433/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+We've had to deal with this for some time with ZFS, I recommend the following command to our users:<br>
+<p>
+cp /dev/null ~/largefile<br>
+<p>
+It's a nice simple syntax they understand.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/579433/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor579651"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs: Subvolumes and snapshots</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 8, 2014 18:46 UTC (Wed)
+                               by <b>mebrown</b> (subscriber, #7960)
+                              [<a href="/Articles/579651/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Even shorter:<br>
+<p>
+<font class="QuotedText">&gt; largefile</font><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/579651/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor579386"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">snapshot performance</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 7, 2014 3:23 UTC (Tue)
+                               by <b>geuder</b> (subscriber, #62854)
+                              [<a href="/Articles/579386/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I have used a daily and a weekly snapshot with LVM2 and ext4 for a long time. Stupid user errors tend to be more common than disk crashes... Cron just creates it/them every morning at 7 using a 5 line shell script. Obviously this will lead to 2 extra big write head moves for every disk write, write throughput is only 10% (IIRC) compared to not using any snapshot. But for normal software development work it does not disturb at all. Machines are fast enough and when they are not the bottleneck is typically elsewhwere than in pure write throughput. When working with filesystem images in the gigabyte class I do it on another filesystem without the safety net.<br>
+<p>
+Note to self: find a system with reasonably new kernel and a free corner on the disk  and compare whether the impact of btrfs snapshots to write performance is less (I guess it should be possible to avoid or at least reduce the extra write head moves)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/579386/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor579393"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">snapshot performance</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 7, 2014 5:51 UTC (Tue)
+                               by <b>dlang</b> (guest, #313)
+                              [<a href="/Articles/579393/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+BTRFS probably won't show significant drops in throughput when using snapshots, not because it avoids head movement, but because even normal writes are out of place and so reads end up seeking all over the place (writes don't suffer because they just get written wherever it's convenient, one spot is as good as the next)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/579393/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor579388"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs: Subvolumes and snapshots</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 7, 2014 5:43 UTC (Tue)
+                               by <b>iabervon</b> (subscriber, #722)
+                              [<a href="/Articles/579388/">Link</a>] (7 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It would be interesting if you could combine multiple devices and subvolumes such that you have a single filesystem spread across your regular hard drive and a backup disk, using RAID0, and the root subvolume were only allocated from the regular hard drive, while snapshots were only allocated from the backup disk. The actual data transfer to the backup disk would then happen as a consequence of both devices needing to contain the same blocks, while the filesystem as a whole understands that the backup disk doesn't need to contain multiple copies of the same block just because multiple snapshots were made. And, of course, at least one subvolume would always be completely recoverable in the event of either disk failing.<br>
+<p>
+I think that kind of policy would be a more interesting use of multiple devices than RAID policies which just have a numeric block allocation policy, and would be more powerful than what you could do with either device-level RAID or rsync or both.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/579388/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor579392"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs: Subvolumes and snapshots</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 7, 2014 5:49 UTC (Tue)
+                               by <b>dlang</b> (guest, #313)
+                              [<a href="/Articles/579392/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+that's not how BTRFS snapshots work.<br>
+<p>
+Every write on a BTR filesystem creates a new block, eventually the old blocks are garbage collected. all that a snapshot does is to prevent the blocks that are current as of the time of the snapshot from being garbage collected. They don't get copied anywhere, they just don't get deleted.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/579392/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor579397"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs: Subvolumes and snapshots</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 7, 2014 7:34 UTC (Tue)
+                               by <b>iabervon</b> (subscriber, #722)
+                              [<a href="/Articles/579397/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Right, the copy wouldn't be due to the snapshot, it would be due to the resulting policy as to where the block has to be stored not being fulfilled, just like if you converted a RAID0 filesystem to a RAID1 filesystem, but on a per-block level, based on what subvolumes include the block. That is, the snapshot doesn't create new blocks, but it does cause the blocks to need to be mirrored, when new files on the root subvolume would not be required to be mirrored (but would have to be on the first device). When the file is deleted from the main subvolume, it could be garbage collected off the first device, but would continue to be required on the backup device until it was no longer in a snapshot.<br>
+<p>
+Of course, I don't think multiple device support interacts like this with subvolumes, either, but it seems like all of the hard work is done: subvolumes and multiple devices work, and online conversion between RAID configurations. Subvolume membership can affect blocks (e.g., via quotas), including when the blocks are shared between subvolumes. It seems to me like all that's missing is the ability to choose raid policy on a per-block basis, some raid policies that wouldn't make sense otherwise (e.g., "raid0, but only use a particular device"), and the ability to trigger balancing based on the creation of a subvolume with a different raid policy.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/579397/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor632131"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs: Subvolumes and snapshots</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 6, 2015 2:45 UTC (Fri)
+                               by <b>JimAvera</b> (guest, #100933)
+                              [<a href="/Articles/632131/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+To somehow get the benefits of RAID0 and RAID1 simultaneously would be awesome.<br>
+<p>
+A variation of iabevon's idea would be an explicit "copying unbalance" operation, which would copy necessary blocks of a specified subvolume to reside only on a specified device(s).  To be useful for the purpose I'll explain momentarily, blocks which were not already on the destination device(s) would be *duplicated* not moved, leaving the originals where they were; blocks already on the destination(s) would stay as-is, possibly shared.<br>
+<p>
+This could be used to get "delayed redundancy", where everything normally runs RAID0 (striped) for speed, including most snapshots.  But periodically a snapshot would be converted to be stored only on a single drive (or subset of striped drives).  These snaps would provide insurance against disk crashes, but not in real-time; after a crash, you could recover only to the time of the latest snap isolated to other drive(s).<br>
+<p>
+For example, you could take snapshots every hour or more frequently, keeping 24 hours worth; and once a day "copy &amp; unbalance" the latest snapshot, rotating the excluded drive.<br>
+<p>
+You would get the full speed benefit of RAID0 striping for real-time operations during the day, and still get periodic backups against disk failures.  But TANSTAAFL, the time-cost of that redundancy would be more than with RAID1 (where redundant blocks are written concurrently in the first place); however that cost could be paid at controlled times, e.g., in the middle of the night.<br>
+<p>
+A big fly in this ointment is that a succession of such "backup" snapshots would end up with multiple copies of the same data on each drive, because blocks which were "de-balanced" became disconnected copies (necessary so that every block would in fact have copies on multiple drives).  Out-of-band deduplication could be run over the latest N "backup" snapshots (N=number of drives) to eliminate unnecessary copies, but adding a lot of disk i/o to the nightly "backup" operations.<br>
+<p>
+A more-difficult solution to duplicate blocks among the backup snapshots, would be to make the "copy &amp; unbalance" operation examine other specified subvolumes to find existing copies of blocks on the destination drive(s), perhaps comparing exactly-parallel files for the same ObjectID in the trees, and then compare corresponding extents which already resided entirely on the destination drive(s).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/632131/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor632159"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs: Subvolumes and snapshots</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 6, 2015 5:42 UTC (Fri)
+                               by <b>nybble41</b> (subscriber, #55106)
+                              [<a href="/Articles/632159/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      It sounds like what you're describing could be handled fairly well by per-subvolume RAID levels, which are already on the agenda according to <a href="https://btrfs.wiki.kernel.org/index.php/FAQ#Why_is_free_space_so_complicated.3F">the btrfs FAQ</a>: "However, we have plans to allow per-subvolume and per-file RAID levels." Just set your backup snapshot as RAID-1 and everything else as RAID-0, then perform a "soft" rebalance to redistribute the data which just changed levels. (But what happens when an extent is part of multiple subvolumes with different allocation schemes? Highest level wins? Last assigned level? The worst possibility would be breaking the COW link....)
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/632159/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor632165"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs: Subvolumes and snapshots</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 6, 2015 6:41 UTC (Fri)
+                               by <b>dlang</b> (guest, #313)
+                              [<a href="/Articles/632165/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I think you are slightly misunderstanding the way snapshots work.<br>
+<p>
+When you do a snapshot, you aren't copying all the data into the snapshot. What you are doing is copying a current set of metadata and flagging all the disk blocks as Copy on Write, so that as you continue to use the filesystem, the blocks that make up the snapshot never get changed. If the OS wants to write to that file the filesystem allocates a new block, copies the existing data over to it and then does the modification that the OS asked for.<br>
+<p>
+So if you have a filesystem in a RAID0 stripe set of drives, when you make a snapshot, the snapshot will continue to require both drives.<br>
+<p>
+You would then have to make a complete copy of the files on the filesystem to have it all reside on one drive.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/632165/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor632176"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs: Subvolumes and snapshots</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 6, 2015 9:40 UTC (Fri)
+                               by <b>JimAvera</b> (guest, #100933)
+                              [<a href="/Articles/632176/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Well, yes.  Creating a snapshot doesn't replicate file data, but that's besides the point.  When blocks are striped across all drives, then failure of a single drive causes a total loss.<br>
+<p>
+The idea is to somehow convert selected "backup" snapshots to no longer store anything on a particular drive. It would be like removing one disk from a RAID-0 set, but only for a single specified subvolume.  The difference is that blocks on the "removed" drive would be replicated, so other snapshots referencing the same data would still point to the original copy, achieving the desired replication effect.<br>
+-----<br>
+But such a scheme would only be interesting with two drives; eventually it would create as many copies as drives, which for more than two is excessive.  <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/632176/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor632184"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs: Subvolumes and snapshots</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Feb 6, 2015 9:47 UTC (Fri)
+                               by <b>dlang</b> (guest, #313)
+                              [<a href="/Articles/632184/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+actually, since the blocks include references to other blocks, you would end up with three (or more) copies of the blocks<br>
+<p>
+1. the original set that's split across the two drives<br>
+<p>
+2. the set that has all pointers changed to live on drive1<br>
+<p>
+3. the set that has all pointers changed to live on drive2<br>
+<p>
+and since the pointer changes need to take place each time the data is copied from one drive to another (since the existing blocks will already be in use), each single-drive snapshot would be a full copy of everything.<br>
+<p>
+Also, while snapshots are pretty reliable (since what they do is stop making changes to the blocks currently in use), this code would be doing some major re-writing of blocks it would also be far more fragile.<br>
+<p>
+you would be better of just using a conventional backup program to do a backup of the snapshot, far less risk involved.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/632184/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor579407"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs: Subvolumes and snapshots</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 7, 2014 9:43 UTC (Tue)
+                               by <b>rvfh</b> (guest, #31018)
+                              [<a href="/Articles/579407/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Am I to understand that a BTR [sub]volume can be mounted any number of times? What if I mount a subv on /mnt/2 and access it from /mnt/1/subv?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/579407/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor579411"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs: Subvolumes and snapshots</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 7, 2014 10:21 UTC (Tue)
+                               by <b>jengelh</b> (subscriber, #33263)
+                              [<a href="/Articles/579411/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+The view should be remaining consistent.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/579411/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor579414"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs: Subvolumes and snapshots</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 7, 2014 11:35 UTC (Tue)
+                               by <b>Yenya</b> (subscriber, #52846)
+                              [<a href="/Articles/579414/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Any Linux FS (e.g. ext4, xfs, ...) can be mounted a number of times. You can do<br>
+<p>
+mount /dev/sdc1 /mnt1<br>
+mount /dev/sdc1 /mnt2<br>
+<p>
+and then access (and write) files under /mnt1 _and_ /mnt2 simultaneously. I suppose it is handled on the vfs level to have only one struct superblock (and the referenced FS structures) in this case.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/579414/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor579424"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs: Subvolumes and snapshots</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 7, 2014 13:15 UTC (Tue)
+                               by <b>cortana</b> (subscriber, #24596)
+                              [<a href="/Articles/579424/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I've always wondered how you can guarantee that a filesystem is unmounted, in the presence of this multiple mounting feature (and, these days, mount namespaces). If I want to eject /dev/sdc, unmounting just /mnt2 in your example is not enough to guarantee that the filesystem is safe for removal. You'd also have to check the list of mounted filesystems and unmount /mnt1. I don't even know what you should do if some process with its own mount namespace has the filesystem mounted...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/579424/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor579435"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs: Subvolumes and snapshots</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 7, 2014 16:03 UTC (Tue)
+                               by <b>cruff</b> (subscriber, #7201)
+                              [<a href="/Articles/579435/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <cite>I don't even know what you should do if some process with its own mount namespace has the filesystem mounted.</cite>
+
+<p>You are out of luck unless you can access the other namespace.  I have several systems that has an LXC container with bind mounts of some file systems inside the container.  Because of the version of the kernel used in RHEL 6, I have not determined a way to access the container's mount namespace from the container host system after the container has been created.  Thus it can be impossible to umount all instances of each file system.  Of course, containers under RHEL 6 have other usability issues, we sometimes have to just reboot the container host to restore everything to normal.  I'm thinking of going back to using chroot jails.</p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/579435/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor579436"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs: Subvolumes and snapshots</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 7, 2014 16:04 UTC (Tue)
+                               by <b>mathstuf</b> (subscriber, #69389)
+                              [<a href="/Articles/579436/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You can also unmount based on the device path. There's also the '--all-targets' option: "umount --all-targets /dev/sdc".<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/579436/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor579463"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs: Subvolumes and snapshots</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 7, 2014 17:25 UTC (Tue)
+                               by <b>cortana</b> (subscriber, #24596)
+                              [<a href="/Articles/579463/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+umount --all-targets only appears to work in the current mount namespace, going by &lt;<a href="https://www.kernel.org/pub/linux/utils/util-linux/v2.23/v2.23-ReleaseNotes">https://www.kernel.org/pub/linux/utils/util-linux/v2.23/v...</a>&gt;.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/579463/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor579410"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs: Subvolumes and snapshots</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 7, 2014 10:16 UTC (Tue)
+                               by <b>sitaram</b> (guest, #5959)
+                              [<a href="/Articles/579410/">Link</a>] (5 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt;    rsync -aix --delete /home /home-backup</font><br>
+<font class="QuotedText">&gt;    btrfs subvolume snapshot /home-backup /home-backup/ss/`date +%y-%m-%d_%H-%M`</font><br>
+<p>
+<font class="QuotedText">&gt; The rsync command makes /home-backup look identical to /home; a snapshot is then made of that state of affairs. Over time, the result is the creation of a directory full of timestamped snapshots; returning to the state of /home at any given time is a simple matter of going into the proper snapshot. Of course, if /home is also on a Btrfs filesystem, one could make regular snapshots without the rsync step, but the redundancy that comes with a backup drive would be lost. </font><br>
+<p>
+Wouldn't it be better to go the other way: have /home on btrfs, make a snapshot, and the rsync that snapshot to the second disk?  By using rsync, you're giving up a fair bit of "snapshot" functionality -- some files might be inconsistent (or at least more so than with a btrfs snapshot)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/579410/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor579440"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs: Subvolumes and snapshots</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 7, 2014 16:51 UTC (Tue)
+                               by <b>oohlaf</b> (guest, #42838)
+                              [<a href="/Articles/579440/">Link</a>] (4 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Exactly.<br>
+Snapshot home and use btrfs send to transfer the snapshot to a second disk.<br>
+Both disks should have btrfs as filesystem.<br>
+<p>
+See <a href="https://btrfs.wiki.kernel.org/index.php/Incremental_Backup">https://btrfs.wiki.kernel.org/index.php/Incremental_Backup</a><br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/579440/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor579506"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs: Subvolumes and snapshots</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 8, 2014 0:39 UTC (Wed)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/579506/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      Syncing from a snapshot is a good idea, yes.  In the case of the very simplistic example given in the article, the system in question has an ext4 home partition that has been there for years, so that wasn't an option.
+<p>
+Current plan is to look at send/receive in the next installment.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/579506/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor579658"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs: Subvolumes and snapshots</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 8, 2014 19:31 UTC (Wed)
+                               by <b>MattJD</b> (subscriber, #91390)
+                              [<a href="/Articles/579658/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Brtfs wiki describes a method to convert an ext4 filesystem to btrfs without data loss (at: <a href="https://btrfs.wiki.kernel.org/index.php/Conversion_from_Ext3">https://btrfs.wiki.kernel.org/index.php/Conversion_from_Ext3</a> ).  It is supposed to preserve the original filesystem, so you can try it out and revert if it doesn't work well enough.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/579658/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor579886"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs: Subvolumes and snapshots</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 10, 2014 11:30 UTC (Fri)
+                               by <b>jezuch</b> (subscriber, #52988)
+                              [<a href="/Articles/579886/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Brtfs wiki describes a method to convert an ext4 filesystem to btrfs without data loss</font><br>
+<p>
+That's a neat trick enabled by the COW nature of btrfs and I wonder if there is a possibility to add support for more filesystems beside ext4. I'm especially interested in XFS as that's what I'm running on my systems :)<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/579886/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor579905"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs: Subvolumes and snapshots</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 10, 2014 15:10 UTC (Fri)
+                               by <b>MattJD</b> (subscriber, #91390)
+                              [<a href="/Articles/579905/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt;&gt; Brtfs wiki describes a method to convert an ext4 filesystem to btrfs without data loss</font><br>
+<font class="QuotedText">&gt;That's a neat trick enabled by the COW nature of btrfs and I wonder if there is a possibility to add support for more filesystems beside ext4. I'm especially interested in XFS as that's what I'm running on my systems :)</font><br>
+<p>
+The tool uses a userspace library to read the filesystem and setup Btrfs.  Adding support for XFS (or any other fs) should mostly involve getting a user space library to read XFS and calling the appropriate functions from the conversion tool to setup Btrfs.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/579905/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor579607"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs: Subvolumes and snapshots</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 8, 2014 16:52 UTC (Wed)
+                               by <b>janecek</b> (subscriber, #74774)
+                              [<a href="/Articles/579607/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+For rsync + btrfs snapshot backups, the --inplace rsync option might be useful. By default, when a file is changed, rsync creates a new file and moves it over the original. With --inplace, updated data is written directly to the file, so the unchanged parts can be shared among snapshots.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/579607/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor582846"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs: Subvolumes and snapshots</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jan 28, 2014 16:00 UTC (Tue)
+                               by <b>nye</b> (subscriber, #51576)
+                              [<a href="/Articles/582846/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+You would also want --no-whole-file, because the default for local syncs is to rewrite the whole file rather than using the delta transfer algorithm.<br>
+<p>
+Anecdote time:<br>
+<p>
+I have a system which stores backups that come in the form of some large-ish database dumps created by some MS software. Each time the backup is made, the entire file is rewritten, thus defeating the use of snapshots for saving multiple versions with minimal disk space.<br>
+My solution to this is to save them to a staging area which does not get snapshotted, then 'rsync --inplace --no-W' to the final destination, which contains yesterday's version of the dump. This neatly turns a full rewrite into a much smaller set of block changes, without having to use some full-blown deduplication tool.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/582846/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+
+</div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<ins data-revive-zoneid="12085" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2014, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

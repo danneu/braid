@@ -1,0 +1,1312 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>Btrfs at Facebook [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Btrfs at Facebook">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="The Btrfs filesystem has had a long and sometimes turbulent history; LWN first wrote about it i [...]">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/825060/">Return to the Front page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><ins data-revive-zoneid="12072" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script></div>
+<div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/824855/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/newaccount"><b>Register</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>Btrfs at Facebook</h1>
+</div>
+<div class="ArticleText">
+<blockquote class="ad">
+<b>Ready to give LWN a try?</b>
+<p>
+With a subscription to LWN, you can stay current with what is happening in the Linux and free-software community and take advantage of subscriber-only site features.  We are pleased to offer you <b><a href="https://lwn.net/Promo/nst-trial1/claim">a free trial subscription</a></b>, no credit card required, so that you can see for yourself.  Please, join us!
+</blockquote>
+<div class="FeatureByline">
+           By <b>Jonathan Corbet</b><br>July 2, 2020</br>
+           <hr>
+<a href="/Archives/ConferenceByYear/#2020-Open_Source_Summit_North_America">OSSNA</a>
+</div>
+The Btrfs filesystem has had a long and sometimes turbulent history; LWN
+first <a href="/Articles/238923/">wrote about it</a> in 2007.  It offers
+features not found in any other mainline Linux filesystem, but reliability
+and performance problems have prevented its widespread adoption.  There is at
+least one company that is using Btrfs on a massive scale, though:
+Facebook.  At the <a
+href="https://events.linuxfoundation.org/open-source-summit-north-america/">2020
+Open Source Summit North America</a> virtual event, Btrfs developer Josef
+Bacik described 
+why and how Facebook has invested deeply in Btrfs and where the remaining
+challenges are.
+<p>
+Every Facebook service, Bacik began, runs within a container; among other
+things, that makes it easy to migrate services between machines (or even
+between data centers).  Facebook has a huge number of machines, so it is
+impossible to manage them in any sort of unique way; the company wants all
+of these machines to be as consistent as possible.  It should be possible
+to move any service to any machine at any time.  The company will, on
+occasion, bring down entire data centers to test how well its
+disaster-recovery mechanisms work.
+<p>
+<h4>Faster testing and more</h4>
+<p>
+All of these containerized services are using Btrfs for their root
+filesystem.  The initial use case within Facebook, though, was for the
+build servers.  The company has a lot of code, implementing the
+web pages, mobile apps, test
+suites, and the infrastructure to support all of that.
+<p>
+The Facebook workflow dictates that nobody commits code directly to a
+repository.  Instead, there is a whole testing routine that is run on each
+change first.  The build system will clone the company
+repository, apply the patch, build the system, and run the tests; once that
+is done, the whole thing is cleaned up in preparation for the next patch to
+test.  That cleanup phase, as it turns out, is relatively slow, averaging
+two or three minutes to delete large directory trees full of code.  Some
+tests can take ten minutes to clean up, during which that machine is
+unavailable to run the next test.
+<p>
+The end result was that developers were finding that it would take hours to
+get individual changes through the process.  So the infrastructure team
+decided to try using Btrfs.  Rather than creating a clone of the
+repository, the test system just makes a snapshot, which is a nearly
+instantaneous operation.  After the tests are run, the snapshot is deleted,
+which also appears to be instantaneous from a user-space point of view.
+There is, of course, a worker thread actually cleaning up the snapshot in
+the background, but cleaning up a snapshot is a lot faster than removing
+directories from an ordinary filesystem.  This change saves a lot of time
+in the build system and reduced the capacity requirement — the number of
+machines needed to do builds and testing — by one-third.
+<p>
+After that experiment worked out so well, the infrastructure team switched
+fully to Btrfs; the entire build system now uses it.  It turns out that
+there was another strong reason to switch to Btrfs: its support for on-disk
+compression.  The point here is not just saving storage space, but also
+extending its lifetime.  Facebook spends a lot of money on flash storage —
+evidently inexpensive, low-quality flash storage at that.  The company
+
+<a href="/Articles/824864/"><img
+src="https://static.lwn.net/images/conf/2020/ossna/JosefBacik-sm.png" alt="[Josef Bacik]"
+title="Josef Bacik" class="rthumb"></a>
+
+would like this storage to last as long as possible, which
+implies minimizing the number of write cycles performed.  Source code tends
+to compress well, so compression reduces the number of blocks written
+considerably, slowing the process of wearing out the storage devices.
+<p>
+This work, Bacik said, was done by the infrastructure team without any sort
+of encouragement by Facebook's Btrfs developers; indeed, they didn't even
+know that it was happening.  He was surprised by how well it worked in the
+end.
+<p>
+Then, there is the case of virtual machines for developers.  Facebook has
+an "unreasonable amount" of engineering staff, Bacik said; each developer
+has a virtual machine for their work.  These machines contain the entire
+source code for the web site; it is a struggle to get the whole thing to
+fit into the 800GB allotted for each and still leave room for some actual
+work to be done.  Once again, compression helps to save the day, and works
+well, though he did admit that there have been some "<tt>ENOSPC</tt>
+issues" (problems that result when the filesystem runs out of available
+space).
+<p>
+
+Another big part of the Facebook code base is the container system itself,
+known internally as "tupperware".  Containers in this system use Btrfs for
+the root filesystem, a choice that enables a number of interesting things.
+The <a href="/Articles/581558/">send and receive mechanism</a> can be used
+both to build the base image and to enable fast, reliable upgrades.  When a
+task is deployed to a container, a snapshot is made of the base image
+(running a version of CentOS) and the specific container is loaded on top.
+When that service is done, cleanup is just a matter of deleting the working
+subvolume and returning to the base snapshot.
+<p>
+Additionally, Btrfs compression once again reduces write I/O, helping
+Facebook to make the best use of cheap flash drives.  Btrfs is also the
+only Linux filesystem that works with the <a
+href="/Articles/782876/">io.latency</a> and <a
+href="/Articles/792256/">io.cost</a> (formerly io.weight) block I/O
+controllers.  These controllers don't work with ext4 at all, he said, and
+there are some problems still with XFS; he has not been able to invest the
+effort to make things work better on those filesystems.
+<p>
+An in-progress project concerns the WhatsApp service.
+WhatsApp messages are normally stored on the users' devices, but they must
+be kept centrally when the user is offline.  Given the number of users,
+that's a fair amount of storage.  Facebook is using XFS for this task, but
+has run into unspecified "weird scalability issues".  Btrfs compression can
+help here as well, and snapshots will be useful for cleaning things up.
+<p>
+But Btrfs, too, has run into scalability problems with this workload.
+Messages are tiny, compressed files; they are small enough that the message
+text is usually stored with the file's metadata rather than in a separate
+data extent.  That leads to filesystems with hundreds of gigabytes of
+metadata and high levels of fragmentation.  These problems have been
+addressed, Bacik said, and it's "relatively smooth sailing" now.  That
+said, there are still some issues left to be dealt with, and WhatsApp may not
+make the switch to Btrfs in the end.
+<p>
+<h4>The good, the bad, and the unresolved</h4>
+<p>
+Bacik concluded with a summary of what has worked well and what has not.
+He told the story of tracking down a bug where Btrfs kept reporting
+checksum errors when working with a specific RAID controller.  Experience
+has led him to assume that such things are Btrfs bugs, but this time it turned
+out that the RAID controller was writing some random data to the middle of
+the disk on every reboot.  This problem had been happening for years,
+silently corrupting filesystems; Btrfs flagged it almost immediately.  That
+is when he started to think that, perhaps, it's time to start trusting
+Btrfs a bit more.
+<p>
+Another unexpected benefit was the help Btrfs has provided in tracking down
+microarchitectural processor bugs.  Btrfs tends to stress the system's CPU
+more than other filesystems; features like checksumming, compression, and
+work offloaded to threads tend to keep things busy.  Facebook, which builds its own
+hardware, has run into a few CPU problems that have been exposed by Btrfs;
+that made it easy to create reproducers to send to CPU vendors in order to
+get things fixed.
+<p>
+In general, he said, he has spent a lot of time trying to track down
+systemic problems in the filesystem.  Being a filesystem developer, he is
+naturally conservative; he worries that "the world will burn down" and it
+will all be his fault.  In almost every case, these problems have turned out
+to have their origin in the hardware or other parts of the system.
+Hardware, he said, is worse than Btrfs when it comes to quality.
+<p>
+What he was most happy with, though, was perhaps the fact that most Btrfs
+use cases in the company have been developed naturally by other groups.  He
+has never gone out of his way to tell other teams that they need to use
+Btrfs, but they have chosen it for its merits anyway.
+<p>
+<span class="PullQuote">
+<span class="invisible">[PULL QUOTE: </span>
+"It's not Btrfs if there isn't an <tt>ENOSPC</tt>
+issue", he said.
+<span class="invisible"> END QUOTE]</span>
+</span>
+
+All is not perfect, however.  At the top of his list was bugs that manifest
+when Btrfs runs out of space, a problem that has plagued Btrfs since the
+beginning; "it's not Btrfs if there isn't an <tt>ENOSPC</tt>
+issue", he said, adding that he has spent most of his career chasing these problems.
+There are still a few bad cases in need of fixing, but these are rare
+occurrences at this point.  He is relatively happy, finally, with the state
+of <tt>ENOSPC</tt> handling.
+<p>
+There have been some scalability problems that have come up, primarily with
+the WhatsApp workload as described above.  These bugs have highlighted some
+interesting corner cases, he said, but haven't been really difficult to
+work out.  There were also a few "weird, one-off issues" that mostly
+affected block subsystem maintainer Jens Axboe; "we like Jens, so we fixed
+it". 
+<p>
+At the top of the list of problems still needing resolution is quota groups;
+their overhead is too high, he said, and things just break at times.  He
+plans to solve these problems within the next year.  There are users who
+would like to see encryption at the subvolume level; that would allow the
+safe stacking of services with differing privacy requirements.  Omar
+Sandoval is working on that feature now.
+<p>
+Then there is the issue of RAID support, another longstanding problem area
+for Btrfs.  Basic striping and mirroring work
+well, and have done so for years, he said.  RAID&nbsp;5 and&nbsp;6 have "lots of
+edge cases", though, and have been famously unreliable.  These problems,
+too, are on his list, but solving them will require "lots of work" over the
+next year or two.<br clear="all"><table class="IndexEntries">
+           <tr><th colspan=2>Index entries for this article</th></tr>
+           <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Btrfs">Btrfs</a></td></tr>
+            <tr><td><a href="/Kernel/Index">Kernel</a></td><td><a href="/Kernel/Index#Filesystems-Btrfs">Filesystems/Btrfs</a></td></tr>
+            <tr><td><a href="/Archives/ConferenceIndex/">Conference</a></td><td><a href="/Archives/ConferenceIndex/#Open_Source_Summit_North_America-2020">Open Source Summit North America/2020</a></td></tr>
+            </table><br clear="all">
+<hr width="60%%" align="left">
+            <form action="/Login/" method="post">
+            <input type="hidden" name="target" value="/Articles/824855/" />
+            <input type="submit" name="login" value="Log in" /> to post comments
+            <p>
+        <p><a name="Comments"></a>
+<a name="CommAnchor825120"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs at Facebook</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 2, 2020 19:02 UTC (Thu)
+                               by <b>Kamilion</b> (subscriber, #42576)
+                              [<a href="/Articles/825120/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Experience has led him to assume that such things are Btrfs bugs, but this time it turned out that the RAID controller was writing some random data to the middle of the disk on every reboot. This problem had been happening for years, silently corrupting filesystems; Btrfs flagged it almost immediately. </font><br>
+<p>
+Which RAID controller would this be? If it&#x27;s an LSI, I&#x27;d really love to know, and I doubt Broadcom would care about LSI&#x27;s reputation at this point... Hopefully it&#x27;s not an adaptec...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/825120/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor825434"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs at Facebook</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 7, 2020 3:37 UTC (Tue)
+                               by <b>TMM</b> (guest, #79398)
+                              [<a href="/Articles/825434/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I don&#x27;t work for facebook, but given that they said they used cheap flash drives I&#x27;m assuming that they are also using somewhat cheap raid controllers. The controller where I saw this was a highpoint rocketraid controller which did the same thing. I imagine that more cheaper (soft)raid controllers which are actually mostly just sata controllers do this to write their raid metadata.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/825434/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor825122"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs at Facebook</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 2, 2020 19:16 UTC (Thu)
+                               by <b>gbalane</b> (subscriber, #130561)
+                              [<a href="/Articles/825122/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Thanks for the update. One question from the last update, do FB still uses readonly stores on Btrfs for serving the news feed ?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/825122/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor825130"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs at Facebook</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 2, 2020 20:59 UTC (Thu)
+                               by <b>cpitrat</b> (subscriber, #116459)
+                              [<a href="/Articles/825130/">Link</a>] (14 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+&quot;Messages are tiny, compressed files; they are small enough that the message text is usually stored with the file&#x27;s metadata rather than in a separate data extent.&quot;<br>
+<p>
+You mean each message is a separate file? It sounds like a poor design ...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/825130/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor825132"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs at Facebook</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 2, 2020 21:50 UTC (Thu)
+                               by <b>Tov</b> (subscriber, #61080)
+                              [<a href="/Articles/825132/">Link</a>] (10 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+&quot;You mean each message is a separate file? It sounds like a poor design ...&quot;<br>
+<p>
+Not if you really think about it. A message is a single entity, which should be &quot;filed&quot; individually. However, metadata overhead and poor performance of older file systems have tought us to implement even more layers of indirection to paste over poor file system design...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/825132/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor825151"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs at Facebook</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 3, 2020 6:36 UTC (Fri)
+                               by <b>cpitrat</b> (subscriber, #116459)
+                              [<a href="/Articles/825151/">Link</a>] (9 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Well, not taking into account the limitations of the tools you use in your design is a bad design. If you plan to store billions of files of a few bytes and your rationale is &quot;a good filesystem should handle this well, all filesystems are bad&quot;, this is not what I&#x27;d call good engineering ...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/825151/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor825158"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs at Facebook</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 3, 2020 10:11 UTC (Fri)
+                               by <b>ibukanov</b> (subscriber, #3942)
+                              [<a href="/Articles/825158/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Engineers at Facebook are not stupid. I suspect there is a missing piece of information about this particular case that justifies using the file system for this that overweights the harm of storing billions of tiny files.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/825158/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor825162"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs at Facebook</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 3, 2020 12:25 UTC (Fri)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/825162/">Link</a>] (7 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Actually, not taking into account the limitations of the tools is GOOD design.<br>
+<p>
+Not taking into account the limitations when implementing the design is bad engineering.<br>
+<p>
+I think Linus has commented on various occasions that when he&#x27;s taken things like processor limitations into account for the basic design, the resulting implementation has been, shall we say, suboptimal.<br>
+<p>
+If on the other hand the design *ignores* the limitations, and then the implementation works round the limitations, the end result is much better (plus, of course, as the tools improve the workarounds can be ripped out. If the workarounds are part of the design, then adapting to better tools is something that rarely gets done).<br>
+<p>
+For example, I think the early processors only had a two-level page table. The best design turned out to be three-level, and when the early code using the two-level hardware was replaced by a three-level design that took advantage of the hardware for two of them, the result was a major improvement.<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/825162/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor825163"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs at Facebook</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 3, 2020 12:44 UTC (Fri)
+                               by <b>pizza</b> (subscriber, #46)
+                              [<a href="/Articles/825163/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Actually, not taking into account the limitations of the tools is GOOD design.</font><br>
+<p>
+I&#x27;m not so sure about that.<br>
+<p>
+Because ignoring reality is how we get designs are predicated on likes of spherical cows and other things that don&#x27;t actually exist, and result in overly complex implementations with more exceptions than rules.  If it can even be implemented at all.<br>
+<p>
+<p>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/825163/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor825184"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs at Facebook</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 3, 2020 13:02 UTC (Fri)
+                               by <b>cpitrat</b> (subscriber, #116459)
+                              [<a href="/Articles/825184/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I guess WoL has a point. The issue here is that we&#x27;re saying &quot;design&quot; for different things. For a complex system, there will be different levels of design and taking into account low-level technical details for the high-level design would be wrong.<br>
+<p>
+But in this case, we&#x27;re talking about deciding how to store the individual messages. It&#x27;s not even about design, it&#x27;s a technical decision to store them as individual files (if that&#x27;s really what is done, that&#x27;s where I have a doubt).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/825184/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor825204"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs at Facebook</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 3, 2020 14:26 UTC (Fri)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/825204/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+In this case it sounds like &quot;the computer is the database&quot;, along the lines of the AS/400 or Pick, would be a good implementation ... :-)<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/825204/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor825199"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs at Facebook</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 4, 2020 12:04 UTC (Sat)
+                               by <b>pizza</b> (subscriber, #46)
+                              [<a href="/Articles/825199/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; For a complex system, there will be different levels of design and taking into account low-level technical details for the high-level design would be wrong.</font><br>
+<p>
+I&#x27;m not talking about &quot;low level details&quot;, I&#x27;m talking about being aware of what is or isn&#x27;t possible (or practical) to implement.<br>
+<p>
+Outside of a handful of fields (mostly to do with advanced mathematics) those &quot;designs&quot; still need to be realized in the real world.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/825199/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor825187"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Page tables</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 3, 2020 13:18 UTC (Fri)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/825187/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      Digging through the code...v1.0 had two-level page tables internally.  The third level was added once processors started supporting it.  The same is true of the fourth and fifth levels.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/825187/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor825202"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Page tables</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 3, 2020 14:23 UTC (Fri)
+                               by <b>Wol</b> (subscriber, #4433)
+                              [<a href="/Articles/825202/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Was the third level emulated in software for processors that didn&#x27;t have it in hardware? I&#x27;m sure I remember something of the sort - that it was better to have an &quot;ideal&quot; design and emulate round practical short-comings.<br>
+<p>
+Cheers,<br>
+Wol<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/825202/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor825222"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Page tables</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 3, 2020 16:58 UTC (Fri)
+                               by <b>corbet</b> (editor, #1)
+                              [<a href="/Articles/825222/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      The kernel was (and still is) built for a given page-table depth; the compiler then shorts out the code for the levels that aren't actually used.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/825222/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor829316"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs at Facebook</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 21, 2020 16:31 UTC (Fri)
+                               by <b>rep_movsd</b> (guest, #100040)
+                              [<a href="/Articles/829316/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Back in 2003-2004 I was on a small team that built an instant messenger client called Rediff Bol 2.0<br>
+<p>
+Version 1.0 had been a huge success in India, but they wanted a snazzy UI like Yahoo.<br>
+Their message server used this same retarded technique of saving messages as files.... on a shared NFS mount.<br>
+<p>
+I won&#x27;t go into the horrors of such a design idea (which to be fair did have one thing going for it - simplicity) but it&#x27;s insane to use a filesystem as a database.<br>
+<p>
+Im sure FB devs had their reasons (maybe legacy), but fundamentally a crap idea. Filesystems are designed to be moderately efficient at various sizes of files.<br>
+I don&#x27;t think any FS dev in their wildest nightmares would have considered a use case of zillions of files which are smaller than a floppy disk sector <br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/829316/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor829317"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs at Facebook</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 21, 2020 17:18 UTC (Fri)
+                               by <b>anselm</b> (subscriber, #2796)
+                              [<a href="/Articles/829317/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <p>
+Things are maybe not so bad if – like Facebook – you have actual file system developers on your payroll.
+</p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/829317/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor829578"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs at Facebook</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 26, 2020 11:45 UTC (Wed)
+                               by <b>flussence</b> (guest, #85566)
+                              [<a href="/Articles/829578/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Sounds like email, or at least the variants that don&#x27;t stuff multi-gigabyte mailboxes into a *single* file...<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/829578/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor825142"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs at Facebook</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 3, 2020 1:03 UTC (Fri)
+                               by <b>champtar</b> (subscriber, #128673)
+                              [<a href="/Articles/825142/">Link</a>] (7 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Am I the only one understanding that WhatsApp message are stored unencrypted ? If they are encrypted I&#x27;m not sure how Btrfs compression can help ?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/825142/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor825154"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs at Facebook</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 3, 2020 7:20 UTC (Fri)
+                               by <b>chatcannon</b> (subscriber, #122400)
+                              [<a href="/Articles/825154/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+My guess: The message metadata (sender, recipient, timestamp, possibly a sequential ID, etc) are not encrypted. Most messages are short enough that the message metadata are larger than the cyphertext of the message content, and that all of this (message metadata plus message content) is small enough to fit in the filesystem metadata space rather than needing a block of its own.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/825154/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor825191"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs at Facebook</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 3, 2020 13:35 UTC (Fri)
+                               by <b>champtar</b> (subscriber, #128673)
+                              [<a href="/Articles/825191/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+That makes more sense, thanks<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/825191/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor825185"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs at Facebook</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 3, 2020 13:10 UTC (Fri)
+                               by <b>judas_iscariote</b> (guest, #47386)
+                              [<a href="/Articles/825185/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+wut? whatsapp message leave the user device encrypted.. you need the recipient private key to decrypt it.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/825185/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor825215"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs at Facebook</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 3, 2020 16:11 UTC (Fri)
+                               by <b>champtar</b> (subscriber, #128673)
+                              [<a href="/Articles/825215/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Encrypted content compress really poorly if at all, thus my interrogation, how can btrfs compression can help. See chatcannon for an explanation.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/825215/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor825250"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs at Facebook</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 3, 2020 22:52 UTC (Fri)
+                               by <b>scott@deltaex.com</b> (guest, #139665)
+                              [<a href="/Articles/825250/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Compressing ciphertext is effectively the same as cracking it.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/825250/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+<a name="CommAnchor825248"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs at Facebook</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 3, 2020 22:49 UTC (Fri)
+                               by <b>nivedita76</b> (subscriber, #121790)
+                              [<a href="/Articles/825248/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I didn&#x27;t understand it that way: they&#x27;re not talking about compression issues when discussing the messages, but problems with storing them along with the metadata instead of in separate blocks. My guess is that if text messages are compressed at all, the messages are compressed, then encrypted and sent; and decrypted and decompressed on the recipient&#x27;s phone. The larger ones for photos, videos, audio would already be in a compressed format anyway.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/825248/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor825292"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs at Facebook</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 5, 2020 2:10 UTC (Sun)
+                               by <b>josefbacik</b> (subscriber, #90083)
+                              [<a href="/Articles/825292/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+There’s an index log that compresses well.  Mostly they’re in it for the snapshotting.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/825292/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor825186"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs at Facebook</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 3, 2020 13:20 UTC (Fri)
+                               by <b>Karellen</b> (subscriber, #67644)
+                              [<a href="/Articles/825186/">Link</a>] (6 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <blockquote>These machines contain the entire source code for the web site; it is a struggle to get the whole thing to fit into the 800GB allotted for each and still leave room for some actual work to be done.</blockquote>
+
+<p><em>800GB‽‽</em>
+
+<p>Am I just getting old, or is that actually somewhat on the large side?
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/825186/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor825200"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs at Facebook</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 3, 2020 13:59 UTC (Fri)
+                               by <b>kevincox</b> (subscriber, #93938)
+                              [<a href="/Articles/825200/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+It doesn&#x27;t seem large to me. They have a lot of projects going on, and I don&#x27;t know how much history this contains. I wouldn&#x27;t be surprised if a number of assets such as images were checked in as well so that they can be built into the final site/whatever. Then I would guess there are 27 versions of jQuery and a couple of compiled binaries.<br>
+<p>
+None of these things are huge but when you sum them up across a large company 800GB seems like they were really keeping themselves in check on the average.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/825200/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor825218"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs at Facebook</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 3, 2020 16:51 UTC (Fri)
+                               by <b>shemminger</b> (subscriber, #5739)
+                              [<a href="/Articles/825218/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+800G is huge. All of Windows is a single git repo of 300G with 35M files.<br>
+Microsoft built Git Virtual Filesystem to deal with that, and avoid having to do massive downloads and checkouts.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/825218/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor825288"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs at Facebook</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 4, 2020 22:03 UTC (Sat)
+                               by <b>gus3</b> (guest, #61103)
+                              [<a href="/Articles/825288/">Link</a>] (3 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+I just (an hour or so ago) bought a 4T USB drive for backups for less than $100. My old backup drive is showing some age, so it was time.<br>
+<p>
+That&#x27;s big enough for four 800GB containers mapped to virtual space, plus filesystem overhead. The only choke-points would be the USB3 connection and head seek time on the platters. Of course, SSD would eliminate the latter.<br>
+<p>
+It isn&#x27;t bleeding edge, or even leading edge anymore. It&#x27;s COTS (commodity, off-the-shelf).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/825288/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor825333"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs at Facebook</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 5, 2020 21:02 UTC (Sun)
+                               by <b>ncm</b> (guest, #165)
+                              [<a href="/Articles/825333/">Link</a>] (2 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Facebook seems to prefer SSD, for Reasons, but a TB SSD is pretty normal now. FB can certainly afford a thousand per developer, and something to plug them all into, what with large multiple $millions annual profit per employee. Not spending as much per head as could possibly be useful would be irresponsible even for a wildly less profitable enterprise. If they don&#x27;t *all* have 3990Xes with 1TB RAM and 3 4k screens yet, heads should roll.<br>
+<p>
+But as a practical matter, I gather from discussion with core devs (a couple of years ago) that it is part of FB&#x27;s received engineering culture to copy dependencies, so there are, e.g., hundreds or thousands of copies of libz scattered throughout their repository, in many, many versions, and likewise now, I expect, libzstd. Btrfs would be able to share blocks for them when unpacked, but maybe not so much so as represented within git?<br>
+<p>
+Imagine the engineering effort just to consolidate all those libz instances, identifying version, bug, and local patch dependencies, while every week more appear. Imagine the effort just to bring them all up to the current release: not a thing to make your CV shine.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/825333/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor825436"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs at Facebook</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 7, 2020 12:15 UTC (Tue)
+                               by <b>jezuch</b> (subscriber, #52988)
+                              [<a href="/Articles/825436/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Git actually deduplicates even binary files - that&#x27;s a convenient side effect of content-addressable storage. Btrfs is in theory able to share extents between identical copies of files, but I think you have to tell it these are copies - automatic deduplication is a work in progress I think?<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/825436/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor825795"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs at Facebook</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 9, 2020 20:51 UTC (Thu)
+                               by <b>khim</b> (subscriber, #9252)
+                              [<a href="/Articles/825795/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <p><b>Useful</b> automatic deduplication is work in progress.</p>
+
+<p>You can run <a href="https://github.com/markfasheh/duperemove/wiki">duperemove</a> in background and everything would be nicely deduplicated but performance would be so awful then you just don't want to do that.</p>
+
+<p>But if that's developer's system you can do that when developer is sleeping - then it works nicely.</p>
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/825795/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+</details>
+</details>
+</details>
+<a name="CommAnchor825205"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs at Facebook</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 3, 2020 14:29 UTC (Fri)
+                               by <b>scientes</b> (guest, #83068)
+                              [<a href="/Articles/825205/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt;  But Btrfs, too, has run into scalability problems with this workload. Messages are tiny, compressed files; they are small enough that the message text is usually stored with the file&#x27;s metadata rather than in a separate data extent. That leads to filesystems with hundreds of gigabytes of metadata and high levels of fragmentation. These problems have been addressed, Bacik said, and it&#x27;s &quot;relatively smooth sailing&quot; now. That said, there are still some issues left to be dealt with, and WhatsApp may not make the switch to Btrfs in the end. </font><br>
+<p>
+This sounds like a perfect use-case of kyotocabinet. I have heard reports that it is rock solid with huge loads, and you also put kyototycoon on top for tcp access (including a memcached-compatible mode).<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/825205/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor825335"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs at Facebook</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 5, 2020 21:51 UTC (Sun)
+                               by <b>ncm</b> (guest, #165)
+                              [<a href="/Articles/825335/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Or, indeed, just about any conventional database.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/825335/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+<a name="CommAnchor825322"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs at Facebook</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 5, 2020 19:02 UTC (Sun)
+                               by <b>caliloo</b> (subscriber, #50055)
+                              [<a href="/Articles/825322/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+Whatsapp was built with erlang, i wouldn’t be surprised this has something to do with their method of message storage....<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/825322/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor825531"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs at Facebook</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 8, 2020 10:22 UTC (Wed)
+                               by <b>intelfx</b> (subscriber, #130118)
+                              [<a href="/Articles/825531/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      <div class="FormattedComment">
+<font class="QuotedText">&gt; Then there is the issue of RAID support, another longstanding problem area for Btrfs. Basic striping and mirroring work well, and have done so for years, he said. RAID 5 and 6 have &quot;lots of edge cases&quot;, though, and have been famously unreliable. These problems, too, are on his list, but solving them will require &quot;lots of work&quot; over the next year or two.</font><br>
+<p>
+I&#x27;d be *really* pleased if this was to happen.<br>
+</div>
+
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/825531/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+<a name="CommAnchor825949"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs at Facebook</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Jul 12, 2020 15:35 UTC (Sun)
+                               by <b>anton</b> (subscriber, #25547)
+                              [<a href="/Articles/825949/">Link</a>] (1 responses)
+      </p>
+      
+      </div>
+      </summary>
+      <blockquote>Basic striping and mirroring work well, and have done so for years</blockquote>
+
+If only btrfs was user-friendly when a drive of a mirror pair fails; instead it gives you one shot at <a href="http://www.complang.tuwien.ac.at/anton/btrfs-raid1.html">dealing with the problem</a>, and on the next reboot becomes irreversably read-only; that was certainly the state of the FAQ when we installed a new server earlier this year.  So we decided to try out ZFS instead, and its handling of a simulated disk failure and replacement was very smooth, hardly perceptible.
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/825949/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    <a name="CommAnchor828582"></a>
+    <details class="CommentBox" open>
+      <summary><h3 class="CommentTitle">Btrfs at Facebook</h3>
+      <div class="AnnLine">
+      <p class="CommentPoster"> Posted Aug 11, 2020 22:17 UTC (Tue)
+                               by <b>redneb</b> (guest, #140746)
+                              [<a href="/Articles/828582/">Link</a>] 
+      </p>
+      
+      </div>
+      </summary>
+      This is not true anymore, it was a bug that was fixed in 4.14 (11/2017). There are <a rel="nofollow" href="https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=21634a19f6467674ef67fba9714c835a1c0a1e67">two</a> <a rel="nofollow" href="https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=4330e183c9537df20952d4a9ee142c536fb8ae54">commits</a> about this and the <a rel="nofollow" href="https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=66ba772ee3119849fcdd8ac9766c6c25ede4a982">pull request</a> says: "degraded read-write mount is allowed if all the raid profile constraints are met, now based on more accurate check".
+      
+          <div class="CommentReplyButton">
+            <form action="/Articles/828582/comment" method="post">
+            <input type="submit" value="Reply to this comment">
+            </form>
+          </div>
+        
+     <p>
+     
+    </details>
+</details>
+
+</div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<ins data-revive-zoneid="12085" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2020, Eklektix, Inc.<BR>
+            This article may be redistributed under the terms of the
+              <a href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+              Commons CC BY-SA 4.0</a> license<br>
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

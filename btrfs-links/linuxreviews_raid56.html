@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html class="client-nojs" lang="en" dir="ltr">
+<head>
+<meta charset="UTF-8"/>
+<title>Btrfs Was Not Meant For RAID5 or 6 - LinuxReviews</title>
+<script>document.documentElement.className="client-js";RLCONF={"wgBreakFrames":!1,"wgSeparatorTransformTable":["",""],"wgDigitTransformTable":["",""],"wgDefaultDateFormat":"dmy","wgMonthNames":["","January","February","March","April","May","June","July","August","September","October","November","December"],"wgRequestId":"aGoAtxrqUldYwjOEOr5lawAAAHc","wgCSPNonce":!1,"wgCanonicalNamespace":"","wgCanonicalSpecialPageName":!1,"wgNamespaceNumber":0,"wgPageName":"Btrfs_Was_Not_Meant_For_RAID5_or_6","wgTitle":"Btrfs Was Not Meant For RAID5 or 6","wgCurRevisionId":18958,"wgRevisionId":18958,"wgArticleId":8667,"wgIsArticle":!0,"wgIsRedirect":!1,"wgAction":"view","wgUserName":null,"wgUserGroups":["*"],"wgCategories":["2021 News Archive","All news"],"wgPageContentLanguage":"en","wgPageContentModel":"wikitext","wgRelevantPageName":"Btrfs_Was_Not_Meant_For_RAID5_or_6","wgRelevantArticleId":8667,"wgIsProbablyEditable":!0,"wgRelevantPageIsProbablyEditable":!0,"wgRestrictionEdit":[],
+"wgRestrictionMove":[],"wgCommentsSortDescending":!1};RLSTATE={"site.styles":"ready","noscript":"ready","user.styles":"ready","user":"ready","user.options":"loading","ext.voteNY.styles":"ready","ext.comments.css":"ready","ext.tmh.player.styles":"ready","ext.socialprofile.responsive":"ready","mediawiki.skinning.interface":"ready","mediawiki.skinning.content.externallinks":"ready","skins.monobook.responsive":"ready"};RLPAGEMODULES=["ext.voteNY.scripts","ext.comments.js","ext.tmh.player","site","mediawiki.page.startup","mediawiki.page.ready","skins.monobook.mobile"];</script>
+<script>(RLQ=window.RLQ||[]).push(function(){mw.loader.implement("user.options@1hzgi",function($,jQuery,require,module){/*@nomin*/mw.user.tokens.set({"patrolToken":"+\\","watchToken":"+\\","csrfToken":"+\\"});
+});});</script>
+<link rel="stylesheet" href="/w/load.php?lang=en&amp;modules=ext.comments.css%7Cext.socialprofile.responsive%7Cext.tmh.player.styles%7Cext.voteNY.styles%7Cmediawiki.skinning.content.externallinks%7Cmediawiki.skinning.interface%7Cskins.monobook.responsive&amp;only=styles&amp;skin=monobook"/>
+<script async="" src="/w/load.php?lang=en&amp;modules=startup&amp;only=scripts&amp;raw=1&amp;skin=monobook"></script>
+<!--[if lt IE 9]><link rel="stylesheet" href="/w/skins/MonoBook/resources/screen-desktop.css?dcdd1" media="screen"/><![endif]--><!--[if IE 6]><link rel="stylesheet" href="/w/skins/MonoBook/resources/IE60Fixes.css?00946" media="screen"/><![endif]--><!--[if IE 7]><link rel="stylesheet" href="/w/skins/MonoBook/resources/IE70Fixes.css?4e4d4" media="screen"/><![endif]-->
+<meta name="generator" content="MediaWiki 1.35.2"/>
+<meta property="og:image" content="https://linuxreviews.org/images/thumb/1/1d/Hdd-domino.mp4/1200px--Hdd-domino.mp4.jpg"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes, minimum-scale=0.25, maximum-scale=5.0"/>
+<link rel="alternate" type="application/x-wiki" title="Edit" href="/w/index.php?title=Btrfs_Was_Not_Meant_For_RAID5_or_6&amp;action=edit"/>
+<link rel="edit" title="Edit" href="/w/index.php?title=Btrfs_Was_Not_Meant_For_RAID5_or_6&amp;action=edit"/>
+<link rel="search" type="application/opensearchdescription+xml" href="/w/opensearch_desc.php" title="LinuxReviews (en)"/>
+<link rel="EditURI" type="application/rsd+xml" href="https://linuxreviews.org/w/api.php?action=rsd"/>
+	<meta property="og:type" content="article"/>
+	<meta property="og:site_name" content="LinuxReviews"/>
+	<meta property="og:title" content="Btrfs Was Not Meant For RAID5 or 6"/>
+	<meta property="og:url" content="https://linuxreviews.org/Btrfs_Was_Not_Meant_For_RAID5_or_6"/>
+    <link rel="alternate" type="application/rss+xml" title="RSS 2.0" href="https://linuxreviews.org/feed.rss" />
+	<meta name="robots" content="max-snippet:-1, max-image-preview:large">
+	<link rel="icon" type="image/png" href="/favicon-32x32.png" sizes="16x16 32x32" />
+	<link rel="icon" type="image/png" href="/favicon-64x64.png" sizes="48x48 64x64 " />
+	<link rel="icon" type="image/png" href="/favicon-256x256.png" sizes="128x128 256x256" />
+	<link rel="apple-touch-icon"      href="/apple-touch-icon.png">
+    <meta name="flattr:id" content="rlejdy">
+
+<script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+<script>
+     (adsbygoogle = window.adsbygoogle || []).push({
+          google_ad_client: "ca-pub-7707288103057160",
+          enable_page_level_ads: true
+     });
+</script>
+
+<!--[if lt IE 9]><script src="/w/resources/lib/html5shiv/html5shiv.js"></script><![endif]-->
+</head>
+<body class="mediawiki ltr sitedir-ltr mw-hide-empty-elt ns-0 ns-subject mw-editable page-Btrfs_Was_Not_Meant_For_RAID5_or_6 rootpage-Btrfs_Was_Not_Meant_For_RAID5_or_6 skin-monobook action-view"><div id="globalWrapper"><div id="column-content"><div id="content" class="mw-body" role="main"><a id="top"></a>
+<div class="topAdvertisement"><script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+<!-- LinuxReviews Desktop TopRH -->
+<ins class="adsbygoogle"
+     style="display:block"
+     data-ad-client="ca-pub-7707288103057160"
+     data-ad-slot="5516996481"
+     data-ad-format="auto"
+     data-full-width-responsive="true"></ins>
+<script>
+     (adsbygoogle = window.adsbygoogle || []).push({});
+</script></div>
+<h1 id="firstHeading" class="firstHeading" lang="en">Btrfs Was Not Meant For RAID5 or 6</h1><div id="bodyContent" class="mw-body-content"><div id="siteSub">From LinuxReviews</div><div id="contentSub" lang="en" dir="ltr"></div><div id="jump-to-nav"></div><a href="#column-one" class="mw-jump-link">Jump to navigation</a><a href="#searchInput" class="mw-jump-link">Jump to search</a><!-- start content --><div id="mw-content-text" lang="en" dir="ltr" class="mw-content-ltr"><div class="mw-parser-output"><div style="float:left;"><div class="floatleft"><img alt="Hdd-icon.png" src="/images/thumb/b/b5/Hdd-icon.png/32px-Hdd-icon.png" decoding="async" width="32" height="32" srcset="/images/thumb/b/b5/Hdd-icon.png/48px-Hdd-icon.png 1.5x, /images/thumb/b/b5/Hdd-icon.png/64px-Hdd-icon.png 2x" /></div></div><p> The mkfs.btrfs utility in the btrfs-progs package will now warn you if you try to create a RAID5 or RAID6 array using btrfs as of the newly released btrfs-progs 5.11. The manual page has long warned that such btrfs arrays are "considered experimental and shouldn’t be employed for production use".
+</p><p><small><i>written by <a href="/User:Chaekyung" title="User:Chaekyung">윤채경 (Yoon Chae-kyung)</a> &#160;2021-03-11 -&#160;last edited 2021-03-11.</i></small>  <small><i><a href="/Creative_Commons#Attribution_.28CC_BY.29" title="Creative Commons">&#169; CC BY</a></i></small>
+</p><p><video id="mwe_player_0" poster="/images/thumb/1/1d/Hdd-domino.mp4/800px--Hdd-domino.mp4.jpg" controls="" preload="none" width="800" height="450" data-durationhint="2.987" data-startoffset="0" data-mwtitle="Hdd-domino.mp4" data-mwprovider="local"><source src="/images/transcoded/1/1d/Hdd-domino.mp4/Hdd-domino.mp4.480p.vp9.webm" type="video/webm; codecs=&quot;vp9, opus&quot;" data-title="SD VP9 (480P)" data-shorttitle="VP9 480P" data-transcodekey="480p.vp9.webm" data-width="854" data-height="480" data-bandwidth="1247184" data-framerate="29.723" /><source src="/images/transcoded/1/1d/Hdd-domino.mp4/Hdd-domino.mp4.720p.vp9.webm" type="video/webm; codecs=&quot;vp9, opus&quot;" data-title="HD VP9 (720P)" data-shorttitle="VP9 720P" data-transcodekey="720p.vp9.webm" data-width="1280" data-height="720" data-bandwidth="2502568" data-framerate="29.723" /><source src="/images/transcoded/1/1d/Hdd-domino.mp4/Hdd-domino.mp4.1080p.vp9.webm" type="video/webm; codecs=&quot;vp9, opus&quot;" data-title="Full HD VP9 (1080P)" data-shorttitle="VP9 1080P" data-transcodekey="1080p.vp9.webm" data-width="1920" data-height="1080" data-bandwidth="5226256" data-framerate="29.723" /><source src="/images/1/1d/Hdd-domino.mp4" type="video/mp4; codecs=&quot;avc1.42E01E, mp4a.40.2&quot;" data-title="Original MP4 file, 1,920 × 1,080 (20.09 Mbps)" data-shorttitle="MP4 source" data-width="1920" data-height="1080" data-bandwidth="20087673" data-framerate="29.723" /><source src="/images/transcoded/1/1d/Hdd-domino.mp4/Hdd-domino.mp4.360p.vp9.webm" type="video/webm; codecs=&quot;vp9, opus&quot;" data-title="VP9 (360P)" data-shorttitle="VP9 360P" data-transcodekey="360p.vp9.webm" data-width="640" data-height="360" data-bandwidth="722568" data-framerate="29.723" /></video><br /><i>Don't do this unless you're using old very dead HDDs.</i>
+</p><p>Using RAID is a very good idea. Not because it is the same as having a backup, it isn't. RAID is a good idea because it saves downtime. If one drive fails in a RAID6 array created with <a href="/Mdadm" title="Mdadm">mdadm</a> then you're good until a second drive dies and you can simply order a replacement. And there won't be any downtime when the replacement arrives, you can use a RAID6 array normally while it is rebuilding. If a single drive fails and you happen to have a recent backup then you're without a drive while you wait for a replacement and you'll have to restore the contents of it from backup when the replacement arrives. This is why it is a good idea to have <i>everything</i> in a RAID setup. 
+</p><p>RAID1, a RAID mode that mirrors two drives, is a good solution for root file systems where binaries and libraries are stored. RAID6 is a good solution for storage drives if you happen to have 5 or more. RAID5 shouldn't really be used by anyone, ever, unless you have 3 identical disks and you can't afford two more (or your motherboard or case limits the number of drives you can have).
+</p><p>RAID-arrays are best made using <a href="/Mdadm" title="Mdadm">mdadm</a> on Linux machines. mdadm is very well supported, very mature and you can restore mdadm arrays using any box that happens to be able to connect the drives you are using if you motherboard dies due to a bad capacitor or something like that.
+</p><p>The Btrfs file-system lets you create RAID arrays directly, without a separate layer beneath it. The mdadm way creates a array block device that can be used to create a XFS or ext4 file system; btrfs lets you skip mdadm and create RAID arrays that are managed and controlled by btrfs.
+</p><p>The Btrfs wiki has <a href="https://btrfs.wiki.kernel.org/index.php/RAID56" class="extiw" title="btrfs:RAID56">an entry for RAID56</a>. It has long said that:
+</p>
+<div style="padding-left:10px;padding-right:10px;background: #f4f8ff;">
+<div style="font-style:italic;">
+<p><span style="font-size: 120%;">"</span>the parity RAID code is not suitable for any system which might encounter unplanned shutdowns (power failure, kernel lock-up), and it should not be considered production-ready.<span style="font-size: 120%;">"</span>
+</p>
+</div><i><div style="text-align:right;border-top:1px dotted black;"><a href="https://btrfs.wiki.kernel.org/index.php/RAID56" class="extiw" title="btrfs:RAID56">btrfs wiki on RAID56</a></div></i>
+</div>
+<p>The <code>mkfs.btrfs</code> <a class="external text" href="https://man.linuxreviews.org/man8/mkfs.btrfs.8.html">manual page</a> has also warned against btrfs RAID5 and RAID6 arrays for years and years:
+</p>
+<div style="padding-left:10px;padding-right:10px;background: #f4f8ff;">
+<div style="font-style:italic;">
+<p><span style="font-size: 120%;">"</span>RAID5/6 is still considered experimental and shouldn’t be employed for production use.<span style="font-size: 120%;">"</span>
+</p>
+</div><i><div style="text-align:right;border-top:1px dotted black;"><a class="external text" href="https://man.linuxreviews.org/man8/mkfs.btrfs.8.html">the mkfs.btrfs manual page</a></div></i>
+</div>
+<p>People have, for some reason, created RAID5 and RAID6 arrays with mkfs.btrfs anyway. Those people have, in cases where unforeseen things like power outages, kernel crashes and other unclean shutdowns have taken place, learned that it is not a good idea the hard way.
+</p><p><b>btrfs-progs version 5.11, released on March 5th, will now warn users who try to create RAID5 and RAID6 arrays using <code>mkfs.btrfs</code>.</b> The warning, which reads:
+</p>
+<div style="padding-left:10px;padding-right:10px;background: #f4f8ff;">
+<div style="font-style:italic;">
+<p><span style="font-size: 120%;">"</span>RAID5/6 support has known problems is strongly discouraged to be used besides testing or evaluation.<span style="font-size: 120%;">"</span>
+</p>
+</div><i><div style="text-align:right;border-top:1px dotted black;">mkfs/main.c in btrfs-progs-v5.11</div></i>
+</div>
+<p><a href="https://linuxreviews.org/images/2/22/Btrfs.mkfs.main.jpg"><img alt="Btrfs.mkfs.main.jpg" src="/images/thumb/2/22/Btrfs.mkfs.main.jpg/900px-Btrfs.mkfs.main.jpg" decoding="async" width="900" height="459" srcset="/images/thumb/2/22/Btrfs.mkfs.main.jpg/1350px-Btrfs.mkfs.main.jpg 1.5x, /images/thumb/2/22/Btrfs.mkfs.main.jpg/1800px-Btrfs.mkfs.main.jpg 2x" /></a><br /><i>mkfs/main.c from btrfs-progs-v5.11.</i>
+</p><p>We encourage our readers to take the numerous warnings against btrfs RAID5/6 arrays seriously. It is, of course, possible to create standard Linux software RAID arrays with <a href="/Mdadm" title="Mdadm">mdadm</a> and put btrfs on top of those if you really want to use btrfs. <a href="/XFS" title="XFS">XFS</a> is also a great file system for larger RAID arrays that will mostly store large files. There is one very annoying pitfall worth being very aware of before deploying XFS anywhere: You can't <i>shrink</i> XFS file systems. You can shrink btrfs, ext4 and a few other file systems and that may be an advantage down the road.
+</p><p>If you already have a btrfs RAID5 or RAID6 array for some reason then you may want to consider re-creating it as a <a href="/Mdadm" title="Mdadm">mdadm</a> array. That is not as easy as it sounds, you will have to copy everything onto another disk or array and re-create a new array from scratch. It may be worth if you don't want to lose all your data if there is a power outage or you get a kernel panic or something else bad happens.
+</p><p>The source for btrfs 5.11, and other versions, can be found at <a class="external text" href="https://mirrors.edge.kernel.org/pub/linux/kernel/people/kdave/btrfs-progs/">mirrors.edge.kernel.org/pub/linux/kernel/people/kdave/btrfs-progs/</a>.
+</p>
+<div id="rating_"><div class="rating-score"><div class="voteboxrate">5.00</div></div><div class="rating-section"><img class="vote-rating-star" data-vote-the-vote="1" data-page-id="8667" data-vote-id="" data-vote-action="3" data-vote-rating="5.00" data-vote-voted="0" id="rating__1" src="/w/extensions/VoteNY/resources/images/star_on.gif" alt="" /><img class="vote-rating-star" data-vote-the-vote="2" data-page-id="8667" data-vote-id="" data-vote-action="3" data-vote-rating="5.00" data-vote-voted="0" id="rating__2" src="/w/extensions/VoteNY/resources/images/star_on.gif" alt="" /><img class="vote-rating-star" data-vote-the-vote="3" data-page-id="8667" data-vote-id="" data-vote-action="3" data-vote-rating="5.00" data-vote-voted="0" id="rating__3" src="/w/extensions/VoteNY/resources/images/star_on.gif" alt="" /><img class="vote-rating-star" data-vote-the-vote="4" data-page-id="8667" data-vote-id="" data-vote-action="3" data-vote-rating="5.00" data-vote-voted="0" id="rating__4" src="/w/extensions/VoteNY/resources/images/star_on.gif" alt="" /><img class="vote-rating-star" data-vote-the-vote="5" data-page-id="8667" data-vote-id="" data-vote-action="3" data-vote-rating="5.00" data-vote-voted="0" id="rating__5" src="/w/extensions/VoteNY/resources/images/star_on.gif" alt="" /> <span class="rating-total">(2 votes)</span></div>
+				<div class="rating-clear">
+			</div></div><div class="comments-body"><div class="c-order">
+			<div class="c-order-select">
+<p class="mw-empty-elt">				</p><form name="ChangeOrder" action="">
+					<select name="TheOrder">
+						<option value="0">Sort by date</option>
+						<option value="1">Sort by score</option>
+					</select>
+				</form>
+<p class="mw-empty-elt"></p>
+			</div>
+			<div id="spy" class="c-spy">
+<p>				<a href="javascript:void(0)">Enable comment auto-refresher</a>
+</p>
+			</div>
+			<div class="visualClear"></div><br />
+		</div>
+<div id="allcomments"><a id="cfirst" name="cfirst" rel="nofollow"></a><div id="ignore-2386" class="c-ignored full" style="display:none;">
+You are ignoring the author of this comment<div class="c-ignored-links">
+<a href="javascript:void(0);" data-comment-id="2386">Show comment</a> | <a href="https://linuxreviews.org/Special:CommentIgnoreList">Manage ignore list</a></div>
+</div>
+<div id="comment-2386" class="c-item full">
+<div class="c-avatar"><img src="/images/avatars/default_avatar_ml-9.jpg" border="0" class="mw-socialprofile-avatar" alt="avatar" />
+</div>
+<div class="c-container">
+<div class="c-user">
+<p>Anonymous  (9b205871fa)<span class="c-user-level"></span> 
+</p>
+<div class="c-time">41 months  ago</div>
+<div class="c-score">
+<span class="c-score-title">Score <span id="Comment2386">0</span></span> </div>
+</div>
+<div class="c-comment f-message">
+Raid 5 with a UPS pretty much solves the problem.</div>
+<div class="c-actions">
+<p><a href="https://linuxreviews.org/Btrfs_Was_Not_Meant_For_RAID5_or_6#comment-2386" rel="nofollow">Permalink</a>  | <a href="#replyto" rel="nofollow" class="comments-reply-to" data-comment-id="2386" data-comments-safe-username="Anonymous" data-comments-user-gender="unknown">Reply</a> 
+</p>
+</div>
+</div>
+<div class="visualClear"></div>
+</div>
+<div id="ignore-2391" class="c-ignored full" style="display:none;">
+You are ignoring the author of this comment<div class="c-ignored-links">
+<a href="javascript:void(0);" data-comment-id="2391">Show comment</a> | <a href="https://linuxreviews.org/Special:CommentIgnoreList">Manage ignore list</a></div>
+</div>
+<div id="comment-2391" class="c-item full">
+<div class="c-avatar"><img src="/images/avatars/default_avatar_ml-9.jpg" border="0" class="mw-socialprofile-avatar" alt="avatar" />
+</div>
+<div class="c-container">
+<div class="c-user">
+<p>Anonymous  (9b2057a55e)<span class="c-user-level"></span> 
+</p>
+<div class="c-time">41 months  ago</div>
+<div class="c-score">
+<span class="c-score-title">Score <span id="Comment2391">0</span></span> </div>
+</div>
+<div class="c-comment f-message">
+<p>Raid 5 with a UPS pretty much solves the problem.  What I mean is that vanishingly small write-hole pretty much disappears if you can get the machine to shut down correctly. It doesn't bother me at all because I use BTRFS raid 5 for backup and stuff I can easily replace.  It's magic very easy to swap out disks, even if they are of different sizes.  I think too much is made out of the raid 5/6 write-hole.
+</p><p>You have to have both an unclean shutdown and a disk failure at the same time.  Both of which are pretty rare, and having both happen at the same time would be very rare.  Like I said, if you use a properly configured UPS, you almost completely eliminate the problem.
+</p><p>Here's a link to an article where a guy was trying really hard to trigger a write-hole incident, try as he might, he couldn't get it to happen:  <a class="external free" href="https://www.unixsheikh.com/articles/battle-testing-data-integrity-verification-with-zfs-btrfs-and-mdadm-dm-integrity.html">https://www....tegrity.html</a>
+</p>
+The BTRFS team just needs to update the wiki and declare raid 5/6 stable.  Even still, have backups.  :)</div>
+<div class="c-actions">
+<p><a href="https://linuxreviews.org/Btrfs_Was_Not_Meant_For_RAID5_or_6#comment-2391" rel="nofollow">Permalink</a>  | <a href="#replyto" rel="nofollow" class="comments-reply-to" data-comment-id="2391" data-comments-safe-username="Anonymous" data-comments-user-gender="unknown">Reply</a> 
+</p>
+</div>
+</div>
+<div class="visualClear"></div>
+</div>
+<div id="ignore-2392" class="c-ignored full" style="display:none;">
+You are ignoring the author of this comment<div class="c-ignored-links">
+<a href="javascript:void(0);" data-comment-id="2392">Show comment</a> | <a href="https://linuxreviews.org/Special:CommentIgnoreList">Manage ignore list</a></div>
+</div>
+<div id="comment-2392" class="c-item full">
+<div class="c-avatar"><img src="/images/avatars/default_avatar_ml-9.jpg" border="0" class="mw-socialprofile-avatar" alt="avatar" />
+</div>
+<div class="c-container">
+<div class="c-user">
+<p>Anonymous  (9b2057a55e)<span class="c-user-level"></span> 
+</p>
+<div class="c-time">41 months  ago</div>
+<div class="c-score">
+<span class="c-score-title">Score <span id="Comment2392">0</span></span> </div>
+</div>
+<div class="c-comment f-message">
+Here is a reddit thread where people are discussing the lack of the write-hole in btrfs raid5:<a class="external free" href="https://www.reddit.com/r/btrfs/comments/etvu03/provoking_the_write_hole_issue/">https://www...._hole_issue/</a></div>
+<div class="c-actions">
+<p><a href="https://linuxreviews.org/Btrfs_Was_Not_Meant_For_RAID5_or_6#comment-2392" rel="nofollow">Permalink</a>  | <a href="#replyto" rel="nofollow" class="comments-reply-to" data-comment-id="2392" data-comments-safe-username="Anonymous" data-comments-user-gender="unknown">Reply</a> 
+</p>
+</div>
+</div>
+<div class="visualClear"></div>
+</div>
+<div id="ignore-2406" class="c-ignored full" style="display:none;">
+You are ignoring the author of this comment<div class="c-ignored-links">
+<a href="javascript:void(0);" data-comment-id="2406">Show comment</a> | <a href="https://linuxreviews.org/Special:CommentIgnoreList">Manage ignore list</a></div>
+</div>
+<div id="comment-2406" class="c-item full">
+<div class="c-avatar"><img src="/images/avatars/default_avatar_ml-6.jpg" border="0" class="mw-socialprofile-avatar" alt="avatar" />
+</div>
+<div class="c-container">
+<div class="c-user">
+<p>Anonymous  (62c7bc3089)<span class="c-user-level"></span> 
+</p>
+<div class="c-time">41 months  ago</div>
+<div class="c-score">
+<span class="c-score-title">Score <span id="Comment2406">0</span></span> </div>
+</div>
+<div class="c-comment f-message">
+<p>This only begins to cover the issues with RAID5/6 support.
+</p><p>There's an open bug, if you have a parity error, then BTRFS will, some percentage of the time (3%? 10%?), corrupt good blocks - making the parity error that was previously correctable, uncorrectable. (Actually, mdadm will do this on RAID6 as well - it doesn't check that the data is intact by checking existing parity, it assumes whatever disk you re-add has correct parity, and a scrub will recalculate that parity across the array without comparing the data + 1parity that is available.)
+</p><p><a class="external free" href="https://www.spinics.net/lists/linux-btrfs/msg94594.html">https://www....sg94594.html</a>
+</p><p>It's probably a not-too-difficult error to find/fix. It seems to not check the checksum of individual RAID blocks per-disk in the stripe (can it do that?). On a stripe checksum issue, it will just rewrite the whole stripe based on whatever is there - without re-checking checksum (and so without examining to see which device might be incorrect).
+</p><p>This system does not work as suggested. If you have no issues, it will work. If you encounter corruption, you will lose some percentage of your data on recovery. It is good for testing only, maybe comparison with other filesystems for performance.
+</p>
+Other filesystems (not advertising) have a mature 2-redundant-device implementation, with checksumming.</div>
+<div class="c-actions">
+<p><a href="https://linuxreviews.org/Btrfs_Was_Not_Meant_For_RAID5_or_6#comment-2406" rel="nofollow">Permalink</a>  | <a href="#replyto" rel="nofollow" class="comments-reply-to" data-comment-id="2406" data-comments-safe-username="Anonymous" data-comments-user-gender="unknown">Reply</a> 
+</p>
+</div>
+</div>
+<div class="visualClear"></div>
+</div>
+</div><a id="end" rel="nofollow"></a><form action="" method="post" name="commentForm">
+<div class="c-form-title">Add your comment</div>
+<div id="replyto" class="c-form-reply-to"></div>
+<div class="c-form-message">LinuxReviews welcomes <b>all comments</b>. If you do not want to be anonymous, <a href="https://linuxreviews.org/Special:UserLogin/signup">register</a> or <a href="https://linuxreviews.org/Special:UserLogin">log in</a>. It is free.</div>
+<p><textarea name="commentText" id="comment" rows="5" cols="64"></textarea>
+</p>
+<div class="comment-preview"></div><div class="c-form-button"><input type="button" value="Post comment" class="site-button" name="wpSubmitComment" />
+<input type="button" value="Show preview" class="site-button" name="wpPreview" /></div>
+<p><input type="hidden" name="action" value="purge" />
+<input type="hidden" name="pageId" value="8667" />
+<input type="hidden" name="commentid" />
+<input type="hidden" name="lastCommentId" value="2406" />
+<input type="hidden" name="commentParentId" />
+<input type="hidden" name="cpage" value="1" />
+<input type="hidden" value="+\" name="token" /></p></form>
+<p class="mw-empty-elt"></p>
+</div><div class="box navigation-not-searchable noprint"><b>Latest News Headlines</b>
+<ul><li><a href="/Monero_P2Pool_V1.0_Is_Released" title="Monero P2Pool V1.0 Is Released">Monero P2Pool V1.0 Is Released</a></li><li><a href="/Macs_%26_MacOS:_Greener_Grass%3F" title="Macs &amp; MacOS: Greener Grass?">Macs &amp; MacOS: Greener Grass?</a></li><li><a href="/Privacy_vs_%22I_have_nothing_to_hide%22" title="Privacy vs &quot;I have nothing to hide&quot;">Privacy vs &quot;I have nothing to hide&quot;</a></li><li><a href="/GIMP_2.99.6_Is_Released" title="GIMP 2.99.6 Is Released">GIMP 2.99.6 Is Released</a></li><li><a href="/Tor_0.4.5.8_Is_Released" title="Tor 0.4.5.8 Is Released">Tor 0.4.5.8 Is Released</a></li><li><a href="/New_Versions_Of_The_GNUstep_Base_Library,_GUI_library,_GUI_Backend_And_GNUstep_Gorm_Are_Released" title="New Versions Of The GNUstep Base Library, GUI library, GUI Backend And GNUstep Gorm Are Released">New Versions Of The GNUstep Base Library, GUI library, GUI Backend And GNUstep Gorm Are Released</a></li><li><a href="/AMDVLK_2021.Q2.2_Driver_Is_Re-Compiled_And_Re-Released" title="AMDVLK 2021.Q2.2 Driver Is Re-Compiled And Re-Released">AMDVLK 2021.Q2.2 Driver Is Re-Compiled And Re-Released</a></li></ul><i>See the <a href="/News" title="News">more archive for news stories</a></i></div>
+
+<!-- 
+NewPP limit report
+Cached time: 20250706045104
+Cache expiry: 0
+Dynamic content: true
+Complications: []
+CPU time usage: 0.130 seconds
+Real time usage: 0.136 seconds
+Preprocessor visited node count: 145/1000000
+Post‐expand include size: 4710/2097152 bytes
+Template argument size: 1046/2097152 bytes
+Highest expansion depth: 8/40
+Expensive parser function count: 0/100
+Unstrip recursion depth: 0/20
+Unstrip post‐expand size: 10383/5000000 bytes
+-->
+<!--
+Transclusion expansion time report (%,ms,calls,template)
+100.00%   91.392      1 -total
+ 78.53%   71.773      1 Template:Newsfooter
+ 21.69%   19.824      1 Template:Latestnewsheadlines
+  7.22%    6.597      1 Template:Bychaekyung
+  5.25%    4.801      3 Template:Quote
+  5.10%    4.663      1 Template:Written_by_cc-by
+  3.59%    3.280      1 Template:Fullsizeimage
+  3.05%    2.786      1 Template:Written_by
+  2.13%    1.948      1 Template:Icon
+  2.02%    1.849      1 Template:Video
+-->
+</div></div><div class="printfooter">
+Retrieved from "<a dir="ltr" href="https://linuxreviews.org/w/index.php?title=Btrfs_Was_Not_Meant_For_RAID5_or_6&amp;oldid=18958">https://linuxreviews.org/w/index.php?title=Btrfs_Was_Not_Meant_For_RAID5_or_6&amp;oldid=18958</a>"</div>
+
+<div class="bottomAdvertisement"><script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+<!-- LinuxReviws Desktop Bottom RH -->
+<ins class="adsbygoogle"
+     style="display:block"
+     data-ad-client="ca-pub-7707288103057160"
+     data-ad-slot="2510033216"
+     data-ad-format="auto"
+     data-full-width-responsive="true"></ins>
+<script>
+     (adsbygoogle = window.adsbygoogle || []).push({});
+</script></div>
+<div id="catlinks" class="catlinks" data-mw="interface"><div id="mw-normal-catlinks" class="mw-normal-catlinks"><a href="/Special:Categories" title="Special:Categories">Categories</a>: <ul><li><a href="/Category:2021_News_Archive" title="Category:2021 News Archive">2021 News Archive</a></li><li><a href="/Category:All_news" title="Category:All news">All news</a></li></ul></div></div><!-- end content --><div class="visualClear"></div></div></div></div><div id="column-one" lang="en" dir="ltr"><h2>Navigation menu</h2><div role="navigation" class="portlet" id="p-cactions" aria-labelledby="p-cactions-label"><h3 id="p-cactions-label" lang="en" dir="ltr">Page actions</h3><div class="pBody"><ul lang="en" dir="ltr"><li id="ca-nstab-main" class="selected"><a href="/Btrfs_Was_Not_Meant_For_RAID5_or_6" title="View the content page [c]" accesskey="c">Page</a></li><li id="ca-talk" class="new"><a href="/w/index.php?title=Talk:Btrfs_Was_Not_Meant_For_RAID5_or_6&amp;action=edit&amp;redlink=1" rel="discussion" title="Discussion about the content page (page does not exist) [t]" accesskey="t">Discussion</a></li><li id="ca-edit"><a href="/w/index.php?title=Btrfs_Was_Not_Meant_For_RAID5_or_6&amp;action=edit" title="Edit this page [e]" accesskey="e">Edit</a></li><li id="ca-history"><a href="/w/index.php?title=Btrfs_Was_Not_Meant_For_RAID5_or_6&amp;action=history" title="Past revisions of this page [h]" accesskey="h">History</a></li></ul></div></div><div role="navigation" class="portlet" id="p-cactions-mobile" aria-labelledby="p-cactions-mobile-label"><h3 id="p-cactions-mobile-label" lang="en" dir="ltr">Page actions</h3><div class="pBody"><ul lang="en" dir="ltr"><li id="ca-nstab-main-mobile" class="selected"><a href="/Btrfs_Was_Not_Meant_For_RAID5_or_6" title="Page">Page</a></li><li id="ca-talk-mobile" class="new"><a href="/w/index.php?title=Talk:Btrfs_Was_Not_Meant_For_RAID5_or_6&amp;action=edit&amp;redlink=1" rel="discussion" title=" (page does not exist)">Discussion</a></li><li id="ca-more"><a href="#p-cactions">More</a></li><li id="ca-tools"><a href="#p-tb" title="Tools">Tools</a></li></ul></div></div><div role="navigation" class="portlet" id="p-personal" aria-labelledby="p-personal-label"><h3 id="p-personal-label" lang="en" dir="ltr">Personal tools</h3><div class="pBody"><ul lang="en" dir="ltr"><li id="pt-anonuserpage">Not logged in</li><li id="pt-anontalk"><a href="/Special:MyTalk" title="Discussion about edits from this IP address [n]" accesskey="n">Talk</a></li><li id="pt-anoncontribs"><a href="/Special:MyContributions" title="A list of edits made from this IP address [y]" accesskey="y">Contributions</a></li><li id="pt-createaccount"><a href="/w/index.php?title=Special:CreateAccount&amp;returnto=Btrfs+Was+Not+Meant+For+RAID5+or+6" title="You are encouraged to create an account and log in; however, it is not mandatory">Create account</a></li><li id="pt-login"><a href="/w/index.php?title=Special:UserLogin&amp;returnto=Btrfs+Was+Not+Meant+For+RAID5+or+6" title="You are encouraged to log in; however, it is not mandatory [o]" accesskey="o">Log in</a></li></ul></div></div><div class="portlet" id="p-logo" role="banner"><a href="/LinuxReviews" class="mw-wiki-logo" title="Visit the main page"></a></div><div id="sidebar"><div role="search" class="portlet" id="p-search"><h3 id="p-search-label" lang="en" dir="ltr"><label for="searchInput">Search</label></h3><div class="pBody" id="searchBody"><form action="/w/index.php" id="searchform"><input type="hidden" value="Special:Search" name="title"/><input type="search" name="search" placeholder="Search LinuxReviews" title="Search LinuxReviews [f]" accesskey="f" id="searchInput"/><input type="submit" name="go" value="Go" title="Go to a page with this exact name if it exists" id="searchGoButton" class="searchButton"/>&#160; <input type="submit" name="fulltext" value="Search" title="Search the pages for this text" id="mw-searchButton" class="searchButton"/></form></div></div><div role="navigation" class="portlet generated-sidebar" id="p-navigation" aria-labelledby="p-navigation-label"><h3 id="p-navigation-label" lang="en" dir="ltr">Navigation</h3><div class="pBody"><ul lang="en" dir="ltr"><li id="n-Front-Page"><a href="/LinuxReviews">Front Page</a></li><li id="n-Breaking-News"><a href="/News">Breaking News</a></li><li id="n-Software-Reviews"><a href="/Latest_Software_Reviews">Software Reviews</a></li><li id="n-Game-Reviews"><a href="/Games">Game Reviews</a></li><li id="n-K-pop-news"><a href="/K-pop_news">K-pop news</a></li></ul></div></div><div role="navigation" class="portlet generated-sidebar" id="p-fun_free_games" aria-labelledby="p-fun_free_games-label"><h3 id="p-fun_free_games-label" lang="en" dir="ltr">fun free games</h3><div class="pBody"><ul lang="en" dir="ltr"><li id="n-Chess"><a href="/Chess_games">Chess</a></li><li id="n-Racing-games"><a href="/Racing_games">Racing games</a></li><li id="n-Blue-Nebula"><a href="/Blue_Nebula">Blue Nebula</a></li><li id="n-Teeworlds"><a href="/Teeworlds">Teeworlds</a></li><li id="n-Gbrainy"><a href="/Gbrainy">Gbrainy</a></li><li id="n-Solitaire"><a href="/KPatience">Solitaire</a></li><li id="n-Secret-Chronicles-of-Dr.-M."><a href="/The_Secret_Chronicles_of_Dr._M.">Secret Chronicles of Dr. M.</a></li><li id="n-SuperTux"><a href="/SuperTux">SuperTux</a></li><li id="n-SuperTuxKart"><a href="/SuperTuxKart">SuperTuxKart</a></li><li id="n-Unvanquished"><a href="/Unvanquished">Unvanquished</a></li></ul></div></div><div role="navigation" class="portlet generated-sidebar" id="p-software_benchmarks" aria-labelledby="p-software_benchmarks-label"><h3 id="p-software_benchmarks-label" lang="en" dir="ltr">software benchmarks</h3><div class="pBody"><ul lang="en" dir="ltr"><li id="n-Web-Browser-Performance-Round-Up-April-2021"><a href="/Web_Browser_Performance_Round-Up_April_2021">Web Browser Performance Round-Up April 2021</a></li><li id="n-bzip2-vs-lzip-vs-xz"><a href="/Comparison_of_Compression_Algorithms">bzip2 vs lzip vs xz</a></li></ul></div></div><div role="navigation" class="portlet generated-sidebar" id="p-educational_videos" aria-labelledby="p-educational_videos-label"><h3 id="p-educational_videos-label" lang="en" dir="ltr">educational videos</h3><div class="pBody"><ul lang="en" dir="ltr"><li id="n-Arch-Conf-2020"><a href="/Arch_Conf_2020">Arch Conf 2020</a></li><li id="n-Fosdem-2021"><a href="/Fosdem_2021">Fosdem 2021</a></li><li id="n-LibrePlanet-2021"><a href="/LibrePlanet_2021">LibrePlanet 2021</a></li><li id="n-X.Org-Developers-Conference-2020"><a href="/X.Org_Developers_Conference_2020">X.Org Developers Conference 2020</a></li><li id="n-Lectures-by-Richard-Stallman"><a href="/Category:Lectures_by_Richard_Stallman">Lectures by Richard Stallman</a></li></ul></div></div><div role="navigation" class="portlet generated-sidebar" id="p-Comparisons" aria-labelledby="p-Comparisons-label"><h3 id="p-Comparisons-label" lang="en" dir="ltr">Comparisons</h3><div class="pBody"><ul lang="en" dir="ltr"><li id="n-BitTorrent-clients"><a href="/BitTorrent_clients_compared">BitTorrent clients</a></li><li id="n-Desktop-Environments"><a href="/Comparison_of_GNU/Linux_desktop_environments">Desktop Environments</a></li><li id="n-Image-Viewers"><a href="/Comparison_of_Image_Viewers">Image Viewers</a></li><li id="n-Video-Editors"><a href="/Linux_Video_Editor_Comparison">Video Editors</a></li><li id="n-RSS-feed-readers"><a href="/RSS_feed_reader_comparison:_The_best_newsfeed_readers_on_GNU/Linux">RSS feed readers</a></li><li id="n-System-Monitoring-Programs"><a href="/Comparison_Of_System_Monitoring_Programs">System Monitoring Programs</a></li></ul></div></div><div role="navigation" class="portlet generated-sidebar" id="p-Great_software" aria-labelledby="p-Great_software-label"><h3 id="p-Great_software-label" lang="en" dir="ltr">Great software</h3><div class="pBody"><ul lang="en" dir="ltr"><li id="n-Cantata-mpd-music-player"><a href="/Cantata">Cantata mpd music player</a></li><li id="n-mpv-media-player"><a href="/Mpv">mpv media player</a></li></ul></div></div><div role="navigation" class="portlet generated-sidebar" id="p-for_beginners" aria-labelledby="p-for_beginners-label"><h3 id="p-for_beginners-label" lang="en" dir="ltr">for beginners</h3><div class="pBody"><ul lang="en" dir="ltr"><li id="n-Bash-Guide-for-Beginners"><a href="/Bash_Guide_for_Beginners">Bash Guide for Beginners</a></li><li id="n-Learn-to-touch-type"><a href="/Learn_to_touch-type_with_KDE_Typewriting_Trainer">Learn to touch-type</a></li><li id="n-Learn-to-compress-and-decompress-archives-with-tar"><a href="/Tar">Learn to compress and decompress archives with tar</a></li><li id="n-Learn-how-to-convert-video-files-with-ffmpeg"><a href="/HOWTO_Convert_video_files">Learn how to convert video files with ffmpeg</a></li><li id="n-Make-GIMPs-interface-colorful-and-happy"><a href="/HOWTO_make_GIMPs_interface_colorful_and_happy_(again)">Make GIMPs interface colorful and happy</a></li><li id="n-Learn-to-lists-the-ports-a-system-is-listening-on"><a href="/HOWTO_lists_the_ports_a_system_is_listening_on">Learn to lists the ports a system is listening on</a></li></ul></div></div><div role="navigation" class="portlet generated-sidebar" id="p-cheat_sheets" aria-labelledby="p-cheat_sheets-label"><h3 id="p-cheat_sheets-label" lang="en" dir="ltr">cheat sheets</h3><div class="pBody"><ul lang="en" dir="ltr"><li id="n-Bourne-Shell-Reference"><a href="/Bourne_Shell_Reference">Bourne Shell Reference</a></li><li id="n-Tao-of-Regular-Expressions"><a href="/Tao_of_Regular_Expressions">Tao of Regular Expressions</a></li><li id="n-Magic-Command-Line-Collection"><a href="/Magic_Command_Line_Collection">Magic Command Line Collection</a></li></ul></div></div><div role="navigation" class="portlet generated-sidebar" id="p-HOWTO" aria-labelledby="p-HOWTO-label"><h3 id="p-HOWTO-label" lang="en" dir="ltr">HOWTO</h3><div class="pBody"><ul lang="en" dir="ltr"><li id="n-see-a-games-FPS-Second-and-other-data-in-a-HUD-overlay"><a href="/HOWTO_See_A_Games_Frames_Per_Second_And_Other_Data_In_A_HUD_Overlay">see a games FPS Second and other data in a HUD overlay</a></li><li id="n-use-the-numeric-keyboard-keys-as-mouse-in-XOrg"><a href="/HOWTO_use_the_numeric_keyboard_keys_as_mouse_in_XOrg">use the numeric keyboard keys as mouse in XOrg</a></li></ul></div></div><div role="navigation" class="portlet generated-sidebar" id="p-.ED.95.9C.EA.B5.AD.EC.96.B4" aria-labelledby="p-.ED.95.9C.EA.B5.AD.EC.96.B4-label"><h3 id="p-.ED.95.9C.EA.B5.AD.EC.96.B4-label" lang="en" dir="ltr">한국어</h3><div class="pBody"><ul lang="en" dir="ltr"><li id="n-HamoniKR"><a href="/HamoniKR">HamoniKR</a></li><li id="n-Red-Star-OS"><a href="/Red_Star_OS">Red Star OS</a></li><li id="n-HOWTO-get-Korean-input-on-Manjaro"><a href="/HOWTO_get_Korean_input_on_Manjaro">HOWTO get Korean input on Manjaro</a></li><li id="n-HOWTO-get-Korean-input-on-Ubuntu"><a href="/HOWTO_get_Korean_input_on_Ubuntu">HOWTO get Korean input on Ubuntu</a></li><li id="n-Rockit-Girl"><a href="/Rockit_Girl">Rockit Girl</a></li><li id="n-WJSN"><a href="/WJSN">WJSN</a></li></ul></div></div><div role="navigation" class="portlet generated-sidebar" id="p-confused.3F" aria-labelledby="p-confused.3F-label"><h3 id="p-confused.3F-label" lang="en" dir="ltr">confused?</h3><div class="pBody"><ul lang="en" dir="ltr"><li id="n-Ask-LinuxReviews"><a href="/Ask_LinuxReviews">Ask LinuxReviews</a></li></ul></div></div><div role="navigation" class="portlet generated-sidebar" id="p-feed_reader_feeds" aria-labelledby="p-feed_reader_feeds-label"><h3 id="p-feed_reader_feeds-label" lang="en" dir="ltr">feed reader feeds</h3><div class="pBody"><ul lang="en" dir="ltr"><li id="n-News-.28RSS.29"><a href="https://linuxreviews.org/feed.rss">News (RSS)</a></li><li id="n-News-.28Atom.29"><a href="https://linuxreviews.org/atom.rss">News (Atom)</a></li></ul></div></div><div role="navigation" class="portlet generated-sidebar" id="p-try_your_luck" aria-labelledby="p-try_your_luck-label"><h3 id="p-try_your_luck-label" lang="en" dir="ltr">try your luck</h3><div class="pBody"><ul lang="en" dir="ltr"><li id="n-Random-Page"><a href="/Special:Random">Random Page</a></li><li id="n-Random-news-story"><a href="/Special:RandomInCategory/All_news">Random news story</a></li><li id="n-Random-Game"><a href="/Special:RandomInCategory/All_games">Random Game</a></li></ul></div></div><div role="navigation" class="portlet generated-sidebar" id="p-logs" aria-labelledby="p-logs-label"><h3 id="p-logs-label" lang="en" dir="ltr">logs</h3><div class="pBody"><ul lang="en" dir="ltr"><li id="n-Recent-Changes"><a href="/Special:RecentChanges">Recent Changes</a></li><li id="n-Comments"><a href="/Special:Log/comments">Comments</a></li></ul></div></div><div role="navigation" class="portlet" id="p-tb" aria-labelledby="p-tb-label"><h3 id="p-tb-label" lang="en" dir="ltr">Tools</h3><div class="pBody"><ul lang="en" dir="ltr"><li id="t-whatlinkshere"><a href="/Special:WhatLinksHere/Btrfs_Was_Not_Meant_For_RAID5_or_6" title="A list of all wiki pages that link here [j]" accesskey="j">What links here</a></li><li id="t-recentchangeslinked"><a href="/Special:RecentChangesLinked/Btrfs_Was_Not_Meant_For_RAID5_or_6" rel="nofollow" title="Recent changes in pages linked from this page [k]" accesskey="k">Related changes</a></li><li id="t-specialpages"><a href="/Special:SpecialPages" title="A list of all special pages [q]" accesskey="q">Special pages</a></li><li id="t-print"><a href="javascript:print();" rel="alternate" title="Printable version of this page [p]" accesskey="p">Printable version</a></li><li id="t-permalink"><a href="/w/index.php?title=Btrfs_Was_Not_Meant_For_RAID5_or_6&amp;oldid=18958" title="Permanent link to this revision of the page">Permanent link</a></li><li id="t-info"><a href="/w/index.php?title=Btrfs_Was_Not_Meant_For_RAID5_or_6&amp;action=info" title="More information about this page">Page information</a></li></ul></div></div></div><a href="#sidebar" title="navigation" class="menu-toggle" id="sidebar-toggle"></a><a href="#p-personal" title="user tools" class="menu-toggle" id="p-personal-toggle"></a><a href="#globalWrapper" title="back to top" class="menu-toggle" id="globalWrapper-toggle"></a></div>
+<!-- end of the left (by default at least) column -->
+<div class="visualClear"></div><div id="footer" role="contentinfo" lang="en" dir="ltr"><ul id="f-list"><li id="lastmod"> This page was last edited on 11 March 2021, at 21:35.</li><li id="privacy"><a href="/LinuxReviews:Privacy_policy" title="LinuxReviews:Privacy policy">Privacy Policy</a></li><li id="about"><a href="/LinuxReviews:About" title="LinuxReviews:About">About LinuxReviews</a></li></ul></div></div>
+<script>(RLQ=window.RLQ||[]).push(function(){mw.config.set({"wgPageParseReport":{"limitreport":{"cputime":"0.130","walltime":"0.136","ppvisitednodes":{"value":145,"limit":1000000},"postexpandincludesize":{"value":4710,"limit":2097152},"templateargumentsize":{"value":1046,"limit":2097152},"expansiondepth":{"value":8,"limit":40},"expensivefunctioncount":{"value":0,"limit":100},"unstrip-depth":{"value":0,"limit":20},"unstrip-size":{"value":10383,"limit":5000000},"timingprofile":["100.00%   91.392      1 -total"," 78.53%   71.773      1 Template:Newsfooter"," 21.69%   19.824      1 Template:Latestnewsheadlines","  7.22%    6.597      1 Template:Bychaekyung","  5.25%    4.801      3 Template:Quote","  5.10%    4.663      1 Template:Written_by_cc-by","  3.59%    3.280      1 Template:Fullsizeimage","  3.05%    2.786      1 Template:Written_by","  2.13%    1.948      1 Template:Icon","  2.02%    1.849      1 Template:Video"]},"cachereport":{"timestamp":"20250706045104","ttl":0,"transientcontent":true}}});mw.config.set({"wgBackendResponseTime":276});});</script>
+<div id="blackfooter">
+<ul class="blackfooterlinks">
+	<li><a class="footerlink" href="https://linuxreviews.org/LinuxReviews">Front page</a></li>
+	<li><a class="footerlink" href="https://linuxreviews.org/News">Latest News</a></li>
+	<li><a class="footerlink" href="https://linuxreviews.org/Latest_Software_Reviews">Latest Reviews</a></li>
+</ul>
+	<form name="multisearch" action="https://search.everdot.org/search" id="searchform">
+	<input name="search" type="search" accesskey="z" value="" id="searchInput" />
+	<input type="submit"
+                class="searchButton"
+                value="Search" /><br />
+
+		<label for="linuxreviewswiki"><input type="radio" name="engine" id="linuxreviewswiki" value="linuxreviewswiki"  checked="checked" /><img src="/gfx/smallflags/en.png" width="18" height="10" alt=" " />&nbsp;LinuxReviews</label>
+		<label for="immortalpoetry"><input type="radio" name="engine" id="immortalpoetry" value="immortalpoetry" /><img src="/gfx/smallflags/en.png" width="18" height="10" alt=" " />&nbsp;Poetry</label>
+		<label for="linuxreviewssearch"><input type="radio" name="engine" id="linuxreviewssearch" value="linuxreviewssearch" /><img src="/gfx/smallflags/en.png" width="18" height="10" alt=" " />&nbsp;Web</label>	</form>
+</div>
+<div style="text-align:center;"><a href="/LinuxReviews"><img style="max-width:98%" src="/gfx/lr-468x.jpg" width="468" height="186" alt="Linux Reviews" /></a></div></body><!-- Cached 20250706045104 -->
+</html>

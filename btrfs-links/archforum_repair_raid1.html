@@ -1,0 +1,560 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en" dir="ltr">
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+<title>[SOLVED] How to repair broken btrfs of raid1 / Kernel &amp; Hardware / Arch Linux Forums</title>
+<link rel="stylesheet" type="text/css" href="style/ArchLinux.css" />
+<link rel="canonical" href="viewtopic.php?id=198662" title="Page 1" />
+<link rel="alternate" type="application/atom+xml" href="extern.php?action=feed&amp;tid=198662&amp;type=atom" title="Atom topic feed" />
+    <link rel="stylesheet" media="screen" href="style/ArchLinux/arch.css?v=5"/>
+        <link rel="stylesheet" media="screen" href="style/ArchLinux/archnavbar.css?v=5"/>
+    
+<link rel="shortcut icon" href="style/ArchLinux/favicon.ico" />
+</head>
+
+<body>
+<div id="archnavbar" class="anb-forum">
+	<div id="archnavbarlogo"><h1><a href="http://archlinux.org/">Arch Linux</a></h1></div>
+	<div id="archnavbarmenu">
+		<ul id="archnavbarlist">
+			<li id="anb-home"><a href="http://archlinux.org/">Home</a></li><li id="anb-packages"><a href="http://archlinux.org/packages/">Packages</a></li><li id="anb-forums" class="anb-selected"><a href="https://bbs.archlinux.org/">Forums</a></li><li id="anb-wiki"><a href="https://wiki.archlinux.org/">Wiki</a></li><li id="anb-gitlab"><a href="https://gitlab.archlinux.org/archlinux">GitLab</a></li><li id="anb-security"><a href="https://security.archlinux.org/">Security</a></li><li id="anb-aur"><a href="https://aur.archlinux.org/">AUR</a></li><li id="anb-download"><a href="http://archlinux.org/download/">Download</a></li>		</ul>
+	</div>
+</div>
+
+
+<div id="punviewtopic" class="pun">
+<div class="top-box"></div>
+<div class="punwrap">
+
+<div id="brdheader" class="block">
+	<div class="box">
+		<div id="brdmenu" class="inbox">
+			<ul>
+				<li id="navindex" class="isactive"><a href="index.php">Index</a></li>
+				<li id="navrules"><a href="misc.php?action=rules">Rules</a></li>
+				<li id="navsearch"><a href="search.php">Search</a></li>
+				<li id="navregister"><a href="register.php">Register</a></li>
+				<li id="navlogin"><a href="login.php">Login</a></li>
+			</ul>
+		</div>
+		<div id="brdwelcome" class="inbox">
+			<p class="conl">You are not logged in.</p>
+			<ul class="conr">
+				<li><span>Topics: <a href="search.php?action=show_recent" title="Find topics with recent posts.">Active</a> | <a href="search.php?action=show_unanswered" title="Find topics with no replies.">Unanswered</a></span></li>
+			</ul>
+			<div class="clearer"></div>
+		</div>
+	</div>
+</div>
+
+
+
+<div id="brdmain">
+<div class="linkst">
+	<div class="inbox crumbsplus">
+		<ul class="crumbs">
+			<li><a href="index.php">Index</a></li>
+			<li><span>»&#160;</span><a href="viewforum.php?id=22">Kernel &amp; Hardware</a></li>
+			<li><span>»&#160;</span><strong><a href="viewtopic.php?id=198662">[SOLVED] How to repair broken btrfs of raid1</a></strong></li>
+		</ul>
+		<div class="pagepost">
+			<p class="pagelink conl"><span class="pages-label">Pages: </span><strong class="item1">1</strong></p>
+		</div>
+		<div class="clearer"></div>
+	</div>
+</div>
+
+<div id="p1537049" class="blockpost rowodd firstpost blockpost1">
+	<h2><span><span class="conr">#1</span> <a href="viewtopic.php?pid=1537049#p1537049">2015-06-15 03:50:45</a></span></h2>
+	<div class="box">
+		<div class="inbox">
+			<div class="postbody">
+				<div class="postleft">
+					<dl>
+						<dt><strong>lawliet</strong></dt>
+						<dd class="usertitle"><strong>Member</strong></dd>
+						<dd><span>Registered: 2010-08-29</span></dd>
+						<dd><span>Posts: 18</span></dd>
+					</dl>
+				</div>
+				<div class="postright">
+					<h3>[SOLVED] How to repair broken btrfs of raid1</h3>
+					<div class="postmsg">
+						<p>Hi guys,</p><p>I got some error of my btrs raid1</p><p>can help me to fix(or mount) the only one hard disk, i want mount without raid after backup my data to other disk.</p><p>my root not in the btrfs raid1, so my arch still working</p><div class="codebox"><pre><code># dmesg | tail
+[ 8199.287231] BTRFS: failed to read the system array on sdb
+[ 8199.304945] BTRFS: open_ctree failed
+[ 8407.417160] BTRFS info (device sdb): disk space caching is enabled
+[ 8407.417163] BTRFS: has skinny extents
+[ 8407.417410] BTRFS: failed to read the system array on sdb
+[ 8407.431167] BTRFS: open_ctree failed
+[ 8435.776296] BTRFS info (device sdb): disk space caching is enabled
+[ 8435.776300] BTRFS: has skinny extents
+[ 8435.776538] BTRFS: failed to read the system array on sdb
+[ 8435.791537] BTRFS: open_ctree failed</code></pre></div><div class="codebox"><pre><code># btrfs filesystem show
+warning, device 1 is missing
+warning devid 1 not found already
+Label: none  uuid: 003eca6f-e284-4a99-844d-528d95e4f256
+        Total devices 2 FS bytes used 31.95GiB
+        devid    2 size 1.82TiB used 34.03GiB path /dev/sdb
+        *** Some devices missing</code></pre></div><p>if need more information, please let me know, this my first time using btrfs</p><p>thanks lot</p>
+						<p class="postedit"><em>Last edited by lawliet (2015-06-18 09:49:27)</em></p>
+					</div>
+				</div>
+			</div>
+		</div>
+		<div class="inbox">
+			<div class="postfoot clearb">
+				<div class="postfootleft"><p><span>Offline</span></p></div>
+			</div>
+		</div>
+	</div>
+</div>
+
+<div id="p1537151" class="blockpost roweven">
+	<h2><span><span class="conr">#2</span> <a href="viewtopic.php?pid=1537151#p1537151">2015-06-15 12:14:11</a></span></h2>
+	<div class="box">
+		<div class="inbox">
+			<div class="postbody">
+				<div class="postleft">
+					<dl>
+						<dt><strong>nstgc</strong></dt>
+						<dd class="usertitle"><strong>Member</strong></dd>
+						<dd><span>Registered: 2014-03-17</span></dd>
+						<dd><span>Posts: 393</span></dd>
+					</dl>
+				</div>
+				<div class="postright">
+					<h3>Re: [SOLVED] How to repair broken btrfs of raid1</h3>
+					<div class="postmsg">
+						<p>btrfs-zero-log</p>
+					</div>
+				</div>
+			</div>
+		</div>
+		<div class="inbox">
+			<div class="postfoot clearb">
+				<div class="postfootleft"><p><span>Offline</span></p></div>
+			</div>
+		</div>
+	</div>
+</div>
+
+<div id="p1537305" class="blockpost rowodd">
+	<h2><span><span class="conr">#3</span> <a href="viewtopic.php?pid=1537305#p1537305">2015-06-16 01:02:31</a></span></h2>
+	<div class="box">
+		<div class="inbox">
+			<div class="postbody">
+				<div class="postleft">
+					<dl>
+						<dt><strong>lawliet</strong></dt>
+						<dd class="usertitle"><strong>Member</strong></dd>
+						<dd><span>Registered: 2010-08-29</span></dd>
+						<dd><span>Posts: 18</span></dd>
+					</dl>
+				</div>
+				<div class="postright">
+					<h3>Re: [SOLVED] How to repair broken btrfs of raid1</h3>
+					<div class="postmsg">
+						<div class="codebox"><pre><code># btrfs-zero-log
+btrfs-zero-log: too few arguments
+usage: btrfs-zero-log dev
+btrfs-progs v4.0.1</code></pre></div><div class="codebox"><pre><code># btrfs-zero-log dev
+check_mounted(): Could not open dev
+Could not check mount status: No such file or directory</code></pre></div>
+					</div>
+				</div>
+			</div>
+		</div>
+		<div class="inbox">
+			<div class="postfoot clearb">
+				<div class="postfootleft"><p><span>Offline</span></p></div>
+			</div>
+		</div>
+	</div>
+</div>
+
+<div id="p1537380" class="blockpost roweven">
+	<h2><span><span class="conr">#4</span> <a href="viewtopic.php?pid=1537380#p1537380">2015-06-16 12:27:25</a></span></h2>
+	<div class="box">
+		<div class="inbox">
+			<div class="postbody">
+				<div class="postleft">
+					<dl>
+						<dt><strong>nstgc</strong></dt>
+						<dd class="usertitle"><strong>Member</strong></dd>
+						<dd><span>Registered: 2014-03-17</span></dd>
+						<dd><span>Posts: 393</span></dd>
+					</dl>
+				</div>
+				<div class="postright">
+					<h3>Re: [SOLVED] How to repair broken btrfs of raid1</h3>
+					<div class="postmsg">
+						<p><a href="https://btrfs.wiki.kernel.org/index.php/Btrfs-zero-log" rel="nofollow">https://btrfs.wiki.kernel.org/index.php/Btrfs-zero-log</a></p><p>[edit] Also, if someone just tells you a command, it&#039;s best not to just blindly use it, especially if you are going to run it as root. You can usually find out what a command does with &quot;command --help&quot; or &quot;man command&quot;.</p><p>Try running &quot;man btrfs-zero-log&quot;.</p>
+						<p class="postedit"><em>Last edited by nstgc (2015-06-16 12:30:46)</em></p>
+					</div>
+				</div>
+			</div>
+		</div>
+		<div class="inbox">
+			<div class="postfoot clearb">
+				<div class="postfootleft"><p><span>Offline</span></p></div>
+			</div>
+		</div>
+	</div>
+</div>
+
+<div id="p1537384" class="blockpost rowodd">
+	<h2><span><span class="conr">#5</span> <a href="viewtopic.php?pid=1537384#p1537384">2015-06-16 12:33:23</a></span></h2>
+	<div class="box">
+		<div class="inbox">
+			<div class="postbody">
+				<div class="postleft">
+					<dl>
+						<dt><strong>WorMzy</strong></dt>
+						<dd class="usertitle"><strong>Administrator</strong></dd>
+						<dd class="postavatar"><img src="https://bbs.archlinux.org/img/avatars/38091.jpg?m=1572193439" width="80" height="80" alt="" /></dd>
+						<dd><span>From: Scotland</span></dd>
+						<dd><span>Registered: 2010-06-16</span></dd>
+						<dd><span>Posts: 13,336</span></dd>
+						<dd class="usercontacts"><span class="website"><a href="https://wormzy.com" rel="nofollow">Website</a></span></dd>
+					</dl>
+				</div>
+				<div class="postright">
+					<h3>Re: [SOLVED] How to repair broken btrfs of raid1</h3>
+					<div class="postmsg">
+						<p>Disregard btrfs-zero-log for now. Can you mount with -odegraded? From &#039;man mount&#039;:</p><div class="codebox"><pre><code>Mount options for btrfs
+[...]
+       degraded
+              Allow mounts to continue with missing devices.  A read-write mount  may  fail  with
+              too many devices missing, for example if a stripe member is completely missing.</code></pre></div>
+					</div>
+					<div class="postsignature postmsg"><hr /><p><strong>Sakura:-</strong><br />Mobo: MSI MAG X570S TORPEDO MAX // Processor: AMD Ryzen 9 5950X @4.9GHz // GFX: AMD Radeon RX 5700 XT // RAM: 32GB (4x 8GB) Corsair DDR4 (@ 3000MHz) // Storage: 1x 3TB HDD, 6x 1TB SSD, 2x 120GB SSD, 1x 275GB M2 SSD</p><p>Making lemonade from lemons since 2015.</p></div>
+				</div>
+			</div>
+		</div>
+		<div class="inbox">
+			<div class="postfoot clearb">
+				<div class="postfootleft"><p><span>Offline</span></p></div>
+			</div>
+		</div>
+	</div>
+</div>
+
+<div id="p1537538" class="blockpost roweven">
+	<h2><span><span class="conr">#6</span> <a href="viewtopic.php?pid=1537538#p1537538">2015-06-17 01:37:11</a></span></h2>
+	<div class="box">
+		<div class="inbox">
+			<div class="postbody">
+				<div class="postleft">
+					<dl>
+						<dt><strong>lawliet</strong></dt>
+						<dd class="usertitle"><strong>Member</strong></dd>
+						<dd><span>Registered: 2010-08-29</span></dd>
+						<dd><span>Posts: 18</span></dd>
+					</dl>
+				</div>
+				<div class="postright">
+					<h3>Re: [SOLVED] How to repair broken btrfs of raid1</h3>
+					<div class="postmsg">
+						<p>ok, thank you for you help</p><p>this is the btrfs-zero-log messenger</p><div class="codebox"><pre><code># btrfs-zero-log /dev/sdb
+warning, device 1 is missing
+warning devid 1 not found already
+Unable to find block group for 0
+extent-tree.c:289: find_search_start: Assertion `1` failed.
+btrfs-zero-log[0x41139e]
+btrfs-zero-log(btrfs_reserve_extent+0xa35)[0x4161a5]
+btrfs-zero-log(btrfs_alloc_free_block+0x5f)[0x41626f]
+btrfs-zero-log(__btrfs_cow_block+0xc1)[0x408211]
+btrfs-zero-log(btrfs_cow_block+0x35)[0x408825]
+btrfs-zero-log[0x40d666]
+btrfs-zero-log(btrfs_commit_transaction+0x8e)[0x40ee7e]
+btrfs-zero-log(main+0x122)[0x4073f2]
+/usr/lib/libc.so.6(__libc_start_main+0xf0)[0x7f56565f7790]
+btrfs-zero-log(_start+0x29)[0x407509]</code></pre></div><div class="quotebox"><cite>WorMzy wrote:</cite><blockquote><div><p>Disregard btrfs-zero-log for now. Can you mount with -odegraded? From &#039;man mount&#039;:</p><div class="codebox"><pre><code>Mount options for btrfs
+[...]
+       degraded
+              Allow mounts to continue with missing devices.  A read-write mount  may  fail  with
+              too many devices missing, for example if a stripe member is completely missing.</code></pre></div></div></blockquote></div><p>hi,</p><p>mount with -odegraded no got any messenger, and check df -h, mount failed i guess</p>
+					</div>
+				</div>
+			</div>
+		</div>
+		<div class="inbox">
+			<div class="postfoot clearb">
+				<div class="postfootleft"><p><span>Offline</span></p></div>
+			</div>
+		</div>
+	</div>
+</div>
+
+<div id="p1537570" class="blockpost rowodd">
+	<h2><span><span class="conr">#7</span> <a href="viewtopic.php?pid=1537570#p1537570">2015-06-17 07:45:46</a></span></h2>
+	<div class="box">
+		<div class="inbox">
+			<div class="postbody">
+				<div class="postleft">
+					<dl>
+						<dt><strong>WorMzy</strong></dt>
+						<dd class="usertitle"><strong>Administrator</strong></dd>
+						<dd class="postavatar"><img src="https://bbs.archlinux.org/img/avatars/38091.jpg?m=1572193439" width="80" height="80" alt="" /></dd>
+						<dd><span>From: Scotland</span></dd>
+						<dd><span>Registered: 2010-06-16</span></dd>
+						<dd><span>Posts: 13,336</span></dd>
+						<dd class="usercontacts"><span class="website"><a href="https://wormzy.com" rel="nofollow">Website</a></span></dd>
+					</dl>
+				</div>
+				<div class="postright">
+					<h3>Re: [SOLVED] How to repair broken btrfs of raid1</h3>
+					<div class="postmsg">
+						<p>Post the output of dmesg following a failed degraded mount, and hope zero-log didn&#039;t cause more problems.</p>
+					</div>
+					<div class="postsignature postmsg"><hr /><p><strong>Sakura:-</strong><br />Mobo: MSI MAG X570S TORPEDO MAX // Processor: AMD Ryzen 9 5950X @4.9GHz // GFX: AMD Radeon RX 5700 XT // RAM: 32GB (4x 8GB) Corsair DDR4 (@ 3000MHz) // Storage: 1x 3TB HDD, 6x 1TB SSD, 2x 120GB SSD, 1x 275GB M2 SSD</p><p>Making lemonade from lemons since 2015.</p></div>
+				</div>
+			</div>
+		</div>
+		<div class="inbox">
+			<div class="postfoot clearb">
+				<div class="postfootleft"><p><span>Offline</span></p></div>
+			</div>
+		</div>
+	</div>
+</div>
+
+<div id="p1537592" class="blockpost roweven">
+	<h2><span><span class="conr">#8</span> <a href="viewtopic.php?pid=1537592#p1537592">2015-06-17 10:12:50</a></span></h2>
+	<div class="box">
+		<div class="inbox">
+			<div class="postbody">
+				<div class="postleft">
+					<dl>
+						<dt><strong>lawliet</strong></dt>
+						<dd class="usertitle"><strong>Member</strong></dd>
+						<dd><span>Registered: 2010-08-29</span></dd>
+						<dd><span>Posts: 18</span></dd>
+					</dl>
+				</div>
+				<div class="postright">
+					<h3>Re: [SOLVED] How to repair broken btrfs of raid1</h3>
+					<div class="postmsg">
+						<div class="quotebox"><cite>WorMzy wrote:</cite><blockquote><div><p>Post the output of dmesg following a failed degraded mount, and hope zero-log didn&#039;t cause more problems.</p></div></blockquote></div><div class="codebox"><pre><code>[205147.095483] BTRFS info (device sdb): allowing degraded mounts
+[205147.095486] BTRFS info (device sdb): disk space caching is enabled
+[205147.095488] BTRFS: has skinny extents
+[205147.124706] BTRFS: bdev (null) errs: wr 25, rd 2, flush 1, corrupt 0, gen 0</code></pre></div>
+					</div>
+				</div>
+			</div>
+		</div>
+		<div class="inbox">
+			<div class="postfoot clearb">
+				<div class="postfootleft"><p><span>Offline</span></p></div>
+			</div>
+		</div>
+	</div>
+</div>
+
+<div id="p1537597" class="blockpost rowodd">
+	<h2><span><span class="conr">#9</span> <a href="viewtopic.php?pid=1537597#p1537597">2015-06-17 10:39:19</a></span></h2>
+	<div class="box">
+		<div class="inbox">
+			<div class="postbody">
+				<div class="postleft">
+					<dl>
+						<dt><strong>WorMzy</strong></dt>
+						<dd class="usertitle"><strong>Administrator</strong></dd>
+						<dd class="postavatar"><img src="https://bbs.archlinux.org/img/avatars/38091.jpg?m=1572193439" width="80" height="80" alt="" /></dd>
+						<dd><span>From: Scotland</span></dd>
+						<dd><span>Registered: 2010-06-16</span></dd>
+						<dd><span>Posts: 13,336</span></dd>
+						<dd class="usercontacts"><span class="website"><a href="https://wormzy.com" rel="nofollow">Website</a></span></dd>
+					</dl>
+				</div>
+				<div class="postright">
+					<h3>Re: [SOLVED] How to repair broken btrfs of raid1</h3>
+					<div class="postmsg">
+						<p>I think that (null) with write and read errors is the missing disk. It shouldn&#039;t be blocking the mount. Arte you sure that it&#039;s not mounted following that?</p><p>Try mounting with -oro,degraded,recovery.</p>
+					</div>
+					<div class="postsignature postmsg"><hr /><p><strong>Sakura:-</strong><br />Mobo: MSI MAG X570S TORPEDO MAX // Processor: AMD Ryzen 9 5950X @4.9GHz // GFX: AMD Radeon RX 5700 XT // RAM: 32GB (4x 8GB) Corsair DDR4 (@ 3000MHz) // Storage: 1x 3TB HDD, 6x 1TB SSD, 2x 120GB SSD, 1x 275GB M2 SSD</p><p>Making lemonade from lemons since 2015.</p></div>
+				</div>
+			</div>
+		</div>
+		<div class="inbox">
+			<div class="postfoot clearb">
+				<div class="postfootleft"><p><span>Offline</span></p></div>
+			</div>
+		</div>
+	</div>
+</div>
+
+<div id="p1537804" class="blockpost roweven">
+	<h2><span><span class="conr">#10</span> <a href="viewtopic.php?pid=1537804#p1537804">2015-06-18 07:13:04</a></span></h2>
+	<div class="box">
+		<div class="inbox">
+			<div class="postbody">
+				<div class="postleft">
+					<dl>
+						<dt><strong>lawliet</strong></dt>
+						<dd class="usertitle"><strong>Member</strong></dd>
+						<dd><span>Registered: 2010-08-29</span></dd>
+						<dd><span>Posts: 18</span></dd>
+					</dl>
+				</div>
+				<div class="postright">
+					<h3>Re: [SOLVED] How to repair broken btrfs of raid1</h3>
+					<div class="postmsg">
+						<div class="quotebox"><cite>WorMzy wrote:</cite><blockquote><div><p>I think that (null) with write and read errors is the missing disk. It shouldn&#039;t be blocking the mount. Arte you sure that it&#039;s not mounted following that?</p><p>Try mounting with -oro,degraded,recovery.</p></div></blockquote></div><p>Hi,</p><p>Thank you very mush, my hard disk can mountd now</p><p>i dont know why yesterday cant mount it</p><p>but my data look is well, can read/write</p><p>if my using new hard disk replace the broken hard disk</p><p>how am i rebuild the btrfs raid1?</p><br /><p>thanks, have a nice day</p>
+					</div>
+				</div>
+			</div>
+		</div>
+		<div class="inbox">
+			<div class="postfoot clearb">
+				<div class="postfootleft"><p><span>Offline</span></p></div>
+			</div>
+		</div>
+	</div>
+</div>
+
+<div id="p1537833" class="blockpost rowodd">
+	<h2><span><span class="conr">#11</span> <a href="viewtopic.php?pid=1537833#p1537833">2015-06-18 09:45:38</a></span></h2>
+	<div class="box">
+		<div class="inbox">
+			<div class="postbody">
+				<div class="postleft">
+					<dl>
+						<dt><strong>WorMzy</strong></dt>
+						<dd class="usertitle"><strong>Administrator</strong></dd>
+						<dd class="postavatar"><img src="https://bbs.archlinux.org/img/avatars/38091.jpg?m=1572193439" width="80" height="80" alt="" /></dd>
+						<dd><span>From: Scotland</span></dd>
+						<dd><span>Registered: 2010-06-16</span></dd>
+						<dd><span>Posts: 13,336</span></dd>
+						<dd class="usercontacts"><span class="website"><a href="https://wormzy.com" rel="nofollow">Website</a></span></dd>
+					</dl>
+				</div>
+				<div class="postright">
+					<h3>Re: [SOLVED] How to repair broken btrfs of raid1</h3>
+					<div class="postmsg">
+						<p>You should just need to use &quot;btrfs device add&quot; to add the new device to the array, then remove the missing device.</p><p><a href="https://btrfs.wiki.kernel.org/index.php/Using_Btrfs_with_Multiple_Devices#Replacing_failed_devices" rel="nofollow">https://btrfs.wiki.kernel.org/index.php … ed_devices</a></p>
+					</div>
+					<div class="postsignature postmsg"><hr /><p><strong>Sakura:-</strong><br />Mobo: MSI MAG X570S TORPEDO MAX // Processor: AMD Ryzen 9 5950X @4.9GHz // GFX: AMD Radeon RX 5700 XT // RAM: 32GB (4x 8GB) Corsair DDR4 (@ 3000MHz) // Storage: 1x 3TB HDD, 6x 1TB SSD, 2x 120GB SSD, 1x 275GB M2 SSD</p><p>Making lemonade from lemons since 2015.</p></div>
+				</div>
+			</div>
+		</div>
+		<div class="inbox">
+			<div class="postfoot clearb">
+				<div class="postfootleft"><p><span>Offline</span></p></div>
+			</div>
+		</div>
+	</div>
+</div>
+
+<div id="p1585720" class="blockpost roweven">
+	<h2><span><span class="conr">#12</span> <a href="viewtopic.php?pid=1585720#p1585720">2015-12-12 22:22:53</a></span></h2>
+	<div class="box">
+		<div class="inbox">
+			<div class="postbody">
+				<div class="postleft">
+					<dl>
+						<dt><strong>Bfg</strong></dt>
+						<dd class="usertitle"><strong>Member</strong></dd>
+						<dd class="postavatar"><img src="https://bbs.archlinux.org/img/avatars/1216.gif?m=1572193442" width="64" height="36" alt="" /></dd>
+						<dd><span>From: Italy</span></dd>
+						<dd><span>Registered: 2004-04-03</span></dd>
+						<dd><span>Posts: 15</span></dd>
+					</dl>
+				</div>
+				<div class="postright">
+					<h3>Re: [SOLVED] How to repair broken btrfs of raid1</h3>
+					<div class="postmsg">
+						<div class="quotebox"><cite>WorMzy wrote:</cite><blockquote><div><p>Disregard btrfs-zero-log for now. Can you mount with -odegraded? From &#039;man mount&#039;:</p><div class="codebox"><pre><code>Mount options for btrfs
+[...]
+       degraded
+              Allow mounts to continue with missing devices.  A read-write mount  may  fail  with
+              too many devices missing, for example if a stripe member is completely missing.</code></pre></div></div></blockquote></div><p>Thankyou WorMzy. Has worked also to me. <img src="https://bbs.archlinux.org/img/smilies/smile.png" width="15" height="15" alt="smile" /></p>
+					</div>
+				</div>
+			</div>
+		</div>
+		<div class="inbox">
+			<div class="postfoot clearb">
+				<div class="postfootleft"><p><span>Offline</span></p></div>
+			</div>
+		</div>
+	</div>
+</div>
+
+<div class="postlinksb">
+	<div class="inbox crumbsplus">
+		<div class="pagepost">
+			<p class="pagelink conl"><span class="pages-label">Pages: </span><strong class="item1">1</strong></p>
+		</div>
+		<ul class="crumbs">
+			<li><a href="index.php">Index</a></li>
+			<li><span>»&#160;</span><a href="viewforum.php?id=22">Kernel &amp; Hardware</a></li>
+			<li><span>»&#160;</span><strong><a href="viewtopic.php?id=198662">[SOLVED] How to repair broken btrfs of raid1</a></strong></li>
+		</ul>
+		<div class="clearer"></div>
+	</div>
+</div>
+</div>
+
+<div id="brdfooter" class="block">
+	<h2><span>Board footer</span></h2>
+	<div class="box">
+		<div id="brdfooternav" class="inbox">
+			<div class="conl">
+				<form id="qjump" method="get" action="viewforum.php">
+					<div><label><span>Jump to<br /></span>
+					<select name="id" onchange="window.location=('viewforum.php?id='+this.options[this.selectedIndex].value)">
+						<optgroup label="Technical Issues and Assistance">
+							<option value="23">Newbie Corner</option>
+							<option value="17">Installation</option>
+							<option value="22" selected="selected">Kernel &amp; Hardware</option>
+							<option value="18">Applications &amp; Desktop Environments</option>
+							<option value="31">Laptop Issues</option>
+							<option value="8">Networking, Server, and Protection</option>
+							<option value="32">Multimedia and Games</option>
+							<option value="51">Arch Linux Guided Installer</option>
+							<option value="50">System Administration</option>
+							<option value="35">Other Architectures</option>
+						</optgroup>
+						<optgroup label="Arch-centric">
+							<option value="24">Announcements, Package &amp; Security Advisories</option>
+							<option value="1">Arch Discussion</option>
+							<option value="13">Forum &amp; Wiki discussion</option>
+						</optgroup>
+						<optgroup label="Pacman Upgrades, Packaging &amp; AUR">
+							<option value="44">Pacman &amp; Package Upgrade Issues</option>
+							<option value="49">[testing] Repo Forum</option>
+							<option value="4">Creating &amp; Modifying Packages</option>
+							<option value="38">AUR Issues, Discussion &amp; PKGBUILD Requests</option>
+						</optgroup>
+						<optgroup label="Contributions &amp; Discussion">
+							<option value="20">GNU/Linux Discussion</option>
+							<option value="27">Community Contributions</option>
+							<option value="33">Programming &amp; Scripting</option>
+							<option value="30">Other Languages</option>
+							<option value="47">Artwork and Screenshots</option>
+						</optgroup>
+					</select></label>
+					<input type="submit" value=" Go " accesskey="g" />
+					</div>
+				</form>
+			</div>
+			<div class="conr">
+				<p id="feedlinks"><span class="atom"><a href="extern.php?action=feed&amp;tid=198662&amp;type=atom">Atom topic feed</a></span></p>
+				<p id="poweredby">Powered by <a href="http://fluxbb.org/">FluxBB</a></p>
+			</div>
+			<div class="clearer"></div>
+		</div>
+	</div>
+</div>
+
+
+
+</div>
+<div class="end-box"></div>
+</div>
+
+</body>
+</html>

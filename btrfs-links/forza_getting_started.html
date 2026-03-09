@@ -1,0 +1,486 @@
+<!DOCTYPE html>
+<html class="client-nojs" lang="en-GB" dir="ltr">
+<head>
+<meta charset="UTF-8">
+<title>Beginner's guide on getting started with the Btrfs filesystem | Forza's Ramblings</title>
+<script>document.documentElement.className="client-js";RLCONF={"wgBreakFrames":false,"wgSeparatorTransformTable":["",""],"wgDigitTransformTable":["",""],"wgDefaultDateFormat":"dmy","wgMonthNames":["","January","February","March","April","May","June","July","August","September","October","November","December"],"wgRequestId":"4dfa2aa06c608e85ce74acf2","wgCanonicalNamespace":"","wgCanonicalSpecialPageName":false,"wgNamespaceNumber":0,"wgPageName":"Btrfs/Getting_Started","wgTitle":"Btrfs/Getting Started","wgCurRevisionId":2183,"wgRevisionId":2183,"wgArticleId":62,"wgIsArticle":true,"wgIsRedirect":false,"wgAction":"view","wgUserName":null,"wgUserGroups":["*"],"wgCategories":["Btrfs"],"wgPageViewLanguage":"en-gb","wgPageContentLanguage":"en-gb","wgPageContentModel":"wikitext","wgRelevantPageName":"Btrfs/Getting_Started","wgRelevantArticleId":62,"wgIsProbablyEditable":true,"wgRelevantPageIsProbablyEditable":true,"wgRestrictionEdit":[],"wgRestrictionMove":[],"wgCiteReferencePreviewsActive":true,"wgVisualEditor":{"pageLanguageCode":"en-GB","pageLanguageDir":"ltr","pageVariantFallbacks":"en-gb"},"wgEditSubmitButtonLabelPublish":false};
+RLSTATE={"site.styles":"ready","user.styles":"ready","user":"ready","user.options":"loading","skins.timeless":"ready","ext.visualEditor.desktopArticleTarget.noscript":"ready"};RLPAGEMODULES=["mediawiki.page.media","site","mediawiki.page.ready","mediawiki.toc","skins.timeless.js","ext.visualEditor.desktopArticleTarget.init","ext.visualEditor.targetLoader","ext.moderation.notify","ext.moderation.ve","ext.moderation.ajaxhook","ext.moderation.notify.desktop","ext.purge"];</script>
+<script>(RLQ=window.RLQ||[]).push(function(){mw.loader.impl(function(){return["user.options@12s5i",function($,jQuery,require,module){mw.user.tokens.set({"patrolToken":"+\\","watchToken":"+\\","csrfToken":"+\\"});
+}];});});</script>
+<link rel="stylesheet" href="/mediawiki/load.php?lang=en-gb&amp;modules=ext.visualEditor.desktopArticleTarget.noscript%7Cskins.timeless&amp;only=styles&amp;skin=timeless">
+<script async="" src="/mediawiki/load.php?lang=en-gb&amp;modules=startup&amp;only=scripts&amp;raw=1&amp;skin=timeless"></script>
+<!--[if IE]><link rel="stylesheet" href="/mediawiki/skins/Timeless/resources/IE9fixes.css?ffe73" media="screen"><![endif]-->
+<meta name="ResourceLoaderDynamicStyles" content="">
+<link rel="stylesheet" href="/mediawiki/load.php?lang=en-gb&amp;modules=site.styles&amp;only=styles&amp;skin=timeless">
+<meta name="generator" content="MediaWiki 1.43.1">
+<meta name="robots" content="max-image-preview:standard">
+<meta name="format-detection" content="telephone=no">
+<meta name="description" content="A guide to get started with the Btrfs filesystem using single or multiple devices. It shows how to prepare disks using parted, and how to setup subvolumes.">
+<meta name="keywords" content="Btrfs, filesystem, mkfs, mkfs.btrfs, partition, format, volume, raid">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes, minimum-scale=0.25, maximum-scale=5.0">
+<link rel="alternate" type="application/x-wiki" title="Edit" href="/mediawiki/index.php?title=Btrfs/Getting_Started&amp;action=edit">
+<link rel="search" type="application/opensearchdescription+xml" href="/mediawiki/rest.php/v1/search" title="Forza&#039;s ramblings (en-gb)">
+<link rel="EditURI" type="application/rsd+xml" href="https://wiki.tnonline.net/mediawiki/api.php?action=rsd">
+<link rel="canonical" href="https://wiki.tnonline.net/w/Btrfs/Getting_Started">
+<link rel="license" href="https://creativecommons.org/licenses/by-sa/4.0/">
+<link rel="alternate" type="application/atom+xml" title="Forza&#039;s ramblings Atom feed" href="/mediawiki/index.php?title=Special:RecentChanges&amp;feed=atom">
+<meta property="og:title" content="Beginner&#039;s guide on getting started with the Btrfs filesystem | Forza&#039;s Ramblings">
+<meta property="og:url" content="https://wiki.tnonline.net/w/Btrfs/Getting_Started">
+<meta property="og:description" content="A guide to get started with the Btrfs filesystem using single or multiple devices. It shows how to prepare disks using parted, and how to setup subvolumes.">
+<meta property="og:image" content="https://wiki.tnonline.net/mediawiki/resources/assets/forza_logo.png">
+<meta property="article:tag" content="Btrfs, filesystem, mkfs, mkfs.btrfs, partition, format, volume, raid">
+<meta property="og:locale" content="en_GB">
+<meta property="article:modified_time" content="2025-10-12">
+<meta property="article:published_time" content="2020-07-25">
+<meta property="og:site_name" content="Forza&#039;s Ramblings">
+<meta property="og:type" content="website">
+<script type="application/ld+json">{"@context":"http:\/\/schema.org","@type":"website","name":"Beginner's guide on getting started with the Btrfs filesystem | Forza's Ramblings","headline":"Beginner's guide on getting started with the Btrfs filesystem | Forza's Ramblings","mainEntityOfPage":"Btrfs\/Getting Started","identifier":"https:\/\/wiki.tnonline.net\/w\/Btrfs\/Getting_Started","url":"https:\/\/wiki.tnonline.net\/w\/Btrfs\/Getting_Started","description":"A guide to get started with the Btrfs filesystem using single or multiple devices. It shows how to prepare disks using parted, and how to setup subvolumes.","keywords":"Btrfs, filesystem, mkfs, mkfs.btrfs, partition, format, volume, raid","dateModified":"2025-10-12","datePublished":"2020-07-25","image":{"@type":"ImageObject","url":"https:\/\/wiki.tnonline.net\/mediawiki\/resources\/assets\/forza_logo.png"},"author":{"@type":"Organization","name":"Forza's ramblings","url":"https:\/\/wiki.tnonline.net","logo":{"@type":"ImageObject","url":"https:\/\/wiki.tnonline.net\/mediawiki\/resources\/assets\/forza_logo.png","caption":"Forza's ramblings"}},"publisher":{"@type":"Organization","name":"Forza's ramblings","url":"https:\/\/wiki.tnonline.net","logo":{"@type":"ImageObject","url":"https:\/\/wiki.tnonline.net\/mediawiki\/resources\/assets\/forza_logo.png","caption":"Forza's ramblings"}},"potentialAction":{"@type":"SearchAction","target":"https:\/\/wiki.tnonline.net\/mediawiki\/index.php?title=Special:Search&search={search_term}","query-input":"required name=search_term"}}</script>
+</head>
+<body class="mediawiki ltr sitedir-ltr mw-hide-empty-elt ns-0 ns-subject mw-editable page-Btrfs_Getting_Started rootpage-Btrfs_Getting_Started skin-timeless action-view skin--responsive"><a href="https://wiki.tnonline.net/cdn-cgi/content?id=a68ZKLUTwmUUfa8R2M_Gqou7Vtu2OKOlMkIuC06bNdk-1772830316.7455437-1.0.1.1-Pii_zpxve7gE1cj1KS6MtF.RWpPaxHsmLxDTVrADMS0" aria-hidden="true" rel="nofollow noopener" style="display: none !important; visibility: hidden !important"></a><div id="mw-wrapper"><div id="mw-header-container" class="ts-container"><div id="mw-header" class="ts-inner"><div id="user-tools"><div id="personal"><h2><span>Anonymous</span></h2><div id="personal-inner" class="dropdown"><div role="navigation" class="mw-portlet" id="p-personal" title="User menu" aria-labelledby="p-personal-label"><h3 id="p-personal-label" lang="en-GB" dir="ltr">Not logged in</h3><div class="mw-portlet-body"><ul lang="en-GB" dir="ltr"><li id="pt-anontalk" class="mw-list-item"><a href="/w/Special:MyTalk" title="Discussion about edits from this IP address [n]" accesskey="n"><span>Talk</span></a></li><li id="pt-anoncontribs" class="mw-list-item"><a href="/w/Special:MyContributions" title="A list of edits made from this IP address [y]" accesskey="y"><span>Contributions</span></a></li><li id="pt-createaccount" class="mw-list-item"><a href="/mediawiki/index.php?title=Special:CreateAccount&amp;returnto=Btrfs%2FGetting+Started" title="You are encouraged to create an account and log in; however, it is not mandatory"><span>Create account</span></a></li><li id="pt-login" class="mw-list-item"><a href="/mediawiki/index.php?title=Special:UserLogin&amp;returnto=Btrfs%2FGetting+Started" title="You are encouraged to log in; however, it is not mandatory [o]" accesskey="o"><span>Log in</span></a></li></ul></div></div></div></div></div><div id="p-logo-text" class="mw-portlet" role="banner"><a id="p-banner" class="mw-wiki-title long" href="/w/Main_Page">Forza&#039;s ramblings</a></div><div class="mw-portlet" id="p-search"><h3 lang="en-GB" dir="ltr"><label for="searchInput">Search</label></h3><form action="/mediawiki/index.php" id="searchform"><div id="simpleSearch"><div id="searchInput-container"><input type="search" name="search" placeholder="Search Forza&#039;s ramblings" aria-label="Search Forza&#039;s ramblings" autocapitalize="sentences" title="Search Forza&#039;s ramblings [f]" accesskey="f" id="searchInput"></div><input type="hidden" value="Special:Search" name="title"><input class="searchButton mw-fallbackSearchButton" type="submit" name="fulltext" title="Search the pages for this text" id="mw-searchButton" value="Search"><input class="searchButton" type="submit" name="go" title="Go to a page with this exact name if it exists" id="searchButton" value="Go"></div></form></div></div><div class="visualClear"></div></div><div id="mw-header-hack" class="color-bar"><div class="color-middle-container"><div class="color-middle"></div></div><div class="color-left"></div><div class="color-right"></div></div><div id="mw-header-nav-hack"><div class="color-bar"><div class="color-middle-container"><div class="color-middle"></div></div><div class="color-left"></div><div class="color-right"></div></div></div><div id="menus-cover"></div><div id="mw-content-container" class="ts-container"><div id="mw-content-block" class="ts-inner"><div id="mw-content-wrapper"><div id="mw-content"><div id="content" class="mw-body" role="main"><div class="mw-indicators">
+</div>
+<h1 id="firstHeading" class="firstHeading mw-first-heading"><span class="mw-page-title-main">Btrfs/Getting Started</span></h1><div id="bodyContentOuter"><div id="siteSub">From Forza's ramblings</div><div id="mw-page-header-links"><div role="navigation" class="mw-portlet tools-inline" id="p-namespaces" aria-labelledby="p-namespaces-label"><h3 id="p-namespaces-label" lang="en-GB" dir="ltr">Namespaces</h3><div class="mw-portlet-body"><ul lang="en-GB" dir="ltr"><li id="ca-nstab-main" class="selected mw-list-item"><a href="/w/Btrfs/Getting_Started" title="View the content page [c]" accesskey="c"><span>Page</span></a></li><li id="ca-talk" class="new mw-list-item"><a href="/mediawiki/index.php?title=Talk:Btrfs/Getting_Started&amp;action=edit&amp;redlink=1" rel="discussion" class="new" title="Discussion about the content page (page does not exist) [t]" accesskey="t"><span>Discussion</span></a></li></ul></div></div><div role="navigation" class="mw-portlet tools-inline" id="p-more" aria-labelledby="p-more-label"><h3 id="p-more-label" lang="en-GB" dir="ltr">More</h3><div class="mw-portlet-body"><ul lang="en-GB" dir="ltr"><li id="ca-more" class="dropdown-toggle mw-list-item"><span>More</span></li></ul></div></div><div role="navigation" class="mw-portlet tools-inline" id="p-views" aria-labelledby="p-views-label"><h3 id="p-views-label" lang="en-GB" dir="ltr">Page actions</h3><div class="mw-portlet-body"><ul lang="en-GB" dir="ltr"><li id="ca-view" class="selected mw-list-item"><a href="/w/Btrfs/Getting_Started"><span>Read</span></a></li><li id="ca-ve-edit" class="mw-list-item"><a href="/mediawiki/index.php?title=Btrfs/Getting_Started&amp;veaction=edit" title="Edit this page [v]" accesskey="v"><span>Edit</span></a></li><li id="ca-edit" class="collapsible mw-list-item"><a href="/mediawiki/index.php?title=Btrfs/Getting_Started&amp;action=edit" title="Edit the source code of this page [e]" accesskey="e"><span>Edit source</span></a></li><li id="ca-history" class="mw-list-item"><a href="/mediawiki/index.php?title=Btrfs/Getting_Started&amp;action=history" title="Past revisions of this page [h]" accesskey="h"><span>History</span></a></li><li id="ca-purge" class="mw-list-item"><a href="#"><span>Purge</span></a></li></ul></div></div></div><div class="visualClear"></div><div id="bodyContent"><div id="contentSub"><div id="mw-content-subtitle"></div></div><div id="mw-content-text" class="mw-body-content"><div class="mw-content-ltr mw-parser-output" lang="en-GB" dir="ltr"><div id="toc" class="toc" role="navigation" aria-labelledby="mw-toc-heading"><input type="checkbox" role="button" id="toctogglecheckbox" class="toctogglecheckbox" style="display:none" /><div class="toctitle" lang="en-GB" dir="ltr"><h2 id="mw-toc-heading">Contents</h2><span class="toctogglespan"><label class="toctogglelabel" for="toctogglecheckbox"></label></span></div>
+<ul>
+<li class="toclevel-1 tocsection-1"><a href="#Getting_Started_with_Btrfs"><span class="tocnumber">1</span> <span class="toctext">Getting Started with Btrfs</span></a></li>
+<li class="toclevel-1 tocsection-2"><a href="#Preparing_your_disks"><span class="tocnumber">2</span> <span class="toctext">Preparing your disks</span></a>
+<ul>
+<li class="toclevel-2 tocsection-3"><a href="#Single,_multi-disk_and_RAID"><span class="tocnumber">2.1</span> <span class="toctext">Single, multi-disk and RAID</span></a>
+<ul>
+<li class="toclevel-3 tocsection-4"><a href="#SSD_and_NVME_disks"><span class="tocnumber">2.1.1</span> <span class="toctext">SSD and NVME disks</span></a></li>
+<li class="toclevel-3 tocsection-5"><a href="#Partitioning"><span class="tocnumber">2.1.2</span> <span class="toctext">Partitioning</span></a></li>
+<li class="toclevel-3 tocsection-6"><a href="#Create_the_filesystem_-_mkfs.btrfs"><span class="tocnumber">2.1.3</span> <span class="toctext">Create the filesystem - mkfs.btrfs</span></a></li>
+</ul>
+</li>
+<li class="toclevel-2 tocsection-7"><a href="#Btrfs_as_root_filesystem"><span class="tocnumber">2.2</span> <span class="toctext">Btrfs as root filesystem</span></a></li>
+<li class="toclevel-2 tocsection-8"><a href="#Subvolumes"><span class="tocnumber">2.3</span> <span class="toctext">Subvolumes</span></a></li>
+<li class="toclevel-2 tocsection-9"><a href="#fstab"><span class="tocnumber">2.4</span> <span class="toctext">fstab</span></a></li>
+<li class="toclevel-2 tocsection-10"><a href="#GRUB_/_Boot_loader"><span class="tocnumber">2.5</span> <span class="toctext">GRUB / Boot loader</span></a>
+<ul>
+<li class="toclevel-3 tocsection-11"><a href="#Initial_RAM_filesystem"><span class="tocnumber">2.5.1</span> <span class="toctext">Initial RAM filesystem</span></a></li>
+<li class="toclevel-3 tocsection-12"><a href="#Common_Boot_Loaders"><span class="tocnumber">2.5.2</span> <span class="toctext">Common Boot Loaders</span></a></li>
+<li class="toclevel-3 tocsection-13"><a href="#Distribution-Specific_Guides"><span class="tocnumber">2.5.3</span> <span class="toctext">Distribution-Specific Guides</span></a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toclevel-1 tocsection-14"><a href="#Further_Reading_and_Support"><span class="tocnumber">3</span> <span class="toctext">Further Reading and Support</span></a></li>
+</ul>
+</div>
+
+<h2><span class="mw-headline" id="Getting_Started_with_Btrfs">Getting Started with Btrfs</span><span class="mw-editsection"><span class="mw-editsection-bracket">[</span><a href="/mediawiki/index.php?title=Btrfs/Getting_Started&amp;veaction=edit&amp;section=1" title="Edit section: Getting Started with Btrfs" class="mw-editsection-visualeditor">edit</a><span class="mw-editsection-divider"> | </span><a href="/mediawiki/index.php?title=Btrfs/Getting_Started&amp;action=edit&amp;section=1" title="Edit section&#039;s source code: Getting Started with Btrfs">edit source</a><span class="mw-editsection-bracket">]</span></span></h2>
+<figure class="mw-default-size mw-halign-right" typeof="mw:File/Thumb"><a href="/w/File:Apertura_hard_disk_08.jpg" class="mw-file-description"><img src="https://upload.wikimedia.org/wikipedia/commons/thumb/c/c7/Apertura_hard_disk_08.jpg/300px-Apertura_hard_disk_08.jpg" decoding="async" width="300" height="225" class="mw-file-element" srcset="https://upload.wikimedia.org/wikipedia/commons/thumb/c/c7/Apertura_hard_disk_08.jpg/450px-Apertura_hard_disk_08.jpg 1.5x, https://upload.wikimedia.org/wikipedia/commons/thumb/c/c7/Apertura_hard_disk_08.jpg/600px-Apertura_hard_disk_08.jpg 2x" /></a><figcaption>A disassembled Hard Disk.</figcaption></figure>
+<p>Welcome,
+</p><p>This guide is designed to introduce you to the Btrfs filesystem, covering basic setup, advanced features like snapshots and compression, and best practices for managing your volumes. Before diving in, familiarize yourself with Btrfs's unique <a href="/w/Btrfs/Features" title="Btrfs/Features">features</a>.
+</p>
+<h2><span class="mw-headline" id="Preparing_your_disks">Preparing your disks</span><span class="mw-editsection"><span class="mw-editsection-bracket">[</span><a href="/mediawiki/index.php?title=Btrfs/Getting_Started&amp;veaction=edit&amp;section=2" title="Edit section: Preparing your disks" class="mw-editsection-visualeditor">edit</a><span class="mw-editsection-divider"> | </span><a href="/mediawiki/index.php?title=Btrfs/Getting_Started&amp;action=edit&amp;section=2" title="Edit section&#039;s source code: Preparing your disks">edit source</a><span class="mw-editsection-bracket">]</span></span></h2>
+<p>For Btrfs, using a partition table is recommended to avoid issues with other tools and operating systems. Use a GUID Partition Table (GPT) for modern compatibility. Tools like <a class="external text" href="https://www.gnu.org/software/parted/">GNU Parted</a>, <a class="external text" href="https://en.wikipedia.org/wiki/Cfdisk">cfdisk</a>, and <a class="external text" href="https://en.wikipedia.org/wiki/Fdisk">fdisk</a> are excellent for partitioning. In this guide we will use GNU Parted.
+</p><p>Btrfs also supports the use of unpartitioned/raw devices, allowing for flexibility in how storage devices are utilized. Additionally, Btrfs can be used on top of <a class="external text" href="https://sourceware.org/lvm2/">LVM</a> (Logical Volume Manager) and <a class="external text" href="https://en.wikipedia.org/wiki/Mdadm">MD</a> (Multiple Device) devices, enabling advanced volume management and RAID configurations. This versatility makes Btrfs suitable for a wide range of storage setups, from simple single-disk systems to complex multi-device RAID arrays.
+</p>
+<h3><span id="Single.2C_multi-disk_and_RAID"></span><span class="mw-headline" id="Single,_multi-disk_and_RAID">Single, multi-disk and RAID</span><span class="mw-editsection"><span class="mw-editsection-bracket">[</span><a href="/mediawiki/index.php?title=Btrfs/Getting_Started&amp;veaction=edit&amp;section=3" title="Edit section: Single, multi-disk and RAID" class="mw-editsection-visualeditor">edit</a><span class="mw-editsection-divider"> | </span><a href="/mediawiki/index.php?title=Btrfs/Getting_Started&amp;action=edit&amp;section=3" title="Edit section&#039;s source code: Single, multi-disk and RAID">edit source</a><span class="mw-editsection-bracket">]</span></span></h3>
+<p>Btrfs is versatile, working on single or multiple disks and supporting a variety of RAID modes, or <a href="/w/Btrfs/Profiles" title="Btrfs/Profiles">Profiles</a>, not all of which are traditional RAID modes. These profiles include DUP, SINGLE, and MIXED, in addition to the conventional RAID levels. Each profile offers different advantages in terms of redundancy, storage efficiency, and performance, allowing users to tailor the filesystem to their specific needs. For detailed information on configuring these profiles, refer to the <a href="/w/Btrfs/Profiles" title="Btrfs/Profiles">Profiles</a> section.
+</p><p>Tools such as the <a class="external text" href="https://carfax.org.uk/btrfs-usage/">Btrfs disk space calculator</a> can help you effectively plan your disk setup by considering the different profiles. Additionally, the <a class="external text" href="https://github.com/knorrie/python-btrfs">python-btrfs</a> package provides a command-line space calculator, useful for understanding the space allocation and redundancy benefits of each profile.
+</p>
+<figure class="mw-default-size" typeof="mw:File/Thumb"><a href="/w/File:Btrfs_disk_space_calculator.png" class="mw-file-description"><img alt="Screenshot of the disk space calculator." src="/mediawiki/images/thumb/4/4c/Btrfs_disk_space_calculator.png/300px-Btrfs_disk_space_calculator.png" decoding="async" width="300" height="283" class="mw-file-element" srcset="/mediawiki/images/thumb/4/4c/Btrfs_disk_space_calculator.png/450px-Btrfs_disk_space_calculator.png 1.5x, /mediawiki/images/thumb/4/4c/Btrfs_disk_space_calculator.png/600px-Btrfs_disk_space_calculator.png 2x" /></a><figcaption>Disk space calculator showing 3 devices in a RAID-1 configuration</figcaption></figure>
+<pre style="margin-bottom: 0; border-bottom:none; padding-bottom:0.8em; font-weight:bold;"># btrfs-space-calculator -m raid1 -d raid1 4TiB 6TiB 8TiB</pre>
+<pre style="margin-top: 0; border-top-style:dashed; padding-top: 0.8em;">Target metadata profile: RAID1
+Target data profile: RAID1
+Mixed block groups: False
+Total raw filesystem size: 18.00TiB
+Device sizes:
+  Device 1: 4.00TiB
+  Device 2: 6.00TiB
+  Device 3: 8.00TiB
+Metadata to data ratio: 1:200
+Estimated virtual space to use for metadata: 46.00GiB
+Estimated virtual space to use for data: 8.96TiB
+Total unallocatable raw amount: 0.00B
+Unallocatable raw bytes per device:
+  Device 1: 0.00B
+  Device 2: 0.00B
+  Device 3: 0.00B
+</pre> 
+<h4><span class="mw-headline" id="SSD_and_NVME_disks">SSD and NVME disks</span><span class="mw-editsection"><span class="mw-editsection-bracket">[</span><a href="/mediawiki/index.php?title=Btrfs/Getting_Started&amp;veaction=edit&amp;section=4" title="Edit section: SSD and NVME disks" class="mw-editsection-visualeditor">edit</a><span class="mw-editsection-divider"> | </span><a href="/mediawiki/index.php?title=Btrfs/Getting_Started&amp;action=edit&amp;section=4" title="Edit section&#039;s source code: SSD and NVME disks">edit source</a><span class="mw-editsection-bracket">]</span></span></h4>
+<p>For NVMe or SSD drives, using <code>blkdiscard</code> before partitioning can improve performance and longevity by informing the firmware the disk is unused. 
+</p>
+<pre style="margin-bottom: 0; border-bottom:none; padding-bottom:0.8em; font-weight:bold;"># blkdiscard -v /dev/vda</pre>
+<pre style="margin-top: 0; border-top-style:dashed; padding-top: 0.8em;">/dev/vda: Discarded 4294967296 bytes from the offset 0</pre>
+<div class="code forzawiki-template-box-note">WARNING: This erases all data on the disk.</div>
+<p>Discards are also known as <a class="external text" href="https://en.m.wikipedia.org/wiki/Trim_(computing)">TRIM</a> or <a class="external text" href="https://en.m.wikipedia.org/wiki/Trim_(computing)">UNMAP</a> operations. Btrfs can handle discards automatically using the <a href="/w/Btrfs/Usage#Discard_/_Trim" title="Btrfs/Usage">discard</a> mount option.
+</p>
+<h4><span class="mw-headline" id="Partitioning">Partitioning</span><span class="mw-editsection"><span class="mw-editsection-bracket">[</span><a href="/mediawiki/index.php?title=Btrfs/Getting_Started&amp;veaction=edit&amp;section=5" title="Edit section: Partitioning" class="mw-editsection-visualeditor">edit</a><span class="mw-editsection-divider"> | </span><a href="/mediawiki/index.php?title=Btrfs/Getting_Started&amp;action=edit&amp;section=5" title="Edit section&#039;s source code: Partitioning">edit source</a><span class="mw-editsection-bracket">]</span></span></h4>
+<p>Create a <a class="external text" href="https://en.wikipedia.org/wiki/Disk%20partitioning">partition table</a> using GNU Parted, ensuring partitions start on a 4MiB boundary for optimal alignment. This alignment matches the internal erase block sizes of many SSDs, which can improve performance and reduce wear. It also ensures enough space at the beginning of the disk if you need to add a <a class="external text" href="https://en.wikipedia.org/wiki/BIOS_boot_partition">BIOS Boot partition</a> later on.
+</p><p>Invoke parted using <code>parted /dev/&lt;disk&gt;</code> for each disk that you want to include in your Btrfs system. We will use <code>/dev/sdb</code> in the following example:
+</p>
+<pre style="margin-bottom: 0; border-bottom:none; padding-bottom:0.8em; font-weight:bold;"># parted /dev/sdb</pre>
+<pre style="margin-top: 0; border-top-style:dashed; padding-top: 0.8em;"> GNU Parted 3.2
+ Using /dev/sdb
+ Welcome to GNU Parted! Type 'help' to view a list of commands.
+ (parted)
+</pre> 
+<p>First check there is no existing partitions or partition tables on the disk:
+</p>
+<pre style="margin-bottom: 0; border-bottom:none; padding-bottom:0.8em; font-weight:bold;">(parted) print</pre>
+<pre style="margin-top: 0; border-top-style:dashed; padding-top: 0.8em;"> Error: /dev/sdb: unrecognised disk label
+ Model: ATA VBOX HARDDISK (scsi)
+ Disk /dev/sdb: 102400MiB
+ Sector size (logical/physical): 512B/512B
+ Partition Table: unknown
+ Disk Flags:
+</pre> 
+<p>Change the display unit to MiB (Megabytes):
+</p>
+<pre>(parted) <b>unit MiB</b></pre> 
+<p>Create a GPT partition table:
+</p>
+<pre>(parted) <b>mklabel gpt</b></pre> 
+<p>Create a partition labelled my-btrfs (you can choose any name you like):
+</p>
+<pre>(parted) <b>mkpart my-btrfs btrfs 4MiB 100%</b></pre> 
+<p>You can list the resulting layout using <b>print</b> command:
+</p>
+<pre style="margin-bottom: 0; border-bottom:none; padding-bottom:0.8em; font-weight:bold;">(parted) print</pre>
+<pre style="margin-top: 0; border-top-style:dashed; padding-top: 0.8em;"> Model: ATA VBOX HARDDISK (scsi)
+ Disk /dev/sdb: 51200MiB
+ Sector size (logical/physical): 512B/512B
+ Partition Table: gpt
+ Disk Flags:
+ 
+ Number  Start    End       Size      File system  Name      Flags
+  1      4.00MiB  51299MiB  51295MiB  btrfs        my-btrfs
+</pre> 
+<p>You should repeat this for each disk you want to add to your Btrfs filesystem. 
+</p><p>The result should be something like this:
+</p>
+<table class="wikitable">
+
+<tbody><tr>
+<th>Partition</th>
+<th>Filesystem</th>
+<th>Start</th>
+<th>End</th>
+<th>Partition type
+</th></tr>
+<tr>
+<td>/dev/sdb1</td>
+<td>Btrfs</td>
+<td>4MiB</td>
+<td>100%</td>
+<td>Linux filesystem
+</td></tr>
+<tr>
+<td>/dev/sdc1</td>
+<td>Btrfs</td>
+<td>4MiB</td>
+<td>100%</td>
+<td>Linux filesystem
+</td></tr></tbody></table>
+<h4><span class="mw-headline" id="Create_the_filesystem_-_mkfs.btrfs">Create the filesystem - mkfs.btrfs</span><span class="mw-editsection"><span class="mw-editsection-bracket">[</span><a href="/mediawiki/index.php?title=Btrfs/Getting_Started&amp;veaction=edit&amp;section=6" title="Edit section: Create the filesystem - mkfs.btrfs" class="mw-editsection-visualeditor">edit</a><span class="mw-editsection-divider"> | </span><a href="/mediawiki/index.php?title=Btrfs/Getting_Started&amp;action=edit&amp;section=6" title="Edit section&#039;s source code: Create the filesystem - mkfs.btrfs">edit source</a><span class="mw-editsection-bracket">]</span></span></h4>
+<p>Use the following command to create a Btrfs filesystem that spans across all disks:
+</p>
+<pre># mkfs.btrfs -L &lt;label&gt; --metadata &lt;profile&gt; --data &lt;profile&gt; &lt;device_1&gt; &lt;device_2&gt; &lt;device_n&gt;</pre>
+<p>Btrfs supports several profiles (RAID modes). Have a look at <a href="/w/Btrfs/Profiles" title="Btrfs/Profiles">profiles</a> for a list of supported Profiles.
+</p>
+<div class="code forzawiki-template-box-note">Btrfs supports different profiles for data and metadata. It defaults to RAID1 for metadata if multiple devices are included in the mkfs.btrfs command.</div>
+<p>This will create a standard btrfs filesystem <b>spanning</b> both disks and give it the name <b>my-data</b>. The filesystem will have the size of the sum of both disks, in this case 150GiB.
+</p>
+<pre style="margin-bottom: 0; border-bottom:none; padding-bottom:0.8em; font-weight:bold;"># mkfs.btrfs -L my-data --data single /dev/sdb1 /dev/sdc1</pre>
+<pre style="margin-top: 0; border-top-style:dashed; padding-top: 0.8em;">Label:              my-data
+UUID:               a36f20ff-f0b1-466d-a7dc-355c189b3e39
+Node size:          16384
+Sector size:        4096
+Filesystem size:    149.99GiB
+Block group profiles:
+  Data:             single            8.00MiB
+  Metadata:         RAID1             1.00GiB
+  System:           RAID1             8.00MiB
+SSD detected:       yes
+Incompat features:  extref, skinny-metadata
+Number of devices:  2
+Devices:
+   ID        SIZE  PATH
+    1    50.00GiB  /dev/sdb1
+    2   100.00GiB  /dev/sdc1
+</pre> 
+<p>If you rather want to use <b>RAID1</b> (mirroring) you would do:
+</p>
+<pre># mkfs.btrfs -L my-data --data RAID1 /dev/sdb1 /dev/sdc1</pre>
+<h3><span class="mw-headline" id="Btrfs_as_root_filesystem">Btrfs as root filesystem</span><span class="mw-editsection"><span class="mw-editsection-bracket">[</span><a href="/mediawiki/index.php?title=Btrfs/Getting_Started&amp;veaction=edit&amp;section=7" title="Edit section: Btrfs as root filesystem" class="mw-editsection-visualeditor">edit</a><span class="mw-editsection-divider"> | </span><a href="/mediawiki/index.php?title=Btrfs/Getting_Started&amp;action=edit&amp;section=7" title="Edit section&#039;s source code: Btrfs as root filesystem">edit source</a><span class="mw-editsection-bracket">]</span></span></h3>
+<p>For a single disk setup, consider separate partitions for boot, swap, and root. Recent kernels supports swap files on single-disk Btrfs, but other <a class="external text" href="https://btrfs.readthedocs.io/en/latest/Swapfile.html">limitations</a> exist too, making swap partitions a safer choice.
+</p><p>Follow the guide in the <a href="#Partitioning">Partitioning</a> section to prepare your partitions. 
+</p>
+<table class="wikitable">
+
+<tbody><tr>
+<th>Partition</th>
+<th>Filesystem</th>
+<th>Start</th>
+<th>End</th>
+<th>Partition type
+</th></tr>
+<tr>
+<td>/dev/sda(none)</td>
+<td>(bootloader)</td>
+<td>0</td>
+<td>4MiB</td>
+<td>BIOS boot
+</td></tr>
+<tr>
+<td>/dev/sda1</td>
+<td>FAT32*</td>
+<td>4MiB</td>
+<td>1GiB</td>
+<td>Boot or EFI system partition (ESP)
+</td></tr>
+<tr>
+<td>/dev/sda2</td>
+<td>Swap</td>
+<td>1GiB</td>
+<td>4GiB</td>
+<td>Swap partition*
+</td></tr>
+<tr>
+<td>/dev/sda3</td>
+<td>Btrfs</td>
+<td>4GiB</td>
+<td>100%</td>
+<td>Linux filesystem
+</td></tr>
+<tr>
+<td colspan="5"><i>Note that with UEFI boot, you must use a FAT32 formatted EFI System Partition for the boot loader.</i>
+</td></tr></tbody></table>
+<p>There is a very good guide in the <a class="external text" href="https://wiki.gentoo.org/wiki/Handbook:AMD64/Installation/Disks#Partition_tables">Gentoo handbook</a> on how to choose and determine a suitable partition layout.
+</p><p>When deciding on swap space you should choose a size based on systems RAM size and if you are going to use Hibernation. There is a good guide over at the <a class="external text" href="https://help.ubuntu.com/community/SwapFaq">Ubuntu Community</a> pages that explains why you need swap and how  to determine an appropriate size. <b>Generally <i>RAM size * 2</i> is a safe choice.</b>
+</p>
+<table class="wikitable">
+<caption>Swap size guideline
+</caption>
+<tbody><tr>
+<th>RAM</th>
+<th>No hibernation</th>
+<th>With Hibernation</th>
+<th>Maximum
+</th></tr>
+<tr>
+<td>1GiB</td>
+<td>1GiB</td>
+<td>2GiB</td>
+<td>2GiB
+</td></tr>
+<tr>
+<td>2GiB</td>
+<td>1GiB</td>
+<td>3GiB</td>
+<td>4GiB
+</td></tr>
+<tr>
+<td>3GiB</td>
+<td>2GiB</td>
+<td>5GiB</td>
+<td>6GiB
+</td></tr>
+<tr>
+<td>4GiB</td>
+<td>2GiB</td>
+<td>6GiB</td>
+<td>8GiB
+</td></tr>
+<tr>
+<td>5GiB</td>
+<td>2GiB</td>
+<td>7GiB</td>
+<td>10GiB
+</td></tr>
+<tr>
+<td>6GiB</td>
+<td>2GiB</td>
+<td>8GiB</td>
+<td>12GiB
+</td></tr>
+<tr>
+<td>8GiB</td>
+<td>3GiB</td>
+<td>11GiB</td>
+<td>16GiB
+</td></tr>
+<tr>
+<td>12GiB</td>
+<td>3GiB</td>
+<td>15GiB</td>
+<td>24GiB
+</td></tr>
+<tr>
+<td>16GiB</td>
+<td>4GiB</td>
+<td>20GiB</td>
+<td>32GiB
+</td></tr>
+<tr>
+<td>24GiB</td>
+<td>5GiB</td>
+<td>29GiB</td>
+<td>48GiB
+</td></tr>
+<tr>
+<td>32GiB</td>
+<td>6GiB</td>
+<td>38GiB</td>
+<td>64GiB
+</td></tr>
+<tr>
+<td>64GiB</td>
+<td>8GiB</td>
+<td>72GiB</td>
+<td>128GiB
+</td></tr></tbody></table>
+<h3><span class="mw-headline" id="Subvolumes">Subvolumes</span><span class="mw-editsection"><span class="mw-editsection-bracket">[</span><a href="/mediawiki/index.php?title=Btrfs/Getting_Started&amp;veaction=edit&amp;section=8" title="Edit section: Subvolumes" class="mw-editsection-visualeditor">edit</a><span class="mw-editsection-divider"> | </span><a href="/mediawiki/index.php?title=Btrfs/Getting_Started&amp;action=edit&amp;section=8" title="Edit section&#039;s source code: Subvolumes">edit source</a><span class="mw-editsection-bracket">]</span></span></h3>
+<p>Btrfs subvolumes is one of the unique features of Btrfs. Subvolumes allow for logical data separation within a single filesystem. They share all the space in the filesystem, support independent snapshots and backups. Subvolumes can also be mounted independently. In most ways, a subvolume looks like a normal directory, but has additional super powers.
+</p><p>Upon creation, Btrfs establishes a default subvolume, often referred to as <b>top-level</b> or <b>root</b> subvolume. This will be the used when mounting the filesystem without <code>subvol</code> or <code>subvolid</code> options.
+</p><p>I usually make two directories, <b>volume</b> and <b>snapshots</b> in which I create all subvolumes. This makes it easy to separate snapshots from normal subvolumes. Having all subvolumes in a single directory is called a flat structure. Avoid making <a class="external text" href="https://btrfs.readthedocs.io/en/latest/Subvolumes.html">nested subvolumes</a> as it makes things more complicated to manage later on.
+</p>
+<pre>toplevel            (default subvolume root directory)
++-- dir_1           (normal directory)
+|   +-- file_2      (normal file)
+|   \-- file_3      (normal file)
+\-- volume          (directory)
+    +-- root        (subvolume)
+    |   \-- file_4  (normal file)
+    +-- home        (subvolume)
+    +-- tmp         (subvolume)
+    \-- file_5      (normal file)
+\-- snapshots       (directory)
+</pre>
+<p>Use the <code>-o subvol=</code> mount option to specify the subvolume to mount.
+</p>
+<pre># mount /dev/sdb1 /home    -o subvol=<b>volume/home</b> # mounts the <i>home</i> subvolume in /home
+# mount /dev/sdb1 /var/tmp -o subvol=<b>volume/tmp</b>  # mounts the <i>tmp</i>  subvolume in /var/tmp
+</pre>
+<p>Btrfs does not impose any restrictions on the layout or naming of subvolumes or snapshots. Subvolumes can be created and removed at anytime so it is a good choice to start with few and expand you need to a later time. Many Linux distributions use an <code>@</code> character to denote a subvolume.
+</p>
+<h3><span class="mw-headline" id="fstab">fstab</span><span class="mw-editsection"><span class="mw-editsection-bracket">[</span><a href="/mediawiki/index.php?title=Btrfs/Getting_Started&amp;veaction=edit&amp;section=9" title="Edit section: fstab" class="mw-editsection-visualeditor">edit</a><span class="mw-editsection-divider"> | </span><a href="/mediawiki/index.php?title=Btrfs/Getting_Started&amp;action=edit&amp;section=9" title="Edit section&#039;s source code: fstab">edit source</a><span class="mw-editsection-bracket">]</span></span></h3>
+<p>The Filesystem Table, or fstab, is a configuration file located at /etc/fstab that defines how and where the different filesystems and storage devices should be mounted, including required mount options.
+</p><p>Using UUIDs (Universally Unique Identifiers) instead of traditional device paths (like /dev/sda1) in fstab is recommended for several reasons:
+</p>
+<ul><li>Uniqueness: UUIDs are unique for each filesystem, which eliminates the risk of confusion between devices, especially when the hardware configuration changes.</li>
+<li>Consistency: Device paths can change between reboots due to hardware changes or the addition of new drives. UUIDs, however, remain consistent regardless of these changes, ensuring that the system always mounts the correct filesystem.</li></ul>
+<p>To find the UUID of a filesystem, you can use the <code>blkid</code> command:
+</p>
+<pre style="margin-bottom: 0; border-bottom:none; padding-bottom:0.8em; font-weight:bold;"># blkid -s UUID -s TYPE</pre>
+<pre style="margin-top: 0; border-top-style:dashed; padding-top: 0.8em;">/dev/sda2: UUID="6f6353bf-d63a-40b4-99d1-b221138e268c" TYPE="btrfs"
+/dev/sda3: UUID="3f08368e-841e-42eb-807e-da3f447b6144" TYPE="btrfs"
+/dev/sdb:  UUID="a8830497-a304-492e-8b08-e034958ca7b5" TYPE="swap"
+</pre>
+<p>This is the fstab on my Linux Mint machine:
+</p>
+<pre style="margin-bottom: 0; border-bottom:none; padding-bottom:0.8em; font-weight:bold;">File: /etc/fstab</pre>
+<pre style="margin-top: 0; border-top-style:dashed; padding-top: 0.8em;">UUID=3f08368e-841e-42eb-807e-da3f447b6144 /               btrfs   noatime,compress=zstd:1,subvol=@      0 0
+UUID=3f08368e-841e-42eb-807e-da3f447b6144 /home           btrfs   noatime,compress=zstd:1,subvol=@home  0 0
+UUID=6f6353bf-d63a-40b4-99d1-b221138e268c /boot           btrfs   noatime                               0 0
+LABEL=swap                                none            swap    sw,discard                            0 0
+UUID=3f08368e-841e-42eb-807e-da3f447b6144 /mnt/rootvol    btrfs   noatime,compress=zstd:1,subvol=/      0 0
+</pre>
+<p>Here is a the fstab from one of my Gentoo Linux machines:
+</p>
+<pre style="margin-bottom: 0; border-bottom:none; padding-bottom:0.8em; font-weight:bold;">File: /etc/fstab</pre>
+<pre style="margin-top: 0; border-top-style:dashed; padding-top: 0.8em;">UUID=c08bb98b-3b98-4dbb-a7c0-5540c2af781b   /                   btrfs   compress=zstd:1,noatime,subvol=volume/root           0 0
+UUID=c08bb98b-3b98-4dbb-a7c0-5540c2af781b   /home               btrfs   compress=zstd:1,noatime,subvol=volume/home           0 0
+UUID=c08bb98b-3b98-4dbb-a7c0-5540c2af781b   /usr/src            btrfs   compress=zstd:1,noatime,subvol=volume/src            0 0
+UUID=c08bb98b-3b98-4dbb-a7c0-5540c2af781b   /var/cache          btrfs   compress=zstd:1,noatime,subvol=volume/var_cache      0 0
+UUID=c08bb98b-3b98-4dbb-a7c0-5540c2af781b   /var/tmp            btrfs   compress=zstd:1,nodev,subvol=volume/var_tmp          0 0
+UUID=c08bb98b-3b98-4dbb-a7c0-5540c2af781b   /var/db/repos       btrfs   compress=zstd:1,noatime,subvol=volume/repos          0 0
+UUID=c08bb98b-3b98-4dbb-a7c0-5540c2af781b   /var/lib/mysql      btrfs   compress=zstd:1,noatime,subvol=volume/mysql          0 0
+UUID=c08bb98b-3b98-4dbb-a7c0-5540c2af781b   /var/lib/unifi      btrfs   compress=zstd:1,noatime,subvol=volume/unifi          0 0
+UUID=c08bb98b-3b98-4dbb-a7c0-5540c2af781b   /var/lib/redis      btrfs   compress=zstd:1,noatime,subvol=volume/redis          0 0
+UUID=c08bb98b-3b98-4dbb-a7c0-5540c2af781b   /var/log            btrfs   compress=zstd:1,noatime,subvol=volume/var_log        0 0
+UUID=c08bb98b-3b98-4dbb-a7c0-5540c2af781b   /var/spool/mail     btrfs   compress=zstd:1,noatime,subvol=volume/mail           0 0
+UUID=c08bb98b-3b98-4dbb-a7c0-5540c2af781b   /var/www            btrfs   compress=zstd:1,noatime,subvol=volume/www            0 0
+UUID=c08bb98b-3b98-4dbb-a7c0-5540c2af781b   /mnt/rootvol        btrfs   noatime,compress=zstd:1                              0 0
+UUID=65539fe2-c83d-41ea-9066-c85d40569bb7   none    swap    sw,pri=0,discard     0 0
+UUID=7885b944-0b12-45e4-9319-a52e62758086   none    swap    sw,pri=100,discard   0 0
+UUID=be4f6376-f113-4382-9f47-1cac32499f22   none    swap    sw,pri=100,discard   0 0
+</pre>
+<p>Take a note of the <code>/mnt/rootvol</code> lines. This is the top-level subvolume for the filesystem. In here you can access all subvolumes, snapshot them, and do maintenance tasks.
+</p>
+<pre style="margin-bottom: 0; border-bottom:none; padding-bottom:0.8em; font-weight:bold;"># ls -l /mnt/rootvol/</pre>
+<pre style="margin-top: 0; border-top-style:dashed; padding-top: 0.8em;"> drwxr-xr-x 1 root root 6224 Aug  2 13:01 snapshots/
+ drwxr-xr-x 1 root root  190 Apr 30 22:28 volume/
+</pre>
+<pre style="margin-bottom: 0; border-bottom:none; padding-bottom:0.8em; font-weight:bold;"># ls -l /mnt/rootvol/volume</pre>
+<pre style="margin-top: 0; border-top-style:dashed; padding-top: 0.8em;">drwxr-xr-x 1 root   root     36 Jul 30 22:27 home/
+drwxr-xr-x 1 root   root    306 Jul 23 12:22 root/
+drwxrwxrwx 1 root   root     96 Aug  2 11:43 var_tmp/
+</pre>
+ <pre style="margin-bottom: 0; border-bottom:none; padding-bottom:0.8em; font-weight:bold;"># ls -l /mnt/rootvol/snapshots</pre>
+<pre style="margin-top: 0; border-top-style:dashed; padding-top: 0.8em;">drwxr-xr-x 1 root   root     36 Jul 30 22:27 home.20200730T2301/
+drwxr-xr-x 1 root   root     36 Jul 30 22:27 home.20200731T0001/
+drwxr-xr-x 1 root   root     36 Jul 30 22:27 home.20200801T2201/
+drwxr-xr-x 1 root   root    306 Jul 23 12:22 root.20200730T0001/
+drwxr-xr-x 1 root   root    306 Jul 23 12:22 root.20200731T0001/
+drwxr-xr-x 1 root   root    306 Jul 23 12:22 root.20200802T1401/
+</pre>
+<h3><span id="GRUB_.2F_Boot_loader"></span><span class="mw-headline" id="GRUB_/_Boot_loader">GRUB / Boot loader</span><span class="mw-editsection"><span class="mw-editsection-bracket">[</span><a href="/mediawiki/index.php?title=Btrfs/Getting_Started&amp;veaction=edit&amp;section=10" title="Edit section: GRUB / Boot loader" class="mw-editsection-visualeditor">edit</a><span class="mw-editsection-divider"> | </span><a href="/mediawiki/index.php?title=Btrfs/Getting_Started&amp;action=edit&amp;section=10" title="Edit section&#039;s source code: GRUB / Boot loader">edit source</a><span class="mw-editsection-bracket">]</span></span></h3>
+<p>The boot process in Linux involves several key steps to initialize the system. At a high level, the process begins with the BIOS or UEFI firmware initializing the hardware, followed by the execution of a boot loader stored on the hard drive or other bootable media. The boot loader is responsible for loading the kernel and the <a class="external text" href="https://en.wikipedia.org/wiki/Initial%20ramdisk">initial ramdisk</a> (initramfs) into memory.
+</p>
+<ol><li>BIOS/UEFI: The system's firmware performs POST (Power-On Self Test) and identifies the boot device.</li>
+<li>Boot Loader: A small piece of software on the boot device, the boot loader is responsible for loading the Linux kernel and the initramfs into memory.</li>
+<li>Kernel Initialization: The kernel takes over, loads the initramfs, a temporary root filesystem and initializes required hardware devices.</li>
+<li>Switch to Real Root: The system switches from the initramfs to real root filesystem.</li>
+<li>Hand over the remainder of the boot process to the operating system.</li></ol>
+<h4><span class="mw-headline" id="Initial_RAM_filesystem">Initial RAM filesystem</span><span class="mw-editsection"><span class="mw-editsection-bracket">[</span><a href="/mediawiki/index.php?title=Btrfs/Getting_Started&amp;veaction=edit&amp;section=11" title="Edit section: Initial RAM filesystem" class="mw-editsection-visualeditor">edit</a><span class="mw-editsection-divider"> | </span><a href="/mediawiki/index.php?title=Btrfs/Getting_Started&amp;action=edit&amp;section=11" title="Edit section&#039;s source code: Initial RAM filesystem">edit source</a><span class="mw-editsection-bracket">]</span></span></h4>
+<p>The initramfs is a temporary root filesystem that is loaded into memory during the boot process. It contains essential drivers (kernel modules) and scripts required to mount the real root filesystem and continue the boot process.
+</p>
+<h4><span class="mw-headline" id="Common_Boot_Loaders">Common Boot Loaders</span><span class="mw-editsection"><span class="mw-editsection-bracket">[</span><a href="/mediawiki/index.php?title=Btrfs/Getting_Started&amp;veaction=edit&amp;section=12" title="Edit section: Common Boot Loaders" class="mw-editsection-visualeditor">edit</a><span class="mw-editsection-divider"> | </span><a href="/mediawiki/index.php?title=Btrfs/Getting_Started&amp;action=edit&amp;section=12" title="Edit section&#039;s source code: Common Boot Loaders">edit source</a><span class="mw-editsection-bracket">]</span></span></h4>
+<p>Several boot loaders are available for Linux, each with its features and configuration methods. Some of the most common ones include:
+<a class="external text" href="https://www.gnu.org/software/grub/">GRUB</a> (GRand Unified Bootloader): The most widely used boot loader, offering extensive configuration options and support for multiple operating systems.
+</p>
+<ul><li><a class="external text" href="https://www.rodsbooks.com/refind/">rEFInd</a>: A fork of the rEFIt boot manager for EFI and UEFI systems, known for its ease of use and graphical menu system. rEFInd can automatically detect kernels, making it a popular choice for dual-booting and systems with multiple operating systems.</li>
+<li><a class="external text" href="https://www.kernel.org/doc/html/latest/admin-guide/efi-stub.html">EFISTUB</a>: Allows the UEFI firmware to directly boot the kernel without a traditional bootloader.</li>
+<li><a class="external text" href="https://www.freedesktop.org/wiki/Software/systemd/systemd-boot/">systemd-boot</a> (previously gummiboot): A simple UEFI boot manager that provides a straightforward boot menu and configuration.</li>
+<li><a class="external text" href="https://wiki.syslinux.org/">Syslinux</a>: A lightweight bootloader.</li>
+<li><a class="external text" href="https://en.wikipedia.org/wiki/LILO%20(bootloader)">LILO</a> (Linux Loader): An older boot loader that directly loads the Linux kernel without a menu system. It is no longer maintained.</li></ul>
+<p>Each boot loader offers unique advantages, and choosing the right one depends on your specific needs, such as support for UEFI or BIOS, ease of configuration, and the ability to boot multiple operating systems. rEFInd, in particular, is noted for its user-friendly approach to managing EFI boot options, making it a great choice for users looking for a customizable and visually appealing boot menu.
+</p><p>For a detailed comparison of boot loaders, visit <a class="external text" href="https://en.wikipedia.org/wiki/Comparison%20of%20bootloaders">Comparison of Bootloaders</a>.
+</p>
+<h4><span class="mw-headline" id="Distribution-Specific_Guides">Distribution-Specific Guides</span><span class="mw-editsection"><span class="mw-editsection-bracket">[</span><a href="/mediawiki/index.php?title=Btrfs/Getting_Started&amp;veaction=edit&amp;section=13" title="Edit section: Distribution-Specific Guides" class="mw-editsection-visualeditor">edit</a><span class="mw-editsection-divider"> | </span><a href="/mediawiki/index.php?title=Btrfs/Getting_Started&amp;action=edit&amp;section=13" title="Edit section&#039;s source code: Distribution-Specific Guides">edit source</a><span class="mw-editsection-bracket">]</span></span></h4>
+<p>Different Linux distributions have their own preferred methods for setting up the boot loader and initramfs. For detailed instructions and guidelines, refer to the documentation specific to your distribution:
+</p>
+<ul><li>Alpine Linux: <a class="external free" href="https://wiki.alpinelinux.org/wiki/Bootloaders">https://wiki.alpinelinux.org/wiki/Bootloaders</a></li>
+<li>Arch Linux: <a class="external free" href="https://wiki.archlinux.org/title/Arch_boot_process">https://wiki.archlinux.org/title/Arch_boot_process</a></li>
+<li>Debian: <a class="external free" href="https://wiki.debian.org/BootLoader">https://wiki.debian.org/BootLoader</a></li>
+<li>Gentoo Linux: <a class="external free" href="https://wiki.gentoo.org/wiki/Handbook:AMD64/Installation/Bootloader">https://wiki.gentoo.org/wiki/Handbook:AMD64/Installation/Bootloader</a></li>
+<li>Ubuntu: <a class="external free" href="https://help.ubuntu.com/community/Grub2/Installing">https://help.ubuntu.com/community/Grub2/Installing</a></li></ul>
+<h2><span class="mw-headline" id="Further_Reading_and_Support">Further Reading and Support</span><span class="mw-editsection"><span class="mw-editsection-bracket">[</span><a href="/mediawiki/index.php?title=Btrfs/Getting_Started&amp;veaction=edit&amp;section=14" title="Edit section: Further Reading and Support" class="mw-editsection-visualeditor">edit</a><span class="mw-editsection-divider"> | </span><a href="/mediawiki/index.php?title=Btrfs/Getting_Started&amp;action=edit&amp;section=14" title="Edit section&#039;s source code: Further Reading and Support">edit source</a><span class="mw-editsection-bracket">]</span></span></h2>
+<p>The official home for Btrfs documentation is at <a class="external free" href="https://btrfs.readthedocs.io/">https://btrfs.readthedocs.io/</a>
+</p><p>If you need support I suggest going to the <a href="/w/Btrfs/IRC" title="Btrfs/IRC">Btrfs/IRC</a> channel. It is a very active and friendly community.
+</p>
+<!-- 
+NewPP limit report
+Cached time: 20260306132915
+Cache expiry: 86400
+Reduced expiry: false
+Complications: [show‐toc]
+CPU time usage: 0.053 seconds
+Real time usage: 0.379 seconds
+Preprocessor visited node count: 403/1000000
+Post‐expand include size: 8629/2097152 bytes
+Template argument size: 6128/2097152 bytes
+Highest expansion depth: 4/100
+Expensive parser function count: 0/100
+Unstrip recursion depth: 0/20
+Unstrip post‐expand size: 0/5000000 bytes
+-->
+<!--
+Transclusion expansion time report (%,ms,calls,template)
+100.00%    3.905      1 -total
+ 34.58%    1.350     12 Template:Hc
+ 16.67%    0.651      9 Template:Ic
+ 15.72%    0.614      6 Template:Bc
+  9.94%    0.388      2 Template:Note
+-->
+
+<!-- Saved in parser cache with key my_wiki:pcache:idhash:62-0!canonical and timestamp 20260306132915 and revision id 2183. Rendering was triggered because: page-view
+ -->
+</div></div><div class="printfooter">
+Retrieved from "<a dir="ltr" href="https://wiki.tnonline.net/mediawiki/index.php?title=Btrfs/Getting_Started&amp;oldid=2183">https://wiki.tnonline.net/mediawiki/index.php?title=Btrfs/Getting_Started&amp;oldid=2183</a>"</div>
+<div class="visualClear"></div></div></div></div></div><div id="content-bottom-stuff"><div id="catlinks" class="catlinks" data-mw="interface"><div id="mw-normal-catlinks" class="mw-normal-catlinks"><a href="/w/Special:Categories" title="Special:Categories">Category</a>: <ul><li><a href="/w/Category:Btrfs" title="Category:Btrfs">Btrfs</a></li></ul></div><div class="after-portlet after-portlet-category-normal"><br /><hr /><a href="/w/Category:Btrfs" title="Category:Btrfs">Btrfs</a></div></div></div></div><div id="mw-site-navigation"><div id="p-logo" class="mw-portlet" role="banner"><a class="mw-wiki-logo timeless-logo" href="/w/Main_Page" title="Visit the main page"><img alt="Forza&#039;s ramblings" decoding="auto" src="/mediawiki/resources/assets/forza_logo.png"></a></div><div id="site-navigation" class="sidebar-chunk"><h2><span>Navigation</span></h2><div class="sidebar-inner"><div role="navigation" class="mw-portlet" id="p-navigation" aria-labelledby="p-navigation-label"><h3 id="p-navigation-label" lang="en-GB" dir="ltr">Navigation</h3><div class="mw-portlet-body"><ul lang="en-GB" dir="ltr"><li id="n-mainpage-description" class="mw-list-item"><a href="/w/Main_Page" title="Visit the main page [z]" accesskey="z"><span>Main page</span></a></li><li id="n-Forza&#039;s-Blog" class="mw-list-item"><a href="/w/Blog"><span>Forza&#039;s Blog</span></a></li><li id="n-Btrfs-Filesystem" class="mw-list-item"><a href="/w/Category:Btrfs"><span>Btrfs Filesystem</span></a></li><li id="n-Photography" class="mw-list-item"><a href="/w/Category:Photographs"><span>Photography</span></a></li><li id="n-recentchanges" class="mw-list-item"><a href="/w/Special:RecentChanges" title="A list of recent changes in the wiki [r]" accesskey="r"><span>Recent changes</span></a></li><li id="n-randompage" class="mw-list-item"><a href="/w/Special:Random" title="Load a random page [x]" accesskey="x"><span>Random page</span></a></li><li id="n-help-mediawiki" class="mw-list-item"><a href="https://www.mediawiki.org/wiki/Special:MyLanguage/Help:Contents"><span>Help about MediaWiki</span></a></li></ul></div></div></div></div><div id="site-tools" class="sidebar-chunk"><h2><span>Wiki tools</span></h2><div class="sidebar-inner"><div role="navigation" class="mw-portlet" id="p-tb" aria-labelledby="p-tb-label"><h3 id="p-tb-label" lang="en-GB" dir="ltr">Wiki tools</h3><div class="mw-portlet-body"><ul lang="en-GB" dir="ltr"><li id="t-specialpages" class="mw-list-item"><a href="/w/Special:SpecialPages" title="A list of all special pages [q]" accesskey="q"><span>Special pages</span></a></li></ul></div></div></div></div></div><div id="mw-related-navigation"><div id="page-tools" class="sidebar-chunk"><h2><span>Page tools</span></h2><div class="sidebar-inner"><div role="navigation" class="mw-portlet emptyPortlet" id="p-cactions" title="More options" aria-labelledby="p-cactions-label"><h3 id="p-cactions-label" lang="en-GB" dir="ltr">Page tools</h3><div class="mw-portlet-body"><ul lang="en-GB" dir="ltr"></ul></div></div><div role="navigation" class="mw-portlet emptyPortlet" id="p-userpagetools" aria-labelledby="p-userpagetools-label"><h3 id="p-userpagetools-label" lang="en-GB" dir="ltr">User page tools</h3><div class="mw-portlet-body"><ul lang="en-GB" dir="ltr"></ul></div></div><div role="navigation" class="mw-portlet" id="p-pagemisc" aria-labelledby="p-pagemisc-label"><h3 id="p-pagemisc-label" lang="en-GB" dir="ltr">More</h3><div class="mw-portlet-body"><ul lang="en-GB" dir="ltr"><li id="t-whatlinkshere" class="mw-list-item"><a href="/w/Special:WhatLinksHere/Btrfs/Getting_Started" title="A list of all wiki pages that link here [j]" accesskey="j"><span>What links here</span></a></li><li id="t-recentchangeslinked" class="mw-list-item"><a href="/w/Special:RecentChangesLinked/Btrfs/Getting_Started" rel="nofollow" title="Recent changes in pages linked from this page [k]" accesskey="k"><span>Related changes</span></a></li><li id="t-print" class="mw-list-item"><a href="javascript:print();" rel="alternate" title="Printable version of this page [p]" accesskey="p"><span>Printable version</span></a></li><li id="t-permalink" class="mw-list-item"><a href="/mediawiki/index.php?title=Btrfs/Getting_Started&amp;oldid=2183" title="Permanent link to this revision of this page"><span>Permanent link</span></a></li><li id="t-info" class="mw-list-item"><a href="/mediawiki/index.php?title=Btrfs/Getting_Started&amp;action=info" title="More information about this page"><span>Page information</span></a></li><li id="t-pagelog" class="mw-list-item"><a href="/mediawiki/index.php?title=Special:Log&amp;page=Btrfs%2FGetting+Started"><span>Page logs</span></a></li></ul></div></div></div></div><div id="catlinks-sidebar" class="sidebar-chunk"><h2><span>Categories</span></h2><div class="sidebar-inner"><div id="sidebar-normal-catlinks" class="mw-normal-catlinks"><div role="navigation" class="mw-portlet" id="p-normal-catlinks" aria-labelledby="p-normal-catlinks-label"><h3 id="p-normal-catlinks-label" lang="en-GB" dir="ltr">Categories</h3><div class="mw-portlet-body"><ul><li><a href="/w/Category:Btrfs" title="Category:Btrfs">Btrfs</a></li></ul></div></div></div></div></div></div><div class="visualClear"></div></div></div><div id="mw-footer-container" class="mw-footer-container ts-container"><div id="mw-footer" class="mw-footer ts-inner" role="contentinfo" lang="en-GB" dir="ltr"><ul id="footer-icons"><li id="footer-copyrightico" class="footer-icons"><a href="https://creativecommons.org/licenses/by-sa/4.0/" class="cdx-button cdx-button--fake-button cdx-button--size-large cdx-button--fake-button--enabled"><img src="/mediawiki/resources/assets/licenses/cc-by-sa.png" alt="Creative Commons Attribution-ShareAlike" width="88" height="31" loading="lazy"></a></li><li id="footer-poweredbyico" class="footer-icons"><a href="https://www.mediawiki.org/" class="cdx-button cdx-button--fake-button cdx-button--size-large cdx-button--fake-button--enabled"><img src="/mediawiki/resources/assets/poweredby_mediawiki.svg" alt="Powered by MediaWiki" width="88" height="31" loading="lazy"></a></li></ul><div id="footer-list"><ul id="footer-info"><li id="footer-info-lastmod"> This page was last modified on 12 October 2025, at 12:31.</li><li id="footer-info-copyright">Content is available under <a class="external" href="https://creativecommons.org/licenses/by-sa/4.0/">Creative Commons Attribution-ShareAlike</a> unless otherwise noted.</li><li id="footer-info-viewcount">This page has been accessed 46,107 times.</li></ul><ul id="footer-places"><li id="footer-places-privacy"><a href="/w/Forza%27s_ramblings:Privacy_policy">Privacy policy</a></li><li id="footer-places-about"><a href="/w/Forza%27s_ramblings:About">About Forza&#039;s ramblings</a></li><li id="footer-places-disclaimers"><a href="/w/Forza%27s_ramblings:General_disclaimer">Disclaimers</a></li></ul></div><div class="visualClear"></div></div></div></div><script>(RLQ=window.RLQ||[]).push(function(){mw.config.set({"wgBackendResponseTime":45,"wgPageParseReport":{"limitreport":{"cputime":"0.053","walltime":"0.379","ppvisitednodes":{"value":403,"limit":1000000},"postexpandincludesize":{"value":8629,"limit":2097152},"templateargumentsize":{"value":6128,"limit":2097152},"expansiondepth":{"value":4,"limit":100},"expensivefunctioncount":{"value":0,"limit":100},"unstrip-depth":{"value":0,"limit":20},"unstrip-size":{"value":0,"limit":5000000},"timingprofile":["100.00%    3.905      1 -total"," 34.58%    1.350     12 Template:Hc"," 16.67%    0.651      9 Template:Ic"," 15.72%    0.614      6 Template:Bc","  9.94%    0.388      2 Template:Note"]},"cachereport":{"timestamp":"20260306132915","ttl":86400,"transientcontent":false}}});});</script>
+<script>(function(){function c(){var b=a.contentDocument||a.contentWindow.document;if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'9d843dc7aa36bfdb',t:'MTc3MjgzMDMxNg=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
+</html>

@@ -1,0 +1,5718 @@
+<!DOCTYPE html>
+
+
+
+
+
+
+
+
+
+
+
+	
+	
+
+
+
+
+
+	
+	
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+	
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+	
+
+
+
+
+
+
+
+
+
+
+
+	
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+	
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+	
+
+
+
+
+
+
+	
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<html id="XF" lang="en-US" dir="LTR"
+	  data-xf="2.3"
+	  style="font-size: 62.5%;"
+	  data-app="public"
+	  data-template="thread_view"
+	  data-container-key="node-16"
+	  data-content-key="thread-126473"
+	  data-logged-in="false"
+	  data-cookie-prefix="xf_"
+	  data-csrf="1772830359,1382e82722941b6f3545208a3b28974c"
+	  class="has-no-js template-thread_view  uix_page--fixed uix_hasSectionLinks  uix_hasCrumbs uix_hasPageAction"
+	  >
+	<head>
+		<meta charset="utf-8" />
+		<title>Handle broken disks with BTRFS | Proxmox Support Forum</title>
+		<link rel="manifest" href="/webmanifest.php">
+		
+		<meta name="apple-mobile-web-app-title" content="Proxmox Forum">
+		
+			<link rel="apple-touch-icon" href="/data/assets/logo/proxmox-logo-symbol-192x192.png">
+			
+		
+		<meta http-equiv="X-UA-Compatible" content="IE=Edge" />
+		<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+		
+		
+			
+				<meta name="theme-color" content="#eceff1" />
+				<meta name="msapplication-TileColor" content="#ECEFF1">
+			
+		
+		
+		
+			<link rel="apple-touch-icon" href="/data/assets/logo/proxmox-logo-symbol-192x192.png">
+		
+		<meta name="apple-mobile-web-app-title" content="Proxmox Forum">
+
+		
+			
+		<meta name="description" content="I&#039;m testing the behavior of BTRFS in case of disk failure.
+
+As a first test, I disconnect one of the two disks in &quot;RAID 1&quot;.
+I get errors whether it&#039;s boot..." />
+		<meta property="og:description" content="I&#039;m testing the behavior of BTRFS in case of disk failure.
+
+As a first test, I disconnect one of the two disks in &quot;RAID 1&quot;.
+I get errors whether it&#039;s boot disks or not, but the errors are different.
+In case of boot disk I have this screen:
+
+
+Otherwise I have:
+
+
+How can I fix?
+
+Ask if you need..." />
+		<meta property="twitter:description" content="I&#039;m testing the behavior of BTRFS in case of disk failure.
+
+As a first test, I disconnect one of the two disks in &quot;RAID 1&quot;.
+I get errors whether it&#039;s boot disks or not, but the errors are..." />
+	
+		
+			<meta property="og:url" content="https://forum.proxmox.com/threads/handle-broken-disks-with-btrfs.126473/" />
+		
+			<link rel="canonical" href="https://forum.proxmox.com/threads/handle-broken-disks-with-btrfs.126473/" />
+		
+
+		
+			
+	
+	
+	<meta property="og:site_name" content="Proxmox Support Forum" />
+
+
+		
+		
+			
+	
+	
+	<meta property="og:type" content="website" />
+
+
+		
+		
+			
+	
+	
+	
+		<meta property="og:title" content="Handle broken disks with BTRFS" />
+		<meta property="twitter:title" content="Handle broken disks with BTRFS" />
+	
+
+
+		
+		
+		
+		
+			
+	
+	
+	
+		<meta property="og:image" content="https://forum.proxmox.com/styles/uix/images/Proxmox-logo-stacked-white-background-1200.png" />
+		<meta property="twitter:image" content="https://forum.proxmox.com/styles/uix/images/Proxmox-logo-stacked-white-background-1200.png" />
+		<meta property="twitter:card" content="summary" />
+	
+
+
+		
+
+		
+	
+	
+	
+	
+	
+		
+	
+	
+	
+	
+	<link rel="stylesheet" href="/css.php?css=public%3Anormalize.css%2Cpublic%3Afa.css%2Cpublic%3Anormalize.css%2Cpublic%3Afa.css%2Cpublic%3Acore.less%2Cpublic%3Aapp.less&amp;s=7&amp;l=1&amp;d=1770901535&amp;k=a22a9c1197e37bcd1c2ac5155d2f9d00c152be59" />
+	
+	
+
+	
+	
+	
+
+	<link rel="stylesheet" href="/css.php?css=public%3Abb_code.less%2Cpublic%3Amessage.less%2Cpublic%3Anotices.less%2Cpublic%3Ashare_controls.less%2Cpublic%3Ath_uix_threadStarterPost.less%2Cpublic%3Auix.less%2Cpublic%3Auix_extendedFooter.less%2Cpublic%3Auix_socialMedia.less%2Cpublic%3Aextra.less&amp;s=7&amp;l=1&amp;d=1770901535&amp;k=d3dc7182d4f5de1496238a99c4a9bbba7d5635e8" />
+
+	
+		<link href='//fonts.googleapis.com/css?family=Roboto:300,400,500,600,700|Open+Sans:400,600,700|Lato:400,700,900' rel='stylesheet' type='text/css'>
+	
+	
+		<script src="/js/xf/preamble.min.js?_v=afca2500"></script>
+	
+	
+	<script src="/js/vendor/vendor-compiled.js?_v=afca2500" defer></script>
+	<script src="/js/xf/core-compiled.js?_v=afca2500" defer></script>
+	
+	<script>
+		XF.ready(() =>
+		{
+			XF.extendObject(true, XF.config, {
+				// 
+				userId: 0,
+				enablePush: false,
+				pushAppServerKey: '',
+				url: {
+					fullBase: 'https://forum.proxmox.com/',
+					basePath: '/',
+					css: '/css.php?css=__SENTINEL__&s=7&l=1&d=1770901535',
+					js: '/js/__SENTINEL__?_v=afca2500',
+					icon: '/data/local/icons/__VARIANT__.svg?v=1770902607#__NAME__',
+					iconInline: '/styles/fa/__VARIANT__/__NAME__.svg?v=5.15.3',
+					keepAlive: '/login/keep-alive'
+				},
+				cookie: {
+					path: '/',
+					domain: '',
+					prefix: 'xf_',
+					secure: true,
+					consentMode: 'advanced',
+					consented: []
+				},
+				cacheKey: 'f3ed7234243583f554e27d349fe769c5',
+				csrf: '1772830359,1382e82722941b6f3545208a3b28974c',
+				js: {"\/js\/xf\/code_block-compiled.js?_v=afca2500":true,"\/js\/themehouse\/uix\/ripple.min.js?_v=afca2500":true,"\/js\/themehouse\/global\/20210125.min.js?_v=afca2500":true,"\/js\/themehouse\/uix\/index.min.js?_v=afca2500":true,"\/js\/themehouse\/uix\/vendor\/hover-intent\/hoverintent.min.js?_v=afca2500":true},
+				fullJs: false,
+				css: {"public:bb_code.less":true,"public:message.less":true,"public:notices.less":true,"public:share_controls.less":true,"public:th_uix_threadStarterPost.less":true,"public:uix.less":true,"public:uix_extendedFooter.less":true,"public:uix_socialMedia.less":true,"public:extra.less":true},
+				time: {
+					now: 1772830359,
+					today: 1772751600,
+					todayDow: 5,
+					tomorrow: 1772838000,
+					yesterday: 1772665200,
+					week: 1772233200,
+					month: 1772319600,
+					year: 1767222000
+				},
+				style: {
+					light: '',
+					dark: '',
+					defaultColorScheme: 'light'
+				},
+				borderSizeFeature: '2px',
+				fontAwesomeWeight: 'r',
+				enableRtnProtect: true,
+				
+				enableFormSubmitSticky: true,
+				imageOptimization: '0',
+				imageOptimizationQuality: 0.85,
+				uploadMaxFilesize: 2097152,
+				uploadMaxWidth: 0,
+				uploadMaxHeight: 0,
+				allowedVideoExtensions: ["m4v","mov","mp4","mp4v","mpeg","mpg","ogv","webm"],
+				allowedAudioExtensions: ["mp3","opus","ogg","wav"],
+				shortcodeToEmoji: true,
+				visitorCounts: {
+					conversations_unread: '0',
+					alerts_unviewed: '0',
+					total_unread: '0',
+					title_count: true,
+					icon_indicator: true
+				},
+				jsMt: {"xf\/action.js":"2157db59","xf\/embed.js":"f3d8898c","xf\/form.js":"8ec8297c","xf\/structure.js":"e6d897e3","xf\/tooltip.js":"8ec8297c"},
+				jsState: {},
+				publicMetadataLogoUrl: 'https://forum.proxmox.com/styles/uix/images/Proxmox-logo-stacked-white-background-1200.png',
+				publicPushBadgeUrl: 'https://forum.proxmox.com/styles/default/xenforo/bell.png'
+			})
+
+			XF.extendObject(XF.phrases, {
+				// 
+				date_x_at_time_y:     "{date} at {time}",
+				day_x_at_time_y:      "{day} at {time}",
+				yesterday_at_x:       "Yesterday at {time}",
+				x_minutes_ago:        "{minutes} minutes ago",
+				one_minute_ago:       "1 minute ago",
+				a_moment_ago:         "A moment ago",
+				today_at_x:           "Today at {time}",
+				in_a_moment:          "In a moment",
+				in_a_minute:          "In a minute",
+				in_x_minutes:         "In {minutes} minutes",
+				later_today_at_x:     "Later today at {time}",
+				tomorrow_at_x:        "Tomorrow at {time}",
+				short_date_x_minutes: "{minutes}m",
+				short_date_x_hours:   "{hours}h",
+				short_date_x_days:    "{days}d",
+
+				day0: "Sunday",
+				day1: "Monday",
+				day2: "Tuesday",
+				day3: "Wednesday",
+				day4: "Thursday",
+				day5: "Friday",
+				day6: "Saturday",
+
+				dayShort0: "Sun",
+				dayShort1: "Mon",
+				dayShort2: "Tue",
+				dayShort3: "Wed",
+				dayShort4: "Thu",
+				dayShort5: "Fri",
+				dayShort6: "Sat",
+
+				month0: "January",
+				month1: "February",
+				month2: "March",
+				month3: "April",
+				month4: "May",
+				month5: "June",
+				month6: "July",
+				month7: "August",
+				month8: "September",
+				month9: "October",
+				month10: "November",
+				month11: "December",
+
+				active_user_changed_reload_page: "The active user has changed. Reload the page for the latest version.",
+				server_did_not_respond_in_time_try_again: "The server did not respond in time. Please try again.",
+				oops_we_ran_into_some_problems: "Oops! We ran into some problems.",
+				oops_we_ran_into_some_problems_more_details_console: "Oops! We ran into some problems. Please try again later. More error details may be in the browser console.",
+				file_too_large_to_upload: "The file is too large to be uploaded.",
+				uploaded_file_is_too_large_for_server_to_process: "The uploaded file is too large for the server to process.",
+				files_being_uploaded_are_you_sure: "Files are still being uploaded. Are you sure you want to submit this form?",
+				attach: "Attach files",
+				rich_text_box: "Rich text box",
+				close: "Close",
+				link_copied_to_clipboard: "Link copied to clipboard.",
+				text_copied_to_clipboard: "Text copied to clipboard.",
+				loading: "Loading…",
+				you_have_exceeded_maximum_number_of_selectable_items: "You have exceeded the maximum number of selectable items.",
+
+				processing: "Processing",
+				'processing...': "Processing…",
+
+				showing_x_of_y_items: "Showing {count} of {total} items",
+				showing_all_items: "Showing all items",
+				no_items_to_display: "No items to display",
+
+				number_button_up: "Increase",
+				number_button_down: "Decrease",
+
+				push_enable_notification_title: "Push notifications enabled successfully at Proxmox Support Forum",
+				push_enable_notification_body: "Thank you for enabling push notifications!",
+
+				pull_down_to_refresh: "Pull down to refresh",
+				release_to_refresh: "Release to refresh",
+				refreshing: "Refreshing…"
+			})
+		})
+	</script>
+	
+	<script src="/js/xf/code_block-compiled.js?_v=afca2500" defer></script>
+<script src="/js/themehouse/uix/ripple.min.js?_v=afca2500" defer></script>
+<script src="/js/themehouse/global/20210125.min.js?_v=afca2500" defer></script>
+<script src="/js/themehouse/uix/index.min.js?_v=afca2500" defer></script>
+<script src="/js/themehouse/uix/vendor/hover-intent/hoverintent.min.js?_v=afca2500" defer></script>
+<script>
+XF.ready(() =>
+{
+
+	// detect android device. Added to fix the dark pixel bug https://github.com/Audentio/xf2theme-issues/issues/1055
+
+	var ua = navigator.userAgent.toLowerCase();
+	var isAndroid = ua.indexOf("android") > -1; //&& ua.indexOf("mobile");
+
+	if(isAndroid) {
+	document.querySelector("html").classList.add("device--isAndroid");
+	}	
+
+})
+</script>
+<script>
+XF.ready(() =>
+{
+
+			var threadSelector = document.querySelector('.structItem--thread') !== null;
+			
+			if (threadSelector) {
+				document.querySelector('.structItem--thread').addEventListener('click', (e) => {
+					var target = e.target;
+					var skip = ['a', 'i', 'input', 'label'];
+					if (target && skip.indexOf(target.tagName.toLowerCase()) === -1) {
+						var href = this.querySelector('.structItem-title').getAttribute('uix-href');
+						if (e.metaKey || e.cmdKey) {
+							e.preventDefault();
+							window.open(href, '_blank');
+						} else {
+							window.location = href;
+						}
+					}
+				});
+			}
+	
+})
+</script>
+<script>
+XF.ready(() =>
+{
+
+		
+			var sidebar = document.querySelector('.p-body-sidebar');
+			var backdrop = document.querySelector('.p-body-sidebar [data-ocm-class="offCanvasMenu-backdrop"]');
+		
+			var hasSidebar = document.querySelector('.p-body-sidebar') !== null;
+			var hasBackdrop = document.querySelector('.p-body-sidebar [data-ocm-class="offCanvasMenu-backdrop"]') !== null;
+			var sidebarTrigger = document.querySelector('.uix_sidebarCanvasTrigger') !== null;
+			var sidebarInner = document.querySelector('.uix_sidebarCanvasTrigger') !== null;
+			
+			if (sidebarTrigger) {
+				document.addEventListener('click', (e) => {
+				  if (e.target.closest('.uix_sidebarCanvasTrigger')) {
+					e.preventDefault();
+
+					sidebar.style.display = "block";
+					window.setTimeout(function() {
+						sidebar.classList.add('offCanvasMenu');
+						sidebar.classList.add('offCanvasMenu--blocks');
+						sidebar.classList.add('is-active');
+						sidebar.classList.add('is-transitioning');
+						document.querySelector('body').classList.add('sideNav--open');
+					}, 50);
+		
+					if (hasSidebar) {
+						window.setTimeout(function() {
+							sidebar.classList.remove('is-transitioning');
+						}, 250);
+					}
+		
+					if (sidebarInner) {
+						document.querySelector('.uix_sidebarInner').classList.add('offCanvasMenu-content');
+						backdrop.classList.add('offCanvasMenu-backdrop');
+						document.querySelector('body').classList.add('is-modalOpen');
+					}
+				}
+			  });
+			}
+			if (hasBackdrop) {
+				backdrop.addEventListener("click", (e) => {
+					sidebar.classList.add('is-transitioning');
+					sidebar.classList.remove('is-active');
+
+					window.setTimeout(function() {
+						sidebar.classList.remove('offCanvasMenu');
+						sidebar.classList.remove('offCanvasMenu--blocks');
+						sidebar.classList.remove('is-transitioning');
+						document.querySelector('.uix_sidebarInner').classList.remove('offCanvasMenu-content');
+						backdrop.classList.remove('offCanvasMenu-backdrop');
+						document.querySelector('body').classList.remove('is-modalOpen');
+						sidebar.style.display="";
+					}, 250);
+				});
+			}
+		
+	
+})
+</script>
+<script>
+XF.ready(() =>
+{
+
+	/****** OFF CANVAS ******/
+
+    var panels = {
+        navigation: {
+            position: 1,
+        },
+        account: {
+            position: 2,
+        },
+        inbox: {
+            position: 3,
+        },
+        alerts: {
+            position: 4,
+        },
+    };
+
+    var tabsContainer = document.querySelector(".sidePanel__tabs");
+
+    var activeTab = "navigation";
+
+    var activeTabPosition = panels[activeTab].position;
+
+    function generateDirections() {
+        var tabPanels = document.querySelectorAll(".sidePanel__tabPanel");
+        tabPanels.forEach(function (tabPanel) {
+            var tabPosition = tabPanel.getAttribute("data-content");
+            var activeTabPosition = panels[activeTab].position;
+
+            if (tabPosition != activeTab) {
+                if (panels[tabPosition].position < activeTabPosition) {
+                    tabPanel.classList.add("is-left");
+                }
+
+                if (panels[tabPosition].position > activeTabPosition) {
+                    tabPanel.classList.add("is-right");
+                }
+            }
+        });
+    }
+
+    generateDirections();
+
+	if (tabsContainer) {
+		var sidePanelTabs = tabsContainer.querySelectorAll(".sidePanel__tab");
+	}
+	
+	if (sidePanelTabs && sidePanelTabs.length > 0) {
+		sidePanelTabs.forEach(function (tab) {
+			tab.addEventListener("click", function () {
+				sidePanelTabs.forEach(function (tab) {
+					tab.classList.remove("sidePanel__tab--active");
+				});
+				this.classList.add("sidePanel__tab--active");
+
+				activeTab = this.getAttribute("data-attr");
+
+				var tabPanels = document.querySelectorAll(".sidePanel__tabPanel");
+				tabPanels.forEach(function (tabPanel) {
+					tabPanel.classList.remove("is-active");
+				});
+
+				var activeTabPanel = document.querySelector(
+					'.sidePanel__tabPanel[data-content="' + activeTab + '"]'
+				);
+				activeTabPanel.classList.add("is-active");
+
+				var tabPanels = document.querySelectorAll(".sidePanel__tabPanel");
+				tabPanels.forEach(function (tabPanel) {
+					tabPanel.classList.remove("is-left", "is-right");
+				});
+
+				generateDirections();
+			});
+		});
+	}
+	
+})
+</script>
+<script>
+XF.ready(() =>
+{
+
+
+	/******** extra info post toggle ***********/
+	
+    XF.thThreadsUserExtraTrigger = {
+        eventNameSpace: 'XFthThreadsUserExtraTrigger',
+
+        init: function(e) {},
+
+        click: function(e) {
+            var target = e.target;
+            var parent = target.closest('.message-user');
+            var triggerContainer = target.parentElement.closest('.thThreads__userExtra--toggle');
+            var container = triggerContainer.previousElementSibling;
+            var child = container.querySelector('.message-userExtras');
+            var eleHeight = child.offsetHeight;
+
+            if (parent.classList.contains('userExtra--expand')) {
+                container.style.height = eleHeight + 'px';
+                parent.classList.toggle('userExtra--expand');
+                setTimeout(function() {
+                    container.style.height = '0';
+                    setTimeout(function() {
+                        container.style.height = '';
+                    }, 200);
+                }, 17);
+            } else {
+                container.style.height = eleHeight + 'px';
+                setTimeout(function() {
+                    parent.classList.toggle('userExtra--expand');
+                    container.style.height = '';
+                }, 200);
+            }
+        }
+    };
+
+    document.body.addEventListener('click', function(event) {
+        var target = event.target;
+        if (target.matches('.thThreads__userExtra--trigger')) {
+            XF.thThreadsUserExtraTrigger.click(event);
+        }
+    });
+	
+	
+})
+</script>
+<script>
+XF.ready(() =>
+{
+
+
+	/******** Backstretch images ***********/
+
+		
+
+
+})
+</script>
+<script>
+XF.ready(() =>
+{
+
+
+	// sidenav canvas blur fix
+
+    document.querySelectorAll('.p-body-sideNavTrigger .button').forEach(function (button) {
+        button.addEventListener('click', function () {
+            document.body.classList.add('sideNav--open');
+        });
+    });
+
+    document.querySelectorAll("[data-ocm-class='offCanvasMenu-backdrop']").forEach(function (backdrop) {
+        backdrop.addEventListener('click', function () {
+            document.body.classList.remove('sideNav--open');
+        });
+    });
+
+    document.addEventListener('editor:start', function (event) {
+        if (typeof event !== 'undefined' && typeof event.target !== 'undefined') {
+            var ele = event.target;
+            if (event?.target) {
+				var ele = event.target;
+				if (!ele.classList==undefined) {
+					if (ele.classList.contains('js-editor')) {
+						var wrapper = ele.closest('.message-editorWrapper');
+						if (wrapper) {
+							setTimeout(function () {
+								var innerEle = wrapper.querySelector('.fr-element');
+								if (innerEle) {
+									innerEle.addEventListener('focus', function (e) {
+										document.documentElement.classList.add('uix_editor--focused');
+									});
+									innerEle.addEventListener('blur', function (e) {
+										document.documentElement.classList.remove('uix_editor--focused');
+									});
+								}
+							}, 0);
+						}
+					}
+				}
+			}
+        }
+    });
+
+})
+</script>
+<script>
+XF.ready(() =>
+{
+
+	// off canvas menu closer keyboard shortcut
+    document.body.addEventListener('keyup', function (e) {
+        switch (e.key) {
+            case 'Escape':
+                var offCanvasMenu = document.querySelector('.offCanvasMenu.is-active');
+                if (offCanvasMenu) {
+                    var backdrop = offCanvasMenu.querySelector('.offCanvasMenu-backdrop');
+                    if (backdrop) {
+                        backdrop.click();
+                    }
+                }
+                return;
+        }
+    });
+	
+})
+</script>
+<script>
+XF.ready(() =>
+{
+
+    let uixMegaHovered = false;
+    const navEls = document.querySelectorAll('.uix-navEl--hasMegaMenu');
+    const pNav = document.querySelector('.p-nav');
+    let menu;
+
+    function handleMouseOver() {
+        if (uixMegaHovered) {
+            menu = this.getAttribute('data-nav-id');
+            pNav.classList.add('uix_showMegaMenu');
+
+            document.querySelectorAll('.uix_megaMenu__content').forEach(function (content) {
+                content.classList.remove('uix_megaMenu__content--active');
+            });
+
+            document
+                .querySelector('.uix_megaMenu__content--' + menu)
+                .classList.add('uix_megaMenu__content--active');
+        }
+    }
+
+    function handleMouseEnter() {
+        uixMegaHovered = true;
+    }
+
+    function handleMouseLeave() {
+        pNav.classList.remove('uix_showMegaMenu');
+        uixMegaHovered = false;
+    }
+
+    navEls.forEach(function (navEl) {
+        navEl.addEventListener('mouseover', handleMouseOver);
+    });
+
+    pNav.addEventListener('mouseenter', handleMouseEnter);
+    pNav.addEventListener('mouseleave', handleMouseLeave);
+	
+})
+</script>
+<script>
+XF.ready(() =>
+{
+
+/******** signature collapse toggle ***********/
+  setTimeout(function() {
+    var maxHeight = 100;
+
+    var signatures = document.querySelectorAll('.message-signature');
+
+    signatures.forEach(function(signature) {
+      var wrapper = signature.querySelector('.bbWrapper');
+      if (wrapper) {
+        var height = wrapper.clientHeight;
+        if (height > maxHeight) {
+          signature.classList.add('message-signature--expandable');
+        }
+      }
+    });
+
+    /*** expand function ***/
+    function expand(container, canClose) {
+      var inner = container.querySelector('.bbWrapper');
+      var eleHeight = inner ? inner.clientHeight : 0;
+      var isExpanded = container.classList.contains('message-signature--expanded');
+
+      if (isExpanded) {
+        if (canClose) {
+          container.style.height = eleHeight + 'px';
+          container.classList.remove('message-signature--expanded');
+          setTimeout(function() {
+            container.style.height = maxHeight + 'px';
+            setTimeout(function() {
+              container.style.height = '';
+            }, 200);
+          }, 17);
+        }
+      } else {
+        container.style.height = eleHeight + 'px';
+        setTimeout(function() {
+          container.classList.add('message-signature--expanded');
+          container.style.height = '';
+        }, 200);
+      }
+    }
+
+    var hash = window.location.hash;
+    if (hash && hash.indexOf('#') === 0) {
+      var replacedHash = hash.replace('#', '');
+      var ele = document.getElementById(replacedHash);
+      if (ele) {
+        ele.scrollIntoView();
+      }
+    }
+
+    /*** handle hover ***/
+    
+
+    /*** handle click ***/
+    var signatureExpandButtons = document.querySelectorAll('.uix_signatureExpand');
+
+    signatureExpandButtons.forEach(function(button) {
+      button.addEventListener('click', function() {
+        var container = button.closest('.message-signature');
+        expand(container, true);
+      });
+    });
+  }, 0);
+		
+})
+</script>
+<script>
+XF.ready(() =>
+{
+
+			setTimeout(function() {
+				var doc = document.querySelector('html');
+				editor = XF.getEditorInContainer(doc);
+				if (!!editor && !!editor.ed) {
+					editor.ed.events.on('focus', function() {
+						if (document.querySelector('.uix_fabBar')) {
+							var fabBar = document.querySelector('.uix_fabBar');
+							fabBar.style.display = 'none';
+						}
+						
+					});
+					editor.ed.events.on('blur', function() {
+						if (document.querySelector('.uix_fabBar')) {
+							var fabBar = document.querySelector('.uix_fabBar');
+							fabBar.style.display = '';
+						}
+					});
+				}
+			}, 100);
+	
+})
+</script>
+<script>
+XF.ready(() =>
+{
+
+document.addEventListener('ajax:complete', function(e) {
+		
+	if (typeof e.detail == 'undefined') {
+		return;
+		}
+    var xhr = e.detail[0];
+    var status = e.detail[1];
+
+    var data = xhr.responseJSON;
+    if (!data) {
+        return;
+    }
+    if (data.visitor) {
+        var totalUnreadBadge = document.querySelector('.js-uix_badge--totalUnread');
+        if (totalUnreadBadge) {
+            totalUnreadBadge.dataset.badge = data.visitor.total_unread;
+        }
+    }
+});
+	
+})
+</script>
+
+	
+	
+
+	
+
+
+
+<script src="/js/themehouse/uix/defer.min.js?_v=afca2500" defer></script>
+
+
+	
+<script src="/js/themehouse/uix/deferFab.min.js?_v=afca2500" defer></script>
+
+
+	
+<script src="/js/themehouse/uix/deferNodesCollapse.min.js?_v=afca2500" defer></script>
+
+
+	
+<script src="/js/themehouse/uix/deferWidthToggle.min.js?_v=afca2500" defer></script>
+
+
+
+
+
+	
+
+
+
+	
+
+
+
+	
+	
+	
+	
+
+	
+
+	
+
+	
+		
+	
+
+
+
+	
+
+	
+
+	
+	
+	
+	
+
+
+		
+			<link rel="icon" type="image/png" href="https://forum.proxmox.com/favicon.png" sizes="32x32" />
+		
+		
+			<link rel="apple-touch-icon" href="https://forum.proxmox.com/styles/uix/images/Proxmox-logo-stacked-white-background-1200.png" />
+		
+		
+
+		
+
+		
+
+	</head>
+
+	<body data-template="thread_view">
+		<style>
+	.p-pageWrapper .p-navSticky {
+		top: 0 !important;
+	}
+
+	
+
+	
+	
+
+	
+	
+	
+		
+			
+			
+				
+			
+		
+	
+
+	
+
+	
+
+		
+		
+		.uix_mainTabBar {top: 90px !important;}
+		.uix_stickyBodyElement:not(.offCanvasMenu) {
+			top: 110px !important;
+			min-height: calc(100vh - 110px) !important;
+		}
+		.uix_sidebarInner .uix_sidebar--scroller {margin-top: 110px;}
+		.uix_sidebarInner {margin-top: -110px;}
+		.p-body-sideNavInner .uix_sidebar--scroller {margin-top: 110px;}
+		.p-body-sideNavInner {margin-top: -110px;}
+		.uix_stickyCategoryStrips {top: 110px !important;}
+		#XF .u-anchorTarget {
+			height: 110px;
+			margin-top: -110px;
+		}
+	
+		
+
+		
+			@media (max-width: 900px) {
+		
+				.p-sectionLinks {display: none;}
+
+				
+
+				.uix_mainTabBar {top: 50px !important;}
+				.uix_stickyBodyElement:not(.offCanvasMenu) {
+					top: 70px !important;
+					min-height: calc(100vh - 70px) !important;
+				}
+				.uix_sidebarInner .uix_sidebar--scroller {margin-top: 70px;}
+				.uix_sidebarInner {margin-top: -70px;}
+				.p-body-sideNavInner .uix_sidebar--scroller {margin-top: 70px;}
+				.p-body-sideNavInner {margin-top: -70px;}
+				.uix_stickyCategoryStrips {top: 70px !important;}
+				#XF .u-anchorTarget {
+					height: 70px;
+					margin-top: -70px;
+				}
+
+				
+		
+			}
+		
+	
+
+	.uix_sidebarNav .uix_sidebar--scroller {max-height: calc(100vh - 70px);}
+	
+	
+</style>
+		<div id="jumpToTop"></div>
+
+		
+
+		<div class="uix_pageWrapper--fixed">
+			<div class="p-pageWrapper" id="top">
+
+				
+					
+	
+	
+
+
+
+					
+
+					
+
+					
+						
+						
+							<header class="p-header" id="header">
+								<div class="p-header-inner">
+									
+						
+							<div class="p-header-content">
+								
+									
+										
+	
+	<div class="p-header-logo p-header-logo--image">
+		<a class="uix_logo" href="https://forum.proxmox.com">
+			
+				
+
+	
+
+	
+		
+		
+
+		
+	
+
+	
+
+	<picture data-variations="{&quot;default&quot;:{&quot;1&quot;:&quot;\/styles\/uix\/images\/Proxmox-logo-500px.png&quot;,&quot;2&quot;:&quot;\/styles\/uix\/images\/Proxmox-logo-1000px.png&quot;}}">
+		
+		
+		
+
+		
+
+		<img src="/styles/uix/images/Proxmox-logo-500px.png" srcset="/styles/uix/images/Proxmox-logo-1000px.png 2x" width="100" height="36" alt="Proxmox Support Forum"  />
+	</picture>
+
+
+				
+		</a>
+		
+			<a class="uix_logoSmall" href="https://forum.proxmox.com">
+				
+
+	
+
+	
+		
+		
+
+		
+	
+
+	
+
+	<picture data-variations="{&quot;default&quot;:{&quot;1&quot;:&quot;\/styles\/uix\/images\/Proxmox-logo-black-800.png&quot;,&quot;2&quot;:null}}">
+		
+		
+		
+
+		
+
+		<img src="/styles/uix/images/Proxmox-logo-black-800.png"  width="" height="" alt="Proxmox Support Forum"  />
+	</picture>
+
+
+			</a>
+		
+	</div>
+
+
+									
+
+									
+										<div class="p-nav-opposite">
+											
+												
+		
+			
+				
+				
+					<div class="p-navgroup p-discovery">
+						
+							
+	
+
+							
+	
+		
+		
+			<div class="uix_searchBar">
+				<div class="uix_searchBarInner">
+					<form action="/search/search" method="post" class="uix_searchForm" data-xf-init="quick-search">
+						<a class="uix_search--close">
+							<i class="fa--xf far fa-window-close "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#window-close"></use></svg></i>
+						</a>
+						<input type="text" class="input js-uix_syncValue uix_searchInput uix_searchDropdown__trigger" autocomplete="off" data-uixsync="search" name="keywords" placeholder="Search…" aria-label="Search" data-menu-autofocus="true" />
+						<a href="/search/"
+						   class="uix_search--settings u-ripple"
+						   data-xf-key="/"
+						   aria-label="Search"
+						   aria-expanded="false"
+						   aria-haspopup="true"
+						   title="Search">
+							<i class="fa--xf far fa-cog "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#cog"></use></svg></i>
+						</a>
+						<span class=" uix_searchIcon">
+							<i class="fa--xf far fa-search "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#search"></use></svg></i>
+						</span>
+						<input type="hidden" name="_xfToken" value="1772830359,1382e82722941b6f3545208a3b28974c" />
+					</form>
+				</div>
+
+				
+					<a class="uix_searchIconTrigger p-navgroup-link p-navgroup-link--iconic p-navgroup-link--search u-ripple"
+					   aria-label="Search"
+					   aria-expanded="false"
+					   aria-haspopup="true"
+					   title="Search">
+						<i aria-hidden="true"></i>
+					</a>
+				
+
+				
+					<a href="/search/"
+					   class="p-navgroup-link p-navgroup-link--iconic p-navgroup-link--search u-ripple js-uix_minimalSearch__target"
+					   data-xf-click="menu"
+					   aria-label="Search"
+					   aria-expanded="false"
+					   aria-haspopup="true"
+					   title="Search">
+						<i aria-hidden="true"></i>
+					</a>
+				
+
+				<div class="menu menu--structural menu--wide" data-menu="menu" aria-hidden="true">
+					<form action="/search/search" method="post"
+						  class="menu-content"
+						  data-xf-init="quick-search">
+						<h3 class="menu-header">Search</h3>
+						
+						<div class="menu-row">
+							
+								<div class="inputGroup inputGroup--joined">
+									<input type="text" class="input js-uix_syncValue" name="keywords" data-acurl="/search/auto-complete" data-uixsync="search" placeholder="Search…" aria-label="Search" data-menu-autofocus="true" />
+									
+			<select name="constraints" class="js-quickSearch-constraint input" aria-label="Search within">
+				<option value="">Everywhere</option>
+<option value="{&quot;search_type&quot;:&quot;post&quot;}">Threads</option>
+<option value="{&quot;search_type&quot;:&quot;post&quot;,&quot;c&quot;:{&quot;nodes&quot;:[16],&quot;child_nodes&quot;:1}}">This forum</option>
+<option value="{&quot;search_type&quot;:&quot;post&quot;,&quot;c&quot;:{&quot;thread&quot;:126473}}">This thread</option>
+
+			</select>
+		
+								</div>
+								
+						</div>
+
+						
+						<div class="menu-row">
+							<label class="iconic"><input type="checkbox"  name="c[title_only]" value="1" /><i aria-hidden="true"></i><span class="iconic-label">Search titles only
+
+										
+											<span tabindex="0" role="button"
+												  data-xf-init="tooltip" data-trigger="hover focus click" title="Tags will also be searched in content where tags are supported">
+
+												<i class="fa--xf far fa-question-circle  u-muted u-smaller"><svg xmlns="http://www.w3.org/2000/svg" role="img" ><title>Note</title><use href="/data/local/icons/regular.svg?v=1770902607#question-circle"></use></svg></i>
+											</span></span></label>
+
+						</div>
+						
+						<div class="menu-row">
+							<div class="inputGroup">
+								<span class="inputGroup-text" id="ctrl_search_menu_by_member">By:</span>
+								<input type="text" class="input" name="c[users]" data-xf-init="auto-complete" placeholder="Member" aria-labelledby="ctrl_search_menu_by_member" />
+							</div>
+						</div>
+						<div class="menu-footer">
+							<span class="menu-footer-controls">
+								<button type="submit" class="button button--icon button--icon--search button--primary"><i class="fa--xf far fa-search "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#search"></use></svg></i><span class="button-text">Search</span></button>
+								<button type="submit" class="button " name="from_search_menu"><span class="button-text">Advanced search…</span></button>
+							</span>
+						</div>
+
+						<input type="hidden" name="_xfToken" value="1772830359,1382e82722941b6f3545208a3b28974c" />
+					</form>
+				</div>
+
+
+				<div class="menu menu--structural menu--wide uix_searchDropdown__menu" aria-hidden="true">
+					<form action="/search/search" method="post"
+						  class="menu-content"
+						  data-xf-init="quick-search">
+						
+						
+							<div class="menu-row">
+
+								<div class="inputGroup">
+									<input name="keywords"
+										   class="js-uix_syncValue"
+										   data-uixsync="search"
+										   placeholder="Search…"
+										   aria-label="Search"
+										   type="hidden" />
+									
+			<select name="constraints" class="js-quickSearch-constraint input" aria-label="Search within">
+				<option value="">Everywhere</option>
+<option value="{&quot;search_type&quot;:&quot;post&quot;}">Threads</option>
+<option value="{&quot;search_type&quot;:&quot;post&quot;,&quot;c&quot;:{&quot;nodes&quot;:[16],&quot;child_nodes&quot;:1}}">This forum</option>
+<option value="{&quot;search_type&quot;:&quot;post&quot;,&quot;c&quot;:{&quot;thread&quot;:126473}}">This thread</option>
+
+			</select>
+		
+								</div>
+							</div>
+							
+
+						
+						<div class="menu-row">
+							<label class="iconic"><input type="checkbox"  name="c[title_only]" value="1" /><i aria-hidden="true"></i><span class="iconic-label">Search titles only
+
+										
+											<span tabindex="0" role="button"
+												  data-xf-init="tooltip" data-trigger="hover focus click" title="Tags will also be searched in content where tags are supported">
+
+												<i class="fa--xf far fa-question-circle  u-muted u-smaller"><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#question-circle"></use></svg></i>
+											</span></span></label>
+
+						</div>
+						
+						<div class="menu-row">
+							<div class="inputGroup">
+								<span class="inputGroup-text">By:</span>
+								<input class="input" name="c[users]" data-xf-init="auto-complete" placeholder="Member" />
+							</div>
+						</div>
+						<div class="menu-footer">
+							<span class="menu-footer-controls">
+								<button type="submit" class="button button--icon button--icon--search button--primary"><i class="fa--xf far fa-search "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#search"></use></svg></i><span class="button-text">Search</span></button>
+								<a href="/search/" class="button " rel="nofollow"><span class="button-text">Advanced…</span></a>
+							</span>
+						</div>
+
+						<input type="hidden" name="_xfToken" value="1772830359,1382e82722941b6f3545208a3b28974c" />
+					</form>
+				</div>
+			</div>
+		
+	
+	
+
+						
+					</div>
+				
+				
+	
+
+			
+		
+	
+											
+										</div>
+									
+								
+							</div>
+						
+					
+								</div>
+							</header>
+						
+					
+					
+
+					
+					
+					
+
+					
+						<div class="p-navSticky p-navSticky--all " data-top-offset-breakpoints="
+						[
+							{
+								&quot;breakpoint&quot;: &quot;0&quot;,
+								&quot;offset&quot;: &quot;0&quot;
+							}
+							
+							
+						]
+					" data-xf-init="sticky-header">
+							
+						<nav class="p-nav">
+							<div class="p-nav-inner">
+								
+									
+									
+										
+										
+									<button type="button" class="button button--plain p-nav-menuTrigger js-uix_badge--totalUnread badgeContainer" data-badge="0" data-xf-click="off-canvas" data-menu=".js-headerOffCanvasMenu" role="button" tabindex="0" aria-label="Menu"><span class="button-text">
+										<i aria-hidden="true"></i>
+									</span></button>
+									
+								
+
+								
+	
+	<div class="p-header-logo p-header-logo--image">
+		<a class="uix_logo" href="https://forum.proxmox.com">
+			
+				
+
+	
+
+	
+		
+		
+
+		
+	
+
+	
+
+	<picture data-variations="{&quot;default&quot;:{&quot;1&quot;:&quot;\/styles\/uix\/images\/Proxmox-logo-500px.png&quot;,&quot;2&quot;:&quot;\/styles\/uix\/images\/Proxmox-logo-1000px.png&quot;}}">
+		
+		
+		
+
+		
+
+		<img src="/styles/uix/images/Proxmox-logo-500px.png" srcset="/styles/uix/images/Proxmox-logo-1000px.png 2x" width="100" height="36" alt="Proxmox Support Forum"  />
+	</picture>
+
+
+				
+		</a>
+		
+			<a class="uix_logoSmall" href="https://forum.proxmox.com">
+				
+
+	
+
+	
+		
+		
+
+		
+	
+
+	
+
+	<picture data-variations="{&quot;default&quot;:{&quot;1&quot;:&quot;\/styles\/uix\/images\/Proxmox-logo-black-800.png&quot;,&quot;2&quot;:null}}">
+		
+		
+		
+
+		
+
+		<img src="/styles/uix/images/Proxmox-logo-black-800.png"  width="" height="" alt="Proxmox Support Forum"  />
+	</picture>
+
+
+			</a>
+		
+	</div>
+
+
+
+								
+									
+										<div class="p-nav-scroller hScroller" data-xf-init="h-scroller" data-auto-scroll=".p-navEl.is-selected">
+											<div class="hScroller-scroll">
+												<ul class="p-nav-list js-offCanvasNavSource">
+													
+														<li>
+															
+	<div class="p-navEl u-ripple " >
+		
+			
+				
+	
+	<a href="https://forum.proxmox.com"
+			class="p-navEl-link  "
+			
+			data-xf-key="1"
+			data-nav-id="home"><span>Home</span></a>
+
+				
+				
+			
+			
+			
+		
+			
+	
+</div>
+
+														</li>
+													
+														<li>
+															
+	<div class="p-navEl u-ripple is-selected" data-has-children="true">
+		
+			
+				
+	
+	<a href="/"
+			class="p-navEl-link p-navEl-link--splitMenu "
+			
+			
+			data-nav-id="forums"><span>Forums</span></a>
+
+				
+					<a data-xf-key="2"
+					   data-xf-click="menu"
+					   data-menu-pos-ref="< .p-navEl"
+					   class="p-navEl-splitTrigger"
+					   role="button"
+					   tabindex="0"
+					   aria-label="Toggle expanded"
+					   aria-expanded="false"
+					   aria-haspopup="true">
+					</a>
+				
+				
+			
+				
+					<div class="menu menu--structural" data-menu="menu" aria-hidden="true">
+						<div class="menu-content">
+							
+								
+	
+	
+	<a href="/whats-new/posts/"
+			class="menu-linkRow u-ripple u-indentDepth0 js-offCanvasCopy "
+			
+			
+			data-nav-id="newPosts"><span>New posts</span></a>
+
+	
+
+							
+								
+	
+	
+	<a href="/search/?type=post"
+			class="menu-linkRow u-ripple u-indentDepth0 js-offCanvasCopy "
+			
+			
+			data-nav-id="searchForums"><span>Search forums</span></a>
+
+	
+
+							
+						</div>
+					</div>
+				
+			
+			
+			
+		
+			
+	
+</div>
+
+														</li>
+													
+														<li>
+															
+	<div class="p-navEl u-ripple " data-has-children="true">
+		
+			
+				
+	
+	<a href="/whats-new/"
+			class="p-navEl-link p-navEl-link--splitMenu "
+			
+			
+			data-nav-id="whatsNew"><span>What's new</span></a>
+
+				
+					<a data-xf-key="3"
+					   data-xf-click="menu"
+					   data-menu-pos-ref="< .p-navEl"
+					   class="p-navEl-splitTrigger"
+					   role="button"
+					   tabindex="0"
+					   aria-label="Toggle expanded"
+					   aria-expanded="false"
+					   aria-haspopup="true">
+					</a>
+				
+				
+			
+				
+					<div class="menu menu--structural" data-menu="menu" aria-hidden="true">
+						<div class="menu-content">
+							
+								
+	
+	
+	<a href="/featured/"
+			class="menu-linkRow u-ripple u-indentDepth0 js-offCanvasCopy "
+			
+			
+			data-nav-id="featured"><span>Featured content</span></a>
+
+	
+
+							
+								
+	
+	
+	<a href="/whats-new/posts/"
+			class="menu-linkRow u-ripple u-indentDepth0 js-offCanvasCopy "
+			 rel="nofollow"
+			
+			data-nav-id="whatsNewPosts"><span>New posts</span></a>
+
+	
+
+							
+								
+	
+	
+	<a href="/whats-new/latest-activity"
+			class="menu-linkRow u-ripple u-indentDepth0 js-offCanvasCopy "
+			 rel="nofollow"
+			
+			data-nav-id="latestActivity"><span>Latest activity</span></a>
+
+	
+
+							
+						</div>
+					</div>
+				
+			
+			
+			
+		
+			
+	
+</div>
+
+														</li>
+													
+														<li>
+															
+	<div class="p-navEl u-ripple " data-has-children="true">
+		
+			
+				
+	
+	<a href="/members/"
+			class="p-navEl-link p-navEl-link--splitMenu "
+			
+			
+			data-nav-id="members"><span>Members</span></a>
+
+				
+					<a data-xf-key="4"
+					   data-xf-click="menu"
+					   data-menu-pos-ref="< .p-navEl"
+					   class="p-navEl-splitTrigger"
+					   role="button"
+					   tabindex="0"
+					   aria-label="Toggle expanded"
+					   aria-expanded="false"
+					   aria-haspopup="true">
+					</a>
+				
+				
+			
+				
+					<div class="menu menu--structural" data-menu="menu" aria-hidden="true">
+						<div class="menu-content">
+							
+								
+	
+	
+	<a href="/online/"
+			class="menu-linkRow u-ripple u-indentDepth0 js-offCanvasCopy "
+			
+			
+			data-nav-id="currentVisitors"><span>Current visitors</span></a>
+
+	
+
+							
+								
+	
+	
+	<a href="/whats-new/profile-posts/"
+			class="menu-linkRow u-ripple u-indentDepth0 js-offCanvasCopy "
+			 rel="nofollow"
+			
+			data-nav-id="newProfilePosts"><span>New profile posts</span></a>
+
+	
+
+							
+								
+	
+	
+	<a href="/search/?type=profile_post"
+			class="menu-linkRow u-ripple u-indentDepth0 js-offCanvasCopy "
+			
+			
+			data-nav-id="searchProfilePosts"><span>Search profile posts</span></a>
+
+	
+
+							
+						</div>
+					</div>
+				
+			
+			
+			
+		
+			
+	
+</div>
+
+														</li>
+													
+												</ul>
+											</div>
+										</div>
+									
+
+									
+								
+
+								
+	
+
+
+								
+									<div class="p-nav-opposite">
+										
+											
+		
+			
+				
+					<div class="p-navgroup p-account p-navgroup--guest">
+						
+							
+								
+	
+		
+		
+	
+		
+			<a href="/login/" class="p-navgroup-link p-navgroup-link--textual p-navgroup-link--logIn" data-xf-click="menu" tabindex="0" aria-expanded="false" aria-haspopup="true">
+				<i></i>
+				<span class="p-navgroup-linkText">Log in</span>
+			</a>
+			<div class="menu menu--structural menu--medium" data-menu="menu" aria-hidden="true" data-href="/login/"></div>
+		
+	
+	
+		
+			<a href="/register/" class="p-navgroup-link u-ripple p-navgroup-link--textual p-navgroup-link--register" data-xf-click="overlay" data-follow-redirects="on">
+				<i></i>
+				<span class="p-navgroup-linkText">Register</span>
+			</a>
+		
+	
+
+	
+
+							
+						
+					</div>
+				
+				
+					<div class="p-navgroup p-discovery">
+						
+							
+	
+		
+	<a href="/whats-new/"
+	   class="p-navgroup-link p-navgroup-link--iconic p-navgroup-link--whatsnew"
+	   title="What&#039;s new">
+		<i aria-hidden="true"></i>
+		<span class="p-navgroup-linkText">What's new</span>
+	</a>
+
+	
+
+							
+	
+		
+		
+			<div class="uix_searchBar">
+				<div class="uix_searchBarInner">
+					<form action="/search/search" method="post" class="uix_searchForm" data-xf-init="quick-search">
+						<a class="uix_search--close">
+							<i class="fa--xf far fa-window-close "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#window-close"></use></svg></i>
+						</a>
+						<input type="text" class="input js-uix_syncValue uix_searchInput uix_searchDropdown__trigger" autocomplete="off" data-uixsync="search" name="keywords" placeholder="Search…" aria-label="Search" data-menu-autofocus="true" />
+						<a href="/search/"
+						   class="uix_search--settings u-ripple"
+						   data-xf-key="/"
+						   aria-label="Search"
+						   aria-expanded="false"
+						   aria-haspopup="true"
+						   title="Search">
+							<i class="fa--xf far fa-cog "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#cog"></use></svg></i>
+						</a>
+						<span class=" uix_searchIcon">
+							<i class="fa--xf far fa-search "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#search"></use></svg></i>
+						</span>
+						<input type="hidden" name="_xfToken" value="1772830359,1382e82722941b6f3545208a3b28974c" />
+					</form>
+				</div>
+
+				
+					<a class="uix_searchIconTrigger p-navgroup-link p-navgroup-link--iconic p-navgroup-link--search u-ripple"
+					   aria-label="Search"
+					   aria-expanded="false"
+					   aria-haspopup="true"
+					   title="Search">
+						<i aria-hidden="true"></i>
+					</a>
+				
+
+				
+					<a href="/search/"
+					   class="p-navgroup-link p-navgroup-link--iconic p-navgroup-link--search u-ripple js-uix_minimalSearch__target"
+					   data-xf-click="menu"
+					   aria-label="Search"
+					   aria-expanded="false"
+					   aria-haspopup="true"
+					   title="Search">
+						<i aria-hidden="true"></i>
+					</a>
+				
+
+				<div class="menu menu--structural menu--wide" data-menu="menu" aria-hidden="true">
+					<form action="/search/search" method="post"
+						  class="menu-content"
+						  data-xf-init="quick-search">
+						<h3 class="menu-header">Search</h3>
+						
+						<div class="menu-row">
+							
+								<div class="inputGroup inputGroup--joined">
+									<input type="text" class="input js-uix_syncValue" name="keywords" data-acurl="/search/auto-complete" data-uixsync="search" placeholder="Search…" aria-label="Search" data-menu-autofocus="true" />
+									
+			<select name="constraints" class="js-quickSearch-constraint input" aria-label="Search within">
+				<option value="">Everywhere</option>
+<option value="{&quot;search_type&quot;:&quot;post&quot;}">Threads</option>
+<option value="{&quot;search_type&quot;:&quot;post&quot;,&quot;c&quot;:{&quot;nodes&quot;:[16],&quot;child_nodes&quot;:1}}">This forum</option>
+<option value="{&quot;search_type&quot;:&quot;post&quot;,&quot;c&quot;:{&quot;thread&quot;:126473}}">This thread</option>
+
+			</select>
+		
+								</div>
+								
+						</div>
+
+						
+						<div class="menu-row">
+							<label class="iconic"><input type="checkbox"  name="c[title_only]" value="1" /><i aria-hidden="true"></i><span class="iconic-label">Search titles only
+
+										
+											<span tabindex="0" role="button"
+												  data-xf-init="tooltip" data-trigger="hover focus click" title="Tags will also be searched in content where tags are supported">
+
+												<i class="fa--xf far fa-question-circle  u-muted u-smaller"><svg xmlns="http://www.w3.org/2000/svg" role="img" ><title>Note</title><use href="/data/local/icons/regular.svg?v=1770902607#question-circle"></use></svg></i>
+											</span></span></label>
+
+						</div>
+						
+						<div class="menu-row">
+							<div class="inputGroup">
+								<span class="inputGroup-text" id="ctrl_search_menu_by_member">By:</span>
+								<input type="text" class="input" name="c[users]" data-xf-init="auto-complete" placeholder="Member" aria-labelledby="ctrl_search_menu_by_member" />
+							</div>
+						</div>
+						<div class="menu-footer">
+							<span class="menu-footer-controls">
+								<button type="submit" class="button button--icon button--icon--search button--primary"><i class="fa--xf far fa-search "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#search"></use></svg></i><span class="button-text">Search</span></button>
+								<button type="submit" class="button " name="from_search_menu"><span class="button-text">Advanced search…</span></button>
+							</span>
+						</div>
+
+						<input type="hidden" name="_xfToken" value="1772830359,1382e82722941b6f3545208a3b28974c" />
+					</form>
+				</div>
+
+
+				<div class="menu menu--structural menu--wide uix_searchDropdown__menu" aria-hidden="true">
+					<form action="/search/search" method="post"
+						  class="menu-content"
+						  data-xf-init="quick-search">
+						
+						
+							<div class="menu-row">
+
+								<div class="inputGroup">
+									<input name="keywords"
+										   class="js-uix_syncValue"
+										   data-uixsync="search"
+										   placeholder="Search…"
+										   aria-label="Search"
+										   type="hidden" />
+									
+			<select name="constraints" class="js-quickSearch-constraint input" aria-label="Search within">
+				<option value="">Everywhere</option>
+<option value="{&quot;search_type&quot;:&quot;post&quot;}">Threads</option>
+<option value="{&quot;search_type&quot;:&quot;post&quot;,&quot;c&quot;:{&quot;nodes&quot;:[16],&quot;child_nodes&quot;:1}}">This forum</option>
+<option value="{&quot;search_type&quot;:&quot;post&quot;,&quot;c&quot;:{&quot;thread&quot;:126473}}">This thread</option>
+
+			</select>
+		
+								</div>
+							</div>
+							
+
+						
+						<div class="menu-row">
+							<label class="iconic"><input type="checkbox"  name="c[title_only]" value="1" /><i aria-hidden="true"></i><span class="iconic-label">Search titles only
+
+										
+											<span tabindex="0" role="button"
+												  data-xf-init="tooltip" data-trigger="hover focus click" title="Tags will also be searched in content where tags are supported">
+
+												<i class="fa--xf far fa-question-circle  u-muted u-smaller"><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#question-circle"></use></svg></i>
+											</span></span></label>
+
+						</div>
+						
+						<div class="menu-row">
+							<div class="inputGroup">
+								<span class="inputGroup-text">By:</span>
+								<input class="input" name="c[users]" data-xf-init="auto-complete" placeholder="Member" />
+							</div>
+						</div>
+						<div class="menu-footer">
+							<span class="menu-footer-controls">
+								<button type="submit" class="button button--icon button--icon--search button--primary"><i class="fa--xf far fa-search "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#search"></use></svg></i><span class="button-text">Search</span></button>
+								<a href="/search/" class="button " rel="nofollow"><span class="button-text">Advanced…</span></a>
+							</span>
+						</div>
+
+						<input type="hidden" name="_xfToken" value="1772830359,1382e82722941b6f3545208a3b28974c" />
+					</form>
+				</div>
+			</div>
+		
+	
+	
+
+						
+					</div>
+				
+				
+	
+
+			
+		
+	
+											
+	
+		
+	
+
+	
+
+										
+									</div>
+								
+							</div>
+							
+						</nav>
+					
+							
+		
+			<div class="p-sectionLinks">
+				<div class="pageContent">
+					
+						
+							
+								
+								
+								<div class="p-sectionLinks-inner hScroller" data-xf-init="h-scroller">
+									<div class="hScroller-scroll">
+										<ul class="p-sectionLinks-list">
+											
+												<li>
+													
+	<div class="p-navEl u-ripple " >
+		
+			
+				
+	
+	<a href="/whats-new/posts/"
+			class="p-navEl-link  "
+			
+			data-xf-key="alt+1"
+			data-nav-id="newPosts"><span>New posts</span></a>
+
+				
+				
+			
+			
+			
+		
+			
+	
+</div>
+
+												</li>
+											
+												<li>
+													
+	<div class="p-navEl u-ripple " >
+		
+			
+				
+	
+	<a href="/search/?type=post"
+			class="p-navEl-link  "
+			
+			data-xf-key="alt+2"
+			data-nav-id="searchForums"><span>Search forums</span></a>
+
+				
+				
+			
+			
+			
+		
+			
+	
+</div>
+
+												</li>
+											
+										</ul>
+									</div>
+								</div>
+							
+							
+						
+					
+				</div>
+			</div>
+			
+	
+						</div>
+						
+
+					
+
+					
+	
+
+					
+	
+
+					
+	
+
+					
+	
+
+					
+				
+
+				
+				<div class="offCanvasMenu offCanvasMenu--nav js-headerOffCanvasMenu" data-menu="menu" aria-hidden="true" data-ocm-builder="navigation">
+					<div class="offCanvasMenu-backdrop" data-menu-close="true"></div>
+					<div class="offCanvasMenu-content">
+						
+						<div class="sidePanel sidePanel--nav sidePanel--visitor">
+	<div class="sidePanel__tabPanels">
+		
+		<div data-content="navigation" class="is-active sidePanel__tabPanel js-navigationTabPanel">
+			
+							<div class="offCanvasMenu-header">
+								Menu
+								<a class="offCanvasMenu-closer" data-menu-close="true" role="button" tabindex="0" aria-label="Close"></a>
+							</div>
+							
+							<div class="js-offCanvasNavTarget"></div>
+							
+							
+						
+		</div>
+		
+		
+		
+	</div>
+</div>
+
+						
+						<div class="offCanvasMenu-installBanner js-installPromptContainer" style="display: none;" data-xf-init="install-prompt">
+							<div class="offCanvasMenu-installBanner-header">Install the app</div>
+							<button type="button" class="button js-installPromptButton"><span class="button-text">Install</span></button>
+							<template class="js-installTemplateIOS">
+								<div class="js-installTemplateContent">
+									<div class="overlay-title">How to install the app on iOS</div>
+									<div class="block-body">
+										<div class="block-row">
+											<p>
+												Follow along with the video below to see how to install our site as a web app on your home screen.
+											</p>
+											<p style="text-align: center">
+												<video src="/styles/default/xenforo/add_to_home.mp4"
+													width="280" height="480" autoplay loop muted playsinline></video>
+											</p>
+											<p>
+												<small><strong>Note:</strong> This feature may not be available in some browsers.</small>
+											</p>
+										</div>
+									</div>
+								</div>
+							</template>
+						</div>
+					</div>
+				</div>
+
+				
+	
+		
+	
+		
+			<div class="p-body-header">
+				<div class="pageContent">
+					
+						
+							<div class="uix_headerInner">
+								
+									
+										<div class="p-title ">
+											
+												
+													<h1 class="p-title-value">Handle broken disks with BTRFS</h1>
+												
+											
+										</div>
+									
+
+									
+										<div class="p-description">
+	<ul class="listInline listInline--bullet">
+		<li>
+			<i class="fa--xf far fa-user "><svg xmlns="http://www.w3.org/2000/svg" role="img" ><title>Thread starter</title><use href="/data/local/icons/regular.svg?v=1770902607#user"></use></svg></i>
+			<span class="u-srOnly">Thread starter</span>
+
+			<a href="/members/vaschthestampede.103452/" class="username  u-concealed" dir="auto" data-user-id="103452" data-xf-init="member-tooltip">vaschthestampede</a>
+		</li>
+		<li>
+			<i class="fa--xf far fa-clock "><svg xmlns="http://www.w3.org/2000/svg" role="img" ><title>Start date</title><use href="/data/local/icons/regular.svg?v=1770902607#clock"></use></svg></i>
+			<span class="u-srOnly">Start date</span>
+
+			<a href="/threads/handle-broken-disks-with-btrfs.126473/" class="u-concealed"><time  class="u-dt" dir="auto" datetime="2023-04-26T17:49:20+0200" data-timestamp="1682524160" data-date="Apr 26, 2023" data-time="17:49" data-short="Apr &#039;23" title="Apr 26, 2023 at 17:49">Apr 26, 2023</time></a>
+		</li>
+		
+		
+	</ul>
+</div>
+									
+								
+							</div>
+						
+						
+					
+				</div>
+			</div>
+		
+	
+
+	
+
+
+				<div class="p-body">
+
+					
+
+					<div class="p-body-inner ">
+						
+						<!--XF:EXTRA_OUTPUT-->
+
+						
+	
+		
+	
+		
+
+		
+	
+
+	
+
+
+						
+	
+
+
+						
+	
+
+
+						
+	
+		
+	
+	
+	
+		<div class="breadcrumb ">
+			<div class="pageContent">
+				
+					
+						
+							<ul class="p-breadcrumbs "
+								itemscope itemtype="https://schema.org/BreadcrumbList">
+								
+									
+		
+
+		
+		
+		
+			
+			
+	<li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+		<a href="https://forum.proxmox.com" itemprop="item">
+			
+				<i class="fa--xf far fa-home "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#home"></use></svg></i>
+				<span style="display: none;" itemprop="name">Home</span>
+				
+		</a>
+		<meta itemprop="position" content="1" />
+	</li>
+
+		
+
+			
+			
+			
+	<li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+		<a href="/" itemprop="item">
+			
+				<span itemprop="name">Forums</span>
+			
+		</a>
+		<meta itemprop="position" content="2" />
+	</li>
+
+		
+		
+			
+			
+	<li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+		<a href="/#proxmox-virtual-environment.11" itemprop="item">
+			
+				<span itemprop="name">Proxmox Virtual Environment</span>
+			
+		</a>
+		<meta itemprop="position" content="3" />
+	</li>
+
+		
+			
+			
+	<li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+		<a href="/forums/proxmox-ve-installation-and-configuration.16/" itemprop="item">
+			
+				<span itemprop="name">Proxmox VE: Installation and configuration</span>
+			
+		</a>
+		<meta itemprop="position" content="4" />
+	</li>
+
+		
+	
+								
+							</ul>
+						
+					
+				
+			</div>
+		</div>
+	
+
+	
+
+	
+
+
+						
+	
+
+
+						
+	<noscript class="js-jsWarning"><div class="blockMessage blockMessage--important blockMessage--iconic u-noJsOnly">JavaScript is disabled. For a better experience, please enable JavaScript in your browser before proceeding.</div></noscript>
+
+						
+	<div class="blockMessage blockMessage--important blockMessage--iconic js-browserWarning" style="display: none">You are using an out of date browser. It  may not display this or other websites correctly.<br />You should upgrade or use an <a href="https://www.google.com/chrome/" target="_blank" rel="noopener">alternative browser</a>.</div>
+
+
+
+						<div uix_component="MainContainer" class="uix_contentWrapper">
+
+							
+	
+
+
+							
+							
+	
+
+							
+	
+
+							
+	
+
+							
+	
+
+
+							<div class="p-body-main  ">
+								
+								
+
+								
+	
+
+								<div uix_component="MainContent" class="p-body-content">
+									<!-- ABOVE MAIN CONTENT -->
+									
+	
+
+									
+	
+
+									
+	
+
+									
+	
+
+									
+	
+
+									<div class="p-body-pageContent">
+										
+	
+
+										
+	
+
+										
+	
+
+										
+	
+
+										
+	
+
+										
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+	
+	
+	
+		
+	
+	
+	
+
+
+	
+	
+	
+		
+	
+	
+	
+
+
+	
+	
+		
+	
+	
+	
+
+
+	
+	
+
+
+
+	
+
+
+
+
+
+
+
+
+
+
+
+
+	
+
+	
+		
+	
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<div class="block block--messages" data-xf-init="" data-type="post" data-href="/inline-mod/" data-search-target="*">
+
+	<span class="u-anchorTarget" id="posts"></span>
+
+	
+		
+	
+
+	
+
+	<div class="block-outer"></div>
+
+	
+
+	
+		
+	<div class="block-outer js-threadStatusField"></div>
+
+	
+
+	<div class="block-container lbContainer"
+		data-xf-init="lightbox select-to-quote"
+		data-message-selector=".js-post"
+		data-lb-id="thread-126473"
+		data-lb-universal="">
+
+		<div class="block-body js-replyNewMessageContainer">
+			
+				
+
+					
+
+					
+						
+
+	
+	
+
+
+	
+
+	
+
+	
+
+	
+	<article class="message    message-threadStarterPost message--post  js-post js-inlineModContainer  "
+			 data-author="vaschthestampede"
+			 data-content="post-552397"
+			 id="js-post-552397"
+			>
+
+			
+
+		<span class="u-anchorTarget" id="post-552397"></span>
+
+		
+			<div class="message-inner">
+				
+					<div class="message-cell message-cell--user">
+						
+
+	<section class="message-user "
+			 
+			 
+			 >
+
+		
+		
+		<div class="message-avatar ">
+			<div class="message-avatar-wrapper">
+				
+					<a href="/members/vaschthestampede.103452/" class="avatar avatar--s avatar--default avatar--default--dynamic" data-user-id="103452" data-xf-init="member-tooltip" style="background-color: #0277bd; color: #80d8ff">
+			<span class="avatar-u103452-s" role="img" aria-label="vaschthestampede">V</span> 
+		</a>
+				
+				
+			</div>
+		</div>
+		<div class="uix_messagePostBitWrapper">
+			<div class="message-userDetails">
+				<h4 class="message-name"><a href="/members/vaschthestampede.103452/" class="username " dir="auto" data-user-id="103452" data-xf-init="member-tooltip">vaschthestampede</a></h4>
+				<h5 class="userTitle message-userTitle" dir="auto">Well-Known Member</h5>
+				
+				
+					
+						<div class="uix_originalPoster__icon" data-xf-init="tooltip" title="Original poster">
+							<i class="fa--xf far fa-user-edit  mdi mdi-account-edit"><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#user-edit"></use></svg></i>
+						</div>
+					
+				
+				
+				
+			</div>
+			
+			
+				
+				
+					
+						<div class="thThreads__message-userExtras">
+					
+							<div class="message-userExtras">
+								
+									
+										<dl class="pairs pairs--justified">
+											
+												<dt>
+													<span data-xf-init="tooltip" title="Joined">
+														<i class="fa--xf far fa-user "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#user"></use></svg></i>
+													</span>
+												</dt>
+											
+											<dd>Oct 21, 2020</dd>
+										</dl>
+									
+									
+										<dl class="pairs pairs--justified">
+											
+												<dt>
+													<span data-xf-init="tooltip" title="Messages">
+														<i class="fa--xf far fa-comments "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#comments"></use></svg></i>
+													</span>
+												</dt>
+												
+											<dd>133</dd>
+										</dl>
+									
+									
+									
+										<dl class="pairs pairs--justified">
+											
+												<dt>
+													<span data-xf-init="tooltip" title="Reaction score">
+														<i class="fa--xf far fa-thumbs-up "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#thumbs-up"></use></svg></i>
+													</span>
+												</dt>
+												
+											<dd>8</dd>
+										</dl>
+									
+									
+										<dl class="pairs pairs--justified">
+											
+												<dt>
+													<span data-xf-init="tooltip" title="Points">
+														<i class="fa--xf far fa-trophy "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#trophy"></use></svg></i>
+													</span>
+												</dt>
+											
+											<dd>58</dd>
+										</dl>
+									
+									
+										<dl class="pairs pairs--justified">
+											
+												<dt>
+													<span data-xf-init="tooltip" title="Age">
+														<i class="fa--xf far fa-birthday-cake "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#birthday-cake"></use></svg></i>
+													</span>
+												</dt>
+											
+											<dd>39</dd>
+										</dl>
+									
+									
+									
+									
+										
+
+	
+
+										
+											
+
+	
+		
+	
+
+										
+									
+								
+							</div>
+						
+							</div>
+							<div class="thThreads__userExtra--toggle">
+								<a href="javascript:;" class="thThreads__userExtra--trigger"></a>
+							</div>
+						
+				
+			
+		</div>
+		<span class="message-userArrow"></span>
+	</section>
+
+					</div>
+				
+
+				
+					<div class="message-cell message-cell--main">
+						
+							<div class="message-main uix_messageContent js-quickEditTarget">
+
+								
+									
+
+          
+
+	<header class="message-attribution message-attribution--split">
+		<ul class="message-attribution-main listInline ">
+			
+			<li class="u-concealed">
+				<a href="/threads/handle-broken-disks-with-btrfs.126473/post-552397" rel="nofollow" >
+					<time  class="u-dt" dir="auto" datetime="2023-04-26T17:49:20+0200" data-timestamp="1682524160" data-date="Apr 26, 2023" data-time="17:49" data-short="Apr &#039;23" title="Apr 26, 2023 at 17:49">Apr 26, 2023</time>
+				</a>
+			</li>
+			
+			
+		</ul>
+
+		<ul class="message-attribution-opposite message-attribution-opposite--list ">
+			
+			<li>
+				<a href="/threads/handle-broken-disks-with-btrfs.126473/post-552397"
+					class="message-attribution-gadget"
+					data-xf-init="share-tooltip"
+					data-href="/posts/552397/share"
+					aria-label="Share"
+					rel="nofollow">
+					<i class="fa--xf far fa-share-alt "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#share-alt"></use></svg></i>
+				</a>
+			</li>
+			
+				<li class="u-hidden js-embedCopy">
+					
+	<a href="javascript:"
+		data-xf-init="copy-to-clipboard"
+		data-copy-text="&lt;div class=&quot;js-xf-embed&quot; data-url=&quot;https://forum.proxmox.com&quot; data-content=&quot;post-552397&quot;&gt;&lt;/div&gt;&lt;script defer src=&quot;https://forum.proxmox.com/js/xf/external_embed.js?_v=afca2500&quot;&gt;&lt;/script&gt;"
+		data-success="Embed code HTML copied to clipboard."
+		class="">
+		<i class="fa--xf far fa-code "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#code"></use></svg></i>
+	</a>
+
+				</li>
+			
+			
+			
+				<li>
+					<a href="/threads/handle-broken-disks-with-btrfs.126473/post-552397" rel="nofollow">
+						#1
+					</a>
+				</li>
+			
+		</ul>
+	</header>
+
+								
+
+								<div class="message-content js-messageContent">
+									
+
+										
+											
+	
+	
+	
+
+										
+
+										
+											
+	
+	
+	<div class="message-userContent lbContainer js-lbContainer "
+		 data-lb-id="post-552397"
+		 data-lb-caption-desc="vaschthestampede &middot; Apr 26, 2023 at 17:49">
+
+		
+			
+
+	
+		
+	
+
+		
+
+		<article class="message-body js-selectToQuote">
+			
+				
+			
+			
+			<div >
+				
+					<div class="bbWrapper">I&#039;m testing the behavior of BTRFS in case of disk failure.<br />
+<br />
+As a first test, I disconnect one of the two disks in &quot;RAID 1&quot;.<br />
+I get errors whether it&#039;s boot disks or not, but the errors are different.<br />
+In case of boot disk I have this screen:<br />
+<a href="https://forum.proxmox.com/attachments/1682523931692-jpeg.49686/"
+		target="_blank"><img src="https://forum.proxmox.com/data/attachments/49/49382-654e18a57d14413a014a6ebc9b962838.jpg?hash=ZU4YpX0UQT"
+		srcset=""
+		class="bbImage "
+		style=""
+		alt="1682523931692.jpeg"
+		title="1682523931692.jpeg"
+		width="200" height="150" loading="lazy" /></a><br />
+<br />
+Otherwise I have:<br />
+<a href="https://forum.proxmox.com/attachments/1682523999186-jpeg.49687/"
+		target="_blank"><img src="https://forum.proxmox.com/data/attachments/49/49383-a2eea26e35b50e2be48b3a5b6d619b3a.jpg?hash=ou6ibjW1Di"
+		srcset=""
+		class="bbImage "
+		style=""
+		alt="1682523999186.jpeg"
+		title="1682523999186.jpeg"
+		width="200" height="150" loading="lazy" /></a><br />
+<br />
+How can I fix?<br />
+<br />
+Ask if you need any other information.</div>
+				
+			</div>
+			
+			<div class="js-selectToQuoteEnd">&nbsp;</div>
+			
+				
+			
+		</article>
+
+		
+			
+
+	
+		
+	
+
+		
+
+		
+			
+	
+
+		
+	</div>
+
+										
+
+										
+											
+    
+
+	
+
+										
+
+										
+											
+	
+
+										
+
+									
+								</div>
+
+								<div class="reactionsBar js-reactionsList ">
+									
+								</div>
+
+								
+									
+    
+
+	<footer class="message-footer">
+        
+        
+		
+
+		
+
+		<div class="js-historyTarget message-historyTarget toggleTarget" data-href="trigger-href"></div>
+	</footer>
+
+								
+							</div>
+
+						
+					</div>
+				
+			</div>
+		
+	</article>
+
+	
+	
+
+					
+
+					
+
+				
+
+					
+
+					
+						
+
+	
+	
+
+
+	
+
+	
+
+	
+	<article class="message   message--post  js-post js-inlineModContainer  "
+			 data-author="leesteken"
+			 data-content="post-552403"
+			 id="js-post-552403"
+			itemscope itemtype="https://schema.org/Comment" itemid="https://forum.proxmox.com/posts/552403/">
+
+			
+				<meta itemprop="parentItem" itemscope itemid="https://forum.proxmox.com/threads/handle-broken-disks-with-btrfs.126473/" />
+				<meta itemprop="name" content="Post #2" />
+			
+
+		<span class="u-anchorTarget" id="post-552403"></span>
+
+		
+			<div class="message-inner">
+				
+					<div class="message-cell message-cell--user">
+						
+
+	<section class="message-user "
+			 itemprop="author"
+			 itemscope itemtype="https://schema.org/Person"
+			 itemid="https://forum.proxmox.com/members/leesteken.93939/">
+
+		
+			<meta itemprop="url" content="https://forum.proxmox.com/members/leesteken.93939/" />
+		
+		
+		<div class="message-avatar ">
+			<div class="message-avatar-wrapper">
+				
+					<a href="/members/leesteken.93939/" class="avatar avatar--s" data-user-id="93939" data-xf-init="member-tooltip">
+			<img src="/data/avatars/s/93/93939.jpg?1769269422" srcset="/data/avatars/m/93/93939.jpg?1769269422 2x" alt="leesteken" class="avatar-u93939-s" width="48" height="48" loading="lazy" itemprop="image" /> 
+		</a>
+				
+				
+			</div>
+		</div>
+		<div class="uix_messagePostBitWrapper">
+			<div class="message-userDetails">
+				<h4 class="message-name"><a href="/members/leesteken.93939/" class="username " dir="auto" data-user-id="93939" data-xf-init="member-tooltip"><span itemprop="name">leesteken</span></a></h4>
+				<h5 class="userTitle message-userTitle" dir="auto" itemprop="jobTitle">Distinguished Member</h5>
+				
+				
+				<div class="userBanner userBannerSubscriber message-userBanner" itemprop="jobTitle"><span class="userBanner-before"></span><strong><a href="https://www.proxmox.com/en/services/support-services/support">Proxmox Subscriber</a></strong><span class="userBanner-after"></span></div>
+				
+			</div>
+			
+			
+				
+				
+					
+						<div class="thThreads__message-userExtras">
+					
+							<div class="message-userExtras">
+								
+									
+										<dl class="pairs pairs--justified">
+											
+												<dt>
+													<span data-xf-init="tooltip" title="Joined">
+														<i class="fa--xf far fa-user "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#user"></use></svg></i>
+													</span>
+												</dt>
+											
+											<dd>May 31, 2020</dd>
+										</dl>
+									
+									
+										<dl class="pairs pairs--justified">
+											
+												<dt>
+													<span data-xf-init="tooltip" title="Messages">
+														<i class="fa--xf far fa-comments "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#comments"></use></svg></i>
+													</span>
+												</dt>
+												
+											<dd>7,947</dd>
+										</dl>
+									
+									
+									
+										<dl class="pairs pairs--justified">
+											
+												<dt>
+													<span data-xf-init="tooltip" title="Reaction score">
+														<i class="fa--xf far fa-thumbs-up "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#thumbs-up"></use></svg></i>
+													</span>
+												</dt>
+												
+											<dd>2,737</dd>
+										</dl>
+									
+									
+										<dl class="pairs pairs--justified">
+											
+												<dt>
+													<span data-xf-init="tooltip" title="Points">
+														<i class="fa--xf far fa-trophy "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#trophy"></use></svg></i>
+													</span>
+												</dt>
+											
+											<dd>278</dd>
+										</dl>
+									
+									
+									
+									
+									
+										
+
+	
+
+										
+									
+								
+							</div>
+						
+							</div>
+							<div class="thThreads__userExtra--toggle">
+								<a href="javascript:;" class="thThreads__userExtra--trigger"></a>
+							</div>
+						
+				
+			
+		</div>
+		<span class="message-userArrow"></span>
+	</section>
+
+					</div>
+				
+
+				
+					<div class="message-cell message-cell--main">
+						
+							<div class="message-main uix_messageContent js-quickEditTarget">
+
+								
+									
+
+          
+
+	<header class="message-attribution message-attribution--split">
+		<ul class="message-attribution-main listInline ">
+			
+			<li class="u-concealed">
+				<a href="/threads/handle-broken-disks-with-btrfs.126473/post-552403" rel="nofollow" itemprop="url">
+					<time  class="u-dt" dir="auto" datetime="2023-04-26T17:57:01+0200" data-timestamp="1682524621" data-date="Apr 26, 2023" data-time="17:57" data-short="Apr &#039;23" title="Apr 26, 2023 at 17:57" itemprop="datePublished">Apr 26, 2023</time>
+				</a>
+			</li>
+			
+			
+		</ul>
+
+		<ul class="message-attribution-opposite message-attribution-opposite--list ">
+			
+			<li>
+				<a href="/threads/handle-broken-disks-with-btrfs.126473/post-552403"
+					class="message-attribution-gadget"
+					data-xf-init="share-tooltip"
+					data-href="/posts/552403/share"
+					aria-label="Share"
+					rel="nofollow">
+					<i class="fa--xf far fa-share-alt "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#share-alt"></use></svg></i>
+				</a>
+			</li>
+			
+				<li class="u-hidden js-embedCopy">
+					
+	<a href="javascript:"
+		data-xf-init="copy-to-clipboard"
+		data-copy-text="&lt;div class=&quot;js-xf-embed&quot; data-url=&quot;https://forum.proxmox.com&quot; data-content=&quot;post-552403&quot;&gt;&lt;/div&gt;&lt;script defer src=&quot;https://forum.proxmox.com/js/xf/external_embed.js?_v=afca2500&quot;&gt;&lt;/script&gt;"
+		data-success="Embed code HTML copied to clipboard."
+		class="">
+		<i class="fa--xf far fa-code "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#code"></use></svg></i>
+	</a>
+
+				</li>
+			
+			
+			
+				<li>
+					<a href="/threads/handle-broken-disks-with-btrfs.126473/post-552403" rel="nofollow">
+						#2
+					</a>
+				</li>
+			
+		</ul>
+	</header>
+
+								
+
+								<div class="message-content js-messageContent">
+									
+
+										
+											
+	
+	
+	
+
+										
+
+										
+											
+	
+	
+	<div class="message-userContent lbContainer js-lbContainer "
+		 data-lb-id="post-552403"
+		 data-lb-caption-desc="leesteken &middot; Apr 26, 2023 at 17:57">
+
+		
+
+		<article class="message-body js-selectToQuote">
+			
+				
+			
+			
+			<div itemprop="text">
+				
+					<div class="bbWrapper">This has come up before on this forum. BTRFS will not mount a mirror when a disk is missing (and I really don&#039;t understand why they made this the default). You need to enable this option first. It&#039;s probably somewhere in the BTRFS documentation.</div>
+				
+			</div>
+			
+			<div class="js-selectToQuoteEnd">&nbsp;</div>
+			
+				
+			
+		</article>
+
+		
+
+		
+	</div>
+
+										
+
+										
+											
+    
+
+	
+
+										
+
+										
+											
+	
+
+										
+
+									
+								</div>
+
+								<div class="reactionsBar js-reactionsList ">
+									
+								</div>
+
+								
+									
+    
+
+	<footer class="message-footer">
+        
+			<div class="message-microdata" itemprop="interactionStatistic" itemtype="https://schema.org/InteractionCounter" itemscope>
+				<meta itemprop="userInteractionCount" content="0" />
+				<meta itemprop="interactionType" content="https://schema.org/LikeAction" />
+			</div>
+		
+        
+		
+
+		
+
+		<div class="js-historyTarget message-historyTarget toggleTarget" data-href="trigger-href"></div>
+	</footer>
+
+								
+							</div>
+
+						
+					</div>
+				
+			</div>
+		
+	</article>
+
+	
+	
+
+					
+
+					
+
+				
+
+					
+
+					
+						
+
+	
+	
+
+
+	
+
+	
+
+	
+	<article class="message   message--post  js-post js-inlineModContainer  "
+			 data-author="Neobin"
+			 data-content="post-552537"
+			 id="js-post-552537"
+			itemscope itemtype="https://schema.org/Comment" itemid="https://forum.proxmox.com/posts/552537/">
+
+			
+				<meta itemprop="parentItem" itemscope itemid="https://forum.proxmox.com/threads/handle-broken-disks-with-btrfs.126473/" />
+				<meta itemprop="name" content="Post #3" />
+			
+
+		<span class="u-anchorTarget" id="post-552537"></span>
+
+		
+			<div class="message-inner">
+				
+					<div class="message-cell message-cell--user">
+						
+
+	<section class="message-user "
+			 itemprop="author"
+			 itemscope itemtype="https://schema.org/Person"
+			 itemid="https://forum.proxmox.com/members/neobin.118631/">
+
+		
+			<meta itemprop="url" content="https://forum.proxmox.com/members/neobin.118631/" />
+		
+		
+		<div class="message-avatar ">
+			<div class="message-avatar-wrapper">
+				
+					<a href="/members/neobin.118631/" class="avatar avatar--s" data-user-id="118631" data-xf-init="member-tooltip">
+			<img src="/data/avatars/s/118/118631.jpg?1696392992" srcset="/data/avatars/m/118/118631.jpg?1696392992 2x" alt="Neobin" class="avatar-u118631-s" width="48" height="48" loading="lazy" itemprop="image" /> 
+		</a>
+				
+				
+			</div>
+		</div>
+		<div class="uix_messagePostBitWrapper">
+			<div class="message-userDetails">
+				<h4 class="message-name"><a href="/members/neobin.118631/" class="username " dir="auto" data-user-id="118631" data-xf-init="member-tooltip"><span itemprop="name">Neobin</span></a></h4>
+				<h5 class="userTitle message-userTitle" dir="auto" itemprop="jobTitle">Distinguished Member</h5>
+				
+				
+				
+				
+			</div>
+			
+			
+				
+				
+					
+						<div class="thThreads__message-userExtras">
+					
+							<div class="message-userExtras">
+								
+									
+										<dl class="pairs pairs--justified">
+											
+												<dt>
+													<span data-xf-init="tooltip" title="Joined">
+														<i class="fa--xf far fa-user "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#user"></use></svg></i>
+													</span>
+												</dt>
+											
+											<dd>Apr 29, 2021</dd>
+										</dl>
+									
+									
+										<dl class="pairs pairs--justified">
+											
+												<dt>
+													<span data-xf-init="tooltip" title="Messages">
+														<i class="fa--xf far fa-comments "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#comments"></use></svg></i>
+													</span>
+												</dt>
+												
+											<dd>2,404</dd>
+										</dl>
+									
+									
+									
+										<dl class="pairs pairs--justified">
+											
+												<dt>
+													<span data-xf-init="tooltip" title="Reaction score">
+														<i class="fa--xf far fa-thumbs-up "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#thumbs-up"></use></svg></i>
+													</span>
+												</dt>
+												
+											<dd>1,157</dd>
+										</dl>
+									
+									
+										<dl class="pairs pairs--justified">
+											
+												<dt>
+													<span data-xf-init="tooltip" title="Points">
+														<i class="fa--xf far fa-trophy "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#trophy"></use></svg></i>
+													</span>
+												</dt>
+											
+											<dd>198</dd>
+										</dl>
+									
+									
+									
+									
+									
+										
+
+	
+
+										
+									
+								
+							</div>
+						
+							</div>
+							<div class="thThreads__userExtra--toggle">
+								<a href="javascript:;" class="thThreads__userExtra--trigger"></a>
+							</div>
+						
+				
+			
+		</div>
+		<span class="message-userArrow"></span>
+	</section>
+
+					</div>
+				
+
+				
+					<div class="message-cell message-cell--main">
+						
+							<div class="message-main uix_messageContent js-quickEditTarget">
+
+								
+									
+
+          
+
+	<header class="message-attribution message-attribution--split">
+		<ul class="message-attribution-main listInline ">
+			
+			<li class="u-concealed">
+				<a href="/threads/handle-broken-disks-with-btrfs.126473/post-552537" rel="nofollow" itemprop="url">
+					<time  class="u-dt" dir="auto" datetime="2023-04-27T03:29:51+0200" data-timestamp="1682558991" data-date="Apr 27, 2023" data-time="03:29" data-short="Apr &#039;23" title="Apr 27, 2023 at 03:29" itemprop="datePublished">Apr 27, 2023</time>
+				</a>
+			</li>
+			
+			
+		</ul>
+
+		<ul class="message-attribution-opposite message-attribution-opposite--list ">
+			
+			<li>
+				<a href="/threads/handle-broken-disks-with-btrfs.126473/post-552537"
+					class="message-attribution-gadget"
+					data-xf-init="share-tooltip"
+					data-href="/posts/552537/share"
+					aria-label="Share"
+					rel="nofollow">
+					<i class="fa--xf far fa-share-alt "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#share-alt"></use></svg></i>
+				</a>
+			</li>
+			
+				<li class="u-hidden js-embedCopy">
+					
+	<a href="javascript:"
+		data-xf-init="copy-to-clipboard"
+		data-copy-text="&lt;div class=&quot;js-xf-embed&quot; data-url=&quot;https://forum.proxmox.com&quot; data-content=&quot;post-552537&quot;&gt;&lt;/div&gt;&lt;script defer src=&quot;https://forum.proxmox.com/js/xf/external_embed.js?_v=afca2500&quot;&gt;&lt;/script&gt;"
+		data-success="Embed code HTML copied to clipboard."
+		class="">
+		<i class="fa--xf far fa-code "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#code"></use></svg></i>
+	</a>
+
+				</li>
+			
+			
+			
+				<li>
+					<a href="/threads/handle-broken-disks-with-btrfs.126473/post-552537" rel="nofollow">
+						#3
+					</a>
+				</li>
+			
+		</ul>
+	</header>
+
+								
+
+								<div class="message-content js-messageContent">
+									
+
+										
+											
+	
+	
+	
+
+										
+
+										
+											
+	
+	
+	<div class="message-userContent lbContainer js-lbContainer "
+		 data-lb-id="post-552537"
+		 data-lb-caption-desc="Neobin &middot; Apr 27, 2023 at 03:29">
+
+		
+
+		<article class="message-body js-selectToQuote">
+			
+				
+			
+			
+			<div itemprop="text">
+				
+					<div class="bbWrapper">Have a look here:<br />
+<ul>
+<li data-xf-list-type="ul"><a href="https://forum.proxmox.com/threads/proxmox-wont-boot-with-degraded-btrfs-raid1.123990" class="link link--internal">https://forum.proxmox.com/threads/proxmox-wont-boot-with-degraded-btrfs-raid1.123990</a></li>
+<li data-xf-list-type="ul"><a href="https://forum.proxmox.com/threads/system-did-not-find-btrfs-root-after-removing-one-disk.108223/post-465250" class="link link--internal">https://forum.proxmox.com/threads/s...ot-after-removing-one-disk.108223/post-465250</a></li>
+</ul></div>
+				
+			</div>
+			
+			<div class="js-selectToQuoteEnd">&nbsp;</div>
+			
+				
+			
+		</article>
+
+		
+
+		
+	</div>
+
+										
+
+										
+											
+    
+
+	
+
+										
+
+										
+											
+	
+
+										
+
+									
+								</div>
+
+								<div class="reactionsBar js-reactionsList is-active">
+									
+	
+	
+		<ul class="reactionSummary">
+		
+			<li><span class="reaction reaction--small reaction--1" data-reaction-id="1"><i aria-hidden="true"></i><img src="https://cdn.jsdelivr.net/joypixels/assets/8.0/png/unicode/64/1f44d.png" loading="lazy" width="64" height="64" class="reaction-image reaction-image--emoji js-reaction" alt="Like" title="Like" /></span></li>
+		
+		</ul>
+	
+
+
+<span class="u-srOnly">Reactions:</span>
+<a class="reactionsBar-link" href="/posts/552537/reactions" data-xf-click="overlay" data-cache="false" rel="nofollow"><bdi>leesteken</bdi></a>
+								</div>
+
+								
+									
+    
+
+	<footer class="message-footer">
+        
+			<div class="message-microdata" itemprop="interactionStatistic" itemtype="https://schema.org/InteractionCounter" itemscope>
+				<meta itemprop="userInteractionCount" content="1" />
+				<meta itemprop="interactionType" content="https://schema.org/LikeAction" />
+			</div>
+		
+        
+		
+
+		
+
+		<div class="js-historyTarget message-historyTarget toggleTarget" data-href="trigger-href"></div>
+	</footer>
+
+								
+							</div>
+
+						
+					</div>
+				
+			</div>
+		
+	</article>
+
+	
+	
+
+					
+
+					
+
+				
+
+					
+
+					
+						
+
+	
+	
+
+
+	
+
+	
+
+	
+
+	
+	<article class="message    message-threadStarterPost message--post  js-post js-inlineModContainer  "
+			 data-author="vaschthestampede"
+			 data-content="post-552741"
+			 id="js-post-552741"
+			itemscope itemtype="https://schema.org/Comment" itemid="https://forum.proxmox.com/posts/552741/">
+
+			
+				<meta itemprop="parentItem" itemscope itemid="https://forum.proxmox.com/threads/handle-broken-disks-with-btrfs.126473/" />
+				<meta itemprop="name" content="Post #4" />
+			
+
+		<span class="u-anchorTarget" id="post-552741"></span>
+
+		
+			<div class="message-inner">
+				
+					<div class="message-cell message-cell--user">
+						
+
+	<section class="message-user "
+			 itemprop="author"
+			 itemscope itemtype="https://schema.org/Person"
+			 itemid="https://forum.proxmox.com/members/vaschthestampede.103452/">
+
+		
+			<meta itemprop="url" content="https://forum.proxmox.com/members/vaschthestampede.103452/" />
+		
+		
+		<div class="message-avatar ">
+			<div class="message-avatar-wrapper">
+				
+					<a href="/members/vaschthestampede.103452/" class="avatar avatar--s avatar--default avatar--default--dynamic" data-user-id="103452" data-xf-init="member-tooltip" style="background-color: #0277bd; color: #80d8ff">
+			<span class="avatar-u103452-s" role="img" aria-label="vaschthestampede">V</span> 
+		</a>
+				
+				
+			</div>
+		</div>
+		<div class="uix_messagePostBitWrapper">
+			<div class="message-userDetails">
+				<h4 class="message-name"><a href="/members/vaschthestampede.103452/" class="username " dir="auto" data-user-id="103452" data-xf-init="member-tooltip"><span itemprop="name">vaschthestampede</span></a></h4>
+				<h5 class="userTitle message-userTitle" dir="auto" itemprop="jobTitle">Well-Known Member</h5>
+				
+				
+					
+						<div class="uix_originalPoster__icon" data-xf-init="tooltip" title="Original poster">
+							<i class="fa--xf far fa-user-edit  mdi mdi-account-edit"><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#user-edit"></use></svg></i>
+						</div>
+					
+				
+				
+				
+			</div>
+			
+			
+				
+				
+					
+						<div class="thThreads__message-userExtras">
+					
+							<div class="message-userExtras">
+								
+									
+										<dl class="pairs pairs--justified">
+											
+												<dt>
+													<span data-xf-init="tooltip" title="Joined">
+														<i class="fa--xf far fa-user "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#user"></use></svg></i>
+													</span>
+												</dt>
+											
+											<dd>Oct 21, 2020</dd>
+										</dl>
+									
+									
+										<dl class="pairs pairs--justified">
+											
+												<dt>
+													<span data-xf-init="tooltip" title="Messages">
+														<i class="fa--xf far fa-comments "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#comments"></use></svg></i>
+													</span>
+												</dt>
+												
+											<dd>133</dd>
+										</dl>
+									
+									
+									
+										<dl class="pairs pairs--justified">
+											
+												<dt>
+													<span data-xf-init="tooltip" title="Reaction score">
+														<i class="fa--xf far fa-thumbs-up "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#thumbs-up"></use></svg></i>
+													</span>
+												</dt>
+												
+											<dd>8</dd>
+										</dl>
+									
+									
+										<dl class="pairs pairs--justified">
+											
+												<dt>
+													<span data-xf-init="tooltip" title="Points">
+														<i class="fa--xf far fa-trophy "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#trophy"></use></svg></i>
+													</span>
+												</dt>
+											
+											<dd>58</dd>
+										</dl>
+									
+									
+										<dl class="pairs pairs--justified">
+											
+												<dt>
+													<span data-xf-init="tooltip" title="Age">
+														<i class="fa--xf far fa-birthday-cake "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#birthday-cake"></use></svg></i>
+													</span>
+												</dt>
+											
+											<dd>39</dd>
+										</dl>
+									
+									
+									
+									
+										
+
+	
+
+										
+											
+
+	
+		
+	
+
+										
+									
+								
+							</div>
+						
+							</div>
+							<div class="thThreads__userExtra--toggle">
+								<a href="javascript:;" class="thThreads__userExtra--trigger"></a>
+							</div>
+						
+				
+			
+		</div>
+		<span class="message-userArrow"></span>
+	</section>
+
+					</div>
+				
+
+				
+					<div class="message-cell message-cell--main">
+						
+							<div class="message-main uix_messageContent js-quickEditTarget">
+
+								
+									
+
+          
+
+	<header class="message-attribution message-attribution--split">
+		<ul class="message-attribution-main listInline ">
+			
+			<li class="u-concealed">
+				<a href="/threads/handle-broken-disks-with-btrfs.126473/post-552741" rel="nofollow" itemprop="url">
+					<time  class="u-dt" dir="auto" datetime="2023-04-27T16:09:26+0200" data-timestamp="1682604566" data-date="Apr 27, 2023" data-time="16:09" data-short="Apr &#039;23" title="Apr 27, 2023 at 16:09" itemprop="datePublished">Apr 27, 2023</time>
+				</a>
+			</li>
+			
+			
+		</ul>
+
+		<ul class="message-attribution-opposite message-attribution-opposite--list ">
+			
+			<li>
+				<a href="/threads/handle-broken-disks-with-btrfs.126473/post-552741"
+					class="message-attribution-gadget"
+					data-xf-init="share-tooltip"
+					data-href="/posts/552741/share"
+					aria-label="Share"
+					rel="nofollow">
+					<i class="fa--xf far fa-share-alt "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#share-alt"></use></svg></i>
+				</a>
+			</li>
+			
+				<li class="u-hidden js-embedCopy">
+					
+	<a href="javascript:"
+		data-xf-init="copy-to-clipboard"
+		data-copy-text="&lt;div class=&quot;js-xf-embed&quot; data-url=&quot;https://forum.proxmox.com&quot; data-content=&quot;post-552741&quot;&gt;&lt;/div&gt;&lt;script defer src=&quot;https://forum.proxmox.com/js/xf/external_embed.js?_v=afca2500&quot;&gt;&lt;/script&gt;"
+		data-success="Embed code HTML copied to clipboard."
+		class="">
+		<i class="fa--xf far fa-code "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#code"></use></svg></i>
+	</a>
+
+				</li>
+			
+			
+			
+				<li>
+					<a href="/threads/handle-broken-disks-with-btrfs.126473/post-552741" rel="nofollow">
+						#4
+					</a>
+				</li>
+			
+		</ul>
+	</header>
+
+								
+
+								<div class="message-content js-messageContent">
+									
+
+										
+											
+	
+	
+	
+
+										
+
+										
+											
+	
+	
+	<div class="message-userContent lbContainer js-lbContainer "
+		 data-lb-id="post-552741"
+		 data-lb-caption-desc="vaschthestampede &middot; Apr 27, 2023 at 16:09">
+
+		
+
+		<article class="message-body js-selectToQuote">
+			
+				
+			
+			
+			<div itemprop="text">
+				
+					<div class="bbWrapper">I followed <a href="https://docs.fedoraproject.org/en-US/fedora/latest/system-administrators-guide/kernel-module-driver-configuration/Working_with_the_GRUB_2_Boot_Loader/#sec-Making_Temporary_Changes_to_a_GRUB_2_Menu:~:text=Configuration%20File.-,Making%20Temporary%20Changes%20to%20a%20GRUB%202%20Menu,-Making%20Temporary%20Changes" target="_blank" class="link link--external" rel="nofollow ugc noopener">this guide</a> to temporarily change the GRUB.<br />
+The change was to add<br />
+
+	
+	
+
+
+<div class="bbCodeBlock bbCodeBlock--screenLimited bbCodeBlock--code">
+	<div class="bbCodeBlock-title">
+		Code:
+	</div>
+	<div class="bbCodeBlock-content" dir="ltr">
+		<pre class="bbCodeCode" dir="ltr" data-xf-init="code-block" data-lang=""><code>rootflags=degraded</code></pre>
+	</div>
+</div>to the end of the line starting with linux.<br />
+<br />
+This made it possible to overcome the problem of boot disks.<br />
+EDIT:<br />
+There is a strange thing, or rather (in my opinion) wrong.<br />
+Reported BTRFS volume capacity is twice the actual capacity.<br />
+<br />
+For non-boot disks what should I do?</div>
+				
+			</div>
+			
+			<div class="js-selectToQuoteEnd">&nbsp;</div>
+			
+				
+			
+		</article>
+
+		
+
+		
+	</div>
+
+										
+
+										
+											
+    
+
+	
+		<div class="message-lastEdit">
+			
+				Last edited: <time  class="u-dt" dir="auto" datetime="2023-04-27T16:26:32+0200" data-timestamp="1682605592" data-date="Apr 27, 2023" data-time="16:26" data-short="Apr &#039;23" title="Apr 27, 2023 at 16:26" itemprop="dateModified">Apr 27, 2023</time>
+				
+		</div>
+	
+
+										
+
+										
+											
+	
+
+										
+
+									
+								</div>
+
+								<div class="reactionsBar js-reactionsList ">
+									
+								</div>
+
+								
+									
+    
+
+	<footer class="message-footer">
+        
+			<div class="message-microdata" itemprop="interactionStatistic" itemtype="https://schema.org/InteractionCounter" itemscope>
+				<meta itemprop="userInteractionCount" content="0" />
+				<meta itemprop="interactionType" content="https://schema.org/LikeAction" />
+			</div>
+		
+        
+		
+
+		
+
+		<div class="js-historyTarget message-historyTarget toggleTarget" data-href="trigger-href"></div>
+	</footer>
+
+								
+							</div>
+
+						
+					</div>
+				
+			</div>
+		
+	</article>
+
+	
+	
+
+					
+
+					
+
+				
+
+					
+
+					
+						
+
+	
+	
+
+
+	
+
+	
+
+	
+
+	
+	<article class="message    message-threadStarterPost message--post  js-post js-inlineModContainer  "
+			 data-author="vaschthestampede"
+			 data-content="post-552974"
+			 id="js-post-552974"
+			itemscope itemtype="https://schema.org/Comment" itemid="https://forum.proxmox.com/posts/552974/">
+
+			
+				<meta itemprop="parentItem" itemscope itemid="https://forum.proxmox.com/threads/handle-broken-disks-with-btrfs.126473/" />
+				<meta itemprop="name" content="Post #5" />
+			
+
+		<span class="u-anchorTarget" id="post-552974"></span>
+
+		
+			<div class="message-inner">
+				
+					<div class="message-cell message-cell--user">
+						
+
+	<section class="message-user "
+			 itemprop="author"
+			 itemscope itemtype="https://schema.org/Person"
+			 itemid="https://forum.proxmox.com/members/vaschthestampede.103452/">
+
+		
+			<meta itemprop="url" content="https://forum.proxmox.com/members/vaschthestampede.103452/" />
+		
+		
+		<div class="message-avatar ">
+			<div class="message-avatar-wrapper">
+				
+					<a href="/members/vaschthestampede.103452/" class="avatar avatar--s avatar--default avatar--default--dynamic" data-user-id="103452" data-xf-init="member-tooltip" style="background-color: #0277bd; color: #80d8ff">
+			<span class="avatar-u103452-s" role="img" aria-label="vaschthestampede">V</span> 
+		</a>
+				
+				
+			</div>
+		</div>
+		<div class="uix_messagePostBitWrapper">
+			<div class="message-userDetails">
+				<h4 class="message-name"><a href="/members/vaschthestampede.103452/" class="username " dir="auto" data-user-id="103452" data-xf-init="member-tooltip"><span itemprop="name">vaschthestampede</span></a></h4>
+				<h5 class="userTitle message-userTitle" dir="auto" itemprop="jobTitle">Well-Known Member</h5>
+				
+				
+					
+						<div class="uix_originalPoster__icon" data-xf-init="tooltip" title="Original poster">
+							<i class="fa--xf far fa-user-edit  mdi mdi-account-edit"><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#user-edit"></use></svg></i>
+						</div>
+					
+				
+				
+				
+			</div>
+			
+			
+				
+				
+					
+						<div class="thThreads__message-userExtras">
+					
+							<div class="message-userExtras">
+								
+									
+										<dl class="pairs pairs--justified">
+											
+												<dt>
+													<span data-xf-init="tooltip" title="Joined">
+														<i class="fa--xf far fa-user "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#user"></use></svg></i>
+													</span>
+												</dt>
+											
+											<dd>Oct 21, 2020</dd>
+										</dl>
+									
+									
+										<dl class="pairs pairs--justified">
+											
+												<dt>
+													<span data-xf-init="tooltip" title="Messages">
+														<i class="fa--xf far fa-comments "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#comments"></use></svg></i>
+													</span>
+												</dt>
+												
+											<dd>133</dd>
+										</dl>
+									
+									
+									
+										<dl class="pairs pairs--justified">
+											
+												<dt>
+													<span data-xf-init="tooltip" title="Reaction score">
+														<i class="fa--xf far fa-thumbs-up "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#thumbs-up"></use></svg></i>
+													</span>
+												</dt>
+												
+											<dd>8</dd>
+										</dl>
+									
+									
+										<dl class="pairs pairs--justified">
+											
+												<dt>
+													<span data-xf-init="tooltip" title="Points">
+														<i class="fa--xf far fa-trophy "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#trophy"></use></svg></i>
+													</span>
+												</dt>
+											
+											<dd>58</dd>
+										</dl>
+									
+									
+										<dl class="pairs pairs--justified">
+											
+												<dt>
+													<span data-xf-init="tooltip" title="Age">
+														<i class="fa--xf far fa-birthday-cake "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#birthday-cake"></use></svg></i>
+													</span>
+												</dt>
+											
+											<dd>39</dd>
+										</dl>
+									
+									
+									
+									
+										
+
+	
+
+										
+											
+
+	
+		
+	
+
+										
+									
+								
+							</div>
+						
+							</div>
+							<div class="thThreads__userExtra--toggle">
+								<a href="javascript:;" class="thThreads__userExtra--trigger"></a>
+							</div>
+						
+				
+			
+		</div>
+		<span class="message-userArrow"></span>
+	</section>
+
+					</div>
+				
+
+				
+					<div class="message-cell message-cell--main">
+						
+							<div class="message-main uix_messageContent js-quickEditTarget">
+
+								
+									
+
+          
+
+	<header class="message-attribution message-attribution--split">
+		<ul class="message-attribution-main listInline ">
+			
+			<li class="u-concealed">
+				<a href="/threads/handle-broken-disks-with-btrfs.126473/post-552974" rel="nofollow" itemprop="url">
+					<time  class="u-dt" dir="auto" datetime="2023-04-28T12:20:09+0200" data-timestamp="1682677209" data-date="Apr 28, 2023" data-time="12:20" data-short="Apr &#039;23" title="Apr 28, 2023 at 12:20" itemprop="datePublished">Apr 28, 2023</time>
+				</a>
+			</li>
+			
+			
+		</ul>
+
+		<ul class="message-attribution-opposite message-attribution-opposite--list ">
+			
+			<li>
+				<a href="/threads/handle-broken-disks-with-btrfs.126473/post-552974"
+					class="message-attribution-gadget"
+					data-xf-init="share-tooltip"
+					data-href="/posts/552974/share"
+					aria-label="Share"
+					rel="nofollow">
+					<i class="fa--xf far fa-share-alt "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#share-alt"></use></svg></i>
+				</a>
+			</li>
+			
+				<li class="u-hidden js-embedCopy">
+					
+	<a href="javascript:"
+		data-xf-init="copy-to-clipboard"
+		data-copy-text="&lt;div class=&quot;js-xf-embed&quot; data-url=&quot;https://forum.proxmox.com&quot; data-content=&quot;post-552974&quot;&gt;&lt;/div&gt;&lt;script defer src=&quot;https://forum.proxmox.com/js/xf/external_embed.js?_v=afca2500&quot;&gt;&lt;/script&gt;"
+		data-success="Embed code HTML copied to clipboard."
+		class="">
+		<i class="fa--xf far fa-code "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#code"></use></svg></i>
+	</a>
+
+				</li>
+			
+			
+			
+				<li>
+					<a href="/threads/handle-broken-disks-with-btrfs.126473/post-552974" rel="nofollow">
+						#5
+					</a>
+				</li>
+			
+		</ul>
+	</header>
+
+								
+
+								<div class="message-content js-messageContent">
+									
+
+										
+											
+	
+	
+	
+
+										
+
+										
+											
+	
+	
+	<div class="message-userContent lbContainer js-lbContainer "
+		 data-lb-id="post-552974"
+		 data-lb-caption-desc="vaschthestampede &middot; Apr 28, 2023 at 12:20">
+
+		
+
+		<article class="message-body js-selectToQuote">
+			
+				
+			
+			
+			<div itemprop="text">
+				
+					<div class="bbWrapper">I think I&#039;ve found a better solution.<br />
+<br />
+In the screen initramfs insert:<br />
+
+	
+	
+
+
+<div class="bbCodeBlock bbCodeBlock--screenLimited bbCodeBlock--code">
+	<div class="bbCodeBlock-title">
+		Code:
+	</div>
+	<div class="bbCodeBlock-content" dir="ltr">
+		<pre class="bbCodeCode" dir="ltr" data-xf-init="code-block" data-lang=""><code>mount -o degraded /dev/sda3 /root -t btrfs</code></pre>
+	</div>
+</div><br />
+Where &quot;/dev/sda3&quot; is the healthy disck.<br />
+And press Ctrl-D.<br />
+<br />
+For non-boot disks in the proxmox shell enter:<br />
+
+	
+	
+
+
+<div class="bbCodeBlock bbCodeBlock--screenLimited bbCodeBlock--code">
+	<div class="bbCodeBlock-title">
+		Code:
+	</div>
+	<div class="bbCodeBlock-content" dir="ltr">
+		<pre class="bbCodeCode" dir="ltr" data-xf-init="code-block" data-lang=""><code>mount -o degraded /dev/nvme0n1 /BTRFS</code></pre>
+	</div>
+</div><br />
+Where &quot;/dev/nvme0n1&quot; is the healthy disck, and /BTRFS is the mount path.<br />
+<br />
+The problem of the reported BTRFS volume twice the actual capacity remains but, for me, seams more clear as solution.</div>
+				
+			</div>
+			
+			<div class="js-selectToQuoteEnd">&nbsp;</div>
+			
+				
+			
+		</article>
+
+		
+
+		
+	</div>
+
+										
+
+										
+											
+    
+
+	
+		<div class="message-lastEdit">
+			
+				Last edited: <time  class="u-dt" dir="auto" datetime="2023-04-28T15:44:33+0200" data-timestamp="1682689473" data-date="Apr 28, 2023" data-time="15:44" data-short="Apr &#039;23" title="Apr 28, 2023 at 15:44" itemprop="dateModified">Apr 28, 2023</time>
+				
+		</div>
+	
+
+										
+
+										
+											
+	
+
+										
+
+									
+								</div>
+
+								<div class="reactionsBar js-reactionsList is-active">
+									
+	
+	
+		<ul class="reactionSummary">
+		
+			<li><span class="reaction reaction--small reaction--1" data-reaction-id="1"><i aria-hidden="true"></i><img src="https://cdn.jsdelivr.net/joypixels/assets/8.0/png/unicode/64/1f44d.png" loading="lazy" width="64" height="64" class="reaction-image reaction-image--emoji js-reaction" alt="Like" title="Like" /></span></li>
+		
+		</ul>
+	
+
+
+<span class="u-srOnly">Reactions:</span>
+<a class="reactionsBar-link" href="/posts/552974/reactions" data-xf-click="overlay" data-cache="false" rel="nofollow"><bdi>leesteken</bdi></a>
+								</div>
+
+								
+									
+    
+
+	<footer class="message-footer">
+        
+			<div class="message-microdata" itemprop="interactionStatistic" itemtype="https://schema.org/InteractionCounter" itemscope>
+				<meta itemprop="userInteractionCount" content="1" />
+				<meta itemprop="interactionType" content="https://schema.org/LikeAction" />
+			</div>
+		
+        
+		
+
+		
+
+		<div class="js-historyTarget message-historyTarget toggleTarget" data-href="trigger-href"></div>
+	</footer>
+
+								
+							</div>
+
+						
+					</div>
+				
+			</div>
+		
+	</article>
+
+	
+	
+
+					
+
+					
+
+				
+
+					
+
+					
+						
+
+	
+	
+
+
+	
+
+	
+
+	
+	<article class="message   message--post  js-post js-inlineModContainer  "
+			 data-author="LnxBil"
+			 data-content="post-553490"
+			 id="js-post-553490"
+			itemscope itemtype="https://schema.org/Comment" itemid="https://forum.proxmox.com/posts/553490/">
+
+			
+				<meta itemprop="parentItem" itemscope itemid="https://forum.proxmox.com/threads/handle-broken-disks-with-btrfs.126473/" />
+				<meta itemprop="name" content="Post #6" />
+			
+
+		<span class="u-anchorTarget" id="post-553490"></span>
+
+		
+			<div class="message-inner">
+				
+					<div class="message-cell message-cell--user">
+						
+
+	<section class="message-user "
+			 itemprop="author"
+			 itemscope itemtype="https://schema.org/Person"
+			 itemid="https://forum.proxmox.com/members/lnxbil.31473/">
+
+		
+			<meta itemprop="url" content="https://forum.proxmox.com/members/lnxbil.31473/" />
+		
+		
+		<div class="message-avatar ">
+			<div class="message-avatar-wrapper">
+				
+					<a href="/members/lnxbil.31473/" class="avatar avatar--s" data-user-id="31473" data-xf-init="member-tooltip">
+			<img src="/data/avatars/s/31/31473.jpg?1696225606" srcset="/data/avatars/m/31/31473.jpg?1696225606 2x" alt="LnxBil" class="avatar-u31473-s" width="48" height="48" loading="lazy" itemprop="image" /> 
+		</a>
+				
+				
+			</div>
+		</div>
+		<div class="uix_messagePostBitWrapper">
+			<div class="message-userDetails">
+				<h4 class="message-name"><a href="/members/lnxbil.31473/" class="username " dir="auto" data-user-id="31473" data-xf-init="member-tooltip"><span itemprop="name">LnxBil</span></a></h4>
+				<h5 class="userTitle message-userTitle" dir="auto" itemprop="jobTitle">Distinguished Member</h5>
+				
+				
+				
+				
+			</div>
+			
+			
+				
+				
+					
+						<div class="thThreads__message-userExtras">
+					
+							<div class="message-userExtras">
+								
+									
+										<dl class="pairs pairs--justified">
+											
+												<dt>
+													<span data-xf-init="tooltip" title="Joined">
+														<i class="fa--xf far fa-user "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#user"></use></svg></i>
+													</span>
+												</dt>
+											
+											<dd>Feb 21, 2015</dd>
+										</dl>
+									
+									
+										<dl class="pairs pairs--justified">
+											
+												<dt>
+													<span data-xf-init="tooltip" title="Messages">
+														<i class="fa--xf far fa-comments "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#comments"></use></svg></i>
+													</span>
+												</dt>
+												
+											<dd>10,331</dd>
+										</dl>
+									
+									
+									
+										<dl class="pairs pairs--justified">
+											
+												<dt>
+													<span data-xf-init="tooltip" title="Reaction score">
+														<i class="fa--xf far fa-thumbs-up "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#thumbs-up"></use></svg></i>
+													</span>
+												</dt>
+												
+											<dd>2,425</dd>
+										</dl>
+									
+									
+										<dl class="pairs pairs--justified">
+											
+												<dt>
+													<span data-xf-init="tooltip" title="Points">
+														<i class="fa--xf far fa-trophy "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#trophy"></use></svg></i>
+													</span>
+												</dt>
+											
+											<dd>303</dd>
+										</dl>
+									
+									
+									
+										<dl class="pairs pairs--justified">
+											
+												<dt>
+													<span data-xf-init="tooltip" title="Location">
+														<i class="fa--xf far fa-map-marker "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#map-marker"></use></svg></i>
+													</span>
+												</dt>
+											
+											<dd data-xf-init="tooltip" title="Saarland, Germany">
+												
+													<a href="/misc/location-info?location=Saarland%2C+Germany" rel="nofollow noreferrer" target="_blank" class="u-concealed">Saarland, Germany</a>
+												
+											</dd>
+										</dl>
+									
+									
+									
+										
+
+	
+
+										
+									
+								
+							</div>
+						
+							</div>
+							<div class="thThreads__userExtra--toggle">
+								<a href="javascript:;" class="thThreads__userExtra--trigger"></a>
+							</div>
+						
+				
+			
+		</div>
+		<span class="message-userArrow"></span>
+	</section>
+
+					</div>
+				
+
+				
+					<div class="message-cell message-cell--main">
+						
+							<div class="message-main uix_messageContent js-quickEditTarget">
+
+								
+									
+
+          
+
+	<header class="message-attribution message-attribution--split">
+		<ul class="message-attribution-main listInline ">
+			
+			<li class="u-concealed">
+				<a href="/threads/handle-broken-disks-with-btrfs.126473/post-553490" rel="nofollow" itemprop="url">
+					<time  class="u-dt" dir="auto" datetime="2023-05-01T09:16:12+0200" data-timestamp="1682925372" data-date="May 1, 2023" data-time="09:16" data-short="May &#039;23" title="May 1, 2023 at 09:16" itemprop="datePublished">May 1, 2023</time>
+				</a>
+			</li>
+			
+			
+		</ul>
+
+		<ul class="message-attribution-opposite message-attribution-opposite--list ">
+			
+			<li>
+				<a href="/threads/handle-broken-disks-with-btrfs.126473/post-553490"
+					class="message-attribution-gadget"
+					data-xf-init="share-tooltip"
+					data-href="/posts/553490/share"
+					aria-label="Share"
+					rel="nofollow">
+					<i class="fa--xf far fa-share-alt "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#share-alt"></use></svg></i>
+				</a>
+			</li>
+			
+				<li class="u-hidden js-embedCopy">
+					
+	<a href="javascript:"
+		data-xf-init="copy-to-clipboard"
+		data-copy-text="&lt;div class=&quot;js-xf-embed&quot; data-url=&quot;https://forum.proxmox.com&quot; data-content=&quot;post-553490&quot;&gt;&lt;/div&gt;&lt;script defer src=&quot;https://forum.proxmox.com/js/xf/external_embed.js?_v=afca2500&quot;&gt;&lt;/script&gt;"
+		data-success="Embed code HTML copied to clipboard."
+		class="">
+		<i class="fa--xf far fa-code "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#code"></use></svg></i>
+	</a>
+
+				</li>
+			
+			
+			
+				<li>
+					<a href="/threads/handle-broken-disks-with-btrfs.126473/post-553490" rel="nofollow">
+						#6
+					</a>
+				</li>
+			
+		</ul>
+	</header>
+
+								
+
+								<div class="message-content js-messageContent">
+									
+
+										
+											
+	
+	
+	
+
+										
+
+										
+											
+	
+	
+	<div class="message-userContent lbContainer js-lbContainer "
+		 data-lb-id="post-553490"
+		 data-lb-caption-desc="LnxBil &middot; May 1, 2023 at 09:16">
+
+		
+
+		<article class="message-body js-selectToQuote">
+			
+				
+			
+			
+			<div itemprop="text">
+				
+					<div class="bbWrapper"><blockquote data-attributes="member: 103452" data-quote="vaschthestampede" data-source="post: 552741"
+	class="bbCodeBlock bbCodeBlock--expandable bbCodeBlock--quote js-expandWatch">
+	
+		<div class="bbCodeBlock-title">
+			
+				<a href="/goto/post?id=552741"
+					class="bbCodeBlock-sourceJump"
+					rel="nofollow"
+					data-xf-click="attribution"
+					data-content-selector="#post-552741">vaschthestampede said:</a>
+			
+		</div>
+	
+	<div class="bbCodeBlock-content">
+		
+		<div class="bbCodeBlock-expandContent js-expandContent ">
+			There is a strange thing, or rather (in my opinion) wrong.<br />
+Reported BTRFS volume capacity is twice the actual capacity.
+		</div>
+		<div class="bbCodeBlock-expandLink js-expandLink"><a role="button" tabindex="0">Click to expand...</a></div>
+	</div>
+</blockquote>Yes, you&#039;ll also have this with ZFS. Due to compression, deduplication and other weirdness, you cannot say how big your virtual disk actually is, therefore the safer option was to just state what you have as a backing device. I don&#039;t like it either, yet here we are.</div>
+				
+			</div>
+			
+			<div class="js-selectToQuoteEnd">&nbsp;</div>
+			
+				
+			
+		</article>
+
+		
+
+		
+	</div>
+
+										
+
+										
+											
+    
+
+	
+
+										
+
+										
+											
+	
+
+										
+
+									
+								</div>
+
+								<div class="reactionsBar js-reactionsList ">
+									
+								</div>
+
+								
+									
+    
+
+	<footer class="message-footer">
+        
+			<div class="message-microdata" itemprop="interactionStatistic" itemtype="https://schema.org/InteractionCounter" itemscope>
+				<meta itemprop="userInteractionCount" content="0" />
+				<meta itemprop="interactionType" content="https://schema.org/LikeAction" />
+			</div>
+		
+        
+		
+
+		
+
+		<div class="js-historyTarget message-historyTarget toggleTarget" data-href="trigger-href"></div>
+	</footer>
+
+								
+							</div>
+
+						
+					</div>
+				
+			</div>
+		
+	</article>
+
+	
+	
+
+					
+
+					
+
+				
+
+					
+
+					
+						
+
+	
+	
+
+
+	
+
+	
+
+	
+	<article class="message   message--post  js-post js-inlineModContainer  "
+			 data-author="Hemps40"
+			 data-content="post-709744"
+			 id="js-post-709744"
+			itemscope itemtype="https://schema.org/Comment" itemid="https://forum.proxmox.com/posts/709744/">
+
+			
+				<meta itemprop="parentItem" itemscope itemid="https://forum.proxmox.com/threads/handle-broken-disks-with-btrfs.126473/" />
+				<meta itemprop="name" content="Post #7" />
+			
+
+		<span class="u-anchorTarget" id="post-709744"></span>
+
+		
+			<div class="message-inner">
+				
+					<div class="message-cell message-cell--user">
+						
+
+	<section class="message-user "
+			 itemprop="author"
+			 itemscope itemtype="https://schema.org/Person"
+			 itemid="https://forum.proxmox.com/members/hemps40.103741/">
+
+		
+			<meta itemprop="url" content="https://forum.proxmox.com/members/hemps40.103741/" />
+		
+		
+		<div class="message-avatar ">
+			<div class="message-avatar-wrapper">
+				
+					<a href="/members/hemps40.103741/" class="avatar avatar--s avatar--default avatar--default--dynamic" data-user-id="103741" data-xf-init="member-tooltip" style="background-color: #1a237e; color: #8c9eff">
+			<span class="avatar-u103741-s" role="img" aria-label="Hemps40">H</span> 
+		</a>
+				
+				
+			</div>
+		</div>
+		<div class="uix_messagePostBitWrapper">
+			<div class="message-userDetails">
+				<h4 class="message-name"><a href="/members/hemps40.103741/" class="username " dir="auto" data-user-id="103741" data-xf-init="member-tooltip"><span itemprop="name">Hemps40</span></a></h4>
+				<h5 class="userTitle message-userTitle" dir="auto" itemprop="jobTitle">Member</h5>
+				
+				
+				
+				
+			</div>
+			
+			
+				
+				
+					
+						<div class="thThreads__message-userExtras">
+					
+							<div class="message-userExtras">
+								
+									
+										<dl class="pairs pairs--justified">
+											
+												<dt>
+													<span data-xf-init="tooltip" title="Joined">
+														<i class="fa--xf far fa-user "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#user"></use></svg></i>
+													</span>
+												</dt>
+											
+											<dd>Oct 26, 2020</dd>
+										</dl>
+									
+									
+										<dl class="pairs pairs--justified">
+											
+												<dt>
+													<span data-xf-init="tooltip" title="Messages">
+														<i class="fa--xf far fa-comments "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#comments"></use></svg></i>
+													</span>
+												</dt>
+												
+											<dd>3</dd>
+										</dl>
+									
+									
+									
+										<dl class="pairs pairs--justified">
+											
+												<dt>
+													<span data-xf-init="tooltip" title="Reaction score">
+														<i class="fa--xf far fa-thumbs-up "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#thumbs-up"></use></svg></i>
+													</span>
+												</dt>
+												
+											<dd>0</dd>
+										</dl>
+									
+									
+										<dl class="pairs pairs--justified">
+											
+												<dt>
+													<span data-xf-init="tooltip" title="Points">
+														<i class="fa--xf far fa-trophy "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#trophy"></use></svg></i>
+													</span>
+												</dt>
+											
+											<dd>21</dd>
+										</dl>
+									
+									
+										<dl class="pairs pairs--justified">
+											
+												<dt>
+													<span data-xf-init="tooltip" title="Age">
+														<i class="fa--xf far fa-birthday-cake "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#birthday-cake"></use></svg></i>
+													</span>
+												</dt>
+											
+											<dd>45</dd>
+										</dl>
+									
+									
+									
+									
+										
+
+	
+
+										
+											
+
+	
+		
+	
+
+										
+									
+								
+							</div>
+						
+							</div>
+							<div class="thThreads__userExtra--toggle">
+								<a href="javascript:;" class="thThreads__userExtra--trigger"></a>
+							</div>
+						
+				
+			
+		</div>
+		<span class="message-userArrow"></span>
+	</section>
+
+					</div>
+				
+
+				
+					<div class="message-cell message-cell--main">
+						
+							<div class="message-main uix_messageContent js-quickEditTarget">
+
+								
+									
+
+          
+
+	<header class="message-attribution message-attribution--split">
+		<ul class="message-attribution-main listInline ">
+			
+			<li class="u-concealed">
+				<a href="/threads/handle-broken-disks-with-btrfs.126473/post-709744" rel="nofollow" itemprop="url">
+					<time  class="u-dt" dir="auto" datetime="2024-10-08T14:12:50+0200" data-timestamp="1728389570" data-date="Oct 8, 2024" data-time="14:12" data-short="Oct &#039;24" title="Oct 8, 2024 at 14:12" itemprop="datePublished">Oct 8, 2024</time>
+				</a>
+			</li>
+			
+			
+		</ul>
+
+		<ul class="message-attribution-opposite message-attribution-opposite--list ">
+			
+			<li>
+				<a href="/threads/handle-broken-disks-with-btrfs.126473/post-709744"
+					class="message-attribution-gadget"
+					data-xf-init="share-tooltip"
+					data-href="/posts/709744/share"
+					aria-label="Share"
+					rel="nofollow">
+					<i class="fa--xf far fa-share-alt "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#share-alt"></use></svg></i>
+				</a>
+			</li>
+			
+				<li class="u-hidden js-embedCopy">
+					
+	<a href="javascript:"
+		data-xf-init="copy-to-clipboard"
+		data-copy-text="&lt;div class=&quot;js-xf-embed&quot; data-url=&quot;https://forum.proxmox.com&quot; data-content=&quot;post-709744&quot;&gt;&lt;/div&gt;&lt;script defer src=&quot;https://forum.proxmox.com/js/xf/external_embed.js?_v=afca2500&quot;&gt;&lt;/script&gt;"
+		data-success="Embed code HTML copied to clipboard."
+		class="">
+		<i class="fa--xf far fa-code "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#code"></use></svg></i>
+	</a>
+
+				</li>
+			
+			
+			
+				<li>
+					<a href="/threads/handle-broken-disks-with-btrfs.126473/post-709744" rel="nofollow">
+						#7
+					</a>
+				</li>
+			
+		</ul>
+	</header>
+
+								
+
+								<div class="message-content js-messageContent">
+									
+
+										
+											
+	
+	
+	
+
+										
+
+										
+											
+	
+	
+	<div class="message-userContent lbContainer js-lbContainer "
+		 data-lb-id="post-709744"
+		 data-lb-caption-desc="Hemps40 &middot; Oct 8, 2024 at 14:12">
+
+		
+
+		<article class="message-body js-selectToQuote">
+			
+				
+			
+			
+			<div itemprop="text">
+				
+					<div class="bbWrapper">Any updates to this, I have a server offsite I cant ipmi into so to change grub id have to be local onsite , whats happens if I add rootflags=degraded even though both disks are working still?</div>
+				
+			</div>
+			
+			<div class="js-selectToQuoteEnd">&nbsp;</div>
+			
+				
+			
+		</article>
+
+		
+
+		
+	</div>
+
+										
+
+										
+											
+    
+
+	
+
+										
+
+										
+											
+	
+
+										
+
+									
+								</div>
+
+								<div class="reactionsBar js-reactionsList ">
+									
+								</div>
+
+								
+									
+    
+
+	<footer class="message-footer">
+        
+			<div class="message-microdata" itemprop="interactionStatistic" itemtype="https://schema.org/InteractionCounter" itemscope>
+				<meta itemprop="userInteractionCount" content="0" />
+				<meta itemprop="interactionType" content="https://schema.org/LikeAction" />
+			</div>
+		
+        
+		
+
+		
+
+		<div class="js-historyTarget message-historyTarget toggleTarget" data-href="trigger-href"></div>
+	</footer>
+
+								
+							</div>
+
+						
+					</div>
+				
+			</div>
+		
+	</article>
+
+	
+	
+
+					
+
+					
+
+				
+			
+		</div>
+	</div>
+
+	
+		<div class="block-outer block-outer--after">
+			
+				
+
+				
+				
+					<div class="block-outer-opposite">
+						
+							<a href="/login/" class="button button--link button--wrap" data-xf-click="overlay"><span class="button-text">
+								You must log in or register to reply here.
+							</span></a>
+						
+					</div>
+				
+			
+		</div>
+	
+
+	
+	
+
+</div>
+
+
+
+
+
+
+
+
+
+
+
+<div class="blockMessage blockMessage--none">
+	
+
+	
+
+	
+		
+
+		<div class="shareButtons shareButtons--iconic" data-xf-init="share-buttons" data-page-url="" data-page-title="" data-page-desc="" data-page-image="">
+			<span class="u-anchorTarget" id="_xfUid-1-1772830359"></span>
+
+			
+				<span class="shareButtons-label">Share:</span>
+			
+
+			<div class="shareButtons-buttons">
+				
+					
+
+					
+
+					
+						<a class="shareButtons-button shareButtons-button--brand shareButtons-button--bluesky" href="#_xfUid-1-1772830359" data-href="https://bsky.app/intent/compose?text={url}">
+							<i class="fa--xf fab fa-bluesky "><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512" role="img" aria-hidden="true" ><path d="M407.8 294.7c-3.3-.4-6.7-.8-10-1.3c3.4 .4 6.7 .9 10 1.3zM288 227.1C261.9 176.4 190.9 81.9 124.9 35.3C61.6-9.4 37.5-1.7 21.6 5.5C3.3 13.8 0 41.9 0 58.4S9.1 194 15 213.9c19.5 65.7 89.1 87.9 153.2 80.7c3.3-.5 6.6-.9 10-1.4c-3.3 .5-6.6 1-10 1.4C74.3 308.6-9.1 342.8 100.3 464.5C220.6 589.1 265.1 437.8 288 361.1c22.9 76.7 49.2 222.5 185.6 103.4c102.4-103.4 28.1-156-65.8-169.9c-3.3-.4-6.7-.8-10-1.3c3.4 .4 6.7 .9 10 1.3c64.1 7.1 133.6-15.1 153.2-80.7C566.9 194 576 75 576 58.4s-3.3-44.7-21.6-52.9c-15.8-7.1-40-14.9-103.2 29.8C385.1 81.9 314.1 176.4 288 227.1z"/></svg></i>
+							<span>Bluesky</span>
+						</a>
+					
+
+					
+						<a class="shareButtons-button shareButtons-button--brand shareButtons-button--linkedin" href="#_xfUid-1-1772830359" data-href="https://www.linkedin.com/sharing/share-offsite/?url={url}">
+							<i class="fa--xf fab fa-linkedin "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/brands.svg?v=1770902607#linkedin"></use></svg></i>
+							<span>LinkedIn</span>
+						</a>
+					
+
+					
+						<a class="shareButtons-button shareButtons-button--brand shareButtons-button--reddit" href="#_xfUid-1-1772830359" data-href="https://reddit.com/submit?url={url}&amp;title={title}">
+							<i class="fa--xf fab fa-reddit-alien "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/brands.svg?v=1770902607#reddit-alien"></use></svg></i>
+							<span>Reddit</span>
+						</a>
+					
+
+					
+
+					
+
+					
+
+					
+						<a class="shareButtons-button shareButtons-button--email" href="#_xfUid-1-1772830359" data-href="mailto:?subject={title}&amp;body={url}">
+							<i class="fa--xf far fa-envelope "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#envelope"></use></svg></i>
+							<span>Email</span>
+						</a>
+					
+
+					
+						<a class="shareButtons-button shareButtons-button--share is-hidden" href="#_xfUid-1-1772830359"
+							data-xf-init="web-share"
+							data-title="" data-text="" data-url=""
+							data-hide=".shareButtons-button:not(.shareButtons-button--share)">
+
+							<i class="fa--xf far fa-share-alt "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#share-alt"></use></svg></i>
+							<span>Share</span>
+						</a>
+					
+
+					
+						<a class="shareButtons-button shareButtons-button--link is-hidden" href="#_xfUid-1-1772830359" data-clipboard="{url}">
+							<i class="fa--xf far fa-link "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#link"></use></svg></i>
+							<span>Link</span>
+						</a>
+					
+				
+			</div>
+		</div>
+	
+
+</div>
+
+
+
+
+
+
+
+
+										
+	
+
+									</div>
+									<!-- BELOW MAIN CONTENT -->
+									
+									
+	
+
+								</div>
+
+								
+	
+		
+	
+
+	
+
+							</div>
+							
+	
+
+						</div>
+						
+	
+		
+	
+		
+		
+	
+		<div class="breadcrumb p-breadcrumb--bottom">
+			<div class="pageContent">
+				
+					
+						
+							<ul class="p-breadcrumbs p-breadcrumbs--bottom"
+								itemscope itemtype="https://schema.org/BreadcrumbList">
+								
+									
+		
+
+		
+		
+		
+			
+			
+	<li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+		<a href="https://forum.proxmox.com" itemprop="item">
+			
+				<i class="fa--xf far fa-home "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#home"></use></svg></i>
+				<span style="display: none;" itemprop="name">Home</span>
+				
+		</a>
+		<meta itemprop="position" content="1" />
+	</li>
+
+		
+
+			
+			
+			
+	<li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+		<a href="/" itemprop="item">
+			
+				<span itemprop="name">Forums</span>
+			
+		</a>
+		<meta itemprop="position" content="2" />
+	</li>
+
+		
+		
+			
+			
+	<li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+		<a href="/#proxmox-virtual-environment.11" itemprop="item">
+			
+				<span itemprop="name">Proxmox Virtual Environment</span>
+			
+		</a>
+		<meta itemprop="position" content="3" />
+	</li>
+
+		
+			
+			
+	<li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+		<a href="/forums/proxmox-ve-installation-and-configuration.16/" itemprop="item">
+			
+				<span itemprop="name">Proxmox VE: Installation and configuration</span>
+			
+		</a>
+		<meta itemprop="position" content="4" />
+	</li>
+
+		
+	
+								
+							</ul>
+						
+					
+				
+			</div>
+		</div>
+	
+
+		
+	
+
+	
+
+						
+	
+
+					</div>
+				</div>
+
+				
+	
+		
+	<footer class="p-footer" id="footer">
+
+		
+			
+<div class="uix_extendedFooter">
+	<div class="pageContent">
+		<div class="uix_extendedFooterRow">
+			
+			
+				
+	<div class="block"  data-widget-id="15" data-widget-key="_widget_footer_about" data-widget-definition="html">
+	<div class="block-container">
+		<h2 class="block-minorHeader" style="font-size: 1.6rem;">About</h2>
+		<div class="block-body block-row">
+			<p style="font-size: 1.5rem;">
+				The Proxmox community has been around for many years and offers help and support for
+				Proxmox VE, Proxmox Backup Server, and Proxmox Mail Gateway.<br>
+				We think our community is one of the best thanks to people like you!
+			</p>
+		</div>
+	</div>
+</div>
+
+
+	<div class="block" data-widget-id="16" data-widget-key="_widget_footer_proxmox_quicknavigation" data-widget-definition="html">
+	<div class="block-container">
+		<h3 class="block-minorHeader" style="font-size: 1.6rem;">Quick Navigation</h3>
+		<div class="block-body block-row" style="font-size: 1.5rem;">
+			<a class="blockLink rippleButton rippleButton" href="https://forum.proxmox.com">Home</a>
+			<a class="blockLink rippleButton rippleButton" href="https://www.proxmox.com/proxmox-virtual-environment/pricing" target="_blank">Get Subscription</a>
+			<a class="blockLink rippleButton rippleButton" href="https://pve.proxmox.com/wiki" target="_blank">Wiki</a>
+			<a class="blockLink rippleButton rippleButton" href="https://www.proxmox.com/downloads" target="_blank">Downloads</a>
+			<a class="blockLink rippleButton rippleButton" href="https://my.proxmox.com/" target="_blank">Proxmox Customer Portal</a>
+			<a class="blockLink rippleButton rippleButton" href="https://www.proxmox.com/about/company" target="_blank">About</a>
+		</div>
+	</div>
+</div>
+
+
+	<div class="block" data-widget-id="17" data-widget-key="_widget_footer_getsubscription" data-widget-definition="html">
+	<div class="block-container">
+		<h3 class="block-minorHeader" style="font-size: 1.6rem;">Get your subscription!</h3>
+		<div class="block-body block-row">
+			<p style="font-size: 1.5rem;">
+                        The Proxmox team works very hard to make sure you are running the best software and getting stable updates and security enhancements, as well as quick enterprise support. Tens of thousands of happy customers have a Proxmox subscription. Get yours easily in our online shop.
+			</p>
+ 			<a class="button button--primary rippleButton" href="https://shop.proxmox.com" target="_blank" style="color: #ffffff;"><i class="fa--xf far fa-shopping-cart  mdi mdi-cart"><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true"  style="margin-right: 5px;"><use href="/data/local/icons/regular.svg?v=1770902607#shopping-cart"></use></svg></i>Buy now!</a>
+		</div>
+	</div>
+</div>
+
+
+			
+		</div>
+	</div>
+</div>
+
+		
+
+		<div class="p-footer-inner">
+			<div class="pageContent">
+				<div class="p-footer-row">
+					
+						<div class="p-footer-row-main">
+							<ul class="p-footer-linkList p-footer-choosers">
+								
+									
+										<li><a href="/misc/cookies" rel="nofollow"
+											data-xf-init="tooltip" title="Cookie consent"
+											data-xf-click="cookie-consent-toggle">
+											<i class="fa--xf far fa-cookie "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#cookie"></use></svg></i> Cookies
+										</a></li>
+									
+									
+										<li><a id="uix_widthToggle--trigger" data-xf-init="tooltip" title="Toggle width" rel="nofollow"><i class="fa--xf far fa-compress-alt "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#compress-alt"></use></svg></i></a></li>
+									
+										
+										<li>
+											
+												
+													<a href="/misc/style" data-xf-click="overlay"
+														data-xf-init="tooltip" title="Style chooser" rel="nofollow">
+														<i class="fa--xf far fa-paint-brush "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#paint-brush"></use></svg></i> Proxmox Support Forum - Light Mode
+													</a>
+												
+												
+											
+										</li>
+									
+									
+								
+							</ul>
+						</div>
+					
+				</div>
+				<div class="p-footer-row-opposite">
+					<ul class="p-footer-linkList">
+						
+							
+								<li><a href="https://www.proxmox.com/en/about/contact" data-xf-click="">Contact us</a></li>
+							
+						
+
+						
+							<li><a href="/help/terms/">Terms and rules</a></li>
+						
+
+						
+							<li><a href="https://www.proxmox.com/en/privacy-policy">Privacy policy</a></li>
+						
+
+						
+							<li><a href="/help/">Help</a></li>
+						
+
+						
+							<li><a href="https://forum.proxmox.com">Home</a></li>
+						
+
+						<li><a href="#top" title="Top" data-xf-click="scroll-to"><i class="fa--xf far fa-arrow-up "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#arrow-up"></use></svg></i></a></li>
+
+						<li><a href="/forums/-/index.rss" target="_blank" class="p-footer-rssLink" title="RSS"><span aria-hidden="true"><i class="fa--xf far fa-rss "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#rss"></use></svg></i><span class="u-srOnly">RSS</span></span></a></li>
+					</ul>
+				</div>
+			</div>
+		</div>
+
+		<div class="p-footer-copyrightRow">
+			<div class="pageContent">
+				<div class="uix_copyrightBlock">
+					
+						<div class="p-footer-copyright">
+							
+								<a href="https://xenforo.com" class="u-concealed" dir="ltr" target="_blank" rel="sponsored noopener">Community platform by XenForo<sup>&reg;</sup> <span class="copyright">&copy; 2010-2026 XenForo Ltd.</span></a>
+								
+								
+							
+						</div>
+					
+
+					
+				</div>
+				
+	
+		
+	
+
+<ul class="uix_socialMedia">
+	
+		
+		
+		
+		
+		
+			<li><a aria-label="Git" data-xf-init="tooltip" title="Git" target="_blank" href="https://git.proxmox.com">
+					<i class="fa--xf fab fa-git-alt "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/brands.svg?v=1770902607#git-alt"></use></svg></i>
+				</a></li>
+		
+		
+		
+		
+		
+		
+		
+		
+		
+			<li><a aria-label="Bugzilla" data-xf-init="tooltip" title="Bugzilla" target="_blank" href="https://bugzilla.proxmox.com">
+					<i class="fa--xf fas fa-bug "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/solid.svg?v=1770902607#bug"></use></svg></i>
+				</a></li>
+		
+		
+		
+			<li><a aria-label="YouTube" data-xf-init="tooltip" title="YouTube" target="_blank" href="https://www.youtube.com/user/ProxmoxVE">
+					<i class="fa--xf fab fa-youtube "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/brands.svg?v=1770902607#youtube"></use></svg></i>
+				</a></li>
+		
+	
+</ul>
+
+
+	
+
+			</div>
+		</div>
+	</footer>
+
+	
+
+				
+				
+					<div class="uix_fabBar uix_fabBar--active">
+						
+							
+								<div class="u-scrollButtons js-scrollButtons" data-trigger-type="both">
+									<a href="#top" class="button button--scroll ripple-JsOnly" data-xf-click="scroll-to"><span class="button-text"><i class="fa--xf far fa-arrow-up "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#arrow-up"></use></svg></i><span class="u-srOnly">Top</span></span></a>
+									
+										<a href="#footer" class="button button--scroll ripple-JsOnly" data-xf-click="scroll-to"><span class="button-text"><i class="fa--xf far fa-arrow-down "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#arrow-down"></use></svg></i><span class="u-srOnly">Bottom</span></span></a>
+									
+									<div class="u-navButtons js-navButtons" data-trigger-type="both">
+										<a href="javascript:" class="button button--scroll ripple-JsOnly"><span class="button-text"><i class="fa--xf far fa-arrow-left "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#arrow-left"></use></svg></i><span class="u-srOnly">Back</span></span></a>
+									</div>
+								</div>
+							
+							
+								
+							
+						
+					</div>
+				
+				
+				
+			</div>
+		</div>
+		
+		<div class="u-bottomFixer js-bottomFixTarget">
+			
+			
+				
+	
+		
+		
+
+		<ul class="notices notices--bottom_fixer  js-notices"
+			data-xf-init="notices"
+			data-type="bottom_fixer"
+			data-scroll-interval="6">
+
+			
+				
+	<li class="notice js-notice notice--primary notice--cookieAdvanced"
+		data-notice-id="-1"
+		data-delay-duration="0"
+		data-display-duration="0"
+		data-auto-dismiss="0"
+		data-visibility="">
+		
+		<div class="uix_noticeInner">
+			
+			<div class="uix_noticeIcon">
+				
+					<i class="fa--xf far fa-info-circle "><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" ><use href="/data/local/icons/regular.svg?v=1770902607#info-circle"></use></svg></i>
+				
+			</div>
+
+			
+			<div class="notice-content">
+				
+				
+	<div class="u-pageCentered">
+		
+
+		<div class="cookies-main">
+			<h2>We value your privacy</h2>
+			<p>We use essential <a href="/help/cookies">cookies</a> to make this site work, and optional cookies to enhance your experience.</p>
+			<p><a href="#" data-xf-click="toggle" data-target="#cookieConsentConfig">See further information and configure your preferences</a></p>
+		</div>
+
+		<div class="cookies-buttons u-inputSpacer _u-alignCenter">
+			<a href="/misc/cookies?update=1&amp;accept=1&amp;t=1772830359%2C1382e82722941b6f3545208a3b28974c" class="button button--notice button--primary" rel="nofollow" data-xf-click="cookie-consent" xicon="confirm"><span class="button-text">
+
+				Accept all cookies
+			</span></a>
+
+			<a href="/misc/cookies?update=1&amp;reject=1&amp;t=1772830359%2C1382e82722941b6f3545208a3b28974c" class="button button--link" rel="nofollow" data-xf-click="cookie-consent" xicon="cancel"><span class="button-text">
+
+				Reject optional cookies
+			</span></a>
+		</div>
+
+	
+			<form action="/misc/cookies?update=1" method="post" class=""
+				 data-xf-init="cookie-consent-form ajax-submit" data-force-flash-message="true" id="cookieConsentConfig"
+			>
+				<input type="hidden" name="_xfToken" value="1772830359,1382e82722941b6f3545208a3b28974c" />
+				
+
+		<div class="cookies-options">
+
+			
+			<dl class="formRow formRow--fullWidth">
+				<dt>
+					<div class="formRow-labelWrapper"></div>
+				</dt>
+				<dd>
+					
+			<ul class="inputChoices">
+				<li class="inputChoices-choice"><label class="iconic iconic--toggle"><input type="checkbox"  value="1" checked="checked" disabled="1" /><i aria-hidden="true"></i><span class="iconic-label">Essential cookies</span></label></li>
+
+			</ul>
+		
+					<div class="formRow-explain">These cookies are required to enable core functionality such as security, network management, and accessibility. You may not reject these.</div>
+				</dd>
+			</dl>
+		
+
+			
+				
+			<dl class="formRow formRow--fullWidth">
+				<dt>
+					<div class="formRow-labelWrapper"></div>
+				</dt>
+				<dd>
+					
+			<ul class="inputChoices">
+				<li class="inputChoices-choice"><label class="iconic iconic--toggle"><input type="checkbox"  name="consent[optional]" value="1" class="js-consent_optional" /><i aria-hidden="true"></i><span class="iconic-label">Optional cookies</span></label></li>
+
+			</ul>
+		
+					<div class="formRow-explain">We deliver enhanced functionality for your browsing experience by setting these cookies. If you reject them, enhanced functionality will be unavailable.</div>
+				</dd>
+			</dl>
+		
+			
+
+			
+			<dl class="formRow formRow--fullWidth">
+				<dt>
+					<div class="formRow-labelWrapper"></div>
+				</dt>
+				<dd>
+					
+			<ul class="inputChoices">
+				<li class="inputChoices-choice"><label class="iconic iconic--toggle"><input type="checkbox"  name="consent[_third_party]" value="1" class="js-consent__third_party" /><i aria-hidden="true"></i><span class="iconic-label">Third-party cookies</span></label></li>
+
+			</ul>
+		
+					<div class="formRow-explain">Cookies set by third parties may be required to power functionality in conjunction with our captcha service provider for security and anti-spam purposes.</div>
+				</dd>
+			</dl>
+		
+
+			
+			<dl class="formRow formRow--fullWidth">
+				<dt>
+					<div class="formRow-labelWrapper"></div>
+				</dt>
+				<dd>
+					
+				<ul class="listInline listInline--bullet">
+					<li><a href="/help/cookies">Detailed cookie usage</a></li>
+					
+						<li><a href="https://www.proxmox.com/en/privacy-policy">Privacy policy</a></li>
+					
+				</ul>
+			
+				</dd>
+			</dl>
+		
+
+		</div>
+
+		<button type="submit" class="button button--notice"><span class="button-text">Save cookie preferences</span></button>
+	
+				
+			</form>
+		
+
+
+	</div>
+
+			</div>
+		</div>
+	</li>
+
+			
+		</ul>
+	
+
+			
+		</div>
+
+		<script>
+	if (typeof (window.themehouse) !== 'object') {
+		window.themehouse = {};
+	}
+	if (typeof (window.themehouse.settings) !== 'object') {
+		window.themehouse.settings = {};
+	}
+	window.themehouse.settings = {
+		common: {
+			'20210125': {
+				init: false,
+			},
+		},
+		data: {
+			version: '2.3.8.0.1',
+			jsVersion: 'No JS Files',
+			templateVersion: '2.1.8.0_Release',
+			betaMode: 0,
+			theme: '',
+			url: 'https://forum.proxmox.com/',
+			user: '0',
+		},
+		inputSync: {},
+		minimalSearch: {
+			breakpoint: "900px",
+			dropdownBreakpoint: "900",
+		},
+		sidebar: {
+            enabled: '1',
+			link: '/uix/toggle-sidebar.json?t=1772830359%2C1382e82722941b6f3545208a3b28974c',
+            state: '',
+		},
+        sidebarNav: {
+            enabled: '',
+			link: '/uix/toggle-sidebar-navigation.json?t=1772830359%2C1382e82722941b6f3545208a3b28974c',
+            state: '',
+		},
+		fab: {
+			enabled: 1,
+		},
+		checkRadius: {
+			enabled: 0,
+			selectors: '.p-footer-inner, .uix_extendedFooter, .p-nav, .p-sectionLinks, .p-staffBar, .p-header, #wpadminbar',
+		},
+		nodes: {
+			enabled: 0,
+		},
+        nodesCollapse: {
+            enabled: '1',
+			link: '/uix/toggle-category.json?t=1772830359%2C1382e82722941b6f3545208a3b28974c',
+			state: '',
+        },
+		widthToggle: {
+			enabled: '1',
+			link: '/uix/toggle-width.json?t=1772830359%2C1382e82722941b6f3545208a3b28974c',
+			state: 'fixed',
+		},
+	}
+
+	window.document.addEventListener('DOMContentLoaded', function() {
+		
+			try {
+			   window.themehouse.common['20210125'].init();
+			   window.themehouse.common['20180112'] = window.themehouse.common['20210125']; // custom projects fallback
+			} catch(e) {
+			   console.log('Error caught', e);
+			}
+		
+
+
+		var jsVersionPrefix = 'No JS Files';
+		if (typeof(window.themehouse.settings.data.jsVersion) === 'string') {
+			var jsVersionSplit = window.themehouse.settings.data.jsVersion.split('_');
+			if (jsVersionSplit.length) {
+				jsVersionPrefix = jsVersionSplit[0];
+			}
+		}
+		var templateVersionPrefix = 'No JS Template Version';
+		if (typeof(window.themehouse.settings.data.templateVersion) === 'string') {
+			var templateVersionSplit = window.themehouse.settings.data.templateVersion.split('_');
+			if (templateVersionSplit.length) {
+				templateVersionPrefix = templateVersionSplit[0];
+			}
+		}
+		if (jsVersionPrefix !== templateVersionPrefix) {
+			var splitFileVersion = jsVersionPrefix.split('.');
+			var splitTemplateVersion = templateVersionPrefix.split('.');
+			console.log('version mismatch', jsVersionPrefix, templateVersionPrefix);
+		}
+
+	});
+</script>
+
+		
+	
+
+	<form style="display:none" hidden="hidden">
+		<input type="text" name="_xfClientLoadTime" value="" id="_xfClientLoadTime" title="_xfClientLoadTime" tabindex="-1" />
+	</form>
+
+	
+
+		
+		
+
+		
+
+		
+	
+	
+		
+		
+			<script type="application/ld+json">
+				{
+    "@context": "https://schema.org",
+    "@type": "WebPage",
+    "url": "https://forum.proxmox.com/threads/handle-broken-disks-with-btrfs.126473/",
+    "mainEntity": {
+        "@type": "DiscussionForumPosting",
+        "@id": "https://forum.proxmox.com/threads/handle-broken-disks-with-btrfs.126473/",
+        "headline": "Handle broken disks with BTRFS",
+        "datePublished": "2023-04-26T15:49:20+00:00",
+        "url": "https://forum.proxmox.com/threads/handle-broken-disks-with-btrfs.126473/",
+        "articleSection": "Proxmox VE: Installation and configuration",
+        "author": {
+            "@type": "Person",
+            "@id": "https://forum.proxmox.com/members/vaschthestampede.103452/",
+            "name": "vaschthestampede",
+            "url": "https://forum.proxmox.com/members/vaschthestampede.103452/"
+        },
+        "interactionStatistic": [
+            {
+                "@type": "InteractionCounter",
+                "interactionType": "https://schema.org/ViewAction",
+                "userInteractionCount": 3274
+            },
+            {
+                "@type": "InteractionCounter",
+                "interactionType": "https://schema.org/CommentAction",
+                "userInteractionCount": 6
+            },
+            {
+                "@type": "InteractionCounter",
+                "interactionType": "https://schema.org/LikeAction",
+                "userInteractionCount": 0
+            }
+        ],
+        "text": "I'm testing the behavior of BTRFS in case of disk failure.\n\nAs a first test, I disconnect one of the two disks in \"RAID 1\".\nI get errors whether it's boot disks or not, but the errors are different.\nIn case of boot disk I have this screen:\n\n\nOtherwise I have:\n\n\nHow can I fix?\n\nAsk if you need any other information."
+    },
+    "publisher": {
+        "@type": "Organization",
+        "name": "Proxmox Support Forum",
+        "alternateName": "Proxmox Forum",
+        "description": "Proxmox Support Forum",
+        "url": "https://forum.proxmox.com",
+        "logo": "https://forum.proxmox.com/styles/uix/images/Proxmox-logo-stacked-white-background-1200.png"
+    }
+}
+			</script>
+		
+	
+
+
+	</body>
+</html>
+
+
+
+
+

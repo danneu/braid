@@ -1,0 +1,348 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="./">
+<head>
+  <meta charset="utf-8" />
+  <meta name="readthedocs-addons-api-version" content="1"><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Compression &mdash; BTRFS  documentation</title>
+      <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="_static/css/theme.css?v=9edc463e" />
+
+  
+      <script src="_static/jquery.js?v=5d32c60e"></script>
+      <script src="_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="_static/documentation_options.js?v=8a448e45"></script>
+      <script src="_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="_static/js/theme.js"></script>
+    <script src="_static/js/versions.js"></script>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="next" title="Checksumming" href="Checksumming.html" />
+    <link rel="prev" title="Balance" href="Balance.html" />
+    <link href="_static/style.css" rel="stylesheet" type="text/css">
+
+<script async type="text/javascript" src="/_/static/javascript/readthedocs-addons.js"></script><meta name="readthedocs-project-slug" content="btrfs" /><meta name="readthedocs-version-slug" content="latest" /><meta name="readthedocs-resolver-filename" content="/Compression.html" /><meta name="readthedocs-http-status" content="200" /></head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="index.html" class="icon icon-home">
+            BTRFS
+          </a>
+              <div class="switch-menus">
+                <div class="version-switch"></div>
+                <div class="language-switch"></div>
+              </div>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Overview</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="Introduction.html">Introduction</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Status.html">Status</a></li>
+<li class="toctree-l1"><a class="reference internal" href="man-index.html">Manual pages</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Administration.html">Administration</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Hardware.html">Hardware considerations</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Feature-by-version.html">Changes (feature/version)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Kernel-by-version.html">Changes (kernel/version)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="CHANGES.html">Changes (btrfs-progs)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Contributors.html">Contributors</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Glossary.html">Glossary</a></li>
+<li class="toctree-l1"><a class="reference internal" href="INSTALL.html">Installation instructions</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Source-repositories.html">Source repositories</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Interoperability.html">Interoperability</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Features</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="Common-features.html">Common Linux features</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Custom-ioctls.html">Custom ioctls</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Auto-repair.html">Auto-repair on read</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Balance.html">Balance</a></li>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Compression</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#how-to-enable-compression">How to enable compression</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#compression-levels">Compression levels</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#exceptions">Exceptions</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#incompressible-data">Incompressible data</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#pre-compression-heuristics">Pre-compression heuristics</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#compatibility">Compatibility</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="Checksumming.html">Checksumming</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Convert.html">Convert</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Deduplication.html">Deduplication</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Defragmentation.html">Defragmentation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Inline-files.html">Inline files</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Qgroups.html">Quota groups</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Reflink.html">Reflink</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Resize.html">Resize</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Scrub.html">Scrub</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Seeding-device.html">Seeding device</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Send-receive.html">Send/receive</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Subpage.html">Subpage support</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Subvolumes.html">Subvolumes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Swapfile.html">Swapfile</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Tree-checker.html">Tree checker</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Trim.html">Trim/discard</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Volume-management.html">Volume management</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Zoned-mode.html">Zoned mode</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Developer documentation</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="dev/Development-notes.html">Development notes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/Developer-s-FAQ.html">Developer’s FAQ</a></li>
+<li class="toctree-l1"><a class="reference internal" href="DocConventions.html">Conventions and style for documentation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/Experimental.html">Experimental features</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/dev-btrfs-design.html">Btrfs design</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/dev-btrees.html">Btrees</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/On-disk-format.html">On-disk Format</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/dev-send-stream.html">Send stream format</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/dev-json.html">JSON output</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/dev-internal-apis.html">Internal APIs</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/ReleaseChecklist.html">Release checklist</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/GithubReviewWorkflow.html">Pull request review workflow</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/CmdLineConventions.html">Command line, formatting, UI guidelines</a></li>
+<li class="toctree-l1"><a class="reference internal" href="btrfs-ioctl.html">btrfs-ioctl(2)</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">TODO</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="trouble-index.html">Troubleshooting pages</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="index.html">BTRFS</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">Compression</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="_sources/Compression.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="compression">
+<h1>Compression<a class="headerlink" href="#compression" title="Link to this heading"></a></h1>
+<p>Btrfs supports transparent file compression. There are three algorithms
+available: ZLIB, LZO and ZSTD (since v4.14), with various levels.
+The compression happens on the level of file extents and the algorithm is
+selected by file property, mount option or by a defrag command.
+You can have a single btrfs mount point that has some files that are
+uncompressed, some that are compressed with LZO, some with ZLIB, for instance
+(though you may not want it that way, it is supported).</p>
+<p>Once the compression is set, all newly written data will be compressed, i.e.
+existing data are untouched. Data are split into smaller chunks (128KiB) before
+compression to make random rewrites possible without a high performance hit. Due
+to the increased number of extents the metadata consumption is higher. The
+chunks are compressed in parallel.</p>
+<p>The algorithms can be characterized as follows regarding the speed/ratio
+trade-offs:</p>
+<dl class="simple">
+<dt>ZLIB</dt><dd><ul class="simple">
+<li><p>slower, higher compression ratio</p></li>
+<li><p>levels: 1 to 9, mapped directly, default level is 3</p></li>
+<li><p>good backward compatibility</p></li>
+</ul>
+</dd>
+<dt>LZO</dt><dd><ul class="simple">
+<li><p>faster compression and decompression than ZLIB, worse compression ratio, designed to be fast</p></li>
+<li><p>no levels</p></li>
+<li><p>good backward compatibility</p></li>
+</ul>
+</dd>
+<dt>ZSTD</dt><dd><ul class="simple">
+<li><p>compression comparable to ZLIB with higher compression/decompression speeds and different ratio</p></li>
+<li><p>levels: -15..15, mapped directly, default is 3</p></li>
+<li><p>support since 4.14</p></li>
+<li><p>levels 1..15 supported since 5.1</p></li>
+<li><p>levels -15..-1 supported since 6.15</p></li>
+</ul>
+</dd>
+</dl>
+<p>The differences depend on the actual data set and cannot be expressed by a
+single number or recommendation. Higher levels consume more CPU time and may
+not bring a significant improvement, lower levels are close to real time.</p>
+<section id="how-to-enable-compression">
+<h2>How to enable compression<a class="headerlink" href="#how-to-enable-compression" title="Link to this heading"></a></h2>
+<p>Typically the compression can be enabled on the whole filesystem, specified for
+the mount point. Note that the compression mount options are shared among all
+mounts of the same filesystem, either bind mounts or subvolume mounts.
+Please refer to <a class="reference internal" href="btrfs-man5.html"><span class="doc">btrfs(5)</span></a> section
+<a class="reference internal" href="btrfs-man5.html#man-btrfs5-mount-options"><span class="std std-ref">MOUNT OPTIONS</span></a>.</p>
+<div class="highlight-shell notranslate"><div class="highlight"><pre><span></span>$<span class="w"> </span>mount<span class="w"> </span>-o<span class="w"> </span><span class="nv">compress</span><span class="o">=</span>zstd<span class="w"> </span>/dev/sdx<span class="w"> </span>/mnt
+</pre></div>
+</div>
+<p>This will enable the <code class="docutils literal notranslate"><span class="pre">zstd</span></code> algorithm on the default level (which is 3).
+The level can be specified manually too like <code class="docutils literal notranslate"><span class="pre">zstd:3</span></code>. Higher levels compress
+better at the cost of time. This in turn may cause increased write latency, low
+levels are suitable for real-time compression and on reasonably fast CPU don’t
+cause noticeable performance drops.</p>
+<div class="highlight-shell notranslate"><div class="highlight"><pre><span></span>$<span class="w"> </span>btrfs<span class="w"> </span>filesystem<span class="w"> </span>defrag<span class="w"> </span>-czstd<span class="w"> </span>file
+</pre></div>
+</div>
+<p>The command above will start defragmentation of the whole <em>file</em> and apply
+the compression, regardless of the mount option. The compression level can be
+also specified with the <code class="docutils literal notranslate"><span class="pre">--level</span></code> or <code class="docutils literal notranslate"><span class="pre">-L</span></code> argument as of version <code class="docutils literal notranslate"><span class="pre">6.14</span></code>.
+The compression algorithm is not persistent and applies only
+to the defragmentation command, for any other writes other compression settings
+apply.</p>
+<p>Persistent settings on a per-file basis can be set in two ways:</p>
+<div class="highlight-shell notranslate"><div class="highlight"><pre><span></span>$<span class="w"> </span>chattr<span class="w"> </span>+c<span class="w"> </span>file
+$<span class="w"> </span>btrfs<span class="w"> </span>property<span class="w"> </span><span class="nb">set</span><span class="w"> </span>file<span class="w"> </span>compression<span class="w"> </span>zstd
+</pre></div>
+</div>
+<p>The first command is using legacy interface of file attributes inherited from
+ext2 filesystem and is not flexible, so by default the <em>zlib</em> compression is
+set. The other command sets a property on the file with the given algorithm.
+(Note: setting level that way is not yet implemented.)</p>
+</section>
+<section id="compression-levels">
+<h2>Compression levels<a class="headerlink" href="#compression-levels" title="Link to this heading"></a></h2>
+<p>The level support of ZLIB has been added in v4.14, LZO does not support levels
+(the kernel implementation provides only one), ZSTD level support has been added
+in v5.1 and the negative levels in v6.15.</p>
+<p>There are 9 levels of ZLIB supported (1 to 9), mapping 1:1 from the mount option
+to the algorithm defined level. The default is level 3, which provides the
+reasonably good compression ratio and is still reasonably fast. The difference
+in compression gain of levels 7, 8 and 9 is comparable but the higher levels
+take longer.</p>
+<p>The ZSTD support includes levels -15..15, a subset of full range of what ZSTD
+provides. Levels -15..-1 are real-time with worse compression ratio, levels
+1..3 are near real-time with good compression, 4..8 are slower with improved
+compression and 9..15 try even harder though the resulting size may not be
+significantly improved. Higher levels also require more memory and as they need
+more CPU the system performance is affected.</p>
+<p>Level 0 always maps to the default. The compression level does not affect
+compatibility.</p>
+</section>
+<section id="exceptions">
+<h2>Exceptions<a class="headerlink" href="#exceptions" title="Link to this heading"></a></h2>
+<p>Any file that has been touched by the <em>fallocate</em> system call will always be
+excepted from compression even if <em>force-compress</em> mount option is used.</p>
+<p>The reason for this is that a successful <em>fallocate</em> call must guarantee that
+future writes to the allocated range will not fail because of lack of space.
+This is difficult to guarantee in a COW filesystem. To reduce the chances of
+it happening, btrfs preallocates space and disables compression for the file.</p>
+<p>As a workaround, one can trigger a compressed rewrite for such a file using the
+<em>btrfs defrag</em> command. Be aware that if the file is touched again by the
+<em>fallocate</em> system call, it will be excepted again from compression for all the
+new data written to it.</p>
+</section>
+<section id="incompressible-data">
+<h2>Incompressible data<a class="headerlink" href="#incompressible-data" title="Link to this heading"></a></h2>
+<p>Files with already compressed data or with data that won’t compress well with
+the CPU and memory constraints of the kernel implementations are using a simple
+decision logic. If the first portion of data being compressed is not smaller
+than the original, the compression of the whole file is disabled. Unless the
+filesystem is mounted with <em>compress-force</em> in which case btrfs will try
+compressing every block, falling back to storing the uncompressed version for
+each block that ends up larger after compression. This is not optimal and
+subject to optimizations and further development.</p>
+<p>If a file is identified as incompressible, a flag is set (<em>NOCOMPRESS</em>) and it’s
+sticky. On that file compression won’t be performed unless forced. The flag
+can be also set by <strong>chattr +m</strong> (since e2fsprogs 1.46.2) or by properties with
+value <em>no</em> or <em>none</em>. Empty value will reset it to the default that’s currently
+applicable on the mounted filesystem.</p>
+<p>There are two ways to detect incompressible data:</p>
+<ul class="simple">
+<li><p>actual compression attempt - data are compressed, if the result is not smaller,
+it’s discarded, so this depends on the algorithm and level</p></li>
+<li><p>pre-compression heuristics - a quick statistical evaluation on the data is
+performed and based on the result either compression is performed or skipped,
+the NOCOMPRESS bit is not set just by the heuristic, only if the compression
+algorithm does not make an improvement</p></li>
+</ul>
+<div class="highlight-shell notranslate"><div class="highlight"><pre><span></span>$<span class="w"> </span>lsattr<span class="w"> </span>file
+---------------------m<span class="w"> </span>file
+</pre></div>
+</div>
+<p>Using the forcing compression is not recommended, the heuristics are
+supposed to decide that and compression algorithms internally detect
+incompressible data too.</p>
+</section>
+<section id="pre-compression-heuristics">
+<h2>Pre-compression heuristics<a class="headerlink" href="#pre-compression-heuristics" title="Link to this heading"></a></h2>
+<p>The heuristics aim to do a few quick statistical tests on the compressed data
+in order to avoid probably costly compression that would turn out to be
+inefficient. Compression algorithms could have internal detection of
+incompressible data too but this leads to more overhead as the compression is
+done in another thread and has to write the data anyway. The heuristic is
+read-only and can utilize cached memory.</p>
+<p>The tests performed based on the following: data sampling, long repeated
+pattern detection, byte frequency, Shannon entropy.</p>
+</section>
+<section id="compatibility">
+<h2>Compatibility<a class="headerlink" href="#compatibility" title="Link to this heading"></a></h2>
+<p>Compression requires both data checksums and COW, so either <em>nodatasum</em> or
+<em>nodatasum</em> mount option/inode flag will result in no compression.</p>
+<p>Direct IO reads of compressed data will always fallback to buffered reads.</p>
+<p>Direct IO write behavior depends on the inode flag.
+For inodes with data checksum, direct IO writes always fallback to buffered
+writes, thus can generate compressed data if the mount option/inode flags
+allows that.</p>
+<p>For inodes without data checksums, direct IO writes will not populate page cache,
+and since the inode has no data checksums, no compressed data will be generated
+anyway.</p>
+<p>The compression algorithms have been added over time so the version
+compatibility should be also considered, together with other tools that may
+access the compressed data like bootloaders.</p>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="Balance.html" class="btn btn-neutral float-left" title="Balance" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="Checksumming.html" class="btn btn-neutral float-right" title="Checksumming" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright .</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

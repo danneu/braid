@@ -1,0 +1,269 @@
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><title>btrfs: introduce RAID stripe tree [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="btrfs: introduce RAID stripe tree">
+<meta property="og:site_name" content="LWN.net">
+<meta property="og:type" content="article">
+<meta property="og:description" content="">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+<META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png"
+              type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="stylesheet" href="/CSS/lwn">
+<link rel="stylesheet" href="/CSS/nosub">
+
+        
+        </head>
+        <body>
+        <a name="t"></a>
+<div id="menu"><a href="/"><img src="https://static.lwn.net/images/logo/barepenguin-70.png" class="logo"
+                 border="0" alt="LWN.net Logo">
+           <span class="logo">LWN<br>.net</span>
+           <span class="logobl">News from the source</span></a>
+           <a href="/"><img src="https://static.lwn.net/images/lcorner-ss.png" class="sslogo"
+                 border="0" alt="LWN"></a><div class="navmenu-container">
+           <ul class="navmenu">
+        <li><a class="navmenu" href="#t"><b>Content</b></a><ul><li><a href="/current/">Weekly Edition</a></li><li><a href="/Archives/">Archives</a></li><li><a href="/Search/">Search</a></li><li><a href="/Kernel/">Kernel</a></li><li><a href="/Security/">Security</a></li><li><a href="/Calendar/">Events calendar</a></li><li><a href="/Comments/unread">Unread comments</a></li><li><hr></li><li><a href="/op/FAQ.lwn">LWN FAQ</a></li><li><a href="/op/AuthorGuide.lwn">Write for us</a></li></ul></li>
+<li><a class="navmenu" href="#t"><b>Edition</b></a><ul><li><a href="/Articles/944439/">Return to the Announcements page</a></li></ul></li>
+</ul></div>
+</div> <!-- menu -->
+<div class="topnav-spacer"></div>
+<div class="top-banner not-print"><ins data-revive-zoneid="12072" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script></div>
+<div class="topnav-container">
+<div class="not-handset"><form action="https://lwn.net/Login/" method="post" name="loginform"
+                 class="loginform">
+        <label><b>User:</b> <input type="text" name="uname" value="" size="8" id="uc" /></label> 
+		<label><b>Password:</b> <input type="password" name="pword" size="8" id="pc" /></label> <input type="hidden" name="target" value="/Articles/944631/" /> <input type="submit" name="submit" value="Log in" /></form> |
+           <form action="https://lwn.net/subscribe/" method="post" class="loginform">
+           <input type="submit" name="submit" value="Subscribe" />
+           </form> |
+           <form action="https://lwn.net/Login/newaccount" method="post" class="loginform">
+           <input type="submit" name="submit" value="Register" />
+           </form>
+        </div>
+               <div class="handset-only">
+               <a href="/Login/"><b>Log in</b></a> /
+               <a href="/subscribe/"><b>Subscribe</b></a> /
+               <a href="/Login/newaccount"><b>Register</b></a>
+               </div>
+               </div><div class="maincolumn flexcol">
+<div class="middlecolumn">
+<div class="PageHeadline">
+<h1>btrfs: introduce RAID stripe tree</h1>
+</div>
+<div class="ArticleText">
+<table>
+<tr><td valign="top"><b>From</b>:</td>
+             <td>&nbsp;</td><td valign="top">Johannes Thumshirn &lt;johannes.thumshirn-AT-wdc.com&gt;</td></tr>
+<tr><td valign="top"><b>To</b>:</td>
+             <td>&nbsp;</td><td valign="top">Chris Mason &lt;clm-AT-fb.com&gt;, Josef Bacik &lt;josef-AT-toxicpanda.com&gt;,        David Sterba &lt;dsterba-AT-suse.com&gt;</td></tr>
+<tr><td valign="top"><b>Subject</b>:</td>
+             <td>&nbsp;</td><td valign="top">[PATCH v9 00/11] btrfs: introduce RAID stripe tree</td></tr>
+<tr><td valign="top"><b>Date</b>:</td>
+             <td>&nbsp;</td><td valign="top">Thu, 14 Sep 2023 09:06:55 -0700</td></tr>
+<tr><td valign="top"><b>Message-ID</b>:</td>
+             <td>&nbsp;</td><td valign="top">&lt;20230914-raid-stripe-tree-v9-0-15d423829637@wdc.com&gt;</td></tr>
+<tr><td valign="top"><b>Cc</b>:</td>
+             <td>&nbsp;</td><td valign="top">Christoph Hellwig &lt;hch-AT-lst.de&gt;,        Naohiro Aota &lt;naohiro.aota-AT-wdc.com&gt;, Qu Wenruo &lt;wqu-AT-suse.com&gt;,        Damien Le Moal &lt;dlemoal-AT-kernel.org&gt;,        linux-btrfs-AT-vger.kernel.org, linux-kernel-AT-vger.kernel.org,        Johannes Thumshirn &lt;johannes.thumshirn-AT-wdc.com&gt;</td></tr>
+<tr><td valign="top"><b>Archive-link</b>:</td>
+             <td>&nbsp;</td><td valign="top"><a href="https://lwn.net/ml/linux-kernel/20230914-raid-stripe-tree-v9-0-15d423829637@wdc.com/">Article</a></td></tr>
+</table><p>
+<pre>
+Updates of the raid-stripe-tree are done at ordered extent write time to safe
+on bandwidth while for reading we do the stripe-tree lookup on bio mapping
+time, i.e. when the logical to physical translation happens for regular btrfs
+RAID as well.
+
+The stripe tree is keyed by an extent's disk_bytenr and disk_num_bytes and
+it's contents are the respective physical device id and position.
+
+For an example 1M write (split into 126K segments due to zone-append)
+rapido2:/home/johannes/src/fstests# xfs_io -fdc "pwrite -b 1M 0 1M" -c fsync /mnt/test/test
+wrote 1048576/1048576 bytes at offset 0
+1 MiB, 1 ops; 0.0065 sec (151.538 MiB/sec and 151.5381 ops/sec)
+
+The tree will look as follows (both 128k buffered writes to a ZNS drive):
+
+RAID0 case:
+bash-5.2# btrfs inspect-internal dump-tree -t raid_stripe /dev/nvme0n1
+btrfs-progs v6.3
+raid stripe tree key (RAID_STRIPE_TREE ROOT_ITEM 0) 
+leaf 805535744 items 1 free space 16218 generation 8 owner RAID_STRIPE_TREE
+leaf 805535744 flags 0x1(WRITTEN) backref revision 1
+checksum stored 2d2d2262
+checksum calced 2d2d2262
+fs uuid ab05cfc6-9859-404e-970d-3999b1cb5438
+chunk uuid c9470ba2-49ac-4d46-8856-438a18e6bd23
+        item 0 key (1073741824 RAID_STRIPE_KEY 131072) itemoff 16243 itemsize 56
+                        encoding: RAID0
+                        stripe 0 devid 1 offset 805306368 length 131072
+                        stripe 1 devid 2 offset 536870912 length 131072
+total bytes 42949672960
+bytes used 294912
+uuid ab05cfc6-9859-404e-970d-3999b1cb5438
+
+RAID1 case:
+bash-5.2# btrfs inspect-internal dump-tree -t raid_stripe /dev/nvme0n1
+btrfs-progs v6.3
+raid stripe tree key (RAID_STRIPE_TREE ROOT_ITEM 0) 
+leaf 805535744 items 1 free space 16218 generation 8 owner RAID_STRIPE_TREE
+leaf 805535744 flags 0x1(WRITTEN) backref revision 1
+checksum stored 56199539
+checksum calced 56199539
+fs uuid 9e693a37-fbd1-4891-aed2-e7fe64605045
+chunk uuid 691874fc-1b9c-469b-bd7f-05e0e6ba88c4
+        item 0 key (939524096 RAID_STRIPE_KEY 131072) itemoff 16243 itemsize 56
+                        encoding: RAID1
+                        stripe 0 devid 1 offset 939524096 length 65536
+                        stripe 1 devid 2 offset 536870912 length 65536
+total bytes 42949672960
+bytes used 294912
+uuid 9e693a37-fbd1-4891-aed2-e7fe64605045
+
+A design document can be found here:
+<a href="https://docs.google.com/document/d/1Iui_jMidCd4MVBNSSLXRfO7p5KmvnoQL/edit?usp=sharing&amp;ouid=103609947580185458266&amp;rtpof=true&amp;sd=true">https://docs.google.com/document/d/1Iui_jMidCd4MVBNSSLXRf...</a>
+
+The user-space part of this series can be found here:
+<a href="https://lore.kernel.org/linux-btrfs/20230215143109.2721722-1-johannes.thumshirn@wdc.com">https://lore.kernel.org/linux-btrfs/20230215143109.272172...</a>
+
+Changes to v8:
+- Changed tracepoints according to David's comments
+- Mark on-disk structures as packed
+- Got rid of __DECLARE_FLEX_ARRAY
+- Rebase onto misc-next
+- Split out helpers for new btrfs_load_block_group_zone_info RAID cases
+- Constify declarations where possible
+- Initialise variables before use
+- Lower scope of variables
+- Remove btrfs_stripe_root() helper
+- Pick different BTRFS_RAID_STRIPE_KEY constant
+- Reorder on-disk encoding types to match the raid_index
+- And possibly more, please git range-diff the versions
+- Link to v8: <a href="https://lore.kernel.org/r/20230911-raid-stripe-tree-v8-0-647676fa852c@wdc.com">https://lore.kernel.org/r/20230911-raid-stripe-tree-v8-0-...</a>
+
+Changes to v7:
+- Huge rewrite
+
+v7 of the patchset can be found here:
+<a href="https://lore.kernel.org/linux-btrfs/cover.1677750131.git.johannes.thumshirn@wdc.com/">https://lore.kernel.org/linux-btrfs/cover.1677750131.git....</a>
+
+Changes to v6:
+- Fix degraded RAID1 mounts
+- Fix RAID0/10 mounts
+
+v6 of the patchset can be found here:
+https://lore/kernel.org/linux-btrfs/cover.1676470614.git.johannes.thumshirn@wdc.com
+
+Changes to v5:
+- Incroporated review comments from Josef and Christoph
+- Rebased onto misc-next
+
+v5 of the patchset can be found here:
+https://lore/kernel.org/linux-btrfs/cover.1675853489.git.johannes.thumshirn@wdc.com
+
+Changes to v4:
+- Added patch to check for RST feature in sysfs
+- Added RST lookups for scrubbing 
+- Fixed the error handling bug Josef pointed out
+- Only check if we need to write out a RST once per delayed_ref head
+- Added support for zoned data DUP with RST
+
+Changes to v3:
+- Rebased onto 20221120124734.18634-1-hch@lst.de
+- Incorporated Josef's review
+- Merged related patches
+
+v3 of the patchset can be found here:
+https://lore/kernel.org/linux-btrfs/cover.1666007330.git.johannes.thumshirn@wdc.com
+
+Changes to v2:
+- Bug fixes
+- Rebased onto 20220901074216.1849941-1-hch@lst.de
+- Added tracepoints
+- Added leak checker
+- Added RAID0 and RAID10
+
+v2 of the patchset can be found here:
+<a href="https://lore.kernel.org/linux-btrfs/cover.1656513330.git.johannes.thumshirn@wdc.com">https://lore.kernel.org/linux-btrfs/cover.1656513330.git....</a>
+
+Changes to v1:
+- Write the stripe-tree at delayed-ref time (Qu)
+- Add a different write path for preallocation
+
+v1 of the patchset can be found here:
+<a href="https://lore.kernel.org/linux-btrfs/cover.1652711187.git.johannes.thumshirn@wdc.com/">https://lore.kernel.org/linux-btrfs/cover.1652711187.git....</a>
+
+Signed-off-by: Johannes Thumshirn &lt;johannes.thumshirn@wdc.com&gt;
+---
+Johannes Thumshirn (11):
+      btrfs: add raid stripe tree definitions
+      btrfs: read raid-stripe-tree from disk
+      btrfs: add support for inserting raid stripe extents
+      btrfs: delete stripe extent on extent deletion
+      btrfs: lookup physical address from stripe extent
+      btrfs: implement RST version of scrub
+      btrfs: zoned: allow zoned RAID
+      btrfs: add raid stripe tree pretty printer
+      btrfs: announce presence of raid-stripe-tree in sysfs
+      btrfs: add trace events for RST
+      btrfs: add raid-stripe-tree to features enabled with debug
+
+ fs/btrfs/Makefile               |   2 +-
+ fs/btrfs/accessors.h            |  10 +
+ fs/btrfs/bio.c                  |  25 +++
+ fs/btrfs/block-rsv.c            |   6 +
+ fs/btrfs/disk-io.c              |  18 ++
+ fs/btrfs/extent-tree.c          |   7 +
+ fs/btrfs/fs.h                   |   4 +-
+ fs/btrfs/inode.c                |   8 +-
+ fs/btrfs/locking.c              |   1 +
+ fs/btrfs/ordered-data.c         |   1 +
+ fs/btrfs/ordered-data.h         |   2 +
+ fs/btrfs/print-tree.c           |  26 +++
+ fs/btrfs/raid-stripe-tree.c     | 449 ++++++++++++++++++++++++++++++++++++++++
+ fs/btrfs/raid-stripe-tree.h     |  52 +++++
+ fs/btrfs/scrub.c                |  53 +++++
+ fs/btrfs/sysfs.c                |   3 +
+ fs/btrfs/volumes.c              |  43 +++-
+ fs/btrfs/volumes.h              |  16 +-
+ fs/btrfs/zoned.c                | 144 ++++++++++++-
+ include/trace/events/btrfs.h    |  75 +++++++
+ include/uapi/linux/btrfs.h      |   1 +
+ include/uapi/linux/btrfs_tree.h |  31 +++
+ 22 files changed, 954 insertions(+), 23 deletions(-)
+---
+base-commit: 1d73023d96965a5c8fb76a39aec88d840ebe5b21
+change-id: 20230613-raid-stripe-tree-e330c9a45cc3
+
+Best regards,
+-- 
+Johannes Thumshirn &lt;johannes.thumshirn@wdc.com&gt;
+
+
+</pre>
+
+</div> <!-- ArticleText -->
+</div> <!-- middlecolumn -->
+<div class="rightcol not-print">
+<ins data-revive-zoneid="12085" 
+data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+<script async src="//servedby.aqua-adserver.com/asyncjs.php"></script>
+</div>
+</div> <!-- maincolumn -->
+
+            <br clear="all">
+            <center>
+            <P>
+            <span class="ReallySmall">
+            Copyright &copy; 2023, Eklektix, Inc.<BR>
+            
+            Comments and public postings are copyrighted by their creators.<br>
+            Linux  is a registered trademark of Linus Torvalds<br>
+            </span>
+            </center>
+            
+            </body></html>

@@ -1,0 +1,926 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>Btrfs on dm-crypt | kyle kneitinger</title>
+  <meta name="description" content="An in depth guide to installing Btrfs raid on top of encrypted volumes">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="kneit.in/2015/09/17/brtfs-raid-on-dmcrypt.html">
+  <link rel="alternate" type="application/rss+xml" title="kyle kneitinger" href="kneit.in/feed.xml">
+</head>
+
+  <div class="container">
+    <body>
+
+      <header class="site-header">
+
+  <div class="wrapper">
+
+    <a class="site-title" href="/">kyle kneitinger</a>
+
+    <nav class="site-nav">
+
+      <div class="trigger">
+        
+          
+        
+          
+          <a class="page-link" href="/about/">about</a>
+          
+        
+          
+        
+          
+        
+          
+        
+          
+        
+          
+        
+          
+          <a class="page-link" href="/tidbits/">tidbits</a>
+          
+        
+          
+          <a class="page-link" href="/tutorials/">tutorials</a>
+          
+        
+          
+        
+      </div>
+    </nav>
+
+  </div>
+
+</header>
+
+
+      <div class="page-content">
+        <div class="wrapper">
+          <article class="post" itemscope itemtype="http://schema.org/BlogPosting">
+
+  <header class="post-header">
+    <h1 class="post-title" itemprop="name headline">Btrfs on dm-crypt</h1>
+    
+    <p class="post-subtitle"> An in depth guide to installing Btrfs raid on top of encrypted volumes </p>
+    
+    <p class="post-meta">
+      <time datetime="2015-09-17T00:00:00+00:00" itemprop="datePublished">
+        Sep 17, 2015
+      </time>
+      
+        • <span itemprop="author" itemscope itemtype="http://schema.org/Person">
+        <span itemprop="name">Kyle Kneitinger</span></span>
+        • <a href="https://twitter.com/kneitinger">@kneitinger</a>
+      
+    </p>
+  </header>
+  <hr class="post-title-rule" />
+
+  <div class="post-content" itemprop="articleBody">
+    <p>Two of the most important and exciting tools for data storage that Linux has
+to offer are disk encryption via dm-crypt, and built-in RAID,
+<a href="https://en.wikipedia.org/wiki/Copy-on-write#Copy-on-write_in_storage_media">copy-on-write</a>,
+and other modern storage features via the Btrfs file system.  Both dm-crypt and
+Btrfs have volumes of information written on them, however, when I bought a
+shiny (on second thought, matte)  new ThinkPad 450s with 3 SSDs and set out to implement a system utilizing
+both features, I had trouble connecting the information into a cohesive process.
+ I learned a lot from this installation and hope this tutorial will be helpful in providing
+a clear guide to a system with Btrfs RAID on top of dm-crypt.</p>
+
+<h3 id="who-this-tutorial-is-for">Who This Tutorial is For</h3>
+<p>This article is written with a few assumptions.  First, I assume that you
+have a general comfortability with the command line, as these steps have
+to be executed in a manual or “guided” CLI installation.  Second, this tutorial
+is written for Arch Linux, however, the majority of the article will remain
+distro-agnostic as the main steps only concern disk setup and the boot process.</p>
+
+<h3 id="brief-description-of-the-setup">Brief Description of the Setup</h3>
+<p>To effectively describe how data is organized, processed, and stored, we will
+follow a file as it traverses down the data hierarchy to the disk.
+First, when we write a file, it will be stored inside of a directory, such as
+/etc/ or /home/sarah/ (indicated in the figure below as orange).  That directory resides in a 
+ <em>subvolume</em> (kind of like a virtual partition, or LVM volume), such
+as “home”, “var”, or “etc” (magenta).  Each subvolume is a member of the Btrfs pool (lavender), which
+consists of one or more device mappings (blue).  These devices are dm-crypt containers that act
+as an intermediary step, encrypting the data before finally writing it to a particular hard drive (green).</p>
+
+<p class="center"><img src="/img/btrfsdmcrypt.png" alt="Data hierarchy diagram" /></p>
+
+<h3 id="attribution">Attribution</h3>
+<p>Much of the information from this article was stitched together from the <a href="https://wiki.archlinux.org/">Arch
+Wiki</a>, primarily the page on
+<a href="https://wiki.archlinux.org/index.php/Btrfs">Btrfs</a>, and the series on
+<a href="https://wiki.archlinux.org/index.php/Dm-crypt">dm-crypt</a>. The use of the
+encrypt2 hook comes from a
+<a href="https://aur.archlinux.org/packages.php?ID=56476">comment by AUR user benke</a>,
+Btrfs subvolume organization and mounting the Btrfs top level subvolume to
+/var/lib/btrfs_root comes from the Arch Forums user
+<a href="https://bbs.archlinux.org/viewtopic.php?pid=1378861#p1378861">WorMzy’s excellent post</a>.
+Additional Btrfs insight and clarification was gained from Marc Merlin’s
+Linuxcon 2014 talk <a href="http://marc.merlins.org/perso/btrfs/post_2014-05-21_My-Btrfs-Talk-at-Linuxcon-JP-2014.html"><em>“Why you should consider using Btrfs, real COW snapshots
+and file level incremental server OS upgrades.”</em></a></p>
+
+<h2 id="contents">Contents</h2>
+<hr />
+<hr />
+
+<ol>
+  <li><a href="#preparation">Preparation</a>
+    <ul>
+      <li><a href="#securely-wiping-the-disks">Securely Wiping the Disks</a></li>
+      <li><a href="#planning-your-disk-layout">Planning Your Disk Layout</a></li>
+    </ul>
+  </li>
+  <li><a href="#partitioning-the-disks">Partitioning the Disks</a></li>
+  <li><a href="#setting-up-dm-crypt">Setting Up dm-crypt</a>
+    <ul>
+      <li><a href="#creating-the-containers">Creating the Containers</a></li>
+      <li><a href="#opening-the-containers">Opening the Containers</a></li>
+    </ul>
+  </li>
+  <li><a href="#creating-the-filesystems">Creating the Filesystems</a></li>
+  <li><a href="#mounting-the-btrfs-filesystem-and-creating-subvolumes">Mounting the Btrfs Filesystem and Creating
+Subvolumes</a></li>
+  <li><a href="#assembling-the--filesystem">Assembling the / Filesystem</a>
+    <ul>
+      <li><a href="#a-bit-about-btrfs-mount-options">A Bit about Btrfs Mount Options</a></li>
+      <li><a href="#mounting-the-subvolumes-and-boot-partition">Mounting the Subvolumes and /boot Partition</a></li>
+    </ul>
+  </li>
+  <li><a href="#proceeding-with-installation">Proceeding with Installation</a>
+    <ul>
+      <li><a href="#generating-the-fstab-file">Generating the fstab file</a></li>
+    </ul>
+  </li>
+  <li><a href="#setting-up-initramfs">Setting Up initramfs</a>
+    <ul>
+      <li><a href="#creating-additional-encrypt-hooks">Creating Additional encrypt Hooks</a></li>
+      <li><a href="#editing-etcmkinitcpioconf">Editing /etc/mkinicpio.conf</a></li>
+    </ul>
+  </li>
+  <li><a href="#setting-the-boot-options">Setting the Boot Options</a></li>
+  <li><a href="#post-installation-considerations-and-niceties">Post Installation Considerations and Niceties</a>
+    <ul>
+      <li><a href="#a-warning-about-kernel-updates">A Warning About Kernel Updates</a></li>
+      <li><a href="#snapshots">Snapshots</a></li>
+      <li><a href="#keyfiles-and-additional-luks-keys">Keyfiles &amp; Additional LUKS Keys</a></li>
+      <li><a href="#encrypted-swap">Encrypted Swap</a></li>
+    </ul>
+  </li>
+  <li><a href="#conclusion">Conclusion</a></li>
+</ol>
+
+<h2 id="preparation">Preparation</h2>
+<hr />
+<p>Once you’re booted into a live environment, you’ll want to run <code class="language-plaintext highlighter-rouge">lsblk</code> to find
+and verify the disks you will be working with based on their size and any
+partitions on them. Since the naming of devices can
+change, you should double check the devices if you reboot. If there are <strong>any</strong>
+partitions or disks that have important data on them, back them up now.</p>
+
+<h3 id="securely-wiping-the-disks">Securely Wiping the Disks</h3>
+<p>To ensure that no sensitive data remains on hard drive, the disk will be
+overwritten with random data. To accomplish this, we will open temporary
+encrypted containers on each disk and write data to the entire disks.</p>
+
+<p>First, use <code class="language-plaintext highlighter-rouge">cryptsetup</code> to set up the containers on each device to be
+used. The following command creates a dm-crypt plain container for each partition (specified as <code class="language-plaintext highlighter-rouge">dev/sdXY</code>) or
+disk (specified as <code class="language-plaintext highlighter-rouge">/dev/sdX</code>), named
+<code class="language-plaintext highlighter-rouge">container_0</code>, <code class="language-plaintext highlighter-rouge">container_1</code>, …, <code class="language-plaintext highlighter-rouge">container_n</code>.</p>
+
+<figure class="highlight"><pre><code class="language-text" data-lang="text"># cryptsetup open --type plain /dev/sdXY container_n</code></pre></figure>
+
+<p>Now that an encrypted container has been opened on each disk, <em>any</em> data
+written to it will appear to be suitably random.  Therefore, you can use <code class="language-plaintext highlighter-rouge">/dev/zero</code> to
+generate data as it is much faster than <code class="language-plaintext highlighter-rouge">/dev/urandom</code>, which on my machine is ~100 times
+slower to read from. To overwrite to disk, simply execute the following <code class="language-plaintext highlighter-rouge">dd</code>
+command for each dm-crypt container you created.</p>
+
+<figure class="highlight"><pre><code class="language-text" data-lang="text"># dd if=/dev/zero of=/dev/mapper/container_XY</code></pre></figure>
+
+<p>Since writing a whole disk can take a long time, you can speed the process up by
+opening a new virtual terminal by pressing <strong>Ctrl+Alt+F2</strong> and then executing
+the command on another disk. Note, it would not be effective to do this on two
+partitions of the same disk, as the bus of one device would be handling both loads.</p>
+
+<p>If you are curious as to how the operation is progressing, simply
+open a new virtual terminal and execute</p>
+
+<figure class="highlight"><pre><code class="language-text" data-lang="text"># watch -n 20 kill -USR1 $(pidof dd)</code></pre></figure>
+
+<p>Then switch back to the virtual console of the dd command for updates every 20
+seconds. When the operation is done, switch back to the terminal you executed
+<code class="language-plaintext highlighter-rouge">watch</code> in and press Ctrl+c.</p>
+
+<p>Once every dd operation has completed, you can proceed on to the actual
+installation. I find that the easiest way to clean up the installation
+environment of the containers is to simply reboot.</p>
+
+<h3 id="planning-your-disk-layout">Planning Your Disk Layout</h3>
+<p>Now you have to decide how exactly to layout the partitions and drives. 
+In every case you will need a boot partition. Depending on your needs and
+the number of disks in your system, there a few considerations to be had.
+With one disk, the only partitioning considerations are whether or not you would
+like a swap partition (note: hibernate will not be possible with btrfs and
+dm-crypt) and/or additional free space for other operating systems. With two or
+more disks, you can utilize the built in RAID features of Btrfs.  There are
+three options for btrfs raid:</p>
+
+<ol>
+  <li>
+    <p>RAID 0 - Data is striped, or distributed across all disks.</p>
+
+    <ul>
+      <li><strong>Pros:</strong>
+        <ul>
+          <li>Write/Read speed increased because disks are accessed in parallel</li>
+          <li>Total usable space is equal to that of the disk combined</li>
+        </ul>
+      </li>
+      <li><strong>Cons:</strong>
+        <ul>
+          <li>No redundancy.  If one disk fails, entire filesystem is unusable.</li>
+        </ul>
+      </li>
+    </ul>
+  </li>
+  <li>RAID 1 - Data is mirrored, or copied to both devices.
+    <ul>
+      <li><strong>Pros:</strong>
+        <ul>
+          <li>Resiliency. All but one drive can fail without harming the filesystem</li>
+        </ul>
+      </li>
+      <li><strong>Cons:</strong>
+        <ul>
+          <li>Total usable space is equal to that of the smallest disk</li>
+          <li>Read/Write speed is equal to that of the slowest disk.</li>
+        </ul>
+      </li>
+    </ul>
+  </li>
+  <li>RAID 1+0 - Data is striped <em>and</em> mirrored, as if a two or more RAID 1 pools were RAID
+0’ed together.
+    <ul>
+      <li><strong>Pros:</strong>
+        <ul>
+          <li>Resiliency. All but one drive from each RAID 1 pool can fail without harming the filesystem</li>
+          <li>Write/Read speed increased because disks are accessed in parallel</li>
+          <li>Total usable space is equal to that of each RAID 1 pool combined</li>
+        </ul>
+      </li>
+      <li><strong>Cons:</strong>
+        <ul>
+          <li>Requires 4 or more disks</li>
+          <li>Could have way more redundancy with 4 disks in RAID 1</li>
+          <li>Could have way more data throughput with 4 disks in RAID 0</li>
+        </ul>
+      </li>
+    </ul>
+  </li>
+</ol>
+
+<p>Clearly there is no correct choice for every situation.  In a file server where
+data integrity is key, go with RAID1 or RAID10. On a desktop or laptop
+workstation, RAID0 can greatly benefit one’s user experience. If you chose RAID
+0, be sure to keep ample off-machine backups!</p>
+
+<h2 id="partitioning-the-disks">Partitioning the Disks</h2>
+<hr />
+
+<p>For remainder of the tutorial, I will write as though you are using two disks of
+different sizes in RAID0, a pretty common setup for one’s first foray into RAID :)</p>
+<ul>
+  <li>/dev/sda: 128G</li>
+  <li>/dev/sdb: 120G</li>
+</ul>
+
+<p>For /dev/sda, create a 120G partition for one half of the btrfs pool, a
+7.5G swap partition and a 500M boot partition.</p>
+
+<figure class="highlight"><pre><code class="language-text" data-lang="text"># fdisk /dev/sda
+Command (m for help): n
+Partition number: &lt;enter&gt;
+First sector: &lt;enter&gt;
+Last Sector: +120G
+
+Command (m for help): n
+Partition number: &lt;enter&gt;
+First sector: &lt;enter&gt;
+Last Sector: +7.5G
+
+Command (m for help): t
+Partition number: &lt;enter&gt;
+Hex code: 14
+
+Command (m for help): n
+Partition number: &lt;enter&gt;
+First sector: &lt;enter&gt;
+Last Sector: &lt;enter&gt;
+
+Command (m for help): t
+Partition number: &lt;enter&gt;
+Hex code: 1
+
+Command (m for help): w</code></pre></figure>
+
+<p>Since btrfs can reside on either a partition or an entire disk, you do not have
+to partition /dev/sdb since you will be using the whole disk.</p>
+
+<h2 id="setting-up-dm-crypt">Setting up dm-crypt</h2>
+<hr />
+<p>With the disks partitioned, you can now setup the dm-crypt containers before
+installing the filesystems. You will have to set up two containers, one for each of
+the disks in the btrfs pool: /dev/sda1 and /dev/sdb.</p>
+
+<p>dm-crypt has two types of containers with different benefits, “plain” and
+“luks”.  The plain encryption sets up a “dumb” container. It has no knowledge
+that it is even encrypted until you open it, specifying every relevant parameter
+each time (keysize, cipher, hash). LUKS on the other hand, places a header on
+the disk that is aware of the parameters it was encrypted with and allows from
+multiple decryption keys.  While LUKS seems like the obvious choice, one may
+decide to use plain if <a href="https://en.wikipedia.org/wiki/Plausible_deniability">plausible
+deniability</a> is a concern,
+as the disk will appear as simply random data to an adversary.  For this
+tutorial, I will proceed using LUKS.</p>
+
+<h3 id="creating-the-containers">Creating the Containers</h3>
+
+<p>Different machines have different hardware support for the various crypto
+hashes and ciphers, so to find what settings will work best for you, check the
+results of the <code class="language-plaintext highlighter-rouge">cryptsetup benchmark</code> command.</p>
+
+<figure class="highlight"><pre><code class="language-text" data-lang="text"># cryptsetup benchmark
+# Tests are approximate using memory only (no storage IO).
+PBKDF2-sha1      1178175 iterations per second
+PBKDF2-sha256     755458 iterations per second
+PBKDF2-sha512     613920 iterations per second
+PBKDF2-ripemd160  678250 iterations per second
+PBKDF2-whirlpool  252061 iterations per second
+#  Algorithm | Key |  Encryption |  Decryption
+     aes-cbc   128b   611.1 MiB/s  2632.0 MiB/s
+ serpent-cbc   128b    81.7 MiB/s   521.5 MiB/s
+ twofish-cbc   128b   181.6 MiB/s   333.4 MiB/s
+     aes-cbc   256b   453.3 MiB/s  2011.5 MiB/s
+ serpent-cbc   256b    82.9 MiB/s   523.0 MiB/s
+ twofish-cbc   256b   183.9 MiB/s   334.6 MiB/s
+     aes-xts   256b  2240.3 MiB/s  2236.9 MiB/s
+ serpent-xts   256b   520.6 MiB/s   506.5 MiB/s
+ twofish-xts   256b   325.5 MiB/s   330.1 MiB/s
+     aes-xts   512b  1732.0 MiB/s  1714.2 MiB/s
+ serpent-xts   512b   520.0 MiB/s   506.3 MiB/s
+ twofish-xts   512b   325.7 MiB/s   329.8 MiB/s</code></pre></figure>
+
+<p>What one wants is the best balance of strength to performance.  In terms of the
+hashes, less iterations per second is stronger, as it increases the amount of
+time needed to decrypt, which decreases the ability to brute force. Though by
+that metric whirlpool seems best, sha256 is considered suitable secure and quite
+standard. For the cipher,  aes-xts clearly has the best performance on this
+computer. As a compromise of strength and speed, I will go with 256 bit aes-xts.</p>
+
+<p>Based on those choices, the resulting cryptsetup command is</p>
+
+<figure class="highlight"><pre><code class="language-text" data-lang="text"># cryptsetup --key-size 512 --hash sha256 --iter-time 5000 --use-random luksFormat /dev/sda1</code></pre></figure>
+
+<ul>
+  <li>
+    <p>The reason that the key size is 512 although we decided on 256 is explained on
+the <a href="https://wiki.archlinux.org/index.php/Dm-crypt/Device_encryption#Encryption_options_for_LUKS_mode">Arch Wiki article on dm-crypt encryption</a>:</p>
+
+    <blockquote>
+      <p>XTS splits the supplied key in half. So to use AES-256 instead of AES-128 you
+would have to set the XTS key-size to 512.</p>
+    </blockquote>
+  </li>
+  <li>
+    <p>The <code class="language-plaintext highlighter-rouge">--iter-time</code> option sets how long we spend hashing the passphrase.  At 755458 iterations per second, the number of iterations is 755458*5=3777290.</p>
+  </li>
+  <li>
+    <p>By default cryptsetup 1.6.2 uses aes-xts, so the –cipher option is unnecessary.</p>
+  </li>
+  <li>
+    <p>The <code class="language-plaintext highlighter-rouge">--use-random</code> specifies to use /dev/random as an entropy (randomness)
+source as opposed to the default of /dev/urandom.  The reason for this is that
+on a fresh, live environment, /dev/urandom may not have suitable entropy.</p>
+  </li>
+</ul>
+
+<p>Upon executing the command, you will be prompted to enter a passphrase, pick one
+that is sufficiently strong.</p>
+
+<p>Repeat the command for any remaining partitions of the btrfs pool, in this case
+just /dev/sdb. When prompted for a passphrase, it is best to enter one different
+from the other disk’s, as both passphrases are necessary to decrypt the btrfs
+pool. If using RAID1, the same passphrase could perhaps be used, as knowing
+either passphrase can access the pool.</p>
+
+<h3 id="opening-the-containers">Opening the Containers</h3>
+<p>Now, the LUKS containers have to be opened in order to use them as block
+devices.  Once opened, the containers reside in the filesystem as /dev/mapper/<em>container_name</em>.
+The syntax for the <code class="language-plaintext highlighter-rouge">cryptsetup open</code> command is</p>
+
+<figure class="highlight"><pre><code class="language-text" data-lang="text"># cryptsetup open --typeluks /dev/sdXY &lt;container_name&gt;</code></pre></figure>
+
+<p>Where <em>container_name</em> is an arbitrary name for the container.  We will use
+“btrfs_pool0” and “btrfs_pool1” for organizational purposes, so the commands are</p>
+
+<figure class="highlight"><pre><code class="language-text" data-lang="text"># cryptsetup open --typeluks /dev/sda1 btrfs_pool0
+# cryptsetup open --typeluks /dev/sdb btrfs_pool1</code></pre></figure>
+
+<p>Run <code class="language-plaintext highlighter-rouge">ls /dev/mapper</code> and verify that both containers are there.</p>
+
+<h2 id="creating-the-filesystems">Creating the Filesystems</h2>
+<hr />
+
+<p>There are three filesystems to create in this setup: boot, swap and the btrfs
+pool. First create the boot partition.</p>
+
+<p>If using a legacy BIOS motherboard, you can simply run <code class="language-plaintext highlighter-rouge">mkfs.ext3 /dev/sda3</code>.
+If you are on a computer with UEFI, you will need a EFI System Partition with a FAT32
+filesystem, which can be created by running <code class="language-plaintext highlighter-rouge">mkfs.fat -F32 /dev/sda3</code>.</p>
+
+<p>To create the swap partition, simply run <code class="language-plaintext highlighter-rouge">mkswap /dev/sda2</code> and then <code class="language-plaintext highlighter-rouge">swapon
+/dev/sda2</code>.</p>
+
+<p>To create the btrfs filesystem use the <code class="language-plaintext highlighter-rouge">mkfs.btrfs</code> command.  You will need to
+specify the RAID level for both the data (-d) and the metadata (-m).  We are using RAID0
+for the data, but for the metadata we will use RAID1 so that it resides on both
+disks.  Since metadata is both small and important, this is a good measure that
+results in virtually no performance loss.</p>
+
+<figure class="highlight"><pre><code class="language-text" data-lang="text"># mkfs.btrfs -m raid1 -d raid0 /dev/mapper/btrfs_pool0 /dev/mapper/btrfs_pool1</code></pre></figure>
+
+<h2 id="mounting-the-btrfs-filesystem-and-creating-subvolumes">Mounting the Btrfs Filesystem and Creating Subvolumes</h2>
+<hr />
+
+<p>Normally in an Arch Linux install, you would mount the root device to /mnt
+and begin constructing the filesystem hierarchy, but first we are going to
+utilize one of the coolest features of btrfs, subvolumes!</p>
+
+<p>Subvolumes are kind of like partitions, except much more flexible.  You do not
+have to specify a fixed size when creating a subvolume, although you can set
+disk quotas for each subvolume (for example, limit the size of each home
+folder).  Arguably, the best feature of subvolumes is <em>snapshots</em>.  A snapshot is
+like a backup of the subvolume at some point in time that is
+extremely fast and space efficient as it only stores changes from one point to another,
+also known as delta backups.  This is made possible by the copy-on-write
+mechanism of btrfs.</p>
+
+<p>To begin creating the various subvolumes, first make a directory to mount the
+btrfs pool: <code class="language-plaintext highlighter-rouge">mkdir /mnt/btrfs</code>.  Now, mount either of the btrfs_pool containers
+to this directory (it does not matter which one you choose).</p>
+
+<figure class="highlight"><pre><code class="language-text" data-lang="text"># mount /dev/mapper/btrfs_pool0 /mnt/btrfs</code></pre></figure>
+
+<p>There are two common layouts of subvolumes: the parent method, and the sibling
+method.  In the parent method, one would create a subvolume called “root” and
+inside of it place others, such as “home” (which could contain the subvolumes
+“alice” and “bob”), “etc” and “var”.  This may seem more traditionally intuitive, but other than
+some ease in initial mounting during installation, it actually less ideal in
+terms of snapshotting, as you’ll see later.
+The sibling method places all snapshots at the same level of the core btrfs
+filesystem.  The “root” subvolume, which will later be mounted as /, is at the
+same level of the subvolume hierarchy as “bob”, “alice”, “etc”, “var”, and so
+on. This makes snapshotting nicer in terms of scripting as all subvolumes live
+in the same directory.</p>
+
+<p>Change your working directory to the btrfs mountpoint with <code class="language-plaintext highlighter-rouge">cd /mnt/btrfs</code> so
+you can easily create the subvolumes.</p>
+
+<p>You create subvolumes using the <code class="language-plaintext highlighter-rouge">btrfs subvolume create</code> command with the syntax</p>
+
+<figure class="highlight"><pre><code class="language-text" data-lang="text"># btrfs subvolume create &lt;subvolume name&gt; &lt;location&gt;</code></pre></figure>
+
+<p>You will need to make a “root” subvolume, but other than that, it is up to you
+to decide what subvolumes you would like to create. For a desktop use-case, 
+you may want a “home” subvolume if you are the only user, or, if not, then a subvolume for
+each user.  A “var” subvolume can be handy for package management purposes,
+and perhaps you will want a “data” subvolume for shared files, such as music
+and movies.  In a server scenario, you may want an “opt” subvolume for various
+services.  I will demonstrate with the subvolumes I used (again, in the /mnt/btrfs/ directory):</p>
+
+<figure class="highlight"><pre><code class="language-text" data-lang="text"># btrfs subvolume create root .
+# btrfs subvolume create home .
+# btrfs subvolume create var .
+# btrfs subvolume create data .</code></pre></figure>
+
+<p>Now run <code class="language-plaintext highlighter-rouge">btrfs subvolume list .</code> and verify that they are all there.  You should
+see output similar to:</p>
+
+<figure class="highlight"><pre><code class="language-text" data-lang="text"># btrfs subvolume list .
+    ID 259 gen 6244 top level 5 path home
+    ID 260 gen 4778 top level 5 path data
+    ID 271 gen 5976 top level 5 path root
+    ID 272 gen 6219 top level 5 path var</code></pre></figure>
+
+<p>Now that the subvolumes are created, we can move on to assembling the filesystem
+hierarchy, just like in a traditional multi-partition install.</p>
+
+<h2 id="assembling-the--filesystem">Assembling the / Filesystem</h2>
+<hr />
+<p>Begin by changing your working directory to /mnt/</p>
+
+<figure class="highlight"><pre><code class="language-text" data-lang="text"># cd /mnt</code></pre></figure>
+
+<p>Now create a directory that will be the mount point for the root filesystem
+(just as you would mount you <code class="language-plaintext highlighter-rouge">/</code> partition to /mnt or /mnt/arch in a normal
+installation) with <code class="language-plaintext highlighter-rouge">mkdir /mnt/arch</code></p>
+
+<h3 id="a-bit-about-btrfs-mount-options">A Bit about Btrfs Mount Options</h3>
+<p>You may have used some options with the mount command before such as noatime or
+defaults.  Btrfs has some additional options to specify some of its features,
+most notably:</p>
+
+<ul>
+  <li><strong>ssd</strong>: enables various optimizations for solid state disks</li>
+  <li><strong>compress=</strong> : enables on the fly compression of the data before writing it,
+which uses less space and often, on modern hardware, is actually <em>faster</em> than
+non-compressed as hard drives (even SSDs) remain the bottleneck in data storage.
+The available choices are zlib (better compression) or lzo (faster compression)</li>
+  <li><strong>subvol=</strong> : specify which subvolume is to be mounted</li>
+</ul>
+
+<h3 id="mounting-the-subvolumes-and-boot-partition">Mounting the Subvolumes and /boot Partition</h3>
+<p>The first step is to mount the “root” subvolume to the /mnt/arch directory, with
+any options you may want.</p>
+
+<figure class="highlight"><pre><code class="language-text" data-lang="text"># mount -t btrfs -o defaults,noatime,ssd,compress=lzo,subvol=root /dev/mapper/btrfs_pool0 /mnt/arch</code></pre></figure>
+
+<p>Now make the necessary directories that will be mount points for the other
+subvolumes and partitions:</p>
+
+<figure class="highlight"><pre><code class="language-text" data-lang="text"># mkdir /mnt/arch/{boot,data,var,home}</code></pre></figure>
+
+<p>And finish mounting the devices</p>
+
+<figure class="highlight"><pre><code class="language-text" data-lang="text"># mount -t btrfs -o defaults,noatime,ssd,compress=lzo,subvol=home /dev/mapper/btrfs_pool0 /mnt/arch/home
+# mount -t btrfs -o defaults,noatime,ssd,compress=lzo,subvol=data /dev/mapper/btrfs_pool0 /mnt/arch/data
+# mount -t btrfs -o defaults,noatime,ssd,compress=lzo,subvol=var /dev/mapper/btrfs_pool0 /mnt/arch/var
+# mount -o defaults,noatime /dev/sdc3 /mnt/arch/boot</code></pre></figure>
+
+<p>There are two modifications we will now make to improve filesystem cleanliness
+and ease of btrfs administration. First, since log files are written to
+extremely frequently, you will want to disable copy-on-write for them to avoid
+fragmentation of thousands of unnecessary log file revisions.</p>
+
+<figure class="highlight"><pre><code class="language-text" data-lang="text"># mkdir /mnt/arch/var/log/
+# chattr +C /mnt/arch/var/log/</code></pre></figure>
+
+<p>The second modification you’ll make will help with later snapshotting and other
+btrfs operations.  Remember how easy creating subvolumes was when you mounted the
+top level btrfs pool to /mnt/btrfs?  You can retain this functionality by
+mounting the btrfs pool with no “subvol” option somewhere in your filesystem.  I
+will do this at /var/lib/btrfs_root, but you are welcome to place this where
+ever you like, such as /data/btrfs_pool.</p>
+
+<figure class="highlight"><pre><code class="language-text" data-lang="text"># mkdir /mnt/arch/var/lib/btrfs_root
+# mount -t btrfs -o defaults,noatime,ssd,compress=lzo /dev/mapper/btrfs_pool0 /mnt/arch/var/lib/btrfs_root</code></pre></figure>
+
+<h2 id="proceeding-with-installation">Proceeding with Installation</h2>
+<hr />
+<p>Now that the filesystem is assembled, you can essentially follow the rest of the
+Arch Installation guide with only a few slight differences.</p>
+
+<h3 id="executing-pacstrap">Executing <code class="language-plaintext highlighter-rouge">pacstrap</code></h3>
+
+<p>When running the pacstrap command, you need to include an additional package in
+order to have the btrfs tools you have been using.  Also, since you mounted your filesystem
+at /mnt/arch instead of /mnt/ as used in the guide, you need to account for that:</p>
+
+<figure class="highlight"><pre><code class="language-text" data-lang="text"># pacstrap /mnt/arch base btrfs-progs</code></pre></figure>
+
+<h3 id="generating-the-fstab-file">Generating the fstab File</h3>
+<p>In order for the system to properly locate and mount all of the partitions and
+subvolumes at boot, a <strong>f</strong>ile<strong>s</strong>ystem <strong>tab</strong>le needs to exist.  Arch Linux
+has a great tool for simplifying the process, <code class="language-plaintext highlighter-rouge">genfstab</code>.
+Although the Arch installation  guide does not specify this option, the ‘-U’ flag is quite
+important, since the order the devices are recognized could change (switching
+what is /dev/sda and /dev/sdb for example).  This is <strong>crucial</strong> if you decide
+to have an encrypted swap partition, which we’ll cover later.</p>
+
+<p>Before writing the fstab to new installation, first run it without the output
+redirection (“»”) and verify it against <code class="language-plaintext highlighter-rouge">ls -l /dev/disk/by-uuid</code></p>
+
+<figure class="highlight"><pre><code class="language-text" data-lang="text"># genfstab -p -U /mnt/arch
+# ls -l /dev/disk/by-uuid</code></pre></figure>
+
+<p>If everything looks good, write it to the new installation</p>
+
+<figure class="highlight"><pre><code class="language-text" data-lang="text"># genfstab -p -U /mnt/arch &gt;&gt; /mnt/arch/etc/fstab</code></pre></figure>
+
+<h3 id="further-configuration">Further Configuration</h3>
+<p>Run <code class="language-plaintext highlighter-rouge">arch-chroot /mnt/arch</code> to chroot into the new system and follow the steps
+in <a href="https://wiki.archlinux.org/index.php/Installation_guide#Configure_the_system">Configure the
+System</a>
+until <em>Configure /etc/mkinitcpio.conf</em>, where you will need to make some slight
+modifications.</p>
+
+<h2 id="setting-up-initramfs">Setting Up initramfs</h2>
+<hr />
+<p>In order to decrypt devices when starting the system, you need to include the
+“encrypt” hook in your initramfs.  There is a slight problem though, in that the
+encrypt hook only allows you to specify 1 device to decrypt.  Since your btrfs
+pool consists of 2 or more devices this will need some modifications.  The
+“encrypt” hook is really just a shell script that lives at
+/lib/initcpio/hooks/encrypt, with a corresponding install script that lives at
+/lib/initcpio/install/encrypt.</p>
+
+<p>All you need to do is create copies of the two scripts make
+some slight modifications.</p>
+
+<h3 id="creating-additional-encrypt-hooks">Creating Additional encrypt hooks</h3>
+
+<figure class="highlight"><pre><code class="language-text" data-lang="text"># cp /lib/initcpio/hooks/encrypt /lib/initcpio/hooks/encrypt2
+# cp /lib/initcpio/install/encrypt /lib/initcpio/install/encrypt2</code></pre></figure>
+
+<p>The install/encrypt2 script is fine as-is, but you need to make some slight
+adjustments to /lib/initcpio/hooks/encrypt2.  Using your favorite text editor,
+change every occurrence of “$cryptkey” to “$cryptkey2” (there should be 2
+occurrences), and “$cryptdevice” to “$cryptdevice2” (2 occurrences).
+Additionally, find the line “mkdir /ckey” and remove it to avoid an annoying but
+harmless error message upon startup.</p>
+
+<p>If you are using more than 2 encrypted disks for your pool, simply repeat the
+process for encrypt3, encrypt4, etc.</p>
+
+<h3 id="editing-etcmkinitcpioconf">Editing /etc/mkinitcpio.conf</h3>
+<p>Now it is time to tell the initramfs to include the necessary components upon
+being built. Open up /etc/mkinitcpio.conf in your favorite text editor.  Find
+the <code class="language-plaintext highlighter-rouge">MODULES=""</code> line and change it to <code class="language-plaintext highlighter-rouge">MODULES="nls_cp437 crc32c"</code> <em>note: if
+you would like to use a keyfile to automatically unlock your devices on boot
+when in a safe place, include the kernel module for the unencrypted filesystem
+it will reside on, such as vfat or ext3. Setting this up will be covered later
+in the tutorial.</em>
+Now find the uncommented line beginning with <code class="language-plaintext highlighter-rouge">HOOKS=</code> and change it to
+<code class="language-plaintext highlighter-rouge">HOOKS="base udev autodetect encrypt encrypt2 modconf block filesystems keyboard
+fsck btrfs"</code> <em>in that order</em>.</p>
+
+<p>Now simply run <code class="language-plaintext highlighter-rouge">mkinicpio -p linux</code> to generate the initramfs.</p>
+
+<h2 id="setting-the-boot-options">Setting the Boot Options</h2>
+<hr />
+<p>In order to decrypt the disks and mount the “root” subvolume to /, you need to
+set a few kernel options in your boot loader configuration.  The specifics may be
+slightly different depending on your choice of bootloader, but generally there
+is an “options” line in the configuration for each boot entry.</p>
+
+<p>To unlock the encrypted LUKS containers, use the <code class="language-plaintext highlighter-rouge">cryptdevice=</code> and
+<code class="language-plaintext highlighter-rouge">cryptdevice2=</code> (and any additional) options from your encrypt hooks.  The format
+for this option is</p>
+
+<figure class="highlight"><pre><code class="language-text" data-lang="text"># cryptdevice=UUID=&lt;uuid-of-disk-or-partition&gt;:&lt;name-of-encryption-container&gt;:allow-discards</code></pre></figure>
+
+<p>Again, because device names of the form /dev/sdXY can change, UUIDs should be
+used.  I find it helpful to append all of the disk UUIDs to the end of the boot
+entry for easy copy and pasting: <code class="language-plaintext highlighter-rouge">ls -l /dev/disk/by-uuid/ &gt;&gt;
+/path/to/boot/entry</code>, just be sure to delete all of the lines appended by ls
+before saving the file!</p>
+
+<p>To indicate that you want to mount your Btrfs pool’s “root” subvolume as /, use
+the standard <code class="language-plaintext highlighter-rouge">root=</code> parameter but also include a <code class="language-plaintext highlighter-rouge">rootflags=</code> parameter like
+so:</p>
+
+<figure class="highlight"><pre><code class="language-text" data-lang="text"># root=/dev/mapper/btrfs_pool0 rootflags=subvol=root</code></pre></figure>
+
+<p>Putting everything together you get something like:</p>
+
+<figure class="highlight"><pre><code class="language-text" data-lang="text">title       Arch Linux
+linux       /vmlinuz-linux
+initrd      /initramfs-linux.img
+options      cryptdevice=UUID=72347efa-f59b-de3a-42fe-02849feacc72:btrfs_pool0:allow-discards cryptdevice2=UUID=987aefcc-f119-56aa-43c1-48cffeaa891e:btrfs_pool1:allow-discards root=/dev/mapper/btrfs_pool0 rootflags=subvol=root quiet rw</code></pre></figure>
+
+<p>Now the base system is completely installed an ready to boot! Feel free to add
+some users, install some other simple packages you prefer, or any other basic
+administrative tasks before you reboot into the installation.  When you’re all
+set, type <code class="language-plaintext highlighter-rouge">exit</code> to leave the chroot environment, unmount the subvolumes and
+disks with <code class="language-plaintext highlighter-rouge">umount -R /mnt/arch</code> and then reboot.  If all goes well, you
+will boot into your new installation, asking you for the passphrase for each
+disk.  If there are any problems, boot back into the live disk, mount your
+filesystems and compare the configuration files to the ones listed in this
+article.  The most likely culprits are your boot configuration, /etc/fstab,
+ and /etc/mkinitcpio.conf.</p>
+
+<h2 id="post-installation-considerations-and-niceties">Post Installation Considerations and Niceties</h2>
+<hr />
+
+<h3 id="a-warning-about-kernel-updates">A Warning About Kernel Updates</h3>
+<p>In the past, some kernel updates have been known to cause corruption to the
+filesystem, most recently in the 3.19.1 kernel where a deadlock prevented
+access.  The issue was easily repairable, and is now fixed, however instability
+in your data storage can be frightening.  To prevent this type of surprise,
+there are a few things that can be done.  The simplest, if your hardware is
+supported, is to switch to a Long Term Support (LTS) kernel.  These are released
+far less frequently and geared to provide the utmost stability.  They are
+generally heavily tested before deployment to ensure that no bugs of this sort
+can creep up.  If you must run a newer kernel, I recommend a reasonable external back up system of your most important files and waiting a few days to
+upgrade after a new kernel version is released, in hopes that any such bugs can
+be discovered and promptly patched.</p>
+
+<h3 id="snapshots">Snapshots</h3>
+<p>Snapshotting, again, is a wonderful feature of Btrfs that allows us to take fast,
+lightweight backups of a subvolume.  Each snapshot essentially freezes a file in
+in the state is it at that moment.  If a file hasn’t changed since a year ago,
+that file in each snapshot is the same exact location on the disks, a file in a snapshot
+only takes up space if it were to change. Because of Btrfs’ copy-on-write
+mechanisms, when you change a file, it is written to a new location and the
+previous snapshots are unaffected, and if you were to delete a file that was
+previously snapshotted, the file tells Btrfs “Hey, I’m still wanted in this one snapshot…so don’t
+forget about me!” and those blocks are not freed. If something were to happen to a file or directory, we can
+simply roll back to an appropriate snapshot and retrieve that copy.</p>
+
+<p>To make a snapshot, first change directories into the /var/lib/btrfs_root
+directory you made earlier.  Run <code class="language-plaintext highlighter-rouge">ls</code> and you should see all of the subvolumes
+you created. Feel free to poke around inside of them and see exactly how the
+system is assembled.  When you’re ready to make a snapshot, run <code class="language-plaintext highlighter-rouge">mkdir
+snapshots</code> to create a directory to store them in.  This is just a standard
+POSIX
+directory at the top most level of your Btrfs system.</p>
+
+<p>I like to organize my
+snapshots by date, so I usually create a new subdirectory in
+/var/lib/btrfs_root/snapshots named after the date.  For example, <code class="language-plaintext highlighter-rouge">mkdir snapshots/$(date +"%F_%H-%M")</code> would create the directory snapshots/2015-09-02_14-56/ because I ran it at 2:56pm on September 2nd, 2015.  This way of organizing snapshots works for me, but by all means, use something that is intuitive to you!  To actually create the snapshot use your good pal, the <code class="language-plaintext highlighter-rouge">btrfs</code> command like so:</p>
+
+<figure class="highlight"><pre><code class="language-text" data-lang="text"># btrfs subvolume snapshot &lt;subvolume name&gt; snapshots/2015-09-02_14-56/</code></pre></figure>
+
+<p>So for the system installed in this article:</p>
+
+<figure class="highlight"><pre><code class="language-text" data-lang="text"># btrfs subvolume snapshot root snapshots/2015-09-02_14-56/
+# btrfs subvolume snapshot home snapshots/2015-09-02_14-56/
+# btrfs subvolume snapshot var snapshots/2015-09-02_14-56/
+# btrfs subvolume snapshot data snapshots/2015-09-02_14-56/</code></pre></figure>
+
+<p>To verify, run <code class="language-plaintext highlighter-rouge">ls</code> in the snapshot/2015-09-02_14-56/ directory. You don’t have
+to snapshot every subvolume at the same time, for instance, your personal data
+in home is likely to change more and you may want to snapshot more often to be
+able to revert to a very recent state.</p>
+
+<p>Btrfs snapshots are very powerful, and can be scripted by hand or with various
+tools such as <a href="https://en.opensuse.org/openSUSE:Snapper_Tutorial">openSUSE’s <em>Snapper</em></a>.
+These operations are outside of the scope of this tutorial, but are by no
+means difficult to do, so have fun checking them out!</p>
+
+<h3 id="keyfiles-and-additional-luks-keys">Keyfiles and Additional LUKS Keys</h3>
+<p>One of the most appealing aspects of the LUKS containers is the ability to have
+up to 8 keys that are able to unlock the container.  The keys can be text
+entered interactively at a prompt, like a standard password, or keyfiles, any
+standard file, such as a picture, a song, a pdf…anything you could store on a
+hard drive!  Additional text keys are helpful to have an unlocking mechanism in
+case you forget or damage another key.  Keyfiles are nice as a quick, automatic
+way to decrypt devices when in a safe place, or to have a key much longer than
+a memorable text one.</p>
+
+<p>For example, my ThinkPad has an SD card slot.  When I am at home, a keyfile on
+the card is used to automatically decrypt the drives in my Btrfs pool at boot.  If I
+leave the house, I simply eject the SD card, and when I startup the computer, I
+am asked for the passphrases for both of the involved disks.</p>
+
+<p>To add new key, use the <code class="language-plaintext highlighter-rouge">cryptsetup luksAddKey</code> command. To add a key to the
+LUKS container at /dev/sda1 for example:</p>
+
+<figure class="highlight"><pre><code class="language-text" data-lang="text"># cryptsetup luksAddKey /dev/sda1</code></pre></figure>
+
+<p>The command will prompt you to type in an existing key and then have you type
+the new passphrase twice.</p>
+
+<p>If you would like to add a keyfile instead, simply add the path of the file to
+your command:</p>
+
+<figure class="highlight"><pre><code class="language-text" data-lang="text"># cryptsetup luksAddKey /dev/sda1 /path/to/file</code></pre></figure>
+
+<p>Once you enter in an existing key, the keyfile will be added. Revoking keys is
+not difficult, but not in the scope of this article.  For more info on LUKS
+management, check out the Arch Wiki page <a href="https://wiki.archlinux.org/index.php/Dm-crypt/Device_encryption">dm-crypt/Device
+encryption</a>.</p>
+
+<p>Assuming that you added a keyfile to each partition’s LUKS header, you may now
+setup your computer to use those upon boot thanks to the <code class="language-plaintext highlighter-rouge">encrypt</code> hook.
+Change your boot loader configuration entry’s options line to include cryptkey
+and cryptkey2 options in the format
+<code class="language-plaintext highlighter-rouge">cryptkey=/dev/disk/by-uuid/xxxx-xxxx:&lt;filesystem
+type&gt;:/path/from/toplevel/of/device</code> For example, to use a keyfile on my SD card
+I would have the following options line:</p>
+
+<figure class="highlight"><pre><code class="language-text" data-lang="text">options     cryptdevice=UUID=6e3e4026-5b53-4bc0-8980-ffe59765f85d:btrfs_pool0:allow-discards cryptdevice2=UUID=16d8e0bf-5384-4f5d-a785-9c7eaf775fa4:btrfs_pool1:allow-discards root=/dev/mapper/btrfs_pool0 rootflags=subvol=root cryptkey=/dev/disk/by-uuid/F224-CEA1:vfat:/cats.gif cryptkey2=/dev/disk/by-uuid/F224-CEA1:vfat:/cats.gif quiet rw</code></pre></figure>
+
+<p>Though absurdly long, it is important (at least for my bootloader) that it all
+to be on one line.</p>
+
+<p>Now reboot, and if your keyfile is present on the specified removable media, your
+LUKS containers should automatically unlock themselves.  If your removable media
+is not present, you will be brought to the standard prompt to type a key in by
+hand.</p>
+
+<h3 id="encrypted-swap">Encrypted Swap</h3>
+<p>If you chose to have a swap partition on your system, it is a good idea to
+encrypt it.  The process is quite simple and unobtrusive, requiring just a slight
+change to both /etc/fstab and /etc/crypttab, with no additional passwords or
+anything at boot since they are encrypted with a one-time random “throwaway”
+passphrase.</p>
+
+<p>First, in /etc/crypttab, find the line with the swap entry:</p>
+
+<figure class="highlight"><pre><code class="language-text" data-lang="text"># swap         /dev/sdaX        /dev/urandom    swap,cipher=aes-cbc-essiv:sha256,size=256</code></pre></figure>
+
+<p>and uncomment it.  Then replace /dev/sdaX with the <strong>UUID</strong> of your swap
+partition in the same way you did for /etc/fstab and our boot options.  <strong>It is
+extremely important to use the UUID here!</strong>: in the boot options or /etc/fstab,
+if the wrong partition was referenced, the system would simply not boot until
+it is fixed.  Here, however, the partition would be  rendered completely
+corrupted after mkswap gets called and a dm-crypt container is created.</p>
+
+<p>Now edit /etc/fstab. Find the line for the swap partition and change the
+partition to /dev/mapper/swap like so:</p>
+
+<figure class="highlight"><pre><code class="language-text" data-lang="text">/dev/mapper/swap    none        swap        defaults    0 0</code></pre></figure>
+
+<p>this indicates that swap partition will be the “swap” container that you just
+told /etc/crypttab to create at boot time.</p>
+
+<h2 id="conclusion">Conclusion</h2>
+<hr />
+
+<p>I hope that you have found this guide to be informative and helpful.  While it
+is quite thorough in explaining the set up process, there is much more to learn
+and use now that your system is up and running.  From automated snapshot
+management, to LUKS header backup and removal, from Btrfs filesystem hygiene
+practices, to further securing your system; there is a plethora of further fun,
+security and data integrity topics to explore with these tools.  Have fun and
+enjoy.</p>
+
+<p><em>feel free to contact me with any comments or corrections via the options listed at the bottom of the page.</em></p>
+
+
+  </div>
+
+  <hr class="post-title-rule" />
+  <div class="license" style="text-align: center; font-size:80%" >
+    <a rel="license" href="http://creativecommons.org/licenses/by/4.0/">
+      <img alt="Creative Commons License" style="border-width:0;margin:auto" src="https://i.creativecommons.org/l/by/4.0/88x31.png" />
+    </a>
+    <br />This work is licensed under a <a rel="license" href="http://creativecommons.org/licenses/by/4.0/">Creative Commons Attribution 4.0 International License</a>.
+  </div>
+
+</article>
+
+        </div>
+      </div>
+
+      <footer class="site-footer">
+
+  <div class="wrapper">
+
+    <h2 class="footer-heading">kyle kneitinger</h2>
+
+    <div class="footer-col-wrapper">
+      <div class="footer-col footer-col-1">
+        <ul class="contact-list">
+          <li>kyle kneitinger</li>
+          <li>
+            <a href="mailto:kyle@kneit.in">kyle@kneit.in</a>
+            <a href="/pgp/">(PGP info)</a>
+          </li>
+        </ul>
+      </div>
+
+      <div class="footer-col footer-col-2">
+        <ul class="social-media-list">
+          
+          <li>
+            <a href="https://github.com/kneitinger"><span class="icon icon--github"><svg viewBox="0 0 16 16"><path fill="#828282" d="M7.999,0.431c-4.285,0-7.76,3.474-7.76,7.761 c0,3.428,2.223,6.337,5.307,7.363c0.388,0.071,0.53-0.168,0.53-0.374c0-0.184-0.007-0.672-0.01-1.32 c-2.159,0.469-2.614-1.04-2.614-1.04c-0.353-0.896-0.862-1.135-0.862-1.135c-0.705-0.481,0.053-0.472,0.053-0.472 c0.779,0.055,1.189,0.8,1.189,0.8c0.692,1.186,1.816,0.843,2.258,0.645c0.071-0.502,0.271-0.843,0.493-1.037 C4.86,11.425,3.049,10.76,3.049,7.786c0-0.847,0.302-1.54,0.799-2.082C3.768,5.507,3.501,4.718,3.924,3.65 c0,0,0.652-0.209,2.134,0.796C6.677,4.273,7.34,4.187,8,4.184c0.659,0.003,1.323,0.089,1.943,0.261 c1.482-1.004,2.132-0.796,2.132-0.796c0.423,1.068,0.157,1.857,0.077,2.054c0.497,0.542,0.798,1.235,0.798,2.082 c0,2.981-1.814,3.637-3.543,3.829c0.279,0.24,0.527,0.713,0.527,1.437c0,1.037-0.01,1.874-0.01,2.129 c0,0.208,0.14,0.449,0.534,0.373c3.081-1.028,5.302-3.935,5.302-7.362C15.76,3.906,12.285,0.431,7.999,0.431z"/></svg>
+</span><span class="username">kneitinger</span></a>
+
+          </li>
+          
+
+          
+          <li>
+            <a href="https://twitter.com/kneitinger"><span class="icon icon--twitter"><svg viewBox="0 0 16 16"><path fill="#828282" d="M15.969,3.058c-0.586,0.26-1.217,0.436-1.878,0.515c0.675-0.405,1.194-1.045,1.438-1.809c-0.632,0.375-1.332,0.647-2.076,0.793c-0.596-0.636-1.446-1.033-2.387-1.033c-1.806,0-3.27,1.464-3.27,3.27 c0,0.256,0.029,0.506,0.085,0.745C5.163,5.404,2.753,4.102,1.14,2.124C0.859,2.607,0.698,3.168,0.698,3.767 c0,1.134,0.577,2.135,1.455,2.722C1.616,6.472,1.112,6.325,0.671,6.08c0,0.014,0,0.027,0,0.041c0,1.584,1.127,2.906,2.623,3.206 C3.02,9.402,2.731,9.442,2.433,9.442c-0.211,0-0.416-0.021-0.615-0.059c0.416,1.299,1.624,2.245,3.055,2.271 c-1.119,0.877-2.529,1.4-4.061,1.4c-0.264,0-0.524-0.015-0.78-0.046c1.447,0.928,3.166,1.469,5.013,1.469 c6.015,0,9.304-4.983,9.304-9.304c0-0.142-0.003-0.283-0.009-0.423C14.976,4.29,15.531,3.714,15.969,3.058z"/></svg>
+</span><span class="username">kneitinger</span></a>
+
+          </li>
+          
+        </ul>
+      </div>
+
+      <div class="footer-col footer-col-3">
+        <p>The personal homepage of Kyle Kneitinger: programmer, ops engineer, software synthesizer creator, musician & friend of dogs.
+</p>
+      </div>
+    </div>
+
+  </div>
+
+</footer>
+
+
+    </body>
+  </div>
+
+</html>

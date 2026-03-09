@@ -1,0 +1,379 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en" dir="ltr">
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+<title>[solved]Btrfs raid1 with very slow HD and SSD, howto maximize performa / Applications &amp; Desktop Environments / Arch Linux Forums</title>
+<link rel="stylesheet" type="text/css" href="style/ArchLinux.css" />
+<link rel="canonical" href="viewtopic.php?id=261693" title="Page 1" />
+<link rel="alternate" type="application/atom+xml" href="extern.php?action=feed&amp;tid=261693&amp;type=atom" title="Atom topic feed" />
+    <link rel="stylesheet" media="screen" href="style/ArchLinux/arch.css?v=5"/>
+        <link rel="stylesheet" media="screen" href="style/ArchLinux/archnavbar.css?v=5"/>
+    
+<link rel="shortcut icon" href="style/ArchLinux/favicon.ico" />
+</head>
+
+<body>
+<div id="archnavbar" class="anb-forum">
+	<div id="archnavbarlogo"><h1><a href="http://archlinux.org/">Arch Linux</a></h1></div>
+	<div id="archnavbarmenu">
+		<ul id="archnavbarlist">
+			<li id="anb-home"><a href="http://archlinux.org/">Home</a></li><li id="anb-packages"><a href="http://archlinux.org/packages/">Packages</a></li><li id="anb-forums" class="anb-selected"><a href="https://bbs.archlinux.org/">Forums</a></li><li id="anb-wiki"><a href="https://wiki.archlinux.org/">Wiki</a></li><li id="anb-gitlab"><a href="https://gitlab.archlinux.org/archlinux">GitLab</a></li><li id="anb-security"><a href="https://security.archlinux.org/">Security</a></li><li id="anb-aur"><a href="https://aur.archlinux.org/">AUR</a></li><li id="anb-download"><a href="http://archlinux.org/download/">Download</a></li>		</ul>
+	</div>
+</div>
+
+
+<div id="punviewtopic" class="pun">
+<div class="top-box"></div>
+<div class="punwrap">
+
+<div id="brdheader" class="block">
+	<div class="box">
+		<div id="brdmenu" class="inbox">
+			<ul>
+				<li id="navindex" class="isactive"><a href="index.php">Index</a></li>
+				<li id="navrules"><a href="misc.php?action=rules">Rules</a></li>
+				<li id="navsearch"><a href="search.php">Search</a></li>
+				<li id="navregister"><a href="register.php">Register</a></li>
+				<li id="navlogin"><a href="login.php">Login</a></li>
+			</ul>
+		</div>
+		<div id="brdwelcome" class="inbox">
+			<p class="conl">You are not logged in.</p>
+			<ul class="conr">
+				<li><span>Topics: <a href="search.php?action=show_recent" title="Find topics with recent posts.">Active</a> | <a href="search.php?action=show_unanswered" title="Find topics with no replies.">Unanswered</a></span></li>
+			</ul>
+			<div class="clearer"></div>
+		</div>
+	</div>
+</div>
+
+
+
+<div id="brdmain">
+<div class="linkst">
+	<div class="inbox crumbsplus">
+		<ul class="crumbs">
+			<li><a href="index.php">Index</a></li>
+			<li><span>»&#160;</span><a href="viewforum.php?id=18">Applications &amp; Desktop Environments</a></li>
+			<li><span>»&#160;</span><strong><a href="viewtopic.php?id=261693">[solved]Btrfs raid1 with very slow HD and SSD, howto maximize performa</a></strong></li>
+		</ul>
+		<div class="pagepost">
+			<p class="pagelink conl"><span class="pages-label">Pages: </span><strong class="item1">1</strong></p>
+		</div>
+		<div class="clearer"></div>
+	</div>
+</div>
+
+<div id="p1943484" class="blockpost rowodd firstpost blockpost1">
+	<h2><span><span class="conr">#1</span> <a href="viewtopic.php?pid=1943484#p1943484">2020-12-13 18:00:20</a></span></h2>
+	<div class="box">
+		<div class="inbox">
+			<div class="postbody">
+				<div class="postleft">
+					<dl>
+						<dt><strong>cdwijs</strong></dt>
+						<dd class="usertitle"><strong>Member</strong></dd>
+						<dd><span>Registered: 2010-04-24</span></dd>
+						<dd><span>Posts: 309</span></dd>
+					</dl>
+				</div>
+				<div class="postright">
+					<h3>[solved]Btrfs raid1 with very slow HD and SSD, howto maximize performa</h3>
+					<div class="postmsg">
+						<p>I have put a laptop 5400 rpm hard drive and a SSD into a btrfs raid1 array. I&#039;m hoping to get the speed of the SSD, and the redundancy of raid1, so I&#039;m basically trying to have my cake and eat it too.</p><p>I&#039;ve run these commands to setup the array. My PC boots OK:</p><div class="codebox"><pre><code>mkfs.btrfs /dev/sda1 #the HD
+mount /dev/sda1 /mnt/newarch
+clone my arch linux system onto the new btrfs partition, and set the correct UUID in /etc/fstab, as described here:
+https://www.rdeeson.com/weblog/157/moving-arch-linux-to-a-new-ssd-with-rsync
+Boot from the btrfs drive, and then add the second drive:
+btrfs device add /dev/sdb1 -f / #the SSD
+btrfs balance start -dconvert=raid1 -mconvert=raid1 /</code></pre></div><p>The current state of the array after the balancing is done:</p><div class="codebox"><pre class="vscroll"><code># df -h
+Filesystem                     Size  Used Avail Use% Mounted on
+/dev/sdb1                      187G   40G  110G  27% /
+# btrfs fi show
+Label: none  uuid: 485952f9-0cfc-499a-b5c2-5131d34b0372
+	Total devices 2 FS bytes used 39.35GiB
+	devid    1 size 149.05GiB used 40.03GiB path /dev/sdb1
+	devid    2 size 223.57GiB used 40.03GiB path /dev/sda1
+# btrfs filesystem df /
+Data, RAID1: total=39.00GiB, used=38.83GiB
+System, RAID1: total=32.00MiB, used=16.00KiB
+Metadata, RAID1: total=1.00GiB, used=532.48MiB
+GlobalReserve, single: total=84.23MiB, used=0.00B
+# btrfs filesystem usage /
+Overall:
+    Device size:		 372.62GiB
+    Device allocated:		  80.06GiB
+    Device unallocated:		 292.56GiB
+    Device missing:		     0.00B
+    Used:			  78.70GiB
+    Free (estimated):		 146.45GiB	(min: 146.45GiB)
+    Data ratio:			      2.00
+    Metadata ratio:		      2.00
+    Global reserve:		  84.22MiB	(used: 0.00B)
+    Multiple profiles:		        no
+
+Data,RAID1: Size:39.00GiB, Used:38.83GiB (99.56%)
+   /dev/sdb1	  39.00GiB
+   /dev/sda1	  39.00GiB
+
+Metadata,RAID1: Size:1.00GiB, Used:532.48MiB (52.00%)
+   /dev/sdb1	   1.00GiB
+   /dev/sda1	   1.00GiB
+
+System,RAID1: Size:32.00MiB, Used:16.00KiB (0.05%)
+   /dev/sdb1	  32.00MiB
+   /dev/sda1	  32.00MiB
+
+Unallocated:
+   /dev/sdb1	 109.02GiB
+   /dev/sda1	 183.54GiB</code></pre></div><p>How can I measure the latency and throughput of this array?<br />How can I optimize the performance?<br />how can i make btrfs to only use the hard drive when a checksum is incorrect, so that a rebuild of the data is needed?<br />Why does df report a size of 187G when the smallest drive in the raid1 array is 150GB?</p>
+						<p class="postedit"><em>Last edited by cdwijs (2020-12-15 06:25:28)</em></p>
+					</div>
+				</div>
+			</div>
+		</div>
+		<div class="inbox">
+			<div class="postfoot clearb">
+				<div class="postfootleft"><p><span>Offline</span></p></div>
+			</div>
+		</div>
+	</div>
+</div>
+
+<div id="p1943489" class="blockpost roweven">
+	<h2><span><span class="conr">#2</span> <a href="viewtopic.php?pid=1943489#p1943489">2020-12-13 18:11:28</a></span></h2>
+	<div class="box">
+		<div class="inbox">
+			<div class="postbody">
+				<div class="postleft">
+					<dl>
+						<dt><strong>frostschutz</strong></dt>
+						<dd class="usertitle"><strong>Member</strong></dd>
+						<dd class="postavatar"><img src="https://bbs.archlinux.org/img/avatars/76897.png?m=1572193435" width="80" height="80" alt="" /></dd>
+						<dd><span>Registered: 2013-11-15</span></dd>
+						<dd><span>Posts: 1,612</span></dd>
+					</dl>
+				</div>
+				<div class="postright">
+					<h3>Re: [solved]Btrfs raid1 with very slow HD and SSD, howto maximize performa</h3>
+					<div class="postmsg">
+						<p>mdadm raid1 has a write-mostly flag for such a use case, which means writes will go to both ssd + hdd, but all reads will be served by ssd only (unless ssd fails).</p><p>no idea if btrfs offers anything like it</p>
+					</div>
+				</div>
+			</div>
+		</div>
+		<div class="inbox">
+			<div class="postfoot clearb">
+				<div class="postfootleft"><p><span>Offline</span></p></div>
+			</div>
+		</div>
+	</div>
+</div>
+
+<div id="p1943507" class="blockpost rowodd">
+	<h2><span><span class="conr">#3</span> <a href="viewtopic.php?pid=1943507#p1943507">2020-12-13 19:33:57</a></span></h2>
+	<div class="box">
+		<div class="inbox">
+			<div class="postbody">
+				<div class="postleft">
+					<dl>
+						<dt><strong>cdwijs</strong></dt>
+						<dd class="usertitle"><strong>Member</strong></dd>
+						<dd><span>Registered: 2010-04-24</span></dd>
+						<dd><span>Posts: 309</span></dd>
+					</dl>
+				</div>
+				<div class="postright">
+					<h3>Re: [solved]Btrfs raid1 with very slow HD and SSD, howto maximize performa</h3>
+					<div class="postmsg">
+						<p>It seems the read actions are almost almost exclusively done at /dev/sdb. Sadly, sdb the slow hdd. below is the output from dstat, during the scan of QDirstat</p><p>I&#039;ve created the btrfs filesystem on the slow hdd, and then added the SSD to the array. Could it be btrfs uses the original drive the filesystem was made on as the primary device? how can the primary device be changed?</p><div class="codebox"><pre class="vscroll"><code>dstat -tdD total,sda,sdb --nocolor
+----system---- -dsk/total- --dsk/sda-- --dsk/sdb--
+     time     | read  writ: read  writ: read  writ
+13-12 21:23:48|6912k    0 :  16k    0 :6896k    0 
+13-12 21:23:49|  13M    0 :   0     0 :  13M    0 
+13-12 21:23:50|  11M    0 :   0     0 :  11M    0 
+13-12 21:23:51|7888k    0 :   0     0 :7888k    0 
+13-12 21:23:52|6080k    0 :   0     0 :6080k    0 
+13-12 21:23:53|9104k    0 :  16k    0 :9088k    0 
+13-12 21:23:54|8016k    0 :   0     0 :8016k    0 
+13-12 21:23:55|8848k    0 :   0     0 :8848k    0 
+13-12 21:23:56|  10M    0 :   0     0 :  10M    0 
+13-12 21:23:57|  13M    0 :   0     0 :  13M    0 
+13-12 21:23:58|7728k    0 :   0     0 :7728k    0 
+13-12 21:23:59|  10M    0 :   0     0 :  10M    0 
+13-12 21:24:00|  10M  336k:   0   168k:  10M  168k
+13-12 21:24:01|7824k    0 :   0     0 :7824k    0 
+13-12 21:24:02|6800k    0 :  32k    0 :6768k    0 
+13-12 21:24:03|3568k    0 :   0     0 :3568k    0 
+13-12 21:24:04|7248k    0 :   0     0 :7248k    0 
+13-12 21:24:05|8928k   16k:  32k 8192B:8896k 8192B
+13-12 21:24:06|7168k    0 :   0     0 :7168k    0 
+13-12 21:24:07|  13M    0 :   0     0 :  13M    0 
+13-12 21:24:08|  11M    0 :   0     0 :  11M    0 
+13-12 21:24:09|9072k    0 :   0     0 :9072k    0 
+13-12 21:24:10|8128k    0 :   0     0 :8128k    0 
+13-12 21:24:11|9120k    0 :   0     0 :9120k    0 
+13-12 21:24:12|7504k    0 :  16k    0 :7488k    0 
+13-12 21:24:13|5824k    0 :   0     0 :5824k    0 
+13-12 21:24:14|7760k    0 :   0     0 :7760k    0 
+13-12 21:24:15|8784k 5040k:   0  2736k:8784k 2304k
+13-12 21:24:16| 896k   47M:   0    24M: 896k   24M
+13-12 21:24:17|1136k   56M:   0    28M:1136k   28M
+13-12 21:24:18|1216k   62M:   0    31M:1216k   31M
+13-12 21:24:19|7008k 1696k:   0   824k:7008k  872k
+13-12 21:24:20|5504k  440k:  16k  220k:5488k  220k
+13-12 21:24:21|9008k    0 :   0     0 :9008k    0 
+13-12 21:24:22|6960k 9072k:2352k 4536k:4608k 4536k
+13-12 21:24:23| 720k   44M:   0    22M: 720k   22M
+13-12 21:24:24|6480k    0 :   0     0 :6480k    0 
+13-12 21:24:25|6096k   72k:   0    36k:6096k   36k
+13-12 21:24:26|5808k    0 :   0     0 :5808k    0 
+13-12 21:24:27|3696k    0 :   0     0 :3696k    0 
+13-12 21:24:28|1312k    0 :   0     0 :1312k    0 
+13-12 21:24:29|4096B    0 :   0     0 :4096B    0 
+13-12 21:24:30|   0     0 :   0     0 :   0     0 
+13-12 21:24:31|   0     0 :   0     0 :   0     0 </code></pre></div>
+					</div>
+				</div>
+			</div>
+		</div>
+		<div class="inbox">
+			<div class="postfoot clearb">
+				<div class="postfootleft"><p><span>Offline</span></p></div>
+			</div>
+		</div>
+	</div>
+</div>
+
+<div id="p1943706" class="blockpost roweven">
+	<h2><span><span class="conr">#4</span> <a href="viewtopic.php?pid=1943706#p1943706">2020-12-15 06:23:01</a></span></h2>
+	<div class="box">
+		<div class="inbox">
+			<div class="postbody">
+				<div class="postleft">
+					<dl>
+						<dt><strong>cdwijs</strong></dt>
+						<dd class="usertitle"><strong>Member</strong></dd>
+						<dd><span>Registered: 2010-04-24</span></dd>
+						<dd><span>Posts: 309</span></dd>
+					</dl>
+				</div>
+				<div class="postright">
+					<h3>Re: [solved]Btrfs raid1 with very slow HD and SSD, howto maximize performa</h3>
+					<div class="postmsg">
+						<p>It&#039;s possible to remove the hard drive from the array, and then re-add it. This causes the ID of the hard drive to change from 1 to 3, so the ssd with ID 2 becomes the primary device.</p><p>My procedure does involve a two reshufflings of all the data. Is there somebody who know a more efficient method?</p><div class="codebox"><pre class="vscroll"><code># btrfs fi show
+Label: none  uuid: 485952f9-0cfc-499a-b5c2-5131d34b0372
+	Total devices 2 FS bytes used 39.76GiB
+	devid    1 size 149.05GiB used 41.03GiB path /dev/sdb1
+	devid    2 size 223.57GiB used 41.03GiB path /dev/sda1
+# btrfs balance start -dconvert=single,devid=2 -mconvert=single,devid=2 --force  /
+# btrfs fi show
+Label: none  uuid: 485952f9-0cfc-499a-b5c2-5131d34b0372
+	Total devices 2 FS bytes used 39.76GiB
+	devid    1 size 149.05GiB used 0.00B path /dev/sdb1
+	devid    2 size 223.57GiB used 42.06GiB path /dev/sda1
+# btrfs device delete /dev/sdb1 /
+# btrfs fi show
+Label: none  uuid: 485952f9-0cfc-499a-b5c2-5131d34b0372
+	Total devices 1 FS bytes used 39.76GiB
+	devid    2 size 223.57GiB used 42.06GiB path /dev/sda1
+# btrfs device add /dev/sdb1 /
+# btrfs fi show
+Label: none  uuid: 485952f9-0cfc-499a-b5c2-5131d34b0372
+	Total devices 2 FS bytes used 39.76GiB
+	devid    2 size 223.57GiB used 42.06GiB path /dev/sda1
+	devid    3 size 149.05GiB used 0.00B path /dev/sdb1
+# btrfs balance start -dconvert=raid1 -mconvert=raid1 /
+# btrfs fi show
+Label: none  uuid: 485952f9-0cfc-499a-b5c2-5131d34b0372
+	Total devices 2 FS bytes used 39.77GiB
+	devid    2 size 223.57GiB used 42.06GiB path /dev/sda1
+	devid    3 size 149.05GiB used 42.06GiB path /dev/sdb1</code></pre></div>
+					</div>
+				</div>
+			</div>
+		</div>
+		<div class="inbox">
+			<div class="postfoot clearb">
+				<div class="postfootleft"><p><span>Offline</span></p></div>
+			</div>
+		</div>
+	</div>
+</div>
+
+<div class="postlinksb">
+	<div class="inbox crumbsplus">
+		<div class="pagepost">
+			<p class="pagelink conl"><span class="pages-label">Pages: </span><strong class="item1">1</strong></p>
+		</div>
+		<ul class="crumbs">
+			<li><a href="index.php">Index</a></li>
+			<li><span>»&#160;</span><a href="viewforum.php?id=18">Applications &amp; Desktop Environments</a></li>
+			<li><span>»&#160;</span><strong><a href="viewtopic.php?id=261693">[solved]Btrfs raid1 with very slow HD and SSD, howto maximize performa</a></strong></li>
+		</ul>
+		<div class="clearer"></div>
+	</div>
+</div>
+</div>
+
+<div id="brdfooter" class="block">
+	<h2><span>Board footer</span></h2>
+	<div class="box">
+		<div id="brdfooternav" class="inbox">
+			<div class="conl">
+				<form id="qjump" method="get" action="viewforum.php">
+					<div><label><span>Jump to<br /></span>
+					<select name="id" onchange="window.location=('viewforum.php?id='+this.options[this.selectedIndex].value)">
+						<optgroup label="Technical Issues and Assistance">
+							<option value="23">Newbie Corner</option>
+							<option value="17">Installation</option>
+							<option value="22">Kernel &amp; Hardware</option>
+							<option value="18" selected="selected">Applications &amp; Desktop Environments</option>
+							<option value="31">Laptop Issues</option>
+							<option value="8">Networking, Server, and Protection</option>
+							<option value="32">Multimedia and Games</option>
+							<option value="51">Arch Linux Guided Installer</option>
+							<option value="50">System Administration</option>
+							<option value="35">Other Architectures</option>
+						</optgroup>
+						<optgroup label="Arch-centric">
+							<option value="24">Announcements, Package &amp; Security Advisories</option>
+							<option value="1">Arch Discussion</option>
+							<option value="13">Forum &amp; Wiki discussion</option>
+						</optgroup>
+						<optgroup label="Pacman Upgrades, Packaging &amp; AUR">
+							<option value="44">Pacman &amp; Package Upgrade Issues</option>
+							<option value="49">[testing] Repo Forum</option>
+							<option value="4">Creating &amp; Modifying Packages</option>
+							<option value="38">AUR Issues, Discussion &amp; PKGBUILD Requests</option>
+						</optgroup>
+						<optgroup label="Contributions &amp; Discussion">
+							<option value="20">GNU/Linux Discussion</option>
+							<option value="27">Community Contributions</option>
+							<option value="33">Programming &amp; Scripting</option>
+							<option value="30">Other Languages</option>
+							<option value="47">Artwork and Screenshots</option>
+						</optgroup>
+					</select></label>
+					<input type="submit" value=" Go " accesskey="g" />
+					</div>
+				</form>
+			</div>
+			<div class="conr">
+				<p id="feedlinks"><span class="atom"><a href="extern.php?action=feed&amp;tid=261693&amp;type=atom">Atom topic feed</a></span></p>
+				<p id="poweredby">Powered by <a href="http://fluxbb.org/">FluxBB</a></p>
+			</div>
+			<div class="clearer"></div>
+		</div>
+	</div>
+</div>
+
+
+
+</div>
+<div class="end-box"></div>
+</div>
+
+</body>
+</html>

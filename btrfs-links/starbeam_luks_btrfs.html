@@ -1,0 +1,619 @@
+<!DOCTYPE HTML>
+<html>
+	<head>
+		<meta charset="utf-8" />
+		<meta name=viewport content="width=device-width, initial-scale=1" />
+		<title>Encrypting and formatting a disk with LUKS + Btrfs | Stardust | Starbeamrainbowlabs</title>
+		
+		<link rel="icon" href="/favicon.ico" />
+		<link rel="shortcut icon" href="/favicon.ico" />
+		
+		<link rel="alternate" type="application/atom+xml" title="Stardust Blog Atom Feed" href="/blog/feed.php" />
+		
+		<meta name="theme-color" content="#5135b6" />
+		
+				<meta property="og:title" content="Encrypting and formatting a disk with LUKS + Btrfs" />
+		<meta property="og:description" content="Hey there, a wild tutorial appeared! This is just a quick one for self-reference, but I hope it helps others too.
+The problem at hand is that of forma.... (click to read more)" />
+		<meta property="og:type" content="article" />
+		<meta property="og:image" content="http://starbeamrainbowlabs.com/favicon.png" />
+		<meta property="og:image:url" content="http://starbeamrainbowlabs.com/favicon.png" />
+		<meta property="og:image:secure_url" content="https://starbeamrainbowlabs.com/favicon.png" />
+		<meta property="og:url" content="https://starbeamrainbowlabs.com/blog/article.php?article=posts%2F548-crypt-btrfs-setup.html" />
+		<meta property="article:author" content="https://starbeamrainbowlabs.com/" />
+		<meta property="article:published_time" content="2024-06-08T09:03:33+01:00" />
+		<meta property="article:tag" content="Guide, Linux, Bash, Terminal, Security" />
+		<meta property="twitter:card" content="summary" />
+		<meta property="twitter:site" content="@SBRLabs" />
+		<meta property="twitter:title" content="Encrypting and formatting a disk with LUKS + Btrfs" />
+		<meta property="twitter:description" content="Hey there, a wild tutorial appeared! This is just a quick one for self-reference, but I hope it helps others too.
+The problem at hand is that of forma.... (click to read more)" />
+		<meta property="twitter:image" content="https://starbeamrainbowlabs.com/favicon.png" />
+		
+		<link rel="alternate" type="application/json+oembed" href="https://starbeamrainbowlabs.com/blog/oembed.php?format=json&url=https%3A%2F%2Fstarbeamrainbowlabs.com%2Fblog%2Farticle.php%3Farticle%3Dposts%252F548-crypt-btrfs-setup.html" />
+
+	</head>
+	<body class="language-clike">
+		
+<!-- <a href="http://starbeamrainbowlabs.com/stealthpackager.php">Cookies.....</a> -->
+
+<h1 class="centretext"><a href="/">
+	<img src="/images/heading.svg" alt="Starbeamrainbowlabs" />
+</a></h1>
+
+		
+		<h2 class="blogtitle centretext"><a href="/blog/">
+			Stardust
+			<br />
+			<small class="block centretext">Blog</small>
+		</a></h2>
+		<article class='post' data-post-title='Encrypting and formatting a disk with LUKS + Btrfs' itemscope itemtype='http://schema.org/BlogPosting'>
+			<a id='posts%2F548-crypt-btrfs-setup.html'></a>
+<div itemprop='articleBody'><!--
+Release on  | 8th June 2024 at 9:00am
+Author      | Starbeamrainbowlabs
+Tags        | Guide, Linux, Bash, Terminal, Security
+-->
+<a itemprop='mainEntityOfPage' href='https://starbeamrainbowlabs.com/blog/article.php?article=posts%2F548-crypt-btrfs-setup.html' class='invisilink'><h2 itemprop='headline'>Encrypting and formatting a disk with LUKS + Btrfs</h2></a>
+<p>Hey there, a wild tutorial appeared! This is just a quick one for self-reference, but I hope it helps others too.</p>
+<p>The problem at hand is that of formatting a <em>data</em> disk (if you want to format your root <code>/</code> disk please look elsewhere - it usually has to be done before or during installation unless you like fiddling around in a live environment) with Btrfs.... but also encrypting the disk, <a href="https://wiki.archlinux.org/title/Btrfs#Encryption">which isn't something that Btrfs natively supports</a>.</p>
+<p>I'm copying over some data to my new lab PC, and I've decided to up the security on the data disk I store my research data on.</p>
+<p>Unfortunately, both <em>GParted</em> and <em>KDE Partition Manager</em> were unable to help me (the former not supporting LUKS, and the latter crashing with a strange error), so I ended up looking through more posts that should be reasonable to find a solution that didn't involve encrypting either <code>/</code> or <code>/boot</code>.</p>
+<p>It's actually quite simple. First, find your disk's name via <code>lsblk</code>, and ensure you have created the partition in question. You can format it with anything (e.g. using the above) since we'll be overwriting it anyway.</p>
+<p><strong>Note:</strong> You may need to reboot after creating the partition (or after some of the below) if you encounter errors, as Linux sometimes doesn't like new partitions appearing out of the blue with names that were used previously on that boot very much.</p>
+<p>Then, format it with LUKS, the most common encryption scheme on Linux:</p>
+<pre><code class="language-bash">sudo cryptsetup luksFormat /dev/nvmeXnYpZ</code></pre>
+<p>...then, formatting with Btrfs is a 2-step process. First we hafta unlock the LUKS encrypted partition:</p>
+<pre><code class="language-bash">sudo cryptsetup luksOpen /dev/nvme0n1p1 SOME_MAPPER_NAME</code></pre>
+<p>...this creates a virtual 'mapper' block device we can hit like any other normal (physical) partition. Change <code>SOME_MAPPER_NAME</code> to anything you like so long as it doesn't match anything else in <code>lsblk</code>/<code>df -h</code> and also doesn't contain spaces. Avoid unicode/special characters too, just to be safe.</p>
+<p>Then, format it with Btrfs:</p>
+<pre><code class="language-bash">sudo mkfs.btrfs --metadata single --data single --label "SOME_LABEL" /dev/mapper/SOME_MAPPER_NAME</code></pre>
+<p>...replacing <code>SOME_MAPPER_NAME</code> (same value you chose earlier) and <code>SOME_LABEL</code> as appropriate. If you have multiple disks, rinse and repeat the above steps for them, and then bung them on the end:</p>
+<pre><code class="language-bash">sudo mkfs.btrfs --metadata raid1 --data raid1 --label "SOME_LABEL" /dev/mapper/MAPPER_NAME_A /dev/mapper/MAPPER_NAME_B ... /dev/mapper/MAPPER_NAME_N</code></pre>
+<p>Note the change from <code>single</code> to <code>raid1</code>. <code>raid1</code> stores at least 2 copies on different disks - it's a bit of a misnomer as <a href="https://starbeamrainbowlabs.com/blog/article.php?article=posts/472-nas-backups-part-2-btrfs-send-recieve.html">I've talked about before</a>.</p>
+<p>Now that you have a kewl Btrfs-formatted partition, mount it as normal:</p>
+<pre><code class="language-bash">sudo mount /dev/mapper/SOME_MAPPER_NAME /absolute/path/to/mount/point</code></pre>
+<p>For Btrfs filesystems with multiple disks, it shouldn't matter which source partition you pick here as Btrfs should pick up on the other disks.</p>
+<h3>Automation</h3>
+<p>Now that we have it formatted, we don't want to hafta keep typing all those commands again. The simple solution to this is to create a shell script and put it somewhere in our <code>$PATH</code>.</p>
+<p>To do this, we should ensure we have a robust name for the disk instead of <code>/dev/nvme</code>, which could point to a different disk in future if your motherboard or kernel decides to present them in a different order for a giggle. That's easy by looking over the output of <code>blkid</code> and cross-referencing it with <code>lsblk</code> and/or <code>df -h</code>:</p>
+<pre><code class="language-bash">sudo lsblk
+sudo df -h
+sudo blkid # → UUID</code></pre>
+<p>The number you're after should be in the <code>UUID=""</code> field. The shell script I came up with is short and sweet:</p>
+<pre><code class="language-bash">#!/usr/bin/env bash
+disk_id="ID_FROM_BLKID";
+mapper_name="SOME_NAME";
+mount_path="/absolute/path/to/mount/dir";
+
+sudo cryptsetup luksOpen "/dev/disk/by-uuid/${disk_id}" "${mapper_name}";
+sudo mount "/dev/mapper/${mapper_name}" "${mount_path}"</code></pre>
+<p>Fill in the values as appropriate:</p>
+<ul>
+<li><strong><code>disk_id</code>:</strong> The UUID of the disk in question from <code>blkid</code>.</li>
+<li><strong><code>mapper_name</code>:</strong> A name of your choosing that doesn't clash with anything else in <code>/dev/mapper</code> on your system</li>
+<li><strong><code>mount_path</code>:</strong> The absolute path to the directory that you want to mount into - usually in <code>/mnt</code> or <code>/media</code>.</li>
+</ul>
+<p>Put this script in e.g. <code>$HOME/.local/bin</code> or somewhere else in <code>$PATH</code> that suits you and your setup. Don't forget to run <code>chmod +x path/to/script</code>!</p>
+<h3>Conclusion</h3>
+<p>We've formatted an existing partition with LUKS and Btrfs, and written a quick-and-dirty shell script to semi-automate the process of mounting it here.</p>
+<p>If this has been useful or if you have any suggestions, please do leave a comment below!</p>
+<h3>Sources and further reading</h3>
+<ul>
+<li>Another guide that I have somehow lost that reminded me about <code>cryptsetup luksFormat</code> and <code>cryptsetup luksOpen</code> - if you find it again please leave a comment below! I think it was a GitHub Gist or repo somewhere</li>
+<li><a href="https://bbs.archlinux.org/viewtopic.php?id=262656">cryptsetup - device-mapper: reload ioctl on failed: No such file or / Newbie Corner / Arch Linux Forums</a></li>
+<li><a href="https://unix.stackexchange.com/q/658/64687">linux: How can I view all UUIDs for all available disks on my system? - Unix &amp; Linux Stack Exchange</a></li>
+</ul><span style='display: none;' itemprop='image' itemscope itemtype='https://schema.org/ImageObject'><meta itemprop='url' content='http://starbeamrainbowlabs.com/favicon.png' /><meta itemprop='width' content='256' /><meta itemprop='height' content='256' /></span>
+</div><meta itemprop='commentCount' content='0' /><meta itemprop='datePublished' content='2024-06-08T09:00:00+01:00' /><meta itemprop='dateModified' content='2024-06-08T09:03:33+01:00' />
+			<footer class='small-panel centretext'>
+<span class='small-spacing small-panel'>				by <span itemprop='author publisher' itemscope itemtype='http://schema.org/Person'><span itemprop='name'>Starbeamrainbowlabs</span><meta itemprop='image' content='https://starbeamrainbowlabs.com/favicon-small.png' /></span></span><wbr /><span class='small-spacing small-panel'><span class='oi' data-glyph='clock' title='Published on' aria-hidden='true'></span>
+			<span title='Saturday 8th of June 2024 at 09:00am BST' style='cursor:help;'>8-6-2024 at 09:00 am</span></span><wbr /><span class='small-spacing small-panel'><span class='oi' data-glyph='tag' title='Tags' aria-hidden='true'></span><a href='//starbeamrainbowlabs.com/blog/?tags=Guide'>Guide</a>, <a href='//starbeamrainbowlabs.com/blog/?tags=Linux'>Linux</a>, <a href='//starbeamrainbowlabs.com/blog/?tags=Bash'>Bash</a>, <a href='//starbeamrainbowlabs.com/blog/?tags=Terminal'>Terminal</a>, <a href='//starbeamrainbowlabs.com/blog/?tags=Security'>Security</a></span><wbr /><span class='small-spacing small-panel'><a itemprop='url' href='https://starbeamrainbowlabs.com/blog/article.php?article=posts%2F548-crypt-btrfs-setup.html'><span class='oi' data-glyph='link-intact' title='Permanent Link' aria-hidden='true'></span>Permanent Link</a></span><wbr /><span class='small-spacing small-panel'><span class='oi' data-glyph='monitor' title='Views'></span>3942 views<img class='icon nomargin' src='https://starbeamrainbowlabs.com/blog/viewtracker.php?action=record&format=image&post-id=posts%2F548-crypt-btrfs-setup.html' alt='View tracking image. Download it to increment the view counter!' /></span><wbr /><span class='small-spacing small-panel'><a href='https://starbeamrainbowlabs.com/blog/article.php?article=posts%2F548-crypt-btrfs-setup.html#comments' itemprop='discussionUrl'><span class='oi' data-glyph='comment-square' title='Comments' aria-hidden='true'></span>0 comments</a></span><wbr /><span class='small-spacing small-panel'><span class='oi' data-glyph='people' title='Share' aria-hidden='true'></span>Share via:
+<a href='https://starbeamrainbowlabs.com/share2fediverse/#text=Encrypting%20and%20formatting%20a%20disk%20with%20LUKS%20%2B%20Btrfs%20-%20Blog%20post%0Ahttps%3A%2F%2Fstarbeamrainbowlabs.com%2Fblog%2Farticle.php%3Farticle%3Dposts%252F548-crypt-btrfs-setup.html' target='_blank'><img src='https://starbeamrainbowlabs.com/images/logos/fediverse.svg' class='icon' title='Share on the Fediverse' alt='Share this post on the Fediverse' /></a>
+<a href='https://twitter.com/share?url=https%3A%2F%2Fstarbeamrainbowlabs.com%2Fblog%2Farticle.php%3Farticle%3Dposts%252F548-crypt-btrfs-setup.html&text=Encrypting%20and%20formatting%20a%20disk%20with%20LUKS%20%2B%20Btrfs%20-%20Blog%20post&via=SBRLabs' target='_blank'><img src='https://starbeamrainbowlabs.com/images/logos/twitter.svg' class='icon' title='Share via Twitter' alt='Share this post via Twitter' /></a>
+<a href='https://facebook.com/sharer/sharer.php?u=https%3A%2F%2Fstarbeamrainbowlabs.com%2Fblog%2Farticle.php%3Farticle%3Dposts%252F548-crypt-btrfs-setup.html' target='_blank'><img src='https://starbeamrainbowlabs.com/images/logos/facebook.svg' class='icon' title='Share via Facebook' alt='Share this post via Facebook' /></a>
+<a href='http://www.addtoany.com/add_to/evernote?linkurl=https%3A%2F%2Fstarbeamrainbowlabs.com%2Fblog%2Farticle.php%3Farticle%3Dposts%252F548-crypt-btrfs-setup.html&title=Encrypting%20and%20formatting%20a%20disk%20with%20LUKS%20%2B%20Btrfs' target='_blank'><img src='https://starbeamrainbowlabs.com/images/logos/evernote.svg' class='icon' title='Share via Evernote' alt='Share this article via Evernote' /></a>
+<a href='mailto:?Subject=Stardust%20Blog%20Post%3A%20Encrypting%20and%20formatting%20a%20disk%20with%20LUKS%20%2B%20Btrfs&amp;Body=https%3A%2F%2Fstarbeamrainbowlabs.com%2Fblog%2Farticle.php%3Farticle%3Dposts%252F548-crypt-btrfs-setup.html'><img src='https://starbeamrainbowlabs.com/images/logos/mail.svg' class='icon' title='Share by Email' alt='Share by Email' /></a></span><wbr />			</footer>
+		</article>
+
+		
+		<details class='tag-cloud small-panel'>
+<summary title='Click to toggle tag cloud'><h2>Tag Cloud</h2></summary>
+	<span class='tag small-panel' title='9 Posts' style='font-size: 1.268rem; opacity: 0.791;'><a href='/blog?tags=3d'>3d</a></span>
+	<span class='tag small-panel' title='2 Posts' style='font-size: 0.919rem; opacity: 0.691;'><a href='/blog?tags=3d%20printing'>3d printing</a></span>
+	<span class='tag small-panel' title='4 Posts' style='font-size: 1.067rem; opacity: 0.733;'><a href='/blog?tags=account'>account</a></span>
+	<span class='tag small-panel' title='35 Posts' style='font-size: 1.639rem; opacity: 0.897;'><a href='/blog?tags=algorithms'>algorithms</a></span>
+	<span class='tag small-panel' title='5 Posts' style='font-size: 1.120rem; opacity: 0.748;'><a href='/blog?tags=android'>android</a></span>
+	<span class='tag small-panel' title='23 Posts' style='font-size: 1.521rem; opacity: 0.863;'><a href='/blog?tags=announcement'>announcement</a></span>
+	<span class='tag small-panel' title='11 Posts' style='font-size: 1.321rem; opacity: 0.806;'><a href='/blog?tags=architecture'>architecture</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=archives'>archives</a></span>
+	<span class='tag small-panel' title='15 Posts' style='font-size: 1.404rem; opacity: 0.830;'><a href='/blog?tags=arduino'>arduino</a></span>
+	<span class='tag small-panel' title='17 Posts' style='font-size: 1.438rem; opacity: 0.839;'><a href='/blog?tags=artificial%20intelligence'>artificial intelligence</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=artix'>artix</a></span>
+	<span class='tag small-panel' title='2 Posts' style='font-size: 0.919rem; opacity: 0.691;'><a href='/blog?tags=assembly'>assembly</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=async'>async</a></span>
+	<span class='tag small-panel' title='3 Posts' style='font-size: 1.002rem; opacity: 0.715;'><a href='/blog?tags=audio'>audio</a></span>
+	<span class='tag small-panel' title='4 Posts' style='font-size: 1.067rem; opacity: 0.733;'><a href='/blog?tags=automation'>automation</a></span>
+	<span class='tag small-panel' title='7 Posts' style='font-size: 1.203rem; opacity: 0.772;'><a href='/blog?tags=backups'>backups</a></span>
+	<span class='tag small-panel' title='39 Posts' style='font-size: 1.670rem; opacity: 0.906;'><a href='/blog?tags=bash'>bash</a></span>
+	<span class='tag small-panel' title='2 Posts' style='font-size: 0.919rem; opacity: 0.691;'><a href='/blog?tags=batch'>batch</a></span>
+	<span class='tag small-panel' title='2 Posts' style='font-size: 0.919rem; opacity: 0.691;'><a href='/blog?tags=blender'>blender</a></span>
+	<span class='tag small-panel' title='2 Posts' style='font-size: 0.919rem; opacity: 0.691;'><a href='/blog?tags=blog'>blog</a></span>
+	<span class='tag small-panel' title='3 Posts' style='font-size: 1.002rem; opacity: 0.715;'><a href='/blog?tags=bookmarklet'>bookmarklet</a></span>
+	<span class='tag small-panel' title='4 Posts' style='font-size: 1.067rem; opacity: 0.733;'><a href='/blog?tags=booting'>booting</a></span>
+	<span class='tag small-panel' title='4 Posts' style='font-size: 1.067rem; opacity: 0.733;'><a href='/blog?tags=bug%20hunting'>bug hunting</a></span>
+	<span class='tag small-panel' title='63 Posts' style='font-size: 1.806rem; opacity: 0.945;'><a href='/blog?tags=c%20sharp'>c sharp</a></span>
+	<span class='tag small-panel' title='7 Posts' style='font-size: 1.203rem; opacity: 0.772;'><a href='/blog?tags=c%2B%2B'>c++</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=challenge'>challenge</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=chrome%20os'>chrome os</a></span>
+	<span class='tag small-panel' title='16 Posts' style='font-size: 1.422rem; opacity: 0.835;'><a href='/blog?tags=cluster'>cluster</a></span>
+	<span class='tag small-panel' title='20 Posts' style='font-size: 1.483rem; opacity: 0.852;'><a href='/blog?tags=code'>code</a></span>
+	<span class='tag small-panel' title='4 Posts' style='font-size: 1.067rem; opacity: 0.733;'><a href='/blog?tags=codepen'>codepen</a></span>
+	<span class='tag small-panel' title='5 Posts' style='font-size: 1.120rem; opacity: 0.748;'><a href='/blog?tags=coding%20conundrums'>coding conundrums</a></span>
+	<span class='tag small-panel' title='5 Posts' style='font-size: 1.120rem; opacity: 0.748;'><a href='/blog?tags=coding%20conundrums%20evolved'>coding conundrums evolved</a></span>
+	<span class='tag small-panel' title='8 Posts' style='font-size: 1.237rem; opacity: 0.782;'><a href='/blog?tags=command%20line'>command line</a></span>
+	<span class='tag small-panel' title='13 Posts' style='font-size: 1.365rem; opacity: 0.819;'><a href='/blog?tags=compilers'>compilers</a></span>
+	<span class='tag small-panel' title='3 Posts' style='font-size: 1.002rem; opacity: 0.715;'><a href='/blog?tags=compiling'>compiling</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=compression'>compression</a></span>
+	<span class='tag small-panel' title='3 Posts' style='font-size: 1.002rem; opacity: 0.715;'><a href='/blog?tags=conference'>conference</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=conferences'>conferences</a></span>
+	<span class='tag small-panel' title='2 Posts' style='font-size: 0.919rem; opacity: 0.691;'><a href='/blog?tags=containerisation'>containerisation</a></span>
+	<span class='tag small-panel' title='6 Posts' style='font-size: 1.164rem; opacity: 0.761;'><a href='/blog?tags=css'>css</a></span>
+	<span class='tag small-panel' title='4 Posts' style='font-size: 1.067rem; opacity: 0.733;'><a href='/blog?tags=dailyprogrammer'>dailyprogrammer</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=data%20analysis'>data analysis</a></span>
+	<span class='tag small-panel' title='11 Posts' style='font-size: 1.321rem; opacity: 0.806;'><a href='/blog?tags=debugging'>debugging</a></span>
+	<span class='tag small-panel' title='2 Posts' style='font-size: 0.919rem; opacity: 0.691;'><a href='/blog?tags=defining%20ai'>defining ai</a></span>
+	<span class='tag small-panel' title='10 Posts' style='font-size: 1.295rem; opacity: 0.799;'><a href='/blog?tags=demystification'>demystification</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=distributed%20computing'>distributed computing</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=dns'>dns</a></span>
+	<span class='tag small-panel' title='2 Posts' style='font-size: 0.919rem; opacity: 0.691;'><a href='/blog?tags=docker'>docker</a></span>
+	<span class='tag small-panel' title='2 Posts' style='font-size: 0.919rem; opacity: 0.691;'><a href='/blog?tags=documentation'>documentation</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=downtime'>downtime</a></span>
+	<span class='tag small-panel' title='2 Posts' style='font-size: 0.919rem; opacity: 0.691;'><a href='/blog?tags=electronics'>electronics</a></span>
+	<span class='tag small-panel' title='2 Posts' style='font-size: 0.919rem; opacity: 0.691;'><a href='/blog?tags=email'>email</a></span>
+	<span class='tag small-panel' title='4 Posts' style='font-size: 1.067rem; opacity: 0.733;'><a href='/blog?tags=embedded%20systems'>embedded systems</a></span>
+	<span class='tag small-panel' title='4 Posts' style='font-size: 1.067rem; opacity: 0.733;'><a href='/blog?tags=encryption'>encryption</a></span>
+	<span class='tag small-panel' title='15 Posts' style='font-size: 1.404rem; opacity: 0.830;'><a href='/blog?tags=es6%20features'>es6 features</a></span>
+	<span class='tag small-panel' title='2 Posts' style='font-size: 0.919rem; opacity: 0.691;'><a href='/blog?tags=ethics'>ethics</a></span>
+	<span class='tag small-panel' title='8 Posts' style='font-size: 1.237rem; opacity: 0.782;'><a href='/blog?tags=event'>event</a></span>
+	<span class='tag small-panel' title='4 Posts' style='font-size: 1.067rem; opacity: 0.733;'><a href='/blog?tags=experiment'>experiment</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=external'>external</a></span>
+	<span class='tag small-panel' title='8 Posts' style='font-size: 1.237rem; opacity: 0.782;'><a href='/blog?tags=first%20impressions'>first impressions</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=freeside'>freeside</a></span>
+	<span class='tag small-panel' title='11 Posts' style='font-size: 1.321rem; opacity: 0.806;'><a href='/blog?tags=future'>future</a></span>
+	<span class='tag small-panel' title='2 Posts' style='font-size: 0.919rem; opacity: 0.691;'><a href='/blog?tags=game'>game</a></span>
+	<span class='tag small-panel' title='8 Posts' style='font-size: 1.237rem; opacity: 0.782;'><a href='/blog?tags=github'>github</a></span>
+	<span class='tag small-panel' title='2 Posts' style='font-size: 0.919rem; opacity: 0.691;'><a href='/blog?tags=github%20gist'>github gist</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=gitlab'>gitlab</a></span>
+	<span class='tag small-panel' title='11 Posts' style='font-size: 1.321rem; opacity: 0.806;'><a href='/blog?tags=graphics'>graphics</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=guide'>guide</a></span>
+	<span class='tag small-panel' title='13 Posts' style='font-size: 1.365rem; opacity: 0.819;'><a href='/blog?tags=hardware'>hardware</a></span>
+	<span class='tag small-panel' title='2 Posts' style='font-size: 0.919rem; opacity: 0.691;'><a href='/blog?tags=hardware%20meetup'>hardware meetup</a></span>
+	<span class='tag small-panel' title='9 Posts' style='font-size: 1.268rem; opacity: 0.791;'><a href='/blog?tags=holiday'>holiday</a></span>
+	<span class='tag small-panel' title='7 Posts' style='font-size: 1.203rem; opacity: 0.772;'><a href='/blog?tags=holidays'>holidays</a></span>
+	<span class='tag small-panel' title='6 Posts' style='font-size: 1.164rem; opacity: 0.761;'><a href='/blog?tags=html'>html</a></span>
+	<span class='tag small-panel' title='2 Posts' style='font-size: 0.919rem; opacity: 0.691;'><a href='/blog?tags=html5'>html5</a></span>
+	<span class='tag small-panel' title='10 Posts' style='font-size: 1.295rem; opacity: 0.799;'><a href='/blog?tags=html5%20canvas'>html5 canvas</a></span>
+	<span class='tag small-panel' title='2 Posts' style='font-size: 0.919rem; opacity: 0.691;'><a href='/blog?tags=infrastructure'>infrastructure</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=interfaces'>interfaces</a></span>
+	<span class='tag small-panel' title='9 Posts' style='font-size: 1.268rem; opacity: 0.791;'><a href='/blog?tags=internet'>internet</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=interoperability'>interoperability</a></span>
+	<span class='tag small-panel' title='2 Posts' style='font-size: 0.919rem; opacity: 0.691;'><a href='/blog?tags=io.js'>io.js</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=jabber'>jabber</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=jam'>jam</a></span>
+	<span class='tag small-panel' title='67 Posts' style='font-size: 1.823rem; opacity: 0.950;'><a href='/blog?tags=javascript'>javascript</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=js%20bin'>js bin</a></span>
+	<span class='tag small-panel' title='6 Posts' style='font-size: 1.164rem; opacity: 0.761;'><a href='/blog?tags=labs'>labs</a></span>
+	<span class='tag small-panel' title='2 Posts' style='font-size: 0.919rem; opacity: 0.691;'><a href='/blog?tags=latex'>latex</a></span>
+	<span class='tag small-panel' title='28 Posts' style='font-size: 1.576rem; opacity: 0.879;'><a href='/blog?tags=learning'>learning</a></span>
+	<span class='tag small-panel' title='4 Posts' style='font-size: 1.067rem; opacity: 0.733;'><a href='/blog?tags=library'>library</a></span>
+	<span class='tag small-panel' title='124 Posts' style='font-size: 2.000rem; opacity: 1.000;'><a href='/blog?tags=linux'>linux</a></span>
+	<span class='tag small-panel' title='4 Posts' style='font-size: 1.067rem; opacity: 0.733;'><a href='/blog?tags=lora'>lora</a></span>
+	<span class='tag small-panel' title='2 Posts' style='font-size: 0.919rem; opacity: 0.691;'><a href='/blog?tags=low%20level'>low level</a></span>
+	<span class='tag small-panel' title='5 Posts' style='font-size: 1.120rem; opacity: 0.748;'><a href='/blog?tags=lua'>lua</a></span>
+	<span class='tag small-panel' title='17 Posts' style='font-size: 1.438rem; opacity: 0.839;'><a href='/blog?tags=maintenance'>maintenance</a></span>
+	<span class='tag small-panel' title='3 Posts' style='font-size: 1.002rem; opacity: 0.715;'><a href='/blog?tags=manjaro'>manjaro</a></span>
+	<span class='tag small-panel' title='2 Posts' style='font-size: 0.919rem; opacity: 0.691;'><a href='/blog?tags=minetest'>minetest</a></span>
+	<span class='tag small-panel' title='16 Posts' style='font-size: 1.422rem; opacity: 0.835;'><a href='/blog?tags=network'>network</a></span>
+	<span class='tag small-panel' title='40 Posts' style='font-size: 1.677rem; opacity: 0.908;'><a href='/blog?tags=networking'>networking</a></span>
+	<span class='tag small-panel' title='9 Posts' style='font-size: 1.268rem; opacity: 0.791;'><a href='/blog?tags=nibriboard'>nibriboard</a></span>
+	<span class='tag small-panel' title='11 Posts' style='font-size: 1.321rem; opacity: 0.806;'><a href='/blog?tags=node.js'>node.js</a></span>
+	<span class='tag small-panel' title='2 Posts' style='font-size: 0.919rem; opacity: 0.691;'><a href='/blog?tags=open%20source'>open source</a></span>
+	<span class='tag small-panel' title='8 Posts' style='font-size: 1.237rem; opacity: 0.782;'><a href='/blog?tags=operating%20systems'>operating systems</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=optimisation'>optimisation</a></span>
+	<span class='tag small-panel' title='2 Posts' style='font-size: 0.919rem; opacity: 0.691;'><a href='/blog?tags=outreach'>outreach</a></span>
+	<span class='tag small-panel' title='7 Posts' style='font-size: 1.203rem; opacity: 0.772;'><a href='/blog?tags=own%20your%20code'>own your code</a></span>
+	<span class='tag small-panel' title='8 Posts' style='font-size: 1.237rem; opacity: 0.782;'><a href='/blog?tags=pepperminty%20wiki'>pepperminty wiki</a></span>
+	<span class='tag small-panel' title='6 Posts' style='font-size: 1.164rem; opacity: 0.761;'><a href='/blog?tags=performance'>performance</a></span>
+	<span class='tag small-panel' title='39 Posts' style='font-size: 1.670rem; opacity: 0.906;'><a href='/blog?tags=phd'>phd</a></span>
+	<span class='tag small-panel' title='3 Posts' style='font-size: 1.002rem; opacity: 0.715;'><a href='/blog?tags=photos'>photos</a></span>
+	<span class='tag small-panel' title='29 Posts' style='font-size: 1.586rem; opacity: 0.882;'><a href='/blog?tags=php'>php</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=pixelbot'>pixelbot</a></span>
+	<span class='tag small-panel' title='2 Posts' style='font-size: 0.919rem; opacity: 0.691;'><a href='/blog?tags=portable'>portable</a></span>
+	<span class='tag small-panel' title='2 Posts' style='font-size: 0.919rem; opacity: 0.691;'><a href='/blog?tags=privacy'>privacy</a></span>
+	<span class='tag small-panel' title='19 Posts' style='font-size: 1.469rem; opacity: 0.848;'><a href='/blog?tags=problem%20solving'>problem solving</a></span>
+	<span class='tag small-panel' title='11 Posts' style='font-size: 1.321rem; opacity: 0.806;'><a href='/blog?tags=programming%20problems'>programming problems</a></span>
+	<span class='tag small-panel' title='2 Posts' style='font-size: 0.919rem; opacity: 0.691;'><a href='/blog?tags=project'>project</a></span>
+	<span class='tag small-panel' title='37 Posts' style='font-size: 1.655rem; opacity: 0.901;'><a href='/blog?tags=projects'>projects</a></span>
+	<span class='tag small-panel' title='18 Posts' style='font-size: 1.454rem; opacity: 0.844;'><a href='/blog?tags=prolog'>prolog</a></span>
+	<span class='tag small-panel' title='6 Posts' style='font-size: 1.164rem; opacity: 0.761;'><a href='/blog?tags=protocol'>protocol</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=protocols'>protocols</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=pseudo%203d'>pseudo 3d</a></span>
+	<span class='tag small-panel' title='11 Posts' style='font-size: 1.321rem; opacity: 0.806;'><a href='/blog?tags=python'>python</a></span>
+	<span class='tag small-panel' title='2 Posts' style='font-size: 0.919rem; opacity: 0.691;'><a href='/blog?tags=reddit'>reddit</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=redis'>redis</a></span>
+	<span class='tag small-panel' title='6 Posts' style='font-size: 1.164rem; opacity: 0.761;'><a href='/blog?tags=reference'>reference</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=release'>release</a></span>
+	<span class='tag small-panel' title='32 Posts' style='font-size: 1.614rem; opacity: 0.890;'><a href='/blog?tags=releases'>releases</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=rendering'>rendering</a></span>
+	<span class='tag small-panel' title='9 Posts' style='font-size: 1.268rem; opacity: 0.791;'><a href='/blog?tags=research'>research</a></span>
+	<span class='tag small-panel' title='11 Posts' style='font-size: 1.321rem; opacity: 0.806;'><a href='/blog?tags=resource'>resource</a></span>
+	<span class='tag small-panel' title='31 Posts' style='font-size: 1.605rem; opacity: 0.887;'><a href='/blog?tags=review'>review</a></span>
+	<span class='tag small-panel' title='2 Posts' style='font-size: 0.919rem; opacity: 0.691;'><a href='/blog?tags=rust'>rust</a></span>
+	<span class='tag small-panel' title='3 Posts' style='font-size: 1.002rem; opacity: 0.715;'><a href='/blog?tags=searching'>searching</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=secrets'>secrets</a></span>
+	<span class='tag small-panel' title='19 Posts' style='font-size: 1.469rem; opacity: 0.848;'><a href='/blog?tags=security'>security</a></span>
+	<span class='tag small-panel' title='10 Posts' style='font-size: 1.295rem; opacity: 0.799;'><a href='/blog?tags=series%20list'>series list</a></span>
+	<span class='tag small-panel' title='49 Posts' style='font-size: 1.734rem; opacity: 0.924;'><a href='/blog?tags=server'>server</a></span>
+	<span class='tag small-panel' title='10 Posts' style='font-size: 1.295rem; opacity: 0.799;'><a href='/blog?tags=software'>software</a></span>
+	<span class='tag small-panel' title='4 Posts' style='font-size: 1.067rem; opacity: 0.733;'><a href='/blog?tags=sorting'>sorting</a></span>
+	<span class='tag small-panel' title='3 Posts' style='font-size: 1.002rem; opacity: 0.715;'><a href='/blog?tags=source%20code%20control'>source code control</a></span>
+	<span class='tag small-panel' title='4 Posts' style='font-size: 1.067rem; opacity: 0.733;'><a href='/blog?tags=statistics'>statistics</a></span>
+	<span class='tag small-panel' title='7 Posts' style='font-size: 1.203rem; opacity: 0.772;'><a href='/blog?tags=storage'>storage</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=svg'>svg</a></span>
+	<span class='tag small-panel' title='2 Posts' style='font-size: 0.919rem; opacity: 0.691;'><a href='/blog?tags=systemquery'>systemquery</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=talks'>talks</a></span>
+	<span class='tag small-panel' title='5 Posts' style='font-size: 1.120rem; opacity: 0.748;'><a href='/blog?tags=technical'>technical</a></span>
+	<span class='tag small-panel' title='61 Posts' style='font-size: 1.797rem; opacity: 0.942;'><a href='/blog?tags=terminal'>terminal</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=textures'>textures</a></span>
+	<span class='tag small-panel' title='2 Posts' style='font-size: 0.919rem; opacity: 0.691;'><a href='/blog?tags=thoughts'>thoughts</a></span>
+	<span class='tag small-panel' title='2 Posts' style='font-size: 0.919rem; opacity: 0.691;'><a href='/blog?tags=three%20thing%20game'>three thing game</a></span>
+	<span class='tag small-panel' title='4 Posts' style='font-size: 1.067rem; opacity: 0.733;'><a href='/blog?tags=three.js'>three.js</a></span>
+	<span class='tag small-panel' title='9 Posts' style='font-size: 1.268rem; opacity: 0.791;'><a href='/blog?tags=tool'>tool</a></span>
+	<span class='tag small-panel' title='72 Posts' style='font-size: 1.844rem; opacity: 0.955;'><a href='/blog?tags=tutorial'>tutorial</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=twitter'>twitter</a></span>
+	<span class='tag small-panel' title='7 Posts' style='font-size: 1.203rem; opacity: 0.772;'><a href='/blog?tags=ubuntu'>ubuntu</a></span>
+	<span class='tag small-panel' title='69 Posts' style='font-size: 1.832rem; opacity: 0.952;'><a href='/blog?tags=university'>university</a></span>
+	<span class='tag small-panel' title='35 Posts' style='font-size: 1.639rem; opacity: 0.897;'><a href='/blog?tags=update'>update</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=updates'>updates</a></span>
+	<span class='tag small-panel' title='6 Posts' style='font-size: 1.164rem; opacity: 0.761;'><a href='/blog?tags=upgrade'>upgrade</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=version%20control'>version control</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=virtual%20reality'>virtual reality</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=virtualisation'>virtualisation</a></span>
+	<span class='tag small-panel' title='29 Posts' style='font-size: 1.586rem; opacity: 0.882;'><a href='/blog?tags=visual'>visual</a></span>
+	<span class='tag small-panel' title='30 Posts' style='font-size: 1.596rem; opacity: 0.884;'><a href='/blog?tags=web'>web</a></span>
+	<span class='tag small-panel' title='34 Posts' style='font-size: 1.631rem; opacity: 0.895;'><a href='/blog?tags=website'>website</a></span>
+	<span class='tag small-panel' title='2 Posts' style='font-size: 0.919rem; opacity: 0.691;'><a href='/blog?tags=windows'>windows</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=windows%2010'>windows 10</a></span>
+	<span class='tag small-panel' title='2 Posts' style='font-size: 0.919rem; opacity: 0.691;'><a href='/blog?tags=worldeditadditions'>worldeditadditions</a></span>
+	<span class='tag small-panel' title='4 Posts' style='font-size: 1.067rem; opacity: 0.733;'><a href='/blog?tags=xmpp'>xmpp</a></span>
+	<span class='tag small-panel' title='1 Posts' style='font-size: 0.801rem; opacity: 0.657;'><a href='/blog?tags=xslt'>xslt</a></span>
+
+</details><!-- type: log -->
+		
+		<article class="panel">
+			<a href="/blog/archive/" style="text-decoration: none;">
+				<h2>Archive</h2>
+			</a>
+		</article>
+		
+		<aside>
+			<h2 id="comments">Comments</h2>
+			<hr />
+			<em class='block centre'>(no comments yet)</em>
+			<hr />
+			<h3 id="sendcomment">Leave a comment</h3>
+<form method="post" action="postcomment.php">
+	<span>
+		<label for="namebox">Name: </label>
+		<input type="text" id="namebox" name="name" placeholder="e.g. Guest, Anonymous, etc." required />
+		<span><span class="help" title="Type your name here. Never use your real name! Posts using a real name will get deleted or altered!">?</span></span>
+	</span>
+	<!-- Hidden field containing a key that allows the comment to be posted. Prefilled by the server. Don't change this unless you know what you are doing! It is to help prevent spam. Email me for more info. -->
+	<input type="hidden" name="key" value="KarcS9ws8BQU5Gl07yV1W6b-Hvz4Oy4a2rWzHLJ4W5cakdayVdVNOgkMsKiPHBa9s54=" />
+	
+	<span>
+		<!--
+			Todo:
+			done.... :D
+			
+			Complex things todo:
+			Set up an 'unsubscribe' function
+			(for now we will do it manually)
+		-->
+		<label for="email">Email Address:</label>
+		<input type="email" id="email" name="email" placeholder="(optional, leave blank if you want) e.g. someone@example.com" />
+		<span><span class="help" title="Entering an email address is optional. If you do, your email address will never be given to anyone else, and you will not receive spam. The only emails you will receive are those notifying you of replies to your comment.">?</span></span>
+	</span>
+	<div style="display: none;">
+		Mess with this field at your own risk. It is here to catch spambots, and so altering it could cause <em>anything</em> to happen!
+		<input type="url" name="website" value="" />
+	</div>
+	<span>
+		<label for="commentbox">Comment: </label>
+		<div>
+			<textarea id="commentbox" name="comment" maxlength="2000" onkeyup="updatecharlimit()" required></textarea>
+			<div id="comment-char-limit" class="meter" title="Character limit: 0 / 2000">
+				<div style="width: 0%;"></div>
+			</div>
+		</div>
+		<span><span class="help" title="Type your comment here. Please read the commenting rules before posting.">?</span></span>
+		<script>
+			function updatecharlimit()
+			{
+				var chars = document.getElementById("commentbox").value.length,
+					meter = document.getElementById("comment-char-limit");
+				
+				meter.setAttribute("title", "Character limit: " + chars + " / 2000");
+				meter.querySelector("div").style.width = ((chars / 2000) * 100) + "%";
+			}
+		</script>
+	</span>
+	<h4>Commenting FAQ</h4>
+	<details>
+		<summary>What are the commenting rules?</summary>
+		<ul>
+			<li><strong>Never</strong> use your real name.</li>
+			<li>Do not give away any personal informtion.</li>
+			<li>Criticism is welcome, but it must be constructive.</li>
+			<li>No abuse or inappropriate content of any kind will be tolerated.</li>
+			<li>Do not spam.</li>
+		</ul>
+		<p>
+			Any comments that are seen to not follow these rules will probably be deleted. It may also result in a ban for the offending user such that they are unable to view the site for an arbitrary length of time.
+		</p>
+		<p>
+			These rules may also be amended without notice, so please check them often.
+		</p>
+	</details>
+	<details>
+		<summary>How can I format my comments?</summary>
+		
+		Basic markdown can be used to format your comments:
+		
+		<table>
+			<tr>
+				<th style="width: 20%;">Type this</th>
+				<th style="width: 15%;">To get this</th>
+				<th style="width: 65%;">Notes</th>
+			</tr>
+			<tr>
+				<td><code>*bold text*</code></td>
+				<td><strong>bold text</strong></td>
+				<td>-</td>
+			</tr>
+			<tr>
+				<td><code>_italics text_</code></td>
+				<td><em>italics text</em></td>
+				<td>-</td>
+			</tr>
+			<tr>
+				<td><code>~~deleted text~~</code></td>
+				<td><del>deleted</del></td>
+				<td>-</td>
+			</tr>
+			<tr>
+				<td><code>`code text`</code></td>
+				<td><code>code text</code></td>
+				<td>Inserts some monospaced code. It is preferred that large blocks of code are linked to using a service such as <a href='//pastebin.com'>Pastebin</a>, <a href='//gist.github.com/'>Github Gists</a> or <a href='//ideone.com/'>Ideone</a>.</td>
+			</tr>
+			<tr>
+				<td><code>&gt; Quote</code></td>
+				<td><blockquote>Quote</blockquote></td>
+				<td>-</td>
+			</tr>
+			<tr>
+				<td><code>[display text](//google.com)</code></td>
+				<td><a href='//google.com' target="_blank" rel="nofollow">display text</a></td>
+				<td>Inserts a hyperlink. Please use responsibly. <code>[rel=nofollow]</code> is in use and spam will be deleted.</td>
+			</tr>
+			<tr>
+				<td><code><br />---<br /><br /></code></td>
+				<td><hr /></td>
+				<td>Inserts a horizontal line. The previous line must be blank.</td>
+			</tr>
+		</table>
+		
+		All HTML will be escaped with HTML entities such that code in <code>&lt;code&gt;</code> blocks will be visible, and for security reasons.
+		
+		The maximum number of characters allowed is 2000.
+	</details>
+	<details>
+		<summary>What is my email address used for?</summary>
+		<!--<strong>Note: This describes a feature that has not yet been implemented. If you have any comments / questions / suggestions, please post them in the comments above.</strong>-->
+		<p>
+			Your email address, should you choose to provide it, is used to send you notifications of replies to your comment(s). It is used to display your <a href="//gravatar.com/">Gravatar</a>.
+		</p>
+		<p>
+			Your email address will be kept securely on the server, and nobody else will be given your email address. You will not receive any spam either.
+		</p>
+		<p>
+			If you do not wish to recieve emails anymore, please contact me (you can find my email address at the bottom of every page) and I will prevent emails from being sent to your email address. I will eventually write an automated system to handle this, but for now I will deal with requests manually. I should get back to you within 48 hours. Note that your (gr)avatar will also disappear and be replaced by an identicon.
+		</p>
+	</details>
+	<!-- These two fields are automatically set by the server so that it knows where to post the comment -->
+	<input type="hidden" name="articleid" id="articleid" value="cG9zdHMlMkY1NDgtY3J5cHQtYnRyZnMtc2V0dXAuaHRtbA==" />
+	<input type="hidden" name="commentid" id="commentid" value="" />
+	<input type="submit" name="submit" value="Post Comment" />
+</form>
+
+<link rel="stylesheet" href="/blog/comment_sendkey.php" />
+		</aside>
+		
+		<footer class="centretext" style="margin-top: 10vmin;" itemscope itemtype="https://schema.org/WPFooter">
+	<!-- Don't follow this link please. It is a spam trap. -->
+	<a href="http://starbeamrainbowlabs.com/stealthpackager.php" rel="nofollow"></a>
+	
+	<p>
+		Built by Starbeamrainbowlabs. Feedback can be sent to <span class="etalk">feedback at starbeamrainbowlabs dot com</span>. Comments can be made on all blog posts. Some icons from the awesome <a href="//useiconic.com/open">Open Iconic</a> icon set.
+	</p>
+	<!--
+		 ___ _ _     ___         _             ___           
+		| _ |_) |_  | __|__ _ __| |_ ___ _ _  | __|__ _ __ _ 
+		| _ \ |  _| | _|/ _` (_-<  _/ -_) '_| | _|/ _` / _` |
+		|___/_|\__| |___\__,_/__/\__\___|_|   |___\__, \__, |
+		                                           |___/|___/ 
+	-->
+	<ul class="binary">
+		<li><input class="bit" type="checkbox" data-index="0" /></li>
+<li><input class="bit" type="checkbox" data-index="1" /></li>
+<li><input class="bit" type="checkbox" data-index="2" /></li>
+<li><input class="bit" type="checkbox" data-index="3" /></li>
+	</ul>
+	<p>
+		<a href="/privacy.php">Privacy Policy</a> | 
+		<a href="/terms.php">Terms of Service</a> | 
+		<a href="/rights.php" rel="license">Licensing Information</a>
+	</p>
+	<p>
+		Blog post content available under<br />
+		<a href="//creativecommons.org/licenses/by-sa/4.0/" rel="license">
+			<img src="/images/cc-by-sa.svg" alt="Creative Commons Attribution-ShareAlike 4.0" title="Creative Commons Attribution-ShareAlike 4.0" />
+		</a>
+	</p>
+	<p>
+		Design &copy; Mythdael 2026. More information available on the <a href="/rights.php">licensing page</a>.
+	</p>
+	<p>
+		<!-- Feeds -->
+		<a href="/blog/feed.php" rel="alternate" title="Atom 1.0 Feed - Blog Posts"><img style="max-width: 24px; vertical-align: middle; margin-bottom: 3px;" src="/images/placeholder/?width=32&amp;height=32" data-src="/blog/feedicon.svg" alt="Atom Feed - Blog Posts" title="Atom Feed - Blog Posts" /></a>
+		<a href="/blog/feed.comments.php" title="Atom 1.0 Feed - Recent Comments"><img class="small-icon" style="margin-bottom: 3px;" src="/images/placeholder/?width=32&amp;height=32" data-src="/blog/commentsfeedicon.svg" title="Atom Feed - Comments" alt="Atom Feed - Comments" /></a>
+		<a rel="me" href="//twitter.com/SBRLabs" target="_blank" title="Starbeamrainbowlabs on Twitter"><img class="small-icon" style="margin-bottom: 3px;" src="/images/logos/twitter.svg" alt="Follow Starbeamrainbowlabs on Twitter" /></a>
+		<a rel="me" href="//reddit.com/r/StardustBlog/" target="_blank" title="Stardust Blog on Reddit"><img class="small-icon" style="margin-bottom: 3px;" src="/images/logos/reddit.png" alt="Subscribe to the Stardust Blog on Reddit" /></a>
+		<a rel="me" href="https://www.facebook.com/Stardust-Blog-395966260738394/" target="_blank" title="Stardust Blog on Facebook"><img class="small-icon" style="margin-bottom: 3px;" src="/images/logos/facebook.svg" alt="Subscribe to the Stardust Blog on Facebook" /></a>
+		<!-- Secure your connection -->
+				<!-- High Visibility mode -->
+		<span class='oi clickable x-large' style="position: relative; top: 8px;" data-glyph='image' title='Toggle High Visibility Mode' aria-hidden='true' onclick="togglehighvis();"></span>
+	</p>
+	<p>
+		<img src="/images/placeholder/?width=32&amp;height=48" data-src="/images/logos/html5.png" alt="Built with HTML5" class="large-icon" />
+		<img src="/images/placeholder/?width=32&amp;height=48" data-src="/images/logos/css3.svg" alt="Built with CSS3" class="large-icon" />
+		<img src="/images/placeholder/?width=32&amp;height=48" data-src="/images/logos/javascript.png" alt="Built with Javascript" class="large-icon" />
+	</p>
+	
+	<!-- ASDS: Advanced spam detection system -->
+	<!-- From projecthoneypot.org -->
+	<!-- For bot eyes only! -->
+	<div data-mode="stealth"><a href="/stealthpackager.php">ASDS</a></div>
+</footer>
+
+<div class="artbymythdael" title="Art by Mythdael">Art by Mythdael</div>
+
+
+
+<!--
+	   ___ ___ ___ 
+	  / __/ __/ __|
+	 | (__\__ \__ \
+	  \___|___/___/
+	
+-->
+		<link rel="stylesheet" href="/theme/core.min.css" />
+		<link rel="stylesheet" href="/theme/main.min.css" />
+		<link rel="stylesheet" href="/theme/comments.min.css" />
+		<link rel="stylesheet" href="/theme/bit.min.css" />
+		<link rel="stylesheet" href="/libraries/prism.min.css" />
+		<link rel="stylesheet" href="/theme/tagcloud.min.css" />
+		<link rel="stylesheet" href="/theme/openiconic/open-iconic.min.css" />
+<!--
+Open Iconic Usage
+- - - - - - - - -
+<span class="oi" data-glyph="icon-name" title="icon name" aria-hidden="true"></span>
+-->
+<!--
+     _                          _      _   
+  _ | |__ ___ ____ _ ___ __ _ _(_)_ __| |_ 
+ | || / _` \ V / _` (_-</ _| '_| | '_ \  _|
+  \__/\__,_|\_/\__,_/__/\__|_| |_| .__/\__|
+                                 |_|       
+-->
+		<script src="/javascript/bit.min.js"></script>
+		<script src="/javascript/accessibility.min.js"></script>
+		<script src="/libraries/prism.min.js"></script>
+		<script src="/libraries/smoothscroll.min.js"></script>
+		<script src="/libraries/SnoozeSquad.min.js"></script>
+
+<script>
+	window.snoozeSquad = new SnoozeSquad({
+		range: 2
+	});
+
+	// An array of code block languages for a hack below.
+	window.languages = {"text": "Plain Text","css":"CSS","clike":"C-like","javascript":"JavaScript","abap":"ABAP","actionscript":"ActionScript","apacheconf":"Apache Configuration","apl":"APL","applescript":"AppleScript","asciidoc":"AsciiDoc","aspnet":"ASP.NET (C#)","autoit":"AutoIt","autohotkey":"AutoHotkey","basic":"BASIC","csharp":"C#","cpp":"C++","coffeescript":"CoffeeScript","css-extras":"CSS Extras","fsharp":"F#","glsl":"GLSL","html": "HTML","http":"HTTP","inform7":"Inform 7","json":"JSON","latex":"LaTeX","lolcode":"LOLCODE","matlab":"MATLAB","mel":"MEL","nasm":"NASM","nginx":"nginx","nsis":"NSIS","objectivec":"Objective-C","ocaml":"OCaml","parigp":"PARI/GP","php":"PHP","php-extras":"PHP Extras","powershell":"PowerShell",prolog:"Prolog","jsx":"React JSX","rest":"reST (reStructuredText)","sas":"SAS","sass":"Sass (Sass)","scss":"Sass (Scss)","sql":"SQL","typescript":"TypeScript","vhdl":"VHDL","vim":"vim","wiki":"Wiki markup","yaml":"YAML"}
+	
+	// Tell Prism where to find all the grammar files
+	Prism.plugins.autoloader.languages_path = "/libraries/prism-grammars/";
+	// A small hack to:
+	// 1. Make all <pre>s have line numbers (unless they have the "no-lines" class) (Note: "no-line-numbers" doesn't work here as the line-numbers class will activate anyway
+	// 2. Add the language display to the data-language attribute so that we can display it with CSS
+	[].forEach.call(document.querySelectorAll("pre"), function(el) {
+		if(!el.classList.contains("no-numbers")) el.classList.add("line-numbers");
+	});
+	[].forEach.call(document.querySelectorAll("pre, code"), function(el) {
+		// el.dataset.manual = "true";
+	})
+	window.addEventListener("load", function() {
+		[].forEach.call(document.querySelectorAll("pre"), function(el) {
+			var languageName = el.className.match(/language-([^\s]+)/i);
+			if(languageName == null) return;
+			
+			languageName = languageName[1];
+			
+			if(typeof window.languages[languageName] == "string")
+				languageName = window.languages[languageName];
+			el.dataset.language = languageName;
+		});
+		
+		updatehighvis();
+	});
+	
+</script>
+
+<!-- LaTEX support for the blog -->
+<script type="text/x-mathjax-config">
+  MathJax.Hub.Config({
+    tex2jax: {
+      inlineMath: [ ['$','$'], ["\\(","\\)"] ],
+      displayMath: [ ['$$','$$'], ["\\[","\\]"] ],
+      processEscapes: true,
+      skipTags: ["script","noscript","style","textarea","pre","code"]
+    }
+  });
+</script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mathjax/2.7.5/MathJax.js?config=TeX-MML-AM_CHTML" async></script>
+
+<!-- 1772830345.0202 -->
+<!-- Took 0.00056099891662598 second(s) to generate -->
+
+		
+		<script>
+			function reply(commentid)
+			{
+				var commentidfield = document.getElementById("commentid");
+				commentidfield.value = commentid;
+				document.getElementById("sendcomment").innerHTML = "Leave a Reply";
+				location.hash = "#sendcomment";
+				document.getElementById("namebox").focus();
+			}
+			
+			function updatetextarea(event)
+			{
+				var textarea = document.getElementById("commentbox"),
+					chars = textarea.value.length;
+				
+				if(chars > 2000)
+				{
+					console.log("Too many characters!");
+					event.stopPropagation();
+					event.preventDefault();
+					return false;
+				}
+				else
+					console.log("characters: " + chars);
+			}
+			
+			window.addEventListener("load", function(event) {
+				document.getElementById("commentbox").addEventListener("keypress", updatetextarea);
+			});
+		</script>
+	</body>
+</html>

@@ -1,0 +1,290 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="./">
+<head>
+  <meta charset="utf-8" />
+  <meta name="readthedocs-addons-api-version" content="1"><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Volume management &mdash; BTRFS  documentation</title>
+      <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="_static/css/theme.css?v=9edc463e" />
+
+  
+      <script src="_static/jquery.js?v=5d32c60e"></script>
+      <script src="_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="_static/documentation_options.js?v=8a448e45"></script>
+      <script src="_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="_static/js/theme.js"></script>
+    <script src="_static/js/versions.js"></script>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="next" title="Zoned mode" href="Zoned-mode.html" />
+    <link rel="prev" title="Trim/discard" href="Trim.html" />
+    <link href="_static/style.css" rel="stylesheet" type="text/css">
+
+<script async type="text/javascript" src="/_/static/javascript/readthedocs-addons.js"></script><meta name="readthedocs-project-slug" content="btrfs" /><meta name="readthedocs-version-slug" content="latest" /><meta name="readthedocs-resolver-filename" content="/Volume-management.html" /><meta name="readthedocs-http-status" content="200" /></head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="index.html" class="icon icon-home">
+            BTRFS
+          </a>
+              <div class="switch-menus">
+                <div class="version-switch"></div>
+                <div class="language-switch"></div>
+              </div>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Overview</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="Introduction.html">Introduction</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Status.html">Status</a></li>
+<li class="toctree-l1"><a class="reference internal" href="man-index.html">Manual pages</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Administration.html">Administration</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Hardware.html">Hardware considerations</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Feature-by-version.html">Changes (feature/version)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Kernel-by-version.html">Changes (kernel/version)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="CHANGES.html">Changes (btrfs-progs)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Contributors.html">Contributors</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Glossary.html">Glossary</a></li>
+<li class="toctree-l1"><a class="reference internal" href="INSTALL.html">Installation instructions</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Source-repositories.html">Source repositories</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Interoperability.html">Interoperability</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Features</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="Common-features.html">Common Linux features</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Custom-ioctls.html">Custom ioctls</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Auto-repair.html">Auto-repair on read</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Balance.html">Balance</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Compression.html">Compression</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Checksumming.html">Checksumming</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Convert.html">Convert</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Deduplication.html">Deduplication</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Defragmentation.html">Defragmentation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Inline-files.html">Inline files</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Qgroups.html">Quota groups</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Reflink.html">Reflink</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Resize.html">Resize</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Scrub.html">Scrub</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Seeding-device.html">Seeding device</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Send-receive.html">Send/receive</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Subpage.html">Subpage support</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Subvolumes.html">Subvolumes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Swapfile.html">Swapfile</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Tree-checker.html">Tree checker</a></li>
+<li class="toctree-l1"><a class="reference internal" href="Trim.html">Trim/discard</a></li>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Volume management</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#typical-use-cases">Typical use cases</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#starting-with-a-single-device-filesystem">Starting with a single-device filesystem</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#add-new-device">Add new device</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#convert-to-raid1">Convert to RAID1</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#remove-device">Remove device</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="Zoned-mode.html">Zoned mode</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Developer documentation</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="dev/Development-notes.html">Development notes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/Developer-s-FAQ.html">Developer’s FAQ</a></li>
+<li class="toctree-l1"><a class="reference internal" href="DocConventions.html">Conventions and style for documentation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/Experimental.html">Experimental features</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/dev-btrfs-design.html">Btrfs design</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/dev-btrees.html">Btrees</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/On-disk-format.html">On-disk Format</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/dev-send-stream.html">Send stream format</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/dev-json.html">JSON output</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/dev-internal-apis.html">Internal APIs</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/ReleaseChecklist.html">Release checklist</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/GithubReviewWorkflow.html">Pull request review workflow</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dev/CmdLineConventions.html">Command line, formatting, UI guidelines</a></li>
+<li class="toctree-l1"><a class="reference internal" href="btrfs-ioctl.html">btrfs-ioctl(2)</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">TODO</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="trouble-index.html">Troubleshooting pages</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="index.html">BTRFS</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">Volume management</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="_sources/Volume-management.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="volume-management">
+<h1>Volume management<a class="headerlink" href="#volume-management" title="Link to this heading"></a></h1>
+<p>BTRFS filesystem can be created on top of single or multiple block devices.
+Devices can be then added, removed or replaced on demand.  Data and metadata are
+organized in allocation profiles with various redundancy policies.  There’s some
+similarity with traditional RAID levels, but this could be confusing to users
+familiar with the traditional meaning. Due to the similarity, the RAID
+terminology is widely used in the documentation.  See <a class="reference internal" href="mkfs.btrfs.html"><span class="doc">mkfs.btrfs(8)</span></a> for more
+details and the exact profile capabilities and constraints.</p>
+<p>The device management works on a mounted filesystem. Devices can be added,
+removed or replaced, by commands provided by <strong class="command">btrfs device</strong> and <strong class="command">btrfs replace</strong>.</p>
+<p>The profiles can be also changed, provided there’s enough workspace to do the
+conversion, using the <strong class="command">btrfs balance</strong> command and namely the filter <em>convert</em>.</p>
+<dl class="simple">
+<dt>Type</dt><dd><p>The block group profile type is the main distinction of the information stored
+on the block device. User data are called <em>Data</em>, the internal data structures
+managed by filesystem are <em>Metadata</em> and <em>System</em>.</p>
+</dd>
+<dt>Profile</dt><dd><p>A profile describes an allocation policy based on the redundancy/replication
+constraints in connection with the number of devices. The profile applies to
+data and metadata block groups separately. E.g. <em>single</em>, <em>RAID1</em>.</p>
+</dd>
+<dt>RAID level</dt><dd><p>Where applicable, the level refers to a profile that matches constraints of the
+standard RAID levels. At the moment the supported ones are: RAID0, RAID1,
+RAID10, RAID5 and RAID6.</p>
+</dd>
+</dl>
+<section id="typical-use-cases">
+<span id="man-device-typical-use-cases"></span><h2>Typical use cases<a class="headerlink" href="#typical-use-cases" title="Link to this heading"></a></h2>
+<section id="starting-with-a-single-device-filesystem">
+<h3>Starting with a single-device filesystem<a class="headerlink" href="#starting-with-a-single-device-filesystem" title="Link to this heading"></a></h3>
+<p>Assume we’ve created a filesystem on a block device <code class="file docutils literal notranslate"><span class="pre">/dev/sda</span></code> with profile
+<em>single/single</em> (data/metadata), the device size is 50GiB and we’ve used the
+whole device for the filesystem. The mount point is <code class="file docutils literal notranslate"><span class="pre">/mnt</span></code>.</p>
+<p>The amount of data stored is 16GiB, metadata have allocated 2GiB.</p>
+<section id="add-new-device">
+<h4>Add new device<a class="headerlink" href="#add-new-device" title="Link to this heading"></a></h4>
+<p>We want to increase the total size of the filesystem and keep the profiles. The
+size of the new device <code class="file docutils literal notranslate"><span class="pre">/dev/sdb</span></code> is 100GiB.</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>$<span class="w"> </span>btrfs<span class="w"> </span>device<span class="w"> </span>add<span class="w"> </span>/dev/sdb<span class="w"> </span>/mnt
+</pre></div>
+</div>
+<p>The amount of free data space increases by less than 100GiB, some space is
+allocated for metadata.</p>
+</section>
+<section id="convert-to-raid1">
+<h4>Convert to RAID1<a class="headerlink" href="#convert-to-raid1" title="Link to this heading"></a></h4>
+<p>Now we want to increase the redundancy level of both data and metadata, but
+we’ll do that in steps. Note, that the device sizes are not equal and we’ll use
+that to show the capabilities of split data/metadata and independent profiles.</p>
+<p>The constraint for RAID1 gives us at most 50GiB of usable space and exactly 2
+copies will be stored on the devices.</p>
+<p>First we’ll convert the metadata. As the metadata occupy less than 50GiB and
+there’s enough workspace for the conversion process, we can do:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>$<span class="w"> </span>btrfs<span class="w"> </span>balance<span class="w"> </span>start<span class="w"> </span>-mconvert<span class="o">=</span>raid1<span class="w"> </span>/mnt
+</pre></div>
+</div>
+<p>This operation can take a while, because all metadata have to be moved and all
+block pointers updated. Depending on the physical locations of the old and new
+blocks, the disk seeking is the key factor affecting performance.</p>
+<p>You’ll note that the system block group has been also converted to RAID1, this
+normally happens as the system block group also holds metadata (the physical to
+logical mappings).</p>
+<p>What changed:</p>
+<ul class="simple">
+<li><p>available data space decreased by 3GiB, usable roughly (50 - 3) + (100 - 3) = 144 GiB</p></li>
+<li><p>metadata redundancy increased</p></li>
+</ul>
+<p>In other words, the unequal device sizes allow for combined space for data yet
+improved redundancy for metadata. If we decide to increase redundancy of data as
+well, we’re going to lose 50GiB of the second device for obvious reasons.</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>$<span class="w"> </span>btrfs<span class="w"> </span>balance<span class="w"> </span>start<span class="w"> </span>-dconvert<span class="o">=</span>raid1<span class="w"> </span>/mnt
+</pre></div>
+</div>
+<p>The balance process needs some workspace (i.e. a free device space without any
+data or metadata block groups) so the command could fail if there’s too much
+data or the block groups occupy the whole first device.</p>
+<p>The device size of <code class="file docutils literal notranslate"><span class="pre">/dev/sdb</span></code> as seen by the filesystem remains unchanged, but
+the logical space from 50-100GiB will be unused.</p>
+</section>
+<section id="remove-device">
+<h4>Remove device<a class="headerlink" href="#remove-device" title="Link to this heading"></a></h4>
+<p>Device removal must satisfy the profile constraints, otherwise the command
+fails. For example:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>$<span class="w"> </span>btrfs<span class="w"> </span>device<span class="w"> </span>remove<span class="w"> </span>/dev/sda<span class="w"> </span>/mnt
+ERROR:<span class="w"> </span>error<span class="w"> </span>removing<span class="w"> </span>device<span class="w"> </span><span class="s1">&#39;/dev/sda&#39;</span>:<span class="w"> </span>unable<span class="w"> </span>to<span class="w"> </span>go<span class="w"> </span>below<span class="w"> </span>two<span class="w"> </span>devices<span class="w"> </span>on<span class="w"> </span>raid1
+</pre></div>
+</div>
+<p>In order to remove a device, you need to convert the profile in this case:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>$<span class="w"> </span>btrfs<span class="w"> </span>balance<span class="w"> </span>start<span class="w"> </span>-mconvert<span class="o">=</span>dup<span class="w"> </span>-dconvert<span class="o">=</span>single<span class="w"> </span>/mnt
+$<span class="w"> </span>btrfs<span class="w"> </span>device<span class="w"> </span>remove<span class="w"> </span>/dev/sda<span class="w"> </span>/mnt
+</pre></div>
+</div>
+<div class="admonition warning">
+<p class="admonition-title">Warning</p>
+<p>Do not run balance to convert from a profile with more redundancy to one with
+less redundancy in order to remove a failing device from a filesystem.</p>
+<p>Balance is done by reading out the good metadata/data and write them into a
+new chunk.
+Thus it’s possible the new chunk is written into the failing device.</p>
+<p>Use <strong class="command">btrfs device replace</strong> instead.</p>
+</div>
+</section>
+</section>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="Trim.html" class="btn btn-neutral float-left" title="Trim/discard" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="Zoned-mode.html" class="btn btn-neutral float-right" title="Zoned mode" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright .</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>
