@@ -377,7 +377,7 @@ fn get_profile<R: CommandRunner>(runner: &R, mount_point: &str) -> Result<String
         .iter()
         .find(|e| e.bg_type == BtrfsBgType::Data)
         .or_else(|| df.entries.first())
-        .map(|e| e.bg_profile.clone())
+        .map(|e| e.bg_profile.to_string())
         .unwrap_or_else(|| "unknown".to_owned());
 
     Ok(profile)

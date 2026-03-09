@@ -2,7 +2,7 @@ use serde::Deserialize;
 
 use crate::cmd::RawCommandOutput;
 
-use super::types::{BtrfsBgType, BtrfsDfEntry, BtrfsDfOutput};
+use super::types::{BtrfsBgType, BtrfsDfEntry, BtrfsDfOutput, BtrfsProfile};
 use super::ParseError;
 
 // --- Serde helper structs (not exposed to domain code) ---
@@ -69,9 +69,21 @@ pub fn parse_btrfs_df_json(raw: &RawCommandOutput) -> Result<BtrfsDfOutput, Pars
                     })
                 }
             };
+            let bg_profile = match e.bg_profile.as_str() {
+                "single" => BtrfsProfile::Single,
+                "DUP" => BtrfsProfile::Dup,
+                "RAID0" => BtrfsProfile::Raid0,
+                "RAID1" => BtrfsProfile::Raid1,
+                "RAID1C3" => BtrfsProfile::Raid1c3,
+                "RAID1C4" => BtrfsProfile::Raid1c4,
+                "RAID5" => BtrfsProfile::Raid5,
+                "RAID6" => BtrfsProfile::Raid6,
+                "RAID10" => BtrfsProfile::Raid10,
+                other => BtrfsProfile::Unknown(other.to_owned()),
+            };
             Ok(BtrfsDfEntry {
                 bg_type,
-                bg_profile: e.bg_profile,
+                bg_profile,
                 bg_used: e.bg_used,
                 bg_total: e.bg_total,
             })
@@ -106,7 +118,7 @@ mod tests {
         let out = parse_btrfs_df_json(&raw).unwrap();
         assert_eq!(out.entries.len(), 4);
         assert_eq!(out.entries[0].bg_type, BtrfsBgType::Data);
-        assert_eq!(out.entries[0].bg_profile, "RAID1");
+        assert_eq!(out.entries[0].bg_profile, BtrfsProfile::Raid1);
         assert_eq!(out.entries[0].bg_used, 16777216);
         assert_eq!(out.entries[0].bg_total, 67108864);
         assert_eq!(out.entries[1].bg_type, BtrfsBgType::System);
@@ -133,7 +145,7 @@ mod tests {
         };
         let out = parse_btrfs_df_json(&raw).unwrap();
         assert_eq!(out.entries.len(), 3);
-        assert_eq!(out.entries[0].bg_profile, "single");
+        assert_eq!(out.entries[0].bg_profile, BtrfsProfile::Single);
     }
 
     #[test]

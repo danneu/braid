@@ -44,10 +44,41 @@ pub enum BtrfsBgType {
     GlobalReserve,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum BtrfsProfile {
+    Single,
+    Dup,
+    Raid0,
+    Raid1,
+    Raid1c3,
+    Raid1c4,
+    Raid5,
+    Raid6,
+    Raid10,
+    Unknown(String),
+}
+
+impl std::fmt::Display for BtrfsProfile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Single => "single",
+            Self::Dup => "DUP",
+            Self::Raid0 => "RAID0",
+            Self::Raid1 => "RAID1",
+            Self::Raid1c3 => "RAID1C3",
+            Self::Raid1c4 => "RAID1C4",
+            Self::Raid5 => "RAID5",
+            Self::Raid6 => "RAID6",
+            Self::Raid10 => "RAID10",
+            Self::Unknown(s) => return f.write_str(s),
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BtrfsDfEntry {
     pub bg_type: BtrfsBgType,
-    pub bg_profile: String,
+    pub bg_profile: BtrfsProfile,
     pub bg_used: u64,
     pub bg_total: u64,
 }

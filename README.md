@@ -195,7 +195,7 @@ sudo braid status --json      # machine-readable output
 ### Diagnostics
 
 ```sh
-sudo braid doctor           # check config, pool health, etc.
+sudo braid doctor           # check config, pool health, profile consistency
 sudo braid doctor --json    # machine-readable output
 ```
 

@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::cmd::{CmdRequest, CommandRunner, RealRunner};
 use crate::config::Config;
 use crate::parse::parse_btrfs_df_json;
+use crate::parse::types::{BtrfsBgType, BtrfsDfOutput, BtrfsProfile};
 use crate::status::format_bytes;
 
 // ---------------------------------------------------------------------------
@@ -34,11 +35,19 @@ pub struct DoctorReport {
     pub checks: Vec<CheckResult>,
 }
 
+enum DfSnapshot {
+    NotMounted,
+    QueryFailed(String),
+    ParseFailed(String),
+    Ok(BtrfsDfOutput),
+}
+
 struct DoctorContext<'a, R: CommandRunner> {
     config_path: PathBuf,
     config_value: Option<serde_json::Value>,
     config: Option<Config>,
     runner: &'a R,
+    df_snapshot: Option<DfSnapshot>,
 }
 
 // ---------------------------------------------------------------------------
@@ -218,31 +227,26 @@ fn check_declared_disks<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> Che
     }
 }
 
-fn check_data_profile_mismatch<R: CommandRunner>(ctx: &DoctorContext<'_, R>) -> CheckResult {
+fn ensure_df_snapshot<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) {
+    if ctx.df_snapshot.is_some() {
+        return;
+    }
+
     let config = match &ctx.config {
         Some(c) => c,
-        None => {
-            return CheckResult {
-                name: "data_profile_mismatch".into(),
-                status: CheckStatus::Skip,
-                message: "skipped (config not available)".into(),
-            };
-        }
+        None => return,
     };
 
     let mount_point = config.mount_point().to_owned();
 
-    // Skip if pool not mounted
+    // Check if pool is mounted
     match ctx.runner.run(&CmdRequest::MountpointCheck {
         path: mount_point.clone(),
     }) {
         Ok(out) if out.exit_status == 0 => {}
         _ => {
-            return CheckResult {
-                name: "data_profile_mismatch".into(),
-                status: CheckStatus::Skip,
-                message: "skipped (pool not mounted)".into(),
-            };
+            ctx.df_snapshot = Some(DfSnapshot::NotMounted);
+            return;
         }
     }
 
@@ -252,62 +256,109 @@ fn check_data_profile_mismatch<R: CommandRunner>(ctx: &DoctorContext<'_, R>) -> 
     }) {
         Ok(raw) => raw,
         Err(e) => {
-            return CheckResult {
-                name: "data_profile_mismatch".into(),
-                status: CheckStatus::Warn,
-                message: format!("could not query data profiles: {e}"),
-            };
+            ctx.df_snapshot = Some(DfSnapshot::QueryFailed(e.to_string()));
+            return;
         }
     };
 
-    let df = match parse_btrfs_df_json(&raw) {
-        Ok(df) => df,
-        Err(e) => {
-            return CheckResult {
-                name: "data_profile_mismatch".into(),
-                status: CheckStatus::Warn,
-                message: format!("could not parse data profiles: {e}"),
-            };
-        }
-    };
+    match parse_btrfs_df_json(&raw) {
+        Ok(df) => ctx.df_snapshot = Some(DfSnapshot::Ok(df)),
+        Err(e) => ctx.df_snapshot = Some(DfSnapshot::ParseFailed(e.to_string())),
+    }
+}
 
-    // Filter to Data entries (GlobalReserve is always "single" even on RAID1 — exclude it)
-    use crate::parse::types::BtrfsBgType;
-    let data_entries: Vec<_> = df
-        .entries
-        .iter()
-        .filter(|e| e.bg_type == BtrfsBgType::Data)
-        .collect();
+fn check_profile_mismatch<R: CommandRunner>(
+    ctx: &mut DoctorContext<'_, R>,
+    bg_type: BtrfsBgType,
+    check_name: &str,
+    type_label: &str,
+) -> CheckResult {
+    if ctx.config.is_none() {
+        return CheckResult {
+            name: check_name.into(),
+            status: CheckStatus::Skip,
+            message: "skipped (config not available)".into(),
+        };
+    }
 
-    let profiles: std::collections::BTreeSet<&str> =
-        data_entries.iter().map(|e| e.bg_profile.as_str()).collect();
+    ensure_df_snapshot(ctx);
 
-    if profiles.len() <= 1 {
-        let profile_name = profiles.into_iter().next().unwrap_or("unknown");
-        CheckResult {
-            name: "data_profile_mismatch".into(),
-            status: CheckStatus::Ok,
-            message: format!("data profile: {profile_name}"),
-        }
-    } else {
-        let mut parts: Vec<String> = Vec::new();
-        for entry in &data_entries {
-            parts.push(format!(
-                "{}: {} used / {} total",
-                entry.bg_profile,
-                format_bytes(entry.bg_used),
-                format_bytes(entry.bg_total),
-            ));
-        }
-        CheckResult {
-            name: "data_profile_mismatch".into(),
+    let mount_point = ctx.config.as_ref().unwrap().mount_point().to_owned();
+
+    match &ctx.df_snapshot {
+        None => CheckResult {
+            name: check_name.into(),
+            status: CheckStatus::Skip,
+            message: "skipped (config not available)".into(),
+        },
+        Some(DfSnapshot::NotMounted) => CheckResult {
+            name: check_name.into(),
+            status: CheckStatus::Skip,
+            message: "skipped (pool not mounted)".into(),
+        },
+        Some(DfSnapshot::QueryFailed(e)) => CheckResult {
+            name: check_name.into(),
             status: CheckStatus::Warn,
-            message: format!(
-                "mixed data profiles ({}); run: btrfs balance start -dconvert=raid1 -mconvert=raid1 {mount_point}",
-                parts.join(", "),
-            ),
+            message: format!("could not query {type_label} profiles: {e}"),
+        },
+        Some(DfSnapshot::ParseFailed(e)) => CheckResult {
+            name: check_name.into(),
+            status: CheckStatus::Warn,
+            message: format!("could not parse {type_label} profiles: {e}"),
+        },
+        Some(DfSnapshot::Ok(df)) => {
+            let entries: Vec<_> = df.entries.iter().filter(|e| e.bg_type == bg_type).collect();
+
+            let profiles: std::collections::BTreeSet<&BtrfsProfile> =
+                entries.iter().map(|e| &e.bg_profile).collect();
+
+            if profiles.len() <= 1 {
+                let profile_name = profiles
+                    .into_iter()
+                    .next()
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| "unknown".into());
+                CheckResult {
+                    name: check_name.into(),
+                    status: CheckStatus::Ok,
+                    message: format!("{type_label} profile: {profile_name}"),
+                }
+            } else {
+                let mut parts: Vec<String> = Vec::new();
+                for entry in &entries {
+                    parts.push(format!(
+                        "{}: {} used / {} total",
+                        entry.bg_profile,
+                        format_bytes(entry.bg_used),
+                        format_bytes(entry.bg_total),
+                    ));
+                }
+                CheckResult {
+                    name: check_name.into(),
+                    status: CheckStatus::Warn,
+                    message: format!(
+                        "mixed {type_label} profiles ({}); run: btrfs balance start -dconvert=raid1 -mconvert=raid1 {mount_point}",
+                        parts.join(", "),
+                    ),
+                }
+            }
         }
     }
+}
+
+fn check_data_profile_mismatch<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> CheckResult {
+    check_profile_mismatch(ctx, BtrfsBgType::Data, "data_profile_mismatch", "data")
+}
+
+fn check_metadata_profile_mismatch<R: CommandRunner>(
+    ctx: &mut DoctorContext<'_, R>,
+) -> CheckResult {
+    check_profile_mismatch(
+        ctx,
+        BtrfsBgType::Metadata,
+        "metadata_profile_mismatch",
+        "metadata",
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -335,6 +386,7 @@ pub fn run_doctor<R: CommandRunner>(config_path: &Path, runner: &R) -> DoctorRep
         config_value: None,
         config: None,
         runner,
+        df_snapshot: None,
     };
 
     let checks = vec![
@@ -342,7 +394,8 @@ pub fn run_doctor<R: CommandRunner>(config_path: &Path, runner: &R) -> DoctorRep
         check_config_schema(&mut ctx),
         check_config_permissions(&mut ctx),
         check_declared_disks(&mut ctx),
-        check_data_profile_mismatch(&ctx),
+        check_data_profile_mismatch(&mut ctx),
+        check_metadata_profile_mismatch(&mut ctx),
     ];
 
     let status = overall_status(&checks);
@@ -369,6 +422,7 @@ pub fn format_doctor_human(report: &DoctorReport) -> String {
             "config_permissions" => "config perms",
             "declared_disks" => "declared disks",
             "data_profile_mismatch" => "data profiles",
+            "metadata_profile_mismatch" => "meta profiles",
             other => other,
         };
         out.push_str(&format!("[{tag:<4}]  {label:<14}  {}\n", c.message));
@@ -447,7 +501,7 @@ mod tests {
     fn valid_config_parses_ok_disks_warn() {
         let f = write_temp(valid_config_json());
         let report = run_doctor(f.path(), &mock());
-        assert_eq!(report.checks.len(), 5);
+        assert_eq!(report.checks.len(), 6);
         assert_eq!(find_check(&report, "config_file").status, CheckStatus::Ok);
         assert_eq!(find_check(&report, "config_schema").status, CheckStatus::Ok);
         // declared_disks warns since /dev/disk/by-id/a doesn't exist in test env
@@ -902,6 +956,119 @@ mod tests {
             check.message.contains("could not"),
             "expected error message: {}",
             check.message
+        );
+    }
+
+    // --- metadata_profile_mismatch tests ---
+
+    const DF_MIXED_METADATA: &str = r#"{
+        "filesystem-df": [
+            { "bg-type": "Data", "bg-profile": "RAID1", "total": 67108864, "used": 16777216 },
+            { "bg-type": "Metadata", "bg-profile": "RAID1", "total": 33554432, "used": 262144 },
+            { "bg-type": "Metadata", "bg-profile": "single", "total": 8388608, "used": 65536 },
+            { "bg-type": "System", "bg-profile": "RAID1", "total": 8388608, "used": 16384 },
+            { "bg-type": "GlobalReserve", "bg-profile": "single", "total": 3407872, "used": 0 }
+        ]
+    }"#;
+
+    // Intent: Verify metadata_profile_mismatch reports Ok for uniform RAID1 metadata.
+    // Why: Ensures the check doesn't false-positive on a healthy pool.
+    // Scenario: A clean 2-disk RAID1 pool has all metadata block groups as RAID1.
+    #[test]
+    fn metadata_profile_clean_raid1_ok() {
+        let (mp_req, mp_out) = mountpoint_ok();
+        let (df_req, df_out) = df_json(DF_RAID1_CLEAN);
+        let runner = mock()
+            .with_output(mp_req, mp_out)
+            .with_output(df_req, df_out);
+        let f = write_temp(valid_config_json());
+        let report = run_doctor(f.path(), &runner);
+        let check = find_check(&report, "metadata_profile_mismatch");
+        assert_eq!(check.status, CheckStatus::Ok);
+        assert!(
+            check.message.contains("RAID1"),
+            "expected RAID1 in message: {}",
+            check.message
+        );
+    }
+
+    // Intent: Verify metadata_profile_mismatch detects mixed metadata profiles.
+    // Why: Mixed metadata is more dangerous than mixed data — metadata loss
+    //   can make the entire filesystem unrecoverable.
+    // Scenario: An interrupted `btrfs balance` leaves some metadata block groups
+    //   as single while others remain RAID1. braid doctor should warn.
+    #[test]
+    fn metadata_profile_mixed_warns() {
+        let (mp_req, mp_out) = mountpoint_ok();
+        let (df_req, df_out) = df_json(DF_MIXED_METADATA);
+        let runner = mock()
+            .with_output(mp_req, mp_out)
+            .with_output(df_req, df_out);
+        let f = write_temp(valid_config_json());
+        let report = run_doctor(f.path(), &runner);
+        let check = find_check(&report, "metadata_profile_mismatch");
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert!(
+            check.message.contains("mixed"),
+            "expected 'mixed' in message: {}",
+            check.message
+        );
+        assert!(
+            check.message.contains("btrfs balance"),
+            "expected balance suggestion: {}",
+            check.message
+        );
+    }
+
+    // Intent: Verify metadata_profile_mismatch skips when config is unavailable.
+    // Why: Without config, we don't know the mount point to query.
+    // Scenario: User runs `braid doctor --config /nonexistent` — profile checks
+    //   should skip gracefully.
+    #[test]
+    fn metadata_profile_skip_when_config_unavailable() {
+        let report = run_doctor(
+            Path::new("/tmp/nonexistent-braid-doctor-test.json"),
+            &mock(),
+        );
+        let check = find_check(&report, "metadata_profile_mismatch");
+        assert_eq!(check.status, CheckStatus::Skip);
+        assert!(
+            check.message.contains("config not available"),
+            "{}",
+            check.message
+        );
+    }
+
+    // Intent: Verify metadata_profile_mismatch skips when pool is not mounted.
+    // Why: Can't query btrfs filesystem df on an unmounted pool.
+    // Scenario: User runs `braid doctor` before unlocking the pool.
+    #[test]
+    fn metadata_profile_skip_when_pool_not_mounted() {
+        let (mp_req, mp_out) = mountpoint_fail();
+        let runner = mock().with_output(mp_req, mp_out);
+        let f = write_temp(valid_config_json());
+        let report = run_doctor(f.path(), &runner);
+        let check = find_check(&report, "metadata_profile_mismatch");
+        assert_eq!(check.status, CheckStatus::Skip);
+        assert!(check.message.contains("not mounted"), "{}", check.message);
+    }
+
+    // Intent: Verify human format includes the "meta profiles" label.
+    // Why: Ensures the new check has a human-readable label in format_doctor_human.
+    // Scenario: Operator reads `braid doctor` output and sees metadata profile status.
+    #[test]
+    fn human_format_contains_meta_profiles_label() {
+        let (mp_req, mp_out) = mountpoint_ok();
+        let (df_req, df_out) = df_json(DF_RAID1_CLEAN);
+        let runner = mock()
+            .with_output(mp_req, mp_out)
+            .with_output(df_req, df_out);
+        let f = write_temp(valid_config_json());
+        let report = run_doctor(f.path(), &runner);
+        let human = format_doctor_human(&report);
+        assert!(
+            human.contains("meta profiles"),
+            "expected 'meta profiles':\n{human}"
         );
     }
 }

@@ -89,7 +89,7 @@ golden_test!(
             .iter()
             .find(|e| e.bg_type == parse::types::BtrfsBgType::Data);
         assert!(data.is_some(), "expected a Data entry");
-        assert_eq!(data.unwrap().bg_profile, "RAID1");
+        assert_eq!(data.unwrap().bg_profile, parse::types::BtrfsProfile::Raid1);
     }
 );
 
