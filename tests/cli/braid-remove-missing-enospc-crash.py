@@ -114,8 +114,8 @@ with subtest("braid remove-missing rejects due to insufficient space"):
     assert status != 0, f"Expected failure, got exit 0: {output}"
 
     output_lower = output.lower()
-    assert "not enough" in output_lower and "free space" in output_lower, \
-        f"Expected 'not enough free space' in error:\n{output}"
+    assert "not enough space" in output_lower, \
+        f"Expected 'not enough space' in error:\n{output}"
 
 # --- Phase 5: Pool unchanged — still has missing device ---
 
