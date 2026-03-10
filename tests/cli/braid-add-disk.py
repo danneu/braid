@@ -41,6 +41,7 @@ with subtest("First disk creates single-drive pool"):
     # Single profile (only 1 drive)
     df_output = machine.succeed("btrfs fi df /mnt/storage")
     assert "Data, single" in df_output, f"Expected single profile:\n{df_output}"
+    assert "Metadata, DUP" in df_output, f"Expected DUP metadata profile:\n{df_output}"
 
     # LUKS mapper exists with correct name (braid-<key>)
     machine.succeed("test -e /dev/mapper/braid-disk1")

@@ -295,6 +295,40 @@ pub fn pool_bootstrap_mount<R: CommandRunner + Sync>(
     Ok(())
 }
 
+/// Bootstrap the pool with multiple devices in RAID1: mkfs.btrfs -d raid1 -m raid1, then mount.
+/// Callers must verify all devices are fresh (no btrfs superblock) before calling this.
+pub fn pool_bootstrap_mount_raid1<R: CommandRunner + Sync>(
+    runner: &R,
+    devices: &[String],
+    mount_point: &str,
+) -> Result<(), PoolError> {
+    let mkfs = runner.run(&CmdRequest::MkfsBtrfsRaid1 {
+        devices: devices.to_vec(),
+    })?;
+    if mkfs.exit_status != 0 {
+        return Err(PoolError::Failed(format!(
+            "mkfs.btrfs RAID1 failed (exit {}): {}",
+            mkfs.exit_status,
+            mkfs.stderr.trim()
+        )));
+    }
+
+    let _ = std::fs::create_dir_all(mount_point);
+
+    let mount = runner.run(&CmdRequest::Mount {
+        device: devices[0].clone(),
+        mount_point: mount_point.to_owned(),
+    })?;
+    if mount.exit_status != 0 {
+        return Err(PoolError::Failed(format!(
+            "mount failed (exit {}): {}",
+            mount.exit_status,
+            mount.stderr.trim()
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

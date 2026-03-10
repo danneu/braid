@@ -106,6 +106,11 @@
               braid = linuxCrane.braid;
             }
           );
+          multi-add = pkgs.testers.nixosTest (
+            import ./tests/cli/multi-add.nix {
+              braid = linuxCrane.braid;
+            }
+          );
           braid-remove-disk = pkgs.testers.nixosTest (
             import ./tests/cli/braid-remove-disk.nix {
               braid = linuxCrane.braid;

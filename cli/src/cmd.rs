@@ -84,6 +84,9 @@ pub enum CmdRequest {
     MkfsBtrfs {
         device: String,
     },
+    MkfsBtrfsRaid1 {
+        devices: Vec<String>,
+    },
     Mount {
         device: String,
         mount_point: String,
@@ -348,6 +351,20 @@ impl CmdRequest {
                 program: "mkfs.btrfs",
                 args: vec!["-f".into(), device.clone()],
             },
+            CmdRequest::MkfsBtrfsRaid1 { devices } => {
+                let mut args = vec![
+                    "-f".into(),
+                    "-d".into(),
+                    "raid1".into(),
+                    "-m".into(),
+                    "raid1".into(),
+                ];
+                args.extend(devices.iter().cloned());
+                CmdArgs {
+                    program: "mkfs.btrfs",
+                    args,
+                }
+            }
             CmdRequest::Mount {
                 device,
                 mount_point,
@@ -839,6 +856,33 @@ mod tests {
             cmd.args.iter().any(|a| a == "-r"),
             "btrfs replace start must include -r flag to read from mirrors, got: {:?}",
             cmd.args
+        );
+    }
+
+    #[test]
+    // Intent: MkfsBtrfsRaid1 generates correct argv with -d raid1 -m raid1 and all devices.
+    // Why: incorrect mkfs arguments could create a single-profile filesystem instead of RAID1.
+    // Scenario: multi-disk add bootstraps a new pool with 2+ fresh disks.
+    fn mkfs_btrfs_raid1_generates_correct_argv() {
+        let cmd = CmdRequest::MkfsBtrfsRaid1 {
+            devices: vec![
+                "/dev/mapper/braid-disk1".to_owned(),
+                "/dev/mapper/braid-disk2".to_owned(),
+            ],
+        }
+        .to_argv();
+        assert_eq!(cmd.program, "mkfs.btrfs");
+        assert_eq!(
+            cmd.args,
+            vec![
+                "-f",
+                "-d",
+                "raid1",
+                "-m",
+                "raid1",
+                "/dev/mapper/braid-disk1",
+                "/dev/mapper/braid-disk2",
+            ]
         );
     }
 

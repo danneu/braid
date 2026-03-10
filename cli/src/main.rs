@@ -21,7 +21,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
-    /// Add a disk to the pool
+    /// Add disk(s) to the pool
     Add(AddArgs),
     /// Remove a disk from the pool
     Remove(RemoveArgs),
@@ -65,9 +65,9 @@ struct CommonArgs {
 
 #[derive(Debug, Args)]
 struct AddArgs {
-    /// Disk name (as defined in braid.disks)
-    #[arg(add = ArgValueCandidates::new(disk_name_candidates))]
-    disk: String,
+    /// Disk name(s) (as defined in braid.disks)
+    #[arg(num_args(1..), add = ArgValueCandidates::new(disk_name_candidates))]
+    disks: Vec<String>,
     /// Directory containing braid.key to enroll in the new disk (LUKS slot 1)
     #[arg(long = "enroll")]
     enroll_key_file: Option<std::path::PathBuf>,
@@ -195,7 +195,7 @@ fn main() {
                 &runner,
                 &fs,
                 Path::new(&config_path),
-                &args.disk,
+                &args.disks,
                 args.common.dry_run,
                 args.common.yes,
                 args.common.passphrase_stdin,

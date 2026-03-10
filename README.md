@@ -81,35 +81,38 @@ sdb      12.0T ata-Ironwolf_ST12000VN0008_YYYYYYYY
 
 Use the ID-LINK column to build your by-id paths.
 
-### Start with one disk
+### Start with multiple disks (recommended)
 
 ```nix
 braid = {
   enable = true;
   disks = {
-    toshiba = {
-      byId = "/dev/disk/by-id/ata-Toshiba_MN07_XXXX";
-    };
+    toshiba  = { byId = "/dev/disk/by-id/ata-Toshiba_MN07_XXXX"; };
+    ironwolf = { byId = "/dev/disk/by-id/ata-Ironwolf_ST12_YYYY"; };
   };
 };
 ```
 
 ```sh
 sudo nixos-rebuild switch
+sudo braid add toshiba ironwolf
+```
+
+`braid add` asks for a passphrase once, LUKS-formats both disks, and creates a btrfs RAID1 pool directly — no balance needed. The pool is live immediately at `/mnt/storage` with full redundancy.
+
+### Start with one disk
+
+```sh
 sudo braid add toshiba
 ```
 
-`braid add` will ask you for a passphrase, write the LUKS header to the disk, and create/add the disk to the btrfs disk pool.
-
-The pool is live immediately at `/mnt/storage`. No redundancy yet — data is available but unprotected until a second drive is added.
+The pool is live at `/mnt/storage` but with no redundancy — data is available but unprotected until a second drive is added.
 
 ### Add a drive
 
 ```nix
-braid.disks = {
-    toshiba = { byId = "/dev/disk/by-id/ata-Toshiba_MN07_XXXX"; };
-   ironwolf = { byId = "/dev/disk/by-id/ata-Ironwolf_ST12_YYYY"; };
-};
+# Add to braid.disks:
+braid.disks.ironwolf = { byId = "/dev/disk/by-id/ata-Ironwolf_ST12_YYYY"; };
 ```
 
 ```
@@ -117,19 +120,21 @@ sudo nixos-rebuild switch
 sudo braid add ironwolf
 ```
 
-The pool converts to RAID1 automatically. Existing data rebalances to the new disk in the background.
+The pool converts to RAID1 automatically. Existing data rebalances to the new disk in the background. You can also add multiple disks at once: `sudo braid add ironwolf seagate`.
 
 ### Preview before executing
 
 ```sh
-$ sudo braid add ironwolf --dry-run
+$ sudo braid add toshiba ironwolf --dry-run
+[destructive] LUKS format /dev/disk/by-id/ata-Toshiba_MN07_XXXX
+[safe       ] LUKS open → braid-toshiba
 [destructive] LUKS format /dev/disk/by-id/ata-Ironwolf_ST12_YYYY
 [safe       ] LUKS open → braid-ironwolf
-[safe       ] btrfs device add /dev/mapper/braid-ironwolf /mnt/storage
-[long       ] btrfs balance to RAID1
+[safe       ] mkfs.btrfs RAID1 /dev/mapper/braid-toshiba /dev/mapper/braid-ironwolf
+[safe       ] mount → /mnt/storage
 ```
 
-Steps reflect actual disk state — if the disk is already LUKS-formatted, the destructive step is omitted.
+Steps reflect actual disk state — if a disk is already LUKS-formatted, the destructive step is omitted.
 
 ### Remove a drive
 
