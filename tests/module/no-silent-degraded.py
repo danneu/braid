@@ -1,5 +1,16 @@
+import json
+
 start_all()
 machine.wait_for_unit("multi-user.target", timeout=180)
+
+# Seed disk-map: the initrd fixture bypasses `braid add`, so the disk-map is
+# empty. braid unlock uses the disk-map to distinguish bricked pool members
+# (degradable) from uninitialized disks (hard error).
+disk_map = json.dumps({"disks": {
+    d: {"by_id": f"/dev/disk/by-id/virtio-{d}", "luks_uuid": "x", "devid": i, "added_at": "t"}
+    for i, d in enumerate(["disk1", "disk2", "disk3"], 1)
+}})
+machine.succeed(f"mkdir -p /var/lib/braid && echo '{disk_map}' > /var/lib/braid/disk-map.json")
 
 with subtest("Pool is not mounted after boot (LUKS closed, no degraded in mount unit)"):
     machine.fail("mountpoint -q /mnt/storage")
@@ -27,10 +38,19 @@ with subtest("Direct mount without -o degraded refuses to mount with missing dev
     machine.fail("mount /dev/mapper/braid-disk1 /mnt/storage")
     machine.fail("mountpoint -q /mnt/storage")
 
-with subtest("braid unlock detects missing disk and mounts degraded"):
-    # braid unlock sees disk1+disk2 already open, disk3 as PresentNotLuks
-    # (bricked header). It adds -o degraded dynamically.
-    machine.succeed("echo -n 'testpassphrase' | braid unlock --passphrase-stdin")
+with subtest("braid unlock refuses degraded mount without --allow-degraded"):
+    ret = machine.execute(
+        "echo -n 'testpassphrase' | braid unlock --passphrase-stdin 2>&1"
+    )
+    assert ret[0] != 0, "Expected refusal"
+    assert "refusing to mount degraded" in ret[1], \
+        f"Expected 'refusing to mount degraded' in output, got: {ret[1]}"
+    machine.fail("mountpoint -q /mnt/storage")
+
+with subtest("braid unlock --allow-degraded mounts degraded"):
+    machine.succeed(
+        "echo -n 'testpassphrase' | braid unlock --passphrase-stdin --allow-degraded"
+    )
     machine.succeed("mountpoint -q /mnt/storage")
 
 with subtest("Pool shows degraded state with missing device"):

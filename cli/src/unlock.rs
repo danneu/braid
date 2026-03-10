@@ -1,5 +1,6 @@
 use crate::cmd::{CmdError, CmdRequest, CommandRunner};
 use crate::config::{mapper_name, Config, ConfigError};
+use crate::disk_map::DiskMap;
 use crate::luks::{self, LuksError};
 use crate::pool::PoolError;
 use crate::probe::{self, Filesystem, ProbeError};
@@ -19,6 +20,8 @@ pub enum UnlockError {
     Cmd(#[from] CmdError),
     #[error("{0}")]
     Failed(String),
+    #[error("{0}")]
+    DegradedRefused(String),
 }
 
 /// Status line tag for output.
@@ -30,9 +33,11 @@ pub fn cmd_unlock<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
     config: &Config,
+    disk_map: &DiskMap,
     passphrase_stdin: bool,
     passphrase_file: Option<&std::path::Path>,
     key_file: Option<&std::path::Path>,
+    allow_degraded: bool,
 ) -> Result<(), UnlockError> {
     let mount_point = config.mount_point();
 
@@ -48,24 +53,47 @@ pub fn cmd_unlock<R: CommandRunner, F: Filesystem + ?Sized>(
     // 2. Probe each config disk
     let mut to_unlock = Vec::new(); // (name, disk) pairs needing unlock
     let mut any_open = false;
-    let mut any_absent = false;
-    let mut any_not_luks = false;
+    let mut any_missing_member = false;
+    let mut any_uninitialized = false;
 
     for (name, disk) in config.disks() {
         let probed = probe::probe_config_disk(runner, fs, name, disk)?;
         match &probed.state {
             ConfigDiskState::Absent => {
-                eprintln!("{}  disk: {:<10}not found (unplugged?)", tag("skip"), name);
-                any_absent = true;
+                if disk_map.disks.contains_key(name) {
+                    // Known pool member, confirmed missing → degradable
+                    eprintln!("{}  disk: {:<10}not found (unplugged?)", tag("skip"), name);
+                    any_missing_member = true;
+                } else {
+                    // Never added — config error, not a degraded scenario
+                    eprintln!(
+                        "{}  disk: {:<10}not found and never added to pool, run `braid add {}`",
+                        tag("skip"),
+                        name,
+                        name
+                    );
+                    any_uninitialized = true;
+                }
             }
             ConfigDiskState::PresentNotLuks => {
-                eprintln!(
-                    "{}  disk: {:<10}not initialized, run `braid add {}`",
-                    tag("skip"),
-                    name,
-                    name
-                );
-                any_not_luks = true;
+                if disk_map.disks.contains_key(name) {
+                    // Was a pool member, LUKS header now bricked → degradable
+                    eprintln!(
+                        "{}  disk: {:<10}LUKS header damaged (was pool member)",
+                        tag("skip"),
+                        name
+                    );
+                    any_missing_member = true;
+                } else {
+                    // Never was a pool member — genuinely uninitialized
+                    eprintln!(
+                        "{}  disk: {:<10}not initialized, run `braid add {}`",
+                        tag("skip"),
+                        name,
+                        name
+                    );
+                    any_uninitialized = true;
+                }
             }
             ConfigDiskState::PresentLuks {
                 mapper_open: true, ..
@@ -84,7 +112,7 @@ pub fn cmd_unlock<R: CommandRunner, F: Filesystem + ?Sized>(
 
     // 3. If no disks to unlock AND none already open → error
     if to_unlock.is_empty() && !any_open {
-        if any_not_luks {
+        if any_uninitialized {
             return Err(UnlockError::Failed(
                 "no unlockable disks found; some disks are not initialized (run `braid add`)"
                     .into(),
@@ -156,35 +184,40 @@ pub fn cmd_unlock<R: CommandRunner, F: Filesystem + ?Sized>(
     }
 
     // 6. mkdir -p mount_point, then mount
+
+    // Uninitialized disks are always a hard error — not a degraded scenario
+    if any_uninitialized {
+        return Err(UnlockError::Failed(
+            "some disks are not initialized (run `braid add`)".into(),
+        ));
+    }
+
+    if any_missing_member && !allow_degraded {
+        return Err(UnlockError::DegradedRefused(
+            "pool has missing devices — refusing to mount degraded\n\
+             new writes would have ZERO redundancy (single-profile chunks)\n\
+             hint: braid unlock --allow-degraded"
+                .into(),
+        ));
+    }
+
     let _ = std::fs::create_dir_all(mount_point);
 
-    let mount_result = if any_absent || any_not_luks {
-        // Some disks missing → degraded mount
+    let mount_key = to_unlock
+        .first()
+        .map(|(k, _)| k.as_str())
+        .or_else(|| config.disks().keys().next().map(|k| k.as_str()))
+        .unwrap_or("unknown");
+
+    let mount_result = if any_missing_member {
+        // --allow-degraded was passed and we have confirmed missing pool members
         runner.run(&CmdRequest::MountWithOptions {
-            device: format!(
-                "/dev/mapper/{}",
-                mapper_name(
-                    &to_unlock
-                        .first()
-                        .map(|(k, _)| k.as_str())
-                        .or_else(|| {
-                            // All disks were already open — find first open mapper
-                            config.disks().keys().next().map(|k| k.as_str())
-                        })
-                        .unwrap_or("unknown")
-                )
-                .0
-            ),
+            device: format!("/dev/mapper/{}", mapper_name(mount_key).0),
             mount_point: mount_point.to_owned(),
             options: vec!["degraded".to_owned()],
         })?
     } else {
-        // All disks present — find a mapper device to mount from
-        let mount_key = to_unlock
-            .first()
-            .map(|(k, _)| k.as_str())
-            .or_else(|| config.disks().keys().next().map(|k| k.as_str()))
-            .unwrap_or("unknown");
+        // All disks present — normal mount
         runner.run(&CmdRequest::Mount {
             device: format!("/dev/mapper/{}", mapper_name(mount_key).0),
             mount_point: mount_point.to_owned(),
@@ -208,6 +241,7 @@ mod tests {
     use super::*;
     use crate::cmd::{MockRunner, RawCommandOutput};
     use crate::config::{Config, DiskConfig};
+    use crate::disk_map::{DiskMap, DiskMapEntry};
     use crate::types::ByIdPath;
     use std::collections::BTreeMap;
 
@@ -268,7 +302,8 @@ mod tests {
         Config::new(disks, "/mnt/storage".to_owned()).unwrap()
     }
 
-    /// Bricked LUKS header (PresentNotLuks) must trigger degraded mount.
+    /// Bricked LUKS header (PresentNotLuks) on a known pool member must trigger
+    /// degraded mount when --allow-degraded is passed.
     ///
     /// Scenario: 3-disk RAID1, disk3's LUKS header is zeroed. Probe sees disk3
     /// as PresentNotLuks (device exists, but cryptsetup luksUUID fails). The
@@ -277,6 +312,18 @@ mod tests {
     #[test]
     fn unlock_bricked_disk_uses_degraded_mount() {
         let config = three_disk_config();
+
+        // disk3 is a known pool member in the disk map
+        let mut disk_map = DiskMap::new();
+        disk_map.disks.insert(
+            "disk3".to_owned(),
+            DiskMapEntry {
+                by_id: "/dev/disk/by-id/virtio-disk3".to_owned(),
+                luks_uuid: "cccccccc-1111-2222-3333-444444444444".to_owned(),
+                devid: 3,
+                added_at: "2024-01-01T00:00:00Z".to_owned(),
+            },
+        );
 
         // disk1 & disk2: exist, are LUKS, mapper not yet open
         // disk3: exists but not LUKS (bricked header)
@@ -374,11 +421,265 @@ mod tests {
             tmp.as_file().write_all(b"testpass").unwrap();
         }
 
-        let result = cmd_unlock(&runner, &fs, &config, false, Some(tmp.path()), None);
+        let result = cmd_unlock(
+            &runner,
+            &fs,
+            &config,
+            &disk_map,
+            false,
+            Some(tmp.path()),
+            None,
+            true, // allow_degraded
+        );
 
         // If the code incorrectly uses Mount instead of MountWithOptions,
         // MockRunner returns MissingMock → the test fails.
         result.expect("unlock with bricked disk should use degraded mount and succeed");
+    }
+
+    /// Bricked LUKS header on a known pool member must refuse degraded mount
+    /// when --allow-degraded is NOT passed.
+    ///
+    /// Scenario: Same as unlock_bricked_disk_uses_degraded_mount but without
+    /// the flag. The error must tell the user how to proceed.
+    #[test]
+    fn unlock_bricked_disk_refuses_without_flag() {
+        let config = three_disk_config();
+
+        // disk3 is a known pool member
+        let mut disk_map = DiskMap::new();
+        disk_map.disks.insert(
+            "disk3".to_owned(),
+            DiskMapEntry {
+                by_id: "/dev/disk/by-id/virtio-disk3".to_owned(),
+                luks_uuid: "cccccccc-1111-2222-3333-444444444444".to_owned(),
+                devid: 3,
+                added_at: "2024-01-01T00:00:00Z".to_owned(),
+            },
+        );
+
+        let fs = MockFs::new(&[
+            "/dev/disk/by-id/virtio-disk1",
+            "/dev/disk/by-id/virtio-disk2",
+            "/dev/disk/by-id/virtio-disk3",
+        ]);
+
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::MountpointCheck {
+                    path: "/mnt/storage".into(),
+                },
+                err_raw("mountpoint", 1, ""),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                RawCommandOutput {
+                    cmd: "cryptsetup luksUUID".into(),
+                    stdout: "aaaaaaaa-1111-2222-3333-444444444444\n".into(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                },
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                },
+                RawCommandOutput {
+                    cmd: "cryptsetup luksUUID".into(),
+                    stdout: "bbbbbbbb-1111-2222-3333-444444444444\n".into(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                },
+            )
+            // disk3 NOT LUKS (bricked)
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk3".into(),
+                },
+                err_raw(
+                    "cryptsetup luksUUID",
+                    1,
+                    "Device is not a valid LUKS device.",
+                ),
+            )
+            // verify passphrase
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw("cryptsetup open --test-passphrase"),
+            )
+            // open disk1
+            .with_output_stdin(
+                CmdRequest::CryptsetupLuksOpen {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                    mapper: "braid-disk1".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw("cryptsetup open"),
+            )
+            // open disk2
+            .with_output_stdin(
+                CmdRequest::CryptsetupLuksOpen {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                    mapper: "braid-disk2".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw("cryptsetup open"),
+            )
+            // btrfs device scan
+            .with_output(CmdRequest::BtrfsDeviceScanAll, ok_raw("btrfs device scan"));
+        // No mount mock — should never reach mount
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        {
+            use std::io::Write;
+            tmp.as_file().write_all(b"testpass").unwrap();
+        }
+
+        let result = cmd_unlock(
+            &runner,
+            &fs,
+            &config,
+            &disk_map,
+            false,
+            Some(tmp.path()),
+            None,
+            false, // allow_degraded = false
+        );
+
+        let err = result.expect_err("should refuse degraded mount without --allow-degraded");
+        assert!(
+            matches!(&err, UnlockError::DegradedRefused(_)),
+            "expected DegradedRefused, got: {err:?}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("refusing to mount degraded"),
+            "error should mention refusal, got: {msg}"
+        );
+        assert!(
+            msg.contains("--allow-degraded"),
+            "error should hint at the flag, got: {msg}"
+        );
+    }
+
+    /// Uninitialized disk (PresentNotLuks, NOT in disk-map) must be a hard error
+    /// even when --allow-degraded is passed.
+    ///
+    /// Scenario: A disk exists but was never `braid add`'d. It's genuinely
+    /// uninitialized, not a bricked pool member. --allow-degraded must not
+    /// bypass this check.
+    #[test]
+    fn unlock_uninitialized_disk_hard_error_even_with_allow_degraded() {
+        let config = three_disk_config();
+
+        // disk3 is NOT in the disk map — never added to pool
+        let disk_map = DiskMap::new();
+
+        let fs = MockFs::new(&[
+            "/dev/disk/by-id/virtio-disk1",
+            "/dev/disk/by-id/virtio-disk2",
+            "/dev/disk/by-id/virtio-disk3",
+        ]);
+
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::MountpointCheck {
+                    path: "/mnt/storage".into(),
+                },
+                err_raw("mountpoint", 1, ""),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                RawCommandOutput {
+                    cmd: "cryptsetup luksUUID".into(),
+                    stdout: "aaaaaaaa-1111-2222-3333-444444444444\n".into(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                },
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                },
+                RawCommandOutput {
+                    cmd: "cryptsetup luksUUID".into(),
+                    stdout: "bbbbbbbb-1111-2222-3333-444444444444\n".into(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                },
+            )
+            // disk3: present but NOT LUKS, and NOT in disk map
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk3".into(),
+                },
+                err_raw(
+                    "cryptsetup luksUUID",
+                    1,
+                    "Device is not a valid LUKS device.",
+                ),
+            )
+            // verify passphrase
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw("cryptsetup open --test-passphrase"),
+            )
+            // open disk1
+            .with_output_stdin(
+                CmdRequest::CryptsetupLuksOpen {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                    mapper: "braid-disk1".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw("cryptsetup open"),
+            )
+            // open disk2
+            .with_output_stdin(
+                CmdRequest::CryptsetupLuksOpen {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                    mapper: "braid-disk2".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw("cryptsetup open"),
+            )
+            // btrfs device scan
+            .with_output(CmdRequest::BtrfsDeviceScanAll, ok_raw("btrfs device scan"));
+        // No mount mock — should never reach mount
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        {
+            use std::io::Write;
+            tmp.as_file().write_all(b"testpass").unwrap();
+        }
+
+        let result = cmd_unlock(
+            &runner,
+            &fs,
+            &config,
+            &disk_map,
+            false,
+            Some(tmp.path()),
+            None,
+            true, // allow_degraded = true — should NOT bypass uninitialized check
+        );
+
+        let err =
+            result.expect_err("should fail for uninitialized disk even with --allow-degraded");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not initialized"),
+            "error should mention 'not initialized', got: {msg}"
+        );
     }
 
     /// Passphrase mismatch on a non-first disk must identify the failing disk.
@@ -485,7 +786,17 @@ mod tests {
             tmp.as_file().write_all(b"testpass").unwrap();
         }
 
-        let result = cmd_unlock(&runner, &fs, &config, false, Some(tmp.path()), None);
+        let disk_map = DiskMap::new();
+        let result = cmd_unlock(
+            &runner,
+            &fs,
+            &config,
+            &disk_map,
+            false,
+            Some(tmp.path()),
+            None,
+            false,
+        );
 
         let err = result.expect_err("should fail when disk2 rejects passphrase");
         let msg = err.to_string();

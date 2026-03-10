@@ -1,8 +1,19 @@
+import json
+
 start_all()
 machine.wait_for_unit("multi-user.target", timeout=180)
 
+# Seed disk-map: the initrd fixture bypasses `braid add`, so the disk-map is
+# empty. braid unlock uses the disk-map to distinguish bricked pool members
+# (degradable) from uninitialized disks (hard error).
+disk_map = json.dumps({"disks": {
+    d: {"by_id": f"/dev/disk/by-id/virtio-{d}", "luks_uuid": "x", "devid": i, "added_at": "t"}
+    for i, d in enumerate(["disk1", "disk2", "disk3"], 1)
+}})
+machine.succeed(f"mkdir -p /var/lib/braid && echo '{disk_map}' > /var/lib/braid/disk-map.json")
+
 with subtest("braid unlock handles bricked disk and mounts degraded"):
-    machine.succeed("echo -n 'testpassphrase' | braid unlock --passphrase-stdin")
+    machine.succeed("echo -n 'testpassphrase' | braid unlock --passphrase-stdin --allow-degraded")
     machine.succeed("mountpoint /mnt/storage")
 
 with subtest("Pool is mounted in degraded mode"):

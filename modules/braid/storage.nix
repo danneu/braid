@@ -167,10 +167,16 @@ in
           *) echo "braid-auto-unlock: WARNING: keyfile perms are $perms (expected 400)" >&2 ;;
         esac
 
-        if braid unlock --key-file "$resolved"; then
+        if braid unlock --key-file "$resolved"${lib.optionalString cfg.autoUnlock.allowDegraded " --allow-degraded"}; then
           echo "braid-auto-unlock: pool unlocked successfully" >&2
         else
-          echo "braid-auto-unlock: unlock failed (wrong keyfile?), skipping" >&2
+          ret=$?
+          if [ $ret -eq 2 ]; then
+            echo "braid-auto-unlock: pool has missing devices — not mounted" >&2
+            echo "braid-auto-unlock: set braid.autoUnlock.allowDegraded = true to allow degraded mount" >&2
+          else
+            echo "braid-auto-unlock: unlock failed (exit $ret), skipping" >&2
+          fi
         fi
 
         # Always unmount USB after use. Never leave keyfile accessible — this

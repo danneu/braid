@@ -63,7 +63,7 @@ Warn but allow dropping to 1 disk — consistent with the single-disk start stor
 
 ### Reboot-in-between safety
 
-If the user reboots between `nixos-rebuild switch` (which removes the LUKS entry) and running `braid-remove-disk`, the disk won't auto-unlock. This is safe: principle #1 (resilient boot) ensures the pool mounts in degraded mode with RAID1 redundancy. The CLI handles both paths (tier 1 if disk is still somehow open, tier 2 if it's absent).
+If the user reboots between `nixos-rebuild switch` (which removes the LUKS entry) and running `braid-remove-disk`, the disk won't auto-unlock. This is safe: principle #1 (resilient boot) ensures the system boots and is reachable via SSH. The pool requires explicit `--allow-degraded` (or `autoUnlock.allowDegraded`) to mount degraded. The CLI handles both paths (tier 1 if disk is still somehow open, tier 2 if it's absent).
 
 ## `braid-status` spec
 

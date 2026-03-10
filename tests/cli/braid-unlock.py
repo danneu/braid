@@ -111,15 +111,26 @@ with subtest("Test 3: partial state — one mapper closed, pool unmounted"):
     content = machine.succeed("cat /mnt/storage/test.txt").strip()
     assert content == "persistent data", f"Expected 'persistent data', got '{content}'"
 
-# --- Test 4: Missing disk (degraded mount) ---
+# --- Test 4a: Missing disk — refuses degraded by default ---
 
-with subtest("Test 4: missing disk — degraded mount"):
+with subtest("Test 4a: missing disk — refuses degraded by default"):
     close_all()
 
     # Remove disk3's by-id symlink to simulate unplugged disk
     machine.succeed("rm -f /dev/disk/by-id/virtio-disk3")
 
-    machine.succeed(unlock_cmd(passphrase))
+    ret = machine.execute(unlock_cmd(passphrase) + " 2>&1")
+    assert ret[0] != 0, "Expected non-zero exit for degraded refusal"
+    assert "refusing to mount degraded" in ret[1], \
+        f"Expected 'refusing to mount degraded' in output, got: {ret[1]}"
+    assert "--allow-degraded" in ret[1], \
+        f"Expected '--allow-degraded' hint in output, got: {ret[1]}"
+    machine.fail("mountpoint -q /mnt/storage")
+
+# --- Test 4b: Missing disk — --allow-degraded mounts degraded ---
+
+with subtest("Test 4b: missing disk — --allow-degraded mounts degraded"):
+    machine.succeed(unlock_cmd(passphrase, extra="--allow-degraded"))
 
     machine.succeed("mountpoint -q /mnt/storage")
 

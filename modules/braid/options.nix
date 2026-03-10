@@ -59,6 +59,12 @@ in
         default = 5;
         description = "Seconds to wait for USB device before giving up.";
       };
+
+      allowDegraded = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = "Mount degraded when devices are missing during auto-unlock. New writes will have zero redundancy.";
+      };
     };
   };
 

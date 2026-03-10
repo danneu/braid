@@ -12,7 +12,7 @@ The OS lives on an internal SSD. Data drives are separate. Nothing about the dat
 
 1. **Hard dependencies** — LUKS required, mount required. Any failure blocks boot. Simple but means a dead drive = unreachable NAS.
 2. **Degraded toggle** — add an option like `braid.allowDegraded = true`. Default to hard failure, opt in to resilience. Adds complexity and a wrong default.
-3. **Resilient by default** — `nofail`, `wants`, `degraded` everywhere. Zero cost when healthy, graceful in every failure case. No toggle.
+3. **Resilient by default** — `nofail`, `wants` everywhere. Zero cost when healthy, graceful in every failure case. No toggle. Degraded mounts require explicit opt-in (`--allow-degraded` or `autoUnlock.allowDegraded`) to prevent silent zero-redundancy operation.
 
 ## Decision
 
@@ -24,7 +24,7 @@ LUKS unlock is strictly stage-2 — `braid-unlock` or `braid-auto-unlock` opens 
 
 Every layer has a specific resilience mechanism:
 
-- **Mount**: `nofail` + `degraded` in mount options. A partial pool still mounts. A total failure doesn't block boot.
+- **Mount**: `nofail` in mount options. A total failure doesn't block boot. Degraded mounts require explicit `--allow-degraded` (or `autoUnlock.allowDegraded` for unattended use) — braid refuses to silently mount with zero redundancy.
 - **btrfs-device-scan**: Stage-2 service referenced by the mount unit's `x-systemd.requires`. Scans for btrfs multi-device filesystems after LUKS mappers are opened.
 
 ### Three-tier failure model
@@ -32,7 +32,7 @@ Every layer has a specific resilience mechanism:
 | Scenario | What happens | User sees |
 |----------|-------------|-----------|
 | All drives healthy | Normal boot | Everything works |
-| One drive dead | 10s timeout, btrfs mounts degraded | Pool accessible in degraded mode |
+| One drive dead | `braid unlock` refuses by default; user must pass `--allow-degraded` or configure `autoUnlock.allowDegraded` | Pool stays locked until explicit opt-in |
 | All drives dead / wrong config | 10s timeout, mount fails | System boots, SSH works, no /mnt/storage |
 
 ## Key discoveries

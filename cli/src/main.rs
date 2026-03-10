@@ -136,6 +136,9 @@ struct UnlockArgs {
     /// Unlock with a binary keyfile instead of passphrase
     #[arg(long, conflicts_with_all = ["passphrase_stdin", "passphrase_file"])]
     key_file: Option<std::path::PathBuf>,
+    /// Allow mounting with missing devices (degraded mode — new writes have no redundancy)
+    #[arg(long)]
+    allow_degraded: bool,
 }
 
 #[derive(Debug, Args)]
@@ -300,18 +303,28 @@ fn main() {
                     std::process::exit(1);
                 }
             };
+            let disk_map = braid_cli::disk_map::load_disk_map();
             let runner = RealRunner;
             let fs = RealFilesystem;
-            if let Err(e) = braid_cli::unlock::cmd_unlock(
+            match braid_cli::unlock::cmd_unlock(
                 &runner,
                 &fs,
                 &config,
+                &disk_map,
                 args.passphrase_stdin,
                 args.passphrase_file.as_deref(),
                 args.key_file.as_deref(),
+                args.allow_degraded,
             ) {
-                print_cli_error(&e.to_string());
-                std::process::exit(1);
+                Ok(()) => {}
+                Err(braid_cli::unlock::UnlockError::DegradedRefused(msg)) => {
+                    print_cli_error(&msg);
+                    std::process::exit(2);
+                }
+                Err(e) => {
+                    print_cli_error(&e.to_string());
+                    std::process::exit(1);
+                }
             }
         }
         Commands::EnrollKeyFile(args) => {

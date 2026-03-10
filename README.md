@@ -221,7 +221,7 @@ After boot, bring the encrypted pool online:
 systemctl start braid-pool.target
 ```
 
-One passphrase prompt opens all available LUKS devices and mounts the pool. Works from TTY, SSH, or scripted. Tolerates missing/dead disks (mounts degraded).
+One passphrase prompt opens all available LUKS devices and mounts the pool. Works from TTY, SSH, or scripted. If disks are missing, use `--allow-degraded` to mount with reduced redundancy.
 
 ## Auto-unlock with USB keyfile
 
@@ -297,7 +297,7 @@ Braid enables these automatically when `braid.enable = true`:
   services.btrfs.autoScrub.enable = false;
   ```
 
-- **Resilient boot** — a dead or missing drive never blocks boot. The pool mounts in degraded mode and the system stays reachable via SSH.
+- **Resilient boot** — a dead or missing drive never blocks boot. The pool stays locked until you unlock it, and the system remains reachable via SSH.
 
 - **Pinned toolchain** — runtime tools (btrfs-progs, cryptsetup, util-linux) are pinned to a NixOS stable release. Parser output formats don't change on flake updates. Override individual tools via `braid.packages.*` if needed.
 

@@ -4,7 +4,7 @@ Canonical invariants for braid. Each principle is authoritative — if code or c
 
 ## 1. Resilient by default
 
-Data drives never block boot. LUKS devices use `nofail` + bounded timeouts. btrfs-device-scan uses `wants`, not `requires`. The mount uses `degraded` + `nofail`. There is no toggle — resilience is the default, not an option. [Why →](decisions/resilient-boot.md)
+Data drives never block boot. LUKS devices use `nofail` + bounded timeouts. btrfs-device-scan uses `wants`, not `requires`. The mount uses `nofail`. Degraded mounts require explicit `--allow-degraded` — braid refuses to silently run with zero redundancy. [Why →](decisions/resilient-boot.md)
 
 ## 2. Config-first workflow
 
