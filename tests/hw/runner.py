@@ -21,6 +21,7 @@ Usage:
 import argparse
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -29,7 +30,9 @@ import time
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_DIR = "/tmp/braid-hw-test"
 CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
+MOUNT_POINT = "/mnt/braid-hw-test"
 RUNTIME_STATE = "/var/lib/braid"
+STATE_BACKUP = os.path.join(CONFIG_DIR, "state-backup")
 
 ALL_TESTS = [
     "test_add_canary",
@@ -139,20 +142,20 @@ def write_config(device_paths):
     os.makedirs(CONFIG_DIR, exist_ok=True)
     config = {
         "disks": {},
-        "mount_point": "/mnt/storage",
+        "mount_point": MOUNT_POINT,
     }
     for i, path in enumerate(device_paths, 1):
-        config["disks"][f"disk{i}"] = {"by_id": path}
+        config["disks"][f"hwtest{i}"] = {"by_id": path}
 
     with open(CONFIG_PATH, "w") as f:
         json.dump(config, f, indent=2)
 
 
 def cleanup():
-    """Best-effort umount + close mappers for test disk names."""
-    subprocess.run("umount /mnt/storage 2>/dev/null", shell=True)
+    """Best-effort umount + close mappers for hw-test disk names."""
+    subprocess.run(f"umount {MOUNT_POINT} 2>/dev/null", shell=True)
     for i in range(1, 10):
-        subprocess.run(f"cryptsetup close braid-disk{i} 2>/dev/null", shell=True)
+        subprocess.run(f"cryptsetup close braid-hwtest{i} 2>/dev/null", shell=True)
 
 
 def wipe_disks(device_paths):
@@ -169,12 +172,32 @@ def reset_state():
     subprocess.run(f"rm -rf {RUNTIME_STATE}", shell=True)
 
 
+def backup_state():
+    """Back up /var/lib/braid if it exists. Returns True if state existed."""
+    if os.path.isdir(RUNTIME_STATE):
+        if os.path.exists(STATE_BACKUP):
+            shutil.rmtree(STATE_BACKUP)
+        shutil.copytree(RUNTIME_STATE, STATE_BACKUP)
+        return True
+    return False
+
+
+def restore_state(had_state):
+    """Restore /var/lib/braid from backup, or clean up if none existed."""
+    if had_state:
+        subprocess.run(f"rm -rf {RUNTIME_STATE}", shell=True)
+        shutil.copytree(STATE_BACKUP, RUNTIME_STATE)
+        shutil.rmtree(STATE_BACKUP)
+    else:
+        subprocess.run(f"rm -rf {RUNTIME_STATE}", shell=True)
+
+
 def run_test(test_name, device_paths):
-    """Run a single test as a subprocess. Returns True on success."""
+    """Run a single test. Returns 'pass', 'fail', or 'skip' (exit 77)."""
     test_file = os.path.join(TESTS_DIR, f"{test_name}.py")
     if not os.path.exists(test_file):
         print(f"  Test file not found: {test_file}")
-        return False
+        return "fail"
 
     env = os.environ.copy()
     env["BRAID_HW_DISKS"] = ":".join(device_paths)
@@ -183,7 +206,12 @@ def run_test(test_name, device_paths):
         [sys.executable, test_file],
         env=env,
     )
-    return result.returncode == 0
+    if result.returncode == 0:
+        return "pass"
+    elif result.returncode == 77:
+        return "skip"
+    else:
+        return "fail"
 
 
 def main():
@@ -242,39 +270,53 @@ def main():
     print(f"Running {len(tests_to_run)} test(s): {', '.join(tests_to_run)}")
     print()
 
+    # Back up production state and create test mount point
+    had_state = backup_state()
+    os.makedirs(MOUNT_POINT, exist_ok=True)
+
     results = {}
     start_time = time.time()
 
-    for test_name in tests_to_run:
-        print(f"\n{'#'*60}")
-        print(f"# {test_name}")
-        print(f"{'#'*60}\n")
+    try:
+        for test_name in tests_to_run:
+            print(f"\n{'#'*60}")
+            print(f"# {test_name}")
+            print(f"{'#'*60}\n")
 
-        # Pre-test reset
+            # Pre-test reset
+            cleanup()
+            wipe_disks(device_paths)
+            reset_state()
+            write_config(device_paths)
+
+            test_start = time.time()
+            outcome = run_test(test_name, device_paths)
+            elapsed = time.time() - test_start
+
+            results[test_name] = outcome
+            label = {"pass": "PASS", "fail": "FAIL", "skip": "SKIP"}[outcome]
+            print(f"\n  {label}: {test_name} ({elapsed:.1f}s)")
+    finally:
         cleanup()
-        wipe_disks(device_paths)
-        reset_state()
-        write_config(device_paths)
-
-        test_start = time.time()
-        passed = run_test(test_name, device_paths)
-        elapsed = time.time() - test_start
-
-        results[test_name] = passed
-        status = "PASS" if passed else "FAIL"
-        print(f"\n  {status}: {test_name} ({elapsed:.1f}s)")
+        restore_state(had_state)
+        # Remove test mount point if empty
+        try:
+            os.rmdir(MOUNT_POINT)
+        except OSError:
+            pass
 
     # Summary
     total_time = time.time() - start_time
     print(f"\n{'='*60}")
     print(f"  SUMMARY ({total_time:.1f}s)")
     print(f"{'='*60}")
-    passed_count = sum(1 for v in results.values() if v)
-    failed_count = len(results) - passed_count
-    for name, passed in results.items():
-        status = "PASS" if passed else "FAIL"
-        print(f"  {status}: {name}")
-    print(f"\n  {passed_count} passed, {failed_count} failed")
+    passed_count = sum(1 for v in results.values() if v == "pass")
+    failed_count = sum(1 for v in results.values() if v == "fail")
+    skipped_count = sum(1 for v in results.values() if v == "skip")
+    for name, outcome in results.items():
+        label = {"pass": "PASS", "fail": "FAIL", "skip": "SKIP"}[outcome]
+        print(f"  {label}: {name}")
+    print(f"\n  {passed_count} passed, {failed_count} failed, {skipped_count} skipped")
 
     sys.exit(0 if failed_count == 0 else 1)
 

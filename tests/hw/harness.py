@@ -7,6 +7,7 @@ import subprocess
 import sys
 
 CONFIG = "/tmp/braid-hw-test/config.json"
+MOUNT_POINT = "/mnt/braid-hw-test"
 
 
 # ---------------------------------------------------------------------------
@@ -60,7 +61,7 @@ def disk(n):
 
 def disk_name(n):
     """Return the braid key for the nth disk."""
-    return f"disk{n}"
+    return f"hwtest{n}"
 
 
 # ---------------------------------------------------------------------------
@@ -68,11 +69,11 @@ def disk_name(n):
 # ---------------------------------------------------------------------------
 
 def cleanup():
-    """Best-effort umount /mnt/storage + close mappers for test disk names only."""
-    subprocess.run("umount /mnt/storage 2>/dev/null", shell=True)
-    # Only close mappers for disk names we use in tests
+    """Best-effort umount + close mappers for hw-test disk names only."""
+    subprocess.run(f"umount {MOUNT_POINT} 2>/dev/null", shell=True)
+    # Only close mappers for hwtest names we use in tests
     for i in range(1, 10):
-        name = f"braid-disk{i}"
+        name = f"braid-hwtest{i}"
         subprocess.run(
             f"cryptsetup close {name} 2>/dev/null", shell=True,
         )
