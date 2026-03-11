@@ -59,6 +59,11 @@ playground:
 cachix:
     nix build .#packages.x86_64-linux.braid-cli-unwrapped --no-link --print-out-paths | xargs nix run nixpkgs#cachix -- push braid
 
+# Run hardware canary tests (requires root, DESTRUCTIVE to specified drives)
+# Usage: just test-hw --from-config /etc/braid/config.json
+test-hw *args:
+    sudo python3 tests/hw/runner.py {{args}}
+
 # Destroy an entire braid pool (dev use only — wipes LUKS signatures + state files)
 destroy config="/etc/braid/config.json":
     ./scripts/braid-destroy.sh {{config}}
