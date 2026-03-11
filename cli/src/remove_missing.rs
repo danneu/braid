@@ -113,9 +113,14 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync>(
     // Confirm
     if !yes {
         if let Some(devid) = missing_id {
-            eprintln!("Remove missing device (devid {}) from pool?", devid);
+            eprintln!(
+                "Clean up missing device entry (devid {}) from pool? This forgets the device — it does not rebuild data. To replace a failed disk, use `braid replace` instead.",
+                devid
+            );
         } else {
-            eprintln!("Remove missing device from pool?");
+            eprintln!(
+                "Clean up missing device entry from pool? This forgets the device — it does not rebuild data. To replace a failed disk, use `braid replace` instead."
+            );
         }
         eprint!("Type 'remove missing' to confirm: ");
         let mut input = String::new();
@@ -195,18 +200,13 @@ fn check_relocation_space<R: CommandRunner>(
         .iter()
         .filter(|d| d.device_size == 0 && (missing_id.is_none() || missing_id == Some(d.devid)))
         .collect();
-    let remaining: Vec<_> = usage
-        .devices
-        .iter()
-        .filter(|d| d.device_size > 0)
-        .collect();
+    let remaining: Vec<_> = usage.devices.iter().filter(|d| d.device_size > 0).collect();
 
-    preflight::check_raid1_relocation_space(&target, &remaining)
-        .map_err(|e| {
-            RemoveMissingError::Validation(format!(
-                "{e}\n\nFree up space by deleting files, or add a new device first with `braid add`."
-            ))
-        })
+    preflight::check_raid1_relocation_space(&target, &remaining).map_err(|e| {
+        RemoveMissingError::Validation(format!(
+            "{e}\n\nFree up space by deleting files, or add a new device first with `braid add`."
+        ))
+    })
 }
 
 fn compile_steps(missing_id: Option<u64>) -> Vec<RemoveMissingStep> {

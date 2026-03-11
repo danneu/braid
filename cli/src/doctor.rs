@@ -7,6 +7,7 @@ use crate::cmd::{CmdRequest, CommandRunner, RealRunner};
 use crate::config::Config;
 use crate::parse::parse_btrfs_df_json;
 use crate::parse::types::{BtrfsBgType, BtrfsDfOutput, BtrfsProfile};
+use crate::preflight;
 use crate::status::format_bytes;
 
 // ---------------------------------------------------------------------------
@@ -346,6 +347,58 @@ fn check_profile_mismatch<R: CommandRunner>(
     }
 }
 
+fn check_pool_missing_devices<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> CheckResult {
+    if ctx.config.is_none() {
+        return CheckResult {
+            name: "pool_missing_devices".into(),
+            status: CheckStatus::Skip,
+            message: "skipped (config not available)".into(),
+        };
+    }
+
+    ensure_df_snapshot(ctx);
+
+    match &ctx.df_snapshot {
+        None | Some(DfSnapshot::NotMounted) => {
+            return CheckResult {
+                name: "pool_missing_devices".into(),
+                status: CheckStatus::Skip,
+                message: "skipped (pool not mounted)".into(),
+            };
+        }
+        _ => {}
+    }
+
+    let mount_point = ctx.config.as_ref().unwrap().mount_point().to_owned();
+
+    match preflight::probe_missing_devids(ctx.runner, &mount_point) {
+        Ok(missing) if missing.is_empty() => CheckResult {
+            name: "pool_missing_devices".into(),
+            status: CheckStatus::Ok,
+            message: "no missing devices".into(),
+        },
+        Ok(missing) => {
+            let devids: Vec<String> = missing.iter().map(|d| d.to_string()).collect();
+            CheckResult {
+                name: "pool_missing_devices".into(),
+                status: CheckStatus::Warn,
+                message: format!(
+                    "pool has {} missing device{} (devid{}: {}); replace with: braid replace --old <disk> --new <disk> --missing-id <devid>",
+                    missing.len(),
+                    if missing.len() == 1 { "" } else { "s" },
+                    if missing.len() == 1 { "" } else { "s" },
+                    devids.join(", "),
+                ),
+            }
+        }
+        Err(e) => CheckResult {
+            name: "pool_missing_devices".into(),
+            status: CheckStatus::Warn,
+            message: format!("could not probe for missing devices: {e}"),
+        },
+    }
+}
+
 fn check_data_profile_mismatch<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> CheckResult {
     check_profile_mismatch(ctx, BtrfsBgType::Data, "data_profile_mismatch", "data")
 }
@@ -394,6 +447,7 @@ pub fn run_doctor<R: CommandRunner>(config_path: &Path, runner: &R) -> DoctorRep
         check_config_schema(&mut ctx),
         check_config_permissions(&mut ctx),
         check_declared_disks(&mut ctx),
+        check_pool_missing_devices(&mut ctx),
         check_data_profile_mismatch(&mut ctx),
         check_metadata_profile_mismatch(&mut ctx),
     ];
@@ -421,6 +475,7 @@ pub fn format_doctor_human(report: &DoctorReport) -> String {
             "config_schema" => "config schema",
             "config_permissions" => "config perms",
             "declared_disks" => "declared disks",
+            "pool_missing_devices" => "missing devs",
             "data_profile_mismatch" => "data profiles",
             "metadata_profile_mismatch" => "meta profiles",
             other => other,
@@ -501,7 +556,7 @@ mod tests {
     fn valid_config_parses_ok_disks_warn() {
         let f = write_temp(valid_config_json());
         let report = run_doctor(f.path(), &mock());
-        assert_eq!(report.checks.len(), 6);
+        assert_eq!(report.checks.len(), 7);
         assert_eq!(find_check(&report, "config_file").status, CheckStatus::Ok);
         assert_eq!(find_check(&report, "config_schema").status, CheckStatus::Ok);
         // declared_disks warns since /dev/disk/by-id/a doesn't exist in test env
@@ -1069,6 +1124,149 @@ mod tests {
         assert!(
             human.contains("meta profiles"),
             "expected 'meta profiles':\n{human}"
+        );
+    }
+
+    // --- pool_missing_devices tests ---
+
+    fn device_usage_healthy() -> (CmdRequest, RawCommandOutput) {
+        (
+            CmdRequest::BtrfsDeviceUsageRaw {
+                mount_point: "/mnt/storage".into(),
+            },
+            RawCommandOutput {
+                cmd: "btrfs device usage --raw /mnt/storage".into(),
+                stdout: "\
+/dev/mapper/braid-toshiba, ID: 1
+   Device size:           520093696
+   Device slack:                  0
+   Data,RAID1:            469762048
+   Unallocated:            50331648
+
+"
+                .into(),
+                stderr: String::new(),
+                exit_status: 0,
+            },
+        )
+    }
+
+    fn device_usage_with_missing() -> (CmdRequest, RawCommandOutput) {
+        (
+            CmdRequest::BtrfsDeviceUsageRaw {
+                mount_point: "/mnt/storage".into(),
+            },
+            RawCommandOutput {
+                cmd: "btrfs device usage --raw /mnt/storage".into(),
+                stdout: "\
+/dev/mapper/braid-toshiba, ID: 1
+   Device size:           520093696
+   Device slack:                  0
+   Data,RAID1:            469762048
+   Unallocated:            50331648
+
+<missing disk>, ID: 2
+   Device size:                  0
+   Device slack:                  0
+   Data,RAID1:            469762048
+   Unallocated:                  0
+
+"
+                .into(),
+                stderr: String::new(),
+                exit_status: 0,
+            },
+        )
+    }
+
+    // Intent: pool_missing_devices reports Ok when no devices are missing.
+    // Why: ensures the check doesn't false-positive on a healthy pool.
+    // Scenario: healthy 1-disk pool, all present.
+    #[test]
+    fn pool_missing_devices_ok_when_healthy() {
+        let (mp_req, mp_out) = mountpoint_ok();
+        let (df_req, df_out) = df_json(DF_RAID1_CLEAN);
+        let (du_req, du_out) = device_usage_healthy();
+        let runner = mock()
+            .with_output(mp_req, mp_out)
+            .with_output(df_req, df_out)
+            .with_output(du_req, du_out);
+        let f = write_temp(valid_config_json());
+        let report = run_doctor(f.path(), &runner);
+        let check = find_check(&report, "pool_missing_devices");
+        assert_eq!(check.status, CheckStatus::Ok);
+        assert!(check.message.contains("no missing"), "{}", check.message);
+    }
+
+    // Intent: pool_missing_devices warns when devices are missing and recommends replace.
+    // Why: degraded pools need operator action; doctor should guide them to replace.
+    // Scenario: one drive died in a 2-disk NAS.
+    #[test]
+    fn pool_missing_devices_warns_with_replace_recommendation() {
+        let (mp_req, mp_out) = mountpoint_ok();
+        let (df_req, df_out) = df_json(DF_RAID1_CLEAN);
+        let (du_req, du_out) = device_usage_with_missing();
+        let runner = mock()
+            .with_output(mp_req, mp_out)
+            .with_output(df_req, df_out)
+            .with_output(du_req, du_out);
+        let f = write_temp(valid_config_json());
+        let report = run_doctor(f.path(), &runner);
+        let check = find_check(&report, "pool_missing_devices");
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert!(
+            check.message.contains("missing device"),
+            "{}",
+            check.message
+        );
+        assert!(
+            check.message.contains("braid replace"),
+            "expected replace recommendation: {}",
+            check.message
+        );
+        assert!(
+            check.message.contains("--missing-id"),
+            "expected --missing-id in recommendation: {}",
+            check.message
+        );
+        assert!(
+            check.message.contains("devid"),
+            "expected devid in message: {}",
+            check.message
+        );
+    }
+
+    // Intent: pool_missing_devices skips when pool is not mounted.
+    // Why: can't probe device usage on an unmounted pool.
+    // Scenario: user runs braid doctor before unlocking.
+    #[test]
+    fn pool_missing_devices_skip_when_not_mounted() {
+        let (mp_req, mp_out) = mountpoint_fail();
+        let runner = mock().with_output(mp_req, mp_out);
+        let f = write_temp(valid_config_json());
+        let report = run_doctor(f.path(), &runner);
+        let check = find_check(&report, "pool_missing_devices");
+        assert_eq!(check.status, CheckStatus::Skip);
+    }
+
+    // Intent: human format includes the "missing devs" label.
+    // Why: ensures the new check has a human-readable label.
+    // Scenario: operator reads braid doctor output.
+    #[test]
+    fn human_format_contains_missing_devs_label() {
+        let (mp_req, mp_out) = mountpoint_ok();
+        let (df_req, df_out) = df_json(DF_RAID1_CLEAN);
+        let (du_req, du_out) = device_usage_healthy();
+        let runner = mock()
+            .with_output(mp_req, mp_out)
+            .with_output(df_req, df_out)
+            .with_output(du_req, du_out);
+        let f = write_temp(valid_config_json());
+        let report = run_doctor(f.path(), &runner);
+        let human = format_doctor_human(&report);
+        assert!(
+            human.contains("missing devs"),
+            "expected 'missing devs':\n{human}"
         );
     }
 }

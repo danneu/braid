@@ -69,7 +69,11 @@ pub fn check_no_missing_devices(missing_count: u64, action: &str) -> Result<(), 
     if missing_count > 0 {
         Err(format!(
             "pool has {missing_count} missing device{}. \
-             Run `braid remove-missing` before you {action}.",
+             Resolve the missing device{} first — repair with \
+             `braid replace --missing-id <devid>`, or forget the entry with \
+             `braid remove-missing` — then {action}. \
+             Use `braid status --verbose` to see device IDs.",
+            if missing_count == 1 { "" } else { "s" },
             if missing_count == 1 { "" } else { "s" },
         ))
     } else {
@@ -127,10 +131,8 @@ pub fn check_raid1_relocation_space(
             continue;
         }
 
-        let mut remaining_unalloc: Vec<u64> = remaining_devs
-            .iter()
-            .map(|d| d.unallocated)
-            .collect();
+        let mut remaining_unalloc: Vec<u64> =
+            remaining_devs.iter().map(|d| d.unallocated).collect();
         remaining_unalloc.sort_unstable_by(|a, b| b.cmp(a));
 
         let devices_with_space = remaining_unalloc.iter().filter(|&&s| s > 0).count();
@@ -316,8 +318,12 @@ mod tests {
             "expected count in: {err}"
         );
         assert!(
+            err.contains("replace --missing-id"),
+            "expected repair guidance in: {err}"
+        );
+        assert!(
             err.contains("remove-missing"),
-            "expected guidance in: {err}"
+            "expected cleanup guidance in: {err}"
         );
     }
 
@@ -440,8 +446,7 @@ mod tests {
         let rem1 = make_dev(2, 200_000_000, &[]);
         let rem2 = make_dev(3, 200_000_000, &[]);
         let rem3 = make_dev(4, 200_000_000, &[]);
-        let result =
-            check_raid1_relocation_space(&[&target], &[&rem1, &rem2, &rem3]);
+        let result = check_raid1_relocation_space(&[&target], &[&rem1, &rem2, &rem3]);
         assert!(result.is_ok(), "should pass: {result:?}");
     }
 
@@ -457,13 +462,9 @@ mod tests {
         let rem1 = make_dev(2, 200_000_000, &[]);
         let rem2 = make_dev(3, 10_000_000, &[]);
         let rem3 = make_dev(4, 10_000_000, &[]);
-        let result =
-            check_raid1_relocation_space(&[&target], &[&rem1, &rem2, &rem3]);
+        let result = check_raid1_relocation_space(&[&target], &[&rem1, &rem2, &rem3]);
         let err = result.expect_err("should fail: pairing constraint");
-        assert!(
-            err.contains("Data"),
-            "expected 'Data' in error: {err}"
-        );
+        assert!(err.contains("Data"), "expected 'Data' in error: {err}");
     }
 
     #[test]
@@ -494,7 +495,10 @@ mod tests {
         let rem1 = make_dev(2, 50_000_000, &[]);
         let rem2 = make_dev(3, 50_000_000, &[]);
         let result = check_raid1_relocation_space(&[&target], &[&rem1, &rem2]);
-        assert!(result.is_ok(), "should pass (Data skipped, Metadata fits): {result:?}");
+        assert!(
+            result.is_ok(),
+            "should pass (Data skipped, Metadata fits): {result:?}"
+        );
     }
 
     #[test]

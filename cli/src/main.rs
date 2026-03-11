@@ -25,7 +25,7 @@ enum Commands {
     Add(AddArgs),
     /// Remove a disk from the pool
     Remove(RemoveArgs),
-    /// Remove a missing/dead device from the pool
+    /// Clean up a missing/dead device entry from the pool (does not rebuild data — use `replace` for that)
     RemoveMissing(RemoveMissingArgs),
     /// Replace a disk with a new one
     Replace(ReplaceArgs),

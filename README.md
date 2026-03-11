@@ -149,7 +149,9 @@ Data migrates off the drive before it's detached. If removing would leave a sing
 sudo nixos-rebuild switch
 ```
 
-### Remove a missing/dead device
+### Remove a missing/dead device (cleanup only)
+
+Forgets a stale missing-device entry from the pool. This does **not** rebuild data — use `braid replace` for that.
 
 ```
 sudo braid remove-missing                    # 1 missing device: auto-detected
@@ -160,7 +162,7 @@ Use `braid status --verbose` to see device IDs.
 
 ### Replace a drive
 
-Replace works for both live and dead/missing disks. The new drive is added and rebalanced **before** the old device is evicted — redundancy never drops.
+Replace works for both live and dead/missing disks using `btrfs replace start`. The new device inherits the old device's slot — no intermediate balance or remove step.
 
 **Live disk** (swap a working drive):
 
@@ -178,10 +180,11 @@ braid.disks.seagate = { byId = "/dev/disk/by-id/ata-Seagate_NEW_ZZZZ"; };
 
 ```
 sudo nixos-rebuild switch
-sudo braid replace --old ironwolf --new seagate
+sudo braid replace --old ironwolf --new seagate                    # auto-detects single missing device
+sudo braid replace --old ironwolf --new seagate --missing-id 3     # explicit devid when multiple missing
 ```
 
-If the pool has missing devices when you try a live replace, resolve them first with `braid remove-missing`. The `--missing-id` flag is only valid when the old disk is dead.
+Use `braid status --verbose` to see device IDs. If the pool has missing devices when you try a live replace, repair the missing device first with `braid replace --missing-id <devid>`. Use `braid remove-missing` only to intentionally forget a stale entry without rebuilding data.
 
 ### Disk identity map
 

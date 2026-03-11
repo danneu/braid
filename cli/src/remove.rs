@@ -72,7 +72,9 @@ pub fn cmd_remove<R: CommandRunner + Sync>(
         let mut msg = format!("disk '{}' not found in pool.", name);
         if pool.missing_count > 0 {
             msg.push_str(&format!(
-                " ({} missing device{} detected. Use 'braid remove-missing' to remove missing devices.)",
+                " ({} missing device{} detected. \
+                 To repair onto a new disk, use `braid replace`. \
+                 To forget the entry, use `braid remove-missing`.)",
                 pool.missing_count,
                 if pool.missing_count == 1 { "" } else { "s" }
             ));
@@ -205,12 +207,11 @@ fn check_eviction_space<R: CommandRunner>(
         .filter(|d| d.devid != target_devid)
         .collect();
 
-    preflight::check_raid1_relocation_space(&target, &remaining)
-        .map_err(|e| {
-            RemoveError::Validation(format!(
-                "{e}\n\nFree up space by deleting files, or add a new device first with `braid add`."
-            ))
-        })
+    preflight::check_raid1_relocation_space(&target, &remaining).map_err(|e| {
+        RemoveError::Validation(format!(
+            "{e}\n\nFree up space by deleting files, or add a new device first with `braid add`."
+        ))
+    })
 }
 
 fn compile_remove_present_steps(

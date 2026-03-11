@@ -18,8 +18,8 @@ Replace plan/apply with five intent commands:
 |---------|---------|------|
 | `braid add <key>` | Format + join pool, or join existing LUKS device | Destructive (new disk) or safe (existing LUKS) |
 | `braid remove <key>` | Migrate data off present disk, detach from pool | Long-running |
-| `braid remove-missing` | Remove a missing/dead device from the pool | Long-running |
-| `braid replace --old <key> --new <key>` | Add new, rebalance, then evict old (live or dead) | Transactional (add-first ordering) |
+| `braid remove-missing` | Clean up a stale missing-device entry from the pool (does not rebuild data) | Long-running |
+| `braid replace --old <key> --new <key>` | Replace a disk (live or dead) using `btrfs replace start` | In-place swap (preserves devid) |
 | `braid status` | Display pool health and disk info | Read-only |
 
 ### Disk keys
@@ -49,9 +49,11 @@ The btrfs superblock check is the "idempotent format primitive" described in `sa
 ### Replace safety constraints
 
 - `--old` accepts both live (present in pool) and dead/missing disks.
-- `--missing-id` is only valid when `--old` is dead/missing. Rejected with live `--old`.
-- Mixed state (live `--old` + pool has missing devices) is rejected — operator must run `braid remove-missing` first.
-- Live eviction uses a shared helper (also used by `remove`) that probes pool state to decide if RAID1→single conversion is needed.
+- Both paths use `btrfs replace start` — the sole replacement primitive. Live disks replace in-place; missing disks are rebuilt from RAID redundancy by devid.
+- `--missing-id` is only valid when `--old` is dead/missing. Rejected with live `--old`. Validated against actual missing devids via `probe_missing_devids()`.
+- When exactly one device is missing, the devid is auto-resolved. Multiple missing devices require explicit `--missing-id`.
+- Mixed state (live `--old` + pool has missing devices) is rejected — operator must repair the missing device first with `braid replace --missing-id <devid>`. `braid remove-missing` is only for intentional cleanup (forgetting stale entries without rebuilding data).
+- No replacement path uses `btrfs device add` or `btrfs balance` — those are for `braid add` only.
 
 ### ENOSPC pre-flight check
 

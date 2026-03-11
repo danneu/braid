@@ -6,10 +6,7 @@ use crate::luks::{
     verify_passphrase,
 };
 use crate::parse::parse_btrfs_device_stats;
-use crate::pool::{
-    pool_add_device, pool_balance_raid1, pool_remove_devid, pool_remove_missing,
-    pool_replace_device, pool_resize_device,
-};
+use crate::pool::{pool_replace_device, pool_resize_device};
 use crate::preflight;
 use crate::probe::{probe_config_disk, probe_pool, Filesystem, ProbeError};
 use crate::progress::ProgressOutput;
@@ -98,15 +95,22 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         ));
     }
 
-    // Resolve --old: live, dead-by-devid, or dead-missing.
+    // Resolve --old: live or missing (by devid).
     let old_mn = mapper_name(old_name);
-    let eviction_target = resolve_eviction_target(old_name, &old_mn, missing_id, &pool)?;
+    let replace_source = resolve_replace_source(
+        runner,
+        old_name,
+        &old_mn,
+        missing_id,
+        &pool,
+        config.mount_point(),
+    )?;
 
     // Probe --new disk state
     let new_probed = probe_config_disk(runner, fs, new_name, new_disk)?;
 
     // Compile steps
-    let steps = compile_replace_steps(new_name, &new_probed, &eviction_target, &config)?;
+    let steps = compile_replace_steps(new_name, &new_probed, &replace_source, &config)?;
 
     if dry_run {
         for step in &steps {
@@ -114,8 +118,6 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         }
         return Ok(());
     }
-
-    let is_live = matches!(eviction_target, EvictionTarget::Live { .. });
 
     // Confirm
     if !yes {
@@ -126,12 +128,12 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
                 old_name,
                 new_name,
                 &new_disk.by_id.0,
-                is_live
+                &replace_source,
             )
         );
 
         // If the operation ends with a single device, require stronger confirmation.
-        let projected_remaining = pool.devices.len(); // add new + evict old = same count
+        let projected_remaining = pool.total_devices; // replace preserves device count
         if projected_remaining == 1 {
             eprintln!("WARNING: This replace leaves only 1 disk — no redundancy.");
             eprint!("Type 'replace without redundancy' to confirm: ");
@@ -217,11 +219,9 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     // Guard: new disk must not already be in the pool.
     check_new_not_in_pool(new_name, &new_mn, &pool)?;
 
-    // Step 2+: Execute replacement — branched by eviction target.
-    match &eviction_target {
-        EvictionTarget::Live { mapper, devid } => {
-            // --- btrfs replace path (fast, preserves devid) ---
-
+    // Step 2+: Execute replacement — both paths use btrfs replace start.
+    match &replace_source {
+        ReplaceSource::Live { mapper, devid } => {
             // Pre-flight: warn if source device has I/O errors (informational only).
             let stats_raw = runner.run(&CmdRequest::BtrfsDeviceStats {
                 mount_point: config.mount_point().to_owned(),
@@ -274,26 +274,22 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             }
             eprintln!("Old device closed. If repurposing the physical disk, wipe it separately.");
         }
-        EvictionTarget::Devid(_) | EvictionTarget::Missing => {
-            // --- add + balance + remove path (dead/missing disk) ---
-            pool_add_device(runner, &new_mapper_path, config.mount_point())?;
-            eprintln!("Device added to pool: {}", new_mn);
+        ReplaceSource::Missing { devid } => {
+            eprintln!(
+                "Rebuilding missing device (devid {devid}) onto {}...",
+                new_mn
+            );
+            pool_replace_device(
+                runner,
+                *devid,
+                &new_mapper_path,
+                config.mount_point(),
+                progress,
+            )?;
+            eprintln!("Replace complete.");
 
-            eprintln!("Balancing to RAID1...");
-            pool_balance_raid1(runner, config.mount_point(), progress)?;
-            eprintln!("Balance complete.");
-
-            match &eviction_target {
-                EvictionTarget::Devid(devid) => {
-                    eprintln!("Removing dead device (devid {})...", *devid);
-                    pool_remove_devid(runner, config.mount_point(), *devid)?;
-                }
-                EvictionTarget::Missing => {
-                    eprintln!("Removing missing device...");
-                    pool_remove_missing(runner, config.mount_point())?;
-                }
-                _ => unreachable!(),
-            }
+            pool_resize_device(runner, *devid, config.mount_point())?;
+            // No old mapper to close — device was already missing.
         }
     }
 
@@ -323,13 +319,11 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
 }
 
 #[derive(Debug)]
-enum EvictionTarget {
+enum ReplaceSource {
     /// Old disk is alive in the pool — replace via `btrfs replace start`.
     Live { mapper: MapperName, devid: u64 },
-    /// Old disk is dead — evict by btrfs devid.
-    Devid(u64),
-    /// Old disk is dead — evict via `btrfs device remove missing`.
-    Missing,
+    /// Old disk is missing — replace via `btrfs replace start` by devid.
+    Missing { devid: u64 },
 }
 
 fn check_new_not_in_pool(
@@ -346,12 +340,14 @@ fn check_new_not_in_pool(
     Ok(())
 }
 
-fn resolve_eviction_target(
+fn resolve_replace_source<R: CommandRunner>(
+    runner: &R,
     old_name: &str,
     old_mn: &MapperName,
     missing_id: Option<u64>,
     pool: &PoolState,
-) -> Result<EvictionTarget, ReplaceError> {
+    mount_point: &str,
+) -> Result<ReplaceSource, ReplaceError> {
     let old_in_pool = pool.devices.iter().any(|d| d.mapper == *old_mn);
 
     if old_in_pool {
@@ -363,9 +359,12 @@ fn resolve_eviction_target(
         }
         if pool.missing_count > 0 {
             return Err(ReplaceError::Validation(format!(
-                "pool has {} missing device{}. Run 'braid remove-missing' first, then retry the replace.",
+                "pool has {} missing device{}. \
+                 Repair the missing device{} first with `braid replace --missing-id <devid>`, \
+                 then retry this live replace. Use `braid status --verbose` to see device IDs.",
                 pool.missing_count,
-                if pool.missing_count == 1 { "" } else { "s" }
+                if pool.missing_count == 1 { "" } else { "s" },
+                if pool.missing_count == 1 { "" } else { "s" },
             )));
         }
         let devid = pool
@@ -374,38 +373,56 @@ fn resolve_eviction_target(
             .find(|d| d.mapper == *old_mn)
             .map(|d| d.devid)
             .expect("old_in_pool was true but device not found");
-        return Ok(EvictionTarget::Live {
+        return Ok(ReplaceSource::Live {
             mapper: old_mn.clone(),
             devid,
         });
     }
 
     // Old disk not in pool — dead/missing path.
+    // Probe actual missing devids for validation and auto-resolution.
+    let missing_devids =
+        preflight::probe_missing_devids(runner, mount_point).map_err(ReplaceError::Validation)?;
+
     if let Some(devid) = missing_id {
-        return Ok(EvictionTarget::Devid(devid));
+        // Validate --missing-id refers to an actually-missing device.
+        if pool.devices.iter().any(|d| d.devid == devid) {
+            return Err(ReplaceError::Validation(format!(
+                "devid {devid} is a live device, not a missing one."
+            )));
+        }
+        if !missing_devids.contains(&devid) {
+            return Err(ReplaceError::Validation(format!(
+                "devid {devid} is not a missing device in this pool. \
+                 Use 'braid status --verbose' to see device IDs."
+            )));
+        }
+        return Ok(ReplaceSource::Missing { devid });
     }
 
-    if pool.missing_count == 0 {
+    if missing_devids.is_empty() {
         return Err(ReplaceError::Validation(format!(
             "disk '{}' not found in pool and no missing devices detected.",
             old_name
         )));
     }
 
-    if pool.missing_count == 1 {
-        return Ok(EvictionTarget::Missing);
+    if missing_devids.len() == 1 {
+        return Ok(ReplaceSource::Missing {
+            devid: missing_devids[0],
+        });
     }
 
     Err(ReplaceError::Validation(format!(
         "multiple missing devices ({} missing). Pass --missing-id <devid> to target the specific dead disk. Use 'braid status --verbose' to see device IDs.",
-        pool.missing_count
+        missing_devids.len()
     )))
 }
 
 fn compile_replace_steps(
     new_name: &str,
     new_probed: &ConfigDisk,
-    eviction_target: &EvictionTarget,
+    replace_source: &ReplaceSource,
     config: &crate::config::Config,
 ) -> Result<Vec<ReplaceStep>, ReplaceError> {
     let new_disk = config.disk_by_name(new_name).unwrap();
@@ -439,8 +456,8 @@ fn compile_replace_steps(
         }
     }
 
-    match eviction_target {
-        EvictionTarget::Live { mapper, devid } => {
+    match replace_source {
+        ReplaceSource::Live { mapper, devid } => {
             steps.push(ReplaceStep {
                 risk: "long",
                 description: format!(
@@ -463,40 +480,23 @@ fn compile_replace_steps(
                 description: format!("cryptsetup close {}", mapper),
             });
         }
-        EvictionTarget::Devid(devid) => {
+        ReplaceSource::Missing { devid } => {
             steps.push(ReplaceStep {
-                risk: "safe",
+                risk: "long",
                 description: format!(
-                    "btrfs device add /dev/mapper/{} {}",
+                    "btrfs replace start {} /dev/mapper/{} {}",
+                    devid,
                     new_mn,
                     config.mount_point()
                 ),
             });
             steps.push(ReplaceStep {
-                risk: "long",
-                description: "btrfs balance to RAID1".into(),
-            });
-            steps.push(ReplaceStep {
-                risk: "safe",
-                description: format!("btrfs device remove {}", devid),
-            });
-        }
-        EvictionTarget::Missing => {
-            steps.push(ReplaceStep {
                 risk: "safe",
                 description: format!(
-                    "btrfs device add /dev/mapper/{} {}",
-                    new_mn,
+                    "btrfs filesystem resize {}:max {}",
+                    devid,
                     config.mount_point()
                 ),
-            });
-            steps.push(ReplaceStep {
-                risk: "long",
-                description: "btrfs balance to RAID1".into(),
-            });
-            steps.push(ReplaceStep {
-                risk: "safe",
-                description: "btrfs device remove missing".into(),
             });
         }
     }
@@ -509,7 +509,7 @@ fn replace_confirm_message(
     old_name: &str,
     new_name: &str,
     by_id: &str,
-    is_live: bool,
+    replace_source: &ReplaceSource,
 ) -> String {
     let mut msg = if matches!(new_state, ConfigDiskState::PresentNotLuks) {
         format!(
@@ -519,13 +519,19 @@ fn replace_confirm_message(
     } else {
         String::new()
     };
-    if is_live {
-        msg.push_str(&format!("Replace {} with {}?", old_name, new_name));
-    } else {
-        msg.push_str(&format!(
-            "Replace {} (dead) with {} (new)?",
-            old_name, new_name
-        ));
+    match replace_source {
+        ReplaceSource::Live { devid, .. } => {
+            msg.push_str(&format!(
+                "Old disk '{}' (devid {}) is present and will be replaced in-place by '{}'.",
+                old_name, devid, new_name
+            ));
+        }
+        ReplaceSource::Missing { devid } => {
+            msg.push_str(&format!(
+                "Missing device (devid {}) will be rebuilt onto new disk '{}' from RAID redundancy.",
+                devid, new_name
+            ));
+        }
     }
     msg
 }
@@ -561,6 +567,7 @@ fn apply_replace_disk_map_update(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cmd::{CmdRequest, MockRunner, RawCommandOutput};
 
     #[test]
     fn replace_confirm_warns_about_luks_format_for_non_luks_disk() {
@@ -569,7 +576,7 @@ mod tests {
             "old1",
             "new1",
             "/dev/disk/by-id/usb-WD_5678",
-            false,
+            &ReplaceSource::Missing { devid: 2 },
         );
         assert!(msg.contains("LUKS-format"), "should mention LUKS-format");
         assert!(msg.contains("new1"), "should mention new disk name");
@@ -584,7 +591,7 @@ mod tests {
     }
 
     #[test]
-    fn replace_confirm_generic_for_luks_disk() {
+    fn replace_confirm_missing_shows_rebuild_message() {
         let msg = replace_confirm_message(
             &ConfigDiskState::PresentLuks {
                 uuid: LuksUuid("abc-123".into()),
@@ -593,11 +600,16 @@ mod tests {
             "old1",
             "new1",
             "/dev/disk/by-id/usb-WD_5678",
-            false,
+            &ReplaceSource::Missing { devid: 2 },
         );
         assert!(
-            msg.contains("Replace old1 (dead) with new1 (new)?"),
-            "should be generic replace prompt, got: {}",
+            msg.contains("Missing device (devid 2)"),
+            "should mention missing devid, got: {}",
+            msg
+        );
+        assert!(
+            msg.contains("rebuilt onto new disk 'new1'"),
+            "should mention rebuild, got: {}",
             msg
         );
         assert!(
@@ -669,16 +681,46 @@ mod tests {
         }
     }
 
+    /// Create a mock runner that returns device usage output with specific
+    /// missing devids (device_size == 0). Devid 1 is always present.
+    fn mock_with_missing_devids(missing_devids: &[u64]) -> MockRunner {
+        let mut output = String::new();
+        output.push_str("/dev/mapper/braid-disk1, ID: 1\n");
+        output.push_str("   Device size:           520093696\n");
+        output.push_str("   Device slack:                  0\n");
+        output.push_str("   Data,RAID1:            469762048\n");
+        output.push_str("   Unallocated:            50331648\n\n");
+        for &devid in missing_devids {
+            output.push_str(&format!("<missing disk>, ID: {}\n", devid));
+            output.push_str("   Device size:                  0\n");
+            output.push_str("   Device slack:                  0\n");
+            output.push_str("   Data,RAID1:            469762048\n");
+            output.push_str("   Unallocated:                  0\n\n");
+        }
+        MockRunner::default().with_output(
+            CmdRequest::BtrfsDeviceUsageRaw {
+                mount_point: "/mnt/storage".into(),
+            },
+            RawCommandOutput {
+                cmd: "btrfs device usage --raw /mnt/storage".into(),
+                stdout: output,
+                stderr: String::new(),
+                exit_status: 0,
+            },
+        )
+    }
+
     #[test]
-    // Intent: live old disk in healthy pool resolves to EvictionTarget::Live.
-    // Why: core new behavior — replace must accept live disks when pool has no missing.
+    // Intent: live old disk in healthy pool resolves to ReplaceSource::Live.
+    // Why: core behavior — replace must accept live disks when pool has no missing.
     // Scenario: operator swaps a slow-but-alive drive for a faster one.
     fn live_old_resolution_succeeds_no_missing() {
         let pool = two_device_pool();
+        let runner = MockRunner::default();
         let mn = MapperName("braid-disk2".into());
-        let result = resolve_eviction_target("disk2", &mn, None, &pool);
+        let result = resolve_replace_source(&runner, "disk2", &mn, None, &pool, "/mnt/storage");
         assert!(
-            matches!(result, Ok(EvictionTarget::Live { .. })),
+            matches!(result, Ok(ReplaceSource::Live { .. })),
             "expected Live target, got: {result:?}"
         );
     }
@@ -689,8 +731,10 @@ mod tests {
     // Scenario: operator passes --missing-id when old disk is still alive.
     fn live_old_with_missing_id_rejects() {
         let pool = two_device_pool();
+        let runner = MockRunner::default();
         let mn = MapperName("braid-disk2".into());
-        let err = resolve_eviction_target("disk2", &mn, Some(99), &pool).unwrap_err();
+        let err = resolve_replace_source(&runner, "disk2", &mn, Some(99), &pool, "/mnt/storage")
+            .unwrap_err();
         assert!(
             err.to_string().contains("--missing-id cannot be used"),
             "unexpected error: {err}"
@@ -705,15 +749,21 @@ mod tests {
         let mut pool = two_device_pool();
         pool.missing_count = 1;
         pool.total_devices = 3;
+        let runner = MockRunner::default();
         let mn = MapperName("braid-disk2".into());
-        let err = resolve_eviction_target("disk2", &mn, None, &pool).unwrap_err();
+        let err =
+            resolve_replace_source(&runner, "disk2", &mn, None, &pool, "/mnt/storage").unwrap_err();
         assert!(
             err.to_string().contains("missing device"),
             "unexpected error: {err}"
         );
         assert!(
-            err.to_string().contains("remove-missing"),
-            "should suggest remove-missing: {err}"
+            err.to_string().contains("replace --missing-id"),
+            "should suggest replace --missing-id: {err}"
+        );
+        assert!(
+            !err.to_string().contains("remove-missing"),
+            "should not suggest remove-missing: {err}"
         );
     }
 
@@ -749,11 +799,11 @@ mod tests {
             by_id_path: ByIdPath("/dev/disk/by-id/virtio-disk3".into()),
             state: ConfigDiskState::PresentNotLuks,
         };
-        let target = EvictionTarget::Live {
+        let source = ReplaceSource::Live {
             mapper: MapperName("braid-disk2".into()),
             devid: 2,
         };
-        let steps = compile_replace_steps("disk3", &new_probed, &target, &config).unwrap();
+        let steps = compile_replace_steps("disk3", &new_probed, &source, &config).unwrap();
         let descriptions: Vec<&str> = steps.iter().map(|s| s.description.as_str()).collect();
         assert!(
             descriptions
@@ -782,11 +832,65 @@ mod tests {
     }
 
     #[test]
+    // Intent: dry-run for missing path shows btrfs replace start, not add/balance/remove.
+    // Why: operator should see the unified replace path, not the old degraded balance path.
+    // Scenario: operator runs --dry-run to preview dead-disk replace.
+    fn dry_run_missing_path_shows_btrfs_replace() {
+        let config_json = serde_json::json!({
+            "disks": {
+                "disk1": { "by_id": "/dev/disk/by-id/virtio-disk1" },
+                "disk2": { "by_id": "/dev/disk/by-id/virtio-disk2" },
+                "disk3": { "by_id": "/dev/disk/by-id/virtio-disk3" },
+            },
+            "mount_point": "/mnt/storage"
+        });
+        let config: crate::config::Config =
+            serde_json::from_value(config_json).expect("valid config");
+        let new_probed = ConfigDisk {
+            name: "disk3".into(),
+            by_id_path: ByIdPath("/dev/disk/by-id/virtio-disk3".into()),
+            state: ConfigDiskState::PresentNotLuks,
+        };
+        let source = ReplaceSource::Missing { devid: 2 };
+        let steps = compile_replace_steps("disk3", &new_probed, &source, &config).unwrap();
+        let descriptions: Vec<&str> = steps.iter().map(|s| s.description.as_str()).collect();
+        assert!(
+            descriptions
+                .iter()
+                .any(|d| d.contains("btrfs replace start")),
+            "expected btrfs replace start step for missing path, got: {descriptions:?}"
+        );
+        assert!(
+            descriptions
+                .iter()
+                .any(|d| d.contains("btrfs filesystem resize")),
+            "expected btrfs filesystem resize step for missing path, got: {descriptions:?}"
+        );
+        assert!(
+            !descriptions.iter().any(|d| d.contains("btrfs device add")),
+            "missing path should NOT show btrfs device add, got: {descriptions:?}"
+        );
+        assert!(
+            !descriptions.iter().any(|d| d.contains("btrfs balance")),
+            "missing path should NOT show btrfs balance, got: {descriptions:?}"
+        );
+        assert!(
+            !descriptions
+                .iter()
+                .any(|d| d.contains("btrfs device remove")),
+            "missing path should NOT show btrfs device remove, got: {descriptions:?}"
+        );
+        assert!(
+            !descriptions.iter().any(|d| d.contains("cryptsetup close")),
+            "missing path should NOT show cryptsetup close (no old mapper), got: {descriptions:?}"
+        );
+    }
+
+    #[test]
     // Intent: replacing with a disk that's already in the pool is rejected.
     // Why: without the guard, the Live path would pass an existing pool member
-    //   to `btrfs replace start`. The old add+balance+remove path relied on
-    //   `btrfs device add` rejecting duplicates; the btrfs replace path has no
-    //   such natural guard, so we need an explicit one.
+    //   to `btrfs replace start`. The btrfs replace path has no natural guard
+    //   against this, so we need an explicit one.
     // Scenario: operator typo — specifies an existing pool member as --new.
     fn new_disk_already_in_pool_rejected() {
         let pool = two_device_pool(); // has braid-disk1 and braid-disk2
@@ -821,21 +925,24 @@ mod tests {
             "disk2",
             "disk3",
             "/dev/disk/by-id/virtio-disk3",
-            true,
+            &ReplaceSource::Live {
+                mapper: MapperName("braid-disk2".into()),
+                devid: 2,
+            },
         );
         assert!(
             !msg.contains("dead"),
             "live replace prompt should not say 'dead', got: {msg}"
         );
         assert!(
-            msg.contains("Replace disk2 with disk3?"),
-            "expected neutral replace prompt, got: {msg}"
+            msg.contains("is present and will be replaced in-place"),
+            "expected in-place replace prompt, got: {msg}"
         );
     }
 
     #[test]
-    // Intent: dead path resolution still works (regression).
-    // Why: the new resolver must not break existing dead-disk resolution.
+    // Intent: dead path resolution auto-detects the missing devid.
+    // Why: when exactly one device is missing, the operator shouldn't need --missing-id.
     // Scenario: operator replaces a dead disk (1 missing device, no --missing-id).
     fn dead_old_resolution_single_missing() {
         let mut pool = two_device_pool();
@@ -843,16 +950,17 @@ mod tests {
         pool.devices.retain(|d| d.mapper.0 != "braid-disk2");
         pool.missing_count = 1;
         pool.total_devices = 2;
+        let runner = mock_with_missing_devids(&[2]);
         let mn = MapperName("braid-disk2".into());
-        let result = resolve_eviction_target("disk2", &mn, None, &pool);
+        let result = resolve_replace_source(&runner, "disk2", &mn, None, &pool, "/mnt/storage");
         assert!(
-            matches!(result, Ok(EvictionTarget::Missing)),
-            "expected Missing target, got: {result:?}"
+            matches!(result, Ok(ReplaceSource::Missing { devid: 2 })),
+            "expected Missing {{ devid: 2 }}, got: {result:?}"
         );
     }
 
     #[test]
-    // Intent: dead path with explicit devid resolves to Devid.
+    // Intent: dead path with explicit --missing-id resolves to that devid.
     // Why: regression guard for --missing-id path.
     // Scenario: operator passes --missing-id for a specific dead device.
     fn dead_old_resolution_with_devid() {
@@ -860,11 +968,71 @@ mod tests {
         pool.devices.retain(|d| d.mapper.0 != "braid-disk2");
         pool.missing_count = 1;
         pool.total_devices = 2;
+        let runner = mock_with_missing_devids(&[2]);
         let mn = MapperName("braid-disk2".into());
-        let result = resolve_eviction_target("disk2", &mn, Some(42), &pool);
+        let result = resolve_replace_source(&runner, "disk2", &mn, Some(2), &pool, "/mnt/storage");
         assert!(
-            matches!(result, Ok(EvictionTarget::Devid(42))),
-            "expected Devid(42), got: {result:?}"
+            matches!(result, Ok(ReplaceSource::Missing { devid: 2 })),
+            "expected Missing {{ devid: 2 }}, got: {result:?}"
+        );
+    }
+
+    #[test]
+    // Intent: --missing-id pointing to a live device is rejected.
+    // Why: the operator may have confused devids; replacing a live device
+    //   via the missing path would corrupt data.
+    // Scenario: operator passes --missing-id with the devid of a healthy disk.
+    fn missing_id_pointing_to_live_device_rejected() {
+        let mut pool = two_device_pool();
+        pool.devices.retain(|d| d.mapper.0 != "braid-disk2");
+        pool.missing_count = 1;
+        pool.total_devices = 2;
+        let runner = mock_with_missing_devids(&[2]);
+        let mn = MapperName("braid-disk2".into());
+        // Devid 1 is live (in pool.devices)
+        let err = resolve_replace_source(&runner, "disk2", &mn, Some(1), &pool, "/mnt/storage")
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("live device"),
+            "expected 'live device' error, got: {err}"
+        );
+    }
+
+    #[test]
+    // Intent: --missing-id pointing to a nonexistent devid is rejected.
+    // Why: a bogus devid would cause btrfs replace start to fail; catch it early.
+    // Scenario: operator typos the devid.
+    fn missing_id_nonexistent_devid_rejected() {
+        let mut pool = two_device_pool();
+        pool.devices.retain(|d| d.mapper.0 != "braid-disk2");
+        pool.missing_count = 1;
+        pool.total_devices = 2;
+        let runner = mock_with_missing_devids(&[2]);
+        let mn = MapperName("braid-disk2".into());
+        let err = resolve_replace_source(&runner, "disk2", &mn, Some(99), &pool, "/mnt/storage")
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("not a missing device"),
+            "expected 'not a missing device' error, got: {err}"
+        );
+    }
+
+    #[test]
+    // Intent: multiple missing devices without --missing-id is rejected.
+    // Why: auto-detect is ambiguous when multiple devices are missing.
+    // Scenario: two drives died; operator must specify which to replace first.
+    fn multiple_missing_without_id_rejected() {
+        let mut pool = two_device_pool();
+        pool.devices.retain(|d| d.mapper.0 != "braid-disk2");
+        pool.missing_count = 2;
+        pool.total_devices = 3;
+        let runner = mock_with_missing_devids(&[2, 3]);
+        let mn = MapperName("braid-disk2".into());
+        let err =
+            resolve_replace_source(&runner, "disk2", &mn, None, &pool, "/mnt/storage").unwrap_err();
+        assert!(
+            err.to_string().contains("multiple missing"),
+            "expected 'multiple missing' error, got: {err}"
         );
     }
 }

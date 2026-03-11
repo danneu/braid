@@ -4,8 +4,9 @@
 # - What behavior this test (tries to) verify.
 #   - `braid replace --old <dead> --new <new>` succeeds when the old disk has
 #     been physically removed (LUKS mapper closed, device missing from pool).
-#     Covers both auto-detect (single missing device → EvictionTarget::Missing)
-#     and explicit `--missing-id <devid>` (→ EvictionTarget::Devid).
+#     Both auto-detect (single missing → ReplaceSource::Missing auto-resolved)
+#     and explicit `--missing-id <devid>` paths use `btrfs replace start` to
+#     rebuild from RAID redundancy.
 #
 # Why it exists:
 # - What risk/regression this protects against.
@@ -143,11 +144,9 @@ with subtest("Kill disk3: simulate second drive failure"):
     print(f"Pool after disk3 death:\n{fi_show}")
     assert "missing" in fi_show.lower(), f"Expected missing device:\n{fi_show}"
 
-with subtest("Wrong --missing-id is rejected"):
-    # Use disk5 for the wrong-ID test. Note: braid will partially complete
-    # (LUKS format + add + balance) before failing at the remove step with
-    # the bogus devid. This pollutes pool state, so the correct test below
-    # uses a separate disk (disk6).
+with subtest("Wrong --missing-id is rejected early (no pool mutation)"):
+    # With btrfs-replace-based replacement, wrong --missing-id is caught at
+    # validation time (before any LUKS formatting or pool changes).
     wrong_devid = 9999
     (status, output) = machine.execute(
         replace_cmd("disk3", "disk5", extra=f"--missing-id {wrong_devid}") + " 2>&1"
@@ -157,23 +156,20 @@ with subtest("Wrong --missing-id is rejected"):
     )
     print(f"Wrong --missing-id error (expected):\n{output}")
 
-    # Clean up: remove disk5 from pool (it was added before the remove failed)
-    # and close its LUKS mapper so the pool is back to: disk1 + disk4 + missing(disk3)
-    machine.succeed("btrfs device remove /dev/mapper/braid-disk5 /mnt/storage")
-    machine.succeed("cryptsetup close braid-disk5")
+    # No cleanup needed — the command failed at validation, before any pool changes.
 
-with subtest("Replace dead disk3 with disk6 (correct --missing-id)"):
+with subtest("Replace dead disk3 with disk5 (correct --missing-id)"):
     result = machine.succeed(
-        replace_cmd("disk3", "disk6", extra=f"--missing-id {disk3_devid}")
+        replace_cmd("disk3", "disk5", extra=f"--missing-id {disk3_devid}")
     )
     print(f"braid replace output:\n{result}")
 
-with subtest("Pool healthy after dead replace: disk3 gone, disk6 present"):
+with subtest("Pool healthy after dead replace: disk3 gone, disk5 present"):
     fi_show = machine.succeed("btrfs fi show /mnt/storage")
-    print(f"Pool after replace disk3→disk6:\n{fi_show}")
+    print(f"Pool after replace disk3→disk5:\n{fi_show}")
 
-    assert "/dev/mapper/braid-disk6" in fi_show, (
-        f"New disk braid-disk6 missing from pool:\n{fi_show}"
+    assert "/dev/mapper/braid-disk5" in fi_show, (
+        f"New disk braid-disk5 missing from pool:\n{fi_show}"
     )
     assert "braid-disk3" not in fi_show, (
         f"Old disk braid-disk3 should be removed:\n{fi_show}"
@@ -195,7 +191,7 @@ with subtest("Data intact after dead replace (--missing-id)"):
 with subtest("Disk map updated after dead replace (--missing-id)"):
     dm = read_disk_map()
     assert "disk3" not in dm["disks"], f"disk3 still in map: {dm}"
-    assert "disk6" in dm["disks"], f"disk6 missing from map: {dm}"
+    assert "disk5" in dm["disks"], f"disk5 missing from map: {dm}"
     for name in ["disk1", "disk4"]:
         assert name in dm["disks"], f"{name} missing from map: {dm}"
 

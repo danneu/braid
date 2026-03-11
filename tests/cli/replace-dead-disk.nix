@@ -1,11 +1,12 @@
 # Test: replace-dead-disk
 #
 # What: Dead disk replacement end-to-end covering both auto-detect (single
-# missing device) and explicit --missing-id paths.
+# missing device) and explicit --missing-id paths. Both use `btrfs replace
+# start` to rebuild from RAID redundancy.
 #
 # Why: The original replace use case — swapping a failed drive — has zero VM
 # coverage. Only unit tests cover the resolution logic. This exercises
-# EvictionTarget::Missing and EvictionTarget::Devid end-to-end.
+# ReplaceSource::Missing end-to-end.
 #
 # Dependencies: braid add (builds the test pool), braid replace dead path.
 { braid }:
