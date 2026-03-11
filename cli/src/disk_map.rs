@@ -22,7 +22,7 @@ pub struct DiskMapEntry {
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum NameStabilityError {
     #[error(
-        "Disk name rename/reassignment is not allowed in v1.0. Keep original name '{name}' or use explicit replace/remove+add workflow. Details: name '{name}' changed by_id from '{recorded_by_id}' to '{config_by_id}'."
+        "Disk name rename/reassignment is not allowed. Keep original name '{name}' or use explicit replace/remove+add workflow. Details: name '{name}' changed by_id from '{recorded_by_id}' to '{config_by_id}'."
     )]
     Reassignment {
         name: String,
@@ -30,7 +30,7 @@ pub enum NameStabilityError {
         config_by_id: String,
     },
     #[error(
-        "Disk name rename/reassignment is not allowed in v1.0. Keep original name '{old_name}' or use explicit replace/remove+add workflow. Details: recorded name '{old_name}' with by_id '{by_id}' now appears as '{new_name}'."
+        "Disk name rename/reassignment is not allowed. Keep original name '{old_name}' or use explicit replace/remove+add workflow. Details: recorded name '{old_name}' with by_id '{by_id}' now appears as '{new_name}'."
     )]
     RenameDetected {
         old_name: String,

@@ -61,7 +61,7 @@ JSON"""
     assert status != 0, f"expected non-zero exit, got {status}:\n{output}"
 
     expected = (
-        "Disk name rename/reassignment is not allowed in v1.0. "
+        "Disk name rename/reassignment is not allowed. "
         "Keep original name 'disk1' or use explicit replace/remove+add workflow. "
         "Details: recorded name 'disk1' with by_id '/dev/disk/by-id/virtio-disk1' "
         "now appears as 'wd-red'."

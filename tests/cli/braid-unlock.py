@@ -148,9 +148,64 @@ with subtest("Test 4b: missing disk — --allow-degraded mounts degraded"):
     machine.succeed("udevadm trigger && udevadm settle")
     machine.succeed("test -e /dev/disk/by-id/virtio-disk3")
 
-# --- Test 5: Wrong passphrase ---
+# --- Test 5a: Identity mismatch blocks degraded unlock ---
 
-with subtest("Test 5: wrong passphrase rejected"):
+with subtest("Test 5a: identity mismatch blocks degraded unlock"):
+    close_all()
+
+    # Save current disk-map
+    disk_map_raw = machine.succeed("cat /var/lib/braid/disk-map.json")
+    disk_map = json.loads(disk_map_raw)
+
+    # Tamper: change disk3's by_id to a wrong value
+    tampered = dict(disk_map)
+    tampered["disks"] = dict(tampered["disks"])
+    tampered["disks"]["disk3"] = dict(tampered["disks"]["disk3"])
+    tampered["disks"]["disk3"]["by_id"] = "/dev/disk/by-id/virtio-WRONG"
+    machine.succeed(f"echo '{json.dumps(tampered)}' > /var/lib/braid/disk-map.json")
+
+    # Remove disk3 symlink to simulate unplugged disk
+    machine.succeed("rm -f /dev/disk/by-id/virtio-disk3")
+
+    cmd = unlock_cmd(passphrase, extra="--allow-degraded") + " 2>&1"
+    ret = machine.execute(cmd)
+    assert ret[0] != 0, "Expected non-zero exit for identity mismatch"
+    assert "not allowed" in ret[1], \
+        f"Expected 'not allowed' in output, got: {ret[1]}"
+
+    # Restore disk-map and symlink
+    machine.succeed(f"echo '{json.dumps(disk_map)}' > /var/lib/braid/disk-map.json")
+    machine.succeed("udevadm trigger && udevadm settle")
+    machine.succeed("test -e /dev/disk/by-id/virtio-disk3")
+
+# --- Test 5b: Identity mismatch blocks healthy unlock ---
+
+with subtest("Test 5b: identity mismatch blocks healthy unlock"):
+    close_all()
+
+    # Save current disk-map
+    disk_map_raw = machine.succeed("cat /var/lib/braid/disk-map.json")
+    disk_map = json.loads(disk_map_raw)
+
+    # Tamper: change disk1's by_id to a wrong value (all disks present)
+    tampered = dict(disk_map)
+    tampered["disks"] = dict(tampered["disks"])
+    tampered["disks"]["disk1"] = dict(tampered["disks"]["disk1"])
+    tampered["disks"]["disk1"]["by_id"] = "/dev/disk/by-id/virtio-WRONG"
+    machine.succeed(f"echo '{json.dumps(tampered)}' > /var/lib/braid/disk-map.json")
+
+    cmd = unlock_cmd(passphrase) + " 2>&1"
+    ret = machine.execute(cmd)
+    assert ret[0] != 0, "Expected non-zero exit for identity mismatch"
+    assert "not allowed" in ret[1], \
+        f"Expected 'not allowed' in output, got: {ret[1]}"
+
+    # Restore disk-map
+    machine.succeed(f"echo '{json.dumps(disk_map)}' > /var/lib/braid/disk-map.json")
+
+# --- Test 6: Wrong passphrase ---
+
+with subtest("Test 6: wrong passphrase rejected"):
     close_all()
 
     ret = machine.execute(unlock_cmd("wrongpassphrase"))
@@ -159,9 +214,9 @@ with subtest("Test 5: wrong passphrase rejected"):
     # No mappers should have been opened
     machine.fail("test -e /dev/mapper/braid-disk1")
 
-# --- Test 6: Uninitialized disk ---
+# --- Test 7: Uninitialized disk ---
 
-with subtest("Test 6: uninitialized disk detected"):
+with subtest("Test 7: uninitialized disk detected"):
     close_all()
 
     # Write a temp config pointing at disk4 (raw, never braid add'd)

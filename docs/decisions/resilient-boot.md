@@ -35,6 +35,10 @@ Every layer has a specific resilience mechanism:
 | One drive dead | `braid unlock` refuses by default; user must pass `--allow-degraded` or configure `autoUnlock.allowDegraded` | Pool stays locked until explicit opt-in |
 | All drives dead / wrong config | 10s timeout, mount fails | System boots, SSH works, no /mnt/storage |
 
+### Identity enforcement
+
+`braid unlock` enforces disk-map/config identity consistency for all unlocks — not only degraded scenarios. Any name reassignment or rename detected between config and disk-map is a hard error before any disk is probed or mounted. `--allow-degraded` only bypasses degraded-mount refusal, never identity mismatches.
+
 ## Key discoveries
 
 ### udev SYSTEMD_READY=0 risk

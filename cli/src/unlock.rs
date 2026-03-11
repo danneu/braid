@@ -22,6 +22,8 @@ pub enum UnlockError {
     Failed(String),
     #[error("{0}")]
     DegradedRefused(String),
+    #[error("{0}")]
+    NameStability(#[from] crate::disk_map::NameStabilityError),
 }
 
 /// Status line tag for output.
@@ -50,7 +52,10 @@ pub fn cmd_unlock<R: CommandRunner, F: Filesystem + ?Sized>(
         return Ok(());
     }
 
-    // 2. Probe each config disk
+    // 2. Validate config/disk-map identity consistency
+    crate::disk_map::validate_config_name_stability(config, disk_map)?;
+
+    // 3. Probe each config disk
     let mut to_unlock = Vec::new(); // (name, disk) pairs needing unlock
     let mut any_open = false;
     let mut any_missing_member = false;
@@ -679,6 +684,214 @@ mod tests {
         assert!(
             msg.contains("not initialized"),
             "error should mention 'not initialized', got: {msg}"
+        );
+    }
+
+    /// Identity mismatch between config and disk-map must fail even with
+    /// --allow-degraded, before any disk is probed.
+    ///
+    /// Intent: Name stability enforcement is unconditional — --allow-degraded
+    /// only bypasses degraded-mount refusal, never identity mismatches.
+    ///
+    /// Why it exists: If someone changes a disk's by_id in NixOS config while
+    /// the disk-map still has the old value, unlock must refuse. Degraded
+    /// classification must not mask this safety violation.
+    ///
+    /// Scenario: disk3 is absent (unplugged), disk-map has disk3 with a stale
+    /// by_id. Even with --allow-degraded, unlock must fail on identity mismatch.
+    #[test]
+    fn unlock_identity_mismatch_fails_even_with_allow_degraded() {
+        let config = three_disk_config();
+
+        // disk-map has disk3 with OLD by_id (mismatch vs config's virtio-disk3)
+        let mut disk_map = DiskMap::new();
+        disk_map.disks.insert(
+            "disk3".to_owned(),
+            DiskMapEntry {
+                by_id: "/dev/disk/by-id/virtio-disk3-OLD".to_owned(),
+                luks_uuid: "cccccccc-1111-2222-3333-444444444444".to_owned(),
+                devid: 3,
+                added_at: "2024-01-01T00:00:00Z".to_owned(),
+            },
+        );
+
+        // disk3 is absent — would normally be degradable
+        let fs = MockFs::new(&[
+            "/dev/disk/by-id/virtio-disk1",
+            "/dev/disk/by-id/virtio-disk2",
+        ]);
+
+        let runner = MockRunner::default()
+            // mountpoint check → not mounted
+            .with_output(
+                CmdRequest::MountpointCheck {
+                    path: "/mnt/storage".into(),
+                },
+                err_raw("mountpoint", 1, ""),
+            );
+        // No further mocks — should fail before probing
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        {
+            use std::io::Write;
+            tmp.as_file().write_all(b"testpass").unwrap();
+        }
+
+        let result = cmd_unlock(
+            &runner,
+            &fs,
+            &config,
+            &disk_map,
+            false,
+            Some(tmp.path()),
+            None,
+            true, // allow_degraded
+        );
+
+        let err = result.expect_err("should fail on identity mismatch even with --allow-degraded");
+        assert!(
+            matches!(
+                &err,
+                UnlockError::NameStability(
+                    crate::disk_map::NameStabilityError::Reassignment { .. }
+                )
+            ),
+            "expected NameStability(Reassignment), got: {err:?}"
+        );
+    }
+
+    /// Identity mismatch between config and disk-map must fail without
+    /// --allow-degraded too.
+    ///
+    /// Intent: Same enforcement as above, confirming it's not gated on the flag.
+    ///
+    /// Why it exists: Symmetry test — if the check only ran in the degraded path,
+    /// this test would catch it.
+    ///
+    /// Scenario: Same setup as above but allow_degraded = false.
+    #[test]
+    fn unlock_identity_mismatch_fails_without_allow_degraded() {
+        let config = three_disk_config();
+
+        let mut disk_map = DiskMap::new();
+        disk_map.disks.insert(
+            "disk3".to_owned(),
+            DiskMapEntry {
+                by_id: "/dev/disk/by-id/virtio-disk3-OLD".to_owned(),
+                luks_uuid: "cccccccc-1111-2222-3333-444444444444".to_owned(),
+                devid: 3,
+                added_at: "2024-01-01T00:00:00Z".to_owned(),
+            },
+        );
+
+        let fs = MockFs::new(&[
+            "/dev/disk/by-id/virtio-disk1",
+            "/dev/disk/by-id/virtio-disk2",
+        ]);
+
+        let runner = MockRunner::default().with_output(
+            CmdRequest::MountpointCheck {
+                path: "/mnt/storage".into(),
+            },
+            err_raw("mountpoint", 1, ""),
+        );
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        {
+            use std::io::Write;
+            tmp.as_file().write_all(b"testpass").unwrap();
+        }
+
+        let result = cmd_unlock(
+            &runner,
+            &fs,
+            &config,
+            &disk_map,
+            false,
+            Some(tmp.path()),
+            None,
+            false, // allow_degraded = false
+        );
+
+        let err = result.expect_err("should fail on identity mismatch without --allow-degraded");
+        assert!(
+            matches!(
+                &err,
+                UnlockError::NameStability(
+                    crate::disk_map::NameStabilityError::Reassignment { .. }
+                )
+            ),
+            "expected NameStability(Reassignment), got: {err:?}"
+        );
+    }
+
+    /// Identity mismatch must fail even when all disks are healthy and present.
+    ///
+    /// Intent: Proves identity enforcement is unconditional — not tied to
+    /// degraded classification or missing disks.
+    ///
+    /// Why it exists: Without an up-front check, identity mismatches would only
+    /// be caught in the Absent/PresentNotLuks branches, letting healthy unlocks
+    /// with drifted identities slip through.
+    ///
+    /// Scenario: All 3 disks present, LUKS-formatted, mapper closed (normal
+    /// healthy state). Disk-map has disk1 with a stale by_id.
+    #[test]
+    fn unlock_identity_mismatch_fails_even_when_all_disks_healthy() {
+        let config = three_disk_config();
+
+        // disk-map has disk1 with OLD by_id (mismatch vs config's virtio-disk1)
+        let mut disk_map = DiskMap::new();
+        disk_map.disks.insert(
+            "disk1".to_owned(),
+            DiskMapEntry {
+                by_id: "/dev/disk/by-id/virtio-disk1-OLD".to_owned(),
+                luks_uuid: "aaaaaaaa-1111-2222-3333-444444444444".to_owned(),
+                devid: 1,
+                added_at: "2024-01-01T00:00:00Z".to_owned(),
+            },
+        );
+
+        // All disks present
+        let fs = MockFs::new(&[
+            "/dev/disk/by-id/virtio-disk1",
+            "/dev/disk/by-id/virtio-disk2",
+            "/dev/disk/by-id/virtio-disk3",
+        ]);
+
+        let runner = MockRunner::default().with_output(
+            CmdRequest::MountpointCheck {
+                path: "/mnt/storage".into(),
+            },
+            err_raw("mountpoint", 1, ""),
+        );
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        {
+            use std::io::Write;
+            tmp.as_file().write_all(b"testpass").unwrap();
+        }
+
+        let result = cmd_unlock(
+            &runner,
+            &fs,
+            &config,
+            &disk_map,
+            false,
+            Some(tmp.path()),
+            None,
+            false,
+        );
+
+        let err = result.expect_err("should fail on identity mismatch even when all disks healthy");
+        assert!(
+            matches!(
+                &err,
+                UnlockError::NameStability(
+                    crate::disk_map::NameStabilityError::Reassignment { .. }
+                )
+            ),
+            "expected NameStability(Reassignment), got: {err:?}"
         );
     }
 
