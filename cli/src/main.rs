@@ -230,6 +230,11 @@ fn main() {
             }
         }
         Commands::RemoveMissing(args) => {
+            let progress = resolve_progress_output(
+                args.common.progress,
+                std::io::IsTerminal::is_terminal(&std::io::stderr()),
+                false,
+            );
             let runner = RealRunner;
             if let Err(e) = braid_cli::remove_missing::cmd_remove_missing(
                 &runner,
@@ -237,6 +242,7 @@ fn main() {
                 args.missing_id,
                 args.common.dry_run,
                 args.common.yes,
+                progress,
             ) {
                 print_cli_error(&e.to_string());
                 std::process::exit(1);

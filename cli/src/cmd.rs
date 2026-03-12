@@ -78,6 +78,9 @@ pub enum CmdRequest {
     BtrfsBalanceRaid1 {
         mount_point: String,
     },
+    BtrfsBalanceRaid1Soft {
+        mount_point: String,
+    },
     BtrfsBalanceSingle {
         mount_point: String,
     },
@@ -335,6 +338,16 @@ impl CmdRequest {
                     mount_point.clone(),
                 ],
             },
+            CmdRequest::BtrfsBalanceRaid1Soft { mount_point } => CmdArgs {
+                program: "btrfs",
+                args: vec![
+                    "balance".into(),
+                    "start".into(),
+                    "-dconvert=raid1,soft".into(),
+                    "-mconvert=raid1,soft".into(),
+                    mount_point.clone(),
+                ],
+            },
             CmdRequest::BtrfsBalanceSingle { mount_point } => CmdArgs {
                 program: "btrfs",
                 args: vec![
@@ -406,6 +419,12 @@ impl CmdRequest {
                 args: vec![
                     "replace".into(),
                     "start".into(),
+                    // -r: read from mirrors, not the source device. Without -r,
+                    // replacing a drive with read errors is extremely slow (kernel
+                    // retries every bad sector). In RAID1 there is no downside to
+                    // always passing -r — it just reads the other copy instead of
+                    // the source, same amount of I/O. The perf cost only exists
+                    // for RAID5/6 (parity reconstruction), which braid doesn't use.
                     "-r".into(),
                     "-f".into(),
                     "-B".into(),
@@ -833,6 +852,32 @@ mod tests {
         let result = mock.run_with_stdin(&req, b"existingpassphrase");
         assert!(result.is_ok());
         assert_eq!(result.unwrap().exit_status, 0);
+    }
+
+    #[test]
+    // Intent: BtrfsBalanceRaid1Soft generates the correct ,soft flags.
+    // Why: the ,soft flag is critical — it tells btrfs to only convert non-RAID1
+    // chunks, skipping already-RAID1 data. Without it, a full rebalance rewrites
+    // every chunk unnecessarily.
+    // Scenario: after remove-missing or replace clears the last missing device,
+    // the soft balance restores redundancy for single-profile chunks created
+    // during degraded operation.
+    fn btrfs_balance_raid1_soft_generates_correct_argv() {
+        let cmd = CmdRequest::BtrfsBalanceRaid1Soft {
+            mount_point: "/mnt/storage".to_owned(),
+        }
+        .to_argv();
+        assert_eq!(cmd.program, "btrfs");
+        assert_eq!(
+            cmd.args,
+            vec![
+                "balance",
+                "start",
+                "-dconvert=raid1,soft",
+                "-mconvert=raid1,soft",
+                "/mnt/storage",
+            ]
+        );
     }
 
     #[test]

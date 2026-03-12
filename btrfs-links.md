@@ -5,6 +5,8 @@ LUKS encryption, NixOS integration, and NAS operations.
 
 Each link is prefixed with a unique slug for cross-referencing.
 
+Each URL's html is saved locally to `./btrfs-links/{slug}.html`. For example, the slug `kerneldocs_btrfs`'s html will be in `./btrfs-links/kerneldocs_btrfs.html` for local reference.
+
 ---
 
 ## 1. Official Documentation
@@ -38,6 +40,7 @@ Each link is prefixed with a unique slug for cross-referencing.
 ## 2. Man Pages
 
 ### btrfs.readthedocs.io (official)
+
 - [x] `readthedocs_man_index` [Manual pages index](https://btrfs.readthedocs.io/en/latest/man-index.html) — Master index of all btrfs man pages.
 - [x] `readthedocs_man_btrfs8` [btrfs(8)](https://btrfs.readthedocs.io/en/latest/btrfs.html) — Top-level btrfs command, all subcommands and global options.
 - [x] `readthedocs_man_btrfs5` [btrfs(5)](https://btrfs.readthedocs.io/en/latest/btrfs-man5.html) — Mount options, filesystem features, on-disk format details.
@@ -55,6 +58,7 @@ Each link is prefixed with a unique slug for cross-referencing.
 - [x] `readthedocs_man_qgroup` [btrfs-qgroup(8)](https://btrfs.readthedocs.io/en/latest/btrfs-qgroup.html) — Qgroup creation, assignment, limits, usage display.
 
 ### man7.org mirrors
+
 - [x] `man7_btrfs8` [btrfs(8)](https://www.man7.org/linux/man-pages/man8/btrfs.8.html)
 - [x] `man7_mkfs` [mkfs.btrfs(8)](https://man7.org/linux/man-pages/man8/mkfs.btrfs.8.html)
 - [x] `man7_balance` [btrfs-balance(8)](https://man7.org/linux/man-pages/man8/btrfs-balance.8.html)
@@ -79,6 +83,7 @@ Each link is prefixed with a unique slug for cross-referencing.
 ## 4. Community Wikis and References
 
 ### Forza's Ramblings (wiki.tnonline.net) — excellent community reference
+
 - [x] `forza_profiles` [Btrfs RAID profiles](https://wiki.tnonline.net/w/Btrfs/Profiles) — All allocation profiles, redundancy guarantees, and space efficiency.
 - [x] `forza_features` [Btrfs features](https://wiki.tnonline.net/w/Btrfs/Features) — Overview of RAID, checksumming, snapshots, self-healing.
 - [x] `forza_add_remove_replace` [Adding, removing and replacing devices](https://wiki.tnonline.net/w/Btrfs/Adding_and_removing_devices) — Practical device management guide.
@@ -97,6 +102,7 @@ Each link is prefixed with a unique slug for cross-referencing.
 - [x] `forza_category_index` [Category index](https://wiki.tnonline.net/w/Category:Btrfs) — Full topic index.
 
 ### Distribution Wikis
+
 - [x] `archwiki_btrfs` [Btrfs — ArchWiki](https://wiki.archlinux.org/title/Btrfs) — Comprehensive community-maintained reference.
 - [x] `gentoowiki_btrfs` [Btrfs — Gentoo Wiki](https://wiki.gentoo.org/wiki/Btrfs) — Gentoo setup instructions with ENOSPC prevention and COW considerations.
 - [x] `debianwiki_btrfs` [Btrfs — Debian Wiki](https://wiki.debian.org/Btrfs) — Debian-specific docs; RAID1 and RAID10 rated stable, RAID5/6 not recommended.
@@ -104,6 +110,7 @@ Each link is prefixed with a unique slug for cross-referencing.
 - [x] `archwiki_damaged_files` [Identify damaged files — ArchWiki](https://wiki.archlinux.org/title/Identify_damaged_files) — Using scrub output and kernel logs to find which files are affected by corruption.
 
 ### Meta (Facebook) at Scale
+
 - [x] `meta_btrfs_facebook` [Btrfs at Facebook — Meta microsite](https://facebookmicrosites.github.io/btrfs/docs/btrfs-facebook.html) — Deployed on millions of servers for container root filesystems, build snapshots, zstd compression.
 - [x] `meta_btrfs_landing` [Btrfs — Meta landing page](https://facebookmicrosites.github.io/btrfs/) — Meta's btrfs patches and usage documentation.
 - [x] `meta_btrfs_docs` [Btrfs Documentation and Resources (Meta)](https://facebookmicrosites.github.io/btrfs/docs/btrfs-docs) — Meta's documentation reflecting their experience at scale.
@@ -182,6 +189,7 @@ Each link is prefixed with a unique slug for cross-referencing.
 ## 10. Gotchas, Pitfalls, and Common Problems
 
 ### General Gotchas
+
 - [x] `silvenga_lessons_learned` [BTRFS: Lessons Learned through Blood and Tears — Silvenga](https://silvenga.com/posts/btrfs-and-lessons-learned/) — Real-world failures including fragmentation, ENOSPC, and RAID issues.
 - [x] `depau_troubleshooting` [Btrfs troubleshooting and tricks — Davide Depau](https://blog.depau.eu/2021/07/19/btrfs-troubleshooting/) — Practical troubleshooting guide.
 - [x] `coldattic_do_not_use` [Do not use Btrfs! — coldattic.info](http://coldattic.info/post/70/) — Cautionary data loss account; catalog of failure modes.
@@ -189,6 +197,7 @@ Each link is prefixed with a unique slug for cross-referencing.
 - [x] `anarcat_btrfs_notes` [BTRFS notes — anarcat](https://anarc.at/blog/2022-05-13-brtfs-notes/) — Detailed personal notes on issues encountered.
 
 ### ENOSPC (No Space Left on Device)
+
 - [x] `archforum_enospc_80pct` [BTRFS balance returns ENOSPC with 80% free — Arch Forums](https://bbs.archlinux.org/viewtopic.php?id=200926) — Real case study with solutions.
 - [x] `fedora_discuss_enospc_profiles` [BTRFS "no space left on device" but there is enough — Fedora Discussion](https://discussion.fedoraproject.org/t/btrfs-problems-no-space-left-on-device-but-there-is-enough-multiple-block-group-profiles/74941) — Multiple block group profiles after degraded mount.
 - [x] `suse_kb_enospc` [btrfs ENOSPC — SUSE KB](https://www.suse.com/support/kb/doc/?id=000018807) — Official diagnosis and resolution.
@@ -197,9 +206,11 @@ Each link is prefixed with a unique slug for cross-referencing.
 - [x] `hugemanatee_emergency_space` [BTRFS and free space — emergency response](https://ohthehugemanatee.org/blog/2019/02/11/btrfs-out-of-space-emergency-response/) — Handling emergencies when snapshot accumulation prevents deletions.
 
 ### RAID1 Write Hole
+
 - [x] `btrfs_ml_raid1_write_hole` [btrfs RAID1 is protected from write holes by COW — btrfs mailing list](https://www.spinics.net/lists/linux-btrfs/msg100951.html) — Both old and new states are valid until superblock commit, unlike RAID5/6.
 
 ### RAID5/6 Problems (Context for Why RAID1 Is Preferred)
+
 - [x] `phoronix_raid56_warning` [Btrfs Will "Strongly Discourage" RAID5/RAID6 — Phoronix](https://www.phoronix.com/news/Btrfs-Warning-RAID5-RAID6) — Official warning added to mkfs.btrfs.
 - [x] `linuxreviews_raid56` [Btrfs Was Not Meant For RAID5 or 6 — LinuxReviews](https://linuxreviews.org/Btrfs_Was_Not_Meant_For_RAID5_or_6) — Parity corruption bug where fixing one error can corrupt good blocks.
 - [x] `marc_raid5_status` [btrfs RAID5 status — Marc's Blog](https://marc.merlins.org/perso/btrfs/post_2014-03-23_Btrfs-Raid5-Status.html) — Long-running tracking of slow progress and persistent issues.
@@ -207,11 +218,13 @@ Each link is prefixed with a unique slug for cross-referencing.
 - [x] `lwn_stripe_tree_drafts` [RAID stripe tree draft patches — LWN.net](https://lwn.net/Articles/899392/) — Early draft patches for the fix.
 
 ### Mixed/Different Size Drives
+
 - [x] `preining_mixed_sizes` [Multi-device and RAID1 with btrfs — preining.info](https://www.preining.info/blog/2020/05/multi-device-and-raid1-with-btrfs/) — Practical setup with varying sizes.
 - [x] `archforum_nonuniform_drives` [Setting up raid1 or raid1c3 with 3-4 non-uniform drives — Arch Forums](https://bbs.archlinux.org/viewtopic.php?id=261626) — Configuration walkthrough.
 - [x] `rockstor_different_sizes` [Multi device BTRFS with disks of different size — Rockstor Forum](https://forum.rockstor.com/t/multi-device-btrfs-filesystem-with-disk-of-different-size/5976) — Practical issues with mixed sizes.
 
 ### Quotas and Performance
+
 - [x] `oracle_qgroup_vs_squota` [Btrfs Qgroup Quota vs. Simple Quota — Oracle](https://blogs.oracle.com/linux/btrfs-qgroup-quota-vs-simple-quota) — Why qgroups cause severe performance issues; how "simple quotas" (squotas) solve them.
 - [x] `github_omarchy_quota_regression` [btrfs quota introduced heavy performance regression — GitHub](https://github.com/basecamp/omarchy/issues/3922) — Real-world severe performance degradation from quotas being enabled.
 - [x] `sensille_qgroups_pdf` [Btrfs Subvolume Quota Groups (PDF) — Arne Jansen](http://sensille.com/qgroups.pdf) — Original design document for btrfs qgroups.
@@ -226,12 +239,14 @@ Each link is prefixed with a unique slug for cross-referencing.
 ## 12. Subvolumes and Snapshots
 
 ### Subvolume Layout
+
 - [x] `jwillikers_layout` [Btrfs Layout — JWillikers](https://www.jwillikers.com/btrfs-layout) — Flat vs. nested layouts; recommends flat with Ubuntu-style naming (@, @home).
 - [x] `fedoramag_subvolumes` [Working with Btrfs Subvolumes — Fedora Magazine](https://fedoramagazine.org/working-with-btrfs-subvolumes/) — Beginner-friendly walkthrough.
 - [x] `archforum_default_subvol` [Best practise btrfs default subvolume — Arch Forums](https://bbs.archlinux.org/viewtopic.php?id=267225) — Top-level (ID=5) vs. dedicated subvolume.
 - [x] `xda_subvol_vs_partitions` [5 ways btrfs subvolumes differ from partitions — XDA](https://www.xda-developers.com/how-btrfs-subvolumes-differ-from-conventional-storage-partitions/) — Accessible comparison with traditional partitions.
 
 ### Snapshots
+
 - [x] `ounapuu_snapshot_guide` [Oversimplified guide into btrfs snapshots](https://ounapuu.ee/posts/2022/04/05/btrfs-snapshots/) — Snapshot mechanics, CoW, space usage, limitations as backups.
 - [x] `fedoramag_snapshots` [Working with Btrfs Snapshots — Fedora Magazine](https://fedoramagazine.org/working-with-btrfs-snapshots/) — Step-by-step tutorial for creating and using snapshots.
 - [x] `lwn_subvol_snapshots` [Btrfs: Subvolumes and snapshots — LWN.net](https://lwn.net/Articles/579009/) — Internals: reference counting and CoW transactions.
@@ -240,6 +255,7 @@ Each link is prefixed with a unique slug for cross-referencing.
 - [x] `oracle_advanced_btrfs` [How I Use Advanced Capabilities of Btrfs — Oracle](https://www.oracle.com/technical-resources/articles/it-infrastructure/admin-advanced-btrfs.html) — Enterprise-oriented snapshots, send/receive, RAID.
 
 ### Send/Receive (Incremental Backups)
+
 - [x] `fedoramag_incremental_backup` [Incremental backups with Btrfs snapshots — Fedora Magazine](https://fedoramagazine.org/btrfs-snapshots-backup-incremental/) — Step-by-step `btrfs send -p` with parent snapshots.
 - [x] `btrfs_wiki_incremental_backup` [Incremental Backup — btrfs Wiki (archived)](https://archive.kernel.org/oldwiki/btrfs.wiki.kernel.org/index.php/Incremental_Backup.html) — Shell script examples and caveats.
 - [x] `marc_send_receive` [Fast incremental backups with btrfs send/receive — Marc's Blog](https://marc.merlins.org/perso/btrfs/post_2014-03-22_Btrfs-Tips_-Doing-Fast-Incremental-Backups-With-Btrfs-Send-and-Receive.html) — Practical tips, scripts, and lessons learned.
@@ -249,6 +265,7 @@ Each link is prefixed with a unique slug for cross-referencing.
 ## 13. Snapshot Backup Tools
 
 ### btrbk
+
 - [x] `github_btrbk` [btrbk — GitHub](https://github.com/digint/btrbk) — The primary tool: snapshots + remote backups, retention policies, incremental send/receive. Written in Perl.
 - [x] `btrbk_man_btrbk` [btrbk(1) man page](https://digint.ch/btrbk/doc/btrbk.1.html) — All subcommands and options.
 - [x] `btrbk_man_conf` [btrbk.conf(5) man page](https://digint.ch/btrbk/doc/btrbk.conf.5.html) — Configuration: retention policies, SSH targets, snapshot groups.
@@ -256,6 +273,7 @@ Each link is prefixed with a unique slug for cross-referencing.
 - [x] `ounapuu_btrbk_awesome` [btrbk is awesome — techtipsy](https://ounapuu.ee/posts/2022/07/09/btrbk-is-awesome/) — Praises separation of snapshots from subvolumes and flexible retention.
 
 ### Snapper
+
 - [x] `archwiki_snapper` [Snapper — ArchWiki](https://wiki.archlinux.org/title/Snapper) — Installation, configuration, timeline snapshots, pre/post snapshots, rollback.
 - [x] `opensuse_snapper_tutorial` [openSUSE Snapper Tutorial](https://en.opensuse.org/openSUSE:Snapper_Tutorial) — Official tutorial.
 - [x] `snapper_io_tutorial` [Snapper project tutorial](http://snapper.io/tutorial.html) — Configuration, snapshot types, comparison, rollback, cleanup.
@@ -263,6 +281,7 @@ Each link is prefixed with a unique slug for cross-referencing.
 - [x] `jwillikers_snapper` [Btrfs Snapshot Management With Snapper — JWillikers](https://www.jwillikers.com/btrfs-snapshot-management-with-snapper) — Timeline settings, cleanup, systemd timer integration.
 
 ### Other Tools
+
 - [x] `github_btrfs_backup` [btrfs-backup — GitHub](https://github.com/bob1de/btrfs-backup) — Python tool for incremental atomic backups.
 - [x] `github_buttermanager` [buttermanager — GitHub](https://github.com/egara/buttermanager) — GUI for managing snapshots, balancing, and system upgrades.
 - [x] `github_awesome_btrfs` [awesome-btrfs — GitHub](https://github.com/boredsquirrel/awesome-btrfs) — Curated list of btrfs tools, utilities, and resources.
@@ -270,17 +289,20 @@ Each link is prefixed with a unique slug for cross-referencing.
 ## 14. Performance Tuning
 
 ### Mount Options
+
 - [x] `jwillikers_mount_options` [Btrfs Mount Options — JWillikers](https://www.jwillikers.com/btrfs-mount-options) — Curated recommended options with discussion.
 - [x] `dragas_best_practices` [BTRFS Best Practices — IT Notes](https://it-notes.dragas.net/2018/10/13/btrfs-best-pratices/) — Checklist-style best practices.
 - [x] `archforum_nvme_best_practice` [Btrfs best practice M.2 NVMe SSD — Arch Forums](https://bbs.archlinux.org/viewtopic.php?id=294472) — Current best practices for NVMe.
 - [x] `endeavouros_optimizations` [Considering btrfs optimizations — EndeavourOS Forum](https://forum.endeavouros.com/t/considering-some-btrfs-optimizations/27025) — Real-world optimization experiences.
 
 ### SSD / HDD Optimization
+
 - [x] `redhat_ssd_optimization` [SSD Optimization — Red Hat 7](https://docs.redhat.com/en/documentation/red_hat_enterprise_linux/7/html/storage_administration_guide/btrfs-ssd-optimization) — `ssd`, `ssd_spread`, TRIM/discard.
 - [x] `poespas_ssd_perf` [SSD Performance Optimization with btrfs — Poespas](https://blog.poespas.me/posts/2024/08/16/optimizing-ssd-performance-with-linux-btrfs/) — SSD-specific techniques.
 - [x] `archforum_mixed_hdd_ssd` [btrfs RAID1 with slow HD and SSD — Arch Forums](https://bbs.archlinux.org/viewtopic.php?id=261693) — Maximizing performance in mixed HDD+SSD RAID1.
 
 ### Compression
+
 - [x] `fedorawiki_zstd_analysis` [Btrfs zstd compression analysis — Fedora Wiki](https://fedoraproject.org/wiki/Changes/BtrfsByDefault/CompressionLevelAnalysis) — zstd:1 yields 40% savings vs uncompressed; zstd:9 only adds 3% more for much higher CPU.
 - [x] `fedorawiki_transparent_compress` [BtrfsTransparentCompression — Fedora Wiki](https://fedoraproject.org/wiki/Changes/BtrfsTransparentCompression) — Rationale for choosing compress=zstd:1 as default.
 - [x] `proxmox_compress_force_zstd` [compress-force=zstd:3 as standard? — Proxmox Forum](https://forum.proxmox.com/threads/compress-force-zstd-3-as-standard-for-btrfs.140731/) — compress vs compress-force tradeoffs.
@@ -288,6 +310,7 @@ Each link is prefixed with a unique slug for cross-referencing.
 - [x] `manjaro_forum_zstd_levels` [What level of zstd compression for BTRFS? — Manjaro Forum](https://forum.manjaro.org/t/what-level-of-compression-is-advantageous-for-btrfs/183098) — Benchmarks comparing levels.
 
 ### Space Cache
+
 - [x] `forza_space_cache_v2_mkfs` [Space cache v2 with mkfs — Forza](https://wiki.tnonline.net/w/Blog/Btrfs_space_cache=v2_with_mkfs) — Creating filesystems with v2 from the start.
 - [x] `phoronix_space_cache_bench` [Benchmarks of Space Cache Option — Phoronix](https://www.phoronix.com/vr.php?view=15570) — v1 vs v2 performance benchmarks.
 - [x] `lwn_free_space_btree` [Free space B-tree — LWN.net](https://lwn.net/Articles/658778/) — Design and rationale behind space_cache v2.
@@ -303,6 +326,7 @@ Each link is prefixed with a unique slug for cross-referencing.
 - [x] `archwiki_advanced_format` [Advanced Format — ArchWiki](https://wiki.archlinux.org/title/Advanced_Format) — Proper alignment for 4K-sector drives, critical for LUKS + btrfs.
 
 ### TRIM with LUKS + btrfs
+
 - [x] `archforum_trim_luks_btrfs` [SSD Trimming with BTRFS and LUKS — Arch Forums](https://bbs.archlinux.org/viewtopic.php?id=297449) — Enabling TRIM passthrough with `allow-discards`.
 - [x] `jaytaala_periodic_trim_luks` [Enable periodic TRIM on LUKS — jaytaala.com](https://confluence.jaytaala.com/display/TKB/Enable+periodic+TRIM+-+including+on+a+LUKS+partition) — fstrim.timer + LUKS allow-discards.
 - [x] `endeavouros_fstrim_encrypted` [fstrim on encrypted btrfs SSD — EndeavourOS Forum](https://forum.endeavouros.com/t/trim-luks-fstrim-on-encrypted-btrfs-ssd-disk-partition/16010) — Setup guide for periodic TRIM on encrypted SSDs.
@@ -337,6 +361,7 @@ Each link is prefixed with a unique slug for cross-referencing.
 ## 19. NixOS Integration
 
 ### NixOS + btrfs
+
 - [x] `nixoswiki_btrfs` [Btrfs — Official NixOS Wiki](https://wiki.nixos.org/wiki/Btrfs) — `boot.supportedFilesystems`, scrub service, mount options.
 - [x] `nixoswiki_community_btrfs` [Btrfs — NixOS Wiki (community)](https://nixos.wiki/wiki/Btrfs) — Community config examples and tips.
 - [x] `github_nixpkgs_btrfs_module` [nixpkgs btrfs.nix module source](https://github.com/NixOS/nixpkgs/blob/master/nixos/modules/tasks/filesystems/btrfs.nix) — Source implementing `services.btrfs.autoScrub`.
@@ -347,6 +372,7 @@ Each link is prefixed with a unique slug for cross-referencing.
 - [x] `solene_continuous_snapshots` [Linux BTRFS continuous snapshots — Solene](https://dataswamp.org/~solene/2022-10-07-nixos-btrfs-continuous-snapshots.html) — Near-real-time local backup on NixOS.
 
 ### NixOS + LUKS + btrfs
+
 - [x] `nixoswiki_fde` [Full Disk Encryption — NixOS Wiki](https://nixos.wiki/wiki/Full_Disk_Encryption) — Overview of all FDE approaches on NixOS.
 - [x] `haseebmajid_disko_luks` [BTRFS and LUKS on NixOS Using Disko — Haseeb Majid](https://haseebmajid.dev/posts/2024-07-30-how-i-setup-btrfs-and-luks-on-nixos-using-disko/) — Declarative disk partitioning.
 - [x] `hubrecht_nixos_luks_btrfs` [NixOS installation (LUKS and BTRFS) — hubrecht.ovh](https://hubrecht.ovh/posts/nixos-01/) — Step-by-step installation.
@@ -363,11 +389,13 @@ Each link is prefixed with a unique slug for cross-referencing.
 - [x] `github_nixpkgs_luks_btrfs_bug` [NixOS fails to load LUKS encrypted btrfs — nixpkgs #303246](https://github.com/NixOS/nixpkgs/issues/303246) — Bug report with diagnostics and workarounds.
 
 ### NixOS disko
+
 - [x] `github_disko` [disko — GitHub](https://github.com/nix-community/disko) — Declarative disk partitioning and formatting using Nix expressions.
 - [x] `github_disko_example_luks_btrfs` [disko example: luks-btrfs-subvolumes.nix](https://github.com/nix-community/disko/blob/master/example/luks-btrfs-subvolumes.nix) — Reference: LUKS-encrypted btrfs with subvolumes.
 - [x] `github_disko_example_btrfs` [disko example: btrfs-subvolumes.nix](https://github.com/nix-community/disko/blob/master/example/btrfs-subvolumes.nix) — Reference: plain btrfs subvolume layout.
 
 ### NixOS btrbk
+
 - [x] `nixoswiki_btrbk` [Btrbk — Official NixOS Wiki](https://wiki.nixos.org/wiki/Btrbk) — NixOS-specific btrbk configuration.
 - [x] `nixoswiki_community_btrbk` [Btrbk — NixOS Wiki (community)](https://nixos.wiki/wiki/Btrbk) — Configuration snippets for local and remote backup.
 - [x] `github_nixpkgs_btrbk_module` [nixpkgs btrbk.nix module source](https://github.com/NixOS/nixpkgs/blob/master/nixos/modules/services/backup/btrbk.nix) — NixOS module source for btrbk.

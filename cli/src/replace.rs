@@ -110,7 +110,16 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     let new_probed = probe_config_disk(runner, fs, new_name, new_disk)?;
 
     // Compile steps
-    let steps = compile_replace_steps(new_name, &new_probed, &replace_source, &config)?;
+    let will_clear_last_missing =
+        matches!(&replace_source, ReplaceSource::Missing { .. }) && pool.missing_count == 1;
+    let steps = compile_replace_steps(
+        new_name,
+        &new_probed,
+        &replace_source,
+        &config,
+        will_clear_last_missing,
+        pool.total_devices,
+    )?;
 
     if dry_run {
         for step in &steps {
@@ -293,6 +302,9 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         }
     }
 
+    // Capture pre-op missing count for soft balance decision
+    let pre_op_missing_count = pool.missing_count;
+
     // Update disk map (best effort — never fail the replace)
     let pool_after = probe_pool(runner, config.mount_point()).ok();
     let new_mn = mapper_name(new_name);
@@ -309,6 +321,17 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     });
     if let Some(w) = map_warning {
         eprintln!("{w}");
+    }
+
+    // Restore RAID1 redundancy for missing-path replacements that clear the last missing device
+    if matches!(&replace_source, ReplaceSource::Missing { .. }) {
+        crate::pool::maybe_restore_raid1(
+            runner,
+            config.mount_point(),
+            pre_op_missing_count,
+            progress,
+        )
+        .map_err(|e| ReplaceError::Pool(e))?;
     }
 
     eprintln!(
@@ -424,6 +447,8 @@ fn compile_replace_steps(
     new_probed: &ConfigDisk,
     replace_source: &ReplaceSource,
     config: &crate::config::Config,
+    will_clear_last_missing: bool,
+    total_devices: u64,
 ) -> Result<Vec<ReplaceStep>, ReplaceError> {
     let new_disk = config.disk_by_name(new_name).unwrap();
     let new_mn = mapper_name(new_name);
@@ -498,6 +523,14 @@ fn compile_replace_steps(
                     config.mount_point()
                 ),
             });
+            if will_clear_last_missing && total_devices >= 2 {
+                steps.push(ReplaceStep {
+                    risk: "long",
+                    description:
+                        "btrfs balance -dconvert=raid1,soft -mconvert=raid1,soft (restore redundancy)"
+                            .into(),
+                });
+            }
         }
     }
 
@@ -803,7 +836,8 @@ mod tests {
             mapper: MapperName("braid-disk2".into()),
             devid: 2,
         };
-        let steps = compile_replace_steps("disk3", &new_probed, &source, &config).unwrap();
+        let steps =
+            compile_replace_steps("disk3", &new_probed, &source, &config, false, 2).unwrap();
         let descriptions: Vec<&str> = steps.iter().map(|s| s.description.as_str()).collect();
         assert!(
             descriptions
@@ -852,7 +886,7 @@ mod tests {
             state: ConfigDiskState::PresentNotLuks,
         };
         let source = ReplaceSource::Missing { devid: 2 };
-        let steps = compile_replace_steps("disk3", &new_probed, &source, &config).unwrap();
+        let steps = compile_replace_steps("disk3", &new_probed, &source, &config, true, 2).unwrap();
         let descriptions: Vec<&str> = steps.iter().map(|s| s.description.as_str()).collect();
         assert!(
             descriptions
@@ -871,8 +905,10 @@ mod tests {
             "missing path should NOT show btrfs device add, got: {descriptions:?}"
         );
         assert!(
-            !descriptions.iter().any(|d| d.contains("btrfs balance")),
-            "missing path should NOT show btrfs balance, got: {descriptions:?}"
+            descriptions
+                .iter()
+                .any(|d| d.contains("-dconvert=raid1,soft")),
+            "missing path (clearing last missing, ≥2 devices) should show soft balance, got: {descriptions:?}"
         );
         assert!(
             !descriptions
@@ -1033,6 +1069,85 @@ mod tests {
         assert!(
             err.to_string().contains("multiple missing"),
             "expected 'multiple missing' error, got: {err}"
+        );
+    }
+
+    fn make_replace_config() -> crate::config::Config {
+        let config_json = serde_json::json!({
+            "disks": {
+                "disk1": { "by_id": "/dev/disk/by-id/virtio-disk1" },
+                "disk2": { "by_id": "/dev/disk/by-id/virtio-disk2" },
+                "disk3": { "by_id": "/dev/disk/by-id/virtio-disk3" },
+            },
+            "mount_point": "/mnt/storage"
+        });
+        serde_json::from_value(config_json).expect("valid config")
+    }
+
+    fn new_probed_not_luks() -> ConfigDisk {
+        ConfigDisk {
+            name: "disk3".into(),
+            by_id_path: ByIdPath("/dev/disk/by-id/virtio-disk3".into()),
+            state: ConfigDiskState::PresentNotLuks,
+        }
+    }
+
+    #[test]
+    // Intent: missing-path dry-run (not last missing) omits rebalance step.
+    // Why: if other missing devices remain, a rebalance would be premature.
+    // Scenario: 3-disk pool, 2 missing, replacing 1 — still degraded after.
+    fn dry_run_missing_not_last_omits_rebalance() {
+        let config = make_replace_config();
+        let new_probed = new_probed_not_luks();
+        let source = ReplaceSource::Missing { devid: 2 };
+        let steps =
+            compile_replace_steps("disk3", &new_probed, &source, &config, false, 3).unwrap();
+        let descriptions: Vec<&str> = steps.iter().map(|s| s.description.as_str()).collect();
+        assert!(
+            !descriptions
+                .iter()
+                .any(|d| d.contains("-dconvert=raid1,soft")),
+            "should NOT show soft balance when not clearing last missing, got: {descriptions:?}"
+        );
+    }
+
+    #[test]
+    // Intent: missing-path dry-run with total_devices == 1 omits rebalance.
+    // Why: can't have RAID1 with 1 device.
+    // Scenario: single-device pool with a missing ghost entry.
+    fn dry_run_missing_single_device_omits_rebalance() {
+        let config = make_replace_config();
+        let new_probed = new_probed_not_luks();
+        let source = ReplaceSource::Missing { devid: 2 };
+        let steps = compile_replace_steps("disk3", &new_probed, &source, &config, true, 1).unwrap();
+        let descriptions: Vec<&str> = steps.iter().map(|s| s.description.as_str()).collect();
+        assert!(
+            !descriptions
+                .iter()
+                .any(|d| d.contains("-dconvert=raid1,soft")),
+            "should NOT show soft balance with total_devices == 1, got: {descriptions:?}"
+        );
+    }
+
+    #[test]
+    // Intent: live-path dry-run still shows NO soft balance step.
+    // Why: live replace doesn't create single-profile chunks — no degraded mode involved.
+    // Scenario: swapping a working drive for a bigger one.
+    fn dry_run_live_path_no_soft_balance() {
+        let config = make_replace_config();
+        let new_probed = new_probed_not_luks();
+        let source = ReplaceSource::Live {
+            mapper: MapperName("braid-disk2".into()),
+            devid: 2,
+        };
+        let steps =
+            compile_replace_steps("disk3", &new_probed, &source, &config, false, 2).unwrap();
+        let descriptions: Vec<&str> = steps.iter().map(|s| s.description.as_str()).collect();
+        assert!(
+            !descriptions
+                .iter()
+                .any(|d| d.contains("-dconvert=raid1,soft")),
+            "live path should NOT show soft balance, got: {descriptions:?}"
         );
     }
 }

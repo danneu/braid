@@ -338,7 +338,7 @@ fn check_profile_mismatch<R: CommandRunner>(
                     name: check_name.into(),
                     status: CheckStatus::Warn,
                     message: format!(
-                        "mixed {type_label} profiles ({}); run: btrfs balance start -dconvert=raid1 -mconvert=raid1 {mount_point}",
+                        "mixed {type_label} profiles ({}); run: btrfs balance start -dconvert=raid1,soft -mconvert=raid1,soft {mount_point}",
                         parts.join(", "),
                     ),
                 }
@@ -944,8 +944,8 @@ mod tests {
             check.message
         );
         assert!(
-            check.message.contains("btrfs balance"),
-            "expected balance suggestion: {}",
+            check.message.contains("-dconvert=raid1,soft"),
+            "expected soft flag in suggestion: {}",
             check.message
         );
     }
@@ -1069,8 +1069,8 @@ mod tests {
             check.message
         );
         assert!(
-            check.message.contains("btrfs balance"),
-            "expected balance suggestion: {}",
+            check.message.contains("-dconvert=raid1,soft"),
+            "expected soft flag in suggestion: {}",
             check.message
         );
     }

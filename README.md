@@ -151,7 +151,7 @@ sudo nixos-rebuild switch
 
 ### Remove a missing/dead device (cleanup only)
 
-Forgets a stale missing-device entry from the pool. This does **not** rebuild data — use `braid replace` for that.
+Forgets a stale missing-device entry from the pool. This does **not** rebuild data — use `braid replace` for that. When clearing the last missing device with ≥2 survivors, automatically runs a soft RAID1 balance to restore redundancy for chunks written during degraded operation.
 
 ```
 sudo braid remove-missing                    # 1 missing device: auto-detected
@@ -184,7 +184,7 @@ sudo braid replace --old ironwolf --new seagate                    # auto-detect
 sudo braid replace --old ironwolf --new seagate --missing-id 3     # explicit devid when multiple missing
 ```
 
-Use `braid status --verbose` to see device IDs. If the pool has missing devices when you try a live replace, repair the missing device first with `braid replace --missing-id <devid>`. Use `braid remove-missing` only to intentionally forget a stale entry without rebuilding data.
+Use `braid status --verbose` to see device IDs. If the pool has missing devices when you try a live replace, repair the missing device first with `braid replace --missing-id <devid>`. Use `braid remove-missing` only to intentionally forget a stale entry without rebuilding data. When replacing a missing device and clearing the last missing entry with ≥2 devices remaining, a soft RAID1 balance runs automatically to restore redundancy.
 
 ### Disk identity map
 

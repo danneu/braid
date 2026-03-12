@@ -5,6 +5,7 @@ use crate::parse::parse_btrfs_device_usage;
 use crate::pool::{pool_remove_devid, pool_remove_missing};
 use crate::preflight;
 use crate::probe::{probe_pool, ProbeError};
+use crate::progress::ProgressOutput;
 use std::path::Path;
 
 #[derive(Debug, thiserror::Error)]
@@ -32,6 +33,7 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync>(
     missing_id: Option<u64>,
     dry_run: bool,
     yes: bool,
+    progress: ProgressOutput,
 ) -> Result<(), RemoveMissingError> {
     let config = config_read(config_path)?;
     let disk_map_state = disk_map::load_disk_map();
@@ -101,7 +103,12 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync>(
         check_relocation_space(runner, config.mount_point(), missing_id)?;
     }
 
-    let steps = compile_steps(missing_id);
+    let will_clear_last_missing = match missing_id {
+        None => pool.missing_count == 1,
+        Some(_) => pool.missing_count == 1,
+    };
+    let remaining_present = pool.devices.len();
+    let steps = compile_steps(missing_id, will_clear_last_missing, remaining_present);
 
     if dry_run {
         for step in &steps {
@@ -112,14 +119,17 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync>(
 
     // Confirm
     if !yes {
-        if let Some(devid) = missing_id {
+        let device_label = match missing_id {
+            Some(devid) => format!("missing device entry (devid {devid})"),
+            None => "missing device entry".to_owned(),
+        };
+        if remaining_present >= 2 {
             eprintln!(
-                "Clean up missing device entry (devid {}) from pool? This forgets the device — it does not rebuild data. To replace a failed disk, use `braid replace` instead.",
-                devid
+                "Remove {device_label} from pool? Data on remaining devices will be rebalanced (long-running). This does not add a replacement — use `braid replace` for that."
             );
         } else {
             eprintln!(
-                "Clean up missing device entry from pool? This forgets the device — it does not rebuild data. To replace a failed disk, use `braid replace` instead."
+                "Remove {device_label} from pool? The surviving disk already has all data. This does not add a replacement — use `braid replace` for that."
             );
         }
         eprint!("Type 'remove missing' to confirm: ");
@@ -154,6 +164,9 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync>(
             disk_map::prune_absent_devids(map, &live_devids);
         });
     }
+
+    crate::pool::maybe_restore_raid1(runner, config.mount_point(), pool.missing_count, progress)
+        .map_err(|e| RemoveMissingError::Pool(e))?;
 
     eprintln!("Done. Missing device removed from pool.");
     Ok(())
@@ -209,7 +222,11 @@ fn check_relocation_space<R: CommandRunner>(
     })
 }
 
-fn compile_steps(missing_id: Option<u64>) -> Vec<RemoveMissingStep> {
+fn compile_steps(
+    missing_id: Option<u64>,
+    will_clear_last_missing: bool,
+    remaining_present: usize,
+) -> Vec<RemoveMissingStep> {
     let mut steps = Vec::new();
     if let Some(devid) = missing_id {
         steps.push(RemoveMissingStep {
@@ -223,6 +240,14 @@ fn compile_steps(missing_id: Option<u64>) -> Vec<RemoveMissingStep> {
         steps.push(RemoveMissingStep {
             risk: "long",
             description: "btrfs device remove missing".into(),
+        });
+    }
+    if will_clear_last_missing && remaining_present >= 2 {
+        steps.push(RemoveMissingStep {
+            risk: "long",
+            description:
+                "btrfs balance -dconvert=raid1,soft -mconvert=raid1,soft (restore redundancy)"
+                    .into(),
         });
     }
     steps
@@ -362,8 +387,15 @@ mod tests {
 
         let log = Arc::new(Mutex::new(Vec::new()));
         let runner = RecordingRunner::new(log.clone());
-        cmd_remove_missing(&runner, &config_path, None, false, true)
-            .expect("remove-missing should succeed");
+        cmd_remove_missing(
+            &runner,
+            &config_path,
+            None,
+            false,
+            true,
+            crate::progress::ProgressOutput::Off,
+        )
+        .expect("remove-missing should succeed");
 
         let calls = log.lock().unwrap();
         assert!(
@@ -537,5 +569,242 @@ mod tests {
 
         let result = check_relocation_space(&FailingRunner, "/mnt/storage", None);
         assert!(result.is_ok(), "should proceed on error: {result:?}");
+    }
+
+    // --- compile_steps tests ---
+
+    #[test]
+    // Intent: dry-run with 1 missing + ≥2 survivors shows rebalance step.
+    // Why: operator should see the soft balance step in the plan.
+    // Scenario: 3-disk pool, 1 disk failed. Dry run should show the balance.
+    fn compile_steps_shows_rebalance_when_clearing_last_missing() {
+        let steps = compile_steps(None, true, 2);
+        assert!(
+            steps
+                .iter()
+                .any(|s| s.description.contains("-dconvert=raid1,soft")),
+            "expected soft balance step; got: {:?}",
+            steps.iter().map(|s| &s.description).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    // Intent: dry-run with 1 survivor omits rebalance step.
+    // Why: can't have RAID1 with only 1 device.
+    // Scenario: 2-disk pool, 1 died. Only 1 survivor — no balance.
+    fn compile_steps_omits_rebalance_with_single_survivor() {
+        let steps = compile_steps(None, true, 1);
+        assert!(
+            !steps
+                .iter()
+                .any(|s| s.description.contains("-dconvert=raid1,soft")),
+            "should not show soft balance with 1 survivor; got: {:?}",
+            steps.iter().map(|s| &s.description).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    // Intent: dry-run when not clearing last missing omits rebalance step.
+    // Why: if more missing devices remain, balance would be premature.
+    // Scenario: 4-disk pool, 2 missing, removing 1 of them.
+    fn compile_steps_omits_rebalance_when_not_last_missing() {
+        let steps = compile_steps(Some(3), false, 2);
+        assert!(
+            !steps
+                .iter()
+                .any(|s| s.description.contains("-dconvert=raid1,soft")),
+            "should not show soft balance when not clearing last missing; got: {:?}",
+            steps.iter().map(|s| &s.description).collect::<Vec<_>>()
+        );
+    }
+
+    // --- RecordingRunner for 3-device pool scenarios ---
+
+    /// 3-device pool RecordingRunner: 2 present + 1 missing.
+    /// After remove-missing, shows 2 present + 0 missing (healthy).
+    #[derive(Clone)]
+    struct ThreeDeviceRunner {
+        log: Arc<Mutex<Vec<CmdRequest>>>,
+        /// If true, post-op probe still shows 1 missing
+        still_degraded_after: bool,
+    }
+
+    impl ThreeDeviceRunner {
+        fn new(log: Arc<Mutex<Vec<CmdRequest>>>, still_degraded: bool) -> Self {
+            Self {
+                log,
+                still_degraded_after: still_degraded,
+            }
+        }
+    }
+
+    impl CommandRunner for ThreeDeviceRunner {
+        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
+            self.log.lock().unwrap().push(request.clone());
+
+            // Track whether we've already removed the missing device (i.e., remove-missing was called)
+            let remove_done = self.log.lock().unwrap().iter().any(|c| {
+                matches!(c, CmdRequest::BtrfsDeviceRemoveMissing { .. })
+                    || matches!(c, CmdRequest::BtrfsDeviceRemove { device, .. } if device.parse::<u64>().is_ok())
+            });
+
+            match request {
+                CmdRequest::FindmntJson { mount_point } => Ok(mock_out(
+                    &format!("findmnt --json --mountpoint {mount_point}"),
+                    r#"{"filesystems":[{"target":"/mnt/storage","source":"/dev/mapper/braid-disk1","fstype":"btrfs"}]}"#,
+                    0,
+                )),
+                CmdRequest::BtrfsFilesystemShow { mount_point } => {
+                    let (missing_line, total) = if remove_done && !self.still_degraded_after {
+                        ("", 2)
+                    } else {
+                        ("\t*** Some devices missing\n", 3)
+                    };
+                    Ok(mock_out(
+                        &format!("btrfs filesystem show {mount_point}"),
+                        &format!(
+                            "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\tTotal devices {total} FS bytes used 16.17MiB\n\tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk2\n{missing_line}",
+                        ),
+                        0,
+                    ))
+                }
+                CmdRequest::CryptsetupStatus { mapper } => Ok(mock_out(
+                    &format!("cryptsetup status {mapper}"),
+                    &format!(
+                        "{mapper} is active and is in use.\n  type:    LUKS2\n  device:  /dev/vdb\n  mode:    read/write\n"
+                    ),
+                    0,
+                )),
+                CmdRequest::CryptsetupLuksUuid { .. } => Ok(mock_out(
+                    "cryptsetup luksUUID",
+                    "11111111-1111-1111-1111-111111111111\n",
+                    0,
+                )),
+                CmdRequest::BtrfsBalanceStatus { .. } => Ok(mock_out(
+                    "btrfs balance status",
+                    "No balance found on '/mnt/storage'\n",
+                    0,
+                )),
+                CmdRequest::BtrfsDeviceRemoveMissing { .. } => {
+                    Ok(mock_out("btrfs device remove missing", "", 0))
+                }
+                CmdRequest::BtrfsDeviceRemove { .. } => {
+                    Ok(mock_out("btrfs device remove", "", 0))
+                }
+                CmdRequest::BtrfsBalanceRaid1Soft { .. } => {
+                    Ok(mock_out("btrfs balance start -dconvert=raid1,soft", "", 0))
+                }
+                CmdRequest::BtrfsDeviceUsageRaw { .. } => {
+                    // Return enough space for relocation check to pass
+                    Ok(mock_out(
+                        "btrfs device usage --raw",
+                        "/dev/mapper/braid-disk1, ID: 1\n   Device size:           520093696\n   Device slack:                  0\n   Data,RAID1:            67108864\n   Unallocated:           452984832\n\n/dev/mapper/braid-disk2, ID: 2\n   Device size:           520093696\n   Device slack:                  0\n   Data,RAID1:            67108864\n   Unallocated:           452984832\n\n<missing disk>, ID: 3\n   Device size:                  0\n   Device slack:                  0\n   Data,RAID1:            67108864\n   Unallocated:                  0\n\n",
+                        0,
+                    ))
+                }
+                _ => Err(CmdError::MissingMock),
+            }
+        }
+
+        fn run_with_stdin(
+            &self,
+            request: &CmdRequest,
+            _stdin: &[u8],
+        ) -> Result<RawCommandOutput, CmdError> {
+            self.run(request)
+        }
+    }
+
+    fn three_device_config() -> (tempfile::TempDir, std::path::PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.json");
+        let mut disks = std::collections::BTreeMap::new();
+        disks.insert(
+            "disk1".to_owned(),
+            serde_json::json!({ "by_id": "/dev/disk/by-id/virtio-disk1" }),
+        );
+        disks.insert(
+            "disk2".to_owned(),
+            serde_json::json!({ "by_id": "/dev/disk/by-id/virtio-disk2" }),
+        );
+        disks.insert(
+            "disk3".to_owned(),
+            serde_json::json!({ "by_id": "/dev/disk/by-id/virtio-disk3" }),
+        );
+        let config_json = serde_json::json!({
+            "disks": disks,
+            "mount_point": "/mnt/storage"
+        });
+        std::fs::write(&config_path, serde_json::to_vec(&config_json).unwrap()).unwrap();
+        (tmp, config_path)
+    }
+
+    #[test]
+    // Intent: 3-disk pool, 1 missing → soft rebalance runs after remove-missing.
+    // Why: clearing the last missing device should restore RAID1 for chunks
+    // written during degraded operation.
+    // Scenario: 3-disk NAS, one drive dies. Operator runs remove-missing.
+    // After the removal, pool is healthy with 2 survivors → soft balance runs.
+    fn three_device_pool_soft_rebalance_runs() {
+        let (_tmp, config_path) = three_device_config();
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let runner = ThreeDeviceRunner::new(log.clone(), false);
+        cmd_remove_missing(
+            &runner,
+            &config_path,
+            None,
+            false,
+            true,
+            crate::progress::ProgressOutput::Off,
+        )
+        .expect("remove-missing should succeed");
+
+        let calls = log.lock().unwrap();
+        let remove_pos = calls
+            .iter()
+            .position(|c| matches!(c, CmdRequest::BtrfsDeviceRemoveMissing { .. }));
+        let balance_pos = calls
+            .iter()
+            .position(|c| matches!(c, CmdRequest::BtrfsBalanceRaid1Soft { .. }));
+        assert!(
+            remove_pos.is_some(),
+            "expected BtrfsDeviceRemoveMissing; calls: {calls:?}"
+        );
+        assert!(
+            balance_pos.is_some(),
+            "expected BtrfsBalanceRaid1Soft; calls: {calls:?}"
+        );
+        assert!(
+            remove_pos.unwrap() < balance_pos.unwrap(),
+            "remove-missing must happen before soft balance"
+        );
+    }
+
+    #[test]
+    // Intent: 3-disk pool, 2 missing, targeting 1 → NO rebalance (still degraded).
+    // Why: running a balance while still degraded is pointless.
+    // Scenario: 3-disk NAS, 2 drives die. Operator removes 1 missing entry.
+    // Pool still has 1 missing device → no rebalance.
+    fn three_device_two_missing_no_rebalance() {
+        let (_tmp, config_path) = three_device_config();
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let runner = ThreeDeviceRunner::new(log.clone(), true);
+        cmd_remove_missing(
+            &runner,
+            &config_path,
+            None,
+            false,
+            true,
+            crate::progress::ProgressOutput::Off,
+        )
+        .expect("remove-missing should succeed");
+
+        let calls = log.lock().unwrap();
+        assert!(
+            !calls
+                .iter()
+                .any(|c| matches!(c, CmdRequest::BtrfsBalanceRaid1Soft { .. })),
+            "should NOT call BtrfsBalanceRaid1Soft when still degraded; calls: {calls:?}"
+        );
     }
 }

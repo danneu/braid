@@ -310,6 +310,9 @@
           repro-degraded-writes-3disk = pkgs.testers.nixosTest (
             import ./tests/repro/degraded-writes-3disk.nix
           );
+          repro-degraded-soft-balance = pkgs.testers.nixosTest (
+            import ./tests/repro/degraded-soft-balance.nix
+          );
           repro-btrfs-replace-preserves-devid = pkgs.testers.nixosTest (
             import ./tests/repro/btrfs-replace-preserves-devid.nix
           );
