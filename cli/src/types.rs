@@ -13,6 +13,16 @@ pub struct LuksUuid(pub String);
 #[serde(transparent)]
 pub struct MapperName(pub String);
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct MountPoint(pub String);
+
+impl MountPoint {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 impl fmt::Display for ByIdPath {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(f)
@@ -28,6 +38,24 @@ impl fmt::Display for LuksUuid {
 impl fmt::Display for MapperName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(f)
+    }
+}
+
+impl fmt::Display for MountPoint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl AsRef<str> for MountPoint {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl AsRef<std::path::Path> for MountPoint {
+    fn as_ref(&self) -> &std::path::Path {
+        std::path::Path::new(&self.0)
     }
 }
 

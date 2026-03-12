@@ -1,3 +1,4 @@
+use crate::types::MountPoint;
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,13 +19,13 @@ pub enum LsblkFieldKind {
 pub enum CmdRequest {
     LsblkJson,
     FindmntJson {
-        mount_point: String,
+        mount_point: MountPoint,
     },
     BtrfsFilesystemDfJson {
-        mount_point: String,
+        mount_point: MountPoint,
     },
     BtrfsFilesystemShow {
-        mount_point: String,
+        mount_point: MountPoint,
     },
     CryptsetupStatus {
         mapper: String,
@@ -33,16 +34,16 @@ pub enum CmdRequest {
         device: String,
     },
     BtrfsFilesystemUsageRaw {
-        mount_point: String,
+        mount_point: MountPoint,
     },
     BtrfsScrubStatus {
-        mount_point: String,
+        mount_point: MountPoint,
     },
     BtrfsScrubStatusPerDevice {
-        mount_point: String,
+        mount_point: MountPoint,
     },
     BtrfsDeviceStats {
-        mount_point: String,
+        mount_point: MountPoint,
     },
     LsblkField {
         device: String,
@@ -61,14 +62,14 @@ pub enum CmdRequest {
     },
     BtrfsDeviceAdd {
         device: String,
-        mount_point: String,
+        mount_point: MountPoint,
     },
     BtrfsDeviceRemove {
         device: String,
-        mount_point: String,
+        mount_point: MountPoint,
     },
     BtrfsDeviceRemoveMissing {
-        mount_point: String,
+        mount_point: MountPoint,
     },
     BtrfsDeviceScan {
         device: String,
@@ -76,13 +77,13 @@ pub enum CmdRequest {
     BtrfsDeviceScanAll,
     BtrfsDeviceScanForget,
     BtrfsBalanceRaid1 {
-        mount_point: String,
+        mount_point: MountPoint,
     },
     BtrfsBalanceRaid1Soft {
-        mount_point: String,
+        mount_point: MountPoint,
     },
     BtrfsBalanceSingle {
-        mount_point: String,
+        mount_point: MountPoint,
     },
     MkfsBtrfs {
         device: String,
@@ -92,25 +93,25 @@ pub enum CmdRequest {
     },
     Mount {
         device: String,
-        mount_point: String,
+        mount_point: MountPoint,
     },
     MountWithOptions {
         device: String,
-        mount_point: String,
+        mount_point: MountPoint,
         options: Vec<String>,
     },
     Umount {
-        mount_point: String,
+        mount_point: MountPoint,
     },
     MountpointCheck {
-        path: String,
+        path: MountPoint,
     },
     // Polling commands for progress monitoring
     BtrfsBalanceStatus {
-        mount_point: String,
+        mount_point: MountPoint,
     },
     BtrfsDeviceUsageRaw {
-        mount_point: String,
+        mount_point: MountPoint,
     },
     // init-disk commands
     CryptsetupLuksFormat {
@@ -134,14 +135,14 @@ pub enum CmdRequest {
     BtrfsReplaceStart {
         devid: u64,
         target_device: String,
-        mount_point: String,
+        mount_point: MountPoint,
     },
     BtrfsReplaceStatus {
-        mount_point: String,
+        mount_point: MountPoint,
     },
     BtrfsFilesystemResize {
         devid: u64,
-        mount_point: String,
+        mount_point: MountPoint,
     },
     // Keyfile commands (auto-unlock)
     CryptsetupLuksOpenKeyFile {
@@ -184,12 +185,12 @@ impl CmdRequest {
                     "--output".into(),
                     "TARGET,SOURCE,FSTYPE,OPTIONS".into(),
                     "--mountpoint".into(),
-                    mount_point.clone(),
+                    mount_point.0.clone(),
                 ],
             },
             CmdRequest::BtrfsFilesystemShow { mount_point } => CmdArgs {
                 program: "btrfs",
-                args: vec!["filesystem".into(), "show".into(), mount_point.clone()],
+                args: vec!["filesystem".into(), "show".into(), mount_point.0.clone()],
             },
             CmdRequest::CryptsetupStatus { mapper } => CmdArgs {
                 program: "cryptsetup",
@@ -206,7 +207,7 @@ impl CmdRequest {
                     "json".into(),
                     "filesystem".into(),
                     "df".into(),
-                    mount_point.clone(),
+                    mount_point.0.clone(),
                 ],
             },
             CmdRequest::BtrfsFilesystemUsageRaw { mount_point } => CmdArgs {
@@ -215,12 +216,12 @@ impl CmdRequest {
                     "filesystem".into(),
                     "usage".into(),
                     "--raw".into(),
-                    mount_point.clone(),
+                    mount_point.0.clone(),
                 ],
             },
             CmdRequest::BtrfsScrubStatus { mount_point } => CmdArgs {
                 program: "btrfs",
-                args: vec!["scrub".into(), "status".into(), mount_point.clone()],
+                args: vec!["scrub".into(), "status".into(), mount_point.0.clone()],
             },
             CmdRequest::BtrfsScrubStatusPerDevice { mount_point } => CmdArgs {
                 program: "btrfs",
@@ -229,16 +230,16 @@ impl CmdRequest {
                     "status".into(),
                     "-d".into(),
                     "-R".into(),
-                    mount_point.clone(),
+                    mount_point.0.clone(),
                 ],
             },
             CmdRequest::BtrfsDeviceStats { mount_point } => CmdArgs {
                 program: "btrfs",
-                args: vec!["device".into(), "stats".into(), mount_point.clone()],
+                args: vec!["device".into(), "stats".into(), mount_point.0.clone()],
             },
             CmdRequest::BtrfsBalanceStatus { mount_point } => CmdArgs {
                 program: "btrfs",
-                args: vec!["balance".into(), "status".into(), mount_point.clone()],
+                args: vec!["balance".into(), "status".into(), mount_point.0.clone()],
             },
             CmdRequest::BtrfsDeviceUsageRaw { mount_point } => CmdArgs {
                 program: "btrfs",
@@ -246,7 +247,7 @@ impl CmdRequest {
                     "device".into(),
                     "usage".into(),
                     "--raw".into(),
-                    mount_point.clone(),
+                    mount_point.0.clone(),
                 ],
             },
             CmdRequest::LsblkField { device, field } => {
@@ -292,7 +293,7 @@ impl CmdRequest {
                     "add".into(),
                     "-f".into(),
                     device.clone(),
-                    mount_point.clone(),
+                    mount_point.0.clone(),
                 ],
             },
             CmdRequest::BtrfsDeviceRemove {
@@ -304,7 +305,7 @@ impl CmdRequest {
                     "device".into(),
                     "remove".into(),
                     device.clone(),
-                    mount_point.clone(),
+                    mount_point.0.clone(),
                 ],
             },
             CmdRequest::BtrfsDeviceRemoveMissing { mount_point } => CmdArgs {
@@ -313,7 +314,7 @@ impl CmdRequest {
                     "device".into(),
                     "remove".into(),
                     "missing".into(),
-                    mount_point.clone(),
+                    mount_point.0.clone(),
                 ],
             },
             CmdRequest::BtrfsDeviceScan { device } => CmdArgs {
@@ -335,7 +336,7 @@ impl CmdRequest {
                     "start".into(),
                     "-dconvert=raid1".into(),
                     "-mconvert=raid1".into(),
-                    mount_point.clone(),
+                    mount_point.0.clone(),
                 ],
             },
             CmdRequest::BtrfsBalanceRaid1Soft { mount_point } => CmdArgs {
@@ -345,7 +346,7 @@ impl CmdRequest {
                     "start".into(),
                     "-dconvert=raid1,soft".into(),
                     "-mconvert=raid1,soft".into(),
-                    mount_point.clone(),
+                    mount_point.0.clone(),
                 ],
             },
             CmdRequest::BtrfsBalanceSingle { mount_point } => CmdArgs {
@@ -357,7 +358,7 @@ impl CmdRequest {
                     // Important: use dup for metadata when converting to single
                     "-mconvert=dup".into(),
                     "-f".into(),
-                    mount_point.clone(),
+                    mount_point.0.clone(),
                 ],
             },
             CmdRequest::MkfsBtrfs { device } => CmdArgs {
@@ -383,7 +384,7 @@ impl CmdRequest {
                 mount_point,
             } => CmdArgs {
                 program: "mount",
-                args: vec![device.clone(), mount_point.clone()],
+                args: vec![device.clone(), mount_point.0.clone()],
             },
             CmdRequest::MountWithOptions {
                 device,
@@ -396,7 +397,7 @@ impl CmdRequest {
                     args.push(options.join(","));
                 }
                 args.push(device.clone());
-                args.push(mount_point.clone());
+                args.push(mount_point.0.clone());
                 CmdArgs {
                     program: "mount",
                     args,
@@ -404,11 +405,11 @@ impl CmdRequest {
             }
             CmdRequest::Umount { mount_point } => CmdArgs {
                 program: "umount",
-                args: vec![mount_point.clone()],
+                args: vec![mount_point.0.clone()],
             },
             CmdRequest::MountpointCheck { path } => CmdArgs {
                 program: "mountpoint",
-                args: vec!["-q".into(), path.clone()],
+                args: vec!["-q".into(), path.0.clone()],
             },
             CmdRequest::BtrfsReplaceStart {
                 devid,
@@ -430,12 +431,12 @@ impl CmdRequest {
                     "-B".into(),
                     devid.to_string(),
                     target_device.clone(),
-                    mount_point.clone(),
+                    mount_point.0.clone(),
                 ],
             },
             CmdRequest::BtrfsReplaceStatus { mount_point } => CmdArgs {
                 program: "btrfs",
-                args: vec!["replace".into(), "status".into(), mount_point.clone()],
+                args: vec!["replace".into(), "status".into(), mount_point.0.clone()],
             },
             CmdRequest::BtrfsFilesystemResize { devid, mount_point } => CmdArgs {
                 program: "btrfs",
@@ -443,7 +444,7 @@ impl CmdRequest {
                     "filesystem".into(),
                     "resize".into(),
                     format!("{devid}:max"),
-                    mount_point.clone(),
+                    mount_point.0.clone(),
                 ],
             },
             CmdRequest::CryptsetupLuksHeaderBackup {
@@ -864,7 +865,7 @@ mod tests {
     // during degraded operation.
     fn btrfs_balance_raid1_soft_generates_correct_argv() {
         let cmd = CmdRequest::BtrfsBalanceRaid1Soft {
-            mount_point: "/mnt/storage".to_owned(),
+            mount_point: MountPoint("/mnt/storage".to_owned()),
         }
         .to_argv();
         assert_eq!(cmd.program, "btrfs");
@@ -894,7 +895,7 @@ mod tests {
         let cmd = CmdRequest::BtrfsReplaceStart {
             devid: 2,
             target_device: "/dev/mapper/braid-new".to_owned(),
-            mount_point: "/mnt/storage".to_owned(),
+            mount_point: MountPoint("/mnt/storage".to_owned()),
         }
         .to_argv();
         assert!(

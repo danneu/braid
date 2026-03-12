@@ -98,7 +98,7 @@ pub fn probe_pool<R: CommandRunner>(
     mount_point: &str,
 ) -> Result<PoolState, ProbeError> {
     let findmnt_raw = runner.run(&CmdRequest::FindmntJson {
-        mount_point: mount_point.to_owned(),
+        mount_point: MountPoint(mount_point.to_owned()),
     })?;
     let findmnt = crate::parse::parse_findmnt_json(&findmnt_raw)?;
 
@@ -125,7 +125,7 @@ pub fn probe_pool<R: CommandRunner>(
     }
 
     let show_raw = runner.run(&CmdRequest::BtrfsFilesystemShow {
-        mount_point: mount_point.to_owned(),
+        mount_point: MountPoint(mount_point.to_owned()),
     })?;
     let show = parse_btrfs_filesystem_show(&show_raw)?;
 
@@ -431,7 +431,7 @@ mod tests {
     fn probe_pool_unmounted() {
         let runner = MockRunner::default().with_output(
             CmdRequest::FindmntJson {
-                mount_point: "/mnt/storage".into(),
+                mount_point: MountPoint("/mnt/storage".to_owned()),
             },
             findmnt_empty(),
         );
@@ -446,7 +446,7 @@ mod tests {
     fn probe_pool_unmounted_target_mismatch() {
         let runner = MockRunner::default().with_output(
             CmdRequest::FindmntJson {
-                mount_point: "/mnt/storage".into(),
+                mount_point: MountPoint("/mnt/storage".to_owned()),
             },
             ok_raw(
                 "findmnt --json --output TARGET,SOURCE,FSTYPE --mountpoint /mnt/storage",
@@ -464,7 +464,7 @@ mod tests {
     fn probe_pool_mounted_not_btrfs() {
         let runner = MockRunner::default().with_output(
             CmdRequest::FindmntJson {
-                mount_point: "/mnt/storage".into(),
+                mount_point: MountPoint("/mnt/storage".to_owned()),
             },
             findmnt_ext4(),
         );
@@ -483,13 +483,13 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::FindmntJson {
-                    mount_point: "/mnt/storage".into(),
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
                 },
                 findmnt_btrfs(),
             )
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
-                    mount_point: "/mnt/storage".into(),
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
                 },
                 btrfs_show_2disk(),
             )
@@ -540,13 +540,13 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::FindmntJson {
-                    mount_point: "/mnt/storage".into(),
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
                 },
                 findmnt_btrfs(),
             )
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
-                    mount_point: "/mnt/storage".into(),
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
                 },
                 btrfs_show_3disk_1missing(),
             )
@@ -587,13 +587,13 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::FindmntJson {
-                    mount_point: "/mnt/storage".into(),
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
                 },
                 findmnt_btrfs(),
             )
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
-                    mount_point: "/mnt/storage".into(),
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
                 },
                 ok_raw(
                     "btrfs filesystem show /mnt/storage",
@@ -630,13 +630,13 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::FindmntJson {
-                    mount_point: "/mnt/storage".into(),
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
                 },
                 findmnt_btrfs(),
             )
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
-                    mount_point: "/mnt/storage".into(),
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
                 },
                 ok_raw(
                     "btrfs filesystem show /mnt/storage",
@@ -670,13 +670,13 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::FindmntJson {
-                    mount_point: "/mnt/storage".into(),
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
                 },
                 findmnt_btrfs(),
             )
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
-                    mount_point: "/mnt/storage".into(),
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
                 },
                 ok_raw(
                     "btrfs filesystem show /mnt/storage",
@@ -705,13 +705,13 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::FindmntJson {
-                    mount_point: "/mnt/storage".into(),
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
                 },
                 findmnt_btrfs(),
             )
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
-                    mount_point: "/mnt/storage".into(),
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
                 },
                 ok_raw(
                     "btrfs filesystem show /mnt/storage",
@@ -765,13 +765,13 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::FindmntJson {
-                    mount_point: "/mnt/storage".into(),
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
                 },
                 findmnt_btrfs(),
             )
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
-                    mount_point: "/mnt/storage".into(),
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
                 },
                 ok_raw(
                     "btrfs filesystem show /mnt/storage",

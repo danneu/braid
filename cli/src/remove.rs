@@ -41,7 +41,7 @@ pub fn cmd_remove<R: CommandRunner + Sync>(
     disk_map::validate_config_name_stability(&config, &disk_map_state)
         .map_err(|e| RemoveError::Validation(e.to_string()))?;
 
-    let pool = match probe_pool(runner, config.mount_point()) {
+    let pool = match probe_pool(runner, config.mount_point().as_str()) {
         Ok(p) => p,
         Err(ProbeError::NotBtrfs { .. }) => {
             return Err(RemoveError::Validation(
@@ -58,9 +58,9 @@ pub fn cmd_remove<R: CommandRunner + Sync>(
     }
 
     // Preflight
-    preflight::check_no_exclusive_op(runner, config.mount_point())
+    preflight::check_no_exclusive_op(runner, config.mount_point().as_str())
         .map_err(RemoveError::Validation)?;
-    preflight::check_not_read_only(runner, config.mount_point())
+    preflight::check_not_read_only(runner, config.mount_point().as_str())
         .map_err(RemoveError::Validation)?;
 
     let mn = mapper_name(name);
@@ -101,7 +101,7 @@ pub fn cmd_remove<R: CommandRunner + Sync>(
     // This does not match the reproduced relocation-failure mode.
     if remaining > 1 {
         if let Some(devid) = target_devid {
-            check_eviction_space(runner, config.mount_point(), devid)?;
+            check_eviction_space(runner, config.mount_point().as_str(), devid)?;
         }
     }
 
@@ -153,7 +153,7 @@ pub fn cmd_remove<R: CommandRunner + Sync>(
     }
 
     // Execute
-    evict_present_device(runner, &mn.0, config.mount_point(), progress)?;
+    evict_present_device(runner, &mn.0, config.mount_point().as_str(), progress)?;
 
     // Update disk map (best effort — never fail the remove)
     disk_map::update_disk_map_best_effort(|map| {
@@ -179,7 +179,7 @@ fn check_eviction_space<R: CommandRunner>(
     target_devid: u64,
 ) -> Result<(), RemoveError> {
     let raw = match runner.run(&CmdRequest::BtrfsDeviceUsageRaw {
-        mount_point: mount_point.to_owned(),
+        mount_point: MountPoint(mount_point.to_owned()),
     }) {
         Ok(r) => r,
         Err(e) => {

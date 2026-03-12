@@ -61,19 +61,20 @@ pub fn cmd_lock<R: CommandRunner, F: Filesystem + ?Sized>(
 
     // 1. Check if pool is mounted
     let mp_result = runner.run(&CmdRequest::MountpointCheck {
-        path: mount_point.to_owned(),
+        path: mount_point.clone(),
     })?;
     let pool_was_mounted = mp_result.exit_status == 0;
 
     // Preflight
     if pool_was_mounted {
-        preflight::check_no_exclusive_op(runner, mount_point).map_err(LockError::Failed)?;
+        preflight::check_no_exclusive_op(runner, mount_point.as_str())
+            .map_err(LockError::Failed)?;
     }
 
     // 2. If mounted → unmount
     if pool_was_mounted {
         let umount_result = runner.run(&CmdRequest::Umount {
-            mount_point: mount_point.to_owned(),
+            mount_point: mount_point.clone(),
         })?;
         if umount_result.exit_status != 0 {
             return Err(LockError::Failed(format!(
@@ -133,7 +134,7 @@ mod tests {
     use super::*;
     use crate::cmd::{MockRunner, RawCommandOutput};
     use crate::config::{Config, DiskConfig};
-    use crate::types::ByIdPath;
+    use crate::types::{ByIdPath, MountPoint};
     use std::collections::BTreeMap;
 
     struct MockFs {
@@ -190,7 +191,7 @@ mod tests {
                 by_id: ByIdPath("/dev/disk/by-id/b".to_owned()),
             },
         );
-        Config::new(disks, "/mnt/storage".to_owned()).unwrap()
+        Config::new(disks, MountPoint("/mnt/storage".to_owned())).unwrap()
     }
 
     /// Build a MockRunner pre-loaded with the standard preflight outputs
@@ -200,13 +201,13 @@ mod tests {
         MockRunner::default()
             .with_output(
                 CmdRequest::MountpointCheck {
-                    path: "/mnt/storage".into(),
+                    path: MountPoint("/mnt/storage".to_owned()),
                 },
                 ok_raw("mountpoint -q /mnt/storage"),
             )
             .with_output(
                 CmdRequest::BtrfsBalanceStatus {
-                    mount_point: "/mnt/storage".into(),
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
                 },
                 RawCommandOutput {
                     cmd: "btrfs balance status /mnt/storage".into(),
@@ -217,7 +218,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::Umount {
-                    mount_point: "/mnt/storage".into(),
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
                 },
                 ok_raw("umount /mnt/storage"),
             )
@@ -252,7 +253,7 @@ mod tests {
     fn lock_already_locked() {
         let runner = MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
-                path: "/mnt/storage".into(),
+                path: MountPoint("/mnt/storage".to_owned()),
             },
             err_raw("mountpoint -q /mnt/storage", 1, ""),
         );
@@ -268,7 +269,7 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::MountpointCheck {
-                    path: "/mnt/storage".into(),
+                    path: MountPoint("/mnt/storage".to_owned()),
                 },
                 err_raw("mountpoint -q /mnt/storage", 1, ""),
             )
@@ -289,13 +290,13 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::MountpointCheck {
-                    path: "/mnt/storage".into(),
+                    path: MountPoint("/mnt/storage".to_owned()),
                 },
                 ok_raw("mountpoint -q /mnt/storage"),
             )
             .with_output(
                 CmdRequest::BtrfsBalanceStatus {
-                    mount_point: "/mnt/storage".into(),
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
                 },
                 RawCommandOutput {
                     cmd: "btrfs balance status /mnt/storage".into(),
@@ -306,7 +307,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::Umount {
-                    mount_point: "/mnt/storage".into(),
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
                 },
                 err_raw("umount /mnt/storage", 32, "target is busy"),
             );
@@ -322,13 +323,13 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::MountpointCheck {
-                    path: "/mnt/storage".into(),
+                    path: MountPoint("/mnt/storage".to_owned()),
                 },
                 ok_raw("mountpoint -q /mnt/storage"),
             )
             .with_output(
                 CmdRequest::BtrfsBalanceStatus {
-                    mount_point: "/mnt/storage".into(),
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
                 },
                 RawCommandOutput {
                     cmd: "btrfs balance status /mnt/storage".into(),
@@ -339,7 +340,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::Umount {
-                    mount_point: "/mnt/storage".into(),
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
                 },
                 err_raw("umount /mnt/storage", 32, "target is busy"),
             );
@@ -382,13 +383,13 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::MountpointCheck {
-                    path: "/mnt/storage".into(),
+                    path: MountPoint("/mnt/storage".to_owned()),
                 },
                 ok_raw("mountpoint -q /mnt/storage"),
             )
             .with_output(
                 CmdRequest::BtrfsBalanceStatus {
-                    mount_point: "/mnt/storage".into(),
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
                 },
                 RawCommandOutput {
                     cmd: "btrfs balance status /mnt/storage".into(),
@@ -399,7 +400,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::Umount {
-                    mount_point: "/mnt/storage".into(),
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
                 },
                 ok_raw("umount /mnt/storage"),
             )

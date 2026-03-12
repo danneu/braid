@@ -10,6 +10,7 @@ use crate::parse::{
 };
 use crate::probe::probe_pool;
 use crate::tui::model::{DiskLuksInfo, DiskUsage, PoolState};
+use crate::types::MountPoint;
 
 pub fn probe_pool_for_tui<R: CommandRunner>(
     runner: &R,
@@ -24,7 +25,7 @@ pub fn probe_pool_for_tui<R: CommandRunner>(
 
     let usage_raw = runner
         .run(&CmdRequest::BtrfsFilesystemUsageRaw {
-            mount_point: mount_point.to_owned(),
+            mount_point: MountPoint(mount_point.to_owned()),
         })
         .map_err(|e| e.to_string())?;
     let usage = parse_btrfs_filesystem_usage(&usage_raw).map_err(|e| e.to_string())?;
@@ -37,7 +38,7 @@ pub fn probe_pool_for_tui<R: CommandRunner>(
 
     let dev_usage_raw = runner
         .run(&CmdRequest::BtrfsDeviceUsageRaw {
-            mount_point: mount_point.to_owned(),
+            mount_point: MountPoint(mount_point.to_owned()),
         })
         .map_err(|e| e.to_string())?;
     let dev_usage = parse_btrfs_device_usage(&dev_usage_raw).map_err(|e| e.to_string())?;
@@ -86,7 +87,7 @@ pub fn probe_pool_for_tui<R: CommandRunner>(
 
     let scrub = runner
         .run(&CmdRequest::BtrfsScrubStatus {
-            mount_point: mount_point.to_owned(),
+            mount_point: MountPoint(mount_point.to_owned()),
         })
         .ok()
         .and_then(|raw| parse_btrfs_scrub_status(&raw).ok())
@@ -144,7 +145,7 @@ pub fn probe_pool_for_tui<R: CommandRunner>(
     }
 
     Ok(Some(PoolState {
-        mount_point: mount_point.to_owned(),
+        mount_point: MountPoint(mount_point.to_owned()),
         profile: profile.to_owned(),
         used: usage.used_bytes,
         total: usage.free_estimated_bytes + usage.used_bytes,

@@ -11,6 +11,7 @@ use crate::tui::app::Message;
 use crate::tui::model::PoolState;
 use crate::tui::keymap;
 use crate::tui::state::{CmdId, Stream};
+use crate::types::MountPoint;
 
 pub enum Event {
     Key(KeyEvent),
@@ -28,7 +29,7 @@ pub enum Event {
         status: ExitStatus,
     },
     PoolProbeFinished(Result<Option<PoolState>, String>, Duration),
-    PollRefresh { mount_point: String },
+    PollRefresh { mount_point: MountPoint },
     Tick,
 }
 

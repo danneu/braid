@@ -228,7 +228,7 @@ mod tests {
     use super::*;
     use crate::cmd::{CmdRequest, MockRunner, RawCommandOutput};
     use crate::probe::Filesystem;
-    use crate::types::ByIdPath;
+    use crate::types::{ByIdPath, MountPoint};
     use std::collections::BTreeMap;
 
     struct MockFs {
@@ -282,7 +282,7 @@ mod tests {
         for (key, by_id) in disks {
             map.insert(key.to_string(), disk(by_id));
         }
-        Config::new(map, "/mnt/storage".to_owned()).unwrap()
+        Config::new(map, MountPoint("/mnt/storage".to_owned())).unwrap()
     }
 
     // -- Mock response helpers --

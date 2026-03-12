@@ -2,6 +2,7 @@ use crate::cmd::{CmdRequest, CommandRunner};
 use crate::parse::types::{BalanceState, BtrfsDeviceUsageEntry};
 use crate::parse::{parse_btrfs_balance_status, parse_btrfs_device_usage, parse_findmnt_json};
 use crate::status::format_bytes;
+use crate::types::MountPoint;
 
 /// Refuse if a btrfs balance or device remove is already running.
 /// Fail-closed: if we can't determine state, refuse. Unmounting or starting
@@ -12,7 +13,7 @@ pub fn check_no_exclusive_op<R: CommandRunner>(
 ) -> Result<(), String> {
     let raw = runner
         .run(&CmdRequest::BtrfsBalanceStatus {
-            mount_point: mount_point.to_owned(),
+            mount_point: MountPoint(mount_point.to_owned()),
         })
         .map_err(|e| format!("cannot determine whether an exclusive operation is running: {e}"))?;
 
@@ -35,7 +36,7 @@ pub fn check_no_exclusive_op<R: CommandRunner>(
 /// and touching all 7+ PoolState construction sites.
 pub fn check_not_read_only<R: CommandRunner>(runner: &R, mount_point: &str) -> Result<(), String> {
     let raw = match runner.run(&CmdRequest::FindmntJson {
-        mount_point: mount_point.to_owned(),
+        mount_point: MountPoint(mount_point.to_owned()),
     }) {
         Ok(r) => r,
         Err(e) => {
@@ -89,7 +90,7 @@ pub fn probe_missing_devids<R: CommandRunner>(
 ) -> Result<Vec<u64>, String> {
     let raw = runner
         .run(&CmdRequest::BtrfsDeviceUsageRaw {
-            mount_point: mount_point.to_owned(),
+            mount_point: MountPoint(mount_point.to_owned()),
         })
         .map_err(|e| format!("failed to probe device usage: {e}"))?;
 
@@ -178,7 +179,7 @@ mod tests {
     fn exclusive_op_passes_when_no_balance() {
         let runner = MockRunner::default().with_output(
             CmdRequest::BtrfsBalanceStatus {
-                mount_point: "/mnt/storage".into(),
+                mount_point: MountPoint("/mnt/storage".to_owned()),
             },
             RawCommandOutput {
                 cmd: "btrfs balance status /mnt/storage".into(),
@@ -197,7 +198,7 @@ mod tests {
     fn exclusive_op_refuses_when_balance_running() {
         let runner = MockRunner::default().with_output(
             CmdRequest::BtrfsBalanceStatus {
-                mount_point: "/mnt/storage".into(),
+                mount_point: MountPoint("/mnt/storage".to_owned()),
             },
             RawCommandOutput {
                 cmd: "btrfs balance status /mnt/storage".into(),
@@ -222,7 +223,7 @@ mod tests {
     fn exclusive_op_refuses_when_balance_paused() {
         let runner = MockRunner::default().with_output(
             CmdRequest::BtrfsBalanceStatus {
-                mount_point: "/mnt/storage".into(),
+                mount_point: MountPoint("/mnt/storage".to_owned()),
             },
             RawCommandOutput {
                 cmd: "btrfs balance status /mnt/storage".into(),
@@ -254,7 +255,7 @@ mod tests {
     fn read_only_passes_when_rw() {
         let runner = MockRunner::default().with_output(
             CmdRequest::FindmntJson {
-                mount_point: "/mnt/storage".into(),
+                mount_point: MountPoint("/mnt/storage".to_owned()),
             },
             RawCommandOutput {
                 cmd: "findmnt --json --output TARGET,SOURCE,FSTYPE,OPTIONS --mountpoint /mnt/storage".into(),
@@ -273,7 +274,7 @@ mod tests {
     fn read_only_refuses_when_ro() {
         let runner = MockRunner::default().with_output(
             CmdRequest::FindmntJson {
-                mount_point: "/mnt/storage".into(),
+                mount_point: MountPoint("/mnt/storage".to_owned()),
             },
             RawCommandOutput {
                 cmd: "findmnt --json --output TARGET,SOURCE,FSTYPE,OPTIONS --mountpoint /mnt/storage".into(),
@@ -346,7 +347,7 @@ mod tests {
     fn probe_missing_devids_returns_missing() {
         let runner = MockRunner::default().with_output(
             CmdRequest::BtrfsDeviceUsageRaw {
-                mount_point: "/mnt/storage".into(),
+                mount_point: MountPoint("/mnt/storage".to_owned()),
             },
             RawCommandOutput {
                 cmd: "btrfs device usage --raw /mnt/storage".into(),
@@ -386,7 +387,7 @@ mod tests {
     fn probe_missing_devids_returns_empty_when_healthy() {
         let runner = MockRunner::default().with_output(
             CmdRequest::BtrfsDeviceUsageRaw {
-                mount_point: "/mnt/storage".into(),
+                mount_point: MountPoint("/mnt/storage".to_owned()),
             },
             RawCommandOutput {
                 cmd: "btrfs device usage --raw /mnt/storage".into(),

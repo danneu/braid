@@ -6,6 +6,7 @@ use crate::pool::{pool_remove_devid, pool_remove_missing};
 use crate::preflight;
 use crate::probe::{probe_pool, ProbeError};
 use crate::progress::ProgressOutput;
+use crate::types::MountPoint;
 use std::path::Path;
 
 #[derive(Debug, thiserror::Error)]
@@ -40,7 +41,7 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync>(
     disk_map::validate_config_name_stability(&config, &disk_map_state)
         .map_err(|e| RemoveMissingError::Validation(e.to_string()))?;
 
-    let pool = match probe_pool(runner, config.mount_point()) {
+    let pool = match probe_pool(runner, config.mount_point().as_str()) {
         Ok(p) => p,
         Err(ProbeError::NotBtrfs { .. }) => {
             return Err(RemoveMissingError::Validation(
@@ -57,9 +58,9 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync>(
     }
 
     // Preflight
-    preflight::check_no_exclusive_op(runner, config.mount_point())
+    preflight::check_no_exclusive_op(runner, config.mount_point().as_str())
         .map_err(RemoveMissingError::Validation)?;
-    preflight::check_not_read_only(runner, config.mount_point())
+    preflight::check_not_read_only(runner, config.mount_point().as_str())
         .map_err(RemoveMissingError::Validation)?;
 
     if pool.missing_count == 0 {
@@ -82,7 +83,7 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync>(
                  Use 'braid remove' to remove live devices."
             )));
         }
-        let missing_devids = preflight::probe_missing_devids(runner, config.mount_point())
+        let missing_devids = preflight::probe_missing_devids(runner, config.mount_point().as_str())
             .map_err(RemoveMissingError::Validation)?;
         if !missing_devids.contains(&devid) {
             return Err(RemoveMissingError::Validation(format!(
@@ -100,7 +101,7 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync>(
     // survivor already has all data (every chunk is mirrored). This does
     // not match the reproduced relocation-failure mode.
     if pool.devices.len() >= 2 {
-        check_relocation_space(runner, config.mount_point(), missing_id)?;
+        check_relocation_space(runner, config.mount_point().as_str(), missing_id)?;
     }
 
     let will_clear_last_missing = match missing_id {
@@ -145,10 +146,10 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync>(
     // Execute
     if let Some(devid) = missing_id {
         eprintln!("Removing missing device (devid {}) from pool...", devid);
-        pool_remove_devid(runner, config.mount_point(), devid)?;
+        pool_remove_devid(runner, config.mount_point().as_str(), devid)?;
     } else {
         eprintln!("Removing missing device from pool...");
-        pool_remove_missing(runner, config.mount_point())?;
+        pool_remove_missing(runner, config.mount_point().as_str())?;
     }
 
     // Update disk map (best effort — never fail the remove-missing)
@@ -157,7 +158,7 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync>(
         disk_map::update_disk_map_best_effort(|map| {
             disk_map::remove_disks_by_devids(map, &[devid]);
         });
-    } else if let Ok(pool_after) = probe_pool(runner, config.mount_point()) {
+    } else if let Ok(pool_after) = probe_pool(runner, config.mount_point().as_str()) {
         // General removal: prune entries whose devid is no longer in pool
         let live_devids: Vec<u64> = pool_after.devices.iter().map(|d| d.devid).collect();
         disk_map::update_disk_map_best_effort(|map| {
@@ -165,8 +166,13 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync>(
         });
     }
 
-    crate::pool::maybe_restore_raid1(runner, config.mount_point(), pool.missing_count, progress)
-        .map_err(|e| RemoveMissingError::Pool(e))?;
+    crate::pool::maybe_restore_raid1(
+        runner,
+        config.mount_point().as_str(),
+        pool.missing_count,
+        progress,
+    )
+    .map_err(|e| RemoveMissingError::Pool(e))?;
 
     eprintln!("Done. Missing device removed from pool.");
     Ok(())
@@ -190,7 +196,7 @@ fn check_relocation_space<R: CommandRunner>(
     missing_id: Option<u64>,
 ) -> Result<(), RemoveMissingError> {
     let raw = match runner.run(&CmdRequest::BtrfsDeviceUsageRaw {
-        mount_point: mount_point.to_owned(),
+        mount_point: MountPoint(mount_point.to_owned()),
     }) {
         Ok(r) => r,
         Err(e) => {

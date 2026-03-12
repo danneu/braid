@@ -1,4 +1,4 @@
-use crate::types::{ByIdPath, MapperName};
+use crate::types::{ByIdPath, MapperName, MountPoint};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::fs;
@@ -28,13 +28,13 @@ pub struct DiskConfig {
 #[serde(try_from = "RawConfig")]
 pub struct Config {
     disks: BTreeMap<String, DiskConfig>,
-    mount_point: String,
+    mount_point: MountPoint,
 }
 
 impl Config {
     pub fn new(
         disks: BTreeMap<String, DiskConfig>,
-        mount_point: String,
+        mount_point: MountPoint,
     ) -> Result<Self, ConfigBuildError> {
         if disks.is_empty() {
             return Err(ConfigBuildError::EmptyDisks);
@@ -50,7 +50,7 @@ impl Config {
                 return Err(ConfigBuildError::DuplicateByIdValue(disk.by_id.to_string()));
             }
         }
-        if mount_point.is_empty() {
+        if mount_point.0.is_empty() {
             return Err(ConfigBuildError::EmptyMountPoint);
         }
         Ok(Config { disks, mount_point })
@@ -68,7 +68,7 @@ impl Config {
         self.disks.keys().collect()
     }
 
-    pub fn mount_point(&self) -> &str {
+    pub fn mount_point(&self) -> &MountPoint {
         &self.mount_point
     }
 }
@@ -93,7 +93,7 @@ fn is_valid_disk_name(name: &str) -> bool {
 #[derive(Deserialize)]
 struct RawConfig {
     disks: BTreeMap<String, DiskConfig>,
-    mount_point: String,
+    mount_point: MountPoint,
 }
 
 impl TryFrom<RawConfig> for Config {
@@ -143,7 +143,7 @@ mod tests {
         let cfg: Config = serde_json::from_str(raw).expect("config should parse");
         assert_eq!(cfg.disks().len(), 1);
         assert!(cfg.disk_by_name("toshiba").is_some());
-        assert_eq!(cfg.mount_point(), "/mnt/storage");
+        assert_eq!(cfg.mount_point().as_str(), "/mnt/storage");
     }
 
     #[test]
@@ -161,14 +161,14 @@ mod tests {
                 by_id: ByIdPath("/dev/disk/by-id/same".to_owned()),
             },
         );
-        let err = Config::new(disks, "/mnt/storage".to_owned())
+        let err = Config::new(disks, MountPoint("/mnt/storage".to_owned()))
             .expect_err("duplicate by_id values should fail");
         assert!(matches!(err, ConfigBuildError::DuplicateByIdValue(_)));
     }
 
     #[test]
     fn rejects_empty_disks() {
-        let err = Config::new(BTreeMap::new(), "/mnt/storage".to_owned())
+        let err = Config::new(BTreeMap::new(), MountPoint("/mnt/storage".to_owned()))
             .expect_err("empty disks should fail");
         assert!(matches!(err, ConfigBuildError::EmptyDisks));
     }
@@ -204,7 +204,7 @@ mod tests {
                 by_id: ByIdPath("/dev/disk/by-id/a".to_owned()),
             },
         );
-        let cfg = Config::new(disks, "/mnt/storage".to_owned()).unwrap();
+        let cfg = Config::new(disks, MountPoint("/mnt/storage".to_owned())).unwrap();
         let keys: Vec<&str> = cfg.names().into_iter().map(|s| s.as_str()).collect();
         assert_eq!(keys, vec!["alpha", "zebra"]);
     }
@@ -218,7 +218,7 @@ mod tests {
                 by_id: ByIdPath("/dev/disk/by-id/a".to_owned()),
             },
         );
-        let err = Config::new(disks, "/mnt/storage".to_owned())
+        let err = Config::new(disks, MountPoint("/mnt/storage".to_owned()))
             .expect_err("digit-starting key should fail");
         assert!(matches!(err, ConfigBuildError::InvalidDiskName(_)));
     }
@@ -232,7 +232,7 @@ mod tests {
                 by_id: ByIdPath("/dev/disk/by-id/a".to_owned()),
             },
         );
-        let err = Config::new(disks, "/mnt/storage".to_owned())
+        let err = Config::new(disks, MountPoint("/mnt/storage".to_owned()))
             .expect_err("hyphen-starting key should fail");
         assert!(matches!(err, ConfigBuildError::InvalidDiskName(_)));
     }
@@ -246,7 +246,7 @@ mod tests {
                 by_id: ByIdPath("/dev/disk/by-id/a".to_owned()),
             },
         );
-        let err = Config::new(disks, "/mnt/storage".to_owned())
+        let err = Config::new(disks, MountPoint("/mnt/storage".to_owned()))
             .expect_err("underscore-starting key should fail");
         assert!(matches!(err, ConfigBuildError::InvalidDiskName(_)));
     }
@@ -260,8 +260,8 @@ mod tests {
                 by_id: ByIdPath("/dev/disk/by-id/a".to_owned()),
             },
         );
-        let err =
-            Config::new(disks, "/mnt/storage".to_owned()).expect_err("space in key should fail");
+        let err = Config::new(disks, MountPoint("/mnt/storage".to_owned()))
+            .expect_err("space in key should fail");
         assert!(matches!(err, ConfigBuildError::InvalidDiskName(_)));
     }
 
@@ -274,7 +274,8 @@ mod tests {
                 by_id: ByIdPath("/dev/disk/by-id/a".to_owned()),
             },
         );
-        let err = Config::new(disks, "/mnt/storage".to_owned()).expect_err("empty key should fail");
+        let err = Config::new(disks, MountPoint("/mnt/storage".to_owned()))
+            .expect_err("empty key should fail");
         assert!(matches!(err, ConfigBuildError::InvalidDiskName(_)));
     }
 
@@ -288,8 +289,8 @@ mod tests {
                 by_id: ByIdPath("/dev/disk/by-id/a".to_owned()),
             },
         );
-        let err =
-            Config::new(disks, "/mnt/storage".to_owned()).expect_err("33-char key should fail");
+        let err = Config::new(disks, MountPoint("/mnt/storage".to_owned()))
+            .expect_err("33-char key should fail");
         assert!(matches!(err, ConfigBuildError::InvalidDiskName(_)));
     }
 
@@ -303,7 +304,8 @@ mod tests {
                 by_id: ByIdPath("/dev/disk/by-id/a".to_owned()),
             },
         );
-        Config::new(disks, "/mnt/storage".to_owned()).expect("32-char key should be valid");
+        Config::new(disks, MountPoint("/mnt/storage".to_owned()))
+            .expect("32-char key should be valid");
     }
 
     #[test]
@@ -316,7 +318,7 @@ mod tests {
                     by_id: ByIdPath(format!("/dev/disk/by-id/{key}")),
                 },
             );
-            Config::new(disks, "/mnt/storage".to_owned())
+            Config::new(disks, MountPoint("/mnt/storage".to_owned()))
                 .unwrap_or_else(|e| panic!("key '{key}' should be valid, got: {e}"));
         }
     }

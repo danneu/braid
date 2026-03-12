@@ -371,7 +371,7 @@ fn check_pool_missing_devices<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) 
 
     let mount_point = ctx.config.as_ref().unwrap().mount_point().to_owned();
 
-    match preflight::probe_missing_devids(ctx.runner, &mount_point) {
+    match preflight::probe_missing_devids(ctx.runner, mount_point.as_str()) {
         Ok(missing) if missing.is_empty() => CheckResult {
             name: "pool_missing_devices".into(),
             status: CheckStatus::Ok,
@@ -526,6 +526,7 @@ pub fn cmd_doctor(config_path: &Path, json: bool) -> Result<(), DoctorError> {
 mod tests {
     use super::*;
     use crate::cmd::{MockRunner, RawCommandOutput};
+    use crate::types::MountPoint;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
@@ -837,7 +838,7 @@ mod tests {
     fn mountpoint_ok() -> (CmdRequest, RawCommandOutput) {
         (
             CmdRequest::MountpointCheck {
-                path: "/mnt/storage".into(),
+                path: MountPoint("/mnt/storage".to_owned()),
             },
             RawCommandOutput {
                 cmd: "mountpoint -q /mnt/storage".into(),
@@ -851,7 +852,7 @@ mod tests {
     fn mountpoint_fail() -> (CmdRequest, RawCommandOutput) {
         (
             CmdRequest::MountpointCheck {
-                path: "/mnt/storage".into(),
+                path: MountPoint("/mnt/storage".to_owned()),
             },
             RawCommandOutput {
                 cmd: "mountpoint -q /mnt/storage".into(),
@@ -865,7 +866,7 @@ mod tests {
     fn df_json(json: &str) -> (CmdRequest, RawCommandOutput) {
         (
             CmdRequest::BtrfsFilesystemDfJson {
-                mount_point: "/mnt/storage".into(),
+                mount_point: MountPoint("/mnt/storage".to_owned()),
             },
             RawCommandOutput {
                 cmd: "btrfs --format json filesystem df /mnt/storage".into(),
@@ -879,7 +880,7 @@ mod tests {
     fn df_json_fail() -> (CmdRequest, RawCommandOutput) {
         (
             CmdRequest::BtrfsFilesystemDfJson {
-                mount_point: "/mnt/storage".into(),
+                mount_point: MountPoint("/mnt/storage".to_owned()),
             },
             RawCommandOutput {
                 cmd: "btrfs --format json filesystem df /mnt/storage".into(),
@@ -1132,7 +1133,7 @@ mod tests {
     fn device_usage_healthy() -> (CmdRequest, RawCommandOutput) {
         (
             CmdRequest::BtrfsDeviceUsageRaw {
-                mount_point: "/mnt/storage".into(),
+                mount_point: MountPoint("/mnt/storage".to_owned()),
             },
             RawCommandOutput {
                 cmd: "btrfs device usage --raw /mnt/storage".into(),
@@ -1154,7 +1155,7 @@ mod tests {
     fn device_usage_with_missing() -> (CmdRequest, RawCommandOutput) {
         (
             CmdRequest::BtrfsDeviceUsageRaw {
-                mount_point: "/mnt/storage".into(),
+                mount_point: MountPoint("/mnt/storage".to_owned()),
             },
             RawCommandOutput {
                 cmd: "btrfs device usage --raw /mnt/storage".into(),

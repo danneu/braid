@@ -22,6 +22,7 @@ use view::view;
 
 use crate::config::config_read;
 use crate::hdparm::DrivePowerState;
+use crate::types::MountPoint;
 use crate::parse::types::{ScrubState, ScrubTimestamp, SmartHealth};
 
 pub fn run(config_path: &Path) -> io::Result<()> {
@@ -35,7 +36,7 @@ pub fn run(config_path: &Path) -> io::Result<()> {
         .map(|(k, v)| (k.clone(), v.by_id.to_string()))
         .collect();
     let (mut model, init_effects) =
-        Model::new(disk_names, disk_by_id, config.mount_point().to_owned());
+        Model::new(disk_names, disk_by_id, config.mount_point().0.clone());
     for effect in init_effects {
         execute_effect(effect, &cmd_tx);
     }
@@ -118,7 +119,7 @@ pub fn run_demo() -> io::Result<()> {
         ("wdc".to_owned(), "usb".to_owned()),
     ]);
     let pool = PoolState {
-        mount_point: "/mnt/storage".to_owned(),
+        mount_point: MountPoint("/mnt/storage".to_owned()),
         profile: "RAID1".to_owned(),
         used: 2_308_094_370_816,
         total: 5_937_955_045_376,

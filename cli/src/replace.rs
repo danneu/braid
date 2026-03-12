@@ -66,7 +66,7 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         ))
     })?;
 
-    let pool = match probe_pool(runner, config.mount_point()) {
+    let pool = match probe_pool(runner, config.mount_point().as_str()) {
         Ok(p) => p,
         Err(ProbeError::NotBtrfs { .. }) => {
             return Err(ReplaceError::Validation(
@@ -83,9 +83,9 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     }
 
     // Preflight
-    preflight::check_no_exclusive_op(runner, config.mount_point())
+    preflight::check_no_exclusive_op(runner, config.mount_point().as_str())
         .map_err(ReplaceError::Validation)?;
-    preflight::check_not_read_only(runner, config.mount_point())
+    preflight::check_not_read_only(runner, config.mount_point().as_str())
         .map_err(ReplaceError::Validation)?;
 
     // --old == --new: reject early.
@@ -103,7 +103,7 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         &old_mn,
         missing_id,
         &pool,
-        config.mount_point(),
+        config.mount_point().as_str(),
     )?;
 
     // Probe --new disk state
@@ -233,7 +233,7 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         ReplaceSource::Live { mapper, devid } => {
             // Pre-flight: warn if source device has I/O errors (informational only).
             let stats_raw = runner.run(&CmdRequest::BtrfsDeviceStats {
-                mount_point: config.mount_point().to_owned(),
+                mount_point: config.mount_point().clone(),
             });
             if let Ok(ref raw) = stats_raw {
                 if let Ok(stats) = parse_btrfs_device_stats(raw) {
@@ -260,12 +260,12 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
                 runner,
                 *devid,
                 &new_mapper_path,
-                config.mount_point(),
+                config.mount_point().as_str(),
                 progress,
             )?;
             eprintln!("Replace complete.");
 
-            pool_resize_device(runner, *devid, config.mount_point())?;
+            pool_resize_device(runner, *devid, config.mount_point().as_str())?;
 
             // Best-effort LUKS close of old mapper.
             let close_result = runner.run(&CmdRequest::CryptsetupClose {
@@ -292,12 +292,12 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
                 runner,
                 *devid,
                 &new_mapper_path,
-                config.mount_point(),
+                config.mount_point().as_str(),
                 progress,
             )?;
             eprintln!("Replace complete.");
 
-            pool_resize_device(runner, *devid, config.mount_point())?;
+            pool_resize_device(runner, *devid, config.mount_point().as_str())?;
             // No old mapper to close — device was already missing.
         }
     }
@@ -306,7 +306,7 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     let pre_op_missing_count = pool.missing_count;
 
     // Update disk map (best effort — never fail the replace)
-    let pool_after = probe_pool(runner, config.mount_point()).ok();
+    let pool_after = probe_pool(runner, config.mount_point().as_str()).ok();
     let new_mn = mapper_name(new_name);
     let mut map_warning: Option<String> = None;
     disk_map::update_disk_map_best_effort(|map| {
@@ -327,7 +327,7 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     if matches!(&replace_source, ReplaceSource::Missing { .. }) {
         crate::pool::maybe_restore_raid1(
             runner,
-            config.mount_point(),
+            config.mount_point().as_str(),
             pre_op_missing_count,
             progress,
         )
@@ -732,7 +732,7 @@ mod tests {
         }
         MockRunner::default().with_output(
             CmdRequest::BtrfsDeviceUsageRaw {
-                mount_point: "/mnt/storage".into(),
+                mount_point: MountPoint("/mnt/storage".to_owned()),
             },
             RawCommandOutput {
                 cmd: "btrfs device usage --raw /mnt/storage".into(),

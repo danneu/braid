@@ -5,6 +5,7 @@ use crate::hdparm::DrivePowerState;
 use crate::parse::types::{ScrubState, SmartHealth};
 use crate::tui::effect::Effect;
 use crate::tui::state::{CmdId, CommandState};
+use crate::types::MountPoint;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
@@ -53,7 +54,7 @@ pub struct DiskUsage {
 
 #[derive(Clone)]
 pub struct PoolState {
-    pub mount_point: String,
+    pub mount_point: MountPoint,
     pub profile: String,
     pub used: u64,
     pub total: u64,
@@ -99,7 +100,7 @@ pub struct Model {
     pub disk_by_id: HashMap<String, String>,
     pub selected_disk: usize,
     pub pool: PoolStatus,
-    pub mount_point: String,
+    pub mount_point: MountPoint,
     pub commands: HashMap<CmdId, CommandState>,
     pub probe_duration: Option<Duration>,
     next_cmd_id: u64,
@@ -111,6 +112,7 @@ impl Model {
         disk_by_id: HashMap<String, String>,
         mount_point: String,
     ) -> (Self, Vec<Effect>) {
+        let mount_point = MountPoint(mount_point);
         let effects = vec![Effect::ProbePool {
             mount_point: mount_point.clone(),
             disk_by_id: disk_by_id.clone(),
@@ -142,7 +144,7 @@ impl Model {
             disk_by_id: HashMap::new(),
             selected_disk: 0,
             pool,
-            mount_point: String::new(),
+            mount_point: MountPoint(String::new()),
             commands: HashMap::new(),
             probe_duration: None,
             next_cmd_id: 0,

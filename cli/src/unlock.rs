@@ -45,7 +45,7 @@ pub fn cmd_unlock<R: CommandRunner, F: Filesystem + ?Sized>(
 
     // 1. If pool already mounted → print message, exit 0
     let mp_result = runner.run(&CmdRequest::MountpointCheck {
-        path: mount_point.to_owned(),
+        path: mount_point.clone(),
     })?;
     if mp_result.exit_status == 0 {
         eprintln!("pool already mounted at {mount_point}");
@@ -218,14 +218,14 @@ pub fn cmd_unlock<R: CommandRunner, F: Filesystem + ?Sized>(
         // --allow-degraded was passed and we have confirmed missing pool members
         runner.run(&CmdRequest::MountWithOptions {
             device: format!("/dev/mapper/{}", mapper_name(mount_key).0),
-            mount_point: mount_point.to_owned(),
+            mount_point: mount_point.clone(),
             options: vec!["degraded".to_owned()],
         })?
     } else {
         // All disks present — normal mount
         runner.run(&CmdRequest::Mount {
             device: format!("/dev/mapper/{}", mapper_name(mount_key).0),
-            mount_point: mount_point.to_owned(),
+            mount_point: mount_point.clone(),
         })?
     };
 
@@ -247,7 +247,7 @@ mod tests {
     use crate::cmd::{MockRunner, RawCommandOutput};
     use crate::config::{Config, DiskConfig};
     use crate::disk_map::{DiskMap, DiskMapEntry};
-    use crate::types::ByIdPath;
+    use crate::types::{ByIdPath, MountPoint};
     use std::collections::BTreeMap;
 
     struct MockFs {
@@ -304,7 +304,7 @@ mod tests {
                 },
             );
         }
-        Config::new(disks, "/mnt/storage".to_owned()).unwrap()
+        Config::new(disks, MountPoint("/mnt/storage".to_owned())).unwrap()
     }
 
     /// Bricked LUKS header (PresentNotLuks) on a known pool member must trigger
@@ -342,7 +342,7 @@ mod tests {
             // 1. mountpoint check → not mounted
             .with_output(
                 CmdRequest::MountpointCheck {
-                    path: "/mnt/storage".into(),
+                    path: MountPoint("/mnt/storage".to_owned()),
                 },
                 err_raw("mountpoint", 1, ""),
             )
@@ -413,7 +413,7 @@ mod tests {
             .with_output(
                 CmdRequest::MountWithOptions {
                     device: "/dev/mapper/braid-disk1".into(),
-                    mount_point: "/mnt/storage".into(),
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
                     options: vec!["degraded".to_owned()],
                 },
                 ok_raw("mount -o degraded"),
@@ -472,7 +472,7 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::MountpointCheck {
-                    path: "/mnt/storage".into(),
+                    path: MountPoint("/mnt/storage".to_owned()),
                 },
                 err_raw("mountpoint", 1, ""),
             )
@@ -594,7 +594,7 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::MountpointCheck {
-                    path: "/mnt/storage".into(),
+                    path: MountPoint("/mnt/storage".to_owned()),
                 },
                 err_raw("mountpoint", 1, ""),
             )
@@ -725,7 +725,7 @@ mod tests {
             // mountpoint check → not mounted
             .with_output(
                 CmdRequest::MountpointCheck {
-                    path: "/mnt/storage".into(),
+                    path: MountPoint("/mnt/storage".to_owned()),
                 },
                 err_raw("mountpoint", 1, ""),
             );
@@ -791,7 +791,7 @@ mod tests {
 
         let runner = MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
-                path: "/mnt/storage".into(),
+                path: MountPoint("/mnt/storage".to_owned()),
             },
             err_raw("mountpoint", 1, ""),
         );
@@ -861,7 +861,7 @@ mod tests {
 
         let runner = MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
-                path: "/mnt/storage".into(),
+                path: MountPoint("/mnt/storage".to_owned()),
             },
             err_raw("mountpoint", 1, ""),
         );
@@ -923,7 +923,7 @@ mod tests {
                 },
             );
         }
-        let config = Config::new(disks, "/mnt/storage".to_owned()).unwrap();
+        let config = Config::new(disks, MountPoint("/mnt/storage".to_owned())).unwrap();
 
         let fs = MockFs::new(&[
             "/dev/disk/by-id/virtio-disk1",
@@ -934,7 +934,7 @@ mod tests {
             // mountpoint check → not mounted
             .with_output(
                 CmdRequest::MountpointCheck {
-                    path: "/mnt/storage".into(),
+                    path: MountPoint("/mnt/storage".to_owned()),
                 },
                 err_raw("mountpoint", 1, ""),
             )

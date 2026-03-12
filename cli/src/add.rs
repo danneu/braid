@@ -100,7 +100,7 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     }
 
     // Probe pool + preflight (once)
-    let pool = match probe_pool(runner, config.mount_point()) {
+    let pool = match probe_pool(runner, config.mount_point().as_str()) {
         Ok(p) => p,
         Err(ProbeError::NotBtrfs { fstype, .. }) => {
             return Err(AddError::Validation(format!(
@@ -112,9 +112,9 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     };
 
     if pool.mounted {
-        preflight::check_no_exclusive_op(runner, config.mount_point())
+        preflight::check_no_exclusive_op(runner, config.mount_point().as_str())
             .map_err(AddError::Validation)?;
-        preflight::check_not_read_only(runner, config.mount_point())
+        preflight::check_not_read_only(runner, config.mount_point().as_str())
             .map_err(AddError::Validation)?;
     }
     if pool.missing_count > 0 {
@@ -279,20 +279,20 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             }
 
             // All fresh — bootstrap with mkfs.btrfs RAID1
-            pool_bootstrap_mount_raid1(runner, &mapper_paths, config.mount_point())?;
+            pool_bootstrap_mount_raid1(runner, &mapper_paths, config.mount_point().as_str())?;
             eprintln!(
                 "Pool created (RAID1) and mounted at {}",
                 config.mount_point()
             );
         } else {
             // Single disk bootstrap
-            pool_bootstrap_mount(runner, &mapper_paths[0], config.mount_point())?;
+            pool_bootstrap_mount(runner, &mapper_paths[0], config.mount_point().as_str())?;
             eprintln!("Pool created and mounted at {}", config.mount_point());
         }
     } else {
         // Add each to existing pool
         for mp in &mapper_paths {
-            pool_add_device(runner, mp, config.mount_point())?;
+            pool_add_device(runner, mp, config.mount_point().as_str())?;
             eprintln!("Device added to pool: {}", mp);
         }
 
@@ -300,7 +300,7 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         let total_after = pool.devices.len() + mapper_paths.len();
         if total_after >= 2 {
             eprintln!("Balancing to RAID1...");
-            pool_balance_raid1(runner, config.mount_point(), progress)?;
+            pool_balance_raid1(runner, config.mount_point().as_str(), progress)?;
             eprintln!("Balance complete.");
         }
     }
@@ -309,7 +309,7 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     for &i in &needs_pool_add {
         finalize_add_disk_map_best_effort(
             runner,
-            config.mount_point(),
+            config.mount_point().as_str(),
             &names[i],
             &disks[i].1.by_id.0,
         );

@@ -6,6 +6,7 @@ use crate::cmd::RealRunner;
 use crate::tui::command;
 use crate::tui::event::Event;
 use crate::tui::state::CmdId;
+use crate::types::MountPoint;
 
 use std::time::Duration;
 
@@ -17,11 +18,11 @@ pub enum Effect {
         cmd: String,
     },
     ProbePool {
-        mount_point: String,
+        mount_point: MountPoint,
         disk_by_id: HashMap<String, String>,
     },
     ScheduleProbe {
-        mount_point: String,
+        mount_point: MountPoint,
         delay: Duration,
     },
 }
@@ -39,8 +40,11 @@ pub fn execute_effect(effect: Effect, cmd_tx: &mpsc::Sender<Event>) {
             thread::spawn(move || {
                 let start = std::time::Instant::now();
                 let runner = RealRunner;
-                let result =
-                    crate::tui::probe::probe_pool_for_tui(&runner, &mount_point, &disk_by_id);
+                let result = crate::tui::probe::probe_pool_for_tui(
+                    &runner,
+                    mount_point.as_str(),
+                    &disk_by_id,
+                );
                 let elapsed = start.elapsed();
                 let _ = tx.send(Event::PoolProbeFinished(result, elapsed));
             });

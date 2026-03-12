@@ -1,6 +1,7 @@
 use crate::cmd::{CmdError, CmdRequest, CommandRunner};
 use crate::probe::probe_pool;
 use crate::progress::{run_replace_with_progress, run_with_progress, ProgressOutput};
+use crate::types::MountPoint;
 
 #[derive(Debug, thiserror::Error)]
 pub enum PoolError {
@@ -18,7 +19,7 @@ pub fn pool_add_device<R: CommandRunner + Sync>(
 ) -> Result<(), PoolError> {
     let result = runner.run(&CmdRequest::BtrfsDeviceAdd {
         device: device.to_owned(),
-        mount_point: mount_point.to_owned(),
+        mount_point: MountPoint(mount_point.to_owned()),
     })?;
     if result.exit_status != 0 {
         return Err(PoolError::Failed(format!(
@@ -39,7 +40,7 @@ pub fn pool_balance_raid1<R: CommandRunner + Sync>(
     let result = run_with_progress(
         runner,
         &CmdRequest::BtrfsBalanceRaid1 {
-            mount_point: mount_point.to_owned(),
+            mount_point: MountPoint(mount_point.to_owned()),
         },
         mount_point,
         progress,
@@ -63,7 +64,7 @@ pub fn pool_balance_single<R: CommandRunner + Sync>(
     let result = run_with_progress(
         runner,
         &CmdRequest::BtrfsBalanceSingle {
-            mount_point: mount_point.to_owned(),
+            mount_point: MountPoint(mount_point.to_owned()),
         },
         mount_point,
         progress,
@@ -88,7 +89,7 @@ pub fn pool_balance_raid1_soft<R: CommandRunner + Sync>(
     let result = run_with_progress(
         runner,
         &CmdRequest::BtrfsBalanceRaid1Soft {
-            mount_point: mount_point.to_owned(),
+            mount_point: MountPoint(mount_point.to_owned()),
         },
         mount_point,
         progress,
@@ -139,7 +140,7 @@ pub fn pool_remove_device<R: CommandRunner + Sync>(
         runner,
         &CmdRequest::BtrfsDeviceRemove {
             device: device.to_owned(),
-            mount_point: mount_point.to_owned(),
+            mount_point: MountPoint(mount_point.to_owned()),
         },
         mount_point,
         progress,
@@ -160,7 +161,7 @@ pub fn pool_remove_missing<R: CommandRunner + Sync>(
     mount_point: &str,
 ) -> Result<(), PoolError> {
     let result = runner.run(&CmdRequest::BtrfsDeviceRemoveMissing {
-        mount_point: mount_point.to_owned(),
+        mount_point: MountPoint(mount_point.to_owned()),
     })?;
     if result.exit_status != 0 {
         return Err(PoolError::Failed(format!(
@@ -180,7 +181,7 @@ pub fn pool_remove_devid<R: CommandRunner + Sync>(
 ) -> Result<(), PoolError> {
     let result = runner.run(&CmdRequest::BtrfsDeviceRemove {
         device: devid.to_string(),
-        mount_point: mount_point.to_owned(),
+        mount_point: MountPoint(mount_point.to_owned()),
     })?;
     if result.exit_status != 0 {
         return Err(PoolError::Failed(format!(
@@ -205,7 +206,7 @@ pub fn pool_replace_device<R: CommandRunner + Sync>(
         &CmdRequest::BtrfsReplaceStart {
             devid,
             target_device: target_device.to_owned(),
-            mount_point: mount_point.to_owned(),
+            mount_point: MountPoint(mount_point.to_owned()),
         },
         mount_point,
         progress,
@@ -228,7 +229,7 @@ pub fn pool_resize_device<R: CommandRunner + Sync>(
 ) -> Result<(), PoolError> {
     let result = runner.run(&CmdRequest::BtrfsFilesystemResize {
         devid,
-        mount_point: mount_point.to_owned(),
+        mount_point: MountPoint(mount_point.to_owned()),
     })?;
     if result.exit_status != 0 {
         return Err(PoolError::Failed(format!(
@@ -333,7 +334,7 @@ pub fn pool_bootstrap_mount<R: CommandRunner + Sync>(
 
     let mount = runner.run(&CmdRequest::Mount {
         device: device.to_owned(),
-        mount_point: mount_point.to_owned(),
+        mount_point: MountPoint(mount_point.to_owned()),
     })?;
     if mount.exit_status != 0 {
         return Err(PoolError::Failed(format!(
@@ -367,7 +368,7 @@ pub fn pool_bootstrap_mount_raid1<R: CommandRunner + Sync>(
 
     let mount = runner.run(&CmdRequest::Mount {
         device: devices[0].clone(),
-        mount_point: mount_point.to_owned(),
+        mount_point: MountPoint(mount_point.to_owned()),
     })?;
     if mount.exit_status != 0 {
         return Err(PoolError::Failed(format!(
@@ -612,7 +613,7 @@ mod tests {
             CmdRequest::BtrfsReplaceStart {
                 devid: 2,
                 target_device: "/dev/mapper/braid-new".to_owned(),
-                mount_point: "/mnt/storage".to_owned(),
+                mount_point: MountPoint("/mnt/storage".to_owned()),
             },
             ok_raw(),
         );
@@ -640,7 +641,7 @@ mod tests {
             CmdRequest::BtrfsReplaceStart {
                 devid: 2,
                 target_device: "/dev/mapper/braid-new".to_owned(),
-                mount_point: "/mnt/storage".to_owned(),
+                mount_point: MountPoint("/mnt/storage".to_owned()),
             },
             RawCommandOutput {
                 cmd: String::new(),

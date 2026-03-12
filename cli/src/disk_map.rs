@@ -164,7 +164,7 @@ pub fn update_disk_map_best_effort(f: impl FnOnce(&mut DiskMap)) {
 mod tests {
     use super::*;
     use crate::config::DiskConfig;
-    use crate::types::ByIdPath;
+    use crate::types::{ByIdPath, MountPoint};
     use tempfile::TempDir;
 
     fn map_path(dir: &TempDir) -> std::path::PathBuf {
@@ -309,7 +309,7 @@ mod tests {
                 },
             );
         }
-        Config::new(cfg_disks, "/mnt/storage".to_owned()).unwrap()
+        Config::new(cfg_disks, MountPoint("/mnt/storage".to_owned())).unwrap()
     }
 
     #[test]

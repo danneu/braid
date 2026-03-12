@@ -98,7 +98,7 @@ fn pool_table(pool: &PoolState, unit: ByteUnit) -> Table<'_> {
         other => other,
     };
     let rows = [
-        Row::new(["Path".to_owned(), pool.mount_point.clone()]),
+        Row::new(["Path".to_owned(), pool.mount_point.0.clone()]),
         Row::new(["Redundancy".to_owned(), redundancy.to_owned()]),
         Row::new([
             "Usage".to_owned(),
@@ -577,6 +577,7 @@ mod tests {
     use crate::hdparm::DrivePowerState;
     use crate::parse::types::{ScrubState, ScrubTimestamp, SmartHealth};
     use crate::tui::model::{DiskLuksInfo, DiskUsage};
+    use crate::types::MountPoint;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
@@ -701,7 +702,7 @@ mod tests {
             ("wdc".to_owned(), "usb".to_owned()),
         ]);
         PoolState {
-            mount_point: "/mnt/storage".to_owned(),
+            mount_point: MountPoint("/mnt/storage".to_owned()),
             profile: "RAID1".to_owned(),
             used: 2_308_094_370_816,  // ~2.1 TiB
             total: 5_937_955_045_376, // ~5.4 TiB

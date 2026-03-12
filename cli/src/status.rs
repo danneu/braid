@@ -37,7 +37,7 @@ impl StatusCode {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StatusReport {
-    pub mount_point: String,
+    pub mount_point: MountPoint,
     pub status_code: StatusCode,
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -181,12 +181,12 @@ pub fn build_status_report<R: CommandRunner, F: Filesystem>(
     fs: &F,
     config: &Config,
 ) -> Result<StatusReport, StatusError> {
-    let pool = match probe_pool(runner, config.mount_point()) {
+    let pool = match probe_pool(runner, config.mount_point().as_str()) {
         Ok(p) => p,
         Err(ProbeError::NotBtrfs { .. }) => {
             let code = StatusCode::NotMounted;
             return Ok(StatusReport {
-                mount_point: config.mount_point().to_owned(),
+                mount_point: config.mount_point().clone(),
                 status_code: code,
                 status: code.display_status(0),
                 total_devices: None,
@@ -204,7 +204,7 @@ pub fn build_status_report<R: CommandRunner, F: Filesystem>(
     if !pool.mounted {
         let code = StatusCode::NotMounted;
         return Ok(StatusReport {
-            mount_point: config.mount_point().to_owned(),
+            mount_point: config.mount_point().clone(),
             status_code: code,
             status: code.display_status(0),
             total_devices: None,
@@ -217,9 +217,9 @@ pub fn build_status_report<R: CommandRunner, F: Filesystem>(
         });
     }
 
-    let profile = get_profile(runner, config.mount_point())?;
-    let capacity = get_capacity(runner, config.mount_point())?;
-    let last_scrub = get_scrub_string(runner, config.mount_point());
+    let profile = get_profile(runner, config.mount_point().as_str())?;
+    let capacity = get_capacity(runner, config.mount_point().as_str())?;
+    let last_scrub = get_scrub_string(runner, config.mount_point().as_str());
 
     let code = if pool.missing_count == 0 {
         StatusCode::Healthy
@@ -232,12 +232,12 @@ pub fn build_status_report<R: CommandRunner, F: Filesystem>(
         .iter()
         .map(|(name, disk)| probe_config_disk(runner, fs, name, disk))
         .collect::<Result<Vec<_>, _>>()?;
-    let device_stats = get_device_stats(runner, config.mount_point())?;
+    let device_stats = get_device_stats(runner, config.mount_point().as_str())?;
     let verbose_ctx = build_disk_reports(runner, &config_disks, &pool, &device_stats);
 
     let present_count = pool.total_devices.saturating_sub(pool.missing_count);
     Ok(StatusReport {
-        mount_point: config.mount_point().to_owned(),
+        mount_point: config.mount_point().clone(),
         status_code: code,
         status: code.display_status(pool.missing_count),
         total_devices: Some(pool.total_devices),
@@ -258,7 +258,7 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
     json: bool,
 ) -> Result<(), StatusError> {
     // 1. Probe pool, mapping NotBtrfs to not-mounted
-    let pool = match probe_pool(runner, config.mount_point()) {
+    let pool = match probe_pool(runner, config.mount_point().as_str()) {
         Ok(p) => p,
         Err(ProbeError::NotBtrfs { .. }) => PoolState {
             mounted: false,
@@ -273,7 +273,7 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
     if !pool.mounted {
         let code = StatusCode::NotMounted;
         let report = StatusReport {
-            mount_point: config.mount_point().to_owned(),
+            mount_point: config.mount_point().clone(),
             status_code: code,
             status: code.display_status(0),
             total_devices: None,
@@ -293,9 +293,9 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
     }
 
     // 3. Strict data gathering
-    let profile = get_profile(runner, config.mount_point())?;
-    let capacity = get_capacity(runner, config.mount_point())?;
-    let last_scrub = get_scrub_string(runner, config.mount_point());
+    let profile = get_profile(runner, config.mount_point().as_str())?;
+    let capacity = get_capacity(runner, config.mount_point().as_str())?;
+    let last_scrub = get_scrub_string(runner, config.mount_point().as_str());
 
     // 4. Compute status code
     let code = if pool.missing_count == 0 {
@@ -315,7 +315,7 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
             .iter()
             .map(|(name, disk)| probe_config_disk(runner, fs, name, disk))
             .collect::<Result<Vec<_>, _>>()?;
-        let device_stats = get_device_stats(runner, config.mount_point())?;
+        let device_stats = get_device_stats(runner, config.mount_point().as_str())?;
         Some(build_disk_reports(
             runner,
             &config_disks,
@@ -329,7 +329,7 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
     // 7. Assemble report
     let present_count = pool.total_devices.saturating_sub(pool.missing_count);
     let report = StatusReport {
-        mount_point: config.mount_point().to_owned(),
+        mount_point: config.mount_point().clone(),
         status_code: code,
         status,
         total_devices: Some(pool.total_devices),
@@ -367,7 +367,7 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
 
 fn get_profile<R: CommandRunner>(runner: &R, mount_point: &str) -> Result<String, StatusError> {
     let raw = runner.run(&CmdRequest::BtrfsFilesystemDfJson {
-        mount_point: mount_point.to_owned(),
+        mount_point: MountPoint(mount_point.to_owned()),
     })?;
     let df = parse_btrfs_df_json(&raw)?;
 
@@ -388,7 +388,7 @@ fn get_capacity<R: CommandRunner>(
     mount_point: &str,
 ) -> Result<CapacityReport, StatusError> {
     let raw = runner.run(&CmdRequest::BtrfsFilesystemUsageRaw {
-        mount_point: mount_point.to_owned(),
+        mount_point: MountPoint(mount_point.to_owned()),
     })?;
     let usage = parse_btrfs_filesystem_usage(&raw)?;
 
@@ -405,7 +405,7 @@ fn get_device_stats<R: CommandRunner>(
     mount_point: &str,
 ) -> Result<BtrfsDeviceStatsOutput, StatusError> {
     let raw = runner.run(&CmdRequest::BtrfsDeviceStats {
-        mount_point: mount_point.to_owned(),
+        mount_point: MountPoint(mount_point.to_owned()),
     })?;
     let stats = parse_btrfs_device_stats(&raw)?;
     Ok(stats)
@@ -417,7 +417,7 @@ fn get_device_stats<R: CommandRunner>(
 
 fn get_scrub_string<R: CommandRunner>(runner: &R, mount_point: &str) -> String {
     let raw = match runner.run(&CmdRequest::BtrfsScrubStatus {
-        mount_point: mount_point.to_owned(),
+        mount_point: MountPoint(mount_point.to_owned()),
     }) {
         Ok(r) => r,
         Err(_) => return "unknown".to_owned(),
@@ -931,7 +931,7 @@ mod tests {
                 by_id: ByIdPath("/dev/disk/by-id/disk3".to_owned()),
             },
         );
-        Config::new(disks, "/mnt/storage".to_owned()).unwrap()
+        Config::new(disks, MountPoint("/mnt/storage".to_owned())).unwrap()
     }
 
     fn config_1disk() -> Config {
@@ -942,7 +942,7 @@ mod tests {
                 by_id: ByIdPath("/dev/disk/by-id/disk1".to_owned()),
             },
         );
-        Config::new(disks, "/mnt/storage".to_owned()).unwrap()
+        Config::new(disks, MountPoint("/mnt/storage".to_owned())).unwrap()
     }
 
     /// Build a MockRunner for a 3-disk mounted healthy pool (no verbose).
@@ -950,13 +950,13 @@ mod tests {
         MockRunner::default()
             .with_output(
                 CmdRequest::FindmntJson {
-                    mount_point: "/mnt/storage".into(),
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
                 },
                 findmnt_btrfs(),
             )
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
-                    mount_point: "/mnt/storage".into(),
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
                 },
                 btrfs_show_3disk(),
             )
@@ -998,19 +998,19 @@ mod tests {
             )
             .with_output(
                 CmdRequest::BtrfsFilesystemDfJson {
-                    mount_point: "/mnt/storage".into(),
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
                 },
                 btrfs_df_raid1(),
             )
             .with_output(
                 CmdRequest::BtrfsFilesystemUsageRaw {
-                    mount_point: "/mnt/storage".into(),
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
                 },
                 btrfs_usage_raw(),
             )
             .with_output(
                 CmdRequest::BtrfsScrubStatus {
-                    mount_point: "/mnt/storage".into(),
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
                 },
                 btrfs_scrub_never(),
             )
@@ -1050,7 +1050,7 @@ mod tests {
             // device stats
             .with_output(
                 CmdRequest::BtrfsDeviceStats {
-                    mount_point: "/mnt/storage".into(),
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
                 },
                 btrfs_device_stats_3disk(),
             )
@@ -1122,7 +1122,7 @@ mod tests {
     fn status_json_not_mounted() {
         let runner = MockRunner::default().with_output(
             CmdRequest::FindmntJson {
-                mount_point: "/mnt/storage".into(),
+                mount_point: MountPoint("/mnt/storage".to_owned()),
             },
             findmnt_not_mounted(),
         );
@@ -1131,7 +1131,7 @@ mod tests {
 
         let code = StatusCode::NotMounted;
         let report = StatusReport {
-            mount_point: config.mount_point().to_owned(),
+            mount_point: config.mount_point().clone(),
             status_code: code,
             status: code.display_status(0),
             total_devices: None,
@@ -1183,7 +1183,7 @@ mod tests {
 
         let code = StatusCode::Healthy;
         let report = StatusReport {
-            mount_point: config.mount_point().to_owned(),
+            mount_point: config.mount_point().clone(),
             status_code: code,
             status: code.display_status(0),
             total_devices: Some(3),
@@ -1214,7 +1214,7 @@ mod tests {
     fn status_json_degraded() {
         let code = StatusCode::Degraded;
         let report = StatusReport {
-            mount_point: "/mnt/storage".to_owned(),
+            mount_point: MountPoint("/mnt/storage".to_owned()),
             status_code: code,
             status: code.display_status(1),
             total_devices: Some(3),
@@ -1268,7 +1268,7 @@ mod tests {
         };
 
         let report = StatusReport {
-            mount_point: "/mnt/storage".to_owned(),
+            mount_point: MountPoint("/mnt/storage".to_owned()),
             status_code: StatusCode::Degraded,
             status: "DEGRADED (1 missing device)".to_owned(),
             total_devices: Some(2),
@@ -1317,7 +1317,7 @@ mod tests {
     fn status_json_disks_always_array_not_mounted() {
         let code = StatusCode::NotMounted;
         let report = StatusReport {
-            mount_point: "/mnt/storage".to_owned(),
+            mount_point: MountPoint("/mnt/storage".to_owned()),
             status_code: code,
             status: code.display_status(0),
             total_devices: None,
@@ -1338,7 +1338,7 @@ mod tests {
     fn status_json_disks_always_array_non_verbose() {
         let code = StatusCode::Healthy;
         let report = StatusReport {
-            mount_point: "/mnt/storage".to_owned(),
+            mount_point: MountPoint("/mnt/storage".to_owned()),
             status_code: code,
             status: code.display_status(0),
             total_devices: Some(3),
@@ -1362,7 +1362,7 @@ mod tests {
     #[test]
     fn status_json_disks_always_array_verbose() {
         let report = StatusReport {
-            mount_point: "/mnt/storage".to_owned(),
+            mount_point: MountPoint("/mnt/storage".to_owned()),
             status_code: StatusCode::Healthy,
             status: "healthy".to_owned(),
             total_devices: Some(1),
@@ -1406,7 +1406,7 @@ mod tests {
     fn status_human_not_mounted() {
         let code = StatusCode::NotMounted;
         let report = StatusReport {
-            mount_point: "/mnt/storage".to_owned(),
+            mount_point: MountPoint("/mnt/storage".to_owned()),
             status_code: code,
             status: code.display_status(0),
             total_devices: None,
@@ -1427,7 +1427,7 @@ mod tests {
     fn status_human_healthy_single() {
         let code = StatusCode::Healthy;
         let report = StatusReport {
-            mount_point: "/mnt/storage".to_owned(),
+            mount_point: MountPoint("/mnt/storage".to_owned()),
             status_code: code,
             status: code.display_status(0),
             total_devices: Some(1),
@@ -1466,7 +1466,7 @@ mod tests {
     fn status_human_healthy_raid1() {
         let code = StatusCode::Healthy;
         let report = StatusReport {
-            mount_point: "/mnt/storage".to_owned(),
+            mount_point: MountPoint("/mnt/storage".to_owned()),
             status_code: code,
             status: code.display_status(0),
             total_devices: Some(3),
@@ -1515,7 +1515,7 @@ mod tests {
     fn status_human_degraded() {
         let code = StatusCode::Degraded;
         let report = StatusReport {
-            mount_point: "/mnt/storage".to_owned(),
+            mount_point: MountPoint("/mnt/storage".to_owned()),
             status_code: code,
             status: code.display_status(1),
             total_devices: Some(3),
@@ -1563,7 +1563,7 @@ mod tests {
     fn status_human_degraded_plural() {
         let code = StatusCode::Degraded;
         let report = StatusReport {
-            mount_point: "/mnt/storage".to_owned(),
+            mount_point: MountPoint("/mnt/storage".to_owned()),
             status_code: code,
             status: code.display_status(2),
             total_devices: Some(4),
@@ -1610,7 +1610,7 @@ mod tests {
 
         let code = StatusCode::Healthy;
         let report = StatusReport {
-            mount_point: "/mnt/storage".to_owned(),
+            mount_point: MountPoint("/mnt/storage".to_owned()),
             status_code: code,
             status: code.display_status(0),
             total_devices: Some(1),
@@ -1650,7 +1650,7 @@ mod tests {
 
         let code = StatusCode::Degraded;
         let report = StatusReport {
-            mount_point: "/mnt/storage".to_owned(),
+            mount_point: MountPoint("/mnt/storage".to_owned()),
             status_code: code,
             status: code.display_status(1),
             total_devices: Some(2),
@@ -1693,7 +1693,7 @@ mod tests {
 
         let code = StatusCode::Healthy;
         let report = StatusReport {
-            mount_point: "/mnt/storage".to_owned(),
+            mount_point: MountPoint("/mnt/storage".to_owned()),
             status_code: code,
             status: code.display_status(0),
             total_devices: Some(1),
@@ -1721,7 +1721,7 @@ mod tests {
     fn status_scrub_completed() {
         let runner = MockRunner::default().with_output(
             CmdRequest::BtrfsScrubStatus {
-                mount_point: "/mnt/storage".into(),
+                mount_point: MountPoint("/mnt/storage".to_owned()),
             },
             btrfs_scrub_completed(),
         );
@@ -1733,7 +1733,7 @@ mod tests {
     fn status_scrub_failure_tolerant() {
         let runner = MockRunner::default().with_output(
             CmdRequest::BtrfsScrubStatus {
-                mount_point: "/mnt/storage".into(),
+                mount_point: MountPoint("/mnt/storage".to_owned()),
             },
             err_raw("btrfs scrub status", 1, "some error"),
         );
@@ -1745,7 +1745,7 @@ mod tests {
     fn status_df_failure_fatal() {
         let runner = MockRunner::default().with_output(
             CmdRequest::BtrfsFilesystemDfJson {
-                mount_point: "/mnt/storage".into(),
+                mount_point: MountPoint("/mnt/storage".to_owned()),
             },
             err_raw("btrfs filesystem df", 1, "not a btrfs filesystem"),
         );
@@ -1757,7 +1757,7 @@ mod tests {
     fn status_usage_failure_fatal() {
         let runner = MockRunner::default().with_output(
             CmdRequest::BtrfsFilesystemUsageRaw {
-                mount_point: "/mnt/storage".into(),
+                mount_point: MountPoint("/mnt/storage".to_owned()),
             },
             err_raw("btrfs filesystem usage", 1, "error"),
         );
@@ -1769,7 +1769,7 @@ mod tests {
     fn status_device_stats_failure_fatal() {
         let runner = MockRunner::default().with_output(
             CmdRequest::BtrfsDeviceStats {
-                mount_point: "/mnt/storage".into(),
+                mount_point: MountPoint("/mnt/storage".to_owned()),
             },
             err_raw("btrfs device stats", 1, "error"),
         );
@@ -1781,7 +1781,7 @@ mod tests {
     fn status_not_btrfs_maps_to_not_mounted() {
         let runner = MockRunner::default().with_output(
             CmdRequest::FindmntJson {
-                mount_point: "/mnt/storage".into(),
+                mount_point: MountPoint("/mnt/storage".to_owned()),
             },
             findmnt_ext4(),
         );
@@ -1816,7 +1816,7 @@ mod tests {
     fn cmd_status_not_mounted_ok() {
         let runner = MockRunner::default().with_output(
             CmdRequest::FindmntJson {
-                mount_point: "/mnt/storage".into(),
+                mount_point: MountPoint("/mnt/storage".to_owned()),
             },
             findmnt_not_mounted(),
         );
@@ -1862,13 +1862,13 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::FindmntJson {
-                    mount_point: "/mnt/storage".into(),
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
                 },
                 findmnt_btrfs(),
             )
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
-                    mount_point: "/mnt/storage".into(),
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
                 },
                 btrfs_show_3disk_1missing(),
             )
@@ -1898,19 +1898,19 @@ mod tests {
             )
             .with_output(
                 CmdRequest::BtrfsFilesystemDfJson {
-                    mount_point: "/mnt/storage".into(),
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
                 },
                 btrfs_df_raid1(),
             )
             .with_output(
                 CmdRequest::BtrfsFilesystemUsageRaw {
-                    mount_point: "/mnt/storage".into(),
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
                 },
                 btrfs_usage_raw(),
             )
             .with_output(
                 CmdRequest::BtrfsScrubStatus {
-                    mount_point: "/mnt/storage".into(),
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
                 },
                 btrfs_scrub_never(),
             );
@@ -1926,13 +1926,13 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::FindmntJson {
-                    mount_point: "/mnt/storage".into(),
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
                 },
                 findmnt_btrfs(),
             )
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
-                    mount_point: "/mnt/storage".into(),
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
                 },
                 btrfs_show_1disk(),
             )
@@ -1950,19 +1950,19 @@ mod tests {
             )
             .with_output(
                 CmdRequest::BtrfsFilesystemDfJson {
-                    mount_point: "/mnt/storage".into(),
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
                 },
                 btrfs_df_single(),
             )
             .with_output(
                 CmdRequest::BtrfsFilesystemUsageRaw {
-                    mount_point: "/mnt/storage".into(),
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
                 },
                 btrfs_usage_raw(),
             )
             .with_output(
                 CmdRequest::BtrfsScrubStatus {
-                    mount_point: "/mnt/storage".into(),
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
                 },
                 btrfs_scrub_never(),
             );
