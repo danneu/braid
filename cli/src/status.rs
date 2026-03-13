@@ -3,15 +3,15 @@ use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, LsblkFieldKind};
-use crate::config::{Config, mapper_name};
+use crate::config::{mapper_name, Config};
 use crate::disk_map::{self, DiskMapLoad};
 use crate::parse::types::BalanceState;
 use crate::parse::{
-    BtrfsDeviceStatsOutput, ParseError, ScrubState, parse_btrfs_balance_status,
-    parse_btrfs_device_stats, parse_btrfs_df_json, parse_btrfs_filesystem_usage,
-    parse_btrfs_scrub_status, parse_lsblk_field,
+    parse_btrfs_balance_status, parse_btrfs_device_stats, parse_btrfs_df_json,
+    parse_btrfs_filesystem_usage, parse_btrfs_scrub_status, parse_lsblk_field,
+    BtrfsDeviceStatsOutput, ParseError, ScrubState,
 };
-use crate::probe::{Filesystem, ProbeError, probe_config_disk, probe_pool};
+use crate::probe::{probe_config_disk, probe_pool, Filesystem, ProbeError};
 use crate::types::*;
 
 // ---------------------------------------------------------------------------
@@ -660,7 +660,7 @@ fn build_disk_reports<R: CommandRunner>(
         let is_unpooled = match &cd.state {
             ConfigDiskState::Absent => true,
             ConfigDiskState::PresentLuks { uuid, .. } => !pool_uuid_set.contains(uuid),
-            ConfigDiskState::PresentNotLuks => false,
+            ConfigDiskState::PresentNotLuks => true,
         };
 
         if !is_unpooled {
@@ -2347,6 +2347,56 @@ mod tests {
     fn classify_unpooled_unknown() {
         let load = DiskMapLoad::Failed("corrupt".to_owned());
         assert_eq!(classify_unpooled_disk("disk1", &load).as_str(), "unknown");
+    }
+
+    // =======================================================================
+    // build_disk_reports: PresentNotLuks classification
+    // =======================================================================
+
+    #[test]
+    fn build_disk_reports_present_not_luks_new() {
+        let config_disks = vec![ConfigDisk {
+            name: "disk1".to_owned(),
+            by_id_path: ByIdPath("/dev/disk/by-id/disk1".to_owned()),
+            state: ConfigDiskState::PresentNotLuks,
+        }];
+        let pool = PoolState {
+            mounted: true,
+            devices: vec![],
+            missing_count: 0,
+            total_devices: 0,
+        };
+        let runner = MockRunner::default();
+        let stats = BtrfsDeviceStatsOutput { devices: vec![] };
+        let load = DiskMapLoad::Loaded(crate::disk_map::DiskMap::new());
+
+        let ctx = build_disk_reports(&runner, &config_disks, &pool, &stats, &load);
+        assert_eq!(ctx.disks.len(), 1);
+        assert_eq!(ctx.disks[0].status, "new");
+    }
+
+    #[test]
+    fn build_disk_reports_present_not_luks_missing() {
+        let config_disks = vec![ConfigDisk {
+            name: "disk1".to_owned(),
+            by_id_path: ByIdPath("/dev/disk/by-id/disk1".to_owned()),
+            state: ConfigDiskState::PresentNotLuks,
+        }];
+        let pool = PoolState {
+            mounted: true,
+            devices: vec![],
+            missing_count: 0,
+            total_devices: 0,
+        };
+        let runner = MockRunner::default();
+        let stats = BtrfsDeviceStatsOutput { devices: vec![] };
+        let mut map = crate::disk_map::DiskMap::new();
+        crate::disk_map::record_disk(&mut map, "disk1", "/by-id/1", "u1", 1);
+        let load = DiskMapLoad::Loaded(map);
+
+        let ctx = build_disk_reports(&runner, &config_disks, &pool, &stats, &load);
+        assert_eq!(ctx.disks.len(), 1);
+        assert_eq!(ctx.disks[0].status, "missing");
     }
 
     // =======================================================================
