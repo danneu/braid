@@ -11,18 +11,7 @@ let
   # Mapper names are braid-<name> (e.g. braid-toshiba)
   mapperName = name: "braid-${name}";
 
-  # Wrapper: braid CLI with all tool packages on PATH
-  braidWrapped = pkgs.runCommand "braid" { nativeBuildInputs = [ pkgs.makeWrapper ]; } ''
-    mkdir -p $out/bin
-    makeWrapper ${cfg.package}/bin/braid $out/bin/braid \
-      --prefix PATH : ${lib.makeBinPath [
-        cfg.packages.cryptsetup
-        cfg.packages.btrfsProgs
-        cfg.packages.utilLinux
-        cfg.packages.jq
-        cfg.packages.coreutils
-      ]}
-  '';
+  braidWrapped = import ./wrapper.nix { inherit cfg pkgs lib; };
 in
 {
   config = lib.mkIf cfg.enable {

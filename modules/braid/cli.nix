@@ -1,15 +1,8 @@
 { config, lib, pkgs, ... }:
 let
   cfg = config.braid;
-  toolPackages = with cfg.packages; [ cryptsetup btrfsProgs utilLinux jq coreutils ];
 
-  braid = pkgs.runCommand "braid-module" {
-    nativeBuildInputs = [ pkgs.makeWrapper ];
-  } ''
-    mkdir -p $out/bin
-    makeWrapper ${cfg.package}/bin/braid $out/bin/braid \
-      --prefix PATH : ${lib.makeBinPath toolPackages}
-  '';
+  braid = import ./wrapper.nix { inherit cfg pkgs lib; };
 
   # Config JSON uses snake_case to match Rust serde field names.
   configJson = builtins.toJSON {

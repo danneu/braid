@@ -33,13 +33,17 @@
           "read only" = "no";
           "guest ok" = "no";
           "force user" = "nas";
+          "force group" = "storage";
         };
       };
     };
 
+    users.groups.storage = {};
+
     users.users.nas = {
       isNormalUser = true;
       description = "Samba share user";
+      extraGroups = [ "storage" ];
     };
 
     networking.firewall.allowedTCPPorts = [ 445 ];

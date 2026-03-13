@@ -219,6 +219,11 @@
           capture-tool-fixtures = pkgs.testers.nixosTest (import ./tests/capture-tool-fixtures.nix);
           progress-monitoring = pkgs.testers.nixosTest (import ./tests/progress-monitoring.nix);
           braid-module-disabled = pkgs.testers.nixosTest (import ./tests/module/disabled.nix);
+          braid-module-add-bootstrap = pkgs.testers.nixosTest (
+            import ./tests/module/add-bootstrap.nix {
+              braid = linuxCrane.braid-cli-unwrapped;
+            }
+          );
           braid-module-single-disk = pkgs.testers.nixosTest (
             import ./tests/module/single-disk.nix {
               braid = linuxCrane.braid-cli-unwrapped;

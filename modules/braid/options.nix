@@ -41,6 +41,12 @@ in
       description = "The braid CLI package (unwrapped crane output). When set, wraps and installs as 'braid'.";
     };
 
+    storageGroup = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = "storage";
+      description = "Group for mount point access. Sets root:<group> 2770 on the mount root after mount-producing commands (unlock, add). Set to null to disable.";
+    };
+
     autoUnlock = {
       enable = lib.mkEnableOption "USB keyfile auto-unlock for braid pool";
 
@@ -94,6 +100,10 @@ in
         message = "braid.package must be set when braid.enable = true. The braid-unlock service requires the CLI binary.";
       }
       {
+        assertion = cfg.storageGroup == null || builtins.match "[a-z_][a-z0-9_-]*" cfg.storageGroup != null;
+        message = "braid.storageGroup '${toString cfg.storageGroup}' is not a valid Unix group name.";
+      }
+      {
         assertion = cfg.autoUnlock.enable -> lib.hasPrefix "/dev/disk/by-id/" cfg.autoUnlock.keyDevice;
         message = "braid.autoUnlock.keyDevice must start with /dev/disk/by-id/.";
       }
@@ -102,5 +112,9 @@ in
         message = "braid.autoUnlock.timeoutSec must be positive.";
       }
     ];
+
+    users.groups = lib.mkIf (cfg.storageGroup != null) {
+      ${cfg.storageGroup} = {};
+    };
   };
 }

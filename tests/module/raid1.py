@@ -26,6 +26,10 @@ with subtest("Runtime config file is generated"):
         assert name in config["disks"], f"Expected {name} in disks: {config['disks']}"
         assert config["disks"][name]["by_id"] == f"/dev/disk/by-id/virtio-disk{i}", f"Unexpected by_id for {name}: {config['disks']}"
 
+with subtest("Mount point has correct group permissions"):
+    stat = machine.succeed("stat -c '%U:%G %a' /mnt/storage").strip()
+    assert stat == "root:storage 2770", f"Expected root:storage 2770, got {stat}"
+
 with subtest("Write and read round-trip"):
     machine.succeed("echo 'raid1 data' > /mnt/storage/test.txt")
     content = machine.succeed("cat /mnt/storage/test.txt").strip()

@@ -20,7 +20,8 @@ with subtest("LUKS format, open, and create btrfs RAID1 on server"):
     )
     server.succeed("mkdir -p /mnt/storage")
     server.succeed("mount /dev/mapper/disk1 /mnt/storage")
-    server.succeed("chown nas /mnt/storage")
+    server.succeed("chown root:storage /mnt/storage")
+    server.succeed("chmod 2770 /mnt/storage")
 
 with subtest("Set up Samba password and restart"):
     server.succeed(f"(echo '{smb_password}'; echo '{smb_password}') | smbpasswd -a -s nas")

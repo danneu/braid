@@ -38,6 +38,7 @@ Create a `braid.*` option when:
 | `services.btrfs.autoScrub.enable` | `true` | Scrub detects bit rot before it compounds. Every NAS should do this. |
 | `services.btrfs.autoScrub.interval` | `"monthly"` | Btrfs community consensus. Weekly is aggressive for spinning disks; quarterly risks undetected corruption on a small RAID1. TrueNAS defaults to weekly (ZFS); Synology doesn't enable it by default. Monthly is the sweet spot. |
 | `services.btrfs.autoScrub.fileSystems` | `[ cfg.mountPoint ]` | Targets braid's pool. Not mkDefault — this must always include the pool. |
+| `braid.storageGroup` | `"storage"` | Mount root set to `root:storage 2770`. Users in the group can read/write the mount root. Setgid ensures new entries inherit the group. Same pattern as TrueNAS/OMV. Does not override per-file umask. |
 
 ## Alternatives considered
 

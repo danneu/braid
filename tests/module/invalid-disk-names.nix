@@ -25,10 +25,15 @@ let
             type = lib.types.listOf lib.types.unspecified;
             default = [];
           };
+          options.users = lib.mkOption {
+            type = lib.types.attrs;
+            default = {};
+          };
         }
         {
           braid = {
             enable = true;
+            storageGroup = null;
             inherit disks;
           };
         }

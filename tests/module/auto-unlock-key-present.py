@@ -36,6 +36,10 @@ with subtest("USB is unmounted after auto-unlock"):
     ret = machine.execute("mountpoint -q /run/braid-key")
     assert ret[0] != 0, "USB should NOT be mounted at /run/braid-key after auto-unlock"
 
+with subtest("Mount point has correct group permissions after auto-unlock"):
+    stat = machine.succeed("stat -c '%U:%G %a' /mnt/storage").strip()
+    assert stat == "root:storage 2770", f"Expected root:storage 2770, got {stat}"
+
 with subtest("Write and read round-trip"):
     machine.succeed("echo 'auto-unlock test' > /mnt/storage/test.txt")
     content = machine.succeed("cat /mnt/storage/test.txt").strip()

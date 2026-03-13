@@ -304,6 +304,34 @@ Braid enables these automatically when `braid.enable = true`:
 
 - **Pinned toolchain** — runtime tools (btrfs-progs, cryptsetup, util-linux) are pinned to a NixOS stable release. Parser output formats don't change on flake updates. Override individual tools via `braid.packages.*` if needed.
 
+### Mount Point Permissions
+
+braid sets the mount root to `root:storage 2770` after mount-producing commands
+(`unlock`, `add`). Users in the `storage` group can read and write the mount root directory.
+New entries inherit the `storage` group via setgid.
+
+Note: individual file permissions still depend on the creating process's umask.
+For collaborative access, ensure users set `umask 002` or configure Samba with
+`force create mode` / `force directory mode`.
+
+Add a user to the storage group:
+
+```nix
+users.users.myuser.extraGroups = [ config.braid.storageGroup ];
+```
+
+Customize the group name:
+
+```nix
+braid.storageGroup = "nas-users";
+```
+
+Disable automatic permissions:
+
+```nix
+braid.storageGroup = null;
+```
+
 ## Samba
 
 Samba is not part of the braid module — NixOS already provides declarative Samba config. Reference `config.braid.mountPoint` to stay in sync:
