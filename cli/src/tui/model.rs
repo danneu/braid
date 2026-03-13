@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use crate::hdparm::DrivePowerState;
-use crate::parse::types::{ScrubState, SmartHealth};
+use crate::parse::types::{DeviceAllocation, ScrubState, SmartHealth};
 use crate::tui::effect::Effect;
 use crate::tui::state::{CmdId, CommandState};
 use crate::types::MountPoint;
@@ -48,8 +48,14 @@ pub struct DiskLuksInfo {
 #[derive(Clone)]
 pub struct DiskUsage {
     pub size: u64,
-    pub data: u64,
-    pub metadata: u64,
+    pub allocations: Vec<DeviceAllocation>,
+    pub unallocated: u64,
+}
+
+impl DiskUsage {
+    pub fn allocated(&self) -> u64 {
+        self.allocations.iter().map(|a| a.bytes).sum()
+    }
 }
 
 #[derive(Clone)]

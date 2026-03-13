@@ -63,24 +63,12 @@ pub fn probe_pool_for_tui<R: CommandRunner>(
             Some(name) => *name,
             None => continue,
         };
-        let data: u64 = entry
-            .allocations
-            .iter()
-            .filter(|a| a.alloc_type == "Data")
-            .map(|a| a.bytes)
-            .sum();
-        let metadata: u64 = entry
-            .allocations
-            .iter()
-            .filter(|a| a.alloc_type == "Metadata")
-            .map(|a| a.bytes)
-            .sum();
         disk_usage.insert(
             disk_name.to_owned(),
             DiskUsage {
                 size: entry.device_size,
-                data,
-                metadata,
+                allocations: entry.allocations.clone(),
+                unallocated: entry.unallocated,
             },
         );
     }
@@ -157,4 +145,166 @@ pub fn probe_pool_for_tui<R: CommandRunner>(
         scrub,
         probed_at: Instant::now(),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cmd::{MockRunner, RawCommandOutput};
+    use crate::parse::types::DeviceAllocation;
+
+    fn ok_raw(cmd: &str, stdout: &str) -> RawCommandOutput {
+        RawCommandOutput {
+            cmd: cmd.to_owned(),
+            stdout: stdout.to_owned(),
+            stderr: String::new(),
+            exit_status: 0,
+        }
+    }
+
+    /// Intent: probe_pool_for_tui passes through per-device allocations and
+    /// unallocated bytes from btrfs device usage into DiskUsage, rather than
+    /// collapsing them into aggregate data/metadata sums.
+    ///
+    /// Why: the old code discarded per-allocation detail (type + profile),
+    /// making it impossible to show a breakdown in the disk detail panel.
+    ///
+    /// Scenario: 2-disk RAID1 pool. btrfs device usage reports Data, Metadata,
+    /// and System allocations per device. The TUI probe must preserve all three
+    /// allocation rows and the unallocated value for each disk.
+    #[test]
+    fn allocations_passed_through() {
+        let mp = MountPoint("/mnt/storage".to_owned());
+
+        let runner = MockRunner::default()
+            // probe_pool: findmnt
+            .with_output(
+                CmdRequest::FindmntJson { mount_point: mp.clone() },
+                ok_raw(
+                    "findmnt",
+                    r#"{"filesystems": [{"target":"/mnt/storage","source":"/dev/mapper/braid-toshiba","fstype":"btrfs"}]}"#,
+                ),
+            )
+            // probe_pool: btrfs filesystem show
+            .with_output(
+                CmdRequest::BtrfsFilesystemShow { mount_point: mp.clone() },
+                ok_raw(
+                    "btrfs filesystem show",
+                    "Label: none  uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
+                     \tTotal devices 2 FS bytes used 1.00GiB\n\
+                     \tdevid    1 size 10.00GiB used 2.00GiB path /dev/mapper/braid-toshiba\n\
+                     \tdevid    2 size 10.00GiB used 2.00GiB path /dev/mapper/braid-ironwolf\n",
+                ),
+            )
+            // probe_pool: cryptsetup status for each device
+            .with_output(
+                CmdRequest::CryptsetupStatus { mapper: "braid-toshiba".into() },
+                ok_raw(
+                    "cryptsetup status",
+                    "/dev/mapper/braid-toshiba is active.\n\tdevice:  /dev/vda\n",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid { device: "/dev/vda".into() },
+                ok_raw("cryptsetup luksUUID", "11111111-1111-1111-1111-111111111111\n"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus { mapper: "braid-ironwolf".into() },
+                ok_raw(
+                    "cryptsetup status",
+                    "/dev/mapper/braid-ironwolf is active.\n\tdevice:  /dev/vdb\n",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid { device: "/dev/vdb".into() },
+                ok_raw("cryptsetup luksUUID", "22222222-2222-2222-2222-222222222222\n"),
+            )
+            // btrfs filesystem usage --raw
+            .with_output(
+                CmdRequest::BtrfsFilesystemUsageRaw { mount_point: mp.clone() },
+                ok_raw(
+                    "btrfs filesystem usage",
+                    "Overall:\n\
+                     \x20   Device size:\t\t        1040187392\n\
+                     \x20   Device allocated:\t\t         254935040\n\
+                     \x20   Device unallocated:\t\t         785252352\n\
+                     \x20   Device missing:\t\t                 0\n\
+                     \x20   Device slack:\t\t                 0\n\
+                     \x20   Used:\t\t\t          33914880\n\
+                     \x20   Free (estimated):\t\t         442957824\t(min: 442957824)\n\
+                     \x20   Free (statfs, df):\t\t         441909248\n\
+                     \x20   Data ratio:\t\t\t              2.00\n\
+                     \x20   Metadata ratio:\t\t              2.00\n\
+                     \x20   Global reserve:\t\t           5767168\t(used: 0)\n\
+                     \x20   Multiple profiles:\t\t                no\n",
+                ),
+            )
+            // btrfs device usage --raw (the key part we're testing)
+            .with_output(
+                CmdRequest::BtrfsDeviceUsageRaw { mount_point: mp.clone() },
+                ok_raw(
+                    "btrfs device usage",
+                    "/dev/dm-0, ID: 1\n\
+                     \x20  Device size:          536870912\n\
+                     \x20  Device slack:              0\n\
+                     \x20  Data,RAID1:           67108864\n\
+                     \x20  Metadata,DUP:         51970048\n\
+                     \x20  System,DUP:            8388608\n\
+                     \x20  Unallocated:          409403392\n\
+                     \n\
+                     /dev/dm-1, ID: 2\n\
+                     \x20  Device size:          536870912\n\
+                     \x20  Device slack:              0\n\
+                     \x20  Data,RAID1:           67108864\n\
+                     \x20  Metadata,DUP:         51970048\n\
+                     \x20  System,DUP:            8388608\n\
+                     \x20  Unallocated:          409403392\n",
+                ),
+            );
+
+        let result = probe_pool_for_tui(&runner, "/mnt/storage", &HashMap::new()).unwrap();
+        let pool = result.expect("pool should be Some");
+
+        // Verify toshiba (devid 1) allocations
+        let toshiba = pool
+            .disk_usage
+            .get("toshiba")
+            .expect("toshiba should be present");
+        assert_eq!(toshiba.size, 536870912);
+        assert_eq!(toshiba.unallocated, 409403392);
+        assert_eq!(toshiba.allocations.len(), 3);
+        assert_eq!(
+            toshiba.allocations[0],
+            DeviceAllocation {
+                alloc_type: "Data".into(),
+                profile: "RAID1".into(),
+                bytes: 67108864
+            },
+        );
+        assert_eq!(
+            toshiba.allocations[1],
+            DeviceAllocation {
+                alloc_type: "Metadata".into(),
+                profile: "DUP".into(),
+                bytes: 51970048
+            },
+        );
+        assert_eq!(
+            toshiba.allocations[2],
+            DeviceAllocation {
+                alloc_type: "System".into(),
+                profile: "DUP".into(),
+                bytes: 8388608
+            },
+        );
+        assert_eq!(toshiba.allocated(), 67108864 + 51970048 + 8388608);
+
+        // Verify ironwolf (devid 2) has same structure
+        let ironwolf = pool
+            .disk_usage
+            .get("ironwolf")
+            .expect("ironwolf should be present");
+        assert_eq!(ironwolf.allocations.len(), 3);
+        assert_eq!(ironwolf.unallocated, 409403392);
+    }
 }

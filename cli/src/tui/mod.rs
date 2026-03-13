@@ -22,8 +22,8 @@ use view::view;
 
 use crate::config::config_read;
 use crate::hdparm::DrivePowerState;
+use crate::parse::types::{DeviceAllocation, ScrubState, ScrubTimestamp, SmartHealth};
 use crate::types::MountPoint;
-use crate::parse::types::{ScrubState, ScrubTimestamp, SmartHealth};
 
 pub fn run(config_path: &Path) -> io::Result<()> {
     let config = config_read(config_path).map_err(|e| io::Error::other(e.to_string()))?;
@@ -56,24 +56,72 @@ pub fn run_demo() -> io::Result<()> {
             "toshiba".to_owned(),
             DiskUsage {
                 size: 6_001_175_126_016,
-                data: 1_483_734_958_080,
-                metadata: 1_610_612_736,
+                allocations: vec![
+                    DeviceAllocation {
+                        alloc_type: "Data".into(),
+                        profile: "RAID1".into(),
+                        bytes: 1_483_734_958_080,
+                    },
+                    DeviceAllocation {
+                        alloc_type: "Metadata".into(),
+                        profile: "DUP".into(),
+                        bytes: 1_610_612_736,
+                    },
+                    DeviceAllocation {
+                        alloc_type: "System".into(),
+                        profile: "DUP".into(),
+                        bytes: 16_777_216,
+                    },
+                ],
+                unallocated: 4_515_816_777_984,
             },
         ),
         (
             "ironwolf".to_owned(),
             DiskUsage {
                 size: 6_001_175_126_016,
-                data: 1_483_734_958_080,
-                metadata: 1_610_612_736,
+                allocations: vec![
+                    DeviceAllocation {
+                        alloc_type: "Data".into(),
+                        profile: "RAID1".into(),
+                        bytes: 1_483_734_958_080,
+                    },
+                    DeviceAllocation {
+                        alloc_type: "Metadata".into(),
+                        profile: "DUP".into(),
+                        bytes: 1_610_612_736,
+                    },
+                    DeviceAllocation {
+                        alloc_type: "System".into(),
+                        profile: "DUP".into(),
+                        bytes: 16_777_216,
+                    },
+                ],
+                unallocated: 4_515_816_777_984,
             },
         ),
         (
             "wdc".to_owned(),
             DiskUsage {
                 size: 4_000_787_030_016,
-                data: 824_633_720_832,
-                metadata: 1_073_741_824,
+                allocations: vec![
+                    DeviceAllocation {
+                        alloc_type: "Data".into(),
+                        profile: "RAID1".into(),
+                        bytes: 824_633_720_832,
+                    },
+                    DeviceAllocation {
+                        alloc_type: "Metadata".into(),
+                        profile: "DUP".into(),
+                        bytes: 1_073_741_824,
+                    },
+                    DeviceAllocation {
+                        alloc_type: "System".into(),
+                        profile: "DUP".into(),
+                        bytes: 16_777_216,
+                    },
+                ],
+                unallocated: 3_175_062_790_144,
             },
         ),
     ]);
@@ -157,8 +205,7 @@ fn run_loop(
 ) -> io::Result<()> {
     while model.running {
         let now = {
-            let offset =
-                time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC);
+            let offset = time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC);
             let local = time::OffsetDateTime::now_utc().to_offset(offset);
             time::PrimitiveDateTime::new(local.date(), local.time())
         };

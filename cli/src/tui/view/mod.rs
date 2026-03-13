@@ -254,8 +254,8 @@ fn disk_table(model: &Model, unit: ByteUnit) -> Table<'_> {
                     power_cell,
                     Line::from(format!(
                         "{:.0}%  {} / {} {}",
-                        percent(usage.data, usage.size),
-                        unit.format(usage.data),
+                        percent(usage.allocated(), usage.size),
+                        unit.format(usage.allocated()),
                         unit.format(usage.size),
                         unit.suffix()
                     )),
@@ -506,13 +506,65 @@ fn view_disk_detail(model: &Model, frame: &mut Frame, area: Rect) {
         )));
     }
 
+    if let Some(usage) = pool.and_then(|p| p.disk_usage.get(&disk_name)) {
+        // Pre-format sizes so we can right-align the column.
+        let alloc_rows: Vec<(&str, &str, String)> = usage
+            .allocations
+            .iter()
+            .map(|a| {
+                let unit = ByteUnit::friendliest(a.bytes);
+                (
+                    a.alloc_type.as_str(),
+                    a.profile.as_str(),
+                    format!("{} {}", unit.format(a.bytes), unit.suffix()),
+                )
+            })
+            .collect();
+        let unalloc_unit = ByteUnit::friendliest(usage.unallocated);
+        let unalloc_size = format!(
+            "{} {}",
+            unalloc_unit.format(usage.unallocated),
+            unalloc_unit.suffix()
+        );
+
+        let size_width = alloc_rows
+            .iter()
+            .map(|(_, _, s)| s.len())
+            .chain(Some(unalloc_size.len()))
+            .max()
+            .unwrap_or(0);
+
+        lines.push(Line::default());
+        let dim = Style::default().fg(Color::DarkGray);
+        lines.push(Line::from(Span::styled("Allocations", dim)));
+        lines.push(Line::from(vec![
+            Span::styled(format!("{:<11}{:<11}", "Type", "Profile"), dim),
+            Span::styled(format!("{:>width$}", "Size", width = size_width), dim),
+        ]));
+        for (alloc_type, profile, size) in &alloc_rows {
+            lines.push(Line::from(vec![
+                Span::styled(format!("{:<11}", alloc_type), dim),
+                Span::raw(format!(
+                    "{:<11}{:>width$}",
+                    profile,
+                    size,
+                    width = size_width
+                )),
+            ]));
+        }
+        lines.push(Line::from(vec![
+            Span::styled(format!("{:<11}{:<11}", "Unallocated", ""), dim),
+            Span::raw(format!("{:>width$}", unalloc_size, width = size_width)),
+        ]));
+    }
+
     lines.push(Line::default());
     lines.push(Line::from(Span::styled(
         "Esc to go back",
         Style::default().fg(Color::DarkGray),
     )));
 
-    let width = 40u16.min(area.width);
+    let width = 48u16.min(area.width);
     let height = (lines.len() as u16 + 2).min(area.height);
     let x = area.width.saturating_sub(width) / 2;
     let y = area.height.saturating_sub(height) / 2;
@@ -575,6 +627,7 @@ mod tests {
 
     use super::*;
     use crate::hdparm::DrivePowerState;
+    use crate::parse::types::DeviceAllocation;
     use crate::parse::types::{ScrubState, ScrubTimestamp, SmartHealth};
     use crate::tui::model::{DiskLuksInfo, DiskUsage};
     use crate::types::MountPoint;
@@ -638,25 +691,73 @@ mod tests {
             (
                 "toshiba".to_owned(),
                 DiskUsage {
-                    size: 6_001_175_126_016, // ~5.5 TiB
-                    data: 1_483_734_958_080, // ~1.3 TiB
-                    metadata: 1_610_612_736, // ~1.5 GiB
+                    size: 6_001_175_126_016,
+                    allocations: vec![
+                        DeviceAllocation {
+                            alloc_type: "Data".into(),
+                            profile: "RAID1".into(),
+                            bytes: 1_483_734_958_080,
+                        },
+                        DeviceAllocation {
+                            alloc_type: "Metadata".into(),
+                            profile: "DUP".into(),
+                            bytes: 1_610_612_736,
+                        },
+                        DeviceAllocation {
+                            alloc_type: "System".into(),
+                            profile: "DUP".into(),
+                            bytes: 16_777_216,
+                        },
+                    ],
+                    unallocated: 4_515_816_777_984,
                 },
             ),
             (
                 "ironwolf".to_owned(),
                 DiskUsage {
                     size: 6_001_175_126_016,
-                    data: 1_483_734_958_080,
-                    metadata: 1_610_612_736,
+                    allocations: vec![
+                        DeviceAllocation {
+                            alloc_type: "Data".into(),
+                            profile: "RAID1".into(),
+                            bytes: 1_483_734_958_080,
+                        },
+                        DeviceAllocation {
+                            alloc_type: "Metadata".into(),
+                            profile: "DUP".into(),
+                            bytes: 1_610_612_736,
+                        },
+                        DeviceAllocation {
+                            alloc_type: "System".into(),
+                            profile: "DUP".into(),
+                            bytes: 16_777_216,
+                        },
+                    ],
+                    unallocated: 4_515_816_777_984,
                 },
             ),
             (
                 "wdc".to_owned(),
                 DiskUsage {
-                    size: 4_000_787_030_016, // ~3.6 TiB
-                    data: 824_633_720_832,   // ~0.7 TiB
-                    metadata: 1_073_741_824, // ~1.0 GiB
+                    size: 4_000_787_030_016,
+                    allocations: vec![
+                        DeviceAllocation {
+                            alloc_type: "Data".into(),
+                            profile: "RAID1".into(),
+                            bytes: 824_633_720_832,
+                        },
+                        DeviceAllocation {
+                            alloc_type: "Metadata".into(),
+                            profile: "DUP".into(),
+                            bytes: 1_073_741_824,
+                        },
+                        DeviceAllocation {
+                            alloc_type: "System".into(),
+                            profile: "DUP".into(),
+                            bytes: 16_777_216,
+                        },
+                    ],
+                    unallocated: 3_175_062_790_144,
                 },
             ),
         ]);
