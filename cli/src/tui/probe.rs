@@ -8,6 +8,7 @@ use crate::parse::{
     parse_cryptsetup_luks_dump, parse_lsblk_json, parse_smartctl_health,
 };
 use crate::probe::probe_pool;
+use crate::status::get_balance_report;
 use crate::tui::model::{DiskLuksInfo, DiskUsage, PoolState};
 use crate::types::MountPoint;
 
@@ -83,6 +84,8 @@ pub fn probe_pool_for_tui<R: CommandRunner>(
         .map(|out| out.state)
         .unwrap_or(ScrubState::Unknown);
 
+    let balance = get_balance_report(runner, mount_point);
+
     let mut smart_health = HashMap::new();
     let mut luks_info = HashMap::new();
     for (disk_name, by_id_path) in disk_by_id {
@@ -138,6 +141,7 @@ pub fn probe_pool_for_tui<R: CommandRunner>(
         smart_health,
         luks_info,
         scrub,
+        balance,
         probed_at: Instant::now(),
     }))
 }
@@ -270,8 +274,21 @@ mod tests {
                 ),
             );
 
+        let runner = runner.with_output(
+            CmdRequest::BtrfsBalanceStatus {
+                mount_point: MountPoint("/mnt/storage".to_owned()),
+            },
+            ok_raw(
+                "btrfs balance status",
+                "No balance found on '/mnt/storage'\n",
+            ),
+        );
+
         let result = probe_pool_for_tui(&runner, "/mnt/storage", &HashMap::new()).unwrap();
         let pool = result.expect("pool should be Some");
+
+        // Verify balance is idle
+        assert_eq!(pool.balance, crate::status::BalanceReport::Idle);
 
         // Verify toshiba (devid 1) allocations
         let toshiba = pool

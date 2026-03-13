@@ -71,6 +71,7 @@ with subtest("status during balance"):
     print(f"status during balance:\n{output}")
     assert "Pool:" in output, f"Expected 'Pool:':\n{output}"
     assert "Drives:" in output, f"Expected 'Drives:':\n{output}"
+    assert "Balance:" in output, f"Expected 'Balance:' line:\n{output}"
 
 with subtest("json status during balance"):
     raw = machine.succeed("braid status --json")
@@ -78,5 +79,7 @@ with subtest("json status during balance"):
     assert s["status_code"] in ("healthy", "degraded"), (
         f"Expected healthy or degraded: {s['status_code']}"
     )
+    assert "balance" in s, f"Expected 'balance' key in JSON: {s}"
+    assert s["balance"]["state"] == "running", f"Expected running balance: {s['balance']}"
 
 machine.shutdown()

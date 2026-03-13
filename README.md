@@ -209,6 +209,14 @@ Drive states:
 
 Drive state classification uses the disk identity map. If the map is unavailable, absent disks show as `unknown` instead of `new` or `missing`.
 
+During an active balance (e.g. after `braid add`), status shows progress:
+
+```
+Balance:  running, 108/160 chunks (68% complete)
+```
+
+The `--json` output includes a `"balance"` object with `"state"` (`running`, `paused`, `idle`, or `unknown`) and chunk progress fields.
+
 ### Diagnostics
 
 ```sh

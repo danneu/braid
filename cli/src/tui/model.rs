@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use crate::parse::types::{DeviceAllocation, ScrubState, SmartHealth};
+use crate::status::BalanceReport;
 use crate::tui::effect::Effect;
 use crate::tui::state::{CmdId, CommandState};
 use crate::types::MountPoint;
@@ -68,6 +69,7 @@ pub struct PoolState {
     pub smart_health: HashMap<String, SmartHealth>,
     pub luks_info: HashMap<String, DiskLuksInfo>,
     pub scrub: ScrubState,
+    pub balance: BalanceReport,
     pub probed_at: Instant,
 }
 

@@ -176,6 +176,7 @@ pub fn run_demo() -> io::Result<()> {
             total: Some("32.36MiB".to_owned()),
             rate: Some("32.34MiB/s".to_owned()),
         },
+        balance: crate::status::BalanceReport::Idle,
         probed_at: Instant::now(),
     };
     let mut model = Model::new_demo(disk_names, PoolStatus::Mounted(pool));

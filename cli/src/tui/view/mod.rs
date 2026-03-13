@@ -9,6 +9,7 @@ use time::PrimitiveDateTime;
 use time::macros::format_description;
 
 use crate::parse::types::{ScrubState, SmartHealth};
+use crate::status::BalanceReport;
 use crate::tui::model::{Model, PoolState, PoolStatus, Tab};
 
 fn format_timestamp(dt: &PrimitiveDateTime) -> String {
@@ -96,22 +97,74 @@ fn pool_table(pool: &PoolState, unit: ByteUnit) -> Table<'_> {
         "single" => "None (single)",
         other => other,
     };
-    let rows = [
+    let mut rows = vec![
         Row::new(["Path".to_owned(), pool.mount_point.0.clone()]),
         Row::new(["Redundancy".to_owned(), redundancy.to_owned()]),
-        Row::new([
-            "Usage".to_owned(),
-            format!(
-                "{:.0}% ({} / {} {})",
-                percent(pool.used, pool.total),
-                unit.format(pool.used),
-                unit.format(pool.total),
-                unit.suffix(),
-            ),
-        ]),
     ];
+
+    match &pool.balance {
+        BalanceReport::Running {
+            done_chunks,
+            estimated_total_chunks,
+            pct_left,
+            ..
+        } => {
+            let pct_complete = 100u8.saturating_sub(*pct_left);
+            rows.push(
+                Row::new([
+                    "Balance".to_owned(),
+                    format!(
+                        "rebalancing — {done_chunks}/{estimated_total_chunks} chunks ({pct_complete}% complete)"
+                    ),
+                ])
+                .style(Style::default().fg(Color::Yellow)),
+            );
+        }
+        BalanceReport::Paused {
+            done_chunks,
+            estimated_total_chunks,
+            pct_left,
+            ..
+        } => {
+            let pct_complete = 100u8.saturating_sub(*pct_left);
+            rows.push(
+                Row::new([
+                    "Balance".to_owned(),
+                    format!(
+                        "paused — {done_chunks}/{estimated_total_chunks} chunks ({pct_complete}% complete)"
+                    ),
+                ])
+                .style(Style::default().fg(Color::Yellow)),
+            );
+        }
+        BalanceReport::Unknown => {
+            rows.push(
+                Row::new(["Balance".to_owned(), "unknown".to_owned()])
+                    .style(Style::default().fg(Color::Yellow)),
+            );
+        }
+        BalanceReport::Idle => {}
+    }
+
+    rows.push(Row::new([
+        "Usage".to_owned(),
+        format!(
+            "{:.0}% ({} / {} {})",
+            percent(pool.used, pool.total),
+            unit.format(pool.used),
+            unit.format(pool.total),
+            unit.suffix(),
+        ),
+    ]));
     let widths = [Constraint::Length(12), Constraint::Min(10)];
     Table::new(rows, widths).block(section_block("Pool"))
+}
+
+fn pool_balance_rows(pool: &PoolState) -> u16 {
+    match pool.balance {
+        BalanceReport::Running { .. } | BalanceReport::Paused { .. } | BalanceReport::Unknown => 1,
+        BalanceReport::Idle => 0,
+    }
 }
 
 fn scrub_table(scrub: &ScrubState, now: PrimitiveDateTime) -> Table<'_> {
@@ -341,7 +394,7 @@ fn view_data(model: &Model, frame: &mut Frame, area: Rect, now: PrimitiveDateTim
 
     // +1 per section for top border
     let pool_height: u16 = match model.pool.current() {
-        Some(_) => 3 + 1 + 1, // +1 gauge
+        Some(p) => 3 + pool_balance_rows(p) + 1 + 1, // +1 gauge
         None => 1 + 1,
     };
     let disk_height: u16 = model.disk_names.len() as u16 + 2; // +1 border, +1 header
@@ -800,6 +853,7 @@ mod tests {
                 total: Some("32.36MiB".to_owned()),
                 rate: Some("32.34MiB/s".to_owned()),
             },
+            balance: BalanceReport::Idle,
             probed_at: Instant::now(),
         }
     }
@@ -816,6 +870,29 @@ mod tests {
         let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(sample_pool()));
         model.show_disk_detail = true;
         let terminal = render(&model, 60, 22);
+        snap!(buffer_to_string(&terminal));
+    }
+
+    #[test]
+    fn snapshot_balance_running() {
+        let mut pool = sample_pool();
+        pool.balance = BalanceReport::Running {
+            done_chunks: 108,
+            estimated_total_chunks: 160,
+            considered_chunks: 120,
+            pct_left: 32,
+        };
+        let model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(pool));
+        let terminal = render(&model, 60, 24);
+        snap!(buffer_to_string(&terminal));
+    }
+
+    #[test]
+    fn snapshot_balance_unknown() {
+        let mut pool = sample_pool();
+        pool.balance = BalanceReport::Unknown;
+        let model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(pool));
+        let terminal = render(&model, 60, 24);
         snap!(buffer_to_string(&terminal));
     }
 

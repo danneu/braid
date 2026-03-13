@@ -5,9 +5,11 @@ use serde::{Deserialize, Serialize};
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, LsblkFieldKind};
 use crate::config::{Config, mapper_name};
 use crate::disk_map::{self, DiskMapLoad};
+use crate::parse::types::BalanceState;
 use crate::parse::{
-    BtrfsDeviceStatsOutput, ParseError, ScrubState, parse_btrfs_device_stats, parse_btrfs_df_json,
-    parse_btrfs_filesystem_usage, parse_btrfs_scrub_status, parse_lsblk_field,
+    BtrfsDeviceStatsOutput, ParseError, ScrubState, parse_btrfs_balance_status,
+    parse_btrfs_device_stats, parse_btrfs_df_json, parse_btrfs_filesystem_usage,
+    parse_btrfs_scrub_status, parse_lsblk_field,
 };
 use crate::probe::{Filesystem, ProbeError, probe_config_disk, probe_pool};
 use crate::types::*;
@@ -52,6 +54,8 @@ pub struct StatusReport {
     pub capacity: Option<CapacityReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_scrub: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub balance: Option<BalanceReport>,
     pub disks: Vec<DiskReport>,
 }
 
@@ -60,6 +64,27 @@ pub struct CapacityReport {
     pub total_bytes: u64,
     pub used_bytes: u64,
     pub free_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "state")]
+pub enum BalanceReport {
+    /// Probe failed or parse error — balance state is indeterminate.
+    Unknown,
+    /// No balance operation is running.
+    Idle,
+    Running {
+        done_chunks: u64,
+        estimated_total_chunks: u64,
+        considered_chunks: u64,
+        pct_left: u8,
+    },
+    Paused {
+        done_chunks: u64,
+        estimated_total_chunks: u64,
+        considered_chunks: u64,
+        pct_left: u8,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -235,6 +260,7 @@ pub fn build_status_report<R: CommandRunner, F: Filesystem>(
                 profile: None,
                 capacity: None,
                 last_scrub: None,
+                balance: None,
                 disks: vec![],
             });
         }
@@ -253,6 +279,7 @@ pub fn build_status_report<R: CommandRunner, F: Filesystem>(
             profile: None,
             capacity: None,
             last_scrub: None,
+            balance: None,
             disks: vec![],
         });
     }
@@ -266,6 +293,7 @@ pub fn build_status_report<R: CommandRunner, F: Filesystem>(
     let profile = get_profile(runner, config.mount_point().as_str())?;
     let capacity = get_capacity(runner, config.mount_point().as_str())?;
     let last_scrub = get_scrub_string(runner, config.mount_point().as_str());
+    let balance = get_balance_report(runner, config.mount_point().as_str());
 
     let code = if pool.missing_count == 0 {
         StatusCode::Healthy
@@ -293,6 +321,7 @@ pub fn build_status_report<R: CommandRunner, F: Filesystem>(
         profile: Some(profile),
         capacity: Some(capacity),
         last_scrub: Some(last_scrub),
+        balance: Some(balance),
         disks: verbose_ctx.disks,
     })
 }
@@ -329,6 +358,7 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
             profile: None,
             capacity: None,
             last_scrub: None,
+            balance: None,
             disks: vec![],
         };
         if json {
@@ -355,6 +385,7 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
     let profile = get_profile(runner, config.mount_point().as_str())?;
     let capacity = get_capacity(runner, config.mount_point().as_str())?;
     let last_scrub = get_scrub_string(runner, config.mount_point().as_str());
+    let balance = get_balance_report(runner, config.mount_point().as_str());
 
     // 5. Compute status code
     let code = if pool.missing_count == 0 {
@@ -398,6 +429,7 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
         profile: Some(profile),
         capacity: Some(capacity),
         last_scrub: Some(last_scrub),
+        balance: Some(balance),
         disks: verbose_ctx
             .as_ref()
             .map(|v| v.disks.clone())
@@ -490,6 +522,43 @@ fn get_scrub_string<R: CommandRunner>(runner: &R, mount_point: &str) -> String {
             ScrubState::Unknown => "unknown".to_owned(),
         },
         Err(_) => "unknown".to_owned(),
+    }
+}
+
+pub(crate) fn get_balance_report<R: CommandRunner>(runner: &R, mount_point: &str) -> BalanceReport {
+    let raw = match runner.run(&CmdRequest::BtrfsBalanceStatus {
+        mount_point: MountPoint(mount_point.to_owned()),
+    }) {
+        Ok(r) => r,
+        Err(_) => return BalanceReport::Unknown,
+    };
+    match parse_btrfs_balance_status(&raw) {
+        Ok(parsed) => match parsed.state {
+            BalanceState::None => BalanceReport::Idle,
+            BalanceState::Running {
+                done_chunks,
+                estimated_total_chunks,
+                considered_chunks,
+                pct_left,
+            } => BalanceReport::Running {
+                done_chunks,
+                estimated_total_chunks,
+                considered_chunks,
+                pct_left,
+            },
+            BalanceState::Paused {
+                done_chunks,
+                estimated_total_chunks,
+                considered_chunks,
+                pct_left,
+            } => BalanceReport::Paused {
+                done_chunks,
+                estimated_total_chunks,
+                considered_chunks,
+                pct_left,
+            },
+        },
+        Err(_) => BalanceReport::Unknown,
     }
 }
 
@@ -652,6 +721,37 @@ fn format_status_human(
 
     if let Some(ref profile) = report.profile {
         out.push_str(&format!("Profile:  {profile}\n"));
+    }
+
+    if let Some(ref balance) = report.balance {
+        match balance {
+            BalanceReport::Running {
+                done_chunks,
+                estimated_total_chunks,
+                pct_left,
+                ..
+            } => {
+                out.push_str(&format!(
+                    "Balance:  running, {done_chunks}/{estimated_total_chunks} chunks ({}% complete)\n",
+                    100u8.saturating_sub(*pct_left),
+                ));
+            }
+            BalanceReport::Paused {
+                done_chunks,
+                estimated_total_chunks,
+                pct_left,
+                ..
+            } => {
+                out.push_str(&format!(
+                    "Balance:  paused, {done_chunks}/{estimated_total_chunks} chunks ({}% complete)\n",
+                    100u8.saturating_sub(*pct_left),
+                ));
+            }
+            BalanceReport::Unknown => {
+                out.push_str("Balance:  unknown\n");
+            }
+            BalanceReport::Idle => {}
+        }
     }
 
     // Compact drive listing
@@ -1201,6 +1301,7 @@ mod tests {
             profile: None,
             capacity: None,
             last_scrub: None,
+            balance: None,
             disks: vec![],
         };
 
@@ -1253,6 +1354,7 @@ mod tests {
             profile: Some(profile),
             capacity: Some(capacity),
             last_scrub: Some(last_scrub),
+            balance: None,
             disks: vec![],
         };
 
@@ -1288,6 +1390,7 @@ mod tests {
                 free_bytes: 442957824,
             }),
             last_scrub: Some("never".to_owned()),
+            balance: None,
             disks: vec![],
         };
 
@@ -1342,6 +1445,7 @@ mod tests {
                 free_bytes: 442957824,
             }),
             last_scrub: Some("never".to_owned()),
+            balance: None,
             disks: vec![present, missing],
         };
 
@@ -1387,6 +1491,7 @@ mod tests {
             profile: None,
             capacity: None,
             last_scrub: None,
+            balance: None,
             disks: vec![],
         };
         let json_str = serde_json::to_string_pretty(&report).unwrap();
@@ -1412,6 +1517,7 @@ mod tests {
                 free_bytes: 442957824,
             }),
             last_scrub: Some("never".to_owned()),
+            balance: None,
             disks: vec![],
         };
         let json_str = serde_json::to_string_pretty(&report).unwrap();
@@ -1436,6 +1542,7 @@ mod tests {
                 free_bytes: 536870912,
             }),
             last_scrub: Some("never".to_owned()),
+            balance: None,
             disks: vec![DiskReport {
                 name: "disk1".to_owned(),
                 mapper: "disk1".to_owned(),
@@ -1476,6 +1583,7 @@ mod tests {
             profile: None,
             capacity: None,
             last_scrub: None,
+            balance: None,
             disks: vec![],
         };
         let human = format_status_human(&report, None, None);
@@ -1501,6 +1609,7 @@ mod tests {
                 free_bytes: 536870912,
             }),
             last_scrub: Some("never".to_owned()),
+            balance: None,
             disks: vec![],
         };
         let compact = vec![CompactDrive {
@@ -1540,6 +1649,7 @@ mod tests {
                 free_bytes: 442957824,
             }),
             last_scrub: Some("never".to_owned()),
+            balance: None,
             disks: vec![],
         };
         let compact = vec![
@@ -1589,6 +1699,7 @@ mod tests {
                 free_bytes: 442957824,
             }),
             last_scrub: Some("never".to_owned()),
+            balance: None,
             disks: vec![],
         };
         let compact = vec![
@@ -1637,6 +1748,7 @@ mod tests {
                 free_bytes: 442957824,
             }),
             last_scrub: Some("never".to_owned()),
+            balance: None,
             disks: vec![],
         };
         let human = format_status_human(&report, None, None);
@@ -1684,6 +1796,7 @@ mod tests {
                 free_bytes: 536870912,
             }),
             last_scrub: Some("never".to_owned()),
+            balance: None,
             disks: vec![],
         };
 
@@ -1724,6 +1837,7 @@ mod tests {
                 free_bytes: 442957824,
             }),
             last_scrub: Some("never".to_owned()),
+            balance: None,
             disks: vec![],
         };
 
@@ -1767,6 +1881,7 @@ mod tests {
                 free_bytes: 536870912,
             }),
             last_scrub: Some("never".to_owned()),
+            balance: None,
             disks: vec![],
         };
 
@@ -1800,6 +1915,176 @@ mod tests {
         );
         let result = get_scrub_string(&runner, "/mnt/storage");
         assert_eq!(result, "unknown");
+    }
+
+    // =======================================================================
+    // Balance report tests
+    // =======================================================================
+
+    #[test]
+    fn balance_report_idle() {
+        let runner = MockRunner::default().with_output(
+            CmdRequest::BtrfsBalanceStatus {
+                mount_point: MountPoint("/mnt/storage".to_owned()),
+            },
+            ok_raw(
+                "btrfs balance status",
+                "No balance found on '/mnt/storage'\n",
+            ),
+        );
+        assert_eq!(
+            get_balance_report(&runner, "/mnt/storage"),
+            BalanceReport::Idle
+        );
+    }
+
+    #[test]
+    fn balance_report_running() {
+        let runner = MockRunner::default().with_output(
+            CmdRequest::BtrfsBalanceStatus {
+                mount_point: MountPoint("/mnt/storage".to_owned()),
+            },
+            RawCommandOutput {
+                cmd: "btrfs balance status".into(),
+                stdout: "Balance on '/mnt/storage' is running\n\
+                         3 out of about 10 chunks balanced (7 considered), 70% left\n"
+                    .into(),
+                stderr: String::new(),
+                exit_status: 1,
+            },
+        );
+        assert_eq!(
+            get_balance_report(&runner, "/mnt/storage"),
+            BalanceReport::Running {
+                done_chunks: 3,
+                estimated_total_chunks: 10,
+                considered_chunks: 7,
+                pct_left: 70,
+            }
+        );
+    }
+
+    #[test]
+    fn balance_report_paused() {
+        let runner = MockRunner::default().with_output(
+            CmdRequest::BtrfsBalanceStatus {
+                mount_point: MountPoint("/mnt/storage".to_owned()),
+            },
+            RawCommandOutput {
+                cmd: "btrfs balance status".into(),
+                stdout: "Balance on '/mnt/storage' is paused\n\
+                         5 out of about 12 chunks balanced (8 considered), 58% left\n"
+                    .into(),
+                stderr: String::new(),
+                exit_status: 1,
+            },
+        );
+        assert_eq!(
+            get_balance_report(&runner, "/mnt/storage"),
+            BalanceReport::Paused {
+                done_chunks: 5,
+                estimated_total_chunks: 12,
+                considered_chunks: 8,
+                pct_left: 58,
+            }
+        );
+    }
+
+    #[test]
+    fn balance_report_unknown_on_cmd_error() {
+        let runner = MockRunner::default().with_output(
+            CmdRequest::BtrfsBalanceStatus {
+                mount_point: MountPoint("/mnt/storage".to_owned()),
+            },
+            err_raw("btrfs balance status", 2, "ERROR: not a btrfs filesystem"),
+        );
+        assert_eq!(
+            get_balance_report(&runner, "/mnt/storage"),
+            BalanceReport::Unknown
+        );
+    }
+
+    #[test]
+    fn balance_human_running() {
+        let code = StatusCode::Healthy;
+        let report = StatusReport {
+            mount_point: MountPoint("/mnt/storage".to_owned()),
+            status_code: code,
+            status: code.display_status(0),
+            total_devices: Some(2),
+            present_count: Some(2),
+            missing_count: Some(0),
+            profile: Some("RAID1".to_owned()),
+            capacity: Some(CapacityReport {
+                total_bytes: 1040187392,
+                used_bytes: 33914880,
+                free_bytes: 442957824,
+            }),
+            last_scrub: Some("never".to_owned()),
+            balance: Some(BalanceReport::Running {
+                done_chunks: 108,
+                estimated_total_chunks: 160,
+                considered_chunks: 120,
+                pct_left: 32,
+            }),
+            disks: vec![],
+        };
+        let human = format_status_human(&report, None, None);
+        assert!(
+            human.contains("Balance:  running, 108/160 chunks (68% complete)"),
+            "got:\n{human}"
+        );
+    }
+
+    #[test]
+    fn balance_human_unknown() {
+        let code = StatusCode::Healthy;
+        let report = StatusReport {
+            mount_point: MountPoint("/mnt/storage".to_owned()),
+            status_code: code,
+            status: code.display_status(0),
+            total_devices: Some(1),
+            present_count: Some(1),
+            missing_count: Some(0),
+            profile: Some("single".to_owned()),
+            capacity: Some(CapacityReport {
+                total_bytes: 1040187392,
+                used_bytes: 33914880,
+                free_bytes: 442957824,
+            }),
+            last_scrub: Some("never".to_owned()),
+            balance: Some(BalanceReport::Unknown),
+            disks: vec![],
+        };
+        let human = format_status_human(&report, None, None);
+        assert!(human.contains("Balance:  unknown"), "got:\n{human}");
+    }
+
+    #[test]
+    fn balance_human_idle_no_line() {
+        let code = StatusCode::Healthy;
+        let report = StatusReport {
+            mount_point: MountPoint("/mnt/storage".to_owned()),
+            status_code: code,
+            status: code.display_status(0),
+            total_devices: Some(1),
+            present_count: Some(1),
+            missing_count: Some(0),
+            profile: Some("single".to_owned()),
+            capacity: Some(CapacityReport {
+                total_bytes: 1040187392,
+                used_bytes: 33914880,
+                free_bytes: 442957824,
+            }),
+            last_scrub: Some("never".to_owned()),
+            balance: Some(BalanceReport::Idle),
+            disks: vec![],
+        };
+        let human = format_status_human(&report, None, None);
+        assert!(
+            !human.contains("Balance:"),
+            "Idle balance should not show Balance line, got:\n{human}"
+        );
     }
 
     #[test]
@@ -2091,6 +2376,7 @@ mod tests {
                 free_bytes: 536870912,
             }),
             last_scrub: Some("never".to_owned()),
+            balance: None,
             disks: vec![],
         };
         let human = format_status_human(&report, Some(&compact), None);
@@ -2145,6 +2431,7 @@ mod tests {
                 free_bytes: 536870912,
             }),
             last_scrub: Some("never".to_owned()),
+            balance: None,
             disks: vec![],
         };
 
@@ -2182,6 +2469,7 @@ mod tests {
                 free_bytes: 536870912,
             }),
             last_scrub: Some("never".to_owned()),
+            balance: None,
             disks: vec![],
         };
 
@@ -2211,6 +2499,7 @@ mod tests {
                 free_bytes: 442957824,
             }),
             last_scrub: Some("never".to_owned()),
+            balance: None,
             disks: vec![],
         };
         let compact = vec![
