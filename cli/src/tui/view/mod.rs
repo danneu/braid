@@ -8,7 +8,6 @@ use ratatui::widgets::{Block, Borders, Clear, Gauge, Padding, Paragraph, Row, Ta
 use time::PrimitiveDateTime;
 use time::macros::format_description;
 
-use crate::hdparm::DrivePowerState;
 use crate::parse::types::{ScrubState, SmartHealth};
 use crate::tui::model::{Model, PoolState, PoolStatus, Tab};
 
@@ -198,22 +197,12 @@ fn smart_cell(health: &SmartHealth) -> Span<'static> {
     }
 }
 
-fn power_label(state: &DrivePowerState) -> &'static str {
-    match state {
-        DrivePowerState::Active => "active",
-        DrivePowerState::Idle => "idle",
-        DrivePowerState::Standby => "standby",
-        DrivePowerState::Unknown(_) => "unknown",
-    }
-}
-
 fn disk_table(model: &Model, unit: ByteUnit) -> Table<'_> {
     let pool = model.pool.current();
     let disk_usage = pool.map(|p| &p.disk_usage);
     let disk_transport = pool.map(|p| &p.disk_transport);
     let smart_health = pool.map(|p| &p.smart_health);
-    let power_state = pool.map(|p| &p.power_state);
-    let header = Row::new(["", "Name", "Bus", "SMART", "Power", "Allocated"])
+    let header = Row::new(["", "Name", "Bus", "SMART", "Allocated"])
         .style(Style::default().fg(Color::DarkGray));
     let rows: Vec<Row> = model
         .disk_names
@@ -231,18 +220,6 @@ fn disk_table(model: &Model, unit: ByteUnit) -> Table<'_> {
                 Some(h) => smart_cell(h),
                 None => Span::raw(""),
             });
-            let power_val = power_state.and_then(|p| p.get(name));
-            let power_cell = match power_val {
-                Some(DrivePowerState::Standby) => Line::from(Span::styled(
-                    "standby",
-                    Style::default().fg(Color::DarkGray),
-                )),
-                Some(DrivePowerState::Idle) => {
-                    Line::from(Span::styled("idle", Style::default().fg(Color::DarkGray)))
-                }
-                Some(s) => Line::from(power_label(s)),
-                None => Line::from("\u{2014}"),
-            };
             let num = Line::from(format!("{}", i + 1));
             let name_cell = Line::from(name.clone());
             match disk_usage.and_then(|u| u.get(name)) {
@@ -251,7 +228,6 @@ fn disk_table(model: &Model, unit: ByteUnit) -> Table<'_> {
                     name_cell,
                     transport_cell,
                     smart_line,
-                    power_cell,
                     Line::from(format!(
                         "{:.0}%  {} / {} {}",
                         percent(usage.allocated(), usage.size),
@@ -265,7 +241,6 @@ fn disk_table(model: &Model, unit: ByteUnit) -> Table<'_> {
                     name_cell,
                     transport_cell,
                     smart_line,
-                    power_cell,
                     Line::from(Span::styled("missing", Style::default().fg(Color::Yellow))),
                 ])
                 .style(Style::default().add_modifier(Modifier::DIM)),
@@ -274,7 +249,6 @@ fn disk_table(model: &Model, unit: ByteUnit) -> Table<'_> {
                     name_cell,
                     transport_cell,
                     smart_line,
-                    power_cell,
                     Line::default(),
                 ]),
             }
@@ -311,24 +285,11 @@ fn disk_table(model: &Model, unit: ByteUnit) -> Table<'_> {
         })
         .unwrap_or(0)
         .max("SMART".len()) as u16;
-    let power_width = power_state
-        .map(|p| {
-            model
-                .disk_names
-                .iter()
-                .filter_map(|name| p.get(name))
-                .map(|s| power_label(s).len())
-                .max()
-                .unwrap_or(0)
-        })
-        .unwrap_or(0)
-        .max("Power".len()) as u16;
     let widths = [
         Constraint::Length(1),
         Constraint::Length(longest_name_len),
         Constraint::Length(transport_width),
         Constraint::Length(smart_width),
-        Constraint::Length(power_width),
         Constraint::Min(10),
     ];
     Table::new(rows, widths)
@@ -626,7 +587,6 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
-    use crate::hdparm::DrivePowerState;
     use crate::parse::types::DeviceAllocation;
     use crate::parse::types::{ScrubState, ScrubTimestamp, SmartHealth};
     use crate::tui::model::{DiskLuksInfo, DiskUsage};
@@ -766,11 +726,6 @@ mod tests {
             ("ironwolf".to_owned(), SmartHealth::Degraded),
             ("wdc".to_owned(), SmartHealth::Unknown),
         ]);
-        let power_state = HashMap::from([
-            ("toshiba".to_owned(), DrivePowerState::Active),
-            ("ironwolf".to_owned(), DrivePowerState::Standby),
-            ("wdc".to_owned(), DrivePowerState::Idle),
-        ]);
         let luks_info = HashMap::from([
             (
                 "toshiba".to_owned(),
@@ -810,7 +765,6 @@ mod tests {
             disk_usage,
             disk_transport,
             smart_health,
-            power_state,
             luks_info,
             scrub: ScrubState::Completed {
                 started_at: ScrubTimestamp(time::macros::datetime!(2026-02-24 02:00:07)),

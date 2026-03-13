@@ -21,7 +21,6 @@ use model::{DiskLuksInfo, DiskUsage, Model, PoolState, PoolStatus};
 use view::view;
 
 use crate::config::config_read;
-use crate::hdparm::DrivePowerState;
 use crate::parse::types::{DeviceAllocation, ScrubState, ScrubTimestamp, SmartHealth};
 use crate::types::MountPoint;
 
@@ -130,11 +129,6 @@ pub fn run_demo() -> io::Result<()> {
         ("ironwolf".to_owned(), SmartHealth::Degraded),
         ("wdc".to_owned(), SmartHealth::Unknown),
     ]);
-    let power_state = HashMap::from([
-        ("toshiba".to_owned(), DrivePowerState::Active),
-        ("ironwolf".to_owned(), DrivePowerState::Standby),
-        ("wdc".to_owned(), DrivePowerState::Idle),
-    ]);
     let luks_info = HashMap::from([
         (
             "toshiba".to_owned(),
@@ -174,7 +168,6 @@ pub fn run_demo() -> io::Result<()> {
         disk_usage,
         disk_transport,
         smart_health,
-        power_state,
         luks_info,
         scrub: ScrubState::Completed {
             started_at: ScrubTimestamp(time::macros::datetime!(2026-02-24 02:00:07)),

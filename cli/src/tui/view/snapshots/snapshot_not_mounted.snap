@@ -6,8 +6,8 @@ Data  Sharing
  Pool ──────────────────────────────────────────────────────
  not mounted
  Disks ─────────────────────────────────────────────────────
-     Name     Bus SMART Power Allocated
- ▶ 1 toshiba  —         —
-   2 ironwolf —         —
-   3 wdc      —         —
+     Name     Bus SMART Allocated
+ ▶ 1 toshiba  —
+   2 ironwolf —
+   3 wdc      —
 Quit: q │ Help: ? │ Reload: r

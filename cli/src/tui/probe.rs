@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use crate::cmd::{CmdRequest, CommandRunner};
-use crate::hdparm::check_power_mode;
 use crate::parse::types::{ScrubState, SmartHealth};
 use crate::parse::{
     parse_btrfs_device_usage, parse_btrfs_filesystem_usage, parse_btrfs_scrub_status,
@@ -83,7 +82,6 @@ pub fn probe_pool_for_tui<R: CommandRunner>(
         .unwrap_or(ScrubState::Unknown);
 
     let mut smart_health = HashMap::new();
-    let mut power_state = HashMap::new();
     let mut luks_info = HashMap::new();
     for (disk_name, by_id_path) in disk_by_id {
         let health = runner
@@ -93,10 +91,6 @@ pub fn probe_pool_for_tui<R: CommandRunner>(
             .map(|raw| parse_smartctl_health(&raw))
             .unwrap_or(SmartHealth::Unknown);
         smart_health.insert(disk_name.clone(), health);
-
-        if let Ok(state) = check_power_mode(by_id_path) {
-            power_state.insert(disk_name.clone(), state);
-        }
 
         if let Ok(raw) = runner.run(&CmdRequest::CryptsetupLuksDump {
             device: by_id_path.clone(),
@@ -140,7 +134,6 @@ pub fn probe_pool_for_tui<R: CommandRunner>(
         disk_usage,
         disk_transport,
         smart_health,
-        power_state,
         luks_info,
         scrub,
         probed_at: Instant::now(),

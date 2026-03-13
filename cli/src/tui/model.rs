@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use crate::hdparm::DrivePowerState;
 use crate::parse::types::{DeviceAllocation, ScrubState, SmartHealth};
 use crate::tui::effect::Effect;
 use crate::tui::state::{CmdId, CommandState};
@@ -67,7 +66,6 @@ pub struct PoolState {
     pub disk_usage: HashMap<String, DiskUsage>,
     pub disk_transport: HashMap<String, String>,
     pub smart_health: HashMap<String, SmartHealth>,
-    pub power_state: HashMap<String, DrivePowerState>,
     pub luks_info: HashMap<String, DiskLuksInfo>,
     pub scrub: ScrubState,
     pub probed_at: Instant,
