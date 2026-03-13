@@ -200,6 +200,15 @@ sudo braid status --verbose   # per-disk detail with devids
 sudo braid status --json      # machine-readable output
 ```
 
+Drive states:
+
+- `present` — disk is in the pool and online
+- `new` — declared in config but not yet added (`braid add`)
+- `missing` — was in pool but device is absent (unplugged, failed, powered off)
+- `unknown` — cannot determine (disk-map unreadable)
+
+Drive state classification uses the disk identity map. If the map is unavailable, absent disks show as `unknown` instead of `new` or `missing`.
+
 ### Diagnostics
 
 ```sh

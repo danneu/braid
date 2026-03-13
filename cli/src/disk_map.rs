@@ -53,6 +53,29 @@ impl DiskMap {
     }
 }
 
+#[derive(Debug)]
+pub enum DiskMapLoad {
+    Loaded(DiskMap),
+    NotFound,
+    Failed(String),
+}
+
+pub fn try_load_disk_map() -> DiskMapLoad {
+    try_load_disk_map_at(Path::new(DISK_MAP_FILE))
+}
+
+pub fn try_load_disk_map_at(path: &Path) -> DiskMapLoad {
+    let contents = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return DiskMapLoad::NotFound,
+        Err(e) => return DiskMapLoad::Failed(e.to_string()),
+    };
+    match serde_json::from_str(&contents) {
+        Ok(map) => DiskMapLoad::Loaded(map),
+        Err(e) => DiskMapLoad::Failed(e.to_string()),
+    }
+}
+
 /// Load disk map from the production path.
 pub fn load_disk_map() -> DiskMap {
     load_disk_map_at(Path::new(DISK_MAP_FILE))
@@ -117,13 +140,14 @@ pub fn validate_config_name_stability(
 ) -> Result<(), NameStabilityError> {
     for (name, disk) in config.disks() {
         if let Some(entry) = disk_map.disks.get(name)
-            && entry.by_id != disk.by_id.0 {
-                return Err(NameStabilityError::Reassignment {
-                    name: name.clone(),
-                    recorded_by_id: entry.by_id.clone(),
-                    config_by_id: disk.by_id.0.clone(),
-                });
-            }
+            && entry.by_id != disk.by_id.0
+        {
+            return Err(NameStabilityError::Reassignment {
+                name: name.clone(),
+                recorded_by_id: entry.by_id.clone(),
+                config_by_id: disk.by_id.0.clone(),
+            });
+        }
     }
 
     for (old_name, entry) in &disk_map.disks {
@@ -132,13 +156,13 @@ pub fn validate_config_name_stability(
                 .disks()
                 .iter()
                 .find(|(new_name, disk)| *new_name != old_name && disk.by_id.0 == entry.by_id)
-            {
-                return Err(NameStabilityError::RenameDetected {
-                    old_name: old_name.clone(),
-                    new_name: new_name.clone(),
-                    by_id: entry.by_id.clone(),
-                });
-            }
+        {
+            return Err(NameStabilityError::RenameDetected {
+                old_name: old_name.clone(),
+                new_name: new_name.clone(),
+                by_id: entry.by_id.clone(),
+            });
+        }
     }
 
     Ok(())
@@ -367,5 +391,40 @@ mod tests {
         record_disk(&mut map, "old", "/dev/disk/by-id/virtio-old", "u1", 1);
         let cfg = test_config(&[("disk2", "/dev/disk/by-id/virtio-disk2")]);
         assert_eq!(validate_config_name_stability(&cfg, &map), Ok(()));
+    }
+
+    #[test]
+    fn try_load_nonexistent() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("does-not-exist.json");
+        assert!(matches!(try_load_disk_map_at(&path), DiskMapLoad::NotFound));
+    }
+
+    #[test]
+    fn try_load_corrupt() {
+        let dir = TempDir::new().unwrap();
+        let path = map_path(&dir);
+        std::fs::write(&path, "not json at all").unwrap();
+        assert!(matches!(
+            try_load_disk_map_at(&path),
+            DiskMapLoad::Failed(_)
+        ));
+    }
+
+    #[test]
+    fn try_load_valid() {
+        let dir = TempDir::new().unwrap();
+        let path = map_path(&dir);
+        let mut map = DiskMap::new();
+        record_disk(&mut map, "d1", "/by-id/1", "u1", 1);
+        save_disk_map_at(&path, &map).unwrap();
+
+        match try_load_disk_map_at(&path) {
+            DiskMapLoad::Loaded(loaded) => {
+                assert_eq!(loaded.disks.len(), 1);
+                assert!(loaded.disks.contains_key("d1"));
+            }
+            other => panic!("expected Loaded, got: {other:?}"),
+        }
     }
 }

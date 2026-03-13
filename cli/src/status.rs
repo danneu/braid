@@ -3,13 +3,13 @@ use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, LsblkFieldKind};
-use crate::config::{mapper_name, Config};
+use crate::config::{Config, mapper_name};
+use crate::disk_map::{self, DiskMapLoad};
 use crate::parse::{
-    parse_btrfs_device_stats, parse_btrfs_df_json, parse_btrfs_filesystem_usage,
-    parse_btrfs_scrub_status, parse_lsblk_field, BtrfsBgType, BtrfsDeviceStatsOutput, ParseError,
-    ScrubState,
+    BtrfsBgType, BtrfsDeviceStatsOutput, ParseError, ScrubState, parse_btrfs_device_stats,
+    parse_btrfs_df_json, parse_btrfs_filesystem_usage, parse_btrfs_scrub_status, parse_lsblk_field,
 };
-use crate::probe::{probe_config_disk, probe_pool, Filesystem, ProbeError};
+use crate::probe::{Filesystem, ProbeError, probe_config_disk, probe_pool};
 use crate::types::*;
 
 // ---------------------------------------------------------------------------
@@ -95,7 +95,11 @@ struct CompactDrive {
     status: &'static str,
 }
 
-fn build_compact_drives(pool: &PoolState, config: &Config) -> Vec<CompactDrive> {
+fn build_compact_drives(
+    pool: &PoolState,
+    config: &Config,
+    disk_map_load: &DiskMapLoad,
+) -> Vec<CompactDrive> {
     let mut drives = Vec::new();
 
     // Present pool devices
@@ -120,7 +124,7 @@ fn build_compact_drives(pool: &PoolState, config: &Config) -> Vec<CompactDrive> 
         });
     }
 
-    // Missing config keys (no matching pool device)
+    // Unpooled config disks
     for (name, _disk) in config.disks() {
         let expected_mapper = format!("braid-{name}");
         if !pool_mappers.contains(expected_mapper.as_str()) {
@@ -128,7 +132,7 @@ fn build_compact_drives(pool: &PoolState, config: &Config) -> Vec<CompactDrive> 
                 name: name.clone(),
                 device_short: "-".to_owned(),
                 devid: None,
-                status: "missing",
+                status: classify_unpooled_disk(name, disk_map_load).as_str(),
             });
         }
     }
@@ -150,6 +154,42 @@ pub enum StatusError {
     Parse(#[from] ParseError),
     #[error("json serialization failed: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("validation error: {0}")]
+    Validation(String),
+}
+
+// ---------------------------------------------------------------------------
+// Unpooled disk classification
+// ---------------------------------------------------------------------------
+
+enum UnpooledStatus {
+    New,
+    Missing,
+    Unknown,
+}
+
+impl UnpooledStatus {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::New => "new",
+            Self::Missing => "missing",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+fn classify_unpooled_disk(name: &str, disk_map_load: &DiskMapLoad) -> UnpooledStatus {
+    match disk_map_load {
+        DiskMapLoad::NotFound => UnpooledStatus::New,
+        DiskMapLoad::Failed(_) => UnpooledStatus::Unknown,
+        DiskMapLoad::Loaded(map) => {
+            if map.disks.contains_key(name) {
+                UnpooledStatus::Missing
+            } else {
+                UnpooledStatus::New
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -217,6 +257,12 @@ pub fn build_status_report<R: CommandRunner, F: Filesystem>(
         });
     }
 
+    let disk_map_load = disk_map::try_load_disk_map();
+    if let DiskMapLoad::Loaded(ref map) = disk_map_load {
+        disk_map::validate_config_name_stability(config, map)
+            .map_err(|e| StatusError::Validation(e.to_string()))?;
+    }
+
     let profile = get_profile(runner, config.mount_point().as_str())?;
     let capacity = get_capacity(runner, config.mount_point().as_str())?;
     let last_scrub = get_scrub_string(runner, config.mount_point().as_str());
@@ -233,7 +279,8 @@ pub fn build_status_report<R: CommandRunner, F: Filesystem>(
         .map(|(name, disk)| probe_config_disk(runner, fs, name, disk))
         .collect::<Result<Vec<_>, _>>()?;
     let device_stats = get_device_stats(runner, config.mount_point().as_str())?;
-    let verbose_ctx = build_disk_reports(runner, &config_disks, &pool, &device_stats);
+    let verbose_ctx =
+        build_disk_reports(runner, &config_disks, &pool, &device_stats, &disk_map_load);
 
     let present_count = pool.total_devices.saturating_sub(pool.missing_count);
     Ok(StatusReport {
@@ -292,12 +339,24 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
         return Ok(());
     }
 
-    // 3. Strict data gathering
+    // 3. Disk-map load + validation
+    let disk_map_load = disk_map::try_load_disk_map();
+    if let DiskMapLoad::Loaded(ref map) = disk_map_load {
+        disk_map::validate_config_name_stability(config, map)
+            .map_err(|e| StatusError::Validation(e.to_string()))?;
+    }
+    if let DiskMapLoad::Failed(ref reason) = disk_map_load {
+        eprintln!(
+            "Warning: disk-map could not be loaded ({reason}) — disk states may be inaccurate"
+        );
+    }
+
+    // 4. Strict data gathering
     let profile = get_profile(runner, config.mount_point().as_str())?;
     let capacity = get_capacity(runner, config.mount_point().as_str())?;
     let last_scrub = get_scrub_string(runner, config.mount_point().as_str());
 
-    // 4. Compute status code
+    // 5. Compute status code
     let code = if pool.missing_count == 0 {
         StatusCode::Healthy
     } else {
@@ -305,10 +364,10 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
     };
     let status = code.display_status(pool.missing_count);
 
-    // 5. Compact drives (always built when mounted)
-    let compact_drives = build_compact_drives(&pool, config);
+    // 6. Compact drives (always built when mounted)
+    let compact_drives = build_compact_drives(&pool, config, &disk_map_load);
 
-    // 6. Verbose context
+    // 7. Verbose context
     let verbose_ctx = if verbose {
         let config_disks: Vec<ConfigDisk> = config
             .disks()
@@ -321,12 +380,13 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
             &config_disks,
             &pool,
             &device_stats,
+            &disk_map_load,
         ))
     } else {
         None
     };
 
-    // 7. Assemble report
+    // 8. Assemble report
     let present_count = pool.total_devices.saturating_sub(pool.missing_count);
     let report = StatusReport {
         mount_point: config.mount_point().clone(),
@@ -344,7 +404,7 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
             .unwrap_or_default(),
     };
 
-    // 8. Output
+    // 9. Output
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
@@ -466,6 +526,7 @@ fn build_disk_reports<R: CommandRunner>(
     config_disks: &[ConfigDisk],
     pool: &PoolState,
     device_stats: &BtrfsDeviceStatsOutput,
+    disk_map_load: &DiskMapLoad,
 ) -> VerboseContext {
     let pool_uuid_set: HashSet<&LuksUuid> = pool.devices.iter().map(|d| &d.luks_uuid).collect();
 
@@ -535,18 +596,21 @@ fn build_disk_reports<R: CommandRunner>(
         });
     }
 
-    // Missing config disks (not matched to pool)
+    // Unpooled config disks (not matched to pool)
     for cd in config_disks {
-        let is_missing = match &cd.state {
+        let is_unpooled = match &cd.state {
             ConfigDiskState::Absent => true,
             ConfigDiskState::PresentLuks { uuid, .. } => !pool_uuid_set.contains(uuid),
             ConfigDiskState::PresentNotLuks => false,
         };
 
-        if !is_missing {
+        if !is_unpooled {
             continue;
         }
 
+        let status = classify_unpooled_disk(&cd.name, disk_map_load)
+            .as_str()
+            .to_owned();
         let mapper = mapper_name(&cd.name).0;
 
         disk_reports.push(DiskReport {
@@ -556,7 +620,7 @@ fn build_disk_reports<R: CommandRunner>(
             luks_uuid: String::new(),
             devid: None,
             underlying: None,
-            status: "missing".to_owned(),
+            status: status.clone(),
             errors: None,
         });
 
@@ -565,7 +629,7 @@ fn build_disk_reports<R: CommandRunner>(
             by_id: cd.by_id_path.0.clone(),
             luks_uuid: String::new(),
             devid: None,
-            status: "missing".to_owned(),
+            status,
             model: None,
             serial: None,
             errors: None,
@@ -635,6 +699,10 @@ fn format_status_human(
             // show disk name
             if d.status == "missing" {
                 out.push_str(&format!("  {:<18}MISSING\n", d.name));
+            } else if d.status == "new" {
+                out.push_str(&format!("  {:<18}NEW\n", d.name));
+            } else if d.status == "unknown" {
+                out.push_str(&format!("  {:<18}UNKNOWN\n", d.name));
             } else {
                 let devid_str = d
                     .devid
@@ -674,6 +742,9 @@ fn format_status_human(
                 }
                 None if d.status == "missing" => {
                     out.push_str("    Errors:  unknown (device absent)\n");
+                }
+                None if d.status == "unknown" => {
+                    out.push_str("    Errors:  unknown (disk-map unavailable)\n");
                 }
                 None => {}
             }
@@ -1971,5 +2042,208 @@ mod tests {
 
         let result = cmd_status(&runner, &fs, &config, false, false);
         assert!(result.is_ok());
+    }
+
+    // =======================================================================
+    // Classification tests
+    // =======================================================================
+
+    #[test]
+    fn classify_unpooled_new_not_found() {
+        let load = DiskMapLoad::NotFound;
+        assert_eq!(classify_unpooled_disk("disk1", &load).as_str(), "new");
+    }
+
+    #[test]
+    fn classify_unpooled_new_loaded_empty() {
+        let load = DiskMapLoad::Loaded(crate::disk_map::DiskMap::new());
+        assert_eq!(classify_unpooled_disk("disk1", &load).as_str(), "new");
+    }
+
+    #[test]
+    fn classify_unpooled_missing() {
+        let mut map = crate::disk_map::DiskMap::new();
+        crate::disk_map::record_disk(&mut map, "disk1", "/by-id/1", "u1", 1);
+        let load = DiskMapLoad::Loaded(map);
+        assert_eq!(classify_unpooled_disk("disk1", &load).as_str(), "missing");
+    }
+
+    #[test]
+    fn classify_unpooled_unknown() {
+        let load = DiskMapLoad::Failed("corrupt".to_owned());
+        assert_eq!(classify_unpooled_disk("disk1", &load).as_str(), "unknown");
+    }
+
+    // =======================================================================
+    // Compact drive new/unknown tests
+    // =======================================================================
+
+    #[test]
+    fn status_compact_new_disk() {
+        let compact = vec![CompactDrive {
+            name: "disk2".to_owned(),
+            device_short: "-".to_owned(),
+            devid: None,
+            status: "new",
+        }];
+        let code = StatusCode::Healthy;
+        let report = StatusReport {
+            mount_point: MountPoint("/mnt/storage".to_owned()),
+            status_code: code,
+            status: code.display_status(0),
+            total_devices: Some(1),
+            present_count: Some(1),
+            missing_count: Some(0),
+            profile: Some("single".to_owned()),
+            capacity: Some(CapacityReport {
+                total_bytes: 1073741824,
+                used_bytes: 536870912,
+                free_bytes: 536870912,
+            }),
+            last_scrub: Some("never".to_owned()),
+            disks: vec![],
+        };
+        let human = format_status_human(&report, Some(&compact), None);
+        assert!(human.contains("new"), "got:\n{human}");
+        assert!(!human.contains("missing"), "got:\n{human}");
+    }
+
+    #[test]
+    fn status_compact_unknown_disk() {
+        let pool = PoolState {
+            mounted: true,
+            devices: vec![],
+            missing_count: 0,
+            total_devices: 0,
+        };
+        let config = config_1disk();
+        let load = DiskMapLoad::Failed("corrupt".to_owned());
+        let drives = build_compact_drives(&pool, &config, &load);
+        assert_eq!(drives.len(), 1);
+        assert_eq!(drives[0].status, "unknown");
+    }
+
+    // =======================================================================
+    // Verbose new/unknown tests
+    // =======================================================================
+
+    #[test]
+    fn status_verbose_new_disk() {
+        let human_disks = vec![HumanDisk {
+            name: "disk2".to_owned(),
+            by_id: "/dev/disk/by-id/disk2".to_owned(),
+            luks_uuid: String::new(),
+            devid: None,
+            status: "new".to_owned(),
+            model: None,
+            serial: None,
+            errors: None,
+        }];
+
+        let code = StatusCode::Healthy;
+        let report = StatusReport {
+            mount_point: MountPoint("/mnt/storage".to_owned()),
+            status_code: code,
+            status: code.display_status(0),
+            total_devices: Some(1),
+            present_count: Some(1),
+            missing_count: Some(0),
+            profile: Some("single".to_owned()),
+            capacity: Some(CapacityReport {
+                total_bytes: 1073741824,
+                used_bytes: 536870912,
+                free_bytes: 536870912,
+            }),
+            last_scrub: Some("never".to_owned()),
+            disks: vec![],
+        };
+
+        let human = format_status_human(&report, None, Some(&human_disks));
+        assert!(human.contains("NEW"), "got:\n{human}");
+        assert!(!human.contains("(not found)"), "got:\n{human}");
+        assert!(!human.contains("Errors:"), "got:\n{human}");
+    }
+
+    #[test]
+    fn status_verbose_unknown_disk() {
+        let human_disks = vec![HumanDisk {
+            name: "disk2".to_owned(),
+            by_id: "/dev/disk/by-id/disk2".to_owned(),
+            luks_uuid: String::new(),
+            devid: None,
+            status: "unknown".to_owned(),
+            model: None,
+            serial: None,
+            errors: None,
+        }];
+
+        let code = StatusCode::Healthy;
+        let report = StatusReport {
+            mount_point: MountPoint("/mnt/storage".to_owned()),
+            status_code: code,
+            status: code.display_status(0),
+            total_devices: Some(1),
+            present_count: Some(1),
+            missing_count: Some(0),
+            profile: Some("single".to_owned()),
+            capacity: Some(CapacityReport {
+                total_bytes: 1073741824,
+                used_bytes: 536870912,
+                free_bytes: 536870912,
+            }),
+            last_scrub: Some("never".to_owned()),
+            disks: vec![],
+        };
+
+        let human = format_status_human(&report, None, Some(&human_disks));
+        assert!(human.contains("UNKNOWN"), "got:\n{human}");
+        assert!(human.contains("disk-map unavailable"), "got:\n{human}");
+    }
+
+    // =======================================================================
+    // Healthy tests assert no "new"
+    // =======================================================================
+
+    #[test]
+    fn status_human_healthy_no_new() {
+        let code = StatusCode::Healthy;
+        let report = StatusReport {
+            mount_point: MountPoint("/mnt/storage".to_owned()),
+            status_code: code,
+            status: code.display_status(0),
+            total_devices: Some(3),
+            present_count: Some(3),
+            missing_count: Some(0),
+            profile: Some("RAID1".to_owned()),
+            capacity: Some(CapacityReport {
+                total_bytes: 1040187392,
+                used_bytes: 33914880,
+                free_bytes: 442957824,
+            }),
+            last_scrub: Some("never".to_owned()),
+            disks: vec![],
+        };
+        let compact = vec![
+            CompactDrive {
+                name: "disk1".into(),
+                device_short: "vda".into(),
+                devid: Some(1),
+                status: "present",
+            },
+            CompactDrive {
+                name: "disk2".into(),
+                device_short: "vdb".into(),
+                devid: Some(2),
+                status: "present",
+            },
+            CompactDrive {
+                name: "disk3".into(),
+                device_short: "vdc".into(),
+                devid: Some(3),
+                status: "present",
+            },
+        ];
+        let human = format_status_human(&report, Some(&compact), None);
+        assert!(!human.contains("new"), "got:\n{human}");
     }
 }

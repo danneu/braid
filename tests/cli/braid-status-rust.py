@@ -35,11 +35,33 @@ def rust_status(extra=""):
     return f"braid status {extra}"
 
 
-# --- Phase 1: Single-disk summary ---
+# --- Phase 0: New disks before any adds ---
 
-with subtest("Setup: single disk pool"):
+with subtest("Setup: add disk1 only"):
     machine.succeed(add_disk("disk1"))
     machine.succeed("mountpoint -q /mnt/storage")
+
+with subtest("New disks in compact output"):
+    output = machine.succeed(rust_status())
+    print(f"Phase 0 compact:\n{output}")
+    assert "disk1" in output, f"Expected 'disk1':\n{output}"
+    assert "present" in output, f"Expected 'present':\n{output}"
+    assert "disk2" in output, f"Expected 'disk2':\n{output}"
+    assert "disk3" in output, f"Expected 'disk3':\n{output}"
+    assert "new" in output, f"Expected 'new' for unadded disks:\n{output}"
+    assert "missing" not in output.lower(), f"Unexpected 'missing':\n{output}"
+
+with subtest("New disks in JSON verbose"):
+    raw = machine.succeed(rust_status("--json --verbose"))
+    s = json.loads(raw)
+    new_disks = [d for d in s["disks"] if d["status"] == "new"]
+    assert len(new_disks) == 2, f"Expected 2 new disks: {new_disks}"
+    present_disks = [d for d in s["disks"] if d["status"] == "present"]
+    assert len(present_disks) == 1, f"Expected 1 present disk: {present_disks}"
+    missing_disks = [d for d in s["disks"] if d["status"] == "missing"]
+    assert len(missing_disks) == 0, f"Expected 0 missing disks: {missing_disks}"
+
+# --- Phase 1: Single-disk summary ---
 
 with subtest("Single-disk summary"):
     output = machine.succeed(rust_status())
@@ -75,6 +97,7 @@ with subtest("Healthy RAID1 summary"):
     assert "Free:" in output, f"Expected 'Free:':\n{output}"
     assert "scrub" in output.lower(), f"Expected 'scrub':\n{output}"
     assert "missing" not in output.lower(), f"Unexpected 'missing':\n{output}"
+    assert "new" not in output.lower(), f"Unexpected 'new':\n{output}"
 
 with subtest("Healthy verbose"):
     output = machine.succeed(rust_status("--verbose"))
