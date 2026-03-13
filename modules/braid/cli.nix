@@ -1,11 +1,16 @@
-{ config, lib, pkgs, ... }:
+{
+  config,
+  lib,
+  pkgs,
+  ...
+}:
 let
   cfg = config.braid;
 
   braid = import ./wrapper.nix { inherit cfg pkgs lib; };
 
   # Config JSON uses snake_case to match Rust serde field names.
-  configJson = builtins.toJSON {
+  configFile = (pkgs.formats.json { }).generate "braid-config.json" {
     disks = lib.mapAttrs (_name: disk: {
       by_id = disk.byId;
     }) cfg.disks;
@@ -14,7 +19,7 @@ let
 in
 {
   config = lib.mkIf cfg.enable {
-    environment.etc."braid/config.json".text = configJson;
+    environment.etc."braid/config.json".source = configFile;
 
     environment.systemPackages = lib.optional (cfg.package != null) braid;
 
@@ -52,27 +57,39 @@ in
 
         # Get config disk LUKS UUIDs
         config_uuids=""
-        ${lib.concatMapStringsSep "\n" (name: let disk = cfg.disks.${name}; in ''
-          if [ -e ${disk.byId} ]; then
-            uuid=$(cryptsetup luksUUID ${disk.byId} 2>/dev/null || true)
-            if [ -n "$uuid" ]; then
-              config_uuids="$config_uuids $uuid"
-            else
-              echo "braid: uninitialized: ${name} -> run: sudo braid add ${name}"
+        ${lib.concatMapStringsSep "\n" (
+          name:
+          let
+            disk = cfg.disks.${name};
+          in
+          ''
+            if [ -e ${disk.byId} ]; then
+              uuid=$(cryptsetup luksUUID ${disk.byId} 2>/dev/null || true)
+              if [ -n "$uuid" ]; then
+                config_uuids="$config_uuids $uuid"
+              else
+                echo "braid: uninitialized: ${name} -> run: sudo braid add ${name}"
+              fi
             fi
-          fi
-        '') (builtins.attrNames cfg.disks)}
+          ''
+        ) (builtins.attrNames cfg.disks)}
 
         # Check for config disks not in pool
         for cuuid in $config_uuids; do
           if ! echo "$pool_uuids" | ${pkgs.gnugrep}/bin/grep -qw "$cuuid"; then
             # Find the name for this UUID
-            ${lib.concatMapStringsSep "\n" (name: let disk = cfg.disks.${name}; in ''
-              this_uuid=$(cryptsetup luksUUID ${disk.byId} 2>/dev/null || true)
-              if [ "$this_uuid" = "$cuuid" ]; then
-                echo "braid: new disk: ${name} -> run: sudo braid add ${name}"
-              fi
-            '') (builtins.attrNames cfg.disks)}
+            ${lib.concatMapStringsSep "\n" (
+              name:
+              let
+                disk = cfg.disks.${name};
+              in
+              ''
+                this_uuid=$(cryptsetup luksUUID ${disk.byId} 2>/dev/null || true)
+                if [ "$this_uuid" = "$cuuid" ]; then
+                  echo "braid: new disk: ${name} -> run: sudo braid add ${name}"
+                fi
+              ''
+            ) (builtins.attrNames cfg.disks)}
           fi
         done
 
