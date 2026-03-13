@@ -523,7 +523,7 @@ fn view_disk_detail(model: &Model, frame: &mut Frame, area: Rect) {
     let dim = Style::default().fg(Color::DarkGray);
     let footer = Paragraph::new(vec![
         Line::default(),
-        Line::from(Span::styled("Esc to go back", dim)),
+        Line::from(Span::styled("r reload · Esc to go back", dim)),
     ]);
 
     let alloc_table = pool

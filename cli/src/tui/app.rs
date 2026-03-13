@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use crate::tui::effect::{Effect, PROBE_INTERVAL};
 use crate::tui::model::{Model, PoolState, PoolStatus};
-use crate::tui::state::{CmdId, CmdStatus, CommandState, Stream, MAX_LINES};
+use crate::tui::state::{CmdId, CmdStatus, CommandState, MAX_LINES, Stream};
 
 pub enum Message {
     Quit,

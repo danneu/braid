@@ -1,6 +1,6 @@
 ---
 source: cli/src/tui/view/mod.rs
-assertion_line: 819
+assertion_line: 873
 expression: buffer_to_string(&terminal)
 ---
 Data  Sharing
@@ -19,7 +19,7 @@ Data  Sharing
  Scrub│ System      DUP         16.0 MiB             │──────
  Last │ Unallocated             4.1 TiB              │
  Error│                                              │
- Total│ Esc to go back                               │
+ Total│ r reload · Esc to go back                    │
  Rate └──────────────────────────────────────────────┘
  Duration     0:00:00
 Quit: q │ Help: ? │ Reload: r
