@@ -380,12 +380,12 @@
         { pkgs, lib, ... }:
         let
           # Use braid's own pinned nixpkgs for tool versions, not the consumer's
-          braidPkgs = import self.inputs.nixpkgs { system = pkgs.system; };
+          braidPkgs = import self.inputs.nixpkgs { system = pkgs.stdenv.hostPlatform.system; };
         in
         {
           imports = [ ./modules/braid ];
           config.braid = {
-            package = lib.mkDefault self.packages.${pkgs.system}.braid-cli-unwrapped;
+            package = lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.braid-cli-unwrapped;
             packages = {
               cryptsetup = lib.mkDefault braidPkgs.cryptsetup;
               btrfsProgs = lib.mkDefault braidPkgs.btrfs-progs;
