@@ -152,16 +152,17 @@ def write_config(device_paths):
 
 
 def cleanup():
-    """Best-effort umount + close mappers for hw-test disk names."""
-    subprocess.run(f"umount {MOUNT_POINT} 2>/dev/null", shell=True)
-    for i in range(1, 10):
-        subprocess.run(f"cryptsetup close braid-hwtest{i} 2>/dev/null", shell=True)
+    """Best-effort lock the pool via braid (umount + close mappers)."""
+    subprocess.run(
+        f"braid lock --config {CONFIG_PATH}",
+        shell=True, capture_output=True,
+    )
 
 
 def wipe_disks(device_paths):
     """Wipe filesystem signatures and first 10 MiB of each disk."""
     for p in device_paths:
-        subprocess.run(f"wipefs -a {p} 2>/dev/null", shell=True)
+        subprocess.run(f"wipefs -a {p}", shell=True)
         subprocess.run(
             f"dd if=/dev/zero of={p} bs=1M count=10 2>/dev/null", shell=True,
         )

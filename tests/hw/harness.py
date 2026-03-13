@@ -69,14 +69,11 @@ def disk_name(n):
 # ---------------------------------------------------------------------------
 
 def cleanup():
-    """Best-effort umount + close mappers for hw-test disk names only."""
-    subprocess.run(f"umount {MOUNT_POINT} 2>/dev/null", shell=True)
-    # Only close mappers for hwtest names we use in tests
-    for i in range(1, 10):
-        name = f"braid-hwtest{i}"
-        subprocess.run(
-            f"cryptsetup close {name} 2>/dev/null", shell=True,
-        )
+    """Best-effort lock the pool via braid (umount + close mappers)."""
+    subprocess.run(
+        f"braid lock --config {CONFIG}",
+        shell=True, capture_output=True,
+    )
 
 
 # ---------------------------------------------------------------------------
