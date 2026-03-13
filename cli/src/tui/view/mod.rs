@@ -61,7 +61,7 @@ impl ByteUnit {
         match self {
             ByteUnit::TiB => format!("{:.1}", b / (1024.0 * 1024.0 * 1024.0 * 1024.0)),
             ByteUnit::GiB => format!("{:.1}", b / (1024.0 * 1024.0 * 1024.0)),
-            ByteUnit::MiB => format!("{:.0}", b / (1024.0 * 1024.0)),
+            ByteUnit::MiB => format!("{:.1}", b / (1024.0 * 1024.0)),
         }
     }
 
@@ -467,81 +467,108 @@ fn view_disk_detail(model: &Model, frame: &mut Frame, area: Rect) {
         )));
     }
 
-    if let Some(usage) = pool.and_then(|p| p.disk_usage.get(&disk_name)) {
-        // Pre-format sizes so we can right-align the column.
-        let alloc_rows: Vec<(&str, &str, String)> = usage
-            .allocations
-            .iter()
-            .map(|a| {
-                let unit = ByteUnit::friendliest(a.bytes);
-                (
-                    a.alloc_type.as_str(),
-                    a.profile.as_str(),
-                    format!("{} {}", unit.format(a.bytes), unit.suffix()),
-                )
-            })
-            .collect();
-        let unalloc_unit = ByteUnit::friendliest(usage.unallocated);
-        let unalloc_size = format!(
-            "{} {}",
-            unalloc_unit.format(usage.unallocated),
-            unalloc_unit.suffix()
-        );
+    let dim = Style::default().fg(Color::DarkGray);
+    let footer = Paragraph::new(vec![
+        Line::default(),
+        Line::from(Span::styled("Esc to go back", dim)),
+    ]);
 
-        let size_width = alloc_rows
-            .iter()
-            .map(|(_, _, s)| s.len())
-            .chain(Some(unalloc_size.len()))
-            .max()
-            .unwrap_or(0);
+    let alloc_table = pool
+        .and_then(|p| p.disk_usage.get(&disk_name))
+        .map(|usage| {
+            let mut rows: Vec<Row> = usage
+                .allocations
+                .iter()
+                .map(|a| {
+                    let unit = ByteUnit::friendliest(a.bytes);
+                    Row::new([
+                        a.alloc_type.clone(),
+                        a.profile.clone(),
+                        format!("{} {}", unit.format(a.bytes), unit.suffix()),
+                    ])
+                })
+                .collect();
+            let unalloc_unit = ByteUnit::friendliest(usage.unallocated);
+            rows.push(
+                Row::new([
+                    "Unallocated".to_owned(),
+                    String::new(),
+                    format!(
+                        "{} {}",
+                        unalloc_unit.format(usage.unallocated),
+                        unalloc_unit.suffix()
+                    ),
+                ])
+                .style(dim),
+            );
+            let header = Row::new(["Type", "Profile", "Size"]).style(dim);
+            Table::new(
+                rows,
+                [
+                    Constraint::Length(11),
+                    Constraint::Length(11),
+                    Constraint::Min(7),
+                ],
+            )
+            .header(header)
+            .block(
+                Block::new()
+                    .borders(Borders::TOP)
+                    .title("Allocations ")
+                    .border_style(Style::default().fg(Color::Cyan)),
+            )
+        });
 
-        lines.push(Line::default());
-        let dim = Style::default().fg(Color::DarkGray);
-        lines.push(Line::from(Span::styled("Allocations", dim)));
-        lines.push(Line::from(vec![
-            Span::styled(format!("{:<11}{:<11}", "Type", "Profile"), dim),
-            Span::styled(format!("{:>width$}", "Size", width = size_width), dim),
-        ]));
-        for (alloc_type, profile, size) in &alloc_rows {
-            lines.push(Line::from(vec![
-                Span::styled(format!("{:<11}", alloc_type), dim),
-                Span::raw(format!(
-                    "{:<11}{:>width$}",
-                    profile,
-                    size,
-                    width = size_width
-                )),
-            ]));
-        }
-        lines.push(Line::from(vec![
-            Span::styled(format!("{:<11}{:<11}", "Unallocated", ""), dim),
-            Span::raw(format!("{:>width$}", unalloc_size, width = size_width)),
-        ]));
-    }
-
-    lines.push(Line::default());
-    lines.push(Line::from(Span::styled(
-        "Esc to go back",
-        Style::default().fg(Color::DarkGray),
-    )));
+    let info_height = lines.len() as u16;
+    // alloc section: 1 border + 1 header + data rows (incl. unallocated) + 1 padding left
+    let alloc_height = alloc_table
+        .as_ref()
+        .map(|_| {
+            let data_rows = pool
+                .and_then(|p| p.disk_usage.get(&disk_name))
+                .map(|u| u.allocations.len() as u16 + 1) // +1 for unallocated
+                .unwrap_or(0);
+            1 + 1 + 1 + data_rows // spacer + border + header + rows
+        })
+        .unwrap_or(0);
+    let footer_height = 2u16; // blank line + text
+    let total_content = info_height + alloc_height + footer_height;
 
     let width = 48u16.min(area.width);
-    let height = (lines.len() as u16 + 2).min(area.height);
+    let height = (total_content + 2).min(area.height); // +2 for popup border
     let x = area.width.saturating_sub(width) / 2;
     let y = area.height.saturating_sub(height) / 2;
     let popup = Rect::new(x, y, width, height);
 
     frame.render_widget(Clear, popup);
-    frame.render_widget(
-        Paragraph::new(lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Cyan))
-                .title(" Disk Detail ")
-                .padding(Padding::horizontal(1)),
-        ),
-        popup,
-    );
+    let outer_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(" Disk Detail ")
+        .padding(Padding::horizontal(1));
+    let inner = outer_block.inner(popup);
+    frame.render_widget(outer_block, popup);
+
+    if let Some(table) = alloc_table {
+        let regions = Layout::vertical([
+            Constraint::Length(info_height),
+            Constraint::Length(1), // spacer
+            Constraint::Length(alloc_height - 1),
+            Constraint::Length(footer_height),
+        ])
+        .split(inner);
+        frame.render_widget(Paragraph::new(lines), regions[0]);
+        frame.render_widget(table, regions[2]);
+        frame.render_widget(footer, regions[3]);
+    } else {
+        let regions = Layout::vertical([
+            Constraint::Length(info_height),
+            Constraint::Length(footer_height),
+        ])
+        .split(inner);
+        frame.render_widget(Paragraph::new(lines), regions[0]);
+        frame.render_widget(footer, regions[1]);
+    }
 }
 
 pub fn view(model: &Model, frame: &mut Frame, now: PrimitiveDateTime) {

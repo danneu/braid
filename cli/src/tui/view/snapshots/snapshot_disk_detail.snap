@@ -1,5 +1,6 @@
 ---
 source: cli/src/tui/view/mod.rs
+assertion_line: 819
 expression: buffer_to_string(&terminal)
 ---
 Data  Sharing
@@ -11,12 +12,12 @@ Data  Sharing
       │ Key size   512 bits                          │
  Disks│ Keyslots   1 of 32 slots used                │──────
      N│                                              │
- ▶ 1 t│ Allocations                                  │
-   2 i│ Type       Profile       Size                │
-   3 w│ Data       RAID1      1.3 TiB                │
-      │ Metadata   DUP        1.5 GiB                │
- Scrub│ System     DUP         16 MiB                │──────
- Last │ Unallocated           4.1 TiB                │
+ ▶ 1 t│ Allocations ──────────────────────────────── │
+   2 i│ Type        Profile     Size                 │
+   3 w│ Data        RAID1       1.3 TiB              │
+      │ Metadata    DUP         1.5 GiB              │
+ Scrub│ System      DUP         16.0 MiB             │──────
+ Last │ Unallocated             4.1 TiB              │
  Error│                                              │
  Total│ Esc to go back                               │
  Rate └──────────────────────────────────────────────┘
