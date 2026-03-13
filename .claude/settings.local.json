@@ -1,4 +1,5 @@
 {
+  "plansDirectory": "./plans/wip",
   "permissions": {
     "allow": [
       "Bash(nix log:*)",
@@ -16,7 +17,8 @@
       "Bash(just test-rust:*)",
       "Bash(cargo check:*)",
       "Bash(just test:*)",
-      "Bash(gh search:*)"
+      "Bash(gh search:*)",
+      "Bash(gh issue:*)"
     ]
   }
 }
