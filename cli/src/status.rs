@@ -6,8 +6,8 @@ use crate::cmd::{CmdError, CmdRequest, CommandRunner, LsblkFieldKind};
 use crate::config::{Config, mapper_name};
 use crate::disk_map::{self, DiskMapLoad};
 use crate::parse::{
-    BtrfsBgType, BtrfsDeviceStatsOutput, ParseError, ScrubState, parse_btrfs_device_stats,
-    parse_btrfs_df_json, parse_btrfs_filesystem_usage, parse_btrfs_scrub_status, parse_lsblk_field,
+    BtrfsDeviceStatsOutput, ParseError, ScrubState, parse_btrfs_device_stats, parse_btrfs_df_json,
+    parse_btrfs_filesystem_usage, parse_btrfs_scrub_status, parse_lsblk_field,
 };
 use crate::probe::{Filesystem, ProbeError, probe_config_disk, probe_pool};
 use crate::types::*;
@@ -430,17 +430,7 @@ fn get_profile<R: CommandRunner>(runner: &R, mount_point: &str) -> Result<String
         mount_point: MountPoint(mount_point.to_owned()),
     })?;
     let df = parse_btrfs_df_json(&raw)?;
-
-    // Use the Data profile; fall back to first entry's profile
-    let profile = df
-        .entries
-        .iter()
-        .find(|e| e.bg_type == BtrfsBgType::Data)
-        .or_else(|| df.entries.first())
-        .map(|e| e.bg_profile.to_string())
-        .unwrap_or_else(|| "unknown".to_owned());
-
-    Ok(profile)
+    Ok(df.data_profile())
 }
 
 fn get_capacity<R: CommandRunner>(
@@ -452,7 +442,7 @@ fn get_capacity<R: CommandRunner>(
     })?;
     let usage = parse_btrfs_filesystem_usage(&raw)?;
 
-    let total_bytes = usage.device_size_bytes / usage.data_ratio;
+    let total_bytes = usage.data_ratio.logical_bytes(usage.device_size_bytes);
     Ok(CapacityReport {
         total_bytes,
         used_bytes: usage.used_bytes,

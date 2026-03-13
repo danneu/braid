@@ -29,11 +29,13 @@ pub fn probe_pool_for_tui<R: CommandRunner>(
         .map_err(|e| e.to_string())?;
     let usage = parse_btrfs_filesystem_usage(&usage_raw).map_err(|e| e.to_string())?;
 
-    let profile = if usage.data_ratio == 2 {
-        "RAID1"
-    } else {
-        "single"
-    };
+    let df_raw = runner
+        .run(&CmdRequest::BtrfsFilesystemDfJson {
+            mount_point: MountPoint(mount_point.to_owned()),
+        })
+        .map_err(|e| e.to_string())?;
+    let df = crate::parse::parse_btrfs_df_json(&df_raw).map_err(|e| e.to_string())?;
+    let profile = df.data_profile();
 
     let dev_usage_raw = runner
         .run(&CmdRequest::BtrfsDeviceUsageRaw {
@@ -230,6 +232,19 @@ mod tests {
                      \x20   Metadata ratio:\t\t              2.00\n\
                      \x20   Global reserve:\t\t           5767168\t(used: 0)\n\
                      \x20   Multiple profiles:\t\t                no\n",
+                ),
+            )
+            // btrfs filesystem df --json (for profile detection)
+            .with_output(
+                CmdRequest::BtrfsFilesystemDfJson { mount_point: mp.clone() },
+                ok_raw(
+                    "btrfs filesystem df",
+                    r#"{"filesystem-df": [
+                        {"bg-type": "Data", "bg-profile": "RAID1", "total": 67108864, "used": 16777216},
+                        {"bg-type": "System", "bg-profile": "RAID1", "total": 4194304, "used": 16384},
+                        {"bg-type": "Metadata", "bg-profile": "RAID1", "total": 33554432, "used": 65536},
+                        {"bg-type": "GlobalReserve", "bg-profile": "single", "total": 3670016, "used": 0}
+                    ]}"#,
                 ),
             )
             // btrfs device usage --raw (the key part we're testing)

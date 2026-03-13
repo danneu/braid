@@ -88,6 +88,19 @@ pub struct BtrfsDfOutput {
     pub entries: Vec<BtrfsDfEntry>,
 }
 
+impl BtrfsDfOutput {
+    /// Return the data profile string (e.g. "RAID1", "single").
+    /// Falls back to the first entry's profile, or "unknown".
+    pub fn data_profile(&self) -> String {
+        self.entries
+            .iter()
+            .find(|e| e.bg_type == BtrfsBgType::Data)
+            .or_else(|| self.entries.first())
+            .map(|e| e.bg_profile.to_string())
+            .unwrap_or_else(|| "unknown".to_owned())
+    }
+}
+
 // --- Text command output structs ---
 
 /// btrfs filesystem show
@@ -128,13 +141,37 @@ pub struct CryptsetupLuksDumpOutput {
     pub keyslot_count: u32, // e.g. 1
 }
 
+/// Fixed-point data ratio in hundredths (100 = 1.00, 200 = 2.00).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct DataRatio(u32);
+
+impl DataRatio {
+    pub fn parse(s: &str) -> Option<Self> {
+        let (whole, frac) = s.split_once('.')?;
+        if frac.len() != 2 {
+            return None;
+        }
+        let whole: u32 = whole.parse().ok()?;
+        let frac: u32 = frac.parse().ok()?;
+        let hundredths = whole * 100 + frac;
+        if hundredths == 0 {
+            return None;
+        }
+        Some(Self(hundredths))
+    }
+
+    pub fn logical_bytes(self, device_size_bytes: u64) -> u64 {
+        device_size_bytes * 100 / u64::from(self.0)
+    }
+}
+
 /// btrfs filesystem usage --raw
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BtrfsFilesystemUsageOutput {
     pub device_size_bytes: u64,
     pub used_bytes: u64,
     pub free_estimated_bytes: u64,
-    pub data_ratio: u64,
+    pub data_ratio: DataRatio,
 }
 
 /// Parsed scrub timestamp — the parser converts the raw ctime string.
@@ -314,4 +351,54 @@ impl BtrfsDeviceUsageEntry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BtrfsDeviceUsageOutput {
     pub devices: Vec<BtrfsDeviceUsageEntry>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn data_ratio_parse_1_00() {
+        assert_eq!(DataRatio::parse("1.00"), Some(DataRatio(100)));
+    }
+
+    #[test]
+    fn data_ratio_parse_2_00() {
+        assert_eq!(DataRatio::parse("2.00"), Some(DataRatio(200)));
+    }
+
+    #[test]
+    fn data_ratio_parse_intermediate() {
+        assert_eq!(DataRatio::parse("1.01"), Some(DataRatio(101)));
+    }
+
+    #[test]
+    fn data_ratio_parse_no_dot() {
+        assert_eq!(DataRatio::parse("abc"), None);
+    }
+
+    #[test]
+    fn data_ratio_parse_one_frac_digit() {
+        assert_eq!(DataRatio::parse("1.0"), None);
+    }
+
+    #[test]
+    fn data_ratio_parse_three_frac_digits() {
+        assert_eq!(DataRatio::parse("1.001"), None);
+    }
+
+    #[test]
+    fn data_ratio_parse_zero() {
+        assert_eq!(DataRatio::parse("0.00"), None);
+    }
+
+    #[test]
+    fn data_ratio_logical_bytes_raid1() {
+        assert_eq!(DataRatio(200).logical_bytes(1_000_000), 500_000);
+    }
+
+    #[test]
+    fn data_ratio_logical_bytes_intermediate() {
+        assert_eq!(DataRatio(101).logical_bytes(1_000_000), 990_099);
+    }
 }

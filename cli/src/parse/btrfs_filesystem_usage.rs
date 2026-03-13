@@ -7,7 +7,7 @@ use nom::{
 use crate::cmd::RawCommandOutput;
 
 use super::ParseError;
-use super::types::BtrfsFilesystemUsageOutput;
+use super::types::{BtrfsFilesystemUsageOutput, DataRatio};
 
 // ---------------------------------------------------------------------------
 // nom parsers
@@ -43,7 +43,7 @@ pub fn parse_btrfs_filesystem_usage(
     let mut device_size: Option<u64> = None;
     let mut used: Option<u64> = None;
     let mut free_est: Option<u64> = None;
-    let mut data_ratio: Option<u64> = None;
+    let mut data_ratio: Option<DataRatio> = None;
 
     for line in raw.stdout.lines() {
         let trimmed = line.trim();
@@ -56,18 +56,16 @@ pub fn parse_btrfs_filesystem_usage(
                 "Device size" => device_size = value_str.parse().ok(),
                 "Used" if used.is_none() => used = value_str.parse().ok(),
                 "Free (estimated)" => free_est = value_str.parse().ok(),
-                "Data ratio" => match value_str {
-                    "1.00" => data_ratio = Some(1),
-                    "2.00" => data_ratio = Some(2),
-                    _ => {
-                        return Err(ParseError::InvalidText {
+                "Data ratio" => {
+                    data_ratio = Some(DataRatio::parse(value_str).ok_or_else(|| {
+                        ParseError::InvalidText {
                             cmd: raw.cmd.clone(),
                             detail: format!(
-                                "unsupported Data ratio {value_str:?} (expected \"1.00\" or \"2.00\")"
+                                "Data ratio {value_str:?} is not in expected X.YY format"
                             ),
-                        });
-                    }
-                },
+                        }
+                    })?);
+                }
                 _ => {}
             }
         }
@@ -101,6 +99,7 @@ pub fn parse_btrfs_filesystem_usage(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parse::types::DataRatio;
 
     fn fixture(name: &str) -> String {
         let path = format!(
@@ -124,7 +123,7 @@ mod tests {
         assert_eq!(out.device_size_bytes, 1040187392);
         assert_eq!(out.used_bytes, 33914880);
         assert_eq!(out.free_estimated_bytes, 442957824);
-        assert_eq!(out.data_ratio, 2);
+        assert_eq!(out.data_ratio, DataRatio::parse("2.00").unwrap());
     }
 
     // --- Synthetic tests (inline) ---
@@ -155,26 +154,43 @@ mod tests {
             exit_status: 0,
         };
         let out = parse_btrfs_filesystem_usage(&raw).unwrap();
-        assert_eq!(out.data_ratio, 1);
+        assert_eq!(out.data_ratio, DataRatio::parse("1.00").unwrap());
     }
 
     #[test]
-    fn usage_rejects_unsupported_data_ratio() {
+    fn usage_rejects_invalid_data_ratio_format() {
         let raw = RawCommandOutput {
             cmd: "btrfs filesystem usage".into(),
             stdout: "Overall:\n\
                      \tDevice size:\t\t\t1040187392\n\
                      \tUsed:\t\t\t\t33914880\n\
                      \tFree (estimated):\t\t442957824\n\
-                     \tData ratio:\t\t\t3.00\n"
+                     \tData ratio:\t\t\t1.0\n"
                 .into(),
             stderr: String::new(),
             exit_status: 0,
         };
         let err = parse_btrfs_filesystem_usage(&raw).unwrap_err();
         assert!(
-            matches!(err, ParseError::InvalidText { ref detail, .. } if detail.contains("3.00")),
-            "expected InvalidText mentioning 3.00, got: {err:?}"
+            matches!(err, ParseError::InvalidText { ref detail, .. } if detail.contains("1.0")),
+            "expected InvalidText mentioning 1.0, got: {err:?}"
         );
+    }
+
+    #[test]
+    fn usage_parses_intermediate_data_ratio() {
+        let raw = RawCommandOutput {
+            cmd: "btrfs filesystem usage".into(),
+            stdout: "Overall:\n\
+                     \tDevice size:\t\t\t1040187392\n\
+                     \tUsed:\t\t\t\t33914880\n\
+                     \tFree (estimated):\t\t442957824\n\
+                     \tData ratio:\t\t\t1.01\n"
+                .into(),
+            stderr: String::new(),
+            exit_status: 0,
+        };
+        let out = parse_btrfs_filesystem_usage(&raw).unwrap();
+        assert_eq!(out.data_ratio, DataRatio::parse("1.01").unwrap());
     }
 }

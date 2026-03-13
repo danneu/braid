@@ -131,6 +131,11 @@
               braid = linuxCrane.braid;
             }
           );
+          braid-status-during-balance = pkgs.testers.nixosTest (
+            import ./tests/cli/braid-status-during-balance.nix {
+              braid = linuxCrane.braid;
+            }
+          );
           luks-header-backup = pkgs.testers.nixosTest (
             import ./tests/storage/luks-header-backup.nix {
               braid = linuxCrane.braid;
