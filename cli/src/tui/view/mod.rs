@@ -3,10 +3,10 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 mod help;
 
-use ratatui::widgets::{Block, Borders, Clear, Gauge, Padding, Paragraph, Row, Table, TableState};
 use ratatui::Frame;
-use time::macros::format_description;
+use ratatui::widgets::{Block, Borders, Clear, Gauge, Padding, Paragraph, Row, Table, TableState};
 use time::PrimitiveDateTime;
+use time::macros::format_description;
 
 use crate::hdparm::DrivePowerState;
 use crate::parse::types::{ScrubState, SmartHealth};
@@ -213,7 +213,7 @@ fn disk_table(model: &Model, unit: ByteUnit) -> Table<'_> {
     let disk_transport = pool.map(|p| &p.disk_transport);
     let smart_health = pool.map(|p| &p.smart_health);
     let power_state = pool.map(|p| &p.power_state);
-    let header = Row::new(["", "Name", "Bus", "SMART", "Power", "Usage"])
+    let header = Row::new(["", "Name", "Bus", "SMART", "Power", "Allocated"])
         .style(Style::default().fg(Color::DarkGray));
     let rows: Vec<Row> = model
         .disk_names
@@ -578,8 +578,8 @@ mod tests {
     use crate::parse::types::{ScrubState, ScrubTimestamp, SmartHealth};
     use crate::tui::model::{DiskLuksInfo, DiskUsage};
     use crate::types::MountPoint;
-    use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     fn render(model: &Model, width: u16, height: u16) -> Terminal<TestBackend> {
         let now = time::macros::datetime!(2026-02-24 02:12:00);
