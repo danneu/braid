@@ -31,6 +31,12 @@ in
         "nofail"
         "x-systemd.requires=btrfs-device-scan.service"
         "x-systemd.after=btrfs-device-scan.service"
+      ]
+      # When auto-unlock is enabled, the mount unit must wait for it to
+      # open the LUKS devices — otherwise systemd races both units and
+      # the mount fails because /dev/mapper/* doesn't exist yet.
+      ++ lib.optionals cfg.autoUnlock.enable [
+        "x-systemd.after=braid-auto-unlock.service"
       ];
     };
 
@@ -67,7 +73,12 @@ in
         RemainAfterExit = true;
       };
       unitConfig.ConditionPathIsMountPoint = "!${cfg.mountPoint}";
-      path = [ braidWrapped cfg.packages.cryptsetup cfg.packages.btrfsProgs cfg.packages.utilLinux ];
+      path = [
+        braidWrapped
+        cfg.packages.cryptsetup
+        cfg.packages.btrfsProgs
+        cfg.packages.utilLinux
+      ];
       script = ''
         ${pkgs.systemd}/bin/systemd-ask-password \
           --id=braid "LUKS passphrase for braid pool:" \
@@ -87,9 +98,12 @@ in
       device = cfg.autoUnlock.keyDevice;
       fsType = "auto";
       options = [
-        "ro" "nosuid" "nodev" "noexec"
-        "nofail"    # never fail boot
-        "noauto"    # only mount on-demand
+        "ro"
+        "nosuid"
+        "nodev"
+        "noexec"
+        "nofail" # never fail boot
+        "noauto" # only mount on-demand
         "x-systemd.device-timeout=${toString cfg.autoUnlock.timeoutSec}s"
       ];
     };
@@ -109,70 +123,81 @@ in
       # re-run the service when the USB is inserted. With RemainAfterExit=true,
       # systemd considers the unit "active" after exit 0 and suppresses
       # subsequent starts. See systemd.service(5).
-      serviceConfig = { Type = "oneshot"; };
-      path = [ braidWrapped cfg.packages.cryptsetup cfg.packages.btrfsProgs cfg.packages.utilLinux ];
-      script = let keyPath = "/run/braid-key/braid.key"; in ''
-        # Mount USB via systemd mount unit — this respects the device-timeout
-        # configured on the mount unit, so slow USB enumeration gets the full
-        # wait window. A direct `mount` call would bypass that timeout.
-        # The escaped unit name matches systemd's path encoding for
-        # /run/braid-key → run-braid\x2dkey.mount.
-        if ! ${pkgs.systemd}/bin/systemctl start run-braid\\x2dkey.mount 2>/dev/null; then
-          echo "braid-auto-unlock: USB key device not available, skipping" >&2
-          exit 0
-        fi
+      serviceConfig = {
+        Type = "oneshot";
+      };
+      path = [
+        braidWrapped
+        cfg.packages.cryptsetup
+        cfg.packages.btrfsProgs
+        cfg.packages.utilLinux
+      ];
+      script =
+        let
+          keyPath = "/run/braid-key/braid.key";
+        in
+        ''
+          # Mount USB via systemd mount unit — this respects the device-timeout
+          # configured on the mount unit, so slow USB enumeration gets the full
+          # wait window. A direct `mount` call would bypass that timeout.
+          # The escaped unit name matches systemd's path encoding for
+          # /run/braid-key → run-braid\x2dkey.mount.
+          if ! ${pkgs.systemd}/bin/systemctl start run-braid\\x2dkey.mount 2>/dev/null; then
+            echo "braid-auto-unlock: USB key device not available, skipping" >&2
+            exit 0
+          fi
 
-        # Path traversal defense. The keyfile name is a hardcoded literal
-        # ("braid.key"), not user-configurable, so CWE-22 via config is
-        # eliminated by construction. However, the USB filesystem is
-        # attacker-controlled, so we still verify the resolved path stays
-        # within /run/braid-key/ to guard against:
-        #   - CWE-59: symlinked keyfile (braid.key -> /etc/shadow)
-        # realpath -e also fails if the file doesn't exist, so this
-        # subsumes the existence check.
-        resolved=$(${pkgs.coreutils}/bin/realpath -e "${keyPath}" 2>/dev/null) || {
-          echo "braid-auto-unlock: keyfile not found at ${keyPath}, skipping" >&2
-          umount /run/braid-key 2>/dev/null || true
-          exit 0
-        }
-        case "$resolved" in
-          /run/braid-key/*)
-            ;;
-          *)
-            echo "braid-auto-unlock: keyfile resolves outside mount root ($resolved), refusing" >&2
+          # Path traversal defense. The keyfile name is a hardcoded literal
+          # ("braid.key"), not user-configurable, so CWE-22 via config is
+          # eliminated by construction. However, the USB filesystem is
+          # attacker-controlled, so we still verify the resolved path stays
+          # within /run/braid-key/ to guard against:
+          #   - CWE-59: symlinked keyfile (braid.key -> /etc/shadow)
+          # realpath -e also fails if the file doesn't exist, so this
+          # subsumes the existence check.
+          resolved=$(${pkgs.coreutils}/bin/realpath -e "${keyPath}" 2>/dev/null) || {
+            echo "braid-auto-unlock: keyfile not found at ${keyPath}, skipping" >&2
             umount /run/braid-key 2>/dev/null || true
             exit 0
-            ;;
-        esac
+          }
+          case "$resolved" in
+            /run/braid-key/*)
+              ;;
+            *)
+              echo "braid-auto-unlock: keyfile resolves outside mount root ($resolved), refusing" >&2
+              umount /run/braid-key 2>/dev/null || true
+              exit 0
+              ;;
+          esac
 
-        # Warn if keyfile is world/group-readable. On vfat (no Unix perms),
-        # files are typically 0755 — we can't fix that (vfat doesn't support
-        # chmod), so warn rather than fail. The mount point perms (0700) and
-        # short mount window limit exposure. Hard-failing here would break
-        # the most common USB format.
-        perms=$(${pkgs.coreutils}/bin/stat -c '%a' "$resolved" 2>/dev/null || echo "???")
-        case "$perms" in
-          400|600) ;; # good
-          *) echo "braid-auto-unlock: WARNING: keyfile perms are $perms (expected 400)" >&2 ;;
-        esac
+          # Warn if keyfile is world/group-readable. On vfat (no Unix perms),
+          # files are typically 0755 — we can't fix that (vfat doesn't support
+          # chmod), so warn rather than fail. The mount point perms (0700) and
+          # short mount window limit exposure. Hard-failing here would break
+          # the most common USB format.
+          perms=$(${pkgs.coreutils}/bin/stat -c '%a' "$resolved" 2>/dev/null || echo "???")
+          case "$perms" in
+            400|600) ;; # good
+            *) echo "braid-auto-unlock: WARNING: keyfile perms are $perms (expected 400)" >&2 ;;
+          esac
 
-        if braid unlock --key-file "$resolved"${lib.optionalString cfg.autoUnlock.allowDegraded " --allow-degraded"}; then
-          echo "braid-auto-unlock: pool unlocked successfully" >&2
-        else
-          ret=$?
-          if [ $ret -eq 2 ]; then
-            echo "braid-auto-unlock: pool has missing devices — not mounted" >&2
-            echo "braid-auto-unlock: set braid.autoUnlock.allowDegraded = true to allow degraded mount" >&2
+          if braid unlock --key-file "$resolved"${lib.optionalString cfg.autoUnlock.allowDegraded " --allow-degraded"}; then
+            echo "braid-auto-unlock: pool unlocked successfully" >&2
           else
-            echo "braid-auto-unlock: unlock failed (exit $ret), skipping" >&2
+            ret=$?
+            if [ $ret -eq 2 ]; then
+              echo "braid-auto-unlock: pool has missing devices — not mounted" >&2
+              echo "braid-auto-unlock: set braid.autoUnlock.allowDegraded = true to allow degraded mount" >&2
+            else
+              echo "braid-auto-unlock: unlock failed (exit $ret), skipping" >&2
+            fi
           fi
-        fi
 
-        # Always unmount USB after use. Never leave keyfile accessible — this
-        # is the Unraid CVE pattern (plaintext credential on a mounted FS).
-        umount /run/braid-key 2>/dev/null || true
-        exit 0
-      '';
+          # Always unmount USB after use. Never leave keyfile accessible — this
+          # is the Unraid CVE pattern (plaintext credential on a mounted FS).
+          umount /run/braid-key 2>/dev/null || true
+          exit 0
+        '';
     };
   };
 }
