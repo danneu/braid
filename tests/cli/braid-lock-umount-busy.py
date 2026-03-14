@@ -42,7 +42,9 @@ with subtest("Setup: create 2-disk pool with test file"):
 
 with subtest("braid lock fails with lsof/fuser hint when mount is busy"):
     # Hold the mount busy with tail -f in the background
-    machine.succeed("nohup tail -f /mnt/storage/test.txt > /dev/null 2>&1 &")
+    pid = machine.succeed("nohup tail -f /mnt/storage/test.txt > /dev/null 2>&1 & echo $!").strip()
+    # Wait until that specific tail process has the file open
+    machine.wait_until_succeeds(f"lsof -t /mnt/storage/test.txt | grep -qx {pid}", timeout=10)
 
     exit_code, output = machine.execute("braid lock 2>&1")
     print(f"Exit code: {exit_code}")
@@ -55,7 +57,7 @@ with subtest("braid lock fails with lsof/fuser hint when mount is busy"):
 # --- Test 2: After killing blocker, braid lock succeeds ---
 
 with subtest("After killing blocker, braid lock succeeds"):
-    machine.succeed("pkill -f 'tail -f /mnt/storage/test.txt'")
+    machine.succeed(f"kill {pid}")
     machine.succeed("braid lock")
 
     machine.fail("mountpoint -q /mnt/storage")
