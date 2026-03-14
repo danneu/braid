@@ -56,25 +56,28 @@ with subtest("start balance in background"):
         "> /tmp/balance.log 2>&1 < /dev/null &"
     )
 
-# 5. Poll until balance is confirmed running
-with subtest("wait for balance to be running"):
-    machine.succeed(
-        "for i in $(seq 1 2400); do "
-        'out="$(btrfs balance status /mnt/storage 2>&1 || true)"; '
-        "if printf '%s\\n' \"$out\" | grep -Eq 'is (running|paused)'; then "
-        "exit 0; fi; sleep 0.05; done; exit 1"
-    )
-
-# 6. Run braid status while balance is in progress
+# 5. Poll braid status until we catch a running balance (eliminates host round-trip race)
 with subtest("status during balance"):
-    output = machine.succeed("braid status")
+    output = machine.succeed(
+        "for i in $(seq 1 200); do "
+        'out="$(braid status 2>&1)"; '
+        "if printf '%s\\n' \"$out\" | grep -q 'Balance:'; then "
+        "printf '%s\\n' \"$out\"; exit 0; fi; "
+        "sleep 0.05; done; exit 1"
+    )
     print(f"status during balance:\n{output}")
     assert "Pool:" in output, f"Expected 'Pool:':\n{output}"
     assert "Drives:" in output, f"Expected 'Drives:':\n{output}"
     assert "Balance:" in output, f"Expected 'Balance:' line:\n{output}"
 
 with subtest("json status during balance"):
-    raw = machine.succeed("braid status --json")
+    raw = machine.succeed(
+        "for i in $(seq 1 200); do "
+        'out="$(braid status --json 2>&1)"; '
+        "if printf '%s\\n' \"$out\" | grep -q '\"balance\"'; then "
+        "printf '%s\\n' \"$out\"; exit 0; fi; "
+        "sleep 0.05; done; exit 1"
+    )
     s = json.loads(raw)
     assert s["status"] in ("intact", "degraded"), (
         f"Expected intact or degraded: {s['status']}"
