@@ -462,7 +462,16 @@ fn get_profile<R: CommandRunner>(runner: &R, mount_point: &str) -> Result<String
         mount_point: MountPoint(mount_point.to_owned()),
     })?;
     let df = parse_btrfs_df_json(&raw)?;
-    Ok(df.data_profile())
+    let profiles = df.profiles_for(crate::parse::types::BtrfsBgType::Data);
+    if profiles.is_empty() {
+        Ok("unknown".to_owned())
+    } else {
+        Ok(profiles
+            .iter()
+            .map(|p| p.to_string())
+            .collect::<Vec<_>>()
+            .join(", "))
+    }
 }
 
 fn get_capacity<R: CommandRunner>(

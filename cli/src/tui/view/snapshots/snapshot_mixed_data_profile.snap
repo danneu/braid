@@ -6,6 +6,7 @@ Data  Sharing
  Pool ──────────────────────────────────────────────────────
  Path       /mnt/storage
  Type       Profile  Used       Allocated
+ Data       single   512.0 MiB  1.0 GiB
  Data       RAID1    2.1 TiB    5.4 TiB
  Metadata   RAID1    1.5 GiB    2.0 GiB
  System     RAID1    0.0 MiB    16.0 MiB

@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use crate::types::LuksUuid;
 
 // --- JSON command output structs ---
@@ -36,12 +38,23 @@ pub struct FindmntOutput {
 }
 
 /// btrfs --format json filesystem df
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum BtrfsBgType {
     Data,
     Metadata,
     System,
     GlobalReserve,
+}
+
+impl std::fmt::Display for BtrfsBgType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Data => "Data",
+            Self::Metadata => "Metadata",
+            Self::System => "System",
+            Self::GlobalReserve => "GlobalReserve",
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -75,7 +88,7 @@ impl std::fmt::Display for BtrfsProfile {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct BtrfsDfEntry {
     pub bg_type: BtrfsBgType,
     pub bg_profile: BtrfsProfile,
@@ -89,15 +102,12 @@ pub struct BtrfsDfOutput {
 }
 
 impl BtrfsDfOutput {
-    /// Return the data profile string (e.g. "RAID1", "single").
-    /// Falls back to the first entry's profile, or "unknown".
-    pub fn data_profile(&self) -> String {
+    pub fn profiles_for(&self, bg_type: BtrfsBgType) -> BTreeSet<BtrfsProfile> {
         self.entries
             .iter()
-            .find(|e| e.bg_type == BtrfsBgType::Data)
-            .or_else(|| self.entries.first())
-            .map(|e| e.bg_profile.to_string())
-            .unwrap_or_else(|| "unknown".to_owned())
+            .filter(|e| e.bg_type == bg_type)
+            .map(|e| e.bg_profile.clone())
+            .collect()
     }
 }
 

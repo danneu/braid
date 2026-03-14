@@ -4,8 +4,8 @@ use std::time::Instant;
 use crate::cmd::{CmdRequest, CommandRunner};
 use crate::parse::types::{ScrubState, SmartHealth};
 use crate::parse::{
-    parse_btrfs_device_usage, parse_btrfs_filesystem_usage, parse_btrfs_scrub_status,
-    parse_cryptsetup_luks_dump, parse_lsblk_json, parse_smartctl_health,
+    parse_btrfs_device_usage, parse_btrfs_scrub_status, parse_cryptsetup_luks_dump,
+    parse_lsblk_json, parse_smartctl_health,
 };
 use crate::probe::probe_pool;
 use crate::status::get_balance_report;
@@ -23,20 +23,12 @@ pub fn probe_pool_for_tui<R: CommandRunner>(
         return Ok(None);
     }
 
-    let usage_raw = runner
-        .run(&CmdRequest::BtrfsFilesystemUsageRaw {
-            mount_point: MountPoint(mount_point.to_owned()),
-        })
-        .map_err(|e| e.to_string())?;
-    let usage = parse_btrfs_filesystem_usage(&usage_raw).map_err(|e| e.to_string())?;
-
     let df_raw = runner
         .run(&CmdRequest::BtrfsFilesystemDfJson {
             mount_point: MountPoint(mount_point.to_owned()),
         })
         .map_err(|e| e.to_string())?;
     let df = crate::parse::parse_btrfs_df_json(&df_raw).map_err(|e| e.to_string())?;
-    let profile = df.data_profile();
 
     let dev_usage_raw = runner
         .run(&CmdRequest::BtrfsDeviceUsageRaw {
@@ -133,9 +125,7 @@ pub fn probe_pool_for_tui<R: CommandRunner>(
 
     Ok(Some(PoolState {
         mount_point: MountPoint(mount_point.to_owned()),
-        profile: profile.to_owned(),
-        used: usage.used_bytes,
-        total: usage.free_estimated_bytes + usage.used_bytes,
+        df_entries: df.entries,
         disk_usage,
         disk_transport,
         smart_health,
@@ -218,27 +208,7 @@ mod tests {
                 CmdRequest::CryptsetupLuksUuid { device: "/dev/vdb".into() },
                 ok_raw("cryptsetup luksUUID", "22222222-2222-2222-2222-222222222222\n"),
             )
-            // btrfs filesystem usage --raw
-            .with_output(
-                CmdRequest::BtrfsFilesystemUsageRaw { mount_point: mp.clone() },
-                ok_raw(
-                    "btrfs filesystem usage",
-                    "Overall:\n\
-                     \x20   Device size:\t\t        1040187392\n\
-                     \x20   Device allocated:\t\t         254935040\n\
-                     \x20   Device unallocated:\t\t         785252352\n\
-                     \x20   Device missing:\t\t                 0\n\
-                     \x20   Device slack:\t\t                 0\n\
-                     \x20   Used:\t\t\t          33914880\n\
-                     \x20   Free (estimated):\t\t         442957824\t(min: 442957824)\n\
-                     \x20   Free (statfs, df):\t\t         441909248\n\
-                     \x20   Data ratio:\t\t\t              2.00\n\
-                     \x20   Metadata ratio:\t\t              2.00\n\
-                     \x20   Global reserve:\t\t           5767168\t(used: 0)\n\
-                     \x20   Multiple profiles:\t\t                no\n",
-                ),
-            )
-            // btrfs filesystem df --json (for profile detection)
+            // btrfs filesystem df --json
             .with_output(
                 CmdRequest::BtrfsFilesystemDfJson { mount_point: mp.clone() },
                 ok_raw(

@@ -21,7 +21,10 @@ use model::{DiskLuksInfo, DiskUsage, Model, PoolState, PoolStatus};
 use view::view;
 
 use crate::config::config_read;
-use crate::parse::types::{DeviceAllocation, ScrubState, ScrubTimestamp, SmartHealth};
+use crate::parse::types::{
+    BtrfsBgType, BtrfsDfEntry, BtrfsProfile, DeviceAllocation, ScrubState, ScrubTimestamp,
+    SmartHealth,
+};
 use crate::types::MountPoint;
 
 pub fn run(config_path: &Path) -> io::Result<()> {
@@ -162,9 +165,32 @@ pub fn run_demo() -> io::Result<()> {
     ]);
     let pool = PoolState {
         mount_point: MountPoint("/mnt/storage".to_owned()),
-        profile: "RAID1".to_owned(),
-        used: 2_308_094_370_816,
-        total: 5_937_955_045_376,
+        df_entries: vec![
+            BtrfsDfEntry {
+                bg_type: BtrfsBgType::Data,
+                bg_profile: BtrfsProfile::Raid1,
+                bg_used: 2_308_094_370_816,
+                bg_total: 5_937_955_045_376,
+            },
+            BtrfsDfEntry {
+                bg_type: BtrfsBgType::Metadata,
+                bg_profile: BtrfsProfile::Raid1,
+                bg_used: 1_610_612_736,
+                bg_total: 2_147_483_648,
+            },
+            BtrfsDfEntry {
+                bg_type: BtrfsBgType::System,
+                bg_profile: BtrfsProfile::Raid1,
+                bg_used: 16_384,
+                bg_total: 16_777_216,
+            },
+            BtrfsDfEntry {
+                bg_type: BtrfsBgType::GlobalReserve,
+                bg_profile: BtrfsProfile::Single,
+                bg_used: 0,
+                bg_total: 5_767_168,
+            },
+        ],
         disk_usage,
         disk_transport,
         smart_health,

@@ -2,8 +2,8 @@ use serde::Deserialize;
 
 use crate::cmd::RawCommandOutput;
 
-use super::types::{BtrfsBgType, BtrfsDfEntry, BtrfsDfOutput, BtrfsProfile};
 use super::ParseError;
+use super::types::{BtrfsBgType, BtrfsDfEntry, BtrfsDfOutput, BtrfsProfile};
 
 // --- Serde helper structs (not exposed to domain code) ---
 
@@ -66,7 +66,7 @@ pub fn parse_btrfs_df_json(raw: &RawCommandOutput) -> Result<BtrfsDfOutput, Pars
                         cmd: raw.cmd.clone(),
                         field: "bg-type".into(),
                         value: other.into(),
-                    })
+                    });
                 }
             };
             let bg_profile = match e.bg_profile.as_str() {
@@ -170,6 +170,104 @@ mod tests {
         };
         let err = parse_btrfs_df_json(&raw).unwrap_err();
         assert!(matches!(err, ParseError::CommandFailed { .. }));
+    }
+
+    #[test]
+    fn profiles_for_single_entry() {
+        let df = BtrfsDfOutput {
+            entries: vec![BtrfsDfEntry {
+                bg_type: BtrfsBgType::Data,
+                bg_profile: BtrfsProfile::Raid1,
+                bg_used: 100,
+                bg_total: 200,
+            }],
+        };
+        let profiles = df.profiles_for(BtrfsBgType::Data);
+        assert_eq!(profiles.len(), 1);
+        assert!(profiles.contains(&BtrfsProfile::Raid1));
+    }
+
+    #[test]
+    fn profiles_for_mixed() {
+        let df = BtrfsDfOutput {
+            entries: vec![
+                BtrfsDfEntry {
+                    bg_type: BtrfsBgType::Data,
+                    bg_profile: BtrfsProfile::Raid1,
+                    bg_used: 100,
+                    bg_total: 200,
+                },
+                BtrfsDfEntry {
+                    bg_type: BtrfsBgType::Data,
+                    bg_profile: BtrfsProfile::Single,
+                    bg_used: 50,
+                    bg_total: 100,
+                },
+            ],
+        };
+        let profiles = df.profiles_for(BtrfsBgType::Data);
+        assert_eq!(profiles.len(), 2);
+        assert!(profiles.contains(&BtrfsProfile::Single));
+        assert!(profiles.contains(&BtrfsProfile::Raid1));
+    }
+
+    #[test]
+    fn profiles_for_no_entries() {
+        let df = BtrfsDfOutput {
+            entries: vec![BtrfsDfEntry {
+                bg_type: BtrfsBgType::Metadata,
+                bg_profile: BtrfsProfile::Raid1,
+                bg_used: 100,
+                bg_total: 200,
+            }],
+        };
+        let profiles = df.profiles_for(BtrfsBgType::Data);
+        assert!(profiles.is_empty());
+    }
+
+    #[test]
+    fn profiles_for_metadata() {
+        let df = BtrfsDfOutput {
+            entries: vec![
+                BtrfsDfEntry {
+                    bg_type: BtrfsBgType::Data,
+                    bg_profile: BtrfsProfile::Raid1,
+                    bg_used: 100,
+                    bg_total: 200,
+                },
+                BtrfsDfEntry {
+                    bg_type: BtrfsBgType::Metadata,
+                    bg_profile: BtrfsProfile::Dup,
+                    bg_used: 50,
+                    bg_total: 100,
+                },
+            ],
+        };
+        let profiles = df.profiles_for(BtrfsBgType::Metadata);
+        assert_eq!(profiles.len(), 1);
+        assert!(profiles.contains(&BtrfsProfile::Dup));
+    }
+
+    #[test]
+    fn profiles_for_deduplicates() {
+        let df = BtrfsDfOutput {
+            entries: vec![
+                BtrfsDfEntry {
+                    bg_type: BtrfsBgType::Data,
+                    bg_profile: BtrfsProfile::Raid1,
+                    bg_used: 100,
+                    bg_total: 200,
+                },
+                BtrfsDfEntry {
+                    bg_type: BtrfsBgType::Data,
+                    bg_profile: BtrfsProfile::Raid1,
+                    bg_used: 300,
+                    bg_total: 400,
+                },
+            ],
+        };
+        let profiles = df.profiles_for(BtrfsBgType::Data);
+        assert_eq!(profiles.len(), 1);
     }
 
     #[test]

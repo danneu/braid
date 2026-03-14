@@ -1,25 +1,24 @@
 ---
 source: cli/src/tui/view/mod.rs
-assertion_line: 873
 expression: buffer_to_string(&terminal)
 ---
 Data  Sharing
  Pool ──────────────────────────────────────────────────────
- Path ┌ Disk Detail ─────────────────────────────────┐
- Redun│ Disk       toshiba                           │
- Usage│ Status     unlocked                          │
- █████│ Cipher     aes-xts-plain64                   │
-      │ Key size   512 bits                          │
- Disks│ Keyslots   1 of 32 slots used                │──────
-     N│                                              │
- ▶ 1 t│ Allocations ──────────────────────────────── │
-   2 i│ Type        Profile     Size                 │
-   3 w│ Data        RAID1       1.3 TiB              │
-      │ Metadata    DUP         1.5 GiB              │
- Scrub│ System      DUP         16.0 MiB             │──────
- Last │ Unallocated             4.1 TiB              │
- Error│                                              │
- Total│ r reload · Esc to go back                    │
- Rate └──────────────────────────────────────────────┘
- Duration     0:00:00
+      ┌ Disk Detail ─────────────────────────────────┐
+ Type │ Disk       toshiba                           │
+ Data │ Status     unlocked                          │
+ Metad│ Cipher     aes-xts-plain64                   │
+ Syste│ Key size   512 bits                          │
+      │ Keyslots   1 of 32 slots used                │
+ Disks│                                              │──────
+     N│ Allocations ──────────────────────────────── │
+ ▶ 1 t│ Type        Profile     Size                 │
+   2 i│ Data        RAID1       1.3 TiB              │
+   3 w│ Metadata    DUP         1.5 GiB              │
+      │ System      DUP         16.0 MiB             │
+ Scrub│ Unallocated             4.1 TiB              │──────
+ Last │                                              │
+ Error│ r reload · Esc to go back                    │
+ Total└──────────────────────────────────────────────┘
+ Rate         32.34MiB/s
 Quit: q │ Help: ? │ Reload: r

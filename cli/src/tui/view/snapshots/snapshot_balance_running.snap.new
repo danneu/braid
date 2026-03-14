@@ -1,14 +1,16 @@
 ---
 source: cli/src/tui/view/mod.rs
+assertion_line: 930
 expression: buffer_to_string(&terminal)
 ---
 Data  Sharing
  Pool ──────────────────────────────────────────────────────
- Path       /mnt/storage
- Type       Profile  Used       Allocated
- Data       RAID1    2.1 TiB    5.4 TiB
- Metadata   RAID1    1.5 GiB    2.0 GiB
- System     RAID1    0.0 MiB    16.0 MiB
+ Path                                   /mnt/storage
+ Balance                                rebalancing — 108/16
+ Type       Profile  Used               Total
+ Data       RAID1    2.1 TiB (38%)      5.4 TiB
+ Metadata   RAID1    1.5 GiB (75%)      2.0 GiB
+ System     RAID1    0.0 MiB (0%)       16.0 MiB
  Disks ─────────────────────────────────────────────────────
      Name     Bus  SMART   Allocated
  ▶ 1 toshiba  sata ok      25%  1.4 / 5.5 TiB

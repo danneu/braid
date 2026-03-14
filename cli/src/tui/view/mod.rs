@@ -4,11 +4,11 @@ use ratatui::text::{Line, Span};
 mod help;
 
 use ratatui::Frame;
-use ratatui::widgets::{Block, Borders, Clear, Gauge, Padding, Paragraph, Row, Table, TableState};
+use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph, Row, Table, TableState};
 use time::PrimitiveDateTime;
 use time::macros::format_description;
 
-use crate::parse::types::{ScrubState, SmartHealth};
+use crate::parse::types::{BtrfsBgType, ScrubState, SmartHealth};
 use crate::status::BalanceReport;
 use crate::tui::model::{Model, PoolState, PoolStatus, Tab};
 
@@ -91,16 +91,12 @@ fn section_block(title: &str) -> Block<'_> {
         .padding(ratatui::widgets::Padding::left(1))
 }
 
-fn pool_table(pool: &PoolState, unit: ByteUnit) -> Table<'_> {
-    let redundancy = match pool.profile.as_str() {
-        "RAID1" => "2x (RAID1)",
-        "single" => "None (single)",
-        other => other,
-    };
-    let mut rows = vec![
-        Row::new(["Path".to_owned(), pool.mount_point.0.clone()]),
-        Row::new(["Redundancy".to_owned(), redundancy.to_owned()]),
-    ];
+fn pool_info(pool: &PoolState) -> Paragraph<'_> {
+    let dim = Style::default().fg(Color::DarkGray);
+    let mut lines = vec![Line::from(vec![
+        Span::styled("Path       ", dim),
+        Span::raw(pool.mount_point.0.clone()),
+    ])];
 
     match &pool.balance {
         BalanceReport::Running {
@@ -110,15 +106,15 @@ fn pool_table(pool: &PoolState, unit: ByteUnit) -> Table<'_> {
             ..
         } => {
             let pct_complete = 100u8.saturating_sub(*pct_left);
-            rows.push(
-                Row::new([
-                    "Balance".to_owned(),
+            lines.push(Line::from(vec![
+                Span::styled("Balance    ", Style::default().fg(Color::Yellow)),
+                Span::styled(
                     format!(
                         "rebalancing — {done_chunks}/{estimated_total_chunks} chunks ({pct_complete}% complete)"
                     ),
-                ])
-                .style(Style::default().fg(Color::Yellow)),
-            );
+                    Style::default().fg(Color::Yellow),
+                ),
+            ]));
         }
         BalanceReport::Paused {
             done_chunks,
@@ -127,37 +123,64 @@ fn pool_table(pool: &PoolState, unit: ByteUnit) -> Table<'_> {
             ..
         } => {
             let pct_complete = 100u8.saturating_sub(*pct_left);
-            rows.push(
-                Row::new([
-                    "Balance".to_owned(),
+            lines.push(Line::from(vec![
+                Span::styled("Balance    ", Style::default().fg(Color::Yellow)),
+                Span::styled(
                     format!(
                         "paused — {done_chunks}/{estimated_total_chunks} chunks ({pct_complete}% complete)"
                     ),
-                ])
-                .style(Style::default().fg(Color::Yellow)),
-            );
+                    Style::default().fg(Color::Yellow),
+                ),
+            ]));
         }
         BalanceReport::Unknown => {
-            rows.push(
-                Row::new(["Balance".to_owned(), "unknown".to_owned()])
-                    .style(Style::default().fg(Color::Yellow)),
-            );
+            lines.push(Line::from(Span::styled(
+                "Balance    unknown",
+                Style::default().fg(Color::Yellow),
+            )));
         }
         BalanceReport::Idle => {}
     }
 
-    rows.push(Row::new([
-        "Usage".to_owned(),
-        format!(
-            "{:.0}% ({} / {} {})",
-            percent(pool.used, pool.total),
-            unit.format(pool.used),
-            unit.format(pool.total),
-            unit.suffix(),
-        ),
-    ]));
-    let widths = [Constraint::Length(12), Constraint::Min(10)];
-    Table::new(rows, widths).block(section_block("Pool"))
+    Paragraph::new(lines)
+}
+
+fn pool_df_table(pool: &PoolState) -> Table<'_> {
+    let header = Row::new(["Type", "Profile", "Used", "Allocated"])
+        .style(Style::default().fg(Color::DarkGray));
+
+    let mut entries: Vec<_> = pool
+        .df_entries
+        .iter()
+        .filter(|e| e.bg_type != BtrfsBgType::GlobalReserve)
+        .collect();
+    entries.sort();
+
+    let rows: Vec<Row> = entries
+        .iter()
+        .map(|entry| {
+            let used_unit = ByteUnit::friendliest(entry.bg_used);
+            let total_unit = ByteUnit::friendliest(entry.bg_total);
+            Row::new([
+                entry.bg_type.to_string(),
+                entry.bg_profile.to_string(),
+                format!("{} {}", used_unit.format(entry.bg_used), used_unit.suffix()),
+                format!(
+                    "{} {}",
+                    total_unit.format(entry.bg_total),
+                    total_unit.suffix()
+                ),
+            ])
+        })
+        .collect();
+
+    let widths = [
+        Constraint::Length(10),
+        Constraint::Length(8),
+        Constraint::Length(10),
+        Constraint::Min(10),
+    ];
+    Table::new(rows, widths).header(header)
 }
 
 fn pool_balance_rows(pool: &PoolState) -> u16 {
@@ -354,13 +377,7 @@ fn disk_table(model: &Model, unit: ByteUnit) -> Table<'_> {
 
 fn page_unit(model: &Model) -> ByteUnit {
     let max_bytes = match model.pool.current() {
-        Some(p) => p
-            .disk_usage
-            .values()
-            .map(|u| u.size)
-            .chain(Some(p.total))
-            .max()
-            .unwrap_or(0),
+        Some(p) => p.disk_usage.values().map(|u| u.size).max().unwrap_or(0),
         None => 0,
     };
     ByteUnit::friendliest(max_bytes)
@@ -394,7 +411,15 @@ fn view_data(model: &Model, frame: &mut Frame, area: Rect, now: PrimitiveDateTim
 
     // +1 per section for top border
     let pool_height: u16 = match model.pool.current() {
-        Some(p) => 3 + pool_balance_rows(p) + 1 + 1, // +1 gauge
+        Some(p) => {
+            let df_rows = p
+                .df_entries
+                .iter()
+                .filter(|e| e.bg_type != BtrfsBgType::GlobalReserve)
+                .count() as u16;
+            // border + Path + balance + blank + header + entries
+            1 + 1 + pool_balance_rows(p) + 1 + 1 + df_rows
+        }
         None => 1 + 1,
     };
     let disk_height: u16 = model.disk_names.len() as u16 + 2; // +1 border, +1 header
@@ -432,24 +457,23 @@ fn view_data(model: &Model, frame: &mut Frame, area: Rect, now: PrimitiveDateTim
         PoolStatus::Mounted(pool)
         | PoolStatus::Refreshing(pool)
         | PoolStatus::ErrorStale(_, pool) => {
+            let info_rows = 1 + pool_balance_rows(pool); // Path + balance
+            let df_rows = pool
+                .df_entries
+                .iter()
+                .filter(|e| e.bg_type != BtrfsBgType::GlobalReserve)
+                .count() as u16
+                + 1; // +1 header
             let pool_inner = Layout::vertical([
-                Constraint::Min(0),    // table
-                Constraint::Length(1), // gauge
+                Constraint::Length(info_rows + 1), // section border + info lines
+                Constraint::Length(1),             // blank line
+                Constraint::Length(df_rows),       // header + data rows
             ])
             .split(chunks[0]);
-            frame.render_widget(pool_table(pool, page_unit), pool_inner[0]);
-            let ratio = if pool.total > 0 {
-                pool.used as f64 / pool.total as f64
-            } else {
-                0.0
-            };
+            frame.render_widget(pool_info(pool).block(section_block("Pool")), pool_inner[0]);
             frame.render_widget(
-                Gauge::default()
-                    .ratio(ratio)
-                    .label("")
-                    .gauge_style(Style::default().fg(Color::Cyan).bg(Color::DarkGray))
-                    .block(Block::new().padding(ratatui::widgets::Padding::left(1))),
-                pool_inner[1],
+                pool_df_table(pool).block(Block::new().padding(Padding::left(1))),
+                pool_inner[2],
             );
         }
         PoolStatus::Error(msg) => {
@@ -667,7 +691,7 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
-    use crate::parse::types::DeviceAllocation;
+    use crate::parse::types::{BtrfsBgType, BtrfsDfEntry, BtrfsProfile, DeviceAllocation};
     use crate::parse::types::{ScrubState, ScrubTimestamp, SmartHealth};
     use crate::tui::model::{DiskLuksInfo, DiskUsage};
     use crate::types::MountPoint;
@@ -839,9 +863,32 @@ mod tests {
         ]);
         PoolState {
             mount_point: MountPoint("/mnt/storage".to_owned()),
-            profile: "RAID1".to_owned(),
-            used: 2_308_094_370_816,  // ~2.1 TiB
-            total: 5_937_955_045_376, // ~5.4 TiB
+            df_entries: vec![
+                BtrfsDfEntry {
+                    bg_type: BtrfsBgType::Data,
+                    bg_profile: BtrfsProfile::Raid1,
+                    bg_used: 2_308_094_370_816,
+                    bg_total: 5_937_955_045_376,
+                },
+                BtrfsDfEntry {
+                    bg_type: BtrfsBgType::Metadata,
+                    bg_profile: BtrfsProfile::Raid1,
+                    bg_used: 1_610_612_736,
+                    bg_total: 2_147_483_648,
+                },
+                BtrfsDfEntry {
+                    bg_type: BtrfsBgType::System,
+                    bg_profile: BtrfsProfile::Raid1,
+                    bg_used: 16_384,
+                    bg_total: 16_777_216,
+                },
+                BtrfsDfEntry {
+                    bg_type: BtrfsBgType::GlobalReserve,
+                    bg_profile: BtrfsProfile::Single,
+                    bg_used: 0,
+                    bg_total: 5_767_168,
+                },
+            ],
             disk_usage,
             disk_transport,
             smart_health,
@@ -861,7 +908,7 @@ mod tests {
     #[test]
     fn snapshot_with_pool() {
         let model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(sample_pool()));
-        let terminal = render(&model, 60, 22);
+        let terminal = render(&model, 60, 24);
         snap!(buffer_to_string(&terminal));
     }
 
@@ -883,7 +930,7 @@ mod tests {
             pct_left: 32,
         };
         let model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(pool));
-        let terminal = render(&model, 60, 24);
+        let terminal = render(&model, 60, 26);
         snap!(buffer_to_string(&terminal));
     }
 
@@ -892,7 +939,47 @@ mod tests {
         let mut pool = sample_pool();
         pool.balance = BalanceReport::Unknown;
         let model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(pool));
-        let terminal = render(&model, 60, 24);
+        let terminal = render(&model, 60, 26);
+        snap!(buffer_to_string(&terminal));
+    }
+
+    #[test]
+    fn snapshot_mixed_data_profile() {
+        let mut pool = sample_pool();
+        pool.df_entries = vec![
+            BtrfsDfEntry {
+                bg_type: BtrfsBgType::Data,
+                bg_profile: BtrfsProfile::Single,
+                bg_used: 536_870_912,
+                bg_total: 1_073_741_824,
+            },
+            BtrfsDfEntry {
+                bg_type: BtrfsBgType::Data,
+                bg_profile: BtrfsProfile::Raid1,
+                bg_used: 2_308_094_370_816,
+                bg_total: 5_937_955_045_376,
+            },
+            BtrfsDfEntry {
+                bg_type: BtrfsBgType::Metadata,
+                bg_profile: BtrfsProfile::Raid1,
+                bg_used: 1_610_612_736,
+                bg_total: 2_147_483_648,
+            },
+            BtrfsDfEntry {
+                bg_type: BtrfsBgType::System,
+                bg_profile: BtrfsProfile::Raid1,
+                bg_used: 16_384,
+                bg_total: 16_777_216,
+            },
+            BtrfsDfEntry {
+                bg_type: BtrfsBgType::GlobalReserve,
+                bg_profile: BtrfsProfile::Single,
+                bg_used: 0,
+                bg_total: 5_767_168,
+            },
+        ];
+        let model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(pool));
+        let terminal = render(&model, 60, 26);
         snap!(buffer_to_string(&terminal));
     }
 

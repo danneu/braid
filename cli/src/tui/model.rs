@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use crate::parse::types::{DeviceAllocation, ScrubState, SmartHealth};
+use crate::parse::types::{BtrfsDfEntry, DeviceAllocation, ScrubState, SmartHealth};
 use crate::status::BalanceReport;
 use crate::tui::effect::Effect;
 use crate::tui::state::{CmdId, CommandState};
@@ -61,9 +61,7 @@ impl DiskUsage {
 #[derive(Clone)]
 pub struct PoolState {
     pub mount_point: MountPoint,
-    pub profile: String,
-    pub used: u64,
-    pub total: u64,
+    pub df_entries: Vec<BtrfsDfEntry>,
     pub disk_usage: HashMap<String, DiskUsage>,
     pub disk_transport: HashMap<String, String>,
     pub smart_health: HashMap<String, SmartHealth>,
