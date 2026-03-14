@@ -5,10 +5,10 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 mod help;
 
-use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph, Row, Table, TableState};
 use ratatui::Frame;
-use time::macros::format_description;
+use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph, Row, Table, TableState};
 use time::PrimitiveDateTime;
+use time::macros::format_description;
 
 use crate::parse::types::{BtrfsBgType, ScrubState, SmartHealth};
 use crate::status::BalanceReport;
@@ -447,7 +447,6 @@ fn view_data(model: &Model, frame: &mut Frame, area: Rect, now: PrimitiveDateTim
         Some(p) => scrub_lines(&p.scrub) + 1,
         None => 0,
     };
-
     let chunks = Layout::vertical([
         Constraint::Length(pool_height),  // [0] pool
         Constraint::Length(disk_height),  // [1] disks
@@ -671,20 +670,39 @@ fn view_disk_detail(model: &Model, frame: &mut Frame, area: Rect) {
 
 pub fn view(model: &Model, frame: &mut Frame, now: PrimitiveDateTime) {
     let area = frame.area();
+    let advisory_height = model.advisories.len() as u16;
 
-    let outer = Layout::vertical([
-        Constraint::Length(1), // [0] tab bar
-        Constraint::Length(1), // [1] spacer
-        Constraint::Min(0),    // [2] tab body
-        Constraint::Length(1), // [3] footer
-    ])
-    .split(area);
+    let mut constraints = Vec::new();
+    if advisory_height > 0 {
+        constraints.push(Constraint::Length(advisory_height));
+    }
+    constraints.push(Constraint::Length(1)); // tab bar
+    constraints.push(Constraint::Length(1)); // spacer
+    constraints.push(Constraint::Min(0)); // tab body
+    constraints.push(Constraint::Length(1)); // footer
 
-    frame.render_widget(tab_bar(model.tab), outer[0]);
+    let outer = Layout::vertical(constraints).split(area);
+    let off = (advisory_height > 0) as usize;
+
+    if advisory_height > 0 {
+        let lines: Vec<Line> = model
+            .advisories
+            .iter()
+            .map(|a| {
+                Line::from(Span::styled(
+                    format!("warning: {a}"),
+                    Style::default().fg(Color::Yellow),
+                ))
+            })
+            .collect();
+        frame.render_widget(Paragraph::new(lines), outer[0]);
+    }
+
+    frame.render_widget(tab_bar(model.tab), outer[off]);
 
     match model.tab {
-        Tab::Data => view_data(model, frame, outer[2], now),
-        Tab::Sharing => view_placeholder(frame, outer[2], "Sharing"),
+        Tab::Data => view_data(model, frame, outer[off + 2], now),
+        Tab::Sharing => view_placeholder(frame, outer[off + 2], "Sharing"),
     }
 
     let spinning =
@@ -703,7 +721,7 @@ pub fn view(model: &Model, frame: &mut Frame, now: PrimitiveDateTime) {
     let footer = format!("Quit: q │ Help: ? │ {reload}");
     frame.render_widget(
         Paragraph::new(footer).style(Style::default().fg(Color::DarkGray)),
-        outer[3],
+        outer[off + 3],
     );
 
     if model.show_disk_detail {
@@ -725,8 +743,8 @@ pub(crate) mod tests {
     use crate::parse::types::{ScrubState, ScrubTimestamp, SmartHealth};
     use crate::tui::model::{DiskLuksInfo, DiskUsage};
     use crate::types::MountPoint;
-    use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     fn render(model: &Model, width: u16, height: u16) -> Terminal<TestBackend> {
         let now = time::macros::datetime!(2026-02-24 02:12:00);
@@ -1060,6 +1078,21 @@ pub(crate) mod tests {
         model.probe_duration = Some(Duration::from_millis(42));
         model.spinner_deadline = None;
         let terminal = render(&model, 60, 24);
+        snap!(buffer_to_string(&terminal));
+    }
+
+    /*
+     * Intent: Advisory warning renders as yellow text below scrub section.
+     * Why: users need a visible nudge to copy LUKS header backups offsite.
+     * Scenario: braid add/enroll created header backups; tui shows warning.
+     */
+    #[test]
+    fn snapshot_with_advisory() {
+        let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(sample_pool()));
+        model.advisories = vec![
+            "LUKS header backups exist in /var/lib/braid/luks-headers — copy offsite and delete local copies".to_owned(),
+        ];
+        let terminal = render(&model, 80, 26);
         snap!(buffer_to_string(&terminal));
     }
 }

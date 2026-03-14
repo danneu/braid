@@ -1,5 +1,5 @@
 use crate::cmd::{CmdError, CmdRequest, CommandRunner};
-use crate::config::{mapper_name, DiskConfig};
+use crate::config::{DiskConfig, mapper_name};
 use crate::probe::Filesystem;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
@@ -94,19 +94,20 @@ pub fn luks_format<R: CommandRunner>(
     Ok(())
 }
 
-/// Back up the LUKS header to /var/lib/braid/luks-headers/<mapper>.img
-pub fn backup_luks_header<R: CommandRunner>(
+/// Back up the LUKS header to `dir/<mapper>.luksheader`.
+/// Extracted so tests can pass a tempdir instead of the real path.
+pub(crate) fn backup_luks_header_to<R: CommandRunner>(
     runner: &R,
     device: &str,
     mapper: &str,
+    dir: &std::path::Path,
 ) -> Result<PathBuf, LuksError> {
-    let dir = std::path::Path::new(HEADER_BACKUP_DIR);
     if !dir.exists() {
         std::fs::create_dir_all(dir)?;
         std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
     }
 
-    let backup_path = dir.join(format!("{mapper}.img"));
+    let backup_path = dir.join(format!("{mapper}.luksheader"));
     let result = runner.run(&CmdRequest::CryptsetupLuksHeaderBackup {
         device: device.to_owned(),
         backup_path: backup_path.display().to_string(),
@@ -120,7 +121,28 @@ pub fn backup_luks_header<R: CommandRunner>(
     }
     // cryptsetup already creates the file as 0400, but enforce it ourselves for defense-in-depth
     std::fs::set_permissions(&backup_path, std::fs::Permissions::from_mode(0o400))?;
+
+    // Clean up old .img backup if it exists (migration from .img → .luksheader)
+    let old_path = dir.join(format!("{mapper}.img"));
+    if old_path.exists() {
+        let _ = std::fs::remove_file(&old_path);
+    }
+
     Ok(backup_path)
+}
+
+/// Back up the LUKS header to /var/lib/braid/luks-headers/<mapper>.luksheader
+pub fn backup_luks_header<R: CommandRunner>(
+    runner: &R,
+    device: &str,
+    mapper: &str,
+) -> Result<PathBuf, LuksError> {
+    backup_luks_header_to(
+        runner,
+        device,
+        mapper,
+        std::path::Path::new(HEADER_BACKUP_DIR),
+    )
 }
 
 /// Verify passphrase against an existing LUKS device (test-passphrase).
@@ -280,5 +302,98 @@ pub fn check_key_slot<R: CommandRunner>(
     match parsed.get("keyslots").and_then(|ks| ks.get(&slot_key)) {
         Some(_) => Ok(KeySlotState::Occupied),
         None => Ok(KeySlotState::Empty),
+    }
+}
+
+/// Scan `dir` for `.luksheader` or `.img` files and return advisories.
+/// Extracted so tests can pass a tempdir instead of the real path.
+fn header_backup_advisories_in(dir: &std::path::Path) -> Vec<String> {
+    let has_backups = match std::fs::read_dir(dir) {
+        Ok(entries) => entries.filter_map(|e| e.ok()).any(|e| {
+            e.path()
+                .extension()
+                .map_or(false, |ext| ext == "luksheader" || ext == "img")
+        }),
+        Err(_) => false,
+    };
+    if has_backups {
+        vec![format!(
+            "LUKS header backups exist in {} — copy offsite and delete local copies",
+            dir.display()
+        )]
+    } else {
+        vec![]
+    }
+}
+
+/// Production wrapper — scans HEADER_BACKUP_DIR.
+pub fn header_backup_advisories() -> Vec<String> {
+    header_backup_advisories_in(std::path::Path::new(HEADER_BACKUP_DIR))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /*
+     * Intent: verify advisory returns empty when directory doesn't exist.
+     * Why: no false positives when no backups have ever been created.
+     * Scenario: fresh system, /var/lib/braid/luks-headers doesn't exist yet.
+     */
+    #[test]
+    fn advisory_empty_when_dir_missing() {
+        let dir = std::path::Path::new("/tmp/nonexistent-braid-test-dir");
+        assert!(header_backup_advisories_in(dir).is_empty());
+    }
+
+    /*
+     * Intent: verify advisory returns empty when directory exists but has no backup files.
+     * Why: no false positives from empty directories or unrelated files.
+     * Scenario: backup dir was created but all backups were cleaned up.
+     */
+    #[test]
+    fn advisory_empty_when_dir_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(header_backup_advisories_in(dir.path()).is_empty());
+    }
+
+    /*
+     * Intent: verify advisory fires when .luksheader files are present.
+     * Why: post-migration backups should trigger the security nudge.
+     * Scenario: user ran `braid add`, header backup exists with new extension.
+     */
+    #[test]
+    fn advisory_present_for_luksheader() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("braid-disk1.luksheader"), b"fake").unwrap();
+        let advisories = header_backup_advisories_in(dir.path());
+        assert_eq!(advisories.len(), 1);
+        assert!(advisories[0].contains("copy offsite"));
+    }
+
+    /*
+     * Intent: verify advisory fires when old .img files are present.
+     * Why: pre-migration backups should still trigger the security nudge.
+     * Scenario: user has old-format backups that haven't been migrated yet.
+     */
+    #[test]
+    fn advisory_present_for_img() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("braid-disk1.img"), b"fake").unwrap();
+        let advisories = header_backup_advisories_in(dir.path());
+        assert_eq!(advisories.len(), 1);
+        assert!(advisories[0].contains("copy offsite"));
+    }
+
+    /*
+     * Intent: verify unrelated files don't trigger advisories.
+     * Why: only actual LUKS header backups should produce warnings.
+     * Scenario: other files exist in the directory (e.g. .json, .txt).
+     */
+    #[test]
+    fn advisory_ignores_unrelated_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("notes.txt"), b"hello").unwrap();
+        assert!(header_backup_advisories_in(dir.path()).is_empty());
     }
 }

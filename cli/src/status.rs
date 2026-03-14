@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, LsblkFieldKind};
 use crate::config::{Config, mapper_name};
 use crate::disk_map::{self, DiskMapLoad};
+use crate::luks;
 use crate::parse::types::BalanceState;
 use crate::parse::{
     BtrfsDeviceStatsOutput, ParseError, ScrubState, parse_btrfs_balance_status,
@@ -59,6 +60,8 @@ pub struct StatusReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub allocation: Option<Vec<AllocationEntry>>,
     pub disks: Vec<DiskReport>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub advisories: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -272,6 +275,8 @@ pub fn build_status_report<R: CommandRunner, F: Filesystem>(
     fs: &F,
     config: &Config,
 ) -> Result<StatusReport, StatusError> {
+    let advisories = luks::header_backup_advisories();
+
     let pool = match probe_pool(runner, config.mount_point().as_str()) {
         Ok(p) => p,
         Err(ProbeError::NotBtrfs { .. }) => {
@@ -289,6 +294,7 @@ pub fn build_status_report<R: CommandRunner, F: Filesystem>(
                 balance: None,
                 allocation: None,
                 disks: vec![],
+                advisories: advisories.clone(),
             });
         }
         Err(e) => return Err(e.into()),
@@ -309,6 +315,7 @@ pub fn build_status_report<R: CommandRunner, F: Filesystem>(
             balance: None,
             allocation: None,
             disks: vec![],
+            advisories: advisories.clone(),
         });
     }
 
@@ -352,6 +359,7 @@ pub fn build_status_report<R: CommandRunner, F: Filesystem>(
         balance: Some(balance),
         allocation: Some(df_summary.allocation),
         disks: verbose_ctx.disks,
+        advisories,
     })
 }
 
@@ -362,6 +370,8 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
     verbose: bool,
     json: bool,
 ) -> Result<(), StatusError> {
+    let advisories = luks::header_backup_advisories();
+
     // 1. Probe pool, mapping NotBtrfs to not-mounted
     let pool = match probe_pool(runner, config.mount_point().as_str()) {
         Ok(p) => p,
@@ -390,6 +400,7 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
             balance: None,
             allocation: None,
             disks: vec![],
+            advisories: advisories.clone(),
         };
         if json {
             println!("{}", serde_json::to_string_pretty(&report)?);
@@ -465,6 +476,7 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
             .as_ref()
             .map(|v| v.disks.clone())
             .unwrap_or_default(),
+        advisories,
     };
 
     // 9. Output
@@ -790,6 +802,10 @@ fn format_status_human(
     human_disks: Option<&[HumanDisk]>,
 ) -> String {
     let mut out = String::new();
+
+    for advisory in &report.advisories {
+        out.push_str(&format!("warning: {advisory}\n"));
+    }
 
     out.push_str(&format!("Pool:     {}\n", report.mount_point));
     out.push_str(&format!("Status:   {}\n", report.status));
@@ -1445,6 +1461,7 @@ mod tests {
             balance: None,
             allocation: None,
             disks: vec![],
+            advisories: vec![],
         };
 
         let json_str = serde_json::to_string_pretty(&report).unwrap();
@@ -1500,6 +1517,7 @@ mod tests {
             balance: None,
             allocation: Some(df_summary.allocation),
             disks: vec![],
+            advisories: vec![],
         };
 
         let json_str = serde_json::to_string_pretty(&report).unwrap();
@@ -1547,6 +1565,7 @@ mod tests {
             balance: None,
             allocation: None,
             disks: vec![],
+            advisories: vec![],
         };
 
         let json_str = serde_json::to_string_pretty(&report).unwrap();
@@ -1603,6 +1622,7 @@ mod tests {
             balance: None,
             allocation: None,
             disks: vec![present, missing],
+            advisories: vec![],
         };
 
         let json_str = serde_json::to_string_pretty(&report).unwrap();
@@ -1650,6 +1670,7 @@ mod tests {
             balance: None,
             allocation: None,
             disks: vec![],
+            advisories: vec![],
         };
         let json_str = serde_json::to_string_pretty(&report).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
@@ -1677,6 +1698,7 @@ mod tests {
             balance: None,
             allocation: None,
             disks: vec![],
+            advisories: vec![],
         };
         let json_str = serde_json::to_string_pretty(&report).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
@@ -1718,6 +1740,7 @@ mod tests {
                     generation: 0,
                 }),
             }],
+            advisories: vec![],
         };
         let json_str = serde_json::to_string_pretty(&report).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
@@ -1745,6 +1768,7 @@ mod tests {
             balance: None,
             allocation: None,
             disks: vec![],
+            advisories: vec![],
         };
         let human = format_status_human(&report, None, None);
         assert!(human.contains("not mounted"), "got:\n{human}");
@@ -1791,6 +1815,7 @@ mod tests {
                 },
             ]),
             disks: vec![],
+            advisories: vec![],
         };
         let compact = vec![CompactDrive {
             name: "disk1".to_owned(),
@@ -1853,6 +1878,7 @@ mod tests {
                 },
             ]),
             disks: vec![],
+            advisories: vec![],
         };
         let compact = vec![
             CompactDrive {
@@ -1905,6 +1931,7 @@ mod tests {
             balance: None,
             allocation: None,
             disks: vec![],
+            advisories: vec![],
         };
         let compact = vec![
             CompactDrive {
@@ -1955,6 +1982,7 @@ mod tests {
             balance: None,
             allocation: None,
             disks: vec![],
+            advisories: vec![],
         };
         let human = format_status_human(&report, None, None);
         assert!(
@@ -2004,6 +2032,7 @@ mod tests {
             balance: None,
             allocation: None,
             disks: vec![],
+            advisories: vec![],
         };
 
         let human = format_status_human(&report, None, Some(&human_disks));
@@ -2046,6 +2075,7 @@ mod tests {
             balance: None,
             allocation: None,
             disks: vec![],
+            advisories: vec![],
         };
 
         let human = format_status_human(&report, None, Some(&human_disks));
@@ -2091,6 +2121,7 @@ mod tests {
             balance: None,
             allocation: None,
             disks: vec![],
+            advisories: vec![],
         };
 
         let human = format_status_human(&report, None, Some(&human_disks));
@@ -2237,6 +2268,7 @@ mod tests {
             }),
             allocation: None,
             disks: vec![],
+            advisories: vec![],
         };
         let human = format_status_human(&report, None, None);
         assert!(
@@ -2265,6 +2297,7 @@ mod tests {
             balance: Some(BalanceReport::Unknown),
             allocation: None,
             disks: vec![],
+            advisories: vec![],
         };
         let human = format_status_human(&report, None, None);
         assert!(human.contains("Balance:  unknown"), "got:\n{human}");
@@ -2290,6 +2323,7 @@ mod tests {
             balance: Some(BalanceReport::Idle),
             allocation: None,
             disks: vec![],
+            advisories: vec![],
         };
         let human = format_status_human(&report, None, None);
         assert!(
@@ -2646,6 +2680,7 @@ mod tests {
             balance: None,
             allocation: None,
             disks: vec![],
+            advisories: vec![],
         };
         let human = format_status_human(&report, Some(&compact), None);
         assert!(human.contains("new"), "got:\n{human}");
@@ -2702,6 +2737,7 @@ mod tests {
             balance: None,
             allocation: None,
             disks: vec![],
+            advisories: vec![],
         };
 
         let human = format_status_human(&report, None, Some(&human_disks));
@@ -2741,6 +2777,7 @@ mod tests {
             balance: None,
             allocation: None,
             disks: vec![],
+            advisories: vec![],
         };
 
         let human = format_status_human(&report, None, Some(&human_disks));
@@ -2772,6 +2809,7 @@ mod tests {
             balance: None,
             allocation: None,
             disks: vec![],
+            advisories: vec![],
         };
         let compact = vec![
             CompactDrive {

@@ -1,6 +1,6 @@
 use crate::cmd::CommandRunner;
-use crate::config::{Config, DiskConfig};
-use crate::luks::{self, KeySlotState, LuksError, KEYFILE_SIZE, LUKS_SLOT_KEYFILE};
+use crate::config::{Config, DiskConfig, mapper_name};
+use crate::luks::{self, KEYFILE_SIZE, KeySlotState, LUKS_SLOT_KEYFILE, LuksError};
 use crate::probe::{self, Filesystem};
 use crate::types::ConfigDiskState;
 use std::io::Read;
@@ -118,6 +118,22 @@ fn apply_enrollment<R: CommandRunner>(
     passphrase: &str,
     key_file_path: &Path,
 ) -> Result<(), EnrollKeyFileError> {
+    apply_enrollment_with_backup_dir(
+        runner,
+        plan,
+        passphrase,
+        key_file_path,
+        Path::new(luks::HEADER_BACKUP_DIR),
+    )
+}
+
+fn apply_enrollment_with_backup_dir<R: CommandRunner>(
+    runner: &R,
+    plan: &[DiskEnrollAction],
+    passphrase: &str,
+    key_file_path: &Path,
+    backup_dir: &Path,
+) -> Result<(), EnrollKeyFileError> {
     let mut enrolled = 0u32;
     let mut already = 0u32;
 
@@ -129,6 +145,12 @@ fn apply_enrollment<R: CommandRunner>(
             DiskEnrollAction::NeedsEnroll { name, disk } => {
                 luks::enroll_key_file(runner, &disk.by_id.0, passphrase, key_file_path)?;
                 eprintln!("ok: {} — keyfile enrolled in slot 1", name);
+
+                let mn = mapper_name(name);
+                let backup_path =
+                    luks::backup_luks_header_to(runner, &disk.by_id.0, &mn.0, backup_dir)?;
+                eprintln!("LUKS header backed up: {}", backup_path.display());
+
                 enrolled += 1;
             }
         }
@@ -718,13 +740,41 @@ mod tests {
         let d2 = "/dev/disk/by-id/d2";
         let kf = "/tmp/braid.key";
         let pass = "testpass";
+        let backup_dir = tempfile::tempdir().unwrap();
+
+        // Pre-create backup files — the real cryptsetup would create them,
+        // but MockRunner doesn't touch the filesystem.
+        std::fs::write(backup_dir.path().join("braid-disk1.luksheader"), b"").unwrap();
+        std::fs::write(backup_dir.path().join("braid-disk2.luksheader"), b"").unwrap();
 
         let (e1_req, e1_stdin, e1_out) = enroll_ok(d1, kf, pass);
         let (e2_req, e2_stdin, e2_out) = enroll_ok(d2, kf, pass);
 
         let runner = MockRunner::default()
             .with_output_stdin(e1_req, e1_stdin, e1_out)
-            .with_output_stdin(e2_req, e2_stdin, e2_out);
+            .with_output_stdin(e2_req, e2_stdin, e2_out)
+            .with_output(
+                CmdRequest::CryptsetupLuksHeaderBackup {
+                    device: d1.to_owned(),
+                    backup_path: backup_dir
+                        .path()
+                        .join("braid-disk1.luksheader")
+                        .display()
+                        .to_string(),
+                },
+                ok_raw("cryptsetup luksHeaderBackup", ""),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksHeaderBackup {
+                    device: d2.to_owned(),
+                    backup_path: backup_dir
+                        .path()
+                        .join("braid-disk2.luksheader")
+                        .display()
+                        .to_string(),
+                },
+                ok_raw("cryptsetup luksHeaderBackup", ""),
+            );
 
         let plan = vec![
             DiskEnrollAction::NeedsEnroll {
@@ -737,7 +787,8 @@ mod tests {
             },
         ];
 
-        apply_enrollment(&runner, &plan, pass, Path::new(kf)).unwrap();
+        apply_enrollment_with_backup_dir(&runner, &plan, pass, Path::new(kf), backup_dir.path())
+            .unwrap();
     }
 
     /*
@@ -774,10 +825,26 @@ mod tests {
         let d2 = "/dev/disk/by-id/d2";
         let kf = "/tmp/braid.key";
         let pass = "testpass";
+        let backup_dir = tempfile::tempdir().unwrap();
+
+        // Pre-create backup file (see apply_enrolls_needs_enroll_items).
+        std::fs::write(backup_dir.path().join("braid-disk2.luksheader"), b"").unwrap();
 
         // Only d2 should have enroll called — d1 is AlreadyEnrolled
         let (e2_req, e2_stdin, e2_out) = enroll_ok(d2, kf, pass);
-        let runner = MockRunner::default().with_output_stdin(e2_req, e2_stdin, e2_out);
+        let runner = MockRunner::default()
+            .with_output_stdin(e2_req, e2_stdin, e2_out)
+            .with_output(
+                CmdRequest::CryptsetupLuksHeaderBackup {
+                    device: d2.to_owned(),
+                    backup_path: backup_dir
+                        .path()
+                        .join("braid-disk2.luksheader")
+                        .display()
+                        .to_string(),
+                },
+                ok_raw("cryptsetup luksHeaderBackup", ""),
+            );
 
         let plan = vec![
             DiskEnrollAction::AlreadyEnrolled {
@@ -790,7 +857,8 @@ mod tests {
             },
         ];
 
-        apply_enrollment(&runner, &plan, pass, Path::new(kf)).unwrap();
+        apply_enrollment_with_backup_dir(&runner, &plan, pass, Path::new(kf), backup_dir.path())
+            .unwrap();
     }
 
     // ---- generate_key_file tests ----

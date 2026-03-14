@@ -277,6 +277,12 @@ sudo braid enroll /mnt/usb
 
 Enrolls an existing `braid.key` in the given directory into all pool disks. The passphrase (slot 0) still works.
 
+### LUKS header backups
+
+`braid add`, `braid replace`, and `braid enroll` automatically back up LUKS headers to `/var/lib/braid/luks-headers/<mapper>.luksheader` after formatting or enrolling keyfiles.
+
+`braid status` and `braid tui` warn when local backups exist — copy them to encrypted offline media (e.g. USB drive in a safe) and delete the local copies. These files contain sensitive keyslot metadata needed for recovery and should not be left on an unencrypted boot drive.
+
 ### Enroll during `braid add`
 
 ```sh

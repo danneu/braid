@@ -111,6 +111,7 @@ pub struct Model {
     pub probe_duration: Option<Duration>,
     pub frame: u64,
     pub spinner_deadline: Option<Instant>,
+    pub advisories: Vec<String>,
     next_cmd_id: u64,
 }
 
@@ -139,6 +140,7 @@ impl Model {
             probe_duration: None,
             frame: 0,
             spinner_deadline: Some(Instant::now() + Duration::from_millis(500)),
+            advisories: crate::luks::header_backup_advisories(),
             next_cmd_id: 0,
         };
         (model, effects)
@@ -159,6 +161,7 @@ impl Model {
             probe_duration: None,
             frame: 0,
             spinner_deadline: None,
+            advisories: vec![],
             next_cmd_id: 0,
         }
     }
