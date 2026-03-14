@@ -1,10 +1,10 @@
 use std::collections::VecDeque;
 use std::process::ExitStatus;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::tui::effect::{Effect, PROBE_INTERVAL};
 use crate::tui::model::{Model, PoolState, PoolStatus};
-use crate::tui::state::{CmdId, CmdStatus, CommandState, MAX_LINES, Stream};
+use crate::tui::state::{CmdId, CmdStatus, CommandState, Stream, MAX_LINES};
 
 pub enum Message {
     Quit,
@@ -55,6 +55,7 @@ pub fn update(model: &mut Model, msg: Message) -> Vec<Effect> {
             if model.pool.is_inflight() {
                 return vec![];
             }
+            model.spinner_deadline = Some(Instant::now() + Duration::from_millis(500));
             if let Some(stale) = model.pool.current().cloned() {
                 model.pool = PoolStatus::Refreshing(stale);
             } else {
@@ -136,5 +137,51 @@ pub fn update(model: &mut Model, msg: Message) -> Vec<Effect> {
             // }]
             vec![]
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::view::tests::{sample_disk_names, sample_pool};
+
+    /*
+     * Intent: RefreshPool must set a spinner_deadline so the footer spinner
+     * shows for at least 500ms.
+     *
+     * Why it exists: Without a minimum visible duration, fast probes give no
+     * visual feedback that a reload happened.
+     *
+     * Scenario: User presses 'r' on a fast local probe that returns in <50ms.
+     */
+    #[test]
+    fn refresh_pool_sets_spinner_deadline() {
+        let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(sample_pool()));
+        let before = Instant::now();
+        update(&mut model, Message::RefreshPool);
+        let after = Instant::now();
+        let deadline = model.spinner_deadline.expect("should be set");
+        assert!(deadline >= before + Duration::from_millis(500));
+        assert!(deadline <= after + Duration::from_millis(500));
+    }
+
+    /*
+     * Intent: PoolProbeFinished must NOT clear spinner_deadline, so the
+     * spinner continues until the deadline expires naturally.
+     *
+     * Why it exists: Clearing it would defeat the minimum-duration guarantee.
+     *
+     * Scenario: Probe finishes in 50ms but spinner should stay for 500ms.
+     */
+    #[test]
+    fn probe_finished_preserves_spinner_deadline() {
+        let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Loading);
+        model.spinner_deadline = Some(Instant::now() + Duration::from_secs(10));
+        let pool = sample_pool();
+        update(
+            &mut model,
+            Message::PoolProbeFinished(Ok(Some(pool)), Duration::from_millis(50)),
+        );
+        assert!(model.spinner_deadline.is_some());
     }
 }

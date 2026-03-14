@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -685,9 +687,18 @@ pub fn view(model: &Model, frame: &mut Frame, now: PrimitiveDateTime) {
         Tab::Sharing => view_placeholder(frame, outer[2], "Sharing"),
     }
 
-    let reload = match model.probe_duration {
-        Some(d) => format!("Reload: r ({}ms)", d.as_millis()),
-        None => "Reload: r".to_owned(),
+    let spinning =
+        model.pool.is_inflight() || model.spinner_deadline.map_or(false, |d| Instant::now() < d);
+
+    let reload = if spinning {
+        const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+        let ch = SPINNER[(model.frame as usize / 8) % SPINNER.len()];
+        format!("Reload: r {ch}")
+    } else {
+        match model.probe_duration {
+            Some(d) => format!("Reload: r ({}ms)", d.as_millis()),
+            None => "Reload: r".to_owned(),
+        }
     };
     let footer = format!("Quit: q │ Help: ? │ {reload}");
     frame.render_widget(
@@ -705,9 +716,9 @@ pub fn view(model: &Model, frame: &mut Frame, now: PrimitiveDateTime) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::collections::HashMap;
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     use super::*;
     use crate::parse::types::{BtrfsBgType, BtrfsDfEntry, BtrfsProfile, DeviceAllocation};
@@ -739,7 +750,7 @@ mod tests {
         out
     }
 
-    fn sample_disk_names() -> Vec<String> {
+    pub(crate) fn sample_disk_names() -> Vec<String> {
         vec![
             "toshiba".to_owned(),
             "ironwolf".to_owned(),
@@ -769,7 +780,7 @@ mod tests {
         snap!(buffer_to_string(&terminal));
     }
 
-    fn sample_pool() -> PoolState {
+    pub(crate) fn sample_pool() -> PoolState {
         let disk_usage = HashMap::from([
             (
                 "toshiba".to_owned(),
@@ -1011,6 +1022,44 @@ mod tests {
             PoolStatus::Error("command failed: findmnt exited 1".to_owned()),
         );
         let terminal = render(&model, 60, 22);
+        snap!(buffer_to_string(&terminal));
+    }
+
+    /*
+     * Intent: Footer shows a braille spinner character when a probe is
+     * inflight and the spinner deadline hasn't expired.
+     *
+     * Why it exists: Confirms the spinner is visible during reload so
+     * the user gets visual feedback that a refresh is in progress.
+     *
+     * Scenario: User presses 'r', the probe is still running, and the
+     * spinner deadline is in the future.
+     */
+    #[test]
+    fn snapshot_footer_spinner_inflight() {
+        let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Refreshing(sample_pool()));
+        model.spinner_deadline = Some(Instant::now() + Duration::from_secs(10));
+        model.frame = 0;
+        let terminal = render(&model, 60, 24);
+        snap!(buffer_to_string(&terminal));
+    }
+
+    /*
+     * Intent: Footer shows probe duration (not a spinner) when the
+     * spinner deadline has expired and the pool is mounted.
+     *
+     * Why it exists: After the minimum spinner duration elapses, the
+     * footer should revert to showing the probe timing.
+     *
+     * Scenario: Probe completed 50ms ago, spinner deadline is in the
+     * past, footer shows "(42ms)".
+     */
+    #[test]
+    fn snapshot_footer_duration_after_spinner() {
+        let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(sample_pool()));
+        model.probe_duration = Some(Duration::from_millis(42));
+        model.spinner_deadline = None;
+        let terminal = render(&model, 60, 24);
         snap!(buffer_to_string(&terminal));
     }
 }

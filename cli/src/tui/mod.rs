@@ -226,6 +226,7 @@ fn run_loop(
     cmd_tx: &mpsc::Sender<event::Event>,
 ) -> io::Result<()> {
     while model.running {
+        model.frame = model.frame.wrapping_add(1);
         let now = {
             let offset = time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC);
             let local = time::OffsetDateTime::now_utc().to_offset(offset);

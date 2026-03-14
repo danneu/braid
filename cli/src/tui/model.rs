@@ -109,6 +109,8 @@ pub struct Model {
     pub mount_point: MountPoint,
     pub commands: HashMap<CmdId, CommandState>,
     pub probe_duration: Option<Duration>,
+    pub frame: u64,
+    pub spinner_deadline: Option<Instant>,
     next_cmd_id: u64,
 }
 
@@ -135,6 +137,8 @@ impl Model {
             mount_point,
             commands: HashMap::new(),
             probe_duration: None,
+            frame: 0,
+            spinner_deadline: Some(Instant::now() + Duration::from_millis(500)),
             next_cmd_id: 0,
         };
         (model, effects)
@@ -153,6 +157,8 @@ impl Model {
             mount_point: MountPoint(String::new()),
             commands: HashMap::new(),
             probe_duration: None,
+            frame: 0,
+            spinner_deadline: None,
             next_cmd_id: 0,
         }
     }
