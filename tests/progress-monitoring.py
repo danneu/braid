@@ -38,7 +38,7 @@ machine.succeed(f"mkdir -p {FIXTURE_DIR}")
 
 with subtest("balance progress observed"):
     # Write heavy workload (~2 GiB) so balance takes observable time
-    machine.succeed(f"dd if=/dev/urandom of={MOUNT}/bigfile bs=1M count=2048")
+    machine.succeed(f"dd if=/dev/urandom of={MOUNT}/bigfile bs=1M count=512")
     machine.succeed("sync")
 
     # Start balance in background (redirect all fds so the test driver's
@@ -90,8 +90,9 @@ with subtest("device remove progress observed"):
         f"btrfs balance start -dconvert=raid1 -mconvert=raid1 {MOUNT}"
     )
 
-    # Write more data (~1 GiB)
-    machine.succeed(f"dd if=/dev/urandom of={MOUNT}/bigfile2 bs=1M count=1024")
+    # Write more data (~2 GiB) — needs to be large enough that device remove
+    # takes long enough for the polling loop to observe bytes decreasing
+    machine.succeed(f"dd if=/dev/urandom of={MOUNT}/bigfile2 bs=1M count=2048")
     machine.succeed("sync")
 
     # Record initial disk3 allocation bytes
