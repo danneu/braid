@@ -7,8 +7,8 @@ use crate::config::{mapper_name, Config};
 use crate::disk_map::{self, DiskMapLoad};
 use crate::parse::types::BalanceState;
 use crate::parse::{
-    parse_btrfs_balance_status, parse_btrfs_device_stats, parse_btrfs_df_json,
-    parse_btrfs_filesystem_usage, parse_btrfs_scrub_status, parse_lsblk_field,
+    parse_btrfs_balance_status, parse_btrfs_device_stats, parse_btrfs_device_usage,
+    parse_btrfs_df_json, parse_btrfs_filesystem_usage, parse_btrfs_scrub_status, parse_lsblk_field,
     BtrfsDeviceStatsOutput, ParseError, ScrubState,
 };
 use crate::probe::{probe_config_disk, probe_pool, Filesystem, ProbeError};
@@ -61,9 +61,25 @@ pub struct StatusReport {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapacityReport {
-    pub total_bytes: u64,
+    pub total_bytes: Option<u64>,
     pub used_bytes: u64,
     pub free_bytes: u64,
+}
+
+/// Estimate usable pool capacity for RAID1 given raw device sizes.
+///
+/// For RAID1, every chunk is mirrored, so total usable = sum/2 — except when
+/// drives are different sizes: the oversized portion of the largest drive can
+/// never be paired, so usable = min(sum/2, sum - max).
+///
+/// Single-disk pools have no mirroring, so the full size is usable.
+pub fn estimate_pool_capacity(device_sizes: &[u64]) -> u64 {
+    let total: u64 = device_sizes.iter().sum();
+    if device_sizes.len() < 2 {
+        return total;
+    }
+    let max: u64 = device_sizes.iter().copied().max().unwrap();
+    (total / 2).min(total - max)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -291,7 +307,7 @@ pub fn build_status_report<R: CommandRunner, F: Filesystem>(
     }
 
     let profile = get_profile(runner, config.mount_point().as_str())?;
-    let capacity = get_capacity(runner, config.mount_point().as_str())?;
+    let capacity = get_capacity(runner, config.mount_point().as_str(), pool.missing_count)?;
     let last_scrub = get_scrub_string(runner, config.mount_point().as_str());
     let balance = get_balance_report(runner, config.mount_point().as_str());
 
@@ -383,7 +399,7 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
 
     // 4. Strict data gathering
     let profile = get_profile(runner, config.mount_point().as_str())?;
-    let capacity = get_capacity(runner, config.mount_point().as_str())?;
+    let capacity = get_capacity(runner, config.mount_point().as_str(), pool.missing_count)?;
     let last_scrub = get_scrub_string(runner, config.mount_point().as_str());
     let balance = get_balance_report(runner, config.mount_point().as_str());
 
@@ -477,13 +493,24 @@ fn get_profile<R: CommandRunner>(runner: &R, mount_point: &str) -> Result<String
 fn get_capacity<R: CommandRunner>(
     runner: &R,
     mount_point: &str,
+    missing_count: u64,
 ) -> Result<CapacityReport, StatusError> {
     let raw = runner.run(&CmdRequest::BtrfsFilesystemUsageRaw {
         mount_point: MountPoint(mount_point.to_owned()),
     })?;
     let usage = parse_btrfs_filesystem_usage(&raw)?;
 
-    let total_bytes = usage.data_ratio.logical_bytes(usage.device_size_bytes);
+    let total_bytes = if missing_count == 0 {
+        let dev_raw = runner.run(&CmdRequest::BtrfsDeviceUsageRaw {
+            mount_point: MountPoint(mount_point.to_owned()),
+        })?;
+        let dev_usage = parse_btrfs_device_usage(&dev_raw)?;
+        let sizes: Vec<u64> = dev_usage.devices.iter().map(|d| d.device_size).collect();
+        Some(estimate_pool_capacity(&sizes))
+    } else {
+        None
+    };
+
     Ok(CapacityReport {
         total_bytes,
         used_bytes: usage.used_bytes,
@@ -781,7 +808,9 @@ fn format_status_human(
     if let Some(ref cap) = report.capacity {
         out.push('\n');
         out.push_str("Capacity:\n");
-        out.push_str(&format!("  Total:  {}\n", format_bytes(cap.total_bytes)));
+        if let Some(total) = cap.total_bytes {
+            out.push_str(&format!("  Total:  {} (Estimated)\n", format_bytes(total)));
+        }
         out.push_str(&format!("  Used:   {}\n", format_bytes(cap.used_bytes)));
         out.push_str(&format!("  Free:   {}\n", format_bytes(cap.free_bytes)));
     }
@@ -1036,6 +1065,48 @@ mod tests {
         )
     }
 
+    fn btrfs_device_usage_raw_3disk() -> RawCommandOutput {
+        ok_raw(
+            "btrfs device usage",
+            "/dev/mapper/disk1, ID: 1\n\
+             \x20  Device size:          346729130\n\
+             \x20  Device slack:              0\n\
+             \x20  Data,RAID1:           67108864\n\
+             \x20  Metadata,RAID1:       33554432\n\
+             \x20  System,RAID1:          4194304\n\
+             \x20  Unallocated:         241871530\n\
+             \n\
+             /dev/mapper/disk2, ID: 2\n\
+             \x20  Device size:          346729130\n\
+             \x20  Device slack:              0\n\
+             \x20  Data,RAID1:           67108864\n\
+             \x20  Metadata,RAID1:       33554432\n\
+             \x20  System,RAID1:          4194304\n\
+             \x20  Unallocated:         241871530\n\
+             \n\
+             /dev/mapper/disk3, ID: 3\n\
+             \x20  Device size:          346729130\n\
+             \x20  Device slack:              0\n\
+             \x20  Data,RAID1:           67108864\n\
+             \x20  Metadata,RAID1:       33554432\n\
+             \x20  System,RAID1:          4194304\n\
+             \x20  Unallocated:         241871530\n",
+        )
+    }
+
+    fn btrfs_device_usage_raw_1disk() -> RawCommandOutput {
+        ok_raw(
+            "btrfs device usage",
+            "/dev/mapper/disk1, ID: 1\n\
+             \x20  Device size:         1040187392\n\
+             \x20  Device slack:              0\n\
+             \x20  Data,single:         1073741824\n\
+             \x20  Metadata,single:      268435456\n\
+             \x20  System,single:          4194304\n\
+             \x20  Unallocated:                 0\n",
+        )
+    }
+
     fn btrfs_scrub_never() -> RawCommandOutput {
         ok_raw(
             "btrfs scrub status",
@@ -1177,6 +1248,12 @@ mod tests {
                     mount_point: MountPoint("/mnt/storage".to_owned()),
                 },
                 btrfs_usage_raw(),
+            )
+            .with_output(
+                CmdRequest::BtrfsDeviceUsageRaw {
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                },
+                btrfs_device_usage_raw_3disk(),
             )
             .with_output(
                 CmdRequest::BtrfsScrubStatus {
@@ -1349,7 +1426,7 @@ mod tests {
         let config = config_3disk();
 
         let profile = get_profile(&runner, "/mnt/storage").unwrap();
-        let capacity = get_capacity(&runner, "/mnt/storage").unwrap();
+        let capacity = get_capacity(&runner, "/mnt/storage", 0).unwrap();
         let last_scrub = get_scrub_string(&runner, "/mnt/storage");
 
         let code = StatusCode::Healthy;
@@ -1394,7 +1471,7 @@ mod tests {
             missing_count: Some(1),
             profile: Some("RAID1".to_owned()),
             capacity: Some(CapacityReport {
-                total_bytes: 1040187392,
+                total_bytes: None,
                 used_bytes: 33914880,
                 free_bytes: 442957824,
             }),
@@ -1449,7 +1526,7 @@ mod tests {
             missing_count: Some(1),
             profile: Some("RAID1".to_owned()),
             capacity: Some(CapacityReport {
-                total_bytes: 1040187392,
+                total_bytes: None,
                 used_bytes: 33914880,
                 free_bytes: 442957824,
             }),
@@ -1521,7 +1598,7 @@ mod tests {
             missing_count: Some(0),
             profile: Some("RAID1".to_owned()),
             capacity: Some(CapacityReport {
-                total_bytes: 1040187392,
+                total_bytes: Some(1040187392),
                 used_bytes: 33914880,
                 free_bytes: 442957824,
             }),
@@ -1546,7 +1623,7 @@ mod tests {
             missing_count: Some(0),
             profile: Some("single".to_owned()),
             capacity: Some(CapacityReport {
-                total_bytes: 1073741824,
+                total_bytes: Some(1073741824),
                 used_bytes: 536870912,
                 free_bytes: 536870912,
             }),
@@ -1613,7 +1690,7 @@ mod tests {
             missing_count: Some(0),
             profile: Some("single".to_owned()),
             capacity: Some(CapacityReport {
-                total_bytes: 1073741824,
+                total_bytes: Some(1073741824),
                 used_bytes: 536870912,
                 free_bytes: 536870912,
             }),
@@ -1653,7 +1730,7 @@ mod tests {
             missing_count: Some(0),
             profile: Some("RAID1".to_owned()),
             capacity: Some(CapacityReport {
-                total_bytes: 1040187392,
+                total_bytes: Some(1040187392),
                 used_bytes: 33914880,
                 free_bytes: 442957824,
             }),
@@ -1703,7 +1780,7 @@ mod tests {
             missing_count: Some(1),
             profile: Some("RAID1".to_owned()),
             capacity: Some(CapacityReport {
-                total_bytes: 1040187392,
+                total_bytes: None,
                 used_bytes: 33914880,
                 free_bytes: 442957824,
             }),
@@ -1752,7 +1829,7 @@ mod tests {
             missing_count: Some(2),
             profile: Some("RAID1".to_owned()),
             capacity: Some(CapacityReport {
-                total_bytes: 1040187392,
+                total_bytes: None,
                 used_bytes: 33914880,
                 free_bytes: 442957824,
             }),
@@ -1800,7 +1877,7 @@ mod tests {
             missing_count: Some(0),
             profile: Some("single".to_owned()),
             capacity: Some(CapacityReport {
-                total_bytes: 1073741824,
+                total_bytes: Some(1073741824),
                 used_bytes: 536870912,
                 free_bytes: 536870912,
             }),
@@ -1841,7 +1918,7 @@ mod tests {
             missing_count: Some(1),
             profile: Some("RAID1".to_owned()),
             capacity: Some(CapacityReport {
-                total_bytes: 1040187392,
+                total_bytes: None,
                 used_bytes: 33914880,
                 free_bytes: 442957824,
             }),
@@ -1885,7 +1962,7 @@ mod tests {
             missing_count: Some(0),
             profile: Some("single".to_owned()),
             capacity: Some(CapacityReport {
-                total_bytes: 1073741824,
+                total_bytes: Some(1073741824),
                 used_bytes: 536870912,
                 free_bytes: 536870912,
             }),
@@ -2025,7 +2102,7 @@ mod tests {
             missing_count: Some(0),
             profile: Some("RAID1".to_owned()),
             capacity: Some(CapacityReport {
-                total_bytes: 1040187392,
+                total_bytes: Some(1040187392),
                 used_bytes: 33914880,
                 free_bytes: 442957824,
             }),
@@ -2057,7 +2134,7 @@ mod tests {
             missing_count: Some(0),
             profile: Some("single".to_owned()),
             capacity: Some(CapacityReport {
-                total_bytes: 1040187392,
+                total_bytes: Some(1040187392),
                 used_bytes: 33914880,
                 free_bytes: 442957824,
             }),
@@ -2081,7 +2158,7 @@ mod tests {
             missing_count: Some(0),
             profile: Some("single".to_owned()),
             capacity: Some(CapacityReport {
-                total_bytes: 1040187392,
+                total_bytes: Some(1040187392),
                 used_bytes: 33914880,
                 free_bytes: 442957824,
             }),
@@ -2116,7 +2193,7 @@ mod tests {
             },
             err_raw("btrfs filesystem usage", 1, "error"),
         );
-        let result = get_capacity(&runner, "/mnt/storage");
+        let result = get_capacity(&runner, "/mnt/storage", 0);
         assert!(result.is_err());
     }
 
@@ -2316,6 +2393,12 @@ mod tests {
                 btrfs_usage_raw(),
             )
             .with_output(
+                CmdRequest::BtrfsDeviceUsageRaw {
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                },
+                btrfs_device_usage_raw_1disk(),
+            )
+            .with_output(
                 CmdRequest::BtrfsScrubStatus {
                     mount_point: MountPoint("/mnt/storage".to_owned()),
                 },
@@ -2430,7 +2513,7 @@ mod tests {
             missing_count: Some(0),
             profile: Some("single".to_owned()),
             capacity: Some(CapacityReport {
-                total_bytes: 1073741824,
+                total_bytes: Some(1073741824),
                 used_bytes: 536870912,
                 free_bytes: 536870912,
             }),
@@ -2485,7 +2568,7 @@ mod tests {
             missing_count: Some(0),
             profile: Some("single".to_owned()),
             capacity: Some(CapacityReport {
-                total_bytes: 1073741824,
+                total_bytes: Some(1073741824),
                 used_bytes: 536870912,
                 free_bytes: 536870912,
             }),
@@ -2523,7 +2606,7 @@ mod tests {
             missing_count: Some(0),
             profile: Some("single".to_owned()),
             capacity: Some(CapacityReport {
-                total_bytes: 1073741824,
+                total_bytes: Some(1073741824),
                 used_bytes: 536870912,
                 free_bytes: 536870912,
             }),
@@ -2553,7 +2636,7 @@ mod tests {
             missing_count: Some(0),
             profile: Some("RAID1".to_owned()),
             capacity: Some(CapacityReport {
-                total_bytes: 1040187392,
+                total_bytes: Some(1040187392),
                 used_bytes: 33914880,
                 free_bytes: 442957824,
             }),
@@ -2583,5 +2666,52 @@ mod tests {
         ];
         let human = format_status_human(&report, Some(&compact), None);
         assert!(!human.contains("new"), "got:\n{human}");
+    }
+
+    // =======================================================================
+    // estimate_pool_capacity tests
+    // =======================================================================
+
+    #[test]
+    fn estimate_pool_capacity_0_disks() {
+        assert_eq!(estimate_pool_capacity(&[]), 0);
+    }
+
+    #[test]
+    fn estimate_pool_capacity_1_disk() {
+        assert_eq!(
+            estimate_pool_capacity(&[8_000_000_000_000]),
+            8_000_000_000_000
+        );
+    }
+
+    #[test]
+    fn estimate_pool_capacity_2_equal() {
+        // 2×4 TB = 8 TB total, RAID1 = 4 TB usable
+        assert_eq!(
+            estimate_pool_capacity(&[4_000_000_000_000, 4_000_000_000_000]),
+            4_000_000_000_000,
+        );
+    }
+
+    #[test]
+    fn estimate_pool_capacity_3_equal() {
+        // 3×4 TB = 12 TB total, RAID1 = 6 TB usable
+        let sizes = &[4_000_000_000_000, 4_000_000_000_000, 4_000_000_000_000];
+        assert_eq!(estimate_pool_capacity(sizes), 6_000_000_000_000);
+    }
+
+    #[test]
+    fn estimate_pool_capacity_mixed_with_waste() {
+        // 3+3+8 = 14 TB total. sum/2 = 7 TB, sum-max = 6 TB. Usable = 6 TB.
+        let sizes = &[3_000_000_000_000, 3_000_000_000_000, 8_000_000_000_000];
+        assert_eq!(estimate_pool_capacity(sizes), 6_000_000_000_000);
+    }
+
+    #[test]
+    fn estimate_pool_capacity_mixed_no_waste() {
+        // 4+4+6 = 14 TB total. sum/2 = 7 TB, sum-max = 8 TB. Usable = 7 TB.
+        let sizes = &[4_000_000_000_000, 4_000_000_000_000, 6_000_000_000_000];
+        assert_eq!(estimate_pool_capacity(sizes), 7_000_000_000_000);
     }
 }

@@ -6,6 +6,7 @@ Data  Sharing
  Pool ──────────────────────────────────────────────────────
  Path       /mnt/storage
  Balance    rebalancing — 108/160 chunks (68% complete)
+ Usage      29% 2.1 TiB / 7.3 TiB (Estimated)
  Type       Profile  Used       Allocated
  Data       RAID1    2.1 TiB    5.4 TiB
  Metadata   RAID1    1.5 GiB    2.0 GiB

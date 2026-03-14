@@ -68,6 +68,8 @@ pub struct PoolState {
     pub luks_info: HashMap<String, DiskLuksInfo>,
     pub scrub: ScrubState,
     pub balance: BalanceReport,
+    pub capacity_total_bytes: Option<u64>,
+    pub capacity_used_bytes: u64,
     pub probed_at: Instant,
 }
 

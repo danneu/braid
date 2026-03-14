@@ -5,6 +5,7 @@ expression: buffer_to_string(&terminal)
 Data  Sharing
  Pool ──────────────────────────────────────────────────────
  Path       /mnt/storage
+ Usage      29% 2.1 TiB / 7.3 TiB (Estimated)
  Type       Profile  Used       Allocated
  Data       single   512.0 MiB  1.0 GiB
  Data       RAID1    2.1 TiB    5.4 TiB

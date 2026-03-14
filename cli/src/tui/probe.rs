@@ -4,11 +4,11 @@ use std::time::Instant;
 use crate::cmd::{CmdRequest, CommandRunner};
 use crate::parse::types::{ScrubState, SmartHealth};
 use crate::parse::{
-    parse_btrfs_device_usage, parse_btrfs_scrub_status, parse_cryptsetup_luks_dump,
-    parse_lsblk_json, parse_smartctl_health,
+    parse_btrfs_device_usage, parse_btrfs_filesystem_usage, parse_btrfs_scrub_status,
+    parse_cryptsetup_luks_dump, parse_lsblk_json, parse_smartctl_health,
 };
 use crate::probe::probe_pool;
-use crate::status::get_balance_report;
+use crate::status::{estimate_pool_capacity, get_balance_report};
 use crate::tui::model::{DiskLuksInfo, DiskUsage, PoolState};
 use crate::types::MountPoint;
 
@@ -123,6 +123,20 @@ pub fn probe_pool_for_tui<R: CommandRunner>(
         }
     }
 
+    let fs_usage_raw = runner
+        .run(&CmdRequest::BtrfsFilesystemUsageRaw {
+            mount_point: MountPoint(mount_point.to_owned()),
+        })
+        .map_err(|e| e.to_string())?;
+    let fs_usage = parse_btrfs_filesystem_usage(&fs_usage_raw).map_err(|e| e.to_string())?;
+
+    let capacity_total_bytes = if domain.missing_count == 0 {
+        let sizes: Vec<u64> = dev_usage.devices.iter().map(|d| d.device_size).collect();
+        Some(estimate_pool_capacity(&sizes))
+    } else {
+        None
+    };
+
     Ok(Some(PoolState {
         mount_point: MountPoint(mount_point.to_owned()),
         df_entries: df.entries,
@@ -132,6 +146,8 @@ pub fn probe_pool_for_tui<R: CommandRunner>(
         luks_info,
         scrub,
         balance,
+        capacity_total_bytes,
+        capacity_used_bytes: fs_usage.used_bytes,
         probed_at: Instant::now(),
     }))
 }
@@ -244,15 +260,31 @@ mod tests {
                 ),
             );
 
-        let runner = runner.with_output(
-            CmdRequest::BtrfsBalanceStatus {
-                mount_point: MountPoint("/mnt/storage".to_owned()),
-            },
-            ok_raw(
-                "btrfs balance status",
-                "No balance found on '/mnt/storage'\n",
-            ),
-        );
+        let runner = runner
+            .with_output(
+                CmdRequest::BtrfsBalanceStatus {
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                },
+                ok_raw(
+                    "btrfs balance status",
+                    "No balance found on '/mnt/storage'\n",
+                ),
+            )
+            .with_output(
+                CmdRequest::BtrfsFilesystemUsageRaw {
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                },
+                ok_raw(
+                    "btrfs filesystem usage",
+                    "Overall:\n\
+                     \tDevice size:\t\t\t1073741824\n\
+                     \tDevice allocated:\t\t503316480\n\
+                     \tDevice unallocated:\t\t570425344\n\
+                     \tUsed:\t\t\t\t33914880\n\
+                     \tFree (estimated):\t\t442957824\t(min: 442957824)\n\
+                     \tData ratio:\t\t\t2.00\n",
+                ),
+            );
 
         let result = probe_pool_for_tui(&runner, "/mnt/storage", &HashMap::new()).unwrap();
         let pool = result.expect("pool should be Some");
@@ -301,5 +333,9 @@ mod tests {
             .expect("ironwolf should be present");
         assert_eq!(ironwolf.allocations.len(), 3);
         assert_eq!(ironwolf.unallocated, 409403392);
+
+        // Verify capacity: 2 equal disks of 536870912 → estimated total = 536870912
+        assert_eq!(pool.capacity_total_bytes, Some(536870912));
+        assert_eq!(pool.capacity_used_bytes, 33914880);
     }
 }

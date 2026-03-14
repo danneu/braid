@@ -1,0 +1,122 @@
+› how is current total_bytes calculator
+
+
+• Current total_bytes comes from btrfs filesystem usage --raw.
+
+  In cli/src/status.rs:477, get_capacity() runs
+  CmdRequest::BtrfsFilesystemUsageRaw, parses it, then computes:
+
+  let total_bytes = usage.data_ratio.logical_bytes(usage.device_size_bytes);
+
+  in cli/src/status.rs:486.
+
+  logical_bytes() is defined in cli/src/parse/types.rs as:
+
+  device_size_bytes * 100 / data_ratio_hundredths
+
+  So effectively:
+
+  - single: device_size / 1.00
+  - RAID1: device_size / 2.00
+  - etc.
+
+  That means it only uses aggregate raw device bytes and the profile ratio. It
+  does not account for mixed-size RAID1 waste, which is why 3 + 3 + 8 TB comes
+  out as 14 / 2 = 7 TB instead of the correct 6 TB.
+
+
+› does our plan consider disk waste?
+
+
+• Yes.
+
+  That is the whole point of estimate_pool_capacity(device_sizes):
+
+  min(sum/2, sum - max)
+
+  It does account for mixed-size RAID1 waste.
+
+  Example 3 + 3 + 8:
+
+  - sum = 14
+  - max = 8
+  - min(14/2, 14-8) = min(7, 6) = 6
+
+  The current implementation does not consider waste because it only uses
+  aggregate device_size / data_ratio.
+
+  The current plan’s problem is not waste handling. It handles waste correctly
+  when all devices are present. The remaining issue is degraded mode and the
+  JSON compatibility question.
+
+
+› how does the current code calculate free_bytes
+
+
+• free_bytes comes directly from btrfs filesystem usage --raw.
+
+  In cli/src/status.rs:488, get_capacity() sets:
+
+  free_bytes: usage.free_estimated_bytes,
+
+  That value is parsed from the Free (estimated): ... line in btrfs filesystem
+  usage --raw into BtrfsFilesystemUsageOutput.free_estimated_bytes.
+
+  So unlike total_bytes, free_bytes is not derived by braid. It is btrfs’s own
+  estimated writable free space.
+
+
+› how does it calculate used_bbytes
+
+
+• used_bytes also comes directly from btrfs filesystem usage --raw.
+
+  In cli/src/status.rs:487, get_capacity() sets:
+
+  used_bytes: usage.used_bytes,
+
+  That is parsed from the Used: line of the command output into
+  BtrfsFilesystemUsageOutput.used_bytes.
+
+  So:
+
+  - used_bytes: direct from btrfs
+  - free_bytes: direct from btrfs’s Free (estimated)
+  - total_bytes: currently derived by braid from device_size / data_ratio
+
+
+› would used_bytes + free_bytes estimate not be a good enough total capacity
+  estimate?
+
+
+• No. It is a good estimate of writable space accounting, but not a good stable
+  “total pool capacity” estimate.
+
+  Why:
+
+  - used_bytes is logical data stored
+  - free_bytes is btrfs’s estimated additional writable space
+  - used + free_estimated is workload- and metadata-dependent, not just
+    hardware-dependent
+
+  That means it can diverge from “usable capacity of this drive set” because of:
+
+  - metadata/system chunks
+  - reserved space
+  - chunk allocation state
+  - temporary imbalance or fragmentation
+  - degraded operation effects
+
+  Your plan text already notes this correctly: used + free does not equal the
+  pool-capacity estimate for exactly these reasons.
+
+  So if the UI wants:
+
+  - “how much space have I used relative to what this pool can ideally hold?”
+    use the estimated total formula
+  - “how much more can I write right now?” use free_bytes
+  - “how full is the filesystem in practice?” then used / (used +
+    free_estimated) is reasonable, but that is a different metric
+
+  So used + free is fine for a practical fullness denominator, but it is not a
+  substitute for estimated total capacity.

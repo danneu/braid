@@ -3,10 +3,10 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 mod help;
 
-use ratatui::Frame;
 use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph, Row, Table, TableState};
-use time::PrimitiveDateTime;
+use ratatui::Frame;
 use time::macros::format_description;
+use time::PrimitiveDateTime;
 
 use crate::parse::types::{BtrfsBgType, ScrubState, SmartHealth};
 use crate::status::BalanceReport;
@@ -140,6 +140,23 @@ fn pool_info(pool: &PoolState) -> Paragraph<'_> {
             )));
         }
         BalanceReport::Idle => {}
+    }
+
+    if let Some(total) = pool.capacity_total_bytes {
+        let pct = percent(pool.capacity_used_bytes, total);
+        let used_unit = ByteUnit::friendliest(pool.capacity_used_bytes);
+        let total_unit = ByteUnit::friendliest(total);
+        lines.push(Line::from(vec![
+            Span::styled("Usage      ", dim),
+            Span::raw(format!(
+                "{:.0}% {} {} / {} {} (Estimated)",
+                pct,
+                used_unit.format(pool.capacity_used_bytes),
+                used_unit.suffix(),
+                total_unit.format(total),
+                total_unit.suffix(),
+            )),
+        ]));
     }
 
     Paragraph::new(lines)
@@ -417,8 +434,9 @@ fn view_data(model: &Model, frame: &mut Frame, area: Rect, now: PrimitiveDateTim
                 .iter()
                 .filter(|e| e.bg_type != BtrfsBgType::GlobalReserve)
                 .count() as u16;
-            // border + Path + balance + blank + header + entries
-            1 + 1 + pool_balance_rows(p) + 1 + 1 + df_rows
+            let usage_row = p.capacity_total_bytes.is_some() as u16;
+            // border + Path + balance + usage + blank + header + entries
+            1 + 1 + pool_balance_rows(p) + usage_row + 1 + 1 + df_rows
         }
         None => 1 + 1,
     };
@@ -457,7 +475,8 @@ fn view_data(model: &Model, frame: &mut Frame, area: Rect, now: PrimitiveDateTim
         PoolStatus::Mounted(pool)
         | PoolStatus::Refreshing(pool)
         | PoolStatus::ErrorStale(_, pool) => {
-            let info_rows = 1 + pool_balance_rows(pool); // Path + balance
+            let usage_row = pool.capacity_total_bytes.is_some() as u16;
+            let info_rows = 1 + pool_balance_rows(pool) + usage_row; // Path + balance + usage
             let df_rows = pool
                 .df_entries
                 .iter()
@@ -695,8 +714,8 @@ mod tests {
     use crate::parse::types::{ScrubState, ScrubTimestamp, SmartHealth};
     use crate::tui::model::{DiskLuksInfo, DiskUsage};
     use crate::types::MountPoint;
-    use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
 
     fn render(model: &Model, width: u16, height: u16) -> Terminal<TestBackend> {
         let now = time::macros::datetime!(2026-02-24 02:12:00);
@@ -901,6 +920,8 @@ mod tests {
                 rate: Some("32.34MiB/s".to_owned()),
             },
             balance: BalanceReport::Idle,
+            capacity_total_bytes: Some(8_001_568_641_024),
+            capacity_used_bytes: 2_308_094_370_816,
             probed_at: Instant::now(),
         }
     }
