@@ -19,7 +19,11 @@
       "Bash(gh search:*)",
       "Bash(gh issue:*)",
       "WebSearch",
-      "Bash(git clone:*)"
+      "Bash(git clone:*)",
+      "Bash(find:*)",
+      "Bash(modinfo:*)",
+      "Bash(zstdcat:*)",
+      "Bash(cd:*)"
     ]
   },
   "plansDirectory": "./plans/wip"
