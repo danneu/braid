@@ -58,29 +58,31 @@ with subtest("start balance in background"):
         "> /tmp/balance.log 2>&1 < /dev/null &"
     )
 
-# 5. Poll braid status until we catch a running balance (eliminates host round-trip race)
+# 5. Poll braid status until we catch a running balance.
+#    Single loop captures both text and JSON in the same iteration to avoid the
+#    race where two sequential subtests compete for one short-lived balance window.
 with subtest("status during balance"):
-    output = machine.succeed(
-        "for i in $(seq 1 200); do "
-        'out="$(braid status 2>&1)"; '
-        "if printf '%s\\n' \"$out\" | grep -q 'Balance:'; then "
-        "printf '%s\\n' \"$out\"; exit 0; fi; "
-        "sleep 0.05; done; exit 1"
-    )
-    print(f"status during balance:\n{output}")
-    assert "Pool:" in output, f"Expected 'Pool:':\n{output}"
-    assert "Drives:" in output, f"Expected 'Drives:':\n{output}"
-    assert "Balance:" in output, f"Expected 'Balance:' line:\n{output}"
-
-with subtest("json status during balance"):
     raw = machine.succeed(
-        "for i in $(seq 1 200); do "
-        'out="$(braid status --json 2>&1)"; '
-        "if printf '%s\\n' \"$out\" | grep -q '\"balance\"'; then "
-        "printf '%s\\n' \"$out\"; exit 0; fi; "
+        "for i in $(seq 1 300); do "
+        'text="$(braid status 2>&1)"; '
+        'js="$(braid status --json 2>&1)"; '
+        "if printf '%s\\n' \"$js\" | jq -e '.balance.state == \"running\"' >/dev/null 2>&1; then "
+        "printf '%s\\n' \"$text\"; "
+        "printf '%s\\n' '**JSON**'; "
+        "printf '%s\\n' \"$js\"; "
+        "exit 0; fi; "
         "sleep 0.05; done; exit 1"
     )
-    s = json.loads(raw)
+    text_out, json_out = raw.split("**JSON**\n", 1)
+
+    # Text assertions
+    print(f"status during balance:\n{text_out}")
+    assert "Pool:" in text_out, f"Expected 'Pool:':\n{text_out}"
+    assert "Drives:" in text_out, f"Expected 'Drives:':\n{text_out}"
+    assert "Balance:" in text_out, f"Expected 'Balance:' line:\n{text_out}"
+
+    # JSON assertions
+    s = json.loads(json_out)
     assert s["status"] in ("intact", "degraded"), (
         f"Expected intact or degraded: {s['status']}"
     )
