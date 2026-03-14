@@ -26,6 +26,10 @@ Unlock:
 - **LUKS** — passphrase-based full disk encryption (keys never stored on disk)
 - **btrfs RAID1** — checksumming filesystem with automatic self-healing from redundant copies; dynamic add/remove drives
 
+## No backwards compatibility
+
+braid is unreleased software. Never add migration paths, compatibility shims, or legacy support. If a format or interface changes, change it everywhere — old versions are not a concern.
+
 ## Architecture Authority
 
 Design principles and invariants live in [`docs/principles.md`](docs/principles.md). Detailed rationale, rejected alternatives, and historical context live in [`docs/decisions/`](docs/decisions/).
