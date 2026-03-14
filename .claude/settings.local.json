@@ -18,7 +18,8 @@
       "Bash(just test:*)",
       "Bash(gh search:*)",
       "Bash(gh issue:*)",
-      "WebSearch"
+      "WebSearch",
+      "Bash(git clone:*)"
     ]
   },
   "plansDirectory": "./plans/wip"
