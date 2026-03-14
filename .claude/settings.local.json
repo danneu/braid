@@ -1,5 +1,4 @@
 {
-  "plansDirectory": "./plans/wip",
   "permissions": {
     "allow": [
       "Bash(nix log:*)",
@@ -18,7 +17,9 @@
       "Bash(cargo check:*)",
       "Bash(just test:*)",
       "Bash(gh search:*)",
-      "Bash(gh issue:*)"
+      "Bash(gh issue:*)",
+      "WebSearch"
     ]
-  }
+  },
+  "plansDirectory": "./plans/wip"
 }

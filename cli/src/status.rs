@@ -22,15 +22,15 @@ use crate::types::*;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StatusCode {
-    Healthy,
+    Intact,
     Degraded,
     NotMounted,
 }
 
 impl StatusCode {
-    pub fn display_status(self, missing_count: u64) -> String {
+    pub fn display_human(self, missing_count: u64) -> String {
         match self {
-            StatusCode::Healthy => "healthy".to_owned(),
+            StatusCode::Intact => "intact".to_owned(),
             StatusCode::Degraded if missing_count == 1 => "DEGRADED (1 missing device)".to_owned(),
             StatusCode::Degraded => format!("DEGRADED ({missing_count} missing devices)"),
             StatusCode::NotMounted => "not mounted".to_owned(),
@@ -41,8 +41,7 @@ impl StatusCode {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StatusReport {
     pub mount_point: MountPoint,
-    pub status_code: StatusCode,
-    pub status: String,
+    pub status: StatusCode,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total_devices: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -283,8 +282,7 @@ pub fn build_status_report<R: CommandRunner, F: Filesystem>(
             let code = StatusCode::NotMounted;
             return Ok(StatusReport {
                 mount_point: config.mount_point().clone(),
-                status_code: code,
-                status: code.display_status(0),
+                status: code,
                 total_devices: None,
                 present_count: None,
                 missing_count: None,
@@ -304,8 +302,7 @@ pub fn build_status_report<R: CommandRunner, F: Filesystem>(
         let code = StatusCode::NotMounted;
         return Ok(StatusReport {
             mount_point: config.mount_point().clone(),
-            status_code: code,
-            status: code.display_status(0),
+            status: code,
             total_devices: None,
             present_count: None,
             missing_count: None,
@@ -331,7 +328,7 @@ pub fn build_status_report<R: CommandRunner, F: Filesystem>(
     let balance = get_balance_report(runner, config.mount_point().as_str());
 
     let code = if pool.missing_count == 0 {
-        StatusCode::Healthy
+        StatusCode::Intact
     } else {
         StatusCode::Degraded
     };
@@ -348,8 +345,7 @@ pub fn build_status_report<R: CommandRunner, F: Filesystem>(
     let present_count = pool.total_devices.saturating_sub(pool.missing_count);
     Ok(StatusReport {
         mount_point: config.mount_point().clone(),
-        status_code: code,
-        status: code.display_status(pool.missing_count),
+        status: code,
         total_devices: Some(pool.total_devices),
         present_count: Some(present_count),
         missing_count: Some(pool.missing_count),
@@ -389,8 +385,7 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
         let code = StatusCode::NotMounted;
         let report = StatusReport {
             mount_point: config.mount_point().clone(),
-            status_code: code,
-            status: code.display_status(0),
+            status: code,
             total_devices: None,
             present_count: None,
             missing_count: None,
@@ -430,11 +425,10 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
 
     // 5. Compute status code
     let code = if pool.missing_count == 0 {
-        StatusCode::Healthy
+        StatusCode::Intact
     } else {
         StatusCode::Degraded
     };
-    let status = code.display_status(pool.missing_count);
 
     // 6. Compact drives (always built when mounted)
     let compact_drives = build_compact_drives(&pool, config, &disk_map_load);
@@ -462,8 +456,7 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
     let present_count = pool.total_devices.saturating_sub(pool.missing_count);
     let report = StatusReport {
         mount_point: config.mount_point().clone(),
-        status_code: code,
-        status,
+        status: code,
         total_devices: Some(pool.total_devices),
         present_count: Some(present_count),
         missing_count: Some(pool.missing_count),
@@ -808,9 +801,14 @@ fn format_status_human(
     }
 
     out.push_str(&format!("Pool:     {}\n", report.mount_point));
-    out.push_str(&format!("Status:   {}\n", report.status));
+    out.push_str(&format!(
+        "Status:   {}\n",
+        report
+            .status
+            .display_human(report.missing_count.unwrap_or(0))
+    ));
 
-    if report.status_code == StatusCode::NotMounted {
+    if report.status == StatusCode::NotMounted {
         return out;
     }
 
@@ -1450,8 +1448,7 @@ mod tests {
         let code = StatusCode::NotMounted;
         let report = StatusReport {
             mount_point: config.mount_point().clone(),
-            status_code: code,
-            status: code.display_status(0),
+            status: code,
             total_devices: None,
             present_count: None,
             missing_count: None,
@@ -1470,8 +1467,7 @@ mod tests {
 
         // Must exist
         assert_eq!(obj["mount_point"], "/mnt/storage");
-        assert_eq!(obj["status_code"], "not_mounted");
-        assert_eq!(obj["status"], "not mounted");
+        assert_eq!(obj["status"], "not_mounted");
         assert_eq!(obj["disks"], serde_json::json!([]));
 
         // Must NOT exist
@@ -1483,11 +1479,11 @@ mod tests {
         assert!(!obj.contains_key("last_scrub"));
         assert!(!obj.contains_key("allocation"));
 
-        // Lock envelope: exactly 4 keys
+        // Lock envelope: exactly 3 keys
         assert_eq!(
             obj.len(),
-            4,
-            "envelope should have exactly 4 keys, got: {obj:?}"
+            3,
+            "envelope should have exactly 3 keys, got: {obj:?}"
         );
 
         // Also verify cmd_status doesn't error
@@ -1503,11 +1499,10 @@ mod tests {
         let capacity = get_capacity(&runner, "/mnt/storage", 0).unwrap();
         let last_scrub = get_scrub_string(&runner, "/mnt/storage");
 
-        let code = StatusCode::Healthy;
+        let code = StatusCode::Intact;
         let report = StatusReport {
             mount_point: config.mount_point().clone(),
-            status_code: code,
-            status: code.display_status(0),
+            status: code,
             total_devices: Some(3),
             present_count: Some(3),
             missing_count: Some(0),
@@ -1524,8 +1519,7 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
         let obj = v.as_object().unwrap();
 
-        assert_eq!(obj["status_code"], "healthy");
-        assert_eq!(obj["status"], "healthy");
+        assert_eq!(obj["status"], "intact");
         assert_eq!(obj["total_devices"], 3);
         assert_eq!(obj["present_count"], 3);
         assert_eq!(obj["missing_count"], 0);
@@ -1550,8 +1544,7 @@ mod tests {
         let code = StatusCode::Degraded;
         let report = StatusReport {
             mount_point: MountPoint("/mnt/storage".to_owned()),
-            status_code: code,
-            status: code.display_status(1),
+            status: code,
             total_devices: Some(3),
             present_count: Some(2),
             missing_count: Some(1),
@@ -1572,8 +1565,7 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
         let obj = v.as_object().unwrap();
 
-        assert_eq!(obj["status_code"], "degraded");
-        assert!(obj["status"].as_str().unwrap().contains("DEGRADED"));
+        assert_eq!(obj["status"], "degraded");
     }
 
     #[test]
@@ -1607,8 +1599,7 @@ mod tests {
 
         let report = StatusReport {
             mount_point: MountPoint("/mnt/storage".to_owned()),
-            status_code: StatusCode::Degraded,
-            status: "DEGRADED (1 missing device)".to_owned(),
+            status: StatusCode::Degraded,
             total_devices: Some(2),
             present_count: Some(1),
             missing_count: Some(1),
@@ -1659,8 +1650,7 @@ mod tests {
         let code = StatusCode::NotMounted;
         let report = StatusReport {
             mount_point: MountPoint("/mnt/storage".to_owned()),
-            status_code: code,
-            status: code.display_status(0),
+            status: code,
             total_devices: None,
             present_count: None,
             missing_count: None,
@@ -1680,11 +1670,10 @@ mod tests {
 
     #[test]
     fn status_json_disks_always_array_non_verbose() {
-        let code = StatusCode::Healthy;
+        let code = StatusCode::Intact;
         let report = StatusReport {
             mount_point: MountPoint("/mnt/storage".to_owned()),
-            status_code: code,
-            status: code.display_status(0),
+            status: code,
             total_devices: Some(3),
             present_count: Some(3),
             missing_count: Some(0),
@@ -1710,8 +1699,7 @@ mod tests {
     fn status_json_disks_always_array_verbose() {
         let report = StatusReport {
             mount_point: MountPoint("/mnt/storage".to_owned()),
-            status_code: StatusCode::Healthy,
-            status: "healthy".to_owned(),
+            status: StatusCode::Intact,
             total_devices: Some(1),
             present_count: Some(1),
             missing_count: Some(0),
@@ -1757,8 +1745,7 @@ mod tests {
         let code = StatusCode::NotMounted;
         let report = StatusReport {
             mount_point: MountPoint("/mnt/storage".to_owned()),
-            status_code: code,
-            status: code.display_status(0),
+            status: code,
             total_devices: None,
             present_count: None,
             missing_count: None,
@@ -1778,11 +1765,10 @@ mod tests {
 
     #[test]
     fn status_human_healthy_single() {
-        let code = StatusCode::Healthy;
+        let code = StatusCode::Intact;
         let report = StatusReport {
             mount_point: MountPoint("/mnt/storage".to_owned()),
-            status_code: code,
-            status: code.display_status(0),
+            status: code,
             total_devices: Some(1),
             present_count: Some(1),
             missing_count: Some(0),
@@ -1824,7 +1810,7 @@ mod tests {
             status: "present",
         }];
         let human = format_status_human(&report, Some(&compact), None);
-        assert!(human.contains("healthy"), "got:\n{human}");
+        assert!(human.contains("intact"), "got:\n{human}");
         assert!(human.contains("Drives:"), "got:\n{human}");
         assert!(human.contains("disk1"), "got:\n{human}");
         assert!(human.contains("vda"), "got:\n{human}");
@@ -1841,11 +1827,10 @@ mod tests {
 
     #[test]
     fn status_human_healthy_raid1() {
-        let code = StatusCode::Healthy;
+        let code = StatusCode::Intact;
         let report = StatusReport {
             mount_point: MountPoint("/mnt/storage".to_owned()),
-            status_code: code,
-            status: code.display_status(0),
+            status: code,
             total_devices: Some(3),
             present_count: Some(3),
             missing_count: Some(0),
@@ -1901,7 +1886,7 @@ mod tests {
             },
         ];
         let human = format_status_human(&report, Some(&compact), None);
-        assert!(human.contains("healthy"), "got:\n{human}");
+        assert!(human.contains("intact"), "got:\n{human}");
         assert!(human.contains("Drives:"), "got:\n{human}");
         assert!(human.contains("disk1"), "got:\n{human}");
         assert!(human.contains("Allocation:"), "got:\n{human}");
@@ -1916,8 +1901,7 @@ mod tests {
         let code = StatusCode::Degraded;
         let report = StatusReport {
             mount_point: MountPoint("/mnt/storage".to_owned()),
-            status_code: code,
-            status: code.display_status(1),
+            status: code,
             total_devices: Some(3),
             present_count: Some(2),
             missing_count: Some(1),
@@ -1967,8 +1951,7 @@ mod tests {
         let code = StatusCode::Degraded;
         let report = StatusReport {
             mount_point: MountPoint("/mnt/storage".to_owned()),
-            status_code: code,
-            status: code.display_status(2),
+            status: code,
             total_devices: Some(4),
             present_count: Some(2),
             missing_count: Some(2),
@@ -2014,11 +1997,10 @@ mod tests {
             }),
         }];
 
-        let code = StatusCode::Healthy;
+        let code = StatusCode::Intact;
         let report = StatusReport {
             mount_point: MountPoint("/mnt/storage".to_owned()),
-            status_code: code,
-            status: code.display_status(0),
+            status: code,
             total_devices: Some(1),
             present_count: Some(1),
             missing_count: Some(0),
@@ -2060,8 +2042,7 @@ mod tests {
         let code = StatusCode::Degraded;
         let report = StatusReport {
             mount_point: MountPoint("/mnt/storage".to_owned()),
-            status_code: code,
-            status: code.display_status(1),
+            status: code,
             total_devices: Some(2),
             present_count: Some(1),
             missing_count: Some(1),
@@ -2103,11 +2084,10 @@ mod tests {
             }),
         }];
 
-        let code = StatusCode::Healthy;
+        let code = StatusCode::Intact;
         let report = StatusReport {
             mount_point: MountPoint("/mnt/storage".to_owned()),
-            status_code: code,
-            status: code.display_status(0),
+            status: code,
             total_devices: Some(1),
             present_count: Some(1),
             missing_count: Some(0),
@@ -2245,11 +2225,10 @@ mod tests {
 
     #[test]
     fn balance_human_running() {
-        let code = StatusCode::Healthy;
+        let code = StatusCode::Intact;
         let report = StatusReport {
             mount_point: MountPoint("/mnt/storage".to_owned()),
-            status_code: code,
-            status: code.display_status(0),
+            status: code,
             total_devices: Some(2),
             present_count: Some(2),
             missing_count: Some(0),
@@ -2279,11 +2258,10 @@ mod tests {
 
     #[test]
     fn balance_human_unknown() {
-        let code = StatusCode::Healthy;
+        let code = StatusCode::Intact;
         let report = StatusReport {
             mount_point: MountPoint("/mnt/storage".to_owned()),
-            status_code: code,
-            status: code.display_status(0),
+            status: code,
             total_devices: Some(1),
             present_count: Some(1),
             missing_count: Some(0),
@@ -2305,11 +2283,10 @@ mod tests {
 
     #[test]
     fn balance_human_idle_no_line() {
-        let code = StatusCode::Healthy;
+        let code = StatusCode::Intact;
         let report = StatusReport {
             mount_point: MountPoint("/mnt/storage".to_owned()),
-            status_code: code,
-            status: code.display_status(0),
+            status: code,
             total_devices: Some(1),
             present_count: Some(1),
             missing_count: Some(0),
@@ -2662,11 +2639,10 @@ mod tests {
             devid: None,
             status: "new",
         }];
-        let code = StatusCode::Healthy;
+        let code = StatusCode::Intact;
         let report = StatusReport {
             mount_point: MountPoint("/mnt/storage".to_owned()),
-            status_code: code,
-            status: code.display_status(0),
+            status: code,
             total_devices: Some(1),
             present_count: Some(1),
             missing_count: Some(0),
@@ -2719,11 +2695,10 @@ mod tests {
             errors: None,
         }];
 
-        let code = StatusCode::Healthy;
+        let code = StatusCode::Intact;
         let report = StatusReport {
             mount_point: MountPoint("/mnt/storage".to_owned()),
-            status_code: code,
-            status: code.display_status(0),
+            status: code,
             total_devices: Some(1),
             present_count: Some(1),
             missing_count: Some(0),
@@ -2759,11 +2734,10 @@ mod tests {
             errors: None,
         }];
 
-        let code = StatusCode::Healthy;
+        let code = StatusCode::Intact;
         let report = StatusReport {
             mount_point: MountPoint("/mnt/storage".to_owned()),
-            status_code: code,
-            status: code.display_status(0),
+            status: code,
             total_devices: Some(1),
             present_count: Some(1),
             missing_count: Some(0),
@@ -2791,11 +2765,10 @@ mod tests {
 
     #[test]
     fn status_human_healthy_no_new() {
-        let code = StatusCode::Healthy;
+        let code = StatusCode::Intact;
         let report = StatusReport {
             mount_point: MountPoint("/mnt/storage".to_owned()),
-            status_code: code,
-            status: code.display_status(0),
+            status: code,
             total_devices: Some(3),
             present_count: Some(3),
             missing_count: Some(0),

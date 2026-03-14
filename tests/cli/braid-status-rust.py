@@ -66,7 +66,7 @@ with subtest("New disks in JSON verbose"):
 with subtest("Single-disk summary"):
     output = machine.succeed(rust_status())
     print(f"Single-disk status:\n{output}")
-    assert "healthy" in output, f"Expected 'healthy':\n{output}"
+    assert "intact" in output, f"Expected 'intact':\n{output}"
     assert "Drives:" in output, f"Expected 'Drives:':\n{output}"
     assert "disk1" in output, f"Expected 'disk1':\n{output}"
     assert "present" in output, f"Expected 'present':\n{output}"
@@ -87,7 +87,7 @@ with subtest("Setup: 3-disk RAID1 pool"):
 with subtest("Healthy RAID1 summary"):
     output = machine.succeed(rust_status())
     print(f"Healthy RAID1 status:\n{output}")
-    assert "healthy" in output, f"Expected 'healthy':\n{output}"
+    assert "intact" in output, f"Expected 'intact':\n{output}"
     assert "Drives:" in output, f"Expected 'Drives:':\n{output}"
     for disk in ["disk1", "disk2", "disk3"]:
         assert disk in output, f"Expected '{disk}':\n{output}"
@@ -113,7 +113,7 @@ with subtest("Healthy verbose"):
 with subtest("Healthy JSON verbose"):
     raw = machine.succeed(rust_status("--json --verbose"))
     s = json.loads(raw)
-    assert s["status_code"] == "healthy", f"Expected healthy: {s['status_code']}"
+    assert s["status"] == "intact", f"Expected intact: {s['status']}"
     assert len(s["disks"]) == 3, f"Expected 3 disks: {len(s['disks'])}"
     for d in s["disks"]:
         assert "mapper" in d, f"Missing mapper: {d}"
@@ -158,7 +158,7 @@ with subtest("Degraded verbose"):
 with subtest("Degraded JSON verbose"):
     raw = machine.succeed(rust_status("--json --verbose"))
     s = json.loads(raw)
-    assert s["status_code"] == "degraded", f"Expected degraded: {s['status_code']}"
+    assert s["status"] == "degraded", f"Expected degraded: {s['status']}"
     present_disks = [d for d in s["disks"] if d["status"] == "present"]
     missing_disks = [d for d in s["disks"] if d["status"] == "missing"]
     assert len(present_disks) >= 2, f"Expected at least 2 present disks: {present_disks}"
@@ -175,8 +175,7 @@ with subtest("Not mounted"):
 with subtest("Not mounted JSON"):
     raw = machine.succeed(rust_status("--json"))
     s = json.loads(raw)
-    assert s["status_code"] == "not_mounted", f"Expected not_mounted: {s['status_code']}"
-    assert s["status"] == "not mounted", f"Expected 'not mounted': {s['status']}"
+    assert s["status"] == "not_mounted", f"Expected not_mounted: {s['status']}"
     assert s["disks"] == [], f"Expected empty disks: {s['disks']}"
     assert "capacity" not in s, f"Unexpected capacity: {s}"
     assert "profile" not in s, f"Unexpected profile: {s}"

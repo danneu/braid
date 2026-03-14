@@ -209,6 +209,12 @@ Drive states:
 
 Drive state classification uses the disk identity map. If the map is unavailable, absent disks show as `unknown` instead of `new` or `missing`.
 
+Pool status values (`--json` `"status"` field / human output):
+
+- `"intact"` / `intact` — mounted, all devices present
+- `"degraded"` / `DEGRADED (N missing device(s))` — mounted, one or more devices missing
+- `"not_mounted"` / `not mounted` — pool is not mounted
+
 Human output includes a per-type allocation table:
 
 ```

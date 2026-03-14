@@ -76,8 +76,8 @@ with subtest("status during balance"):
 with subtest("json status during balance"):
     raw = machine.succeed("braid status --json")
     s = json.loads(raw)
-    assert s["status_code"] in ("healthy", "degraded"), (
-        f"Expected healthy or degraded: {s['status_code']}"
+    assert s["status"] in ("intact", "degraded"), (
+        f"Expected intact or degraded: {s['status']}"
     )
     assert "balance" in s, f"Expected 'balance' key in JSON: {s}"
     assert s["balance"]["state"] == "running", f"Expected running balance: {s['balance']}"

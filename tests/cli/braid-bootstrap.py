@@ -87,9 +87,9 @@ with subtest("Apply creates single-disk pool"):
 
 # --- Phase 4: Status works on new pool ---
 
-with subtest("Status reports healthy single-disk pool"):
+with subtest("Status reports intact single-disk pool"):
     output = machine.succeed("braid status --config /tmp/braid-config.json")
-    assert "healthy" in output.lower(), f"Expected healthy status:\n{output}"
+    assert "intact" in output.lower(), f"Expected intact status:\n{output}"
 
 
 # --- Phase 5: Write data for integrity check ---

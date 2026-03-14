@@ -47,7 +47,7 @@ with subtest("Setup: build 3-disk RAID1 pool"):
 with subtest("braid status shows pool summary"):
     output = machine.succeed("braid status")
     print(f"braid status output:\n{output}")
-    assert "healthy" in output, f"Expected 'healthy':\n{output}"
+    assert "intact" in output, f"Expected 'intact':\n{output}"
     assert "Drives:" in output, f"Expected 'Drives:':\n{output}"
     for disk in ["disk1", "disk2", "disk3"]:
         assert disk in output, f"Expected '{disk}':\n{output}"
@@ -63,7 +63,7 @@ with subtest("braid status --json has schema fields"):
     raw = machine.succeed("braid status --json")
     s = json.loads(raw)
     assert s["mount_point"] == "/mnt/storage", f"Bad mount_point: {s['mount_point']}"
-    assert s["status"] == "healthy", f"Bad status: {s['status']}"
+    assert s["status"] == "intact", f"Bad status: {s['status']}"
     assert s["total_devices"] == 3, f"Bad total_devices: {s['total_devices']}"
     assert s["present_count"] == 3, f"Bad present_count: {s['present_count']}"
     assert s["missing_count"] == 0, f"Bad missing_count: {s['missing_count']}"
@@ -109,7 +109,7 @@ with subtest("braid status reports not mounted on unmounted pool"):
 
     json_output = machine.succeed("braid status --json")
     s = json.loads(json_output)
-    assert s["status"] == "not mounted", f"Expected status 'not mounted':\n{s}"
+    assert s["status"] == "not_mounted", f"Expected status 'not_mounted':\n{s}"
     assert "mount_point" in s, f"Expected mount_point in JSON:\n{s}"
 
 machine.shutdown()
