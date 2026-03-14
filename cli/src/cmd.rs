@@ -684,10 +684,22 @@ impl MockRunner {
 
 impl CommandRunner for MockRunner {
     fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
-        self.outputs
+        let output = self
+            .outputs
             .get(&format!("{request:?}"))
             .cloned()
-            .ok_or(CmdError::MissingMock)
+            .ok_or(CmdError::MissingMock)?;
+        if let CmdRequest::CryptsetupLuksHeaderBackup { backup_path, .. } = request {
+            if output.exit_status == 0 {
+                if let Some(parent) = std::path::Path::new(backup_path.as_str()).parent() {
+                    std::fs::create_dir_all(parent)
+                        .map_err(|e| CmdError::Failed(format!("mock: create_dir_all: {e}")))?;
+                }
+                std::fs::write(backup_path, b"")
+                    .map_err(|e| CmdError::Failed(format!("mock: write backup: {e}")))?;
+            }
+        }
+        Ok(output)
     }
 
     fn run_with_stdin(
@@ -950,5 +962,59 @@ mod tests {
         let result = mock.run_with_stdin(&req, b"secret");
         assert!(result.is_ok());
         assert_eq!(result.unwrap().exit_status, 0);
+    }
+
+    #[test]
+    // Intent: MockRunner creates the backup file on successful luksHeaderBackup.
+    // Why: backup_luks_header_to does atomic write (tmp + rename) and needs the
+    // tmp file to exist after cryptsetup runs. Without the mock side-effect,
+    // set_permissions on the tmp file would ENOENT.
+    // Scenario: any enroll_key_file test that backs up headers.
+    fn mock_header_backup_creates_file_on_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("braid-test.luksheader.tmp");
+
+        let req = CmdRequest::CryptsetupLuksHeaderBackup {
+            device: "/dev/vda".to_owned(),
+            backup_path: path.display().to_string(),
+        };
+        let mock = MockRunner::default().with_output(
+            req.clone(),
+            RawCommandOutput {
+                cmd: "cryptsetup luksHeaderBackup".to_owned(),
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_status: 0,
+            },
+        );
+
+        mock.run(&req).unwrap();
+        assert!(path.exists(), "mock should create backup file on success");
+    }
+
+    #[test]
+    // Intent: MockRunner does NOT create file when luksHeaderBackup fails.
+    // Why: a failed cryptsetup shouldn't leave artifacts on disk.
+    // Scenario: cryptsetup fails (bad device, permissions, etc).
+    fn mock_header_backup_skips_file_on_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("braid-test.luksheader.tmp");
+
+        let req = CmdRequest::CryptsetupLuksHeaderBackup {
+            device: "/dev/vda".to_owned(),
+            backup_path: path.display().to_string(),
+        };
+        let mock = MockRunner::default().with_output(
+            req.clone(),
+            RawCommandOutput {
+                cmd: "cryptsetup luksHeaderBackup".to_owned(),
+                stdout: String::new(),
+                stderr: "Device not found".to_owned(),
+                exit_status: 1,
+            },
+        );
+
+        mock.run(&req).unwrap();
+        assert!(!path.exists(), "mock should not create file on failure");
     }
 }

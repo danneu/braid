@@ -742,11 +742,6 @@ mod tests {
         let pass = "testpass";
         let backup_dir = tempfile::tempdir().unwrap();
 
-        // Pre-create backup files — the real cryptsetup would create them,
-        // but MockRunner doesn't touch the filesystem.
-        std::fs::write(backup_dir.path().join("braid-disk1.luksheader"), b"").unwrap();
-        std::fs::write(backup_dir.path().join("braid-disk2.luksheader"), b"").unwrap();
-
         let (e1_req, e1_stdin, e1_out) = enroll_ok(d1, kf, pass);
         let (e2_req, e2_stdin, e2_out) = enroll_ok(d2, kf, pass);
 
@@ -758,7 +753,7 @@ mod tests {
                     device: d1.to_owned(),
                     backup_path: backup_dir
                         .path()
-                        .join("braid-disk1.luksheader")
+                        .join("braid-disk1.luksheader.tmp")
                         .display()
                         .to_string(),
                 },
@@ -769,7 +764,7 @@ mod tests {
                     device: d2.to_owned(),
                     backup_path: backup_dir
                         .path()
-                        .join("braid-disk2.luksheader")
+                        .join("braid-disk2.luksheader.tmp")
                         .display()
                         .to_string(),
                 },
@@ -827,9 +822,6 @@ mod tests {
         let pass = "testpass";
         let backup_dir = tempfile::tempdir().unwrap();
 
-        // Pre-create backup file (see apply_enrolls_needs_enroll_items).
-        std::fs::write(backup_dir.path().join("braid-disk2.luksheader"), b"").unwrap();
-
         // Only d2 should have enroll called — d1 is AlreadyEnrolled
         let (e2_req, e2_stdin, e2_out) = enroll_ok(d2, kf, pass);
         let runner = MockRunner::default()
@@ -839,7 +831,7 @@ mod tests {
                     device: d2.to_owned(),
                     backup_path: backup_dir
                         .path()
-                        .join("braid-disk2.luksheader")
+                        .join("braid-disk2.luksheader.tmp")
                         .display()
                         .to_string(),
                 },

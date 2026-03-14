@@ -37,8 +37,8 @@ with subtest("braid add creates header backups for both disks"):
     machine.succeed(add_disk("disk2"))
 
 with subtest("backup files exist"):
-    machine.succeed(f"test -f {backup_dir}/braid-disk1.img")
-    machine.succeed(f"test -f {backup_dir}/braid-disk2.img")
+    machine.succeed(f"test -f {backup_dir}/braid-disk1.luksheader")
+    machine.succeed(f"test -f {backup_dir}/braid-disk2.luksheader")
 
 with subtest("backup directory has 0700 permissions"):
     perms = machine.succeed(f"stat -c '%a' {backup_dir}").strip()
@@ -46,8 +46,8 @@ with subtest("backup directory has 0700 permissions"):
 
 with subtest("backup files have 0400 permissions"):
     for disk in ["braid-disk1", "braid-disk2"]:
-        perms = machine.succeed(f"stat -c '%a' {backup_dir}/{disk}.img").strip()
-        assert perms == "400", f"expected 400 for {disk}.img, got {perms}"
+        perms = machine.succeed(f"stat -c '%a' {backup_dir}/{disk}.luksheader").strip()
+        assert perms == "400", f"expected 400 for {disk}.luksheader, got {perms}"
 
 with subtest("backup UUID matches device UUID"):
     for name, by_id in [("braid-disk1", "virtio-disk1"), ("braid-disk2", "virtio-disk2")]:
@@ -55,7 +55,7 @@ with subtest("backup UUID matches device UUID"):
             f"cryptsetup luksUUID /dev/disk/by-id/{by_id}"
         ).strip()
         backup_uuid = machine.succeed(
-            f"cryptsetup luksUUID --header {backup_dir}/{name}.img /dev/disk/by-id/{by_id}"
+            f"cryptsetup luksUUID --header {backup_dir}/{name}.luksheader /dev/disk/by-id/{by_id}"
         ).strip()
         assert device_uuid == backup_uuid, (
             f"UUID mismatch for {name}: device={device_uuid}, backup={backup_uuid}"
@@ -94,7 +94,7 @@ with subtest("restore LUKS header from backup"):
     # -q suppresses interactive "Are you sure?" confirmation
     machine.succeed(
         f"cryptsetup -q luksHeaderRestore "
-        f"--header-backup-file {backup_dir}/braid-disk1.img "
+        f"--header-backup-file {backup_dir}/braid-disk1.luksheader "
         "/dev/disk/by-id/virtio-disk1"
     )
 

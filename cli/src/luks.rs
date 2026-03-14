@@ -108,11 +108,17 @@ pub(crate) fn backup_luks_header_to<R: CommandRunner>(
     }
 
     let backup_path = dir.join(format!("{mapper}.luksheader"));
+    let tmp_path = dir.join(format!("{mapper}.luksheader.tmp"));
+    // Write to temp file, then atomic rename so we never lose an existing backup
+    if tmp_path.exists() {
+        std::fs::remove_file(&tmp_path)?;
+    }
     let result = runner.run(&CmdRequest::CryptsetupLuksHeaderBackup {
         device: device.to_owned(),
-        backup_path: backup_path.display().to_string(),
+        backup_path: tmp_path.display().to_string(),
     })?;
     if result.exit_status != 0 {
+        let _ = std::fs::remove_file(&tmp_path);
         return Err(LuksError::Validation(format!(
             "LUKS header backup failed (exit {}): {}",
             result.exit_status,
@@ -120,13 +126,8 @@ pub(crate) fn backup_luks_header_to<R: CommandRunner>(
         )));
     }
     // cryptsetup already creates the file as 0400, but enforce it ourselves for defense-in-depth
-    std::fs::set_permissions(&backup_path, std::fs::Permissions::from_mode(0o400))?;
-
-    // Clean up old .img backup if it exists (migration from .img → .luksheader)
-    let old_path = dir.join(format!("{mapper}.img"));
-    if old_path.exists() {
-        let _ = std::fs::remove_file(&old_path);
-    }
+    std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o400))?;
+    std::fs::rename(&tmp_path, &backup_path)?;
 
     Ok(backup_path)
 }
