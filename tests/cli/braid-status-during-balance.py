@@ -28,9 +28,11 @@ with subtest("create single-disk pool"):
     machine.succeed(add_disk("disk1"))
     machine.succeed("mountpoint -q /mnt/storage")
 
-# 2. Write ~2 GiB so balance has observable work
+# 2. Write ~512 MiB so balance has observable work.
+#    Only 1/4 of disk size — more causes ENOSPC during single→RAID1 rebalance
+#    because btrfs needs unallocated chunk space on the source device.
 with subtest("write test data"):
-    machine.succeed("dd if=/dev/urandom of=/mnt/storage/bigfile bs=1M count=2048")
+    machine.succeed("dd if=/dev/urandom of=/mnt/storage/bigfile bs=1M count=512")
     machine.succeed("sync")
 
 # 3. LUKS-format and open disk2 manually, add to btrfs directly
