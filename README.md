@@ -209,6 +209,18 @@ Drive states:
 
 Drive state classification uses the disk identity map. If the map is unavailable, absent disks show as `unknown` instead of `new` or `missing`.
 
+Human output includes a per-type allocation table:
+
+```
+Allocation:
+  Type       Profile  Used        Allocated
+  Data       RAID1    153.40 GiB  157.00 GiB
+  Metadata   RAID1    156.50 MiB  1.00 GiB
+  System     RAID1    0.00 MiB    32.00 MiB
+```
+
+The `--json` output includes an `"allocation"` array with `bg_type`, `profile`, `used_bytes`, and `allocated_bytes` per entry.
+
 During an active balance (e.g. after `braid add`), status shows progress:
 
 ```

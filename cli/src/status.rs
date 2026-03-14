@@ -3,15 +3,15 @@ use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, LsblkFieldKind};
-use crate::config::{mapper_name, Config};
+use crate::config::{Config, mapper_name};
 use crate::disk_map::{self, DiskMapLoad};
 use crate::parse::types::BalanceState;
 use crate::parse::{
-    parse_btrfs_balance_status, parse_btrfs_device_stats, parse_btrfs_device_usage,
-    parse_btrfs_df_json, parse_btrfs_filesystem_usage, parse_btrfs_scrub_status, parse_lsblk_field,
-    BtrfsDeviceStatsOutput, ParseError, ScrubState,
+    BtrfsDeviceStatsOutput, ParseError, ScrubState, parse_btrfs_balance_status,
+    parse_btrfs_device_stats, parse_btrfs_device_usage, parse_btrfs_df_json,
+    parse_btrfs_filesystem_usage, parse_btrfs_scrub_status, parse_lsblk_field,
 };
-use crate::probe::{probe_config_disk, probe_pool, Filesystem, ProbeError};
+use crate::probe::{Filesystem, ProbeError, probe_config_disk, probe_pool};
 use crate::types::*;
 
 // ---------------------------------------------------------------------------
@@ -56,7 +56,17 @@ pub struct StatusReport {
     pub last_scrub: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub balance: Option<BalanceReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allocation: Option<Vec<AllocationEntry>>,
     pub disks: Vec<DiskReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AllocationEntry {
+    pub bg_type: String,
+    pub profile: String,
+    pub used_bytes: u64,
+    pub allocated_bytes: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -277,6 +287,7 @@ pub fn build_status_report<R: CommandRunner, F: Filesystem>(
                 capacity: None,
                 last_scrub: None,
                 balance: None,
+                allocation: None,
                 disks: vec![],
             });
         }
@@ -296,6 +307,7 @@ pub fn build_status_report<R: CommandRunner, F: Filesystem>(
             capacity: None,
             last_scrub: None,
             balance: None,
+            allocation: None,
             disks: vec![],
         });
     }
@@ -306,7 +318,7 @@ pub fn build_status_report<R: CommandRunner, F: Filesystem>(
             .map_err(|e| StatusError::Validation(e.to_string()))?;
     }
 
-    let profile = get_profile(runner, config.mount_point().as_str())?;
+    let df_summary = summarize_df(runner, config.mount_point().as_str())?;
     let capacity = get_capacity(runner, config.mount_point().as_str(), pool.missing_count)?;
     let last_scrub = get_scrub_string(runner, config.mount_point().as_str());
     let balance = get_balance_report(runner, config.mount_point().as_str());
@@ -334,10 +346,11 @@ pub fn build_status_report<R: CommandRunner, F: Filesystem>(
         total_devices: Some(pool.total_devices),
         present_count: Some(present_count),
         missing_count: Some(pool.missing_count),
-        profile: Some(profile),
+        profile: Some(df_summary.profile),
         capacity: Some(capacity),
         last_scrub: Some(last_scrub),
         balance: Some(balance),
+        allocation: Some(df_summary.allocation),
         disks: verbose_ctx.disks,
     })
 }
@@ -375,6 +388,7 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
             capacity: None,
             last_scrub: None,
             balance: None,
+            allocation: None,
             disks: vec![],
         };
         if json {
@@ -398,7 +412,7 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
     }
 
     // 4. Strict data gathering
-    let profile = get_profile(runner, config.mount_point().as_str())?;
+    let df_summary = summarize_df(runner, config.mount_point().as_str())?;
     let capacity = get_capacity(runner, config.mount_point().as_str(), pool.missing_count)?;
     let last_scrub = get_scrub_string(runner, config.mount_point().as_str());
     let balance = get_balance_report(runner, config.mount_point().as_str());
@@ -442,10 +456,11 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
         total_devices: Some(pool.total_devices),
         present_count: Some(present_count),
         missing_count: Some(pool.missing_count),
-        profile: Some(profile),
+        profile: Some(df_summary.profile),
         capacity: Some(capacity),
         last_scrub: Some(last_scrub),
         balance: Some(balance),
+        allocation: Some(df_summary.allocation),
         disks: verbose_ctx
             .as_ref()
             .map(|v| v.disks.clone())
@@ -473,21 +488,49 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
 // Private helpers — strict (return Result)
 // ---------------------------------------------------------------------------
 
-fn get_profile<R: CommandRunner>(runner: &R, mount_point: &str) -> Result<String, StatusError> {
+struct DfSummary {
+    profile: String,
+    allocation: Vec<AllocationEntry>,
+}
+
+fn summarize_df<R: CommandRunner>(runner: &R, mount_point: &str) -> Result<DfSummary, StatusError> {
     let raw = runner.run(&CmdRequest::BtrfsFilesystemDfJson {
         mount_point: MountPoint(mount_point.to_owned()),
     })?;
     let df = parse_btrfs_df_json(&raw)?;
+
     let profiles = df.profiles_for(crate::parse::types::BtrfsBgType::Data);
-    if profiles.is_empty() {
-        Ok("unknown".to_owned())
+    let profile = if profiles.is_empty() {
+        "unknown".to_owned()
     } else {
-        Ok(profiles
+        profiles
             .iter()
             .map(|p| p.to_string())
             .collect::<Vec<_>>()
-            .join(", "))
-    }
+            .join(", ")
+    };
+
+    let mut entries: Vec<_> = df
+        .entries
+        .iter()
+        .filter(|e| e.bg_type != crate::parse::types::BtrfsBgType::GlobalReserve)
+        .collect();
+    entries.sort();
+
+    let allocation = entries
+        .iter()
+        .map(|e| AllocationEntry {
+            bg_type: e.bg_type.to_string(),
+            profile: e.bg_profile.to_string(),
+            used_bytes: e.bg_used,
+            allocated_bytes: e.bg_total,
+        })
+        .collect();
+
+    Ok(DfSummary {
+        profile,
+        allocation,
+    })
 }
 
 fn get_capacity<R: CommandRunner>(
@@ -755,8 +798,20 @@ fn format_status_human(
         return out;
     }
 
-    if let Some(ref profile) = report.profile {
-        out.push_str(&format!("Profile:  {profile}\n"));
+    if let Some(ref alloc) = report.allocation {
+        if !alloc.is_empty() {
+            out.push_str("Allocation:\n");
+            out.push_str("  Type       Profile  Used        Allocated\n");
+            for a in alloc {
+                out.push_str(&format!(
+                    "  {:<9}  {:<7}  {:<10}  {}\n",
+                    a.bg_type,
+                    a.profile,
+                    format_bytes(a.used_bytes),
+                    format_bytes(a.allocated_bytes),
+                ));
+            }
+        }
     }
 
     if let Some(ref balance) = report.balance {
@@ -1388,6 +1443,7 @@ mod tests {
             capacity: None,
             last_scrub: None,
             balance: None,
+            allocation: None,
             disks: vec![],
         };
 
@@ -1408,6 +1464,7 @@ mod tests {
         assert!(!obj.contains_key("profile"));
         assert!(!obj.contains_key("capacity"));
         assert!(!obj.contains_key("last_scrub"));
+        assert!(!obj.contains_key("allocation"));
 
         // Lock envelope: exactly 4 keys
         assert_eq!(
@@ -1425,7 +1482,7 @@ mod tests {
         let runner = runner_healthy_3disk_base();
         let config = config_3disk();
 
-        let profile = get_profile(&runner, "/mnt/storage").unwrap();
+        let df_summary = summarize_df(&runner, "/mnt/storage").unwrap();
         let capacity = get_capacity(&runner, "/mnt/storage", 0).unwrap();
         let last_scrub = get_scrub_string(&runner, "/mnt/storage");
 
@@ -1437,10 +1494,11 @@ mod tests {
             total_devices: Some(3),
             present_count: Some(3),
             missing_count: Some(0),
-            profile: Some(profile),
+            profile: Some(df_summary.profile),
             capacity: Some(capacity),
             last_scrub: Some(last_scrub),
             balance: None,
+            allocation: Some(df_summary.allocation),
             disks: vec![],
         };
 
@@ -1457,6 +1515,16 @@ mod tests {
         assert!(obj.contains_key("capacity"));
         assert!(obj.contains_key("last_scrub"));
         assert_eq!(obj["disks"], serde_json::json!([]));
+
+        // allocation array: Data, Metadata, System (sorted by BtrfsBgType ord, GlobalReserve filtered)
+        let alloc = obj["allocation"].as_array().unwrap();
+        assert_eq!(alloc.len(), 3);
+        assert_eq!(alloc[0]["bg_type"], "Data");
+        assert_eq!(alloc[0]["profile"], "RAID1");
+        assert_eq!(alloc[0]["used_bytes"], 16777216);
+        assert_eq!(alloc[0]["allocated_bytes"], 67108864);
+        assert_eq!(alloc[1]["bg_type"], "Metadata");
+        assert_eq!(alloc[2]["bg_type"], "System");
     }
 
     #[test]
@@ -1477,6 +1545,7 @@ mod tests {
             }),
             last_scrub: Some("never".to_owned()),
             balance: None,
+            allocation: None,
             disks: vec![],
         };
 
@@ -1532,6 +1601,7 @@ mod tests {
             }),
             last_scrub: Some("never".to_owned()),
             balance: None,
+            allocation: None,
             disks: vec![present, missing],
         };
 
@@ -1578,6 +1648,7 @@ mod tests {
             capacity: None,
             last_scrub: None,
             balance: None,
+            allocation: None,
             disks: vec![],
         };
         let json_str = serde_json::to_string_pretty(&report).unwrap();
@@ -1604,6 +1675,7 @@ mod tests {
             }),
             last_scrub: Some("never".to_owned()),
             balance: None,
+            allocation: None,
             disks: vec![],
         };
         let json_str = serde_json::to_string_pretty(&report).unwrap();
@@ -1629,6 +1701,7 @@ mod tests {
             }),
             last_scrub: Some("never".to_owned()),
             balance: None,
+            allocation: None,
             disks: vec![DiskReport {
                 name: "disk1".to_owned(),
                 mapper: "disk1".to_owned(),
@@ -1670,12 +1743,13 @@ mod tests {
             capacity: None,
             last_scrub: None,
             balance: None,
+            allocation: None,
             disks: vec![],
         };
         let human = format_status_human(&report, None, None);
         assert!(human.contains("not mounted"), "got:\n{human}");
         assert!(!human.contains("Capacity"), "got:\n{human}");
-        assert!(!human.contains("Profile"), "got:\n{human}");
+        assert!(!human.contains("Allocation:"), "got:\n{human}");
     }
 
     #[test]
@@ -1696,6 +1770,26 @@ mod tests {
             }),
             last_scrub: Some("never".to_owned()),
             balance: None,
+            allocation: Some(vec![
+                AllocationEntry {
+                    bg_type: "Data".to_owned(),
+                    profile: "single".to_owned(),
+                    used_bytes: 536870912,
+                    allocated_bytes: 1073741824,
+                },
+                AllocationEntry {
+                    bg_type: "Metadata".to_owned(),
+                    profile: "single".to_owned(),
+                    used_bytes: 65536,
+                    allocated_bytes: 268435456,
+                },
+                AllocationEntry {
+                    bg_type: "System".to_owned(),
+                    profile: "single".to_owned(),
+                    used_bytes: 16384,
+                    allocated_bytes: 4194304,
+                },
+            ]),
             disks: vec![],
         };
         let compact = vec![CompactDrive {
@@ -1710,12 +1804,14 @@ mod tests {
         assert!(human.contains("disk1"), "got:\n{human}");
         assert!(human.contains("vda"), "got:\n{human}");
         assert!(human.contains("present"), "got:\n{human}");
+        assert!(human.contains("Allocation:"), "got:\n{human}");
         assert!(human.contains("single"), "got:\n{human}");
         assert!(human.contains("Total:"), "got:\n{human}");
         assert!(human.contains("Used:"), "got:\n{human}");
         assert!(human.contains("Free:"), "got:\n{human}");
         assert!(!human.contains("RAID1"), "got:\n{human}");
         assert!(!human.contains("missing"), "got:\n{human}");
+        assert!(!human.contains("Profile:"), "got:\n{human}");
     }
 
     #[test]
@@ -1736,6 +1832,26 @@ mod tests {
             }),
             last_scrub: Some("never".to_owned()),
             balance: None,
+            allocation: Some(vec![
+                AllocationEntry {
+                    bg_type: "Data".to_owned(),
+                    profile: "RAID1".to_owned(),
+                    used_bytes: 16777216,
+                    allocated_bytes: 67108864,
+                },
+                AllocationEntry {
+                    bg_type: "Metadata".to_owned(),
+                    profile: "RAID1".to_owned(),
+                    used_bytes: 65536,
+                    allocated_bytes: 33554432,
+                },
+                AllocationEntry {
+                    bg_type: "System".to_owned(),
+                    profile: "RAID1".to_owned(),
+                    used_bytes: 16384,
+                    allocated_bytes: 4194304,
+                },
+            ]),
             disks: vec![],
         };
         let compact = vec![
@@ -1762,6 +1878,7 @@ mod tests {
         assert!(human.contains("healthy"), "got:\n{human}");
         assert!(human.contains("Drives:"), "got:\n{human}");
         assert!(human.contains("disk1"), "got:\n{human}");
+        assert!(human.contains("Allocation:"), "got:\n{human}");
         assert!(human.contains("RAID1"), "got:\n{human}");
         assert!(human.contains("Total:"), "got:\n{human}");
         assert!(human.contains("scrub"), "got:\n{human}");
@@ -1786,6 +1903,7 @@ mod tests {
             }),
             last_scrub: Some("never".to_owned()),
             balance: None,
+            allocation: None,
             disks: vec![],
         };
         let compact = vec![
@@ -1835,6 +1953,7 @@ mod tests {
             }),
             last_scrub: Some("never".to_owned()),
             balance: None,
+            allocation: None,
             disks: vec![],
         };
         let human = format_status_human(&report, None, None);
@@ -1883,6 +2002,7 @@ mod tests {
             }),
             last_scrub: Some("never".to_owned()),
             balance: None,
+            allocation: None,
             disks: vec![],
         };
 
@@ -1924,6 +2044,7 @@ mod tests {
             }),
             last_scrub: Some("never".to_owned()),
             balance: None,
+            allocation: None,
             disks: vec![],
         };
 
@@ -1968,6 +2089,7 @@ mod tests {
             }),
             last_scrub: Some("never".to_owned()),
             balance: None,
+            allocation: None,
             disks: vec![],
         };
 
@@ -2113,6 +2235,7 @@ mod tests {
                 considered_chunks: 120,
                 pct_left: 32,
             }),
+            allocation: None,
             disks: vec![],
         };
         let human = format_status_human(&report, None, None);
@@ -2140,6 +2263,7 @@ mod tests {
             }),
             last_scrub: Some("never".to_owned()),
             balance: Some(BalanceReport::Unknown),
+            allocation: None,
             disks: vec![],
         };
         let human = format_status_human(&report, None, None);
@@ -2164,6 +2288,7 @@ mod tests {
             }),
             last_scrub: Some("never".to_owned()),
             balance: Some(BalanceReport::Idle),
+            allocation: None,
             disks: vec![],
         };
         let human = format_status_human(&report, None, None);
@@ -2181,7 +2306,7 @@ mod tests {
             },
             err_raw("btrfs filesystem df", 1, "not a btrfs filesystem"),
         );
-        let result = get_profile(&runner, "/mnt/storage");
+        let result = summarize_df(&runner, "/mnt/storage");
         assert!(result.is_err());
     }
 
@@ -2519,6 +2644,7 @@ mod tests {
             }),
             last_scrub: Some("never".to_owned()),
             balance: None,
+            allocation: None,
             disks: vec![],
         };
         let human = format_status_human(&report, Some(&compact), None);
@@ -2574,6 +2700,7 @@ mod tests {
             }),
             last_scrub: Some("never".to_owned()),
             balance: None,
+            allocation: None,
             disks: vec![],
         };
 
@@ -2612,6 +2739,7 @@ mod tests {
             }),
             last_scrub: Some("never".to_owned()),
             balance: None,
+            allocation: None,
             disks: vec![],
         };
 
@@ -2642,6 +2770,7 @@ mod tests {
             }),
             last_scrub: Some("never".to_owned()),
             balance: None,
+            allocation: None,
             disks: vec![],
         };
         let compact = vec![
