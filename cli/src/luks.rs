@@ -127,7 +127,7 @@ pub(crate) fn backup_luks_header_to<R: CommandRunner>(
     }
     // cryptsetup already creates the file as 0400, but enforce it ourselves for defense-in-depth
     std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o400))?;
-    std::fs::rename(&tmp_path, &backup_path)?;
+    crate::state_io::durable_rename(&tmp_path, &backup_path)?;
 
     Ok(backup_path)
 }

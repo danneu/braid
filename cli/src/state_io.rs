@@ -2,6 +2,44 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::Path;
 
+/// Durably rename an already-written temp file to its final path.
+/// Both paths must share the same parent directory (same-directory rename).
+/// Fsyncs the temp file, renames, then fsyncs the parent directory.
+pub fn durable_rename(tmp: &Path, final_path: &Path) -> io::Result<()> {
+    let tmp_dir = tmp.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "tmp path has no parent directory",
+        )
+    })?;
+    let final_dir = final_path.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "final path has no parent directory",
+        )
+    })?;
+    if tmp_dir != final_dir {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "durable_rename requires same parent directory, got {tmp_dir:?} and {final_dir:?}"
+            ),
+        ));
+    }
+
+    // Flush temp file contents to disk.
+    let f = File::open(tmp)?;
+    f.sync_all()?;
+    drop(f);
+
+    fs::rename(tmp, final_path)?;
+
+    // Sync directory metadata so rename survives power loss.
+    let dir_fd = File::open(final_dir)?;
+    dir_fd.sync_all()?;
+    Ok(())
+}
+
 /// Atomically replace a file by writing to a temp file in the same directory,
 /// fsyncing data, renaming, then fsyncing the parent directory.
 pub fn atomic_write(path: &Path, contents: &[u8]) -> io::Result<()> {
@@ -22,15 +60,9 @@ pub fn atomic_write(path: &Path, contents: &[u8]) -> io::Result<()> {
             .write(true)
             .open(&tmp_path)?;
         tmp.write_all(contents)?;
-        tmp.sync_all()?;
     }
 
-    fs::rename(&tmp_path, path)?;
-
-    // Sync directory metadata so rename survives power loss.
-    let dir_fd = File::open(dir)?;
-    dir_fd.sync_all()?;
-    Ok(())
+    durable_rename(&tmp_path, path)
 }
 
 #[cfg(test)]
@@ -55,5 +87,53 @@ mod tests {
         atomic_write(&path, b"v2").unwrap();
         let contents = std::fs::read_to_string(path).unwrap();
         assert_eq!(contents, "v2");
+    }
+
+    /*
+     * Intent: durable_rename fsyncs the temp file, renames it to the final
+     * path, and fsyncs the parent directory.
+     *
+     * Why it exists: backup_luks_header_to previously skipped both fsyncs,
+     * risking corrupt or missing LUKS header backups after power loss.
+     *
+     * Scenario: NAS loses power right after cryptsetup writes a LUKS header
+     * backup to a temp file. Without fsync before rename + dir fsync after,
+     * the renamed file could be zero-length or the directory entry could be
+     * lost entirely.
+     */
+    #[test]
+    fn durable_rename_syncs_and_renames() {
+        let tmp = TempDir::new().unwrap();
+        let src = tmp.path().join("data.tmp");
+        let dst = tmp.path().join("data.final");
+        fs::write(&src, b"header-bytes").unwrap();
+        durable_rename(&src, &dst).unwrap();
+        assert!(!src.exists());
+        assert_eq!(fs::read(&dst).unwrap(), b"header-bytes");
+    }
+
+    /*
+     * Intent: durable_rename rejects cross-directory renames.
+     *
+     * Why it exists: the durability guarantee only holds for same-directory
+     * renames (single dir fsync). Allowing cross-directory paths would
+     * silently weaken crash safety.
+     *
+     * Scenario: a future caller accidentally passes paths in different
+     * directories — this must fail loudly rather than produce a false sense
+     * of durability.
+     */
+    #[test]
+    fn durable_rename_rejects_cross_directory() {
+        let tmp = TempDir::new().unwrap();
+        let dir_a = tmp.path().join("a");
+        let dir_b = tmp.path().join("b");
+        fs::create_dir_all(&dir_a).unwrap();
+        fs::create_dir_all(&dir_b).unwrap();
+        let src = dir_a.join("data.tmp");
+        let dst = dir_b.join("data.final");
+        fs::write(&src, b"bytes").unwrap();
+        let err = durable_rename(&src, &dst).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
     }
 }
