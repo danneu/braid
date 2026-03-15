@@ -26,6 +26,14 @@ Unlock:
 - **LUKS** — passphrase-based full disk encryption (keys never stored on disk)
 - **btrfs RAID1** — checksumming filesystem with automatic self-healing from redundant copies; dynamic add/remove drives
 
+## Layout
+
+- `cli/src/` — Rust CLI (clap commands, TUI in `tui/`)
+- `modules/braid/` — NixOS module (options, systemd units, storage config)
+- `tests/` — NixOS VM tests (`.py` scripts, `module/` NixOS configs, `hw/` hardware canary tests)
+- `docs/decisions/` — architecture decision records
+- `docs/btrfs-docs/` — local btrfs-progs reference (RST)
+
 ## No backwards compatibility
 
 braid is unreleased software. Never add migration paths, compatibility shims, or legacy support. If a format or interface changes, change it everywhere — old versions are not a concern.
@@ -45,20 +53,10 @@ Decision docs must include an explicit status: `Draft`, `Active`, `Superseded`, 
 ## References
 
 - [User stories](docs/1-user-stories.md) — full UX walkthrough from first disk to third
-- [Design: braid-add-disk](design-docs/1-braid-add-disk.md) — script design (historical, replaced by unified CLI)
 
 ## btrfs Documentation Reference
 
-Local copy of the official btrfs-progs documentation lives in [`docs/btrfs-docs/`](docs/btrfs-docs/). Fetch/refresh it with `scripts/fetch-btrfs-docs.sh`. Use these docs to answer questions about btrfs behavior, commands, mount options, RAID profiles, etc. before searching the web.
-
-**Entry point:** `docs/btrfs-docs/index.rst` — lists all top-level pages.
-
-**Navigating the RST files:**
-
-- `:doc:`Title<Filename>`` links to `Filename.rst` (no extension). If no angle brackets, the filename is also the display text.
-- `:ref:`Title<label>`` links to a named anchor `.. _label:` which can be in **any** file. Grep all `.rst` files for `.. _label:` to resolve.
-
-**Key files for braid's domain:**
+Local copy of the official btrfs-progs documentation lives in [`docs/btrfs-docs/`](docs/btrfs-docs/). Fetch/refresh it with `scripts/fetch-btrfs-docs.sh`. Use these docs before searching the web. Entry point: `docs/btrfs-docs/index.rst`.
 
 | Topic | File(s) |
 |---|---|
