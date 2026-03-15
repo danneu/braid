@@ -412,6 +412,23 @@ just test braid-add-disk -v
 just test
 ```
 
+### Faster tests with tmpfs
+
+#### NixOS
+
+VM tests create qcow2 disk images that hammer your SSD. Mount a dedicated tmpfs so builds happen in RAM:
+
+```nix
+# NixOS config (e.g. hosts/silverstone/configuration.nix)
+fileSystems."/tmp-braid" = {
+  device = "tmpfs";
+  fsType = "tmpfs";
+  options = [ "size=16G" "mode=0755" ];
+};
+```
+
+Then pass `--option build-dir /tmp-braid` to nix commands, or use `just test` / `just test-fast` which do this automatically.
+
 Rust CLI code lives in `cli/`. Build it directly with:
 
 ```bash
