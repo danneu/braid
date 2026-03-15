@@ -27,6 +27,12 @@ pub enum CmdRequest {
     BtrfsFilesystemShow {
         mount_point: MountPoint,
     },
+    /// `btrfs filesystem show <target>` — accepts any path (device or mount point).
+    /// Unlike `BtrfsFilesystemShow` which takes a typed `MountPoint`, this accepts
+    /// a raw string for per-device FSID queries in the add path.
+    BtrfsFilesystemShowTarget {
+        target: String,
+    },
     CryptsetupStatus {
         mapper: String,
     },
@@ -131,6 +137,12 @@ pub enum CmdRequest {
     CryptsetupLuksDump {
         device: String,
     },
+    /// `cryptsetup luksDump <device>` (text output, no --dump-json-metadata).
+    /// Used to read the LUKS2 binary header label field, which is NOT included
+    /// in the JSON metadata output.
+    CryptsetupLuksDumpText {
+        device: String,
+    },
     // btrfs replace commands
     BtrfsReplaceStart {
         devid: u64,
@@ -191,6 +203,10 @@ impl CmdRequest {
             CmdRequest::BtrfsFilesystemShow { mount_point } => CmdArgs {
                 program: "btrfs",
                 args: vec!["filesystem".into(), "show".into(), mount_point.0.clone()],
+            },
+            CmdRequest::BtrfsFilesystemShowTarget { target } => CmdArgs {
+                program: "btrfs",
+                args: vec!["filesystem".into(), "show".into(), target.clone()],
             },
             CmdRequest::CryptsetupStatus { mapper } => CmdArgs {
                 program: "cryptsetup",
@@ -510,6 +526,10 @@ impl CmdRequest {
                     "--dump-json-metadata".into(),
                     device.clone(),
                 ],
+            },
+            CmdRequest::CryptsetupLuksDumpText { device } => CmdArgs {
+                program: "cryptsetup",
+                args: vec!["luksDump".into(), device.clone()],
             },
             CmdRequest::CryptsetupLuksOpenKeyFile {
                 device,
@@ -1046,5 +1066,28 @@ mod tests {
 
         mock.run(&req).unwrap();
         assert!(!path.exists(), "mock should not create file on failure");
+    }
+
+    #[test]
+    fn btrfs_filesystem_show_target_generates_correct_argv() {
+        let cmd = CmdRequest::BtrfsFilesystemShowTarget {
+            target: "/dev/mapper/braid-disk1".to_owned(),
+        }
+        .to_argv();
+        assert_eq!(cmd.program, "btrfs");
+        assert_eq!(
+            cmd.args,
+            vec!["filesystem", "show", "/dev/mapper/braid-disk1"]
+        );
+    }
+
+    #[test]
+    fn cryptsetup_luks_dump_text_generates_correct_argv() {
+        let cmd = CmdRequest::CryptsetupLuksDumpText {
+            device: "/dev/disk/by-id/disk1".to_owned(),
+        }
+        .to_argv();
+        assert_eq!(cmd.program, "cryptsetup");
+        assert_eq!(cmd.args, vec!["luksDump", "/dev/disk/by-id/disk1"]);
     }
 }

@@ -112,6 +112,7 @@ pub fn probe_pool<R: CommandRunner>(
                 devices: vec![],
                 missing_count: 0,
                 total_devices: 0,
+                fsid: None,
             });
         }
         Some(e) => e,
@@ -185,6 +186,7 @@ pub fn probe_pool<R: CommandRunner>(
         devices,
         missing_count,
         total_devices: show.total_devices,
+        fsid: show.uuid,
     })
 }
 
@@ -532,6 +534,11 @@ mod tests {
         assert_eq!(
             result.devices[1].mapper,
             MapperName("braid-ironwolf".into())
+        );
+        assert_eq!(
+            result.fsid.as_deref(),
+            Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"),
+            "pool FSID must be populated from btrfs filesystem show"
         );
     }
 

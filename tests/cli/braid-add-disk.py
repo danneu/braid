@@ -2,12 +2,14 @@
 #
 # What: Runs `braid add <name> --yes` through its full lifecycle: first disk
 # (creates pool), second disk (converts to RAID1), third disk (expands pool),
-# validation errors, idempotent re-add, pre-formatted disk recovery, and fifth
-# disk expansion.
+# validation errors, idempotent re-add, identity-check refusals (non-braid
+# LUKS, braid-labeled but no btrfs), disk add after cleanup, and fifth disk
+# expansion.
 #
 # Why: `braid add` is the primary intent command for LUKS format + pool join.
 # Every primitive has been proven in isolation (luks, btrfs-raid1, grow, shrink,
-# heal, degrade). This test proves the intent CLI ties them together correctly.
+# heal, degrade). This test proves the intent CLI ties them together correctly
+# and that the identity checks refuse unsafe disks.
 #
 # Dependencies: btrfs-grow1 (single -> RAID1 -> 3-drive works manually).
 
@@ -90,20 +92,47 @@ with subtest("Non-existent key fails add"):
 with subtest("Already-in-pool disk is a no-op (exit 0)"):
     machine.succeed(add_cmd("disk1"))
 
-# --- Phase 5: Crash recovery — pre-formatted LUKS ---
+# --- Phase 5: Identity check refusals + fresh add after cleanup ---
 
-with subtest("Crash recovery — pre-formatted LUKS completes add"):
-    # Format disk4 as LUKS manually (simulating crash between luksFormat and add)
+with subtest("Non-braid LUKS disk is refused"):
+    # Intent: braid add refuses a LUKS device without the braid-<name> label.
+    # Why: adopting unknown LUKS containers risks merging unrelated filesystems.
+    # Scenario: user has a LUKS-encrypted drive from another system and tries
+    # to add it to braid.
     dev = "/dev/disk/by-id/virtio-disk4"
     machine.succeed(
         f"echo -n '{passphrase}' | cryptsetup luksFormat --batch-mode --key-file=- "
         f"{luks_opts} {dev}"
     )
+    machine.fail(add_cmd("disk4"))
 
-    # braid add should detect existing LUKS, skip luksFormat, open, and add to pool
+    # Clean up: wipe the LUKS header so disk4 is fresh for the next test
+    machine.succeed(f"dd if=/dev/zero of={dev} bs=1M count=4")
+
+with subtest("Braid-labeled LUKS with no btrfs is refused"):
+    # Intent: braid add refuses a braid-labeled LUKS device that has no btrfs
+    # superblock (partial/inconsistent state).
+    # Why: a braid label without btrfs data means the disk was never fully
+    # initialized. This could be a crash between luksFormat and mkfs, or
+    # data corruption. Proceeding could add garbage to the pool.
+    # Scenario: operator's machine crashed after LUKS format but before btrfs
+    # device add completed.
+    dev = "/dev/disk/by-id/virtio-disk4"
+    machine.succeed(
+        f"echo -n '{passphrase}' | cryptsetup luksFormat --batch-mode --key-file=- "
+        f"--label braid-disk4 {luks_opts} {dev}"
+    )
+    machine.fail(add_cmd("disk4"))
+
+    # Clean up: close mapper if open, wipe header so disk4 is fresh
+    machine.execute("cryptsetup close braid-disk4 2>/dev/null || true")
+    machine.succeed(f"dd if=/dev/zero of={dev} bs=1M count=4")
+
+with subtest("Fresh disk4 added after cleanup"):
+    # Intent: after cleaning up the rejected LUKS, a fresh disk can be added normally.
+    # Why: proves the refusal didn't leave any state that blocks future adds.
+    # Scenario: operator wipes the rejected disk and retries.
     machine.succeed(add_cmd("disk4"))
-
-    # Verify it was added to the pool
     fi_show = machine.succeed("btrfs fi show /mnt/storage")
     assert "/dev/mapper/braid-disk4" in fi_show, f"braid-disk4 missing:\n{fi_show}"
 

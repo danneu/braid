@@ -3,16 +3,16 @@ use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, LsblkFieldKind};
-use crate::config::{Config, mapper_name};
+use crate::config::{mapper_name, Config};
 use crate::disk_map::{self, DiskMapLoad};
 use crate::luks;
 use crate::parse::types::BalanceState;
 use crate::parse::{
-    BtrfsDeviceStatsOutput, ParseError, ScrubState, parse_btrfs_balance_status,
-    parse_btrfs_device_stats, parse_btrfs_device_usage, parse_btrfs_df_json,
-    parse_btrfs_filesystem_usage, parse_btrfs_scrub_status, parse_lsblk_field,
+    parse_btrfs_balance_status, parse_btrfs_device_stats, parse_btrfs_device_usage,
+    parse_btrfs_df_json, parse_btrfs_filesystem_usage, parse_btrfs_scrub_status, parse_lsblk_field,
+    BtrfsDeviceStatsOutput, ParseError, ScrubState,
 };
-use crate::probe::{Filesystem, ProbeError, probe_config_disk, probe_pool};
+use crate::probe::{probe_config_disk, probe_pool, Filesystem, ProbeError};
 use crate::types::*;
 
 // ---------------------------------------------------------------------------
@@ -376,6 +376,7 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
             devices: vec![],
             missing_count: 0,
             total_devices: 0,
+            fsid: None,
         },
         Err(e) => return Err(e.into()),
     };
@@ -2593,6 +2594,7 @@ mod tests {
             devices: vec![],
             missing_count: 0,
             total_devices: 0,
+            fsid: None,
         };
         let runner = MockRunner::default();
         let stats = BtrfsDeviceStatsOutput { devices: vec![] };
@@ -2615,6 +2617,7 @@ mod tests {
             devices: vec![],
             missing_count: 0,
             total_devices: 0,
+            fsid: None,
         };
         let runner = MockRunner::default();
         let stats = BtrfsDeviceStatsOutput { devices: vec![] };
@@ -2670,6 +2673,7 @@ mod tests {
             devices: vec![],
             missing_count: 0,
             total_devices: 0,
+            fsid: None,
         };
         let config = config_1disk();
         let load = DiskMapLoad::Failed("corrupt".to_owned());

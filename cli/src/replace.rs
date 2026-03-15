@@ -711,6 +711,7 @@ mod tests {
             ],
             missing_count: 0,
             total_devices: 2,
+            fsid: None,
         }
     }
 

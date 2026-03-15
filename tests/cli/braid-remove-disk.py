@@ -152,6 +152,11 @@ with subtest("Data intact after redundancy removal"):
 # --- Phase 4: Remove of a dead disk must fail ---
 
 with subtest("Rebuild pool: re-add disk2 and disk3"):
+    # After braid remove, disks still have LUKS headers with braid labels but
+    # no btrfs superblock. braid add refuses this ambiguous state — wipe the
+    # LUKS headers so they go through the fresh-disk path.
+    machine.succeed("dd if=/dev/zero of=/dev/disk/by-id/virtio-disk2 bs=1M count=4")
+    machine.succeed("dd if=/dev/zero of=/dev/disk/by-id/virtio-disk3 bs=1M count=4")
     machine.succeed(add_cmd("disk2"))
     machine.succeed(add_cmd("disk3"))
 

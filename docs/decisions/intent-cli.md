@@ -16,7 +16,7 @@ Replace plan/apply with five intent commands:
 
 | Command | Purpose | Risk |
 |---------|---------|------|
-| `braid add <key>` | Format + join pool, or join existing LUKS device | Destructive (new disk) or safe (existing LUKS) |
+| `braid add <key>` | Format + join pool, or recover identity-verified LUKS device | Destructive (new disk), safe (returning braid disk with matching FSID), or refused (non-braid LUKS, foreign pool, no pool to verify) |
 | `braid remove <key>` | Migrate data off present disk, detach from pool | Long-running |
 | `braid remove-missing` | Clean up a stale missing-device entry; restores RAID1 profiles if this clears the last missing device | Long-running |
 | `braid replace --old <key> --new <key>` | Replace a disk (live or dead) using `btrfs replace start`; restores RAID1 profiles for missing-path when clearing the last missing device | In-place swap (preserves devid) |
@@ -40,11 +40,16 @@ Mapper names are `braid-<key>` (e.g., `braid-toshiba`) — human-friendly, debug
 The old architecture used a structural code boundary — `luksFormat` was literally unreachable from `apply`. The new architecture replaces this with:
 
 1. **Explicit operator intent**: user specifies a disk key and confirms
-2. **Superblock guard**: before any `mkfs.btrfs`, the code opens the LUKS device and checks for an existing btrfs superblock. If found, the device is a returning member and `add` becomes a no-op.
+2. **Layered identity check** for existing LUKS devices:
+   a. LUKS label must be `braid-<key>` — non-braid LUKS is refused outright.
+   b. Pool must be mounted — bootstrap refuses existing LUKS (no pool to verify against).
+   c. Opened mapper's btrfs FSID must match the current pool — foreign-pool disks are refused.
+   d. Braid-labeled LUKS with no btrfs superblock is refused — this state is ambiguous (clean eviction, partial init, manual wipe, stale data) and cannot be distinguished without tombstones. A previously removed disk must be wiped before re-add.
+   e. Superblock guard remains as defense-in-depth within the FSID-matching path.
 3. **Confirmation calibrated to risk**: destructive operations (LUKS format) require explicit confirmation; safe operations (opening existing LUKS, adding to pool) proceed after simple yes/no.
 4. **Disk key immutability**: mutating commands validate config keys against recorded disk identity and reject key rename/reassignment. Operators must use explicit `replace` or `remove`+`add` workflows instead of renaming keys in config.
 
-The btrfs superblock check is the "idempotent format primitive" described in `safe-by-construction-reconciliation.md` as a potential revisit trigger.
+`--dry-run` reads the LUKS label without side effects. Full identity verification (FSID comparison) requires opening the mapper, so dry-run defers this to execution time when the mapper is closed.
 
 ### Replace safety constraints
 

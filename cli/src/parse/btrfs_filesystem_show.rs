@@ -43,6 +43,14 @@ pub fn classify_btrfs_probe(raw: &RawCommandOutput) -> DeviceBtrfsProbe {
 // nom parsers
 // ---------------------------------------------------------------------------
 
+// Parses: "Label: none  uuid: f1e2d3c4-b5a6-9788-7654-321fedcba098"  →  uuid string
+fn parse_uuid_line(input: &str) -> IResult<&str, &str> {
+    let (input, _) = take_until("uuid: ")(input)?;
+    let (input, _) = tag("uuid: ")(input)?;
+    let (input, uuid) = not_line_ending(input)?;
+    Ok((input, uuid.trim()))
+}
+
 // Parses: "\tTotal devices 3 FS bytes used 1.00GiB"  →  3
 fn parse_total_devices(input: &str) -> IResult<&str, u64> {
     let (input, _) = take_until("Total devices")(input)?;
@@ -120,8 +128,12 @@ pub fn parse_btrfs_filesystem_show(
         .lines()
         .any(|line| parse_missing_sentinel(line).is_ok());
 
+    let uuid = stdout
+        .lines()
+        .find_map(|line| parse_uuid_line(line).ok().map(|(_, u)| u.to_owned()));
+
     Ok(BtrfsFilesystemShowOutput {
-        uuid: None,
+        uuid,
         total_devices,
         devices,
         has_missing,
@@ -155,6 +167,11 @@ mod tests {
         assert_eq!(out.devices.len(), 2);
         assert_eq!(out.devices[0].devid, 1);
         assert_eq!(out.devices[0].path, "/dev/mapper/braid-vdb");
+        assert_eq!(
+            out.uuid.as_deref(),
+            Some("cc86845b-aec3-408e-bef5-553affc1f2b1"),
+            "FSID must be parsed from uuid line"
+        );
         assert_eq!(out.devices[1].devid, 2);
         assert_eq!(out.devices[1].path, "/dev/mapper/braid-vdc");
         assert!(!out.has_missing);
@@ -228,6 +245,24 @@ mod tests {
         assert_eq!(out.devices.len(), 1, "bare MISSING path must be excluded");
         assert_eq!(out.devices[0].devid, 1);
         assert!(out.has_missing);
+    }
+
+    #[test]
+    fn btrfs_show_parses_fsid_from_uuid_line() {
+        let raw = RawCommandOutput {
+            cmd: "btrfs filesystem show".into(),
+            stdout: "Label: none  uuid: f1e2d3c4-b5a6-9788-7654-321fedcba098\n\
+                     \tTotal devices 1 FS bytes used 4.00GiB\n\
+                     \tdevid    1 size 10.00GiB used 5.00GiB path /dev/mapper/braid-vda\n"
+                .into(),
+            stderr: String::new(),
+            exit_status: 0,
+        };
+        let out = parse_btrfs_filesystem_show(&raw).unwrap();
+        assert_eq!(
+            out.uuid.as_deref(),
+            Some("f1e2d3c4-b5a6-9788-7654-321fedcba098")
+        );
     }
 
     #[test]

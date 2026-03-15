@@ -1,10 +1,12 @@
-use crate::cmd::CommandRunner;
+use crate::cmd::{CmdError, CmdRequest, CommandRunner};
 use crate::config::{config_read, mapper_name, Config, DiskConfig};
 use crate::disk_map;
 use crate::luks::{
     backup_luks_header, device_has_btrfs_superblock, ensure_luks_open, luks_format,
     luks_opts_from_env, read_passphrase, verify_passphrase,
 };
+use crate::parse::btrfs_filesystem_show::{classify_btrfs_probe, DeviceBtrfsProbe};
+use crate::parse::parse_btrfs_filesystem_show;
 use crate::pool::{
     pool_add_device, pool_balance_raid1, pool_bootstrap_mount, pool_bootstrap_mount_raid1,
 };
@@ -33,9 +35,84 @@ pub enum AddError {
 }
 
 /// A step in the add operation, for dry-run display.
+#[derive(Debug)]
 pub struct AddStep {
-    pub risk: &'static str, // "destructive", "safe", "long"
+    pub risk: &'static str, // "destructive", "safe", "long", "blocked"
     pub description: String,
+}
+
+// ---------------------------------------------------------------------------
+// Add-local identity classification for PresentLuks disks
+// ---------------------------------------------------------------------------
+
+/// Identity classification for a PresentLuks disk in the add path.
+/// This is add-local — not shared with unlock, status, replace, etc.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)] // NonBraid/BraidLabeledNoPool are handled before classify_braid_disk_fsid
+enum AddLuksIdentity {
+    /// LUKS label is not braid-<name> (or absent).
+    NonBraid,
+    /// Correct braid label, but pool is not mounted — can't verify.
+    BraidLabeledNoPool,
+    /// Correct braid label, mapper open, no btrfs superblock.
+    /// Ambiguous: could be clean eviction, partial init, or manual wipe.
+    /// Refused — operator must wipe the disk to re-add as fresh.
+    BraidLabeledNoBtrfs,
+    /// Correct braid label, mapper open, btrfs FSID differs from pool.
+    BraidLabeledForeignPool,
+    /// Correct braid label, mapper open, btrfs FSID matches pool, already in pool.
+    BraidLabeledAlreadyInPool,
+    /// Correct braid label, mapper open, btrfs FSID matches pool, not yet in pool.
+    BraidLabeledRecoverable,
+}
+
+/// Read the LUKS label from a raw device (no mapper open required).
+fn read_luks_label<R: CommandRunner>(runner: &R, device: &str) -> Result<Option<String>, AddError> {
+    let raw = runner.run(&CmdRequest::CryptsetupLuksDumpText {
+        device: device.to_owned(),
+    })?;
+    let out = crate::parse::parse_cryptsetup_luks_label(&raw)?;
+    Ok(out.label)
+}
+
+/// Classify a braid-labeled PresentLuks disk whose mapper is already open.
+/// Checks btrfs superblock presence and FSID against the mounted pool.
+/// Caller must ensure: pool.mounted == true, mapper is open.
+fn classify_braid_disk_fsid<R: CommandRunner>(
+    runner: &R,
+    name: &str,
+    mapper: &MapperName,
+    pool: &PoolState,
+) -> Result<AddLuksIdentity, AddError> {
+    let mapper_path = format!("/dev/mapper/{}", mapper.0);
+    let show_raw = runner.run(&CmdRequest::BtrfsFilesystemShowTarget {
+        target: mapper_path,
+    })?;
+
+    match classify_btrfs_probe(&show_raw) {
+        DeviceBtrfsProbe::NoBtrfs => return Ok(AddLuksIdentity::BraidLabeledNoBtrfs),
+        DeviceBtrfsProbe::Unknown(msg) => {
+            return Err(AddError::Cmd(CmdError::Failed(format!(
+                "disk '{}': {}",
+                name, msg
+            ))));
+        }
+        DeviceBtrfsProbe::HasBtrfs => {}
+    }
+
+    let show = parse_btrfs_filesystem_show(&show_raw)?;
+
+    if let (Some(device_fsid), Some(pool_fsid)) = (&show.uuid, &pool.fsid) {
+        if device_fsid != pool_fsid {
+            return Ok(AddLuksIdentity::BraidLabeledForeignPool);
+        }
+    }
+
+    if pool.devices.iter().any(|d| d.mapper == *mapper) {
+        return Ok(AddLuksIdentity::BraidLabeledAlreadyInPool);
+    }
+
+    Ok(AddLuksIdentity::BraidLabeledRecoverable)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -128,7 +205,7 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     }
 
     // Compile steps for dry-run display
-    let steps = compile_add_steps_multi(names, &probed, &pool, &config)?;
+    let steps = compile_add_steps_multi(runner, names, &probed, &pool, &config)?;
 
     if dry_run {
         for step in &steps {
@@ -220,25 +297,67 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
                 needs_pool_add.push(i);
             }
             ConfigDiskState::PresentLuks { mapper_open, .. } => {
+                // Identity check: read LUKS label (works on raw device, no mapper needed)
+                let label = read_luks_label(runner, &disk.by_id.0)?;
+                let expected_label = format!("braid-{name}");
+
+                if label.as_deref() != Some(expected_label.as_str()) {
+                    return Err(AddError::Validation(format!(
+                        "disk '{}' ({}) is already a LUKS container but is not labeled as {}; \
+                         braid will not adopt a non-braid encrypted device",
+                        name, disk.by_id, expected_label,
+                    )));
+                }
+
+                // Braid-labeled — pool must be mounted to verify FSID
+                if !pool.mounted {
+                    return Err(AddError::Validation(format!(
+                        "disk '{}' is braid-labeled but no mounted pool exists to verify identity; \
+                         bootstrap only accepts fresh disks",
+                        name,
+                    )));
+                }
+
+                // Open mapper if closed (now we know it's braid-labeled + pool is up)
                 if !mapper_open {
                     ensure_luks_open(runner, fs, name, disk, &passphrase)?;
                     eprintln!("LUKS opened: {} → {}", disk.by_id, mn);
                 }
 
-                // Check btrfs membership
-                let mapper_path = format!("/dev/mapper/{}", mn.0);
-                if device_has_btrfs_superblock(runner, &mapper_path)? {
-                    if pool.devices.iter().any(|d| d.mapper == mn) {
-                        // Already in pool — skip
+                // Full FSID-based identity classification
+                match classify_braid_disk_fsid(runner, name, &mn, &pool)? {
+                    AddLuksIdentity::BraidLabeledNoBtrfs => {
+                        return Err(AddError::Validation(format!(
+                            "disk '{}' is braid-labeled but contains no btrfs superblock; \
+                             identity is ambiguous, so braid will not re-add it automatically. \
+                             Wipe the disk and add it again as fresh.",
+                            name,
+                        )));
+                    }
+                    AddLuksIdentity::BraidLabeledForeignPool => {
+                        return Err(AddError::Validation(format!(
+                            "disk '{}' is a braid-managed device from a different btrfs filesystem; \
+                             braid will not merge foreign pools",
+                            name,
+                        )));
+                    }
+                    AddLuksIdentity::BraidLabeledAlreadyInPool => {
+                        // No-op — already in pool
                         continue;
                     }
+                    AddLuksIdentity::BraidLabeledRecoverable => {
+                        eprintln!(
+                            "note: braid-labeled disk '{}' verified as pool member. \
+                             Completing recovery add.",
+                            name
+                        );
+                        needs_pool_add.push(i);
+                    }
+                    // These cases are handled above before calling classify_braid_disk_fsid
+                    AddLuksIdentity::NonBraid | AddLuksIdentity::BraidLabeledNoPool => {
+                        unreachable!("handled before FSID classification")
+                    }
                 }
-
-                if !pool.devices.iter().any(|d| d.mapper == mn) {
-                    eprintln!("note: LUKS mapper for {} is already open but device is not yet in pool. Completing add.", name);
-                }
-
-                needs_pool_add.push(i);
             }
         }
     }
@@ -341,7 +460,8 @@ fn finalize_add_disk_map_best_effort<R: CommandRunner + Sync>(
     }
 }
 
-fn compile_add_steps_multi(
+fn compile_add_steps_multi<R: CommandRunner>(
+    runner: &R,
     names: &[String],
     probed: &[ConfigDisk],
     pool: &PoolState,
@@ -374,18 +494,74 @@ fn compile_add_steps_multi(
                 needs_pool_add += 1;
             }
             ConfigDiskState::PresentLuks { mapper_open, .. } => {
-                if !mapper_open {
-                    steps.push(AddStep {
-                        risk: "safe",
-                        description: format!("LUKS open → {}", mn),
-                    });
+                // Dry-run identity check: read LUKS label (no side effects)
+                let label = read_luks_label(runner, &disk.by_id.0)?;
+                let expected_label = format!("braid-{name}");
+
+                if label.as_deref() != Some(expected_label.as_str()) {
+                    return Err(AddError::Validation(format!(
+                        "disk '{}' ({}) is already a LUKS container but is not labeled as {}; \
+                         braid will not adopt a non-braid encrypted device",
+                        name, disk.by_id, expected_label,
+                    )));
                 }
 
-                // If already in pool, skip
-                if *mapper_open && pool.devices.iter().any(|d| d.mapper == mn) {
-                    continue;
+                // Braid-labeled: check pool
+                if !pool.mounted {
+                    return Err(AddError::Validation(format!(
+                        "disk '{}' is braid-labeled but no mounted pool exists to verify identity; \
+                         bootstrap only accepts fresh disks",
+                        name,
+                    )));
                 }
-                needs_pool_add += 1;
+
+                if *mapper_open {
+                    // Mapper is open — full classification without side effects
+                    match classify_braid_disk_fsid(runner, name, &mn, pool)? {
+                        AddLuksIdentity::BraidLabeledNoBtrfs => {
+                            return Err(AddError::Validation(format!(
+                                "disk '{}' is braid-labeled but contains no btrfs superblock; \
+                                 blocked: identity is ambiguous. \
+                                 Wipe the disk to re-add it as fresh.",
+                                name,
+                            )));
+                        }
+                        AddLuksIdentity::BraidLabeledForeignPool => {
+                            return Err(AddError::Validation(format!(
+                                "disk '{}' is a braid-managed device from a different btrfs \
+                                 filesystem; braid will not merge foreign pools",
+                                name,
+                            )));
+                        }
+                        AddLuksIdentity::BraidLabeledAlreadyInPool => {
+                            continue;
+                        }
+                        AddLuksIdentity::BraidLabeledRecoverable => {
+                            steps.push(AddStep {
+                                risk: "safe",
+                                description: format!(
+                                    "btrfs device add /dev/mapper/{} {} (recovery)",
+                                    mn,
+                                    config.mount_point()
+                                ),
+                            });
+                            needs_pool_add += 1;
+                        }
+                        AddLuksIdentity::NonBraid | AddLuksIdentity::BraidLabeledNoPool => {
+                            unreachable!("handled above")
+                        }
+                    }
+                } else {
+                    // Mapper closed — can't open in dry-run, defer full verification
+                    steps.push(AddStep {
+                        risk: "safe",
+                        description: format!(
+                            "LUKS open + identity verification at execution time → {}",
+                            mn
+                        ),
+                    });
+                    needs_pool_add += 1;
+                }
             }
         }
     }
@@ -425,8 +601,8 @@ fn compile_add_steps_multi(
     } else {
         for (i, p) in probed.iter().enumerate() {
             let mn = mapper_name(&names[i]);
-            let skip = matches!(&p.state, ConfigDiskState::PresentLuks { mapper_open, .. } if *mapper_open && pool.devices.iter().any(|d| d.mapper == mn));
-            if !skip {
+            // PresentNotLuks disks still need the device-add step
+            if matches!(&p.state, ConfigDiskState::PresentNotLuks) {
                 steps.push(AddStep {
                     risk: "safe",
                     description: format!(
@@ -436,6 +612,7 @@ fn compile_add_steps_multi(
                     ),
                 });
             }
+            // PresentLuks recovery steps already added above
         }
         let total_after = pool.devices.len() + needs_pool_add;
         if total_after >= 2 {
@@ -545,6 +722,347 @@ mod tests {
         assert!(
             err.contains("duplicate disk name"),
             "expected duplicate error, got: {err}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Identity classification tests
+    // -----------------------------------------------------------------------
+
+    use crate::cmd::{MockRunner, RawCommandOutput};
+
+    fn luks_dump_text_with_label(label: &str) -> RawCommandOutput {
+        RawCommandOutput {
+            cmd: "cryptsetup luksDump /dev/disk/by-id/disk1".into(),
+            stdout: format!(
+                "LUKS header information\n\
+                 Version:       \t2\n\
+                 Label:         \t{label}\n\
+                 Subsystem:     \t(no subsystem)\n"
+            ),
+            stderr: String::new(),
+            exit_status: 0,
+        }
+    }
+
+    fn luks_dump_text_no_label() -> RawCommandOutput {
+        RawCommandOutput {
+            cmd: "cryptsetup luksDump /dev/disk/by-id/disk1".into(),
+            stdout: "LUKS header information\n\
+                     Version:       \t2\n\
+                     Label:         \t(no label)\n\
+                     Subsystem:     \t(no subsystem)\n"
+                .into(),
+            stderr: String::new(),
+            exit_status: 0,
+        }
+    }
+
+    fn btrfs_show_with_uuid(uuid: &str) -> RawCommandOutput {
+        RawCommandOutput {
+            cmd: "btrfs filesystem show /dev/mapper/braid-disk1".into(),
+            stdout: format!(
+                "Label: none  uuid: {uuid}\n\
+                 \tTotal devices 1 FS bytes used 16.00MiB\n\
+                 \tdevid    1 size 500.00MiB used 100.00MiB path /dev/mapper/braid-disk1\n"
+            ),
+            stderr: String::new(),
+            exit_status: 0,
+        }
+    }
+
+    fn btrfs_show_no_btrfs() -> RawCommandOutput {
+        RawCommandOutput {
+            cmd: "btrfs filesystem show /dev/mapper/braid-disk1".into(),
+            stdout: String::new(),
+            stderr: "ERROR: not a valid btrfs filesystem on /dev/mapper/braid-disk1".into(),
+            exit_status: 1,
+        }
+    }
+
+    fn pool_mounted_with_fsid(fsid: &str) -> PoolState {
+        PoolState {
+            mounted: true,
+            devices: vec![PoolDevice {
+                mapper: MapperName("braid-existing".into()),
+                luks_uuid: LuksUuid("11111111-1111-1111-1111-111111111111".into()),
+                devid: 1,
+                underlying: "/dev/vda".into(),
+            }],
+            missing_count: 0,
+            total_devices: 1,
+            fsid: Some(fsid.to_owned()),
+        }
+    }
+
+    fn pool_unmounted() -> PoolState {
+        PoolState {
+            mounted: false,
+            devices: vec![],
+            missing_count: 0,
+            total_devices: 0,
+            fsid: None,
+        }
+    }
+
+    // --- read_luks_label tests ---
+
+    #[test]
+    fn read_label_extracts_braid_label() {
+        let runner = MockRunner::default().with_output(
+            CmdRequest::CryptsetupLuksDumpText {
+                device: "/dev/disk/by-id/disk1".into(),
+            },
+            luks_dump_text_with_label("braid-disk1"),
+        );
+        let label = read_luks_label(&runner, "/dev/disk/by-id/disk1").unwrap();
+        assert_eq!(label, Some("braid-disk1".to_owned()));
+    }
+
+    #[test]
+    fn read_label_returns_none_for_no_label() {
+        let runner = MockRunner::default().with_output(
+            CmdRequest::CryptsetupLuksDumpText {
+                device: "/dev/disk/by-id/disk1".into(),
+            },
+            luks_dump_text_no_label(),
+        );
+        let label = read_luks_label(&runner, "/dev/disk/by-id/disk1").unwrap();
+        assert_eq!(label, None);
+    }
+
+    #[test]
+    fn read_label_returns_non_braid_label() {
+        let runner = MockRunner::default().with_output(
+            CmdRequest::CryptsetupLuksDumpText {
+                device: "/dev/disk/by-id/disk1".into(),
+            },
+            luks_dump_text_with_label("other-thing"),
+        );
+        let label = read_luks_label(&runner, "/dev/disk/by-id/disk1").unwrap();
+        assert_eq!(label, Some("other-thing".to_owned()));
+    }
+
+    // --- classify_braid_disk_fsid tests ---
+
+    #[test]
+    fn classify_fsid_no_btrfs() {
+        let runner = MockRunner::default().with_output(
+            CmdRequest::BtrfsFilesystemShowTarget {
+                target: "/dev/mapper/braid-disk1".into(),
+            },
+            btrfs_show_no_btrfs(),
+        );
+        let pool = pool_mounted_with_fsid("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+        let mn = MapperName("braid-disk1".into());
+
+        let result = classify_braid_disk_fsid(&runner, "disk1", &mn, &pool).unwrap();
+        assert_eq!(result, AddLuksIdentity::BraidLabeledNoBtrfs);
+    }
+
+    #[test]
+    fn classify_fsid_foreign_pool() {
+        let pool_fsid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+        let device_fsid = "11111111-2222-3333-4444-555555555555";
+
+        let runner = MockRunner::default().with_output(
+            CmdRequest::BtrfsFilesystemShowTarget {
+                target: "/dev/mapper/braid-disk1".into(),
+            },
+            btrfs_show_with_uuid(device_fsid),
+        );
+        let pool = pool_mounted_with_fsid(pool_fsid);
+        let mn = MapperName("braid-disk1".into());
+
+        let result = classify_braid_disk_fsid(&runner, "disk1", &mn, &pool).unwrap();
+        assert_eq!(result, AddLuksIdentity::BraidLabeledForeignPool);
+    }
+
+    #[test]
+    fn classify_fsid_already_in_pool() {
+        let fsid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+        let runner = MockRunner::default().with_output(
+            CmdRequest::BtrfsFilesystemShowTarget {
+                target: "/dev/mapper/braid-disk1".into(),
+            },
+            btrfs_show_with_uuid(fsid),
+        );
+        // Pool contains braid-disk1 already
+        let pool = PoolState {
+            mounted: true,
+            devices: vec![PoolDevice {
+                mapper: MapperName("braid-disk1".into()),
+                luks_uuid: LuksUuid("11111111-1111-1111-1111-111111111111".into()),
+                devid: 1,
+                underlying: "/dev/vda".into(),
+            }],
+            missing_count: 0,
+            total_devices: 1,
+            fsid: Some(fsid.to_owned()),
+        };
+        let mn = MapperName("braid-disk1".into());
+
+        let result = classify_braid_disk_fsid(&runner, "disk1", &mn, &pool).unwrap();
+        assert_eq!(result, AddLuksIdentity::BraidLabeledAlreadyInPool);
+    }
+
+    #[test]
+    fn classify_fsid_recoverable() {
+        let fsid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+        let runner = MockRunner::default().with_output(
+            CmdRequest::BtrfsFilesystemShowTarget {
+                target: "/dev/mapper/braid-disk1".into(),
+            },
+            btrfs_show_with_uuid(fsid),
+        );
+        // Pool does NOT contain braid-disk1 yet
+        let pool = pool_mounted_with_fsid(fsid);
+        let mn = MapperName("braid-disk1".into());
+
+        let result = classify_braid_disk_fsid(&runner, "disk1", &mn, &pool).unwrap();
+        assert_eq!(result, AddLuksIdentity::BraidLabeledRecoverable);
+    }
+
+    // --- compile_add_steps_multi identity tests ---
+
+    fn config_1disk() -> Config {
+        serde_json::from_str(
+            r#"{"disks":{"disk1":{"by_id":"/dev/disk/by-id/disk1"}},"mount_point":"/mnt/storage"}"#,
+        )
+        .unwrap()
+    }
+
+    fn probed_present_luks(name: &str, mapper_open: bool) -> ConfigDisk {
+        ConfigDisk {
+            name: name.to_owned(),
+            by_id_path: ByIdPath("/dev/disk/by-id/disk1".to_owned()),
+            state: ConfigDiskState::PresentLuks {
+                uuid: LuksUuid("a1b2c3d4-e5f6-7890-abcd-ef1234567890".into()),
+                mapper_open,
+            },
+        }
+    }
+
+    #[test]
+    fn dry_run_non_braid_luks_reports_blocked() {
+        let runner = MockRunner::default().with_output(
+            CmdRequest::CryptsetupLuksDumpText {
+                device: "/dev/disk/by-id/disk1".into(),
+            },
+            luks_dump_text_no_label(),
+        );
+        let probed = vec![probed_present_luks("disk1", true)];
+        let pool = pool_mounted_with_fsid("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+        let config = config_1disk();
+
+        let result = compile_add_steps_multi(&runner, &["disk1".into()], &probed, &pool, &config);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("not labeled as braid-disk1"),
+            "expected non-braid error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn dry_run_braid_labeled_foreign_fsid_reports_blocked() {
+        let pool_fsid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+        let device_fsid = "11111111-2222-3333-4444-555555555555";
+
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::CryptsetupLuksDumpText {
+                    device: "/dev/disk/by-id/disk1".into(),
+                },
+                luks_dump_text_with_label("braid-disk1"),
+            )
+            .with_output(
+                CmdRequest::BtrfsFilesystemShowTarget {
+                    target: "/dev/mapper/braid-disk1".into(),
+                },
+                btrfs_show_with_uuid(device_fsid),
+            );
+        let probed = vec![probed_present_luks("disk1", true)];
+        let pool = pool_mounted_with_fsid(pool_fsid);
+        let config = config_1disk();
+
+        let result = compile_add_steps_multi(&runner, &["disk1".into()], &probed, &pool, &config);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("different btrfs filesystem"),
+            "expected foreign-pool error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn dry_run_braid_labeled_mapper_closed_reports_deferred() {
+        let runner = MockRunner::default().with_output(
+            CmdRequest::CryptsetupLuksDumpText {
+                device: "/dev/disk/by-id/disk1".into(),
+            },
+            luks_dump_text_with_label("braid-disk1"),
+        );
+        let probed = vec![probed_present_luks("disk1", false)];
+        let pool = pool_mounted_with_fsid("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+        let config = config_1disk();
+
+        let steps =
+            compile_add_steps_multi(&runner, &["disk1".into()], &probed, &pool, &config).unwrap();
+
+        assert!(
+            steps.iter().any(|s| s
+                .description
+                .contains("identity verification at execution time")),
+            "expected deferred verification step, got: {:?}",
+            steps.iter().map(|s| &s.description).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn dry_run_braid_labeled_no_pool_reports_blocked() {
+        let runner = MockRunner::default().with_output(
+            CmdRequest::CryptsetupLuksDumpText {
+                device: "/dev/disk/by-id/disk1".into(),
+            },
+            luks_dump_text_with_label("braid-disk1"),
+        );
+        let probed = vec![probed_present_luks("disk1", false)];
+        let pool = pool_unmounted();
+        let config = config_1disk();
+
+        let result = compile_add_steps_multi(&runner, &["disk1".into()], &probed, &pool, &config);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("no mounted pool exists"),
+            "expected no-pool error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn dry_run_raw_disk_still_shows_destructive_format() {
+        let runner = MockRunner::default();
+        let probed = vec![ConfigDisk {
+            name: "disk1".to_owned(),
+            by_id_path: ByIdPath("/dev/disk/by-id/disk1".to_owned()),
+            state: ConfigDiskState::PresentNotLuks,
+        }];
+        let pool = pool_unmounted();
+        let config = config_1disk();
+
+        let steps =
+            compile_add_steps_multi(&runner, &["disk1".into()], &probed, &pool, &config).unwrap();
+
+        assert!(
+            steps
+                .iter()
+                .any(|s| s.risk == "destructive" && s.description.contains("LUKS format")),
+            "expected destructive LUKS format step, got: {:?}",
+            steps
+                .iter()
+                .map(|s| format!("[{}] {}", s.risk, s.description))
+                .collect::<Vec<_>>()
         );
     }
 }

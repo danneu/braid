@@ -122,6 +122,12 @@ sudo braid add ironwolf
 
 The pool converts to RAID1 automatically. Existing data rebalances to the new disk in the background. You can also add multiple disks at once: `sudo braid add ironwolf seagate`.
 
+`braid add` handles three cases:
+
+- **Fresh disk** (no LUKS header) — LUKS-formats, opens, and adds to pool.
+- **Returning braid disk** (braid-labeled LUKS, btrfs FSID matches current pool) — identity-verified recovery add.
+- **Refused** — non-braid LUKS, braid disk from a different pool, braid-labeled but no btrfs superblock (ambiguous state — wipe the disk and retry), or existing LUKS when the pool is not mounted (bootstrap only accepts fresh disks).
+
 ### Preview before executing
 
 ```sh

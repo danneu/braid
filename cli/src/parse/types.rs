@@ -151,6 +151,13 @@ pub struct CryptsetupLuksDumpOutput {
     pub keyslot_count: u32, // e.g. 1
 }
 
+/// cryptsetup luksDump (text output) — LUKS label field
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CryptsetupLuksLabelOutput {
+    /// `None` if the label is `(no label)` or empty.
+    pub label: Option<String>,
+}
+
 /// Fixed-point data ratio in hundredths (100 = 1.00, 200 = 2.00).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct DataRatio(u32);
