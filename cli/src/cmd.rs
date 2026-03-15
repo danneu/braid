@@ -291,7 +291,13 @@ impl CmdRequest {
                 args: vec![
                     "device".into(),
                     "add".into(),
-                    "-f".into(),
+                    // We don't need '-f' here to bypass `btrfs device add`'s blkid probe
+                    // because at this point we've added a fresh luks header,
+                    // the volume is luks-opened, and mapper will be "decrypting"
+                    // preexisting data that we never encrypted which will look like garbage
+                    // rather than anything blkid will recognize.
+                    //
+                    // "-f".into(),
                     device.clone(),
                     mount_point.0.clone(),
                 ],
