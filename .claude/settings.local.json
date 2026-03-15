@@ -23,7 +23,8 @@
       "Bash(find:*)",
       "Bash(modinfo:*)",
       "Bash(zstdcat:*)",
-      "Bash(cd:*)"
+      "Bash(cd:*)",
+      "Bash(gh api:*)"
     ]
   },
   "plansDirectory": "./plans/wip"
