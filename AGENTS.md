@@ -47,6 +47,30 @@ Decision docs must include an explicit status: `Draft`, `Active`, `Superseded`, 
 - [User stories](docs/1-user-stories.md) — full UX walkthrough from first disk to third
 - [Design: braid-add-disk](design-docs/1-braid-add-disk.md) — script design (historical, replaced by unified CLI)
 
+## btrfs Documentation Reference
+
+Local copy of the official btrfs-progs documentation lives in [`docs/btrfs-docs/`](docs/btrfs-docs/). Fetch/refresh it with `scripts/fetch-btrfs-docs.sh`. Use these docs to answer questions about btrfs behavior, commands, mount options, RAID profiles, etc. before searching the web.
+
+**Entry point:** `docs/btrfs-docs/index.rst` — lists all top-level pages.
+
+**Navigating the RST files:**
+
+- `:doc:`Title<Filename>`` links to `Filename.rst` (no extension). If no angle brackets, the filename is also the display text.
+- `:ref:`Title<label>`` links to a named anchor `.. _label:` which can be in **any** file. Grep all `.rst` files for `.. _label:` to resolve.
+
+**Key files for braid's domain:**
+
+| Topic | File(s) |
+|---|---|
+| Adding/removing devices | `Volume-management.rst`, `btrfs-device.rst` |
+| Device replacement | `btrfs-replace.rst` |
+| Rebalancing | `Balance.rst`, `ch-balance-filters.rst` |
+| RAID profiles (RAID1 etc.) | `mkfs.btrfs.rst` (search for "profiles") |
+| Mount options | `ch-mount-options.rst` |
+| Scrub / self-healing | `Scrub.rst` |
+| Filesystem limits & storage model | `btrfs-man5.rst` |
+| Administration overview | `Administration.rst` |
+
 ## Git Commits
 
 The first line of a commit message must not be capitalized (e.g. `fix the foo bug`, not `Fix the foo bug`).
