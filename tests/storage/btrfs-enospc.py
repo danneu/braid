@@ -18,7 +18,7 @@ with subtest("LUKS format and open disk2"):
 # --- Create single-profile btrfs and fill it ---
 
 with subtest("Create single-drive btrfs"):
-    machine.succeed("mkfs.btrfs -f /dev/mapper/disk1")
+    machine.succeed("mkfs.btrfs -f -d single -m dup /dev/mapper/disk1")
     machine.succeed("mkdir -p /mnt/storage")
     machine.succeed("mount /dev/mapper/disk1 /mnt/storage")
 

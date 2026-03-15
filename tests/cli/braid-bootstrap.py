@@ -83,6 +83,9 @@ with subtest("Apply creates single-disk pool"):
     machine.succeed("mountpoint -q /mnt/storage")
     fi_show = machine.succeed("btrfs fi show /mnt/storage")
     assert "/dev/mapper/virtio-disk1" in fi_show, f"disk1 not in pool:\n{fi_show}"
+    fi_df = machine.succeed("btrfs fi df /mnt/storage")
+    assert "Data, single" in fi_df, f"Expected Data, single profile:\n{fi_df}"
+    assert "Metadata, DUP" in fi_df, f"Expected Metadata, DUP profile:\n{fi_df}"
 
 
 # --- Phase 4: Status works on new pool ---

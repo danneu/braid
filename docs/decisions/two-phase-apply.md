@@ -6,7 +6,7 @@
 
 After a reboot, all LUKS mappers are closed and the btrfs pool is unmounted. The planner runs after probe, which sees no open mappers and no mounted pool. This causes two problems:
 
-1. **Misleading plan display**: `braid plan` shows `mkfs.btrfs -f (may run)` for disks that are actually returning pool members. The execute-time superblock check prevents data loss, but the plan output is alarming for routine re-mounts.
+1. **Misleading plan display**: `braid plan` shows `mkfs.btrfs -f -d single -m dup (may run)` for disks that are actually returning pool members. The execute-time superblock check prevents data loss, but the plan output is alarming for routine re-mounts.
 
 2. **Mount failure after reboot**: Per-device `btrfs device scan <device>` doesn't reliably assemble multi-device pools. Even after opening all LUKS mappers and scanning each device individually, `mount` can fail with "missing members" because the kernel's btrfs subsystem hasn't been told about all members atomically. `btrfs device scan` (no arguments) scans all block devices and reliably assembles multi-device pools.
 

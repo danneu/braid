@@ -29,7 +29,7 @@ for name in DISKS:
     )
 
 # Create single-profile btrfs on disk1 only, mount, add disk2
-machine.succeed("mkfs.btrfs -f /dev/mapper/disk1")
+machine.succeed("mkfs.btrfs -f -d single -m dup /dev/mapper/disk1")
 machine.succeed(f"mkdir -p {MOUNT}")
 machine.succeed(f"mount /dev/mapper/disk1 {MOUNT}")
 machine.succeed(f"btrfs device add -f /dev/mapper/disk2 {MOUNT}")

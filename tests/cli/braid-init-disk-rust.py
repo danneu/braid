@@ -84,7 +84,7 @@ with subtest("init-disk refuses disk currently in pool"):
         f"echo -n '{passphrase}' | cryptsetup luksOpen --key-file=- "
         "/dev/disk/by-id/virtio-disk1 virtio-disk1"
     )
-    machine.succeed("mkfs.btrfs -f /dev/mapper/virtio-disk1")
+    machine.succeed("mkfs.btrfs -f -d single -m dup /dev/mapper/virtio-disk1")
     machine.succeed("mkdir -p /mnt/storage && mount /dev/mapper/virtio-disk1 /mnt/storage")
 
     # Now try to init-disk disk1 while it's in the pool — should refuse

@@ -33,7 +33,7 @@ let
 
   mkfsCmd =
     if builtins.length diskNames == 1 then
-      "mkfs.btrfs -f /dev/mapper/braid-${builtins.head diskNames}-fmt"
+      "mkfs.btrfs -f -d single -m dup /dev/mapper/braid-${builtins.head diskNames}-fmt"
     else
       "mkfs.btrfs -f -d raid1 -m raid1 "
       + lib.concatMapStringsSep " " (d: "/dev/mapper/braid-${d}-fmt") diskNames;

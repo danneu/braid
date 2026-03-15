@@ -363,7 +363,14 @@ impl CmdRequest {
             },
             CmdRequest::MkfsBtrfs { device } => CmdArgs {
                 program: "mkfs.btrfs",
-                args: vec!["-f".into(), device.clone()],
+                args: vec![
+                    "-f".into(),
+                    "-d".into(),
+                    "single".into(),
+                    "-m".into(),
+                    "dup".into(),
+                    device.clone(),
+                ],
             },
             CmdRequest::MkfsBtrfsRaid1 { devices } => {
                 let mut args = vec![
@@ -941,6 +948,23 @@ mod tests {
                 "/dev/mapper/braid-disk1",
                 "/dev/mapper/braid-disk2",
             ]
+        );
+    }
+
+    #[test]
+    /* Intent: MkfsBtrfs generates correct argv with -d single -m dup.
+     * Why: implicit profiles make braid's storage intent ambiguous and ignore upstream guidance.
+     * Scenario: single-disk bootstrap creates a new pool with one fresh disk.
+     */
+    fn mkfs_btrfs_single_generates_correct_argv() {
+        let cmd = CmdRequest::MkfsBtrfs {
+            device: "/dev/mapper/braid-disk1".to_owned(),
+        }
+        .to_argv();
+        assert_eq!(cmd.program, "mkfs.btrfs");
+        assert_eq!(
+            cmd.args,
+            vec!["-f", "-d", "single", "-m", "dup", "/dev/mapper/braid-disk1"]
         );
     }
 

@@ -22,7 +22,7 @@ with subtest("Setup: LUKS format, open, mkfs, mount"):
     dev = "/dev/disk/by-id/virtio-disk1"
     machine.succeed(f"echo -n '{passphrase}' | cryptsetup luksFormat {luks_format} {dev}")
     machine.succeed(f"echo -n '{passphrase}' | cryptsetup luksOpen --key-file=- {dev} disk1")
-    machine.succeed("mkfs.btrfs -f /dev/mapper/disk1")
+    machine.succeed("mkfs.btrfs -f -d single -m dup /dev/mapper/disk1")
     machine.succeed("mkdir -p /mnt/storage")
     machine.succeed("mount /dev/mapper/disk1 /mnt/storage")
     machine.succeed("echo 'test data' > /mnt/storage/test.txt")
