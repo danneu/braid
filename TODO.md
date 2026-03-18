@@ -1,3 +1,5 @@
+- [ ] how to move a braid disk pool from one machine to another?
+- [ ] Sound some system beep when degraded via automount
 - [ ] Braid status should show the by-id so user can use it for other cli stuff.
 - [ ] Show mixed-profile situation in braid status and tui
       Repro with `braid add <disk>` to a pool; there will be
