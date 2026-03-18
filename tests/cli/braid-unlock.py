@@ -92,6 +92,74 @@ with subtest("Test 2: idempotent — unlock again is a no-op"):
     content = machine.succeed("cat /mnt/storage/test.txt").strip()
     assert content == "persistent data", f"Expected 'persistent data', got '{content}'"
 
+# --- Test 2b: Bootstrap disk-map on fresh system ---
+
+with subtest("Test 2b: bootstrap disk-map on fresh system"):
+    close_all()
+
+    # Save expected entries (written by `braid add`)
+    disk_map_raw = machine.succeed("cat /var/lib/braid/disk-map.json")
+    expected = json.loads(disk_map_raw)
+
+    # Simulate fresh machine: delete disk-map
+    machine.succeed("rm /var/lib/braid/disk-map.json")
+
+    # Unlock should succeed and bootstrap disk-map
+    machine.succeed(unlock_cmd(passphrase))
+    machine.succeed("mountpoint -q /mnt/storage")
+
+    # Verify disk-map was recreated with all 3 disks
+    new_raw = machine.succeed("cat /var/lib/braid/disk-map.json")
+    new_map = json.loads(new_raw)
+
+    assert set(new_map["disks"].keys()) == {"disk1", "disk2", "disk3"}, \
+        f"Expected 3 disks in bootstrapped map, got: {set(new_map['disks'].keys())}"
+
+    # Identity fields must match originals (added_at will differ)
+    for name in ["disk1", "disk2", "disk3"]:
+        for field in ["by_id", "luks_uuid", "devid"]:
+            assert new_map["disks"][name][field] == expected["disks"][name][field], \
+                f"{name}.{field}: expected {expected['disks'][name][field]}, " \
+                f"got {new_map['disks'][name][field]}"
+
+# --- Test 2c: Swapped config refuses to bootstrap wrong entries ---
+
+with subtest("Test 2c: swapped config refuses to bootstrap wrong entries"):
+    close_all()
+
+    # Save original disk-map for restoration
+    original_map = machine.succeed("cat /var/lib/braid/disk-map.json")
+
+    # Simulate fresh machine: delete disk-map
+    machine.succeed("rm /var/lib/braid/disk-map.json")
+
+    # Create config with disk1/disk2 by-id paths swapped
+    swapped_config = json.dumps({
+        "disks": {
+            "disk1": {"by_id": "/dev/disk/by-id/virtio-disk2"},
+            "disk2": {"by_id": "/dev/disk/by-id/virtio-disk1"},
+            "disk3": {"by_id": "/dev/disk/by-id/virtio-disk3"},
+        },
+        "mount_point": "/mnt/storage",
+    })
+    machine.succeed(f"echo '{swapped_config}' > /tmp/swapped.json")
+
+    # Unlock with swapped config — mounts fine (btrfs doesn't care about names)
+    machine.succeed(unlock_cmd(passphrase, extra="--config /tmp/swapped.json"))
+    machine.succeed("mountpoint -q /mnt/storage")
+
+    # Bootstrap should record ONLY disk3 (label matches).
+    # disk1 and disk2 are swapped: LUKS labels don't match config names.
+    new_raw = machine.succeed("cat /var/lib/braid/disk-map.json")
+    new_map = json.loads(new_raw)
+    assert set(new_map["disks"].keys()) == {"disk3"}, \
+        f"Expected only disk3 (label-verified), got: {set(new_map['disks'].keys())}"
+
+    # Restore for subsequent tests: re-unlock with correct config so pool is mounted
+    close_all()
+    machine.succeed(f"echo '{original_map}' > /var/lib/braid/disk-map.json")
+    machine.succeed(unlock_cmd(passphrase))
+
 # --- Test 3: Partial state ---
 
 with subtest("Test 3: partial state — one mapper closed, pool unmounted"):

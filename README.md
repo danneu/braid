@@ -194,7 +194,7 @@ Use `braid status --verbose` to see device IDs. If the pool has missing devices 
 
 ### Disk identity map
 
-Braid maintains an advisory disk identity map at `/var/lib/braid/disk-map.json`, recording each disk's `name`, `by_id`, `luks_uuid`, and `devid`. This is updated automatically by `add`, `remove`, `replace`, and `remove-missing` commands. It is non-authoritative — live pool probing is always the source of truth — and is rebuilt by normal command executions.
+Braid maintains an advisory disk identity map at `/var/lib/braid/disk-map.json`, recording each disk's `name`, `by_id`, `luks_uuid`, and `devid`. This is updated automatically by `add`, `remove`, `replace`, `remove-missing`, and `unlock` commands. It is non-authoritative — live pool probing is always the source of truth — and is rebuilt by normal command executions.
 
 In v1.0, disk names are immutable once recorded in this map. Renaming/reassigning a name in config is rejected by mutating commands. Keep the original name, or use explicit `braid replace` / `braid remove` + `braid add` workflows.
 
@@ -266,6 +266,8 @@ systemctl start braid-pool.target
 ```
 
 One passphrase prompt opens all available LUKS devices and mounts the pool. Works from TTY, SSH, or scripted. If disks are missing, use `--allow-degraded` to mount with reduced redundancy.
+
+When unlocking on a fresh system (e.g., after migrating disks to a new machine), `unlock` automatically rebuilds the disk identity map from live pool state. Each disk's on-disk LUKS label is verified before recording.
 
 ## Auto-unlock with USB keyfile
 

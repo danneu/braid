@@ -1,6 +1,6 @@
 use crate::cmd::{CmdError, CmdRequest, CommandRunner};
 use crate::config::{mapper_name, Config, ConfigError};
-use crate::disk_map::DiskMap;
+use crate::disk_map::{self, DiskMap};
 use crate::luks::{self, LuksError};
 use crate::pool::PoolError;
 use crate::probe::{self, Filesystem, ProbeError};
@@ -238,6 +238,61 @@ pub fn cmd_unlock<R: CommandRunner, F: Filesystem + ?Sized>(
     }
 
     eprintln!("{}  {:<10}mounted {}", tag("ok"), "pool", mount_point);
+
+    // 7. Best-effort: populate disk-map for any config disks not yet recorded.
+    //    Covers migration to a new machine where disk-map.json doesn't exist.
+    //    Each entry is verified against the on-disk LUKS label before recording.
+    let needs_bootstrap = config
+        .disks()
+        .keys()
+        .any(|name| !disk_map.disks.contains_key(name));
+    if needs_bootstrap {
+        if let Ok(pool) = probe::probe_pool(runner, mount_point.as_str()) {
+            let mut map = disk_map::load_disk_map();
+            let mut count = 0u32;
+
+            for (name, disk) in config.disks() {
+                if map.disks.contains_key(name) {
+                    continue;
+                }
+                let mn = mapper_name(name);
+                let Some(dev) = pool.devices.iter().find(|d| d.mapper == mn) else {
+                    continue;
+                };
+
+                // Verify on-disk LUKS label matches expected identity.
+                // The label (braid-<name>) was written by `braid add` and is the
+                // only identity source independent of config.
+                let expected_label = format!("braid-{name}");
+                let label_ok = runner
+                    .run(&CmdRequest::CryptsetupLuksDumpText {
+                        device: dev.underlying.clone(),
+                    })
+                    .ok()
+                    .and_then(|raw| crate::parse::parse_cryptsetup_luks_label(&raw).ok())
+                    .and_then(|out| out.label)
+                    .is_some_and(|label| label == expected_label);
+
+                if label_ok {
+                    disk_map::record_disk(
+                        &mut map,
+                        name,
+                        &disk.by_id.0,
+                        &dev.luks_uuid.0,
+                        dev.devid,
+                    );
+                    count += 1;
+                }
+            }
+
+            if count > 0 {
+                if let Err(e) = disk_map::save_disk_map(&map) {
+                    eprintln!("Warning: failed to save bootstrapped disk map: {e}");
+                }
+            }
+        }
+    }
+
     Ok(())
 }
 
