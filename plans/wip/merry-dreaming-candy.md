@@ -63,23 +63,18 @@ pub fn compute_alert_state(
 - For each device: if any current counter > acked counter → `BtrfsDeviceErrors { devid }`
 - Counter reset detection: if current < acked, treat acked as 0 (remount reset)
 - Missing device not acked → `MissingDevice { devid }`
-- smartd alert flag exists and `smartd_acked` is false → `SmartdAlert`
+- smartd alert flag file exists → `SmartdAlert`
 - `active = !causes.is_empty()`
 
 This single function is called by `braid monitor`, `braid status`, and TUI.
 
 #### Acked state
 
-Keyed by btrfs devid. Includes smartd acknowledgment:
+Keyed by btrfs devid. Clean map with no mixed top-level fields:
 
 ```rust
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AckedStats {
-    #[serde(default)]
-    pub smartd_acked: bool,
-    #[serde(flatten)]
-    pub devices: BTreeMap<String, AckedDisk>,
-}
+/// Keyed by btrfs devid (e.g. "1", "2")
+pub struct AckedStats(pub BTreeMap<String, AckedDisk>);
 
 pub struct AckedDisk {
     pub missing_acked: bool,
@@ -99,7 +94,6 @@ On-disk format (`/var/lib/braid/acked-stats.json`):
 
 ```json
 {
-  "smartd_acked": false,
   "1": {
     "missing_acked": false,
     "device_stats": {
@@ -113,10 +107,16 @@ On-disk format (`/var/lib/braid/acked-stats.json`):
 }
 ```
 
-- smartd flag file: `/var/lib/braid/smartd-alert` (written by smartd exec script, checked by `compute_alert_state()`, removed by `braid ack`)
+#### smartd alert flag
+
+`/var/lib/braid/smartd-alert` — the flag file IS the state. No tracking in AckedStats:
+- smartd exec script touches the file to signal an alert
+- `compute_alert_state()` checks if the file exists → `SmartdAlert` cause
+- `braid ack` removes the file
+- Latch works: flag persists until ack. Re-alert works: a new smartd touch recreates it after ack removed it.
 - Follows `disk_map.rs` patterns: `load_acked_stats()` / `save_acked_stats()` using `atomic_write` from `state_io.rs`
 - Returns empty struct on missing/corrupt file
-- `snapshot_current(current_stats, missing_devids) -> AckedStats` — captures current values + sets `missing_acked: true` for missing devids + sets `smartd_acked: true` if smartd flag exists
+- `snapshot_current(current_stats, missing_devids) -> AckedStats` — captures current values + sets `missing_acked: true` for missing devids
 - Register in `cli/src/lib.rs`
 - Unit tests: roundtrip, compute_alert_state with each cause type, counter reset, missing ack, smartd flag, empty file
 
@@ -140,7 +140,7 @@ In `cli/src/probe.rs`:
 
 New file: `cli/src/monitor.rs`
 
-`braid monitor` is a **pure detector** — it checks state, returns an exit code, and does nothing else. It does not start/stop services or write files.
+`braid monitor` is a **pure detector** — it checks state and returns an exit code. It does not start/stop services. (It may write the ack file for self-heal of stale state.)
 
 `cmd_monitor(runner, fs, config) -> Result<MonitorResult>`
 
@@ -177,8 +177,8 @@ New file: `cli/src/ack.rs`
 1. Check if pool is mounted. If not → error.
 2. Run `btrfs device stats`.
 3. Get missing devids (from pool probe).
-4. `snapshot_current(stats, missing_devids)` → save to acked stats file (sets `missing_acked: true` for missing devids, `smartd_acked: true` if smartd flag exists).
-5. Remove smartd alert flag (`/var/lib/braid/smartd-alert`) if present.
+4. `snapshot_current(stats, missing_devids)` → save to acked stats file (sets `missing_acked: true` for missing devids).
+5. Remove smartd alert flag (`/var/lib/braid/smartd-alert`) if present — this is the sole ack mechanism for smartd alerts.
 6. Stop beeper: `systemctl stop braid-alert.service` — best-effort, warn on failure. Uses the systemd binary from the wrapper PATH (see Step 5 — systemd added to `toolPackages`).
 7. Print confirmation: "acknowledged N alert(s)"
 
