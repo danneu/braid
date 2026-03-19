@@ -72,6 +72,8 @@ pub struct PoolState {
     pub total_devices: u64,
     /// btrfs filesystem FSID (uuid), populated when pool is mounted.
     pub fsid: Option<String>,
+    /// Devids of missing devices (from btrfs filesystem show MISSING sentinels).
+    pub missing_devids: Vec<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

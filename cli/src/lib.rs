@@ -1,4 +1,6 @@
+pub mod ack;
 pub mod add;
+pub mod alert;
 pub mod cmd;
 pub mod config;
 pub mod disk_map;
@@ -7,6 +9,7 @@ pub mod enroll_key_file;
 pub mod hdparm;
 pub mod lock;
 pub mod luks;
+pub mod monitor;
 pub mod parse;
 pub mod pool;
 pub mod preflight;

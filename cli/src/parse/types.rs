@@ -128,6 +128,8 @@ pub struct BtrfsFilesystemShowOutput {
     pub total_devices: u64,
     pub devices: Vec<BtrfsShowDevice>,
     pub has_missing: bool,
+    /// Devids of missing devices (extracted from MISSING sentinel lines).
+    pub missing_devids: Vec<u64>,
 }
 
 /// cryptsetup status

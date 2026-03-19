@@ -790,6 +790,7 @@ mod tests {
                 underlying: "/dev/vda".into(),
             }],
             missing_count: 0,
+            missing_devids: vec![],
             total_devices: 1,
             fsid: Some(fsid.to_owned()),
         }
@@ -800,6 +801,7 @@ mod tests {
             mounted: false,
             devices: vec![],
             missing_count: 0,
+            missing_devids: vec![],
             total_devices: 0,
             fsid: None,
         }
@@ -897,6 +899,7 @@ mod tests {
                 underlying: "/dev/vda".into(),
             }],
             missing_count: 0,
+            missing_devids: vec![],
             total_devices: 1,
             fsid: Some(fsid.to_owned()),
         };

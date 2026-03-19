@@ -378,6 +378,21 @@
               braid = linuxCrane.braid-cli-unwrapped;
             }
           );
+          braid-monitor = pkgs.testers.nixosTest (
+            import ./tests/cli/braid-monitor.nix {
+              braid = linuxCrane.braid;
+            }
+          );
+          braid-smartd-alert = pkgs.testers.nixosTest (
+            import ./tests/cli/braid-smartd-alert.nix {
+              braid = linuxCrane.braid;
+            }
+          );
+          braid-alert = pkgs.testers.nixosTest (
+            import ./tests/module/braid-alert.nix {
+              braid = linuxCrane.braid-cli-unwrapped;
+            }
+          );
         };
     in
     {

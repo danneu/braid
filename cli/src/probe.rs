@@ -113,6 +113,7 @@ pub fn probe_pool<R: CommandRunner>(
                 missing_count: 0,
                 total_devices: 0,
                 fsid: None,
+                missing_devids: vec![],
             });
         }
         Some(e) => e,
@@ -187,6 +188,7 @@ pub fn probe_pool<R: CommandRunner>(
         missing_count,
         total_devices: show.total_devices,
         fsid: show.uuid,
+        missing_devids: show.missing_devids,
     })
 }
 

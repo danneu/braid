@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use crate::alert::AlertState;
 use crate::parse::types::{BtrfsDfEntry, DeviceAllocation, ScrubState, SmartHealth};
-use crate::status::BalanceReport;
+use crate::status::{BalanceReport, DiskErrors};
 use crate::tui::effect::Effect;
 use crate::tui::state::{CmdId, CommandState};
 use crate::types::MountPoint;
@@ -66,6 +67,8 @@ pub struct PoolState {
     pub disk_transport: HashMap<String, String>,
     pub smart_health: HashMap<String, SmartHealth>,
     pub luks_info: HashMap<String, DiskLuksInfo>,
+    pub device_errors: HashMap<String, DiskErrors>,
+    pub alert_state: AlertState,
     pub scrub: ScrubState,
     pub balance: BalanceReport,
     pub capacity_total_bytes: Option<u64>,

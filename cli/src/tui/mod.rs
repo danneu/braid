@@ -195,6 +195,8 @@ pub fn run_demo() -> io::Result<()> {
         disk_transport,
         smart_health,
         luks_info,
+        device_errors: HashMap::new(),
+        alert_state: crate::alert::AlertState { active: false, causes: vec![] },
         scrub: ScrubState::Completed {
             started_at: ScrubTimestamp(time::macros::datetime!(2026-02-24 02:00:07)),
             error_count: 0,

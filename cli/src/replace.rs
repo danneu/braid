@@ -710,6 +710,7 @@ mod tests {
                 },
             ],
             missing_count: 0,
+            missing_devids: vec![],
             total_devices: 2,
             fsid: None,
         }
