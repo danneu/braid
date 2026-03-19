@@ -1,37 +1,85 @@
-# Plan: Disk Health Monitoring & Audible Alerting
+# Plan: First-Class Alerts for Disk Health
 
 Status: Draft
 
 ## Context
 
-Synology NAS boxes beep when a disk develops bad sectors — you hear it, SSH in, and deal with it. Without this, a braid NAS user has no idea anything is wrong unless they happen to run `braid status`. This plan adds two detection layers (btrfs device stats + SMART via smartd) that feed a single alert path (PC speaker beep), with an ack workflow to silence it.
+Synology NAS boxes beep when a disk develops bad sectors — you hear it, SSH in, and deal with it. Without this, a braid NAS user has no idea anything is wrong unless they happen to run `braid status`. This plan introduces **Alerts** as a first-class concept in braid: a shared alert model that all surfaces consume (`braid status`, TUI, beeper), with two detection sources (btrfs device stats + SMART via smartd) and a single acknowledgment workflow (`braid ack`).
 
 ## Design Decisions
 
-- **Two detection layers, one alert path**: braid owns btrfs device stats polling. smartd (already a NixOS service) owns SMART monitoring. Both trigger the same `braid-alert.service`.
-- **All five btrfs device stat counters are beep-worthy**: write_io_errs, read_io_errs, flush_io_errs, corruption_errs, generation_errs. Any non-zero counter above acked baseline triggers alert.
-- **Single alert tier**: the beep is just a "go check your NAS" signal. `braid status` is where the user learns what's actually wrong (errors vs missing device vs both).
-- **Ack silences everything**: `braid ack` stops all beeping, including missing-device alerts. The monitor won't re-trigger for the same condition. If a *different* drive goes missing after ack, that's a new event and beeping resumes. Rationale: user heard the alert, they're working on it (ordering a drive, etc.) — beeping while they can't act is just annoying.
-- **Ack state keyed by btrfs devid**: devid is btrfs-native — no need to cross-reference config or disk-map to identify missing devices. The `btrfs filesystem show` parser already sees missing device devids; we just need to stop discarding them.
-- **Ack state is machine-local, not pool-portable**: on a new machine, `/var/lib/braid/acked-device-stats.json` doesn't exist, so everything evaluates fresh. This is correct — a new machine should assess drives independently.
-- **Ack state separate from disk-map.json**: different concerns (identity vs operator acknowledgment), different write patterns (mutating commands vs monitor timer), different risk profiles (precious vs disposable).
-- **`braid monitor` is a pure detector**: it checks state and returns exit 0 (ok) or exit 1 (alert needed). It does not start/stop services or write files. The systemd service wrapper starts the alert on exit 1, does nothing on exit 0.
-- **Alerts are latched**: once triggered, alerts persist until `braid ack` — even if the triggering condition later disappears (e.g. transient error, drive replaced). A beep means "something happened that needs acknowledgment," not "something is currently true." This avoids the cross-source ownership bug where btrfs monitor exit 0 could accidentally clear a smartd-triggered alert. Matches Synology UX: beep until a human mutes it.
-- **Periodic one-shot, not daemon**: systemd timer + oneshot service. No mount condition on the timer — `braid monitor` handles pool-not-mounted gracefully (exit 0).
-- **Monitor self-heals ack state**: after a drive replacement, the monitor detects the previously-missing devid is now present and resets `missing_acked` to false. No coupling between replace/add commands and monitoring — the monitor owns its own state.
-- **On by default**: `braid.monitor.enable` defaults to true when `braid.enable` is true. beep/pcspkr failures are silently swallowed, so it's harmless on hardware without a speaker.
+- **Alert is the primary domain concept**: braid has first-class Alerts. Beeping is one notification mechanism for an active alert. `braid status` is the primary place to understand active alerts. `braid ack` acknowledges current alerts and silences notifications.
+- **Shared alert computation**: a single `compute_alert_state()` function produces an `AlertState` consumed by all surfaces — `braid monitor` (exit code), `braid status` (banner + causes), TUI (banner + indicators). No surface re-encodes alert logic.
+- **Alert causes are explicit**: `AlertCause` enum — `BtrfsDeviceErrors`, `MissingDevice`, `SmartdAlert`. The banner is cause-neutral ("disk health issue detected"); cause details appear below it and in JSON output.
+- **Two detection sources, one alert model**: braid owns btrfs device stats + missing device detection. smartd owns SMART monitoring and writes a flag file (`/var/lib/braid/smartd-alert`) when triggered. `compute_alert_state()` checks both sources.
+- **All five btrfs device stat counters trigger alerts**: write_io_errs, read_io_errs, flush_io_errs, corruption_errs, generation_errs. Any non-zero counter above acked baseline → alert.
+- **`braid ack` acknowledges alerts**: the user action is "acknowledge alert." Side effects: stop beeping, clear smartd flag, update acked baseline. The monitor won't re-trigger for the same condition. If a *different* issue occurs after ack, that's a new alert.
+- **Ack state keyed by btrfs devid**: devid is btrfs-native — no cross-referencing config or disk-map. The parser already sees missing device devids; we just need to stop discarding them.
+- **Ack state is machine-local, not pool-portable**: on a new machine, state doesn't exist → everything evaluates fresh.
+- **Ack state separate from disk-map.json**: different concerns (identity vs acknowledgment), different write patterns, different risk profiles (precious vs disposable).
+- **`braid monitor` is a pure detector**: checks state, returns exit 0 (ok) or exit 1 (alert). Does not start/stop services. The systemd wrapper starts the beeper on exit 1.
+- **Alerts are latched**: persist until `braid ack` — even if the triggering condition disappears. "Something happened that needs acknowledgment," not "something is currently true." Avoids the cross-source bug where btrfs monitor exit 0 could clear a smartd-triggered alert. Matches Synology UX.
+- **Periodic one-shot, not daemon**: systemd timer + oneshot service. No mount condition on timer — `braid monitor` handles pool-not-mounted gracefully (exit 0).
+- **Monitor self-heals ack state**: after drive replacement, resets `missing_acked` for now-present devids. No coupling to replace/add commands.
+- **On by default**: `braid.monitor.enable` defaults to true when `braid.enable` is true. beep/pcspkr failures silently swallowed.
 
 ## Implementation
 
-### Step 1: Acked stats state management (Rust)
+### Step 1: Alert model + acked state (Rust)
 
-New file: `cli/src/acked_stats.rs`
+New file: `cli/src/alert.rs`
 
-Keyed by btrfs devid (string). devid is btrfs-native — no need to cross-reference config or disk-map to identify missing devices.
+#### Alert model
+
+All surfaces consume the same `AlertState`:
 
 ```rust
-/// Keyed by btrfs devid (e.g. "1", "2")
-pub struct AckedStats(pub BTreeMap<String, AckedDisk>);
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AlertState {
+    pub active: bool,
+    pub causes: Vec<AlertCause>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AlertCause {
+    BtrfsDeviceErrors { devid: u64 },
+    MissingDevice { devid: u64 },
+    SmartdAlert,
+}
+```
+
+#### Shared computation
+
+```rust
+pub fn compute_alert_state(
+    current_stats: &BtrfsDeviceStatsOutput,
+    acked: &AckedStats,
+    missing_devids: &[u64],
+    smartd_alert_active: bool,
+) -> AlertState
+```
+
+- For each device: if any current counter > acked counter → `BtrfsDeviceErrors { devid }`
+- Counter reset detection: if current < acked, treat acked as 0 (remount reset)
+- Missing device not acked → `MissingDevice { devid }`
+- smartd alert flag exists and `smartd_acked` is false → `SmartdAlert`
+- `active = !causes.is_empty()`
+
+This single function is called by `braid monitor`, `braid status`, and TUI.
+
+#### Acked state
+
+Keyed by btrfs devid. Includes smartd acknowledgment:
+
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AckedStats {
+    #[serde(default)]
+    pub smartd_acked: bool,
+    #[serde(flatten)]
+    pub devices: BTreeMap<String, AckedDisk>,
+}
 
 pub struct AckedDisk {
     pub missing_acked: bool,
@@ -47,10 +95,11 @@ pub struct AckedDeviceCounters {
 }
 ```
 
-On-disk format (`/var/lib/braid/acked-device-stats.json`):
+On-disk format (`/var/lib/braid/acked-stats.json`):
 
 ```json
 {
+  "smartd_acked": false,
   "1": {
     "missing_acked": false,
     "device_stats": {
@@ -60,31 +109,16 @@ On-disk format (`/var/lib/braid/acked-device-stats.json`):
       "corruption_errs": 1,
       "generation_errs": 0
     }
-  },
-  "2": {
-    "missing_acked": true,
-    "device_stats": {
-      "read_io_errs": 0,
-      "write_io_errs": 0,
-      "flush_io_errs": 0,
-      "corruption_errs": 0,
-      "generation_errs": 0
-    }
   }
 }
 ```
 
+- smartd flag file: `/var/lib/braid/smartd-alert` (written by smartd exec script, checked by `compute_alert_state()`, removed by `braid ack`)
 - Follows `disk_map.rs` patterns: `load_acked_stats()` / `save_acked_stats()` using `atomic_write` from `state_io.rs`
-- Returns empty struct on missing/corrupt file (same as `load_disk_map`)
-- Comparison function: `check_for_new_errors(current_stats, acked, missing_devids) -> AlertCheck`
-  - For each device: if any current counter > acked counter → new errors
-  - Counter reset detection: if current < acked, treat acked as 0 for that device (remount reset the counters)
-  - Missing device: if devid is missing and `missing_acked` is false → alert
-  - Missing device already acked: no alert for that devid. But if a *different* devid goes missing → new alert
-  - Returns: `AlertCheck { alert_needed: bool, devices_with_new_errors: Vec<u64>, new_missing: Vec<u64> }`
-- `snapshot_current(current_stats, missing_devids) -> AckedStats` — captures current values + sets `missing_acked: true` for missing devids
+- Returns empty struct on missing/corrupt file
+- `snapshot_current(current_stats, missing_devids) -> AckedStats` — captures current values + sets `missing_acked: true` for missing devids + sets `smartd_acked: true` if smartd flag exists
 - Register in `cli/src/lib.rs`
-- Unit tests: roundtrip, comparison logic, counter reset detection, missing ack, empty file
+- Unit tests: roundtrip, compute_alert_state with each cause type, counter reset, missing ack, smartd flag, empty file
 
 Reuses:
 - `state_io::atomic_write` (`cli/src/state_io.rs`)
@@ -114,13 +148,14 @@ New file: `cli/src/monitor.rs`
 2. Run `btrfs device stats` (existing `CmdRequest::BtrfsDeviceStats`).
 3. Load acked stats.
 4. Get missing devids (from pool probe's new `missing_devids` field).
-5. **Self-heal stale ack state**: for any devid where `missing_acked: true` but the devid is now present, reset `missing_acked` to false. Save updated ack file if changed.
-6. Call `check_for_new_errors()`.
-7. Return `MonitorResult` with `alert_needed: bool`.
+5. Check smartd alert flag (`/var/lib/braid/smartd-alert` exists).
+6. **Self-heal stale ack state**: for any devid where `missing_acked: true` but the devid is now present, reset `missing_acked` to false. Save updated ack file if changed.
+7. Call `compute_alert_state()`.
+8. Return exit code based on `alert_state.active`.
 
 Exit codes:
-- 0: no alert needed (or pool offline)
-- 1: alert needed (new errors or missing device)
+- 0: no alert (or pool offline)
+- 1: alert active
 
 Wire in `cli/src/main.rs`:
 - Add `Monitor` to `Commands` enum (no args)
@@ -135,17 +170,21 @@ Reuses:
 
 New file: `cli/src/ack.rs`
 
+`braid ack` **acknowledges current alerts**. Silencing the beeper is a side effect.
+
 `cmd_ack(runner, config) -> Result<()>`
 
 1. Check if pool is mounted. If not → error.
 2. Run `btrfs device stats`.
 3. Get missing devids (from pool probe).
-4. `snapshot_current(stats, missing_devids)` → save to acked stats file (sets `missing_acked: true` for missing devids).
-5. Stop alert service: `std::process::Command::new(systemctl_path).args(["stop", "braid-alert.service"])` — best-effort, warn on failure. Uses the systemd binary from the wrapper PATH (see Step 5 — systemd added to `toolPackages`).
-6. Print confirmation: "acknowledged errors on N devices"
+4. `snapshot_current(stats, missing_devids)` → save to acked stats file (sets `missing_acked: true` for missing devids, `smartd_acked: true` if smartd flag exists).
+5. Remove smartd alert flag (`/var/lib/braid/smartd-alert`) if present.
+6. Stop beeper: `systemctl stop braid-alert.service` — best-effort, warn on failure. Uses the systemd binary from the wrapper PATH (see Step 5 — systemd added to `toolPackages`).
+7. Print confirmation: "acknowledged N alert(s)"
 
 Wire in `cli/src/main.rs`:
 - Add `Ack` to `Commands` enum (no args)
+- Help text: "Acknowledge current alerts and silence notifications"
 
 ### Step 5: NixOS module — monitor and alert services
 
@@ -243,17 +282,51 @@ Where `smartdAlertScript` is:
 
 ```nix
 smartdAlertScript = pkgs.writeShellScript "braid-smartd-alert" ''
+  touch /var/lib/braid/smartd-alert
   ${pkgs.systemd}/bin/systemctl start braid-alert.service 2>/dev/null || true
 '';
 ```
 
-smartd handles its own state tracking (persists in `/var/lib/smartmontools/`). braid doesn't track SMART state — smartd fires the exec script only when something changes.
+smartd fires the exec script on SMART attribute changes. The flag file `/var/lib/braid/smartd-alert` is the bridge into braid's alert model — `compute_alert_state()` checks for its existence, `braid ack` removes it. The flag persists across reboots (SMART issues don't resolve on reboot).
 
 ### Step 7: `braid status` enhancements
 
 In `cli/src/status.rs`:
 
-- When a disk has non-zero errors, add action guidance to human-readable output:
+**Alert banner**: `braid status` calls `compute_alert_state()` (same as monitor and TUI). If alert is active, print a cause-neutral banner at the top, followed by cause details:
+
+```
+ALERT -- disk health issue detected. Run 'braid ack' to acknowledge and silence.
+  - missing device (devid 2)
+  - btrfs device errors on devid 1
+```
+
+Or for smartd-only:
+
+```
+ALERT -- disk health issue detected. Run 'braid ack' to acknowledge and silence.
+  - SMART health warning
+```
+
+Disappears after `braid ack` (acked baseline matches current state).
+
+**JSON output**: add `AlertState` to `StatusReport`:
+
+```json
+{
+  "alert_active": true,
+  "alert_causes": [
+    {"type": "missing_device", "devid": 2},
+    {"type": "btrfs_device_errors", "devid": 1}
+  ],
+  ...
+}
+```
+
+When no alert: `"alert_active": false, "alert_causes": []`.
+
+**Per-disk action guidance** (below the existing error line):
+- When a disk has non-zero errors:
   ```
   Errors:  read 3 / write 0 / flush 0 / corruption 1 / generation 0
   Action:  add replacement disk to config, then: braid replace --old <name> --new <new-name>
@@ -267,27 +340,45 @@ In `cli/src/status.rs`:
 
 ### Step 8: TUI enhancements
 
-- Add `device_errors: HashMap<String, DiskErrors>` to `PoolState` in `cli/src/tui/model.rs`
-- Probe device errors in `cli/src/tui/probe.rs` (reuse existing `CmdRequest::BtrfsDeviceStats`)
+- **Alert banner**: TUI calls `compute_alert_state()`. When active, show a persistent banner at the top (red background): `ALERT -- disk health issue detected. Run 'braid ack' to acknowledge and silence.`
+- Add `alert_state: AlertState` to `PoolState` in `cli/src/tui/model.rs`
+- Add `device_errors: HashMap<String, DiskErrors>` to `PoolState`
+- Probe device errors + acked stats + smartd flag in `cli/src/tui/probe.rs` (calls `compute_alert_state()`)
 - Disk table in `cli/src/tui/view/mod.rs`: show error total per disk, red when non-zero
 - Disk detail popup: show all five error counters
-- Update snapshot tests with error data
+- Update snapshot tests with alert + error data
 
 ### Step 9: NixOS VM tests
 
-#### Test: monitor + ack workflow (`tests/cli/braid-monitor.py`)
+#### Test: btrfs alert lifecycle (`tests/cli/braid-monitor.py`)
 
-Intent: Verify `braid monitor` detects missing devices and `braid ack` clears alert state.
+Intent: Verify the full alert lifecycle for btrfs-detected issues: detection → banner → ack → cleared.
 
 Scenario:
 1. Create 3-disk RAID1 pool
-2. `braid monitor` → exit 0 (no errors)
-3. Close one LUKS mapper, remount degraded → missing device
-4. `braid monitor` → exit 1 (alert needed)
-5. `braid ack` → verify acked state file written, contains `missing_acked: true` for the missing devid
-6. `braid monitor` → exit 0 (missing device acknowledged, no re-trigger for same condition)
+2. `braid monitor` → exit 0 (no alerts)
+3. `braid status` → output does NOT contain "ALERT"
+4. Close one LUKS mapper, remount degraded → missing device
+5. `braid monitor` → exit 1 (alert active)
+6. `braid status` → output contains "ALERT" banner, "braid ack", and "missing device"
+7. `braid status --json` → JSON contains `"alert_active": true` and `"missing_device"` cause
+8. `braid ack` → verify acked state file written, contains `missing_acked: true` for the missing devid
+9. `braid status` → output does NOT contain "ALERT"
+10. `braid monitor` → exit 0 (acknowledged, no re-trigger)
 
-Note: Testing actual beep output is not feasible in VM. Tests verify service lifecycle and exit codes.
+#### Test: smartd alert lifecycle (`tests/cli/braid-smartd-alert.py`)
+
+Intent: Verify smartd-triggered alerts appear in `braid status` and clear with `braid ack`.
+
+Scenario:
+1. Create 2-disk RAID1 pool (healthy)
+2. `braid status` → no "ALERT"
+3. Simulate smartd alert: `touch /var/lib/braid/smartd-alert`
+4. `braid monitor` → exit 1
+5. `braid status` → output contains "ALERT" and "SMART"
+6. `braid ack` → verify smartd flag removed
+7. `braid status` → no "ALERT"
+8. `braid monitor` → exit 0
 
 #### Test: alert service lifecycle (`tests/module/braid-alert.py`)
 
@@ -300,28 +391,30 @@ Intent: Verify systemd units exist and can be started/stopped.
 
 ### Step 10: Docs
 
-- Update `README.md` with monitoring section
-- Add `docs/decisions/disk-health-monitoring.md` (ADR, status: Active)
+- Update `README.md` with Alerts section: braid has first-class Alerts. Beeping is the default audible notifier. `braid status` is the primary place to understand active alerts. `braid ack` acknowledges current alerts and silences notifications.
+- Add `docs/decisions/alerts.md` (ADR, status: Active): first-class alert concept, shared `compute_alert_state()`, alert causes, latched alerts, ack workflow, two detection sources.
 
 ## Files to create
 
 | File | Purpose |
 |------|---------|
-| `cli/src/acked_stats.rs` | Acked state management |
+| `cli/src/alert.rs` | Alert model, `compute_alert_state()`, acked state management |
 | `cli/src/monitor.rs` | `braid monitor` command |
 | `cli/src/ack.rs` | `braid ack` command |
 | `modules/braid/monitor.nix` | NixOS services/timer/smartd |
-| `tests/cli/braid-monitor.py` | VM test: monitor + ack |
+| `tests/cli/braid-monitor.py` | VM test: btrfs alert lifecycle |
 | `tests/cli/braid-monitor.nix` | VM test: NixOS config |
+| `tests/cli/braid-smartd-alert.py` | VM test: smartd alert lifecycle |
+| `tests/cli/braid-smartd-alert.nix` | VM test: NixOS config |
 | `tests/module/braid-alert.py` | VM test: alert service |
 | `tests/module/braid-alert.nix` | VM test: NixOS config |
-| `docs/decisions/disk-health-monitoring.md` | ADR |
+| `docs/decisions/alerts.md` | ADR: first-class alerts |
 
 ## Files to modify
 
 | File | Change |
 |------|--------|
-| `cli/src/lib.rs` | Add `pub mod acked_stats;`, `pub mod monitor;`, `pub mod ack;` |
+| `cli/src/lib.rs` | Add `pub mod alert;`, `pub mod monitor;`, `pub mod ack;` |
 | `cli/src/main.rs` | Add `Monitor` and `Ack` to `Commands` enum |
 | `cli/src/parse/types.rs` | Add `missing_devids: Vec<u64>` to `BtrfsFilesystemShowOutput` |
 | `cli/src/parse/btrfs_filesystem_show.rs` | Capture missing devids instead of discarding them |
@@ -337,7 +430,8 @@ Intent: Verify systemd units exist and can be started/stopped.
 
 ## Verification
 
-1. `just test-rust` — unit tests for acked_stats comparison logic
-2. `just test braid-monitor` — VM test for monitor + ack CLI workflow
-3. `just test braid-alert` — VM test for systemd service lifecycle
-4. Manual: on a NixOS machine with `braid.monitor.enable = true`, verify `systemctl list-timers` shows `braid-monitor.timer`, and `braid monitor` exits 0 on a healthy pool
+1. `just test-rust` — unit tests for `compute_alert_state()`, acked stats, each cause type
+2. `just test braid-monitor` — VM test: btrfs alert lifecycle (detection → status banner → ack → cleared)
+3. `just test braid-smartd-alert` — VM test: smartd alert lifecycle (flag → status banner → ack → cleared)
+4. `just test braid-alert` — VM test: systemd service lifecycle
+5. Manual: on a NixOS machine with `braid.monitor.enable = true`, verify `systemctl list-timers` shows `braid-monitor.timer`, `braid monitor` exits 0 on healthy pool, `braid status` shows no alert banner
