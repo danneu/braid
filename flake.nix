@@ -338,6 +338,12 @@
           repro-cryptsetup-close-btrfs-held = pkgs.testers.nixosTest (
             import ./tests/repro/cryptsetup-close-btrfs-held.nix
           );
+          repro-kernel-journal-write-error = pkgs.testers.nixosTest (
+            import ./tests/repro/kernel-journal-write-error.nix
+          );
+          repro-kernel-journal-bad-sector = pkgs.testers.nixosTest (
+            import ./tests/repro/kernel-journal-bad-sector.nix
+          );
           luks-label = pkgs.testers.nixosTest (
             import ./tests/cli/luks-label.nix {
               braid = linuxCrane.braid;
