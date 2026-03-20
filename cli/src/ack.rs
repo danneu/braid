@@ -1,67 +1,67 @@
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use crate::alert::{self, save_acked_stats, snapshot_current};
 use crate::cmd::{CmdRequest, CommandRunner};
+use crate::journal;
 use crate::parse::parse_btrfs_device_stats;
 use crate::probe::{probe_pool, ProbeError};
 use crate::types::MountPoint;
 
 pub fn cmd_ack<R: CommandRunner>(runner: &R, mount_point: &str) -> Result<(), AckError> {
-    // 1. Check if pool is mounted
+    // 1. Read latch for count (authoritative alert state)
+    let latch = alert::load_alert_latch();
+    let latch_count = latch.as_ref().map_or(0, |s| s.causes.len());
+
+    // 2. Check if pool is mounted
     let pool = match probe_pool(runner, mount_point) {
         Ok(p) => p,
         Err(ProbeError::NotBtrfs { .. }) => {
-            return ack_offline();
+            return ack_offline(latch_count);
         }
         Err(e) => return Err(AckError::Probe(e)),
     };
 
     if !pool.mounted {
-        return ack_offline();
+        return ack_offline(latch_count);
     }
 
-    // 2. Run btrfs device stats
+    // 3. Run btrfs device stats
     let stats_raw = runner.run(&CmdRequest::BtrfsDeviceStats {
         mount_point: MountPoint(mount_point.to_owned()),
     })?;
     let device_stats = parse_btrfs_device_stats(&stats_raw)?;
 
-    // 3. Get missing devids
+    // 4. Get missing devids
     let missing_devids = &pool.missing_devids;
 
-    // 4. Build devid map
+    // 5. Build devid map
     let path_to_devid: BTreeMap<String, u64> = pool
         .devices
         .iter()
         .map(|d| (format!("/dev/mapper/{}", d.mapper.0), d.devid))
         .collect();
 
-    // Count current alerts before acking (for user message)
-    let smartd_active = alert::smartd_alert_active();
-    let acked = alert::load_acked_stats();
-    let current_alert = alert::compute_alert_state_with_devid_map(
-        &device_stats,
-        &acked,
-        missing_devids,
-        smartd_active,
-        &path_to_devid,
-    )?;
-
-    // 5. Snapshot current state
+    // 6. Snapshot current state
     let new_acked = snapshot_current(&device_stats, missing_devids, &path_to_devid)?;
     save_acked_stats(&new_acked)?;
 
-    // 6. Remove smartd alert flag + alert latch
+    // 7. Advance journal cursor to now
+    let cursor_path = Path::new(journal::CURSOR_FILE);
+    if let Err(e) = journal::advance_cursor_to_now(cursor_path) {
+        eprintln!("Warning: failed to advance journal cursor: {e}");
+    }
+
+    // 8. Remove smartd alert flag + alert latch
     alert::remove_smartd_alert_flag()?;
     alert::remove_alert_latch()?;
 
-    // 7. Stop beeper (best-effort)
+    // 9. Stop beeper (best-effort)
     stop_beeper();
 
-    // 8. Print confirmation
-    let count = current_alert.causes.len();
-    if count > 0 {
-        println!("acknowledged {count} alert(s)");
+    // 10. Print confirmation using latch count
+    if latch_count > 0 {
+        println!("acknowledged {latch_count} alert(s)");
     } else {
         println!("no active alerts");
     }
@@ -69,13 +69,18 @@ pub fn cmd_ack<R: CommandRunner>(runner: &R, mount_point: &str) -> Result<(), Ac
     Ok(())
 }
 
-fn ack_offline() -> Result<(), AckError> {
-    let latch = alert::load_alert_latch();
+fn ack_offline(latch_count: usize) -> Result<(), AckError> {
     let smartd_active = alert::smartd_alert_active();
 
-    let has_alert = latch.as_ref().map_or(false, |s| s.active) || smartd_active;
+    let has_alert = latch_count > 0 || smartd_active;
     if !has_alert {
         return Err(AckError::PoolNotMounted);
+    }
+
+    // Advance journal cursor to now
+    let cursor_path = Path::new(journal::CURSOR_FILE);
+    if let Err(e) = journal::advance_cursor_to_now(cursor_path) {
+        eprintln!("Warning: failed to advance journal cursor: {e}");
     }
 
     alert::remove_alert_latch()?;

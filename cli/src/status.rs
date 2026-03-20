@@ -876,6 +876,16 @@ fn format_status_human(
                 AlertCause::ComputationError { detail } => {
                     out.push_str(&format!("  - alert computation error: {detail}\n"));
                 }
+                AlertCause::KernelJournalError {
+                    message, disk_name, ..
+                } => match disk_name {
+                    Some(name) => {
+                        out.push_str(&format!("  - kernel storage error ({name}): {message}\n"));
+                    }
+                    None => {
+                        out.push_str(&format!("  - kernel storage error: {message}\n"));
+                    }
+                },
             }
         }
         out.push('\n');

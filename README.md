@@ -406,7 +406,7 @@ braid has first-class alerts for disk health. When something is wrong — a miss
 
 **How it works:**
 
-- `braid monitor` checks btrfs device stats, missing devices, and SMART alerts. Exits 0 (healthy) or 1 (alert active).
+- `braid monitor` checks btrfs device stats, missing devices, kernel journal errors, and SMART alerts. Exits 0 (healthy or pool offline with no alerts), 1 (alert active), or 2 (monitor error).
 - A systemd timer runs `braid monitor` every 5 minutes (configurable). On exit 1, it starts an audible beeper.
 - `braid status` shows an ALERT banner with cause details when an alert is active.
 - `braid ack` acknowledges the alert, silences the beeper, and sets a baseline so the same condition won't re-trigger.

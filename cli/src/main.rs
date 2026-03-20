@@ -395,6 +395,9 @@ fn main() {
                 Ok(braid_cli::monitor::MonitorResult::Alert(_)) => {
                     std::process::exit(1);
                 }
+                Ok(braid_cli::monitor::MonitorResult::PoolOfflineJournalAlert(_)) => {
+                    std::process::exit(1);
+                }
                 Err(e) => {
                     print_cli_error(&e.to_string());
                     std::process::exit(2);

@@ -27,10 +27,21 @@ pub struct AlertState {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AlertCause {
-    BtrfsDeviceErrors { devid: u64 },
-    MissingDevice { devid: u64 },
+    BtrfsDeviceErrors {
+        devid: u64,
+    },
+    MissingDevice {
+        devid: u64,
+    },
     SmartdAlert,
-    ComputationError { detail: String },
+    ComputationError {
+        detail: String,
+    },
+    KernelJournalError {
+        message: String,
+        cursor: String,
+        disk_name: Option<String>,
+    },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -263,6 +274,76 @@ pub fn remove_alert_latch() -> Result<(), std::io::Error> {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Latch merging
+// ---------------------------------------------------------------------------
+
+/// Merge existing latched causes with newly detected live and journal causes.
+///
+/// Algorithm:
+/// 1. Start with all causes from the existing latch (carried forward).
+/// 2. For each live cause: if a latched cause matches by key, replace it;
+///    otherwise append.
+/// 3. For each journal cause: same — replace by key or append.
+/// 4. Result: `AlertState { active: !causes.is_empty(), causes }`.
+pub fn merge_into_latch(
+    existing_latch: Option<&AlertState>,
+    live_causes: &[AlertCause],
+    journal_causes: &[AlertCause],
+) -> AlertState {
+    let mut causes: Vec<AlertCause> = existing_latch.map(|s| s.causes.clone()).unwrap_or_default();
+
+    for new_cause in live_causes.iter().chain(journal_causes.iter()) {
+        if let Some(pos) = causes
+            .iter()
+            .position(|existing| same_cause_key(existing, new_cause))
+        {
+            causes[pos] = new_cause.clone();
+        } else {
+            causes.push(new_cause.clone());
+        }
+    }
+
+    AlertState {
+        active: !causes.is_empty(),
+        causes,
+    }
+}
+
+/// Two causes match by key if they identify the same "slot" in the latch.
+fn same_cause_key(a: &AlertCause, b: &AlertCause) -> bool {
+    match (a, b) {
+        (
+            AlertCause::BtrfsDeviceErrors { devid: a },
+            AlertCause::BtrfsDeviceErrors { devid: b },
+        ) => a == b,
+        (AlertCause::MissingDevice { devid: a }, AlertCause::MissingDevice { devid: b }) => a == b,
+        (AlertCause::SmartdAlert, AlertCause::SmartdAlert) => true,
+        (AlertCause::ComputationError { .. }, AlertCause::ComputationError { .. }) => true,
+        (
+            AlertCause::KernelJournalError {
+                disk_name: Some(a), ..
+            },
+            AlertCause::KernelJournalError {
+                disk_name: Some(b), ..
+            },
+        ) => a == b,
+        (
+            AlertCause::KernelJournalError {
+                disk_name: None,
+                cursor: ca,
+                ..
+            },
+            AlertCause::KernelJournalError {
+                disk_name: None,
+                cursor: cb,
+                ..
+            },
+        ) => ca == cb,
+        _ => false,
     }
 }
 
@@ -566,5 +647,190 @@ mod tests {
         // Missing device comes from missing_devids, not the sentinel row
         let disk2 = snapshot.0.get("2").unwrap();
         assert!(disk2.missing_acked);
+    }
+
+    // --- merge_into_latch tests ---
+
+    fn journal_cause(disk_name: Option<&str>, cursor: &str, msg: &str) -> AlertCause {
+        AlertCause::KernelJournalError {
+            message: msg.to_owned(),
+            cursor: cursor.to_owned(),
+            disk_name: disk_name.map(|s| s.to_owned()),
+        }
+    }
+
+    #[test]
+    fn merge_live_and_journal_causes_combined() {
+        let live = vec![AlertCause::BtrfsDeviceErrors { devid: 1 }];
+        let journal = vec![journal_cause(Some("toshiba"), "c1", "BTRFS error")];
+        let merged = merge_into_latch(None, &live, &journal);
+        assert!(merged.active);
+        assert_eq!(merged.causes.len(), 2);
+    }
+
+    #[test]
+    fn merge_no_new_causes_carries_forward_latched() {
+        let existing = AlertState {
+            active: true,
+            causes: vec![
+                AlertCause::BtrfsDeviceErrors { devid: 1 },
+                journal_cause(Some("toshiba"), "c1", "BTRFS error"),
+            ],
+        };
+        let merged = merge_into_latch(Some(&existing), &[], &[]);
+        assert!(merged.active);
+        assert_eq!(merged.causes.len(), 2);
+    }
+
+    #[test]
+    fn merge_journal_same_disk_replaces_latched() {
+        let existing = AlertState {
+            active: true,
+            causes: vec![journal_cause(Some("toshiba"), "c1", "old error")],
+        };
+        let journal = vec![journal_cause(Some("toshiba"), "c2", "new error")];
+        let merged = merge_into_latch(Some(&existing), &[], &journal);
+        assert_eq!(merged.causes.len(), 1);
+        if let AlertCause::KernelJournalError {
+            message, cursor, ..
+        } = &merged.causes[0]
+        {
+            assert_eq!(message, "new error");
+            assert_eq!(cursor, "c2");
+        } else {
+            panic!("Expected KernelJournalError");
+        }
+    }
+
+    #[test]
+    fn merge_anonymous_journal_different_cursor_accumulates() {
+        let existing = AlertState {
+            active: true,
+            causes: vec![journal_cause(None, "c1", "error one")],
+        };
+        let journal = vec![journal_cause(None, "c2", "error two")];
+        let merged = merge_into_latch(Some(&existing), &[], &journal);
+        assert_eq!(merged.causes.len(), 2);
+    }
+
+    #[test]
+    fn merge_live_same_devid_replaces_latched() {
+        let existing = AlertState {
+            active: true,
+            causes: vec![AlertCause::BtrfsDeviceErrors { devid: 1 }],
+        };
+        let live = vec![AlertCause::BtrfsDeviceErrors { devid: 1 }];
+        let merged = merge_into_latch(Some(&existing), &live, &[]);
+        assert_eq!(merged.causes.len(), 1);
+    }
+
+    #[test]
+    fn merge_live_missing_devid_preserves_latched() {
+        // Key invariant fix: a previously-latched cause for devid 1 persists
+        // even when live causes no longer include devid 1.
+        let existing = AlertState {
+            active: true,
+            causes: vec![
+                AlertCause::BtrfsDeviceErrors { devid: 1 },
+                AlertCause::MissingDevice { devid: 2 },
+            ],
+        };
+        // Live sources only detect devid 2 this cycle (devid 1 resolved)
+        let live = vec![AlertCause::MissingDevice { devid: 2 }];
+        let merged = merge_into_latch(Some(&existing), &live, &[]);
+        assert_eq!(merged.causes.len(), 2);
+        assert!(merged.active);
+    }
+
+    #[test]
+    fn merge_empty_latch_with_journal_creates_active_alert() {
+        let journal = vec![journal_cause(Some("toshiba"), "c1", "BTRFS error")];
+        let merged = merge_into_latch(None, &[], &journal);
+        assert!(merged.active);
+        assert_eq!(merged.causes.len(), 1);
+    }
+
+    #[test]
+    fn same_cause_key_btrfs_device_errors() {
+        assert!(same_cause_key(
+            &AlertCause::BtrfsDeviceErrors { devid: 1 },
+            &AlertCause::BtrfsDeviceErrors { devid: 1 },
+        ));
+        assert!(!same_cause_key(
+            &AlertCause::BtrfsDeviceErrors { devid: 1 },
+            &AlertCause::BtrfsDeviceErrors { devid: 2 },
+        ));
+    }
+
+    #[test]
+    fn same_cause_key_missing_device() {
+        assert!(same_cause_key(
+            &AlertCause::MissingDevice { devid: 1 },
+            &AlertCause::MissingDevice { devid: 1 },
+        ));
+        assert!(!same_cause_key(
+            &AlertCause::MissingDevice { devid: 1 },
+            &AlertCause::MissingDevice { devid: 2 },
+        ));
+    }
+
+    #[test]
+    fn same_cause_key_smartd_singleton() {
+        assert!(same_cause_key(
+            &AlertCause::SmartdAlert,
+            &AlertCause::SmartdAlert
+        ));
+    }
+
+    #[test]
+    fn same_cause_key_computation_error_singleton() {
+        assert!(same_cause_key(
+            &AlertCause::ComputationError { detail: "a".into() },
+            &AlertCause::ComputationError { detail: "b".into() },
+        ));
+    }
+
+    #[test]
+    fn same_cause_key_journal_same_disk_name() {
+        assert!(same_cause_key(
+            &journal_cause(Some("toshiba"), "c1", "err1"),
+            &journal_cause(Some("toshiba"), "c2", "err2"),
+        ));
+    }
+
+    #[test]
+    fn same_cause_key_journal_different_disk_name() {
+        assert!(!same_cause_key(
+            &journal_cause(Some("toshiba"), "c1", "err1"),
+            &journal_cause(Some("ironwolf"), "c2", "err2"),
+        ));
+    }
+
+    #[test]
+    fn same_cause_key_journal_anonymous_same_cursor() {
+        assert!(same_cause_key(
+            &journal_cause(None, "c1", "err1"),
+            &journal_cause(None, "c1", "err2"),
+        ));
+    }
+
+    #[test]
+    fn same_cause_key_journal_anonymous_different_cursor() {
+        assert!(!same_cause_key(
+            &journal_cause(None, "c1", "err1"),
+            &journal_cause(None, "c2", "err2"),
+        ));
+    }
+
+    #[test]
+    fn same_cause_key_cross_variant_never_matches() {
+        assert!(!same_cause_key(
+            &AlertCause::BtrfsDeviceErrors { devid: 1 },
+            &AlertCause::MissingDevice { devid: 1 },
+        ));
+        assert!(!same_cause_key(
+            &AlertCause::SmartdAlert,
+            &journal_cause(Some("toshiba"), "c1", "err"),
+        ));
     }
 }

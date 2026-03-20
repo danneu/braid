@@ -7,6 +7,7 @@ pub mod disk_map;
 pub mod doctor;
 pub mod enroll_key_file;
 pub mod hdparm;
+pub mod journal;
 pub mod lock;
 pub mod luks;
 pub mod monitor;
