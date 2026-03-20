@@ -11,13 +11,13 @@ pub fn cmd_ack<R: CommandRunner>(runner: &R, mount_point: &str) -> Result<(), Ac
     let pool = match probe_pool(runner, mount_point) {
         Ok(p) => p,
         Err(ProbeError::NotBtrfs { .. }) => {
-            return Err(AckError::PoolNotMounted);
+            return ack_offline();
         }
         Err(e) => return Err(AckError::Probe(e)),
     };
 
     if !pool.mounted {
-        return Err(AckError::PoolNotMounted);
+        return ack_offline();
     }
 
     // 2. Run btrfs device stats
@@ -45,14 +45,15 @@ pub fn cmd_ack<R: CommandRunner>(runner: &R, mount_point: &str) -> Result<(), Ac
         missing_devids,
         smartd_active,
         &path_to_devid,
-    );
+    )?;
 
     // 5. Snapshot current state
-    let new_acked = snapshot_current(&device_stats, missing_devids, &path_to_devid);
+    let new_acked = snapshot_current(&device_stats, missing_devids, &path_to_devid)?;
     save_acked_stats(&new_acked)?;
 
-    // 6. Remove smartd alert flag
+    // 6. Remove smartd alert flag + alert latch
     alert::remove_smartd_alert_flag()?;
+    alert::remove_alert_latch()?;
 
     // 7. Stop beeper (best-effort)
     stop_beeper();
@@ -65,6 +66,22 @@ pub fn cmd_ack<R: CommandRunner>(runner: &R, mount_point: &str) -> Result<(), Ac
         println!("no active alerts");
     }
 
+    Ok(())
+}
+
+fn ack_offline() -> Result<(), AckError> {
+    let latch = alert::load_alert_latch();
+    let smartd_active = alert::smartd_alert_active();
+
+    let has_alert = latch.as_ref().map_or(false, |s| s.active) || smartd_active;
+    if !has_alert {
+        return Err(AckError::PoolNotMounted);
+    }
+
+    alert::remove_alert_latch()?;
+    alert::remove_smartd_alert_flag()?;
+    stop_beeper();
+    println!("acknowledged current alerts");
     Ok(())
 }
 
@@ -89,4 +106,6 @@ pub enum AckError {
     Parse(#[from] crate::parse::ParseError),
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("unmapped device: {0}")]
+    UnmappedDevice(#[from] crate::alert::UnmappedDeviceError),
 }

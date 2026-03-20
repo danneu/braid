@@ -49,8 +49,12 @@ with subtest("Simulate disk failure"):
     # Remount degraded (only 2 of 3 devices)
     machine.succeed("mount -o degraded /dev/mapper/braid-disk1 /mnt/storage")
 
-with subtest("Degraded pool: monitor exits 1"):
-    machine.fail("braid monitor")
+with subtest("Degraded pool: monitor exit code is exactly 1"):
+    rc = machine.succeed("braid monitor; echo $?").strip().split('\n')[-1]
+    assert rc == "1", f"Expected exit 1, got {rc}"
+
+with subtest("Degraded pool: latch file created"):
+    machine.succeed("test -f /var/lib/braid/alert-latch.json")
 
 with subtest("Degraded pool: status shows ALERT banner"):
     output = machine.succeed("braid status")
@@ -76,11 +80,31 @@ with subtest("Ack clears alert"):
     )
     assert has_missing_acked, f"Expected missing_acked=true in acked stats, got: {acked}"
 
+with subtest("Ack removes latch file"):
+    machine.fail("test -f /var/lib/braid/alert-latch.json")
+
 with subtest("After ack: status has no ALERT"):
     output = machine.succeed("braid status")
     assert "ALERT" not in output, f"Expected no ALERT after ack, got: {output}"
 
 with subtest("After ack: monitor exits 0"):
     machine.succeed("braid monitor")
+
+with subtest("Btrfs alert latched after pool offline"):
+    # Pool is still degraded. Remove acked state to re-trigger alert.
+    machine.succeed("rm -f /var/lib/braid/acked-stats.json")
+    rc = machine.succeed("braid monitor; echo $?").strip().split('\n')[-1]
+    assert rc == "1", f"Expected exit 1, got {rc}"
+    machine.succeed("test -f /var/lib/braid/alert-latch.json")
+    # Now lock the pool
+    machine.succeed("umount /mnt/storage")
+    machine.succeed("cryptsetup close braid-disk1")
+    machine.succeed("cryptsetup close braid-disk3")
+    # Status should still show the latched alert
+    output = machine.succeed("braid status")
+    assert "ALERT" in output, f"Expected ALERT in offline status, got: {output}"
+    # Offline ack should succeed
+    machine.succeed("braid ack")
+    machine.fail("test -f /var/lib/braid/alert-latch.json")
 
 machine.shutdown()

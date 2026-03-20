@@ -48,8 +48,12 @@ in
       serviceConfig.Type = "oneshot";
       path = [ braidWrapped cfg.packages.btrfsProgs ];
       script = ''
-        if braid monitor; then true; else
+        rc=0
+        braid monitor || rc=$?
+        if [ "$rc" -eq 1 ]; then
           ${pkgs.systemd}/bin/systemctl start braid-alert.service 2>/dev/null || true
+        elif [ "$rc" -ge 2 ]; then
+          echo "braid monitor failed (exit $rc)" >&2
         fi
         exit 0
       '';

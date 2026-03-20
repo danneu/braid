@@ -9,6 +9,11 @@ use crate::state_io::atomic_write;
 pub const ACKED_STATS_FILE: &str = "/var/lib/braid/acked-stats.json";
 pub const SMARTD_ALERT_FILE: &str = "/var/lib/braid/smartd-alert";
 
+/// Authoritative source of "is there an unacknowledged alert?" for all UI
+/// surfaces (status, TUI, offline). `braid monitor` writes it; only `braid ack`
+/// clears it.
+pub const ALERT_LATCH_FILE: &str = "/var/lib/braid/alert-latch.json";
+
 // ---------------------------------------------------------------------------
 // Alert model
 // ---------------------------------------------------------------------------
@@ -25,6 +30,13 @@ pub enum AlertCause {
     BtrfsDeviceErrors { devid: u64 },
     MissingDevice { devid: u64 },
     SmartdAlert,
+    ComputationError { detail: String },
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("device {path} not found in devid map")]
+pub struct UnmappedDeviceError {
+    pub path: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -93,11 +105,15 @@ pub fn compute_alert_state_with_devid_map(
     missing_devids: &[u64],
     smartd_alert_active: bool,
     path_to_devid: &BTreeMap<String, u64>,
-) -> AlertState {
+) -> Result<AlertState, UnmappedDeviceError> {
     let mut causes = Vec::new();
 
     for dev in &current_stats.devices {
-        let devid = path_to_devid.get(&dev.device_path).copied().unwrap_or(0);
+        let devid = *path_to_devid
+            .get(&dev.device_path)
+            .ok_or_else(|| UnmappedDeviceError {
+                path: dev.device_path.clone(),
+            })?;
         let key = devid.to_string();
         let acked_disk = acked.0.get(&key);
         let acked_counters = acked_disk.map(|d| &d.device_stats);
@@ -119,10 +135,10 @@ pub fn compute_alert_state_with_devid_map(
         causes.push(AlertCause::SmartdAlert);
     }
 
-    AlertState {
+    Ok(AlertState {
         active: !causes.is_empty(),
         causes,
-    }
+    })
 }
 
 fn has_new_errors(current: &DeviceErrorStats, acked: Option<&AckedDeviceCounters>) -> bool {
@@ -171,11 +187,15 @@ pub fn snapshot_current(
     current_stats: &BtrfsDeviceStatsOutput,
     missing_devids: &[u64],
     path_to_devid: &BTreeMap<String, u64>,
-) -> AckedStats {
+) -> Result<AckedStats, UnmappedDeviceError> {
     let mut map = BTreeMap::new();
 
     for dev in &current_stats.devices {
-        let devid = path_to_devid.get(&dev.device_path).copied().unwrap_or(0);
+        let devid = *path_to_devid
+            .get(&dev.device_path)
+            .ok_or_else(|| UnmappedDeviceError {
+                path: dev.device_path.clone(),
+            })?;
         let key = devid.to_string();
         map.insert(
             key,
@@ -201,7 +221,7 @@ pub fn snapshot_current(
         });
     }
 
-    AckedStats(map)
+    Ok(AckedStats(map))
 }
 
 /// Check if the smartd alert flag file exists.
@@ -212,6 +232,28 @@ pub fn smartd_alert_active() -> bool {
 /// Remove the smartd alert flag file. Returns Ok(()) even if it didn't exist.
 pub fn remove_smartd_alert_flag() -> Result<(), std::io::Error> {
     match std::fs::remove_file(SMARTD_ALERT_FILE) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Alert latch file
+// ---------------------------------------------------------------------------
+
+pub fn load_alert_latch() -> Option<AlertState> {
+    let contents = std::fs::read_to_string(ALERT_LATCH_FILE).ok()?;
+    serde_json::from_str(&contents).ok()
+}
+
+pub fn save_alert_latch(state: &AlertState) -> Result<(), std::io::Error> {
+    let json = serde_json::to_string_pretty(state).map_err(std::io::Error::other)?;
+    atomic_write(Path::new(ALERT_LATCH_FILE), json.as_bytes())
+}
+
+pub fn remove_alert_latch() -> Result<(), std::io::Error> {
+    match std::fs::remove_file(ALERT_LATCH_FILE) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e),
@@ -295,7 +337,7 @@ mod tests {
         let stats = make_stats(vec![zero_device("/dev/mapper/braid-vda")]);
         let acked = AckedStats::default();
         let map = devid_map(&[("/dev/mapper/braid-vda", 1)]);
-        let alert = compute_alert_state_with_devid_map(&stats, &acked, &[], false, &map);
+        let alert = compute_alert_state_with_devid_map(&stats, &acked, &[], false, &map).unwrap();
         assert!(!alert.active);
         assert!(alert.causes.is_empty());
     }
@@ -308,7 +350,7 @@ mod tests {
         let stats = make_stats(vec![dev]);
         let acked = AckedStats::default();
         let map = devid_map(&[("/dev/mapper/braid-vda", 1)]);
-        let alert = compute_alert_state_with_devid_map(&stats, &acked, &[], false, &map);
+        let alert = compute_alert_state_with_devid_map(&stats, &acked, &[], false, &map).unwrap();
         assert!(alert.active);
         assert_eq!(alert.causes.len(), 1);
         assert_eq!(alert.causes[0], AlertCause::BtrfsDeviceErrors { devid: 1 });
@@ -319,7 +361,7 @@ mod tests {
         let stats = make_stats(vec![zero_device("/dev/mapper/braid-vda")]);
         let acked = AckedStats::default();
         let map = devid_map(&[("/dev/mapper/braid-vda", 1)]);
-        let alert = compute_alert_state_with_devid_map(&stats, &acked, &[2], false, &map);
+        let alert = compute_alert_state_with_devid_map(&stats, &acked, &[2], false, &map).unwrap();
         assert!(alert.active);
         assert_eq!(alert.causes.len(), 1);
         assert_eq!(alert.causes[0], AlertCause::MissingDevice { devid: 2 });
@@ -330,7 +372,7 @@ mod tests {
         let stats = make_stats(vec![zero_device("/dev/mapper/braid-vda")]);
         let acked = AckedStats::default();
         let map = devid_map(&[("/dev/mapper/braid-vda", 1)]);
-        let alert = compute_alert_state_with_devid_map(&stats, &acked, &[], true, &map);
+        let alert = compute_alert_state_with_devid_map(&stats, &acked, &[], true, &map).unwrap();
         assert!(alert.active);
         assert_eq!(alert.causes.len(), 1);
         assert_eq!(alert.causes[0], AlertCause::SmartdAlert);
@@ -355,7 +397,7 @@ mod tests {
         );
         let acked = AckedStats(acked_map);
         let map = devid_map(&[("/dev/mapper/braid-vda", 1)]);
-        let alert = compute_alert_state_with_devid_map(&stats, &acked, &[], false, &map);
+        let alert = compute_alert_state_with_devid_map(&stats, &acked, &[], false, &map).unwrap();
         assert!(!alert.active);
     }
 
@@ -380,7 +422,7 @@ mod tests {
         );
         let acked = AckedStats(acked_map);
         let map = devid_map(&[("/dev/mapper/braid-vda", 1)]);
-        let alert = compute_alert_state_with_devid_map(&stats, &acked, &[], false, &map);
+        let alert = compute_alert_state_with_devid_map(&stats, &acked, &[], false, &map).unwrap();
         assert!(alert.active, "counter reset should trigger alert");
     }
 
@@ -397,7 +439,7 @@ mod tests {
         );
         let acked = AckedStats(acked_map);
         let map = devid_map(&[("/dev/mapper/braid-vda", 1)]);
-        let alert = compute_alert_state_with_devid_map(&stats, &acked, &[2], false, &map);
+        let alert = compute_alert_state_with_devid_map(&stats, &acked, &[2], false, &map).unwrap();
         assert!(!alert.active, "acked missing should not trigger alert");
     }
 
@@ -408,7 +450,7 @@ mod tests {
         let stats = make_stats(vec![dev]);
         let acked = AckedStats::default();
         let map = devid_map(&[("/dev/mapper/braid-vda", 1)]);
-        let alert = compute_alert_state_with_devid_map(&stats, &acked, &[2], true, &map);
+        let alert = compute_alert_state_with_devid_map(&stats, &acked, &[2], true, &map).unwrap();
         assert!(alert.active);
         assert_eq!(alert.causes.len(), 3);
     }
@@ -420,7 +462,7 @@ mod tests {
         dev.corruption_errs = 1;
         let stats = make_stats(vec![dev]);
         let map = devid_map(&[("/dev/mapper/braid-vda", 1)]);
-        let snapshot = snapshot_current(&stats, &[2], &map);
+        let snapshot = snapshot_current(&stats, &[2], &map).unwrap();
 
         let disk1 = snapshot.0.get("1").unwrap();
         assert!(!disk1.missing_acked);
@@ -450,10 +492,30 @@ mod tests {
         );
         let acked = AckedStats(acked_map);
         let map = devid_map(&[("/dev/mapper/braid-vda", 1)]);
-        let alert = compute_alert_state_with_devid_map(&stats, &acked, &[], false, &map);
+        let alert = compute_alert_state_with_devid_map(&stats, &acked, &[], false, &map).unwrap();
         assert!(
             alert.active,
             "new errors above acked baseline should trigger alert"
         );
+    }
+
+    #[test]
+    fn unmapped_device_is_error_in_alert() {
+        let mut dev = zero_device("/dev/mapper/braid-unknown");
+        dev.read_io_errs = 5;
+        let stats = make_stats(vec![dev]);
+        let acked = AckedStats::default();
+        let map = devid_map(&[]);
+        let result = compute_alert_state_with_devid_map(&stats, &acked, &[], false, &map);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn unmapped_device_is_error_in_snapshot() {
+        let dev = zero_device("/dev/mapper/braid-unknown");
+        let stats = make_stats(vec![dev]);
+        let map = devid_map(&[]);
+        let result = snapshot_current(&stats, &[], &map);
+        assert!(result.is_err());
     }
 }

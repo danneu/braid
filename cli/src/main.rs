@@ -40,7 +40,7 @@ enum Commands {
     /// Enroll a binary keyfile into LUKS slot 1 on all pool disks
     #[command(name = "enroll")]
     EnrollKeyFile(EnrollKeyFileArgs),
-    /// Check disk health and return exit 1 if alert is active
+    /// Check disk health: exit 0 = ok/offline, exit 1 = alert, exit 2 = error
     Monitor,
     /// Acknowledge current alerts and silence notifications
     Ack,
@@ -381,7 +381,7 @@ fn main() {
                 Ok(c) => c,
                 Err(e) => {
                     eprintln!("error: {e}");
-                    std::process::exit(1);
+                    std::process::exit(2);
                 }
             };
             let runner = RealRunner;
@@ -397,7 +397,7 @@ fn main() {
                 }
                 Err(e) => {
                     print_cli_error(&e.to_string());
-                    std::process::exit(1);
+                    std::process::exit(2);
                 }
             }
         }

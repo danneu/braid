@@ -1,7 +1,6 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::time::Instant;
 
-use crate::alert::{self, compute_alert_state_with_devid_map, load_acked_stats};
 use crate::cmd::{CmdRequest, CommandRunner};
 use crate::parse::types::{ScrubState, SmartHealth};
 use crate::parse::{
@@ -9,6 +8,7 @@ use crate::parse::{
     parse_btrfs_scrub_status, parse_cryptsetup_luks_dump, parse_lsblk_json, parse_smartctl_health,
 };
 use crate::probe::probe_pool;
+use crate::status::resolve_alert_state;
 use crate::status::{estimate_pool_capacity, get_balance_report, DiskErrors};
 use crate::tui::model::{DiskLuksInfo, DiskUsage, PoolState};
 use crate::types::MountPoint;
@@ -131,13 +131,7 @@ pub fn probe_pool_for_tui<R: CommandRunner>(
         .map_err(|e| e.to_string())?;
     let fs_usage = parse_btrfs_filesystem_usage(&fs_usage_raw).map_err(|e| e.to_string())?;
 
-    // Device error stats + alert
-    let path_to_devid: BTreeMap<String, u64> = domain
-        .devices
-        .iter()
-        .map(|d| (format!("/dev/mapper/{}", d.mapper.0), d.devid))
-        .collect();
-
+    // Device error stats
     let mut device_errors = HashMap::new();
     let device_stats_raw = runner
         .run(&CmdRequest::BtrfsDeviceStats {
@@ -164,22 +158,7 @@ pub fn probe_pool_for_tui<R: CommandRunner>(
         }
     }
 
-    let alert_state = if let Some(ref stats) = device_stats {
-        let acked = load_acked_stats();
-        let smartd_active = alert::smartd_alert_active();
-        compute_alert_state_with_devid_map(
-            stats,
-            &acked,
-            &domain.missing_devids,
-            smartd_active,
-            &path_to_devid,
-        )
-    } else {
-        crate::alert::AlertState {
-            active: false,
-            causes: vec![],
-        }
-    };
+    let alert_state = resolve_alert_state();
 
     let capacity_total_bytes = if domain.missing_count == 0 {
         let sizes: Vec<u64> = dev_usage.devices.iter().map(|d| d.device_size).collect();

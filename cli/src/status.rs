@@ -1,10 +1,8 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
-use crate::alert::{
-    self, compute_alert_state_with_devid_map, load_acked_stats, AlertCause, AlertState,
-};
+use crate::alert::{self, AlertCause, AlertState};
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, LsblkFieldKind};
 use crate::config::{mapper_name, Config};
 use crate::disk_map::{self, DiskMapLoad};
@@ -287,6 +285,7 @@ pub fn build_status_report<R: CommandRunner, F: Filesystem>(
         Ok(p) => p,
         Err(ProbeError::NotBtrfs { .. }) => {
             let code = StatusCode::NotMounted;
+            let alert_state = resolve_alert_state();
             return Ok(StatusReport {
                 mount_point: config.mount_point().clone(),
                 status: code,
@@ -300,8 +299,8 @@ pub fn build_status_report<R: CommandRunner, F: Filesystem>(
                 allocation: None,
                 disks: vec![],
                 advisories: advisories.clone(),
-                alert_active: false,
-                alert_causes: vec![],
+                alert_active: alert_state.active,
+                alert_causes: alert_state.causes,
             });
         }
         Err(e) => return Err(e.into()),
@@ -309,6 +308,7 @@ pub fn build_status_report<R: CommandRunner, F: Filesystem>(
 
     if !pool.mounted {
         let code = StatusCode::NotMounted;
+        let alert_state = resolve_alert_state();
         return Ok(StatusReport {
             mount_point: config.mount_point().clone(),
             status: code,
@@ -322,8 +322,8 @@ pub fn build_status_report<R: CommandRunner, F: Filesystem>(
             allocation: None,
             disks: vec![],
             advisories: advisories.clone(),
-            alert_active: false,
-            alert_causes: vec![],
+            alert_active: alert_state.active,
+            alert_causes: alert_state.causes,
         });
     }
 
@@ -353,8 +353,7 @@ pub fn build_status_report<R: CommandRunner, F: Filesystem>(
     let verbose_ctx =
         build_disk_reports(runner, &config_disks, &pool, &device_stats, &disk_map_load);
 
-    // Compute alert state
-    let alert_state = compute_alert_for_pool(&pool, &device_stats);
+    let alert_state = resolve_alert_state();
 
     let present_count = pool.total_devices.saturating_sub(pool.missing_count);
     Ok(StatusReport {
@@ -401,6 +400,7 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
     // 2. Not mounted → minimal report
     if !pool.mounted {
         let code = StatusCode::NotMounted;
+        let alert_state = resolve_alert_state();
         let report = StatusReport {
             mount_point: config.mount_point().clone(),
             status: code,
@@ -414,8 +414,8 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
             allocation: None,
             disks: vec![],
             advisories: advisories.clone(),
-            alert_active: false,
-            alert_causes: vec![],
+            alert_active: alert_state.active,
+            alert_causes: alert_state.causes,
         };
         if json {
             println!("{}", serde_json::to_string_pretty(&report)?);
@@ -453,12 +453,12 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
     // 6. Compact drives (always built when mounted)
     let compact_drives = build_compact_drives(&pool, config, &disk_map_load);
 
-    // 7. Device stats + alert (always needed for alert banner)
-    let device_stats = get_device_stats(runner, config.mount_point().as_str())?;
-    let alert_state = compute_alert_for_pool(&pool, &device_stats);
+    // 7. Alert state (latch-based)
+    let alert_state = resolve_alert_state();
 
     // 8. Verbose context
     let verbose_ctx = if verbose {
+        let device_stats = get_device_stats(runner, config.mount_point().as_str())?;
         let config_disks: Vec<ConfigDisk> = config
             .disks()
             .iter()
@@ -515,24 +515,39 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
 }
 
 // ---------------------------------------------------------------------------
-// Alert computation
+// Alert state (latch-based)
 // ---------------------------------------------------------------------------
 
-fn compute_alert_for_pool(pool: &PoolState, device_stats: &BtrfsDeviceStatsOutput) -> AlertState {
-    let acked = load_acked_stats();
+/// Read alert state from the latch file + smartd flag. Status reads the latch
+/// instead of recomputing live alert state — the latch is the single source of
+/// truth. Recomputing would cause the alert to disappear when a condition
+/// resolves, contradicting the "latched until ack" model. The smartd flag is
+/// checked as a bridge for between-cycle fires.
+pub(crate) fn resolve_alert_state() -> AlertState {
+    let latch = alert::load_alert_latch();
     let smartd_active = alert::smartd_alert_active();
-    let path_to_devid: BTreeMap<String, u64> = pool
-        .devices
-        .iter()
-        .map(|d| (format!("/dev/mapper/{}", d.mapper.0), d.devid))
-        .collect();
-    compute_alert_state_with_devid_map(
-        device_stats,
-        &acked,
-        &pool.missing_devids,
-        smartd_active,
-        &path_to_devid,
-    )
+
+    match latch {
+        Some(mut state) if state.active => {
+            if smartd_active
+                && !state
+                    .causes
+                    .iter()
+                    .any(|c| matches!(c, AlertCause::SmartdAlert))
+            {
+                state.causes.push(AlertCause::SmartdAlert);
+            }
+            state
+        }
+        _ if smartd_active => AlertState {
+            active: true,
+            causes: vec![AlertCause::SmartdAlert],
+        },
+        _ => AlertState {
+            active: false,
+            causes: vec![],
+        },
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -857,6 +872,9 @@ fn format_status_human(
                 }
                 AlertCause::SmartdAlert => {
                     out.push_str("  - SMART health warning\n");
+                }
+                AlertCause::ComputationError { detail } => {
+                    out.push_str(&format!("  - alert computation error: {detail}\n"));
                 }
             }
         }

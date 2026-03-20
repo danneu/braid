@@ -51,7 +51,14 @@ On a new machine, acked state doesn't exist — everything evaluates fresh.
 
 ### `braid monitor` is a pure detector
 
-Checks state and returns exit 0 (ok) or exit 1 (alert). Does not start/stop services. The systemd wrapper starts the beeper on exit 1. Self-heals stale ack state (resets `missing_acked` for now-present devids after drive replacement).
+Checks state and returns an exit code. Does not start/stop services. The systemd wrapper starts the beeper on exit 1.
+
+Exit codes:
+- **0** — ok or pool offline
+- **1** — alert active (disk health issue detected)
+- **2** — monitor execution error (config, probe, parse, or unmapped device)
+
+Self-heals stale ack state (resets `missing_acked` for now-present devids after drive replacement).
 
 ### Periodic one-shot, not daemon
 

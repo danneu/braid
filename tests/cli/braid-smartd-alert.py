@@ -62,4 +62,20 @@ with subtest("After ack: no ALERT"):
 with subtest("After ack: monitor exits 0"):
     machine.succeed("braid monitor")
 
+with subtest("Pool offline with smartd alert: status shows ALERT"):
+    machine.succeed("umount /mnt/storage")
+    machine.succeed("cryptsetup close braid-disk1")
+    machine.succeed("cryptsetup close braid-disk2")
+    machine.succeed("touch /var/lib/braid/smartd-alert")
+    output = machine.succeed("braid status")
+    assert "ALERT" in output, f"Expected ALERT, got: {output}"
+    assert "SMART" in output, f"Expected SMART cause, got: {output}"
+
+with subtest("Pool offline with smartd alert: ack succeeds"):
+    machine.succeed("braid ack")
+    machine.fail("test -f /var/lib/braid/smartd-alert")
+
+with subtest("Pool offline with no alert: ack fails"):
+    machine.fail("braid ack")
+
 machine.shutdown()
