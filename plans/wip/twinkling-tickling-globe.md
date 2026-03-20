@@ -117,11 +117,12 @@ pub fn check_journal(cursor_path: &Path) -> JournalCheckResult
 ```
 
 1. Load cursor from file (`None` if missing).
-2. Run `journalctl -k -o json --no-pager --after-cursor=<cursor>` (or `--boot` if no cursor).
-3. Parse JSON lines. Extract `MESSAGE`, `__CURSOR` per entry.
-4. Filter: `MESSAGE` contains `"BTRFS error"`.
-5. For matches, extract `disk_name` from MESSAGE / `_UDEV_DEVNODE` / `_UDEV_DEVLINK`.
-6. Deduplicate: collapse entries with the same `disk_name` (when `Some`) into one cause using the first matching message. Entries with `disk_name: None` are kept individually (each has a unique cursor).
+2. If no cursor (first run): initialize cursor to the journal tail via `advance_cursor_to_now()` and return early with no causes. This avoids surfacing historical boot-time noise as new alerts on the first monitor run.
+3. Run `journalctl -k -o json --no-pager --after-cursor=<cursor>`.
+4. Parse JSON lines. Extract `MESSAGE`, `__CURSOR` per entry.
+5. Filter: `MESSAGE` contains `"BTRFS error"`.
+6. For matches, extract `disk_name` from MESSAGE / `_UDEV_DEVNODE` / `_UDEV_DEVLINK`.
+7. Deduplicate: collapse entries with the same `disk_name` (when `Some`) into one cause using the first matching message. Entries with `disk_name: None` are kept individually (each has a unique cursor).
 
 ### Return type
 
@@ -281,6 +282,8 @@ No changes. `journalctl` already on PATH, monitor runs as root.
 
 **Deferred** (requires additional repro tests): `"I/O error"`, `"Buffer I/O error"`, `"blk_update_request"`, `"critical medium error"`.
 
+**Deferred: richer device attribution.** v1 only resolves disk names via the `braid-<name>` regex in MESSAGE/`_UDEV_DEVNODE`/`_UDEV_DEVLINK`. Some real alerts will remain anonymous (`disk_name: None`, keyed by cursor). Richer resolution via `_KERNEL_DEVICE`, sysfs, or udev reverse lookups is deferred until repro coverage proves it is needed and reliable — do not expand v1 to require full sysfs/udev identity resolution.
+
 ---
 
 ## 10. Test strategy
@@ -299,6 +302,7 @@ No changes. `journalctl` already on PATH, monitor runs as root.
 8. Deduplication: multiple entries for same disk_name → one cause per disk.
 9. Multiple entries for different disks → separate causes.
 10. Anonymous entries (disk_name: None) with different cursors → separate causes.
+11. First-run bootstrap: no cursor file → initializes cursor to now, returns no causes (no false positives from boot history).
 
 **`cli/src/alert.rs` tests:**
 
@@ -342,12 +346,13 @@ Remain as-is.
 
 ---
 
-## 11. ADR update
+## 11. ADR + README updates
 
 **File: `docs/decisions/alerts.md`**
 
 - Add `KernelJournalError { message, cursor, disk_name }` to "Alert causes" list.
 - Rename "Two detection sources" → "Three detection sources."
+- Update exit code docs: exit 0 = "ok or pool offline with no active alerts"; exit 1 = "alert active (includes pool-offline with latched journal alert)". The old definition "exit 0 = ok or pool offline" is no longer correct — a pool-offline state with an unacked journal alert now exits 1.
 - Add section "Latch as append/refresh log" explaining the invariant fix: all causes persist until ack, even if the triggering condition resolves. This applies to all cause types, not just journal.
 - Add section "Kernel journal monitoring":
 
@@ -375,6 +380,12 @@ Cursor stored at `/var/lib/braid/journal-cursor`. v1 matches only `BTRFS error`
 in the MESSAGE field. Broader patterns deferred until confirmed by repro tests.
 ```
 
+**File: `README.md`**
+
+Update the "Monitoring and Alerts" section:
+- Change "Exits 0 (healthy) or 1 (alert active)" to "Exits 0 (healthy or pool offline with no alerts), 1 (alert active), or 2 (monitor error)."
+- Add "kernel journal errors" to the list of things monitor checks: "btrfs device stats, missing devices, kernel journal errors, and SMART alerts."
+
 ---
 
 ## Implementation order
@@ -389,8 +400,9 @@ in the MESSAGE field. Broader patterns deferred until confirmed by repro tests.
 | 6 | `cli/src/ack.rs` | Derive count from latch. Add `journal::advance_cursor_to_now()` in both online and offline paths. |
 | 7 | `cli/src/status.rs` | Add `KernelJournalError` match arm in `format_status_human`. |
 | 8 | `cli/tests/fixtures/nixos-25.11/journalctl-btrfs-error.jsonl` (new) | Fixture for unit tests. |
-| 9 | `docs/decisions/alerts.md` | ADR update. |
-| 10 | `tests/cli/braid-journal-alert.nix` + `.py` (new), `flake.nix` | Integration test. |
+| 9 | `docs/decisions/alerts.md` | ADR update (new cause, exit codes, latch-as-log, journal section). |
+| 10 | `README.md` | Update monitor description (exit codes, journal mention). |
+| 11 | `tests/cli/braid-journal-alert.nix` + `.py` (new), `flake.nix` | Integration test. |
 
 ---
 
@@ -405,7 +417,8 @@ in the MESSAGE field. Broader patterns deferred until confirmed by repro tests.
 | `cli/src/status.rs` | Human display of new cause |
 | `cli/src/main.rs` | Exit code for `PoolOfflineJournalAlert` |
 | `cli/src/state_io.rs` | Reuse `atomic_write` for cursor persistence |
-| `docs/decisions/alerts.md` | ADR |
+| `docs/decisions/alerts.md` | ADR (new cause, exit codes, latch-as-log, journal section) |
+| `README.md` | Monitor description update (exit codes, journal mention) |
 
 ---
 
