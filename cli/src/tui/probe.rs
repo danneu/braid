@@ -143,7 +143,11 @@ pub fn probe_pool_for_tui<R: CommandRunner>(
         .and_then(|raw| parse_btrfs_device_stats(raw).ok());
     if let Some(ref stats) = device_stats {
         for dev in &stats.devices {
-            if let Some(name) = dev.device_path.strip_prefix("/dev/mapper/braid-") {
+            if let Some(name) = dev
+                .target
+                .as_path()
+                .and_then(|p| p.strip_prefix("/dev/mapper/braid-"))
+            {
                 device_errors.insert(
                     name.to_owned(),
                     DiskErrors {

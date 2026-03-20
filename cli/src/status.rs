@@ -768,7 +768,7 @@ fn build_disk_reports<R: CommandRunner>(
         let errors = device_stats
             .devices
             .iter()
-            .find(|d| d.device_path == dev_path)
+            .find(|d| d.target.as_path() == Some(dev_path.as_str()))
             .map(|d| DiskErrors {
                 read: d.read_io_errs,
                 write: d.write_io_errs,

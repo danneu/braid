@@ -3,7 +3,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::parse::types::{BtrfsDeviceStatsOutput, DeviceErrorStats};
+use crate::parse::types::{BtrfsDeviceStatsOutput, DeviceErrorStats, DeviceStatsTarget};
 use crate::state_io::atomic_write;
 
 pub const ACKED_STATS_FILE: &str = "/var/lib/braid/acked-stats.json";
@@ -109,19 +109,14 @@ pub fn compute_alert_state_with_devid_map(
     let mut causes = Vec::new();
 
     for dev in &current_stats.devices {
-        // btrfs-progs emits "<missing disk>" as the device path in
-        // `btrfs device stats` for devices that are absent during a
-        // degraded mount. This is not a mapping failure — missing-device
-        // alerting comes from missing_devids, not from stats rows.
-        if dev.device_path == "<missing disk>" {
-            continue;
-        }
+        let path = match &dev.target {
+            DeviceStatsTarget::MissingDisk => continue,
+            DeviceStatsTarget::Path(p) => p,
+        };
 
         let devid = *path_to_devid
-            .get(&dev.device_path)
-            .ok_or_else(|| UnmappedDeviceError {
-                path: dev.device_path.clone(),
-            })?;
+            .get(path)
+            .ok_or_else(|| UnmappedDeviceError { path: path.clone() })?;
         let key = devid.to_string();
         let acked_disk = acked.0.get(&key);
         let acked_counters = acked_disk.map(|d| &d.device_stats);
@@ -199,17 +194,14 @@ pub fn snapshot_current(
     let mut map = BTreeMap::new();
 
     for dev in &current_stats.devices {
-        // Skip btrfs missing-device sentinel (see comment in
-        // compute_alert_state_with_devid_map for details).
-        if dev.device_path == "<missing disk>" {
-            continue;
-        }
+        let path = match &dev.target {
+            DeviceStatsTarget::MissingDisk => continue,
+            DeviceStatsTarget::Path(p) => p,
+        };
 
         let devid = *path_to_devid
-            .get(&dev.device_path)
-            .ok_or_else(|| UnmappedDeviceError {
-                path: dev.device_path.clone(),
-            })?;
+            .get(path)
+            .ok_or_else(|| UnmappedDeviceError { path: path.clone() })?;
         let key = devid.to_string();
         map.insert(
             key,
@@ -288,7 +280,18 @@ mod tests {
 
     fn zero_device(path: &str) -> DeviceErrorStats {
         DeviceErrorStats {
-            device_path: path.to_owned(),
+            target: DeviceStatsTarget::Path(path.to_owned()),
+            read_io_errs: 0,
+            write_io_errs: 0,
+            flush_io_errs: 0,
+            corruption_errs: 0,
+            generation_errs: 0,
+        }
+    }
+
+    fn zero_missing_device() -> DeviceErrorStats {
+        DeviceErrorStats {
+            target: DeviceStatsTarget::MissingDisk,
             read_io_errs: 0,
             write_io_errs: 0,
             flush_io_errs: 0,
@@ -540,7 +543,7 @@ mod tests {
         // missing_devids, not from stats rows.
         let stats = make_stats(vec![
             zero_device("/dev/mapper/braid-vda"),
-            zero_device("<missing disk>"),
+            zero_missing_device(),
         ]);
         let acked = AckedStats::default();
         let map = devid_map(&[("/dev/mapper/braid-vda", 1)]);
@@ -554,7 +557,7 @@ mod tests {
     fn missing_disk_sentinel_skipped_in_snapshot() {
         let stats = make_stats(vec![
             zero_device("/dev/mapper/braid-vda"),
-            zero_device("<missing disk>"),
+            zero_missing_device(),
         ]);
         let map = devid_map(&[("/dev/mapper/braid-vda", 1)]);
         let snapshot = snapshot_current(&stats, &[2], &map).unwrap();
