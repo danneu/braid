@@ -50,7 +50,7 @@ with subtest("Simulate disk failure"):
     machine.succeed("mount -o degraded /dev/mapper/braid-disk1 /mnt/storage")
 
 with subtest("Degraded pool: monitor exit code is exactly 1"):
-    rc = machine.succeed("braid monitor; echo $?").strip().split('\n')[-1]
+    rc = machine.succeed("set +e; braid monitor; echo $?").strip().splitlines()[-1]
     assert rc == "1", f"Expected exit 1, got {rc}"
 
 with subtest("Degraded pool: latch file created"):
@@ -93,7 +93,7 @@ with subtest("After ack: monitor exits 0"):
 with subtest("Btrfs alert latched after pool offline"):
     # Pool is still degraded. Remove acked state to re-trigger alert.
     machine.succeed("rm -f /var/lib/braid/acked-stats.json")
-    rc = machine.succeed("braid monitor; echo $?").strip().split('\n')[-1]
+    rc = machine.succeed("set +e; braid monitor; echo $?").strip().splitlines()[-1]
     assert rc == "1", f"Expected exit 1, got {rc}"
     machine.succeed("test -f /var/lib/braid/alert-latch.json")
     # Now lock the pool

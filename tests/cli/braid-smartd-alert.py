@@ -11,7 +11,6 @@
 #   the flag file. Verify monitor detects it, status shows SMART warning,
 #   ack clears the flag.
 
-import json
 
 start_all()
 machine.wait_for_unit("multi-user.target")

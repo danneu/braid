@@ -109,6 +109,14 @@ pub fn compute_alert_state_with_devid_map(
     let mut causes = Vec::new();
 
     for dev in &current_stats.devices {
+        // btrfs-progs emits "<missing disk>" as the device path in
+        // `btrfs device stats` for devices that are absent during a
+        // degraded mount. This is not a mapping failure — missing-device
+        // alerting comes from missing_devids, not from stats rows.
+        if dev.device_path == "<missing disk>" {
+            continue;
+        }
+
         let devid = *path_to_devid
             .get(&dev.device_path)
             .ok_or_else(|| UnmappedDeviceError {
@@ -191,6 +199,12 @@ pub fn snapshot_current(
     let mut map = BTreeMap::new();
 
     for dev in &current_stats.devices {
+        // Skip btrfs missing-device sentinel (see comment in
+        // compute_alert_state_with_devid_map for details).
+        if dev.device_path == "<missing disk>" {
+            continue;
+        }
+
         let devid = *path_to_devid
             .get(&dev.device_path)
             .ok_or_else(|| UnmappedDeviceError {
@@ -517,5 +531,37 @@ mod tests {
         let map = devid_map(&[]);
         let result = snapshot_current(&stats, &[], &map);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn missing_disk_sentinel_skipped_in_alert() {
+        // btrfs emits "<missing disk>" in device stats during degraded mount.
+        // This sentinel must be skipped — missing-device alerting comes from
+        // missing_devids, not from stats rows.
+        let stats = make_stats(vec![
+            zero_device("/dev/mapper/braid-vda"),
+            zero_device("<missing disk>"),
+        ]);
+        let acked = AckedStats::default();
+        let map = devid_map(&[("/dev/mapper/braid-vda", 1)]);
+        let alert = compute_alert_state_with_devid_map(&stats, &acked, &[2], false, &map).unwrap();
+        assert!(alert.active);
+        assert_eq!(alert.causes.len(), 1);
+        assert_eq!(alert.causes[0], AlertCause::MissingDevice { devid: 2 });
+    }
+
+    #[test]
+    fn missing_disk_sentinel_skipped_in_snapshot() {
+        let stats = make_stats(vec![
+            zero_device("/dev/mapper/braid-vda"),
+            zero_device("<missing disk>"),
+        ]);
+        let map = devid_map(&[("/dev/mapper/braid-vda", 1)]);
+        let snapshot = snapshot_current(&stats, &[2], &map).unwrap();
+        // Present device is snapshotted normally
+        assert!(snapshot.0.contains_key("1"));
+        // Missing device comes from missing_devids, not the sentinel row
+        let disk2 = snapshot.0.get("2").unwrap();
+        assert!(disk2.missing_acked);
     }
 }
