@@ -284,7 +284,7 @@ impl CmdRequest {
                     "luks".into(),
                     "--key-file=-".into(),
                     // Bypass dm-crypt's internal workqueues — they add 3-4x queuing
-                    // overhead regardless of disk type (HDD or SSD). Requires kernel >= 5.9.
+                    // overhead on any block device. Requires kernel >= 5.9.
                     "--perf-no_read_workqueue".into(),
                     "--perf-no_write_workqueue".into(),
                     device.clone(),

@@ -22,6 +22,9 @@ It wraps two standard tools:
   - simple, but it means you lose half of your capacity to redundancy; four 12TB drives will only give you 48TB/2 = 24TB storage
   - more drives won't increase your redundacy
   - only tolerates one disk failure at a time
+- HDD-first
+  - defaults are tuned for spinning drives (no TRIM/discard passthrough, HDD-oriented scrub scheduling)
+  - flash media (SSDs, NVMe, USB sticks) may work but are not validated or optimized
 
 ## Goals and aspirations
 

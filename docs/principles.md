@@ -48,6 +48,10 @@ Braid only targets NixOS. No portability abstractions, no generic Linux fallback
 
 Runtime tool versions are pinned to a specific NixOS stable release via the flake input. Both shell and Rust wrappers execute with an explicit PATH containing only module-controlled packages. Parsers assume the output format of the pinned version. Upgrading tools requires updating golden-file fixtures and parser tests. [Why →](decisions/toolchain-pinning.md)
 
+## 11. HDD defaults
+
+Mount options, LUKS flags, and scrub scheduling are chosen for HDD NAS deployments. [Why →](decisions/hdd-defaults.md)
+
 ---
 
 Implementation workflow and conventions are in [AGENTS.md](../AGENTS.md).
