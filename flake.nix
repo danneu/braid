@@ -344,18 +344,6 @@
           repro-kernel-journal-bad-sector = pkgs.testers.nixosTest (
             import ./tests/repro/kernel-journal-bad-sector.nix
           );
-          repro-kernel-journal-missing-disk-idle = pkgs.testers.nixosTest (
-            import ./tests/repro/kernel-journal-missing-disk-idle.nix
-          );
-          repro-kernel-journal-missing-disk-io = pkgs.testers.nixosTest (
-            import ./tests/repro/kernel-journal-missing-disk-io.nix
-          );
-          repro-udev-missing-disk-idle = pkgs.testers.nixosTest (
-            import ./tests/repro/udev-missing-disk-idle.nix
-          );
-          repro-udev-missing-disk-io = pkgs.testers.nixosTest (
-            import ./tests/repro/udev-missing-disk-io.nix
-          );
           luks-label = pkgs.testers.nixosTest (
             import ./tests/cli/luks-label.nix {
               braid = linuxCrane.braid;
@@ -415,6 +403,23 @@
             import ./tests/module/smartd-config.nix {
               braid = linuxCrane.braid-cli-unwrapped;
             }
+          );
+        }
+        # These 4 tests use QEMU device_del for hot-unplug simulation.
+        # aarch64 QEMU's pcie.0 bus doesn't support hotplugging, so they
+        # only work on x86_64 (i440fx/q35 chipset).
+        // nixpkgs.lib.optionalAttrs (system == "x86_64-linux") {
+          repro-kernel-journal-missing-disk-idle = pkgs.testers.nixosTest (
+            import ./tests/repro/kernel-journal-missing-disk-idle.nix
+          );
+          repro-kernel-journal-missing-disk-io = pkgs.testers.nixosTest (
+            import ./tests/repro/kernel-journal-missing-disk-io.nix
+          );
+          repro-udev-missing-disk-idle = pkgs.testers.nixosTest (
+            import ./tests/repro/udev-missing-disk-idle.nix
+          );
+          repro-udev-missing-disk-io = pkgs.testers.nixosTest (
+            import ./tests/repro/udev-missing-disk-io.nix
           );
         };
     in
