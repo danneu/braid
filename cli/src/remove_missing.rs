@@ -71,7 +71,7 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync>(
 
     if pool.missing_count > 1 && missing_id.is_none() {
         return Err(RemoveMissingError::Validation(format!(
-            "multiple missing devices ({} missing). Pass --missing-id <devid> to target a specific one. Use 'braid status --verbose' to see device IDs.",
+            "multiple missing devices ({} missing). Pass --missing-id <devid> to target a specific one. Use 'braid status' to see device IDs.",
             pool.missing_count
         )));
     }
@@ -88,7 +88,7 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync>(
         if !missing_devids.contains(&devid) {
             return Err(RemoveMissingError::Validation(format!(
                 "devid {devid} is not a device in this pool. \
-                 Use 'braid status --verbose' to see device IDs."
+                 Use 'braid status' to see device IDs."
             )));
         }
     }

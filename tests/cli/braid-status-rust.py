@@ -2,7 +2,7 @@
 #
 # What: Validates the Rust braid status subcommand end-to-end against real
 # virtual disks — single-disk, RAID1, degraded, and not-mounted states in both
-# human and JSON output modes (including --verbose).
+# human and JSON output modes.
 #
 # Why: The Rust CLI must produce correct status reports from real disk state.
 # This test bridges unit tests (pure logic) with integration: real LUKS, real
@@ -51,8 +51,8 @@ with subtest("New disks in compact output"):
     assert "new" in output, f"Expected 'new' for unadded disks:\n{output}"
     assert "missing" not in output.lower(), f"Unexpected 'missing':\n{output}"
 
-with subtest("New disks in JSON verbose"):
-    raw = machine.succeed(rust_status("--json --verbose"))
+with subtest("New disks in JSON"):
+    raw = machine.succeed(rust_status("--json"))
     s = json.loads(raw)
     new_disks = [d for d in s["disks"] if d["status"] == "new"]
     assert len(new_disks) == 2, f"Expected 2 new disks: {new_disks}"
@@ -98,10 +98,7 @@ with subtest("Healthy RAID1 summary"):
     assert "scrub" in output.lower(), f"Expected 'scrub':\n{output}"
     assert "missing" not in output.lower(), f"Unexpected 'missing':\n{output}"
     assert "new" not in output.lower(), f"Unexpected 'new':\n{output}"
-
-with subtest("Healthy verbose"):
-    output = machine.succeed(rust_status("--verbose"))
-    print(f"Healthy verbose:\n{output}")
+    # Per-disk detail (always shown)
     lines = output.splitlines()
     for disk in ["disk1", "disk2", "disk3"]:
         disk_lines = [l for l in lines if disk in l and "present" in l]
@@ -110,8 +107,8 @@ with subtest("Healthy verbose"):
     assert "LUKS:" in output, f"Expected 'LUKS:':\n{output}"
     assert "Errors:" in output, f"Expected 'Errors:':\n{output}"
 
-with subtest("Healthy JSON verbose"):
-    raw = machine.succeed(rust_status("--json --verbose"))
+with subtest("Healthy JSON"):
+    raw = machine.succeed(rust_status("--json"))
     s = json.loads(raw)
     assert s["status"] == "intact", f"Expected intact: {s['status']}"
     assert len(s["disks"]) == 3, f"Expected 3 disks: {len(s['disks'])}"
@@ -141,10 +138,7 @@ with subtest("Degraded summary"):
     assert "missing" in output.lower(), f"Expected 'missing':\n{output}"
     assert "RAID1" in output, f"Expected 'RAID1':\n{output}"
     assert "1 missing device" in output, f"Expected '1 missing device':\n{output}"
-
-with subtest("Degraded verbose"):
-    output = machine.succeed(rust_status("--verbose"))
-    print(f"Degraded verbose:\n{output}")
+    # Per-disk detail (always shown)
     assert "MISSING" in output, f"Expected 'MISSING':\n{output}"
     assert "disk3" in output, f"Expected 'disk3':\n{output}"
     assert "not found" in output or "device absent" in output, (
@@ -155,8 +149,8 @@ with subtest("Degraded verbose"):
         disk_lines = [l for l in lines if disk in l and "present" in l]
         assert disk_lines, f"{disk} not shown as present:\n{output}"
 
-with subtest("Degraded JSON verbose"):
-    raw = machine.succeed(rust_status("--json --verbose"))
+with subtest("Degraded JSON"):
+    raw = machine.succeed(rust_status("--json"))
     s = json.loads(raw)
     assert s["status"] == "degraded", f"Expected degraded: {s['status']}"
     present_disks = [d for d in s["disks"] if d["status"] == "present"]

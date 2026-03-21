@@ -378,7 +378,6 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
     runner: &R,
     fs: &F,
     config: &Config,
-    verbose: bool,
     json: bool,
 ) -> Result<(), StatusError> {
     let advisories = luks::header_backup_advisories();
@@ -456,23 +455,15 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
     // 7. Alert state (latch-based)
     let alert_state = resolve_alert_state();
 
-    // 8. Verbose context
-    let verbose_ctx = if verbose {
+    // 8. Per-disk detail
+    let verbose_ctx = {
         let device_stats = get_device_stats(runner, config.mount_point().as_str())?;
         let config_disks: Vec<ConfigDisk> = config
             .disks()
             .iter()
             .map(|(name, disk)| probe_config_disk(runner, fs, name, disk))
             .collect::<Result<Vec<_>, _>>()?;
-        Some(build_disk_reports(
-            runner,
-            &config_disks,
-            &pool,
-            &device_stats,
-            &disk_map_load,
-        ))
-    } else {
-        None
+        build_disk_reports(runner, &config_disks, &pool, &device_stats, &disk_map_load)
     };
 
     // 9. Assemble report
@@ -488,10 +479,7 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
         last_scrub: Some(last_scrub),
         balance: Some(balance),
         allocation: Some(df_summary.allocation),
-        disks: verbose_ctx
-            .as_ref()
-            .map(|v| v.disks.clone())
-            .unwrap_or_default(),
+        disks: verbose_ctx.disks.clone(),
         advisories,
         alert_active: alert_state.active,
         alert_causes: alert_state.causes,
@@ -506,7 +494,7 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
             format_status_human(
                 &report,
                 Some(&compact_drives),
-                verbose_ctx.as_ref().map(|v| v.human_details.as_slice()),
+                Some(&verbose_ctx.human_details),
             )
         );
     }
@@ -1356,7 +1344,7 @@ mod tests {
         Config::new(disks, MountPoint("/mnt/storage".to_owned())).unwrap()
     }
 
-    /// Build a MockRunner for a 3-disk mounted healthy pool (no verbose).
+    /// Build a MockRunner for a 3-disk mounted healthy pool (base probes, no per-disk detail).
     fn runner_healthy_3disk_base() -> MockRunner {
         MockRunner::default()
             .with_output(
@@ -1597,7 +1585,7 @@ mod tests {
         );
 
         // Also verify cmd_status doesn't error
-        let _ = cmd_status(&runner, &fs, &config, false, false);
+        let _ = cmd_status(&runner, &fs, &config, false);
     }
 
     #[test]
@@ -1787,7 +1775,7 @@ mod tests {
     }
 
     #[test]
-    fn status_json_disks_always_array_non_verbose() {
+    fn status_json_disks_always_array_empty() {
         let code = StatusCode::Intact;
         let report = StatusReport {
             mount_point: MountPoint("/mnt/storage".to_owned()),
@@ -2501,7 +2489,7 @@ mod tests {
         let config = config_3disk();
 
         // cmd_status should succeed (not error), treating it as not-mounted
-        let result = cmd_status(&runner, &fs, &config, false, false);
+        let result = cmd_status(&runner, &fs, &config, false);
         assert!(result.is_ok(), "expected Ok, got: {result:?}");
     }
 
@@ -2535,42 +2523,32 @@ mod tests {
         let fs = MockFs::new(&[]);
         let config = config_3disk();
 
-        let result = cmd_status(&runner, &fs, &config, false, false);
+        let result = cmd_status(&runner, &fs, &config, false);
         assert!(result.is_ok());
     }
 
     #[test]
-    fn cmd_status_healthy_non_verbose_ok() {
-        let runner = runner_healthy_3disk_base();
-        let fs = fs_3disk();
-        let config = config_3disk();
-
-        let result = cmd_status(&runner, &fs, &config, false, false);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn cmd_status_healthy_verbose_ok() {
+    fn cmd_status_healthy_ok() {
         let runner = runner_healthy_3disk_verbose(runner_healthy_3disk_base());
         let fs = fs_3disk();
         let config = config_3disk();
 
-        let result = cmd_status(&runner, &fs, &config, true, false);
+        let result = cmd_status(&runner, &fs, &config, false);
         assert!(result.is_ok());
     }
 
     #[test]
     fn cmd_status_healthy_json_ok() {
-        let runner = runner_healthy_3disk_base();
+        let runner = runner_healthy_3disk_verbose(runner_healthy_3disk_base());
         let fs = fs_3disk();
         let config = config_3disk();
 
-        let result = cmd_status(&runner, &fs, &config, false, true);
+        let result = cmd_status(&runner, &fs, &config, true);
         assert!(result.is_ok());
     }
 
     #[test]
-    fn cmd_status_degraded_non_verbose_ok() {
+    fn cmd_status_degraded_ok() {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::FindmntJson {
@@ -2631,11 +2609,39 @@ mod tests {
                     mount_point: MountPoint("/mnt/storage".to_owned()),
                 },
                 btrfs_device_stats_3disk(),
+            )
+            // probe_config_disk for each config disk (by-id path)
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/disk1".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/disk1",
+                    "11111111-1111-1111-1111-111111111111",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/disk2".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/disk2",
+                    "22222222-2222-2222-2222-222222222222",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/disk3".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/disk3",
+                    "33333333-3333-3333-3333-333333333333",
+                ),
             );
         let fs = fs_3disk();
         let config = config_3disk();
 
-        let result = cmd_status(&runner, &fs, &config, false, false);
+        let result = cmd_status(&runner, &fs, &config, false);
         assert!(result.is_ok());
     }
 
@@ -2702,11 +2708,21 @@ mod tests {
                      [/dev/mapper/disk1].corruption_errs  0\n\
                      [/dev/mapper/disk1].generation_errs  0\n",
                 ),
+            )
+            // probe_config_disk for disk1 (by-id path)
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/disk1".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/disk1",
+                    "11111111-1111-1111-1111-111111111111",
+                ),
             );
         let fs = fs_1disk();
         let config = config_1disk();
 
-        let result = cmd_status(&runner, &fs, &config, false, false);
+        let result = cmd_status(&runner, &fs, &config, false);
         assert!(result.is_ok());
     }
 

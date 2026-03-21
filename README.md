@@ -164,7 +164,7 @@ sudo braid remove-missing                    # 1 missing device: auto-detected
 sudo braid remove-missing --missing-id 3     # multiple missing: target by devid
 ```
 
-Use `braid status --verbose` to see device IDs.
+Use `braid status` to see device IDs.
 
 ### Replace a drive
 
@@ -190,7 +190,7 @@ sudo braid replace --old ironwolf --new seagate                    # auto-detect
 sudo braid replace --old ironwolf --new seagate --missing-id 3     # explicit devid when multiple missing
 ```
 
-Use `braid status --verbose` to see device IDs. If the pool has missing devices when you try a live replace, repair the missing device first with `braid replace --missing-id <devid>`. Use `braid remove-missing` only to intentionally forget a stale entry without rebuilding data. When replacing a missing device and clearing the last missing entry with ≥2 devices remaining, a soft RAID1 balance runs automatically to restore redundancy.
+Use `braid status` to see device IDs. If the pool has missing devices when you try a live replace, repair the missing device first with `braid replace --missing-id <devid>`. Use `braid remove-missing` only to intentionally forget a stale entry without rebuilding data. When replacing a missing device and clearing the last missing entry with ≥2 devices remaining, a soft RAID1 balance runs automatically to restore redundancy.
 
 ### Disk identity map
 
@@ -201,8 +201,7 @@ In v1.0, disk names are immutable once recorded in this map. Renaming/reassignin
 ### Pool status
 
 ```sh
-sudo braid status             # pool health summary
-sudo braid status --verbose   # per-disk detail with devids
+sudo braid status             # pool health + per-disk detail
 sudo braid status --json      # machine-readable output
 ```
 

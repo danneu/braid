@@ -80,7 +80,6 @@ with subtest("remove-missing flag completion"):
 
 with subtest("status flag completion"):
     output = machine.succeed("bash /tmp/get-completions.sh braid status --")
-    assert "--verbose" in output, f"Expected --verbose: {output}"
     assert "--json" in output, f"Expected --json: {output}"
 
 # --- --config override during completion (bash) ---

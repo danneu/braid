@@ -198,7 +198,7 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         eprintln!(
             "warning: pool has {} missing device{}. \
              Consider repairing with `braid replace --missing-id <devid>` first. \
-             Use `braid status --verbose` to see device IDs.",
+             Use `braid status` to see device IDs.",
             pool.missing_count,
             if pool.missing_count == 1 { "" } else { "s" }
         );

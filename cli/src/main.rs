@@ -118,8 +118,6 @@ struct ReplaceArgs {
 #[derive(Debug, Args)]
 struct StatusArgs {
     #[arg(long)]
-    verbose: bool,
-    #[arg(long)]
     json: bool,
 }
 
@@ -292,9 +290,7 @@ fn main() {
             };
             let runner = RealRunner;
             let fs = RealFilesystem;
-            if let Err(e) =
-                braid_cli::status::cmd_status(&runner, &fs, &config, args.verbose, args.json)
-            {
+            if let Err(e) = braid_cli::status::cmd_status(&runner, &fs, &config, args.json) {
                 print_cli_error(&e.to_string());
                 std::process::exit(1);
             }

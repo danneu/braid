@@ -69,15 +69,11 @@ If the user reboots between `nixos-rebuild switch` (which removes the LUKS entry
 
 ### Default output
 
-Pool health summary: drive count, RAID profile, total/used/free capacity, degraded/missing state, last scrub result.
+Pool health summary: drive count, RAID profile, total/used/free capacity, degraded/missing state, last scrub result. Per-disk detail: model, serial, mapper name, btrfs devid, read/write/corruption error counters, LUKS UUID, present/missing state.
 
-### `--verbose`
+### `--json`
 
-Per-disk detail: model, serial, mapper name, btrfs devid, read/write/corruption error counters, LUKS UUID, present/missing state.
-
-### Future: `--json`
-
-Machine-readable output for monitoring and automation. Not yet implemented.
+Machine-readable output for monitoring and automation.
 
 ## Replace workflow
 

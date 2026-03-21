@@ -73,7 +73,7 @@ pub fn check_no_missing_devices(missing_count: u64, action: &str) -> Result<(), 
              Resolve the missing device{} first — repair with \
              `braid replace --missing-id <devid>`, or forget the entry with \
              `braid remove-missing` — then {action}. \
-             Use `braid status --verbose` to see device IDs.",
+             Use `braid status` to see device IDs.",
             if missing_count == 1 { "" } else { "s" },
             if missing_count == 1 { "" } else { "s" },
         ))

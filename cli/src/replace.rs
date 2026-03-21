@@ -385,7 +385,7 @@ fn resolve_replace_source<R: CommandRunner>(
             return Err(ReplaceError::Validation(format!(
                 "pool has {} missing device{}. \
                  Repair the missing device{} first with `braid replace --missing-id <devid>`, \
-                 then retry this live replace. Use `braid status --verbose` to see device IDs.",
+                 then retry this live replace. Use `braid status` to see device IDs.",
                 pool.missing_count,
                 if pool.missing_count == 1 { "" } else { "s" },
                 if pool.missing_count == 1 { "" } else { "s" },
@@ -418,7 +418,7 @@ fn resolve_replace_source<R: CommandRunner>(
         if !missing_devids.contains(&devid) {
             return Err(ReplaceError::Validation(format!(
                 "devid {devid} is not a missing device in this pool. \
-                 Use 'braid status --verbose' to see device IDs."
+                 Use 'braid status' to see device IDs."
             )));
         }
         return Ok(ReplaceSource::Missing { devid });
@@ -438,7 +438,7 @@ fn resolve_replace_source<R: CommandRunner>(
     }
 
     Err(ReplaceError::Validation(format!(
-        "multiple missing devices ({} missing). Pass --missing-id <devid> to target the specific dead disk. Use 'braid status --verbose' to see device IDs.",
+        "multiple missing devices ({} missing). Pass --missing-id <devid> to target the specific dead disk. Use 'braid status' to see device IDs.",
         missing_devids.len()
     )))
 }

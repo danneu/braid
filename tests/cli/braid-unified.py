@@ -1,8 +1,7 @@
 # Test: braid unified CLI — status reporting and error cases
 #
-# What: Exercises `braid status` in all output modes (human, --json, --verbose,
-# --json --verbose) against a 3-disk RAID1 pool, and validates the "not mounted"
-# error case.
+# What: Exercises `braid status` in all output modes (human, --json) against a
+# 3-disk RAID1 pool, and validates the "not mounted" error case.
 #
 # Why: The unified CLI must produce correct, complete status reports after pool
 # setup using intent commands (`braid add`). This covers the primary read path
@@ -44,7 +43,7 @@ with subtest("Setup: build 3-disk RAID1 pool"):
 
 # --- Phase 1: braid status (human output) ---
 
-with subtest("braid status shows pool summary"):
+with subtest("braid status shows pool summary with per-disk detail"):
     output = machine.succeed("braid status")
     print(f"braid status output:\n{output}")
     assert "intact" in output, f"Expected 'intact':\n{output}"
@@ -56,10 +55,18 @@ with subtest("braid status shows pool summary"):
     assert "Used:" in output, f"Expected 'Used:':\n{output}"
     assert "Free:" in output, f"Expected 'Free:':\n{output}"
     assert "scrub" in output.lower(), f"Expected 'scrub':\n{output}"
+    # Per-disk detail (always shown)
+    lines = output.splitlines()
+    for disk in ["disk1", "disk2", "disk3"]:
+        disk_lines = [l for l in lines if disk in l and "present" in l]
+        assert disk_lines, f"{disk} not shown as present:\n{output}"
+    assert "devid" in output, f"Expected 'devid':\n{output}"
+    assert "LUKS:" in output, f"Expected 'LUKS:':\n{output}"
+    assert "Errors:" in output, f"Expected 'Errors:':\n{output}"
 
 # --- Phase 2: braid status --json ---
 
-with subtest("braid status --json has schema fields"):
+with subtest("braid status --json has schema fields and disk details"):
     raw = machine.succeed("braid status --json")
     s = json.loads(raw)
     assert s["mount_point"] == "/mnt/storage", f"Bad mount_point: {s['mount_point']}"
@@ -73,25 +80,6 @@ with subtest("braid status --json has schema fields"):
     assert "free_bytes" in s["capacity"], "Missing capacity.free_bytes"
     assert s["capacity"]["total_bytes"] > 0, "total_bytes should be positive"
     assert "last_scrub" in s, "Missing last_scrub"
-
-# --- Phase 3: braid status --verbose ---
-
-with subtest("braid status --verbose shows per-disk detail"):
-    output = machine.succeed("braid status --verbose")
-    print(f"braid status --verbose:\n{output}")
-    lines = output.splitlines()
-    for disk in ["disk1", "disk2", "disk3"]:
-        disk_lines = [l for l in lines if disk in l and "present" in l]
-        assert disk_lines, f"{disk} not shown as present:\n{output}"
-    assert "devid" in output, f"Expected 'devid':\n{output}"
-    assert "LUKS:" in output, f"Expected 'LUKS:':\n{output}"
-    assert "Errors:" in output, f"Expected 'Errors:':\n{output}"
-
-# --- Phase 4: braid status --json --verbose ---
-
-with subtest("braid status --json --verbose includes disk details"):
-    raw = machine.succeed("braid status --json --verbose")
-    s = json.loads(raw)
     assert len(s["disks"]) == 3, f"Expected 3 disks: {s['disks']}"
     for disk in s["disks"]:
         assert "mapper" in disk, f"Disk missing mapper: {disk}"
@@ -100,7 +88,7 @@ with subtest("braid status --json --verbose includes disk details"):
         assert disk["status"] == "present", f"Disk not present: {disk}"
         assert "errors" in disk, f"Disk missing errors: {disk}"
 
-# --- Phase 5: Error cases ---
+# --- Phase 3: Error cases ---
 
 with subtest("braid status reports not mounted on unmounted pool"):
     machine.succeed("umount /mnt/storage")

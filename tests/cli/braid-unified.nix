@@ -1,7 +1,7 @@
 # Test: braid unified CLI
 #
-# What: Exercises `braid status` (human, --json, --verbose), verifies the full
-# add workflow, and validates error cases.
+# What: Exercises `braid status` (human, --json), verifies the full add
+# workflow, and validates error cases.
 #
 # Why: The unified CLI must produce correct results for status reporting after
 # pool setup using named disk commands.

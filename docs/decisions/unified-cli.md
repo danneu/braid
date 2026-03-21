@@ -27,7 +27,7 @@ Rust CLI (`cli/src/`) with subcommand dispatcher:
 - `braid init-disk <by-id> [--force] [--config <path>]` — destructive one-shot: LUKS format a declared disk. Requires explicit operator intent. Never called from `apply`.
 - `braid plan [--json] [--allow-remove-missing] [--allow-remove-ambiguous] [--config <path>]` — read-only diff: desired state (config) vs live state (LUKS/btrfs/mounts). Outputs action list with status (`applicable`/`blocked`), warnings, and blocked reasons.
 - `braid apply [--resume] [--allow-remove-missing] [--allow-remove-ambiguous] [--config <path>]` — executes plan with checkpoint persistence. `--resume` continues from `/var/lib/braid/apply-state.json`. Never performs `luksFormat`.
-- `braid status [--verbose] [--json] [--config <path>]` — pool health summary (replaces `braid-status`).
+- `braid status [--json] [--config <path>]` — pool health summary with per-disk detail (replaces `braid-status`).
 - `braid doctor [--json] [--config <path>]` — run diagnostic checks against config and pool state (config file, schema, permissions, declared disks, data/metadata profile consistency). Reports ok/warn/fail per check.
 
 Packaged via Crane + `makeWrapper` in `flake.nix`.
