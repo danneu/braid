@@ -141,6 +141,7 @@ dependencies = [
  "nom 8.0.0",
  "pretty_assertions",
  "ratatui",
+ "regex",
  "rpassword",
  "serde",
  "serde_json",

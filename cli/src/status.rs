@@ -2,6 +2,7 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
+use crate::alert::{self, AlertCause, AlertState};
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, LsblkFieldKind};
 use crate::config::{mapper_name, Config};
 use crate::disk_map::{self, DiskMapLoad};
@@ -61,6 +62,10 @@ pub struct StatusReport {
     pub disks: Vec<DiskReport>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub advisories: Vec<String>,
+    #[serde(default)]
+    pub alert_active: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alert_causes: Vec<AlertCause>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -280,6 +285,7 @@ pub fn build_status_report<R: CommandRunner, F: Filesystem>(
         Ok(p) => p,
         Err(ProbeError::NotBtrfs { .. }) => {
             let code = StatusCode::NotMounted;
+            let alert_state = resolve_alert_state();
             return Ok(StatusReport {
                 mount_point: config.mount_point().clone(),
                 status: code,
@@ -293,6 +299,8 @@ pub fn build_status_report<R: CommandRunner, F: Filesystem>(
                 allocation: None,
                 disks: vec![],
                 advisories: advisories.clone(),
+                alert_active: alert_state.active,
+                alert_causes: alert_state.causes,
             });
         }
         Err(e) => return Err(e.into()),
@@ -300,6 +308,7 @@ pub fn build_status_report<R: CommandRunner, F: Filesystem>(
 
     if !pool.mounted {
         let code = StatusCode::NotMounted;
+        let alert_state = resolve_alert_state();
         return Ok(StatusReport {
             mount_point: config.mount_point().clone(),
             status: code,
@@ -313,6 +322,8 @@ pub fn build_status_report<R: CommandRunner, F: Filesystem>(
             allocation: None,
             disks: vec![],
             advisories: advisories.clone(),
+            alert_active: alert_state.active,
+            alert_causes: alert_state.causes,
         });
     }
 
@@ -342,6 +353,8 @@ pub fn build_status_report<R: CommandRunner, F: Filesystem>(
     let verbose_ctx =
         build_disk_reports(runner, &config_disks, &pool, &device_stats, &disk_map_load);
 
+    let alert_state = resolve_alert_state();
+
     let present_count = pool.total_devices.saturating_sub(pool.missing_count);
     Ok(StatusReport {
         mount_point: config.mount_point().clone(),
@@ -356,6 +369,8 @@ pub fn build_status_report<R: CommandRunner, F: Filesystem>(
         allocation: Some(df_summary.allocation),
         disks: verbose_ctx.disks,
         advisories,
+        alert_active: alert_state.active,
+        alert_causes: alert_state.causes,
     })
 }
 
@@ -375,6 +390,7 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
             mounted: false,
             devices: vec![],
             missing_count: 0,
+            missing_devids: vec![],
             total_devices: 0,
             fsid: None,
         },
@@ -384,6 +400,7 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
     // 2. Not mounted → minimal report
     if !pool.mounted {
         let code = StatusCode::NotMounted;
+        let alert_state = resolve_alert_state();
         let report = StatusReport {
             mount_point: config.mount_point().clone(),
             status: code,
@@ -397,6 +414,8 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
             allocation: None,
             disks: vec![],
             advisories: advisories.clone(),
+            alert_active: alert_state.active,
+            alert_causes: alert_state.causes,
         };
         if json {
             println!("{}", serde_json::to_string_pretty(&report)?);
@@ -434,14 +453,17 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
     // 6. Compact drives (always built when mounted)
     let compact_drives = build_compact_drives(&pool, config, &disk_map_load);
 
-    // 7. Verbose context
+    // 7. Alert state (latch-based)
+    let alert_state = resolve_alert_state();
+
+    // 8. Verbose context
     let verbose_ctx = if verbose {
+        let device_stats = get_device_stats(runner, config.mount_point().as_str())?;
         let config_disks: Vec<ConfigDisk> = config
             .disks()
             .iter()
             .map(|(name, disk)| probe_config_disk(runner, fs, name, disk))
             .collect::<Result<Vec<_>, _>>()?;
-        let device_stats = get_device_stats(runner, config.mount_point().as_str())?;
         Some(build_disk_reports(
             runner,
             &config_disks,
@@ -453,7 +475,7 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
         None
     };
 
-    // 8. Assemble report
+    // 9. Assemble report
     let present_count = pool.total_devices.saturating_sub(pool.missing_count);
     let report = StatusReport {
         mount_point: config.mount_point().clone(),
@@ -471,6 +493,8 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
             .map(|v| v.disks.clone())
             .unwrap_or_default(),
         advisories,
+        alert_active: alert_state.active,
+        alert_causes: alert_state.causes,
     };
 
     // 9. Output
@@ -488,6 +512,42 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Alert state (latch-based)
+// ---------------------------------------------------------------------------
+
+/// Read alert state from the latch file + smartd flag. Status reads the latch
+/// instead of recomputing live alert state — the latch is the single source of
+/// truth. Recomputing would cause the alert to disappear when a condition
+/// resolves, contradicting the "latched until ack" model. The smartd flag is
+/// checked as a bridge for between-cycle fires.
+pub(crate) fn resolve_alert_state() -> AlertState {
+    let latch = alert::load_alert_latch();
+    let smartd_active = alert::smartd_alert_active();
+
+    match latch {
+        Some(mut state) if state.active => {
+            if smartd_active
+                && !state
+                    .causes
+                    .iter()
+                    .any(|c| matches!(c, AlertCause::SmartdAlert))
+            {
+                state.causes.push(AlertCause::SmartdAlert);
+            }
+            state
+        }
+        _ if smartd_active => AlertState {
+            active: true,
+            causes: vec![AlertCause::SmartdAlert],
+        },
+        _ => AlertState {
+            active: false,
+            causes: vec![],
+        },
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -708,7 +768,7 @@ fn build_disk_reports<R: CommandRunner>(
         let errors = device_stats
             .devices
             .iter()
-            .find(|d| d.device_path == dev_path)
+            .find(|d| d.target.as_path() == Some(dev_path.as_str()))
             .map(|d| DiskErrors {
                 read: d.read_io_errs,
                 write: d.write_io_errs,
@@ -796,6 +856,30 @@ fn format_status_human(
     human_disks: Option<&[HumanDisk]>,
 ) -> String {
     let mut out = String::new();
+
+    // Alert banner (before everything else)
+    if report.alert_active {
+        out.push_str(
+            "ALERT -- disk health issue detected. Run 'braid ack' to acknowledge and silence.\n",
+        );
+        for cause in &report.alert_causes {
+            match cause {
+                AlertCause::BtrfsDeviceErrors { devid } => {
+                    out.push_str(&format!("  - btrfs device errors on devid {devid}\n"));
+                }
+                AlertCause::MissingDevice { devid } => {
+                    out.push_str(&format!("  - missing device (devid {devid})\n"));
+                }
+                AlertCause::SmartdAlert => {
+                    out.push_str("  - SMART health warning\n");
+                }
+                AlertCause::ComputationError { detail } => {
+                    out.push_str(&format!("  - alert computation error: {detail}\n"));
+                }
+            }
+        }
+        out.push('\n');
+    }
 
     for advisory in &report.advisories {
         out.push_str(&format!("warning: {advisory}\n"));
@@ -931,20 +1015,36 @@ fn format_status_human(
             }
 
             // Errors
-            match &d.errors {
+            let has_errors = match &d.errors {
                 Some(e) => {
                     out.push_str(&format!(
                         "    Errors:  read {} / write {} / flush {} / corruption {} / generation {}\n",
                         e.read, e.write, e.flush, e.corruption, e.generation
                     ));
+                    e.read + e.write + e.flush + e.corruption + e.generation > 0
                 }
                 None if d.status == "missing" => {
                     out.push_str("    Errors:  unknown (device absent)\n");
+                    false
                 }
                 None if d.status == "unknown" => {
                     out.push_str("    Errors:  unknown (disk-map unavailable)\n");
+                    false
                 }
-                None => {}
+                None => false,
+            };
+
+            // Action guidance
+            if has_errors {
+                out.push_str(&format!(
+                    "    Action:  add replacement disk to config, then: braid replace --old {} --new <new-name>\n",
+                    d.name
+                ));
+            } else if d.status == "missing" {
+                out.push_str(&format!(
+                    "    Action:  add replacement disk to config, then: braid replace --old {} --new <new-name>\n",
+                    d.name
+                ));
             }
         }
     }
@@ -1331,6 +1431,12 @@ mod tests {
                 },
                 btrfs_scrub_never(),
             )
+            .with_output(
+                CmdRequest::BtrfsDeviceStats {
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                },
+                btrfs_device_stats_3disk(),
+            )
     }
 
     /// Extend a base runner with verbose probe outputs for 3-disk config.
@@ -1460,6 +1566,8 @@ mod tests {
             allocation: None,
             disks: vec![],
             advisories: vec![],
+            alert_active: false,
+            alert_causes: vec![],
         };
 
         let json_str = serde_json::to_string_pretty(&report).unwrap();
@@ -1470,6 +1578,7 @@ mod tests {
         assert_eq!(obj["mount_point"], "/mnt/storage");
         assert_eq!(obj["status"], "not_mounted");
         assert_eq!(obj["disks"], serde_json::json!([]));
+        assert_eq!(obj["alert_active"], false);
 
         // Must NOT exist
         assert!(!obj.contains_key("total_devices"));
@@ -1480,11 +1589,11 @@ mod tests {
         assert!(!obj.contains_key("last_scrub"));
         assert!(!obj.contains_key("allocation"));
 
-        // Lock envelope: exactly 3 keys
+        // Lock envelope: exactly 4 keys
         assert_eq!(
             obj.len(),
-            3,
-            "envelope should have exactly 3 keys, got: {obj:?}"
+            4,
+            "envelope should have exactly 4 keys, got: {obj:?}"
         );
 
         // Also verify cmd_status doesn't error
@@ -1514,6 +1623,8 @@ mod tests {
             allocation: Some(df_summary.allocation),
             disks: vec![],
             advisories: vec![],
+            alert_active: false,
+            alert_causes: vec![],
         };
 
         let json_str = serde_json::to_string_pretty(&report).unwrap();
@@ -1560,6 +1671,8 @@ mod tests {
             allocation: None,
             disks: vec![],
             advisories: vec![],
+            alert_active: false,
+            alert_causes: vec![],
         };
 
         let json_str = serde_json::to_string_pretty(&report).unwrap();
@@ -1615,6 +1728,8 @@ mod tests {
             allocation: None,
             disks: vec![present, missing],
             advisories: vec![],
+            alert_active: false,
+            alert_causes: vec![],
         };
 
         let json_str = serde_json::to_string_pretty(&report).unwrap();
@@ -1662,6 +1777,8 @@ mod tests {
             allocation: None,
             disks: vec![],
             advisories: vec![],
+            alert_active: false,
+            alert_causes: vec![],
         };
         let json_str = serde_json::to_string_pretty(&report).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
@@ -1689,6 +1806,8 @@ mod tests {
             allocation: None,
             disks: vec![],
             advisories: vec![],
+            alert_active: false,
+            alert_causes: vec![],
         };
         let json_str = serde_json::to_string_pretty(&report).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
@@ -1730,6 +1849,8 @@ mod tests {
                 }),
             }],
             advisories: vec![],
+            alert_active: false,
+            alert_causes: vec![],
         };
         let json_str = serde_json::to_string_pretty(&report).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
@@ -1757,6 +1878,8 @@ mod tests {
             allocation: None,
             disks: vec![],
             advisories: vec![],
+            alert_active: false,
+            alert_causes: vec![],
         };
         let human = format_status_human(&report, None, None);
         assert!(human.contains("not mounted"), "got:\n{human}");
@@ -1803,6 +1926,8 @@ mod tests {
             ]),
             disks: vec![],
             advisories: vec![],
+            alert_active: false,
+            alert_causes: vec![],
         };
         let compact = vec![CompactDrive {
             name: "disk1".to_owned(),
@@ -1865,6 +1990,8 @@ mod tests {
             ]),
             disks: vec![],
             advisories: vec![],
+            alert_active: false,
+            alert_causes: vec![],
         };
         let compact = vec![
             CompactDrive {
@@ -1917,6 +2044,8 @@ mod tests {
             allocation: None,
             disks: vec![],
             advisories: vec![],
+            alert_active: false,
+            alert_causes: vec![],
         };
         let compact = vec![
             CompactDrive {
@@ -1967,6 +2096,8 @@ mod tests {
             allocation: None,
             disks: vec![],
             advisories: vec![],
+            alert_active: false,
+            alert_causes: vec![],
         };
         let human = format_status_human(&report, None, None);
         assert!(
@@ -2016,6 +2147,8 @@ mod tests {
             allocation: None,
             disks: vec![],
             advisories: vec![],
+            alert_active: false,
+            alert_causes: vec![],
         };
 
         let human = format_status_human(&report, None, Some(&human_disks));
@@ -2058,6 +2191,8 @@ mod tests {
             allocation: None,
             disks: vec![],
             advisories: vec![],
+            alert_active: false,
+            alert_causes: vec![],
         };
 
         let human = format_status_human(&report, None, Some(&human_disks));
@@ -2103,6 +2238,8 @@ mod tests {
             allocation: None,
             disks: vec![],
             advisories: vec![],
+            alert_active: false,
+            alert_causes: vec![],
         };
 
         let human = format_status_human(&report, None, Some(&human_disks));
@@ -2249,6 +2386,8 @@ mod tests {
             allocation: None,
             disks: vec![],
             advisories: vec![],
+            alert_active: false,
+            alert_causes: vec![],
         };
         let human = format_status_human(&report, None, None);
         assert!(
@@ -2277,6 +2416,8 @@ mod tests {
             allocation: None,
             disks: vec![],
             advisories: vec![],
+            alert_active: false,
+            alert_causes: vec![],
         };
         let human = format_status_human(&report, None, None);
         assert!(human.contains("Balance:  unknown"), "got:\n{human}");
@@ -2302,6 +2443,8 @@ mod tests {
             allocation: None,
             disks: vec![],
             advisories: vec![],
+            alert_active: false,
+            alert_causes: vec![],
         };
         let human = format_status_human(&report, None, None);
         assert!(
@@ -2482,6 +2625,12 @@ mod tests {
                     mount_point: MountPoint("/mnt/storage".to_owned()),
                 },
                 btrfs_scrub_never(),
+            )
+            .with_output(
+                CmdRequest::BtrfsDeviceStats {
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                },
+                btrfs_device_stats_3disk(),
             );
         let fs = fs_3disk();
         let config = config_3disk();
@@ -2540,6 +2689,19 @@ mod tests {
                     mount_point: MountPoint("/mnt/storage".to_owned()),
                 },
                 btrfs_scrub_never(),
+            )
+            .with_output(
+                CmdRequest::BtrfsDeviceStats {
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                },
+                ok_raw(
+                    "btrfs device stats",
+                    "[/dev/mapper/disk1].write_io_errs    0\n\
+                     [/dev/mapper/disk1].read_io_errs     0\n\
+                     [/dev/mapper/disk1].flush_io_errs    0\n\
+                     [/dev/mapper/disk1].corruption_errs  0\n\
+                     [/dev/mapper/disk1].generation_errs  0\n",
+                ),
             );
         let fs = fs_1disk();
         let config = config_1disk();
@@ -2593,6 +2755,7 @@ mod tests {
             mounted: true,
             devices: vec![],
             missing_count: 0,
+            missing_devids: vec![],
             total_devices: 0,
             fsid: None,
         };
@@ -2616,6 +2779,7 @@ mod tests {
             mounted: true,
             devices: vec![],
             missing_count: 0,
+            missing_devids: vec![],
             total_devices: 0,
             fsid: None,
         };
@@ -2660,6 +2824,8 @@ mod tests {
             allocation: None,
             disks: vec![],
             advisories: vec![],
+            alert_active: false,
+            alert_causes: vec![],
         };
         let human = format_status_human(&report, Some(&compact), None);
         assert!(human.contains("new"), "got:\n{human}");
@@ -2672,6 +2838,7 @@ mod tests {
             mounted: true,
             devices: vec![],
             missing_count: 0,
+            missing_devids: vec![],
             total_devices: 0,
             fsid: None,
         };
@@ -2717,6 +2884,8 @@ mod tests {
             allocation: None,
             disks: vec![],
             advisories: vec![],
+            alert_active: false,
+            alert_causes: vec![],
         };
 
         let human = format_status_human(&report, None, Some(&human_disks));
@@ -2756,6 +2925,8 @@ mod tests {
             allocation: None,
             disks: vec![],
             advisories: vec![],
+            alert_active: false,
+            alert_causes: vec![],
         };
 
         let human = format_status_human(&report, None, Some(&human_disks));
@@ -2787,6 +2958,8 @@ mod tests {
             allocation: None,
             disks: vec![],
             advisories: vec![],
+            alert_active: false,
+            alert_causes: vec![],
         };
         let compact = vec![
             CompactDrive {

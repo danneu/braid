@@ -102,27 +102,27 @@ pub fn parse_btrfs_filesystem_show(
             field: "Total devices".into(),
         })?;
 
-    // Filter out missing-device placeholders. btrfs-progs prints either:
+    // Separate present devices from missing-device placeholders.
+    // btrfs-progs prints either:
     //   devid  2 size 0 used 0 path /dev/mapper/disk-2 MISSING
     //   devid  2 size 0 used 0 path MISSING
     // These are synthetic — the device is gone. Only real present devices
     // are included; non-mapper real paths (e.g. /dev/sda1) are kept so
     // probe_pool can hard-fail on the invariant violation.
-    let devices: Vec<BtrfsShowDevice> = stdout
-        .lines()
-        .filter_map(|line| {
-            parse_devid_line(line).ok().and_then(|(_, (devid, path))| {
-                if path == "MISSING" || path.ends_with(" MISSING") {
-                    None
-                } else {
-                    Some(BtrfsShowDevice {
-                        devid,
-                        path: path.to_owned(),
-                    })
-                }
-            })
-        })
-        .collect();
+    let mut devices: Vec<BtrfsShowDevice> = Vec::new();
+    let mut missing_devids: Vec<u64> = Vec::new();
+    for line in stdout.lines() {
+        if let Ok((_, (devid, path))) = parse_devid_line(line) {
+            if path == "MISSING" || path.ends_with(" MISSING") {
+                missing_devids.push(devid);
+            } else {
+                devices.push(BtrfsShowDevice {
+                    devid,
+                    path: path.to_owned(),
+                });
+            }
+        }
+    }
 
     let has_missing = stdout
         .lines()
@@ -137,6 +137,7 @@ pub fn parse_btrfs_filesystem_show(
         total_devices,
         devices,
         has_missing,
+        missing_devids,
     })
 }
 

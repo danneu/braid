@@ -40,6 +40,10 @@ enum Commands {
     /// Enroll a binary keyfile into LUKS slot 1 on all pool disks
     #[command(name = "enroll")]
     EnrollKeyFile(EnrollKeyFileArgs),
+    /// Check disk health: exit 0 = ok/offline, exit 1 = alert, exit 2 = error
+    Monitor,
+    /// Acknowledge current alerts and silence notifications
+    Ack,
     /// Interactive terminal dashboard
     Tui(TuiArgs),
 }
@@ -368,6 +372,45 @@ fn main() {
             let runner = RealRunner;
             let fs = RealFilesystem;
             if let Err(e) = braid_cli::lock::cmd_lock(&runner, &fs, &config) {
+                print_cli_error(&e.to_string());
+                std::process::exit(1);
+            }
+        }
+        Commands::Monitor => {
+            let config = match config_read(Path::new(&config_path)) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    std::process::exit(2);
+                }
+            };
+            let runner = RealRunner;
+            match braid_cli::monitor::cmd_monitor(&runner, config.mount_point().as_str()) {
+                Ok(braid_cli::monitor::MonitorResult::PoolOffline) => {
+                    std::process::exit(0);
+                }
+                Ok(braid_cli::monitor::MonitorResult::Ok) => {
+                    std::process::exit(0);
+                }
+                Ok(braid_cli::monitor::MonitorResult::Alert(_)) => {
+                    std::process::exit(1);
+                }
+                Err(e) => {
+                    print_cli_error(&e.to_string());
+                    std::process::exit(2);
+                }
+            }
+        }
+        Commands::Ack => {
+            let config = match config_read(Path::new(&config_path)) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                }
+            };
+            let runner = RealRunner;
+            if let Err(e) = braid_cli::ack::cmd_ack(&runner, config.mount_point().as_str()) {
                 print_cli_error(&e.to_string());
                 std::process::exit(1);
             }

@@ -1,5 +1,5 @@
 use crate::cmd::{CmdError, CmdRequest, CommandRunner};
-use crate::config::{mapper_name, Config, ConfigError};
+use crate::config::{Config, ConfigError, mapper_name};
 use crate::disk_map::{self, DiskMap};
 use crate::luks::{self, LuksError};
 use crate::pool::PoolError;
@@ -471,7 +471,7 @@ mod tests {
                     mount_point: MountPoint("/mnt/storage".to_owned()),
                     options: vec!["degraded".to_owned()],
                 },
-                ok_raw("mount -o degraded"),
+                ok_raw("mount -o noatime,degraded"),
             );
 
         // Write passphrase to a temp file for the test (avoid stdin TTY)

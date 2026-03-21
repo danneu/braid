@@ -7,7 +7,7 @@
 #    root:<storageGroup> 2770 on the mount point
 { cfg, pkgs, lib }:
 let
-  toolPackages = with cfg.packages; [ cryptsetup btrfsProgs utilLinux jq coreutils ];
+  toolPackages = with cfg.packages; [ cryptsetup btrfsProgs utilLinux jq coreutils ] ++ [ pkgs.systemd ];
 in
 pkgs.runCommand "braid" {} ''
   mkdir -p $out/bin

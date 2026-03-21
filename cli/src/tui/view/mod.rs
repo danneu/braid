@@ -5,10 +5,10 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 mod help;
 
-use ratatui::Frame;
 use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph, Row, Table, TableState};
-use time::PrimitiveDateTime;
+use ratatui::Frame;
 use time::macros::format_description;
+use time::PrimitiveDateTime;
 
 use crate::parse::types::{BtrfsBgType, ScrubState, SmartHealth};
 use crate::status::BalanceReport;
@@ -671,8 +671,17 @@ fn view_disk_detail(model: &Model, frame: &mut Frame, area: Rect) {
 pub fn view(model: &Model, frame: &mut Frame, now: PrimitiveDateTime) {
     let area = frame.area();
     let advisory_height = model.advisories.len() as u16;
+    let alert_active = model
+        .pool
+        .current()
+        .map(|p| p.alert_state.active)
+        .unwrap_or(false);
+    let alert_height: u16 = if alert_active { 1 } else { 0 };
 
     let mut constraints = Vec::new();
+    if alert_height > 0 {
+        constraints.push(Constraint::Length(alert_height));
+    }
     if advisory_height > 0 {
         constraints.push(Constraint::Length(advisory_height));
     }
@@ -682,7 +691,19 @@ pub fn view(model: &Model, frame: &mut Frame, now: PrimitiveDateTime) {
     constraints.push(Constraint::Length(1)); // footer
 
     let outer = Layout::vertical(constraints).split(area);
-    let off = (advisory_height > 0) as usize;
+    let mut off: usize = 0;
+
+    if alert_active {
+        let alert_line = Line::from(Span::styled(
+            " ALERT -- disk health issue detected. Run 'braid ack' to acknowledge and silence. ",
+            Style::default()
+                .bg(Color::Red)
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ));
+        frame.render_widget(Paragraph::new(alert_line), outer[off]);
+        off += 1;
+    }
 
     if advisory_height > 0 {
         let lines: Vec<Line> = model
@@ -695,7 +716,8 @@ pub fn view(model: &Model, frame: &mut Frame, now: PrimitiveDateTime) {
                 ))
             })
             .collect();
-        frame.render_widget(Paragraph::new(lines), outer[0]);
+        frame.render_widget(Paragraph::new(lines), outer[off]);
+        off += 1;
     }
 
     frame.render_widget(tab_bar(model.tab), outer[off]);
@@ -743,8 +765,8 @@ pub(crate) mod tests {
     use crate::parse::types::{ScrubState, ScrubTimestamp, SmartHealth};
     use crate::tui::model::{DiskLuksInfo, DiskUsage};
     use crate::types::MountPoint;
-    use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
 
     fn render(model: &Model, width: u16, height: u16) -> Terminal<TestBackend> {
         let now = time::macros::datetime!(2026-02-24 02:12:00);
@@ -941,6 +963,11 @@ pub(crate) mod tests {
             disk_transport,
             smart_health,
             luks_info,
+            device_errors: HashMap::new(),
+            alert_state: crate::alert::AlertState {
+                active: false,
+                causes: vec![],
+            },
             scrub: ScrubState::Completed {
                 started_at: ScrubTimestamp(time::macros::datetime!(2026-02-24 02:00:07)),
                 error_count: 0,

@@ -4,11 +4,12 @@ use std::time::Instant;
 use crate::cmd::{CmdRequest, CommandRunner};
 use crate::parse::types::{ScrubState, SmartHealth};
 use crate::parse::{
-    parse_btrfs_device_usage, parse_btrfs_filesystem_usage, parse_btrfs_scrub_status,
-    parse_cryptsetup_luks_dump, parse_lsblk_json, parse_smartctl_health,
+    parse_btrfs_device_stats, parse_btrfs_device_usage, parse_btrfs_filesystem_usage,
+    parse_btrfs_scrub_status, parse_cryptsetup_luks_dump, parse_lsblk_json, parse_smartctl_health,
 };
 use crate::probe::probe_pool;
-use crate::status::{estimate_pool_capacity, get_balance_report};
+use crate::status::resolve_alert_state;
+use crate::status::{estimate_pool_capacity, get_balance_report, DiskErrors};
 use crate::tui::model::{DiskLuksInfo, DiskUsage, PoolState};
 use crate::types::MountPoint;
 
@@ -130,6 +131,39 @@ pub fn probe_pool_for_tui<R: CommandRunner>(
         .map_err(|e| e.to_string())?;
     let fs_usage = parse_btrfs_filesystem_usage(&fs_usage_raw).map_err(|e| e.to_string())?;
 
+    // Device error stats
+    let mut device_errors = HashMap::new();
+    let device_stats_raw = runner
+        .run(&CmdRequest::BtrfsDeviceStats {
+            mount_point: MountPoint(mount_point.to_owned()),
+        })
+        .ok();
+    let device_stats = device_stats_raw
+        .as_ref()
+        .and_then(|raw| parse_btrfs_device_stats(raw).ok());
+    if let Some(ref stats) = device_stats {
+        for dev in &stats.devices {
+            if let Some(name) = dev
+                .target
+                .as_path()
+                .and_then(|p| p.strip_prefix("/dev/mapper/braid-"))
+            {
+                device_errors.insert(
+                    name.to_owned(),
+                    DiskErrors {
+                        read: dev.read_io_errs,
+                        write: dev.write_io_errs,
+                        flush: dev.flush_io_errs,
+                        corruption: dev.corruption_errs,
+                        generation: dev.generation_errs,
+                    },
+                );
+            }
+        }
+    }
+
+    let alert_state = resolve_alert_state();
+
     let capacity_total_bytes = if domain.missing_count == 0 {
         let sizes: Vec<u64> = dev_usage.devices.iter().map(|d| d.device_size).collect();
         Some(estimate_pool_capacity(&sizes))
@@ -144,6 +178,8 @@ pub fn probe_pool_for_tui<R: CommandRunner>(
         disk_transport,
         smart_health,
         luks_info,
+        device_errors,
+        alert_state,
         scrub,
         balance,
         capacity_total_bytes,

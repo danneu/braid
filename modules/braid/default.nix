@@ -1,1 +1,1 @@
-{ imports = [ ./options.nix ./storage.nix ./cli.nix ]; }
+{ imports = [ ./options.nix ./storage.nix ./cli.nix ./monitor.nix ]; }

@@ -237,8 +237,9 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             });
             if let Ok(ref raw) = stats_raw {
                 if let Ok(stats) = parse_btrfs_device_stats(raw) {
+                    let expected_path = format!("/dev/mapper/{}", mapper.0);
                     let has_errs = stats.devices.iter().any(|d| {
-                        d.device_path.contains(&mapper.0)
+                        d.target.as_path() == Some(expected_path.as_str())
                             && (d.read_io_errs > 0
                                 || d.write_io_errs > 0
                                 || d.flush_io_errs > 0
@@ -710,6 +711,7 @@ mod tests {
                 },
             ],
             missing_count: 0,
+            missing_devids: vec![],
             total_devices: 2,
             fsid: None,
         }

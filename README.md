@@ -400,6 +400,49 @@ services.samba = {
 };
 ```
 
+## Monitoring and Alerts
+
+braid has first-class alerts for disk health. When something is wrong — a missing device, btrfs errors, or a SMART warning — braid detects it and beeps until you acknowledge it.
+
+**How it works:**
+
+- `braid monitor` checks btrfs device stats, missing devices, and SMART alerts. Exits 0 (healthy or pool offline), 1 (alert active), or 2 (monitor error).
+- A systemd timer runs `braid monitor` every 5 minutes (configurable). On exit 1, it starts an audible beeper.
+- `braid status` shows an ALERT banner with cause details when an alert is active.
+- `braid ack` acknowledges the alert, silences the beeper, and sets a baseline so the same condition won't re-trigger.
+
+**PC speaker setup is automatic.** braid un-blacklists `pcspkr` (NixOS inherits Ubuntu's blacklist), loads the kernel module at boot, and creates a `beep` group with udev permissions for the PC Speaker evdev device. No manual setup needed.
+
+**Enabled by default.** When `braid.enable = true`, monitoring is active. To disable:
+
+```nix
+braid.monitor.enable = false;
+```
+
+**Configuration:**
+
+```nix
+braid.monitor = {
+  interval = "5min";       # polling interval (systemd time span)
+  alertCommand = null;     # optional command to run on alert (runs as root)
+};
+```
+
+**Example workflow:**
+
+```bash
+# NAS beeps — SSH in
+sudo braid status
+# ALERT -- disk health issue detected. Run 'braid ack' to acknowledge and silence.
+#   - missing device (devid 2)
+
+# Add replacement disk to config, rebuild, then:
+sudo braid replace --old bad-disk --new new-disk
+
+# Acknowledge the alert (stops beeping)
+sudo braid ack
+```
+
 ## Development
 
 Braid is developed test-first with NixOS VM tests.

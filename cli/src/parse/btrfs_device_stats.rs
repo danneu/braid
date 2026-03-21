@@ -1,14 +1,14 @@
 use nom::{
-    IResult,
     bytes::complete::take_till1,
     character::complete::{char, digit1, space1},
     combinator::eof,
+    IResult,
 };
 
 use crate::cmd::RawCommandOutput;
 
+use super::types::{BtrfsDeviceStatsOutput, DeviceErrorStats, DeviceStatsTarget};
 use super::ParseError;
-use super::types::{BtrfsDeviceStatsOutput, DeviceErrorStats};
 
 // Parses: "[/dev/mapper/braid-vda].write_io_errs    0"
 //      → ("/dev/mapper/braid-vda", "write_io_errs", "0")
@@ -35,9 +35,9 @@ pub fn parse_btrfs_device_stats(
         });
     }
 
-    // Collect stats keyed by device path, preserving order
-    let mut device_order: Vec<String> = Vec::new();
-    let mut stats_map: std::collections::HashMap<String, DeviceErrorStats> =
+    // Collect stats keyed by device target, preserving order
+    let mut device_order: Vec<DeviceStatsTarget> = Vec::new();
+    let mut stats_map: std::collections::HashMap<DeviceStatsTarget, DeviceErrorStats> =
         std::collections::HashMap::new();
 
     for line in raw.stdout.lines() {
@@ -51,16 +51,20 @@ pub fn parse_btrfs_device_stats(
                 detail: format!("unexpected device stats line: {trimmed:?}"),
             })?;
 
-        let device_path = device.to_owned();
+        let target = if device == "<missing disk>" {
+            DeviceStatsTarget::MissingDisk
+        } else {
+            DeviceStatsTarget::Path(device.to_owned())
+        };
         let value: u64 = value_str.parse().map_err(|_| ParseError::InvalidText {
             cmd: raw.cmd.clone(),
             detail: format!("non-numeric stat value in: {trimmed:?}"),
         })?;
 
-        let entry = stats_map.entry(device_path.clone()).or_insert_with(|| {
-            device_order.push(device_path.clone());
+        let entry = stats_map.entry(target.clone()).or_insert_with(|| {
+            device_order.push(target.clone());
             DeviceErrorStats {
-                device_path: device_path.clone(),
+                target: target.clone(),
                 read_io_errs: 0,
                 write_io_errs: 0,
                 corruption_errs: 0,
@@ -81,7 +85,7 @@ pub fn parse_btrfs_device_stats(
 
     let devices = device_order
         .into_iter()
-        .map(|path| stats_map.remove(&path).unwrap())
+        .map(|t| stats_map.remove(&t).unwrap())
         .collect();
 
     Ok(BtrfsDeviceStatsOutput { devices })
@@ -111,9 +115,15 @@ mod tests {
         };
         let out = parse_btrfs_device_stats(&raw).unwrap();
         assert_eq!(out.devices.len(), 2);
-        assert_eq!(out.devices[0].device_path, "/dev/mapper/braid-vdb");
+        assert_eq!(
+            out.devices[0].target.as_path(),
+            Some("/dev/mapper/braid-vdb")
+        );
         assert_eq!(out.devices[0].read_io_errs, 0);
-        assert_eq!(out.devices[1].device_path, "/dev/mapper/braid-vdc");
+        assert_eq!(
+            out.devices[1].target.as_path(),
+            Some("/dev/mapper/braid-vdc")
+        );
     }
 
     // --- Synthetic tests (inline) ---
@@ -163,6 +173,36 @@ mod tests {
         assert_eq!(out.devices[0].read_io_errs, 2);
         assert_eq!(out.devices[0].write_io_errs, 0);
         // discard_errs (unknown) is silently dropped — not in DeviceErrorStats
+    }
+
+    /// Parser contract: `<missing disk>` sentinel is converted to
+    /// `DeviceStatsTarget::MissingDisk` at parse time so downstream code
+    /// never sees the raw string.
+    #[test]
+    fn device_stats_parses_missing_disk_sentinel() {
+        let raw = RawCommandOutput {
+            cmd: "btrfs device stats".into(),
+            stdout: "[/dev/mapper/braid-vda].write_io_errs    0\n\
+                     [/dev/mapper/braid-vda].read_io_errs     0\n\
+                     [/dev/mapper/braid-vda].flush_io_errs    0\n\
+                     [/dev/mapper/braid-vda].corruption_errs  0\n\
+                     [/dev/mapper/braid-vda].generation_errs  0\n\
+                     [<missing disk>].write_io_errs    0\n\
+                     [<missing disk>].read_io_errs     0\n\
+                     [<missing disk>].flush_io_errs    0\n\
+                     [<missing disk>].corruption_errs  0\n\
+                     [<missing disk>].generation_errs  0\n"
+                .into(),
+            stderr: String::new(),
+            exit_status: 0,
+        };
+        let out = parse_btrfs_device_stats(&raw).unwrap();
+        assert_eq!(out.devices.len(), 2);
+        assert_eq!(
+            out.devices[0].target,
+            DeviceStatsTarget::Path("/dev/mapper/braid-vda".to_owned())
+        );
+        assert_eq!(out.devices[1].target, DeviceStatsTarget::MissingDisk);
     }
 
     #[test]

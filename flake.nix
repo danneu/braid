@@ -338,6 +338,12 @@
           repro-cryptsetup-close-btrfs-held = pkgs.testers.nixosTest (
             import ./tests/repro/cryptsetup-close-btrfs-held.nix
           );
+          repro-kernel-journal-write-error = pkgs.testers.nixosTest (
+            import ./tests/repro/kernel-journal-write-error.nix
+          );
+          repro-kernel-journal-bad-sector = pkgs.testers.nixosTest (
+            import ./tests/repro/kernel-journal-bad-sector.nix
+          );
           luks-label = pkgs.testers.nixosTest (
             import ./tests/cli/luks-label.nix {
               braid = linuxCrane.braid;
@@ -377,6 +383,43 @@
             import ./tests/module/auto-unlock-key-wrong.nix {
               braid = linuxCrane.braid-cli-unwrapped;
             }
+          );
+          braid-monitor = pkgs.testers.nixosTest (
+            import ./tests/cli/braid-monitor.nix {
+              braid = linuxCrane.braid;
+            }
+          );
+          braid-smartd-alert = pkgs.testers.nixosTest (
+            import ./tests/cli/braid-smartd-alert.nix {
+              braid = linuxCrane.braid;
+            }
+          );
+          braid-alert = pkgs.testers.nixosTest (
+            import ./tests/module/braid-alert.nix {
+              braid = linuxCrane.braid-cli-unwrapped;
+            }
+          );
+          braid-smartd-config = pkgs.testers.nixosTest (
+            import ./tests/module/smartd-config.nix {
+              braid = linuxCrane.braid-cli-unwrapped;
+            }
+          );
+        }
+        # These 4 tests use QEMU device_del for hot-unplug simulation.
+        # aarch64 QEMU's pcie.0 bus doesn't support hotplugging, so they
+        # only work on x86_64 (i440fx/q35 chipset).
+        // nixpkgs.lib.optionalAttrs (system == "x86_64-linux") {
+          repro-kernel-journal-missing-disk-idle = pkgs.testers.nixosTest (
+            import ./tests/repro/kernel-journal-missing-disk-idle.nix
+          );
+          repro-kernel-journal-missing-disk-io = pkgs.testers.nixosTest (
+            import ./tests/repro/kernel-journal-missing-disk-io.nix
+          );
+          repro-udev-missing-disk-idle = pkgs.testers.nixosTest (
+            import ./tests/repro/udev-missing-disk-idle.nix
+          );
+          repro-udev-missing-disk-io = pkgs.testers.nixosTest (
+            import ./tests/repro/udev-missing-disk-io.nix
           );
         };
     in

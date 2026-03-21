@@ -102,14 +102,12 @@ with subtest("device remove progress observed"):
     initial_bytes = int(machine.succeed("cat /tmp/disk3-initial-bytes").strip())
     assert initial_bytes > 0, f"disk3 should have allocations, got {initial_bytes}"
 
-    # Start device remove in background, capturing PID and log for debug
+    # Start device remove in background and poll in the same shell command
+    # to eliminate host round-trip latency — the remove can finish in ~3s
+    # on fast VM I/O, so any gap between start and poll risks missing it.
     machine.succeed(
-        f"sh -c 'btrfs device remove /dev/mapper/disk3 {MOUNT} "
-        f"> {FIXTURE_DIR}/device-remove.log 2>&1 < /dev/null & echo $! > /tmp/device-remove.pid'"
-    )
-
-    # Poll inside VM shell — compare current allocation to initial baseline
-    machine.succeed(
+        f"btrfs device remove /dev/mapper/disk3 {MOUNT} "
+        f"> {FIXTURE_DIR}/device-remove.log 2>&1 < /dev/null & "
         f"initial=$(cat /tmp/disk3-initial-bytes); "
         f"for i in $(seq 1 2400); do "
         f"out=\"$(btrfs device usage --raw {MOUNT} 2>&1)\" || {{ sleep 0.05; continue; }}; "
