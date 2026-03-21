@@ -411,6 +411,11 @@
               braid = linuxCrane.braid-cli-unwrapped;
             }
           );
+          braid-smartd-config = pkgs.testers.nixosTest (
+            import ./tests/module/smartd-config.nix {
+              braid = linuxCrane.braid-cli-unwrapped;
+            }
+          );
         };
     in
     {

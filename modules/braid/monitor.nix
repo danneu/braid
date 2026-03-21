@@ -73,7 +73,11 @@ in
     services.smartd = {
       enable = lib.mkDefault true;
       defaults.monitored = lib.mkDefault
-        "-a -o on -S on -m root -M exec ${smartdAlertScript}";
+        "-a -o on -S on -m <nomailer> -M exec ${smartdAlertScript}";
+      # Suppress the NixOS smartd module's own notification handlers.
+      # Without these, installing an MTA (e.g. postfix) would cause the
+      # module to prepend a second -m/-M exec pair to every config line.
+      notifications.mail.enable = lib.mkDefault false;
       notifications.wall.enable = lib.mkDefault false;
     };
   };
