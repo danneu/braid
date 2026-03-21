@@ -411,6 +411,8 @@ braid has first-class alerts for disk health. When something is wrong — a miss
 - `braid status` shows an ALERT banner with cause details when an alert is active.
 - `braid ack` acknowledges the alert, silences the beeper, and sets a baseline so the same condition won't re-trigger.
 
+**PC speaker setup is automatic.** braid un-blacklists `pcspkr` (NixOS inherits Ubuntu's blacklist), loads the kernel module at boot, and creates a `beep` group with udev permissions for the PC Speaker evdev device. No manual setup needed.
+
 **Enabled by default.** When `braid.enable = true`, monitoring is active. To disable:
 
 ```nix
@@ -422,7 +424,7 @@ braid.monitor.enable = false;
 ```nix
 braid.monitor = {
   interval = "5min";       # polling interval (systemd time span)
-  alertCommand = null;     # optional custom command to run on alert
+  alertCommand = null;     # optional command to run on alert (runs as root)
 };
 ```
 

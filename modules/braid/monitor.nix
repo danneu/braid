@@ -26,6 +26,29 @@ in
   };
 
   config = lib.mkIf (cfg.enable && cfg.monitor.enable) {
+    # --- PC speaker setup ---
+    # NixOS inherits Ubuntu's kmod blacklist which blocks pcspkr by default.
+    # Same overlay pattern nixpkgs uses for i2c_i801.
+    nixpkgs.overlays = [
+      (_final: prev: {
+        kmod-blacklist-ubuntu = prev.kmod-blacklist-ubuntu.overrideAttrs (old: {
+          installPhase = old.installPhase + ''
+            sed -i '/^blacklist pcspkr/d' $out/modprobe.conf
+          '';
+        });
+      })
+    ];
+
+    boot.kernelModules = [ "pcspkr" ];
+
+    # beep refuses to run as root — grant the beep group write access to
+    # the PC Speaker evdev device so the alert service can beep unprivileged.
+    users.groups.beep = {};
+
+    services.udev.extraRules = ''
+      ACTION=="add", SUBSYSTEM=="input", ATTRS{name}=="PC Speaker", ENV{DEVNAME}!="", GROUP="beep", MODE="0620"
+    '';
+
     # --- Alert service (the beeper) ---
     systemd.services.braid-alert = {
       description = "Braid disk health alert (audible beep)";
@@ -36,7 +59,7 @@ in
           ${cfg.monitor.alertCommand} || true
         ''}
         while true; do
-          ${pkgs.beep}/bin/beep -f 1000 -l 500 2>/dev/null || true
+          ${pkgs.util-linux}/bin/setpriv --reuid=nobody --regid=beep --groups=beep -- ${pkgs.beep}/bin/beep -f 1000 -l 500 2>/dev/null || true
           sleep 5
         done
       '';

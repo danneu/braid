@@ -29,6 +29,7 @@ in
       package = braid;
       disks = lib.genAttrs diskNames (d: { byId = "/dev/disk/by-id/virtio-${d}"; });
       monitor.enable = true;
+      monitor.alertCommand = "touch /root/alert-fired";
     };
 
     virtualisation.emptyDiskImages = [
