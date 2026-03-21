@@ -8,11 +8,12 @@
 # "configured pool drive disappeared", it needs evidence that a useful block
 # event appears immediately on disappearance without probing disks.
 #
-# Scenario: A 3-disk RAID1 pool is mounted normally. QEMU deletes the host
-# backing drive for one member while the guest-visible block device remains
-# present. A background `udevadm monitor` capture runs before injection and is
-# stopped shortly after. The test prints all captured block events plus a
-# filtered subset related to the removed disk, but does not require any match.
+# Scenario: A 3-disk RAID1 pool is mounted normally. QEMU sends an ACPI
+# hot-unplug via `device_del` for one member, triggering the proper kernel
+# device-removal path (same as physical SATA hot-unplug). A background
+# `udevadm monitor` capture runs before injection and is stopped shortly after.
+# The test asserts that at least one udev ACTION=remove event fires for the
+# victim disk.
 
 start_all()
 machine.wait_for_unit("multi-user.target")
@@ -20,23 +21,18 @@ machine.wait_for_unit("multi-user.target")
 passphrase = "testpassphrase"
 mount = "/mnt/storage"
 log_path = "/tmp/udev-monitor.log"
-victim_by_id = "/dev/disk/by-id/virtio-disk3"
 disks = ["disk1", "disk2", "disk3"]
 
-
-def qemu_drive_for_image(image_name):
-    out = machine.send_monitor_command("info block")
-    print(f"QEMU info block:\n{out}")
-    for line in out.splitlines():
-        line = line.strip()
-        if line.startswith("drive") and image_name in line:
-            return line.split(":", 1)[0]
-    raise AssertionError(f"Could not find QEMU drive for image {image_name!r} in:\n{out}")
+victim = {
+    "device_id": "disk2dev",
+    "by_id": "/dev/disk/by-id/virtio-disk2",
+    "mapper": "/dev/mapper/disk2",
+    "label": "disk2",
+}
 
 
-def delete_backing_drive(image_name):
-    drive = qemu_drive_for_image(image_name)
-    machine.send_monitor_command(f"drive_del {drive}")
+def hot_unplug_device(device_id):
+    machine.send_monitor_command(f"device_del {device_id}")
 
 
 def start_udev_monitor():
@@ -107,6 +103,19 @@ def relevant_blocks(blocks, candidates):
     return out
 
 
+def is_victim_remove(event):
+    return (
+        event.get("ACTION") == "remove"
+        and victim["label"]
+        in (
+            event.get("DEVNAME", "")
+            + event.get("DM_NAME", "")
+            + event.get("ID_SERIAL", "")
+            + event.get("DEVLINKS", "")
+        )
+    )
+
+
 with subtest("Setup: 3-disk LUKS + btrfs RAID1 pool mounted normally"):
     for name in disks:
         dev = f"/dev/disk/by-id/virtio-{name}"
@@ -127,18 +136,18 @@ with subtest("Setup: 3-disk LUKS + btrfs RAID1 pool mounted normally"):
     machine.succeed(f"echo 'healthy data' > {mount}/healthy.txt")
     machine.succeed("sync")
 
-with subtest("Start background udev monitor before disappearance injection"):
-    victim_devname = machine.succeed(f"readlink -f {victim_by_id}").strip()
-    print(f"Victim by-id path: {victim_by_id}")
+with subtest("Start background udev monitor before hot-unplug"):
+    victim_devname = machine.succeed(f"readlink -f {victim['by_id']}").strip()
+    print(f"Victim by-id path: {victim['by_id']}")
     print(f"Victim raw device path before disappearance: {victim_devname}")
     monitor_pid = start_udev_monitor()
     print(f"udevadm monitor pid: {monitor_pid}")
 
-with subtest("Delete one backing drive while mounted, with no follow-up I/O"):
-    delete_backing_drive("empty2.qcow2")
-    machine.succeed("sleep 2")
+with subtest("Hot-unplug one disk while mounted, with no follow-up I/O"):
+    hot_unplug_device(victim["device_id"])
+    machine.wait_until_fails(f"test -e {victim['by_id']}", timeout=10)
 
-with subtest("Pool remains mounted after backing drive deletion"):
+with subtest("Pool remains mounted after device removal"):
     machine.succeed(f"mountpoint -q {mount}")
 
 with subtest("Stop monitor and print captured block events"):
@@ -150,12 +159,12 @@ with subtest("Stop monitor and print captured block events"):
     print_event_blocks("All captured block-event blocks", blocks)
 
     candidates = [
-        victim_by_id,
+        victim["by_id"],
         victim_devname,
-        "disk3",
-        "virtio-disk3",
-        "/dev/mapper/disk3",
-        "DM_NAME=disk3",
+        victim["label"],
+        f"virtio-{victim['label']}",
+        victim["mapper"],
+        f"DM_NAME={victim['label']}",
         "ACTION=remove",
         "ACTION=change",
     ]
@@ -183,5 +192,8 @@ with subtest("Stop monitor and print captured block events"):
                 ]
             }
         )
+
+    remove_events = [e for e in parsed if is_victim_remove(e)]
+    assert len(remove_events) > 0, "Expected udev ACTION=remove event for victim disk"
 
 machine.shutdown()

@@ -7,11 +7,12 @@
 # missing-device detection, passive monitoring would need the kernel journal to
 # surface disappearance events without requiring active probing.
 #
-# Scenario: A 3-disk RAID1 pool is mounted normally. QEMU deletes the host
-# backing drive for one member while the guest-visible block device remains
-# present. No follow-up filesystem I/O is forced. The test then inspects only
-# the post-marker kernel journal to see whether the disappearance itself emits
-# useful structured kernel evidence.
+# Scenario: A 3-disk RAID1 pool is mounted normally. QEMU sends an ACPI
+# hot-unplug via `device_del` for one member, triggering the proper kernel
+# device-removal path (same as physical SATA hot-unplug). No follow-up
+# filesystem I/O is forced. The test then inspects only the post-marker kernel
+# journal to see whether the disappearance itself emits useful structured
+# kernel evidence.
 
 import json
 
@@ -24,9 +25,16 @@ mount = "/mnt/storage"
 marker = "BRAID_REPRO_MISSING_IDLE_START"
 disks = ["disk1", "disk2", "disk3"]
 
+victim = {
+    "device_id": "disk2dev",
+    "by_id": "/dev/disk/by-id/virtio-disk2",
+    "mapper": "/dev/mapper/disk2",
+    "label": "disk2",
+}
+
 
 def kernel_entries_after_marker():
-    raw = machine.succeed("journalctl -k -o json --no-pager")
+    raw = machine.succeed("journalctl -o json --no-pager")
     entries = []
     for line in raw.splitlines():
         line = line.strip()
@@ -50,7 +58,7 @@ def kernel_entries_after_marker():
 
 
 def kernel_marker_present():
-    raw = machine.succeed("journalctl -k -o json --no-pager")
+    raw = machine.succeed("journalctl -o json --no-pager")
     for line in raw.splitlines():
         line = line.strip()
         if not line:
@@ -64,19 +72,8 @@ def kernel_marker_present():
     return False
 
 
-def qemu_drive_for_image(image_name):
-    out = machine.send_monitor_command("info block")
-    print(f"QEMU info block:\n{out}")
-    for line in out.splitlines():
-        line = line.strip()
-        if line.startswith("drive") and image_name in line:
-            return line.split(":", 1)[0]
-    raise AssertionError(f"Could not find QEMU drive for image {image_name!r} in:\n{out}")
-
-
-def delete_backing_drive(image_name):
-    drive = qemu_drive_for_image(image_name)
-    machine.send_monitor_command(f"drive_del {drive}")
+def hot_unplug_device(device_id):
+    machine.send_monitor_command(f"device_del {device_id}")
 
 
 def print_interesting(entries):
@@ -134,12 +131,13 @@ with subtest("Setup: 3-disk LUKS + btrfs RAID1 pool mounted normally"):
     machine.succeed(f"echo 'healthy data' > {mount}/healthy.txt")
     machine.succeed("sync")
 
-with subtest("Delete one backing drive while mounted, with no follow-up I/O"):
+with subtest("Hot-unplug one disk while mounted, with no follow-up I/O"):
     machine.succeed(f"printf '<6>{marker}\\n' > /dev/kmsg")
-    delete_backing_drive("empty2.qcow2")
-    machine.succeed("sleep 1")
+    hot_unplug_device(victim["device_id"])
+    machine.wait_until_fails(f"test -e {victim['by_id']}", timeout=10)
+    machine.succeed("journalctl --sync")
 
-with subtest("Pool remains mounted after backing drive deletion"):
+with subtest("Pool remains mounted after device removal"):
     machine.succeed(f"mountpoint -q {mount}")
 
 with subtest("Kernel journal after marker is captured for analysis"):
@@ -148,5 +146,8 @@ with subtest("Kernel journal after marker is captured for analysis"):
     interesting = print_interesting(entries)
     print(f"Found {len(entries)} total kernel entries after quiet disappearance")
     print(f"Found {len(interesting)} interesting entries after quiet disappearance")
+    # Virtio PCI hot-unplug with no follow-up I/O produces no journal entries.
+    # The device IS removed (confirmed by wait_until_fails on by-id symlink above),
+    # but the journal is silent. This is the expected finding for idle disappearance.
 
 machine.shutdown()

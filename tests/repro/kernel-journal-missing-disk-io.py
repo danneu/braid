@@ -9,10 +9,11 @@
 # post-disappearance I/O reliably produces journal evidence that braid could
 # alert on without `btrfs filesystem show`.
 #
-# Scenario: A 3-disk RAID1 pool is mounted normally. QEMU deletes the host
-# backing drive for one member while the guest-visible block device remains
-# present. The test then forces a read and a write+fsync on the mounted
-# filesystem, and inspects only the post-marker kernel journal.
+# Scenario: A 3-disk RAID1 pool is mounted normally. QEMU sends an ACPI
+# hot-unplug via `device_del` for one member, triggering the proper kernel
+# device-removal path (same as physical SATA hot-unplug). The test then forces
+# a read and a write+fsync on the mounted filesystem, and inspects only the
+# post-marker kernel journal.
 
 import json
 
@@ -23,12 +24,19 @@ machine.wait_for_unit("multi-user.target")
 passphrase = "testpassphrase"
 mount = "/mnt/storage"
 marker = "BRAID_REPRO_MISSING_IO_START"
-victim = f"{mount}/victim.txt"
+victim_file = f"{mount}/victim.txt"
 disks = ["disk1", "disk2", "disk3"]
+
+victim = {
+    "device_id": "disk2dev",
+    "by_id": "/dev/disk/by-id/virtio-disk2",
+    "mapper": "/dev/mapper/disk2",
+    "label": "disk2",
+}
 
 
 def kernel_entries_after_marker():
-    raw = machine.succeed("journalctl -k -o json --no-pager")
+    raw = machine.succeed("journalctl -o json --no-pager")
     entries = []
     for line in raw.splitlines():
         line = line.strip()
@@ -52,7 +60,7 @@ def kernel_entries_after_marker():
 
 
 def kernel_marker_present():
-    raw = machine.succeed("journalctl -k -o json --no-pager")
+    raw = machine.succeed("journalctl -o json --no-pager")
     for line in raw.splitlines():
         line = line.strip()
         if not line:
@@ -66,19 +74,8 @@ def kernel_marker_present():
     return False
 
 
-def qemu_drive_for_image(image_name):
-    out = machine.send_monitor_command("info block")
-    print(f"QEMU info block:\n{out}")
-    for line in out.splitlines():
-        line = line.strip()
-        if line.startswith("drive") and image_name in line:
-            return line.split(":", 1)[0]
-    raise AssertionError(f"Could not find QEMU drive for image {image_name!r} in:\n{out}")
-
-
-def delete_backing_drive(image_name):
-    drive = qemu_drive_for_image(image_name)
-    machine.send_monitor_command(f"drive_del {drive}")
+def hot_unplug_device(device_id):
+    machine.send_monitor_command(f"device_del {device_id}")
 
 
 def interesting_entries(entries):
@@ -116,19 +113,20 @@ with subtest("Setup: 3-disk LUKS + btrfs RAID1 pool mounted normally"):
     )
     machine.succeed(f"mkdir -p {mount}")
     machine.succeed(f"mount /dev/mapper/disk1 {mount}")
-    machine.succeed(f"echo 'victim data' > {victim}")
+    machine.succeed(f"echo 'victim data' > {victim_file}")
     machine.succeed("sync")
 
-with subtest("Delete one backing drive while mounted"):
+with subtest("Hot-unplug one disk while mounted"):
     machine.succeed(f"printf '<6>{marker}\\n' > /dev/kmsg")
-    delete_backing_drive("empty2.qcow2")
-    machine.succeed("sleep 1")
+    hot_unplug_device(victim["device_id"])
+    machine.wait_until_fails(f"test -e {victim['by_id']}", timeout=10)
+    machine.succeed("journalctl --sync")
 
-with subtest("Pool remains mounted after backing drive deletion"):
+with subtest("Pool remains mounted after device removal"):
     machine.succeed(f"mountpoint -q {mount}")
 
 with subtest("Follow-up read and write exercise the degraded filesystem"):
-    read_back = machine.succeed(f"cat {victim}").strip()
+    read_back = machine.succeed(f"cat {victim_file}").strip()
     assert read_back == "victim data", f"Expected victim data, got: {read_back}"
     machine.succeed(
         f"dd if=/dev/zero of={mount}/post-fail.bin bs=1M count=8 conv=fsync status=none"
@@ -159,5 +157,6 @@ with subtest("Kernel journal after marker is captured for analysis"):
         )
     print(f"Found {len(entries)} total kernel entries after disappearance + I/O")
     print(f"Found {len(interesting)} interesting entries after disappearance + I/O")
+    assert len(interesting) > 0, "Expected kernel journal entries about device removal"
 
 machine.shutdown()
