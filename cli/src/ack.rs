@@ -1,9 +1,7 @@
 use std::collections::BTreeMap;
-use std::path::Path;
 
 use crate::alert::{self, save_acked_stats, snapshot_current};
 use crate::cmd::{CmdRequest, CommandRunner};
-use crate::journal;
 use crate::parse::parse_btrfs_device_stats;
 use crate::probe::{probe_pool, ProbeError};
 use crate::types::MountPoint;
@@ -46,20 +44,14 @@ pub fn cmd_ack<R: CommandRunner>(runner: &R, mount_point: &str) -> Result<(), Ac
     let new_acked = snapshot_current(&device_stats, missing_devids, &path_to_devid)?;
     save_acked_stats(&new_acked)?;
 
-    // 7. Advance journal cursor to now
-    let cursor_path = Path::new(journal::CURSOR_FILE);
-    if let Err(e) = journal::advance_cursor_to_now(cursor_path) {
-        eprintln!("Warning: failed to advance journal cursor: {e}");
-    }
-
-    // 8. Remove smartd alert flag + alert latch
+    // 7. Remove smartd alert flag + alert latch
     alert::remove_smartd_alert_flag()?;
     alert::remove_alert_latch()?;
 
-    // 9. Stop beeper (best-effort)
+    // 8. Stop beeper (best-effort)
     stop_beeper();
 
-    // 10. Print confirmation using latch count
+    // 9. Print confirmation using latch count
     if latch_count > 0 {
         println!("acknowledged {latch_count} alert(s)");
     } else {
@@ -75,12 +67,6 @@ fn ack_offline(latch_count: usize) -> Result<(), AckError> {
     let has_alert = latch_count > 0 || smartd_active;
     if !has_alert {
         return Err(AckError::PoolNotMounted);
-    }
-
-    // Advance journal cursor to now
-    let cursor_path = Path::new(journal::CURSOR_FILE);
-    if let Err(e) = journal::advance_cursor_to_now(cursor_path) {
-        eprintln!("Warning: failed to advance journal cursor: {e}");
     }
 
     alert::remove_alert_latch()?;

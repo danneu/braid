@@ -396,11 +396,6 @@
               braid = linuxCrane.braid-cli-unwrapped;
             }
           );
-          braid-journal-alert = pkgs.testers.nixosTest (
-            import ./tests/cli/braid-journal-alert.nix {
-              braid = linuxCrane.braid;
-            }
-          );
           braid-monitor = pkgs.testers.nixosTest (
             import ./tests/cli/braid-monitor.nix {
               braid = linuxCrane.braid;
