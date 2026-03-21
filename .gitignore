@@ -8,3 +8,5 @@ result-*
 /.claude/worktrees
 /tests/hw/__pycache__
 target/
+/tests/repro/__pycache__
+/reference/btrfs-progs

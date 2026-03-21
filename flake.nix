@@ -344,6 +344,18 @@
           repro-kernel-journal-bad-sector = pkgs.testers.nixosTest (
             import ./tests/repro/kernel-journal-bad-sector.nix
           );
+          repro-kernel-journal-missing-disk-idle = pkgs.testers.nixosTest (
+            import ./tests/repro/kernel-journal-missing-disk-idle.nix
+          );
+          repro-kernel-journal-missing-disk-io = pkgs.testers.nixosTest (
+            import ./tests/repro/kernel-journal-missing-disk-io.nix
+          );
+          repro-udev-missing-disk-idle = pkgs.testers.nixosTest (
+            import ./tests/repro/udev-missing-disk-idle.nix
+          );
+          repro-udev-missing-disk-io = pkgs.testers.nixosTest (
+            import ./tests/repro/udev-missing-disk-io.nix
+          );
           luks-label = pkgs.testers.nixosTest (
             import ./tests/cli/luks-label.nix {
               braid = linuxCrane.braid;
