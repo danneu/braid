@@ -60,7 +60,7 @@ in
         ''}
         while true; do
           ${pkgs.util-linux}/bin/setpriv --reuid=nobody --regid=beep --groups=beep -- ${pkgs.beep}/bin/beep -f 1000 -l 500 2>/dev/null || true
-          sleep 5
+          sleep 15
         done
       '';
     };
