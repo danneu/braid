@@ -411,22 +411,33 @@ impl CmdRequest {
             CmdRequest::Mount {
                 device,
                 mount_point,
-            } => CmdArgs {
-                program: "mount",
-                args: vec![device.clone(), mount_point.0.clone()],
-            },
+            } => {
+                // noatime: relatime (default) turns reads into CoW metadata
+                // writes across all RAID1 drives, preventing HDD spindown.
+                let args = vec![
+                    "-o".into(),
+                    "noatime".into(),
+                    device.clone(),
+                    mount_point.0.clone(),
+                ];
+                CmdArgs {
+                    program: "mount",
+                    args,
+                }
+            }
             CmdRequest::MountWithOptions {
                 device,
                 mount_point,
                 options,
             } => {
-                let mut args = Vec::new();
-                if !options.is_empty() {
-                    args.push("-o".into());
-                    args.push(options.join(","));
-                }
-                args.push(device.clone());
-                args.push(mount_point.0.clone());
+                let mut all_options = vec!["noatime".to_owned()];
+                all_options.extend(options.iter().cloned());
+                let args = vec![
+                    "-o".into(),
+                    all_options.join(","),
+                    device.clone(),
+                    mount_point.0.clone(),
+                ];
                 CmdArgs {
                     program: "mount",
                     args,

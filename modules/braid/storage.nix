@@ -29,6 +29,11 @@ in
       fsType = "btrfs";
       options = [
         "nofail"
+        # noatime: the default (relatime) updates the access timestamp on
+        # first read after a write — on a NAS serving files, that turns every
+        # read into a CoW metadata write across all RAID1 drives, preventing
+        # HDD spindown. noatime makes reads truly passive.
+        "noatime"
         "x-systemd.requires=btrfs-device-scan.service"
         "x-systemd.after=btrfs-device-scan.service"
       ]

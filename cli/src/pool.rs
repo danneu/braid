@@ -1,6 +1,6 @@
 use crate::cmd::{CmdError, CmdRequest, CommandRunner};
 use crate::probe::probe_pool;
-use crate::progress::{run_replace_with_progress, run_with_progress, ProgressOutput};
+use crate::progress::{ProgressOutput, run_replace_with_progress, run_with_progress};
 use crate::types::MountPoint;
 
 #[derive(Debug, thiserror::Error)]
@@ -459,7 +459,8 @@ mod tests {
                     })
                 }
                 CmdRequest::BtrfsFilesystemShow { .. } => {
-                    let mut lines = String::from("Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n");
+                    let mut lines =
+                        String::from("Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n");
                     let total = self.post_present_count as u64 + self.post_missing_count;
                     lines.push_str(&format!("\tTotal devices {total} FS bytes used 16.17MiB\n"));
                     for i in 0..self.post_present_count {
