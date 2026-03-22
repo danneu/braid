@@ -39,6 +39,8 @@
       options = [
         "degraded"
         "nofail"
+        "noatime"
+        "skip_balance"
         "x-systemd.device-timeout=1s"
         "x-systemd.requires=btrfs-device-scan.service"
         "x-systemd.after=btrfs-device-scan.service"

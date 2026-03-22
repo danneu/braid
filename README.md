@@ -271,6 +271,14 @@ One passphrase prompt opens all available LUKS devices and mounts the pool. Work
 
 When unlocking on a fresh system (e.g., after migrating disks to a new machine), `unlock` automatically rebuilds the disk identity map from live pool state. Each disk's on-disk LUKS label is verified before recording.
 
+Interrupted balance operations (e.g., from a crash or `braid lock` during rebalance) are **never silently resumed** on unlock. braid mounts with `skip_balance` and warns if a paused balance is detected:
+
+```
+[warn]  paused balance detected — will not auto-resume
+           resume:  btrfs balance resume /mnt/storage
+           cancel:  btrfs balance cancel /mnt/storage
+```
+
 ## Auto-unlock with USB keyfile
 
 For unattended reboots, a binary random keyfile on a removable USB device can auto-unlock the pool without typing a passphrase.

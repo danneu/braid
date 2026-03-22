@@ -17,6 +17,7 @@ Declare the disk in `braid.disks` (named attrset) before formatting it. `nixos-r
 - Disk names are immutable once recorded in braid state; name rename/reassignment is rejected by mutating commands and must use explicit `replace` or `remove`+`add` workflows.
 - `mkfs.btrfs` is gated on bootstrap only (no existing superblock).
 - An existing LUKS device or pool member is never reformatted — a multi-layer identity check (LUKS label match, pool-mounted requirement, btrfs FSID comparison) prevents accidental data loss, with the btrfs superblock guard as defense-in-depth.
+- Mounts always include `skip_balance` — btrfs silently resumes interrupted balances on mount by default, which can re-trigger ENOSPC or surprise the user with heavy I/O. braid manages balance lifecycle explicitly; `unlock` warns if a paused balance is detected.
 - [Why →](decisions/intent-cli.md)
 
 ## 4. Single passphrase

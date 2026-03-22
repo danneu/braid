@@ -82,6 +82,10 @@ with subtest("Test 1: happy path — all locked, unlock opens everything"):
     content = machine.succeed("cat /mnt/storage/test.txt").strip()
     assert content == "persistent data", f"Expected 'persistent data', got '{content}'"
 
+    # skip_balance must appear in mount options
+    opts = machine.succeed("findmnt -o OPTIONS -n /mnt/storage").strip()
+    assert "skip_balance" in opts, f"Expected skip_balance in mount options, got: {opts}"
+
 # --- Test 2: Idempotent ---
 
 with subtest("Test 2: idempotent — unlock again is a no-op"):
@@ -302,5 +306,58 @@ with subtest("Test 7: uninitialized disk detected"):
     assert ret[0] != 0, "Expected non-zero exit for uninitialized disk"
     assert "not initialized" in ret[1], \
         f"Expected 'not initialized' in output, got: {ret}"
+
+# --- Test 8: Paused balance survives unlock (skip_balance) ---
+
+with subtest("Test 8: paused balance survives unlock"):
+    close_all()
+    machine.succeed(unlock_cmd(passphrase))
+
+    # Write enough data to create multiple chunks so balance takes time
+    machine.succeed(
+        "dd if=/dev/urandom of=/mnt/storage/balancedata bs=1M count=50"
+    )
+    machine.succeed("sync")
+
+    # Start a converting balance in background (nohup keeps it alive after
+    # the shell exits, matching the pattern in braid-lock-umount-busy.py)
+    machine.execute(
+        "nohup btrfs balance start -dconvert=single /mnt/storage "
+        "> /tmp/balance.log 2>&1 & echo $!"
+    )
+
+    # Wait until balance is actually running before pausing
+    import time
+    for _ in range(30):
+        ret = machine.execute("btrfs balance status /mnt/storage")
+        if "running" in ret[1].lower() or "paused" in ret[1].lower():
+            break
+        time.sleep(0.2)
+    else:
+        raise Exception("Balance never entered running state")
+
+    machine.succeed("btrfs balance pause /mnt/storage")
+
+    # Verify balance is paused
+    status = machine.succeed("btrfs balance status /mnt/storage")
+    assert "paused" in status.lower(), f"Expected paused balance, got: {status}"
+
+    # Lock and re-unlock
+    close_all()
+    ret = machine.execute(unlock_cmd(passphrase) + " 2>&1")
+    assert ret[0] == 0, f"Unlock failed: {ret[1]}"
+
+    # Balance must still be paused (not resumed by kernel)
+    status = machine.succeed("btrfs balance status /mnt/storage")
+    assert "paused" in status.lower(), \
+        f"Expected balance still paused after unlock, got: {status}"
+
+    # Warning text must have been emitted
+    assert "paused balance" in ret[1], \
+        f"Expected paused balance warning, got: {ret[1]}"
+
+    # Clean up: cancel the paused balance and remove test data
+    machine.succeed("btrfs balance cancel /mnt/storage")
+    machine.succeed("rm /mnt/storage/balancedata")
 
 machine.shutdown()

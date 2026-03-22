@@ -34,6 +34,9 @@ in
         # read into a CoW metadata write across all RAID1 drives, preventing
         # HDD spindown. noatime makes reads truly passive.
         "noatime"
+        # skip_balance: prevent the kernel from silently resuming an interrupted
+        # balance on mount. braid manages balance lifecycle explicitly.
+        "skip_balance"
         "x-systemd.requires=btrfs-device-scan.service"
         "x-systemd.after=btrfs-device-scan.service"
       ]

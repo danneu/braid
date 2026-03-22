@@ -178,6 +178,17 @@ pub struct CmdArgs {
     pub args: Vec<String>,
 }
 
+/// Base mount options braid always applies.
+///
+/// noatime: relatime (default) turns reads into CoW metadata writes across all
+/// RAID1 drives, preventing HDD spindown.
+///
+/// skip_balance: prevent the kernel from silently resuming an interrupted balance
+/// on mount. braid manages balance lifecycle explicitly.
+fn base_mount_options() -> Vec<String> {
+    vec!["noatime".to_owned(), "skip_balance".to_owned()]
+}
+
 impl CmdRequest {
     pub fn to_argv(&self) -> CmdArgs {
         match self {
@@ -412,11 +423,9 @@ impl CmdRequest {
                 device,
                 mount_point,
             } => {
-                // noatime: relatime (default) turns reads into CoW metadata
-                // writes across all RAID1 drives, preventing HDD spindown.
                 let args = vec![
                     "-o".into(),
-                    "noatime".into(),
+                    base_mount_options().join(","),
                     device.clone(),
                     mount_point.0.clone(),
                 ];
@@ -430,7 +439,7 @@ impl CmdRequest {
                 mount_point,
                 options,
             } => {
-                let mut all_options = vec!["noatime".to_owned()];
+                let mut all_options = base_mount_options();
                 all_options.extend(options.iter().cloned());
                 let args = vec![
                     "-o".into(),
@@ -1100,5 +1109,51 @@ mod tests {
         .to_argv();
         assert_eq!(cmd.program, "cryptsetup");
         assert_eq!(cmd.args, vec!["luksDump", "/dev/disk/by-id/disk1"]);
+    }
+
+    #[test]
+    // Intent: Mount always includes noatime and skip_balance.
+    // Why: skip_balance prevents the kernel from silently resuming an
+    // interrupted balance on mount — a safety-critical invariant.
+    // Scenario: normal unlock mounts the pool with base options only.
+    fn mount_includes_skip_balance() {
+        let cmd = CmdRequest::Mount {
+            device: "/dev/mapper/braid-disk1".to_owned(),
+            mount_point: MountPoint("/mnt/storage".to_owned()),
+        }
+        .to_argv();
+        assert_eq!(cmd.program, "mount");
+        assert_eq!(
+            cmd.args,
+            vec![
+                "-o",
+                "noatime,skip_balance",
+                "/dev/mapper/braid-disk1",
+                "/mnt/storage"
+            ]
+        );
+    }
+
+    #[test]
+    // Intent: MountWithOptions prepends noatime,skip_balance before caller options.
+    // Why: degraded mount must still include skip_balance.
+    // Scenario: degraded unlock adds -o degraded; base options must appear first.
+    fn mount_with_options_includes_skip_balance() {
+        let cmd = CmdRequest::MountWithOptions {
+            device: "/dev/mapper/braid-disk1".to_owned(),
+            mount_point: MountPoint("/mnt/storage".to_owned()),
+            options: vec!["degraded".to_owned()],
+        }
+        .to_argv();
+        assert_eq!(cmd.program, "mount");
+        assert_eq!(
+            cmd.args,
+            vec![
+                "-o",
+                "noatime,skip_balance,degraded",
+                "/dev/mapper/braid-disk1",
+                "/mnt/storage",
+            ]
+        );
     }
 }

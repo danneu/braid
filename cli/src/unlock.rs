@@ -1,5 +1,5 @@
 use crate::cmd::{CmdError, CmdRequest, CommandRunner};
-use crate::config::{Config, ConfigError, mapper_name};
+use crate::config::{mapper_name, Config, ConfigError};
 use crate::disk_map::{self, DiskMap};
 use crate::luks::{self, LuksError};
 use crate::pool::PoolError;
@@ -239,6 +239,22 @@ pub fn cmd_unlock<R: CommandRunner, F: Filesystem + ?Sized>(
 
     eprintln!("{}  {:<10}mounted {}", tag("ok"), "pool", mount_point);
 
+    // Best-effort: warn if a paused balance was found on mount.
+    // skip_balance prevents the kernel from resuming it silently, but the user
+    // should know so they can resume or cancel explicitly.
+    match crate::status::get_balance_report(runner, mount_point.as_str()) {
+        crate::status::BalanceReport::Paused { .. } => {
+            eprintln!(
+                "{}  {:<10}paused balance detected \u{2014} will not auto-resume",
+                tag("warn"),
+                ""
+            );
+            eprintln!("           resume:  btrfs balance resume {mount_point}");
+            eprintln!("           cancel:  btrfs balance cancel {mount_point}");
+        }
+        _ => {}
+    }
+
     // 7. Best-effort: populate disk-map for any config disks not yet recorded.
     //    Covers migration to a new machine where disk-map.json doesn't exist.
     //    Each entry is verified against the on-disk LUKS label before recording.
@@ -471,7 +487,19 @@ mod tests {
                     mount_point: MountPoint("/mnt/storage".to_owned()),
                     options: vec!["degraded".to_owned()],
                 },
-                ok_raw("mount -o noatime,degraded"),
+                ok_raw("mount -o noatime,skip_balance,degraded"),
+            )
+            // 7. balance status check after mount (best-effort)
+            .with_output(
+                CmdRequest::BtrfsBalanceStatus {
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                },
+                RawCommandOutput {
+                    cmd: "btrfs balance status".into(),
+                    stdout: "No balance found on '/mnt/storage'\n".into(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                },
             );
 
         // Write passphrase to a temp file for the test (avoid stdin TTY)
@@ -1080,5 +1108,148 @@ mod tests {
             !msg.contains("Wrong passphrase?"),
             "error should not say 'Wrong passphrase?', got: {msg}"
         );
+    }
+
+    /// Paused balance after unlock succeeds (warning is informational only).
+    ///
+    /// Intent: When a paused balance is detected after mount, unlock must still
+    /// return Ok(()) — the warning is informational, not an error.
+    ///
+    /// Why it exists: The post-mount balance check must not accidentally convert
+    /// an informational warning into a failure that breaks auto-unlock.
+    ///
+    /// Scenario: 3-disk RAID1, all healthy. A balance was paused before lock.
+    /// On re-unlock, skip_balance prevents kernel auto-resume, and the CLI
+    /// prints a warning. Unlock still succeeds.
+    #[test]
+    fn unlock_warns_on_paused_balance() {
+        let config = three_disk_config();
+        let disk_map = DiskMap::new();
+        let fs = MockFs::new(&[
+            "/dev/disk/by-id/virtio-disk1",
+            "/dev/disk/by-id/virtio-disk2",
+            "/dev/disk/by-id/virtio-disk3",
+        ]);
+
+        let runner = MockRunner::default()
+            // mountpoint check → not mounted
+            .with_output(
+                CmdRequest::MountpointCheck {
+                    path: MountPoint("/mnt/storage".to_owned()),
+                },
+                err_raw("mountpoint", 1, ""),
+            )
+            // probe: all 3 disks are LUKS
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                RawCommandOutput {
+                    cmd: "cryptsetup luksUUID".into(),
+                    stdout: "aaaaaaaa-1111-2222-3333-444444444444\n".into(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                },
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                },
+                RawCommandOutput {
+                    cmd: "cryptsetup luksUUID".into(),
+                    stdout: "bbbbbbbb-1111-2222-3333-444444444444\n".into(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                },
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk3".into(),
+                },
+                RawCommandOutput {
+                    cmd: "cryptsetup luksUUID".into(),
+                    stdout: "cccccccc-1111-2222-3333-444444444444\n".into(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                },
+            )
+            // verify passphrase
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw("cryptsetup open --test-passphrase"),
+            )
+            // open all 3 disks
+            .with_output_stdin(
+                CmdRequest::CryptsetupLuksOpen {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                    mapper: "braid-disk1".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw("cryptsetup open"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupLuksOpen {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                    mapper: "braid-disk2".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw("cryptsetup open"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupLuksOpen {
+                    device: "/dev/disk/by-id/virtio-disk3".into(),
+                    mapper: "braid-disk3".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw("cryptsetup open"),
+            )
+            // btrfs device scan
+            .with_output(CmdRequest::BtrfsDeviceScanAll, ok_raw("btrfs device scan"))
+            // normal mount (all present)
+            .with_output(
+                CmdRequest::Mount {
+                    device: "/dev/mapper/braid-disk1".into(),
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                },
+                ok_raw("mount -o noatime,skip_balance"),
+            )
+            // balance status → PAUSED
+            .with_output(
+                CmdRequest::BtrfsBalanceStatus {
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                },
+                RawCommandOutput {
+                    cmd: "btrfs balance status".into(),
+                    stdout: "Balance on '/mnt/storage' is paused\n\
+                             3 out of about 10 chunks balanced (7 considered), \
+                             70% left\n"
+                        .into(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                },
+            );
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        {
+            use std::io::Write;
+            tmp.as_file().write_all(b"testpass").unwrap();
+        }
+
+        let result = cmd_unlock(
+            &runner,
+            &fs,
+            &config,
+            &disk_map,
+            false,
+            Some(tmp.path()),
+            None,
+            false,
+        );
+
+        // The paused balance warning must not cause unlock to fail.
+        result.expect("unlock should succeed even with paused balance");
     }
 }
