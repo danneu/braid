@@ -8,6 +8,7 @@ pub mod disk_map;
 pub mod doctor;
 pub mod enroll_key_file;
 pub mod hdparm;
+pub mod idle;
 
 pub mod lock;
 pub mod luks;

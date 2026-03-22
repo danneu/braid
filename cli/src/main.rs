@@ -40,6 +40,8 @@ enum Commands {
     /// Enroll a binary keyfile into LUKS slot 1 on all pool disks
     #[command(name = "enroll")]
     EnrollKeyFile(EnrollKeyFileArgs),
+    /// Check if pool is idle (no scrub/balance/replace): exit 0 = idle, exit 1 = busy, exit 2 = error
+    Idle,
     /// Check disk health: exit 0 = ok/offline, exit 1 = alert, exit 2 = error
     Monitor,
     /// Acknowledge current alerts and silence notifications
@@ -383,6 +385,34 @@ fn main() {
             if let Err(e) = braid_cli::lock::cmd_lock(&runner, &fs, &config) {
                 print_cli_error(&e.to_string());
                 std::process::exit(1);
+            }
+        }
+        Commands::Idle => {
+            let config = match config_read(Path::new(&config_path)) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    std::process::exit(2);
+                }
+            };
+            let runner = RealRunner;
+            match braid_cli::idle::cmd_idle(&runner, config.mount_point().as_str()) {
+                Ok(braid_cli::idle::IdleResult::PoolOffline) => {
+                    println!("idle: pool is offline");
+                    std::process::exit(0);
+                }
+                Ok(braid_cli::idle::IdleResult::Idle) => {
+                    println!("idle: pool is idle");
+                    std::process::exit(0);
+                }
+                Ok(braid_cli::idle::IdleResult::Busy(reason)) => {
+                    println!("busy: {reason}");
+                    std::process::exit(1);
+                }
+                Err(e) => {
+                    print_cli_error(&e.to_string());
+                    std::process::exit(2);
+                }
             }
         }
         Commands::Monitor => {

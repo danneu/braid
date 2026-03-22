@@ -409,6 +409,16 @@
               braid = linuxCrane.braid-cli-unwrapped;
             }
           );
+          braid-idle = pkgs.testers.nixosTest (
+            import ./tests/cli/braid-idle.nix {
+              braid = linuxCrane.braid;
+            }
+          );
+          braid-auto-suspend = pkgs.testers.nixosTest (
+            import ./tests/module/braid-auto-suspend.nix {
+              braid = linuxCrane.braid-cli-unwrapped;
+            }
+          );
         }
         # These 4 tests use QEMU device_del for hot-unplug simulation.
         # aarch64 QEMU's pcie.0 bus doesn't support hotplugging, so they

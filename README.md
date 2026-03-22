@@ -471,6 +471,41 @@ sudo braid replace --old bad-disk --new new-disk
 sudo braid ack
 ```
 
+## Auto-Suspend
+
+braid can automatically suspend the NAS when idle and wake it on demand via Wake-on-LAN or for scheduled maintenance (monthly scrub).
+
+Uses [autosuspend](https://github.com/languitar/autosuspend) under the hood. braid configures it with the right checks for a NAS: btrfs operations, SSH sessions, SMB/NFS connections.
+
+```nix
+braid.autoSuspend = {
+  enable = true;
+  wolInterface = "eno1";  # your primary NIC (find with: ip link)
+};
+```
+
+**What it does:**
+
+- Suspends after 15 minutes of idle (configurable with `braid.autoSuspend.idleTime`)
+- Blocks suspend during: btrfs scrub, balance, replace, active SSH sessions
+- Auto-detects SMB clients (if `services.samba` enabled) and NFS clients (if `services.nfs.server` enabled)
+- Wakes the machine via RTC alarm for the monthly btrfs scrub timer
+- smartd and braid-monitor run opportunistically during wake windows
+
+**Prerequisites:** Wake-on-LAN must be enabled in your BIOS. braid handles the OS side automatically.
+
+**Configuration:**
+
+```nix
+braid.autoSuspend = {
+  enable = true;
+  wolInterface = "eno1";  # required — find with: ip link
+  idleTime = 900;         # seconds before suspend (default: 15 min)
+};
+```
+
+For additional idle checks beyond what braid configures, use `services.autosuspend.checks` directly.
+
 ## Usage/NAS recommendations
 
 ### Create btrfs subvolumes for different silos of data
