@@ -492,7 +492,7 @@ braid.autoSuspend = {
 - Wakes the machine via RTC alarm for the monthly btrfs scrub timer
 - smartd and braid-monitor run opportunistically during wake windows
 
-**Prerequisites:** Wake-on-LAN must be enabled in your BIOS. braid handles the OS side automatically.
+**Prerequisites:** Wake-on-LAN must be working — see [Wake-on-LAN troubleshooting](#wake-on-lan-troubleshooting) below.
 
 **Configuration:**
 
@@ -505,6 +505,104 @@ braid.autoSuspend = {
 ```
 
 For additional idle checks beyond what braid configures, use `services.autosuspend.checks` directly.
+
+### Wake-on-LAN troubleshooting
+
+Wake-on-LAN lets clients wake a suspended NAS by sending a magic packet. braid's auto-suspend feature relies on it.
+
+Getting WoL working on Linux often requires fixing multiple issues. For reference, a Gigabyte B550I AORUS PRO AX with an RTL8125 NIC needed all three fixes below: spurious ACPI wake sources, the vendor NIC driver, and PCI bridge wakeup.
+
+**BIOS:** Enable Wake on LAN and disable ErP (ErP cuts standby power to the NIC during sleep).
+
+**Test basic suspend first.** Many motherboards have ACPI wake sources that cause instant resume from suspend:
+
+```sh
+sudo systemctl suspend   # does it stay suspended?
+```
+
+If the system wakes immediately, find the culprit by disabling ACPI wake sources:
+
+```sh
+$ cat /proc/acpi/wakeup
+Device  S-state   Status   Sysfs node
+GP12      S4    *enabled   pci:0000:00:07.1
+XHC0      S4    *enabled   pci:0000:09:00.3     # ← USB controller
+GPP0      S4    *enabled   pci:0000:00:01.1     # ← PCIe bridge
+...
+
+$ echo XHC0 | sudo tee /proc/acpi/wakeup       # toggle one off
+$ sudo systemctl suspend                        # test again
+```
+
+Binary search until you find which source(s) cause the spurious wake. Common offenders: USB controllers (XHC, PTXH), PCIe bridges (GPP0). Once identified, disable them at boot:
+
+```nix
+# Example: XHC0 and GPP0 were causing instant wake on a B550I AORUS PRO AX.
+systemd.services.disable-spurious-wakeup = {
+  description = "Disable ACPI wake sources that cause spurious resume";
+  wantedBy = [ "multi-user.target" ];
+  serviceConfig = {
+    Type = "oneshot";
+    ExecStart = "${pkgs.bash}/bin/bash -c 'echo XHC0 > /proc/acpi/wakeup; echo GPP0 > /proc/acpi/wakeup'";
+  };
+};
+```
+
+**Test WoL.** From another machine on the same LAN:
+
+```sh
+# on the NAS — find MAC address and confirm WoL is enabled
+$ ip -brief link show
+lo               UNKNOWN        00:00:00:00:00:00
+eno1             UP             18:c0:4d:3e:88:07   # ← MAC address
+
+$ sudo ethtool eno1 | grep Wake-on
+        Supports Wake-on: pumbg
+        Wake-on: g                                   # ← "g" = magic packet, good
+
+# suspend the NAS
+$ sudo systemctl suspend
+
+# from a client (e.g. macOS)
+$ wakeonlan 18:c0:4d:3e:88:07   # brew install wakeonlan
+```
+
+**NIC driver.** If the NIC link light goes off during suspend and WoL doesn't work, the kernel driver may not be keeping the NIC powered. RTL8125 NICs are known to need the vendor `r8125` driver instead of the kernel's `r8169`:
+
+```nix
+boot.extraModulePackages = [ config.boot.kernelPackages.r8125 ];
+boot.blacklistedKernelModules = [ "r8169" ];
+```
+
+**PCI bridge wakeup.** WoL magic packets generate a PME (Power Management Event) that must propagate from the NIC through every PCI bridge to the CPU. If any bridge in the chain has wakeup disabled, the signal is silently dropped. Find your NIC's bridge chain and check:
+
+```sh
+$ readlink -f /sys/class/net/eno1/device
+/sys/devices/pci0000:00/0000:00:01.2/0000:02:00.2/0000:03:08.0/0000:05:00.0
+#                       ^^^^^^^^^^^^  ^^^^^^^^^^^^  ^^^^^^^^^^^^  ^^^^^^^^^^^^
+#                       bridge        bridge        bridge        NIC
+
+# check each bridge in the path (exclude the NIC itself)
+$ for p in /sys/devices/pci0000:00/0000:00:01.2/power/wakeup \
+           /sys/devices/pci0000:00/0000:00:01.2/0000:02:00.2/power/wakeup \
+           /sys/devices/pci0000:00/0000:00:01.2/0000:02:00.2/0000:03:08.0/power/wakeup; do
+    echo "$p: $(cat $p)"
+  done
+/sys/.../0000:00:01.2/power/wakeup: disabled     # ← problem
+/sys/.../0000:02:00.2/power/wakeup: disabled     # ← problem
+/sys/.../0000:03:08.0/power/wakeup: enabled      # ok
+```
+
+Any bridge showing `disabled` needs a udev rule to persist across reboots:
+
+```nix
+# Enable wakeup on PCI bridges so WoL magic packets propagate to the CPU.
+# Addresses are hardware-specific — find yours with: readlink -f /sys/class/net/<iface>/device
+services.udev.extraRules = ''
+  ACTION=="add", SUBSYSTEM=="pci", KERNEL=="0000:00:01.2", ATTR{power/wakeup}="enabled"
+  ACTION=="add", SUBSYSTEM=="pci", KERNEL=="0000:02:00.2", ATTR{power/wakeup}="enabled"
+'';
+```
 
 ## Usage/NAS recommendations
 
