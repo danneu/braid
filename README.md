@@ -62,8 +62,12 @@ Add braid to your flake inputs and import the module:
 braid = {
   enable = true;
   disks = {
-    toshiba  = { byId = "/dev/disk/by-id/ata-Toshiba_MN07_XXXX"; };
-    ironwolf = { byId = "/dev/disk/by-id/ata-Ironwolf_ST12_YYYY"; };
+    toshiba  = {
+      byId = "/dev/disk/by-id/ata-Toshiba_MN07_XXXX";
+    };
+    ironwolf = {
+      byId = "/dev/disk/by-id/ata-Ironwolf_ST12_YYYY";
+    };
   };
   mountPoint = "/mnt/storage";  # default
 };
@@ -452,6 +456,32 @@ sudo braid replace --old bad-disk --new new-disk
 # Acknowledge the alert (stops beeping)
 sudo braid ack
 ```
+
+## Usage/NAS recommendations
+
+### Create btrfs subvolumes for different silos of data
+
+Btrfs subvolumes are like directories that can be individually snapshotted and restored.
+
+Naive:
+
+```sh
+mkdir /mnt/storage/movies
+mkdir /mnt/storage/my-poetry
+```
+
+With subvolumes:
+
+```sh
+btrfs subvolume create /mnt/storage/movies
+btrfs subvolume create /mnt/storage/my-poetry
+```
+
+The subvolume approach lets you do things like snapshot and restore `my-poetry` without touching `movies`, back up just `my-poetry` offsite, or run different snapshot schedules for each (e.g. hourly for poetry, weekly for movies).
+
+Subvolumes look and act like regular directories — you read and write files the same way. The only difference is that btrfs tracks them independently, so you get granular control over snapshots, backups, and rollbacks.
+
+There's no cost to creating subvolumes upfront. They share the same disk space with no pre-allocation. It's much harder to convert a regular directory into a subvolume later, so prefer creating subvolumes from the start for any top-level data category you care about.
 
 ## Development
 
