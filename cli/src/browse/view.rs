@@ -1,7 +1,7 @@
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph, Row, Table};
 use ratatui::Frame;
 
 use super::model::{Model, Tab, ViewMode};
@@ -112,36 +112,36 @@ pub fn view(model: &mut Model, frame: &mut Frame) {
                 .collect();
             frame.render_widget(Paragraph::new(lines), body_area);
         } else {
-            let visible_height = body_area.height as usize;
-            // Keep selected item visible
-            let scroll = if model.subvol_selected >= visible_height {
-                model.subvol_selected - visible_height + 1
-            } else {
-                0
-            };
-            let lines: Vec<Line> = model
+            let header = Row::new(["ID", "Gen", "Top Level", "Path"])
+                .style(Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED));
+            let rows: Vec<Row> = model
                 .subvolumes
                 .iter()
-                .enumerate()
-                .skip(scroll)
-                .take(visible_height)
-                .map(|(i, sv)| {
-                    let marker = if i == model.subvol_selected {
-                        "> "
-                    } else {
-                        "  "
-                    };
-                    let style = if i == model.subvol_selected {
-                        Style::default()
-                            .fg(Color::Cyan)
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default()
-                    };
-                    Line::from(Span::styled(format!("{marker}{}", sv.path), style))
+                .map(|sv| {
+                    Row::new([
+                        sv.id.to_string(),
+                        sv.generation.to_string(),
+                        sv.top_level.to_string(),
+                        sv.path.clone(),
+                    ])
                 })
                 .collect();
-            frame.render_widget(Paragraph::new(lines), body_area);
+            let widths = [
+                Constraint::Length(6),
+                Constraint::Length(8),
+                Constraint::Length(10),
+                Constraint::Min(10),
+            ];
+            let table = Table::new(rows, widths)
+                .header(header)
+                .row_highlight_style(
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                )
+                .highlight_symbol("> ");
+            model.subvol_table_state.select(Some(model.subvol_selected));
+            frame.render_stateful_widget(table, body_area, &mut model.subvol_table_state);
         }
     } else {
         // Raw output with scroll

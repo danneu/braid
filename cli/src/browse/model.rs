@@ -1,3 +1,5 @@
+use ratatui::widgets::TableState;
+
 use crate::cmd::CmdRequest;
 use crate::parse::types::BtrfsSubvolume;
 use crate::types::MountPoint;
@@ -143,6 +145,7 @@ pub struct Model {
     pub viewport_height: u16,
     /// Stored output for the subvol list so we can restore it on Back.
     pub subvol_list_output: Vec<String>,
+    pub subvol_table_state: TableState,
 }
 
 impl Model {
@@ -163,6 +166,7 @@ impl Model {
             subvol_selected: 0,
             viewport_height: 20,
             subvol_list_output: Vec::new(),
+            subvol_table_state: TableState::default(),
         };
         let effects = vec![super::Effect::RunCommand {
             request,
@@ -197,6 +201,7 @@ impl Model {
             subvol_selected: 0,
             viewport_height: 20,
             subvol_list_output: Vec::new(),
+            subvol_table_state: TableState::default(),
         }
     }
 }

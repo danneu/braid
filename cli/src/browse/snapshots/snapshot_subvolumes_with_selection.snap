@@ -3,8 +3,9 @@ source: cli/src/browse/view.rs
 expression: buffer_to_string(&terminal)
 ---
 Filesystem  Devices  Subvolumes  Scrub  Balance
-> data
-  snapshots
-  snapshots/daily
+  ID     Gen      Top Level  Path
+> 256    10       5          data
+  257    20       5          snapshots
+  258    30       257        snapshots/daily
 $ btrfs subvolume list /mnt/storage
 q:quit | ?:help | r:reload | j/k:scroll | enter:detail
