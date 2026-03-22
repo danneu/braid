@@ -1,0 +1,10 @@
+---
+source: cli/src/browse/view.rs
+expression: buffer_to_string(&terminal)
+---
+Filesystem  Devices  Subvolumes  Scrub  Balance
+> data
+  snapshots
+  snapshots/daily
+$ btrfs subvolume list /mnt/storage
+q:quit | ?:help | r:reload | j/k:scroll | enter:detail

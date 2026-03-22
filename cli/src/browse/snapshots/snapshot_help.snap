@@ -1,0 +1,24 @@
+---
+source: cli/src/browse/view.rs
+expression: buffer_to_string(&terminal)
+---
+Filesystem  Devices  Subvolumes  Scrub  Balance
+[Usage]  Show  Df
+       ┌ Help ──────────────────────────────────────┐
+some ou│                                            │
+       │ Tab/Shift-Tab  switch tab                  │
+       │ h / l          switch subtab               │
+       │ j / k          scroll / select             │
+       │ Ctrl-D/U       page down/up                │
+       │ Enter          subvol detail               │
+       │ Esc            back                        │
+       │ r              reload                      │
+       │ q              quit                        │
+       │                                            │
+       │   press any key to close                   │
+       │                                            │
+       │                                            │
+       │                                            │
+       └────────────────────────────────────────────┘
+$ btrfs filesystem usage /mnt/storage
+q:quit | ?:help | r:reload | j/k:scroll | h/l:subtab

@@ -46,6 +46,8 @@ enum Commands {
     Ack,
     /// Interactive terminal dashboard
     Tui(TuiArgs),
+    /// Browse raw btrfs command output in a tabbed TUI
+    Browse(BrowseArgs),
 }
 
 #[derive(Debug, Args)]
@@ -163,6 +165,17 @@ struct TuiArgs {
     /// Run with fake data (no config or btrfs required)
     #[arg(long)]
     demo: bool,
+}
+
+#[derive(Debug, Args)]
+struct BrowseArgs {
+    /// Mount point to inspect (defaults to config mount_point)
+    #[arg(long)]
+    mount_point: Option<String>,
+
+    /// Non-interactive: run key commands and exit 0/1
+    #[arg(long)]
+    check: bool,
 }
 
 fn main() {
@@ -416,6 +429,30 @@ fn main() {
                 braid_cli::tui::run_demo()
             } else {
                 braid_cli::tui::run(Path::new(&config_path))
+            };
+            if let Err(e) = result {
+                print_cli_error(&e.to_string());
+                std::process::exit(1);
+            }
+        }
+        Commands::Browse(args) => {
+            let mount_point = match args.mount_point {
+                Some(mp) => mp,
+                None => {
+                    let config = match config_read(Path::new(&config_path)) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            print_cli_error(&e.to_string());
+                            std::process::exit(1);
+                        }
+                    };
+                    config.mount_point().0.clone()
+                }
+            };
+            let result = if args.check {
+                braid_cli::browse::run_check(&mount_point)
+            } else {
+                braid_cli::browse::run(&mount_point)
             };
             if let Err(e) = result {
                 print_cli_error(&e.to_string());

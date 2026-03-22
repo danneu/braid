@@ -1,0 +1,9 @@
+---
+source: cli/src/browse/view.rs
+expression: buffer_to_string(&terminal)
+---
+Filesystem  Devices  Subvolumes  Scrub  Balance
+[Usage]  Show  Df
+  ⠋ loading...
+$ btrfs filesystem usage /mnt/storage ⠋
+q:quit | ?:help | r:reload | j/k:scroll | h/l:subtab

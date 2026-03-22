@@ -254,6 +254,20 @@ sudo braid doctor           # check config, pool health, profile consistency
 sudo braid doctor --json    # machine-readable output
 ```
 
+### Browse btrfs commands
+
+Interactive read-only browser for raw btrfs command output:
+
+```sh
+sudo braid browse
+```
+
+Tabs: Filesystem, Devices, Subvolumes, Scrub, Balance. Each tab runs the corresponding `btrfs` command and dumps the output. Press `r` to reload, `Tab`/`Shift-Tab` to switch tabs, `h`/`l` for subtabs, `j`/`k` to scroll. In the Subvolumes tab, `Enter` drills into a selected subvolume's detail.
+
+```sh
+sudo braid browse --check    # non-interactive: verify all browse commands succeed
+```
+
 ### Non-interactive mode
 
 For scripting, use `--passphrase-stdin` or `--passphrase-file` with `--yes`:

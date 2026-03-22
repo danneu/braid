@@ -170,6 +170,22 @@ pub enum CmdRequest {
         device: String,
         key_file_path: String,
     },
+    // Browse TUI — human-readable display variants (no --raw / --format json)
+    BtrfsFilesystemUsage {
+        mount_point: MountPoint,
+    },
+    BtrfsFilesystemDf {
+        mount_point: MountPoint,
+    },
+    BtrfsDeviceUsage {
+        mount_point: MountPoint,
+    },
+    BtrfsSubvolumeList {
+        mount_point: MountPoint,
+    },
+    BtrfsSubvolumeShow {
+        path: String,
+    },
 }
 
 #[derive(Debug)]
@@ -600,6 +616,26 @@ impl CmdRequest {
                     device.clone(),
                     key_file_path.clone(),
                 ],
+            },
+            CmdRequest::BtrfsFilesystemUsage { mount_point } => CmdArgs {
+                program: "btrfs",
+                args: vec!["filesystem".into(), "usage".into(), mount_point.0.clone()],
+            },
+            CmdRequest::BtrfsFilesystemDf { mount_point } => CmdArgs {
+                program: "btrfs",
+                args: vec!["filesystem".into(), "df".into(), mount_point.0.clone()],
+            },
+            CmdRequest::BtrfsDeviceUsage { mount_point } => CmdArgs {
+                program: "btrfs",
+                args: vec!["device".into(), "usage".into(), mount_point.0.clone()],
+            },
+            CmdRequest::BtrfsSubvolumeList { mount_point } => CmdArgs {
+                program: "btrfs",
+                args: vec!["subvolume".into(), "list".into(), mount_point.0.clone()],
+            },
+            CmdRequest::BtrfsSubvolumeShow { path } => CmdArgs {
+                program: "btrfs",
+                args: vec!["subvolume".into(), "show".into(), path.clone()],
             },
         }
     }

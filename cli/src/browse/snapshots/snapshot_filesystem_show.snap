@@ -1,0 +1,10 @@
+---
+source: cli/src/browse/view.rs
+expression: buffer_to_string(&terminal)
+---
+Filesystem  Devices  Subvolumes  Scrub  Balance
+Usage  [Show]  Df
+Label: none  uuid: abc-123
+  Total devices 2  FS bytes used 4.20TiB
+$ btrfs filesystem show /mnt/storage
+q:quit | ?:help | r:reload | j/k:scroll | h/l:subtab

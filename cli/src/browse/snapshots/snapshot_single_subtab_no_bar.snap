@@ -1,0 +1,10 @@
+---
+source: cli/src/browse/view.rs
+expression: buffer_to_string(&terminal)
+---
+Filesystem  Devices  Subvolumes  Scrub  Balance
+UUID:  abc-123
+Scrub started:    Mon Mar 22 02:00:00 2026
+Status:           finished
+$ btrfs scrub status /mnt/storage
+q:quit | ?:help | r:reload | j/k:scroll

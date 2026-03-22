@@ -402,6 +402,20 @@ pub struct BtrfsDeviceUsageOutput {
     pub devices: Vec<BtrfsDeviceUsageEntry>,
 }
 
+/// btrfs subvolume list
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BtrfsSubvolume {
+    pub id: u64,
+    pub generation: u64,
+    pub top_level: u64,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BtrfsSubvolumeListOutput {
+    pub subvolumes: Vec<BtrfsSubvolume>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
