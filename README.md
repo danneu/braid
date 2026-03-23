@@ -509,7 +509,7 @@ For additional idle checks beyond what braid configures, use `services.autosuspe
 
 Wake-on-LAN lets clients wake a suspended NAS by sending a magic packet. braid's auto-suspend feature relies on it.
 
-Getting WoL working on Linux often requires fixing multiple issues. For reference, a Gigabyte B550I AORUS PRO AX with an RTL8125 NIC needed all three fixes below: spurious ACPI wake sources, the vendor NIC driver, and PCI bridge wakeup.
+WoL on Linux can require some trial and error due to differences and bugs between motherboards. For reference, my Gigabyte B550I AORUS PRO AX with an RTL8125 NIC needed all three fixes below: spurious ACPI wake sources, the vendor NIC driver, and PCI bridge wakeup.
 
 **BIOS:** Enable Wake on LAN and disable ErP (ErP cuts standby power to the NIC during sleep).
 
