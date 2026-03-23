@@ -430,16 +430,14 @@ services.samba = {
 
 ## Monitoring and Alerts
 
-braid has first-class alerts for disk health. When something is wrong — a missing device, btrfs errors, or a SMART warning — braid detects it and beeps until you acknowledge it.
+braid has first-class alerts for disk health. When something is wrong — a missing device, btrfs errors, or a SMART warning — braid detects it and alerts you via the motherboard speaker (enabled by default, disable with `beep = false`).
 
 **How it works:**
 
 - `braid monitor` checks btrfs device stats, missing devices, and SMART alerts. Exits 0 (healthy or pool offline), 1 (alert active), or 2 (monitor error).
-- A systemd timer runs `braid monitor` every 5 minutes (configurable). On exit 1, it starts an audible beeper.
+- A systemd timer runs `braid monitor` every 5 minutes (configurable). On exit 1, it starts the alert service.
 - `braid status` shows an ALERT banner with cause details when an alert is active.
-- `braid ack` acknowledges the alert, silences the beeper, and sets a baseline so the same condition won't re-trigger.
-
-**PC speaker setup is automatic.** braid un-blacklists `pcspkr` (NixOS inherits Ubuntu's blacklist), loads the kernel module at boot, and creates a `beep` group with udev permissions for the PC Speaker evdev device. No manual setup needed.
+- `braid ack` acknowledges the alert, silences the beeper, clears alerts from status and TUI, and sets a baseline so the same condition won't re-trigger.
 
 **Enabled by default.** When `braid.enable = true`, monitoring is active. To disable:
 
@@ -452,6 +450,7 @@ braid.monitor.enable = false;
 ```nix
 braid.monitor = {
   interval = "5min";       # polling interval (systemd time span)
+  beep = true;             # motherboard speaker alert (set false to disable)
   alertCommand = null;     # optional command to run on alert (runs as root)
 };
 ```
@@ -480,7 +479,7 @@ Uses [autosuspend](https://github.com/languitar/autosuspend) under the hood. bra
 ```nix
 braid.autoSuspend = {
   enable = true;
-  wolInterface = "eno1";  # your primary NIC (find with: ip link)
+  wolInterface = "eno1";  # your primary wired NIC (find with: ip link)
 };
 ```
 

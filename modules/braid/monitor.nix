@@ -1,6 +1,7 @@
 { config, lib, pkgs, ... }:
 let
   cfg = config.braid;
+  beepEnabled = cfg.monitor.beep;
   braidWrapped = import ./wrapper.nix { inherit cfg pkgs lib; };
 
   smartdAlertScript = pkgs.writeShellScript "braid-smartd-alert" ''
@@ -18,6 +19,12 @@ in
       description = "Polling interval for btrfs device stats (systemd time span, e.g. \"5min\", \"30s\").";
     };
 
+    beep = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = "Emit an audible beep via the PC speaker on disk health alerts.";
+    };
+
     alertCommand = lib.mkOption {
       type = lib.types.nullOr lib.types.str;
       default = null;
@@ -26,10 +33,10 @@ in
   };
 
   config = lib.mkIf (cfg.enable && cfg.monitor.enable) {
-    # --- PC speaker setup ---
+    # --- PC speaker setup (only when beep is enabled) ---
     # NixOS inherits Ubuntu's kmod blacklist which blocks pcspkr by default.
     # Same overlay pattern nixpkgs uses for i2c_i801.
-    nixpkgs.overlays = [
+    nixpkgs.overlays = lib.mkIf beepEnabled [
       (_final: prev: {
         kmod-blacklist-ubuntu = prev.kmod-blacklist-ubuntu.overrideAttrs (old: {
           installPhase = old.installPhase + ''
@@ -39,29 +46,38 @@ in
       })
     ];
 
-    boot.kernelModules = [ "pcspkr" ];
+    boot.kernelModules = lib.mkIf beepEnabled [ "pcspkr" ];
 
     # beep refuses to run as root — grant the beep group write access to
     # the PC Speaker evdev device so the alert service can beep unprivileged.
-    users.groups.beep = {};
+    users.groups.beep = lib.mkIf beepEnabled {};
 
-    services.udev.extraRules = ''
+    services.udev.extraRules = lib.mkIf beepEnabled ''
       ACTION=="add", SUBSYSTEM=="input", ATTRS{name}=="PC Speaker", ENV{DEVNAME}!="", GROUP="beep", MODE="0620"
     '';
 
-    # --- Alert service (the beeper) ---
+    # --- Alert service ---
     systemd.services.braid-alert = {
-      description = "Braid disk health alert (audible beep)";
-      serviceConfig.Type = "simple";
+      description = "Braid disk health alert (audible beep if enabled)";
+      serviceConfig = if beepEnabled then {
+        Type = "simple";
+      } else {
+        Type = "oneshot";
+        RemainAfterExit = true;
+      };
       script = ''
-        ${pkgs.kmod}/bin/modprobe pcspkr 2>/dev/null || true
+        ${lib.optionalString beepEnabled ''
+          ${pkgs.kmod}/bin/modprobe pcspkr 2>/dev/null || true
+        ''}
         ${lib.optionalString (cfg.monitor.alertCommand != null) ''
           ${cfg.monitor.alertCommand} || true
         ''}
-        while true; do
-          ${pkgs.util-linux}/bin/setpriv --reuid=nobody --regid=beep --groups=beep -- ${pkgs.beep}/bin/beep -f 1000 -l 500 2>/dev/null || true
-          sleep 15
-        done
+        ${lib.optionalString beepEnabled ''
+          while true; do
+            ${pkgs.util-linux}/bin/setpriv --reuid=nobody --regid=beep --groups=beep -- ${pkgs.beep}/bin/beep -f 1000 -l 500 2>/dev/null || true
+            sleep 15
+          done
+        ''}
       '';
     };
 
