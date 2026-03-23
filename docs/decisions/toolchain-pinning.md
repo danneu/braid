@@ -4,18 +4,38 @@ Status: Active
 
 ## Context
 
-Braid's runtime tools (btrfs-progs, cryptsetup, util-linux) are parsed by the Rust CLI. Output formats change between tool versions — a flake update to nixpkgs-unstable could silently break parsers.
+Braid's parser-critical runtime tools (btrfs-progs, cryptsetup, util-linux) are parsed by the Rust CLI. Output formats change between tool versions — a flake update to nixpkgs-unstable could silently break parsers. Generic helpers (coreutils, systemd) are used for basic system operations but their output is never parsed by braid.
 
 ## Decision
 
-Pin `flake.nix` to a specific NixOS stable release (nixos-25.11). The Rust wrapper executes with an explicit PATH containing only module-controlled packages. Parser code is written against the pinned version's output format.
+Pin `flake.nix` to a specific NixOS stable release (nixos-25.11). Pin only parser-critical tools — those whose output braid parses or whose behavior is part of braid's correctness model. Generic helpers come from the consumer's system package set.
 
 ### How it works
 
-- **Flake input**: `nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11"` — all tool packages come from this channel.
-- **Module options**: `braid.packages.*` (cryptsetup, btrfsProgs, utilLinux, jq, coreutils) default to the flake's nixpkgs but can be overridden per-system.
-- **PATH wrapping**: `makeWrapper` (Rust) injects only `cfg.packages.*` into PATH. No ambient system tools leak in.
+- **Flake input**: `nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11"` — parser-critical tool packages come from this channel.
+- **Module options**: `braid.packages.*` (cryptsetup, btrfsProgs, utilLinux) default to the flake's nixpkgs but can be overridden per-system.
+- **PATH wrapping**: The wrapper injects `cfg.packages.*` into PATH. Generic helpers (coreutils, systemd) are resolved from the consumer's `pkgs`, not pinned.
 - **Two wrapping sites**: flake.nix wraps with `pkgs.*` defaults (for `nix run` and tests); the module wraps `cfg.package` with `cfg.packages.*` (for deployed NixOS systems where package options may be overridden).
+
+### Operational escape hatch
+
+Parser-critical tools are pinned by default to the flake's nixpkgs release, but `braid.packages.*` overrides are intentional — operators may need a newer upstream version for urgent bugfixes or security patches before braid's next nixpkgs bump. The override takes precedence; if the newer version changes output format, parser tests will catch it.
+
+### Classification guideline
+
+**Pin** when: braid parses the tool's output, or the tool's behavior is part of braid's correctness/safety model.
+
+**Use system `pkgs`** when: the tool is a generic helper, braid doesn't parse its output, and version drift is unlikely to affect correctness.
+
+New runtime dependencies must be classified into one of these two groups when added.
+
+| Tool | Pinned by default? | Overrideable? | Reason |
+|------|-------------------|---------------|--------|
+| btrfs-progs | Yes | Yes (`braid.packages.btrfsProgs`) | Output parsed by nom combinators and serde JSON |
+| cryptsetup | Yes | Yes (`braid.packages.cryptsetup`) | Output parsed by nom combinators |
+| util-linux (findmnt, lsblk) | Yes | Yes (`braid.packages.utilLinux`) | JSON output parsed by serde |
+| coreutils | No — system `pkgs` | No option | chown/chmod/realpath/stat — output not parsed |
+| systemd | No — system `pkgs` | No option | systemctl/ask-password — commodity behavior |
 
 ### Upgrading tools
 
@@ -38,6 +58,10 @@ Rejected. Would require threading Nix store paths into the Rust binary at build 
 ### Stay on nixpkgs-unstable
 
 Rejected. Unstable channel updates tool versions without notice. A routine `nix flake update` could change btrfs-progs output format and break parsers silently. Stable releases change only for security fixes.
+
+### Pin all runtime tools (blanket pinning)
+
+Previously active, now superseded. Blanket pinning created unnecessary closure duplication for generic helpers (jq, coreutils) that braid does not parse. The `braid.packages.coreutils` option was also inconsistently wired — `storage.nix` used `pkgs.coreutils` directly, bypassing the option. Selective pinning is simpler and honest about what braid actually depends on.
 
 ## See
 

@@ -7,7 +7,7 @@
 #    root:<storageGroup> 2770 on the mount point
 { cfg, pkgs, lib }:
 let
-  toolPackages = with cfg.packages; [ cryptsetup btrfsProgs utilLinux jq coreutils ] ++ [ pkgs.systemd ];
+  toolPackages = with cfg.packages; [ cryptsetup btrfsProgs utilLinux ] ++ [ pkgs.systemd ];
 in
 pkgs.runCommand "braid" {} ''
   mkdir -p $out/bin
@@ -17,8 +17,8 @@ pkgs.runCommand "braid" {} ''
     --subst-var-by toolPath '${lib.makeBinPath toolPackages}' \
     --subst-var-by storageGroup '${if cfg.storageGroup != null then cfg.storageGroup else ""}' \
     --subst-var-by mountpointBin '${cfg.packages.utilLinux}/bin/mountpoint' \
-    --subst-var-by chownBin '${cfg.packages.coreutils}/bin/chown' \
-    --subst-var-by chmodBin '${cfg.packages.coreutils}/bin/chmod' \
+    --subst-var-by chownBin '${pkgs.coreutils}/bin/chown' \
+    --subst-var-by chmodBin '${pkgs.coreutils}/bin/chmod' \
     --subst-var-by mountPointPath '${cfg.mountPoint}'
   chmod +x $out/bin/braid
 ''

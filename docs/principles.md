@@ -47,7 +47,7 @@ Braid only targets NixOS. No portability abstractions, no generic Linux fallback
 
 ## 10. Pinned toolchain
 
-Runtime tool versions are pinned to a specific NixOS stable release via the flake input. Both shell and Rust wrappers execute with an explicit PATH containing only module-controlled packages. Parsers assume the output format of the pinned version. Upgrading tools requires updating golden-file fixtures and parser tests. [Why →](decisions/toolchain-pinning.md)
+Parser-critical tools (btrfs-progs, cryptsetup, util-linux) are pinned to a specific NixOS stable release via the flake input. Wrappers execute with an explicit PATH built from module-controlled packages (`braid.packages.*`). Parsers assume the output format of the pinned version — upgrading those tools requires updating fixtures and parser tests. These pinned defaults are a compatibility baseline, not a lock; users may override `braid.packages.*` to pick up newer system versions when needed. Generic helpers (coreutils, systemd) come from the consumer's package set and are not part of braid's parser contract. [Why →](decisions/toolchain-pinning.md)
 
 ## 11. HDD defaults
 

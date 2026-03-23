@@ -49,8 +49,6 @@
             pkgs.cryptsetup
             pkgs.btrfs-progs
             pkgs.util-linux
-            pkgs.jq
-            pkgs.coreutils
           ];
           braid = pkgs.runCommand "braid" { nativeBuildInputs = [ pkgs.makeWrapper ]; } ''
             mkdir -p $out/bin
@@ -458,8 +456,6 @@
               cryptsetup = lib.mkDefault braidPkgs.cryptsetup;
               btrfsProgs = lib.mkDefault braidPkgs.btrfs-progs;
               utilLinux = lib.mkDefault braidPkgs.util-linux;
-              jq = lib.mkDefault braidPkgs.jq;
-              coreutils = lib.mkDefault braidPkgs.coreutils;
             };
           };
         };
