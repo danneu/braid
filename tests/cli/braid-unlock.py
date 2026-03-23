@@ -313,44 +313,82 @@ with subtest("Test 8: paused balance survives unlock"):
     close_all()
     machine.succeed(unlock_cmd(passphrase))
 
-    # Write enough data to create multiple chunks so balance takes time
+    # Write enough data to create multiple btrfs chunks so balance has
+    # observable work that can be paused mid-operation.
     machine.succeed(
-        "dd if=/dev/urandom of=/mnt/storage/balancedata bs=1M count=50"
+        "dd if=/dev/urandom of=/mnt/storage/balancedata bs=1M count=256"
     )
     machine.succeed("sync")
 
-    # Start a converting balance in background (nohup keeps it alive after
-    # the shell exits, matching the pattern in braid-lock-umount-busy.py)
-    machine.execute(
-        "nohup btrfs balance start -dconvert=single /mnt/storage "
-        "> /tmp/balance.log 2>&1 & echo $!"
-    )
+    import re
 
-    # Wait until balance is actually running before pausing
-    import time
-    for _ in range(30):
+    # Bounded retry: start balance → pause → check for remaining work.
+    # If the balance completes before pause catches it, restart with
+    # the opposite conversion target so there's always new work to do.
+    #
+    # The start+pause loop runs in a single shell command to avoid the
+    # serial-console overhead of machine.execute() — each roundtrip
+    # takes ~100ms which is too slow for a balance that finishes in <1s.
+    targets = ["single", "raid1"]
+    paused_status = None
+    for attempt in range(3):
+        target = targets[attempt % 2]
+
+        # Start balance in background, then tight-loop pause attempts
+        # natively on the VM (no Python roundtrip overhead).
+        machine.execute(
+            f"btrfs balance start -dconvert={target} /mnt/storage "
+            f"> /tmp/balance.log 2>&1 & "
+            f"for i in $(seq 1 200); do "
+            f"  btrfs balance pause /mnt/storage 2>/dev/null && break; "
+            f"  sleep 0.02; "
+            f"done"
+        )
+
+        # Check status from Python — one roundtrip is fine here.
         ret = machine.execute("btrfs balance status /mnt/storage")
-        if "running" in ret[1].lower() or "paused" in ret[1].lower():
-            break
-        time.sleep(0.2)
+        output = ret[1]
+        lower = output.lower()
+
+        if "paused" in lower:
+            match = re.search(
+                r"(\d+)\s+out of about\s+(\d+)\s+chunks", output
+            )
+            if match and int(match.group(1)) < int(match.group(2)):
+                paused_status = output
+                break
+
+        # Balance completed or paused with no remaining work.
+        # Clean up and retry with the opposite conversion target.
+        machine.execute(
+            "btrfs balance cancel /mnt/storage 2>/dev/null || true"
+        )
+        for _ in range(30):
+            ret = machine.execute("btrfs balance status /mnt/storage")
+            if "no balance" in ret[1].lower():
+                break
+            import time
+            time.sleep(0.2)
+        else:
+            raise Exception(
+                "Balance did not terminate after cancel — cannot retry safely"
+            )
     else:
-        raise Exception("Balance never entered running state")
-
-    machine.succeed("btrfs balance pause /mnt/storage")
-
-    # Verify balance is paused
-    status = machine.succeed("btrfs balance status /mnt/storage")
-    assert "paused" in status.lower(), f"Expected paused balance, got: {status}"
+        raise Exception(
+            "Could not pause balance with remaining work after 3 full attempts"
+        )
 
     # Lock and re-unlock
     close_all()
     ret = machine.execute(unlock_cmd(passphrase) + " 2>&1")
     assert ret[0] == 0, f"Unlock failed: {ret[1]}"
 
-    # Balance must still be paused (not resumed by kernel)
-    status = machine.succeed("btrfs balance status /mnt/storage")
-    assert "paused" in status.lower(), \
-        f"Expected balance still paused after unlock, got: {status}"
+    # Balance must still be paused (not resumed by kernel).
+    # Note: btrfs balance status can return exit code 1 for a paused
+    # balance after remount, so check the text output, not the exit code.
+    ret2 = machine.execute("btrfs balance status /mnt/storage")
+    assert "paused" in ret2[1].lower(), \
+        f"Expected balance still paused after unlock, got: {ret2[1]}"
 
     # Warning text must have been emitted
     assert "paused balance" in ret[1], \

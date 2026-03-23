@@ -34,6 +34,27 @@ fn parse_chunks_line(input: &str) -> IResult<&str, (u64, u64, u64, u8)> {
     Ok((input, (done, total, considered, pct)))
 }
 
+// After remount with skip_balance the kernel resets chunk counters to 0/0
+// and prints "nan% left" (0 ÷ 0 = NaN).  Handle this variant explicitly.
+//   "0 out of about 0 chunks balanced (0 considered), nan% left"
+//   → (0, 0, 0, 0)
+fn parse_chunks_line_nan(input: &str) -> IResult<&str, (u64, u64, u64, u8)> {
+    let (input, _) = space0(input)?;
+    let (input, done) = parse_u64(input)?;
+    let (input, _) = space1(input)?;
+    let (input, _) = tag("out of about")(input)?;
+    let (input, _) = space1(input)?;
+    let (input, total) = parse_u64(input)?;
+    let (input, _) = space1(input)?;
+    let (input, _) = tag("chunks balanced (")(input)?;
+    let (input, considered) = parse_u64(input)?;
+    let (input, _) = space1(input)?;
+    let (input, _) = tag("considered),")(input)?;
+    let (input, _) = space1(input)?;
+    let (input, _) = tag("nan% left")(input)?;
+    Ok((input, (done, total, considered, 0)))
+}
+
 // Parses the state line, returning "running" or "paused":
 //   "Balance on '/mnt/storage' is running"
 //   "Balance on '/mnt/storage' is paused"
@@ -80,10 +101,18 @@ pub fn parse_btrfs_balance_status(
             });
         }
 
-        // Find chunk progress line
+        // Find chunk progress line.  Try the normal parser first, then
+        // the nan% variant (kernel resets counters to 0/0 after remount
+        // with skip_balance).
         let (done_chunks, estimated_total_chunks, considered_chunks, pct_left) = stdout
             .lines()
-            .find_map(|l| parse_chunks_line(l.trim()).ok().map(|(_, v)| v))
+            .find_map(|l| {
+                let trimmed = l.trim();
+                parse_chunks_line(trimmed)
+                    .or_else(|_| parse_chunks_line_nan(trimmed))
+                    .ok()
+                    .map(|(_, v)| v)
+            })
             .ok_or_else(|| ParseError::InvalidText {
                 cmd: raw.cmd.clone(),
                 detail: "balance running/paused but no chunk progress line found".into(),
@@ -266,6 +295,32 @@ mod tests {
         assert!(matches!(err, ParseError::CommandFailed { .. }));
     }
 
+    // Intent: After remount with skip_balance the kernel resets chunk counters
+    // and prints "nan% left".  The parser must still report Paused.
+    // Why: Without this, get_balance_report returns Unknown and braid unlock
+    // silently omits the paused-balance warning.
+    #[test]
+    fn balance_status_paused_after_remount_nan_pct() {
+        let raw = RawCommandOutput {
+            cmd: "btrfs balance status".into(),
+            stdout: "Balance on '/mnt/storage' is paused\n\
+                     0 out of about 0 chunks balanced (0 considered), nan% left\n"
+                .into(),
+            stderr: String::new(),
+            exit_status: 1,
+        };
+        let out = parse_btrfs_balance_status(&raw).unwrap();
+        assert_eq!(
+            out.state,
+            BalanceState::Paused {
+                done_chunks: 0,
+                estimated_total_chunks: 0,
+                considered_chunks: 0,
+                pct_left: 0,
+            }
+        );
+    }
+
     #[test]
     fn balance_status_empty_output() {
         let raw = RawCommandOutput {
@@ -273,6 +328,20 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
             exit_status: 0,
+        };
+        let err = parse_btrfs_balance_status(&raw).unwrap_err();
+        assert!(matches!(err, ParseError::InvalidText { .. }));
+    }
+
+    // Intent: If the state is recognized but the chunk-progress line is
+    // genuinely missing or garbled, the parser must still fail loudly.
+    #[test]
+    fn balance_status_paused_missing_chunks_line_errors() {
+        let raw = RawCommandOutput {
+            cmd: "btrfs balance status".into(),
+            stdout: "Balance on '/mnt/storage' is paused\n".into(),
+            stderr: String::new(),
+            exit_status: 1,
         };
         let err = parse_btrfs_balance_status(&raw).unwrap_err();
         assert!(matches!(err, ParseError::InvalidText { .. }));
