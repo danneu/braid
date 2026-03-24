@@ -486,7 +486,7 @@ braid.autoSuspend = {
 **What it does:**
 
 - Suspends after 15 minutes of idle (configurable with `braid.autoSuspend.idleTime`)
-- Blocks suspend during: btrfs scrub, balance, replace, active SSH sessions
+- Blocks suspend during: btrfs scrub, balance, replace, active SSH sessions, local interactive sessions (TTY/X11/Wayland)
 - Auto-detects SMB clients (if `services.samba` enabled) and NFS clients (if `services.nfs.server` enabled)
 - Wakes the machine via RTC alarm for the monthly btrfs scrub timer
 - smartd and braid-monitor run opportunistically during wake windows

@@ -4,8 +4,8 @@
 # suspend/wake lifecycle. braid provides `braid idle` as an ExternalCommand
 # check for btrfs-specific activity (scrub, balance, replace).
 #
-# SSH check is always on (braid requires SSH for unlock). SMB and NFS checks
-# are auto-detected from whether those services are enabled.
+# SSH and local-session checks are always on. SMB and NFS checks are
+# auto-detected from whether those services are enabled.
 {
   config,
   lib,
@@ -22,7 +22,7 @@ in
 
     idleTime = lib.mkOption {
       type = lib.types.ints.positive;
-      default = 900;
+      default = 900; # 15 minutes
       description = "Seconds of idle time before suspending.";
     };
 
@@ -76,6 +76,12 @@ in
           SSH = {
             class = "ActiveConnection";
             ports = "22";
+          };
+          # Local interactive sessions (TTY, X11, Wayland) block suspend —
+          # someone at a keyboard/monitor should not have the machine sleep
+          # under them.
+          LocalSession = {
+            class = "LogindSessionsIdle";
           };
         }
         (lib.mkIf config.services.samba.enable {
