@@ -115,6 +115,61 @@ fn classify_braid_disk_fsid<R: CommandRunner>(
     Ok(AddLuksIdentity::BraidLabeledRecoverable)
 }
 
+/// Tracks LUKS mappers opened by this invocation of cmd_add.
+/// On drop (error path), closes them best-effort.
+/// Call `disarm()` on the success path to skip cleanup.
+struct LuksCleanupGuard<'a, R: CommandRunner> {
+    runner: &'a R,
+    mappers: Vec<String>,
+    armed: bool,
+}
+
+impl<'a, R: CommandRunner> LuksCleanupGuard<'a, R> {
+    fn new(runner: &'a R) -> Self {
+        Self {
+            runner,
+            mappers: Vec::new(),
+            armed: true,
+        }
+    }
+
+    fn track(&mut self, mapper: String) {
+        self.mappers.push(mapper);
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl<R: CommandRunner> Drop for LuksCleanupGuard<'_, R> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        for mapper in self.mappers.iter().rev() {
+            match self.runner.run(&CmdRequest::CryptsetupClose {
+                mapper: mapper.clone(),
+            }) {
+                Ok(r) if r.exit_status == 0 => {
+                    eprintln!("cleanup: closed LUKS mapper {}", mapper);
+                }
+                Ok(r) => {
+                    eprintln!(
+                        "cleanup: failed to close LUKS mapper {} (exit {}): {}",
+                        mapper,
+                        r.exit_status,
+                        r.stderr.trim()
+                    );
+                }
+                Err(e) => {
+                    eprintln!("cleanup: failed to close LUKS mapper {}: {}", mapper, e);
+                }
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     runner: &R,
@@ -267,6 +322,8 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     }
 
     // LUKS phase — for each disk: format/open as needed. Track which need pool add.
+    // Guard closes any mappers we opened if the LUKS phase fails partway through.
+    let mut luks_guard = LuksCleanupGuard::new(runner);
     let mut needs_pool_add: Vec<usize> = Vec::new();
 
     for (i, p) in probed.iter().enumerate() {
@@ -287,6 +344,7 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
                 eprintln!("LUKS header backed up: {}", backup_path.display());
 
                 ensure_luks_open(runner, fs, name, disk, &passphrase)?;
+                luks_guard.track(mn.0.clone());
                 eprintln!("LUKS opened: {} → {}", disk.by_id, mn);
 
                 if let Some(kf) = enroll_key_file {
@@ -321,6 +379,7 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
                 // Open mapper if closed (now we know it's braid-labeled + pool is up)
                 if !mapper_open {
                     ensure_luks_open(runner, fs, name, disk, &passphrase)?;
+                    luks_guard.track(mn.0.clone());
                     eprintln!("LUKS opened: {} → {}", disk.by_id, mn);
                 }
 
@@ -361,6 +420,9 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             }
         }
     }
+
+    // LUKS phase complete — mappers are committed for pool operations.
+    luks_guard.disarm();
 
     if needs_pool_add.is_empty() {
         let label = if names.len() == 1 {
@@ -1066,6 +1128,115 @@ mod tests {
                 .iter()
                 .map(|s| format!("[{}] {}", s.risk, s.description))
                 .collect::<Vec<_>>()
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // LuksCleanupGuard tests
+    // -----------------------------------------------------------------------
+
+    use std::sync::Mutex;
+
+    /// Test-only CommandRunner that delegates to MockRunner but records
+    /// which mapper names were passed to CryptsetupClose.
+    struct SpyRunner {
+        inner: MockRunner,
+        closed: Mutex<Vec<String>>,
+    }
+
+    impl SpyRunner {
+        fn new(inner: MockRunner) -> Self {
+            Self {
+                inner,
+                closed: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl CommandRunner for SpyRunner {
+        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
+            if let CmdRequest::CryptsetupClose { mapper } = request {
+                self.closed.lock().unwrap().push(mapper.clone());
+                return Ok(RawCommandOutput {
+                    cmd: format!("cryptsetup close {mapper}"),
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                });
+            }
+            self.inner.run(request)
+        }
+
+        fn run_with_stdin(
+            &self,
+            request: &CmdRequest,
+            stdin: &[u8],
+        ) -> Result<RawCommandOutput, CmdError> {
+            self.inner.run_with_stdin(request, stdin)
+        }
+    }
+
+    #[test]
+    fn guard_closes_on_armed_drop() {
+        // Intent: Drop calls CryptsetupClose for each tracked mapper.
+        // Why it exists: core correctness — without this, the guard is dead code.
+        // Scenario: cmd_add opens a mapper, a later step in the LUKS phase
+        // fails, the guard fires on unwind and closes the mapper.
+        let runner = SpyRunner::new(MockRunner::default());
+        {
+            let mut guard = LuksCleanupGuard::new(&runner);
+            guard.track("braid-aaa".into());
+            guard.track("braid-bbb".into());
+            // guard drops here while still armed
+        }
+        let closed = runner.closed.lock().unwrap();
+        assert_eq!(
+            *closed,
+            vec!["braid-bbb", "braid-aaa"],
+            "should close tracked mappers in reverse order"
+        );
+    }
+
+    #[test]
+    fn guard_noop_when_disarmed() {
+        // Intent: disarm() prevents close on drop.
+        // Why it exists: successful LUKS phase must not close the mappers it
+        // just opened — they're needed for the pool phase.
+        // Scenario: all identity checks pass, guard is disarmed, drop is a no-op.
+        let runner = SpyRunner::new(MockRunner::default());
+        {
+            let mut guard = LuksCleanupGuard::new(&runner);
+            guard.track("braid-aaa".into());
+            guard.disarm();
+            // guard drops here, disarmed
+        }
+        let closed = runner.closed.lock().unwrap();
+        assert!(
+            closed.is_empty(),
+            "disarmed guard should not close anything, got: {:?}",
+            *closed
+        );
+    }
+
+    #[test]
+    fn preexisting_mapper_not_closed() {
+        // Intent: a mapper already open before cmd_add is not tracked or closed.
+        // Why it exists: closing a pre-existing mapper would break a running pool.
+        // Scenario: PresentLuks with mapper_open=true fails identity check;
+        // the guard must not close that mapper since we didn't open it.
+        let runner = SpyRunner::new(MockRunner::default());
+        {
+            let mut guard = LuksCleanupGuard::new(&runner);
+            // Only track mappers we opened ourselves.
+            // Pre-existing mapper "braid-existing" is NOT tracked.
+            guard.track("braid-new".into());
+            // guard drops here while armed — simulates error path
+        }
+        let closed = runner.closed.lock().unwrap();
+        assert_eq!(*closed, vec!["braid-new"]);
+        assert!(
+            !closed.contains(&"braid-existing".to_string()),
+            "must not close a mapper we didn't open"
         );
     }
 }
