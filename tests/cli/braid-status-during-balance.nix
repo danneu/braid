@@ -1,11 +1,15 @@
 # Test: braid status during balance
 #
 # What: Validates that braid status succeeds while a RAID1 balance is in
-# progress, when the data ratio is a fractional value like "1.01".
+# progress (paused), when the data ratio is a fractional value like "1.01".
 #
 # Why: During a single→RAID1 balance, btrfs reports intermediate data ratios.
 # The parser previously only accepted "1.00" and "2.00", causing braid status
 # to hard-error during any balance operation.
+#
+# How: Starts a balance and immediately pauses it to guarantee a stable
+# mid-balance window, avoiding the race where the balance completes before
+# the test can observe it.
 #
 # Dependencies: Rust braid binary for all commands.
 { braid }:
