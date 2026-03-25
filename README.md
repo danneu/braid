@@ -31,6 +31,12 @@ It wraps two standard tools:
 - Simple - I want anyone to be able to use this
 - Well-tested - Every bug, fix, and regression I encounter is turned into another NixOS VM test in `tests/`
 
+## Hardware notes
+
+braid works on any NixOS x86_64 machine. A few component choices matter for compatibility:
+
+- **10GbE NIC** — Intel X540 (`ixgbe` driver) has rock-solid Linux support and reliable Wake-on-LAN. Avoid Aquantia/Marvell AQC107 (`atlantic` driver) if WoL matters — it's firmware-dependent and hit-or-miss on Linux.
+
 ## Install
 
 Add braid to your flake inputs and import the module:
@@ -288,6 +294,8 @@ systemctl start braid-pool.target
 One passphrase prompt opens all available LUKS devices and mounts the pool. Works from TTY, SSH, or scripted. If disks are missing, use `--allow-degraded` to mount with reduced redundancy.
 
 When unlocking on a fresh system (e.g., after migrating disks to a new machine), `unlock` automatically rebuilds the disk identity map from live pool state. Each disk's on-disk LUKS label is verified before recording.
+
+braid always mounts the top-level subvolume explicitly (`subvolid=5`), so `btrfs subvolume set-default` changes can't alter what gets mounted.
 
 Interrupted balance operations (e.g., from a crash or `braid lock` during rebalance) are **never silently resumed** on unlock. braid mounts with `skip_balance` and warns if a paused balance is detected:
 

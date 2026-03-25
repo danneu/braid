@@ -37,6 +37,9 @@ in
         # skip_balance: prevent the kernel from silently resuming an interrupted
         # balance on mount. braid manages balance lifecycle explicitly.
         "skip_balance"
+        # subvolid=5: always mount the top-level subvolume, regardless of
+        # btrfs subvolume set-default. Prevents silent mount target changes.
+        "subvolid=5"
         "x-systemd.requires=btrfs-device-scan.service"
         "x-systemd.after=btrfs-device-scan.service"
       ]

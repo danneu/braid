@@ -201,8 +201,17 @@ pub struct CmdArgs {
 ///
 /// skip_balance: prevent the kernel from silently resuming an interrupted balance
 /// on mount. braid manages balance lifecycle explicitly.
+///
+/// subvolid=5: always mount the top-level subvolume, regardless of what
+/// `btrfs subvolume set-default` is set to. Without this, a set-default to a
+/// non-top-level subvolume would silently change what braid mounts, hiding
+/// sibling subvolumes from the mountpoint.
 fn base_mount_options() -> Vec<String> {
-    vec!["noatime".to_owned(), "skip_balance".to_owned()]
+    vec![
+        "noatime".to_owned(),
+        "skip_balance".to_owned(),
+        "subvolid=5".to_owned(),
+    ]
 }
 
 impl CmdRequest {
@@ -1163,7 +1172,7 @@ mod tests {
             cmd.args,
             vec![
                 "-o",
-                "noatime,skip_balance",
+                "noatime,skip_balance,subvolid=5",
                 "/dev/mapper/braid-disk1",
                 "/mnt/storage"
             ]
@@ -1171,8 +1180,8 @@ mod tests {
     }
 
     #[test]
-    // Intent: MountWithOptions prepends noatime,skip_balance before caller options.
-    // Why: degraded mount must still include skip_balance.
+    // Intent: MountWithOptions prepends base options before caller options.
+    // Why: degraded mount must still include skip_balance and subvolid=5.
     // Scenario: degraded unlock adds -o degraded; base options must appear first.
     fn mount_with_options_includes_skip_balance() {
         let cmd = CmdRequest::MountWithOptions {
@@ -1186,7 +1195,7 @@ mod tests {
             cmd.args,
             vec![
                 "-o",
-                "noatime,skip_balance,degraded",
+                "noatime,skip_balance,subvolid=5,degraded",
                 "/dev/mapper/braid-disk1",
                 "/mnt/storage",
             ]

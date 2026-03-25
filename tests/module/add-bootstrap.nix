@@ -43,6 +43,7 @@
         "nofail"
         "noatime"
         "skip_balance"
+        "subvolid=5"
         "x-systemd.device-timeout=1s"
         "x-systemd.requires=btrfs-device-scan.service"
         "x-systemd.after=btrfs-device-scan.service"
