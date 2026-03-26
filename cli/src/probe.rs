@@ -1,5 +1,5 @@
 use crate::cmd::{CmdError, CmdRequest, CommandRunner};
-use crate::config::{mapper_name, DiskConfig};
+use crate::config::mapper_name;
 use crate::parse::{
     parse_btrfs_filesystem_show, parse_cryptsetup_luks_uuid, parse_cryptsetup_status, ParseError,
 };
@@ -53,18 +53,18 @@ pub fn probe_config_disk<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
     name: &str,
-    disk: &DiskConfig,
+    by_id: &ByIdPath,
 ) -> Result<ConfigDisk, ProbeError> {
-    if !fs.exists(&disk.by_id.0) {
+    if !fs.exists(&by_id.0) {
         return Ok(ConfigDisk {
             name: name.to_owned(),
-            by_id_path: disk.by_id.clone(),
+            by_id_path: by_id.clone(),
             state: ConfigDiskState::Absent,
         });
     }
 
     let raw = runner.run(&CmdRequest::CryptsetupLuksUuid {
-        device: disk.by_id.0.clone(),
+        device: by_id.0.clone(),
     })?;
 
     let uuid = match parse_cryptsetup_luks_uuid(&raw) {
@@ -72,7 +72,7 @@ pub fn probe_config_disk<R: CommandRunner, F: Filesystem + ?Sized>(
         Err(ParseError::CommandFailed { .. }) => {
             return Ok(ConfigDisk {
                 name: name.to_owned(),
-                by_id_path: disk.by_id.clone(),
+                by_id_path: by_id.clone(),
                 state: ConfigDiskState::PresentNotLuks,
             });
         }
@@ -84,7 +84,7 @@ pub fn probe_config_disk<R: CommandRunner, F: Filesystem + ?Sized>(
 
     Ok(ConfigDisk {
         name: name.to_owned(),
-        by_id_path: disk.by_id.clone(),
+        by_id_path: by_id.clone(),
         state: ConfigDiskState::PresentLuks { uuid, mapper_open },
     })
 }
@@ -243,10 +243,8 @@ mod tests {
         }
     }
 
-    fn disk(by_id: &str) -> DiskConfig {
-        DiskConfig {
-            by_id: ByIdPath(by_id.to_owned()),
-        }
+    fn by_id(path: &str) -> ByIdPath {
+        ByIdPath(path.to_owned())
     }
 
     // -- probe_config_disk tests --
@@ -255,7 +253,7 @@ mod tests {
     fn probe_config_disk_absent() {
         let runner = MockRunner::default();
         let fs = MockFs::new(&[]);
-        let d = disk("/dev/disk/by-id/disk-1");
+        let d = by_id("/dev/disk/by-id/disk-1");
 
         let result = probe_config_disk(&runner, &fs, "toshiba", &d).unwrap();
         assert_eq!(result.name, "toshiba");
@@ -275,7 +273,7 @@ mod tests {
             ),
         );
         let fs = MockFs::new(&["/dev/disk/by-id/disk-1"]);
-        let d = disk("/dev/disk/by-id/disk-1");
+        let d = by_id("/dev/disk/by-id/disk-1");
 
         let result = probe_config_disk(&runner, &fs, "toshiba", &d).unwrap();
         assert_eq!(result.state, ConfigDiskState::PresentNotLuks);
@@ -285,7 +283,7 @@ mod tests {
     fn probe_config_disk_cmd_spawn_fails() {
         let runner = MockRunner::default();
         let fs = MockFs::new(&["/dev/disk/by-id/disk-1"]);
-        let d = disk("/dev/disk/by-id/disk-1");
+        let d = by_id("/dev/disk/by-id/disk-1");
 
         let result = probe_config_disk(&runner, &fs, "toshiba", &d);
         assert!(result.is_err());
@@ -305,7 +303,7 @@ mod tests {
             ok_raw("cryptsetup luksUUID /dev/disk/by-id/disk-1", "not-a-uuid\n"),
         );
         let fs = MockFs::new(&["/dev/disk/by-id/disk-1"]);
-        let d = disk("/dev/disk/by-id/disk-1");
+        let d = by_id("/dev/disk/by-id/disk-1");
 
         let result = probe_config_disk(&runner, &fs, "toshiba", &d);
         assert!(result.is_err());
@@ -328,7 +326,7 @@ mod tests {
             ),
         );
         let fs = MockFs::new(&["/dev/disk/by-id/disk-1"]);
-        let d = disk("/dev/disk/by-id/disk-1");
+        let d = by_id("/dev/disk/by-id/disk-1");
 
         let result = probe_config_disk(&runner, &fs, "toshiba", &d).unwrap();
         assert_eq!(result.name, "toshiba");
@@ -354,7 +352,7 @@ mod tests {
         );
         // Named mapper: braid-toshiba
         let fs = MockFs::new(&["/dev/disk/by-id/disk-1", "/dev/mapper/braid-toshiba"]);
-        let d = disk("/dev/disk/by-id/disk-1");
+        let d = by_id("/dev/disk/by-id/disk-1");
 
         let result = probe_config_disk(&runner, &fs, "toshiba", &d).unwrap();
         assert_eq!(

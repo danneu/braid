@@ -1,6 +1,7 @@
 use crate::cmd::{CmdRequest, CommandRunner};
 use crate::config::config_read;
 use crate::disk_map;
+use crate::membership;
 use crate::parse::parse_btrfs_device_usage;
 use crate::pool::{pool_remove_devid, pool_remove_missing};
 use crate::preflight;
@@ -37,9 +38,6 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync>(
     progress: ProgressOutput,
 ) -> Result<(), RemoveMissingError> {
     let config = config_read(config_path)?;
-    let disk_map_state = disk_map::load_disk_map();
-    disk_map::validate_config_name_stability(&config, &disk_map_state)
-        .map_err(|e| RemoveMissingError::Validation(e.to_string()))?;
 
     let pool = match probe_pool(runner, config.mount_point().as_str()) {
         Ok(p) => p,
@@ -143,6 +141,33 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync>(
         }
     }
 
+    // Pre-commit: persist membership removal BEFORE btrfs operation.
+    // Look up which membership entry corresponds to the missing devid via disk-map.
+    let target_devid = missing_id.or_else(|| pool.missing_devids.first().copied());
+    if let Some(devid) = target_devid {
+        let disk_map = disk_map::load_disk_map();
+        let name_to_remove = disk_map
+            .disks
+            .iter()
+            .find(|(_, entry)| entry.devid == devid)
+            .map(|(name, _)| name.clone());
+        if let Some(name) = name_to_remove {
+            match membership::load_membership() {
+                Ok(mut m) => {
+                    m.disks.remove(&name);
+                    if let Err(e) = membership::save_membership(&m) {
+                        eprintln!(
+                            "warning: failed to persist membership removal for '{name}': {e}"
+                        );
+                    }
+                }
+                Err(e) => {
+                    eprintln!("warning: failed to load membership for removal: {e}");
+                }
+            }
+        }
+    }
+
     // Execute
     if let Some(devid) = missing_id {
         eprintln!("Removing missing device (devid {}) from pool...", devid);
@@ -150,20 +175,6 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync>(
     } else {
         eprintln!("Removing missing device from pool...");
         pool_remove_missing(runner, config.mount_point().as_str())?;
-    }
-
-    // Update disk map (best effort — never fail the remove-missing)
-    if let Some(devid) = missing_id {
-        // Targeted removal: prune entries with this specific devid
-        disk_map::update_disk_map_best_effort(|map| {
-            disk_map::remove_disks_by_devids(map, &[devid]);
-        });
-    } else if let Ok(pool_after) = probe_pool(runner, config.mount_point().as_str()) {
-        // General removal: prune entries whose devid is no longer in pool
-        let live_devids: Vec<u64> = pool_after.devices.iter().map(|d| d.devid).collect();
-        disk_map::update_disk_map_best_effort(|map| {
-            disk_map::prune_absent_devids(map, &live_devids);
-        });
     }
 
     crate::pool::maybe_restore_raid1(

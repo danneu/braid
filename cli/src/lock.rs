@@ -2,7 +2,8 @@ use std::thread;
 use std::time::Duration;
 
 use crate::cmd::{CmdError, CmdRequest, CommandRunner};
-use crate::config::{mapper_name, Config, ConfigError};
+use crate::config::{mapper_name, Config};
+use crate::membership::{self, PoolMembership};
 use crate::preflight;
 use crate::probe::Filesystem;
 
@@ -11,7 +12,7 @@ pub enum LockError {
     #[error("command failed: {0}")]
     Cmd(#[from] CmdError),
     #[error("{0}")]
-    Config(#[from] ConfigError),
+    Membership(#[from] membership::MembershipError),
     #[error("{0}")]
     Failed(String),
 }
@@ -56,6 +57,7 @@ pub fn cmd_lock<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
     config: &Config,
+    membership: &PoolMembership,
 ) -> Result<(), LockError> {
     let mount_point = config.mount_point();
 
@@ -108,7 +110,7 @@ pub fn cmd_lock<R: CommandRunner, F: Filesystem + ?Sized>(
 
     // 3. Close each mapper
     let mut all_already_closed = true;
-    for name in config.disks().keys() {
+    for name in membership.disks.keys() {
         let mn = mapper_name(name);
         let mapper_path = format!("/dev/mapper/{}", mn.0);
 
@@ -133,7 +135,8 @@ pub fn cmd_lock<R: CommandRunner, F: Filesystem + ?Sized>(
 mod tests {
     use super::*;
     use crate::cmd::{MockRunner, RawCommandOutput};
-    use crate::config::{Config, DiskConfig};
+    use crate::config::Config;
+    use crate::membership::PoolMembership;
     use crate::types::{ByIdPath, MountPoint};
     use std::collections::BTreeMap;
 
@@ -178,20 +181,14 @@ mod tests {
     }
 
     fn test_config() -> Config {
+        Config::new(MountPoint("/mnt/storage".to_owned())).unwrap()
+    }
+
+    fn test_membership() -> PoolMembership {
         let mut disks = BTreeMap::new();
-        disks.insert(
-            "aaa".to_owned(),
-            DiskConfig {
-                by_id: ByIdPath("/dev/disk/by-id/a".to_owned()),
-            },
-        );
-        disks.insert(
-            "bbb".to_owned(),
-            DiskConfig {
-                by_id: ByIdPath("/dev/disk/by-id/b".to_owned()),
-            },
-        );
-        Config::new(disks, MountPoint("/mnt/storage".to_owned())).unwrap()
+        disks.insert("aaa".to_owned(), ByIdPath("/dev/disk/by-id/a".to_owned()));
+        disks.insert("bbb".to_owned(), ByIdPath("/dev/disk/by-id/b".to_owned()));
+        PoolMembership { disks }
     }
 
     /// Build a MockRunner pre-loaded with the standard preflight outputs
@@ -245,8 +242,9 @@ mod tests {
             );
         let fs = MockFs::new(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]);
         let config = test_config();
+        let membership = test_membership();
 
-        cmd_lock(&runner, &fs, &config).expect("lock should succeed");
+        cmd_lock(&runner, &fs, &config, &membership).expect("lock should succeed");
     }
 
     #[test]
@@ -259,8 +257,9 @@ mod tests {
         );
         let fs = MockFs::new(&[]);
         let config = test_config();
+        let membership = test_membership();
 
-        cmd_lock(&runner, &fs, &config).expect("lock should succeed (already locked)");
+        cmd_lock(&runner, &fs, &config, &membership).expect("lock should succeed (already locked)");
     }
 
     #[test]
@@ -281,8 +280,9 @@ mod tests {
             );
         let fs = MockFs::new(&["/dev/mapper/braid-aaa"]);
         let config = test_config();
+        let membership = test_membership();
 
-        cmd_lock(&runner, &fs, &config).expect("lock should succeed (partial)");
+        cmd_lock(&runner, &fs, &config, &membership).expect("lock should succeed (partial)");
     }
 
     #[test]
@@ -313,8 +313,9 @@ mod tests {
             );
         let fs = MockFs::new(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]);
         let config = test_config();
+        let membership = test_membership();
 
-        let err = cmd_lock(&runner, &fs, &config).expect_err("should fail on busy");
+        let err = cmd_lock(&runner, &fs, &config, &membership).expect_err("should fail on busy");
         assert!(err.to_string().contains("target is busy"));
     }
 
@@ -346,8 +347,9 @@ mod tests {
             );
         let fs = MockFs::new(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]);
         let config = test_config();
+        let membership = test_membership();
 
-        let err = cmd_lock(&runner, &fs, &config).expect_err("should fail on busy");
+        let err = cmd_lock(&runner, &fs, &config, &membership).expect_err("should fail on busy");
         let msg = err.to_string();
         assert!(
             msg.contains("lsof") && msg.contains("fuser"),
@@ -372,10 +374,11 @@ mod tests {
             );
         let fs = MockFs::new(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]);
         let config = test_config();
+        let membership = test_membership();
 
         // If BtrfsDeviceScanForget were not called, MockRunner would return
         // MissingMock and the test would fail.
-        cmd_lock(&runner, &fs, &config).expect("lock should succeed with forget");
+        cmd_lock(&runner, &fs, &config, &membership).expect("lock should succeed with forget");
     }
 
     #[test]
@@ -422,7 +425,9 @@ mod tests {
             );
         let fs = MockFs::new(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]);
         let config = test_config();
+        let membership = test_membership();
 
-        cmd_lock(&runner, &fs, &config).expect("lock should succeed even when forget fails");
+        cmd_lock(&runner, &fs, &config, &membership)
+            .expect("lock should succeed even when forget fails");
     }
 }

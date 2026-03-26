@@ -1,6 +1,7 @@
 use crate::cmd::{CmdError, CmdRequest, CommandRunner};
-use crate::config::{DiskConfig, mapper_name};
+use crate::config::mapper_name;
 use crate::probe::Filesystem;
+use crate::types::ByIdPath;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
@@ -166,7 +167,7 @@ pub fn ensure_luks_open<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
     name: &str,
-    disk: &DiskConfig,
+    by_id: &ByIdPath,
     passphrase: &str,
 ) -> Result<(), LuksError> {
     let mn = mapper_name(name);
@@ -177,7 +178,7 @@ pub fn ensure_luks_open<R: CommandRunner, F: Filesystem + ?Sized>(
 
     let result = runner.run_with_stdin(
         &CmdRequest::CryptsetupLuksOpen {
-            device: disk.by_id.0.clone(),
+            device: by_id.0.clone(),
             mapper: mn.0.clone(),
         },
         passphrase.as_bytes(),
@@ -185,7 +186,7 @@ pub fn ensure_luks_open<R: CommandRunner, F: Filesystem + ?Sized>(
     if result.exit_status != 0 {
         return Err(LuksError::Validation(format!(
             "failed to open LUKS device {}. Wrong passphrase?",
-            disk.by_id
+            by_id
         )));
     }
     Ok(())
@@ -218,7 +219,7 @@ pub fn ensure_luks_open_with_key_file<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
     name: &str,
-    disk: &DiskConfig,
+    by_id: &ByIdPath,
     key_file_path: &std::path::Path,
 ) -> Result<(), LuksError> {
     let mn = mapper_name(name);
@@ -228,14 +229,14 @@ pub fn ensure_luks_open_with_key_file<R: CommandRunner, F: Filesystem + ?Sized>(
     }
 
     let result = runner.run(&CmdRequest::CryptsetupLuksOpenKeyFile {
-        device: disk.by_id.0.clone(),
+        device: by_id.0.clone(),
         mapper: mn.0.clone(),
         key_file_path: key_file_path.display().to_string(),
     })?;
     if result.exit_status != 0 {
         return Err(LuksError::Validation(format!(
             "failed to open LUKS device {} with keyfile. Wrong keyfile?",
-            disk.by_id
+            by_id
         )));
     }
     Ok(())

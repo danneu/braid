@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::cmd::{CmdRequest, CommandRunner, RealRunner};
 use crate::config::Config;
+use crate::membership;
 use crate::parse::parse_btrfs_df_json;
 use crate::parse::types::{BtrfsBgType, BtrfsDfOutput, BtrfsProfile};
 use crate::preflight;
@@ -169,27 +170,34 @@ fn check_config_permissions<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) ->
     }
 }
 
-fn check_declared_disks<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> CheckResult {
-    let config = match &ctx.config {
-        Some(c) => c,
-        None => {
+fn check_declared_disks<R: CommandRunner>(_ctx: &mut DoctorContext<'_, R>) -> CheckResult {
+    let pool_membership = match membership::load_membership() {
+        Ok(m) => m,
+        Err(membership::MembershipError::NotFound(_)) => {
             return CheckResult {
                 name: "declared_disks".into(),
                 status: CheckStatus::Skip,
-                message: "skipped (config not available)".into(),
+                message: "skipped (no pool membership file)".into(),
+            };
+        }
+        Err(e) => {
+            return CheckResult {
+                name: "declared_disks".into(),
+                status: CheckStatus::Warn,
+                message: format!("could not load pool membership: {e}"),
             };
         }
     };
 
     let mut missing: Vec<String> = Vec::new();
     let mut not_block: Vec<String> = Vec::new();
-    let total = config.disks().len();
-    for (name, disk) in config.disks() {
-        let path = Path::new(disk.by_id.0.as_str());
+    let total = pool_membership.disks.len();
+    for (name, by_id) in &pool_membership.disks {
+        let path = Path::new(by_id.0.as_str());
         match std::fs::metadata(path) {
             Ok(meta) if meta.file_type().is_block_device() => {}
-            Ok(_) => not_block.push(format!("{name} ({})", disk.by_id)),
-            Err(_) => missing.push(format!("{name} ({})", disk.by_id)),
+            Ok(_) => not_block.push(format!("{name} ({})", by_id)),
+            Err(_) => missing.push(format!("{name} ({})", by_id)),
         }
     }
 
@@ -560,10 +568,10 @@ mod tests {
         assert_eq!(report.checks.len(), 7);
         assert_eq!(find_check(&report, "config_file").status, CheckStatus::Ok);
         assert_eq!(find_check(&report, "config_schema").status, CheckStatus::Ok);
-        // declared_disks warns since /dev/disk/by-id/a doesn't exist in test env
+        // declared_disks skips since no pool membership file exists in test env
         assert_eq!(
             find_check(&report, "declared_disks").status,
-            CheckStatus::Warn
+            CheckStatus::Skip
         );
     }
 
@@ -602,18 +610,12 @@ mod tests {
     }
 
     #[test]
-    fn valid_json_bad_schema_empty_disks() {
+    fn valid_json_with_extra_fields_parses_ok() {
+        // Config no longer has disks — extra fields are ignored.
         let f = write_temp(r#"{"disks":{},"mount_point":"/mnt/storage"}"#);
         let report = run_doctor(f.path(), &mock());
-        assert_eq!(report.status, CheckStatus::Fail);
         assert_eq!(find_check(&report, "config_file").status, CheckStatus::Ok);
-        let schema = find_check(&report, "config_schema");
-        assert_eq!(schema.status, CheckStatus::Fail);
-        assert!(
-            schema.message.contains("disks must not be empty"),
-            "unexpected message: {}",
-            schema.message
-        );
+        assert_eq!(find_check(&report, "config_schema").status, CheckStatus::Ok);
     }
 
     #[test]
@@ -777,31 +779,11 @@ mod tests {
     }
 
     #[test]
-    fn declared_disks_all_missing_warns() {
-        let f = write_temp(
-            r#"{"disks":{"disk-a":{"by_id":"/dev/disk/by-id/nonexistent-a"},"disk-b":{"by_id":"/dev/disk/by-id/nonexistent-b"}},"mount_point":"/mnt/storage"}"#,
-        );
+    fn declared_disks_skips_when_no_membership() {
+        let f = write_temp(r#"{"mount_point":"/mnt/storage"}"#);
         let report = run_doctor(f.path(), &mock());
         let check = find_check(&report, "declared_disks");
-        assert_eq!(check.status, CheckStatus::Warn);
-        assert!(check.message.contains("2/2"), "{}", check.message);
-        assert!(check.message.contains("disk-a"), "{}", check.message);
-        assert!(check.message.contains("disk-b"), "{}", check.message);
-    }
-
-    #[test]
-    fn declared_disks_not_block_device_warns() {
-        // /dev/null exists but is a char device, not a block device
-        let f =
-            write_temp(r#"{"disks":{"null":{"by_id":"/dev/null"}},"mount_point":"/mnt/storage"}"#);
-        let report = run_doctor(f.path(), &mock());
-        let check = find_check(&report, "declared_disks");
-        assert_eq!(check.status, CheckStatus::Warn);
-        assert!(
-            check.message.contains("not a block device"),
-            "{}",
-            check.message
-        );
+        assert_eq!(check.status, CheckStatus::Skip);
     }
 
     #[test]

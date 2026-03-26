@@ -1,8 +1,9 @@
 use crate::cmd::CommandRunner;
-use crate::config::{Config, DiskConfig, mapper_name};
-use crate::luks::{self, KEYFILE_SIZE, KeySlotState, LUKS_SLOT_KEYFILE, LuksError};
+use crate::config::mapper_name;
+use crate::luks::{self, KeySlotState, LuksError, KEYFILE_SIZE, LUKS_SLOT_KEYFILE};
+use crate::membership::PoolMembership;
 use crate::probe::{self, Filesystem};
-use crate::types::ConfigDiskState;
+use crate::types::{ByIdPath, ConfigDiskState};
 use std::io::Read;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
@@ -23,21 +24,21 @@ pub enum EnrollKeyFileError {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DiskEnrollAction {
-    AlreadyEnrolled { name: String, disk: DiskConfig },
-    NeedsEnroll { name: String, disk: DiskConfig },
+    AlreadyEnrolled { name: String, by_id: ByIdPath },
+    NeedsEnroll { name: String, by_id: ByIdPath },
 }
 
-/// Discovery phase: iterate config disks and collect present LUKS candidates.
+/// Discovery phase: iterate membership disks and collect present LUKS candidates.
 /// Absent and non-LUKS disks are silently skipped.
 /// Errors if zero candidates found.
 fn discover_enrollment_candidates<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
-    config: &Config,
-) -> Result<Vec<(String, DiskConfig)>, EnrollKeyFileError> {
+    membership: &PoolMembership,
+) -> Result<Vec<(String, ByIdPath)>, EnrollKeyFileError> {
     let mut candidates = Vec::new();
-    for (name, disk) in config.disks() {
-        let probed = probe::probe_config_disk(runner, fs, name, disk)?;
+    for (name, by_id) in &membership.disks {
+        let probed = probe::probe_config_disk(runner, fs, name, by_id)?;
         match &probed.state {
             ConfigDiskState::Absent => {
                 eprintln!("skip: {} not present", name);
@@ -46,7 +47,7 @@ fn discover_enrollment_candidates<R: CommandRunner, F: Filesystem + ?Sized>(
                 eprintln!("skip: {} not LUKS-formatted", name);
             }
             ConfigDiskState::PresentLuks { .. } => {
-                candidates.push((name.clone(), disk.clone()));
+                candidates.push((name.clone(), by_id.clone()));
             }
         }
     }
@@ -65,13 +66,13 @@ fn discover_enrollment_candidates<R: CommandRunner, F: Filesystem + ?Sized>(
 /// Fails immediately on wrong passphrase or slot-1 conflict.
 fn plan_enrollment<R: CommandRunner>(
     runner: &R,
-    candidates: &[(String, DiskConfig)],
+    candidates: &[(String, ByIdPath)],
     key_file_path: &Path,
     passphrase: &str,
 ) -> Result<Vec<DiskEnrollAction>, EnrollKeyFileError> {
     // Verify passphrase once against first candidate
-    let (ref first_name, ref first_disk) = candidates[0];
-    let ok = luks::verify_passphrase(runner, &first_disk.by_id.0, passphrase)?;
+    let (ref first_name, ref first_by_id) = candidates[0];
+    let ok = luks::verify_passphrase(runner, &first_by_id.0, passphrase)?;
     if !ok {
         return Err(EnrollKeyFileError::Validation(format!(
             "wrong passphrase (verified against {})",
@@ -80,31 +81,31 @@ fn plan_enrollment<R: CommandRunner>(
     }
 
     let mut plan = Vec::new();
-    for (name, disk) in candidates {
+    for (name, by_id) in candidates {
         // Check if keyfile already works (idempotent)
-        if luks::verify_key_file(runner, &disk.by_id.0, key_file_path)? {
+        if luks::verify_key_file(runner, &by_id.0, key_file_path)? {
             eprintln!("ok: {} — keyfile already enrolled", name);
             plan.push(DiskEnrollAction::AlreadyEnrolled {
                 name: name.clone(),
-                disk: disk.clone(),
+                by_id: by_id.clone(),
             });
             continue;
         }
 
         // Preflight: check slot 1 state
-        let slot_state = luks::check_key_slot(runner, &disk.by_id.0, LUKS_SLOT_KEYFILE)?;
+        let slot_state = luks::check_key_slot(runner, &by_id.0, LUKS_SLOT_KEYFILE)?;
         if slot_state == KeySlotState::Occupied {
             return Err(EnrollKeyFileError::Validation(format!(
                 "slot 1 on {} ({}) is occupied by an unknown key. \
                  Remove it first with `cryptsetup luksKillSlot {} 1` then re-run enrollment.",
-                name, disk.by_id, disk.by_id
+                name, by_id, by_id
             )));
         }
 
         eprintln!("enroll: {} — will add keyfile to slot 1", name);
         plan.push(DiskEnrollAction::NeedsEnroll {
             name: name.clone(),
-            disk: disk.clone(),
+            by_id: by_id.clone(),
         });
     }
 
@@ -142,13 +143,12 @@ fn apply_enrollment_with_backup_dir<R: CommandRunner>(
             DiskEnrollAction::AlreadyEnrolled { .. } => {
                 already += 1;
             }
-            DiskEnrollAction::NeedsEnroll { name, disk } => {
-                luks::enroll_key_file(runner, &disk.by_id.0, passphrase, key_file_path)?;
+            DiskEnrollAction::NeedsEnroll { name, by_id } => {
+                luks::enroll_key_file(runner, &by_id.0, passphrase, key_file_path)?;
                 eprintln!("ok: {} — keyfile enrolled in slot 1", name);
 
                 let mn = mapper_name(name);
-                let backup_path =
-                    luks::backup_luks_header_to(runner, &disk.by_id.0, &mn.0, backup_dir)?;
+                let backup_path = luks::backup_luks_header_to(runner, &by_id.0, &mn.0, backup_dir)?;
                 eprintln!("LUKS header backed up: {}", backup_path.display());
 
                 enrolled += 1;
@@ -185,7 +185,7 @@ fn generate_key_file(path: &Path) -> Result<(), std::io::Error> {
 pub fn cmd_enroll_key_file<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
-    config: &Config,
+    membership: &PoolMembership,
     key_file_path: &Path,
     generate: bool,
     passphrase_stdin: bool,
@@ -201,7 +201,7 @@ pub fn cmd_enroll_key_file<R: CommandRunner, F: Filesystem + ?Sized>(
         }
 
         // 1. Discover candidates
-        let candidates = discover_enrollment_candidates(runner, fs, config)?;
+        let candidates = discover_enrollment_candidates(runner, fs, membership)?;
 
         // 2. Read passphrase
         let passphrase = luks::read_passphrase(passphrase_file, passphrase_stdin)?;
@@ -236,7 +236,7 @@ pub fn cmd_enroll_key_file<R: CommandRunner, F: Filesystem + ?Sized>(
             )));
         }
 
-        let candidates = discover_enrollment_candidates(runner, fs, config)?;
+        let candidates = discover_enrollment_candidates(runner, fs, membership)?;
         let passphrase = luks::read_passphrase(passphrase_file, passphrase_stdin)?;
         let plan = plan_enrollment(runner, &candidates, key_file_path, &passphrase)?;
         apply_enrollment(runner, &plan, &passphrase, key_file_path)?;
@@ -275,10 +275,8 @@ mod tests {
         }
     }
 
-    fn disk(by_id: &str) -> DiskConfig {
-        DiskConfig {
-            by_id: ByIdPath(by_id.to_owned()),
-        }
+    fn by_id(path: &str) -> ByIdPath {
+        ByIdPath(path.to_owned())
     }
 
     fn ok_raw(cmd: &str, stdout: &str) -> RawCommandOutput {
@@ -299,12 +297,12 @@ mod tests {
         }
     }
 
-    fn make_config(disks: &[(&str, &str)]) -> Config {
+    fn make_membership(disks: &[(&str, &str)]) -> PoolMembership {
         let mut map = BTreeMap::new();
-        for (key, by_id) in disks {
-            map.insert(key.to_string(), disk(by_id));
+        for (key, path) in disks {
+            map.insert(key.to_string(), by_id(path));
         }
-        Config::new(map, MountPoint("/mnt/storage".to_owned())).unwrap()
+        PoolMembership { disks: map }
     }
 
     // -- Mock response helpers --
@@ -438,12 +436,12 @@ mod tests {
             .with_output(req1, out1)
             .with_output(req2, out2);
         let fs = MockFs::new(&["/dev/disk/by-id/d1", "/dev/disk/by-id/d2"]);
-        let config = make_config(&[
+        let membership = make_membership(&[
             ("disk1", "/dev/disk/by-id/d1"),
             ("disk2", "/dev/disk/by-id/d2"),
         ]);
 
-        let result = discover_enrollment_candidates(&runner, &fs, &config).unwrap();
+        let result = discover_enrollment_candidates(&runner, &fs, &membership).unwrap();
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].0, "disk1");
         assert_eq!(result[1].0, "disk2");
@@ -459,12 +457,12 @@ mod tests {
         let (req, out) = luks_uuid_ok("/dev/disk/by-id/d2");
         let runner = MockRunner::default().with_output(req, out);
         let fs = MockFs::new(&["/dev/disk/by-id/d2"]);
-        let config = make_config(&[
+        let membership = make_membership(&[
             ("disk1", "/dev/disk/by-id/d1"),
             ("disk2", "/dev/disk/by-id/d2"),
         ]);
 
-        let result = discover_enrollment_candidates(&runner, &fs, &config).unwrap();
+        let result = discover_enrollment_candidates(&runner, &fs, &membership).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].0, "disk2");
     }
@@ -482,12 +480,12 @@ mod tests {
             .with_output(req1, out1)
             .with_output(req2, out2);
         let fs = MockFs::new(&["/dev/disk/by-id/d1", "/dev/disk/by-id/d2"]);
-        let config = make_config(&[
+        let membership = make_membership(&[
             ("disk1", "/dev/disk/by-id/d1"),
             ("disk2", "/dev/disk/by-id/d2"),
         ]);
 
-        let result = discover_enrollment_candidates(&runner, &fs, &config).unwrap();
+        let result = discover_enrollment_candidates(&runner, &fs, &membership).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].0, "disk2");
     }
@@ -501,9 +499,9 @@ mod tests {
     fn discover_all_absent_errors() {
         let runner = MockRunner::default();
         let fs = MockFs::new(&[]);
-        let config = make_config(&[("disk1", "/dev/disk/by-id/d1")]);
+        let membership = make_membership(&[("disk1", "/dev/disk/by-id/d1")]);
 
-        let result = discover_enrollment_candidates(&runner, &fs, &config);
+        let result = discover_enrollment_candidates(&runner, &fs, &membership);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
@@ -522,9 +520,9 @@ mod tests {
         let (req, out) = luks_uuid_not_luks("/dev/disk/by-id/d1");
         let runner = MockRunner::default().with_output(req, out);
         let fs = MockFs::new(&["/dev/disk/by-id/d1"]);
-        let config = make_config(&[("disk1", "/dev/disk/by-id/d1")]);
+        let membership = make_membership(&[("disk1", "/dev/disk/by-id/d1")]);
 
-        let result = discover_enrollment_candidates(&runner, &fs, &config);
+        let result = discover_enrollment_candidates(&runner, &fs, &membership);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
@@ -561,8 +559,8 @@ mod tests {
             .with_output(ld2_req, ld2_out);
 
         let candidates = vec![
-            ("disk1".to_owned(), disk(d1)),
-            ("disk2".to_owned(), disk(d2)),
+            ("disk1".to_owned(), by_id(d1)),
+            ("disk2".to_owned(), by_id(d2)),
         ];
 
         let plan = plan_enrollment(&runner, &candidates, Path::new(kf), pass).unwrap();
@@ -571,14 +569,14 @@ mod tests {
             plan[0],
             DiskEnrollAction::NeedsEnroll {
                 name: "disk1".to_owned(),
-                disk: disk(d1),
+                by_id: by_id(d1),
             }
         );
         assert_eq!(
             plan[1],
             DiskEnrollAction::NeedsEnroll {
                 name: "disk2".to_owned(),
-                disk: disk(d2),
+                by_id: by_id(d2),
             }
         );
     }
@@ -605,8 +603,8 @@ mod tests {
             .with_output(tkf2_req, tkf2_out);
 
         let candidates = vec![
-            ("disk1".to_owned(), disk(d1)),
-            ("disk2".to_owned(), disk(d2)),
+            ("disk1".to_owned(), by_id(d1)),
+            ("disk2".to_owned(), by_id(d2)),
         ];
 
         let plan = plan_enrollment(&runner, &candidates, Path::new(kf), pass).unwrap();
@@ -643,8 +641,8 @@ mod tests {
             .with_output(ld2_req, ld2_out);
 
         let candidates = vec![
-            ("disk1".to_owned(), disk(d1)),
-            ("disk2".to_owned(), disk(d2)),
+            ("disk1".to_owned(), by_id(d1)),
+            ("disk2".to_owned(), by_id(d2)),
         ];
 
         let plan = plan_enrollment(&runner, &candidates, Path::new(kf), pass).unwrap();
@@ -669,7 +667,7 @@ mod tests {
         let (tp_req, tp_stdin, tp_out) = test_passphrase_fail(d1, pass);
         let runner = MockRunner::default().with_output_stdin(tp_req, tp_stdin, tp_out);
 
-        let candidates = vec![("disk1".to_owned(), disk(d1))];
+        let candidates = vec![("disk1".to_owned(), by_id(d1))];
 
         let result = plan_enrollment(&runner, &candidates, Path::new(kf), pass);
         assert!(result.is_err());
@@ -710,8 +708,8 @@ mod tests {
             .with_output(ld2_req, ld2_out);
 
         let candidates = vec![
-            ("disk1".to_owned(), disk(d1)),
-            ("disk2".to_owned(), disk(d2)),
+            ("disk1".to_owned(), by_id(d1)),
+            ("disk2".to_owned(), by_id(d2)),
         ];
 
         let result = plan_enrollment(&runner, &candidates, Path::new(kf), pass);
@@ -774,11 +772,11 @@ mod tests {
         let plan = vec![
             DiskEnrollAction::NeedsEnroll {
                 name: "disk1".to_owned(),
-                disk: disk(d1),
+                by_id: by_id(d1),
             },
             DiskEnrollAction::NeedsEnroll {
                 name: "disk2".to_owned(),
-                disk: disk(d2),
+                by_id: by_id(d2),
             },
         ];
 
@@ -803,7 +801,7 @@ mod tests {
 
         let plan = vec![DiskEnrollAction::AlreadyEnrolled {
             name: "disk1".to_owned(),
-            disk: disk(d1),
+            by_id: by_id(d1),
         }];
 
         apply_enrollment(&runner, &plan, pass, Path::new(kf)).unwrap();
@@ -841,11 +839,11 @@ mod tests {
         let plan = vec![
             DiskEnrollAction::AlreadyEnrolled {
                 name: "disk1".to_owned(),
-                disk: disk(d1),
+                by_id: by_id(d1),
             },
             DiskEnrollAction::NeedsEnroll {
                 name: "disk2".to_owned(),
-                disk: disk(d2),
+                by_id: by_id(d2),
             },
         ];
 

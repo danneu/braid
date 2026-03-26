@@ -1,6 +1,6 @@
 use crate::cmd::{CmdRequest, CommandRunner};
 use crate::config::{config_read, mapper_name};
-use crate::disk_map;
+use crate::membership;
 use crate::parse::parse_btrfs_device_usage;
 use crate::pool::evict_present_device;
 use crate::preflight;
@@ -37,9 +37,6 @@ pub fn cmd_remove<R: CommandRunner + Sync>(
     progress: ProgressOutput,
 ) -> Result<(), RemoveError> {
     let config = config_read(config_path)?;
-    let disk_map_state = disk_map::load_disk_map();
-    disk_map::validate_config_name_stability(&config, &disk_map_state)
-        .map_err(|e| RemoveError::Validation(e.to_string()))?;
 
     let pool = match probe_pool(runner, config.mount_point().as_str()) {
         Ok(p) => p,
@@ -152,18 +149,30 @@ pub fn cmd_remove<R: CommandRunner + Sync>(
         }
     }
 
+    // Pre-commit: persist membership removal BEFORE irreversible disk op.
+    // If membership doesn't exist, warn and continue — the user explicitly
+    // asked to remove a disk, and the pool operation is what matters.
+    match membership::load_membership() {
+        Ok(mut m) => {
+            m.disks.remove(name);
+            membership::save_membership(&m).map_err(|e| {
+                RemoveError::Validation(format!("failed to persist pool membership: {e}"))
+            })?;
+        }
+        Err(membership::MembershipError::NotFound(_)) => {
+            eprintln!("warning: pool membership file not found, skipping membership update");
+        }
+        Err(e) => {
+            return Err(RemoveError::Validation(format!(
+                "failed to load pool membership: {e}"
+            )));
+        }
+    }
+
     // Execute
     evict_present_device(runner, &mn.0, config.mount_point().as_str(), progress)?;
 
-    // Update disk map (best effort — never fail the remove)
-    disk_map::update_disk_map_best_effort(|map| {
-        disk_map::remove_disk(map, name);
-    });
-
-    eprintln!(
-        "Done. If not already done: remove '{}' from braid.disks and run nixos-rebuild switch.",
-        name
-    );
+    eprintln!("Done. Disk '{}' removed from pool.", name);
     Ok(())
 }
 

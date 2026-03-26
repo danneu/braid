@@ -21,6 +21,7 @@ use model::{DiskLuksInfo, DiskUsage, Model, PoolState, PoolStatus};
 use view::view;
 
 use crate::config::config_read;
+use crate::membership;
 use crate::parse::types::{
     BtrfsBgType, BtrfsDfEntry, BtrfsProfile, DeviceAllocation, ScrubState, ScrubTimestamp,
     SmartHealth,
@@ -29,13 +30,15 @@ use crate::types::MountPoint;
 
 pub fn run(config_path: &Path) -> io::Result<()> {
     let config = config_read(config_path).map_err(|e| io::Error::other(e.to_string()))?;
+    let membership = membership::load_membership()
+        .map_err(|e| io::Error::other(e.to_string()))?;
     let mut terminal = ratatui::init();
     let (_input, cmd_tx, rx) = InputHandler::new();
-    let disk_names: Vec<String> = config.disks().keys().cloned().collect();
-    let disk_by_id: HashMap<String, String> = config
-        .disks()
+    let disk_names: Vec<String> = membership.disks.keys().cloned().collect();
+    let disk_by_id: HashMap<String, String> = membership
+        .disks
         .iter()
-        .map(|(k, v)| (k.clone(), v.by_id.to_string()))
+        .map(|(k, v)| (k.clone(), v.to_string()))
         .collect();
     let (mut model, init_effects) =
         Model::new(disk_names, disk_by_id, config.mount_point().0.clone());

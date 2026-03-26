@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 use crate::alert::{self, AlertCause, AlertState};
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, LsblkFieldKind};
 use crate::config::{mapper_name, Config};
-use crate::disk_map::{self, DiskMapLoad};
 use crate::luks;
+use crate::membership::{self, PoolMembership};
 use crate::parse::types::BalanceState;
 use crate::parse::{
     parse_btrfs_balance_status, parse_btrfs_device_stats, parse_btrfs_device_usage,
@@ -153,11 +153,7 @@ struct CompactDrive {
     status: &'static str,
 }
 
-fn build_compact_drives(
-    pool: &PoolState,
-    config: &Config,
-    disk_map_load: &DiskMapLoad,
-) -> Vec<CompactDrive> {
+fn build_compact_drives(pool: &PoolState, membership: &PoolMembership) -> Vec<CompactDrive> {
     let mut drives = Vec::new();
 
     // Present pool devices
@@ -182,15 +178,15 @@ fn build_compact_drives(
         });
     }
 
-    // Unpooled config disks
-    for (name, _disk) in config.disks() {
+    // Unpooled membership disks
+    for name in membership.disks.keys() {
         let expected_mapper = format!("braid-{name}");
         if !pool_mappers.contains(expected_mapper.as_str()) {
             drives.push(CompactDrive {
                 name: name.clone(),
                 device_short: "-".to_owned(),
                 devid: None,
-                status: classify_unpooled_disk(name, disk_map_load).as_str(),
+                status: "missing",
             });
         }
     }
@@ -220,36 +216,6 @@ pub enum StatusError {
 // Unpooled disk classification
 // ---------------------------------------------------------------------------
 
-enum UnpooledStatus {
-    New,
-    Missing,
-    Unknown,
-}
-
-impl UnpooledStatus {
-    fn as_str(&self) -> &'static str {
-        match self {
-            Self::New => "new",
-            Self::Missing => "missing",
-            Self::Unknown => "unknown",
-        }
-    }
-}
-
-fn classify_unpooled_disk(name: &str, disk_map_load: &DiskMapLoad) -> UnpooledStatus {
-    match disk_map_load {
-        DiskMapLoad::NotFound => UnpooledStatus::New,
-        DiskMapLoad::Failed(_) => UnpooledStatus::Unknown,
-        DiskMapLoad::Loaded(map) => {
-            if map.disks.contains_key(name) {
-                UnpooledStatus::Missing
-            } else {
-                UnpooledStatus::New
-            }
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Internal types (verbose context)
 // ---------------------------------------------------------------------------
@@ -278,6 +244,7 @@ pub fn build_status_report<R: CommandRunner, F: Filesystem>(
     runner: &R,
     fs: &F,
     config: &Config,
+    membership: &PoolMembership,
 ) -> Result<StatusReport, StatusError> {
     let advisories = luks::header_backup_advisories();
 
@@ -327,12 +294,6 @@ pub fn build_status_report<R: CommandRunner, F: Filesystem>(
         });
     }
 
-    let disk_map_load = disk_map::try_load_disk_map();
-    if let DiskMapLoad::Loaded(ref map) = disk_map_load {
-        disk_map::validate_config_name_stability(config, map)
-            .map_err(|e| StatusError::Validation(e.to_string()))?;
-    }
-
     let df_summary = summarize_df(runner, config.mount_point().as_str())?;
     let capacity = get_capacity(runner, config.mount_point().as_str(), pool.missing_count)?;
     let last_scrub = get_scrub_string(runner, config.mount_point().as_str());
@@ -344,14 +305,13 @@ pub fn build_status_report<R: CommandRunner, F: Filesystem>(
         StatusCode::Degraded
     };
 
-    let config_disks: Vec<ConfigDisk> = config
-        .disks()
+    let config_disks: Vec<ConfigDisk> = membership
+        .disks
         .iter()
-        .map(|(name, disk)| probe_config_disk(runner, fs, name, disk))
+        .map(|(name, by_id)| probe_config_disk(runner, fs, name, by_id))
         .collect::<Result<Vec<_>, _>>()?;
     let device_stats = get_device_stats(runner, config.mount_point().as_str())?;
-    let verbose_ctx =
-        build_disk_reports(runner, &config_disks, &pool, &device_stats, &disk_map_load);
+    let verbose_ctx = build_disk_reports(runner, &config_disks, &pool, &device_stats);
 
     let alert_state = resolve_alert_state();
 
@@ -424,17 +384,12 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
         return Ok(());
     }
 
-    // 3. Disk-map load + validation
-    let disk_map_load = disk_map::try_load_disk_map();
-    if let DiskMapLoad::Loaded(ref map) = disk_map_load {
-        disk_map::validate_config_name_stability(config, map)
-            .map_err(|e| StatusError::Validation(e.to_string()))?;
-    }
-    if let DiskMapLoad::Failed(ref reason) = disk_map_load {
-        eprintln!(
-            "Warning: disk-map could not be loaded ({reason}) — disk states may be inaccurate"
-        );
-    }
+    // 3. Membership load (try_load pattern)
+    let membership_result = membership::load_membership();
+    let membership = match &membership_result {
+        Ok(m) => m.clone(),
+        Err(_) => PoolMembership::empty(),
+    };
 
     // 4. Strict data gathering
     let df_summary = summarize_df(runner, config.mount_point().as_str())?;
@@ -450,7 +405,7 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
     };
 
     // 6. Compact drives (always built when mounted)
-    let compact_drives = build_compact_drives(&pool, config, &disk_map_load);
+    let compact_drives = build_compact_drives(&pool, &membership);
 
     // 7. Alert state (latch-based)
     let alert_state = resolve_alert_state();
@@ -458,12 +413,12 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
     // 8. Per-disk detail
     let verbose_ctx = {
         let device_stats = get_device_stats(runner, config.mount_point().as_str())?;
-        let config_disks: Vec<ConfigDisk> = config
-            .disks()
+        let config_disks: Vec<ConfigDisk> = membership
+            .disks
             .iter()
-            .map(|(name, disk)| probe_config_disk(runner, fs, name, disk))
+            .map(|(name, by_id)| probe_config_disk(runner, fs, name, by_id))
             .collect::<Result<Vec<_>, _>>()?;
-        build_disk_reports(runner, &config_disks, &pool, &device_stats, &disk_map_load)
+        build_disk_reports(runner, &config_disks, &pool, &device_stats)
     };
 
     // 9. Assemble report
@@ -718,7 +673,6 @@ fn build_disk_reports<R: CommandRunner>(
     config_disks: &[ConfigDisk],
     pool: &PoolState,
     device_stats: &BtrfsDeviceStatsOutput,
-    disk_map_load: &DiskMapLoad,
 ) -> VerboseContext {
     let pool_uuid_set: HashSet<&LuksUuid> = pool.devices.iter().map(|d| &d.luks_uuid).collect();
 
@@ -800,9 +754,7 @@ fn build_disk_reports<R: CommandRunner>(
             continue;
         }
 
-        let status = classify_unpooled_disk(&cd.name, disk_map_load)
-            .as_str()
-            .to_owned();
+        let status = "missing".to_owned();
         let mapper = mapper_name(&cd.name).0;
 
         disk_reports.push(DiskReport {
@@ -1067,7 +1019,7 @@ pub fn format_bytes(bytes: u64) -> String {
 mod tests {
     use super::*;
     use crate::cmd::{MockRunner, RawCommandOutput};
-    use crate::config::DiskConfig;
+    use crate::membership::PoolMembership;
     use std::collections::BTreeMap;
 
     struct MockFs {
@@ -1311,37 +1263,37 @@ mod tests {
     }
 
     fn config_3disk() -> Config {
+        Config::new(MountPoint("/mnt/storage".to_owned())).unwrap()
+    }
+
+    fn membership_3disk() -> PoolMembership {
         let mut disks = BTreeMap::new();
         disks.insert(
             "disk1".to_owned(),
-            DiskConfig {
-                by_id: ByIdPath("/dev/disk/by-id/disk1".to_owned()),
-            },
+            ByIdPath("/dev/disk/by-id/disk1".to_owned()),
         );
         disks.insert(
             "disk2".to_owned(),
-            DiskConfig {
-                by_id: ByIdPath("/dev/disk/by-id/disk2".to_owned()),
-            },
+            ByIdPath("/dev/disk/by-id/disk2".to_owned()),
         );
         disks.insert(
             "disk3".to_owned(),
-            DiskConfig {
-                by_id: ByIdPath("/dev/disk/by-id/disk3".to_owned()),
-            },
+            ByIdPath("/dev/disk/by-id/disk3".to_owned()),
         );
-        Config::new(disks, MountPoint("/mnt/storage".to_owned())).unwrap()
+        PoolMembership { disks }
     }
 
     fn config_1disk() -> Config {
+        Config::new(MountPoint("/mnt/storage".to_owned())).unwrap()
+    }
+
+    fn membership_1disk() -> PoolMembership {
         let mut disks = BTreeMap::new();
         disks.insert(
             "disk1".to_owned(),
-            DiskConfig {
-                by_id: ByIdPath("/dev/disk/by-id/disk1".to_owned()),
-            },
+            ByIdPath("/dev/disk/by-id/disk1".to_owned()),
         );
-        Config::new(disks, MountPoint("/mnt/storage".to_owned())).unwrap()
+        PoolMembership { disks }
     }
 
     /// Build a MockRunner for a 3-disk mounted healthy pool (base probes, no per-disk detail).
@@ -2727,62 +2679,8 @@ mod tests {
     }
 
     // =======================================================================
-    // Classification tests
-    // =======================================================================
-
-    #[test]
-    fn classify_unpooled_new_not_found() {
-        let load = DiskMapLoad::NotFound;
-        assert_eq!(classify_unpooled_disk("disk1", &load).as_str(), "new");
-    }
-
-    #[test]
-    fn classify_unpooled_new_loaded_empty() {
-        let load = DiskMapLoad::Loaded(crate::disk_map::DiskMap::new());
-        assert_eq!(classify_unpooled_disk("disk1", &load).as_str(), "new");
-    }
-
-    #[test]
-    fn classify_unpooled_missing() {
-        let mut map = crate::disk_map::DiskMap::new();
-        crate::disk_map::record_disk(&mut map, "disk1", "/by-id/1", "u1", 1);
-        let load = DiskMapLoad::Loaded(map);
-        assert_eq!(classify_unpooled_disk("disk1", &load).as_str(), "missing");
-    }
-
-    #[test]
-    fn classify_unpooled_unknown() {
-        let load = DiskMapLoad::Failed("corrupt".to_owned());
-        assert_eq!(classify_unpooled_disk("disk1", &load).as_str(), "unknown");
-    }
-
-    // =======================================================================
     // build_disk_reports: PresentNotLuks classification
     // =======================================================================
-
-    #[test]
-    fn build_disk_reports_present_not_luks_new() {
-        let config_disks = vec![ConfigDisk {
-            name: "disk1".to_owned(),
-            by_id_path: ByIdPath("/dev/disk/by-id/disk1".to_owned()),
-            state: ConfigDiskState::PresentNotLuks,
-        }];
-        let pool = PoolState {
-            mounted: true,
-            devices: vec![],
-            missing_count: 0,
-            missing_devids: vec![],
-            total_devices: 0,
-            fsid: None,
-        };
-        let runner = MockRunner::default();
-        let stats = BtrfsDeviceStatsOutput { devices: vec![] };
-        let load = DiskMapLoad::Loaded(crate::disk_map::DiskMap::new());
-
-        let ctx = build_disk_reports(&runner, &config_disks, &pool, &stats, &load);
-        assert_eq!(ctx.disks.len(), 1);
-        assert_eq!(ctx.disks[0].status, "new");
-    }
 
     #[test]
     fn build_disk_reports_present_not_luks_missing() {
@@ -2801,17 +2699,14 @@ mod tests {
         };
         let runner = MockRunner::default();
         let stats = BtrfsDeviceStatsOutput { devices: vec![] };
-        let mut map = crate::disk_map::DiskMap::new();
-        crate::disk_map::record_disk(&mut map, "disk1", "/by-id/1", "u1", 1);
-        let load = DiskMapLoad::Loaded(map);
 
-        let ctx = build_disk_reports(&runner, &config_disks, &pool, &stats, &load);
+        let ctx = build_disk_reports(&runner, &config_disks, &pool, &stats);
         assert_eq!(ctx.disks.len(), 1);
         assert_eq!(ctx.disks[0].status, "missing");
     }
 
     // =======================================================================
-    // Compact drive new/unknown tests
+    // Compact drive tests
     // =======================================================================
 
     #[test]
@@ -2849,7 +2744,7 @@ mod tests {
     }
 
     #[test]
-    fn status_compact_unknown_disk() {
+    fn status_compact_missing_disk() {
         let pool = PoolState {
             mounted: true,
             devices: vec![],
@@ -2858,11 +2753,10 @@ mod tests {
             total_devices: 0,
             fsid: None,
         };
-        let config = config_1disk();
-        let load = DiskMapLoad::Failed("corrupt".to_owned());
-        let drives = build_compact_drives(&pool, &config, &load);
+        let membership = membership_1disk();
+        let drives = build_compact_drives(&pool, &membership);
         assert_eq!(drives.len(), 1);
-        assert_eq!(drives[0].status, "unknown");
+        assert_eq!(drives[0].status, "missing");
     }
 
     // =======================================================================

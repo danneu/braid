@@ -4,6 +4,7 @@ pub mod alert;
 pub mod browse;
 pub mod cmd;
 pub mod config;
+pub mod discover;
 pub mod disk_map;
 pub mod doctor;
 pub mod enroll_key_file;
@@ -12,6 +13,7 @@ pub mod idle;
 
 pub mod lock;
 pub mod luks;
+pub mod membership;
 pub mod monitor;
 pub mod parse;
 pub mod pool;
