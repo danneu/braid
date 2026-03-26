@@ -24,7 +24,7 @@ def add_cmd(key):
     return (
         f"printf '%s\\n' {passphrase_q} | "
         f"BRAID_LUKS_OPTS='{luks_opts}' "
-        f"braid add {key} --passphrase-stdin --yes"
+        f"braid add {key}=/dev/disk/by-id/virtio-{key} --passphrase-stdin --yes"
     )
 
 
@@ -41,32 +41,17 @@ with subtest("Setup: build 2-disk pool and disk-map entries"):
     assert "disk1" in disk_map["disks"], disk_map
     assert "disk2" in disk_map["disks"], disk_map
 
-with subtest("Rename name in config and run mutating command"):
-    machine.succeed(
-        """cat > /tmp/renamed-config.json <<'JSON'
-{
-  "disks": {
-    "wd-red": { "by_id": "/dev/disk/by-id/virtio-disk1" },
-    "disk2": { "by_id": "/dev/disk/by-id/virtio-disk2" }
-  },
-  "mount_point": "/mnt/storage"
-}
-JSON"""
-    )
-
+with subtest("Add with renamed name for same disk is rejected"):
+    # Try to add the same physical disk (virtio-disk1) under a new name (wd-red).
+    # This should be rejected because disk-map already has disk1 for that by_id.
     map_before = machine.succeed("cat /var/lib/braid/disk-map.json")
+    pq = shlex.quote(passphrase)
     status, output = machine.execute(
-        "braid --config /tmp/renamed-config.json remove-missing --yes 2>&1"
+        f"printf '%s\\n' {pq} | "
+        f"BRAID_LUKS_OPTS='{luks_opts}' "
+        f"braid add wd-red=/dev/disk/by-id/virtio-disk1 --passphrase-stdin --yes 2>&1"
     )
     assert status != 0, f"expected non-zero exit, got {status}:\n{output}"
-
-    expected = (
-        "Disk name rename/reassignment is not allowed. "
-        "Keep original name 'disk1' or use explicit replace/remove+add workflow. "
-        "Details: recorded name 'disk1' with by_id '/dev/disk/by-id/virtio-disk1' "
-        "now appears as 'wd-red'."
-    )
-    assert expected in output, f"expected exact immutability error:\n{output}"
 
     fi_show = machine.succeed("btrfs fi show /mnt/storage")
     assert "/dev/mapper/braid-disk1" in fi_show, fi_show

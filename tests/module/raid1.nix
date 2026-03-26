@@ -6,13 +6,13 @@
 # RAID1 profile, and runtime config.
 #
 # Why: Validates the module's storage path with the production-like 3-disk
-# RAID1 configuration — braid-unlock opening all 3 LUKS devices,
-# btrfs-device-scan gating the mount, and correct RAID1 profile on the pool.
+# RAID1 configuration — braid discover + unlock opening all 3 LUKS devices
+# and mounting the pool with correct RAID1 profile.
 #
 # Dependencies: braid-module-single-disk (single-disk path works),
 # hello-world (VM infra).
 { braid }:
-{ lib, pkgs, ... }:
+{ pkgs, ... }:
 let
   passphrase = "testpassphrase";
   diskNames = [
@@ -38,9 +38,6 @@ in
       braid = {
         enable = true;
         package = braid;
-        disks = lib.genAttrs diskNames (d: {
-          byId = "/dev/disk/by-id/virtio-${d}";
-        });
       };
 
       virtualisation.emptyDiskImages = [
@@ -60,22 +57,6 @@ in
       virtualisation.memorySize = 2048;
 
       environment.systemPackages = [ pkgs.btrfs-progs ];
-
-      # Re-declare mount for VM compat (qemu-vm.nix clobbers fileSystems)
-      virtualisation.fileSystems."/mnt/storage" = {
-        device = "/dev/mapper/braid-disk1";
-        fsType = "btrfs";
-        options = [
-          "degraded"
-          "nofail"
-          "noatime"
-          "skip_balance"
-          "subvolid=5"
-          "x-systemd.device-timeout=1s"
-          "x-systemd.requires=btrfs-device-scan.service"
-          "x-systemd.after=btrfs-device-scan.service"
-        ];
-      };
 
     };
 

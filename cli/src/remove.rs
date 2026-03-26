@@ -1,5 +1,6 @@
 use crate::cmd::{CmdRequest, CommandRunner};
 use crate::config::{config_read, mapper_name};
+use crate::disk_map;
 use crate::membership;
 use crate::parse::parse_btrfs_device_usage;
 use crate::pool::evict_present_device;
@@ -171,6 +172,11 @@ pub fn cmd_remove<R: CommandRunner + Sync>(
 
     // Execute
     evict_present_device(runner, &mn.0, config.mount_point().as_str(), progress)?;
+
+    // Best-effort: remove entry from disk-map
+    disk_map::update_disk_map_best_effort(|map| {
+        map.disks.remove(name);
+    });
 
     eprintln!("Done. Disk '{}' removed from pool.", name);
     Ok(())

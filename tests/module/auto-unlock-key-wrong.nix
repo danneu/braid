@@ -7,7 +7,7 @@
 # Why: A corrupted or swapped USB must not block boot, cause error loops,
 # or leave the system in a degraded state.
 { braid }:
-{ lib, pkgs, ... }:
+{ pkgs, ... }:
 let
   passphrase = "testpassphrase";
   diskNames = [ "disk1" ];
@@ -42,15 +42,19 @@ in
       braid = {
         enable = true;
         package = braid;
-        disks = lib.genAttrs diskNames (d: {
-          byId = "/dev/disk/by-id/virtio-${d}";
-        });
         autoUnlock = {
           enable = true;
           keyDevice = "/dev/disk/by-id/virtio-usbkey";
           timeoutSec = 10;
         };
       };
+
+      # Seed pool.json — the initrd fixture bypasses `braid add`, so there is
+      # no pool membership file.  braid unlock requires it.
+      systemd.tmpfiles.rules = [
+        "d /var/lib/braid 0755 root root -"
+        ''f /var/lib/braid/pool.json 0644 root root - {"disks":{"disk1":"/dev/disk/by-id/virtio-disk1"}}''
+      ];
 
       virtualisation.emptyDiskImages = [
         {
@@ -79,22 +83,6 @@ in
           "nofail"
           "noauto"
           "x-systemd.device-timeout=10s"
-        ];
-      };
-
-      virtualisation.fileSystems."/mnt/storage" = {
-        device = "/dev/mapper/braid-disk1";
-        fsType = "btrfs";
-        neededForBoot = false;
-        options = [
-          "degraded"
-          "nofail"
-          "noatime"
-          "skip_balance"
-          "subvolid=5"
-          "x-systemd.device-timeout=1s"
-          "x-systemd.requires=btrfs-device-scan.service"
-          "x-systemd.after=btrfs-device-scan.service"
         ];
       };
 

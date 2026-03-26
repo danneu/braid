@@ -1,5 +1,6 @@
 use crate::cmd::{CmdError, CmdRequest, CommandRunner};
 use crate::config::{config_read, mapper_name};
+use crate::disk_map;
 use crate::luks::{
     backup_luks_header, device_has_btrfs_superblock, ensure_luks_open, luks_format,
     luks_opts_from_env, read_passphrase, verify_passphrase,
@@ -502,6 +503,22 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             pool_balance_raid1(runner, config.mount_point().as_str(), progress)?;
             eprintln!("Balance complete.");
         }
+    }
+
+    // Best-effort disk-map update: re-probe the pool and record each newly
+    // added disk's devid + luks_uuid. Failure here only warns — the primary
+    // operation (pool add) already succeeded.
+    if let Ok(pool_after) = probe_pool(runner, config.mount_point().as_str()) {
+        disk_map::update_disk_map_best_effort(|map| {
+            for &i in &needs_pool_add {
+                let name = names[i];
+                let by_id = &by_ids[i].0;
+                let mn = mapper_name(name);
+                if let Some(dev) = pool_after.devices.iter().find(|d| d.mapper == mn) {
+                    disk_map::record_disk(map, name, by_id, &dev.luks_uuid.0, dev.devid);
+                }
+            }
+        });
     }
 
     let label = if names.len() == 1 {

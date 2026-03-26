@@ -97,6 +97,7 @@ in
             dev="/dev/disk/by-id/virtio-$disk"
             if ! cryptsetup isLuks "$dev" 2>/dev/null; then
               echo -n '${passphrase}' | cryptsetup luksFormat --batch-mode \
+                --label "braid-$disk" \
                 --key-file=- --pbkdf pbkdf2 --pbkdf-force-iterations 1000 "$dev"
             fi
           done

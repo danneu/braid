@@ -3,16 +3,16 @@ import json
 start_all()
 machine.wait_for_unit("multi-user.target", timeout=180)
 
-# Seed disk-map: the initrd fixture bypasses `braid add`, so the disk-map is
-# empty. braid unlock uses the disk-map to distinguish bricked pool members
-# (degradable) from uninitialized disks (hard error).
-disk_map = json.dumps({"disks": {
-    d: {"by_id": f"/dev/disk/by-id/virtio-{d}", "luks_uuid": "x", "devid": i, "added_at": "t"}
-    for i, d in enumerate(["disk1", "disk2", "disk3"], 1)
+# Seed pool.json with all 3 members including the bricked disk3.
+# braid discover can't be used here — it only finds disks with intact LUKS
+# headers, so it would miss disk3, and unlock wouldn't know a member is missing.
+pool = json.dumps({"disks": {
+    d: f"/dev/disk/by-id/virtio-{d}"
+    for d in ["disk1", "disk2", "disk3"]
 }})
-machine.succeed(f"mkdir -p /var/lib/braid && echo '{disk_map}' > /var/lib/braid/disk-map.json")
+machine.succeed(f"mkdir -p /var/lib/braid && echo '{pool}' > /var/lib/braid/pool.json")
 
-with subtest("Pool is not mounted after boot (LUKS closed, no degraded in mount unit)"):
+with subtest("Pool is not mounted after boot (LUKS closed, no mount unit)"):
     machine.fail("mountpoint -q /mnt/storage")
 
 with subtest("Open LUKS on surviving disks and scan for btrfs members"):

@@ -6,50 +6,22 @@
 }:
 let
   cfg = config.braid;
-  diskNames = builtins.attrNames cfg.disks;
-
-  # Mapper names are braid-<name> (e.g. braid-toshiba)
-  mapperName = name: "braid-${name}";
-
   braidWrapped = import ./wrapper.nix { inherit cfg pkgs lib; };
+  cryptsetup = cfg.packages.cryptsetup;
+  btrfsProgs = cfg.packages.btrfsProgs;
+  utilLinux = cfg.packages.utilLinux;
 in
 {
   config = lib.mkIf cfg.enable {
-    # nofail — not authoritative for mounting. braid-unlock or
-    # braid-auto-unlock handle the actual mount in stage 2. This entry
-    # exists so NixOS knows about the mount point for systemctl targets.
-    #
-    # No 'degraded' here — that must only come from `braid unlock`, which
-    # detects missing devices and adds -o degraded deliberately. If systemd
-    # could mount degraded via this entry, the pool would silently run with
-    # single-profile block groups (zero redundancy) and the user would never
-    # know.
-    fileSystems.${cfg.mountPoint} = {
-      device = "/dev/mapper/${mapperName (builtins.head diskNames)}";
-      fsType = "btrfs";
-      options = [
-        "nofail"
-        # noatime: the default (relatime) updates the access timestamp on
-        # first read after a write — on a NAS serving files, that turns every
-        # read into a CoW metadata write across all RAID1 drives, preventing
-        # HDD spindown. noatime makes reads truly passive.
-        "noatime"
-        # skip_balance: prevent the kernel from silently resuming an interrupted
-        # balance on mount. braid manages balance lifecycle explicitly.
-        "skip_balance"
-        # subvolid=5: always mount the top-level subvolume, regardless of
-        # btrfs subvolume set-default. Prevents silent mount target changes.
-        "subvolid=5"
-        "x-systemd.requires=btrfs-device-scan.service"
-        "x-systemd.after=btrfs-device-scan.service"
-      ]
-      # When auto-unlock is enabled, the mount unit must wait for it to
-      # open the LUKS devices — otherwise systemd races both units and
-      # the mount fails because /dev/mapper/* doesn't exist yet.
-      ++ lib.optionals cfg.autoUnlock.enable [
-        "x-systemd.after=braid-auto-unlock.service"
-      ];
-    };
+    # Mount point directory — replaces the old fileSystems entry.
+    # Permissions are set by the braid wrapper post-unlock (root:storageGroup 2770).
+    systemd.tmpfiles.rules = [
+      "d ${cfg.mountPoint} 0755 root root -"
+    ]
+    ++ lib.optionals cfg.autoUnlock.enable [
+      # 0700 root:root — keyfile is sensitive; non-root must not traverse.
+      "d /run/braid-key 0700 root root -"
+    ];
 
     services.btrfs.autoScrub = {
       enable = lib.mkDefault true;
@@ -57,21 +29,22 @@ in
       fileSystems = [ cfg.mountPoint ];
     };
 
-    # Stage-2 btrfs-device-scan: the mount unit's x-systemd.requires
-    # references this service. In production it scans and finds nothing
-    # (LUKS mappers aren't opened yet); braid-unlock handles the mount.
-    # In VM tests it finds LUKS mappers opened by initrd fixtures.
-    systemd.services.btrfs-device-scan = {
-      description = "Scan for btrfs multi-device filesystems";
+    # Wrapped CLI available on PATH
+    environment.systemPackages = [ braidWrapped ];
+
+    # Lifecycle owner: "pool is online."
+    # ExecStart=/bin/true — the service's purpose is state ownership, not work.
+    # ExecStop=braid lock — unmounts and closes LUKS on shutdown or manual stop.
+    # Only activated by the wrapper on successful unlock/add (mountpoint -q check).
+    systemd.services.braid-online = {
+      description = "Braid storage pool online";
       serviceConfig = {
         Type = "oneshot";
         RemainAfterExit = true;
+        ExecStart = "${pkgs.coreutils}/bin/true";
+        ExecStop = "${braidWrapped}/bin/braid lock";
       };
-      script = "${config.braid.packages.btrfsProgs}/bin/btrfs device scan";
     };
-
-    # Wrapped CLI available on PATH
-    environment.systemPackages = [ braidWrapped ];
 
     # Single orchestrator service that opens all LUKS and mounts pool.
     # Guarantees one passphrase prompt — avoids relying on systemd-ask-password
@@ -86,9 +59,9 @@ in
       unitConfig.ConditionPathIsMountPoint = "!${cfg.mountPoint}";
       path = [
         braidWrapped
-        cfg.packages.cryptsetup
-        cfg.packages.btrfsProgs
-        cfg.packages.utilLinux
+        cryptsetup
+        btrfsProgs
+        utilLinux
       ];
       script = ''
         ${pkgs.systemd}/bin/systemd-ask-password \
@@ -97,6 +70,8 @@ in
       '';
     };
 
+    # Start handle: "bring pool online."
+    # Wants unlock only — braid-online is activated by the wrapper on success.
     systemd.targets.braid-pool = {
       description = "Braid storage pool online";
       wants = [ "braid-unlock.service" ];
@@ -119,11 +94,6 @@ in
       ];
     };
 
-    systemd.tmpfiles.rules = lib.mkIf cfg.autoUnlock.enable [
-      # 0700 root:root — keyfile is sensitive; non-root must not traverse.
-      "d /run/braid-key 0700 root root -"
-    ];
-
     systemd.services.braid-auto-unlock = lib.mkIf cfg.autoUnlock.enable {
       description = "Auto-unlock braid pool from USB keyfile";
       wantedBy = [ "multi-user.target" ];
@@ -139,9 +109,9 @@ in
       };
       path = [
         braidWrapped
-        cfg.packages.cryptsetup
-        cfg.packages.btrfsProgs
-        cfg.packages.utilLinux
+        cryptsetup
+        btrfsProgs
+        utilLinux
       ];
       script =
         let

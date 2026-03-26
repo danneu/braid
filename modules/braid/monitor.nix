@@ -84,6 +84,8 @@ in
     # --- Monitor service (pure detector) ---
     systemd.services.braid-monitor = {
       description = "Poll btrfs device stats for disk errors";
+      after = [ "mnt-storage.mount" ];
+      bindsTo = [ "mnt-storage.mount" ];
       serviceConfig.Type = "oneshot";
       path = [ braidWrapped cfg.packages.btrfsProgs ];
       script = ''

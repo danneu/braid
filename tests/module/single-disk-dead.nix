@@ -12,7 +12,7 @@
 # Dependencies: braid-module-single-disk (single-disk happy path),
 # braid-module-bad-config (nofail boot-continue works).
 { braid }:
-{ lib, pkgs, ... }:
+{ pkgs, ... }:
 let
   passphrase = "testpassphrase";
   diskNames = [ "disk1" ];
@@ -38,9 +38,6 @@ in
       braid = {
         enable = true;
         package = braid;
-        disks = lib.genAttrs diskNames (d: {
-          byId = "/dev/disk/by-id/virtio-${d}";
-        });
       };
 
       virtualisation.emptyDiskImages = [
@@ -50,22 +47,6 @@ in
         }
       ];
       virtualisation.memorySize = 2048;
-
-      # Re-declare mount for VM compat (qemu-vm.nix clobbers fileSystems)
-      virtualisation.fileSystems."/mnt/storage" = {
-        device = "/dev/mapper/braid-disk1";
-        fsType = "btrfs";
-        options = [
-          "degraded"
-          "nofail"
-          "noatime"
-          "skip_balance"
-          "subvolid=5"
-          "x-systemd.device-timeout=1s"
-          "x-systemd.requires=btrfs-device-scan.service"
-          "x-systemd.after=btrfs-device-scan.service"
-        ];
-      };
 
     };
 

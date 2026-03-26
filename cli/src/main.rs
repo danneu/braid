@@ -50,6 +50,8 @@ enum Commands {
     Tui(TuiArgs),
     /// Browse raw btrfs command output in a tabbed TUI
     Browse(BrowseArgs),
+    /// Scan for braid-labeled LUKS devices and display or rebuild pool membership
+    Discover(DiscoverArgs),
 }
 
 #[derive(Debug, Args)]
@@ -178,6 +180,16 @@ struct BrowseArgs {
     /// Non-interactive: run key commands and exit 0/1
     #[arg(long)]
     check: bool,
+}
+
+#[derive(Debug, Args)]
+struct DiscoverArgs {
+    /// Write discovered membership to pool.json
+    #[arg(long)]
+    write: bool,
+    /// Show what would be written without writing
+    #[arg(long)]
+    dry_run: bool,
 }
 
 fn main() {
@@ -476,6 +488,34 @@ fn main() {
             if let Err(e) = result {
                 print_cli_error(&e.to_string());
                 std::process::exit(1);
+            }
+        }
+        Commands::Discover(args) => {
+            let runner = RealRunner;
+            match braid_cli::discover::discover_pool_members(&runner) {
+                Ok(members) => {
+                    if members.is_empty() {
+                        eprintln!("no braid-labeled LUKS devices found");
+                        std::process::exit(1);
+                    }
+                    for (name, by_id) in &members {
+                        eprintln!("  {} = {}", name, by_id);
+                    }
+                    if args.write {
+                        let m = braid_cli::membership::PoolMembership { disks: members };
+                        if let Err(e) = braid_cli::membership::save_membership(&m) {
+                            print_cli_error(&format!("failed to write pool membership: {e}"));
+                            std::process::exit(1);
+                        }
+                        eprintln!("pool membership written to /var/lib/braid/pool.json");
+                    } else if !args.dry_run {
+                        eprintln!("pass --write to persist, or --dry-run to preview");
+                    }
+                }
+                Err(e) => {
+                    print_cli_error(&e.to_string());
+                    std::process::exit(1);
+                }
             }
         }
         Commands::Browse(args) => {

@@ -177,6 +177,13 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync>(
         pool_remove_missing(runner, config.mount_point().as_str())?;
     }
 
+    // Best-effort: remove entry from disk-map by devid
+    if let Some(devid) = target_devid {
+        disk_map::update_disk_map_best_effort(|map| {
+            disk_map::remove_disks_by_devids(map, &[devid]);
+        });
+    }
+
     crate::pool::maybe_restore_raid1(
         runner,
         config.mount_point().as_str(),

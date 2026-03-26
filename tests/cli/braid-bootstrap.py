@@ -17,8 +17,8 @@ passphrase = "testpassphrase"
 luks_opts = "--pbkdf pbkdf2 --pbkdf-force-iterations 1000"
 
 
-def write_config(disk_list, mount="/mnt/storage"):
-    config = json.dumps({"disks": disk_list, "mountPoint": mount})
+def write_config(mount="/mnt/storage"):
+    config = json.dumps({"mount_point": mount})
     escaped = config.replace("'", "'\\''")
     return f"echo '{escaped}' > /tmp/braid-config.json"
 
@@ -53,7 +53,7 @@ def init_disk(by_id):
 # --- Phase 1: Plan with no pool (disk not yet init'd => blocked) ---
 
 with subtest("Plan warns when disk not LUKS formatted"):
-    machine.succeed(write_config(["/dev/disk/by-id/virtio-disk1"]))
+    machine.succeed(write_config())
     p = plan_json()
     # Plan is applicable (no blocked_reasons) but warns about non-LUKS disk
     assert p["status"] == "applicable", (
@@ -106,10 +106,7 @@ with subtest("Write test data"):
 # --- Phase 6: Plan to add second disk ---
 
 with subtest("Plan shows OPEN_LUKS + ADD + RAID1 balance for second disk"):
-    machine.succeed(write_config([
-        "/dev/disk/by-id/virtio-disk1",
-        "/dev/disk/by-id/virtio-disk2",
-    ]))
+    machine.succeed(write_config())
     # init-disk disk2 first
     machine.succeed(init_disk("/dev/disk/by-id/virtio-disk2"))
     p = plan_json()

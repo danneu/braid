@@ -6,7 +6,7 @@
 # Why: Principle 1 (resilient by default). A missing USB key must NEVER
 # block boot or cause systemd to enter degraded state.
 { braid }:
-{ lib, pkgs, ... }:
+{ pkgs, ... }:
 let
   passphrase = "testpassphrase";
   diskNames = [ "disk1" ];
@@ -28,9 +28,6 @@ in
       braid = {
         enable = true;
         package = braid;
-        disks = lib.genAttrs diskNames (d: {
-          byId = "/dev/disk/by-id/virtio-${d}";
-        });
         autoUnlock = {
           enable = true;
           # Point at a device that does NOT exist in this VM
@@ -62,22 +59,6 @@ in
           "nofail"
           "noauto"
           "x-systemd.device-timeout=2s"
-        ];
-      };
-
-      virtualisation.fileSystems."/mnt/storage" = {
-        device = "/dev/mapper/braid-disk1";
-        fsType = "btrfs";
-        neededForBoot = false;
-        options = [
-          "degraded"
-          "nofail"
-          "noatime"
-          "skip_balance"
-          "subvolid=5"
-          "x-systemd.device-timeout=1s"
-          "x-systemd.requires=btrfs-device-scan.service"
-          "x-systemd.after=btrfs-device-scan.service"
         ];
       };
 

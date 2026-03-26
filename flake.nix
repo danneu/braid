@@ -262,10 +262,6 @@
               braid = linuxCrane.braid-cli-unwrapped;
             }
           );
-          braid-module-invalid-disk-names = import ./tests/module/invalid-disk-names.nix {
-            inherit nixpkgs;
-            system = linuxSystem;
-          };
           braid-lock = pkgs.testers.nixosTest (
             import ./tests/cli/braid-lock.nix {
               braid = linuxCrane.braid;

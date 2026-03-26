@@ -10,7 +10,7 @@
 #
 # Dependencies: braid-module-raid1 (RAID1 fixture setup).
 { braid }:
-{ lib, pkgs, ... }:
+{ pkgs, ... }:
 let
   passphrase = "testpassphrase";
   diskNames = [
@@ -35,9 +35,6 @@ in
       braid = {
         enable = true;
         package = braid;
-        disks = lib.genAttrs diskNames (d: {
-          byId = "/dev/disk/by-id/virtio-${d}";
-        });
       };
 
       virtualisation.emptyDiskImages = [
@@ -54,20 +51,6 @@ in
 
       environment.systemPackages = [ pkgs.btrfs-progs ];
 
-      virtualisation.fileSystems."/mnt/storage" = {
-        device = "/dev/mapper/braid-disk1";
-        fsType = "btrfs";
-        options = [
-          "degraded"
-          "nofail"
-          "noatime"
-          "skip_balance"
-          "subvolid=5"
-          "x-systemd.device-timeout=1s"
-          "x-systemd.requires=btrfs-device-scan.service"
-          "x-systemd.after=btrfs-device-scan.service"
-        ];
-      };
     };
 
   testScript = builtins.readFile ./braid-browse.py;

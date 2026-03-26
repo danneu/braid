@@ -11,7 +11,8 @@
 start_all()
 machine.wait_for_unit("multi-user.target", timeout=120)
 
-with subtest("unlock pool"):
+with subtest("discover and unlock pool"):
+    machine.succeed("braid discover --write")
     machine.succeed("echo -n 'testpassphrase' | braid unlock --passphrase-stdin")
     machine.succeed("mountpoint /mnt/storage")
 

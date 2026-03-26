@@ -12,7 +12,7 @@
 # Dependencies: braid-module-single-disk (module loads correctly),
 # hello-world (VM infra).
 { braid }:
-{ lib, pkgs, ... }:
+{ pkgs, ... }:
 {
   name = "braid-module-add-bootstrap";
 
@@ -22,7 +22,6 @@
     braid = {
       enable = true;
       package = braid;
-      disks.disk1 = { byId = "/dev/disk/by-id/virtio-disk1"; };
     };
 
     virtualisation.emptyDiskImages = [
@@ -32,23 +31,6 @@
 
     environment.systemPackages = [ pkgs.btrfs-progs ];
 
-    # Re-declare mount for VM compat (qemu-vm.nix clobbers fileSystems).
-    # nofail — braid add creates and mounts the pool; this entry is for
-    # systemd awareness only.
-    virtualisation.fileSystems."/mnt/storage" = {
-      device = "/dev/mapper/braid-disk1";
-      fsType = "btrfs";
-      options = [
-        "degraded"
-        "nofail"
-        "noatime"
-        "skip_balance"
-        "subvolid=5"
-        "x-systemd.device-timeout=1s"
-        "x-systemd.requires=btrfs-device-scan.service"
-        "x-systemd.after=btrfs-device-scan.service"
-      ];
-    };
   };
 
   testScript = builtins.readFile ./add-bootstrap.py;

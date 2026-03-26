@@ -23,14 +23,14 @@ import os
 sys.path.insert(0, os.path.dirname(__file__))
 from harness import (
     run, run_capture, cleanup, section,
-    add_cmd, replace_cmd, CONFIG, MOUNT_POINT,
+    add_cmd, replace_cmd, disk, CONFIG, MOUNT_POINT,
 )
 
 # --- Phase 0: Build 2-drive RAID1 pool ---
 
 with section("Setup: build 2-drive RAID1 pool"):
-    run(add_cmd("hwtest1"))
-    run(add_cmd("hwtest2"))
+    run(add_cmd("hwtest1", disk(1)))
+    run(add_cmd("hwtest2", disk(2)))
 
     fi_show = run(f"btrfs fi show {MOUNT_POINT}")
     for name in ["braid-hwtest1", "braid-hwtest2"]:
@@ -45,7 +45,7 @@ with section("Setup: build 2-drive RAID1 pool"):
 # --- Phase 1: Live replace disk2 → disk3 ---
 
 with section("Live replace hwtest2 with hwtest3"):
-    result = run(replace_cmd("hwtest2", "hwtest3"), timeout=1800)
+    result = run(replace_cmd("hwtest2", "hwtest3", disk(3)), timeout=1800)
     print(f"braid replace output:\n{result}")
 
 with section("Pool healthy after live replace"):

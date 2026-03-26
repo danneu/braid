@@ -3,7 +3,7 @@ export PATH="@toolPath@:$PATH"
 @braidBin@ "$@"
 ret=$?
 
-if [ -n "@storageGroup@" ] && [ "$ret" -eq 0 ]; then
+if [ "$ret" -eq 0 ]; then
   # Subcommand detection mirrors the global CLI shape in cli/src/main.rs (struct Cli).
   # If global options change there, update this parser to match.
   subcmd=""
@@ -32,12 +32,22 @@ if [ -n "@storageGroup@" ] && [ "$ret" -eq 0 ]; then
     case "$subcmd" in
       unlock|add)
         if @mountpointBin@ -q "@mountPointPath@" 2>/dev/null; then
-          if ! @chownBin@ "root:@storageGroup@" "@mountPointPath@"; then
-            echo "braid: WARNING: failed to set ownership on @mountPointPath@" >&2
+          if [ -n "@storageGroup@" ]; then
+            if ! @chownBin@ "root:@storageGroup@" "@mountPointPath@"; then
+              echo "braid: WARNING: failed to set ownership on @mountPointPath@" >&2
+            fi
+            if ! @chmodBin@ 2770 "@mountPointPath@"; then
+              echo "braid: WARNING: failed to set permissions on @mountPointPath@" >&2
+            fi
           fi
-          if ! @chmodBin@ 2770 "@mountPointPath@"; then
-            echo "braid: WARNING: failed to set permissions on @mountPointPath@" >&2
+          if ! @systemctlBin@ start braid-online.service 2>/dev/null; then
+            echo "braid: WARNING: failed to activate braid-online.service — pool is mounted but shutdown may not lock automatically" >&2
           fi
+        fi
+        ;;
+      lock)
+        if ! @mountpointBin@ -q "@mountPointPath@" 2>/dev/null; then
+          @systemctlBin@ stop braid-online.service 2>/dev/null || true
         fi
         ;;
     esac

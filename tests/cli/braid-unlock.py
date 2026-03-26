@@ -29,7 +29,7 @@ def add_cmd(key):
     return (
         f"printf '%s\\n' {pq} | "
         f"BRAID_LUKS_OPTS='{luks_opts}' "
-        f"braid add {key} --passphrase-stdin --yes"
+        f"braid add {key}=/dev/disk/by-id/virtio-{key} --passphrase-stdin --yes"
     )
 
 
@@ -127,44 +127,6 @@ with subtest("Test 2b: bootstrap disk-map on fresh system"):
                 f"{name}.{field}: expected {expected['disks'][name][field]}, " \
                 f"got {new_map['disks'][name][field]}"
 
-# --- Test 2c: Swapped config refuses to bootstrap wrong entries ---
-
-with subtest("Test 2c: swapped config refuses to bootstrap wrong entries"):
-    close_all()
-
-    # Save original disk-map for restoration
-    original_map = machine.succeed("cat /var/lib/braid/disk-map.json")
-
-    # Simulate fresh machine: delete disk-map
-    machine.succeed("rm /var/lib/braid/disk-map.json")
-
-    # Create config with disk1/disk2 by-id paths swapped
-    swapped_config = json.dumps({
-        "disks": {
-            "disk1": {"by_id": "/dev/disk/by-id/virtio-disk2"},
-            "disk2": {"by_id": "/dev/disk/by-id/virtio-disk1"},
-            "disk3": {"by_id": "/dev/disk/by-id/virtio-disk3"},
-        },
-        "mount_point": "/mnt/storage",
-    })
-    machine.succeed(f"echo '{swapped_config}' > /tmp/swapped.json")
-
-    # Unlock with swapped config — mounts fine (btrfs doesn't care about names)
-    machine.succeed(unlock_cmd(passphrase, extra="--config /tmp/swapped.json"))
-    machine.succeed("mountpoint -q /mnt/storage")
-
-    # Bootstrap should record ONLY disk3 (label matches).
-    # disk1 and disk2 are swapped: LUKS labels don't match config names.
-    new_raw = machine.succeed("cat /var/lib/braid/disk-map.json")
-    new_map = json.loads(new_raw)
-    assert set(new_map["disks"].keys()) == {"disk3"}, \
-        f"Expected only disk3 (label-verified), got: {set(new_map['disks'].keys())}"
-
-    # Restore for subsequent tests: re-unlock with correct config so pool is mounted
-    close_all()
-    machine.succeed(f"echo '{original_map}' > /var/lib/braid/disk-map.json")
-    machine.succeed(unlock_cmd(passphrase))
-
 # --- Test 3: Partial state ---
 
 with subtest("Test 3: partial state — one mapper closed, pool unmounted"):
@@ -221,61 +183,6 @@ with subtest("Test 4b: missing disk — --allow-degraded mounts degraded"):
     machine.succeed("udevadm trigger && udevadm settle")
     machine.succeed("test -e /dev/disk/by-id/virtio-disk3")
 
-# --- Test 5a: Identity mismatch blocks degraded unlock ---
-
-with subtest("Test 5a: identity mismatch blocks degraded unlock"):
-    close_all()
-
-    # Save current disk-map
-    disk_map_raw = machine.succeed("cat /var/lib/braid/disk-map.json")
-    disk_map = json.loads(disk_map_raw)
-
-    # Tamper: change disk3's by_id to a wrong value
-    tampered = dict(disk_map)
-    tampered["disks"] = dict(tampered["disks"])
-    tampered["disks"]["disk3"] = dict(tampered["disks"]["disk3"])
-    tampered["disks"]["disk3"]["by_id"] = "/dev/disk/by-id/virtio-WRONG"
-    machine.succeed(f"echo '{json.dumps(tampered)}' > /var/lib/braid/disk-map.json")
-
-    # Remove disk3 symlink to simulate unplugged disk
-    machine.succeed("rm -f /dev/disk/by-id/virtio-disk3")
-
-    cmd = unlock_cmd(passphrase, extra="--allow-degraded") + " 2>&1"
-    ret = machine.execute(cmd)
-    assert ret[0] != 0, "Expected non-zero exit for identity mismatch"
-    assert "not allowed" in ret[1], \
-        f"Expected 'not allowed' in output, got: {ret[1]}"
-
-    # Restore disk-map and symlink
-    machine.succeed(f"echo '{json.dumps(disk_map)}' > /var/lib/braid/disk-map.json")
-    machine.succeed("udevadm trigger && udevadm settle")
-    machine.succeed("test -e /dev/disk/by-id/virtio-disk3")
-
-# --- Test 5b: Identity mismatch blocks healthy unlock ---
-
-with subtest("Test 5b: identity mismatch blocks healthy unlock"):
-    close_all()
-
-    # Save current disk-map
-    disk_map_raw = machine.succeed("cat /var/lib/braid/disk-map.json")
-    disk_map = json.loads(disk_map_raw)
-
-    # Tamper: change disk1's by_id to a wrong value (all disks present)
-    tampered = dict(disk_map)
-    tampered["disks"] = dict(tampered["disks"])
-    tampered["disks"]["disk1"] = dict(tampered["disks"]["disk1"])
-    tampered["disks"]["disk1"]["by_id"] = "/dev/disk/by-id/virtio-WRONG"
-    machine.succeed(f"echo '{json.dumps(tampered)}' > /var/lib/braid/disk-map.json")
-
-    cmd = unlock_cmd(passphrase) + " 2>&1"
-    ret = machine.execute(cmd)
-    assert ret[0] != 0, "Expected non-zero exit for identity mismatch"
-    assert "not allowed" in ret[1], \
-        f"Expected 'not allowed' in output, got: {ret[1]}"
-
-    # Restore disk-map
-    machine.succeed(f"echo '{json.dumps(disk_map)}' > /var/lib/braid/disk-map.json")
-
 # --- Test 6: Wrong passphrase ---
 
 with subtest("Test 6: wrong passphrase rejected"):
@@ -292,21 +199,28 @@ with subtest("Test 6: wrong passphrase rejected"):
 with subtest("Test 7: uninitialized disk detected"):
     close_all()
 
-    # Write a temp config pointing at disk4 (raw, never braid add'd)
-    raw_config = json.dumps({
+    # Save original pool.json for restoration
+    original_pool = machine.succeed("cat /var/lib/braid/pool.json")
+
+    # Write a pool.json pointing at disk4 (raw, never braid add'd)
+    raw_pool = json.dumps({
         "disks": {
-            "raw": {"by_id": "/dev/disk/by-id/virtio-disk4"},
+            "raw": "/dev/disk/by-id/virtio-disk4",
         },
-        "mount_point": "/mnt/storage",
     })
-    machine.succeed(f"echo '{raw_config}' > /tmp/raw.json")
+    machine.succeed(f"echo '{raw_pool}' > /var/lib/braid/pool.json")
 
     # Redirect stderr to stdout so we can capture the error message
-    cmd = unlock_cmd(passphrase, extra="--config /tmp/raw.json") + " 2>&1"
+    cmd = unlock_cmd(passphrase) + " 2>&1"
     ret = machine.execute(cmd)
     assert ret[0] != 0, "Expected non-zero exit for uninitialized disk"
-    assert "not initialized" in ret[1], \
-        f"Expected 'not initialized' in output, got: {ret}"
+    # A raw (never LUKS-formatted) disk in pool.json looks like a damaged
+    # member to unlock — the device exists but has no LUKS header.
+    assert "LUKS header damaged" in ret[1] or "no unlockable disks" in ret[1], \
+        f"Expected 'LUKS header damaged' or 'no unlockable disks' in output, got: {ret}"
+
+    # Restore original pool.json
+    machine.succeed(f"echo '{original_pool}' > /var/lib/braid/pool.json")
 
 # --- Test 8: Paused balance survives unlock (skip_balance) ---
 

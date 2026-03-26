@@ -4,7 +4,8 @@
 # 1. Puts tool packages on PATH
 # 2. Runs the unwrapped braid binary
 # 3. On success of mount-producing commands (unlock, add), sets
-#    root:<storageGroup> 2770 on the mount point
+#    root:<storageGroup> 2770 on the mount point and activates braid-online
+# 4. On success of lock, deactivates braid-online
 { cfg, pkgs, lib }:
 let
   toolPackages = with cfg.packages; [ cryptsetup btrfsProgs utilLinux ] ++ [ pkgs.systemd ];
@@ -19,6 +20,7 @@ pkgs.runCommand "braid" {} ''
     --subst-var-by mountpointBin '${cfg.packages.utilLinux}/bin/mountpoint' \
     --subst-var-by chownBin '${pkgs.coreutils}/bin/chown' \
     --subst-var-by chmodBin '${pkgs.coreutils}/bin/chmod' \
+    --subst-var-by systemctlBin '${pkgs.systemd}/bin/systemctl' \
     --subst-var-by mountPointPath '${cfg.mountPoint}'
   chmod +x $out/bin/braid
 ''

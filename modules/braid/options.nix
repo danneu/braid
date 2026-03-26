@@ -1,25 +1,10 @@
 { lib, pkgs, config, ... }:
 let
   cfg = config.braid;
-  diskNames = builtins.attrNames cfg.disks;
-  byIdValues = map (name: cfg.disks.${name}.byId) diskNames;
-  inherit (builtins) map length attrValues;
-  validDiskName = name: builtins.match "[a-zA-Z][a-zA-Z0-9_-]*" name != null && builtins.stringLength name <= 32;
 in
 {
   options.braid = {
     enable = lib.mkEnableOption "braid encrypted storage";
-
-    disks = lib.mkOption {
-      type = lib.types.attrsOf (lib.types.submodule {
-        options.byId = lib.mkOption {
-          type = lib.types.str;
-          description = "Full /dev/disk/by-id/ path for this disk.";
-        };
-      });
-      default = {};
-      description = "Named disks for the LUKS + btrfs pool.";
-    };
 
     mountPoint = lib.mkOption {
       type = lib.types.path;
@@ -74,25 +59,6 @@ in
 
   config = lib.mkIf cfg.enable {
     assertions = [
-      {
-        assertion = (length diskNames) >= 1;
-        message = "braid.disks must contain at least 1 disk when braid.enable = true.";
-      }
-      {
-        assertion = lib.all validDiskName diskNames;
-        message =
-          let bad = builtins.filter (n: !validDiskName n) diskNames;
-          in "braid.disks: invalid disk name(s): ${lib.concatStringsSep ", " (map (n: "'${n}'") bad)}. "
-             + "Names must start with a letter, contain only letters, digits, hyphens, or underscores, and be at most 32 characters.";
-      }
-      {
-        assertion = lib.all (v: lib.hasPrefix "/dev/disk/by-id/" v) byIdValues;
-        message = "All braid.disks.*.byId paths must start with /dev/disk/by-id/.";
-      }
-      {
-        assertion = (length (lib.unique byIdValues)) == (length byIdValues);
-        message = "braid.disks contains duplicate byId values. Each disk must have a unique by-id path.";
-      }
       {
         assertion = cfg.package != null;
         message = "braid.package must be set when braid.enable = true. The braid-unlock service requires the CLI binary.";

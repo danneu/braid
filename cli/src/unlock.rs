@@ -1,5 +1,6 @@
 use crate::cmd::{CmdError, CmdRequest, CommandRunner};
 use crate::config::{mapper_name, Config};
+use crate::disk_map;
 use crate::luks::{self, LuksError};
 use crate::membership::{self, PoolMembership};
 use crate::pool::PoolError;
@@ -195,6 +196,24 @@ pub fn cmd_unlock<R: CommandRunner, F: Filesystem + ?Sized>(
     }
 
     eprintln!("{}  {:<10}mounted {}", tag("ok"), "pool", mount_point);
+
+    // Best-effort: rebuild disk-map.json from live pool state.
+    // disk-map is advisory metadata — missing/corrupt is not an error, but
+    // rebuilding it here keeps status output and remove-missing richer.
+    if let Ok(pool_after) = probe::probe_pool(runner, mount_point.as_str()) {
+        disk_map::update_disk_map_best_effort(|map| {
+            for dev in &pool_after.devices {
+                // Derive name from mapper (braid-<name> → <name>)
+                let name = dev.mapper.0.strip_prefix("braid-").unwrap_or(&dev.mapper.0);
+                let by_id = membership
+                    .disks
+                    .get(name)
+                    .map(|b| b.0.as_str())
+                    .unwrap_or("");
+                disk_map::record_disk(map, name, by_id, &dev.luks_uuid.0, dev.devid);
+            }
+        });
+    }
 
     // Best-effort: warn if a paused balance was found on mount.
     // skip_balance prevents the kernel from resuming it silently, but the user

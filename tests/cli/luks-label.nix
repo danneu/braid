@@ -25,9 +25,6 @@
     ];
 
     environment.etc."braid/config.json".text = builtins.toJSON {
-      disks = {
-        disk1 = { by_id = "/dev/disk/by-id/virtio-disk1"; };
-      };
       mount_point = "/mnt/storage";
     };
   };

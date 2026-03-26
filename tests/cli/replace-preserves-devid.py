@@ -40,7 +40,7 @@ def add_cmd(name):
     return (
         f"printf '%s\\n' {passphrase_q} | "
         f"BRAID_LUKS_OPTS='{luks_opts}' "
-        f"braid add {name} --passphrase-stdin --yes"
+        f"braid add {name}=/dev/disk/by-id/virtio-{name} --passphrase-stdin --yes"
     )
 
 
@@ -49,7 +49,7 @@ def replace_cmd(old, new, extra=""):
     return (
         f"printf '%s\\n' {passphrase_q} | "
         f"BRAID_LUKS_OPTS='{luks_opts}' "
-        f"braid replace --old {old} --new {new} --passphrase-stdin --yes {extra}"
+        f"braid replace --old {old} --new {new}=/dev/disk/by-id/virtio-{new} --passphrase-stdin --yes {extra}"
     )
 
 

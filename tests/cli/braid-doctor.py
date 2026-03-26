@@ -24,7 +24,6 @@ with subtest("Valid config — human output"):
     assert "config file" in output, f"Expected 'config file':\n{output}"
     assert "config schema" in output, f"Expected 'config schema':\n{output}"
     assert "config perms" in output, f"Expected 'config perms':\n{output}"
-    assert "declared disks" in output, f"Expected 'declared disks':\n{output}"
 
 with subtest("Valid config — JSON output"):
     raw = machine.succeed("braid doctor --json")
@@ -35,7 +34,6 @@ with subtest("Valid config — JSON output"):
     assert checks["config_file"]["status"] == "ok", f"config_file: {checks['config_file']}"
     assert checks["config_schema"]["status"] == "ok", f"config_schema: {checks['config_schema']}"
     assert checks["config_permissions"]["status"] == "ok", f"config_permissions: {checks['config_permissions']}"
-    assert checks["declared_disks"]["status"] == "ok", f"declared_disks: {checks['declared_disks']}"
 
 # --- Missing config ---
 
@@ -69,7 +67,7 @@ with subtest("Invalid JSON — exits 1, config_file fail"):
 # --- Bad schema (valid JSON, fails validation) ---
 
 with subtest("Bad schema — config_file ok, config_schema fail"):
-    machine.succeed("""echo '{"disks":{},"mount_point":""}' > /tmp/bad-schema.json""")
+    machine.succeed("""echo '{"mount_point":""}' > /tmp/bad-schema.json""")
     result = machine.execute("braid doctor --json --config /tmp/bad-schema.json")
     exit_code = result[0]
     raw = result[1]
@@ -79,32 +77,6 @@ with subtest("Bad schema — config_file ok, config_schema fail"):
     checks = {c["name"]: c for c in report["checks"]}
     assert checks["config_file"]["status"] == "ok", f"config_file: {checks['config_file']}"
     assert checks["config_schema"]["status"] == "fail", f"config_schema: {checks['config_schema']}"
-
-# --- Declared disks warnings ---
-
-with subtest("Missing disk warns"):
-    machine.succeed(
-        """echo '{"disks":{"missing1":{"by_id":"/dev/disk/by-id/nonexistent-xyz"}},"mount_point":"/mnt/storage"}' > /tmp/missing-disk.json"""
-    )
-    raw = machine.succeed("braid doctor --json --config /tmp/missing-disk.json")
-    print(f"Missing disk JSON:\n{raw}")
-    report = json.loads(raw)
-    assert report["status"] == "warn", f"Expected overall warn: {report['status']}"
-    checks = {c["name"]: c for c in report["checks"]}
-    assert checks["declared_disks"]["status"] == "warn", f"declared_disks: {checks['declared_disks']}"
-    assert "nonexistent-xyz" in checks["declared_disks"]["message"], (
-        f"Expected disk path in message: {checks['declared_disks']['message']}"
-    )
-    assert "1/1" in checks["declared_disks"]["message"], (
-        f"Expected '1/1' in message: {checks['declared_disks']['message']}"
-    )
-
-with subtest("Declared disks skip when config file missing"):
-    result = machine.execute("braid doctor --json --config /tmp/nonexistent.json")
-    raw = result[1]
-    report = json.loads(raw)
-    checks = {c["name"]: c for c in report["checks"]}
-    assert checks["declared_disks"]["status"] == "skip", f"declared_disks: {checks['declared_disks']}"
 
 # --- Permissions warnings ---
 
@@ -132,7 +104,7 @@ def add_cmd(key):
     return (
         f"printf '%s\\n' {passphrase_q} | "
         f"BRAID_LUKS_OPTS='{luks_opts}' "
-        f"braid add {key} --passphrase-stdin --yes"
+        f"braid add {key}=/dev/disk/by-id/virtio-{key} --passphrase-stdin --yes"
     )
 
 with subtest("Data profile mismatch — skip when pool not mounted"):

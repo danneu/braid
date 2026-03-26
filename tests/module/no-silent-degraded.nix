@@ -20,7 +20,7 @@
 #
 # Dependencies: braid-module-degraded-raid1 (degraded mount via braid works).
 { braid }:
-{ lib, pkgs, ... }:
+{ pkgs, ... }:
 let
   passphrase = "testpassphrase";
   diskNames = [
@@ -59,9 +59,6 @@ in
       braid = {
         enable = true;
         package = braid;
-        disks = lib.genAttrs diskNames (d: {
-          byId = "/dev/disk/by-id/virtio-${d}";
-        });
       };
 
       virtualisation.emptyDiskImages = [
@@ -84,23 +81,6 @@ in
         pkgs.btrfs-progs
         pkgs.cryptsetup
       ];
-
-      # Re-declare mount for VM compat (qemu-vm.nix clobbers fileSystems).
-      # Crucially: NO 'degraded' option. This matches the production module's
-      # fileSystems entry, which must not include 'degraded'.
-      virtualisation.fileSystems."/mnt/storage" = {
-        device = "/dev/mapper/braid-disk1";
-        fsType = "btrfs";
-        options = [
-          "nofail"
-          "noatime"
-          "skip_balance"
-          "subvolid=5"
-          "x-systemd.device-timeout=1s"
-          "x-systemd.requires=btrfs-device-scan.service"
-          "x-systemd.after=btrfs-device-scan.service"
-        ];
-      };
 
     };
 

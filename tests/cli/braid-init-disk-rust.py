@@ -14,8 +14,8 @@ passphrase = "testpassphrase"
 luks_opts = "--pbkdf pbkdf2 --pbkdf-force-iterations 1000"
 
 
-def write_config(disk_list, mount="/mnt/storage"):
-    config = json.dumps({"disks": disk_list, "mountPoint": mount})
+def write_config(mount="/mnt/storage"):
+    config = json.dumps({"mount_point": mount})
     escaped = config.replace("'", "'\\''")
     return f"echo '{escaped}' > /tmp/braid-config.json"
 
@@ -35,30 +35,23 @@ def init_disk(by_id, extra="", confirm=""):
 # --- Formats declared non-LUKS disk ---
 
 with subtest("init-disk formats declared non-LUKS disk"):
-    machine.succeed(write_config(["/dev/disk/by-id/virtio-disk1"]))
+    machine.succeed(write_config())
     machine.succeed(init_disk("/dev/disk/by-id/virtio-disk1"))
 
     # Verify disk now has LUKS header
     machine.succeed("cryptsetup isLuks /dev/disk/by-id/virtio-disk1")
 
-# --- Refuses undeclared disk ---
-
-with subtest("init-disk refuses undeclared disk"):
-    # disk2 is NOT in config
-    machine.succeed(write_config(["/dev/disk/by-id/virtio-disk1"]))
-    machine.fail(init_disk("/dev/disk/by-id/virtio-disk2"))
-
 # --- Refuses already-LUKS without --force ---
 
 with subtest("init-disk refuses already-LUKS disk without --force"):
     # disk1 was formatted above
-    machine.succeed(write_config(["/dev/disk/by-id/virtio-disk1"]))
+    machine.succeed(write_config())
     machine.fail(init_disk("/dev/disk/by-id/virtio-disk1"))
 
 # --- --force without BRAID_CONFIRM fails ---
 
 with subtest("init-disk --force without confirmation fails"):
-    machine.succeed(write_config(["/dev/disk/by-id/virtio-disk1"]))
+    machine.succeed(write_config())
     machine.fail(init_disk("/dev/disk/by-id/virtio-disk1", "--force"))
 
 # --- --force with wrong BRAID_CONFIRM fails ---
@@ -76,10 +69,7 @@ with subtest("init-disk --force with correct confirmation succeeds"):
 
 with subtest("init-disk refuses disk currently in pool"):
     # Set up a pool with disk1
-    machine.succeed(write_config([
-        "/dev/disk/by-id/virtio-disk1",
-        "/dev/disk/by-id/virtio-disk2",
-    ]))
+    machine.succeed(write_config())
     machine.succeed(
         f"echo -n '{passphrase}' | cryptsetup luksOpen --key-file=- "
         "/dev/disk/by-id/virtio-disk1 virtio-disk1"

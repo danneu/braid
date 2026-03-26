@@ -14,7 +14,7 @@ start_all()
 machine.wait_for_unit("multi-user.target", timeout=120)
 
 with subtest("Bootstrap: braid add creates pool with correct permissions"):
-    machine.succeed("echo -n 'testpassphrase' | braid add disk1 --passphrase-stdin --yes")
+    machine.succeed("echo -n 'testpassphrase' | braid add disk1=/dev/disk/by-id/virtio-disk1 --passphrase-stdin --yes")
     machine.succeed("mountpoint -q /mnt/storage")
     stat = machine.succeed("stat -c '%U:%G %a' /mnt/storage").strip()
     assert stat == "root:storage 2770", f"Expected root:storage 2770, got {stat}"

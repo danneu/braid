@@ -14,10 +14,7 @@
 #   present (simulating postfix). Read the generated smartd.conf and assert it
 #   contains exactly one -m and one -M exec, both from braid.
 { braid }:
-{ lib, ... }:
-let
-  diskNames = ["disk1" "disk2"];
-in
+{ ... }:
 {
   name = "braid-smartd-config";
 
@@ -27,7 +24,6 @@ in
     braid = {
       enable = true;
       package = braid;
-      disks = lib.genAttrs diskNames (d: { byId = "/dev/disk/by-id/virtio-${d}"; });
       monitor.enable = true;
     };
 
