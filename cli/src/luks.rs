@@ -393,4 +393,24 @@ mod tests {
         std::fs::write(dir.path().join("notes.txt"), b"hello").unwrap();
         assert!(header_backup_advisories_in(dir.path()).is_empty());
     }
+
+    /*
+     * Intent: verify the public header_backup_advisories wrapper reads from
+     *   the custom root rather than a hardcoded path.
+     * Why: the wrapper is a thin delegation to header_backup_advisories_in;
+     *   a regression that ignores StatePaths would silently use production paths.
+     * Scenario: test creates a .luksheader file under a custom state root and
+     *   confirms the public API sees it.
+     */
+    #[test]
+    fn advisory_via_state_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = crate::state_paths::StatePaths::custom(dir.path().into());
+        let headers_dir = paths.luks_headers_dir();
+        std::fs::create_dir_all(&headers_dir).unwrap();
+        std::fs::write(headers_dir.join("braid-disk1.luksheader"), b"fake").unwrap();
+        let advisories = header_backup_advisories(&paths);
+        assert_eq!(advisories.len(), 1);
+        assert!(advisories[0].contains("copy offsite"));
+    }
 }

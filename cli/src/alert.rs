@@ -710,4 +710,26 @@ mod tests {
             &AlertCause::BtrfsDeviceErrors { devid: 1 },
         ));
     }
+
+    #[test]
+    fn acked_stats_roundtrip_via_state_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = crate::state_paths::StatePaths::custom(dir.path().into());
+
+        let mut map = BTreeMap::new();
+        map.insert(
+            "1".to_owned(),
+            AckedDisk {
+                missing_acked: false,
+                device_stats: AckedDeviceCounters {
+                    read_io_errs: 7,
+                    ..Default::default()
+                },
+            },
+        );
+        let stats = AckedStats(map);
+        save_acked_stats(&stats, &paths).unwrap();
+        let reloaded = load_acked_stats(&paths);
+        assert_eq!(reloaded, stats);
+    }
 }

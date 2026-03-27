@@ -144,6 +144,8 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync>(
     }
 
     // Pre-commit: persist membership removal BEFORE btrfs operation.
+    // Fail hard if membership cannot be loaded or saved — proceeding without
+    // updating pool.json would let btrfs state diverge from authoritative membership.
     // Look up which membership entry corresponds to the missing devid via disk-map.
     let target_devid = missing_id.or_else(|| pool.missing_devids.first().copied());
     if let Some(devid) = target_devid {
@@ -154,19 +156,15 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync>(
             .find(|(_, entry)| entry.devid == devid)
             .map(|(name, _)| name.clone());
         if let Some(name) = name_to_remove {
-            match membership::load_membership(paths) {
-                Ok(mut m) => {
-                    m.disks.remove(&name);
-                    if let Err(e) = membership::save_membership(&m, paths) {
-                        eprintln!(
-                            "warning: failed to persist membership removal for '{name}': {e}"
-                        );
-                    }
-                }
-                Err(e) => {
-                    eprintln!("warning: failed to load membership for removal: {e}");
-                }
-            }
+            let mut m = membership::load_membership(paths).map_err(|e| {
+                RemoveMissingError::Validation(format!("failed to load pool membership: {e}"))
+            })?;
+            m.disks.remove(&name);
+            membership::save_membership(&m, paths).map_err(|e| {
+                RemoveMissingError::Validation(format!(
+                    "failed to persist membership removal for '{name}': {e}"
+                ))
+            })?;
         }
     }
 
