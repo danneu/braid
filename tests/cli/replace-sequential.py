@@ -5,11 +5,11 @@
 #   - Two back-to-back `braid replace` operations in a 2-disk pool both
 #     succeed. After replacing disk1→disk3 and disk2→disk4, the pool contains
 #     only disk3+disk4, both old LUKS mappers are closed, data is intact, and
-#     the disk map reflects the final state.
+#     the pool membership reflects the final state.
 #
 # Why it exists:
 # - What risk/regression this protects against.
-#   - The first replace may leave residual state (disk map entries, pool
+#   - The first replace may leave residual state (pool membership entries, pool
 #     topology, LUKS mapper state) that causes the second replace to fail.
 #     This is the actual migration workflow users follow when upgrading all
 #     drives in a pool.
@@ -30,8 +30,8 @@ passphrase = "testpassphrase"
 luks_opts = "--pbkdf pbkdf2 --pbkdf-force-iterations 1000"
 
 
-def read_disk_map():
-    raw = machine.succeed("cat /var/lib/braid/disk-map.json")
+def read_pool():
+    raw = machine.succeed("cat /var/lib/braid/pool.json")
     return json.loads(raw)
 
 
@@ -97,11 +97,11 @@ with subtest("Data intact after first replace"):
 with subtest("Old mapper closed after first replace"):
     machine.fail("test -e /dev/mapper/braid-disk1")
 
-with subtest("Disk map correct after first replace"):
-    dm = read_disk_map()
-    assert "disk1" not in dm["disks"], f"disk1 still in map: {dm}"
-    assert "disk3" in dm["disks"], f"disk3 missing from map: {dm}"
-    assert "disk2" in dm["disks"], f"disk2 missing from map: {dm}"
+with subtest("Pool membership correct after first replace"):
+    pm = read_pool()
+    assert "disk1" not in pm["disks"], f"disk1 still in pool: {pm}"
+    assert "disk3" in pm["disks"], f"disk3 missing from pool: {pm}"
+    assert "disk2" in pm["disks"], f"disk2 missing from pool: {pm}"
 
 # --- Phase 2: Replace disk2 → disk4 ---
 
@@ -133,11 +133,11 @@ with subtest("Both old mappers closed"):
     machine.fail("test -e /dev/mapper/braid-disk1")
     machine.fail("test -e /dev/mapper/braid-disk2")
 
-with subtest("Disk map reflects final state"):
-    dm = read_disk_map()
-    assert "disk1" not in dm["disks"], f"disk1 still in map: {dm}"
-    assert "disk2" not in dm["disks"], f"disk2 still in map: {dm}"
-    assert "disk3" in dm["disks"], f"disk3 missing from map: {dm}"
-    assert "disk4" in dm["disks"], f"disk4 missing from map: {dm}"
+with subtest("Pool membership reflects final state"):
+    pm = read_pool()
+    assert "disk1" not in pm["disks"], f"disk1 still in pool: {pm}"
+    assert "disk2" not in pm["disks"], f"disk2 still in pool: {pm}"
+    assert "disk3" in pm["disks"], f"disk3 missing from pool: {pm}"
+    assert "disk4" in pm["disks"], f"disk4 missing from pool: {pm}"
 
 machine.shutdown()

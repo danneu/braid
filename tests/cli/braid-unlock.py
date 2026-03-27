@@ -97,35 +97,29 @@ with subtest("Test 2: idempotent — unlock again is a no-op"):
     content = machine.succeed("cat /mnt/storage/test.txt").strip()
     assert content == "persistent data", f"Expected 'persistent data', got '{content}'"
 
-# --- Test 2b: Bootstrap disk-map on fresh system ---
+# --- Test 2b: Unlock enriches pool.json ---
 
-with subtest("Test 2b: bootstrap disk-map on fresh system"):
+with subtest("Test 2b: unlock enriches pool.json with runtime metadata"):
     close_all()
 
-    # Save expected entries (written by `braid add`)
-    disk_map_raw = machine.succeed("cat /var/lib/braid/disk-map.json")
-    expected = json.loads(disk_map_raw)
-
-    # Simulate fresh machine: delete disk-map
-    machine.succeed("rm /var/lib/braid/disk-map.json")
-
-    # Unlock should succeed and bootstrap disk-map
+    # Unlock should succeed and enrich pool.json with runtime fields
     machine.succeed(unlock_cmd(passphrase))
     machine.succeed("mountpoint -q /mnt/storage")
 
-    # Verify disk-map was recreated with all 3 disks
-    new_raw = machine.succeed("cat /var/lib/braid/disk-map.json")
-    new_map = json.loads(new_raw)
+    # Verify pool.json has enriched fields for all 3 disks
+    pool_raw = machine.succeed("cat /var/lib/braid/pool.json")
+    pool_m = json.loads(pool_raw)
 
-    assert set(new_map["disks"].keys()) == {"disk1", "disk2", "disk3"}, \
-        f"Expected 3 disks in bootstrapped map, got: {set(new_map['disks'].keys())}"
+    assert set(pool_m["disks"].keys()) == {"disk1", "disk2", "disk3"}, \
+        f"Expected 3 disks in pool.json, got: {set(pool_m['disks'].keys())}"
 
-    # Identity fields must match originals (added_at will differ)
+    # Enriched fields must be present and non-null
     for name in ["disk1", "disk2", "disk3"]:
-        for field in ["by_id", "luks_uuid", "devid"]:
-            assert new_map["disks"][name][field] == expected["disks"][name][field], \
-                f"{name}.{field}: expected {expected['disks'][name][field]}, " \
-                f"got {new_map['disks'][name][field]}"
+        entry = pool_m["disks"][name]
+        assert entry.get("luks_uuid") is not None, \
+            f"{name}.luks_uuid should not be None after unlock: {entry}"
+        assert entry.get("devid") is not None, \
+            f"{name}.devid should not be None after unlock: {entry}"
 
 # --- Test 3: Partial state ---
 

@@ -49,7 +49,7 @@ pub fn cmd_unlock<R: CommandRunner, F: Filesystem + ?Sized>(
     // - Membership comes from pool.json; unlock never creates, repairs, or rewrites it.
     // - Probe only configured members, open what is available, and mount the pool.
     // - Refuse degraded mounts unless --allow-degraded is explicit.
-    // - After a successful mount, advisory metadata like disk-map.json may be
+    // - After a successful mount, pool.json enriched fields (luks_uuid, devid) are
     //   refreshed best-effort, but correctness never depends on that write.
     let mount_point = config.mount_point();
 
@@ -208,7 +208,6 @@ pub fn cmd_unlock<R: CommandRunner, F: Filesystem + ?Sized>(
 
     eprintln!("{}  {:<10}mounted {}", tag("ok"), "pool", mount_point);
 
-    // Best-effort: rebuild disk-map.json from live pool state.
     // Enrich pool.json with live metadata (luks_uuid, devid) — best-effort.
     if let Ok(pool_after) = probe::probe_pool(runner, mount_point.as_str()) {
         membership::refresh_pool_metadata(&pool_after, paths);

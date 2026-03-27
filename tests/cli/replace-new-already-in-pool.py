@@ -29,12 +29,7 @@ passphrase = "testpassphrase"
 luks_opts = "--pbkdf pbkdf2 --pbkdf-force-iterations 1000"
 
 
-def read_disk_map():
-    raw = machine.succeed("cat /var/lib/braid/disk-map.json")
-    return json.loads(raw)
-
-
-def read_membership():
+def read_pool():
     raw = machine.succeed("cat /var/lib/braid/pool.json")
     return json.loads(raw)
 
@@ -91,16 +86,9 @@ with subtest("Data intact after failed replace"):
     content = machine.succeed("cat /mnt/storage/precious.txt").strip()
     assert content == "important data", f"Got '{content}'"
 
-with subtest("Disk map unchanged after failed replace"):
-    dm = read_disk_map()
+with subtest("Pool membership unchanged after failed replace"):
+    pm = read_pool()
     for name in ["disk1", "disk2", "disk3"]:
-        assert name in dm["disks"], f"{name} missing from map: {dm}"
-
-with subtest("Membership unchanged after failed replace"):
-    m = read_membership()
-    for name in ["disk1", "disk2", "disk3"]:
-        assert name in m["disks"], (
-            name + " missing from membership: " + str(m)
-        )
+        assert name in pm["disks"], f"{name} missing from pool: {pm}"
 
 machine.shutdown()

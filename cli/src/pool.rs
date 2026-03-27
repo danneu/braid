@@ -1,6 +1,6 @@
 use crate::cmd::{CmdError, CmdRequest, CommandRunner};
 use crate::probe::probe_pool;
-use crate::progress::{ProgressOutput, run_replace_with_progress, run_with_progress};
+use crate::progress::{run_replace_with_progress, run_with_progress, ProgressOutput};
 use crate::types::MountPoint;
 
 #[derive(Debug, thiserror::Error)]
@@ -109,7 +109,7 @@ pub fn pool_balance_raid1_soft<R: CommandRunner + Sync>(
 /// for single-profile chunks created during degraded operation (known btrfs bug).
 ///
 /// Callers: `remove-missing` and `replace` (missing path), after their primary
-/// operation and disk-map update have completed.
+/// operation and pool.json update have completed.
 pub fn maybe_restore_raid1<R: CommandRunner + Sync>(
     runner: &R,
     mount_point: &str,

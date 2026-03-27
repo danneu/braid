@@ -75,11 +75,11 @@ with section("Data intact after live replace"):
     content = run(f"cat {MOUNT_POINT}/precious.txt").strip()
     assert content == "important data", f"Expected 'important data', got '{content}'"
 
-with section("Disk map updated after live replace"):
-    dm_raw = run("cat /var/lib/braid/disk-map.json")
-    dm = json.loads(dm_raw)
-    assert "hwtest2" not in dm["disks"], f"hwtest2 still in map: {dm}"
-    assert "hwtest3" in dm["disks"], f"hwtest3 missing from map: {dm}"
-    assert "hwtest1" in dm["disks"], f"hwtest1 missing from map: {dm}"
+with section("Pool membership updated after live replace"):
+    pm_raw = run("cat /var/lib/braid/pool.json")
+    pm = json.loads(pm_raw)
+    assert "hwtest2" not in pm["disks"], f"hwtest2 still in pool: {pm}"
+    assert "hwtest3" in pm["disks"], f"hwtest3 missing from pool: {pm}"
+    assert "hwtest1" in pm["disks"], f"hwtest1 missing from pool: {pm}"
 
 print("\nAll replace live canary tests passed.")

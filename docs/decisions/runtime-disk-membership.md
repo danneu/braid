@@ -14,38 +14,52 @@ Move disk membership to a CLI-owned runtime state file. The NixOS module provide
 
 ### State model
 
-**`/var/lib/braid/pool.json`** — authoritative membership:
+**`/var/lib/braid/pool.json`** — authoritative membership with enriched metadata:
 ```json
-{ "disks": { "toshiba": "/dev/disk/by-id/ata-TOSHIBA_...", "wd": "/dev/disk/by-id/ata-WDC_..." } }
+{
+  "disks": {
+    "toshiba": {
+      "by_id": "/dev/disk/by-id/ata-TOSHIBA_...",
+      "luks_uuid": "aaaa-bbbb-cccc-dddd",
+      "devid": 1,
+      "added_at": "2026-03-27T12:00:00Z"
+    }
+  }
+}
 ```
+The `luks_uuid`, `devid`, and `added_at` fields are populated after disk operations succeed. `unlock` enriches them on each mount via `refresh_pool_metadata`. They replace the former `disk-map.json` advisory file.
 
 **`/etc/braid/config.json`** — machine config (no disk information):
 ```json
 { "mount_point": "/mnt/storage" }
 ```
 
-**`/var/lib/braid/disk-map.json`** — advisory observed metadata (unchanged).
+**`/var/lib/braid/pending-op.json`** — pending-operation journal (transient, present only during mutations).
 
 ### Mutation ordering
 
-All mutating commands: validate → persist membership to `pool.json` → irreversible disk operation → disk-map update.
+All mutating commands: validate → write journal (`pending-op.json` with pre/target membership snapshots) → irreversible disk operation → write `pool.json` → clear journal.
 
-Pre-commit writes ensure that if the persist fails, the command aborts before touching any disk.
+Post-commit persist ensures `pool.json` only reflects completed operations. The journal provides crash safety: if braid crashes mid-operation, the journal triggers recovery mode on next invocation.
+
+### Recovery mode
+
+When `pending-op.json` exists, braid enters recovery mode. All commands except `status`, `recover`, and `lock` hard-fail. `braid recover` rebuilds membership from the live mounted btrfs pool topology — not from LUKS label scanning, which could include labeled-but-never-added disks.
 
 ### State contract
 
 - `pool.json` is authoritative. `unlock` requires it.
-- `unlock` is read-only with respect to `pool.json`. It never writes, creates, or repairs it.
+- `unlock` enriches `pool.json` metadata (luks_uuid, devid) on each mount via `refresh_pool_metadata`, but never changes membership (disk set).
 - If `pool.json` is missing or corrupt, `unlock` fails with a clear error directing the user to `braid add` or `braid discover --write`.
 - If `pool.json` is readable but stale (a member fails to probe), `unlock` warns and proceeds with the members it can probe. It never rewrites `pool.json`.
-- Only these commands write `pool.json`: `add`, `remove`, `replace`, `remove-missing`, `discover --write`.
+- Only these commands write `pool.json` membership: `add`, `remove`, `replace`, `remove-missing`, `discover --write`, `recover`.
 
 ### Recovery
 
 Recovery is always explicit, never implicit:
-- `braid discover` scans `/dev/disk/by-id/*` for LUKS devices with `braid-*` labels.
-- Displays what it finds. With `--write`, persists to `pool.json`.
-- This is a repair tool, not a bootstrap mechanism. The normal path to create `pool.json` is `braid add`.
+- `braid recover` rebuilds `pool.json` from the live mounted btrfs pool. This is the only path out of recovery mode (journal present). It probes actual pool topology, not LUKS labels.
+- `braid discover` scans `/dev/disk/by-id/*` for LUKS devices with `braid-*` labels. Displays what it finds. With `--write`, persists to `pool.json`. This is for initial setup recovery (lost pool.json), not for crash recovery.
+- The normal path to create `pool.json` is `braid add`.
 
 ### CLI syntax
 
@@ -82,7 +96,10 @@ The NixOS module no longer generates `fileSystems`, LUKS entries, or `btrfs-devi
 
 ## See
 
-- `cli/src/membership.rs` — load/save/validate membership
+- `cli/src/membership.rs` — load/save/validate membership, `DiskMember`, `refresh_pool_metadata`
+- `cli/src/journal.rs` — pending-operation journal (pre/target membership snapshots)
+- `cli/src/recover.rs` — rebuild membership from live pool state
+- `cli/src/preflight.rs` — `check_no_pending_operation` recovery mode guard
 - `cli/src/discover.rs` — LUKS label scanning
 - `modules/braid/storage.nix` — `braid-online.service`, no `fileSystems`
 - `modules/braid/options.nix` — no `braid.disks`

@@ -195,10 +195,10 @@ This is a repair tool — the normal path to create `pool.json` is `braid add`.
 
 ### Disk identity map
 
-Braid maintains two state files in `/var/lib/braid/`:
+Braid maintains state files in `/var/lib/braid/`:
 
-- **`pool.json`** — authoritative disk membership. Maps disk names to `/dev/disk/by-id/` paths. Written by `braid add`, `remove`, `replace`, `remove-missing`, and `discover --write`. Read by `unlock` (never written by unlock). If missing or corrupt, `unlock` fails with a clear error directing you to `braid discover --write`.
-- **`disk-map.json`** — advisory disk identity map. Records each disk's `name`, `by_id`, `luks_uuid`, and `devid`. Updated automatically by mutating commands and `unlock`. Non-authoritative — live pool probing is always the source of truth.
+- **`pool.json`** — authoritative disk membership with enriched metadata. Maps disk names to `/dev/disk/by-id/` paths plus `luks_uuid`, `devid`, and `added_at`. Written by `braid add`, `remove`, `replace`, `remove-missing`, `discover --write`, and `recover`. Metadata fields enriched by `unlock` on each mount. If missing or corrupt, `unlock` fails with a clear error directing you to `braid discover --write`.
+- **`pending-op.json`** — pending-operation journal (transient). Present only during mutations. When present, braid enters recovery mode — only `status`, `recover`, and `lock` are allowed. `braid recover` rebuilds membership from the live pool and clears the journal.
 
 Disk names are immutable once assigned. Renaming/reassigning a name is rejected by mutating commands. Keep the original name, or use explicit `braid replace` / `braid remove` + `braid add` workflows.
 

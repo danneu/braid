@@ -966,7 +966,7 @@ fn format_status_human(
                     false
                 }
                 None if d.status == "unknown" => {
-                    out.push_str("    Errors:  unknown (disk-map unavailable)\n");
+                    out.push_str("    Errors:  unknown (metadata unavailable)\n");
                     false
                 }
                 None => false,
@@ -2840,7 +2840,7 @@ mod tests {
 
         let human = format_status_human(&report, None, Some(&human_disks));
         assert!(human.contains("UNKNOWN"), "got:\n{human}");
-        assert!(human.contains("disk-map unavailable"), "got:\n{human}");
+        assert!(human.contains("metadata unavailable"), "got:\n{human}");
     }
 
     // =======================================================================

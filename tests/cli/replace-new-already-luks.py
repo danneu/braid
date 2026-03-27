@@ -30,8 +30,8 @@ passphrase = "testpassphrase"
 luks_opts = "--pbkdf pbkdf2 --pbkdf-force-iterations 1000"
 
 
-def read_disk_map():
-    raw = machine.succeed("cat /var/lib/braid/disk-map.json")
+def read_pool():
+    raw = machine.succeed("cat /var/lib/braid/pool.json")
     return json.loads(raw)
 
 
@@ -129,9 +129,9 @@ with subtest("LUKS UUID unchanged — disk was NOT re-formatted"):
         f"before={luks_uuid_before}, after={luks_uuid_after}"
     )
 
-with subtest("Disk map updated"):
-    dm = read_disk_map()
-    assert "disk2" not in dm["disks"], f"disk2 still in map: {dm}"
-    assert "disk4" in dm["disks"], f"disk4 missing from map: {dm}"
+with subtest("Pool membership updated"):
+    pm = read_pool()
+    assert "disk2" not in pm["disks"], f"disk2 still in pool: {pm}"
+    assert "disk4" in pm["disks"], f"disk4 missing from pool: {pm}"
 
 machine.shutdown()

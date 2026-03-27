@@ -1,12 +1,12 @@
 # Test: config disk-name immutability
 #
-# What: Builds a pool and disk-map entries, then renames one disk name in config
+# What: Builds a pool and pool membership entries, then renames one disk name in config
 # while keeping the same by-id path and runs a mutating command.
 #
 # Why: v1.0 forbids name rename/reassignment in mutating commands; they must
 # fail fast before probing or making storage changes.
 #
-# Dependencies: braid add succeeds and writes disk-map entries.
+# Dependencies: braid add succeeds and writes pool membership entries.
 
 import json
 
@@ -28,7 +28,7 @@ def add_cmd(key):
     )
 
 
-with subtest("Setup: build 2-disk pool and disk-map entries"):
+with subtest("Setup: build 2-disk pool and pool membership"):
     machine.succeed(add_cmd("disk1"))
     machine.succeed(add_cmd("disk2"))
 
@@ -36,15 +36,15 @@ with subtest("Setup: build 2-disk pool and disk-map entries"):
     assert "/dev/mapper/braid-disk1" in fi_show, fi_show
     assert "/dev/mapper/braid-disk2" in fi_show, fi_show
 
-    raw_map = machine.succeed("cat /var/lib/braid/disk-map.json")
-    disk_map = json.loads(raw_map)
-    assert "disk1" in disk_map["disks"], disk_map
-    assert "disk2" in disk_map["disks"], disk_map
+    raw_pool = machine.succeed("cat /var/lib/braid/pool.json")
+    pool_m = json.loads(raw_pool)
+    assert "disk1" in pool_m["disks"], pool_m
+    assert "disk2" in pool_m["disks"], pool_m
 
 with subtest("Add with renamed name for same disk is rejected"):
     # Try to add the same physical disk (virtio-disk1) under a new name (wd-red).
-    # This should be rejected because disk-map already has disk1 for that by_id.
-    map_before = machine.succeed("cat /var/lib/braid/disk-map.json")
+    # This should be rejected because pool.json already has disk1 for that by_id.
+    pool_before = machine.succeed("cat /var/lib/braid/pool.json")
     pq = shlex.quote(passphrase)
     status, output = machine.execute(
         f"printf '%s\\n' {pq} | "
@@ -58,7 +58,7 @@ with subtest("Add with renamed name for same disk is rejected"):
     assert "/dev/mapper/braid-disk2" in fi_show, fi_show
     assert "missing" not in fi_show.lower(), fi_show
 
-    map_after = machine.succeed("cat /var/lib/braid/disk-map.json")
-    assert map_after == map_before, "disk-map changed on rejected name rename"
+    pool_after = machine.succeed("cat /var/lib/braid/pool.json")
+    assert pool_after == pool_before, "pool.json changed on rejected name rename"
 
 machine.shutdown()
