@@ -53,6 +53,8 @@ enum Commands {
     Browse(BrowseArgs),
     /// Scan for braid-labeled LUKS devices and display or rebuild pool membership
     Discover(DiscoverArgs),
+    /// Recover from an interrupted operation by rebuilding pool.json from live pool state
+    Recover,
 }
 
 #[derive(Debug, Args)]
@@ -501,6 +503,10 @@ fn main() {
             }
         }
         Commands::Discover(args) => {
+            if let Err(e) = braid_cli::preflight::check_no_pending_operation(&paths) {
+                print_cli_error(&e);
+                std::process::exit(1);
+            }
             let runner = RealRunner;
             match braid_cli::discover::discover_pool_members(&runner) {
                 Ok(members) => {
@@ -533,6 +539,20 @@ fn main() {
                     print_cli_error(&e.to_string());
                     std::process::exit(1);
                 }
+            }
+        }
+        Commands::Recover => {
+            let config = match config_read(Path::new(&config_path)) {
+                Ok(c) => c,
+                Err(e) => {
+                    print_cli_error(&e.to_string());
+                    std::process::exit(1);
+                }
+            };
+            let runner = RealRunner;
+            if let Err(e) = braid_cli::recover::cmd_recover(&runner, &config, &paths) {
+                print_cli_error(&e.to_string());
+                std::process::exit(1);
             }
         }
         Commands::Browse(args) => {

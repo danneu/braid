@@ -3,6 +3,7 @@ use crate::config::{mapper_name, Config};
 use crate::luks::{self, LuksError};
 use crate::membership::{self, PoolMembership};
 use crate::pool::PoolError;
+use crate::preflight;
 use crate::probe::{self, Filesystem, ProbeError};
 use crate::state_paths::StatePaths;
 use crate::types::ConfigDiskState;
@@ -41,6 +42,8 @@ pub fn cmd_unlock<R: CommandRunner, F: Filesystem + ?Sized>(
     key_file: Option<&std::path::Path>,
     allow_degraded: bool,
 ) -> Result<(), UnlockError> {
+    preflight::check_no_pending_operation(paths).map_err(UnlockError::Failed)?;
+
     // Contract:
     // - Pure operator command: bring the pool online from authoritative state.
     // - Membership comes from pool.json; unlock never creates, repairs, or rewrites it.

@@ -1,5 +1,6 @@
 use crate::cmd::{CmdRequest, CommandRunner};
 use crate::config::{config_read, mapper_name};
+use crate::journal;
 use crate::luks::{
     backup_luks_header, ensure_luks_open, luks_format, luks_opts_from_env, read_passphrase,
     verify_passphrase,
@@ -53,6 +54,8 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     progress: ProgressOutput,
     paths: &StatePaths,
 ) -> Result<(), ReplaceError> {
+    preflight::check_no_pending_operation(paths).map_err(ReplaceError::Validation)?;
+
     let config = config_read(config_path)?;
 
     // Parse new_name as name=by_id spec
@@ -192,14 +195,21 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     // Guard: new disk must not already be in the pool.
     check_new_not_in_pool(new_name, &new_mn, &pool)?;
 
-    // Pre-commit: persist membership swap after all reversible checks pass,
-    // but before the first irreversible disk operation.
-    let current_membership = membership::load_membership(paths)
+    // Build target membership and write journal before irreversible disk ops.
+    let pre_membership = membership::load_membership(paths)
         .map_err(|e| ReplaceError::Validation(format!("failed to load pool membership: {e}")))?;
-    let next_membership =
-        build_replacement_membership(&current_membership, old_name, new_name, &new_by_id)?;
-    membership::save_membership(&next_membership, paths)
-        .map_err(|e| ReplaceError::Validation(format!("failed to persist pool membership: {e}")))?;
+    let target_membership =
+        build_replacement_membership(&pre_membership, old_name, new_name, &new_by_id)?;
+    let journal = journal::build_journal(
+        pre_membership,
+        target_membership.clone(),
+        journal::OpKind::Replace {
+            old_name: old_name.to_owned(),
+            new_name: new_name.to_owned(),
+            new_by_id: new_by_id.clone(),
+        },
+    );
+    journal::write_journal(paths, &journal).map_err(|e| ReplaceError::Validation(e.to_string()))?;
 
     // Step 1: Init new disk (LUKS format/open) — irreversible from here.
     match new_probed.state {
@@ -326,10 +336,29 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         .map_err(|e| ReplaceError::Pool(e))?;
     }
 
-    // Best-effort: enrich pool.json with live metadata (luks_uuid, devid).
+    // Post-commit: write pool.json with enriched metadata and clear journal.
+    let mut final_membership = target_membership;
     if let Ok(pool_after) = probe_pool(runner, config.mount_point().as_str()) {
-        membership::refresh_pool_metadata(&pool_after, paths);
+        for dev in &pool_after.devices {
+            let Some(name) = crate::config::name_from_mapper(&dev.mapper.0) else {
+                continue;
+            };
+            if let Some(member) = final_membership.disks.get_mut(name) {
+                member.luks_uuid = Some(dev.luks_uuid.clone());
+                member.devid = Some(dev.devid);
+                if member.added_at.is_none() {
+                    member.added_at = Some(
+                        time::OffsetDateTime::now_utc()
+                            .format(&time::format_description::well_known::Iso8601::DEFAULT)
+                            .unwrap_or_else(|_| "unknown".into()),
+                    );
+                }
+            }
+        }
     }
+    membership::save_membership(&final_membership, paths)
+        .map_err(|e| ReplaceError::Validation(format!("failed to persist pool membership: {e}")))?;
+    journal::clear_journal(paths).map_err(|e| ReplaceError::Validation(e.to_string()))?;
 
     eprintln!("Done. Replaced {} with {}.", old_name, new_name);
     Ok(())

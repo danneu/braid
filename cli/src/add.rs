@@ -1,5 +1,6 @@
 use crate::cmd::{CmdError, CmdRequest, CommandRunner};
 use crate::config::{config_read, mapper_name};
+use crate::journal;
 use crate::luks::{
     backup_luks_header, device_has_btrfs_superblock, ensure_luks_open, luks_format,
     luks_opts_from_env, read_passphrase, verify_passphrase,
@@ -187,6 +188,8 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     progress: ProgressOutput,
     paths: &StatePaths,
 ) -> Result<(), AddError> {
+    preflight::check_no_pending_operation(paths).map_err(AddError::Validation)?;
+
     let config = config_read(config_path)?;
 
     // Parse disk specs: name=by_id
@@ -211,7 +214,7 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     }
 
     // Load existing membership (or empty if first add)
-    let mut pool_membership = match membership::load_membership(paths) {
+    let pool_membership = match membership::load_membership(paths) {
         Ok(m) => m,
         Err(membership::MembershipError::NotFound(_)) => PoolMembership::empty(),
         Err(e) => return Err(e.into()),
@@ -335,15 +338,22 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         }
     }
 
-    // Pre-commit persist: save membership after all reversible checks pass,
-    // but before the first irreversible disk operation (LUKS format).
+    // Build target membership and write journal before irreversible disk operations.
+    let mut target_membership = pool_membership.clone();
     for (name, by_id) in &parsed {
-        pool_membership.disks.insert(
+        target_membership.disks.insert(
             name.clone(),
             membership::DiskMember::from_by_id(by_id.clone()),
         );
     }
-    membership::save_membership(&pool_membership, paths)?;
+    let journal = journal::build_journal(
+        pool_membership.clone(),
+        target_membership,
+        journal::OpKind::Add {
+            disks: parsed.iter().map(|(n, b)| (n.clone(), b.clone())).collect(),
+        },
+    );
+    journal::write_journal(paths, &journal).map_err(|e| AddError::Validation(e.to_string()))?;
 
     // LUKS phase — for each disk: format/open as needed. Track which need pool add.
     // Guard closes any mappers we opened if the LUKS phase fails partway through.
@@ -510,10 +520,29 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         }
     }
 
-    // Best-effort: enrich pool.json with live metadata (luks_uuid, devid).
+    // Post-commit persist: write pool.json only after all disk ops succeed.
+    // Enrich with live metadata (luks_uuid, devid) from pool probe.
+    let mut final_membership = journal.target_membership.clone();
     if let Ok(pool_after) = probe_pool(runner, config.mount_point().as_str()) {
-        membership::refresh_pool_metadata(&pool_after, paths);
+        for dev in &pool_after.devices {
+            let Some(name) = crate::config::name_from_mapper(&dev.mapper.0) else {
+                continue;
+            };
+            if let Some(member) = final_membership.disks.get_mut(name) {
+                member.luks_uuid = Some(dev.luks_uuid.clone());
+                member.devid = Some(dev.devid);
+                if member.added_at.is_none() {
+                    member.added_at = Some(
+                        time::OffsetDateTime::now_utc()
+                            .format(&time::format_description::well_known::Iso8601::DEFAULT)
+                            .unwrap_or_else(|_| "unknown".into()),
+                    );
+                }
+            }
+        }
     }
+    membership::save_membership(&final_membership, paths)?;
+    journal::clear_journal(paths).map_err(|e| AddError::Validation(e.to_string()))?;
 
     let label = if names.len() == 1 {
         format!("{} is", names[0])

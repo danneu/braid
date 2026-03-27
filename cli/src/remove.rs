@@ -1,5 +1,6 @@
 use crate::cmd::{CmdRequest, CommandRunner};
 use crate::config::{config_read, mapper_name};
+use crate::journal;
 use crate::membership;
 use crate::parse::parse_btrfs_device_usage;
 use crate::pool::evict_present_device;
@@ -38,6 +39,8 @@ pub fn cmd_remove<R: CommandRunner + Sync>(
     progress: ProgressOutput,
     paths: &StatePaths,
 ) -> Result<(), RemoveError> {
+    preflight::check_no_pending_operation(paths).map_err(RemoveError::Validation)?;
+
     let config = config_read(config_path)?;
 
     let pool = match probe_pool(runner, config.mount_point().as_str()) {
@@ -151,17 +154,27 @@ pub fn cmd_remove<R: CommandRunner + Sync>(
         }
     }
 
-    // Pre-commit: persist membership removal BEFORE irreversible disk op.
-    // Fail hard if membership cannot be loaded or saved — proceeding without
-    // updating pool.json would let btrfs state diverge from authoritative membership.
-    let mut m = membership::load_membership(paths)
+    // Build target membership and write journal before irreversible disk op.
+    let pre_membership = membership::load_membership(paths)
         .map_err(|e| RemoveError::Validation(format!("failed to load pool membership: {e}")))?;
-    m.disks.remove(name);
-    membership::save_membership(&m, paths)
-        .map_err(|e| RemoveError::Validation(format!("failed to persist pool membership: {e}")))?;
+    let mut target_membership = pre_membership.clone();
+    target_membership.disks.remove(name);
+    let journal = journal::build_journal(
+        pre_membership,
+        target_membership.clone(),
+        journal::OpKind::Remove {
+            name: name.to_owned(),
+        },
+    );
+    journal::write_journal(paths, &journal).map_err(|e| RemoveError::Validation(e.to_string()))?;
 
     // Execute
     evict_present_device(runner, &mn.0, config.mount_point().as_str(), progress)?;
+
+    // Post-commit: write pool.json and clear journal.
+    membership::save_membership(&target_membership, paths)
+        .map_err(|e| RemoveError::Validation(format!("failed to persist pool membership: {e}")))?;
+    journal::clear_journal(paths).map_err(|e| RemoveError::Validation(e.to_string()))?;
 
     eprintln!("Done. Disk '{}' removed from pool.", name);
     Ok(())

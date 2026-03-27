@@ -20,6 +20,10 @@ impl StatePaths {
         self.root.join("pool.json")
     }
 
+    pub fn pending_op_json(&self) -> PathBuf {
+        self.root.join("pending-op.json")
+    }
+
     pub fn acked_stats_json(&self) -> PathBuf {
         self.root.join("acked-stats.json")
     }

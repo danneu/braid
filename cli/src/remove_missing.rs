@@ -1,5 +1,6 @@
 use crate::cmd::{CmdRequest, CommandRunner};
 use crate::config::config_read;
+use crate::journal;
 use crate::membership;
 use crate::parse::parse_btrfs_device_usage;
 use crate::pool::{pool_remove_devid, pool_remove_missing};
@@ -38,6 +39,8 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync>(
     progress: ProgressOutput,
     paths: &StatePaths,
 ) -> Result<(), RemoveMissingError> {
+    preflight::check_no_pending_operation(paths).map_err(RemoveMissingError::Validation)?;
+
     let config = config_read(config_path)?;
 
     let pool = match probe_pool(runner, config.mount_point().as_str()) {
@@ -142,29 +145,31 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync>(
         }
     }
 
-    // Pre-commit: persist membership removal BEFORE btrfs operation.
-    // Fail hard if membership cannot be loaded or saved — proceeding without
-    // updating pool.json would let btrfs state diverge from authoritative membership.
-    // Look up which membership entry corresponds to the missing devid via enriched pool.json.
+    // Resolve devid→name from enriched pool.json and build journal before btrfs operation.
     let target_devid = missing_id.or_else(|| pool.missing_devids.first().copied());
+    let pre_membership = membership::load_membership(paths).map_err(|e| {
+        RemoveMissingError::Validation(format!("failed to load pool membership: {e}"))
+    })?;
+    let mut target_membership = pre_membership.clone();
     if let Some(devid) = target_devid {
-        let mut m = membership::load_membership(paths).map_err(|e| {
-            RemoveMissingError::Validation(format!("failed to load pool membership: {e}"))
-        })?;
-        let name_to_remove = m
+        let name_to_remove = target_membership
             .disks
             .iter()
             .find(|(_, member)| member.devid == Some(devid))
             .map(|(name, _)| name.clone());
-        if let Some(name) = name_to_remove {
-            m.disks.remove(&name);
-            membership::save_membership(&m, paths).map_err(|e| {
-                RemoveMissingError::Validation(format!(
-                    "failed to persist membership removal for '{name}': {e}"
-                ))
-            })?;
+        if let Some(name) = &name_to_remove {
+            target_membership.disks.remove(name);
         }
     }
+    let journal = journal::build_journal(
+        pre_membership,
+        target_membership.clone(),
+        journal::OpKind::RemoveMissing {
+            devid: target_devid,
+        },
+    );
+    journal::write_journal(paths, &journal)
+        .map_err(|e| RemoveMissingError::Validation(e.to_string()))?;
 
     // Execute
     if let Some(devid) = missing_id {
@@ -174,6 +179,12 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync>(
         eprintln!("Removing missing device from pool...");
         pool_remove_missing(runner, config.mount_point().as_str())?;
     }
+
+    // Post-commit: write pool.json and clear journal.
+    membership::save_membership(&target_membership, paths).map_err(|e| {
+        RemoveMissingError::Validation(format!("failed to persist pool membership: {e}"))
+    })?;
+    journal::clear_journal(paths).map_err(|e| RemoveMissingError::Validation(e.to_string()))?;
 
     crate::pool::maybe_restore_raid1(
         runner,
@@ -272,7 +283,24 @@ fn compile_steps(
 mod tests {
     use super::*;
     use crate::cmd::{CmdError, CmdRequest, CommandRunner, RawCommandOutput};
+    use crate::membership::{DiskMember, PoolMembership};
     use crate::state_paths::StatePaths;
+    use crate::types::ByIdPath;
+
+    /// Create a StatePaths backed by a temp dir, with pool.json pre-populated.
+    fn test_paths(disk_names: &[(&str, &str)]) -> (tempfile::TempDir, StatePaths) {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let mut m = PoolMembership::empty();
+        for (name, by_id) in disk_names {
+            m.disks.insert(
+                name.to_string(),
+                DiskMember::from_by_id(ByIdPath(by_id.to_string())),
+            );
+        }
+        membership::save_membership(&m, &paths).unwrap();
+        (tmp, paths)
+    }
 
     struct EnospcRunner {
         device_usage_stdout: &'static str,
@@ -383,22 +411,13 @@ mod tests {
     // Scenario: User's 2-disk NAS has one drive die. They run braid remove-missing.
     //   The operation succeeds because no data relocation is needed.
     fn enospc_check_skipped_for_single_survivor() {
+        let (_state_tmp, state_paths) = test_paths(&[
+            ("disk1", "/dev/disk/by-id/virtio-disk1"),
+            ("disk2", "/dev/disk/by-id/virtio-disk2"),
+        ]);
         let tmp = tempfile::tempdir().unwrap();
         let config_path = tmp.path().join("config.json");
-
-        let mut disks = std::collections::BTreeMap::new();
-        disks.insert(
-            "disk1".to_owned(),
-            serde_json::json!({ "by_id": "/dev/disk/by-id/virtio-disk1" }),
-        );
-        disks.insert(
-            "disk2".to_owned(),
-            serde_json::json!({ "by_id": "/dev/disk/by-id/virtio-disk2" }),
-        );
-        let config_json = serde_json::json!({
-            "disks": disks,
-            "mount_point": "/mnt/storage"
-        });
+        let config_json = serde_json::json!({ "mount_point": "/mnt/storage" });
         std::fs::write(&config_path, serde_json::to_vec(&config_json).unwrap()).unwrap();
 
         let log = Arc::new(Mutex::new(Vec::new()));
@@ -410,7 +429,7 @@ mod tests {
             false,
             true,
             crate::progress::ProgressOutput::Off,
-            &StatePaths::production(),
+            &state_paths,
         )
         .expect("remove-missing should succeed");
 
@@ -732,28 +751,22 @@ mod tests {
         }
     }
 
-    fn three_device_config() -> (tempfile::TempDir, std::path::PathBuf) {
+    fn three_device_config() -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        tempfile::TempDir,
+        StatePaths,
+    ) {
         let tmp = tempfile::tempdir().unwrap();
         let config_path = tmp.path().join("config.json");
-        let mut disks = std::collections::BTreeMap::new();
-        disks.insert(
-            "disk1".to_owned(),
-            serde_json::json!({ "by_id": "/dev/disk/by-id/virtio-disk1" }),
-        );
-        disks.insert(
-            "disk2".to_owned(),
-            serde_json::json!({ "by_id": "/dev/disk/by-id/virtio-disk2" }),
-        );
-        disks.insert(
-            "disk3".to_owned(),
-            serde_json::json!({ "by_id": "/dev/disk/by-id/virtio-disk3" }),
-        );
-        let config_json = serde_json::json!({
-            "disks": disks,
-            "mount_point": "/mnt/storage"
-        });
+        let config_json = serde_json::json!({ "mount_point": "/mnt/storage" });
         std::fs::write(&config_path, serde_json::to_vec(&config_json).unwrap()).unwrap();
-        (tmp, config_path)
+        let (state_tmp, state_paths) = test_paths(&[
+            ("disk1", "/dev/disk/by-id/virtio-disk1"),
+            ("disk2", "/dev/disk/by-id/virtio-disk2"),
+            ("disk3", "/dev/disk/by-id/virtio-disk3"),
+        ]);
+        (tmp, config_path, state_tmp, state_paths)
     }
 
     #[test]
@@ -763,7 +776,7 @@ mod tests {
     // Scenario: 3-disk NAS, one drive dies. Operator runs remove-missing.
     // After the removal, pool is healthy with 2 survivors → soft balance runs.
     fn three_device_pool_soft_rebalance_runs() {
-        let (_tmp, config_path) = three_device_config();
+        let (_tmp, config_path, _state_tmp, state_paths) = three_device_config();
         let log = Arc::new(Mutex::new(Vec::new()));
         let runner = ThreeDeviceRunner::new(log.clone(), false);
         cmd_remove_missing(
@@ -773,7 +786,7 @@ mod tests {
             false,
             true,
             crate::progress::ProgressOutput::Off,
-            &StatePaths::production(),
+            &state_paths,
         )
         .expect("remove-missing should succeed");
 
@@ -804,7 +817,7 @@ mod tests {
     // Scenario: 3-disk NAS, 2 drives die. Operator removes 1 missing entry.
     // Pool still has 1 missing device → no rebalance.
     fn three_device_two_missing_no_rebalance() {
-        let (_tmp, config_path) = three_device_config();
+        let (_tmp, config_path, _state_tmp, state_paths) = three_device_config();
         let log = Arc::new(Mutex::new(Vec::new()));
         let runner = ThreeDeviceRunner::new(log.clone(), true);
         cmd_remove_missing(
@@ -814,7 +827,7 @@ mod tests {
             false,
             true,
             crate::progress::ProgressOutput::Off,
-            &StatePaths::production(),
+            &state_paths,
         )
         .expect("remove-missing should succeed");
 

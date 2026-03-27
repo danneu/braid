@@ -9,6 +9,7 @@ pub mod doctor;
 pub mod enroll_key_file;
 pub mod hdparm;
 pub mod idle;
+pub mod journal;
 
 pub mod lock;
 pub mod luks;
@@ -17,6 +18,7 @@ pub mod monitor;
 pub mod parse;
 pub mod pool;
 pub mod preflight;
+pub mod recover;
 pub mod probe;
 pub mod progress;
 pub mod remove;
