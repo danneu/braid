@@ -32,6 +32,9 @@ with subtest("Pool is mounted after auto-unlock"):
     assert "/dev/mapper/braid-disk1" in fi_show, f"disk1 missing from pool:\n{fi_show}"
     assert "/dev/mapper/braid-disk2" in fi_show, f"disk2 missing from pool:\n{fi_show}"
 
+with subtest("braid-online.service is active after auto-unlock"):
+    machine.succeed("systemctl is-active braid-online.service")
+
 with subtest("USB is unmounted after auto-unlock"):
     ret = machine.execute("mountpoint -q /run/braid-key")
     assert ret[0] != 0, "USB should NOT be mounted at /run/braid-key after auto-unlock"

@@ -47,7 +47,12 @@ if [ "$ret" -eq 0 ]; then
         ;;
       lock)
         if ! @mountpointBin@ -q "@mountPointPath@" 2>/dev/null; then
-          @systemctlBin@ stop braid-online.service 2>/dev/null || true
+          # --no-block: when braid-online.service's ExecStop runs `braid lock`,
+          # the wrapper would call `systemctl stop braid-online.service` again.
+          # A synchronous stop here deadlocks — systemd waits for ExecStop to
+          # exit, but the wrapper is waiting for the stop to complete.  --no-block
+          # queues the stop and returns immediately, breaking the cycle.
+          @systemctlBin@ stop --no-block braid-online.service 2>/dev/null || true
         fi
         ;;
     esac

@@ -388,6 +388,11 @@
               braid = linuxCrane.braid-cli-unwrapped;
             }
           );
+          systemd-lifecycle = pkgs.testers.nixosTest (
+            import ./tests/module/systemd-lifecycle.nix {
+              braid = linuxCrane.braid-cli-unwrapped;
+            }
+          );
           auto-unlock-key-missing = pkgs.testers.nixosTest (
             import ./tests/module/auto-unlock-key-missing.nix {
               braid = linuxCrane.braid-cli-unwrapped;
