@@ -62,8 +62,11 @@ with subtest("Simulate disk3 death and mount degraded"):
 
 with subtest("Make membership dir read-only"):
     # atomic_write creates .pool.json.tmp in the same directory then renames.
-    # Making the directory read-only blocks temp file creation.
-    machine.succeed("chmod 555 /var/lib/braid")
+    # chmod 555 is insufficient — root bypasses Unix permission bits.
+    # A read-only bind mount enforces read-only at the VFS level, blocking
+    # even root from creating files in the directory.
+    machine.succeed("mount --bind /var/lib/braid /var/lib/braid")
+    machine.succeed("mount -o remount,bind,ro /var/lib/braid")
 
 with subtest("remove-missing with read-only membership dir fails"):
     (status, output) = machine.execute("braid remove-missing --yes 2>&1")
