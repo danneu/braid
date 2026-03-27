@@ -36,7 +36,7 @@ Pre-commit writes ensure that if the persist fails, the command aborts before to
 
 - `pool.json` is authoritative. `unlock` requires it.
 - `unlock` is read-only with respect to `pool.json`. It never writes, creates, or repairs it.
-- If `pool.json` is missing or corrupt, `unlock` fails with: `"pool membership not found — run 'braid discover --write' to create it"`
+- If `pool.json` is missing or corrupt, `unlock` fails with a clear error directing the user to `braid add` or `braid discover --write`.
 - If `pool.json` is readable but stale (a member fails to probe), `unlock` warns and proceeds with the members it can probe. It never rewrites `pool.json`.
 - Only these commands write `pool.json`: `add`, `remove`, `replace`, `remove-missing`, `discover --write`.
 
