@@ -37,7 +37,7 @@ Resilience mechanisms:
 
 ### Identity enforcement
 
-`braid unlock` enforces disk identity consistency for all unlocks — not only degraded scenarios. Any name reassignment or rename detected between membership and disk-map is a hard error before any disk is probed or mounted. `--allow-degraded` only bypasses degraded-mount refusal, never identity mismatches.
+`braid unlock` uses authoritative pool membership from `pool.json` and probes only those configured members. `--allow-degraded` only bypasses degraded-mount refusal; it does not change which disks are considered pool members.
 
 ## Key discoveries
 

@@ -195,11 +195,10 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
 
     // Pre-commit: persist membership swap after all reversible checks pass,
     // but before the first irreversible disk operation.
-    let mut m = membership::load_membership(paths)
+    let current_membership = membership::load_membership(paths)
         .map_err(|e| ReplaceError::Validation(format!("failed to load pool membership: {e}")))?;
-    m.disks.remove(old_name);
-    m.disks.insert(new_name.to_owned(), new_by_id.clone());
-    membership::save_membership(&m, paths)
+    let next_membership = build_replacement_membership(&current_membership, old_name, new_name, &new_by_id)?;
+    membership::save_membership(&next_membership, paths)
         .map_err(|e| ReplaceError::Validation(format!("failed to persist pool membership: {e}")))?;
 
     // Step 1: Init new disk (LUKS format/open) — irreversible from here.
@@ -558,6 +557,20 @@ fn replace_confirm_message(
     msg
 }
 
+fn build_replacement_membership(
+    existing: &membership::PoolMembership,
+    old_name: &str,
+    new_name: &str,
+    new_by_id: &ByIdPath,
+) -> Result<membership::PoolMembership, ReplaceError> {
+    let mut next = existing.clone();
+    next.disks.remove(old_name);
+    membership::validate_no_conflicts(&next, new_name, &new_by_id.0)
+        .map_err(|e| ReplaceError::Validation(e.to_string()))?;
+    next.disks.insert(new_name.to_owned(), new_by_id.clone());
+    Ok(next)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -731,6 +744,37 @@ mod tests {
         assert_eq!(
             "disk1", "disk1",
             "same key should be rejected by cmd_replace"
+        );
+    }
+
+    #[test]
+    // Intent: replace must reject a post-replace membership that reuses another
+    // member's by-id under a new name.
+    // Why: docs and invariants say mutating commands reject name reassignment /
+    // by-id rename rather than silently corrupting pool membership.
+    // Scenario: operator tries `braid replace --old disk1 --new newname=<disk2 by-id>`.
+    fn build_replacement_membership_rejects_by_id_rename_conflict() {
+        let mut membership = membership::PoolMembership::empty();
+        membership.disks.insert(
+            "disk1".into(),
+            ByIdPath("/dev/disk/by-id/virtio-disk1".into()),
+        );
+        membership.disks.insert(
+            "disk2".into(),
+            ByIdPath("/dev/disk/by-id/virtio-disk2".into()),
+        );
+
+        let err = build_replacement_membership(
+            &membership,
+            "disk1",
+            "newname",
+            &ByIdPath("/dev/disk/by-id/virtio-disk2".into()),
+        )
+        .expect_err("should reject by-id rename conflict");
+
+        assert!(
+            err.to_string().contains("cannot register"),
+            "unexpected error: {err}"
         );
     }
 

@@ -42,6 +42,13 @@ pub fn cmd_unlock<R: CommandRunner, F: Filesystem + ?Sized>(
     key_file: Option<&std::path::Path>,
     allow_degraded: bool,
 ) -> Result<(), UnlockError> {
+    // Contract:
+    // - Pure operator command: bring the pool online from authoritative state.
+    // - Membership comes from pool.json; unlock never creates, repairs, or rewrites it.
+    // - Probe only configured members, open what is available, and mount the pool.
+    // - Refuse degraded mounts unless --allow-degraded is explicit.
+    // - After a successful mount, advisory metadata like disk-map.json may be
+    //   refreshed best-effort, but correctness never depends on that write.
     let mount_point = config.mount_point();
 
     // 1. If pool already mounted → print message, exit 0
