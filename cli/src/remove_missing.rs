@@ -170,6 +170,7 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync>(
     );
     journal::write_journal(paths, &journal)
         .map_err(|e| RemoveMissingError::Validation(e.to_string()))?;
+    let mut journal_guard = journal::JournalGuard::new(paths);
 
     // Execute
     if let Some(devid) = missing_id {
@@ -185,6 +186,7 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync>(
         RemoveMissingError::Validation(format!("failed to persist pool membership: {e}"))
     })?;
     journal::clear_journal(paths).map_err(|e| RemoveMissingError::Validation(e.to_string()))?;
+    journal_guard.disarm();
 
     crate::pool::maybe_restore_raid1(
         runner,

@@ -354,6 +354,7 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         },
     );
     journal::write_journal(paths, &journal).map_err(|e| AddError::Validation(e.to_string()))?;
+    let mut journal_guard = journal::JournalGuard::new(paths);
 
     // LUKS phase — for each disk: format/open as needed. Track which need pool add.
     // Guard closes any mappers we opened if the LUKS phase fails partway through.
@@ -543,6 +544,7 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     }
     membership::save_membership(&final_membership, paths)?;
     journal::clear_journal(paths).map_err(|e| AddError::Validation(e.to_string()))?;
+    journal_guard.disarm();
 
     let label = if names.len() == 1 {
         format!("{} is", names[0])

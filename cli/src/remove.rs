@@ -167,6 +167,7 @@ pub fn cmd_remove<R: CommandRunner + Sync>(
         },
     );
     journal::write_journal(paths, &journal).map_err(|e| RemoveError::Validation(e.to_string()))?;
+    let mut journal_guard = journal::JournalGuard::new(paths);
 
     // Execute
     evict_present_device(runner, &mn.0, config.mount_point().as_str(), progress)?;
@@ -175,6 +176,7 @@ pub fn cmd_remove<R: CommandRunner + Sync>(
     membership::save_membership(&target_membership, paths)
         .map_err(|e| RemoveError::Validation(format!("failed to persist pool membership: {e}")))?;
     journal::clear_journal(paths).map_err(|e| RemoveError::Validation(e.to_string()))?;
+    journal_guard.disarm();
 
     eprintln!("Done. Disk '{}' removed from pool.", name);
     Ok(())

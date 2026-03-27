@@ -210,6 +210,7 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         },
     );
     journal::write_journal(paths, &journal).map_err(|e| ReplaceError::Validation(e.to_string()))?;
+    let mut journal_guard = journal::JournalGuard::new(paths);
 
     // Step 1: Init new disk (LUKS format/open) — irreversible from here.
     match new_probed.state {
@@ -359,6 +360,7 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     membership::save_membership(&final_membership, paths)
         .map_err(|e| ReplaceError::Validation(format!("failed to persist pool membership: {e}")))?;
     journal::clear_journal(paths).map_err(|e| ReplaceError::Validation(e.to_string()))?;
+    journal_guard.disarm();
 
     eprintln!("Done. Replaced {} with {}.", old_name, new_name);
     Ok(())
