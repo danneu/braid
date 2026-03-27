@@ -212,10 +212,7 @@ sudo braid status --json      # machine-readable output
 Drive states:
 
 - `present` — disk is in the pool and online
-- `missing` — was in pool but device is absent (unplugged, failed, powered off)
-- `unknown` — cannot determine (disk-map unreadable)
-
-Drive state classification uses the disk identity map. If the map is unavailable, absent disks show as `unknown` instead of `missing`.
+- `missing` — in pool membership but device is absent (unplugged, failed, powered off)
 
 Pool status values (`--json` `"status"` field / human output):
 

@@ -2,7 +2,7 @@
 
 Status: Superseded by [runtime-disk-membership.md](runtime-disk-membership.md)
 
-> Principle: [Config-first workflow](../principles.md#2-config-first-workflow)
+> Principle: [CLI-owned membership](../principles.md#2-cli-owned-membership) (successor)
 
 ## Context
 

@@ -2,7 +2,7 @@
 
 Status: Active
 
-> Principle: [Safe-by-construction reconciliation](../principles.md#3-safe-by-construction-reconciliation)
+> Principle: [Safe-by-construction operations](../principles.md#3-safe-by-construction-operations)
 
 ## Context
 

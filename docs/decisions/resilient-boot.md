@@ -33,7 +33,7 @@ Resilience mechanisms:
 |----------|-------------|-----------|
 | All drives healthy | Normal boot | Everything works |
 | One drive dead | `braid unlock` refuses by default; user must pass `--allow-degraded` or configure `autoUnlock.allowDegraded` | Pool stays locked until explicit opt-in |
-| All drives dead / wrong config | 10s timeout, mount fails | System boots, SSH works, no /mnt/storage |
+| All drives dead / no pool.json | `braid unlock` fails (no devices to probe) | System boots, SSH works, no /mnt/storage |
 
 ### Identity enforcement
 
