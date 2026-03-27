@@ -428,6 +428,16 @@
               braid = linuxCrane.braid-cli-unwrapped;
             }
           );
+          monitor-lifecycle = pkgs.testers.nixosTest (
+            import ./tests/module/monitor-lifecycle.nix {
+              braid = linuxCrane.braid-cli-unwrapped;
+            }
+          );
+          smartd-hook = pkgs.testers.nixosTest (
+            import ./tests/module/smartd-hook.nix {
+              braid = linuxCrane.braid-cli-unwrapped;
+            }
+          );
           braid-idle = pkgs.testers.nixosTest (
             import ./tests/cli/braid-idle.nix {
               braid = linuxCrane.braid;
