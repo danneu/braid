@@ -64,7 +64,7 @@ in
       # no pool membership file.  braid unlock requires it.
       systemd.tmpfiles.rules = [
         "d /var/lib/braid 0755 root root -"
-        ''f /var/lib/braid/pool.json 0644 root root - {"disks":{"disk1":"/dev/disk/by-id/virtio-disk1","disk2":"/dev/disk/by-id/virtio-disk2"}}''
+        ''f /var/lib/braid/pool.json 0644 root root - {"disks":{"disk1":{"by_id":"/dev/disk/by-id/virtio-disk1"},"disk2":{"by_id":"/dev/disk/by-id/virtio-disk2"}}}''
       ];
 
       virtualisation.emptyDiskImages = [
