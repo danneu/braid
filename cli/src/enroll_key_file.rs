@@ -3,6 +3,7 @@ use crate::config::mapper_name;
 use crate::luks::{self, KeySlotState, LuksError, KEYFILE_SIZE, LUKS_SLOT_KEYFILE};
 use crate::membership::PoolMembership;
 use crate::probe::{self, Filesystem};
+use crate::state_paths::StatePaths;
 use crate::types::{ByIdPath, ConfigDiskState};
 use std::io::Read;
 use std::os::unix::fs::OpenOptionsExt;
@@ -118,13 +119,14 @@ fn apply_enrollment<R: CommandRunner>(
     plan: &[DiskEnrollAction],
     passphrase: &str,
     key_file_path: &Path,
+    paths: &StatePaths,
 ) -> Result<(), EnrollKeyFileError> {
     apply_enrollment_with_backup_dir(
         runner,
         plan,
         passphrase,
         key_file_path,
-        Path::new(luks::HEADER_BACKUP_DIR),
+        &paths.luks_headers_dir(),
     )
 }
 
@@ -190,6 +192,7 @@ pub fn cmd_enroll_key_file<R: CommandRunner, F: Filesystem + ?Sized>(
     generate: bool,
     passphrase_stdin: bool,
     passphrase_file: Option<&Path>,
+    paths: &StatePaths,
 ) -> Result<(), EnrollKeyFileError> {
     if generate {
         // --generate: keyfile must NOT exist
@@ -214,7 +217,7 @@ pub fn cmd_enroll_key_file<R: CommandRunner, F: Filesystem + ?Sized>(
         eprintln!("ok: generated {}", key_file_path.display());
 
         // 5. Apply enrollment
-        apply_enrollment(runner, &plan, &passphrase, key_file_path)?;
+        apply_enrollment(runner, &plan, &passphrase, key_file_path, paths)?;
     } else {
         // Existing flow: keyfile must exist
         if !key_file_path.exists() {
@@ -239,7 +242,7 @@ pub fn cmd_enroll_key_file<R: CommandRunner, F: Filesystem + ?Sized>(
         let candidates = discover_enrollment_candidates(runner, fs, membership)?;
         let passphrase = luks::read_passphrase(passphrase_file, passphrase_stdin)?;
         let plan = plan_enrollment(runner, &candidates, key_file_path, &passphrase)?;
-        apply_enrollment(runner, &plan, &passphrase, key_file_path)?;
+        apply_enrollment(runner, &plan, &passphrase, key_file_path, paths)?;
     }
 
     Ok(())
@@ -804,7 +807,8 @@ mod tests {
             by_id: by_id(d1),
         }];
 
-        apply_enrollment(&runner, &plan, pass, Path::new(kf)).unwrap();
+        let paths = crate::state_paths::StatePaths::production();
+        apply_enrollment(&runner, &plan, pass, Path::new(kf), &paths).unwrap();
     }
 
     /*

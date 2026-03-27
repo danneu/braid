@@ -1,9 +1,8 @@
 use crate::state_io::atomic_write;
+use crate::state_paths::StatePaths;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
-
-pub const DISK_MAP_FILE: &str = "/var/lib/braid/disk-map.json";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DiskMap {
@@ -39,8 +38,8 @@ pub enum DiskMapLoad {
     Failed(String),
 }
 
-pub fn try_load_disk_map() -> DiskMapLoad {
-    try_load_disk_map_at(Path::new(DISK_MAP_FILE))
+pub fn try_load_disk_map(paths: &StatePaths) -> DiskMapLoad {
+    try_load_disk_map_at(&paths.disk_map_json())
 }
 
 pub fn try_load_disk_map_at(path: &Path) -> DiskMapLoad {
@@ -55,9 +54,9 @@ pub fn try_load_disk_map_at(path: &Path) -> DiskMapLoad {
     }
 }
 
-/// Load disk map from the production path.
-pub fn load_disk_map() -> DiskMap {
-    load_disk_map_at(Path::new(DISK_MAP_FILE))
+/// Load disk map, resolving the path from StatePaths.
+pub fn load_disk_map(paths: &StatePaths) -> DiskMap {
+    load_disk_map_at(&paths.disk_map_json())
 }
 
 /// Load disk map from an arbitrary path (for testing).
@@ -70,9 +69,9 @@ pub fn load_disk_map_at(path: &Path) -> DiskMap {
     serde_json::from_str(&contents).unwrap_or_else(|_| DiskMap::new())
 }
 
-/// Save disk map to the production path (atomic: tmp + rename).
-pub fn save_disk_map(map: &DiskMap) -> Result<(), std::io::Error> {
-    save_disk_map_at(Path::new(DISK_MAP_FILE), map)
+/// Save disk map, resolving the path from StatePaths (atomic: tmp + rename).
+pub fn save_disk_map(paths: &StatePaths, map: &DiskMap) -> Result<(), std::io::Error> {
+    save_disk_map_at(&paths.disk_map_json(), map)
 }
 
 /// Save disk map to an arbitrary path (for testing). Atomic: tmp + rename in same dir.
@@ -121,10 +120,11 @@ fn now_iso() -> String {
 }
 
 /// Best-effort disk map update. Logs warning on failure, never fails the caller.
-pub fn update_disk_map_best_effort(f: impl FnOnce(&mut DiskMap)) {
-    let mut map = load_disk_map();
+pub fn update_disk_map_best_effort(paths: &StatePaths, f: impl FnOnce(&mut DiskMap)) {
+    let path = paths.disk_map_json();
+    let mut map = load_disk_map_at(&path);
     f(&mut map);
-    if let Err(e) = save_disk_map(&map) {
+    if let Err(e) = save_disk_map_at(&path, &map) {
         eprintln!("Warning: failed to update disk map: {e}");
     }
 }
@@ -132,10 +132,22 @@ pub fn update_disk_map_best_effort(f: impl FnOnce(&mut DiskMap)) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state_paths::StatePaths;
     use tempfile::TempDir;
 
     fn map_path(dir: &TempDir) -> std::path::PathBuf {
         dir.path().join("disk-map.json")
+    }
+
+    #[test]
+    fn roundtrip_via_state_paths() {
+        let dir = TempDir::new().unwrap();
+        let paths = StatePaths::custom(dir.path().into());
+        let mut map = DiskMap::new();
+        record_disk(&mut map, "d1", "/by-id/1", "u1", 1);
+        save_disk_map(&paths, &map).unwrap();
+        let loaded = load_disk_map(&paths);
+        assert_eq!(loaded.disks.len(), 1);
     }
 
     #[test]

@@ -1,11 +1,10 @@
 use crate::cmd::{CmdError, CmdRequest, CommandRunner};
 use crate::config::mapper_name;
 use crate::probe::Filesystem;
+use crate::state_paths::StatePaths;
 use crate::types::ByIdPath;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
-
-pub(crate) const HEADER_BACKUP_DIR: &str = "/var/lib/braid/luks-headers";
 
 /// LUKS key slot 1: binary random keyfile (no PBKDF, raw key material).
 pub const LUKS_SLOT_KEYFILE: u8 = 1;
@@ -133,18 +132,14 @@ pub(crate) fn backup_luks_header_to<R: CommandRunner>(
     Ok(backup_path)
 }
 
-/// Back up the LUKS header to /var/lib/braid/luks-headers/<mapper>.luksheader
+/// Back up the LUKS header to <state_root>/luks-headers/<mapper>.luksheader
 pub fn backup_luks_header<R: CommandRunner>(
     runner: &R,
     device: &str,
     mapper: &str,
+    paths: &StatePaths,
 ) -> Result<PathBuf, LuksError> {
-    backup_luks_header_to(
-        runner,
-        device,
-        mapper,
-        std::path::Path::new(HEADER_BACKUP_DIR),
-    )
+    backup_luks_header_to(runner, device, mapper, &paths.luks_headers_dir())
 }
 
 /// Verify passphrase against an existing LUKS device (test-passphrase).
@@ -328,9 +323,9 @@ fn header_backup_advisories_in(dir: &std::path::Path) -> Vec<String> {
     }
 }
 
-/// Production wrapper — scans HEADER_BACKUP_DIR.
-pub fn header_backup_advisories() -> Vec<String> {
-    header_backup_advisories_in(std::path::Path::new(HEADER_BACKUP_DIR))
+/// Scan the luks-headers directory for backup files and return advisories.
+pub fn header_backup_advisories(paths: &StatePaths) -> Vec<String> {
+    header_backup_advisories_in(&paths.luks_headers_dir())
 }
 
 #[cfg(test)]

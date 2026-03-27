@@ -3,6 +3,7 @@ use std::sync::mpsc;
 use std::thread;
 
 use crate::cmd::RealRunner;
+use crate::state_paths::StatePaths;
 use crate::tui::command;
 use crate::tui::event::Event;
 use crate::tui::state::CmdId;
@@ -20,6 +21,7 @@ pub enum Effect {
     ProbePool {
         mount_point: MountPoint,
         disk_by_id: HashMap<String, String>,
+        paths: StatePaths,
     },
     ScheduleProbe {
         mount_point: MountPoint,
@@ -35,6 +37,7 @@ pub fn execute_effect(effect: Effect, cmd_tx: &mpsc::Sender<Event>) {
         Effect::ProbePool {
             mount_point,
             disk_by_id,
+            paths,
         } => {
             let tx = cmd_tx.clone();
             thread::spawn(move || {
@@ -44,6 +47,7 @@ pub fn execute_effect(effect: Effect, cmd_tx: &mpsc::Sender<Event>) {
                     &runner,
                     mount_point.as_str(),
                     &disk_by_id,
+                    &paths,
                 );
                 let elapsed = start.elapsed();
                 let _ = tx.send(Event::PoolProbeFinished(result, elapsed));

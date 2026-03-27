@@ -11,6 +11,7 @@ use crate::pool::{pool_replace_device, pool_resize_device};
 use crate::preflight;
 use crate::probe::{probe_config_disk, probe_pool, Filesystem, ProbeError};
 use crate::progress::ProgressOutput;
+use crate::state_paths::StatePaths;
 use crate::types::*;
 use std::path::Path;
 
@@ -51,6 +52,7 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     passphrase_file: Option<&Path>,
     enroll_key_file: Option<&Path>,
     progress: ProgressOutput,
+    paths: &StatePaths,
 ) -> Result<(), ReplaceError> {
     let config = config_read(config_path)?;
 
@@ -159,50 +161,59 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         }
     }
 
-    // Pre-commit: persist membership swap BEFORE irreversible disk ops
-    let mut m = membership::load_membership()
-        .map_err(|e| ReplaceError::Validation(format!("failed to load pool membership: {e}")))?;
-    m.disks.remove(old_name);
-    m.disks.insert(new_name.to_owned(), new_by_id.clone());
-    membership::save_membership(&m)
-        .map_err(|e| ReplaceError::Validation(format!("failed to persist pool membership: {e}")))?;
-
     // Read passphrase
     let passphrase = read_passphrase(passphrase_file, passphrase_stdin)?;
     let new_mn = mapper_name(new_name);
 
-    // Step 1: Init new disk if needed
-    match new_probed.state {
-        ConfigDiskState::Absent => {
-            return Err(ReplaceError::Validation(format!(
-                "new disk '{}' ({}) is not present. Is it plugged in?",
-                new_name, new_by_id
-            )));
-        }
-        ConfigDiskState::PresentNotLuks => {
-            // If pool exists, verify passphrase against existing member
-            if let Some(existing) = pool.devices.first() {
-                let status_raw = runner.run(&crate::cmd::CmdRequest::CryptsetupStatus {
-                    mapper: existing.mapper.0.clone(),
-                })?;
-                let status = crate::parse::parse_cryptsetup_status(&status_raw)?;
-                if let Some(underlying) = status.device {
-                    let ok = verify_passphrase(runner, &underlying, &passphrase)?;
-                    if !ok {
-                        return Err(ReplaceError::Validation(
-                            "passphrase does not match existing pool member".into(),
-                        ));
-                    }
+    // Reversible checks: reject absent disk, verify passphrase, check not already in pool.
+    if matches!(new_probed.state, ConfigDiskState::Absent) {
+        return Err(ReplaceError::Validation(format!(
+            "new disk '{}' ({}) is not present. Is it plugged in?",
+            new_name, new_by_id
+        )));
+    }
+
+    if matches!(new_probed.state, ConfigDiskState::PresentNotLuks) {
+        if let Some(existing) = pool.devices.first() {
+            let status_raw = runner.run(&crate::cmd::CmdRequest::CryptsetupStatus {
+                mapper: existing.mapper.0.clone(),
+            })?;
+            let status = crate::parse::parse_cryptsetup_status(&status_raw)?;
+            if let Some(underlying) = status.device {
+                let ok = verify_passphrase(runner, &underlying, &passphrase)?;
+                if !ok {
+                    return Err(ReplaceError::Validation(
+                        "passphrase does not match existing pool member".into(),
+                    ));
                 }
             }
+        }
+    }
 
+    // Guard: new disk must not already be in the pool.
+    check_new_not_in_pool(new_name, &new_mn, &pool)?;
+
+    // Pre-commit: persist membership swap after all reversible checks pass,
+    // but before the first irreversible disk operation.
+    let mut m = membership::load_membership(paths)
+        .map_err(|e| ReplaceError::Validation(format!("failed to load pool membership: {e}")))?;
+    m.disks.remove(old_name);
+    m.disks.insert(new_name.to_owned(), new_by_id.clone());
+    membership::save_membership(&m, paths)
+        .map_err(|e| ReplaceError::Validation(format!("failed to persist pool membership: {e}")))?;
+
+    // Step 1: Init new disk (LUKS format/open) — irreversible from here.
+    match new_probed.state {
+        ConfigDiskState::Absent => unreachable!("already checked above"),
+        ConfigDiskState::PresentNotLuks => {
+            // Passphrase already verified above.
             let mut luks_opts = luks_opts_from_env();
             luks_opts.push("--label".into());
             luks_opts.push(format!("braid-{new_name}"));
             luks_format(runner, &new_by_id.0, &passphrase, &luks_opts)?;
             eprintln!("LUKS formatted: {}", new_by_id);
 
-            let backup_path = backup_luks_header(runner, &new_by_id.0, &new_mn.0)?;
+            let backup_path = backup_luks_header(runner, &new_by_id.0, &new_mn.0, paths)?;
             eprintln!("LUKS header backed up: {}", backup_path.display());
 
             ensure_luks_open(runner, fs, new_name, &new_by_id, &passphrase)?;
@@ -226,9 +237,6 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     }
 
     let new_mapper_path = format!("/dev/mapper/{}", new_mn.0);
-
-    // Guard: new disk must not already be in the pool.
-    check_new_not_in_pool(new_name, &new_mn, &pool)?;
 
     // Step 2+: Execute replacement — both paths use btrfs replace start.
     match &replace_source {
@@ -322,7 +330,7 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     // Best-effort disk-map update: remove old entry, record new disk's metadata.
     if let Ok(pool_after) = probe_pool(runner, config.mount_point().as_str()) {
         let new_mn = mapper_name(new_name);
-        disk_map::update_disk_map_best_effort(|map| {
+        disk_map::update_disk_map_best_effort(paths, |map| {
             map.disks.remove(old_name);
             if let Some(dev) = pool_after.devices.iter().find(|d| d.mapper == new_mn) {
                 disk_map::record_disk(map, new_name, &new_by_id.0, &dev.luks_uuid.0, dev.devid);

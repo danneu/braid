@@ -7,6 +7,7 @@ use crate::pool::evict_present_device;
 use crate::preflight;
 use crate::probe::{probe_pool, ProbeError};
 use crate::progress::ProgressOutput;
+use crate::state_paths::StatePaths;
 use crate::types::*;
 use std::path::Path;
 
@@ -36,6 +37,7 @@ pub fn cmd_remove<R: CommandRunner + Sync>(
     dry_run: bool,
     yes: bool,
     progress: ProgressOutput,
+    paths: &StatePaths,
 ) -> Result<(), RemoveError> {
     let config = config_read(config_path)?;
 
@@ -151,30 +153,19 @@ pub fn cmd_remove<R: CommandRunner + Sync>(
     }
 
     // Pre-commit: persist membership removal BEFORE irreversible disk op.
-    // If membership doesn't exist, warn and continue — the user explicitly
-    // asked to remove a disk, and the pool operation is what matters.
-    match membership::load_membership() {
-        Ok(mut m) => {
-            m.disks.remove(name);
-            membership::save_membership(&m).map_err(|e| {
-                RemoveError::Validation(format!("failed to persist pool membership: {e}"))
-            })?;
-        }
-        Err(membership::MembershipError::NotFound(_)) => {
-            eprintln!("warning: pool membership file not found, skipping membership update");
-        }
-        Err(e) => {
-            return Err(RemoveError::Validation(format!(
-                "failed to load pool membership: {e}"
-            )));
-        }
-    }
+    // Fail hard if membership cannot be loaded or saved — proceeding without
+    // updating pool.json would let btrfs state diverge from authoritative membership.
+    let mut m = membership::load_membership(paths)
+        .map_err(|e| RemoveError::Validation(format!("failed to load pool membership: {e}")))?;
+    m.disks.remove(name);
+    membership::save_membership(&m, paths)
+        .map_err(|e| RemoveError::Validation(format!("failed to persist pool membership: {e}")))?;
 
     // Execute
     evict_present_device(runner, &mn.0, config.mount_point().as_str(), progress)?;
 
     // Best-effort: remove entry from disk-map
-    disk_map::update_disk_map_best_effort(|map| {
+    disk_map::update_disk_map_best_effort(paths, |map| {
         map.disks.remove(name);
     });
 
@@ -265,9 +256,24 @@ fn compile_remove_present_steps(
 mod tests {
     use super::*;
     use crate::cmd::{CmdError, CmdRequest, CommandRunner, RawCommandOutput};
+    use crate::membership::{self, PoolMembership};
     use crate::progress::ProgressOutput;
+    use crate::state_paths::StatePaths;
+    use crate::types::ByIdPath;
     use std::collections::BTreeMap;
     use std::sync::{Arc, Mutex};
+
+    fn setup_membership(disks: &[(&str, &str)]) -> (tempfile::TempDir, StatePaths) {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let mut m = PoolMembership::empty();
+        for (name, by_id) in disks {
+            m.disks
+                .insert(name.to_string(), ByIdPath(by_id.to_string()));
+        }
+        membership::save_membership_to(&m, &paths.pool_json()).unwrap();
+        (tmp, paths)
+    }
 
     fn mock_out(cmd: &str, stdout: &str, exit_status: i32) -> RawCommandOutput {
         RawCommandOutput {
@@ -363,6 +369,10 @@ mod tests {
     //   small and mostly allocated. The operation succeeds because the balance
     //   step handles redistribution, making the space check irrelevant.
     fn enospc_check_skipped_for_two_to_one_removal() {
+        let (_state_dir, paths) = setup_membership(&[
+            ("disk1", "/dev/disk/by-id/virtio-disk1"),
+            ("disk2", "/dev/disk/by-id/virtio-disk2"),
+        ]);
         let tmp = tempfile::tempdir().unwrap();
         let config_path = tmp.path().join("config.json");
 
@@ -390,6 +400,7 @@ mod tests {
             false,
             true,
             ProgressOutput::Off,
+            &paths,
         )
         .expect("remove should succeed");
 
@@ -416,6 +427,10 @@ mod tests {
     //   specific scenario that inspired this test (like a real world bug).
     //   - Operator removes one disk from a healthy two-disk pool and expects the operation to succeed end-to-end.
     fn remove_two_disk_pool_balances_single_before_device_remove() {
+        let (_state_dir, paths) = setup_membership(&[
+            ("disk1", "/dev/disk/by-id/virtio-disk1"),
+            ("disk2", "/dev/disk/by-id/virtio-disk2"),
+        ]);
         let tmp = tempfile::tempdir().unwrap();
         let config_path = tmp.path().join("config.json");
 
@@ -443,6 +458,7 @@ mod tests {
             false,
             true,
             ProgressOutput::Off,
+            &paths,
         )
         .expect("remove should succeed");
 

@@ -7,6 +7,7 @@ use crate::pool::{pool_remove_devid, pool_remove_missing};
 use crate::preflight;
 use crate::probe::{probe_pool, ProbeError};
 use crate::progress::ProgressOutput;
+use crate::state_paths::StatePaths;
 use crate::types::MountPoint;
 use std::path::Path;
 
@@ -36,6 +37,7 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync>(
     dry_run: bool,
     yes: bool,
     progress: ProgressOutput,
+    paths: &StatePaths,
 ) -> Result<(), RemoveMissingError> {
     let config = config_read(config_path)?;
 
@@ -145,17 +147,17 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync>(
     // Look up which membership entry corresponds to the missing devid via disk-map.
     let target_devid = missing_id.or_else(|| pool.missing_devids.first().copied());
     if let Some(devid) = target_devid {
-        let disk_map = disk_map::load_disk_map();
+        let disk_map = disk_map::load_disk_map(paths);
         let name_to_remove = disk_map
             .disks
             .iter()
             .find(|(_, entry)| entry.devid == devid)
             .map(|(name, _)| name.clone());
         if let Some(name) = name_to_remove {
-            match membership::load_membership() {
+            match membership::load_membership(paths) {
                 Ok(mut m) => {
                     m.disks.remove(&name);
-                    if let Err(e) = membership::save_membership(&m) {
+                    if let Err(e) = membership::save_membership(&m, paths) {
                         eprintln!(
                             "warning: failed to persist membership removal for '{name}': {e}"
                         );
@@ -179,7 +181,7 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync>(
 
     // Best-effort: remove entry from disk-map by devid
     if let Some(devid) = target_devid {
-        disk_map::update_disk_map_best_effort(|map| {
+        disk_map::update_disk_map_best_effort(paths, |map| {
             disk_map::remove_disks_by_devids(map, &[devid]);
         });
     }
@@ -281,6 +283,7 @@ fn compile_steps(
 mod tests {
     use super::*;
     use crate::cmd::{CmdError, CmdRequest, CommandRunner, RawCommandOutput};
+    use crate::state_paths::StatePaths;
 
     struct EnospcRunner {
         device_usage_stdout: &'static str,
@@ -418,6 +421,7 @@ mod tests {
             false,
             true,
             crate::progress::ProgressOutput::Off,
+            &StatePaths::production(),
         )
         .expect("remove-missing should succeed");
 
@@ -780,6 +784,7 @@ mod tests {
             false,
             true,
             crate::progress::ProgressOutput::Off,
+            &StatePaths::production(),
         )
         .expect("remove-missing should succeed");
 
@@ -820,6 +825,7 @@ mod tests {
             false,
             true,
             crate::progress::ProgressOutput::Off,
+            &StatePaths::production(),
         )
         .expect("remove-missing should succeed");
 

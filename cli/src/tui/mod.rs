@@ -21,17 +21,20 @@ use model::{DiskLuksInfo, DiskUsage, Model, PoolState, PoolStatus};
 use view::view;
 
 use crate::config::config_read;
+use crate::luks;
 use crate::membership;
 use crate::parse::types::{
     BtrfsBgType, BtrfsDfEntry, BtrfsProfile, DeviceAllocation, ScrubState, ScrubTimestamp,
     SmartHealth,
 };
+use crate::state_paths::StatePaths;
 use crate::types::MountPoint;
 
-pub fn run(config_path: &Path) -> io::Result<()> {
+pub fn run(config_path: &Path, paths: &StatePaths) -> io::Result<()> {
     let config = config_read(config_path).map_err(|e| io::Error::other(e.to_string()))?;
-    let membership = membership::load_membership()
+    let membership = membership::load_membership(paths)
         .map_err(|e| io::Error::other(e.to_string()))?;
+    let advisories = luks::header_backup_advisories(paths);
     let mut terminal = ratatui::init();
     let (_input, cmd_tx, rx) = InputHandler::new();
     let disk_names: Vec<String> = membership.disks.keys().cloned().collect();
@@ -41,7 +44,7 @@ pub fn run(config_path: &Path) -> io::Result<()> {
         .map(|(k, v)| (k.clone(), v.to_string()))
         .collect();
     let (mut model, init_effects) =
-        Model::new(disk_names, disk_by_id, config.mount_point().0.clone());
+        Model::new(disk_names, disk_by_id, config.mount_point().0.clone(), advisories, paths.clone());
     for effect in init_effects {
         execute_effect(effect, &cmd_tx);
     }

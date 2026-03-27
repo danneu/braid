@@ -34,6 +34,11 @@ def read_disk_map():
     return json.loads(raw)
 
 
+def read_membership():
+    raw = machine.succeed("cat /var/lib/braid/pool.json")
+    return json.loads(raw)
+
+
 def add_cmd(name):
     passphrase_q = shlex.quote(passphrase)
     return (
@@ -90,5 +95,12 @@ with subtest("Disk map unchanged after failed replace"):
     dm = read_disk_map()
     for name in ["disk1", "disk2", "disk3"]:
         assert name in dm["disks"], f"{name} missing from map: {dm}"
+
+with subtest("Membership unchanged after failed replace"):
+    m = read_membership()
+    for name in ["disk1", "disk2", "disk3"]:
+        assert name in m["disks"], (
+            name + " missing from membership: " + str(m)
+        )
 
 machine.shutdown()

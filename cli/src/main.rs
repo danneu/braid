@@ -7,6 +7,7 @@ use braid_cli::config::config_read;
 use braid_cli::doctor::cmd_doctor;
 use braid_cli::probe::RealFilesystem;
 use braid_cli::progress::{resolve_progress_output, ProgressMode};
+use braid_cli::state_paths::StatePaths;
 
 #[derive(Debug, Parser)]
 #[command(name = "braid", version)]
@@ -209,6 +210,7 @@ fn main() {
     }
 
     let config_path = cli.config;
+    let paths = StatePaths::production();
 
     match cli.command {
         Commands::Add(args) => {
@@ -234,6 +236,7 @@ fn main() {
                 args.common.passphrase_file.as_deref(),
                 enroll_kf.as_deref(),
                 progress,
+                &paths,
             ) {
                 print_cli_error(&e.to_string());
                 std::process::exit(1);
@@ -253,6 +256,7 @@ fn main() {
                 args.common.dry_run,
                 args.common.yes,
                 progress,
+                &paths,
             ) {
                 print_cli_error(&e.to_string());
                 std::process::exit(1);
@@ -272,6 +276,7 @@ fn main() {
                 args.common.dry_run,
                 args.common.yes,
                 progress,
+                &paths,
             ) {
                 print_cli_error(&e.to_string());
                 std::process::exit(1);
@@ -302,6 +307,7 @@ fn main() {
                 args.common.passphrase_file.as_deref(),
                 enroll_kf.as_deref(),
                 progress,
+                &paths,
             ) {
                 print_cli_error(&e.to_string());
                 std::process::exit(1);
@@ -317,13 +323,14 @@ fn main() {
             };
             let runner = RealRunner;
             let fs = RealFilesystem;
-            if let Err(e) = braid_cli::status::cmd_status(&runner, &fs, &config, args.json) {
+            if let Err(e) = braid_cli::status::cmd_status(&runner, &fs, &config, args.json, &paths)
+            {
                 print_cli_error(&e.to_string());
                 std::process::exit(1);
             }
         }
         Commands::Doctor(args) => {
-            if let Err(e) = cmd_doctor(Path::new(&config_path), args.json) {
+            if let Err(e) = cmd_doctor(Path::new(&config_path), &paths, args.json) {
                 print_cli_error(&e.to_string());
                 std::process::exit(1);
             }
@@ -336,7 +343,7 @@ fn main() {
                     std::process::exit(1);
                 }
             };
-            let membership = match braid_cli::membership::load_membership() {
+            let membership = match braid_cli::membership::load_membership(&paths) {
                 Ok(m) => m,
                 Err(e) => {
                     eprintln!("error: {e}");
@@ -350,6 +357,7 @@ fn main() {
                 &fs,
                 &config,
                 &membership,
+                &paths,
                 args.passphrase_stdin,
                 args.passphrase_file.as_deref(),
                 args.key_file.as_deref(),
@@ -367,7 +375,7 @@ fn main() {
             }
         }
         Commands::EnrollKeyFile(args) => {
-            let membership = match braid_cli::membership::load_membership() {
+            let membership = match braid_cli::membership::load_membership(&paths) {
                 Ok(m) => m,
                 Err(e) => {
                     eprintln!("error: {e}");
@@ -385,6 +393,7 @@ fn main() {
                 args.generate,
                 args.passphrase_stdin,
                 args.passphrase_file.as_deref(),
+                &paths,
             ) {
                 print_cli_error(&e.to_string());
                 std::process::exit(1);
@@ -398,7 +407,7 @@ fn main() {
                     std::process::exit(1);
                 }
             };
-            let membership = match braid_cli::membership::load_membership() {
+            let membership = match braid_cli::membership::load_membership(&paths) {
                 Ok(m) => m,
                 Err(e) => {
                     eprintln!("error: {e}");
@@ -449,7 +458,7 @@ fn main() {
                 }
             };
             let runner = RealRunner;
-            match braid_cli::monitor::cmd_monitor(&runner, config.mount_point().as_str()) {
+            match braid_cli::monitor::cmd_monitor(&runner, config.mount_point().as_str(), &paths) {
                 Ok(braid_cli::monitor::MonitorResult::PoolOffline) => {
                     std::process::exit(0);
                 }
@@ -474,7 +483,8 @@ fn main() {
                 }
             };
             let runner = RealRunner;
-            if let Err(e) = braid_cli::ack::cmd_ack(&runner, config.mount_point().as_str()) {
+            if let Err(e) = braid_cli::ack::cmd_ack(&runner, config.mount_point().as_str(), &paths)
+            {
                 print_cli_error(&e.to_string());
                 std::process::exit(1);
             }
@@ -483,7 +493,7 @@ fn main() {
             let result = if args.demo {
                 braid_cli::tui::run_demo()
             } else {
-                braid_cli::tui::run(Path::new(&config_path))
+                braid_cli::tui::run(Path::new(&config_path), &paths)
             };
             if let Err(e) = result {
                 print_cli_error(&e.to_string());
@@ -503,11 +513,11 @@ fn main() {
                     }
                     if args.write {
                         let m = braid_cli::membership::PoolMembership { disks: members };
-                        if let Err(e) = braid_cli::membership::save_membership(&m) {
+                        if let Err(e) = braid_cli::membership::save_membership(&m, &paths) {
                             print_cli_error(&format!("failed to write pool membership: {e}"));
                             std::process::exit(1);
                         }
-                        eprintln!("pool membership written to /var/lib/braid/pool.json");
+                        eprintln!("pool membership written to {}", paths.pool_json().display());
                     } else if !args.dry_run {
                         eprintln!("pass --write to persist, or --dry-run to preview");
                     }
@@ -555,7 +565,8 @@ fn print_cli_error(message: &str) {
 
 /// Tab completion returns disk names from membership.
 fn disk_name_candidates() -> Vec<CompletionCandidate> {
-    let Ok(membership) = braid_cli::membership::load_membership() else {
+    let paths = StatePaths::production();
+    let Ok(membership) = braid_cli::membership::load_membership(&paths) else {
         return Vec::new();
     };
     membership

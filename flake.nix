@@ -114,8 +114,18 @@
               braid = linuxCrane.braid;
             }
           );
+          add-passphrase-mismatch = pkgs.testers.nixosTest (
+            import ./tests/cli/add-passphrase-mismatch.nix {
+              braid = linuxCrane.braid;
+            }
+          );
           braid-remove-disk = pkgs.testers.nixosTest (
             import ./tests/cli/braid-remove-disk.nix {
+              braid = linuxCrane.braid;
+            }
+          );
+          remove-no-membership = pkgs.testers.nixosTest (
+            import ./tests/cli/remove-no-membership.nix {
               braid = linuxCrane.braid;
             }
           );
@@ -299,6 +309,11 @@
           );
           braid-remove-missing-enospc-crash = pkgs.testers.nixosTest (
             import ./tests/cli/braid-remove-missing-enospc-crash.nix {
+              braid = linuxCrane.braid;
+            }
+          );
+          remove-missing-membership-readonly = pkgs.testers.nixosTest (
+            import ./tests/cli/remove-missing-membership-readonly.nix {
               braid = linuxCrane.braid;
             }
           );

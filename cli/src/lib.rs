@@ -24,6 +24,7 @@ pub mod remove;
 pub mod remove_missing;
 pub mod replace;
 pub mod state_io;
+pub mod state_paths;
 pub mod status;
 // TUI is stubbed out — suppress unused-code warnings for now.
 // TODO: remove #[allow(dead_code)] once the TUI is more developed.

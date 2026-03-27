@@ -1,11 +1,10 @@
 use crate::state_io;
+use crate::state_paths::StatePaths;
 use crate::types::ByIdPath;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
 use thiserror::Error;
-
-const POOL_PATH: &str = "/var/lib/braid/pool.json";
 
 #[derive(Debug, Error)]
 pub enum MembershipError {
@@ -38,8 +37,8 @@ impl PoolMembership {
 
 /// Load authoritative pool membership from disk.
 /// Returns NotFound if the file doesn't exist, Corrupt if it exists but can't be parsed.
-pub fn load_membership() -> Result<PoolMembership, MembershipError> {
-    load_membership_from(Path::new(POOL_PATH))
+pub fn load_membership(paths: &StatePaths) -> Result<PoolMembership, MembershipError> {
+    load_membership_from(&paths.pool_json())
 }
 
 pub fn load_membership_from(path: &Path) -> Result<PoolMembership, MembershipError> {
@@ -61,8 +60,8 @@ pub fn load_membership_from(path: &Path) -> Result<PoolMembership, MembershipErr
 }
 
 /// Durably persist pool membership. Fails hard on any I/O error.
-pub fn save_membership(m: &PoolMembership) -> Result<(), MembershipError> {
-    save_membership_to(m, Path::new(POOL_PATH))
+pub fn save_membership(m: &PoolMembership, paths: &StatePaths) -> Result<(), MembershipError> {
+    save_membership_to(m, &paths.pool_json())
 }
 
 pub fn save_membership_to(m: &PoolMembership, path: &Path) -> Result<(), MembershipError> {
@@ -142,6 +141,19 @@ pub fn parse_disk_spec(spec: &str) -> Result<(String, ByIdPath), MembershipError
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state_paths::StatePaths;
+
+    #[test]
+    fn roundtrip_via_state_paths() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let mut m = PoolMembership::empty();
+        m.disks
+            .insert("d1".into(), ByIdPath("/dev/disk/by-id/ata-X".into()));
+        save_membership(&m, &paths).unwrap();
+        let loaded = load_membership(&paths).unwrap();
+        assert_eq!(m, loaded);
+    }
 
     #[test]
     fn round_trip() {

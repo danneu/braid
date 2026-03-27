@@ -64,6 +64,7 @@ pub fn update(model: &mut Model, msg: Message) -> Vec<Effect> {
             vec![Effect::ProbePool {
                 mount_point: model.mount_point.clone(),
                 disk_by_id: model.disk_by_id.clone(),
+                paths: model.paths.clone(),
             }]
         }
         Message::SelectNextDisk => {

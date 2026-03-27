@@ -5,6 +5,7 @@ use crate::luks::{self, LuksError};
 use crate::membership::{self, PoolMembership};
 use crate::pool::PoolError;
 use crate::probe::{self, Filesystem, ProbeError};
+use crate::state_paths::StatePaths;
 use crate::types::ConfigDiskState;
 
 #[derive(Debug, thiserror::Error)]
@@ -35,6 +36,7 @@ pub fn cmd_unlock<R: CommandRunner, F: Filesystem + ?Sized>(
     fs: &F,
     config: &Config,
     membership: &PoolMembership,
+    paths: &StatePaths,
     passphrase_stdin: bool,
     passphrase_file: Option<&std::path::Path>,
     key_file: Option<&std::path::Path>,
@@ -201,7 +203,7 @@ pub fn cmd_unlock<R: CommandRunner, F: Filesystem + ?Sized>(
     // disk-map is advisory metadata — missing/corrupt is not an error, but
     // rebuilding it here keeps status output and remove-missing richer.
     if let Ok(pool_after) = probe::probe_pool(runner, mount_point.as_str()) {
-        disk_map::update_disk_map_best_effort(|map| {
+        disk_map::update_disk_map_best_effort(paths, |map| {
             for dev in &pool_after.devices {
                 // Derive name from mapper (braid-<name> → <name>)
                 let name = dev.mapper.0.strip_prefix("braid-").unwrap_or(&dev.mapper.0);
@@ -240,6 +242,7 @@ mod tests {
     use crate::cmd::{MockRunner, RawCommandOutput};
     use crate::config::Config;
     use crate::membership::PoolMembership;
+    use crate::state_paths::StatePaths;
     use crate::types::{ByIdPath, MountPoint};
     use std::collections::BTreeMap;
 
@@ -424,6 +427,7 @@ mod tests {
             &fs,
             &config,
             &membership,
+            &StatePaths::production(),
             false,
             Some(tmp.path()),
             None,
@@ -532,6 +536,7 @@ mod tests {
             &fs,
             &config,
             &membership,
+            &StatePaths::production(),
             false,
             Some(tmp.path()),
             None,
@@ -661,6 +666,7 @@ mod tests {
             &fs,
             &config,
             &membership,
+            &StatePaths::production(),
             false,
             Some(tmp.path()),
             None,
@@ -816,6 +822,7 @@ mod tests {
             &fs,
             &config,
             &membership,
+            &StatePaths::production(),
             false,
             Some(tmp.path()),
             None,

@@ -14,6 +14,7 @@ use crate::parse::{
     BtrfsDeviceStatsOutput, ParseError, ScrubState,
 };
 use crate::probe::{probe_config_disk, probe_pool, Filesystem, ProbeError};
+use crate::state_paths::StatePaths;
 use crate::types::*;
 
 // ---------------------------------------------------------------------------
@@ -245,14 +246,15 @@ pub fn build_status_report<R: CommandRunner, F: Filesystem>(
     fs: &F,
     config: &Config,
     membership: &PoolMembership,
+    paths: &StatePaths,
 ) -> Result<StatusReport, StatusError> {
-    let advisories = luks::header_backup_advisories();
+    let advisories = luks::header_backup_advisories(paths);
 
     let pool = match probe_pool(runner, config.mount_point().as_str()) {
         Ok(p) => p,
         Err(ProbeError::NotBtrfs { .. }) => {
             let code = StatusCode::NotMounted;
-            let alert_state = resolve_alert_state();
+            let alert_state = resolve_alert_state(paths);
             return Ok(StatusReport {
                 mount_point: config.mount_point().clone(),
                 status: code,
@@ -275,7 +277,7 @@ pub fn build_status_report<R: CommandRunner, F: Filesystem>(
 
     if !pool.mounted {
         let code = StatusCode::NotMounted;
-        let alert_state = resolve_alert_state();
+        let alert_state = resolve_alert_state(paths);
         return Ok(StatusReport {
             mount_point: config.mount_point().clone(),
             status: code,
@@ -313,7 +315,7 @@ pub fn build_status_report<R: CommandRunner, F: Filesystem>(
     let device_stats = get_device_stats(runner, config.mount_point().as_str())?;
     let verbose_ctx = build_disk_reports(runner, &config_disks, &pool, &device_stats);
 
-    let alert_state = resolve_alert_state();
+    let alert_state = resolve_alert_state(paths);
 
     let present_count = pool.total_devices.saturating_sub(pool.missing_count);
     Ok(StatusReport {
@@ -339,8 +341,9 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
     fs: &F,
     config: &Config,
     json: bool,
+    paths: &StatePaths,
 ) -> Result<(), StatusError> {
-    let advisories = luks::header_backup_advisories();
+    let advisories = luks::header_backup_advisories(paths);
 
     // 1. Probe pool, mapping NotBtrfs to not-mounted
     let pool = match probe_pool(runner, config.mount_point().as_str()) {
@@ -359,7 +362,7 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
     // 2. Not mounted → minimal report
     if !pool.mounted {
         let code = StatusCode::NotMounted;
-        let alert_state = resolve_alert_state();
+        let alert_state = resolve_alert_state(paths);
         let report = StatusReport {
             mount_point: config.mount_point().clone(),
             status: code,
@@ -385,7 +388,7 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
     }
 
     // 3. Membership load (try_load pattern)
-    let membership_result = membership::load_membership();
+    let membership_result = membership::load_membership(paths);
     let membership = match &membership_result {
         Ok(m) => m.clone(),
         Err(_) => PoolMembership::empty(),
@@ -408,7 +411,7 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
     let compact_drives = build_compact_drives(&pool, &membership);
 
     // 7. Alert state (latch-based)
-    let alert_state = resolve_alert_state();
+    let alert_state = resolve_alert_state(paths);
 
     // 8. Per-disk detail
     let verbose_ctx = {
@@ -466,9 +469,9 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
 /// truth. Recomputing would cause the alert to disappear when a condition
 /// resolves, contradicting the "latched until ack" model. The smartd flag is
 /// checked as a bridge for between-cycle fires.
-pub(crate) fn resolve_alert_state() -> AlertState {
-    let latch = alert::load_alert_latch();
-    let smartd_active = alert::smartd_alert_active();
+pub(crate) fn resolve_alert_state(paths: &StatePaths) -> AlertState {
+    let latch = alert::load_alert_latch(paths);
+    let smartd_active = alert::smartd_alert_active(paths);
 
     match latch {
         Some(mut state) if state.active => {
@@ -1020,6 +1023,7 @@ mod tests {
     use super::*;
     use crate::cmd::{MockRunner, RawCommandOutput};
     use crate::membership::PoolMembership;
+    use crate::state_paths::StatePaths;
     use std::collections::BTreeMap;
 
     struct MockFs {
@@ -1537,7 +1541,7 @@ mod tests {
         );
 
         // Also verify cmd_status doesn't error
-        let _ = cmd_status(&runner, &fs, &config, false);
+        let _ = cmd_status(&runner, &fs, &config, false, &StatePaths::production());
     }
 
     #[test]
@@ -2441,7 +2445,7 @@ mod tests {
         let config = config_3disk();
 
         // cmd_status should succeed (not error), treating it as not-mounted
-        let result = cmd_status(&runner, &fs, &config, false);
+        let result = cmd_status(&runner, &fs, &config, false, &StatePaths::production());
         assert!(result.is_ok(), "expected Ok, got: {result:?}");
     }
 
@@ -2475,7 +2479,7 @@ mod tests {
         let fs = MockFs::new(&[]);
         let config = config_3disk();
 
-        let result = cmd_status(&runner, &fs, &config, false);
+        let result = cmd_status(&runner, &fs, &config, false, &StatePaths::production());
         assert!(result.is_ok());
     }
 
@@ -2485,7 +2489,7 @@ mod tests {
         let fs = fs_3disk();
         let config = config_3disk();
 
-        let result = cmd_status(&runner, &fs, &config, false);
+        let result = cmd_status(&runner, &fs, &config, false, &StatePaths::production());
         assert!(result.is_ok());
     }
 
@@ -2495,7 +2499,7 @@ mod tests {
         let fs = fs_3disk();
         let config = config_3disk();
 
-        let result = cmd_status(&runner, &fs, &config, true);
+        let result = cmd_status(&runner, &fs, &config, true, &StatePaths::production());
         assert!(result.is_ok());
     }
 
@@ -2593,7 +2597,7 @@ mod tests {
         let fs = fs_3disk();
         let config = config_3disk();
 
-        let result = cmd_status(&runner, &fs, &config, false);
+        let result = cmd_status(&runner, &fs, &config, false, &StatePaths::production());
         assert!(result.is_ok());
     }
 
@@ -2674,7 +2678,7 @@ mod tests {
         let fs = fs_1disk();
         let config = config_1disk();
 
-        let result = cmd_status(&runner, &fs, &config, false);
+        let result = cmd_status(&runner, &fs, &config, false, &StatePaths::production());
         assert!(result.is_ok());
     }
 

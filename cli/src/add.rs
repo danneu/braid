@@ -14,6 +14,7 @@ use crate::pool::{
 use crate::preflight;
 use crate::probe::{probe_config_disk, probe_pool, Filesystem, ProbeError};
 use crate::progress::ProgressOutput;
+use crate::state_paths::StatePaths;
 use crate::types::*;
 use std::path::Path;
 
@@ -185,6 +186,7 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     passphrase_file: Option<&Path>,
     enroll_key_file: Option<&Path>,
     progress: ProgressOutput,
+    paths: &StatePaths,
 ) -> Result<(), AddError> {
     let config = config_read(config_path)?;
 
@@ -210,7 +212,7 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     }
 
     // Load existing membership (or empty if first add)
-    let mut pool_membership = match membership::load_membership() {
+    let mut pool_membership = match membership::load_membership(paths) {
         Ok(m) => m,
         Err(membership::MembershipError::NotFound(_)) => PoolMembership::empty(),
         Err(e) => return Err(e.into()),
@@ -292,12 +294,6 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         return Ok(());
     }
 
-    // Pre-commit persist: save membership BEFORE LUKS format
-    for (name, by_id) in &parsed {
-        pool_membership.disks.insert(name.clone(), by_id.clone());
-    }
-    membership::save_membership(&pool_membership)?;
-
     // Read passphrase (once)
     let passphrase = read_passphrase(passphrase_file, passphrase_stdin)?;
 
@@ -340,6 +336,13 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         }
     }
 
+    // Pre-commit persist: save membership after all reversible checks pass,
+    // but before the first irreversible disk operation (LUKS format).
+    for (name, by_id) in &parsed {
+        pool_membership.disks.insert(name.clone(), by_id.clone());
+    }
+    membership::save_membership(&pool_membership, paths)?;
+
     // LUKS phase — for each disk: format/open as needed. Track which need pool add.
     // Guard closes any mappers we opened if the LUKS phase fails partway through.
     let mut luks_guard = LuksCleanupGuard::new(runner);
@@ -359,7 +362,7 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
                 luks_format(runner, &by_id.0, &passphrase, &luks_opts)?;
                 eprintln!("LUKS formatted: {}", by_id);
 
-                let backup_path = backup_luks_header(runner, &by_id.0, &mn.0)?;
+                let backup_path = backup_luks_header(runner, &by_id.0, &mn.0, paths)?;
                 eprintln!("LUKS header backed up: {}", backup_path.display());
 
                 ensure_luks_open(runner, fs, name, by_id, &passphrase)?;
@@ -509,7 +512,7 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     // added disk's devid + luks_uuid. Failure here only warns — the primary
     // operation (pool add) already succeeded.
     if let Ok(pool_after) = probe_pool(runner, config.mount_point().as_str()) {
-        disk_map::update_disk_map_best_effort(|map| {
+        disk_map::update_disk_map_best_effort(paths, |map| {
             for &i in &needs_pool_add {
                 let name = names[i];
                 let by_id = &by_ids[i].0;
@@ -786,6 +789,7 @@ mod tests {
             None,
             None,
             ProgressOutput::Off,
+            &StatePaths::production(),
         );
         let err = result.unwrap_err().to_string();
         assert!(
