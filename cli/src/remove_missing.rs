@@ -1,6 +1,5 @@
 use crate::cmd::{CmdRequest, CommandRunner};
 use crate::config::config_read;
-use crate::disk_map;
 use crate::membership;
 use crate::parse::parse_btrfs_device_usage;
 use crate::pool::{pool_remove_devid, pool_remove_missing};
@@ -146,19 +145,18 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync>(
     // Pre-commit: persist membership removal BEFORE btrfs operation.
     // Fail hard if membership cannot be loaded or saved — proceeding without
     // updating pool.json would let btrfs state diverge from authoritative membership.
-    // Look up which membership entry corresponds to the missing devid via disk-map.
+    // Look up which membership entry corresponds to the missing devid via enriched pool.json.
     let target_devid = missing_id.or_else(|| pool.missing_devids.first().copied());
     if let Some(devid) = target_devid {
-        let disk_map = disk_map::load_disk_map(paths);
-        let name_to_remove = disk_map
+        let mut m = membership::load_membership(paths).map_err(|e| {
+            RemoveMissingError::Validation(format!("failed to load pool membership: {e}"))
+        })?;
+        let name_to_remove = m
             .disks
             .iter()
-            .find(|(_, entry)| entry.devid == devid)
+            .find(|(_, member)| member.devid == Some(devid))
             .map(|(name, _)| name.clone());
         if let Some(name) = name_to_remove {
-            let mut m = membership::load_membership(paths).map_err(|e| {
-                RemoveMissingError::Validation(format!("failed to load pool membership: {e}"))
-            })?;
             m.disks.remove(&name);
             membership::save_membership(&m, paths).map_err(|e| {
                 RemoveMissingError::Validation(format!(
@@ -175,13 +173,6 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync>(
     } else {
         eprintln!("Removing missing device from pool...");
         pool_remove_missing(runner, config.mount_point().as_str())?;
-    }
-
-    // Best-effort: remove entry from disk-map by devid
-    if let Some(devid) = target_devid {
-        disk_map::update_disk_map_best_effort(paths, |map| {
-            disk_map::remove_disks_by_devids(map, &[devid]);
-        });
     }
 
     crate::pool::maybe_restore_raid1(

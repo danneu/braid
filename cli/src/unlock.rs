@@ -1,6 +1,5 @@
 use crate::cmd::{CmdError, CmdRequest, CommandRunner};
 use crate::config::{mapper_name, Config};
-use crate::disk_map;
 use crate::luks::{self, LuksError};
 use crate::membership::{self, PoolMembership};
 use crate::pool::PoolError;
@@ -65,8 +64,8 @@ pub fn cmd_unlock<R: CommandRunner, F: Filesystem + ?Sized>(
     let mut any_open = false;
     let mut any_missing_member = false;
 
-    for (name, by_id) in &membership.disks {
-        let probed = probe::probe_config_disk(runner, fs, name, by_id)?;
+    for (name, member) in &membership.disks {
+        let probed = probe::probe_config_disk(runner, fs, name, &member.by_id)?;
         match &probed.state {
             ConfigDiskState::Absent => {
                 // Known pool member, confirmed missing → degradable
@@ -88,7 +87,7 @@ pub fn cmd_unlock<R: CommandRunner, F: Filesystem + ?Sized>(
                 mapper_open: false, ..
             } => {
                 eprintln!("{}  disk: {:<10}found", tag("ok"), name);
-                to_unlock.push((name.clone(), by_id.clone()));
+                to_unlock.push((name.clone(), member.by_id.clone()));
             }
         }
     }
@@ -207,21 +206,9 @@ pub fn cmd_unlock<R: CommandRunner, F: Filesystem + ?Sized>(
     eprintln!("{}  {:<10}mounted {}", tag("ok"), "pool", mount_point);
 
     // Best-effort: rebuild disk-map.json from live pool state.
-    // disk-map is advisory metadata — missing/corrupt is not an error, but
-    // rebuilding it here keeps status output and remove-missing richer.
+    // Enrich pool.json with live metadata (luks_uuid, devid) — best-effort.
     if let Ok(pool_after) = probe::probe_pool(runner, mount_point.as_str()) {
-        disk_map::update_disk_map_best_effort(paths, |map| {
-            for dev in &pool_after.devices {
-                // Derive name from mapper (braid-<name> → <name>)
-                let name = dev.mapper.0.strip_prefix("braid-").unwrap_or(&dev.mapper.0);
-                let by_id = membership
-                    .disks
-                    .get(name)
-                    .map(|b| b.0.as_str())
-                    .unwrap_or("");
-                disk_map::record_disk(map, name, by_id, &dev.luks_uuid.0, dev.devid);
-            }
-        });
+        membership::refresh_pool_metadata(&pool_after, paths);
     }
 
     // Best-effort: warn if a paused balance was found on mount.
@@ -248,7 +235,7 @@ mod tests {
     use super::*;
     use crate::cmd::{MockRunner, RawCommandOutput};
     use crate::config::Config;
-    use crate::membership::PoolMembership;
+    use crate::membership::{DiskMember, PoolMembership};
     use crate::state_paths::StatePaths;
     use crate::types::{ByIdPath, MountPoint};
     use std::collections::BTreeMap;
@@ -304,7 +291,10 @@ mod tests {
             ("disk2", "/dev/disk/by-id/virtio-disk2"),
             ("disk3", "/dev/disk/by-id/virtio-disk3"),
         ] {
-            disks.insert(name.to_owned(), ByIdPath(path.to_owned()));
+            disks.insert(
+                name.to_owned(),
+                DiskMember::from_by_id(ByIdPath(path.to_owned())),
+            );
         }
         PoolMembership { disks }
     }
@@ -588,7 +578,10 @@ mod tests {
             ("disk1", "/dev/disk/by-id/virtio-disk1"),
             ("disk2", "/dev/disk/by-id/virtio-disk2"),
         ] {
-            membership_disks.insert(name.to_owned(), ByIdPath(path.to_owned()));
+            membership_disks.insert(
+                name.to_owned(),
+                DiskMember::from_by_id(ByIdPath(path.to_owned())),
+            );
         }
         let membership = PoolMembership {
             disks: membership_disks,

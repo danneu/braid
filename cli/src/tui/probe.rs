@@ -46,12 +46,7 @@ pub fn probe_pool_for_tui<R: CommandRunner>(
     let devid_to_name: HashMap<u64, &str> = domain
         .devices
         .iter()
-        .filter_map(|d| {
-            d.mapper
-                .0
-                .strip_prefix("braid-")
-                .map(|name| (d.devid, name))
-        })
+        .filter_map(|d| crate::config::name_from_mapper(&d.mapper.0).map(|name| (d.devid, name)))
         .collect();
 
     let mut disk_usage = HashMap::new();
@@ -117,7 +112,7 @@ pub fn probe_pool_for_tui<R: CommandRunner>(
             for dev in &lsblk.blockdevices {
                 if let Some(tran) = &dev.tran {
                     for child in &dev.children {
-                        if let Some(name) = child.name.strip_prefix("braid-") {
+                        if let Some(name) = crate::config::name_from_mapper(&child.name) {
                             disk_transport.insert(name.to_owned(), tran.clone());
                         }
                     }

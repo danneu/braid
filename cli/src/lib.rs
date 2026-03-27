@@ -5,7 +5,6 @@ pub mod browse;
 pub mod cmd;
 pub mod config;
 pub mod discover;
-pub mod disk_map;
 pub mod doctor;
 pub mod enroll_key_file;
 pub mod hdparm;

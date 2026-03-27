@@ -136,7 +136,7 @@ mod tests {
     use super::*;
     use crate::cmd::{MockRunner, RawCommandOutput};
     use crate::config::Config;
-    use crate::membership::PoolMembership;
+    use crate::membership::{DiskMember, PoolMembership};
     use crate::types::{ByIdPath, MountPoint};
     use std::collections::BTreeMap;
 
@@ -186,8 +186,14 @@ mod tests {
 
     fn test_membership() -> PoolMembership {
         let mut disks = BTreeMap::new();
-        disks.insert("aaa".to_owned(), ByIdPath("/dev/disk/by-id/a".to_owned()));
-        disks.insert("bbb".to_owned(), ByIdPath("/dev/disk/by-id/b".to_owned()));
+        disks.insert(
+            "aaa".to_owned(),
+            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/a".to_owned())),
+        );
+        disks.insert(
+            "bbb".to_owned(),
+            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/b".to_owned())),
+        );
         PoolMembership { disks }
     }
 

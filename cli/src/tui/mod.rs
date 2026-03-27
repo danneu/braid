@@ -41,7 +41,7 @@ pub fn run(config_path: &Path, paths: &StatePaths) -> io::Result<()> {
     let disk_by_id: HashMap<String, String> = membership
         .disks
         .iter()
-        .map(|(k, v)| (k.clone(), v.to_string()))
+        .map(|(k, m)| (k.clone(), m.by_id.to_string()))
         .collect();
     let (mut model, init_effects) =
         Model::new(disk_names, disk_by_id, config.mount_point().0.clone(), advisories, paths.clone());

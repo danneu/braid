@@ -1,6 +1,5 @@
 use crate::cmd::{CmdRequest, CommandRunner};
 use crate::config::{config_read, mapper_name};
-use crate::disk_map;
 use crate::luks::{
     backup_luks_header, ensure_luks_open, luks_format, luks_opts_from_env, read_passphrase,
     verify_passphrase,
@@ -197,7 +196,8 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     // but before the first irreversible disk operation.
     let current_membership = membership::load_membership(paths)
         .map_err(|e| ReplaceError::Validation(format!("failed to load pool membership: {e}")))?;
-    let next_membership = build_replacement_membership(&current_membership, old_name, new_name, &new_by_id)?;
+    let next_membership =
+        build_replacement_membership(&current_membership, old_name, new_name, &new_by_id)?;
     membership::save_membership(&next_membership, paths)
         .map_err(|e| ReplaceError::Validation(format!("failed to persist pool membership: {e}")))?;
 
@@ -326,15 +326,9 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         .map_err(|e| ReplaceError::Pool(e))?;
     }
 
-    // Best-effort disk-map update: remove old entry, record new disk's metadata.
+    // Best-effort: enrich pool.json with live metadata (luks_uuid, devid).
     if let Ok(pool_after) = probe_pool(runner, config.mount_point().as_str()) {
-        let new_mn = mapper_name(new_name);
-        disk_map::update_disk_map_best_effort(paths, |map| {
-            map.disks.remove(old_name);
-            if let Some(dev) = pool_after.devices.iter().find(|d| d.mapper == new_mn) {
-                disk_map::record_disk(map, new_name, &new_by_id.0, &dev.luks_uuid.0, dev.devid);
-            }
-        });
+        membership::refresh_pool_metadata(&pool_after, paths);
     }
 
     eprintln!("Done. Replaced {} with {}.", old_name, new_name);
@@ -567,7 +561,10 @@ fn build_replacement_membership(
     next.disks.remove(old_name);
     membership::validate_no_conflicts(&next, new_name, &new_by_id.0)
         .map_err(|e| ReplaceError::Validation(e.to_string()))?;
-    next.disks.insert(new_name.to_owned(), new_by_id.clone());
+    next.disks.insert(
+        new_name.to_owned(),
+        membership::DiskMember::from_by_id(new_by_id.clone()),
+    );
     Ok(next)
 }
 
@@ -757,11 +754,11 @@ mod tests {
         let mut membership = membership::PoolMembership::empty();
         membership.disks.insert(
             "disk1".into(),
-            ByIdPath("/dev/disk/by-id/virtio-disk1".into()),
+            membership::DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
         );
         membership.disks.insert(
             "disk2".into(),
-            ByIdPath("/dev/disk/by-id/virtio-disk2".into()),
+            membership::DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk2".into())),
         );
 
         let err = build_replacement_membership(

@@ -34,6 +34,11 @@ pub fn mapper_name(name: &str) -> MapperName {
     MapperName(format!("braid-{name}"))
 }
 
+/// Extract the disk name from a mapper name, if it has the braid- prefix.
+pub fn name_from_mapper(mapper: &str) -> Option<&str> {
+    mapper.strip_prefix("braid-")
+}
+
 #[derive(Deserialize)]
 struct RawConfig {
     mount_point: MountPoint,
@@ -97,5 +102,17 @@ mod tests {
     fn mapper_name_for_disk() {
         assert_eq!(mapper_name("toshiba"), MapperName("braid-toshiba".into()));
         assert_eq!(mapper_name("ironwolf"), MapperName("braid-ironwolf".into()));
+    }
+
+    #[test]
+    fn name_from_mapper_strips_prefix() {
+        assert_eq!(name_from_mapper("braid-toshiba"), Some("toshiba"));
+        assert_eq!(name_from_mapper("braid-ironwolf"), Some("ironwolf"));
+    }
+
+    #[test]
+    fn name_from_mapper_returns_none_for_non_braid() {
+        assert_eq!(name_from_mapper("luks-something"), None);
+        assert_eq!(name_from_mapper(""), None);
     }
 }

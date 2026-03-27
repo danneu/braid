@@ -20,10 +20,6 @@ impl StatePaths {
         self.root.join("pool.json")
     }
 
-    pub fn disk_map_json(&self) -> PathBuf {
-        self.root.join("disk-map.json")
-    }
-
     pub fn acked_stats_json(&self) -> PathBuf {
         self.root.join("acked-stats.json")
     }
@@ -49,10 +45,6 @@ mod tests {
     fn production_resolves_expected_paths() {
         let p = StatePaths::production();
         assert_eq!(p.pool_json(), PathBuf::from("/var/lib/braid/pool.json"));
-        assert_eq!(
-            p.disk_map_json(),
-            PathBuf::from("/var/lib/braid/disk-map.json")
-        );
         assert_eq!(
             p.acked_stats_json(),
             PathBuf::from("/var/lib/braid/acked-stats.json")

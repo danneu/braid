@@ -61,7 +61,7 @@ pub fn discover_pool_members<R: CommandRunner>(
 
         // Check if label matches braid-<name>
         if let Some(label) = label {
-            if let Some(disk_name) = label.strip_prefix("braid-") {
+            if let Some(disk_name) = crate::config::name_from_mapper(&label) {
                 if crate::membership::is_valid_disk_name(disk_name) {
                     members.insert(disk_name.to_owned(), ByIdPath(path_str));
                 }

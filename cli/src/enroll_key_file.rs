@@ -38,8 +38,8 @@ fn discover_enrollment_candidates<R: CommandRunner, F: Filesystem + ?Sized>(
     membership: &PoolMembership,
 ) -> Result<Vec<(String, ByIdPath)>, EnrollKeyFileError> {
     let mut candidates = Vec::new();
-    for (name, by_id) in &membership.disks {
-        let probed = probe::probe_config_disk(runner, fs, name, by_id)?;
+    for (name, member) in &membership.disks {
+        let probed = probe::probe_config_disk(runner, fs, name, &member.by_id)?;
         match &probed.state {
             ConfigDiskState::Absent => {
                 eprintln!("skip: {} not present", name);
@@ -48,7 +48,7 @@ fn discover_enrollment_candidates<R: CommandRunner, F: Filesystem + ?Sized>(
                 eprintln!("skip: {} not LUKS-formatted", name);
             }
             ConfigDiskState::PresentLuks { .. } => {
-                candidates.push((name.clone(), by_id.clone()));
+                candidates.push((name.clone(), member.by_id.clone()));
             }
         }
     }
@@ -252,6 +252,7 @@ pub fn cmd_enroll_key_file<R: CommandRunner, F: Filesystem + ?Sized>(
 mod tests {
     use super::*;
     use crate::cmd::{CmdRequest, MockRunner, RawCommandOutput};
+    use crate::membership::DiskMember;
     use crate::probe::Filesystem;
     use crate::types::{ByIdPath, MountPoint};
     use std::collections::BTreeMap;
@@ -303,7 +304,7 @@ mod tests {
     fn make_membership(disks: &[(&str, &str)]) -> PoolMembership {
         let mut map = BTreeMap::new();
         for (key, path) in disks {
-            map.insert(key.to_string(), by_id(path));
+            map.insert(key.to_string(), DiskMember::from_by_id(by_id(path)));
         }
         PoolMembership { disks: map }
     }

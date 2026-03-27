@@ -194,12 +194,12 @@ fn check_declared_disks<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> Che
     let mut missing: Vec<String> = Vec::new();
     let mut not_block: Vec<String> = Vec::new();
     let total = pool_membership.disks.len();
-    for (name, by_id) in &pool_membership.disks {
-        let path = Path::new(by_id.0.as_str());
+    for (name, member) in &pool_membership.disks {
+        let path = Path::new(member.by_id.0.as_str());
         match std::fs::metadata(path) {
             Ok(meta) if meta.file_type().is_block_device() => {}
-            Ok(_) => not_block.push(format!("{name} ({})", by_id)),
-            Err(_) => missing.push(format!("{name} ({})", by_id)),
+            Ok(_) => not_block.push(format!("{name} ({})", member.by_id)),
+            Err(_) => missing.push(format!("{name} ({})", member.by_id)),
         }
     }
 

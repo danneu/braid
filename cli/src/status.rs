@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::alert::{self, AlertCause, AlertState};
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, LsblkFieldKind};
-use crate::config::{mapper_name, Config};
+use crate::config::{self, mapper_name, Config};
 use crate::luks;
 use crate::membership::{self, PoolMembership};
 use crate::parse::types::BalanceState;
@@ -160,10 +160,7 @@ fn build_compact_drives(pool: &PoolState, membership: &PoolMembership) -> Vec<Co
     // Present pool devices
     let pool_mappers: HashSet<&str> = pool.devices.iter().map(|d| d.mapper.0.as_str()).collect();
     for pd in &pool.devices {
-        let name = pd
-            .mapper
-            .0
-            .strip_prefix("braid-")
+        let name = config::name_from_mapper(&pd.mapper.0)
             .unwrap_or(&pd.mapper.0)
             .to_owned();
         let device_short = pd
@@ -310,7 +307,7 @@ pub fn build_status_report<R: CommandRunner, F: Filesystem>(
     let config_disks: Vec<ConfigDisk> = membership
         .disks
         .iter()
-        .map(|(name, by_id)| probe_config_disk(runner, fs, name, by_id))
+        .map(|(name, member)| probe_config_disk(runner, fs, name, &member.by_id))
         .collect::<Result<Vec<_>, _>>()?;
     let device_stats = get_device_stats(runner, config.mount_point().as_str())?;
     let verbose_ctx = build_disk_reports(runner, &config_disks, &pool, &device_stats);
@@ -419,7 +416,7 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
         let config_disks: Vec<ConfigDisk> = membership
             .disks
             .iter()
-            .map(|(name, by_id)| probe_config_disk(runner, fs, name, by_id))
+            .map(|(name, member)| probe_config_disk(runner, fs, name, &member.by_id))
             .collect::<Result<Vec<_>, _>>()?;
         build_disk_reports(runner, &config_disks, &pool, &device_stats)
     };
@@ -691,9 +688,7 @@ fn build_disk_reports<R: CommandRunner>(
 
         let disk_name = matched_config.map(|cd| cd.name.clone()).unwrap_or_else(|| {
             // Derive name from mapper (strip braid- prefix)
-            pd.mapper
-                .0
-                .strip_prefix("braid-")
+            config::name_from_mapper(&pd.mapper.0)
                 .unwrap_or(&pd.mapper.0)
                 .to_owned()
         });
@@ -1022,7 +1017,7 @@ pub fn format_bytes(bytes: u64) -> String {
 mod tests {
     use super::*;
     use crate::cmd::{MockRunner, RawCommandOutput};
-    use crate::membership::PoolMembership;
+    use crate::membership::{DiskMember, PoolMembership};
     use crate::state_paths::StatePaths;
     use std::collections::BTreeMap;
 
@@ -1274,15 +1269,15 @@ mod tests {
         let mut disks = BTreeMap::new();
         disks.insert(
             "disk1".to_owned(),
-            ByIdPath("/dev/disk/by-id/disk1".to_owned()),
+            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/disk1".to_owned())),
         );
         disks.insert(
             "disk2".to_owned(),
-            ByIdPath("/dev/disk/by-id/disk2".to_owned()),
+            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/disk2".to_owned())),
         );
         disks.insert(
             "disk3".to_owned(),
-            ByIdPath("/dev/disk/by-id/disk3".to_owned()),
+            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/disk3".to_owned())),
         );
         PoolMembership { disks }
     }
@@ -1295,7 +1290,7 @@ mod tests {
         let mut disks = BTreeMap::new();
         disks.insert(
             "disk1".to_owned(),
-            ByIdPath("/dev/disk/by-id/disk1".to_owned()),
+            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/disk1".to_owned())),
         );
         PoolMembership { disks }
     }

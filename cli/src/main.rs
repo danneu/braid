@@ -512,7 +512,14 @@ fn main() {
                         eprintln!("  {} = {}", name, by_id);
                     }
                     if args.write {
-                        let m = braid_cli::membership::PoolMembership { disks: members };
+                        let m = braid_cli::membership::PoolMembership {
+                            disks: members
+                                .into_iter()
+                                .map(|(name, by_id)| {
+                                    (name, braid_cli::membership::DiskMember::from_by_id(by_id))
+                                })
+                                .collect(),
+                        };
                         if let Err(e) = braid_cli::membership::save_membership(&m, &paths) {
                             print_cli_error(&format!("failed to write pool membership: {e}"));
                             std::process::exit(1);

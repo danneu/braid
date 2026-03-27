@@ -1,6 +1,5 @@
 use crate::cmd::{CmdRequest, CommandRunner};
 use crate::config::{config_read, mapper_name};
-use crate::disk_map;
 use crate::membership;
 use crate::parse::parse_btrfs_device_usage;
 use crate::pool::evict_present_device;
@@ -164,11 +163,6 @@ pub fn cmd_remove<R: CommandRunner + Sync>(
     // Execute
     evict_present_device(runner, &mn.0, config.mount_point().as_str(), progress)?;
 
-    // Best-effort: remove entry from disk-map
-    disk_map::update_disk_map_best_effort(paths, |map| {
-        map.disks.remove(name);
-    });
-
     eprintln!("Done. Disk '{}' removed from pool.", name);
     Ok(())
 }
@@ -268,8 +262,10 @@ mod tests {
         let paths = StatePaths::custom(tmp.path().into());
         let mut m = PoolMembership::empty();
         for (name, by_id) in disks {
-            m.disks
-                .insert(name.to_string(), ByIdPath(by_id.to_string()));
+            m.disks.insert(
+                name.to_string(),
+                membership::DiskMember::from_by_id(ByIdPath(by_id.to_string())),
+            );
         }
         membership::save_membership_to(&m, &paths.pool_json()).unwrap();
         (tmp, paths)

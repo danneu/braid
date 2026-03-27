@@ -1,6 +1,7 @@
+use crate::config;
 use crate::state_io;
 use crate::state_paths::StatePaths;
-use crate::types::ByIdPath;
+use crate::types::{ByIdPath, LuksUuid, PoolState};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -24,13 +25,46 @@ pub enum MembershipError {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PoolMembership {
-    pub disks: BTreeMap<String, ByIdPath>,
+    pub disks: BTreeMap<String, DiskMember>,
 }
 
 impl PoolMembership {
     pub fn empty() -> Self {
         PoolMembership {
             disks: BTreeMap::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiskMember {
+    pub by_id: ByIdPath,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub luks_uuid: Option<LuksUuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub devid: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub added_at: Option<String>,
+}
+
+impl DiskMember {
+    /// Minimal member — used by discover, initial add.
+    pub fn from_by_id(by_id: ByIdPath) -> Self {
+        DiskMember {
+            by_id,
+            luks_uuid: None,
+            devid: None,
+            added_at: None,
+        }
+    }
+
+    /// Fully enriched — used after disk operations succeed.
+    pub fn enriched(by_id: ByIdPath, luks_uuid: LuksUuid, devid: u64) -> Self {
+        DiskMember {
+            by_id,
+            luks_uuid: Some(luks_uuid),
+            devid: Some(devid),
+            added_at: Some(now_iso()),
         }
     }
 }
@@ -77,18 +111,18 @@ pub fn validate_no_conflicts(
     by_id: &str,
 ) -> Result<(), MembershipError> {
     // Check name reassignment: name exists with different by_id
-    if let Some(current_by_id) = existing.disks.get(name) {
-        if current_by_id.0 != by_id {
+    if let Some(current) = existing.disks.get(name) {
+        if current.by_id.0 != by_id {
             return Err(MembershipError::Conflict(format!(
                 "disk '{}' already exists with by_id '{}', cannot reassign to '{}'",
-                name, current_by_id, by_id
+                name, current.by_id, by_id
             )));
         }
     }
 
     // Check by_id rename: by_id exists under different name
-    for (existing_name, existing_by_id) in &existing.disks {
-        if existing_by_id.0 == by_id && existing_name != name {
+    for (existing_name, existing_member) in &existing.disks {
+        if existing_member.by_id.0 == by_id && existing_name != name {
             return Err(MembershipError::Conflict(format!(
                 "by_id '{}' already registered under name '{}', cannot register as '{}'",
                 by_id, existing_name, name
@@ -138,6 +172,40 @@ pub fn parse_disk_spec(spec: &str) -> Result<(String, ByIdPath), MembershipError
     Ok((name.to_owned(), ByIdPath(by_id.to_owned())))
 }
 
+fn now_iso() -> String {
+    use time::format_description::well_known::Iso8601;
+    time::OffsetDateTime::now_utc()
+        .format(&Iso8601::DEFAULT)
+        .unwrap_or_else(|_| "unknown".into())
+}
+
+/// Enrich pool.json with metadata from the live pool state.
+/// Best-effort: logs warning on failure, never fails the caller.
+pub fn refresh_pool_metadata(pool: &PoolState, paths: &StatePaths) {
+    let mut membership = match load_membership(paths) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("Warning: failed to load membership for metadata refresh: {e}");
+            return;
+        }
+    };
+    for dev in &pool.devices {
+        let Some(name) = config::name_from_mapper(&dev.mapper.0) else {
+            continue;
+        };
+        if let Some(member) = membership.disks.get_mut(name) {
+            member.luks_uuid = Some(dev.luks_uuid.clone());
+            member.devid = Some(dev.devid);
+            if member.added_at.is_none() {
+                member.added_at = Some(now_iso());
+            }
+        }
+    }
+    if let Err(e) = save_membership(&membership, paths) {
+        eprintln!("Warning: failed to save enriched membership: {e}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,8 +216,10 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let paths = StatePaths::custom(tmp.path().into());
         let mut m = PoolMembership::empty();
-        m.disks
-            .insert("d1".into(), ByIdPath("/dev/disk/by-id/ata-X".into()));
+        m.disks.insert(
+            "d1".into(),
+            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/ata-X".into())),
+        );
         save_membership(&m, &paths).unwrap();
         let loaded = load_membership(&paths).unwrap();
         assert_eq!(m, loaded);
@@ -163,10 +233,12 @@ mod tests {
         let mut m = PoolMembership::empty();
         m.disks.insert(
             "toshiba".into(),
-            ByIdPath("/dev/disk/by-id/ata-TOSHIBA".into()),
+            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/ata-TOSHIBA".into())),
         );
-        m.disks
-            .insert("wd".into(), ByIdPath("/dev/disk/by-id/ata-WDC".into()));
+        m.disks.insert(
+            "wd".into(),
+            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/ata-WDC".into())),
+        );
 
         save_membership_to(&m, &path).unwrap();
         let loaded = load_membership_from(&path).unwrap();
@@ -193,8 +265,10 @@ mod tests {
     #[test]
     fn conflict_name_reassignment() {
         let mut m = PoolMembership::empty();
-        m.disks
-            .insert("toshiba".into(), ByIdPath("/dev/disk/by-id/ata-OLD".into()));
+        m.disks.insert(
+            "toshiba".into(),
+            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/ata-OLD".into())),
+        );
 
         let err = validate_no_conflicts(&m, "toshiba", "/dev/disk/by-id/ata-NEW").unwrap_err();
         assert!(matches!(err, MembershipError::Conflict(_)));
@@ -206,7 +280,7 @@ mod tests {
         let mut m = PoolMembership::empty();
         m.disks.insert(
             "toshiba".into(),
-            ByIdPath("/dev/disk/by-id/ata-SAME".into()),
+            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/ata-SAME".into())),
         );
 
         let err = validate_no_conflicts(&m, "newname", "/dev/disk/by-id/ata-SAME").unwrap_err();
@@ -217,8 +291,10 @@ mod tests {
     #[test]
     fn no_conflict_same_entry() {
         let mut m = PoolMembership::empty();
-        m.disks
-            .insert("toshiba".into(), ByIdPath("/dev/disk/by-id/ata-X".into()));
+        m.disks.insert(
+            "toshiba".into(),
+            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/ata-X".into())),
+        );
 
         // Re-adding same name + same by_id is fine (idempotent)
         validate_no_conflicts(&m, "toshiba", "/dev/disk/by-id/ata-X").unwrap();
@@ -227,8 +303,10 @@ mod tests {
     #[test]
     fn no_conflict_new_entry() {
         let mut m = PoolMembership::empty();
-        m.disks
-            .insert("toshiba".into(), ByIdPath("/dev/disk/by-id/ata-X".into()));
+        m.disks.insert(
+            "toshiba".into(),
+            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/ata-X".into())),
+        );
 
         validate_no_conflicts(&m, "wd", "/dev/disk/by-id/ata-Y").unwrap();
     }
