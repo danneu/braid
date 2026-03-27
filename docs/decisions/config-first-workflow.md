@@ -1,6 +1,6 @@
 # Decision: Config-First Workflow
 
-Status: Active
+Status: Superseded by [runtime-disk-membership.md](runtime-disk-membership.md)
 
 > Principle: [Config-first workflow](../principles.md#2-config-first-workflow)
 

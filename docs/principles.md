@@ -4,17 +4,17 @@ Canonical invariants for braid. Each principle is authoritative — if code or c
 
 ## 1. Resilient by default
 
-Data drives never block boot. LUKS devices use `nofail` + bounded timeouts. btrfs-device-scan uses `wants`, not `requires`. The mount uses `nofail`. Degraded mounts require explicit `--allow-degraded` — braid refuses to silently run with zero redundancy. [Why →](decisions/resilient-boot.md)
+Data drives never block boot. The pool is unlocked and mounted by explicit CLI commands (`braid unlock` or `braid-auto-unlock`), not by systemd mount units. No LUKS or btrfs units are generated at build time. Degraded mounts require explicit `--allow-degraded` — braid refuses to silently run with zero redundancy. [Why →](decisions/resilient-boot.md)
 
-## 2. Config-first workflow
+## 2. CLI-owned membership
 
-Declare the disk in `braid.disks` (named attrset) before formatting it. `nixos-rebuild switch` exports config and creates LUKS entries. `braid add <disk>` formats and adds the disk. CLI tools refuse to operate on undeclared disks. Workflow: edit config → `nixos-rebuild switch` → `braid add <disk>`. [Why →](decisions/config-first-workflow.md)
+Disk membership is runtime state owned by the CLI, stored in `/var/lib/braid/pool.json`. Adding or removing a drive is `braid add name=/dev/disk/by-id/...` — no `nixos-rebuild` required. The NixOS module provides the mount point, services, and toolchain; the CLI owns which disks are in the pool. `unlock` requires `pool.json` to exist and be valid — it never creates or repairs it. Recovery is explicit via `braid discover --write`. [Why →](decisions/runtime-disk-membership.md)
 
 ## 3. Safe-by-construction operations
 
-- `nixos-rebuild switch` is declarative and idempotent — always safe to run.
 - Each intent command (`add`, `remove`, `remove-missing`, `replace`) does exactly one thing with risk-appropriate confirmation. `replace` always uses `btrfs replace start` — for live disks it replaces in-place, for missing disks it rebuilds from RAID redundancy using the missing device's devid. `remove-missing` cleans up a stale missing-device entry; it never rebuilds data onto a new device (that is `replace`). When clearing the last missing device with ≥2 devices remaining, both `remove-missing` and `replace` (missing path) run a follow-up soft balance to restore RAID1 profiles for chunks written during degraded operation.
-- Disk names are immutable once recorded in braid state; name rename/reassignment is rejected by mutating commands and must use explicit `replace` or `remove`+`add` workflows.
+- Pre-commit persist: mutating commands write membership to `pool.json` before the irreversible disk operation. If the write fails, the command aborts before touching any disk.
+- Disk names are immutable once recorded in pool membership; name rename/reassignment is rejected by mutating commands and must use explicit `replace` or `remove`+`add` workflows.
 - `mkfs.btrfs` is gated on bootstrap only (no existing superblock).
 - An existing LUKS device or pool member is never reformatted — a multi-layer identity check (LUKS label match, pool-mounted requirement, btrfs FSID comparison) prevents accidental data loss, with the btrfs superblock guard as defense-in-depth.
 - Mounts always include `skip_balance` — btrfs silently resumes interrupted balances on mount by default, which can re-trigger ENOSPC or surprise the user with heavy I/O. braid manages balance lifecycle explicitly; `unlock` warns if a paused balance is detected.

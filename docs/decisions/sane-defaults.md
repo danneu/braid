@@ -28,7 +28,7 @@ Create a `braid.*` option when:
 
 - **One braid option maps to many underlying options** — e.g., `braid.shares.media` sets Samba config, permissions, and directory creation.
 - **The underlying tech could change** — the abstraction survives an implementation swap.
-- **The raw option requires braid-specific context** — e.g., `braid.disks` encodes LUKS + mapper naming + crypttab options + btrfs scan ordering. Exposing the raw options would require the user to understand braid's internals.
+- **The raw option requires braid-specific context** — e.g., the pool membership encodes LUKS + mapper naming conventions. Exposing the raw options would require the user to understand braid's internals.
 - **The mapping is non-obvious or must stay in sync** — e.g., if braid supported multiple pools, scrub `fileSystems` would need to track all mount points automatically.
 
 ## Defaults applied
