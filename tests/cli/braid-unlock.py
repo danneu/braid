@@ -225,7 +225,7 @@ with subtest("Test 8: paused balance survives unlock"):
     # Write enough data to create multiple btrfs chunks so balance has
     # observable work that can be paused mid-operation.
     machine.succeed(
-        "dd if=/dev/urandom of=/mnt/storage/balancedata bs=1M count=256"
+        "dd if=/dev/urandom of=/mnt/storage/balancedata bs=1M count=512"
     )
     machine.succeed("sync")
 
