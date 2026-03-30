@@ -117,10 +117,10 @@ with subtest("Degraded summary"):
     assert "RAID1" in output, f"Expected 'RAID1':\n{output}"
     assert "1 missing device" in output, f"Expected '1 missing device':\n{output}"
     # Per-disk detail (always shown)
-    assert "MISSING" in output, f"Expected 'MISSING':\n{output}"
+    assert "UNKNOWN" in output, f"Expected 'UNKNOWN':\n{output}"
     assert "disk3" in output, f"Expected 'disk3':\n{output}"
-    assert "not found" in output or "device absent" in output, (
-        f"Expected 'not found' or 'device absent':\n{output}"
+    assert "metadata unavailable" in output, (
+        f"Expected 'metadata unavailable':\n{output}"
     )
     lines = output.splitlines()
     for disk in ["disk1", "disk2"]:
@@ -132,9 +132,9 @@ with subtest("Degraded JSON"):
     s = json.loads(raw)
     assert s["status"] == "degraded", f"Expected degraded: {s['status']}"
     present_disks = [d for d in s["disks"] if d["status"] == "present"]
-    missing_disks = [d for d in s["disks"] if d["status"] == "missing"]
+    unknown_disks = [d for d in s["disks"] if d["status"] == "unknown"]
     assert len(present_disks) >= 2, f"Expected at least 2 present disks: {present_disks}"
-    assert len(missing_disks) >= 1, f"Expected at least 1 missing disk: {missing_disks}"
+    assert len(unknown_disks) >= 1, f"Expected at least 1 unknown disk: {unknown_disks}"
 
 # --- Phase 4: Not mounted ---
 
