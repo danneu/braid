@@ -30,6 +30,36 @@ pub struct RemoveMissingStep {
     pub description: String,
 }
 
+/// Resolve the missing-device removal target to a (devid, membership-name) pair.
+/// Returns Err if the missing device's identity can't be mapped to a pool.json entry.
+fn resolve_removal_target(
+    target_devid: Option<u64>,
+    membership: &membership::PoolMembership,
+) -> Result<(u64, String), RemoveMissingError> {
+    let devid = target_devid.ok_or_else(|| {
+        RemoveMissingError::Validation(
+            "cannot determine which device to remove: btrfs did not report \
+             the missing device's ID. Pass --missing-id <devid> explicitly."
+                .into(),
+        )
+    })?;
+
+    let name = membership
+        .disks
+        .iter()
+        .find(|(_, member)| member.devid == Some(devid))
+        .map(|(name, _)| name.clone())
+        .ok_or_else(|| {
+            RemoveMissingError::Validation(format!(
+                "devid {devid} not found in pool.json membership — \
+                 no disk entry has this device ID. \
+                 Pool membership may need manual repair."
+            ))
+        })?;
+
+    Ok((devid, name))
+}
+
 pub fn cmd_remove_missing<R: CommandRunner + Sync>(
     runner: &R,
     config_path: &Path,
@@ -150,22 +180,14 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync>(
     let pre_membership = membership::load_membership(paths).map_err(|e| {
         RemoveMissingError::Validation(format!("failed to load pool membership: {e}"))
     })?;
+    let (resolved_devid, name_to_remove) = resolve_removal_target(target_devid, &pre_membership)?;
     let mut target_membership = pre_membership.clone();
-    if let Some(devid) = target_devid {
-        let name_to_remove = target_membership
-            .disks
-            .iter()
-            .find(|(_, member)| member.devid == Some(devid))
-            .map(|(name, _)| name.clone());
-        if let Some(name) = &name_to_remove {
-            target_membership.disks.remove(name);
-        }
-    }
+    target_membership.disks.remove(&name_to_remove);
     let journal = journal::build_journal(
         pre_membership,
         target_membership.clone(),
         journal::OpKind::RemoveMissing {
-            devid: target_devid,
+            devid: Some(resolved_devid),
         },
     );
     journal::write_journal(paths, &journal)
@@ -173,9 +195,12 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync>(
     let mut journal_guard = journal::JournalGuard::new(paths);
 
     // Execute
-    if let Some(devid) = missing_id {
-        eprintln!("Removing missing device (devid {}) from pool...", devid);
-        pool_remove_devid(runner, config.mount_point().as_str(), devid)?;
+    if missing_id.is_some() {
+        eprintln!(
+            "Removing missing device (devid {}) from pool...",
+            resolved_devid
+        );
+        pool_remove_devid(runner, config.mount_point().as_str(), resolved_devid)?;
     } else {
         eprintln!("Removing missing device from pool...");
         pool_remove_missing(runner, config.mount_point().as_str())?;
@@ -290,15 +315,15 @@ mod tests {
     use crate::types::ByIdPath;
 
     /// Create a StatePaths backed by a temp dir, with pool.json pre-populated.
-    fn test_paths(disk_names: &[(&str, &str)]) -> (tempfile::TempDir, StatePaths) {
+    /// Each entry is (name, by_id_path, optional_devid).
+    fn test_paths(disks: &[(&str, &str, Option<u64>)]) -> (tempfile::TempDir, StatePaths) {
         let tmp = tempfile::tempdir().unwrap();
         let paths = StatePaths::custom(tmp.path().into());
         let mut m = PoolMembership::empty();
-        for (name, by_id) in disk_names {
-            m.disks.insert(
-                name.to_string(),
-                DiskMember::from_by_id(ByIdPath(by_id.to_string())),
-            );
+        for (name, by_id, devid) in disks {
+            let mut member = DiskMember::from_by_id(ByIdPath(by_id.to_string()));
+            member.devid = *devid;
+            m.disks.insert(name.to_string(), member);
         }
         membership::save_membership(&m, &paths).unwrap();
         (tmp, paths)
@@ -366,7 +391,7 @@ mod tests {
                 )),
                 CmdRequest::BtrfsFilesystemShow { mount_point } => Ok(mock_out(
                     &format!("btrfs filesystem show {mount_point}"),
-                    "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\tTotal devices 2 FS bytes used 16.17MiB\n\tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\t*** Some devices missing\n",
+                    "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\tTotal devices 2 FS bytes used 16.17MiB\n\tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\tdevid    2 size 0 used 0 path MISSING\n",
                     0,
                 )),
                 CmdRequest::CryptsetupStatus { mapper } => Ok(mock_out(
@@ -414,8 +439,8 @@ mod tests {
     //   The operation succeeds because no data relocation is needed.
     fn enospc_check_skipped_for_single_survivor() {
         let (_state_tmp, state_paths) = test_paths(&[
-            ("disk1", "/dev/disk/by-id/virtio-disk1"),
-            ("disk2", "/dev/disk/by-id/virtio-disk2"),
+            ("disk1", "/dev/disk/by-id/virtio-disk1", Some(1)),
+            ("disk2", "/dev/disk/by-id/virtio-disk2", Some(2)),
         ]);
         let tmp = tempfile::tempdir().unwrap();
         let config_path = tmp.path().join("config.json");
@@ -696,7 +721,7 @@ mod tests {
                     let (missing_line, total) = if remove_done && !self.still_degraded_after {
                         ("", 2)
                     } else {
-                        ("\t*** Some devices missing\n", 3)
+                        ("\tdevid    3 size 0 used 0 path MISSING\n", 3)
                     };
                     Ok(mock_out(
                         &format!("btrfs filesystem show {mount_point}"),
@@ -764,9 +789,9 @@ mod tests {
         let config_json = serde_json::json!({ "mount_point": "/mnt/storage" });
         std::fs::write(&config_path, serde_json::to_vec(&config_json).unwrap()).unwrap();
         let (state_tmp, state_paths) = test_paths(&[
-            ("disk1", "/dev/disk/by-id/virtio-disk1"),
-            ("disk2", "/dev/disk/by-id/virtio-disk2"),
-            ("disk3", "/dev/disk/by-id/virtio-disk3"),
+            ("disk1", "/dev/disk/by-id/virtio-disk1", Some(1)),
+            ("disk2", "/dev/disk/by-id/virtio-disk2", Some(2)),
+            ("disk3", "/dev/disk/by-id/virtio-disk3", Some(3)),
         ]);
         (tmp, config_path, state_tmp, state_paths)
     }
@@ -839,6 +864,53 @@ mod tests {
                 .iter()
                 .any(|c| matches!(c, CmdRequest::BtrfsBalanceRaid1Soft { .. })),
             "should NOT call BtrfsBalanceRaid1Soft when still degraded; calls: {calls:?}"
+        );
+    }
+
+    // --- resolve_removal_target tests ---
+
+    #[test]
+    // Intent: resolve_removal_target fails when no devid is available.
+    //
+    // Why it exists: When btrfs only prints the "*** Some devices missing"
+    //   sentinel (no explicit devid line), target_devid is None. Previously
+    //   the code silently skipped membership removal, leaving pool.json
+    //   with the dead disk still listed.
+    //
+    // Scenario: Single missing device on an older kernel that doesn't emit
+    //   per-device MISSING lines. User runs remove-missing without --missing-id.
+    fn resolve_target_fails_when_devid_unavailable() {
+        let m = PoolMembership::empty();
+        let err = resolve_removal_target(None, &m).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("missing device's ID"),
+            "expected hint about missing device ID; got: {msg}"
+        );
+    }
+
+    #[test]
+    // Intent: resolve_removal_target fails when devid is known but no
+    //   pool.json member has that devid enriched.
+    //
+    // Why it exists: If devid enrichment was skipped or failed, the lookup
+    //   returns None. Previously the code silently proceeded, leaving
+    //   pool.json unchanged despite the btrfs device being removed.
+    //
+    // Scenario: User enrolled a disk before devid enrichment existed, then
+    //   the disk fails. remove-missing has a devid from btrfs but can't
+    //   match it to any pool.json entry.
+    fn resolve_target_fails_when_devid_not_in_membership() {
+        let mut m = PoolMembership::empty();
+        m.disks.insert(
+            "disk1".to_string(),
+            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".to_string())),
+        );
+        let err = resolve_removal_target(Some(99), &m).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not found in pool.json"),
+            "expected pool.json membership error; got: {msg}"
         );
     }
 }
