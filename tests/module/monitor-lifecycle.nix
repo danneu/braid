@@ -2,8 +2,8 @@
 #
 # What: Verifies the end-to-end systemd monitoring chain — braid-monitor.service
 # detects degraded state, triggers braid-alert.service, braid ack clears the
-# alert via systemd, and the BindsTo contract with mnt-storage.mount governs
-# when monitoring can run.
+# alert via systemd, and the ConditionPathIsMountPoint gate prevents monitoring
+# from running when the pool is not mounted.
 #
 # Why: Existing tests cover the CLI alert model (braid-monitor) and alert unit
 # plumbing (braid-alert, braid-alert-no-beep) in isolation. Nothing exercises

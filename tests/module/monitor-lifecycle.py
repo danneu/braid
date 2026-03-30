@@ -1,14 +1,14 @@
 # Test: monitor-lifecycle
 #
 # Intent: Verify the end-to-end systemd monitoring chain — timer activation,
-#   mount-bound BindsTo contract on braid-monitor.service, monitor-triggered
+#   ConditionPathIsMountPoint gate on braid-monitor.service, monitor-triggered
 #   alert service activation, and braid ack clearing through systemd.
 #
 # Why it exists: Existing tests verify CLI-level monitor/ack behavior
 #   (braid-monitor, braid-smartd-alert) and alert service unit properties
 #   (braid-alert, braid-alert-no-beep), but no test exercises the systemd
 #   integration: braid-monitor.service starting braid-alert.service on a
-#   degraded pool, BindsTo preventing alert side effects when unmounted,
+#   degraded pool, condition-gating preventing alert side effects when unmounted,
 #   or braid ack stopping the alert service through the real systemd path.
 #
 # Scenario: 3-disk RAID1 pool pre-created by initrd fixture. Pool is unlocked
@@ -30,12 +30,10 @@ with subtest("Monitor timer is active at boot"):
 # --- Subtest 2: No alert side effects before mount ---
 
 with subtest("No alert side effects before pool mount"):
-    # Pool is not yet mounted. braid-monitor.service has
-    # BindsTo=mnt-storage.mount — we do not assert whether systemd
-    # allows the start or not, only that no alert is triggered.
+    # Pool is not yet mounted. ConditionPathIsMountPoint gates the
+    # service — systemd skips it cleanly (exit 0, no dependency failure).
     machine.succeed("rm -f /root/alert-fired")
-    rc, _ = machine.execute("systemctl start braid-monitor.service 2>&1")
-    print(f"monitor start before mount: exit {rc}")
+    machine.succeed("systemctl start braid-monitor.service")
     machine.fail("systemctl is-active braid-alert.service")
     machine.fail("test -f /root/alert-fired")
 
@@ -90,9 +88,8 @@ with subtest("No alert side effects after pool unmount"):
     machine.succeed("cryptsetup close braid-disk1")
     machine.succeed("cryptsetup close braid-disk2")
     machine.fail("mountpoint -q /mnt/storage")
-    # Same observable-behavior test as subtest 2: no side effects.
-    rc, _ = machine.execute("systemctl start braid-monitor.service 2>&1")
-    print(f"monitor start after unmount: exit {rc}")
+    # ConditionPathIsMountPoint: clean skip, not a dependency failure.
+    machine.succeed("systemctl start braid-monitor.service")
     machine.fail("systemctl is-active braid-alert.service")
     machine.fail("test -f /root/alert-fired")
 
