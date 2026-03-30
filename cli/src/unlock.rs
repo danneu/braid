@@ -1,34 +1,19 @@
-use crate::cmd::{CmdError, CmdRequest, CommandRunner};
-use crate::config::{mapper_name, Config};
-use crate::luks::{self, LuksError};
+use crate::cmd::CommandRunner;
+use crate::config::Config;
 use crate::membership::{self, PoolMembership};
-use crate::pool::PoolError;
+use crate::mount::{self, Credential, MountError};
 use crate::preflight;
-use crate::probe::{self, Filesystem, ProbeError};
+use crate::probe::{self, Filesystem};
 use crate::state_paths::StatePaths;
-use crate::types::ConfigDiskState;
 
 #[derive(Debug, thiserror::Error)]
 pub enum UnlockError {
     #[error("{0}")]
-    Probe(#[from] ProbeError),
-    #[error("{0}")]
-    Luks(#[from] LuksError),
-    #[error("{0}")]
-    Pool(#[from] PoolError),
+    Mount(#[from] MountError),
     #[error("{0}")]
     Membership(#[from] membership::MembershipError),
-    #[error("command failed: {0}")]
-    Cmd(#[from] CmdError),
     #[error("{0}")]
     Failed(String),
-    #[error("{0}")]
-    DegradedRefused(String),
-}
-
-/// Status line tag for output.
-fn tag(label: &str) -> String {
-    format!("[{:<4}]", label)
 }
 
 pub fn cmd_unlock<R: CommandRunner, F: Filesystem + ?Sized>(
@@ -51,162 +36,32 @@ pub fn cmd_unlock<R: CommandRunner, F: Filesystem + ?Sized>(
     // - Refuse degraded mounts unless --allow-degraded is explicit.
     // - After a successful mount, pool.json enriched fields (luks_uuid, devid) are
     //   refreshed best-effort, but correctness never depends on that write.
-    let mount_point = config.mount_point();
 
-    // 1. If pool already mounted → print message, exit 0
-    let mp_result = runner.run(&CmdRequest::MountpointCheck {
-        path: mount_point.clone(),
-    })?;
-    if mp_result.exit_status == 0 {
-        eprintln!("pool already mounted at {mount_point}");
+    let credential = if let Some(kf) = key_file {
+        Credential::KeyFile(kf)
+    } else {
+        Credential::Passphrase {
+            passphrase_stdin,
+            passphrase_file,
+        }
+    };
+
+    let mounted = mount::open_and_mount_pool(
+        runner,
+        fs,
+        config,
+        membership,
+        credential,
+        allow_degraded,
+        "unlock",
+    )?;
+
+    if !mounted {
+        // Pool was already mounted
         return Ok(());
     }
 
-    // 2. Probe each membership disk
-    let mut to_unlock = Vec::new(); // (name, by_id) pairs needing unlock
-    let mut any_open = false;
-    let mut any_missing_member = false;
-
-    for (name, member) in &membership.disks {
-        let probed = probe::probe_config_disk(runner, fs, name, &member.by_id)?;
-        match &probed.state {
-            ConfigDiskState::Absent => {
-                // Known pool member, confirmed missing → degradable
-                eprintln!("{}  disk: {:<10}not found (unplugged?)", tag("skip"), name);
-                any_missing_member = true;
-            }
-            ConfigDiskState::PresentNotLuks => {
-                // Was a pool member, LUKS header now bricked → degradable
-                eprintln!("{}  disk: {:<10}LUKS header damaged", tag("skip"), name);
-                any_missing_member = true;
-            }
-            ConfigDiskState::PresentLuks {
-                mapper_open: true, ..
-            } => {
-                eprintln!("{}  disk: {:<10}already open", tag("ok"), name);
-                any_open = true;
-            }
-            ConfigDiskState::PresentLuks {
-                mapper_open: false, ..
-            } => {
-                eprintln!("{}  disk: {:<10}found", tag("ok"), name);
-                to_unlock.push((name.clone(), member.by_id.clone()));
-            }
-        }
-    }
-
-    // 3. If no disks to unlock AND none already open → error
-    if to_unlock.is_empty() && !any_open {
-        return Err(UnlockError::Failed("no unlockable disks found".into()));
-    }
-
-    // 4. If disks need opening → verify credential, then open each disk
-    if !to_unlock.is_empty() {
-        if let Some(kf) = key_file {
-            // Keyfile path: verify against first disk, then open each
-            let (ref first_name, ref first_by_id) = to_unlock[0];
-            let ok = luks::verify_key_file(runner, &first_by_id.0, kf)?;
-            if !ok {
-                return Err(UnlockError::Failed(format!(
-                    "wrong keyfile (verified against {})",
-                    first_name
-                )));
-            }
-
-            for (name, by_id) in &to_unlock {
-                luks::ensure_luks_open_with_key_file(runner, fs, name, by_id, kf).map_err(
-                    |_| {
-                        UnlockError::Failed(format!(
-                            "failed to open disk '{}': keyfile was verified against \
-                             '{}' but rejected here (single-passphrase invariant \
-                             may be violated by external LUKS manipulation)",
-                            name, first_name
-                        ))
-                    },
-                )?;
-                eprintln!("{}  disk: {:<10}unlocked", tag("ok"), name);
-            }
-        } else {
-            // Passphrase path
-            let passphrase = luks::read_passphrase(passphrase_file, passphrase_stdin)?;
-
-            let (ref first_name, ref first_by_id) = to_unlock[0];
-            let ok = luks::verify_passphrase(runner, &first_by_id.0, &passphrase)?;
-            if !ok {
-                return Err(UnlockError::Failed(format!(
-                    "wrong passphrase (verified against {})",
-                    first_name
-                )));
-            }
-
-            for (name, by_id) in &to_unlock {
-                luks::ensure_luks_open(runner, fs, name, by_id, &passphrase).map_err(|_| {
-                    UnlockError::Failed(format!(
-                        "failed to open disk '{}': passphrase was verified \
-                             against '{}' but rejected here (single-passphrase \
-                             invariant may be violated by external LUKS \
-                             manipulation)",
-                        name, first_name
-                    ))
-                })?;
-                eprintln!("{}  disk: {:<10}unlocked", tag("ok"), name);
-            }
-        }
-    }
-
-    // 5. btrfs device scan
-    let scan = runner.run(&CmdRequest::BtrfsDeviceScanAll)?;
-    if scan.exit_status != 0 {
-        return Err(UnlockError::Failed(format!(
-            "btrfs device scan failed (exit {}): {}",
-            scan.exit_status,
-            scan.stderr.trim()
-        )));
-    }
-
-    // 6. mkdir -p mount_point, then mount
-
-    if any_missing_member && !allow_degraded {
-        return Err(UnlockError::DegradedRefused(
-            "pool has missing devices — refusing to mount degraded\n\
-             new writes would have ZERO redundancy (single-profile chunks)\n\
-             hint: braid unlock --allow-degraded"
-                .into(),
-        ));
-    }
-
-    let _ = std::fs::create_dir_all(mount_point);
-
-    let mount_key = to_unlock
-        .first()
-        .map(|(k, _)| k.as_str())
-        .or_else(|| membership.disks.keys().next().map(|k| k.as_str()))
-        .unwrap_or("unknown");
-
-    let mount_result = if any_missing_member {
-        // --allow-degraded was passed and we have confirmed missing pool members
-        runner.run(&CmdRequest::MountWithOptions {
-            device: format!("/dev/mapper/{}", mapper_name(mount_key).0),
-            mount_point: mount_point.clone(),
-            options: vec!["degraded".to_owned()],
-        })?
-    } else {
-        // All disks present — normal mount
-        runner.run(&CmdRequest::Mount {
-            device: format!("/dev/mapper/{}", mapper_name(mount_key).0),
-            mount_point: mount_point.clone(),
-        })?
-    };
-
-    if mount_result.exit_status != 0 {
-        return Err(UnlockError::Failed(format!(
-            "mount failed (exit {}): {}",
-            mount_result.exit_status,
-            mount_result.stderr.trim()
-        )));
-    }
-
-    eprintln!("{}  {:<10}mounted {}", tag("ok"), "pool", mount_point);
+    let mount_point = config.mount_point();
 
     // Enrich pool.json with live metadata (luks_uuid, devid) — best-effort.
     if let Ok(pool_after) = probe::probe_pool(runner, mount_point.as_str()) {
@@ -216,6 +71,9 @@ pub fn cmd_unlock<R: CommandRunner, F: Filesystem + ?Sized>(
     // Best-effort: warn if a paused balance was found on mount.
     // skip_balance prevents the kernel from resuming it silently, but the user
     // should know so they can resume or cancel explicitly.
+    fn tag(label: &str) -> String {
+        format!("[{:<4}]", label)
+    }
     match crate::status::get_balance_report(runner, mount_point.as_str()) {
         crate::status::BalanceReport::Paused { .. } => {
             eprintln!(
@@ -235,9 +93,11 @@ pub fn cmd_unlock<R: CommandRunner, F: Filesystem + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cmd::{MockRunner, RawCommandOutput};
+    use crate::cmd::{CmdRequest, MockRunner, RawCommandOutput};
     use crate::config::Config;
     use crate::membership::{DiskMember, PoolMembership};
+    use crate::mount::MountError;
+    use crate::probe::Filesystem;
     use crate::state_paths::StatePaths;
     use crate::types::{ByIdPath, MountPoint};
     use std::collections::BTreeMap;
@@ -548,7 +408,7 @@ mod tests {
 
         let err = result.expect_err("should refuse degraded mount without --allow-degraded");
         assert!(
-            matches!(&err, UnlockError::DegradedRefused(_)),
+            matches!(&err, UnlockError::Mount(MountError::DegradedRefused(_))),
             "expected DegradedRefused, got: {err:?}"
         );
         let msg = err.to_string();

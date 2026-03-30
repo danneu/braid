@@ -4,7 +4,7 @@ Canonical invariants for braid. Each principle is authoritative — if code or c
 
 ## 1. Resilient by default
 
-Data drives never block boot. The pool is unlocked and mounted by explicit CLI commands (`braid unlock` or `braid-auto-unlock`), not by systemd mount units. No LUKS or btrfs units are generated at build time. Degraded mounts require explicit `--allow-degraded` — braid refuses to silently run with zero redundancy. [Why →](decisions/resilient-boot.md)
+Data drives never block boot. The pool is unlocked and mounted by explicit CLI commands (`braid unlock`, `braid-auto-unlock`, or `braid recover` during recovery), not by systemd mount units. No LUKS or btrfs units are generated at build time. Degraded mounts require explicit `--allow-degraded` — braid refuses to silently run with zero redundancy. [Why →](decisions/resilient-boot.md)
 
 ## 2. CLI-owned membership
 

@@ -95,8 +95,8 @@ Started by monitor on error detection. Beeps via PC speaker (if enabled) and/or 
 
 The wrapper (`braid-wrapper.sh`) bridges CLI operations and systemd state. This is intentional — the CLI owns disk operations, and the wrapper translates success/failure into systemd unit state.
 
-**On successful `unlock` or `add`:**
-1. CLI opens LUKS + mounts pool.
+**On successful `unlock`, `add`, or `recover`:**
+1. CLI opens LUKS + mounts pool. (`recover` self-mounts when recovering from an interrupted operation.)
 2. Wrapper checks `mountpoint -q`.
 3. Sets permissions (`root:storageGroup 2770`) if `storageGroup` is configured.
 4. `systemctl start braid-online.service`.

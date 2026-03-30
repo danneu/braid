@@ -44,7 +44,7 @@ Post-commit persist ensures `pool.json` only reflects completed operations. The 
 
 ### Recovery mode
 
-When `pending-op.json` exists, braid enters recovery mode. All commands except `status`, `recover`, and `lock` hard-fail. `braid recover` rebuilds membership from the live mounted btrfs pool topology — not from LUKS label scanning, which could include labeled-but-never-added disks.
+When `pending-op.json` exists, braid enters recovery mode. All commands except `status`, `recover`, and `lock` hard-fail. `braid recover` opens LUKS devices, mounts the pool (with `--allow-degraded` if needed), and rebuilds membership from the live btrfs pool topology — not from LUKS label scanning, which could include labeled-but-never-added disks.
 
 ### State contract
 
@@ -57,7 +57,7 @@ When `pending-op.json` exists, braid enters recovery mode. All commands except `
 ### Recovery
 
 Recovery is always explicit, never implicit:
-- `braid recover` rebuilds `pool.json` from the live mounted btrfs pool. This is the only path out of recovery mode (journal present). It probes actual pool topology, not LUKS labels.
+- `braid recover` opens LUKS devices and mounts the pool if needed (using the union of pre/target membership from the journal), then rebuilds `pool.json` from the live btrfs pool. This is the only path out of recovery mode (journal present). It probes actual pool topology, not LUKS labels.
 - `braid discover` scans `/dev/disk/by-id/*` for LUKS devices with `braid-*` labels. Displays what it finds. With `--write`, persists to `pool.json`. This is for initial setup recovery (lost pool.json), not for crash recovery.
 - The normal path to create `pool.json` is `braid add`.
 

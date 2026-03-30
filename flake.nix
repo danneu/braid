@@ -297,6 +297,11 @@
               braid = linuxCrane.braid;
             }
           );
+          braid-recover = pkgs.testers.nixosTest (
+            import ./tests/cli/braid-recover.nix {
+              braid = linuxCrane.braid;
+            }
+          );
           braid-remove-disk-busy = pkgs.testers.nixosTest (
             import ./tests/cli/braid-remove-disk-busy.nix {
               braid = linuxCrane.braid;

@@ -14,6 +14,7 @@ pub mod journal;
 pub mod lock;
 pub mod luks;
 pub mod membership;
+pub mod mount;
 pub mod monitor;
 pub mod parse;
 pub mod pool;

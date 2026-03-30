@@ -54,7 +54,20 @@ enum Commands {
     /// Scan for braid-labeled LUKS devices and display or rebuild pool membership
     Discover(DiscoverArgs),
     /// Recover from an interrupted operation by rebuilding pool.json from live pool state
-    Recover,
+    Recover(RecoverArgs),
+}
+
+#[derive(Debug, Args)]
+struct RecoverArgs {
+    /// Read passphrase from stdin
+    #[arg(long)]
+    passphrase_stdin: bool,
+    /// Read passphrase from file instead of TTY prompt
+    #[arg(long)]
+    passphrase_file: Option<std::path::PathBuf>,
+    /// Allow mounting with missing devices (degraded mode — new writes have no redundancy)
+    #[arg(long)]
+    allow_degraded: bool,
 }
 
 #[derive(Debug, Args)]
@@ -366,7 +379,9 @@ fn main() {
                 args.allow_degraded,
             ) {
                 Ok(()) => {}
-                Err(braid_cli::unlock::UnlockError::DegradedRefused(msg)) => {
+                Err(braid_cli::unlock::UnlockError::Mount(
+                    braid_cli::mount::MountError::DegradedRefused(msg),
+                )) => {
                     print_cli_error(&msg);
                     std::process::exit(2);
                 }
@@ -541,7 +556,7 @@ fn main() {
                 }
             }
         }
-        Commands::Recover => {
+        Commands::Recover(args) => {
             let config = match config_read(Path::new(&config_path)) {
                 Ok(c) => c,
                 Err(e) => {
@@ -550,9 +565,27 @@ fn main() {
                 }
             };
             let runner = RealRunner;
-            if let Err(e) = braid_cli::recover::cmd_recover(&runner, &config, &paths) {
-                print_cli_error(&e.to_string());
-                std::process::exit(1);
+            let fs = RealFilesystem;
+            match braid_cli::recover::cmd_recover(
+                &runner,
+                &fs,
+                &config,
+                &paths,
+                args.passphrase_stdin,
+                args.passphrase_file.as_deref(),
+                args.allow_degraded,
+            ) {
+                Ok(()) => {}
+                Err(braid_cli::recover::RecoverError::Mount(
+                    braid_cli::mount::MountError::DegradedRefused(msg),
+                )) => {
+                    print_cli_error(&msg);
+                    std::process::exit(2);
+                }
+                Err(e) => {
+                    print_cli_error(&e.to_string());
+                    std::process::exit(1);
+                }
             }
         }
         Commands::Browse(args) => {

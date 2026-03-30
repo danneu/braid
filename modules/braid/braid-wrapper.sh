@@ -30,7 +30,7 @@ if [ "$ret" -eq 0 ]; then
 
   if ! $skip_fixup; then
     case "$subcmd" in
-      unlock|add)
+      unlock|add|recover)
         if @mountpointBin@ -q "@mountPointPath@" 2>/dev/null; then
           if [ -n "@storageGroup@" ]; then
             if ! @chownBin@ "root:@storageGroup@" "@mountPointPath@"; then
