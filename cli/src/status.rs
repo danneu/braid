@@ -208,6 +208,8 @@ pub enum StatusError {
     Json(#[from] serde_json::Error),
     #[error("validation error: {0}")]
     Validation(String),
+    #[error("{0}")]
+    Membership(#[from] membership::MembershipError),
 }
 
 // ---------------------------------------------------------------------------
@@ -384,11 +386,11 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
         return Ok(());
     }
 
-    // 3. Membership load (try_load pattern)
-    let membership_result = membership::load_membership(paths);
-    let membership = match &membership_result {
-        Ok(m) => m.clone(),
-        Err(_) => PoolMembership::empty(),
+    // 3. Membership load — NotFound is expected (no pool yet), but Corrupt must surface
+    let membership = match membership::load_membership(paths) {
+        Ok(m) => m,
+        Err(membership::MembershipError::NotFound(_)) => PoolMembership::empty(),
+        Err(e) => return Err(e.into()),
     };
 
     // 4. Strict data gathering
@@ -2948,5 +2950,39 @@ mod tests {
         // 4+4+6 = 14 TB total. sum/2 = 7 TB, sum-max = 8 TB. Usable = 7 TB.
         let sizes = &[4_000_000_000_000, 4_000_000_000_000, 6_000_000_000_000];
         assert_eq!(estimate_pool_capacity(sizes), 7_000_000_000_000);
+    }
+
+    // =======================================================================
+    // Corrupt pool.json regression test
+    // =======================================================================
+
+    #[test]
+    fn cmd_status_corrupt_membership_returns_error() {
+        // Intent: a corrupt pool.json must surface as an error, not be silently
+        // treated as an empty pool.
+        //
+        // Why it exists: the original code used Err(_) => PoolMembership::empty(),
+        // which collapsed NotFound (expected) and Corrupt (data loss) into the
+        // same fallback, hiding corruption from the user.
+        //
+        // Scenario: pool is mounted and healthy, but pool.json contains garbage.
+        // braid status should return StatusError::Membership(Corrupt(..)).
+        let tmpdir = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(tmpdir.path().to_path_buf());
+        std::fs::write(paths.pool_json(), "not valid json {{{").unwrap();
+
+        let runner = runner_healthy_3disk_base();
+        let fs = fs_3disk();
+        let config = config_3disk();
+
+        let result = cmd_status(&runner, &fs, &config, false, &paths);
+        assert!(result.is_err(), "expected error for corrupt pool.json");
+        assert!(
+            matches!(
+                result.unwrap_err(),
+                StatusError::Membership(membership::MembershipError::Corrupt(_, _))
+            ),
+            "expected StatusError::Membership(Corrupt(..))"
+        );
     }
 }
