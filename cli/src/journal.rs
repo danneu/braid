@@ -2,6 +2,7 @@ use crate::membership::PoolMembership;
 use crate::state_io::atomic_write;
 use crate::state_paths::StatePaths;
 use crate::types::ByIdPath;
+use crate::util::now_iso;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use thiserror::Error;
@@ -76,13 +77,6 @@ pub fn clear_journal(paths: &StatePaths) -> Result<(), JournalError> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(JournalError::Delete(e)),
     }
-}
-
-fn now_iso() -> String {
-    use time::format_description::well_known::Iso8601;
-    time::OffsetDateTime::now_utc()
-        .format(&Iso8601::DEFAULT)
-        .expect("formatting UTC as ISO8601 should never fail")
 }
 
 /// Build a journal for a mutation. Snapshots current membership as pre_membership,

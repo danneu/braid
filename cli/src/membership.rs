@@ -2,6 +2,7 @@ use crate::config;
 use crate::state_io;
 use crate::state_paths::StatePaths;
 use crate::types::{ByIdPath, LuksUuid, PoolState};
+use crate::util::now_iso;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -170,13 +171,6 @@ pub fn parse_disk_spec(spec: &str) -> Result<(String, ByIdPath), MembershipError
     validate_disk_name(name)?;
     validate_by_id(by_id)?;
     Ok((name.to_owned(), ByIdPath(by_id.to_owned())))
-}
-
-fn now_iso() -> String {
-    use time::format_description::well_known::Iso8601;
-    time::OffsetDateTime::now_utc()
-        .format(&Iso8601::DEFAULT)
-        .expect("formatting UTC as ISO8601 should never fail")
 }
 
 /// Enrich pool.json with metadata from the live pool state.

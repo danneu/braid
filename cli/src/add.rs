@@ -544,11 +544,7 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
                 member.luks_uuid = Some(dev.luks_uuid.clone());
                 member.devid = Some(dev.devid);
                 if member.added_at.is_none() {
-                    member.added_at = Some(
-                        time::OffsetDateTime::now_utc()
-                            .format(&time::format_description::well_known::Iso8601::DEFAULT)
-                            .expect("formatting UTC as ISO8601 should never fail"),
-                    );
+                    member.added_at = Some(crate::util::now_iso());
                 }
             }
         }
