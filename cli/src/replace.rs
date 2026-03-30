@@ -351,7 +351,7 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
                     member.added_at = Some(
                         time::OffsetDateTime::now_utc()
                             .format(&time::format_description::well_known::Iso8601::DEFAULT)
-                            .unwrap_or_else(|_| "unknown".into()),
+                            .expect("formatting UTC as ISO8601 should never fail"),
                     );
                 }
             }

@@ -176,7 +176,7 @@ fn now_iso() -> String {
     use time::format_description::well_known::Iso8601;
     time::OffsetDateTime::now_utc()
         .format(&Iso8601::DEFAULT)
-        .unwrap_or_else(|_| "unknown".into())
+        .expect("formatting UTC as ISO8601 should never fail")
 }
 
 /// Enrich pool.json with metadata from the live pool state.
