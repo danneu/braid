@@ -2712,7 +2712,7 @@ mod tests {
 
         let ctx = build_disk_reports(&runner, &config_disks, &pool, &stats);
         assert_eq!(ctx.disks.len(), 1);
-        assert_eq!(ctx.disks[0].status, "missing");
+        assert_eq!(ctx.disks[0].status, "unknown");
     }
 
     // =======================================================================
