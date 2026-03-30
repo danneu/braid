@@ -2,6 +2,7 @@ use crate::cmd::CommandRunner;
 use crate::config::mapper_name;
 use crate::luks::{self, KeySlotState, LuksError, KEYFILE_SIZE, LUKS_SLOT_KEYFILE};
 use crate::membership::PoolMembership;
+use crate::preflight;
 use crate::probe::{self, Filesystem};
 use crate::state_paths::StatePaths;
 use crate::types::{ByIdPath, ConfigDiskState};
@@ -194,6 +195,8 @@ pub fn cmd_enroll_key_file<R: CommandRunner, F: Filesystem + ?Sized>(
     passphrase_file: Option<&Path>,
     paths: &StatePaths,
 ) -> Result<(), EnrollKeyFileError> {
+    preflight::check_no_pending_operation(paths).map_err(EnrollKeyFileError::Validation)?;
+
     if generate {
         // --generate: keyfile must NOT exist
         if key_file_path.exists() {
@@ -912,5 +915,42 @@ mod tests {
 
         let err = super::generate_key_file(&kf).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+    }
+
+    /*
+     * Intent: enroll is blocked when a pending-operation journal exists.
+     * Why: enroll reads pool.json membership to discover disks — if membership
+     *   is inconsistent (mid-recovery), it could miss disks or target stale ones.
+     * Scenario: an add was interrupted; pending-op.json exists. User runs
+     *   braid enroll before braid recover.
+     */
+    #[test]
+    fn cmd_enroll_blocked_in_recovery_mode() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+
+        // Create a pending-op journal
+        let journal = crate::journal::build_journal(
+            crate::membership::PoolMembership::empty(),
+            crate::membership::PoolMembership::empty(),
+            crate::journal::OpKind::Add {
+                disks: std::collections::BTreeMap::new(),
+            },
+        );
+        crate::journal::write_journal(&paths, &journal).unwrap();
+
+        // No mock commands — if enroll reaches cryptsetup, MockRunner will panic
+        let runner = MockRunner::default();
+        let fs = MockFs::new(&[]);
+        let membership = make_membership(&[("d1", "/dev/disk/by-id/d1")]);
+        let kf = tmp.path().join("braid.key");
+
+        let err = cmd_enroll_key_file(&runner, &fs, &membership, &kf, false, false, None, &paths)
+            .unwrap_err();
+
+        assert!(
+            err.to_string().contains("interrupted operation"),
+            "expected 'interrupted operation' in: {err}"
+        );
     }
 }
