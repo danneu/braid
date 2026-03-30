@@ -70,7 +70,7 @@ Dan is tired of SSH'ing in to type the passphrase after every reboot. He sets up
 
 2. Enroll the keyfile into all pool disks:
    ```
-   $ sudo braid enroll /mnt/usb/braid.key
+   $ sudo braid enroll /mnt/usb
    ```
 
 3. Find the USB's by-id path:
