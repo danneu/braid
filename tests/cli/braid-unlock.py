@@ -199,7 +199,7 @@ with subtest("Test 7: uninitialized disk detected"):
     # Write a pool.json pointing at disk4 (raw, never braid add'd)
     raw_pool = json.dumps({
         "disks": {
-            "raw": "/dev/disk/by-id/virtio-disk4",
+            "raw": {"by_id": "/dev/disk/by-id/virtio-disk4"},
         },
     })
     machine.succeed(f"echo '{raw_pool}' > /var/lib/braid/pool.json")

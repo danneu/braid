@@ -7,7 +7,7 @@ machine.wait_for_unit("multi-user.target", timeout=180)
 # braid discover can't be used here — it only finds disks with intact LUKS
 # headers, so it would miss disk3, and unlock wouldn't know a member is missing.
 pool = json.dumps({"disks": {
-    d: f"/dev/disk/by-id/virtio-{d}"
+    d: {"by_id": f"/dev/disk/by-id/virtio-{d}"}
     for d in ["disk1", "disk2", "disk3"]
 }})
 machine.succeed(f"mkdir -p /var/lib/braid && echo '{pool}' > /var/lib/braid/pool.json")

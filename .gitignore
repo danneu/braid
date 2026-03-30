@@ -10,3 +10,5 @@ result-*
 target/
 /tests/repro/__pycache__
 /reference/btrfs-progs
+/tests/cli/__pycache__
+/tests/module/__pycache__

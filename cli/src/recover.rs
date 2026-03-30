@@ -72,11 +72,15 @@ pub fn cmd_recover<R: CommandRunner>(
             .disks
             .get(name)
             .map(|m| m.by_id.clone())
-            .unwrap_or_else(|| {
-                // Fallback: we don't know the by_id — this shouldn't happen
-                // in practice since the device was in one of the snapshots
-                crate::types::ByIdPath(format!("unknown-{}", dev.mapper.0))
-            });
+            .ok_or_else(|| {
+                RecoverError::Failed(format!(
+                    "device {} is in the live pool but has no by-id path in either \
+                     the pre-operation or target membership snapshot.\n\
+                     This must be resolved manually — provide the correct \
+                     /dev/disk/by-id/ path and re-run recovery.",
+                    dev.mapper.0
+                ))
+            })?;
         recovered.disks.insert(
             name.to_owned(),
             DiskMember::enriched(by_id, dev.luks_uuid.clone(), dev.devid),
@@ -123,4 +127,158 @@ fn union_memberships(journal: &Journal) -> PoolMembership {
             .or_insert_with(|| member.clone());
     }
     union
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cmd::{CmdRequest, MockRunner, RawCommandOutput};
+    use crate::journal::{self, OpKind};
+    use crate::types::{ByIdPath, MountPoint};
+    use std::collections::BTreeMap;
+
+    fn ok_raw(cmd: &str, stdout: &str) -> RawCommandOutput {
+        RawCommandOutput {
+            cmd: cmd.to_owned(),
+            stdout: stdout.to_owned(),
+            stderr: String::new(),
+            exit_status: 0,
+        }
+    }
+
+    fn findmnt_btrfs() -> RawCommandOutput {
+        ok_raw(
+            "findmnt --json --output TARGET,SOURCE,FSTYPE -T /mnt/storage",
+            r#"{"filesystems": [{"target":"/mnt/storage","source":"/dev/mapper/braid-toshiba","fstype":"btrfs"}]}"#,
+        )
+    }
+
+    fn btrfs_show_toshiba_and_mystery() -> RawCommandOutput {
+        ok_raw(
+            "btrfs filesystem show /mnt/storage",
+            "Label: none  uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
+             \tTotal devices 2 FS bytes used 1.00GiB\n\
+             \tdevid    1 size 10.00GiB used 2.00GiB path /dev/mapper/braid-toshiba\n\
+             \tdevid    2 size 10.00GiB used 2.00GiB path /dev/mapper/braid-mystery\n",
+        )
+    }
+
+    fn cryptsetup_status_active(mapper: &str, device: &str) -> RawCommandOutput {
+        ok_raw(
+            &format!("cryptsetup status {mapper}"),
+            &format!(
+                "/dev/mapper/{mapper} is active and is in use.\n\
+                 \ttype:    LUKS2\n\
+                 \tcipher:  aes-xts-plain64\n\
+                 \tdevice:  {device}\n\
+                 \tsector size:  512\n"
+            ),
+        )
+    }
+
+    fn cryptsetup_uuid_ok(device: &str, uuid: &str) -> RawCommandOutput {
+        ok_raw(
+            &format!("cryptsetup luksUUID {device}"),
+            &format!("{uuid}\n"),
+        )
+    }
+
+    /// If a live pool device is absent from both the pre-operation and target
+    /// membership snapshots, recovery must fail rather than fabricating a bogus
+    /// by_id path. This protects against writing corrupt pool.json entries that
+    /// would break subsequent unlock/lock cycles.
+    ///
+    /// Scenario: an interrupted add left a device in the btrfs pool that
+    /// somehow appears in neither journal snapshot. Recovery should refuse to
+    /// write pool.json and leave the journal intact so the user can intervene.
+    #[test]
+    fn recover_fails_when_device_missing_from_both_snapshots() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+
+        // pre and target both only know about "toshiba"
+        let mut pre_disks = BTreeMap::new();
+        pre_disks.insert(
+            "toshiba".to_owned(),
+            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/ata-TOSHIBA".into())),
+        );
+        let pre = PoolMembership { disks: pre_disks };
+        let target = pre.clone();
+
+        // Op is adding "mystery" — but neither snapshot contains it
+        let mut add_disks = BTreeMap::new();
+        add_disks.insert(
+            "mystery".to_owned(),
+            ByIdPath("/dev/disk/by-id/ata-MYSTERY".into()),
+        );
+        let journal = journal::Journal {
+            started_at: "2026-01-01T00:00:00Z".into(),
+            op: OpKind::Add { disks: add_disks },
+            pre_membership: pre,
+            target_membership: target,
+        };
+        journal::write_journal(&paths, &journal).unwrap();
+
+        // Mock: pool is mounted with both toshiba and mystery
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::FindmntJson {
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                findmnt_btrfs(),
+            )
+            .with_output(
+                CmdRequest::BtrfsFilesystemShow {
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                btrfs_show_toshiba_and_mystery(),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-toshiba".into(),
+                },
+                cryptsetup_status_active("braid-toshiba", "/dev/vda"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vda".into(),
+                },
+                cryptsetup_uuid_ok("/dev/vda", "11111111-1111-1111-1111-111111111111"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-mystery".into(),
+                },
+                cryptsetup_status_active("braid-mystery", "/dev/vdb"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vdb".into(),
+                },
+                cryptsetup_uuid_ok("/dev/vdb", "22222222-2222-2222-2222-222222222222"),
+            );
+
+        let result = cmd_recover(&runner, &config, &paths);
+
+        // Must fail with an error mentioning the unknown device
+        let err = result.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("braid-mystery"),
+            "error should name the unknown device, got: {msg}"
+        );
+
+        // pool.json must NOT have been written
+        assert!(
+            !paths.pool_json().exists(),
+            "pool.json should not exist after failed recovery"
+        );
+
+        // pending-op.json must NOT have been cleared
+        assert!(
+            paths.pending_op_json().exists(),
+            "journal should still exist after failed recovery"
+        );
+    }
 }
