@@ -2,7 +2,7 @@ use std::thread;
 use std::time::Duration;
 
 use crate::cmd::{CmdError, CmdRequest, CommandRunner};
-use crate::config::{mapper_name, Config};
+use crate::config::{mapper_name, name_from_mapper, Config};
 use crate::membership::{self, PoolMembership};
 use crate::preflight;
 use crate::probe::Filesystem;
@@ -123,6 +123,31 @@ pub fn cmd_lock<R: CommandRunner, F: Filesystem + ?Sized>(
         }
     }
 
+    // 3b. Scan for orphaned braid-* mappers not in membership
+    match fs.list_dir("/dev/mapper") {
+        Ok(entries) => {
+            for entry in entries {
+                let Some(disk_name) = name_from_mapper(&entry) else {
+                    continue;
+                };
+                if membership.disks.contains_key(disk_name) {
+                    continue;
+                }
+                if fs.exists(&format!("/dev/mapper/{entry}")) {
+                    eprintln!(
+                        "[warn]  orphaned mapper {entry} (not in pool.json — likely a prior crash)"
+                    );
+                    close_mapper_with_retry(runner, &entry)?;
+                    eprintln!("{}  disk: {:<7}locked (orphan)", tag("ok"), disk_name);
+                    all_already_closed = false;
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("[warn]  could not scan /dev/mapper for orphans: {e} (skipping)");
+        }
+    }
+
     // 4. If nothing was done → short message
     if !pool_was_mounted && all_already_closed {
         eprintln!("pool already locked");
@@ -159,6 +184,21 @@ mod tests {
 
         fn is_block_device(&self, _path: &str) -> bool {
             false
+        }
+
+        fn list_dir(&self, dir: &str) -> Result<Vec<String>, std::io::Error> {
+            let prefix = if dir.ends_with('/') {
+                dir.to_string()
+            } else {
+                format!("{dir}/")
+            };
+            let entries: Vec<String> = self
+                .paths
+                .iter()
+                .filter_map(|p| p.strip_prefix(&prefix).map(|s| s.to_string()))
+                .filter(|s| !s.contains('/'))
+                .collect();
+            Ok(entries)
         }
     }
 
@@ -435,5 +475,132 @@ mod tests {
 
         cmd_lock(&runner, &fs, &config, &membership)
             .expect("lock should succeed even when forget fails");
+    }
+
+    // Intent: orphaned braid-* mappers from prior crashes are cleaned up
+    //   during lock.
+    // Why it exists: a crash between cryptsetup open and journal/pool.json
+    //   write leaves a mapper outside pool.json that the membership loop
+    //   won't close.
+    // Scenario: power loss during `braid add` after LUKS open but before
+    //   pool.json write; next `braid lock` must still close the orphan.
+    #[test]
+    fn lock_closes_orphaned_mapper() {
+        let runner = mounted_runner()
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: "braid-aaa".into(),
+                },
+                ok_raw("cryptsetup close braid-aaa"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: "braid-bbb".into(),
+                },
+                ok_raw("cryptsetup close braid-bbb"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: "braid-ccc".into(),
+                },
+                ok_raw("cryptsetup close braid-ccc"),
+            );
+        // ccc is not in membership but exists as a mapper → orphan
+        let fs = MockFs::new(&[
+            "/dev/mapper/braid-aaa",
+            "/dev/mapper/braid-bbb",
+            "/dev/mapper/braid-ccc",
+        ]);
+        let config = test_config();
+        let membership = test_membership();
+
+        cmd_lock(&runner, &fs, &config, &membership).expect("lock should close orphan too");
+    }
+
+    // Intent: I/O errors scanning /dev/mapper don't prevent closing known
+    //   mappers.
+    // Why it exists: /dev/mapper may be unreadable in degraded environments;
+    //   the safety-net scan shouldn't break the primary lock path.
+    // Scenario: containerized environment where /dev/mapper has restricted
+    //   permissions; lock must still close membership-known mappers.
+    #[test]
+    fn lock_orphan_scan_failure_is_nonfatal() {
+        struct FailListDirFs;
+        impl Filesystem for FailListDirFs {
+            fn exists(&self, path: &str) -> bool {
+                path == "/dev/mapper/braid-aaa" || path == "/dev/mapper/braid-bbb"
+            }
+            fn is_block_device(&self, _path: &str) -> bool {
+                false
+            }
+            fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "permission denied",
+                ))
+            }
+        }
+
+        let runner = mounted_runner()
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: "braid-aaa".into(),
+                },
+                ok_raw("cryptsetup close braid-aaa"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: "braid-bbb".into(),
+                },
+                ok_raw("cryptsetup close braid-bbb"),
+            );
+        let config = test_config();
+        let membership = test_membership();
+
+        cmd_lock(&runner, &FailListDirFs, &config, &membership)
+            .expect("lock should succeed despite list_dir failure");
+    }
+
+    // Intent: if an orphan mapper is detected but can't be closed, lock must
+    //   fail rather than silently leaving LUKS open.
+    // Why it exists: a stray open LUKS mapper is a security concern —
+    //   reporting success while leaving it open is worse than failing.
+    // Scenario: orphan mapper is held open by a leaked process; lock must
+    //   surface the failure.
+    #[test]
+    fn lock_orphan_close_failure_is_fatal() {
+        let runner = mounted_runner()
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: "braid-aaa".into(),
+                },
+                ok_raw("cryptsetup close braid-aaa"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: "braid-bbb".into(),
+                },
+                ok_raw("cryptsetup close braid-bbb"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: "braid-orphan".into(),
+                },
+                err_raw("cryptsetup close braid-orphan", 5, "Device is not active."),
+            );
+        let fs = MockFs::new(&[
+            "/dev/mapper/braid-aaa",
+            "/dev/mapper/braid-bbb",
+            "/dev/mapper/braid-orphan",
+        ]);
+        let config = test_config();
+        let membership = test_membership();
+
+        let err =
+            cmd_lock(&runner, &fs, &config, &membership).expect_err("should fail on orphan close");
+        assert!(
+            err.to_string().contains("braid-orphan"),
+            "error should mention the orphan mapper, got: {err}"
+        );
     }
 }

@@ -782,6 +782,9 @@ mod tests {
             fn is_block_device(&self, _path: &str) -> bool {
                 false
             }
+            fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
+                Ok(vec![])
+            }
         }
 
         // Write a temp config

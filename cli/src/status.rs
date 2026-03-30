@@ -1043,6 +1043,10 @@ mod tests {
         fn is_block_device(&self, path: &str) -> bool {
             self.block_devices.contains(&path.to_string())
         }
+
+        fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
+            Ok(vec![])
+        }
     }
 
     fn ok_raw(cmd: &str, stdout: &str) -> RawCommandOutput {

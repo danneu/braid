@@ -92,7 +92,7 @@ with subtest("device remove progress observed"):
 
     # Write more data (~2 GiB) — needs to be large enough that device remove
     # takes long enough for the polling loop to observe bytes decreasing
-    machine.succeed(f"dd if=/dev/urandom of={MOUNT}/bigfile2 bs=1M count=2048")
+    machine.succeed(f"dd if=/dev/urandom of={MOUNT}/bigfile2 bs=1M count=4096")
     machine.succeed("sync")
 
     # Record initial disk3 allocation bytes

@@ -12,6 +12,7 @@ use crate::types::*;
 pub trait Filesystem {
     fn exists(&self, path: &str) -> bool;
     fn is_block_device(&self, path: &str) -> bool;
+    fn list_dir(&self, path: &str) -> Result<Vec<String>, std::io::Error>;
 }
 
 pub struct RealFilesystem;
@@ -26,6 +27,20 @@ impl Filesystem for RealFilesystem {
         std::fs::metadata(path)
             .map(|m| m.file_type().is_block_device())
             .unwrap_or(false)
+    }
+
+    fn list_dir(&self, path: &str) -> Result<Vec<String>, std::io::Error> {
+        match std::fs::read_dir(path) {
+            Ok(entries) => {
+                let mut names = Vec::new();
+                for entry in entries {
+                    names.push(entry?.file_name().to_string_lossy().into_owned());
+                }
+                Ok(names)
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(vec![]),
+            Err(e) => Err(e),
+        }
     }
 }
 
@@ -222,6 +237,10 @@ mod tests {
 
         fn is_block_device(&self, path: &str) -> bool {
             self.block_devices.contains(&path.to_string())
+        }
+
+        fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
+            Ok(vec![])
         }
     }
 

@@ -277,6 +277,11 @@
               braid = linuxCrane.braid;
             }
           );
+          braid-lock-orphan = pkgs.testers.nixosTest (
+            import ./tests/cli/braid-lock-orphan.nix {
+              braid = linuxCrane.braid;
+            }
+          );
           braid-lock-umount-busy = pkgs.testers.nixosTest (
             import ./tests/cli/braid-lock-umount-busy.nix {
               braid = linuxCrane.braid;
