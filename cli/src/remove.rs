@@ -167,7 +167,6 @@ pub fn cmd_remove<R: CommandRunner + Sync>(
         },
     );
     journal::write_journal(paths, &journal).map_err(|e| RemoveError::Validation(e.to_string()))?;
-    let mut journal_guard = journal::JournalGuard::new(paths);
 
     // Execute
     evict_present_device(runner, &mn.0, config.mount_point().as_str(), progress)?;
@@ -176,7 +175,6 @@ pub fn cmd_remove<R: CommandRunner + Sync>(
     membership::save_membership(&target_membership, paths)
         .map_err(|e| RemoveError::Validation(format!("failed to persist pool membership: {e}")))?;
     journal::clear_journal(paths).map_err(|e| RemoveError::Validation(e.to_string()))?;
-    journal_guard.disarm();
 
     eprintln!("Done. Disk '{}' removed from pool.", name);
     Ok(())
@@ -486,6 +484,114 @@ mod tests {
         assert!(
             balance_idx < remove_idx,
             "expected balance-to-single before device-remove; calls: {calls:?}"
+        );
+    }
+
+    /// Runner that handles all preflight commands but fails on BtrfsDeviceRemove,
+    /// simulating a btrfs failure during the irreversible eviction step.
+    struct FailingEvictRunner;
+
+    impl CommandRunner for FailingEvictRunner {
+        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
+            match request {
+                CmdRequest::FindmntJson { mount_point } => Ok(mock_out(
+                    &format!("findmnt --json --mountpoint {mount_point}"),
+                    r#"{"filesystems":[{"target":"/mnt/storage","source":"/dev/mapper/braid-disk1","fstype":"btrfs"}]}"#,
+                    0,
+                )),
+                CmdRequest::BtrfsFilesystemShow { mount_point } => Ok(mock_out(
+                    &format!("btrfs filesystem show {mount_point}"),
+                    "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\tTotal devices 2 FS bytes used 16.17MiB\n\tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk2\n",
+                    0,
+                )),
+                CmdRequest::CryptsetupStatus { mapper } => {
+                    let dev = if mapper == "braid-disk1" { "/dev/vdb" } else { "/dev/vdc" };
+                    Ok(mock_out(
+                        &format!("cryptsetup status {mapper}"),
+                        &format!("{mapper} is active and is in use.\n  type:    LUKS2\n  device:  {dev}\n  mode:    read/write\n"),
+                        0,
+                    ))
+                }
+                CmdRequest::CryptsetupLuksUuid { device } => {
+                    let uuid = if device == "/dev/vdb" {
+                        "11111111-1111-1111-1111-111111111111"
+                    } else {
+                        "22222222-2222-2222-2222-222222222222"
+                    };
+                    Ok(mock_out(&format!("cryptsetup luksUUID {device}"), &format!("{uuid}\n"), 0))
+                }
+                CmdRequest::BtrfsBalanceStatus { .. } => Ok(mock_out(
+                    "btrfs balance status",
+                    "No balance found on '/mnt/storage'\n",
+                    0,
+                )),
+                CmdRequest::BtrfsBalanceSingle { .. } => Ok(mock_out("btrfs balance start", "", 0)),
+                CmdRequest::BtrfsDeviceRemove { .. } => Ok(RawCommandOutput {
+                    cmd: "btrfs device remove".into(),
+                    stdout: String::new(),
+                    stderr: "ERROR: error removing device".into(),
+                    exit_status: 1,
+                }),
+                _ => Err(CmdError::MissingMock),
+            }
+        }
+
+        fn run_with_stdin(
+            &self,
+            request: &CmdRequest,
+            _stdin: &[u8],
+        ) -> Result<RawCommandOutput, CmdError> {
+            self.run(request)
+        }
+    }
+
+    #[test]
+    // Intent: pending-op.json survives when eviction fails after journal write.
+    //
+    // Why it exists: JournalGuard previously cleared the journal on any exit,
+    //   including error returns. This left pool.json potentially stale with no
+    //   recovery path after a failed btrfs device remove.
+    //
+    // Scenario: 2-disk pool, btrfs device remove fails mid-eviction. The journal
+    //   must persist so `braid recover` can reconcile pool.json from live state.
+    fn journal_survives_evict_failure() {
+        let (_state_dir, paths) = setup_membership(&[
+            ("disk1", "/dev/disk/by-id/virtio-disk1"),
+            ("disk2", "/dev/disk/by-id/virtio-disk2"),
+        ]);
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.json");
+
+        let mut disks = BTreeMap::new();
+        disks.insert(
+            "disk1".to_owned(),
+            serde_json::json!({ "by_id": "/dev/disk/by-id/virtio-disk1" }),
+        );
+        disks.insert(
+            "disk2".to_owned(),
+            serde_json::json!({ "by_id": "/dev/disk/by-id/virtio-disk2" }),
+        );
+        let config_json = serde_json::json!({
+            "disks": disks,
+            "mount_point": "/mnt/storage"
+        });
+        std::fs::write(&config_path, serde_json::to_vec(&config_json).unwrap()).unwrap();
+
+        let runner = FailingEvictRunner;
+        let result = cmd_remove(
+            &runner,
+            Path::new(&config_path),
+            "disk2",
+            false,
+            true,
+            ProgressOutput::Off,
+            &paths,
+        );
+
+        assert!(result.is_err(), "remove should fail when eviction fails");
+        assert!(
+            journal::load_journal(&paths).unwrap().is_some(),
+            "pending-op.json must survive error exit so braid recover can reconcile"
         );
     }
 }

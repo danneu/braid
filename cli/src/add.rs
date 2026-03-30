@@ -354,7 +354,6 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         },
     );
     journal::write_journal(paths, &journal).map_err(|e| AddError::Validation(e.to_string()))?;
-    let mut journal_guard = journal::JournalGuard::new(paths);
 
     // LUKS phase — for each disk: format/open as needed. Track which need pool add.
     // Guard closes any mappers we opened if the LUKS phase fails partway through.
@@ -466,6 +465,7 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             names.iter().copied().collect::<Vec<_>>().join(", ")
         };
         eprintln!("Nothing to do — {} already in pool.", label);
+        journal::clear_journal(paths).map_err(|e| AddError::Validation(e.to_string()))?;
         return Ok(());
     }
 
@@ -544,7 +544,6 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     }
     membership::save_membership(&final_membership, paths)?;
     journal::clear_journal(paths).map_err(|e| AddError::Validation(e.to_string()))?;
-    journal_guard.disarm();
 
     let label = if names.len() == 1 {
         format!("{} is", names[0])
@@ -1296,6 +1295,231 @@ mod tests {
         assert!(
             !closed.contains(&"braid-existing".to_string()),
             "must not close a mapper we didn't open"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Journal survival tests
+    // -----------------------------------------------------------------------
+
+    use crate::membership;
+    use crate::state_paths::StatePaths;
+
+    fn mock_ok(cmd: &str, stdout: &str) -> RawCommandOutput {
+        RawCommandOutput {
+            cmd: cmd.to_owned(),
+            stdout: stdout.to_owned(),
+            stderr: String::new(),
+            exit_status: 0,
+        }
+    }
+
+    struct AddMockFs(Vec<String>);
+    impl crate::probe::Filesystem for AddMockFs {
+        fn exists(&self, path: &str) -> bool {
+            self.0.iter().any(|p| p == path)
+        }
+        fn is_block_device(&self, _path: &str) -> bool {
+            false
+        }
+        fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
+            Ok(vec![])
+        }
+    }
+
+    const POOL_FSID: &str = "cc86845b-aec3-408e-bef5-553affc1f2b1";
+
+    /// Runner for add tests. Pool has 1 device (disk1). New disk (disk2) is
+    /// LUKS-labeled and open. `fail_device_add` controls whether BtrfsDeviceAdd fails.
+    struct AddTestRunner {
+        /// If true, the new disk's mapper is already in the pool (no-op path).
+        /// If false, the disk's FSID matches but it's not in pool (recoverable).
+        disk_in_pool: bool,
+        fail_device_add: bool,
+    }
+
+    impl CommandRunner for AddTestRunner {
+        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
+            match request {
+                CmdRequest::FindmntJson { mount_point } => Ok(mock_ok(
+                    &format!("findmnt --json --mountpoint {mount_point}"),
+                    r#"{"filesystems":[{"target":"/mnt/storage","source":"/dev/mapper/braid-disk1","fstype":"btrfs"}]}"#,
+                )),
+                CmdRequest::BtrfsFilesystemShow { mount_point } => {
+                    let disk2_line = if self.disk_in_pool {
+                        "\tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk2\n"
+                    } else {
+                        ""
+                    };
+                    let total = if self.disk_in_pool { 2 } else { 1 };
+                    Ok(mock_ok(
+                        &format!("btrfs filesystem show {mount_point}"),
+                        &format!(
+                            "Label: none  uuid: {POOL_FSID}\n\tTotal devices {total} FS bytes used 16.17MiB\n\tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n{disk2_line}",
+                        ),
+                    ))
+                }
+                CmdRequest::CryptsetupStatus { mapper } => Ok(mock_ok(
+                    &format!("cryptsetup status {mapper}"),
+                    &format!("{mapper} is active and is in use.\n  type:    LUKS2\n  device:  /dev/vdb\n  mode:    read/write\n"),
+                )),
+                CmdRequest::CryptsetupLuksUuid { device } => {
+                    let uuid = match device.as_str() {
+                        "/dev/vdb" => "11111111-1111-1111-1111-111111111111",
+                        _ => "22222222-2222-2222-2222-222222222222",
+                    };
+                    Ok(mock_ok(&format!("cryptsetup luksUUID {device}"), &format!("{uuid}\n")))
+                }
+                CmdRequest::BtrfsBalanceStatus { .. } => Ok(mock_ok(
+                    "btrfs balance status",
+                    "No balance found on '/mnt/storage'\n",
+                )),
+                // LUKS label check for new disk
+                CmdRequest::CryptsetupLuksDumpText { .. } => Ok(mock_ok(
+                    "cryptsetup luksDump",
+                    "LUKS header information\nVersion:       \t2\nLabel:         \tbraid-disk2\nSubsystem:     \t(no subsystem)\n",
+                )),
+                // FSID check for new disk's mapper
+                CmdRequest::BtrfsFilesystemShowTarget { target } => Ok(mock_ok(
+                    &format!("btrfs filesystem show {target}"),
+                    &format!("Label: none  uuid: {POOL_FSID}\n\tTotal devices 1 FS bytes used 16.17MiB\n\tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n"),
+                )),
+                CmdRequest::BtrfsDeviceAdd { .. } => {
+                    if self.fail_device_add {
+                        Ok(RawCommandOutput {
+                            cmd: "btrfs device add".into(),
+                            stdout: String::new(),
+                            stderr: "ERROR: unable to add device".into(),
+                            exit_status: 1,
+                        })
+                    } else {
+                        Ok(mock_ok("btrfs device add", ""))
+                    }
+                }
+                _ => Err(CmdError::MissingMock),
+            }
+        }
+
+        fn run_with_stdin(
+            &self,
+            request: &CmdRequest,
+            _stdin: &[u8],
+        ) -> Result<RawCommandOutput, CmdError> {
+            self.run(request)
+        }
+    }
+
+    fn add_test_setup() -> (
+        tempfile::TempDir,
+        StatePaths,
+        tempfile::TempDir,
+        std::path::PathBuf,
+        std::path::PathBuf,
+    ) {
+        let state_tmp = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(state_tmp.path().into());
+        let mut m = membership::PoolMembership::empty();
+        m.disks.insert(
+            "disk1".into(),
+            membership::DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
+        );
+        membership::save_membership(&m, &paths).unwrap();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.json");
+        std::fs::write(
+            &config_path,
+            serde_json::to_vec(&serde_json::json!({ "mount_point": "/mnt/storage" })).unwrap(),
+        )
+        .unwrap();
+        let pass_path = tmp.path().join("passphrase");
+        std::fs::write(&pass_path, b"test-passphrase\n").unwrap();
+
+        (state_tmp, paths, tmp, config_path, pass_path)
+    }
+
+    #[test]
+    // Intent: pending-op.json is cleared when all disks are already in pool (no-op).
+    //
+    // Why it exists: after removing JournalGuard, the no-op early return must
+    //   explicitly clear the journal. Without this, a stale journal would
+    //   incorrectly trigger recovery mode on the next command.
+    //
+    // Scenario: user runs `braid add` for a disk that's already a pool member.
+    //   The command succeeds as a no-op and the journal is cleaned up.
+    fn journal_cleared_on_noop_add() {
+        let (_state_tmp, paths, _tmp, config_path, pass_path) = add_test_setup();
+        let fs = AddMockFs(vec![
+            "/dev/disk/by-id/virtio-disk2".into(),
+            "/dev/mapper/braid-disk2".into(),
+        ]);
+        let runner = AddTestRunner {
+            disk_in_pool: true,
+            fail_device_add: false,
+        };
+
+        cmd_add(
+            &runner,
+            &fs,
+            &config_path,
+            &["disk2=/dev/disk/by-id/virtio-disk2".into()],
+            false,
+            true,
+            false,
+            Some(pass_path.as_path()),
+            None,
+            ProgressOutput::Off,
+            &paths,
+        )
+        .expect("no-op add should succeed");
+
+        assert!(
+            journal::load_journal(&paths).unwrap().is_none(),
+            "pending-op.json should be cleared after no-op add"
+        );
+    }
+
+    #[test]
+    // Intent: pending-op.json survives when btrfs device add fails.
+    //
+    // Why it exists: JournalGuard previously cleared the journal on any exit,
+    //   including error returns. A failed btrfs device add would leave pool.json
+    //   missing the new disk entry with no recovery path.
+    //
+    // Scenario: user adds a LUKS-labeled disk whose FSID matches but isn't in
+    //   the pool yet. btrfs device add fails. Journal must persist for recovery.
+    fn journal_survives_btrfs_device_add_failure() {
+        let (_state_tmp, paths, _tmp, config_path, pass_path) = add_test_setup();
+        let fs = AddMockFs(vec![
+            "/dev/disk/by-id/virtio-disk2".into(),
+            "/dev/mapper/braid-disk2".into(),
+        ]);
+        let runner = AddTestRunner {
+            disk_in_pool: false,
+            fail_device_add: true,
+        };
+
+        let result = cmd_add(
+            &runner,
+            &fs,
+            &config_path,
+            &["disk2=/dev/disk/by-id/virtio-disk2".into()],
+            false,
+            true,
+            false,
+            Some(pass_path.as_path()),
+            None,
+            ProgressOutput::Off,
+            &paths,
+        );
+
+        assert!(
+            result.is_err(),
+            "add should fail when btrfs device add fails"
+        );
+        assert!(
+            journal::load_journal(&paths).unwrap().is_some(),
+            "pending-op.json must survive error exit so braid recover can reconcile"
         );
     }
 }

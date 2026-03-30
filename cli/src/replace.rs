@@ -210,7 +210,6 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         },
     );
     journal::write_journal(paths, &journal).map_err(|e| ReplaceError::Validation(e.to_string()))?;
-    let mut journal_guard = journal::JournalGuard::new(paths);
 
     // Step 1: Init new disk (LUKS format/open) — irreversible from here.
     match new_probed.state {
@@ -360,7 +359,6 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     membership::save_membership(&final_membership, paths)
         .map_err(|e| ReplaceError::Validation(format!("failed to persist pool membership: {e}")))?;
     journal::clear_journal(paths).map_err(|e| ReplaceError::Validation(e.to_string()))?;
-    journal_guard.disarm();
 
     eprintln!("Done. Replaced {} with {}.", old_name, new_name);
     Ok(())
@@ -1149,6 +1147,157 @@ mod tests {
                 .iter()
                 .any(|d| d.contains("-dconvert=raid1,soft")),
             "should NOT show soft balance with total_devices == 1, got: {descriptions:?}"
+        );
+    }
+
+    use crate::cmd::{CmdError, CommandRunner as CmdRunner2};
+    use crate::membership::{self, DiskMember, PoolMembership};
+    use crate::state_paths::StatePaths;
+
+    fn mock_ok(cmd: &str, stdout: &str) -> RawCommandOutput {
+        RawCommandOutput {
+            cmd: cmd.to_owned(),
+            stdout: stdout.to_owned(),
+            stderr: String::new(),
+            exit_status: 0,
+        }
+    }
+
+    /// Mock filesystem where specific paths exist.
+    struct ReplaceMockFs(Vec<String>);
+    impl crate::probe::Filesystem for ReplaceMockFs {
+        fn exists(&self, path: &str) -> bool {
+            self.0.iter().any(|p| p == path)
+        }
+        fn is_block_device(&self, _path: &str) -> bool {
+            false
+        }
+        fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
+            Ok(vec![])
+        }
+    }
+
+    /// Runner for live replace that fails on BtrfsReplaceStart.
+    /// Handles all preflight/probe commands successfully.
+    struct FailingReplaceRunner;
+
+    impl CmdRunner2 for FailingReplaceRunner {
+        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
+            match request {
+                CmdRequest::FindmntJson { mount_point } => Ok(mock_ok(
+                    &format!("findmnt --json --mountpoint {mount_point}"),
+                    r#"{"filesystems":[{"target":"/mnt/storage","source":"/dev/mapper/braid-disk1","fstype":"btrfs"}]}"#,
+                )),
+                CmdRequest::BtrfsFilesystemShow { mount_point } => Ok(mock_ok(
+                    &format!("btrfs filesystem show {mount_point}"),
+                    "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\tTotal devices 2 FS bytes used 16.17MiB\n\tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk2\n",
+                )),
+                CmdRequest::CryptsetupStatus { mapper } => {
+                    let dev = if mapper == "braid-disk1" { "/dev/vdb" } else { "/dev/vdc" };
+                    Ok(mock_ok(
+                        &format!("cryptsetup status {mapper}"),
+                        &format!("{mapper} is active and is in use.\n  type:    LUKS2\n  device:  {dev}\n  mode:    read/write\n"),
+                    ))
+                }
+                CmdRequest::CryptsetupLuksUuid { device } => {
+                    let uuid = match device.as_str() {
+                        "/dev/vdb" => "11111111-1111-1111-1111-111111111111",
+                        "/dev/vdc" => "22222222-2222-2222-2222-222222222222",
+                        // new disk
+                        _ => "33333333-3333-3333-3333-333333333333",
+                    };
+                    Ok(mock_ok(&format!("cryptsetup luksUUID {device}"), &format!("{uuid}\n")))
+                }
+                CmdRequest::BtrfsBalanceStatus { .. } => Ok(mock_ok(
+                    "btrfs balance status",
+                    "No balance found on '/mnt/storage'\n",
+                )),
+                CmdRequest::BtrfsDeviceStats { .. } => Ok(mock_ok("btrfs device stats", "")),
+                CmdRequest::BtrfsReplaceStart { .. } => Ok(RawCommandOutput {
+                    cmd: "btrfs replace start".into(),
+                    stdout: String::new(),
+                    stderr: "ERROR: target device is too small".into(),
+                    exit_status: 1,
+                }),
+                _ => Err(CmdError::MissingMock),
+            }
+        }
+
+        fn run_with_stdin(
+            &self,
+            request: &CmdRequest,
+            _stdin: &[u8],
+        ) -> Result<RawCommandOutput, CmdError> {
+            self.run(request)
+        }
+    }
+
+    #[test]
+    // Intent: pending-op.json survives when btrfs replace start fails.
+    //
+    // Why it exists: JournalGuard previously cleared the journal on any exit,
+    //   including error returns. After LUKS init on the new disk, a failed
+    //   btrfs replace would leave pool.json stale with no recovery path.
+    //
+    // Scenario: live replace, new disk already LUKS-open, btrfs replace start
+    //   fails (e.g. target too small). Journal must persist for recovery.
+    fn journal_survives_replace_failure() {
+        // Set up state
+        let state_tmp = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(state_tmp.path().into());
+        let mut m = PoolMembership::empty();
+        m.disks.insert(
+            "disk1".into(),
+            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
+        );
+        m.disks.insert(
+            "disk2".into(),
+            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk2".into())),
+        );
+        membership::save_membership(&m, &paths).unwrap();
+
+        let config_tmp = tempfile::tempdir().unwrap();
+        let config_path = config_tmp.path().join("config.json");
+        std::fs::write(
+            &config_path,
+            serde_json::to_vec(&serde_json::json!({ "mount_point": "/mnt/storage" })).unwrap(),
+        )
+        .unwrap();
+
+        // Passphrase file (required by cmd_replace)
+        let pass_path = config_tmp.path().join("passphrase");
+        std::fs::write(&pass_path, b"test-passphrase\n").unwrap();
+
+        // Filesystem mock: new disk and its mapper exist
+        let fs = ReplaceMockFs(vec![
+            "/dev/disk/by-id/virtio-disk3".into(),
+            "/dev/mapper/braid-disk3".into(),
+        ]);
+
+        let runner = FailingReplaceRunner;
+        let result = cmd_replace(
+            &runner,
+            &fs,
+            &config_path,
+            "disk2",
+            "disk3=/dev/disk/by-id/virtio-disk3",
+            None,
+            false,
+            true,
+            false,
+            Some(pass_path.as_path()),
+            None,
+            crate::progress::ProgressOutput::Off,
+            &paths,
+        );
+
+        assert!(
+            result.is_err(),
+            "replace should fail when btrfs replace fails"
+        );
+        assert!(
+            journal::load_journal(&paths).unwrap().is_some(),
+            "pending-op.json must survive error exit so braid recover can reconcile"
         );
     }
 

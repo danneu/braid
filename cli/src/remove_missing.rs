@@ -192,7 +192,6 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync>(
     );
     journal::write_journal(paths, &journal)
         .map_err(|e| RemoveMissingError::Validation(e.to_string()))?;
-    let mut journal_guard = journal::JournalGuard::new(paths);
 
     // Execute
     if missing_id.is_some() {
@@ -206,13 +205,6 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync>(
         pool_remove_missing(runner, config.mount_point().as_str())?;
     }
 
-    // Post-commit: write pool.json and clear journal.
-    membership::save_membership(&target_membership, paths).map_err(|e| {
-        RemoveMissingError::Validation(format!("failed to persist pool membership: {e}"))
-    })?;
-    journal::clear_journal(paths).map_err(|e| RemoveMissingError::Validation(e.to_string()))?;
-    journal_guard.disarm();
-
     crate::pool::maybe_restore_raid1(
         runner,
         config.mount_point().as_str(),
@@ -220,6 +212,12 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync>(
         progress,
     )
     .map_err(|e| RemoveMissingError::Pool(e))?;
+
+    // Post-commit: write pool.json and clear journal only after the full operation succeeds.
+    membership::save_membership(&target_membership, paths).map_err(|e| {
+        RemoveMissingError::Validation(format!("failed to persist pool membership: {e}"))
+    })?;
+    journal::clear_journal(paths).map_err(|e| RemoveMissingError::Validation(e.to_string()))?;
 
     eprintln!("Done. Missing device removed from pool.");
     Ok(())
@@ -864,6 +862,130 @@ mod tests {
                 .iter()
                 .any(|c| matches!(c, CmdRequest::BtrfsBalanceRaid1Soft { .. })),
             "should NOT call BtrfsBalanceRaid1Soft when still degraded; calls: {calls:?}"
+        );
+    }
+
+    /// Runner for 3-device pool where the soft balance fails after successful
+    /// device removal. Everything succeeds except BtrfsBalanceRaid1Soft.
+    struct FailingSoftBalanceRunner {
+        log: Arc<Mutex<Vec<CmdRequest>>>,
+    }
+
+    impl FailingSoftBalanceRunner {
+        fn new(log: Arc<Mutex<Vec<CmdRequest>>>) -> Self {
+            Self { log }
+        }
+    }
+
+    impl CommandRunner for FailingSoftBalanceRunner {
+        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
+            self.log.lock().unwrap().push(request.clone());
+
+            let remove_done = self
+                .log
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|c| matches!(c, CmdRequest::BtrfsDeviceRemoveMissing { .. }));
+
+            match request {
+                CmdRequest::FindmntJson { mount_point } => Ok(mock_out(
+                    &format!("findmnt --json --mountpoint {mount_point}"),
+                    r#"{"filesystems":[{"target":"/mnt/storage","source":"/dev/mapper/braid-disk1","fstype":"btrfs"}]}"#,
+                    0,
+                )),
+                CmdRequest::BtrfsFilesystemShow { mount_point } => {
+                    let (missing_line, total) = if remove_done {
+                        ("", 2)
+                    } else {
+                        ("\tdevid    3 size 0 used 0 path MISSING\n", 3)
+                    };
+                    Ok(mock_out(
+                        &format!("btrfs filesystem show {mount_point}"),
+                        &format!(
+                            "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\tTotal devices {total} FS bytes used 16.17MiB\n\tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk2\n{missing_line}",
+                        ),
+                        0,
+                    ))
+                }
+                CmdRequest::CryptsetupStatus { mapper } => Ok(mock_out(
+                    &format!("cryptsetup status {mapper}"),
+                    &format!("{mapper} is active and is in use.\n  type:    LUKS2\n  device:  /dev/vdb\n  mode:    read/write\n"),
+                    0,
+                )),
+                CmdRequest::CryptsetupLuksUuid { .. } => Ok(mock_out(
+                    "cryptsetup luksUUID",
+                    "11111111-1111-1111-1111-111111111111\n",
+                    0,
+                )),
+                CmdRequest::BtrfsBalanceStatus { .. } => Ok(mock_out(
+                    "btrfs balance status",
+                    "No balance found on '/mnt/storage'\n",
+                    0,
+                )),
+                CmdRequest::BtrfsDeviceRemoveMissing { .. } => {
+                    Ok(mock_out("btrfs device remove missing", "", 0))
+                }
+                CmdRequest::BtrfsDeviceUsageRaw { .. } => {
+                    Ok(mock_out(
+                        "btrfs device usage --raw",
+                        "/dev/mapper/braid-disk1, ID: 1\n   Device size:           520093696\n   Device slack:                  0\n   Data,RAID1:            67108864\n   Unallocated:           452984832\n\n/dev/mapper/braid-disk2, ID: 2\n   Device size:           520093696\n   Device slack:                  0\n   Data,RAID1:            67108864\n   Unallocated:           452984832\n\n<missing disk>, ID: 3\n   Device size:                  0\n   Device slack:                  0\n   Data,RAID1:            67108864\n   Unallocated:                  0\n\n",
+                        0,
+                    ))
+                }
+                CmdRequest::BtrfsBalanceRaid1Soft { .. } => Ok(RawCommandOutput {
+                    cmd: "btrfs balance start -dconvert=raid1,soft".into(),
+                    stdout: String::new(),
+                    stderr: "ERROR: error during balancing: No space left on device".into(),
+                    exit_status: 1,
+                }),
+                _ => Err(CmdError::MissingMock),
+            }
+        }
+
+        fn run_with_stdin(
+            &self,
+            request: &CmdRequest,
+            _stdin: &[u8],
+        ) -> Result<RawCommandOutput, CmdError> {
+            self.run(request)
+        }
+    }
+
+    #[test]
+    // Intent: pending-op.json survives when soft balance fails after a successful
+    //   device removal.
+    //
+    // Why it exists: remove-missing previously cleared the journal before
+    //   maybe_restore_raid1(). If the soft balance failed, the journal was already
+    //   gone despite an irreversible pool change, leaving pool.json stale with
+    //   no recovery path.
+    //
+    // Scenario: 3-disk NAS, one drive dies. Operator runs remove-missing. The
+    //   device removal succeeds but the post-removal soft balance fails. The
+    //   journal must persist so `braid recover` can reconcile.
+    fn journal_survives_soft_balance_failure() {
+        let (_tmp, config_path, _state_tmp, state_paths) = three_device_config();
+
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let runner = FailingSoftBalanceRunner::new(log.clone());
+        let result = cmd_remove_missing(
+            &runner,
+            &config_path,
+            None,
+            false,
+            true,
+            crate::progress::ProgressOutput::Off,
+            &state_paths,
+        );
+
+        assert!(
+            result.is_err(),
+            "remove-missing should fail when soft balance fails"
+        );
+        assert!(
+            journal::load_journal(&state_paths).unwrap().is_some(),
+            "pending-op.json must survive error exit so braid recover can reconcile"
         );
     }
 

@@ -78,32 +78,6 @@ pub fn clear_journal(paths: &StatePaths) -> Result<(), JournalError> {
     }
 }
 
-/// RAII guard that clears pending-op.json on drop (covering clean error exits).
-/// Call `disarm()` on the success path after you have explicitly cleared the journal,
-/// so the guard becomes a no-op. The journal should only survive a process crash,
-/// never a clean return (success or error).
-pub struct JournalGuard<'a> {
-    paths: &'a StatePaths,
-    armed: bool,
-}
-
-impl<'a> JournalGuard<'a> {
-    pub fn new(paths: &'a StatePaths) -> Self {
-        JournalGuard { paths, armed: true }
-    }
-    pub fn disarm(&mut self) {
-        self.armed = false;
-    }
-}
-
-impl Drop for JournalGuard<'_> {
-    fn drop(&mut self) {
-        if self.armed {
-            let _ = clear_journal(self.paths);
-        }
-    }
-}
-
 fn now_iso() -> String {
     use time::format_description::well_known::Iso8601;
     time::OffsetDateTime::now_utc()
