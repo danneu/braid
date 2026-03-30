@@ -752,7 +752,12 @@ fn build_disk_reports<R: CommandRunner>(
             continue;
         }
 
-        let status = "missing".to_owned();
+        let status = match &cd.state {
+            ConfigDiskState::Absent => "missing",
+            ConfigDiskState::PresentLuks { .. } => "unknown",
+            ConfigDiskState::PresentNotLuks => "unknown",
+        }
+        .to_owned();
         let mapper = mapper_name(&cd.name).0;
 
         disk_reports.push(DiskReport {
