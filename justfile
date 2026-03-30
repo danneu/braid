@@ -22,8 +22,9 @@ test *args:
     else
         echo "build-dir: default"
     fi
+    rc=0
     if [ ${#tests[@]} -eq 0 ]; then
-        nix flake check --max-jobs 4 "${build_dir[@]}" $verbose
+        nix flake check --max-jobs 4 "${build_dir[@]}" $verbose || rc=$?
     else
         # Build all specified tests in a single `nix build` so nix can run them
         # concurrently (up to the linux-builder's maxJobs). A single invocation
@@ -35,11 +36,17 @@ test *args:
             installables+=(".#checks.{{system}}.$t")
         done
         if $rebuild; then
-            nix build "${installables[@]}" --rebuild --max-jobs 4 "${build_dir[@]}" $keep_going $verbose
+            nix build "${installables[@]}" --rebuild --max-jobs 4 "${build_dir[@]}" $keep_going $verbose || rc=$?
         else
-            nix build "${installables[@]}" --max-jobs 4 "${build_dir[@]}" $keep_going $verbose
+            nix build "${installables[@]}" --max-jobs 4 "${build_dir[@]}" $keep_going $verbose || rc=$?
         fi
     fi
+    if [ $rc -eq 0 ]; then
+        printf '\033]777;notify;braid;tests passed\033\\'
+    else
+        printf '\033]777;notify;braid;tests failed\033\\'
+    fi
+    exit $rc
 
 # Run NixOS VM tests with parallel evaluation (requires nix-fast-build)
 # Add --no-nom to replace the dep graph with a one-liner progress bar
