@@ -159,6 +159,10 @@ pub fn cmd_recover<R: CommandRunner, F: Filesystem + ?Sized>(
     journal::clear_journal(paths).map_err(|e| RecoverError::Journal(e.to_string()))?;
     eprintln!("pending-op.json cleared. Recovery complete.");
 
+    // Best-effort: warn if a paused balance was detected (e.g. crash during
+    // RAID1 conversion). skip_balance prevents kernel auto-resume.
+    crate::status::emit_paused_balance_warning(runner, mount_point, &mut std::io::stderr());
+
     Ok(())
 }
 

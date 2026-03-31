@@ -198,7 +198,7 @@ This is a repair tool — the normal path to create `pool.json` is `braid add`.
 Braid maintains state files in `/var/lib/braid/`:
 
 - **`pool.json`** — authoritative disk membership with enriched metadata. Maps disk names to `/dev/disk/by-id/` paths plus `luks_uuid`, `devid`, and `added_at`. Written by `braid add`, `remove`, `replace`, `remove-missing`, `discover --write`, and `recover`. Metadata fields enriched by `unlock` on each mount. If missing or corrupt, `unlock` fails with a clear error directing you to `braid discover --write`.
-- **`pending-op.json`** — pending-operation journal (transient). Present only during mutations. When present, braid enters recovery mode — only `status`, `recover`, and `lock` are allowed. `braid recover --passphrase-stdin` opens LUKS, mounts the pool, rebuilds membership from live state, and clears the journal. If devices are missing, pass `--allow-degraded`.
+- **`pending-op.json`** — pending-operation journal (transient). Present only during mutations. When present, braid enters recovery mode — only `status`, `recover`, and `lock` are allowed. `braid recover --passphrase-stdin` opens LUKS, mounts the pool, rebuilds membership from live state, and clears the journal. If devices are missing, pass `--allow-degraded`. If a paused balance is detected (e.g. from an interrupted RAID1 conversion), `recover` warns and tells you to resume or cancel it manually.
 
 Disk names are immutable once assigned. Renaming/reassigning a name is rejected by mutating commands. Keep the original name, or use explicit `braid replace` / `braid remove` + `braid add` workflows.
 
@@ -287,9 +287,9 @@ braid always mounts the top-level subvolume explicitly (`subvolid=5`), so `btrfs
 Interrupted balance operations (e.g., from a crash or `braid lock` during rebalance) are **never silently resumed** on unlock. braid mounts with `skip_balance` and warns if a paused balance is detected:
 
 ```
-[warn]  paused balance detected — will not auto-resume
-           resume:  btrfs balance resume /mnt/storage
-           cancel:  btrfs balance cancel /mnt/storage
+  paused balance detected — will not auto-resume
+    resume:  btrfs balance resume /mnt/storage
+    cancel:  btrfs balance cancel /mnt/storage
 ```
 
 ## Auto-unlock with USB keyfile

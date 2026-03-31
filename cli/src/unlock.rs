@@ -71,21 +71,11 @@ pub fn cmd_unlock<R: CommandRunner, F: Filesystem + ?Sized>(
     // Best-effort: warn if a paused balance was found on mount.
     // skip_balance prevents the kernel from resuming it silently, but the user
     // should know so they can resume or cancel explicitly.
-    fn tag(label: &str) -> String {
-        format!("[{:<4}]", label)
-    }
-    match crate::status::get_balance_report(runner, mount_point.as_str()) {
-        crate::status::BalanceReport::Paused { .. } => {
-            eprintln!(
-                "{}  {:<10}paused balance detected \u{2014} will not auto-resume",
-                tag("warn"),
-                ""
-            );
-            eprintln!("           resume:  btrfs balance resume {mount_point}");
-            eprintln!("           cancel:  btrfs balance cancel {mount_point}");
-        }
-        _ => {}
-    }
+    crate::status::emit_paused_balance_warning(
+        runner,
+        mount_point.as_str(),
+        &mut std::io::stderr(),
+    );
 
     Ok(())
 }
