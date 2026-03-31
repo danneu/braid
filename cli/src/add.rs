@@ -2,8 +2,8 @@ use crate::cmd::{CmdError, CmdRequest, CommandRunner};
 use crate::config::{config_read, mapper_name};
 use crate::journal;
 use crate::luks::{
-    backup_luks_header, device_has_btrfs_superblock, ensure_luks_open, luks_format,
-    luks_opts_from_env, read_passphrase, verify_passphrase,
+    backup_luks_header, ensure_luks_open, luks_format, luks_opts_from_env, read_passphrase,
+    verify_passphrase,
 };
 use crate::membership::{self, PoolMembership};
 use crate::parse::btrfs_filesystem_show::{classify_btrfs_probe, DeviceBtrfsProbe};
@@ -488,24 +488,7 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
 
     if !pool.mounted {
         if mapper_paths.len() >= 2 {
-            // Check if ALL target mappers are fresh (no btrfs superblock)
-            let mut any_has_superblock = false;
-            for mp in &mapper_paths {
-                if device_has_btrfs_superblock(runner, mp)? {
-                    any_has_superblock = true;
-                    break;
-                }
-            }
-
-            if any_has_superblock {
-                return Err(AddError::Validation(
-                    "pool is not mounted but some target devices have existing btrfs data. \
-                     Run `braid unlock` first to bring the pool online, then add disks."
-                        .into(),
-                ));
-            }
-
-            // All fresh — bootstrap with mkfs.btrfs RAID1
+            // Bootstrap with mkfs.btrfs RAID1
             pool_bootstrap_mount_raid1(runner, &mapper_paths, config.mount_point().as_str())?;
             eprintln!(
                 "Pool created (RAID1) and mounted at {}",
@@ -1591,6 +1574,76 @@ mod tests {
         assert!(
             journal::load_journal(&paths).unwrap().is_none(),
             "no journal should exist after pre-mutation identity failure"
+        );
+    }
+
+    #[test]
+    // Intent: unmounted bootstrap rejects braid-labeled PresentLuks disks.
+    //
+    // Why it exists: the guard at line 367 ("bootstrap only accepts fresh
+    //   disks") is the invariant that makes the bootstrap path unreachable for
+    //   PresentLuks disks. This test locks that invariant so a future refactor
+    //   can't silently remove it.
+    //
+    // Scenario: user has a braid-labeled LUKS disk and no mounted pool. Running
+    //   `braid add` must refuse rather than attempting bootstrap with an
+    //   existing encrypted disk.
+    fn bootstrap_rejects_braid_labeled_luks_disk() {
+        let (_state_tmp, paths, _tmp, config_path, pass_path) = add_test_setup();
+        let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                },
+                RawCommandOutput {
+                    cmd: "cryptsetup luksUUID /dev/disk/by-id/virtio-disk2".into(),
+                    stdout: "a1b2c3d4-e5f6-7890-abcd-ef1234567890\n".into(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                },
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksDumpText {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                },
+                RawCommandOutput {
+                    cmd: "cryptsetup luksDump /dev/disk/by-id/virtio-disk2".into(),
+                    stdout: "LUKS header information\nVersion:       \t2\nLabel:         \tbraid-disk2\nSubsystem:     \t(no subsystem)\n".into(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                },
+            )
+            .with_output(
+                CmdRequest::FindmntJson {
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                RawCommandOutput {
+                    cmd: "findmnt --json --mountpoint /mnt/storage".into(),
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    exit_status: 1,
+                },
+            );
+
+        let result = cmd_add(
+            &runner,
+            &fs,
+            &config_path,
+            &["disk2=/dev/disk/by-id/virtio-disk2".into()],
+            false,
+            true,
+            false,
+            Some(pass_path.as_path()),
+            None,
+            ProgressOutput::Off,
+            &paths,
+        );
+
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("bootstrap only accepts fresh disks"),
+            "expected bootstrap rejection, got: {err}"
         );
     }
 }
