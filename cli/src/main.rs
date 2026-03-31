@@ -203,9 +203,6 @@ struct DiscoverArgs {
     /// Write discovered membership to pool.json
     #[arg(long)]
     write: bool,
-    /// Show what would be written without writing
-    #[arg(long)]
-    dry_run: bool,
 }
 
 fn main() {
