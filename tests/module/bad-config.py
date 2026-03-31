@@ -1,9 +1,8 @@
 start_all()
 
-# Boot will take a while — LUKS units wait 10s for devices that never appear.
-machine.wait_for_unit("multi-user.target", timeout=180)
+machine.wait_for_unit("multi-user.target", timeout=120)
 
-with subtest("Boot completed despite missing drives"):
+with subtest("Boot completed with no pool configured"):
     # multi-user.target reached means boot didn't hang
     machine.succeed("systemctl is-active multi-user.target")
 

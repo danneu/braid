@@ -1,11 +1,13 @@
 use crate::cmd::{CmdRequest, CommandRunner};
 use crate::config::config_read;
-use crate::disk_map;
+use crate::journal;
+use crate::membership;
 use crate::parse::parse_btrfs_device_usage;
 use crate::pool::{pool_remove_devid, pool_remove_missing};
 use crate::preflight;
 use crate::probe::{probe_pool, ProbeError};
 use crate::progress::ProgressOutput;
+use crate::state_paths::StatePaths;
 use crate::types::MountPoint;
 use std::path::Path;
 
@@ -28,6 +30,36 @@ pub struct RemoveMissingStep {
     pub description: String,
 }
 
+/// Resolve the missing-device removal target to a (devid, membership-name) pair.
+/// Returns Err if the missing device's identity can't be mapped to a pool.json entry.
+fn resolve_removal_target(
+    target_devid: Option<u64>,
+    membership: &membership::PoolMembership,
+) -> Result<(u64, String), RemoveMissingError> {
+    let devid = target_devid.ok_or_else(|| {
+        RemoveMissingError::Validation(
+            "cannot determine which device to remove: btrfs did not report \
+             the missing device's ID. Pass --missing-id <devid> explicitly."
+                .into(),
+        )
+    })?;
+
+    let name = membership
+        .disks
+        .iter()
+        .find(|(_, member)| member.devid == Some(devid))
+        .map(|(name, _)| name.clone())
+        .ok_or_else(|| {
+            RemoveMissingError::Validation(format!(
+                "devid {devid} not found in pool.json membership — \
+                 no disk entry has this device ID. \
+                 Pool membership may need manual repair."
+            ))
+        })?;
+
+    Ok((devid, name))
+}
+
 pub fn cmd_remove_missing<R: CommandRunner + Sync>(
     runner: &R,
     config_path: &Path,
@@ -35,11 +67,11 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync>(
     dry_run: bool,
     yes: bool,
     progress: ProgressOutput,
+    paths: &StatePaths,
 ) -> Result<(), RemoveMissingError> {
+    preflight::check_no_pending_operation(paths).map_err(RemoveMissingError::Validation)?;
+
     let config = config_read(config_path)?;
-    let disk_map_state = disk_map::load_disk_map();
-    disk_map::validate_config_name_stability(&config, &disk_map_state)
-        .map_err(|e| RemoveMissingError::Validation(e.to_string()))?;
 
     let pool = match probe_pool(runner, config.mount_point().as_str()) {
         Ok(p) => p,
@@ -143,27 +175,34 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync>(
         }
     }
 
+    // Resolve devid→name from enriched pool.json and build journal before btrfs operation.
+    let target_devid = missing_id.or_else(|| pool.missing_devids.first().copied());
+    let pre_membership = membership::load_membership(paths).map_err(|e| {
+        RemoveMissingError::Validation(format!("failed to load pool membership: {e}"))
+    })?;
+    let (resolved_devid, name_to_remove) = resolve_removal_target(target_devid, &pre_membership)?;
+    let mut target_membership = pre_membership.clone();
+    target_membership.disks.remove(&name_to_remove);
+    let journal = journal::build_journal(
+        pre_membership,
+        target_membership.clone(),
+        journal::OpKind::RemoveMissing {
+            devid: Some(resolved_devid),
+        },
+    );
+    journal::write_journal(paths, &journal)
+        .map_err(|e| RemoveMissingError::Validation(e.to_string()))?;
+
     // Execute
-    if let Some(devid) = missing_id {
-        eprintln!("Removing missing device (devid {}) from pool...", devid);
-        pool_remove_devid(runner, config.mount_point().as_str(), devid)?;
+    if missing_id.is_some() {
+        eprintln!(
+            "Removing missing device (devid {}) from pool...",
+            resolved_devid
+        );
+        pool_remove_devid(runner, config.mount_point().as_str(), resolved_devid)?;
     } else {
         eprintln!("Removing missing device from pool...");
         pool_remove_missing(runner, config.mount_point().as_str())?;
-    }
-
-    // Update disk map (best effort — never fail the remove-missing)
-    if let Some(devid) = missing_id {
-        // Targeted removal: prune entries with this specific devid
-        disk_map::update_disk_map_best_effort(|map| {
-            disk_map::remove_disks_by_devids(map, &[devid]);
-        });
-    } else if let Ok(pool_after) = probe_pool(runner, config.mount_point().as_str()) {
-        // General removal: prune entries whose devid is no longer in pool
-        let live_devids: Vec<u64> = pool_after.devices.iter().map(|d| d.devid).collect();
-        disk_map::update_disk_map_best_effort(|map| {
-            disk_map::prune_absent_devids(map, &live_devids);
-        });
     }
 
     crate::pool::maybe_restore_raid1(
@@ -173,6 +212,12 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync>(
         progress,
     )
     .map_err(|e| RemoveMissingError::Pool(e))?;
+
+    // Post-commit: write pool.json and clear journal only after the full operation succeeds.
+    membership::save_membership(&target_membership, paths).map_err(|e| {
+        RemoveMissingError::Validation(format!("failed to persist pool membership: {e}"))
+    })?;
+    journal::clear_journal(paths).map_err(|e| RemoveMissingError::Validation(e.to_string()))?;
 
     eprintln!("Done. Missing device removed from pool.");
     Ok(())
@@ -263,6 +308,24 @@ fn compile_steps(
 mod tests {
     use super::*;
     use crate::cmd::{CmdError, CmdRequest, CommandRunner, RawCommandOutput};
+    use crate::membership::{DiskMember, PoolMembership};
+    use crate::state_paths::StatePaths;
+    use crate::types::ByIdPath;
+
+    /// Create a StatePaths backed by a temp dir, with pool.json pre-populated.
+    /// Each entry is (name, by_id_path, optional_devid).
+    fn test_paths(disks: &[(&str, &str, Option<u64>)]) -> (tempfile::TempDir, StatePaths) {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let mut m = PoolMembership::empty();
+        for (name, by_id, devid) in disks {
+            let mut member = DiskMember::from_by_id(ByIdPath(by_id.to_string()));
+            member.devid = *devid;
+            m.disks.insert(name.to_string(), member);
+        }
+        membership::save_membership(&m, &paths).unwrap();
+        (tmp, paths)
+    }
 
     struct EnospcRunner {
         device_usage_stdout: &'static str,
@@ -326,7 +389,7 @@ mod tests {
                 )),
                 CmdRequest::BtrfsFilesystemShow { mount_point } => Ok(mock_out(
                     &format!("btrfs filesystem show {mount_point}"),
-                    "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\tTotal devices 2 FS bytes used 16.17MiB\n\tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\t*** Some devices missing\n",
+                    "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\tTotal devices 2 FS bytes used 16.17MiB\n\tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\tdevid    2 size 0 used 0 path MISSING\n",
                     0,
                 )),
                 CmdRequest::CryptsetupStatus { mapper } => Ok(mock_out(
@@ -373,22 +436,13 @@ mod tests {
     // Scenario: User's 2-disk NAS has one drive die. They run braid remove-missing.
     //   The operation succeeds because no data relocation is needed.
     fn enospc_check_skipped_for_single_survivor() {
+        let (_state_tmp, state_paths) = test_paths(&[
+            ("disk1", "/dev/disk/by-id/virtio-disk1", Some(1)),
+            ("disk2", "/dev/disk/by-id/virtio-disk2", Some(2)),
+        ]);
         let tmp = tempfile::tempdir().unwrap();
         let config_path = tmp.path().join("config.json");
-
-        let mut disks = std::collections::BTreeMap::new();
-        disks.insert(
-            "disk1".to_owned(),
-            serde_json::json!({ "by_id": "/dev/disk/by-id/virtio-disk1" }),
-        );
-        disks.insert(
-            "disk2".to_owned(),
-            serde_json::json!({ "by_id": "/dev/disk/by-id/virtio-disk2" }),
-        );
-        let config_json = serde_json::json!({
-            "disks": disks,
-            "mount_point": "/mnt/storage"
-        });
+        let config_json = serde_json::json!({ "mount_point": "/mnt/storage" });
         std::fs::write(&config_path, serde_json::to_vec(&config_json).unwrap()).unwrap();
 
         let log = Arc::new(Mutex::new(Vec::new()));
@@ -400,6 +454,7 @@ mod tests {
             false,
             true,
             crate::progress::ProgressOutput::Off,
+            &state_paths,
         )
         .expect("remove-missing should succeed");
 
@@ -664,7 +719,7 @@ mod tests {
                     let (missing_line, total) = if remove_done && !self.still_degraded_after {
                         ("", 2)
                     } else {
-                        ("\t*** Some devices missing\n", 3)
+                        ("\tdevid    3 size 0 used 0 path MISSING\n", 3)
                     };
                     Ok(mock_out(
                         &format!("btrfs filesystem show {mount_point}"),
@@ -721,28 +776,22 @@ mod tests {
         }
     }
 
-    fn three_device_config() -> (tempfile::TempDir, std::path::PathBuf) {
+    fn three_device_config() -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        tempfile::TempDir,
+        StatePaths,
+    ) {
         let tmp = tempfile::tempdir().unwrap();
         let config_path = tmp.path().join("config.json");
-        let mut disks = std::collections::BTreeMap::new();
-        disks.insert(
-            "disk1".to_owned(),
-            serde_json::json!({ "by_id": "/dev/disk/by-id/virtio-disk1" }),
-        );
-        disks.insert(
-            "disk2".to_owned(),
-            serde_json::json!({ "by_id": "/dev/disk/by-id/virtio-disk2" }),
-        );
-        disks.insert(
-            "disk3".to_owned(),
-            serde_json::json!({ "by_id": "/dev/disk/by-id/virtio-disk3" }),
-        );
-        let config_json = serde_json::json!({
-            "disks": disks,
-            "mount_point": "/mnt/storage"
-        });
+        let config_json = serde_json::json!({ "mount_point": "/mnt/storage" });
         std::fs::write(&config_path, serde_json::to_vec(&config_json).unwrap()).unwrap();
-        (tmp, config_path)
+        let (state_tmp, state_paths) = test_paths(&[
+            ("disk1", "/dev/disk/by-id/virtio-disk1", Some(1)),
+            ("disk2", "/dev/disk/by-id/virtio-disk2", Some(2)),
+            ("disk3", "/dev/disk/by-id/virtio-disk3", Some(3)),
+        ]);
+        (tmp, config_path, state_tmp, state_paths)
     }
 
     #[test]
@@ -752,7 +801,7 @@ mod tests {
     // Scenario: 3-disk NAS, one drive dies. Operator runs remove-missing.
     // After the removal, pool is healthy with 2 survivors → soft balance runs.
     fn three_device_pool_soft_rebalance_runs() {
-        let (_tmp, config_path) = three_device_config();
+        let (_tmp, config_path, _state_tmp, state_paths) = three_device_config();
         let log = Arc::new(Mutex::new(Vec::new()));
         let runner = ThreeDeviceRunner::new(log.clone(), false);
         cmd_remove_missing(
@@ -762,6 +811,7 @@ mod tests {
             false,
             true,
             crate::progress::ProgressOutput::Off,
+            &state_paths,
         )
         .expect("remove-missing should succeed");
 
@@ -792,7 +842,7 @@ mod tests {
     // Scenario: 3-disk NAS, 2 drives die. Operator removes 1 missing entry.
     // Pool still has 1 missing device → no rebalance.
     fn three_device_two_missing_no_rebalance() {
-        let (_tmp, config_path) = three_device_config();
+        let (_tmp, config_path, _state_tmp, state_paths) = three_device_config();
         let log = Arc::new(Mutex::new(Vec::new()));
         let runner = ThreeDeviceRunner::new(log.clone(), true);
         cmd_remove_missing(
@@ -802,6 +852,7 @@ mod tests {
             false,
             true,
             crate::progress::ProgressOutput::Off,
+            &state_paths,
         )
         .expect("remove-missing should succeed");
 
@@ -811,6 +862,177 @@ mod tests {
                 .iter()
                 .any(|c| matches!(c, CmdRequest::BtrfsBalanceRaid1Soft { .. })),
             "should NOT call BtrfsBalanceRaid1Soft when still degraded; calls: {calls:?}"
+        );
+    }
+
+    /// Runner for 3-device pool where the soft balance fails after successful
+    /// device removal. Everything succeeds except BtrfsBalanceRaid1Soft.
+    struct FailingSoftBalanceRunner {
+        log: Arc<Mutex<Vec<CmdRequest>>>,
+    }
+
+    impl FailingSoftBalanceRunner {
+        fn new(log: Arc<Mutex<Vec<CmdRequest>>>) -> Self {
+            Self { log }
+        }
+    }
+
+    impl CommandRunner for FailingSoftBalanceRunner {
+        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
+            self.log.lock().unwrap().push(request.clone());
+
+            let remove_done = self
+                .log
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|c| matches!(c, CmdRequest::BtrfsDeviceRemoveMissing { .. }));
+
+            match request {
+                CmdRequest::FindmntJson { mount_point } => Ok(mock_out(
+                    &format!("findmnt --json --mountpoint {mount_point}"),
+                    r#"{"filesystems":[{"target":"/mnt/storage","source":"/dev/mapper/braid-disk1","fstype":"btrfs"}]}"#,
+                    0,
+                )),
+                CmdRequest::BtrfsFilesystemShow { mount_point } => {
+                    let (missing_line, total) = if remove_done {
+                        ("", 2)
+                    } else {
+                        ("\tdevid    3 size 0 used 0 path MISSING\n", 3)
+                    };
+                    Ok(mock_out(
+                        &format!("btrfs filesystem show {mount_point}"),
+                        &format!(
+                            "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\tTotal devices {total} FS bytes used 16.17MiB\n\tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk2\n{missing_line}",
+                        ),
+                        0,
+                    ))
+                }
+                CmdRequest::CryptsetupStatus { mapper } => Ok(mock_out(
+                    &format!("cryptsetup status {mapper}"),
+                    &format!("{mapper} is active and is in use.\n  type:    LUKS2\n  device:  /dev/vdb\n  mode:    read/write\n"),
+                    0,
+                )),
+                CmdRequest::CryptsetupLuksUuid { .. } => Ok(mock_out(
+                    "cryptsetup luksUUID",
+                    "11111111-1111-1111-1111-111111111111\n",
+                    0,
+                )),
+                CmdRequest::BtrfsBalanceStatus { .. } => Ok(mock_out(
+                    "btrfs balance status",
+                    "No balance found on '/mnt/storage'\n",
+                    0,
+                )),
+                CmdRequest::BtrfsDeviceRemoveMissing { .. } => {
+                    Ok(mock_out("btrfs device remove missing", "", 0))
+                }
+                CmdRequest::BtrfsDeviceUsageRaw { .. } => {
+                    Ok(mock_out(
+                        "btrfs device usage --raw",
+                        "/dev/mapper/braid-disk1, ID: 1\n   Device size:           520093696\n   Device slack:                  0\n   Data,RAID1:            67108864\n   Unallocated:           452984832\n\n/dev/mapper/braid-disk2, ID: 2\n   Device size:           520093696\n   Device slack:                  0\n   Data,RAID1:            67108864\n   Unallocated:           452984832\n\n<missing disk>, ID: 3\n   Device size:                  0\n   Device slack:                  0\n   Data,RAID1:            67108864\n   Unallocated:                  0\n\n",
+                        0,
+                    ))
+                }
+                CmdRequest::BtrfsBalanceRaid1Soft { .. } => Ok(RawCommandOutput {
+                    cmd: "btrfs balance start -dconvert=raid1,soft".into(),
+                    stdout: String::new(),
+                    stderr: "ERROR: error during balancing: No space left on device".into(),
+                    exit_status: 1,
+                }),
+                _ => Err(CmdError::MissingMock),
+            }
+        }
+
+        fn run_with_stdin(
+            &self,
+            request: &CmdRequest,
+            _stdin: &[u8],
+        ) -> Result<RawCommandOutput, CmdError> {
+            self.run(request)
+        }
+    }
+
+    #[test]
+    // Intent: pending-op.json survives when soft balance fails after a successful
+    //   device removal.
+    //
+    // Why it exists: remove-missing previously cleared the journal before
+    //   maybe_restore_raid1(). If the soft balance failed, the journal was already
+    //   gone despite an irreversible pool change, leaving pool.json stale with
+    //   no recovery path.
+    //
+    // Scenario: 3-disk NAS, one drive dies. Operator runs remove-missing. The
+    //   device removal succeeds but the post-removal soft balance fails. The
+    //   journal must persist so `braid recover` can reconcile.
+    fn journal_survives_soft_balance_failure() {
+        let (_tmp, config_path, _state_tmp, state_paths) = three_device_config();
+
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let runner = FailingSoftBalanceRunner::new(log.clone());
+        let result = cmd_remove_missing(
+            &runner,
+            &config_path,
+            None,
+            false,
+            true,
+            crate::progress::ProgressOutput::Off,
+            &state_paths,
+        );
+
+        assert!(
+            result.is_err(),
+            "remove-missing should fail when soft balance fails"
+        );
+        assert!(
+            journal::load_journal(&state_paths).unwrap().is_some(),
+            "pending-op.json must survive error exit so braid recover can reconcile"
+        );
+    }
+
+    // --- resolve_removal_target tests ---
+
+    #[test]
+    // Intent: resolve_removal_target fails when no devid is available.
+    //
+    // Why it exists: When btrfs only prints the "*** Some devices missing"
+    //   sentinel (no explicit devid line), target_devid is None. Previously
+    //   the code silently skipped membership removal, leaving pool.json
+    //   with the dead disk still listed.
+    //
+    // Scenario: Single missing device on an older kernel that doesn't emit
+    //   per-device MISSING lines. User runs remove-missing without --missing-id.
+    fn resolve_target_fails_when_devid_unavailable() {
+        let m = PoolMembership::empty();
+        let err = resolve_removal_target(None, &m).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("missing device's ID"),
+            "expected hint about missing device ID; got: {msg}"
+        );
+    }
+
+    #[test]
+    // Intent: resolve_removal_target fails when devid is known but no
+    //   pool.json member has that devid enriched.
+    //
+    // Why it exists: If devid enrichment was skipped or failed, the lookup
+    //   returns None. Previously the code silently proceeded, leaving
+    //   pool.json unchanged despite the btrfs device being removed.
+    //
+    // Scenario: User enrolled a disk before devid enrichment existed, then
+    //   the disk fails. remove-missing has a devid from btrfs but can't
+    //   match it to any pool.json entry.
+    fn resolve_target_fails_when_devid_not_in_membership() {
+        let mut m = PoolMembership::empty();
+        m.disks.insert(
+            "disk1".to_string(),
+            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".to_string())),
+        );
+        let err = resolve_removal_target(Some(99), &m).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not found in pool.json"),
+            "expected pool.json membership error; got: {msg}"
         );
     }
 }

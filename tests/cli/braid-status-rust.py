@@ -27,7 +27,7 @@ def add_disk(key):
     return (
         f"printf '%s\\n' {passphrase_q} | "
         f"BRAID_LUKS_OPTS='{luks_opts}' "
-        f"braid add {key} --passphrase-stdin --yes"
+        f"braid add {key}=/dev/disk/by-id/virtio-{key} --passphrase-stdin --yes"
     )
 
 
@@ -35,33 +35,11 @@ def rust_status(extra=""):
     return f"braid status {extra}"
 
 
-# --- Phase 0: New disks before any adds ---
+# --- Phase 1: Single-disk summary ---
 
 with subtest("Setup: add disk1 only"):
     machine.succeed(add_disk("disk1"))
     machine.succeed("mountpoint -q /mnt/storage")
-
-with subtest("New disks in compact output"):
-    output = machine.succeed(rust_status())
-    print(f"Phase 0 compact:\n{output}")
-    assert "disk1" in output, f"Expected 'disk1':\n{output}"
-    assert "present" in output, f"Expected 'present':\n{output}"
-    assert "disk2" in output, f"Expected 'disk2':\n{output}"
-    assert "disk3" in output, f"Expected 'disk3':\n{output}"
-    assert "new" in output, f"Expected 'new' for unadded disks:\n{output}"
-    assert "missing" not in output.lower(), f"Unexpected 'missing':\n{output}"
-
-with subtest("New disks in JSON"):
-    raw = machine.succeed(rust_status("--json"))
-    s = json.loads(raw)
-    new_disks = [d for d in s["disks"] if d["status"] == "new"]
-    assert len(new_disks) == 2, f"Expected 2 new disks: {new_disks}"
-    present_disks = [d for d in s["disks"] if d["status"] == "present"]
-    assert len(present_disks) == 1, f"Expected 1 present disk: {present_disks}"
-    missing_disks = [d for d in s["disks"] if d["status"] == "missing"]
-    assert len(missing_disks) == 0, f"Expected 0 missing disks: {missing_disks}"
-
-# --- Phase 1: Single-disk summary ---
 
 with subtest("Single-disk summary"):
     output = machine.succeed(rust_status())
@@ -139,10 +117,10 @@ with subtest("Degraded summary"):
     assert "RAID1" in output, f"Expected 'RAID1':\n{output}"
     assert "1 missing device" in output, f"Expected '1 missing device':\n{output}"
     # Per-disk detail (always shown)
-    assert "MISSING" in output, f"Expected 'MISSING':\n{output}"
+    assert "UNKNOWN" in output, f"Expected 'UNKNOWN':\n{output}"
     assert "disk3" in output, f"Expected 'disk3':\n{output}"
-    assert "not found" in output or "device absent" in output, (
-        f"Expected 'not found' or 'device absent':\n{output}"
+    assert "metadata unavailable" in output, (
+        f"Expected 'metadata unavailable':\n{output}"
     )
     lines = output.splitlines()
     for disk in ["disk1", "disk2"]:
@@ -154,9 +132,9 @@ with subtest("Degraded JSON"):
     s = json.loads(raw)
     assert s["status"] == "degraded", f"Expected degraded: {s['status']}"
     present_disks = [d for d in s["disks"] if d["status"] == "present"]
-    missing_disks = [d for d in s["disks"] if d["status"] == "missing"]
+    unknown_disks = [d for d in s["disks"] if d["status"] == "unknown"]
     assert len(present_disks) >= 2, f"Expected at least 2 present disks: {present_disks}"
-    assert len(missing_disks) >= 1, f"Expected at least 1 missing disk: {missing_disks}"
+    assert len(unknown_disks) >= 1, f"Expected at least 1 unknown disk: {unknown_disks}"
 
 # --- Phase 4: Not mounted ---
 

@@ -38,7 +38,7 @@ with subtest("Setup: create 1-disk pool without keyfile"):
     machine.succeed(
         f"printf '%s\\n' {pq} | "
         f"BRAID_LUKS_OPTS='{luks_opts}' "
-        f"braid add disk1 --passphrase-stdin --yes"
+        f"braid add disk1=/dev/disk/by-id/virtio-disk1 --passphrase-stdin --yes"
     )
     machine.succeed("echo 'add-enroll test' > /mnt/storage/test.txt")
     machine.succeed("sync")
@@ -54,7 +54,7 @@ with subtest("Test 1: add disk2 with --enroll"):
     machine.succeed(
         f"printf '%s\\n' {pq} | "
         f"BRAID_LUKS_OPTS='{luks_opts}' "
-        f"braid add disk2 --passphrase-stdin --yes "
+        f"braid add disk2=/dev/disk/by-id/virtio-disk2 --passphrase-stdin --yes "
         f"--enroll /tmp"
     )
 

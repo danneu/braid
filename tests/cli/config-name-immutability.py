@@ -1,12 +1,12 @@
 # Test: config disk-name immutability
 #
-# What: Builds a pool and disk-map entries, then renames one disk name in config
+# What: Builds a pool and pool membership entries, then renames one disk name in config
 # while keeping the same by-id path and runs a mutating command.
 #
 # Why: v1.0 forbids name rename/reassignment in mutating commands; they must
 # fail fast before probing or making storage changes.
 #
-# Dependencies: braid add succeeds and writes disk-map entries.
+# Dependencies: braid add succeeds and writes pool membership entries.
 
 import json
 
@@ -24,11 +24,11 @@ def add_cmd(key):
     return (
         f"printf '%s\\n' {passphrase_q} | "
         f"BRAID_LUKS_OPTS='{luks_opts}' "
-        f"braid add {key} --passphrase-stdin --yes"
+        f"braid add {key}=/dev/disk/by-id/virtio-{key} --passphrase-stdin --yes"
     )
 
 
-with subtest("Setup: build 2-disk pool and disk-map entries"):
+with subtest("Setup: build 2-disk pool and pool membership"):
     machine.succeed(add_cmd("disk1"))
     machine.succeed(add_cmd("disk2"))
 
@@ -36,44 +36,29 @@ with subtest("Setup: build 2-disk pool and disk-map entries"):
     assert "/dev/mapper/braid-disk1" in fi_show, fi_show
     assert "/dev/mapper/braid-disk2" in fi_show, fi_show
 
-    raw_map = machine.succeed("cat /var/lib/braid/disk-map.json")
-    disk_map = json.loads(raw_map)
-    assert "disk1" in disk_map["disks"], disk_map
-    assert "disk2" in disk_map["disks"], disk_map
+    raw_pool = machine.succeed("cat /var/lib/braid/pool.json")
+    pool_m = json.loads(raw_pool)
+    assert "disk1" in pool_m["disks"], pool_m
+    assert "disk2" in pool_m["disks"], pool_m
 
-with subtest("Rename name in config and run mutating command"):
-    machine.succeed(
-        """cat > /tmp/renamed-config.json <<'JSON'
-{
-  "disks": {
-    "wd-red": { "by_id": "/dev/disk/by-id/virtio-disk1" },
-    "disk2": { "by_id": "/dev/disk/by-id/virtio-disk2" }
-  },
-  "mount_point": "/mnt/storage"
-}
-JSON"""
-    )
-
-    map_before = machine.succeed("cat /var/lib/braid/disk-map.json")
+with subtest("Add with renamed name for same disk is rejected"):
+    # Try to add the same physical disk (virtio-disk1) under a new name (wd-red).
+    # This should be rejected because pool.json already has disk1 for that by_id.
+    pool_before = machine.succeed("cat /var/lib/braid/pool.json")
+    pq = shlex.quote(passphrase)
     status, output = machine.execute(
-        "braid --config /tmp/renamed-config.json remove-missing --yes 2>&1"
+        f"printf '%s\\n' {pq} | "
+        f"BRAID_LUKS_OPTS='{luks_opts}' "
+        f"braid add wd-red=/dev/disk/by-id/virtio-disk1 --passphrase-stdin --yes 2>&1"
     )
     assert status != 0, f"expected non-zero exit, got {status}:\n{output}"
-
-    expected = (
-        "Disk name rename/reassignment is not allowed. "
-        "Keep original name 'disk1' or use explicit replace/remove+add workflow. "
-        "Details: recorded name 'disk1' with by_id '/dev/disk/by-id/virtio-disk1' "
-        "now appears as 'wd-red'."
-    )
-    assert expected in output, f"expected exact immutability error:\n{output}"
 
     fi_show = machine.succeed("btrfs fi show /mnt/storage")
     assert "/dev/mapper/braid-disk1" in fi_show, fi_show
     assert "/dev/mapper/braid-disk2" in fi_show, fi_show
     assert "missing" not in fi_show.lower(), fi_show
 
-    map_after = machine.succeed("cat /var/lib/braid/disk-map.json")
-    assert map_after == map_before, "disk-map changed on rejected name rename"
+    pool_after = machine.succeed("cat /var/lib/braid/pool.json")
+    assert pool_after == pool_before, "pool.json changed on rejected name rename"
 
 machine.shutdown()

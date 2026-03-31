@@ -1,15 +1,17 @@
 use crate::cmd::{CmdRequest, CommandRunner};
 use crate::config::{config_read, mapper_name};
-use crate::disk_map;
+use crate::journal;
 use crate::luks::{
     backup_luks_header, ensure_luks_open, luks_format, luks_opts_from_env, read_passphrase,
     verify_passphrase,
 };
+use crate::membership;
 use crate::parse::parse_btrfs_device_stats;
 use crate::pool::{pool_replace_device, pool_resize_device};
 use crate::preflight;
 use crate::probe::{probe_config_disk, probe_pool, Filesystem, ProbeError};
 use crate::progress::ProgressOutput;
+use crate::state_paths::StatePaths;
 use crate::types::*;
 use std::path::Path;
 
@@ -50,21 +52,16 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     passphrase_file: Option<&Path>,
     enroll_key_file: Option<&Path>,
     progress: ProgressOutput,
+    paths: &StatePaths,
 ) -> Result<(), ReplaceError> {
-    let config = config_read(config_path)?;
-    let disk_map_state = disk_map::load_disk_map();
-    disk_map::validate_config_name_stability(&config, &disk_map_state)
-        .map_err(|e| ReplaceError::Validation(e.to_string()))?;
+    preflight::check_no_pending_operation(paths).map_err(ReplaceError::Validation)?;
 
-    // --new must be in config
-    let new_disk = config.disk_by_name(new_name).ok_or_else(|| {
-        let available: Vec<_> = config.names().into_iter().map(|s| s.as_str()).collect();
-        ReplaceError::Validation(format!(
-            "new disk '{}' not found in config. Available: {}",
-            new_name,
-            available.join(", ")
-        ))
-    })?;
+    let config = config_read(config_path)?;
+
+    // Parse new_name as name=by_id spec
+    let (new_name_parsed, new_by_id) = membership::parse_disk_spec(new_name)
+        .map_err(|e| ReplaceError::Validation(e.to_string()))?;
+    let new_name = new_name_parsed.as_str();
 
     let pool = match probe_pool(runner, config.mount_point().as_str()) {
         Ok(p) => p,
@@ -107,16 +104,17 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     )?;
 
     // Probe --new disk state
-    let new_probed = probe_config_disk(runner, fs, new_name, new_disk)?;
+    let new_probed = probe_config_disk(runner, fs, new_name, &new_by_id)?;
 
     // Compile steps
     let will_clear_last_missing =
         matches!(&replace_source, ReplaceSource::Missing { .. }) && pool.missing_count == 1;
     let steps = compile_replace_steps(
         new_name,
+        &new_by_id,
         &new_probed,
         &replace_source,
-        &config,
+        config.mount_point(),
         will_clear_last_missing,
         pool.total_devices,
     )?;
@@ -136,7 +134,7 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
                 &new_probed.state,
                 old_name,
                 new_name,
-                &new_disk.by_id.0,
+                &new_by_id.0,
                 &replace_source,
             )
         );
@@ -169,52 +167,76 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     let passphrase = read_passphrase(passphrase_file, passphrase_stdin)?;
     let new_mn = mapper_name(new_name);
 
-    // Step 1: Init new disk if needed
-    match new_probed.state {
-        ConfigDiskState::Absent => {
-            return Err(ReplaceError::Validation(format!(
-                "new disk '{}' ({}) is not present. Is it plugged in?",
-                new_name, new_disk.by_id
-            )));
-        }
-        ConfigDiskState::PresentNotLuks => {
-            // If pool exists, verify passphrase against existing member
-            if let Some(existing) = pool.devices.first() {
-                let status_raw = runner.run(&crate::cmd::CmdRequest::CryptsetupStatus {
-                    mapper: existing.mapper.0.clone(),
-                })?;
-                let status = crate::parse::parse_cryptsetup_status(&status_raw)?;
-                if let Some(underlying) = status.device {
-                    let ok = verify_passphrase(runner, &underlying, &passphrase)?;
-                    if !ok {
-                        return Err(ReplaceError::Validation(
-                            "passphrase does not match existing pool member".into(),
-                        ));
-                    }
+    // Reversible checks: reject absent disk, verify passphrase, check not already in pool.
+    if matches!(new_probed.state, ConfigDiskState::Absent) {
+        return Err(ReplaceError::Validation(format!(
+            "new disk '{}' ({}) is not present. Is it plugged in?",
+            new_name, new_by_id
+        )));
+    }
+
+    if matches!(new_probed.state, ConfigDiskState::PresentNotLuks) {
+        if let Some(existing) = pool.devices.first() {
+            let status_raw = runner.run(&crate::cmd::CmdRequest::CryptsetupStatus {
+                mapper: existing.mapper.0.clone(),
+            })?;
+            let status = crate::parse::parse_cryptsetup_status(&status_raw)?;
+            if let Some(underlying) = status.device {
+                let ok = verify_passphrase(runner, &underlying, &passphrase)?;
+                if !ok {
+                    return Err(ReplaceError::Validation(
+                        "passphrase does not match existing pool member".into(),
+                    ));
                 }
             }
+        }
+    }
 
+    // Guard: new disk must not already be in the pool.
+    check_new_not_in_pool(new_name, &new_mn, &pool)?;
+
+    // Build target membership and write journal before irreversible disk ops.
+    let pre_membership = membership::load_membership(paths)
+        .map_err(|e| ReplaceError::Validation(format!("failed to load pool membership: {e}")))?;
+    let target_membership =
+        build_replacement_membership(&pre_membership, old_name, new_name, &new_by_id)?;
+    let journal = journal::build_journal(
+        pre_membership,
+        target_membership.clone(),
+        journal::OpKind::Replace {
+            old_name: old_name.to_owned(),
+            new_name: new_name.to_owned(),
+            new_by_id: new_by_id.clone(),
+        },
+    );
+    journal::write_journal(paths, &journal).map_err(|e| ReplaceError::Validation(e.to_string()))?;
+
+    // Step 1: Init new disk (LUKS format/open) — irreversible from here.
+    match new_probed.state {
+        ConfigDiskState::Absent => unreachable!("already checked above"),
+        ConfigDiskState::PresentNotLuks => {
+            // Passphrase already verified above.
             let mut luks_opts = luks_opts_from_env();
             luks_opts.push("--label".into());
             luks_opts.push(format!("braid-{new_name}"));
-            luks_format(runner, &new_disk.by_id.0, &passphrase, &luks_opts)?;
-            eprintln!("LUKS formatted: {}", new_disk.by_id);
+            luks_format(runner, &new_by_id.0, &passphrase, &luks_opts)?;
+            eprintln!("LUKS formatted: {}", new_by_id);
 
-            let backup_path = backup_luks_header(runner, &new_disk.by_id.0, &new_mn.0)?;
+            let backup_path = backup_luks_header(runner, &new_by_id.0, &new_mn.0, paths)?;
             eprintln!("LUKS header backed up: {}", backup_path.display());
 
-            ensure_luks_open(runner, fs, new_name, new_disk, &passphrase)?;
-            eprintln!("LUKS opened: {} → {}", new_disk.by_id, new_mn);
+            ensure_luks_open(runner, fs, new_name, &new_by_id, &passphrase)?;
+            eprintln!("LUKS opened: {} → {}", new_by_id, new_mn);
 
             if let Some(kf) = enroll_key_file {
-                crate::luks::enroll_key_file(runner, &new_disk.by_id.0, &passphrase, kf)?;
-                eprintln!("Keyfile enrolled in slot 1: {}", new_disk.by_id);
+                crate::luks::enroll_key_file(runner, &new_by_id.0, &passphrase, kf)?;
+                eprintln!("Keyfile enrolled in slot 1: {}", new_by_id);
             }
         }
         ConfigDiskState::PresentLuks { mapper_open, .. } => {
             if !mapper_open {
-                ensure_luks_open(runner, fs, new_name, new_disk, &passphrase)?;
-                eprintln!("LUKS opened: {} → {}", new_disk.by_id, new_mn);
+                ensure_luks_open(runner, fs, new_name, &new_by_id, &passphrase)?;
+                eprintln!("LUKS opened: {} → {}", new_by_id, new_mn);
             } else if !pool.devices.iter().any(|d| d.mapper == new_mn) {
                 eprintln!(
                     "note: LUKS mapper is already open but device is not yet in pool. Completing replace."
@@ -224,9 +246,6 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     }
 
     let new_mapper_path = format!("/dev/mapper/{}", new_mn.0);
-
-    // Guard: new disk must not already be in the pool.
-    check_new_not_in_pool(new_name, &new_mn, &pool)?;
 
     // Step 2+: Execute replacement — both paths use btrfs replace start.
     match &replace_source {
@@ -306,24 +325,6 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     // Capture pre-op missing count for soft balance decision
     let pre_op_missing_count = pool.missing_count;
 
-    // Update disk map (best effort — never fail the replace)
-    let pool_after = probe_pool(runner, config.mount_point().as_str()).ok();
-    let new_mn = mapper_name(new_name);
-    let mut map_warning: Option<String> = None;
-    disk_map::update_disk_map_best_effort(|map| {
-        map_warning = apply_replace_disk_map_update(
-            map,
-            old_name,
-            new_name,
-            &new_disk.by_id.0,
-            &new_mn,
-            pool_after.as_ref(),
-        );
-    });
-    if let Some(w) = map_warning {
-        eprintln!("{w}");
-    }
-
     // Restore RAID1 redundancy for missing-path replacements that clear the last missing device
     if matches!(&replace_source, ReplaceSource::Missing { .. }) {
         crate::pool::maybe_restore_raid1(
@@ -335,10 +336,27 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         .map_err(|e| ReplaceError::Pool(e))?;
     }
 
-    eprintln!(
-        "Done. Replaced {} with {}. If not already done: update braid.disks and run nixos-rebuild switch.",
-        old_name, new_name
-    );
+    // Post-commit: write pool.json with enriched metadata and clear journal.
+    let mut final_membership = target_membership;
+    if let Ok(pool_after) = probe_pool(runner, config.mount_point().as_str()) {
+        for dev in &pool_after.devices {
+            let Some(name) = crate::config::name_from_mapper(&dev.mapper.0) else {
+                continue;
+            };
+            if let Some(member) = final_membership.disks.get_mut(name) {
+                member.luks_uuid = Some(dev.luks_uuid.clone());
+                member.devid = Some(dev.devid);
+                if member.added_at.is_none() {
+                    member.added_at = Some(crate::util::now_iso());
+                }
+            }
+        }
+    }
+    membership::save_membership(&final_membership, paths)
+        .map_err(|e| ReplaceError::Validation(format!("failed to persist pool membership: {e}")))?;
+    journal::clear_journal(paths).map_err(|e| ReplaceError::Validation(e.to_string()))?;
+
+    eprintln!("Done. Replaced {} with {}.", old_name, new_name);
     Ok(())
 }
 
@@ -445,13 +463,13 @@ fn resolve_replace_source<R: CommandRunner>(
 
 fn compile_replace_steps(
     new_name: &str,
+    new_by_id: &ByIdPath,
     new_probed: &ConfigDisk,
     replace_source: &ReplaceSource,
-    config: &crate::config::Config,
+    mount_point: &MountPoint,
     will_clear_last_missing: bool,
     total_devices: u64,
 ) -> Result<Vec<ReplaceStep>, ReplaceError> {
-    let new_disk = config.disk_by_name(new_name).unwrap();
     let new_mn = mapper_name(new_name);
     let mut steps = Vec::new();
 
@@ -459,13 +477,13 @@ fn compile_replace_steps(
         ConfigDiskState::Absent => {
             return Err(ReplaceError::Validation(format!(
                 "new disk '{}' ({}) is not present. Is it plugged in?",
-                new_name, new_disk.by_id
+                new_name, new_by_id
             )));
         }
         ConfigDiskState::PresentNotLuks => {
             steps.push(ReplaceStep {
                 risk: "destructive",
-                description: format!("LUKS format {}", new_disk.by_id),
+                description: format!("LUKS format {}", new_by_id),
             });
             steps.push(ReplaceStep {
                 risk: "safe",
@@ -488,18 +506,12 @@ fn compile_replace_steps(
                 risk: "long",
                 description: format!(
                     "btrfs replace start {} /dev/mapper/{} {}",
-                    devid,
-                    new_mn,
-                    config.mount_point()
+                    devid, new_mn, mount_point
                 ),
             });
             steps.push(ReplaceStep {
                 risk: "safe",
-                description: format!(
-                    "btrfs filesystem resize {}:max {}",
-                    devid,
-                    config.mount_point()
-                ),
+                description: format!("btrfs filesystem resize {}:max {}", devid, mount_point),
             });
             steps.push(ReplaceStep {
                 risk: "safe",
@@ -511,18 +523,12 @@ fn compile_replace_steps(
                 risk: "long",
                 description: format!(
                     "btrfs replace start {} /dev/mapper/{} {}",
-                    devid,
-                    new_mn,
-                    config.mount_point()
+                    devid, new_mn, mount_point
                 ),
             });
             steps.push(ReplaceStep {
                 risk: "safe",
-                description: format!(
-                    "btrfs filesystem resize {}:max {}",
-                    devid,
-                    config.mount_point()
-                ),
+                description: format!("btrfs filesystem resize {}:max {}", devid, mount_point),
             });
             if will_clear_last_missing && total_devices >= 2 {
                 steps.push(ReplaceStep {
@@ -570,32 +576,21 @@ fn replace_confirm_message(
     msg
 }
 
-fn apply_replace_disk_map_update(
-    map: &mut crate::disk_map::DiskMap,
+fn build_replacement_membership(
+    existing: &membership::PoolMembership,
     old_name: &str,
     new_name: &str,
-    new_by_id: &str,
-    new_mn: &MapperName,
-    pool_after: Option<&PoolState>,
-) -> Option<String> {
-    crate::disk_map::remove_disk(map, old_name);
-
-    if let Some(pool_after) = pool_after {
-        if let Some(dev) = pool_after.devices.iter().find(|d| d.mapper == *new_mn) {
-            crate::disk_map::record_disk(map, new_name, new_by_id, &dev.luks_uuid.0, dev.devid);
-            None
-        } else {
-            Some(format!(
-                "Warning: replace succeeded but could not find '{}' in post-operation pool probe; old disk map entry removed, new entry not recorded.",
-                new_name
-            ))
-        }
-    } else {
-        Some(
-            "Warning: replace succeeded but post-operation pool probe failed; old disk map entry removed, new entry not recorded."
-                .to_owned(),
-        )
-    }
+    new_by_id: &ByIdPath,
+) -> Result<membership::PoolMembership, ReplaceError> {
+    let mut next = existing.clone();
+    next.disks.remove(old_name);
+    membership::validate_no_conflicts(&next, new_name, &new_by_id.0)
+        .map_err(|e| ReplaceError::Validation(e.to_string()))?;
+    next.disks.insert(
+        new_name.to_owned(),
+        membership::DiskMember::from_by_id(new_by_id.clone()),
+    );
+    Ok(next)
 }
 
 #[cfg(test)]
@@ -649,47 +644,6 @@ mod tests {
         assert!(
             !msg.contains("LUKS-format"),
             "should not warn about formatting"
-        );
-    }
-
-    #[test]
-    fn spec_replace_probe_failure_still_removes_old_map_entry() {
-        let mut map = crate::disk_map::DiskMap::new();
-        crate::disk_map::record_disk(&mut map, "old", "/dev/disk/by-id/old", "old-uuid", 1);
-
-        let new_mn = MapperName("braid-new".into());
-        let _ = apply_replace_disk_map_update(
-            &mut map,
-            "old",
-            "new",
-            "/dev/disk/by-id/new",
-            &new_mn,
-            None,
-        );
-
-        assert!(
-            !map.disks.contains_key("old"),
-            "old entry should be removed even if post-replace re-probe fails"
-        );
-    }
-
-    #[test]
-    fn spec_replace_probe_failure_requests_warning() {
-        let mut map = crate::disk_map::DiskMap::new();
-        let new_mn = MapperName("braid-new".into());
-
-        let warning = apply_replace_disk_map_update(
-            &mut map,
-            "old",
-            "new",
-            "/dev/disk/by-id/new",
-            &new_mn,
-            None,
-        );
-
-        assert!(
-            warning.is_some(),
-            "expected a warning when post-replace disk-map update is skipped due to re-probe failure"
         );
     }
 
@@ -816,6 +770,37 @@ mod tests {
     }
 
     #[test]
+    // Intent: replace must reject a post-replace membership that reuses another
+    // member's by-id under a new name.
+    // Why: docs and invariants say mutating commands reject name reassignment /
+    // by-id rename rather than silently corrupting pool membership.
+    // Scenario: operator tries `braid replace --old disk1 --new newname=<disk2 by-id>`.
+    fn build_replacement_membership_rejects_by_id_rename_conflict() {
+        let mut membership = membership::PoolMembership::empty();
+        membership.disks.insert(
+            "disk1".into(),
+            membership::DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
+        );
+        membership.disks.insert(
+            "disk2".into(),
+            membership::DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk2".into())),
+        );
+
+        let err = build_replacement_membership(
+            &membership,
+            "disk1",
+            "newname",
+            &ByIdPath("/dev/disk/by-id/virtio-disk2".into()),
+        )
+        .expect_err("should reject by-id rename conflict");
+
+        assert!(
+            err.to_string().contains("cannot register"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
     // Intent: dry-run for live path shows btrfs replace and resize steps.
     // Why: operator should see what the live replace will do before committing.
     // Scenario: operator runs --dry-run to preview live replace.
@@ -839,8 +824,16 @@ mod tests {
             mapper: MapperName("braid-disk2".into()),
             devid: 2,
         };
-        let steps =
-            compile_replace_steps("disk3", &new_probed, &source, &config, false, 2).unwrap();
+        let steps = compile_replace_steps(
+            "disk3",
+            &ByIdPath("/dev/disk/by-id/virtio-disk3".into()),
+            &new_probed,
+            &source,
+            &MountPoint("/mnt/storage".into()),
+            false,
+            2,
+        )
+        .unwrap();
         let descriptions: Vec<&str> = steps.iter().map(|s| s.description.as_str()).collect();
         assert!(
             descriptions
@@ -889,7 +882,16 @@ mod tests {
             state: ConfigDiskState::PresentNotLuks,
         };
         let source = ReplaceSource::Missing { devid: 2 };
-        let steps = compile_replace_steps("disk3", &new_probed, &source, &config, true, 2).unwrap();
+        let steps = compile_replace_steps(
+            "disk3",
+            &ByIdPath("/dev/disk/by-id/virtio-disk3".into()),
+            &new_probed,
+            &source,
+            &MountPoint("/mnt/storage".into()),
+            true,
+            2,
+        )
+        .unwrap();
         let descriptions: Vec<&str> = steps.iter().map(|s| s.description.as_str()).collect();
         assert!(
             descriptions
@@ -1077,11 +1079,6 @@ mod tests {
 
     fn make_replace_config() -> crate::config::Config {
         let config_json = serde_json::json!({
-            "disks": {
-                "disk1": { "by_id": "/dev/disk/by-id/virtio-disk1" },
-                "disk2": { "by_id": "/dev/disk/by-id/virtio-disk2" },
-                "disk3": { "by_id": "/dev/disk/by-id/virtio-disk3" },
-            },
             "mount_point": "/mnt/storage"
         });
         serde_json::from_value(config_json).expect("valid config")
@@ -1103,8 +1100,16 @@ mod tests {
         let config = make_replace_config();
         let new_probed = new_probed_not_luks();
         let source = ReplaceSource::Missing { devid: 2 };
-        let steps =
-            compile_replace_steps("disk3", &new_probed, &source, &config, false, 3).unwrap();
+        let steps = compile_replace_steps(
+            "disk3",
+            &ByIdPath("/dev/disk/by-id/virtio-disk3".into()),
+            &new_probed,
+            &source,
+            &MountPoint("/mnt/storage".into()),
+            false,
+            3,
+        )
+        .unwrap();
         let descriptions: Vec<&str> = steps.iter().map(|s| s.description.as_str()).collect();
         assert!(
             !descriptions
@@ -1122,13 +1127,173 @@ mod tests {
         let config = make_replace_config();
         let new_probed = new_probed_not_luks();
         let source = ReplaceSource::Missing { devid: 2 };
-        let steps = compile_replace_steps("disk3", &new_probed, &source, &config, true, 1).unwrap();
+        let steps = compile_replace_steps(
+            "disk3",
+            &ByIdPath("/dev/disk/by-id/virtio-disk3".into()),
+            &new_probed,
+            &source,
+            &MountPoint("/mnt/storage".into()),
+            true,
+            1,
+        )
+        .unwrap();
         let descriptions: Vec<&str> = steps.iter().map(|s| s.description.as_str()).collect();
         assert!(
             !descriptions
                 .iter()
                 .any(|d| d.contains("-dconvert=raid1,soft")),
             "should NOT show soft balance with total_devices == 1, got: {descriptions:?}"
+        );
+    }
+
+    use crate::cmd::{CmdError, CommandRunner as CmdRunner2};
+    use crate::membership::{self, DiskMember, PoolMembership};
+    use crate::state_paths::StatePaths;
+
+    fn mock_ok(cmd: &str, stdout: &str) -> RawCommandOutput {
+        RawCommandOutput {
+            cmd: cmd.to_owned(),
+            stdout: stdout.to_owned(),
+            stderr: String::new(),
+            exit_status: 0,
+        }
+    }
+
+    /// Mock filesystem where specific paths exist.
+    struct ReplaceMockFs(Vec<String>);
+    impl crate::probe::Filesystem for ReplaceMockFs {
+        fn exists(&self, path: &str) -> bool {
+            self.0.iter().any(|p| p == path)
+        }
+        fn is_block_device(&self, _path: &str) -> bool {
+            false
+        }
+        fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
+            Ok(vec![])
+        }
+    }
+
+    /// Runner for live replace that fails on BtrfsReplaceStart.
+    /// Handles all preflight/probe commands successfully.
+    struct FailingReplaceRunner;
+
+    impl CmdRunner2 for FailingReplaceRunner {
+        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
+            match request {
+                CmdRequest::FindmntJson { mount_point } => Ok(mock_ok(
+                    &format!("findmnt --json --mountpoint {mount_point}"),
+                    r#"{"filesystems":[{"target":"/mnt/storage","source":"/dev/mapper/braid-disk1","fstype":"btrfs"}]}"#,
+                )),
+                CmdRequest::BtrfsFilesystemShow { mount_point } => Ok(mock_ok(
+                    &format!("btrfs filesystem show {mount_point}"),
+                    "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\tTotal devices 2 FS bytes used 16.17MiB\n\tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk2\n",
+                )),
+                CmdRequest::CryptsetupStatus { mapper } => {
+                    let dev = if mapper == "braid-disk1" { "/dev/vdb" } else { "/dev/vdc" };
+                    Ok(mock_ok(
+                        &format!("cryptsetup status {mapper}"),
+                        &format!("{mapper} is active and is in use.\n  type:    LUKS2\n  device:  {dev}\n  mode:    read/write\n"),
+                    ))
+                }
+                CmdRequest::CryptsetupLuksUuid { device } => {
+                    let uuid = match device.as_str() {
+                        "/dev/vdb" => "11111111-1111-1111-1111-111111111111",
+                        "/dev/vdc" => "22222222-2222-2222-2222-222222222222",
+                        // new disk
+                        _ => "33333333-3333-3333-3333-333333333333",
+                    };
+                    Ok(mock_ok(&format!("cryptsetup luksUUID {device}"), &format!("{uuid}\n")))
+                }
+                CmdRequest::BtrfsBalanceStatus { .. } => Ok(mock_ok(
+                    "btrfs balance status",
+                    "No balance found on '/mnt/storage'\n",
+                )),
+                CmdRequest::BtrfsDeviceStats { .. } => Ok(mock_ok("btrfs device stats", "")),
+                CmdRequest::BtrfsReplaceStart { .. } => Ok(RawCommandOutput {
+                    cmd: "btrfs replace start".into(),
+                    stdout: String::new(),
+                    stderr: "ERROR: target device is too small".into(),
+                    exit_status: 1,
+                }),
+                _ => Err(CmdError::MissingMock),
+            }
+        }
+
+        fn run_with_stdin(
+            &self,
+            request: &CmdRequest,
+            _stdin: &[u8],
+        ) -> Result<RawCommandOutput, CmdError> {
+            self.run(request)
+        }
+    }
+
+    #[test]
+    // Intent: pending-op.json survives when btrfs replace start fails.
+    //
+    // Why it exists: JournalGuard previously cleared the journal on any exit,
+    //   including error returns. After LUKS init on the new disk, a failed
+    //   btrfs replace would leave pool.json stale with no recovery path.
+    //
+    // Scenario: live replace, new disk already LUKS-open, btrfs replace start
+    //   fails (e.g. target too small). Journal must persist for recovery.
+    fn journal_survives_replace_failure() {
+        // Set up state
+        let state_tmp = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(state_tmp.path().into());
+        let mut m = PoolMembership::empty();
+        m.disks.insert(
+            "disk1".into(),
+            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
+        );
+        m.disks.insert(
+            "disk2".into(),
+            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk2".into())),
+        );
+        membership::save_membership(&m, &paths).unwrap();
+
+        let config_tmp = tempfile::tempdir().unwrap();
+        let config_path = config_tmp.path().join("config.json");
+        std::fs::write(
+            &config_path,
+            serde_json::to_vec(&serde_json::json!({ "mount_point": "/mnt/storage" })).unwrap(),
+        )
+        .unwrap();
+
+        // Passphrase file (required by cmd_replace)
+        let pass_path = config_tmp.path().join("passphrase");
+        std::fs::write(&pass_path, b"test-passphrase\n").unwrap();
+
+        // Filesystem mock: new disk and its mapper exist
+        let fs = ReplaceMockFs(vec![
+            "/dev/disk/by-id/virtio-disk3".into(),
+            "/dev/mapper/braid-disk3".into(),
+        ]);
+
+        let runner = FailingReplaceRunner;
+        let result = cmd_replace(
+            &runner,
+            &fs,
+            &config_path,
+            "disk2",
+            "disk3=/dev/disk/by-id/virtio-disk3",
+            None,
+            false,
+            true,
+            false,
+            Some(pass_path.as_path()),
+            None,
+            crate::progress::ProgressOutput::Off,
+            &paths,
+        );
+
+        assert!(
+            result.is_err(),
+            "replace should fail when btrfs replace fails"
+        );
+        assert!(
+            journal::load_journal(&paths).unwrap().is_some(),
+            "pending-op.json must survive error exit so braid recover can reconcile"
         );
     }
 
@@ -1143,8 +1308,16 @@ mod tests {
             mapper: MapperName("braid-disk2".into()),
             devid: 2,
         };
-        let steps =
-            compile_replace_steps("disk3", &new_probed, &source, &config, false, 2).unwrap();
+        let steps = compile_replace_steps(
+            "disk3",
+            &ByIdPath("/dev/disk/by-id/virtio-disk3".into()),
+            &new_probed,
+            &source,
+            &MountPoint("/mnt/storage".into()),
+            false,
+            2,
+        )
+        .unwrap();
         let descriptions: Vec<&str> = steps.iter().map(|s| s.description.as_str()).collect();
         assert!(
             !descriptions

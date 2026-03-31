@@ -16,24 +16,22 @@ Replace plan/apply with five intent commands:
 
 | Command | Purpose | Risk |
 |---------|---------|------|
-| `braid add <key>` | Format + join pool, or recover identity-verified LUKS device | Destructive (new disk), safe (returning braid disk with matching FSID), or refused (non-braid LUKS, foreign pool, no pool to verify) |
-| `braid remove <key>` | Migrate data off present disk, detach from pool | Long-running |
+| `braid add <name=by_id>...` | Format + join pool, or recover identity-verified LUKS device | Destructive (new disk), safe (returning braid disk with matching FSID), or refused (non-braid LUKS, foreign pool, no pool to verify) |
+| `braid remove <name>` | Migrate data off present disk, detach from pool | Long-running |
 | `braid remove-missing` | Clean up a stale missing-device entry; restores RAID1 profiles if this clears the last missing device | Long-running |
-| `braid replace --old <key> --new <key>` | Replace a disk (live or dead) using `btrfs replace start`; restores RAID1 profiles for missing-path when clearing the last missing device | In-place swap (preserves devid) |
+| `braid replace --old <name> --new <name=by_id>` | Replace a disk (live or dead) using `btrfs replace start`; restores RAID1 profiles for missing-path when clearing the last missing device | In-place swap (preserves devid) |
 | `braid status` | Display pool health and disk info | Read-only |
 
 ### Disk keys
 
-Config changed from a list of by-id paths to a keyed attrset:
+Disk membership is CLI-owned runtime state in `/var/lib/braid/pool.json` (see [runtime-disk-membership.md](runtime-disk-membership.md)). Disks are added with `name=by_id` syntax:
 
-```nix
-braid.disks = {
-  toshiba  = { byId = "/dev/disk/by-id/ata-Toshiba_MN07_XXXX"; };
-  ironwolf = { byId = "/dev/disk/by-id/ata-Ironwolf_ST12_YYYY"; };
-};
+```sh
+braid add toshiba=/dev/disk/by-id/ata-Toshiba_MN07_XXXX \
+          ironwolf=/dev/disk/by-id/ata-Ironwolf_ST12_YYYY
 ```
 
-Mapper names are `braid-<key>` (e.g., `braid-toshiba`) — human-friendly, debuggable in lsblk/systemd logs, deterministic.
+Mapper names are `braid-<name>` (e.g., `braid-toshiba`) — human-friendly, debuggable in lsblk/systemd logs, deterministic.
 
 ### Safety model
 
@@ -47,7 +45,8 @@ The old architecture used a structural code boundary — `luksFormat` was litera
    d. Braid-labeled LUKS with no btrfs superblock is refused — this state is ambiguous (clean eviction, partial init, manual wipe, stale data) and cannot be distinguished without tombstones. A previously removed disk must be wiped before re-add.
    e. Superblock guard remains as defense-in-depth within the FSID-matching path.
 3. **Confirmation calibrated to risk**: destructive operations (LUKS format) require explicit confirmation; safe operations (opening existing LUKS, adding to pool) proceed after simple yes/no.
-4. **Disk key immutability**: mutating commands validate config keys against recorded disk identity and reject key rename/reassignment. Operators must use explicit `replace` or `remove`+`add` workflows instead of renaming keys in config.
+4. **Disk name immutability**: mutating commands validate names against recorded disk identity and reject name rename/reassignment. Operators must use explicit `replace` or `remove`+`add` workflows instead of renaming.
+5. **Journal-protected mutations**: mutating commands write `pending-op.json` before the first irreversible step; it is cleared only after the full operation (including follow-up work like soft balance) succeeds. On any error exit, the journal persists to enable `braid recover`.
 
 `--dry-run` reads the LUKS label without side effects. Full identity verification (FSID comparison) requires opening the mapper, so dry-run defers this to execution time when the mapper is closed.
 
@@ -78,7 +77,7 @@ The check is skipped when only one device survives the removal:
 ### NixOS-native automation
 
 - systemd `braid-unlock.service` + `braid-pool.target` for post-boot unlock
-- Activation script prints UUID-based advisory guidance on `nixos-rebuild switch`
+- `braid-online.service` lifecycle owner (`ExecStop=braid lock`, `RemainAfterExit=yes`)
 
 ## Rejected alternatives
 
@@ -89,4 +88,4 @@ The check is skipped when only one device survives the removal:
 
 - Five commands instead of three (no init-disk, no plan, no apply; `remove` split into `remove` + `remove-missing`)
 - Every command supports `--dry-run` and `--yes` for scripting
-- Tab completion returns disk keys from config
+- Tab completion returns disk names from `pool.json`

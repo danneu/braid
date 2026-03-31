@@ -114,8 +114,18 @@
               braid = linuxCrane.braid;
             }
           );
+          add-passphrase-mismatch = pkgs.testers.nixosTest (
+            import ./tests/cli/add-passphrase-mismatch.nix {
+              braid = linuxCrane.braid;
+            }
+          );
           braid-remove-disk = pkgs.testers.nixosTest (
             import ./tests/cli/braid-remove-disk.nix {
+              braid = linuxCrane.braid;
+            }
+          );
+          remove-no-membership = pkgs.testers.nixosTest (
+            import ./tests/cli/remove-no-membership.nix {
               braid = linuxCrane.braid;
             }
           );
@@ -262,12 +272,13 @@
               braid = linuxCrane.braid-cli-unwrapped;
             }
           );
-          braid-module-invalid-disk-names = import ./tests/module/invalid-disk-names.nix {
-            inherit nixpkgs;
-            system = linuxSystem;
-          };
           braid-lock = pkgs.testers.nixosTest (
             import ./tests/cli/braid-lock.nix {
+              braid = linuxCrane.braid;
+            }
+          );
+          braid-lock-orphan = pkgs.testers.nixosTest (
+            import ./tests/cli/braid-lock-orphan.nix {
               braid = linuxCrane.braid;
             }
           );
@@ -283,6 +294,11 @@
           );
           braid-unlock = pkgs.testers.nixosTest (
             import ./tests/cli/braid-unlock.nix {
+              braid = linuxCrane.braid;
+            }
+          );
+          braid-recover = pkgs.testers.nixosTest (
+            import ./tests/cli/braid-recover.nix {
               braid = linuxCrane.braid;
             }
           );
@@ -303,6 +319,11 @@
           );
           braid-remove-missing-enospc-crash = pkgs.testers.nixosTest (
             import ./tests/cli/braid-remove-missing-enospc-crash.nix {
+              braid = linuxCrane.braid;
+            }
+          );
+          remove-missing-membership-readonly = pkgs.testers.nixosTest (
+            import ./tests/cli/remove-missing-membership-readonly.nix {
               braid = linuxCrane.braid;
             }
           );
@@ -377,6 +398,11 @@
               braid = linuxCrane.braid-cli-unwrapped;
             }
           );
+          systemd-lifecycle = pkgs.testers.nixosTest (
+            import ./tests/module/systemd-lifecycle.nix {
+              braid = linuxCrane.braid-cli-unwrapped;
+            }
+          );
           auto-unlock-key-missing = pkgs.testers.nixosTest (
             import ./tests/module/auto-unlock-key-missing.nix {
               braid = linuxCrane.braid-cli-unwrapped;
@@ -409,6 +435,16 @@
           );
           braid-smartd-config = pkgs.testers.nixosTest (
             import ./tests/module/smartd-config.nix {
+              braid = linuxCrane.braid-cli-unwrapped;
+            }
+          );
+          monitor-lifecycle = pkgs.testers.nixosTest (
+            import ./tests/module/monitor-lifecycle.nix {
+              braid = linuxCrane.braid-cli-unwrapped;
+            }
+          );
+          smartd-hook = pkgs.testers.nixosTest (
+            import ./tests/module/smartd-hook.nix {
               braid = linuxCrane.braid-cli-unwrapped;
             }
           );

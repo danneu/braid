@@ -20,12 +20,12 @@ Option 3. Resilience is the default, not an option.
 
 ## Implementation
 
-LUKS unlock is strictly stage-2 — `braid-unlock` or `braid-auto-unlock` opens LUKS and mounts the pool. The module does not generate `boot.initrd.luks.devices`.
+LUKS unlock is strictly stage-2 — `braid-unlock` or `braid-auto-unlock` opens LUKS and mounts the pool. The module does not generate `boot.initrd.luks.devices`, `fileSystems` entries, or LUKS device declarations. The pool is brought online entirely by the CLI at runtime.
 
-Every layer has a specific resilience mechanism:
+Resilience mechanisms:
 
-- **Mount**: `nofail` in mount options. A total failure doesn't block boot. Degraded mounts require explicit `--allow-degraded` (or `autoUnlock.allowDegraded` for unattended use) — braid refuses to silently mount with zero redundancy.
-- **btrfs-device-scan**: Stage-2 service referenced by the mount unit's `x-systemd.requires`. Scans for btrfs multi-device filesystems after LUKS mappers are opened.
+- **No build-time mount units**: The module generates no `fileSystems` or LUKS entries. The CLI (`braid unlock`) handles LUKS open + btrfs mount directly. Nothing referencing data drives can block boot.
+- **Degraded mount**: Requires explicit `--allow-degraded` (or `autoUnlock.allowDegraded` for unattended use) — braid refuses to silently mount with zero redundancy.
 
 ### Three-tier failure model
 
@@ -33,11 +33,11 @@ Every layer has a specific resilience mechanism:
 |----------|-------------|-----------|
 | All drives healthy | Normal boot | Everything works |
 | One drive dead | `braid unlock` refuses by default; user must pass `--allow-degraded` or configure `autoUnlock.allowDegraded` | Pool stays locked until explicit opt-in |
-| All drives dead / wrong config | 10s timeout, mount fails | System boots, SSH works, no /mnt/storage |
+| All drives dead / no pool.json | `braid unlock` fails (no devices to probe) | System boots, SSH works, no /mnt/storage |
 
 ### Identity enforcement
 
-`braid unlock` enforces disk-map/config identity consistency for all unlocks — not only degraded scenarios. Any name reassignment or rename detected between config and disk-map is a hard error before any disk is probed or mounted. `--allow-degraded` only bypasses degraded-mount refusal, never identity mismatches.
+`braid unlock` uses authoritative pool membership from `pool.json` and probes only those configured members. `--allow-degraded` only bypasses degraded-mount refusal; it does not change which disks are considered pool members.
 
 ## Key discoveries
 
@@ -55,6 +55,6 @@ This is not configurable. There is no `braid.resilient` option. Every braid depl
 
 ## See
 
-- `modules/braid/storage.nix` — LUKS, mount, and device-scan config
+- `modules/braid/storage.nix` — `braid-online.service`, `braid-pool.target`
 - `tests/module/` — module tests validate boot with all drives healthy
 - [archive/plans/test-boot-degraded.md](../../archive/plans/test-boot-degraded.md) — original plan and research

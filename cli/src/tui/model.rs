@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 
 use crate::alert::AlertState;
 use crate::parse::types::{BtrfsDfEntry, DeviceAllocation, ScrubState, SmartHealth};
+use crate::state_paths::StatePaths;
 use crate::status::{BalanceReport, DiskErrors};
 use crate::tui::effect::Effect;
 use crate::tui::state::{CmdId, CommandState};
@@ -115,6 +116,7 @@ pub struct Model {
     pub frame: u64,
     pub spinner_deadline: Option<Instant>,
     pub advisories: Vec<String>,
+    pub paths: StatePaths,
     next_cmd_id: u64,
 }
 
@@ -123,11 +125,14 @@ impl Model {
         disk_names: Vec<String>,
         disk_by_id: HashMap<String, String>,
         mount_point: String,
+        advisories: Vec<String>,
+        paths: StatePaths,
     ) -> (Self, Vec<Effect>) {
         let mount_point = MountPoint(mount_point);
         let effects = vec![Effect::ProbePool {
             mount_point: mount_point.clone(),
             disk_by_id: disk_by_id.clone(),
+            paths: paths.clone(),
         }];
         let model = Self {
             running: true,
@@ -143,7 +148,8 @@ impl Model {
             probe_duration: None,
             frame: 0,
             spinner_deadline: Some(Instant::now() + Duration::from_millis(500)),
-            advisories: crate::luks::header_backup_advisories(),
+            advisories,
+            paths,
             next_cmd_id: 0,
         };
         (model, effects)
@@ -165,6 +171,7 @@ impl Model {
             frame: 0,
             spinner_deadline: None,
             advisories: vec![],
+            paths: StatePaths::production(),
             next_cmd_id: 0,
         }
     }

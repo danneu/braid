@@ -4,14 +4,14 @@
 # pre-formats the empty virtual drive as LUKS + single-disk btrfs. After boot,
 # the test script unlocks the pool via `braid unlock --passphrase-stdin`.
 #
-# Why: Validates the module's core storage path — braid-unlock opening LUKS,
-# stage-2 btrfs-device-scan, and the mount — on the simplest possible pool
+# Why: Validates the module's core storage path — braid discover + unlock
+# opening LUKS and mounting the pool — on the simplest possible pool
 # (one disk, no RAID1).
 #
 # Dependencies: braid-module-disabled (module loads without error),
 # hello-world (VM infra).
 { braid }:
-{ lib, pkgs, ... }:
+{ pkgs, ... }:
 let
   passphrase = "testpassphrase";
   diskNames = [ "disk1" ];
@@ -33,9 +33,6 @@ in
       braid = {
         enable = true;
         package = braid;
-        disks = lib.genAttrs diskNames (d: {
-          byId = "/dev/disk/by-id/virtio-${d}";
-        });
       };
 
       virtualisation.emptyDiskImages = [
@@ -47,22 +44,6 @@ in
       virtualisation.memorySize = 2048;
 
       environment.systemPackages = [ pkgs.btrfs-progs ];
-
-      # Re-declare mount for VM compat (qemu-vm.nix clobbers fileSystems)
-      virtualisation.fileSystems."/mnt/storage" = {
-        device = "/dev/mapper/braid-disk1";
-        fsType = "btrfs";
-        options = [
-          "degraded"
-          "nofail"
-          "noatime"
-          "skip_balance"
-          "subvolid=5"
-          "x-systemd.device-timeout=1s"
-          "x-systemd.requires=btrfs-device-scan.service"
-          "x-systemd.after=btrfs-device-scan.service"
-        ];
-      };
 
     };
 

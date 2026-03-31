@@ -1,6 +1,9 @@
 start_all()
 machine.wait_for_unit("multi-user.target", timeout=120)
 
+with subtest("braid discover finds pool members"):
+    machine.succeed("braid discover --write")
+
 with subtest("braid unlock opens LUKS and mounts pool"):
     machine.succeed("echo -n 'testpassphrase' | braid unlock --passphrase-stdin")
     machine.succeed("mountpoint /mnt/storage")
@@ -21,10 +24,6 @@ with subtest("Runtime config file is generated"):
     config_raw = machine.succeed("cat /etc/braid/config.json")
     config = json.loads(config_raw)
     assert config["mount_point"] == "/mnt/storage", f"Expected /mnt/storage, got {config['mount_point']}"
-    for i in range(1, 4):
-        name = f"disk{i}"
-        assert name in config["disks"], f"Expected {name} in disks: {config['disks']}"
-        assert config["disks"][name]["by_id"] == f"/dev/disk/by-id/virtio-disk{i}", f"Unexpected by_id for {name}: {config['disks']}"
 
 with subtest("Mount point has correct group permissions"):
     stat = machine.succeed("stat -c '%U:%G %a' /mnt/storage").strip()

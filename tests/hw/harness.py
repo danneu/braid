@@ -84,23 +84,23 @@ PASSPHRASE = "testpassphrase"
 LUKS_OPTS = "--pbkdf pbkdf2 --pbkdf-force-iterations 1000"
 
 
-def add_cmd(key):
-    """Build a `braid add <key> --yes` command with env vars and --config."""
+def add_cmd(key, by_id):
+    """Build a `braid add <key>=<by_id> --yes` command with env vars and --config."""
     pq = shlex.quote(PASSPHRASE)
     return (
         f"printf '%s\\n' {pq} | "
         f"BRAID_LUKS_OPTS='{LUKS_OPTS}' "
-        f"braid add {key} --passphrase-stdin --yes --config {CONFIG}"
+        f"braid add {key}={by_id} --passphrase-stdin --yes --config {CONFIG}"
     )
 
 
-def replace_cmd(old, new, extra=""):
+def replace_cmd(old, new, new_by_id, extra=""):
     """Build a `braid replace` command."""
     pq = shlex.quote(PASSPHRASE)
     return (
         f"printf '%s\\n' {pq} | "
         f"BRAID_LUKS_OPTS='{LUKS_OPTS}' "
-        f"braid replace --old {old} --new {new} "
+        f"braid replace --old {old} --new {new}={new_by_id} "
         f"--passphrase-stdin --yes --config {CONFIG} {extra}"
     )
 

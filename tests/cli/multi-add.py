@@ -21,9 +21,9 @@ luks_opts = "--pbkdf pbkdf2 --pbkdf-force-iterations 1000"
 
 
 def add_cmd(*keys):
-    """Build a `braid add key1 key2 ... --yes` command with env vars."""
+    """Build a `braid add key1=by_id1 key2=by_id2 ... --yes` command with env vars."""
     passphrase_q = shlex.quote(passphrase)
-    disk_args = " ".join(keys)
+    disk_args = " ".join(f"{k}=/dev/disk/by-id/virtio-{k}" for k in keys)
     return (
         f"printf '%s\\n' {passphrase_q} | "
         f"BRAID_LUKS_OPTS='{luks_opts}' "

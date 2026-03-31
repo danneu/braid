@@ -7,6 +7,7 @@ use braid_cli::config::config_read;
 use braid_cli::doctor::cmd_doctor;
 use braid_cli::probe::RealFilesystem;
 use braid_cli::progress::{resolve_progress_output, ProgressMode};
+use braid_cli::state_paths::StatePaths;
 
 #[derive(Debug, Parser)]
 #[command(name = "braid", version)]
@@ -50,6 +51,23 @@ enum Commands {
     Tui(TuiArgs),
     /// Browse raw btrfs command output in a tabbed TUI
     Browse(BrowseArgs),
+    /// Scan for braid-labeled LUKS devices and display or rebuild pool membership
+    Discover(DiscoverArgs),
+    /// Recover from an interrupted operation by rebuilding pool.json from live pool state
+    Recover(RecoverArgs),
+}
+
+#[derive(Debug, Args)]
+struct RecoverArgs {
+    /// Read passphrase from stdin
+    #[arg(long)]
+    passphrase_stdin: bool,
+    /// Read passphrase from file instead of TTY prompt
+    #[arg(long)]
+    passphrase_file: Option<std::path::PathBuf>,
+    /// Allow mounting with missing devices (degraded mode — new writes have no redundancy)
+    #[arg(long)]
+    allow_degraded: bool,
 }
 
 #[derive(Debug, Args)]
@@ -73,7 +91,7 @@ struct CommonArgs {
 
 #[derive(Debug, Args)]
 struct AddArgs {
-    /// Disk name(s) (as defined in braid.disks)
+    /// Disk spec(s): NAME=/dev/disk/by-id/... (e.g. toshiba=/dev/disk/by-id/ata-TOSHIBA_MN07)
     #[arg(num_args(1..), add = ArgValueCandidates::new(disk_name_candidates))]
     disks: Vec<String>,
     /// Directory containing braid.key to enroll in the new disk (LUKS slot 1)
@@ -180,6 +198,16 @@ struct BrowseArgs {
     check: bool,
 }
 
+#[derive(Debug, Args)]
+struct DiscoverArgs {
+    /// Write discovered membership to pool.json
+    #[arg(long)]
+    write: bool,
+    /// Show what would be written without writing
+    #[arg(long)]
+    dry_run: bool,
+}
+
 fn main() {
     // When COMPLETE=bash|zsh|fish is set, produce shell completion output and exit.
     clap_complete::CompleteEnv::with_factory(Cli::command).complete();
@@ -197,6 +225,7 @@ fn main() {
     }
 
     let config_path = cli.config;
+    let paths = StatePaths::production();
 
     match cli.command {
         Commands::Add(args) => {
@@ -222,6 +251,7 @@ fn main() {
                 args.common.passphrase_file.as_deref(),
                 enroll_kf.as_deref(),
                 progress,
+                &paths,
             ) {
                 print_cli_error(&e.to_string());
                 std::process::exit(1);
@@ -241,6 +271,7 @@ fn main() {
                 args.common.dry_run,
                 args.common.yes,
                 progress,
+                &paths,
             ) {
                 print_cli_error(&e.to_string());
                 std::process::exit(1);
@@ -260,6 +291,7 @@ fn main() {
                 args.common.dry_run,
                 args.common.yes,
                 progress,
+                &paths,
             ) {
                 print_cli_error(&e.to_string());
                 std::process::exit(1);
@@ -290,6 +322,7 @@ fn main() {
                 args.common.passphrase_file.as_deref(),
                 enroll_kf.as_deref(),
                 progress,
+                &paths,
             ) {
                 print_cli_error(&e.to_string());
                 std::process::exit(1);
@@ -305,13 +338,14 @@ fn main() {
             };
             let runner = RealRunner;
             let fs = RealFilesystem;
-            if let Err(e) = braid_cli::status::cmd_status(&runner, &fs, &config, args.json) {
+            if let Err(e) = braid_cli::status::cmd_status(&runner, &fs, &config, args.json, &paths)
+            {
                 print_cli_error(&e.to_string());
                 std::process::exit(1);
             }
         }
         Commands::Doctor(args) => {
-            if let Err(e) = cmd_doctor(Path::new(&config_path), args.json) {
+            if let Err(e) = cmd_doctor(Path::new(&config_path), &paths, args.json) {
                 print_cli_error(&e.to_string());
                 std::process::exit(1);
             }
@@ -324,21 +358,30 @@ fn main() {
                     std::process::exit(1);
                 }
             };
-            let disk_map = braid_cli::disk_map::load_disk_map();
+            let membership = match braid_cli::membership::load_membership(&paths) {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                }
+            };
             let runner = RealRunner;
             let fs = RealFilesystem;
             match braid_cli::unlock::cmd_unlock(
                 &runner,
                 &fs,
                 &config,
-                &disk_map,
+                &membership,
+                &paths,
                 args.passphrase_stdin,
                 args.passphrase_file.as_deref(),
                 args.key_file.as_deref(),
                 args.allow_degraded,
             ) {
                 Ok(()) => {}
-                Err(braid_cli::unlock::UnlockError::DegradedRefused(msg)) => {
+                Err(braid_cli::unlock::UnlockError::Mount(
+                    braid_cli::mount::MountError::DegradedRefused(msg),
+                )) => {
                     print_cli_error(&msg);
                     std::process::exit(2);
                 }
@@ -349,8 +392,8 @@ fn main() {
             }
         }
         Commands::EnrollKeyFile(args) => {
-            let config = match config_read(Path::new(&config_path)) {
-                Ok(c) => c,
+            let membership = match braid_cli::membership::load_membership(&paths) {
+                Ok(m) => m,
                 Err(e) => {
                     eprintln!("error: {e}");
                     std::process::exit(1);
@@ -362,11 +405,12 @@ fn main() {
             if let Err(e) = braid_cli::enroll_key_file::cmd_enroll_key_file(
                 &runner,
                 &fs,
-                &config,
+                &membership,
                 &key_file_path,
                 args.generate,
                 args.passphrase_stdin,
                 args.passphrase_file.as_deref(),
+                &paths,
             ) {
                 print_cli_error(&e.to_string());
                 std::process::exit(1);
@@ -380,9 +424,16 @@ fn main() {
                     std::process::exit(1);
                 }
             };
+            let membership = match braid_cli::membership::load_membership(&paths) {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                }
+            };
             let runner = RealRunner;
             let fs = RealFilesystem;
-            if let Err(e) = braid_cli::lock::cmd_lock(&runner, &fs, &config) {
+            if let Err(e) = braid_cli::lock::cmd_lock(&runner, &fs, &config, &membership) {
                 print_cli_error(&e.to_string());
                 std::process::exit(1);
             }
@@ -424,7 +475,7 @@ fn main() {
                 }
             };
             let runner = RealRunner;
-            match braid_cli::monitor::cmd_monitor(&runner, config.mount_point().as_str()) {
+            match braid_cli::monitor::cmd_monitor(&runner, config.mount_point().as_str(), &paths) {
                 Ok(braid_cli::monitor::MonitorResult::PoolOffline) => {
                     std::process::exit(0);
                 }
@@ -449,7 +500,8 @@ fn main() {
                 }
             };
             let runner = RealRunner;
-            if let Err(e) = braid_cli::ack::cmd_ack(&runner, config.mount_point().as_str()) {
+            if let Err(e) = braid_cli::ack::cmd_ack(&runner, config.mount_point().as_str(), &paths)
+            {
                 print_cli_error(&e.to_string());
                 std::process::exit(1);
             }
@@ -458,11 +510,82 @@ fn main() {
             let result = if args.demo {
                 braid_cli::tui::run_demo()
             } else {
-                braid_cli::tui::run(Path::new(&config_path))
+                braid_cli::tui::run(Path::new(&config_path), &paths)
             };
             if let Err(e) = result {
                 print_cli_error(&e.to_string());
                 std::process::exit(1);
+            }
+        }
+        Commands::Discover(args) => {
+            if let Err(e) = braid_cli::preflight::check_no_pending_operation(&paths) {
+                print_cli_error(&e);
+                std::process::exit(1);
+            }
+            let runner = RealRunner;
+            match braid_cli::discover::discover_pool_members(&runner) {
+                Ok(members) => {
+                    if members.is_empty() {
+                        eprintln!("no braid-labeled LUKS devices found");
+                        std::process::exit(1);
+                    }
+                    for (name, by_id) in &members {
+                        eprintln!("  {} = {}", name, by_id);
+                    }
+                    if args.write {
+                        let m = braid_cli::membership::PoolMembership {
+                            disks: members
+                                .into_iter()
+                                .map(|(name, by_id)| {
+                                    (name, braid_cli::membership::DiskMember::from_by_id(by_id))
+                                })
+                                .collect(),
+                        };
+                        if let Err(e) = braid_cli::membership::save_membership(&m, &paths) {
+                            print_cli_error(&format!("failed to write pool membership: {e}"));
+                            std::process::exit(1);
+                        }
+                        eprintln!("pool membership written to {}", paths.pool_json().display());
+                    } else if !args.dry_run {
+                        eprintln!("pass --write to persist, or --dry-run to preview");
+                    }
+                }
+                Err(e) => {
+                    print_cli_error(&e.to_string());
+                    std::process::exit(1);
+                }
+            }
+        }
+        Commands::Recover(args) => {
+            let config = match config_read(Path::new(&config_path)) {
+                Ok(c) => c,
+                Err(e) => {
+                    print_cli_error(&e.to_string());
+                    std::process::exit(1);
+                }
+            };
+            let runner = RealRunner;
+            let fs = RealFilesystem;
+            match braid_cli::recover::cmd_recover(
+                &runner,
+                &fs,
+                &config,
+                &paths,
+                args.passphrase_stdin,
+                args.passphrase_file.as_deref(),
+                args.allow_degraded,
+            ) {
+                Ok(()) => {}
+                Err(braid_cli::recover::RecoverError::Mount(
+                    braid_cli::mount::MountError::DegradedRefused(msg),
+                )) => {
+                    print_cli_error(&msg);
+                    std::process::exit(2);
+                }
+                Err(e) => {
+                    print_cli_error(&e.to_string());
+                    std::process::exit(1);
+                }
             }
         }
         Commands::Browse(args) => {
@@ -500,31 +623,15 @@ fn print_cli_error(message: &str) {
     }
 }
 
-/// Scan the in-flight command line for `--config <path>` or `--config=<path>`.
-fn completion_config_path() -> String {
-    let args: Vec<String> = std::env::args().collect();
-    for pair in args.windows(2) {
-        if pair[0] == "--config" {
-            return pair[1].clone();
-        }
-    }
-    for arg in &args {
-        if let Some(val) = arg.strip_prefix("--config=") {
-            return val.to_string();
-        }
-    }
-    "/etc/braid/config.json".to_string()
-}
-
-/// Tab completion returns disk names from config.
+/// Tab completion returns disk names from membership.
 fn disk_name_candidates() -> Vec<CompletionCandidate> {
-    let config_path = completion_config_path();
-    let Ok(config) = config_read(Path::new(&config_path)) else {
+    let paths = StatePaths::production();
+    let Ok(membership) = braid_cli::membership::load_membership(&paths) else {
         return Vec::new();
     };
-    config
-        .names()
-        .into_iter()
+    membership
+        .disks
+        .keys()
         .map(|name| CompletionCandidate::new(name.clone()))
         .collect()
 }

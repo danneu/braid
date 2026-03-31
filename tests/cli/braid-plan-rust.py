@@ -31,8 +31,8 @@ def apply_cmd(config=None, extra="", confirm=""):
     return f"printf '%s\\n' {passphrase_q} | {env}braid apply --passphrase-stdin {config_flag} {extra}"
 
 
-def write_config(disk_list, mount="/mnt/storage"):
-    config = json.dumps({"disks": disk_list, "mountPoint": mount})
+def write_config(mount="/mnt/storage"):
+    config = json.dumps({"mount_point": mount})
     escaped = config.replace("'", "'\\''")
     return f"echo '{escaped}' > /tmp/braid-config.json"
 
@@ -61,10 +61,7 @@ with subtest("Setup: build 2-disk RAID1 pool"):
 # --- Subtest 1: No-op plan ---
 
 with subtest("No-op plan when config matches live state"):
-    machine.succeed(write_config([
-        "/dev/disk/by-id/virtio-disk1",
-        "/dev/disk/by-id/virtio-disk2",
-    ]))
+    machine.succeed(write_config())
     p = rust_plan_json()
     mutation_actions = [a for a in p["actions"] if not a["type"].startswith("VERIFY_")]
     assert len(mutation_actions) == 0, f"Expected zero mutation actions:\n{p['actions']}"
@@ -73,11 +70,7 @@ with subtest("No-op plan when config matches live state"):
 # --- Subtest 2: Non-LUKS disk warning ---
 
 with subtest("Plan warns about non-LUKS disk with INIT_REQUIRED"):
-    machine.succeed(write_config([
-        "/dev/disk/by-id/virtio-disk1",
-        "/dev/disk/by-id/virtio-disk2",
-        "/dev/disk/by-id/virtio-disk3",
-    ]))
+    machine.succeed(write_config())
     p = rust_plan_json()
     warning_codes = [w["code"] for w in p["warnings"]]
     assert "INIT_REQUIRED" in warning_codes, (
@@ -111,11 +104,7 @@ with subtest("Plan shows OPEN_LUKS after init-disk"):
 # --- Subtest 4: Absent disk → DISK_ABSENT_SKIPPED ---
 
 with subtest("Absent disk produces DISK_ABSENT_SKIPPED warning"):
-    machine.succeed(write_config([
-        "/dev/disk/by-id/virtio-disk1",
-        "/dev/disk/by-id/virtio-disk2",
-        "/dev/disk/by-id/virtio-disk99",
-    ]))
+    machine.succeed(write_config())
     p = rust_plan_json()
     warning_codes = [w["code"] for w in p["warnings"]]
     assert "DISK_ABSENT_SKIPPED" in warning_codes, (
@@ -129,10 +118,7 @@ with subtest("Absent disk produces DISK_ABSENT_SKIPPED warning"):
 # --- Subtest 5: Absent blocks removal ---
 
 with subtest("Absent config disk blocks removal when pool has unmatched device"):
-    machine.succeed(write_config([
-        "/dev/disk/by-id/virtio-disk1",
-        "/dev/disk/by-id/virtio-disk99",
-    ]))
+    machine.succeed(write_config())
     p = rust_plan_json()
     assert p["status"] == "blocked", f"Expected blocked:\n{p}"
     blocked_codes = [r["code"] for r in p["blocked_reasons"]]
@@ -160,7 +146,7 @@ with subtest("--allow-remove-ambiguous unblocks plan with confirmations"):
 # --- Subtest 7: Graceful remove ---
 
 with subtest("Plan shows remove actions for disk in pool but not config"):
-    machine.succeed(write_config(["/dev/disk/by-id/virtio-disk1"]))
+    machine.succeed(write_config())
     p = rust_plan_json()
     types = [a["type"] for a in p["actions"]]
     assert "REMOVE_DISK_GRACEFUL" in types, f"Missing REMOVE_DISK_GRACEFUL:\n{types}"
@@ -193,10 +179,7 @@ with subtest("Degraded pool warning includes --allow-remove-missing hint"):
     fi_show = machine.succeed("btrfs fi show /mnt/storage")
     assert "missing" in fi_show.lower(), f"Expected missing device:\n{fi_show}"
 
-    machine.succeed(write_config([
-        "/dev/disk/by-id/virtio-disk1",
-        "/dev/disk/by-id/virtio-disk3",
-    ]))
+    machine.succeed(write_config())
     p = rust_plan_json()
     degraded_warnings = [w for w in p["warnings"] if w["code"] == "POOL_DEGRADED_MISSING_DEVICES"]
     assert len(degraded_warnings) > 0, f"Expected POOL_DEGRADED warning:\n{p['warnings']}"
@@ -219,10 +202,7 @@ with subtest("JSON output has required schema fields"):
     if "missing" in fi_show.lower():
         machine.succeed("btrfs device remove missing /mnt/storage")
 
-    machine.succeed(write_config([
-        "/dev/disk/by-id/virtio-disk1",
-        "/dev/disk/by-id/virtio-disk2",
-    ]))
+    machine.succeed(write_config())
     p = rust_plan_json()
     assert "plan_id" in p, "Missing plan_id"
     assert "mount_point" in p, "Missing mount_point"
@@ -267,11 +247,7 @@ with subtest("JSON output has required schema fields"):
 # --- Subtest 11: Human output format ---
 
 with subtest("Human output shows plan summary and command lines"):
-    machine.succeed(write_config([
-        "/dev/disk/by-id/virtio-disk1",
-        "/dev/disk/by-id/virtio-disk2",
-        "/dev/disk/by-id/virtio-disk3",
-    ]))
+    machine.succeed(write_config())
     output = machine.succeed(rust_plan())
     assert "Plan ID:" in output, f"Missing Plan ID:\n{output}"
     assert "Mount:" in output, f"Missing Mount:\n{output}"
@@ -295,7 +271,7 @@ with subtest("Bootstrap plan for unmounted pool"):
     machine.succeed("cryptsetup luksClose virtio-disk2 || true")
     machine.succeed("cryptsetup luksClose virtio-disk3 || true")
     machine.succeed("cryptsetup luksClose virtio-disk4 || true")
-    machine.succeed(write_config(["/dev/disk/by-id/virtio-disk1"]))
+    machine.succeed(write_config())
     p = rust_plan_json()
     types = [a["type"] for a in p["actions"]]
     assert "OPEN_LUKS" in types, f"Missing OPEN_LUKS:\n{types}"
@@ -332,11 +308,7 @@ with subtest("Verify actions have empty commands list"):
     )
     machine.succeed("btrfs device scan")
     machine.succeed("mount /dev/mapper/virtio-disk1 /mnt/storage")
-    machine.succeed(write_config([
-        "/dev/disk/by-id/virtio-disk1",
-        "/dev/disk/by-id/virtio-disk2",
-        "/dev/disk/by-id/virtio-disk3",
-    ]))
+    machine.succeed(write_config())
     p = rust_plan_json()
     verify_actions = [a for a in p["actions"] if a["type"].startswith("VERIFY_")]
     for va in verify_actions:

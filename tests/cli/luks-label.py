@@ -18,7 +18,7 @@ passphrase = "testpassphrase"
 
 with subtest("braid add disk1 formats the volume"):
     machine.succeed(
-        f"echo -n '{passphrase}' | braid add disk1 --passphrase-stdin --yes"
+        f"echo -n '{passphrase}' | braid add disk1=/dev/disk/by-id/virtio-disk1 --passphrase-stdin --yes"
     )
 
 with subtest("LUKS label is braid-disk1"):

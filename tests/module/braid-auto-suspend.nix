@@ -12,10 +12,7 @@
 # configured, all expected checks exist, and the BraidPool command uses
 # fully qualified store paths.
 { braid }:
-{ lib, ... }:
-let
-  diskNames = ["disk1" "disk2"];
-in
+{ ... }:
 {
   name = "braid-auto-suspend";
 
@@ -25,7 +22,6 @@ in
     braid = {
       enable = true;
       package = braid;
-      disks = lib.genAttrs diskNames (d: { byId = "/dev/disk/by-id/virtio-${d}"; });
       autoSuspend.enable = true;
       autoSuspend.wolInterface = "eth0";
     };

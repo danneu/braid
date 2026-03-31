@@ -1,8 +1,28 @@
 use crate::cmd::{CmdRequest, CommandRunner};
+use crate::journal;
 use crate::parse::types::{BalanceState, BtrfsDeviceUsageEntry};
 use crate::parse::{parse_btrfs_balance_status, parse_btrfs_device_usage, parse_findmnt_json};
+use crate::state_paths::StatePaths;
 use crate::status::format_bytes;
 use crate::types::MountPoint;
+
+/// Refuse if a pending-operation journal exists.
+/// When the journal is present, pool.json may be inconsistent — only
+/// `status`, `recover`, and `lock` are safe to run.
+pub fn check_no_pending_operation(paths: &StatePaths) -> Result<(), String> {
+    match journal::load_journal(paths) {
+        Ok(Some(j)) => Err(format!(
+            "interrupted operation detected (pending-op.json exists, started {}).\n\
+             Pool membership may be inconsistent. Run 'braid recover' to reconcile \
+             from live pool state, or 'braid status' to inspect.",
+            j.started_at
+        )),
+        Ok(None) => Ok(()),
+        Err(e) => Err(format!(
+            "cannot read pending-op.json: {e}. Remove it manually or run 'braid recover'."
+        )),
+    }
+}
 
 /// Refuse if a btrfs balance or device remove is already running.
 /// Fail-closed: if we can't determine state, refuse. Unmounting or starting
@@ -535,5 +555,52 @@ mod tests {
         let result = check_raid1_relocation_space(&[&target], &[&rem1, &rem2, &rem3]);
         let err = result.expect_err("should fail: total/2 < bytes_on_target");
         assert!(err.contains("Data"), "expected 'Data' in error: {err}");
+    }
+
+    #[test]
+    // Intent: check_no_pending_operation passes when no journal exists.
+    // Why: Normal operations should not be blocked when there's no interrupted op.
+    // Scenario: Fresh state dir, no pending-op.json.
+    fn pending_op_passes_when_absent() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        assert!(check_no_pending_operation(&paths).is_ok());
+    }
+
+    #[test]
+    // Intent: check_no_pending_operation refuses when a journal exists.
+    // Why: Operations on suspect membership risk mounting the wrong disks.
+    // Scenario: An add was interrupted; pending-op.json exists.
+    fn pending_op_refuses_when_present() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let journal = crate::journal::build_journal(
+            crate::membership::PoolMembership::empty(),
+            crate::membership::PoolMembership::empty(),
+            crate::journal::OpKind::Add {
+                disks: std::collections::BTreeMap::new(),
+            },
+        );
+        crate::journal::write_journal(&paths, &journal).unwrap();
+        let err = check_no_pending_operation(&paths).unwrap_err();
+        assert!(
+            err.contains("interrupted operation"),
+            "expected 'interrupted operation' in: {err}"
+        );
+    }
+
+    #[test]
+    // Intent: check_no_pending_operation refuses on corrupt journal (fail-closed).
+    // Why: A corrupt journal is ambiguous — safer to block than proceed.
+    // Scenario: pending-op.json exists but contains garbage.
+    fn pending_op_refuses_on_corrupt_journal() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        std::fs::write(paths.pending_op_json(), "not json").unwrap();
+        let err = check_no_pending_operation(&paths).unwrap_err();
+        assert!(
+            err.contains("cannot read"),
+            "expected 'cannot read' in: {err}"
+        );
     }
 }

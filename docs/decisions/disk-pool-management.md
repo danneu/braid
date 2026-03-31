@@ -1,8 +1,8 @@
 # Decision: Disk Pool Management
 
-Status: Active
+Status: Superseded by [intent-cli.md](intent-cli.md) and [runtime-disk-membership.md](runtime-disk-membership.md)
 
-> Principle: [Config-first workflow](../principles.md#2-config-first-workflow)
+> Principle: [CLI-owned membership](../principles.md#2-cli-owned-membership)
 
 ## Context
 

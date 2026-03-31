@@ -1,10 +1,10 @@
 use crate::cmd::{CmdError, CmdRequest, CommandRunner};
-use crate::config::{DiskConfig, mapper_name};
+use crate::config::mapper_name;
 use crate::probe::Filesystem;
+use crate::state_paths::StatePaths;
+use crate::types::ByIdPath;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
-
-pub(crate) const HEADER_BACKUP_DIR: &str = "/var/lib/braid/luks-headers";
 
 /// LUKS key slot 1: binary random keyfile (no PBKDF, raw key material).
 pub const LUKS_SLOT_KEYFILE: u8 = 1;
@@ -132,18 +132,14 @@ pub(crate) fn backup_luks_header_to<R: CommandRunner>(
     Ok(backup_path)
 }
 
-/// Back up the LUKS header to /var/lib/braid/luks-headers/<mapper>.luksheader
+/// Back up the LUKS header to <state_root>/luks-headers/<mapper>.luksheader
 pub fn backup_luks_header<R: CommandRunner>(
     runner: &R,
     device: &str,
     mapper: &str,
+    paths: &StatePaths,
 ) -> Result<PathBuf, LuksError> {
-    backup_luks_header_to(
-        runner,
-        device,
-        mapper,
-        std::path::Path::new(HEADER_BACKUP_DIR),
-    )
+    backup_luks_header_to(runner, device, mapper, &paths.luks_headers_dir())
 }
 
 /// Verify passphrase against an existing LUKS device (test-passphrase).
@@ -166,7 +162,7 @@ pub fn ensure_luks_open<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
     name: &str,
-    disk: &DiskConfig,
+    by_id: &ByIdPath,
     passphrase: &str,
 ) -> Result<(), LuksError> {
     let mn = mapper_name(name);
@@ -177,7 +173,7 @@ pub fn ensure_luks_open<R: CommandRunner, F: Filesystem + ?Sized>(
 
     let result = runner.run_with_stdin(
         &CmdRequest::CryptsetupLuksOpen {
-            device: disk.by_id.0.clone(),
+            device: by_id.0.clone(),
             mapper: mn.0.clone(),
         },
         passphrase.as_bytes(),
@@ -185,7 +181,7 @@ pub fn ensure_luks_open<R: CommandRunner, F: Filesystem + ?Sized>(
     if result.exit_status != 0 {
         return Err(LuksError::Validation(format!(
             "failed to open LUKS device {}. Wrong passphrase?",
-            disk.by_id
+            by_id
         )));
     }
     Ok(())
@@ -218,7 +214,7 @@ pub fn ensure_luks_open_with_key_file<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
     name: &str,
-    disk: &DiskConfig,
+    by_id: &ByIdPath,
     key_file_path: &std::path::Path,
 ) -> Result<(), LuksError> {
     let mn = mapper_name(name);
@@ -228,14 +224,14 @@ pub fn ensure_luks_open_with_key_file<R: CommandRunner, F: Filesystem + ?Sized>(
     }
 
     let result = runner.run(&CmdRequest::CryptsetupLuksOpenKeyFile {
-        device: disk.by_id.0.clone(),
+        device: by_id.0.clone(),
         mapper: mn.0.clone(),
         key_file_path: key_file_path.display().to_string(),
     })?;
     if result.exit_status != 0 {
         return Err(LuksError::Validation(format!(
             "failed to open LUKS device {} with keyfile. Wrong keyfile?",
-            disk.by_id
+            by_id
         )));
     }
     Ok(())
@@ -327,9 +323,9 @@ fn header_backup_advisories_in(dir: &std::path::Path) -> Vec<String> {
     }
 }
 
-/// Production wrapper — scans HEADER_BACKUP_DIR.
-pub fn header_backup_advisories() -> Vec<String> {
-    header_backup_advisories_in(std::path::Path::new(HEADER_BACKUP_DIR))
+/// Scan the luks-headers directory for backup files and return advisories.
+pub fn header_backup_advisories(paths: &StatePaths) -> Vec<String> {
+    header_backup_advisories_in(&paths.luks_headers_dir())
 }
 
 #[cfg(test)]
@@ -396,5 +392,25 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("notes.txt"), b"hello").unwrap();
         assert!(header_backup_advisories_in(dir.path()).is_empty());
+    }
+
+    /*
+     * Intent: verify the public header_backup_advisories wrapper reads from
+     *   the custom root rather than a hardcoded path.
+     * Why: the wrapper is a thin delegation to header_backup_advisories_in;
+     *   a regression that ignores StatePaths would silently use production paths.
+     * Scenario: test creates a .luksheader file under a custom state root and
+     *   confirms the public API sees it.
+     */
+    #[test]
+    fn advisory_via_state_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = crate::state_paths::StatePaths::custom(dir.path().into());
+        let headers_dir = paths.luks_headers_dir();
+        std::fs::create_dir_all(&headers_dir).unwrap();
+        std::fs::write(headers_dir.join("braid-disk1.luksheader"), b"fake").unwrap();
+        let advisories = header_backup_advisories(&paths);
+        assert_eq!(advisories.len(), 1);
+        assert!(advisories[0].contains("copy offsite"));
     }
 }

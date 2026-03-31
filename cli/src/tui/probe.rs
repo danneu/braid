@@ -8,6 +8,7 @@ use crate::parse::{
     parse_btrfs_scrub_status, parse_cryptsetup_luks_dump, parse_lsblk_json, parse_smartctl_health,
 };
 use crate::probe::probe_pool;
+use crate::state_paths::StatePaths;
 use crate::status::resolve_alert_state;
 use crate::status::{estimate_pool_capacity, get_balance_report, DiskErrors};
 use crate::tui::model::{DiskLuksInfo, DiskUsage, PoolState};
@@ -17,6 +18,7 @@ pub fn probe_pool_for_tui<R: CommandRunner>(
     runner: &R,
     mount_point: &str,
     disk_by_id: &HashMap<String, String>,
+    paths: &StatePaths,
 ) -> Result<Option<PoolState>, String> {
     let domain = probe_pool(runner, mount_point).map_err(|e| e.to_string())?;
 
@@ -44,12 +46,7 @@ pub fn probe_pool_for_tui<R: CommandRunner>(
     let devid_to_name: HashMap<u64, &str> = domain
         .devices
         .iter()
-        .filter_map(|d| {
-            d.mapper
-                .0
-                .strip_prefix("braid-")
-                .map(|name| (d.devid, name))
-        })
+        .filter_map(|d| crate::config::name_from_mapper(&d.mapper.0).map(|name| (d.devid, name)))
         .collect();
 
     let mut disk_usage = HashMap::new();
@@ -115,7 +112,7 @@ pub fn probe_pool_for_tui<R: CommandRunner>(
             for dev in &lsblk.blockdevices {
                 if let Some(tran) = &dev.tran {
                     for child in &dev.children {
-                        if let Some(name) = child.name.strip_prefix("braid-") {
+                        if let Some(name) = crate::config::name_from_mapper(&child.name) {
                             disk_transport.insert(name.to_owned(), tran.clone());
                         }
                     }
@@ -162,7 +159,7 @@ pub fn probe_pool_for_tui<R: CommandRunner>(
         }
     }
 
-    let alert_state = resolve_alert_state();
+    let alert_state = resolve_alert_state(paths);
 
     let capacity_total_bytes = if domain.missing_count == 0 {
         let sizes: Vec<u64> = dev_usage.devices.iter().map(|d| d.device_size).collect();
@@ -322,7 +319,13 @@ mod tests {
                 ),
             );
 
-        let result = probe_pool_for_tui(&runner, "/mnt/storage", &HashMap::new()).unwrap();
+        let result = probe_pool_for_tui(
+            &runner,
+            "/mnt/storage",
+            &HashMap::new(),
+            &StatePaths::production(),
+        )
+        .unwrap();
         let pool = result.expect("pool should be Some");
 
         // Verify balance is idle

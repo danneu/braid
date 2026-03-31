@@ -1,71 +1,27 @@
-use crate::types::{ByIdPath, MapperName, MountPoint};
+use crate::types::{MapperName, MountPoint};
 use serde::Deserialize;
-use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum ConfigBuildError {
-    #[error("disks must not be empty")]
-    EmptyDisks,
-    #[error("duplicate by_id value in config: {0}")]
-    DuplicateByIdValue(String),
     #[error("mount_point must not be empty")]
     EmptyMountPoint,
-    #[error(
-        "invalid disk name '{0}': must start with a letter, contain only letters, digits, hyphens, or underscores, and be at most 32 characters"
-    )]
-    InvalidDiskName(String),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct DiskConfig {
-    pub by_id: ByIdPath,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(try_from = "RawConfig")]
 pub struct Config {
-    disks: BTreeMap<String, DiskConfig>,
     mount_point: MountPoint,
 }
 
 impl Config {
-    pub fn new(
-        disks: BTreeMap<String, DiskConfig>,
-        mount_point: MountPoint,
-    ) -> Result<Self, ConfigBuildError> {
-        if disks.is_empty() {
-            return Err(ConfigBuildError::EmptyDisks);
-        }
-        for name in disks.keys() {
-            if !is_valid_disk_name(name) {
-                return Err(ConfigBuildError::InvalidDiskName(name.clone()));
-            }
-        }
-        let mut seen = std::collections::HashSet::new();
-        for disk in disks.values() {
-            if !seen.insert(&disk.by_id) {
-                return Err(ConfigBuildError::DuplicateByIdValue(disk.by_id.to_string()));
-            }
-        }
+    pub fn new(mount_point: MountPoint) -> Result<Self, ConfigBuildError> {
         if mount_point.0.is_empty() {
             return Err(ConfigBuildError::EmptyMountPoint);
         }
-        Ok(Config { disks, mount_point })
-    }
-
-    pub fn disks(&self) -> &BTreeMap<String, DiskConfig> {
-        &self.disks
-    }
-
-    pub fn disk_by_name(&self, name: &str) -> Option<&DiskConfig> {
-        self.disks.get(name)
-    }
-
-    pub fn names(&self) -> Vec<&String> {
-        self.disks.keys().collect()
+        Ok(Config { mount_point })
     }
 
     pub fn mount_point(&self) -> &MountPoint {
@@ -78,21 +34,13 @@ pub fn mapper_name(name: &str) -> MapperName {
     MapperName(format!("braid-{name}"))
 }
 
-fn is_valid_disk_name(name: &str) -> bool {
-    if name.len() > 32 {
-        return false;
-    }
-    let mut chars = name.chars();
-    match chars.next() {
-        Some(c) if c.is_ascii_alphabetic() => {}
-        _ => return false,
-    }
-    chars.all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+/// Extract the disk name from a mapper name, if it has the braid- prefix.
+pub fn name_from_mapper(mapper: &str) -> Option<&str> {
+    mapper.strip_prefix("braid-")
 }
 
 #[derive(Deserialize)]
 struct RawConfig {
-    disks: BTreeMap<String, DiskConfig>,
     mount_point: MountPoint,
 }
 
@@ -100,7 +48,7 @@ impl TryFrom<RawConfig> for Config {
     type Error = ConfigBuildError;
 
     fn try_from(raw: RawConfig) -> Result<Self, Self::Error> {
-        Config::new(raw.disks, raw.mount_point)
+        Config::new(raw.mount_point)
     }
 }
 
@@ -138,49 +86,16 @@ mod tests {
 
     #[test]
     fn parses_valid_config() {
-        let raw =
-            r#"{"disks":{"toshiba":{"by_id":"/dev/disk/by-id/a"}},"mount_point":"/mnt/storage"}"#;
+        let raw = r#"{"mount_point":"/mnt/storage"}"#;
         let cfg: Config = serde_json::from_str(raw).expect("config should parse");
-        assert_eq!(cfg.disks().len(), 1);
-        assert!(cfg.disk_by_name("toshiba").is_some());
         assert_eq!(cfg.mount_point().as_str(), "/mnt/storage");
     }
 
     #[test]
-    fn rejects_duplicate_by_id_values() {
-        let mut disks = BTreeMap::new();
-        disks.insert(
-            "a".to_owned(),
-            DiskConfig {
-                by_id: ByIdPath("/dev/disk/by-id/same".to_owned()),
-            },
-        );
-        disks.insert(
-            "b".to_owned(),
-            DiskConfig {
-                by_id: ByIdPath("/dev/disk/by-id/same".to_owned()),
-            },
-        );
-        let err = Config::new(disks, MountPoint("/mnt/storage".to_owned()))
-            .expect_err("duplicate by_id values should fail");
-        assert!(matches!(err, ConfigBuildError::DuplicateByIdValue(_)));
-    }
-
-    #[test]
-    fn rejects_empty_disks() {
-        let err = Config::new(BTreeMap::new(), MountPoint("/mnt/storage".to_owned()))
-            .expect_err("empty disks should fail");
-        assert!(matches!(err, ConfigBuildError::EmptyDisks));
-    }
-
-    #[test]
-    fn rejects_empty_disks_json() {
-        let raw = r#"{"disks":{},"mount_point":"/mnt/storage"}"#;
-        let err = serde_json::from_str::<Config>(raw).expect_err("empty disks JSON should fail");
-        assert!(
-            err.to_string().contains("disks must not be empty"),
-            "unexpected error: {err}"
-        );
+    fn rejects_empty_mount_point() {
+        let raw = r#"{"mount_point":""}"#;
+        let err = serde_json::from_str::<Config>(raw).expect_err("empty mount should fail");
+        assert!(err.to_string().contains("mount_point must not be empty"));
     }
 
     #[test]
@@ -190,136 +105,14 @@ mod tests {
     }
 
     #[test]
-    fn names_returns_sorted_keys() {
-        let mut disks = BTreeMap::new();
-        disks.insert(
-            "zebra".to_owned(),
-            DiskConfig {
-                by_id: ByIdPath("/dev/disk/by-id/z".to_owned()),
-            },
-        );
-        disks.insert(
-            "alpha".to_owned(),
-            DiskConfig {
-                by_id: ByIdPath("/dev/disk/by-id/a".to_owned()),
-            },
-        );
-        let cfg = Config::new(disks, MountPoint("/mnt/storage".to_owned())).unwrap();
-        let keys: Vec<&str> = cfg.names().into_iter().map(|s| s.as_str()).collect();
-        assert_eq!(keys, vec!["alpha", "zebra"]);
+    fn name_from_mapper_strips_prefix() {
+        assert_eq!(name_from_mapper("braid-toshiba"), Some("toshiba"));
+        assert_eq!(name_from_mapper("braid-ironwolf"), Some("ironwolf"));
     }
 
     #[test]
-    fn rejects_disk_name_starting_with_digit() {
-        let mut disks = BTreeMap::new();
-        disks.insert(
-            "1bad".to_owned(),
-            DiskConfig {
-                by_id: ByIdPath("/dev/disk/by-id/a".to_owned()),
-            },
-        );
-        let err = Config::new(disks, MountPoint("/mnt/storage".to_owned()))
-            .expect_err("digit-starting key should fail");
-        assert!(matches!(err, ConfigBuildError::InvalidDiskName(_)));
-    }
-
-    #[test]
-    fn rejects_disk_name_starting_with_hyphen() {
-        let mut disks = BTreeMap::new();
-        disks.insert(
-            "-bad".to_owned(),
-            DiskConfig {
-                by_id: ByIdPath("/dev/disk/by-id/a".to_owned()),
-            },
-        );
-        let err = Config::new(disks, MountPoint("/mnt/storage".to_owned()))
-            .expect_err("hyphen-starting key should fail");
-        assert!(matches!(err, ConfigBuildError::InvalidDiskName(_)));
-    }
-
-    #[test]
-    fn rejects_disk_name_starting_with_underscore() {
-        let mut disks = BTreeMap::new();
-        disks.insert(
-            "_bad".to_owned(),
-            DiskConfig {
-                by_id: ByIdPath("/dev/disk/by-id/a".to_owned()),
-            },
-        );
-        let err = Config::new(disks, MountPoint("/mnt/storage".to_owned()))
-            .expect_err("underscore-starting key should fail");
-        assert!(matches!(err, ConfigBuildError::InvalidDiskName(_)));
-    }
-
-    #[test]
-    fn rejects_disk_name_with_space() {
-        let mut disks = BTreeMap::new();
-        disks.insert(
-            "my disk".to_owned(),
-            DiskConfig {
-                by_id: ByIdPath("/dev/disk/by-id/a".to_owned()),
-            },
-        );
-        let err = Config::new(disks, MountPoint("/mnt/storage".to_owned()))
-            .expect_err("space in key should fail");
-        assert!(matches!(err, ConfigBuildError::InvalidDiskName(_)));
-    }
-
-    #[test]
-    fn rejects_empty_disk_name() {
-        let mut disks = BTreeMap::new();
-        disks.insert(
-            "".to_owned(),
-            DiskConfig {
-                by_id: ByIdPath("/dev/disk/by-id/a".to_owned()),
-            },
-        );
-        let err = Config::new(disks, MountPoint("/mnt/storage".to_owned()))
-            .expect_err("empty key should fail");
-        assert!(matches!(err, ConfigBuildError::InvalidDiskName(_)));
-    }
-
-    #[test]
-    fn rejects_disk_name_too_long() {
-        let key = "a".repeat(33);
-        let mut disks = BTreeMap::new();
-        disks.insert(
-            key,
-            DiskConfig {
-                by_id: ByIdPath("/dev/disk/by-id/a".to_owned()),
-            },
-        );
-        let err = Config::new(disks, MountPoint("/mnt/storage".to_owned()))
-            .expect_err("33-char key should fail");
-        assert!(matches!(err, ConfigBuildError::InvalidDiskName(_)));
-    }
-
-    #[test]
-    fn accepts_disk_name_at_max_length() {
-        let key = "a".repeat(32);
-        let mut disks = BTreeMap::new();
-        disks.insert(
-            key,
-            DiskConfig {
-                by_id: ByIdPath("/dev/disk/by-id/a".to_owned()),
-            },
-        );
-        Config::new(disks, MountPoint("/mnt/storage".to_owned()))
-            .expect("32-char key should be valid");
-    }
-
-    #[test]
-    fn accepts_valid_disk_names() {
-        for key in ["toshiba", "disk1", "my-disk", "my_disk", "A", "Z1-b2-c3"] {
-            let mut disks = BTreeMap::new();
-            disks.insert(
-                key.to_owned(),
-                DiskConfig {
-                    by_id: ByIdPath(format!("/dev/disk/by-id/{key}")),
-                },
-            );
-            Config::new(disks, MountPoint("/mnt/storage".to_owned()))
-                .unwrap_or_else(|e| panic!("key '{key}' should be valid, got: {e}"));
-        }
+    fn name_from_mapper_returns_none_for_non_braid() {
+        assert_eq!(name_from_mapper("luks-something"), None);
+        assert_eq!(name_from_mapper(""), None);
     }
 }

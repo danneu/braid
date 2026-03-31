@@ -13,7 +13,7 @@ It wraps two standard tools:
 - Redundancy - data is stored on two disks, so you can always tolerate a single disk failure
 - Dynamic pool — add or remove drives incrementally
 - Self-healing data - btrfs checksums and silently repairs corruption from the redundant copy
-- Declarative config - declare your disks in nix; the pool state follows the config
+- CLI-owned membership - add drives with `braid add`, no `nixos-rebuild` required
 - Dashboard - `braid tui` shows you the state of your system
 
 ## Downsides
@@ -65,21 +65,20 @@ Add braid to your flake inputs and import the module:
 ## Example
 
 ```nix
+# NixOS config — just enable the module
 braid = {
   enable = true;
-  disks = {
-    toshiba  = {
-      byId = "/dev/disk/by-id/ata-Toshiba_MN07_XXXX";
-    };
-    ironwolf = {
-      byId = "/dev/disk/by-id/ata-Ironwolf_ST12_YYYY";
-    };
-  };
   mountPoint = "/mnt/storage";  # default
 };
 ```
 
-Each disk gets a human-friendly name used in CLI commands, systemd mapper names (`braid-toshiba`), logs, and error messages.
+```sh
+# Add drives — no nixos-rebuild needed
+sudo braid add toshiba=/dev/disk/by-id/ata-Toshiba_MN07_XXXX \
+               ironwolf=/dev/disk/by-id/ata-Ironwolf_ST12_YYYY
+```
+
+Each disk gets a human-friendly name used in CLI commands, systemd mapper names (`braid-toshiba`), logs, and error messages. Disk membership is stored in `/var/lib/braid/pool.json`, owned by the CLI.
 
 ## Managing drives
 
@@ -96,19 +95,9 @@ Use the ID-LINK column to build your by-id paths.
 
 ### Start with multiple disks (recommended)
 
-```nix
-braid = {
-  enable = true;
-  disks = {
-    toshiba  = { byId = "/dev/disk/by-id/ata-Toshiba_MN07_XXXX"; };
-    ironwolf = { byId = "/dev/disk/by-id/ata-Ironwolf_ST12_YYYY"; };
-  };
-};
-```
-
 ```sh
-sudo nixos-rebuild switch
-sudo braid add toshiba ironwolf
+sudo braid add toshiba=/dev/disk/by-id/ata-Toshiba_MN07_XXXX \
+               ironwolf=/dev/disk/by-id/ata-Ironwolf_ST12_YYYY
 ```
 
 `braid add` asks for a passphrase once, LUKS-formats both disks, and creates a btrfs RAID1 pool directly — no balance needed. The pool is live immediately at `/mnt/storage` with full redundancy.
@@ -116,24 +105,23 @@ sudo braid add toshiba ironwolf
 ### Start with one disk
 
 ```sh
-sudo braid add toshiba
+sudo braid add toshiba=/dev/disk/by-id/ata-Toshiba_MN07_XXXX
 ```
 
 The pool is live at `/mnt/storage` but with no redundancy — data is available but unprotected until a second drive is added.
 
 ### Add a drive
 
-```nix
-# Add to braid.disks:
-braid.disks.ironwolf = { byId = "/dev/disk/by-id/ata-Ironwolf_ST12_YYYY"; };
+```sh
+sudo braid add ironwolf=/dev/disk/by-id/ata-Ironwolf_ST12_YYYY
 ```
 
-```
-sudo nixos-rebuild switch
-sudo braid add ironwolf
-```
+The pool converts to RAID1 automatically. Existing data rebalances to the new disk in the background. You can also add multiple disks at once:
 
-The pool converts to RAID1 automatically. Existing data rebalances to the new disk in the background. You can also add multiple disks at once: `sudo braid add ironwolf seagate`.
+```sh
+sudo braid add ironwolf=/dev/disk/by-id/ata-Ironwolf_ST12_YYYY \
+               seagate=/dev/disk/by-id/ata-Seagate_ST12_ZZZZ
+```
 
 `braid add` handles three cases:
 
@@ -144,7 +132,8 @@ The pool converts to RAID1 automatically. Existing data rebalances to the new di
 ### Preview before executing
 
 ```sh
-$ sudo braid add toshiba ironwolf --dry-run
+$ sudo braid add toshiba=/dev/disk/by-id/ata-Toshiba_MN07_XXXX \
+                 ironwolf=/dev/disk/by-id/ata-Ironwolf_ST12_YYYY --dry-run
 [destructive] LUKS format /dev/disk/by-id/ata-Toshiba_MN07_XXXX
 [safe       ] LUKS open → braid-toshiba
 [destructive] LUKS format /dev/disk/by-id/ata-Ironwolf_ST12_YYYY
@@ -161,12 +150,7 @@ Steps reflect actual disk state — if a disk is already LUKS-formatted, the des
 sudo braid remove ironwolf
 ```
 
-Data migrates off the drive before it's detached. If removing would leave a single disk (losing redundancy), confirmation is required. After removing, update config and rebuild:
-
-```nix
-# Remove from braid.disks, then:
-sudo nixos-rebuild switch
-```
+Data migrates off the drive before it's detached. If removing would leave a single disk (losing redundancy), confirmation is required. The disk is removed from pool membership (`pool.json`) automatically.
 
 ### Remove a missing/dead device (cleanup only)
 
@@ -186,30 +170,37 @@ Replace works for both live and dead/missing disks using `btrfs replace start`. 
 **Live disk** (swap a working drive):
 
 ```
-sudo braid replace --old ironwolf --new seagate
+sudo braid replace --old ironwolf --new seagate=/dev/disk/by-id/ata-Seagate_NEW_ZZZZ
 ```
 
 **Dead/missing disk** (after a drive failure):
 
-```nix
-# Add replacement to config:
-braid.disks.seagate = { byId = "/dev/disk/by-id/ata-Seagate_NEW_ZZZZ"; };
-# (keep dead disk in config until replace completes, then remove it)
 ```
-
-```
-sudo nixos-rebuild switch
-sudo braid replace --old ironwolf --new seagate                    # auto-detects single missing device
-sudo braid replace --old ironwolf --new seagate --missing-id 3     # explicit devid when multiple missing
+sudo braid replace --old ironwolf --new seagate=/dev/disk/by-id/ata-Seagate_NEW_ZZZZ
+sudo braid replace --old ironwolf --new seagate=/dev/disk/by-id/ata-Seagate_NEW_ZZZZ --missing-id 3   # explicit devid when multiple missing
 ```
 
 Use `braid status` to see device IDs. If the pool has missing devices when you try a live replace, repair the missing device first with `braid replace --missing-id <devid>`. Use `braid remove-missing` only to intentionally forget a stale entry without rebuilding data. When replacing a missing device and clearing the last missing entry with ≥2 devices remaining, a soft RAID1 balance runs automatically to restore redundancy.
 
+### Discover pool members
+
+If `pool.json` is lost or corrupt, `braid discover` scans `/dev/disk/by-id/` for LUKS devices with `braid-*` labels and reconstructs membership:
+
+```sh
+sudo braid discover              # show what's found
+sudo braid discover --write      # persist to pool.json
+```
+
+This is a repair tool — the normal path to create `pool.json` is `braid add`.
+
 ### Disk identity map
 
-Braid maintains an advisory disk identity map at `/var/lib/braid/disk-map.json`, recording each disk's `name`, `by_id`, `luks_uuid`, and `devid`. This is updated automatically by `add`, `remove`, `replace`, `remove-missing`, and `unlock` commands. It is non-authoritative — live pool probing is always the source of truth — and is rebuilt by normal command executions.
+Braid maintains state files in `/var/lib/braid/`:
 
-In v1.0, disk names are immutable once recorded in this map. Renaming/reassigning a name in config is rejected by mutating commands. Keep the original name, or use explicit `braid replace` / `braid remove` + `braid add` workflows.
+- **`pool.json`** — authoritative disk membership with enriched metadata. Maps disk names to `/dev/disk/by-id/` paths plus `luks_uuid`, `devid`, and `added_at`. Written by `braid add`, `remove`, `replace`, `remove-missing`, `discover --write`, and `recover`. Metadata fields enriched by `unlock` on each mount. If missing or corrupt, `unlock` fails with a clear error directing you to `braid discover --write`.
+- **`pending-op.json`** — pending-operation journal (transient). Present only during mutations. When present, braid enters recovery mode — only `status`, `recover`, and `lock` are allowed. `braid recover --passphrase-stdin` opens LUKS, mounts the pool, rebuilds membership from live state, and clears the journal. If devices are missing, pass `--allow-degraded`.
+
+Disk names are immutable once assigned. Renaming/reassigning a name is rejected by mutating commands. Keep the original name, or use explicit `braid replace` / `braid remove` + `braid add` workflows.
 
 ### Pool status
 
@@ -221,11 +212,7 @@ sudo braid status --json      # machine-readable output
 Drive states:
 
 - `present` — disk is in the pool and online
-- `new` — declared in config but not yet added (`braid add`)
-- `missing` — was in pool but device is absent (unplugged, failed, powered off)
-- `unknown` — cannot determine (disk-map unreadable)
-
-Drive state classification uses the disk identity map. If the map is unavailable, absent disks show as `unknown` instead of `new` or `missing`.
+- `missing` — in pool membership but device is absent (unplugged, failed, powered off)
 
 Pool status values (`--json` `"status"` field / human output):
 
@@ -279,8 +266,8 @@ sudo braid browse --check    # non-interactive: verify all browse commands succe
 For scripting, use `--passphrase-stdin` or `--passphrase-file` with `--yes`:
 
 ```sh
-echo 'secret' | sudo braid add ironwolf --passphrase-stdin --yes
-sudo braid add ironwolf --yes --passphrase-file /run/secrets/luks
+echo 'secret' | sudo braid add ironwolf=/dev/disk/by-id/ata-Ironwolf_ST12_YYYY --passphrase-stdin --yes
+sudo braid add ironwolf=/dev/disk/by-id/ata-Ironwolf_ST12_YYYY --yes --passphrase-file /run/secrets/luks
 ```
 
 ## Pool unlock
@@ -336,7 +323,7 @@ Enrolls an existing `braid.key` in the given directory into all pool disks. The 
 ### Enroll during `braid add`
 
 ```sh
-sudo braid add ironwolf --enroll /mnt/usb
+sudo braid add ironwolf=/dev/disk/by-id/ata-Ironwolf_ST12_YYYY --enroll /mnt/usb
 ```
 
 ### Enable auto-unlock during boot
@@ -364,12 +351,12 @@ On boot, the `braid-auto-unlock` service mounts the USB read-only, unlocks the p
 Tab completion for subcommands, flags, and disk names works out of the box on NixOS when `braid.enable = true`. Completions are registered for bash, zsh, and fish.
 
 ```sh
-braid <TAB>           # → add  remove  remove-missing  replace  status  doctor
-braid add <TAB>       # → toshiba  ironwolf  seagate
-braid add --<TAB>     # → --dry-run  --yes  --passphrase-file  --progress
+braid <TAB>              # → add  remove  remove-missing  replace  status  doctor
+braid remove <TAB>       # → toshiba  ironwolf  seagate
+braid add --<TAB>        # → --dry-run  --yes  --passphrase-file  --progress
 ```
 
-Disk name candidates are read from `/etc/braid/config.json` on every tab press, so they reflect your current `braid.disks` config after a `nixos-rebuild`.
+Disk name candidates are read from `/var/lib/braid/pool.json` on every tab press, so they reflect your current pool membership.
 
 ## What you get for free
 
@@ -471,8 +458,8 @@ sudo braid status
 # ALERT -- disk health issue detected. Run 'braid ack' to acknowledge and silence.
 #   - missing device (devid 2)
 
-# Add replacement disk to config, rebuild, then:
-sudo braid replace --old bad-disk --new new-disk
+# Replace the failed disk:
+sudo braid replace --old bad-disk --new new-disk=/dev/disk/by-id/ata-NEW_DISK
 
 # Acknowledge the alert (stops beeping)
 sudo braid ack

@@ -11,7 +11,7 @@
 # not want audible beeping. The alert service should run alertCommand once,
 # stay active (RemainAfterExit), and leave all PC speaker config untouched.
 { braid }:
-{ lib, ... }:
+{ ... }:
 let
   passphrase = "testpassphrase";
   diskNames = ["disk1" "disk2"];
@@ -28,7 +28,6 @@ in
     braid = {
       enable = true;
       package = braid;
-      disks = lib.genAttrs diskNames (d: { byId = "/dev/disk/by-id/virtio-${d}"; });
       monitor.enable = true;
       monitor.beep = false;
       monitor.alertCommand = "touch /root/alert-fired";

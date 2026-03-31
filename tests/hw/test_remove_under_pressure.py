@@ -24,15 +24,15 @@ import os
 sys.path.insert(0, os.path.dirname(__file__))
 from harness import (
     run, run_fail, run_capture, cleanup, section,
-    add_cmd, remove_cmd, CONFIG, MOUNT_POINT,
+    add_cmd, remove_cmd, disk, CONFIG, MOUNT_POINT,
 )
 
 # --- Phase 1: Build 3-drive RAID1 pool ---
 
 with section("Setup: build 3-drive pool"):
-    run(add_cmd("hwtest1"))
-    run(add_cmd("hwtest2"))
-    run(add_cmd("hwtest3"))
+    run(add_cmd("hwtest1", disk(1)))
+    run(add_cmd("hwtest2", disk(2)))
+    run(add_cmd("hwtest3", disk(3)))
 
     fi_show = run(f"btrfs fi show {MOUNT_POINT}")
     for name in ["braid-hwtest1", "braid-hwtest2", "braid-hwtest3"]:

@@ -75,23 +75,27 @@ def disk_info(path):
 
 
 def devices_from_config(config_path):
-    """Read disk by_id paths from a braid config file, sorted by key name."""
+    """Read disk by_id paths from pool.json, sorted by key name."""
+    # pool.json lives alongside config.json in /var/lib/braid/
+    pool_path = os.path.join(os.path.dirname(config_path), "pool.json")
+    if not os.path.exists(pool_path):
+        pool_path = "/var/lib/braid/pool.json"
     try:
-        with open(config_path) as f:
-            config = json.load(f)
+        with open(pool_path) as f:
+            pool = json.load(f)
     except (OSError, json.JSONDecodeError) as e:
-        die(f"Cannot read config {config_path}: {e}")
+        die(f"Cannot read pool {pool_path}: {e}")
 
-    disks = config.get("disks", {})
+    disks = pool.get("disks", {})
     if not disks:
-        die(f"No disks found in {config_path}")
+        die(f"No disks found in {pool_path}")
 
     # Sort by key name for deterministic ordering
     paths = []
     for key in sorted(disks.keys()):
         by_id = disks[key].get("by_id")
         if not by_id:
-            die(f"Disk '{key}' in {config_path} has no by_id field")
+            die(f"Disk '{key}' in {pool_path} has no by_id field")
         paths.append(by_id)
 
     return paths
@@ -141,11 +145,8 @@ def write_config(device_paths):
     """Write test config to /tmp/braid-hw-test/config.json."""
     os.makedirs(CONFIG_DIR, exist_ok=True)
     config = {
-        "disks": {},
         "mount_point": MOUNT_POINT,
     }
-    for i, path in enumerate(device_paths, 1):
-        config["disks"][f"hwtest{i}"] = {"by_id": path}
 
     with open(CONFIG_PATH, "w") as f:
         json.dump(config, f, indent=2)

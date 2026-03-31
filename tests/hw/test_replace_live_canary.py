@@ -23,14 +23,14 @@ import os
 sys.path.insert(0, os.path.dirname(__file__))
 from harness import (
     run, run_capture, cleanup, section,
-    add_cmd, replace_cmd, CONFIG, MOUNT_POINT,
+    add_cmd, replace_cmd, disk, CONFIG, MOUNT_POINT,
 )
 
 # --- Phase 0: Build 2-drive RAID1 pool ---
 
 with section("Setup: build 2-drive RAID1 pool"):
-    run(add_cmd("hwtest1"))
-    run(add_cmd("hwtest2"))
+    run(add_cmd("hwtest1", disk(1)))
+    run(add_cmd("hwtest2", disk(2)))
 
     fi_show = run(f"btrfs fi show {MOUNT_POINT}")
     for name in ["braid-hwtest1", "braid-hwtest2"]:
@@ -45,7 +45,7 @@ with section("Setup: build 2-drive RAID1 pool"):
 # --- Phase 1: Live replace disk2 → disk3 ---
 
 with section("Live replace hwtest2 with hwtest3"):
-    result = run(replace_cmd("hwtest2", "hwtest3"), timeout=1800)
+    result = run(replace_cmd("hwtest2", "hwtest3", disk(3)), timeout=1800)
     print(f"braid replace output:\n{result}")
 
 with section("Pool healthy after live replace"):
@@ -75,11 +75,11 @@ with section("Data intact after live replace"):
     content = run(f"cat {MOUNT_POINT}/precious.txt").strip()
     assert content == "important data", f"Expected 'important data', got '{content}'"
 
-with section("Disk map updated after live replace"):
-    dm_raw = run("cat /var/lib/braid/disk-map.json")
-    dm = json.loads(dm_raw)
-    assert "hwtest2" not in dm["disks"], f"hwtest2 still in map: {dm}"
-    assert "hwtest3" in dm["disks"], f"hwtest3 missing from map: {dm}"
-    assert "hwtest1" in dm["disks"], f"hwtest1 missing from map: {dm}"
+with section("Pool membership updated after live replace"):
+    pm_raw = run("cat /var/lib/braid/pool.json")
+    pm = json.loads(pm_raw)
+    assert "hwtest2" not in pm["disks"], f"hwtest2 still in pool: {pm}"
+    assert "hwtest3" in pm["disks"], f"hwtest3 missing from pool: {pm}"
+    assert "hwtest1" in pm["disks"], f"hwtest1 missing from pool: {pm}"
 
 print("\nAll replace live canary tests passed.")

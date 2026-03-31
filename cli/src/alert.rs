@@ -5,14 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::parse::types::{BtrfsDeviceStatsOutput, DeviceErrorStats, DeviceStatsTarget};
 use crate::state_io::atomic_write;
-
-pub const ACKED_STATS_FILE: &str = "/var/lib/braid/acked-stats.json";
-pub const SMARTD_ALERT_FILE: &str = "/var/lib/braid/smartd-alert";
-
-/// Authoritative source of "is there an unacknowledged alert?" for all UI
-/// surfaces (status, TUI, offline). `braid monitor` writes it; only `braid ack`
-/// clears it.
-pub const ALERT_LATCH_FILE: &str = "/var/lib/braid/alert-latch.json";
+use crate::state_paths::StatePaths;
 
 // ---------------------------------------------------------------------------
 // Alert model
@@ -73,8 +66,8 @@ impl Default for AckedStats {
 // Load / save
 // ---------------------------------------------------------------------------
 
-pub fn load_acked_stats() -> AckedStats {
-    load_acked_stats_at(Path::new(ACKED_STATS_FILE))
+pub fn load_acked_stats(paths: &StatePaths) -> AckedStats {
+    load_acked_stats_at(&paths.acked_stats_json())
 }
 
 pub fn load_acked_stats_at(path: &Path) -> AckedStats {
@@ -85,8 +78,8 @@ pub fn load_acked_stats_at(path: &Path) -> AckedStats {
     serde_json::from_str(&contents).unwrap_or_default()
 }
 
-pub fn save_acked_stats(stats: &AckedStats) -> Result<(), std::io::Error> {
-    save_acked_stats_at(Path::new(ACKED_STATS_FILE), stats)
+pub fn save_acked_stats(stats: &AckedStats, paths: &StatePaths) -> Result<(), std::io::Error> {
+    save_acked_stats_at(&paths.acked_stats_json(), stats)
 }
 
 pub fn save_acked_stats_at(path: &Path, stats: &AckedStats) -> Result<(), std::io::Error> {
@@ -231,13 +224,13 @@ pub fn snapshot_current(
 }
 
 /// Check if the smartd alert flag file exists.
-pub fn smartd_alert_active() -> bool {
-    Path::new(SMARTD_ALERT_FILE).exists()
+pub fn smartd_alert_active(paths: &StatePaths) -> bool {
+    paths.smartd_alert().exists()
 }
 
 /// Remove the smartd alert flag file. Returns Ok(()) even if it didn't exist.
-pub fn remove_smartd_alert_flag() -> Result<(), std::io::Error> {
-    match std::fs::remove_file(SMARTD_ALERT_FILE) {
+pub fn remove_smartd_alert_flag(paths: &StatePaths) -> Result<(), std::io::Error> {
+    match std::fs::remove_file(paths.smartd_alert()) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e),
@@ -248,18 +241,18 @@ pub fn remove_smartd_alert_flag() -> Result<(), std::io::Error> {
 // Alert latch file
 // ---------------------------------------------------------------------------
 
-pub fn load_alert_latch() -> Option<AlertState> {
-    let contents = std::fs::read_to_string(ALERT_LATCH_FILE).ok()?;
+pub fn load_alert_latch(paths: &StatePaths) -> Option<AlertState> {
+    let contents = std::fs::read_to_string(paths.alert_latch_json()).ok()?;
     serde_json::from_str(&contents).ok()
 }
 
-pub fn save_alert_latch(state: &AlertState) -> Result<(), std::io::Error> {
+pub fn save_alert_latch(state: &AlertState, paths: &StatePaths) -> Result<(), std::io::Error> {
     let json = serde_json::to_string_pretty(state).map_err(std::io::Error::other)?;
-    atomic_write(Path::new(ALERT_LATCH_FILE), json.as_bytes())
+    atomic_write(&paths.alert_latch_json(), json.as_bytes())
 }
 
-pub fn remove_alert_latch() -> Result<(), std::io::Error> {
-    match std::fs::remove_file(ALERT_LATCH_FILE) {
+pub fn remove_alert_latch(paths: &StatePaths) -> Result<(), std::io::Error> {
+    match std::fs::remove_file(paths.alert_latch_json()) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e),
@@ -716,5 +709,27 @@ mod tests {
             &AlertCause::SmartdAlert,
             &AlertCause::BtrfsDeviceErrors { devid: 1 },
         ));
+    }
+
+    #[test]
+    fn acked_stats_roundtrip_via_state_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = crate::state_paths::StatePaths::custom(dir.path().into());
+
+        let mut map = BTreeMap::new();
+        map.insert(
+            "1".to_owned(),
+            AckedDisk {
+                missing_acked: false,
+                device_stats: AckedDeviceCounters {
+                    read_io_errs: 7,
+                    ..Default::default()
+                },
+            },
+        );
+        let stats = AckedStats(map);
+        save_acked_stats(&stats, &paths).unwrap();
+        let reloaded = load_acked_stats(&paths);
+        assert_eq!(reloaded, stats);
     }
 }

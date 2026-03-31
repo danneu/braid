@@ -3,7 +3,7 @@ export PATH="@toolPath@:$PATH"
 @braidBin@ "$@"
 ret=$?
 
-if [ -n "@storageGroup@" ] && [ "$ret" -eq 0 ]; then
+if [ "$ret" -eq 0 ]; then
   # Subcommand detection mirrors the global CLI shape in cli/src/main.rs (struct Cli).
   # If global options change there, update this parser to match.
   subcmd=""
@@ -30,14 +30,29 @@ if [ -n "@storageGroup@" ] && [ "$ret" -eq 0 ]; then
 
   if ! $skip_fixup; then
     case "$subcmd" in
-      unlock|add)
+      unlock|add|recover)
         if @mountpointBin@ -q "@mountPointPath@" 2>/dev/null; then
-          if ! @chownBin@ "root:@storageGroup@" "@mountPointPath@"; then
-            echo "braid: WARNING: failed to set ownership on @mountPointPath@" >&2
+          if [ -n "@storageGroup@" ]; then
+            if ! @chownBin@ "root:@storageGroup@" "@mountPointPath@"; then
+              echo "braid: WARNING: failed to set ownership on @mountPointPath@" >&2
+            fi
+            if ! @chmodBin@ 2770 "@mountPointPath@"; then
+              echo "braid: WARNING: failed to set permissions on @mountPointPath@" >&2
+            fi
           fi
-          if ! @chmodBin@ 2770 "@mountPointPath@"; then
-            echo "braid: WARNING: failed to set permissions on @mountPointPath@" >&2
+          if ! @systemctlBin@ start braid-online.service 2>/dev/null; then
+            echo "braid: WARNING: failed to activate braid-online.service — pool is mounted but shutdown may not lock automatically" >&2
           fi
+        fi
+        ;;
+      lock)
+        if ! @mountpointBin@ -q "@mountPointPath@" 2>/dev/null; then
+          # --no-block: when braid-online.service's ExecStop runs `braid lock`,
+          # the wrapper would call `systemctl stop braid-online.service` again.
+          # A synchronous stop here deadlocks — systemd waits for ExecStop to
+          # exit, but the wrapper is waiting for the stop to complete.  --no-block
+          # queues the stop and returns immediately, breaking the cycle.
+          @systemctlBin@ stop --no-block braid-online.service 2>/dev/null || true
         fi
         ;;
     esac

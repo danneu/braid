@@ -8,25 +8,21 @@ Dan buys a NAS computer and installs NixOS on its internal SSD. He has one 12TB 
 
 1. Plug in the 12TB Toshiba. Find its by-id path:
    ```
-   $ ls /dev/disk/by-id/ata-*
+   $ lsblk -d -o NAME,SIZE,ID-LINK
    ```
 
-2. Add braid to the NixOS config with the disk:
+2. Add braid to the NixOS config:
    ```nix
    braid = {
      enable = true;
-     disks = [
-       "/dev/disk/by-id/ata-Toshiba_MN07_XXXX"
-     ];
    };
    ```
 
-3. `nixos-rebuild switch` — module writes config, creates LUKS entries (which fail gracefully since the disk isn't formatted yet).
+3. `nixos-rebuild switch` — module sets up services, toolchain, and mount point.
 
 4. Format and add it to the pool:
    ```
-   $ sudo braid init-disk /dev/disk/by-id/ata-Toshiba_MN07_XXXX
-   $ sudo braid apply
+   $ sudo braid add toshiba=/dev/disk/by-id/ata-Toshiba_MN07_XXXX
    ```
 
 5. From MacBook: Finder → Cmd+K → `smb://nas/storage`. Start dragging files over.
@@ -44,41 +40,21 @@ Dan buys a NAS computer and installs NixOS on its internal SSD. He has one 12TB 
 
 8. Find the new disk:
    ```
-   $ ls /dev/disk/by-id/ata-*
+   $ lsblk -d -o NAME,SIZE,ID-LINK
    ```
 
-9. Add the new disk to the NixOS config:
-   ```nix
-   braid = {
-     disks = [
-       "/dev/disk/by-id/ata-Toshiba_MN07_XXXX"
-       "/dev/disk/by-id/ata-Ironwolf_ST12_YYYY"
-     ];
-     # ... same samba/unlock config
-   };
+9. Add it directly — no config change needed:
+   ```
+   $ sudo braid add ironwolf=/dev/disk/by-id/ata-Ironwolf_ST12_YYYY
    ```
 
-10. `nixos-rebuild switch` — module now knows about both disks for unlock at boot.
+10. The pool converts to RAID1 automatically. Existing data rebalances to the new disk in the background.
 
-11. Preview and apply:
-    ```
-    $ sudo braid plan
-    Plan ID: 2024-01-15T10:30:00Z-a1b2c3
-    Mount:   /mnt/storage
-
-    Actions:
-      ADD_DISK_LUKS_FORMAT_OPEN  /dev/disk/by-id/ata-Ironwolf_ST12_YYYY
-      ADD_DISK_BTRFS_ADD         /dev/disk/by-id/ata-Ironwolf_ST12_YYYY
-      BALANCE_TO_RAID1           /mnt/storage
-
-    $ sudo braid apply
-    ```
-
-12. Samba share never went down. Files still at `smb://nas/storage`. The Mac never noticed anything changed.
+11. Samba share never went down. Files still at `smb://nas/storage`. The Mac never noticed anything changed.
 
 ### Three months later: third drive on sale
 
-13. Same flow — plug in, add to config, rebuild, `braid plan`, `braid apply`. Pool grows to ~18TB usable with RAID1 across 3 drives.
+12. Same flow — plug in, find by-id path, `braid add seagate=/dev/disk/by-id/ata-Seagate_...`. Pool grows to ~18TB usable with RAID1 across 3 drives.
 
 ## Story 2: USB keyfile auto-unlock
 
@@ -94,7 +70,7 @@ Dan is tired of SSH'ing in to type the passphrase after every reboot. He sets up
 
 2. Enroll the keyfile into all pool disks:
    ```
-   $ sudo braid enroll /mnt/usb/braid.key
+   $ sudo braid enroll /mnt/usb
    ```
 
 3. Find the USB's by-id path:

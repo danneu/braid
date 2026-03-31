@@ -7,6 +7,7 @@ use crate::alert::{
 use crate::cmd::{CmdRequest, CommandRunner};
 use crate::parse::parse_btrfs_device_stats;
 use crate::probe::{probe_pool, ProbeError};
+use crate::state_paths::StatePaths;
 use crate::types::MountPoint;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -19,6 +20,7 @@ pub enum MonitorResult {
 pub fn cmd_monitor<R: CommandRunner>(
     runner: &R,
     mount_point: &str,
+    paths: &StatePaths,
 ) -> Result<MonitorResult, MonitorError> {
     // 1. Check if pool is mounted
     let pool = match probe_pool(runner, mount_point) {
@@ -40,13 +42,13 @@ pub fn cmd_monitor<R: CommandRunner>(
     let device_stats = parse_btrfs_device_stats(&stats_raw)?;
 
     // 3. Load acked stats
-    let mut acked = load_acked_stats();
+    let mut acked = load_acked_stats(paths);
 
     // 4. Get missing devids from pool probe
     let missing_devids = &pool.missing_devids;
 
     // 5. Check smartd alert flag
-    let smartd_active = alert::smartd_alert_active();
+    let smartd_active = alert::smartd_alert_active(paths);
 
     // 6. Build devid map from pool devices
     let path_to_devid: BTreeMap<String, u64> = pool
@@ -70,7 +72,7 @@ pub fn cmd_monitor<R: CommandRunner>(
         }
     }
     if ack_changed {
-        if let Err(e) = save_acked_stats(&acked) {
+        if let Err(e) = save_acked_stats(&acked, paths) {
             eprintln!("Warning: failed to update acked stats: {e}");
         }
     }
@@ -90,9 +92,9 @@ pub fn cmd_monitor<R: CommandRunner>(
             let error_causes = vec![AlertCause::ComputationError {
                 detail: e.to_string(),
             }];
-            let existing_latch = alert::load_alert_latch();
+            let existing_latch = alert::load_alert_latch(paths);
             let merged = merge_into_latch(existing_latch.as_ref(), &error_causes);
-            if let Err(write_err) = alert::save_alert_latch(&merged) {
+            if let Err(write_err) = alert::save_alert_latch(&merged, paths) {
                 eprintln!("Warning: failed to write alert latch: {write_err}");
             }
             return Err(MonitorError::UnmappedDevice(e));
@@ -100,14 +102,14 @@ pub fn cmd_monitor<R: CommandRunner>(
     };
 
     // 9. Load existing latch
-    let existing_latch = alert::load_alert_latch();
+    let existing_latch = alert::load_alert_latch(paths);
 
     // 10. Merge: existing latch + live causes
     let merged = merge_into_latch(existing_latch.as_ref(), &live_causes);
 
     // 11. If merged state active → write latch
     if merged.active {
-        if let Err(e) = alert::save_alert_latch(&merged) {
+        if let Err(e) = alert::save_alert_latch(&merged, paths) {
             eprintln!("Warning: failed to write alert latch: {e}");
         }
     }

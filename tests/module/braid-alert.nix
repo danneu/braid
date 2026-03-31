@@ -10,7 +10,7 @@
 # Scenario: NixOS machine with braid.monitor enabled. Verify the timer is
 # active, the alert service unit exists, and it can be started and stopped.
 { braid }:
-{ lib, ... }:
+{ ... }:
 let
   passphrase = "testpassphrase";
   diskNames = ["disk1" "disk2"];
@@ -27,7 +27,6 @@ in
     braid = {
       enable = true;
       package = braid;
-      disks = lib.genAttrs diskNames (d: { byId = "/dev/disk/by-id/virtio-${d}"; });
       monitor.enable = true;
       monitor.alertCommand = "touch /root/alert-fired";
     };

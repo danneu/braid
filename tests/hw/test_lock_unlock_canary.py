@@ -23,15 +23,15 @@ import os
 sys.path.insert(0, os.path.dirname(__file__))
 from harness import (
     run, run_fail, run_capture, cleanup, section,
-    add_cmd, unlock_cmd, lock_cmd, MOUNT_POINT,
+    add_cmd, unlock_cmd, lock_cmd, disk, MOUNT_POINT,
 )
 
 # --- Setup: Create 3-disk RAID1 pool ---
 
 with section("Setup: create 3-disk pool"):
-    run(add_cmd("hwtest1"))
-    run(add_cmd("hwtest2"))
-    run(add_cmd("hwtest3"))
+    run(add_cmd("hwtest1", disk(1)))
+    run(add_cmd("hwtest2", disk(2)))
+    run(add_cmd("hwtest3", disk(3)))
 
     run(f"echo 'persistent data' > {MOUNT_POINT}/test.txt")
     run("sync")

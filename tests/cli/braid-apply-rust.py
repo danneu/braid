@@ -9,8 +9,8 @@ passphrase = "testpassphrase"
 luks_opts = "--pbkdf pbkdf2 --pbkdf-force-iterations 1000"
 
 
-def write_config(disk_list, mount="/mnt/storage"):
-    config = json.dumps({"disks": disk_list, "mountPoint": mount})
+def write_config(mount="/mnt/storage"):
+    config = json.dumps({"mount_point": mount})
     escaped = config.replace("'", "'\\''")
     return f"echo '{escaped}' > /tmp/braid-config.json"
 
@@ -34,10 +34,7 @@ def apply(extra="", confirm=""):
 # --- Subtest 0: Setup — init 2 disks, build pool ---
 
 with subtest("Setup: init 2 disks"):
-    machine.succeed(write_config([
-        "/dev/disk/by-id/virtio-disk1",
-        "/dev/disk/by-id/virtio-disk2",
-    ]))
+    machine.succeed(write_config())
     machine.succeed(init_disk("/dev/disk/by-id/virtio-disk1"))
     machine.succeed(init_disk("/dev/disk/by-id/virtio-disk2"))
 
@@ -68,11 +65,7 @@ with subtest("No-op apply"):
 # --- Subtest 3: Add disk3 ---
 
 with subtest("Add disk3 to pool"):
-    machine.succeed(write_config([
-        "/dev/disk/by-id/virtio-disk1",
-        "/dev/disk/by-id/virtio-disk2",
-        "/dev/disk/by-id/virtio-disk3",
-    ]))
+    machine.succeed(write_config())
     machine.succeed(init_disk("/dev/disk/by-id/virtio-disk3"))
     output = machine.succeed(apply())
     assert "Applied" in output and "skipped" in output, (
@@ -103,10 +96,7 @@ with subtest("History file written"):
 # --- Subtest 7: Remove disk3 ---
 
 with subtest("Remove disk3 from pool"):
-    machine.succeed(write_config([
-        "/dev/disk/by-id/virtio-disk1",
-        "/dev/disk/by-id/virtio-disk2",
-    ]))
+    machine.succeed(write_config())
     machine.succeed(apply())
 
     fi_show = machine.succeed("btrfs fi show /mnt/storage")
@@ -116,7 +106,7 @@ with subtest("Remove disk3 from pool"):
 # --- Subtest 8: Redundancy refusal without confirmation ---
 
 with subtest("Redundancy refusal without confirmation"):
-    machine.succeed(write_config(["/dev/disk/by-id/virtio-disk1"]))
+    machine.succeed(write_config())
     machine.fail(apply())
 
 # --- Subtest 9: Redundancy acceptance with phrase ---
@@ -130,11 +120,7 @@ with subtest("Redundancy acceptance with correct phrase"):
 # --- Subtest 10: Absent disk warns but continues ---
 
 with subtest("Absent disk warns but continues"):
-    machine.succeed(write_config([
-        "/dev/disk/by-id/virtio-disk1",
-        "/dev/disk/by-id/virtio-disk3",
-        "/dev/disk/by-id/virtio-disk99",
-    ]))
+    machine.succeed(write_config())
     # disk3 still has LUKS from earlier init
     output = machine.succeed(apply())
     # Should have warning about absent disk99
@@ -155,10 +141,7 @@ with subtest("Setup: simulate disk failure for replace"):
     machine.succeed("mount -o degraded /dev/mapper/virtio-disk1 /mnt/storage")
 
 with subtest("Replace dead disk with --allow-remove-missing"):
-    machine.succeed(write_config([
-        "/dev/disk/by-id/virtio-disk1",
-        "/dev/disk/by-id/virtio-disk2",
-    ]))
+    machine.succeed(write_config())
     # disk2 still has LUKS from earlier init
     machine.succeed(apply(
         extra="--allow-remove-missing",
@@ -175,22 +158,14 @@ with subtest("Data intact after replace"):
 # --- Subtest 12: Blocked plan exits 1 ---
 
 with subtest("Setup: build 3-disk pool for ambiguity test"):
-    machine.succeed(write_config([
-        "/dev/disk/by-id/virtio-disk1",
-        "/dev/disk/by-id/virtio-disk2",
-        "/dev/disk/by-id/virtio-disk4",
-    ]))
+    machine.succeed(write_config())
     machine.succeed(init_disk("/dev/disk/by-id/virtio-disk4"))
     machine.succeed(apply())
     fi_show = machine.succeed("btrfs fi show /mnt/storage")
     assert "virtio-disk4" in fi_show, f"disk4 not in pool:\n{fi_show}"
 
 with subtest("Blocked plan exits 1"):
-    machine.succeed(write_config([
-        "/dev/disk/by-id/virtio-disk1",
-        "/dev/disk/by-id/virtio-disk2",
-        "/dev/disk/by-id/virtio-disk99",
-    ]))
+    machine.succeed(write_config())
     machine.fail(apply())
 
 # --- Subtest 13: --allow-remove-ambiguous with confirmation ---
@@ -209,10 +184,7 @@ with subtest("--allow-remove-ambiguous with confirmation"):
 with subtest("Semicolon multi-confirmation"):
     # Pool: disk1 + disk2. Config: [disk1, disk99_absent]
     # Needs both ambiguity + redundancy phrases
-    machine.succeed(write_config([
-        "/dev/disk/by-id/virtio-disk1",
-        "/dev/disk/by-id/virtio-disk99",
-    ]))
+    machine.succeed(write_config())
     output = machine.succeed(apply(
         extra="--allow-remove-ambiguous",
         confirm="remove despite ambiguous identity;remove this disk without redundancy",
@@ -226,10 +198,7 @@ with subtest("Semicolon multi-confirmation"):
 # --- Rebuild for checkpoint tests ---
 
 with subtest("Setup: rebuild 2-disk pool for checkpoint tests"):
-    machine.succeed(write_config([
-        "/dev/disk/by-id/virtio-disk1",
-        "/dev/disk/by-id/virtio-disk2",
-    ]))
+    machine.succeed(write_config())
     machine.succeed(init_disk("/dev/disk/by-id/virtio-disk2", extra="--force", confirm="reformat this disk"))
     machine.succeed(apply())
     fi_show = machine.succeed("btrfs fi show /mnt/storage")
@@ -239,11 +208,7 @@ with subtest("Setup: rebuild 2-disk pool for checkpoint tests"):
 # --- Subtest 15: Interrupted apply leaves checkpoint ---
 
 with subtest("Interrupted apply leaves checkpoint"):
-    machine.succeed(write_config([
-        "/dev/disk/by-id/virtio-disk1",
-        "/dev/disk/by-id/virtio-disk2",
-        "/dev/disk/by-id/virtio-disk3",
-    ]))
+    machine.succeed(write_config())
     machine.succeed(init_disk("/dev/disk/by-id/virtio-disk3", extra="--force", confirm="reformat this disk"))
     cmd = (
         f"printf '%s\\n' {shlex.quote(passphrase)} | "
@@ -291,12 +256,7 @@ with subtest("Stale checkpoint refuses resume"):
 
 with subtest("Resume target absent exits 1"):
     # Current pool: disk1 + disk2 + disk3. Add disk4 then interrupt.
-    machine.succeed(write_config([
-        "/dev/disk/by-id/virtio-disk1",
-        "/dev/disk/by-id/virtio-disk2",
-        "/dev/disk/by-id/virtio-disk3",
-        "/dev/disk/by-id/virtio-disk4",
-    ]))
+    machine.succeed(write_config())
     machine.succeed(init_disk("/dev/disk/by-id/virtio-disk4", extra="--force", confirm="reformat this disk"))
     cmd = (
         f"printf '%s\\n' {shlex.quote(passphrase)} | "
@@ -325,11 +285,7 @@ with subtest("Apply never calls luksFormat"):
     # The ActionType enum has no format variant — verified at compile time in plan.rs
     # (plan_no_format_action_exists test). Here we verify via plan JSON that no
     # action of type containing "FORMAT" appears.
-    machine.succeed(write_config([
-        "/dev/disk/by-id/virtio-disk1",
-        "/dev/disk/by-id/virtio-disk2",
-        "/dev/disk/by-id/virtio-disk3",
-    ]))
+    machine.succeed(write_config())
     raw = machine.succeed("braid plan --config /tmp/braid-config.json --json")
     p = json.loads(raw)
     for a in p["actions"]:
@@ -346,10 +302,7 @@ with subtest("Setup: ensure clean 2-disk RAID1 for bootstrap-safety test"):
     # Clean up any stale state from previous subtests
     machine.succeed("rm -f /var/lib/braid/apply-state.json")
     # After earlier subtests the pool has disk1+disk2+disk3. Shrink to 2-disk.
-    machine.succeed(write_config([
-        "/dev/disk/by-id/virtio-disk1",
-        "/dev/disk/by-id/virtio-disk2",
-    ]))
+    machine.succeed(write_config())
     machine.succeed(apply())
     fi_show = machine.succeed("btrfs fi show /mnt/storage")
     assert "virtio-disk1" in fi_show, f"disk1 not in pool:\n{fi_show}"
@@ -375,11 +328,7 @@ with subtest("Existing-but-unmounted pool must not be treated as bootstrap"):
     # Now add disk3 to force a mutation so apply actually runs actions.
     # disk3 still has its LUKS header from earlier subtests.
     machine.succeed("cryptsetup close virtio-disk3 || true")
-    machine.succeed(write_config([
-        "/dev/disk/by-id/virtio-disk1",
-        "/dev/disk/by-id/virtio-disk2",
-        "/dev/disk/by-id/virtio-disk3",
-    ]))
+    machine.succeed(write_config())
 
     # Run apply — this must NOT create a new filesystem
     output = machine.succeed(apply())
@@ -411,10 +360,7 @@ with subtest("Existing-but-unmounted pool must not be treated as bootstrap"):
 with subtest("Resume rejects unrecoverable missing mapper target"):
     # Optional VM-level hardening guard: if checkpoint points to a mapper target
     # that cannot be recovered by pending OPEN_LUKS, resume must fail.
-    machine.succeed(write_config([
-        "/dev/disk/by-id/virtio-disk1",
-        "/dev/disk/by-id/virtio-disk2",
-    ]))
+    machine.succeed(write_config())
 
     import hashlib
     raw_cfg = machine.succeed("cat /tmp/braid-config.json")
@@ -451,12 +397,7 @@ with subtest("Resume rejects unrecoverable missing mapper target"):
 
 with subtest("Failed action records error in checkpoint and history"):
     # Pool: disk1 + disk2 + disk3. disk4 has LUKS, not in pool.
-    machine.succeed(write_config([
-        "/dev/disk/by-id/virtio-disk1",
-        "/dev/disk/by-id/virtio-disk2",
-        "/dev/disk/by-id/virtio-disk3",
-        "/dev/disk/by-id/virtio-disk4",
-    ]))
+    machine.succeed(write_config())
     cmd = (
         f"printf '%s\\n' {shlex.quote(passphrase)} | "
         f"BRAID_TEST_FAIL_DURING_ACTION=a1 "
@@ -508,11 +449,7 @@ with subtest("Failed action records error in checkpoint and history"):
 
 with subtest("Setup: ensure clean 3-disk RAID1 for reboot test"):
     machine.succeed("rm -f /var/lib/braid/apply-state.json")
-    machine.succeed(write_config([
-        "/dev/disk/by-id/virtio-disk1",
-        "/dev/disk/by-id/virtio-disk2",
-        "/dev/disk/by-id/virtio-disk3",
-    ]))
+    machine.succeed(write_config())
     machine.succeed(apply())
     fi_show = machine.succeed("btrfs fi show /mnt/storage")
     assert "virtio-disk1" in fi_show
@@ -562,11 +499,7 @@ with subtest("Blocked after prephase: LUKS opens but plan blocks"):
     machine.succeed("rm -f /var/lib/braid/apply-state.json")
 
     # Remove disk3 from config (triggers identity ambiguity → blocked)
-    machine.succeed(write_config([
-        "/dev/disk/by-id/virtio-disk1",
-        "/dev/disk/by-id/virtio-disk2",
-        "/dev/disk/by-id/virtio-disk99",
-    ]))
+    machine.succeed(write_config())
 
     # Apply should exit 1 (blocked)
     machine.fail(apply())
@@ -586,22 +519,13 @@ with subtest("Blocked after prephase: LUKS opens but plan blocks"):
 
 with subtest("Resume with stale checkpoint after reboot replans"):
     # Restore config to 3-disk
-    machine.succeed(write_config([
-        "/dev/disk/by-id/virtio-disk1",
-        "/dev/disk/by-id/virtio-disk2",
-        "/dev/disk/by-id/virtio-disk3",
-    ]))
+    machine.succeed(write_config())
     # Ensure clean state
     machine.succeed("rm -f /var/lib/braid/apply-state.json")
     machine.succeed(apply())
 
     # Create a checkpoint, then simulate reboot
-    machine.succeed(write_config([
-        "/dev/disk/by-id/virtio-disk1",
-        "/dev/disk/by-id/virtio-disk2",
-        "/dev/disk/by-id/virtio-disk3",
-        "/dev/disk/by-id/virtio-disk4",
-    ]))
+    machine.succeed(write_config())
     machine.succeed(init_disk("/dev/disk/by-id/virtio-disk4", extra="--force", confirm="reformat this disk"))
     cmd = (
         f"printf '%s\\n' {shlex.quote(passphrase)} | "

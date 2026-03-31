@@ -30,8 +30,8 @@ wrong_passphrase = "wrongpassphrase"
 luks_opts = "--pbkdf pbkdf2 --pbkdf-force-iterations 1000"
 
 
-def read_disk_map():
-    raw = machine.succeed("cat /var/lib/braid/disk-map.json")
+def read_pool():
+    raw = machine.succeed("cat /var/lib/braid/pool.json")
     return json.loads(raw)
 
 
@@ -40,7 +40,7 @@ def add_cmd(name):
     return (
         f"printf '%s\\n' {passphrase_q} | "
         f"BRAID_LUKS_OPTS='{luks_opts}' "
-        f"braid add {name} --passphrase-stdin --yes"
+        f"braid add {name}=/dev/disk/by-id/virtio-{name} --passphrase-stdin --yes"
     )
 
 
@@ -49,7 +49,7 @@ def replace_cmd_with_passphrase(old, new, pp):
     return (
         f"printf '%s\\n' {passphrase_q} | "
         f"BRAID_LUKS_OPTS='{luks_opts}' "
-        f"braid replace --old {old} --new {new} --passphrase-stdin --yes"
+        f"braid replace --old {old} --new {new}=/dev/disk/by-id/virtio-{new} --passphrase-stdin --yes"
     )
 
 
@@ -96,10 +96,10 @@ with subtest("Data intact after failed replace"):
     content = machine.succeed("cat /mnt/storage/precious.txt").strip()
     assert content == "important data", f"Got '{content}'"
 
-with subtest("Disk map unchanged after failed replace"):
-    dm = read_disk_map()
-    assert "disk1" in dm["disks"], f"disk1 missing from map: {dm}"
-    assert "disk2" in dm["disks"], f"disk2 missing from map: {dm}"
-    assert "disk3" not in dm["disks"], f"disk3 should not be in map: {dm}"
+with subtest("Pool membership unchanged after failed replace"):
+    pm = read_pool()
+    assert "disk1" in pm["disks"], f"disk1 missing from pool: {pm}"
+    assert "disk2" in pm["disks"], f"disk2 missing from pool: {pm}"
+    assert "disk3" not in pm["disks"], f"disk3 should not be in pool: {pm}"
 
 machine.shutdown()

@@ -28,7 +28,7 @@ from harness import (
 # --- Phase 1: First disk (no pool) ---
 
 with section("Phase 1: first disk creates single-drive pool"):
-    run(add_cmd("hwtest1"))
+    run(add_cmd("hwtest1", disk(1)))
 
     # Pool is mounted
     run(f"mountpoint -q {MOUNT_POINT}")
@@ -48,7 +48,7 @@ with section("Phase 1: first disk creates single-drive pool"):
 # --- Phase 2: Second disk (convert to RAID1) ---
 
 with section("Phase 2: second disk converts pool to RAID1"):
-    run(add_cmd("hwtest2"))
+    run(add_cmd("hwtest2", disk(2)))
 
     df_output = run(f"btrfs fi df {MOUNT_POINT}")
     assert "Data, RAID1" in df_output, f"Expected RAID1:\n{df_output}"
@@ -64,7 +64,7 @@ with section("Phase 2: write more data on RAID1"):
 # --- Phase 3: Third disk (add to RAID1) ---
 
 with section("Phase 3: third disk expands RAID1 pool"):
-    run(add_cmd("hwtest3"))
+    run(add_cmd("hwtest3", disk(3)))
 
     # All 3 mapper devices in pool
     fi_show = run(f"btrfs fi show {MOUNT_POINT}")
