@@ -109,6 +109,11 @@
               braid = linuxCrane.braid;
             }
           );
+          braid-discover = pkgs.testers.nixosTest (
+            import ./tests/cli/braid-discover.nix {
+              braid = linuxCrane.braid;
+            }
+          );
           multi-add = pkgs.testers.nixosTest (
             import ./tests/cli/multi-add.nix {
               braid = linuxCrane.braid;
