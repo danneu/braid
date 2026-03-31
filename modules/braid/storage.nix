@@ -29,9 +29,6 @@ in
       fileSystems = [ cfg.mountPoint ];
     };
 
-    # Wrapped CLI available on PATH
-    environment.systemPackages = [ braidWrapped ];
-
     # Lifecycle owner: "pool is online."
     # ExecStart=/bin/true — the service's purpose is state ownership, not work.
     # ExecStop=braid lock — unmounts and closes LUKS on shutdown or manual stop.
