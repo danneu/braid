@@ -549,6 +549,10 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             }
         }
     }
+    // Order matters: save_membership before clear_journal. If save_membership
+    // fails (disk full, permissions), the journal survives and braid recover can
+    // reconstruct pool.json from the live pool. The reverse order (clear first,
+    // then save fails) would leave no recovery path.
     membership::save_membership(&final_membership, paths)?;
     journal::clear_journal(paths).map_err(|e| AddError::Validation(e.to_string()))?;
 
