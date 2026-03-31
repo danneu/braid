@@ -2,20 +2,21 @@
 """Hardware canary test orchestrator.
 
 Usage:
-    # Read disks from existing braid config (interactive confirm):
-    sudo python3 tests/hw/runner.py --from-config /etc/braid/config.json
+    # Read disks from pool.json (default /var/lib/braid/pool.json):
+    sudo python3 tests/hw/runner.py
 
-    # Explicit device paths (interactive confirm):
+    # Explicit pool.json path:
+    sudo python3 tests/hw/runner.py --pool-json /path/to/pool.json
+
+    # Explicit device paths:
     sudo python3 tests/hw/runner.py \\
         /dev/disk/by-id/usb-ABC /dev/disk/by-id/usb-DEF /dev/disk/by-id/usb-GHI
 
     # Skip confirmation (CI / scripted):
-    sudo python3 tests/hw/runner.py --from-config /etc/braid/config.json \\
-        --yes-destroy-these-disks
+    sudo python3 tests/hw/runner.py --yes-destroy-these-disks
 
     # Run specific tests:
-    sudo python3 tests/hw/runner.py --from-config /etc/braid/config.json \\
-        --tests test_add_canary test_lock_unlock_canary
+    sudo python3 tests/hw/runner.py --tests test_add_canary test_lock_unlock_canary
 """
 
 import argparse
@@ -74,12 +75,8 @@ def disk_info(path):
     return model, size
 
 
-def devices_from_config(config_path):
+def devices_from_pool(pool_path):
     """Read disk by_id paths from pool.json, sorted by key name."""
-    # pool.json lives alongside config.json in /var/lib/braid/
-    pool_path = os.path.join(os.path.dirname(config_path), "pool.json")
-    if not os.path.exists(pool_path):
-        pool_path = "/var/lib/braid/pool.json"
     try:
         with open(pool_path) as f:
             pool = json.load(f)
@@ -225,8 +222,9 @@ def main():
         help="Block device paths (need exactly 3)",
     )
     parser.add_argument(
-        "--from-config", metavar="PATH",
-        help="Read disk paths from a braid config file",
+        "--pool-json", metavar="PATH",
+        default="/var/lib/braid/pool.json",
+        help="Path to pool.json (default: /var/lib/braid/pool.json)",
     )
     parser.add_argument(
         "--tests", nargs="+", metavar="TEST",
@@ -239,14 +237,10 @@ def main():
     args = parser.parse_args()
 
     # Resolve device paths
-    if args.from_config and args.devices:
-        die("Use --from-config or positional devices, not both")
-    elif args.from_config:
-        device_paths = devices_from_config(args.from_config)
-    elif args.devices:
+    if args.devices:
         device_paths = args.devices
     else:
-        die("Provide device paths or --from-config")
+        device_paths = devices_from_pool(args.pool_json)
 
     if len(device_paths) != 3:
         die(f"Expected exactly 3 devices, got {len(device_paths)}")
