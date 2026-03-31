@@ -35,9 +35,13 @@ pub fn durable_rename(tmp: &Path, final_path: &Path) -> io::Result<()> {
     fs::rename(tmp, final_path)?;
 
     // Sync directory metadata so rename survives power loss.
-    let dir_fd = File::open(final_dir)?;
-    dir_fd.sync_all()?;
-    Ok(())
+    sync_dir(final_dir)
+}
+
+/// Fsync a directory to flush metadata (renames, deletions) to disk.
+pub fn sync_dir(dir: &Path) -> io::Result<()> {
+    let d = File::open(dir)?;
+    d.sync_all()
 }
 
 /// Atomically replace a file by writing to a temp file in the same directory,
@@ -135,5 +139,37 @@ mod tests {
         fs::write(&src, b"bytes").unwrap();
         let err = durable_rename(&src, &dst).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    /*
+     * Intent: sync_dir succeeds on a valid directory.
+     *
+     * Why it exists: sync_dir is the shared primitive for durable renames
+     * and durable deletions. A failure here would break both code paths.
+     *
+     * Scenario: after writing or deleting a file, the caller fsyncs the
+     * parent directory to ensure the metadata change survives power loss.
+     */
+    #[test]
+    fn sync_dir_on_valid_directory() {
+        let tmp = TempDir::new().unwrap();
+        sync_dir(tmp.path()).unwrap();
+    }
+
+    /*
+     * Intent: sync_dir fails on a nonexistent directory.
+     *
+     * Why it exists: callers rely on sync_dir returning an error when the
+     * directory is invalid, rather than silently succeeding.
+     *
+     * Scenario: a bug passes a bogus path to sync_dir — the error must
+     * propagate so the caller can report the durability failure.
+     */
+    #[test]
+    fn sync_dir_on_nonexistent_directory() {
+        let tmp = TempDir::new().unwrap();
+        let bogus = tmp.path().join("does-not-exist");
+        let err = sync_dir(&bogus).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
     }
 }

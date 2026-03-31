@@ -70,10 +70,21 @@ pub fn load_journal(paths: &StatePaths) -> Result<Option<Journal>, JournalError>
     Ok(Some(journal))
 }
 
-/// Delete the journal file. Returns Ok if file doesn't exist.
+/// Durably delete the journal file. Fsyncs the parent directory after removal
+/// so the deletion survives power loss. Returns Ok if file doesn't exist.
 pub fn clear_journal(paths: &StatePaths) -> Result<(), JournalError> {
-    match std::fs::remove_file(paths.pending_op_json()) {
-        Ok(()) => Ok(()),
+    let path = paths.pending_op_json();
+    match std::fs::remove_file(&path) {
+        Ok(()) => {
+            let dir = path.parent().ok_or_else(|| {
+                JournalError::Delete(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "journal path has no parent directory",
+                ))
+            })?;
+            crate::state_io::sync_dir(dir).map_err(JournalError::Delete)?;
+            Ok(())
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(JournalError::Delete(e)),
     }
@@ -147,6 +158,26 @@ mod tests {
         write_journal(&paths, &sample_journal()).unwrap();
         clear_journal(&paths).unwrap();
         assert!(load_journal(&paths).unwrap().is_none());
+    }
+
+    /// Intent: clear_journal durably deletes the file by fsyncing the parent
+    /// directory. This test confirms the full durable-delete path executes
+    /// without error and the file is actually gone.
+    ///
+    /// Why it exists: clear_journal previously used a bare remove_file without
+    /// dir fsync, risking journal reappearance after power loss.
+    ///
+    /// Scenario: a mutation succeeds, pool.json is written, and the journal is
+    /// cleared. If the system crashes immediately after, the journal must not
+    /// reappear on reboot.
+    #[test]
+    fn clear_journal_fsyncs_directory() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        write_journal(&paths, &sample_journal()).unwrap();
+        assert!(paths.pending_op_json().exists());
+        clear_journal(&paths).unwrap();
+        assert!(!paths.pending_op_json().exists());
     }
 
     #[test]
