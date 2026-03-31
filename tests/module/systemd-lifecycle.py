@@ -41,7 +41,16 @@ with subtest("Precondition: pool offline after boot"):
     machine.fail("test -e /dev/mapper/braid-disk1")
     machine.fail("test -e /dev/mapper/braid-disk2")
 
-# --- Subtest 2: braid-pool.target round-trip ---
+# --- Subtest 2: Direct start skipped when pool unmounted ---
+
+with subtest("Direct start of braid-online.service skipped when pool unmounted"):
+    # ConditionPathIsMountPoint causes systemd to skip activation (exit 0)
+    # when the mount point isn't mounted. Verify the unit stays inactive.
+    machine.fail("mountpoint -q /mnt/storage")
+    machine.succeed("systemctl start braid-online.service")
+    machine.fail("systemctl is-active braid-online.service")
+
+# --- Subtest 3: braid-pool.target round-trip ---
 
 with subtest("braid-pool.target brings pool online"):
     machine.succeed("systemctl start braid-pool.target")
@@ -138,8 +147,13 @@ with subtest("Wrapper warns but succeeds when braid-online.service fails"):
     )
     machine.succeed("systemctl daemon-reload")
 
-    # Verify the override makes the service fail.
+    # Verify the override makes the service fail. Temporarily satisfy
+    # ConditionPathIsMountPoint with a tmpfs so ExecStart=/bin/false is
+    # actually reached — proving the override works independently of the
+    # condition guard.
+    machine.succeed("mount -t tmpfs tmpfs /mnt/storage")
     machine.fail("systemctl start braid-online.service")
+    machine.succeed("umount /mnt/storage")
 
     # Run unlock, capturing output to a file for reliable assertion.
     # machine.execute() output capture can be inconsistent with pipes.

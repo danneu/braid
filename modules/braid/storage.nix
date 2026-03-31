@@ -38,6 +38,12 @@ in
     # Only activated by the wrapper on successful unlock/add (mountpoint -q check).
     systemd.services.braid-online = {
       description = "Braid storage pool online";
+      # Guard against direct `systemctl start braid-online.service` bypassing
+      # the wrapper. When the condition is not met, systemd skips activation
+      # (unit stays inactive, systemctl returns 0). The wrapper's own
+      # mountpoint -q check (braid-wrapper.sh) is the primary gate; this is
+      # defense-in-depth for the invariant: braid-online active ⟺ pool mounted.
+      unitConfig.ConditionPathIsMountPoint = cfg.mountPoint;
       serviceConfig = {
         Type = "oneshot";
         RemainAfterExit = true;

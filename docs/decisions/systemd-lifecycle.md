@@ -73,6 +73,7 @@ State-ownership service. Its only purpose is to mark "pool is online" and run `b
 - `ExecStart = /bin/true` — no work. Exists for its `ExecStop` hook.
 - `ExecStop = braid lock` — unmounts pool and closes all LUKS on shutdown or manual stop.
 - `RemainAfterExit = true` — persists "active" state.
+- `ConditionPathIsMountPoint = ${mountPoint}` — systemd skips activation when the pool is not mounted (`systemctl start` returns 0 but the unit stays inactive). Defense-in-depth: the wrapper's `mountpoint -q` check is the primary gate, but this condition prevents direct `systemctl start` from leaving the unit active while unmounted.
 - **Not in any dependency chain.** Neither the target nor unlock services want/require it. Activated exclusively by the CLI wrapper after `mountpoint -q` confirms the pool is mounted.
 
 ### mnt-storage.mount — readiness contract
@@ -123,7 +124,7 @@ Services that depend on the pool being mounted use one of two patterns:
 ## Key design constraints
 
 1. **No hard boot dependencies.** `wants` everywhere, never `requires`. Pool failure never blocks boot.
-2. **"braid-online active" = "pool mounted."** The wrapper only activates it after `mountpoint -q` succeeds. No other path activates it.
+2. **"braid-online active" = "pool mounted."** Enforced at two layers: the wrapper only activates it after `mountpoint -q` succeeds, and `ConditionPathIsMountPoint` on the unit itself causes systemd to skip activation (unit stays inactive) on direct `systemctl start` when unmounted.
 3. **One passphrase prompt.** `braid-unlock.service` is the sole interactive prompt source. The CLI opens all LUKS devices from that single passphrase.
 4. **Graceful degradation.** If `braid-online` activation fails, the pool is still mounted and usable — only the shutdown hook is missing (warned to stderr).
 
