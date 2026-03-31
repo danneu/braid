@@ -322,6 +322,16 @@
               braid = linuxCrane.braid;
             }
           );
+          recover-replace-not-started = pkgs.testers.nixosTest (
+            import ./tests/cli/recover-replace-not-started.nix {
+              braid = linuxCrane.braid;
+            }
+          );
+          recover-replace-completed = pkgs.testers.nixosTest (
+            import ./tests/cli/recover-replace-completed.nix {
+              braid = linuxCrane.braid;
+            }
+          );
           braid-remove-disk-busy = pkgs.testers.nixosTest (
             import ./tests/cli/braid-remove-disk-busy.nix {
               braid = linuxCrane.braid;
