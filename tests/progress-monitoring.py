@@ -12,13 +12,34 @@
 PASSPHRASE = "testpassphrase"
 MOUNT = "/mnt/storage"
 FIXTURE_DIR = "/tmp/fixtures"
-DISKS = ["disk1", "disk2", "disk3"]
+DISK3_RAW = "/dev/disk/by-id/virtio-disk3"
+DISK3_DM = "disk3-delay"
+
+
+def dm_delay_table(delay_ms):
+    """dm-delay table for disk3 with given per-I/O delay."""
+    sectors = machine.succeed(f"blockdev --getsz {DISK3_RAW}").strip()
+    return f"0 {sectors} delay {DISK3_RAW} 0 {delay_ms}"
+
+
+def dm_delay_create():
+    """Create dm-delay wrapper on disk3 with zero delay."""
+    machine.succeed("modprobe dm-delay")
+    machine.succeed(f"dmsetup create {DISK3_DM} --table '{dm_delay_table(0)}'")
+
+
+def dm_delay_activate(delay_ms):
+    """Live-swap dm-delay table to inject real I/O delay."""
+    machine.succeed(f"dmsetup suspend {DISK3_DM}")
+    machine.succeed(f"dmsetup reload {DISK3_DM} --table '{dm_delay_table(delay_ms)}'")
+    machine.succeed(f"dmsetup resume {DISK3_DM}")
+
 
 start_all()
 machine.wait_for_unit("multi-user.target")
 
-# LUKS format + open all three disks
-for name in DISKS:
+# LUKS format + open disk1 and disk2 directly
+for name in ["disk1", "disk2"]:
     dev = f"/dev/disk/by-id/virtio-{name}"
     machine.succeed(
         f"echo -n '{PASSPHRASE}' | cryptsetup luksFormat --batch-mode --key-file=- "
@@ -27,6 +48,16 @@ for name in DISKS:
     machine.succeed(
         f"echo -n '{PASSPHRASE}' | cryptsetup luksOpen --key-file=- {dev} {name}"
     )
+
+# disk3: dm-delay wrapper (0ms initially) → LUKS on top
+dm_delay_create()
+machine.succeed(
+    f"echo -n '{PASSPHRASE}' | cryptsetup luksFormat --batch-mode --key-file=- "
+    f"--pbkdf pbkdf2 --pbkdf-force-iterations 1000 /dev/mapper/{DISK3_DM}"
+)
+machine.succeed(
+    f"echo -n '{PASSPHRASE}' | cryptsetup luksOpen --key-file=- /dev/mapper/{DISK3_DM} disk3"
+)
 
 # Create single-profile btrfs on disk1 only, mount, add disk2
 machine.succeed("mkfs.btrfs -f -d single -m dup /dev/mapper/disk1")
@@ -101,6 +132,11 @@ with subtest("device remove progress observed"):
     )
     initial_bytes = int(machine.succeed("cat /tmp/disk3-initial-bytes").strip())
     assert initial_bytes > 0, f"disk3 should have allocations, got {initial_bytes}"
+
+    # Inject 100ms per-I/O delay on disk3 to slow block group relocation
+    # enough for the polling loop to observe bytes decreasing.  Without this,
+    # VM I/O is so fast the remove completes before a single poll fires.
+    dm_delay_activate(100)
 
     # Start device remove in background and poll in the same shell command
     # to eliminate host round-trip latency — the remove can finish in ~3s

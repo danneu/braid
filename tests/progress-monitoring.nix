@@ -25,6 +25,7 @@
     environment.systemPackages = [
       pkgs.cryptsetup
       pkgs.btrfs-progs
+      pkgs.lvm2
     ];
   };
 
