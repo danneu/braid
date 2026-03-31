@@ -519,6 +519,14 @@ fn main() {
                 print_cli_error(&e);
                 std::process::exit(1);
             }
+            let pool_json = paths.pool_json();
+            if pool_json.exists() {
+                print_cli_error(&format!(
+                    "pool.json already exists at {} — use 'braid add' to add disks",
+                    pool_json.display()
+                ));
+                std::process::exit(1);
+            }
             let runner = RealRunner;
             match braid_cli::discover::discover_pool_members(&runner) {
                 Ok(members) => {
@@ -542,9 +550,9 @@ fn main() {
                             print_cli_error(&format!("failed to write pool membership: {e}"));
                             std::process::exit(1);
                         }
-                        eprintln!("pool membership written to {}", paths.pool_json().display());
-                    } else if !args.dry_run {
-                        eprintln!("pass --write to persist, or --dry-run to preview");
+                        eprintln!("pool membership written to {}", pool_json.display());
+                    } else {
+                        eprintln!("pass --write to save to {}", pool_json.display());
                     }
                 }
                 Err(e) => {
