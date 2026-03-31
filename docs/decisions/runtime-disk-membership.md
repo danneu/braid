@@ -52,6 +52,7 @@ When `pending-op.json` exists, braid enters recovery mode. All commands except `
 - `unlock` enriches `pool.json` metadata (luks_uuid, devid) on each mount via `refresh_pool_metadata`, but never changes membership (disk set).
 - If `pool.json` is missing or corrupt, `unlock` fails with a clear error directing the user to `braid add` or `braid discover --write`.
 - If `pool.json` is readable but stale (a member fails to probe), `unlock` warns and proceeds with the members it can probe. It never rewrites `pool.json`.
+- If a member's stored `luks_uuid` doesn't match the probed device's LUKS UUID, `unlock` fatally errors. This catches swapped, reformatted, or corrupted drives before any LUKS open or mount is attempted.
 - Only these commands write `pool.json` membership: `add`, `remove`, `replace`, `remove-missing`, `discover --write`, `recover`.
 
 ### Recovery

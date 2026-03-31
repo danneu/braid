@@ -76,17 +76,25 @@ pub fn open_and_mount_pool<R: CommandRunner, F: Filesystem + ?Sized>(
                 eprintln!("{}  disk: {:<10}LUKS header damaged", tag("skip"), name);
                 any_missing_member = true;
             }
-            ConfigDiskState::PresentLuks {
-                mapper_open: true, ..
-            } => {
-                eprintln!("{}  disk: {:<10}already open", tag("ok"), name);
-                any_open = true;
-            }
-            ConfigDiskState::PresentLuks {
-                mapper_open: false, ..
-            } => {
-                eprintln!("{}  disk: {:<10}found", tag("ok"), name);
-                to_unlock.push((name.clone(), member.by_id.clone()));
+            ConfigDiskState::PresentLuks { uuid, mapper_open } => {
+                if let Some(expected) = &member.luks_uuid {
+                    if expected != uuid {
+                        return Err(MountError::Failed(format!(
+                            "disk '{}' LUKS UUID mismatch at {}:\n  \
+                             expected  {}\n  \
+                             found     {}",
+                            name, member.by_id, expected, uuid
+                        )));
+                    }
+                }
+
+                if *mapper_open {
+                    eprintln!("{}  disk: {:<10}already open", tag("ok"), name);
+                    any_open = true;
+                } else {
+                    eprintln!("{}  disk: {:<10}found", tag("ok"), name);
+                    to_unlock.push((name.clone(), member.by_id.clone()));
+                }
             }
         }
     }
@@ -215,7 +223,7 @@ mod tests {
     use crate::cmd::{CmdRequest, MockRunner, RawCommandOutput};
     use crate::config::Config;
     use crate::membership::{DiskMember, PoolMembership};
-    use crate::types::{ByIdPath, MountPoint};
+    use crate::types::{ByIdPath, LuksUuid, MountPoint};
     use std::collections::BTreeMap;
 
     struct MockFs {
@@ -811,5 +819,143 @@ mod tests {
         );
 
         assert_eq!(result.unwrap(), true);
+    }
+
+    /// Intent: When a disk's probed LUKS UUID doesn't match pool.json's stored
+    /// UUID, unlock must fatally error before attempting to open the device.
+    ///
+    /// Why: A UUID mismatch means the physical drive has been swapped,
+    /// reformatted, or corrupted. Proceeding would mount the wrong data.
+    ///
+    /// Scenario: 2-disk RAID1. disk1 has a stored luks_uuid from a prior
+    /// unlock, but the device now reports a different UUID (drive was swapped).
+    /// Both LUKS devices are closed.
+    #[test]
+    fn mount_luks_uuid_mismatch_closed() {
+        let config = test_config();
+        let mut membership = two_disk_membership();
+        membership.disks.get_mut("disk1").unwrap().luks_uuid =
+            Some(LuksUuid("aaaaaaaa-1111-2222-3333-444444444444".into()));
+
+        let fs = MockFs::new(&[
+            "/dev/disk/by-id/virtio-disk1",
+            "/dev/disk/by-id/virtio-disk2",
+        ]);
+
+        let (uuid1_req, uuid1_out) = luks_uuid_ok(
+            "/dev/disk/by-id/virtio-disk1",
+            "ffffffff-ffff-ffff-ffff-ffffffffffff", // different from stored
+        );
+        let (uuid2_req, uuid2_out) = luks_uuid_ok(
+            "/dev/disk/by-id/virtio-disk2",
+            "bbbbbbbb-1111-2222-3333-444444444444",
+        );
+
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::MountpointCheck {
+                    path: MountPoint("/mnt/storage".to_owned()),
+                },
+                err_raw("mountpoint", 1, ""),
+            )
+            .with_output(uuid1_req, uuid1_out)
+            .with_output(uuid2_req, uuid2_out);
+
+        let result = open_and_mount_pool(
+            &runner,
+            &fs,
+            &config,
+            &membership,
+            Credential::Passphrase {
+                passphrase_stdin: false,
+                passphrase_file: None,
+            },
+            false,
+            "unlock",
+        );
+
+        let err = result.expect_err("should fail on LUKS UUID mismatch");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("disk1"),
+            "error should name the disk, got: {msg}"
+        );
+        assert!(
+            msg.contains("aaaaaaaa"),
+            "error should show expected UUID, got: {msg}"
+        );
+        assert!(
+            msg.contains("ffffffff"),
+            "error should show found UUID, got: {msg}"
+        );
+    }
+
+    /// Intent: UUID mismatch must be caught even when the LUKS mapper is
+    /// already open (e.g. from a previous partial unlock or manual intervention).
+    ///
+    /// Why: The check must fire in both PresentLuks branches — mapper_open
+    /// status doesn't make a swapped drive safe.
+    ///
+    /// Scenario: Same as mount_luks_uuid_mismatch_closed, but disk1's mapper
+    /// is already open.
+    #[test]
+    fn mount_luks_uuid_mismatch_already_open() {
+        let config = test_config();
+        let mut membership = two_disk_membership();
+        membership.disks.get_mut("disk1").unwrap().luks_uuid =
+            Some(LuksUuid("aaaaaaaa-1111-2222-3333-444444444444".into()));
+
+        let fs = MockFs::new(&[
+            "/dev/disk/by-id/virtio-disk1",
+            "/dev/disk/by-id/virtio-disk2",
+            "/dev/mapper/braid-disk1", // mapper already open
+        ]);
+
+        let (uuid1_req, uuid1_out) = luks_uuid_ok(
+            "/dev/disk/by-id/virtio-disk1",
+            "ffffffff-ffff-ffff-ffff-ffffffffffff", // different from stored
+        );
+        let (uuid2_req, uuid2_out) = luks_uuid_ok(
+            "/dev/disk/by-id/virtio-disk2",
+            "bbbbbbbb-1111-2222-3333-444444444444",
+        );
+
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::MountpointCheck {
+                    path: MountPoint("/mnt/storage".to_owned()),
+                },
+                err_raw("mountpoint", 1, ""),
+            )
+            .with_output(uuid1_req, uuid1_out)
+            .with_output(uuid2_req, uuid2_out);
+
+        let result = open_and_mount_pool(
+            &runner,
+            &fs,
+            &config,
+            &membership,
+            Credential::Passphrase {
+                passphrase_stdin: false,
+                passphrase_file: None,
+            },
+            false,
+            "unlock",
+        );
+
+        let err = result.expect_err("should fail on LUKS UUID mismatch even with open mapper");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("disk1"),
+            "error should name the disk, got: {msg}"
+        );
+        assert!(
+            msg.contains("aaaaaaaa"),
+            "error should show expected UUID, got: {msg}"
+        );
+        assert!(
+            msg.contains("ffffffff"),
+            "error should show found UUID, got: {msg}"
+        );
     }
 }
