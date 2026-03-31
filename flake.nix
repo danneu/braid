@@ -312,6 +312,11 @@
               braid = linuxCrane.braid;
             }
           );
+          recover-bootstrap-crash = pkgs.testers.nixosTest (
+            import ./tests/cli/recover-bootstrap-crash.nix {
+              braid = linuxCrane.braid;
+            }
+          );
           braid-remove-disk-busy = pkgs.testers.nixosTest (
             import ./tests/cli/braid-remove-disk-busy.nix {
               braid = linuxCrane.braid;
