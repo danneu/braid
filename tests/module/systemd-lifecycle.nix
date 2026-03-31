@@ -54,6 +54,9 @@ in
         # Extra disk for the braid-add activation path test (subtest 6).
         # Not in pool.json — added via `braid add` during the test.
         { size = 512; driveConfig.deviceExtraOpts.serial = "disk3"; }
+        # Extra disks for the concurrent-add flock serialization test.
+        { size = 512; driveConfig.deviceExtraOpts.serial = "disk4"; }
+        { size = 512; driveConfig.deviceExtraOpts.serial = "disk5"; }
       ];
       virtualisation.memorySize = 2048;
 

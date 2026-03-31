@@ -13,7 +13,8 @@
 # silent failure of automatic locking on shutdown.
 #
 # Scenario: 2-disk RAID1 pool pre-created by initrd fixture (disk1, disk2),
-# plus a spare disk3 for the add test. Tests exercise:
+# plus spare disks (disk3 for the add test, disk4+disk5 for the concurrent-add
+# test). Tests exercise:
 # (1) systemctl start braid-pool.target brings pool online and activates
 #     braid-online.service,
 # (2) systemctl stop braid-online.service unmounts pool and closes LUKS,
@@ -22,7 +23,9 @@
 # (4) braid add via CLI wrapper activates braid-online.service,
 # (5) wrapper prints warning but still succeeds when braid-online.service
 #     cannot be activated,
-# (6) actual VM shutdown/reboot runs ExecStop=braid lock to completion.
+# (6) two concurrent braid add invocations serialize via the wrapper's flock
+#     and both complete successfully,
+# (7) actual VM shutdown/reboot runs ExecStop=braid lock to completion.
 
 import json
 import shlex
@@ -270,7 +273,71 @@ with subtest("braid recover activates braid-online.service"):
     machine.succeed("braid lock")
     machine.fail("systemctl is-active braid-online.service")
 
-# --- Subtest 9: Shutdown runs ExecStop=braid lock ---
+# --- Subtest 9: Concurrent add attempts serialize via flock ---
+
+with subtest("Concurrent add attempts serialize via flock"):
+    # Intent: Two concurrent `braid add` invocations must serialize via the
+    # wrapper's flock — the winner adds its disk, then the loser acquires the
+    # lock, reads the updated pool.json, and adds its own disk.
+    #
+    # Why it exists: The unlock flock test (subtest 6) covers the early-exit
+    # re-check path. The add path is structurally different — the loser runs
+    # the full add command after acquiring the lock. Without a test, a
+    # regression that breaks flock for add would let concurrent adds race on
+    # pool.json: the second write could lose the first's disk entry.
+    #
+    # Scenario: A script bug launches two `braid add` commands at the same
+    # time. The flock serializes them so both complete and pool.json reflects
+    # all disks.
+
+    machine.succeed(
+        f"printf '%s\\n' {pq} | braid unlock --passphrase-stdin"
+    )
+    machine.succeed("mountpoint -q /mnt/storage")
+
+    # Launch two concurrent adds, capture PIDs for independent exit checks.
+    machine.succeed(
+        f"printf '%s\\n' {pq} | BRAID_LUKS_OPTS='{luks_opts}' "
+        f"braid add disk4=/dev/disk/by-id/virtio-disk4 --passphrase-stdin --yes "
+        f">/tmp/add-a 2>&1 & pid_a=$! ; "
+        f"printf '%s\\n' {pq} | BRAID_LUKS_OPTS='{luks_opts}' "
+        f"braid add disk5=/dev/disk/by-id/virtio-disk5 --passphrase-stdin --yes "
+        f">/tmp/add-b 2>&1 & pid_b=$! ; "
+        f"wait $pid_a ; echo $? > /tmp/exit-a ; "
+        f"wait $pid_b ; echo $? > /tmp/exit-b"
+    )
+
+    # Assert each add succeeded independently.
+    exit_a = int(machine.succeed("cat /tmp/exit-a").strip())
+    exit_b = int(machine.succeed("cat /tmp/exit-b").strip())
+    out_a = machine.succeed("cat /tmp/add-a")
+    out_b = machine.succeed("cat /tmp/add-b")
+    assert exit_a == 0, f"add-a failed (exit {exit_a}):\n{out_a}"
+    assert exit_b == 0, f"add-b failed (exit {exit_b}):\n{out_b}"
+
+    # pool.json must contain all 5 disks.
+    pool_raw = machine.succeed("cat /var/lib/braid/pool.json")
+    pool = json.loads(pool_raw)
+    for d in ["disk1", "disk2", "disk3", "disk4", "disk5"]:
+        assert d in pool["disks"], (
+            f"{d} missing from pool.json: {set(pool['disks'].keys())}"
+        )
+
+    # btrfs must show 5 devices.
+    fi_show = machine.succeed("btrfs fi show /mnt/storage")
+    devid_count = fi_show.count("devid")
+    assert devid_count == 5, (
+        f"Expected 5 btrfs devices, got {devid_count}:\n{fi_show}"
+    )
+
+    # No residual journal.
+    machine.fail("test -f /var/lib/braid/pending-op.json")
+
+    # Cleanup
+    machine.succeed("braid lock")
+    machine.fail("systemctl is-active braid-online.service")
+
+# --- Subtest 10: Shutdown runs ExecStop=braid lock ---
 #
 # Subtests 3/5 test manual stop, but systemd's shutdown ordering differs.
 # DefaultDependencies adds Conflicts=shutdown.target + timeout enforcement.
