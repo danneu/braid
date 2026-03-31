@@ -16,6 +16,8 @@ pub enum MountError {
     #[error("{0}")]
     Failed(String),
     #[error("{0}")]
+    MountFailed(String),
+    #[error("{0}")]
     DegradedRefused(String),
 }
 
@@ -205,7 +207,7 @@ pub fn open_and_mount_pool<R: CommandRunner, F: Filesystem + ?Sized>(
     };
 
     if mount_result.exit_status != 0 {
-        return Err(MountError::Failed(format!(
+        return Err(MountError::MountFailed(format!(
             "mount failed (exit {}): {}",
             mount_result.exit_status,
             mount_result.stderr.trim()

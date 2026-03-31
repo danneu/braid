@@ -1,8 +1,9 @@
-use crate::cmd::CommandRunner;
+use crate::cmd::{CmdRequest, CommandRunner};
 use crate::config::{self, Config};
 use crate::journal::{self, Journal};
 use crate::membership::{self, DiskMember, PoolMembership};
 use crate::mount::{self, Credential, MountError};
+use crate::parse::btrfs_filesystem_show::{classify_btrfs_probe, DeviceBtrfsProbe};
 use crate::probe::{self, Filesystem, ProbeError};
 use crate::state_paths::StatePaths;
 use thiserror::Error;
@@ -58,7 +59,7 @@ pub fn cmd_recover<R: CommandRunner, F: Filesystem + ?Sized>(
         passphrase_stdin,
         passphrase_file,
     };
-    mount::open_and_mount_pool(
+    if let Err(e) = mount::open_and_mount_pool(
         runner,
         fs,
         config,
@@ -66,7 +67,48 @@ pub fn cmd_recover<R: CommandRunner, F: Filesystem + ?Sized>(
         credential,
         allow_degraded,
         "recover",
-    )?;
+    ) {
+        // Bootstrap mount failure: probe the target devices to confirm no btrfs
+        // superblock exists — only then is it safe to advise wiping.
+        if journal.pre_membership.disks.is_empty() {
+            if let mount::MountError::MountFailed(_) = &e {
+                if let journal::OpKind::Add { ref disks } = journal.op {
+                    let all_no_btrfs = disks.keys().all(|name| {
+                        let mapper = format!("/dev/mapper/{}", config::mapper_name(name).0);
+                        match runner.run(&CmdRequest::BtrfsFilesystemShowTarget { target: mapper })
+                        {
+                            Ok(raw) => {
+                                matches!(classify_btrfs_probe(&raw), DeviceBtrfsProbe::NoBtrfs)
+                            }
+                            Err(_) => false,
+                        }
+                    });
+                    if all_no_btrfs {
+                        let disk_list: Vec<_> = union
+                            .disks
+                            .iter()
+                            .map(|(name, m)| format!("  {} ({})", name, m.by_id))
+                            .collect();
+                        return Err(RecoverError::Failed(format!(
+                            "bootstrap add was interrupted before the filesystem was \
+                             created.\n\
+                             The pool does not exist yet, so there is nothing to \
+                             recover.\n\n\
+                             To return to a clean state:\n\
+                             1. rm {}\n\
+                             2. Wipe the LUKS container from each disk that was being \
+                                added:\n{}\n\
+                                e.g.: wipefs -a /dev/disk/by-id/<device>\n\
+                             3. Re-run braid add",
+                            paths.pending_op_json().display(),
+                            disk_list.join("\n"),
+                        )));
+                    }
+                }
+            }
+        }
+        return Err(e.into());
+    }
 
     // 3. Probe live pool state
     let mount_point = config.mount_point().as_str();
@@ -748,6 +790,387 @@ mod tests {
         assert!(
             !paths.pending_op_json().exists(),
             "journal should be cleared"
+        );
+    }
+
+    /// Bootstrap journal: pre_membership is empty, target has one disk.
+    fn bootstrap_journal() -> journal::Journal {
+        let mut target_disks = BTreeMap::new();
+        target_disks.insert(
+            "disk1".to_owned(),
+            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
+        );
+        let target = PoolMembership {
+            disks: target_disks,
+        };
+
+        let mut add_disks = BTreeMap::new();
+        add_disks.insert(
+            "disk1".to_owned(),
+            ByIdPath("/dev/disk/by-id/virtio-disk1".into()),
+        );
+
+        journal::Journal {
+            started_at: "2026-01-01T00:00:00Z".into(),
+            op: OpKind::Add { disks: add_disks },
+            pre_membership: PoolMembership::empty(),
+            target_membership: target,
+        }
+    }
+
+    /// Intent: when bootstrap add crashes after LUKS format but before mkfs,
+    ///   recover detects the unmountable state and prints step-by-step escape
+    ///   instructions.
+    ///
+    /// Why it exists: without this, the user is stuck in recovery mode with no
+    ///   documented way out — recover fails, add is blocked by the journal, and
+    ///   the error message gives no guidance.
+    ///
+    /// Scenario: first-ever braid add of one disk. LUKS format succeeded, crash
+    ///   before mkfs.btrfs. User runs braid recover. Mount fails because no btrfs
+    ///   superblock exists. Error should name the pending-op.json path, the disk's
+    ///   by-id path, and wipefs.
+    #[test]
+    fn recover_bootstrap_crash_gives_actionable_instructions() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let fs = MockFs::new(&["/dev/disk/by-id/virtio-disk1"]);
+
+        let journal = bootstrap_journal();
+        journal::write_journal(&paths, &journal).unwrap();
+
+        let (mp_req, mp_out) = mountpoint_fail();
+        let runner = MockRunner::default()
+            .with_output(mp_req, mp_out)
+            // probe disk1 → PresentLuks
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/virtio-disk1",
+                    "11111111-1111-1111-1111-111111111111",
+                ),
+            )
+            // passphrase ok
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw_empty("cryptsetup open --test-passphrase"),
+            )
+            // LUKS open ok
+            .with_output_stdin(
+                CmdRequest::CryptsetupLuksOpen {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                    mapper: "braid-disk1".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw_empty("cryptsetup open"),
+            )
+            // btrfs scan ok
+            .with_output(
+                CmdRequest::BtrfsDeviceScanAll,
+                ok_raw_empty("btrfs device scan"),
+            )
+            // mount fails — no btrfs superblock
+            .with_output(
+                CmdRequest::Mount {
+                    device: "/dev/mapper/braid-disk1".into(),
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                err_raw(
+                    "mount",
+                    32,
+                    "wrong fs type, bad option, bad superblock on /dev/mapper/braid-disk1",
+                ),
+            )
+            // btrfs probe confirms NoBtrfs
+            .with_output(
+                CmdRequest::BtrfsFilesystemShowTarget {
+                    target: "/dev/mapper/braid-disk1".into(),
+                },
+                err_raw(
+                    "btrfs filesystem show",
+                    1,
+                    "not a valid btrfs filesystem on /dev/mapper/braid-disk1",
+                ),
+            );
+
+        let passphrase_file = tempfile::NamedTempFile::new().unwrap();
+        {
+            use std::io::Write;
+            passphrase_file.as_file().write_all(b"testpass").unwrap();
+        }
+
+        let result = cmd_recover(
+            &runner,
+            &fs,
+            &config,
+            &paths,
+            false,
+            Some(passphrase_file.path()),
+            false,
+        );
+
+        let err = result.expect_err("should fail with bootstrap instructions");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("bootstrap add was interrupted"),
+            "expected bootstrap message, got: {msg}"
+        );
+        assert!(
+            msg.contains("pending-op.json"),
+            "should mention pending-op.json, got: {msg}"
+        );
+        assert!(msg.contains("wipefs"), "should mention wipefs, got: {msg}");
+        assert!(
+            msg.contains("virtio-disk1"),
+            "should list disk by-id path, got: {msg}"
+        );
+
+        // Journal must NOT have been cleared
+        assert!(
+            paths.pending_op_json().exists(),
+            "journal should still exist"
+        );
+        // pool.json must NOT have been written
+        assert!(!paths.pool_json().exists(), "pool.json should not exist");
+    }
+
+    /// Intent: when bootstrap recover fails due to wrong passphrase, the error
+    ///   must be the original passphrase error — not the bootstrap escape
+    ///   instructions.
+    ///
+    /// Why it exists: an earlier version caught all MountErrors during bootstrap
+    ///   recovery, which would tell the user to wipe disks when the real problem
+    ///   was just a typo in the passphrase.
+    ///
+    /// Scenario: first-ever braid add of one disk. LUKS format succeeded, crash
+    ///   before mkfs. User runs braid recover with wrong passphrase. Error should
+    ///   say "wrong passphrase", not "bootstrap add was interrupted".
+    #[test]
+    fn recover_bootstrap_wrong_passphrase_not_masked() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let fs = MockFs::new(&["/dev/disk/by-id/virtio-disk1"]);
+
+        let journal = bootstrap_journal();
+        journal::write_journal(&paths, &journal).unwrap();
+
+        let (mp_req, mp_out) = mountpoint_fail();
+        let runner = MockRunner::default()
+            .with_output(mp_req, mp_out)
+            // probe disk1 → PresentLuks
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/virtio-disk1",
+                    "11111111-1111-1111-1111-111111111111",
+                ),
+            )
+            // passphrase FAILS
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                b"wrongpass".to_vec(),
+                err_raw("cryptsetup open --test-passphrase", 2, "No key available"),
+            );
+
+        let passphrase_file = tempfile::NamedTempFile::new().unwrap();
+        {
+            use std::io::Write;
+            passphrase_file.as_file().write_all(b"wrongpass").unwrap();
+        }
+
+        let result = cmd_recover(
+            &runner,
+            &fs,
+            &config,
+            &paths,
+            false,
+            Some(passphrase_file.path()),
+            false,
+        );
+
+        let err = result.expect_err("should fail with passphrase error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("wrong passphrase"),
+            "expected passphrase error, got: {msg}"
+        );
+        assert!(
+            !msg.contains("bootstrap add was interrupted"),
+            "must not show bootstrap message for passphrase error, got: {msg}"
+        );
+
+        // Journal must NOT have been cleared
+        assert!(
+            paths.pending_op_json().exists(),
+            "journal should still exist"
+        );
+    }
+
+    /// Intent: when a non-bootstrap recover hits a mount failure, the original
+    ///   mount error propagates without bootstrap rewriting.
+    ///
+    /// Why it exists: the bootstrap detection must key off pre_membership being
+    ///   empty. A non-empty pre_membership with a mount failure is a different
+    ///   situation (e.g. damaged pool) that needs the real error.
+    ///
+    /// Scenario: 2-disk pool, interrupted add of disk3. All three disks absent.
+    ///   Error should be the original "no unlockable disks", not bootstrap advice.
+    #[test]
+    fn recover_non_bootstrap_mount_failure_propagates() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let fs = MockFs::new(&[]); // all disks absent
+
+        let journal = two_disk_journal();
+        journal::write_journal(&paths, &journal).unwrap();
+
+        let (mp_req, mp_out) = mountpoint_fail();
+        let runner = MockRunner::default().with_output(mp_req, mp_out);
+
+        let result = cmd_recover(&runner, &fs, &config, &paths, false, None, false);
+
+        let err = result.expect_err("should fail with mount error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("no unlockable disks"),
+            "expected original mount error, got: {msg}"
+        );
+        assert!(
+            !msg.contains("bootstrap"),
+            "must not show bootstrap message for non-bootstrap case, got: {msg}"
+        );
+
+        // Journal must NOT have been cleared
+        assert!(
+            paths.pending_op_json().exists(),
+            "journal should still exist"
+        );
+    }
+
+    /// Intent: when bootstrap recover's mount fails but the disk actually has a
+    ///   btrfs superblock, the original mount error must propagate — the guidance
+    ///   to wipe disks would be wrong.
+    ///
+    /// Why it exists: mkfs may have succeeded but mount failed for another reason
+    ///   (missing kernel module, bad options). Telling the user to wipefs would
+    ///   destroy a valid filesystem.
+    ///
+    /// Scenario: first-ever add of one disk. mkfs.btrfs succeeded, mount failed
+    ///   for an unrelated reason. btrfs filesystem show confirms HasBtrfs. Error
+    ///   should be the original mount error, not bootstrap guidance.
+    #[test]
+    fn recover_bootstrap_mount_fails_but_btrfs_exists_propagates_mount_error() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let fs = MockFs::new(&["/dev/disk/by-id/virtio-disk1"]);
+
+        let journal = bootstrap_journal();
+        journal::write_journal(&paths, &journal).unwrap();
+
+        let (mp_req, mp_out) = mountpoint_fail();
+        let runner = MockRunner::default()
+            .with_output(mp_req, mp_out)
+            // probe disk1 → PresentLuks
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/virtio-disk1",
+                    "11111111-1111-1111-1111-111111111111",
+                ),
+            )
+            // passphrase ok
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw_empty("cryptsetup open --test-passphrase"),
+            )
+            // LUKS open ok
+            .with_output_stdin(
+                CmdRequest::CryptsetupLuksOpen {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                    mapper: "braid-disk1".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw_empty("cryptsetup open"),
+            )
+            // btrfs scan ok
+            .with_output(
+                CmdRequest::BtrfsDeviceScanAll,
+                ok_raw_empty("btrfs device scan"),
+            )
+            // mount fails for non-btrfs reason
+            .with_output(
+                CmdRequest::Mount {
+                    device: "/dev/mapper/braid-disk1".into(),
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                err_raw(
+                    "mount",
+                    32,
+                    "mount(2) system call failed: Permission denied",
+                ),
+            )
+            // btrfs probe confirms HasBtrfs — mkfs DID succeed
+            .with_output(
+                CmdRequest::BtrfsFilesystemShowTarget {
+                    target: "/dev/mapper/braid-disk1".into(),
+                },
+                ok_raw(
+                    "btrfs filesystem show",
+                    "Label: none  uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
+                     \tTotal devices 1 FS bytes used 256.00KiB\n\
+                     \tdevid    1 size 10.00GiB used 536.00MiB path /dev/mapper/braid-disk1\n",
+                ),
+            );
+
+        let passphrase_file = tempfile::NamedTempFile::new().unwrap();
+        {
+            use std::io::Write;
+            passphrase_file.as_file().write_all(b"testpass").unwrap();
+        }
+
+        let result = cmd_recover(
+            &runner,
+            &fs,
+            &config,
+            &paths,
+            false,
+            Some(passphrase_file.path()),
+            false,
+        );
+
+        let err = result.expect_err("should fail with original mount error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("mount failed"),
+            "expected original mount error, got: {msg}"
+        );
+        assert!(
+            !msg.contains("bootstrap add was interrupted"),
+            "must not show bootstrap message when btrfs exists, got: {msg}"
+        );
+
+        // Journal must NOT have been cleared
+        assert!(
+            paths.pending_op_json().exists(),
+            "journal should still exist"
         );
     }
 }
