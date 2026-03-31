@@ -73,14 +73,26 @@ with subtest("Stopping braid-online.service locks pool"):
     machine.fail("test -e /dev/mapper/braid-disk2")
     machine.fail("systemctl is-active braid-online.service")
 
-    # Reset braid-unlock.service state. RemainAfterExit=true keeps it
-    # "active (exited)" after subtest 2, which would prevent re-use of the
-    # systemctl start braid-pool.target path. Not strictly needed for
-    # subtests 4-7 (use CLI directly), but prevents fragility if subtests
-    # are reordered later.
-    machine.succeed("systemctl stop braid-unlock.service")
+# --- Subtest 4: Re-unlock via braid-pool.target after lock ---
 
-# --- Subtest 4: CLI wrapper synchronization (unlock) ---
+with subtest("braid-pool.target re-unlock after lock"):
+    # After stopping braid-online (which ran braid lock), the pool is offline.
+    # braid-unlock.service should be inactive (no RemainAfterExit), so
+    # re-starting braid-pool.target must trigger a fresh unlock cycle.
+    machine.fail("mountpoint -q /mnt/storage")
+    machine.fail("systemctl is-active braid-online.service")
+
+    machine.succeed("systemctl start braid-pool.target")
+
+    machine.succeed("mountpoint -q /mnt/storage")
+    machine.succeed("systemctl is-active braid-online.service")
+
+    # Tear down via lifecycle owner (systemd path, not CLI path).
+    machine.succeed("systemctl stop braid-online.service")
+    machine.fail("systemctl is-active braid-online.service")
+    machine.fail("mountpoint -q /mnt/storage")
+
+# --- Subtest 5: CLI wrapper synchronization (unlock) ---
 
 with subtest("braid unlock activates braid-online.service"):
     machine.succeed(f"printf '%s\\n' {pq} | braid unlock --passphrase-stdin")

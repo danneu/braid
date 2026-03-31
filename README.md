@@ -278,7 +278,7 @@ After boot, bring the encrypted pool online:
 systemctl start braid-pool.target
 ```
 
-One passphrase prompt opens all available LUKS devices and mounts the pool. Works from TTY, SSH, or scripted. If disks are missing, use `--allow-degraded` to mount with reduced redundancy.
+One passphrase prompt opens all available LUKS devices and mounts the pool. The same command re-unlocks the pool after `braid lock`. Works from TTY, SSH, or scripted. If disks are missing, use `--allow-degraded` to mount with reduced redundancy.
 
 When unlocking on a fresh system (e.g., after migrating disks to a new machine), `unlock` automatically rebuilds the disk identity map from live pool state. Each disk's on-disk LUKS label is verified before recording.
 

@@ -18,7 +18,7 @@ braid needs systemd integration for three things: interactive unlock, unattended
                                     │ (soft dep)
                           ┌─────────▼────────────┐
                           │  braid-unlock.service │  interactive passphrase
-                          │  oneshot, RAE         │
+                          │  oneshot              │
                           └─────────┬────────────┘
                                     │ (wrapper activates on success)
                           ┌─────────▼────────────┐
@@ -51,7 +51,7 @@ Public handle for "bring pool online." User runs `systemctl start braid-pool.tar
 
 Single orchestrator: opens all LUKS devices and mounts the btrfs pool in one shot. Guarantees exactly one passphrase prompt (avoids relying on `systemd-ask-password` cache behavior across multiple LUKS units).
 
-- `Type = oneshot`, `RemainAfterExit = true` — runs once, stays "active (exited)" to prevent re-run.
+- `Type = oneshot` — runs once, returns to inactive on completion. `ConditionPathIsMountPoint` (below) prevents re-run while mounted; the inactive state allows `systemctl start braid-pool.target` to re-unlock after a prior `braid lock`.
 - `ConditionPathIsMountPoint = !${mountPoint}` — skips if pool already mounted.
 - Calls `systemd-ask-password --id=braid | braid unlock --passphrase-stdin`.
 

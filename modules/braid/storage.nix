@@ -60,7 +60,6 @@ in
       description = "Open LUKS and mount braid pool";
       serviceConfig = {
         Type = "oneshot";
-        RemainAfterExit = true;
       };
       unitConfig.ConditionPathIsMountPoint = "!${cfg.mountPoint}";
       path = [
