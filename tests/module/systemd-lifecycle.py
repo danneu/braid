@@ -111,7 +111,43 @@ with subtest("braid lock deactivates braid-online.service"):
     machine.fail("test -e /dev/mapper/braid-disk1")
     machine.fail("test -e /dev/mapper/braid-disk2")
 
-# --- Subtest 6: braid add activates braid-online.service ---
+# --- Subtest 6: Concurrent unlock attempts serialize via flock ---
+
+with subtest("Concurrent unlock attempts serialize via flock"):
+    # Intent: Two concurrent `braid unlock` invocations must not race into
+    # cryptsetup open on the same devices. The wrapper's flock on
+    # /run/braid-pool.lock serializes them — the winner unlocks, the loser
+    # acquires the lock, re-checks mountpoint, and exits cleanly.
+    #
+    # Why it exists: braid-auto-unlock and braid-unlock can both pass their
+    # ConditionPathIsMountPoint gate before either mounts the pool. Without
+    # the flock, the second cryptsetup open fails with EBUSY, leaving
+    # partial LUKS state requiring manual cleanup.
+    #
+    # Scenario: User SSHs in and runs `systemctl start braid-pool.target`
+    # while braid-auto-unlock is still in-flight at boot.
+    machine.fail("mountpoint -q /mnt/storage")
+
+    # Launch two concurrent unlock attempts through the wrapper.
+    machine.succeed(
+        f"printf '%s\\n' {pq} | braid unlock --passphrase-stdin >/tmp/unlock-a 2>&1 & "
+        f"printf '%s\\n' {pq} | braid unlock --passphrase-stdin >/tmp/unlock-b 2>&1 & "
+        f"wait"
+    )
+
+    machine.succeed("mountpoint -q /mnt/storage")
+    machine.succeed("systemctl is-active braid-online.service")
+
+    out_a = machine.succeed("cat /tmp/unlock-a")
+    out_b = machine.succeed("cat /tmp/unlock-b")
+    assert "pool already mounted" in out_a or "pool already mounted" in out_b, (
+        f"Expected one 'pool already mounted' message.\nA: {out_a}\nB: {out_b}"
+    )
+
+    machine.succeed("braid lock")
+    machine.fail("systemctl is-active braid-online.service")
+
+# --- Subtest 7: braid add activates braid-online.service ---
 
 with subtest("braid add activates braid-online.service"):
     # Pool is offline from subtest 5. Manually open existing LUKS mappers

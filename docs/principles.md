@@ -53,6 +53,10 @@ Parser-critical tools (btrfs-progs, cryptsetup, util-linux) are pinned to a spec
 
 Mount options, LUKS flags, and scrub scheduling are chosen for HDD NAS deployments. [Why →](decisions/hdd-defaults.md)
 
+## 12. One pool operation at a time
+
+Pool-mutating commands (`unlock`, `add`, `recover`) hold an exclusive `flock` on `/run/braid-pool.lock` for their duration. This serializes concurrent entry points (e.g. `braid-auto-unlock` at boot racing a manual `braid-pool.target` start) at the critical section itself, not via systemd unit topology. After acquiring the lock, `unlock` re-checks `mountpoint -q` and exits cleanly if the pool was already mounted by the winner. `add` and `recover` do not fast-exit — they legitimately operate on mounted pools.
+
 ---
 
 Implementation workflow and conventions are in [AGENTS.md](../AGENTS.md).

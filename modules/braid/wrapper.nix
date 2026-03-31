@@ -21,6 +21,7 @@ pkgs.runCommand "braid" {} ''
     --subst-var-by chownBin '${pkgs.coreutils}/bin/chown' \
     --subst-var-by chmodBin '${pkgs.coreutils}/bin/chmod' \
     --subst-var-by systemctlBin '${pkgs.systemd}/bin/systemctl' \
-    --subst-var-by mountPointPath '${cfg.mountPoint}'
+    --subst-var-by mountPointPath '${cfg.mountPoint}' \
+    --subst-var-by flockBin '${cfg.packages.utilLinux}/bin/flock'
   chmod +x $out/bin/braid
 ''

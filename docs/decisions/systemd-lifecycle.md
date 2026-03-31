@@ -113,6 +113,10 @@ The wrapper (`braid-wrapper.sh`) bridges CLI operations and systemd state. This 
 2. `ExecStop = braid lock` runs — unmounts and closes LUKS.
 3. Drives are safe to power off.
 
+## Unlock path mutual exclusion
+
+Pool-mutating commands (`unlock`, `add`, `recover`) are serialized by `flock /run/braid-pool.lock` in the wrapper. The lock is acquired before the CLI runs and held through post-processing (permissions, `braid-online` activation). After acquiring the lock, `unlock` re-checks `mountpoint -q` and exits cleanly if the pool was already mounted — `add` and `recover` do not fast-exit because they operate on mounted pools. See [Principle 12](../principles.md#12-one-pool-operation-at-a-time).
+
 ## Consumer dependency contracts
 
 Services that depend on the pool being mounted use one of two patterns:
@@ -127,6 +131,7 @@ Services that depend on the pool being mounted use one of two patterns:
 2. **"braid-online active" = "pool mounted."** Enforced at two layers: the wrapper only activates it after `mountpoint -q` succeeds, and `ConditionPathIsMountPoint` on the unit itself causes systemd to skip activation (unit stays inactive) on direct `systemctl start` when unmounted.
 3. **One passphrase prompt.** `braid-unlock.service` is the sole interactive prompt source. The CLI opens all LUKS devices from that single passphrase.
 4. **Graceful degradation.** If `braid-online` activation fails, the pool is still mounted and usable — only the shutdown hook is missing (warned to stderr).
+5. **One pool operation at a time.** Enforced by `flock` in the wrapper, not unit topology. See [Principle 12](../principles.md#12-one-pool-operation-at-a-time).
 
 ## See
 

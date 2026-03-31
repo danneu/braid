@@ -1,61 +1,89 @@
 #!@shell@
 export PATH="@toolPath@:$PATH"
+
+# Parse subcommand before execution — needed to decide whether to acquire
+# the pool lock and which post-processing path to take.
+# Mirrors the global CLI shape in cli/src/main.rs (struct Cli).
+# If global options change there, update this parser to match.
+subcmd=""
+skip_next=false
+for arg in "$@"; do
+  if $skip_next; then
+    skip_next=false
+    continue
+  fi
+  case "$arg" in
+    --config) skip_next=true ;;
+    --config=*) ;;
+    -*) ;;
+    *) subcmd="$arg"; break ;;
+  esac
+done
+
+skip_fixup=false
+for arg in "$@"; do
+  case "$arg" in
+    --help|-h|--version|-V|--dry-run) skip_fixup=true; break ;;
+  esac
+done
+
+# Pool-mutating commands (unlock, add, recover) hold an exclusive flock for
+# their duration. This serializes concurrent entry points (e.g. braid-auto-
+# unlock at boot racing a manual braid-pool.target start) at the critical
+# section itself, not via systemd unit topology. See Principle 12.
+case "$subcmd" in
+  unlock|add|recover)
+    if ! $skip_fixup; then
+      exec 9>/run/braid-pool.lock
+      @flockBin@ 9
+    fi
+    ;;
+esac
+
+# For unlock specifically: re-check after acquiring the lock — another
+# unlock path may have already mounted the pool while we waited.
+# Does NOT apply to add/recover, which operate on a mounted pool.
+case "$subcmd" in
+  unlock)
+    if ! $skip_fixup; then
+      if @mountpointBin@ -q "@mountPointPath@" 2>/dev/null; then
+        echo "pool already mounted at @mountPointPath@"
+        exit 0
+      fi
+    fi
+    ;;
+esac
+
 @braidBin@ "$@"
 ret=$?
 
-if [ "$ret" -eq 0 ]; then
-  # Subcommand detection mirrors the global CLI shape in cli/src/main.rs (struct Cli).
-  # If global options change there, update this parser to match.
-  subcmd=""
-  skip_next=false
-  for arg in "$@"; do
-    if $skip_next; then
-      skip_next=false
-      continue
-    fi
-    case "$arg" in
-      --config) skip_next=true ;;
-      --config=*) ;;
-      -*) ;;
-      *) subcmd="$arg"; break ;;
-    esac
-  done
-
-  skip_fixup=false
-  for arg in "$@"; do
-    case "$arg" in
-      --help|-h|--version|-V|--dry-run) skip_fixup=true; break ;;
-    esac
-  done
-
-  if ! $skip_fixup; then
-    case "$subcmd" in
-      unlock|add|recover)
-        if @mountpointBin@ -q "@mountPointPath@" 2>/dev/null; then
-          if [ -n "@storageGroup@" ]; then
-            if ! @chownBin@ "root:@storageGroup@" "@mountPointPath@"; then
-              echo "braid: WARNING: failed to set ownership on @mountPointPath@" >&2
-            fi
-            if ! @chmodBin@ 2770 "@mountPointPath@"; then
-              echo "braid: WARNING: failed to set permissions on @mountPointPath@" >&2
-            fi
+if [ "$ret" -eq 0 ] && ! $skip_fixup; then
+  case "$subcmd" in
+    unlock|add|recover)
+      if @mountpointBin@ -q "@mountPointPath@" 2>/dev/null; then
+        if [ -n "@storageGroup@" ]; then
+          if ! @chownBin@ "root:@storageGroup@" "@mountPointPath@"; then
+            echo "braid: WARNING: failed to set ownership on @mountPointPath@" >&2
           fi
-          if ! @systemctlBin@ start braid-online.service 2>/dev/null; then
-            echo "braid: WARNING: failed to activate braid-online.service — pool is mounted but shutdown may not lock automatically" >&2
+          if ! @chmodBin@ 2770 "@mountPointPath@"; then
+            echo "braid: WARNING: failed to set permissions on @mountPointPath@" >&2
           fi
         fi
-        ;;
-      lock)
-        if ! @mountpointBin@ -q "@mountPointPath@" 2>/dev/null; then
-          # --no-block: when braid-online.service's ExecStop runs `braid lock`,
-          # the wrapper would call `systemctl stop braid-online.service` again.
-          # A synchronous stop here deadlocks — systemd waits for ExecStop to
-          # exit, but the wrapper is waiting for the stop to complete.  --no-block
-          # queues the stop and returns immediately, breaking the cycle.
-          @systemctlBin@ stop --no-block braid-online.service 2>/dev/null || true
+        if ! @systemctlBin@ start braid-online.service 2>/dev/null; then
+          echo "braid: WARNING: failed to activate braid-online.service — pool is mounted but shutdown may not lock automatically" >&2
         fi
-        ;;
-    esac
-  fi
+      fi
+      ;;
+    lock)
+      if ! @mountpointBin@ -q "@mountPointPath@" 2>/dev/null; then
+        # --no-block: when braid-online.service's ExecStop runs `braid lock`,
+        # the wrapper would call `systemctl stop braid-online.service` again.
+        # A synchronous stop here deadlocks — systemd waits for ExecStop to
+        # exit, but the wrapper is waiting for the stop to complete.  --no-block
+        # queues the stop and returns immediately, breaking the cycle.
+        @systemctlBin@ stop --no-block braid-online.service 2>/dev/null || true
+      fi
+      ;;
+  esac
 fi
 exit $ret
