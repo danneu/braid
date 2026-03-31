@@ -39,7 +39,7 @@ in
       # the wrapper. When the condition is not met, systemd skips activation
       # (unit stays inactive, systemctl returns 0). The wrapper's own
       # mountpoint -q check (braid-wrapper.sh) is the primary gate; this is
-      # defense-in-depth for the invariant: braid-online active ⟺ pool mounted.
+      # defense-in-depth. Out-of-band mount/unmount can leave this stale.
       unitConfig.ConditionPathIsMountPoint = cfg.mountPoint;
       serviceConfig = {
         Type = "oneshot";

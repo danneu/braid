@@ -60,7 +60,7 @@ RAE = `RemainAfterExit = true`
 5. `braid-auto-unlock.service` is an alternative unlock path (same wrapper activation).
 
 **Key invariants:**
-- `braid-online active` ⟺ pool is mounted. Only the wrapper activates it, only after mount check.
+- Wrapper keeps `braid-online` synchronized with pool mount state. Out-of-band mount/unmount can leave it stale.
 - `wants` everywhere, never `requires` — pool failure cannot block boot.
 - One passphrase prompt — `braid-unlock` is the sole interactive prompt source.
 - Oneshot consumers use `ConditionPathIsMountPoint` + `After=mnt-storage.mount`. Long-running consumers `BindsTo` `braid-online.service`.

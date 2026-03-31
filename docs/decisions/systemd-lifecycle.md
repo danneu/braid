@@ -128,7 +128,7 @@ Services that depend on the pool being mounted use one of two patterns:
 ## Key design constraints
 
 1. **No hard boot dependencies.** `wants` everywhere, never `requires`. Pool failure never blocks boot.
-2. **"braid-online active" = "pool mounted."** Enforced at two layers: the wrapper only activates it after `mountpoint -q` succeeds, and `ConditionPathIsMountPoint` on the unit itself causes systemd to skip activation (unit stays inactive) on direct `systemctl start` when unmounted.
+2. **Wrapper-synchronized lifecycle.** For wrapper-managed operations, the wrapper keeps `braid-online` synchronized with pool mount state: it activates the service only after `mountpoint -q` succeeds, and deactivates it after a successful lock. `ConditionPathIsMountPoint` on the unit is defense-in-depth against direct `systemctl start` when unmounted. Out-of-band mount or unmount bypasses the wrapper and can leave `braid-online` stale; `braid lock` handles already-unmounted pools gracefully.
 3. **One passphrase prompt.** `braid-unlock.service` is the sole interactive prompt source. The CLI opens all LUKS devices from that single passphrase.
 4. **Graceful degradation.** If `braid-online` activation fails, the pool is still mounted and usable — only the shutdown hook is missing (warned to stderr).
 5. **One pool operation at a time.** Enforced by `flock` in the wrapper, not unit topology. See [Principle 12](../principles.md#12-one-pool-operation-at-a-time).
