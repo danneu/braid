@@ -2,10 +2,12 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::Path;
 
-/// Durably rename an already-written temp file to its final path.
-/// Both paths must share the same parent directory (same-directory rename).
-/// Fsyncs the temp file, renames, then fsyncs the parent directory.
-pub fn durable_rename(tmp: &Path, final_path: &Path) -> io::Result<()> {
+/// Rename a temp file to its final path and fsync the parent directory.
+/// Both paths must share the same parent directory.
+///
+/// Caller must fsync file contents before calling — this only ensures the
+/// directory entry is durable.
+fn rename_and_sync_dir(tmp: &Path, final_path: &Path) -> io::Result<()> {
     let tmp_dir = tmp.parent().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -22,20 +24,22 @@ pub fn durable_rename(tmp: &Path, final_path: &Path) -> io::Result<()> {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!(
-                "durable_rename requires same parent directory, got {tmp_dir:?} and {final_dir:?}"
+                "rename_and_sync_dir requires same parent directory, got {tmp_dir:?} and {final_dir:?}"
             ),
         ));
     }
+    fs::rename(tmp, final_path)?;
+    sync_dir(final_dir)
+}
 
-    // Flush temp file contents to disk.
+/// Durably rename an already-written temp file to its final path.
+/// Both paths must share the same parent directory (same-directory rename).
+/// Fsyncs the temp file, renames, then fsyncs the parent directory.
+pub fn durable_rename(tmp: &Path, final_path: &Path) -> io::Result<()> {
     let f = File::open(tmp)?;
     f.sync_all()?;
     drop(f);
-
-    fs::rename(tmp, final_path)?;
-
-    // Sync directory metadata so rename survives power loss.
-    sync_dir(final_dir)
+    rename_and_sync_dir(tmp, final_path)
 }
 
 /// Fsync a directory to flush metadata (renames, deletions) to disk.
@@ -64,9 +68,10 @@ pub fn atomic_write(path: &Path, contents: &[u8]) -> io::Result<()> {
             .write(true)
             .open(&tmp_path)?;
         tmp.write_all(contents)?;
+        tmp.sync_all()?;
     }
 
-    durable_rename(&tmp_path, path)
+    rename_and_sync_dir(&tmp_path, path)
 }
 
 #[cfg(test)]
@@ -154,6 +159,51 @@ mod tests {
     fn sync_dir_on_valid_directory() {
         let tmp = TempDir::new().unwrap();
         sync_dir(tmp.path()).unwrap();
+    }
+
+    /*
+     * Intent: rename_and_sync_dir moves a temp file to its final path
+     * within the same directory.
+     *
+     * Why it exists: rename_and_sync_dir is the lower-level primitive
+     * used by atomic_write after same-fd fsync. It must correctly rename
+     * and remove the source.
+     *
+     * Scenario: atomic_write creates a temp file, fsyncs it, then calls
+     * rename_and_sync_dir to atomically place the final file.
+     */
+    #[test]
+    fn rename_and_sync_dir_same_directory() {
+        let tmp = TempDir::new().unwrap();
+        let src = tmp.path().join("data.tmp");
+        let dst = tmp.path().join("data.final");
+        fs::write(&src, b"payload").unwrap();
+        rename_and_sync_dir(&src, &dst).unwrap();
+        assert!(!src.exists());
+        assert_eq!(fs::read(&dst).unwrap(), b"payload");
+    }
+
+    /*
+     * Intent: rename_and_sync_dir rejects cross-directory renames.
+     *
+     * Why it exists: same-directory rename + single dir fsync is the
+     * durability contract. Cross-directory paths would silently weaken it.
+     *
+     * Scenario: a caller accidentally passes paths in different directories —
+     * this must fail loudly.
+     */
+    #[test]
+    fn rename_and_sync_dir_rejects_cross_directory() {
+        let tmp = TempDir::new().unwrap();
+        let dir_a = tmp.path().join("a");
+        let dir_b = tmp.path().join("b");
+        fs::create_dir_all(&dir_a).unwrap();
+        fs::create_dir_all(&dir_b).unwrap();
+        let src = dir_a.join("data.tmp");
+        let dst = dir_b.join("data.final");
+        fs::write(&src, b"bytes").unwrap();
+        let err = rename_and_sync_dir(&src, &dst).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
     }
 
     /*
