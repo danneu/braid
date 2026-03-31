@@ -146,6 +146,14 @@ pub fn probe_pool<R: CommandRunner>(
     })?;
     let show = parse_btrfs_filesystem_show(&show_raw)?;
 
+    // A mounted btrfs filesystem always has an FSID. None here means the
+    // parser couldn't extract the uuid line — a broken invariant, not a
+    // state we should silently propagate to consumers.
+    let fsid = show.uuid.ok_or_else(|| ProbeError::PoolDevice {
+        mapper: mount_point.to_owned(),
+        detail: "mounted pool has no FSID in btrfs filesystem show output".into(),
+    })?;
+
     let mut devices = Vec::new();
     for bdev in &show.devices {
         let path = &bdev.path;
@@ -202,7 +210,7 @@ pub fn probe_pool<R: CommandRunner>(
         devices,
         missing_count,
         total_devices: show.total_devices,
-        fsid: show.uuid,
+        fsid: Some(fsid),
         missing_devids: show.missing_devids,
     })
 }
@@ -823,6 +831,40 @@ mod tests {
         assert_eq!(
             result.missing_count, 0,
             "saturating_sub should prevent underflow"
+        );
+    }
+
+    // A mounted pool whose btrfs filesystem show output has no uuid line
+    // is a broken invariant — probe_pool must reject it rather than
+    // returning PoolState with fsid: None, which would let downstream
+    // consumers silently skip FSID-based safety guards.
+    #[test]
+    fn probe_pool_errors_on_missing_fsid() {
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::FindmntJson {
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                },
+                findmnt_btrfs(),
+            )
+            .with_output(
+                CmdRequest::BtrfsFilesystemShow {
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                },
+                ok_raw(
+                    "btrfs filesystem show /mnt/storage",
+                    "\tTotal devices 1 FS bytes used 1.00GiB\n\
+                     \tdevid    1 size 10.00GiB used 2.00GiB path /dev/mapper/braid-toshiba\n",
+                ),
+            );
+
+        let result = probe_pool(&runner, "/mnt/storage");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, ProbeError::PoolDevice { ref detail, .. }
+                if detail.contains("no FSID")),
+            "expected ProbeError::PoolDevice about missing FSID, got: {err:?}"
         );
     }
 }

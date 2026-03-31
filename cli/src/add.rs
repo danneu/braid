@@ -106,10 +106,22 @@ fn classify_braid_disk_fsid<R: CommandRunner>(
 
     let show = parse_btrfs_filesystem_show(&show_raw)?;
 
-    if let (Some(device_fsid), Some(pool_fsid)) = (&show.uuid, &pool.fsid) {
-        if device_fsid != pool_fsid {
-            return Ok(AddLuksIdentity::BraidLabeledForeignPool);
-        }
+    // The device passed HasBtrfs (exit 0) so btrfs filesystem show should
+    // have printed a uuid line. None means the parser couldn't extract it —
+    // fail rather than silently skipping the foreign-pool guard.
+    let device_fsid = show.uuid.as_ref().ok_or_else(|| {
+        AddError::Validation(format!(
+            "disk '{}': btrfs superblock present but no UUID in \
+             btrfs filesystem show output",
+            name,
+        ))
+    })?;
+
+    // pool.fsid is guaranteed Some for mounted pools by probe_pool.
+    let pool_fsid = pool.fsid.as_ref().expect("mounted pool must have FSID");
+
+    if device_fsid != pool_fsid {
+        return Ok(AddLuksIdentity::BraidLabeledForeignPool);
     }
 
     if pool.devices.iter().any(|d| d.mapper == *mapper) {
@@ -1015,6 +1027,37 @@ mod tests {
 
         let result = classify_braid_disk_fsid(&runner, "disk1", &mn, &pool).unwrap();
         assert_eq!(result, AddLuksIdentity::BraidLabeledRecoverable);
+    }
+
+    // Device has a btrfs superblock (exit 0) but the parser finds no uuid
+    // line. This is the dangerous case: without a device FSID, the
+    // foreign-pool guard cannot run. Must fail rather than fall through
+    // to Recoverable.
+    #[test]
+    fn classify_fsid_errors_on_missing_device_uuid() {
+        let runner = MockRunner::default().with_output(
+            CmdRequest::BtrfsFilesystemShowTarget {
+                target: "/dev/mapper/braid-disk1".into(),
+            },
+            RawCommandOutput {
+                cmd: "btrfs filesystem show /dev/mapper/braid-disk1".into(),
+                stdout: "\tTotal devices 1 FS bytes used 16.00MiB\n\
+                         \tdevid    1 size 500.00MiB used 100.00MiB path /dev/mapper/braid-disk1\n"
+                    .into(),
+                stderr: String::new(),
+                exit_status: 0,
+            },
+        );
+        let pool = pool_mounted_with_fsid("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+        let mn = MapperName("braid-disk1".into());
+
+        let result = classify_braid_disk_fsid(&runner, "disk1", &mn, &pool);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("no UUID"),
+            "expected error about missing UUID, got: {err}"
+        );
     }
 
     // --- compile_add_steps_multi identity tests ---
