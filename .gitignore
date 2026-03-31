@@ -6,9 +6,6 @@ result-*
 /target
 /target
 /.claude/worktrees
-/tests/hw/__pycache__
 target/
-/tests/repro/__pycache__
 /reference/btrfs-progs
-/tests/cli/__pycache__
-/tests/module/__pycache__
+__pycache__/
