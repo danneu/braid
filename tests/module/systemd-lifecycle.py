@@ -21,7 +21,8 @@
 #     braid-online.service,
 # (4) braid add via CLI wrapper activates braid-online.service,
 # (5) wrapper prints warning but still succeeds when braid-online.service
-#     cannot be activated.
+#     cannot be activated,
+# (6) actual VM shutdown/reboot runs ExecStop=braid lock to completion.
 
 import json
 import shlex
@@ -228,6 +229,48 @@ with subtest("braid recover activates braid-online.service"):
     machine.succeed("systemctl is-active braid-online.service")
     machine.succeed("mountpoint -q /mnt/storage")
     machine.fail("test -f /var/lib/braid/pending-op.json")
+
+    # Cleanup
+    machine.succeed("braid lock")
+    machine.fail("systemctl is-active braid-online.service")
+
+# --- Subtest 9: Shutdown runs ExecStop=braid lock ---
+#
+# Subtests 3/5 test manual stop, but systemd's shutdown ordering differs.
+# DefaultDependencies adds Conflicts=shutdown.target + timeout enforcement.
+# ExecStop could be skipped or killed if ordering is wrong. Post-reboot
+# state (mappers gone, mount gone) proves nothing — a reboot clears those
+# regardless. The journal is the real proof.
+
+# Setup: unlock pool, write canary, trigger real shutdown.
+machine.succeed(f"printf '%s\\n' {pq} | braid unlock --passphrase-stdin")
+machine.succeed("systemctl is-active braid-online.service")
+machine.succeed("echo 'shutdown-canary' > /mnt/storage/canary.txt")
+machine.succeed("sync")
+
+machine.shutdown()
+machine.start()
+machine.wait_for_unit("multi-user.target", timeout=120)
+
+with subtest("ExecStop=braid lock completes during shutdown"):
+    # PRIMARY: previous boot's journal proves ExecStop ran to completion.
+    # "Stopped Braid storage pool online." means systemd saw clean exit.
+    svc_log = machine.succeed(
+        "journalctl -b -1 -u braid-online.service --no-pager"
+    )
+    assert "Stopped Braid storage pool online" in svc_log, (
+        f"ExecStop did not complete during shutdown. Journal:\n{svc_log}"
+    )
+    assert "timed out" not in svc_log.lower(), (
+        f"braid-online.service was killed by timeout. Journal:\n{svc_log}"
+    )
+
+    # SECONDARY: canary file survives — data integrity after clean unmount.
+    machine.succeed(f"printf '%s\\n' {pq} | braid unlock --passphrase-stdin")
+    content = machine.succeed("cat /mnt/storage/canary.txt").strip()
+    assert content == "shutdown-canary", (
+        f"Expected 'shutdown-canary', got '{content}'"
+    )
 
     # Cleanup
     machine.succeed("braid lock")

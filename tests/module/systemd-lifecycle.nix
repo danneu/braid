@@ -57,6 +57,10 @@ in
       ];
       virtualisation.memorySize = 2048;
 
+      # Persist journal across reboots so the shutdown subtest can assert
+      # on the previous boot's log via journalctl -b -1.
+      services.journald.extraConfig = "Storage=persistent";
+
       environment.systemPackages = [
         pkgs.btrfs-progs
         pkgs.cryptsetup
