@@ -64,7 +64,7 @@ Optional (only created when `braid.autoUnlock.enable = true`). Runs at boot, unl
 - `ConditionPathIsMountPoint = !${mountPoint}` — skips if pool already mounted.
 - **No `RemainAfterExit`** — intentional. If USB is absent at boot (service exits 0 on skip), a later `systemctl start braid-auto-unlock` can re-run when the USB is inserted.
 - Mounts USB read-only, validates keyfile path (symlink defense), runs `braid unlock --key-file`, always unmounts USB after (never leaves keyfile accessible).
-- Exits 0 on skip or success. Non-zero only on errors.
+- Always exits 0 — failures are logged to the journal but never reported as unit failure, because auto-unlock must not block boot under any circumstance.
 
 ### braid-online.service — lifecycle owner
 
