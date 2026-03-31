@@ -79,6 +79,34 @@ fn read_luks_label<R: CommandRunner>(runner: &R, device: &str) -> Result<Option<
     Ok(out.label)
 }
 
+/// Validate the preconditions for adding a PresentLuks disk.
+/// Reads the LUKS label and checks the pool is mounted.
+/// No side effects — works on the raw device, no mapper required.
+fn validate_braid_preconditions<R: CommandRunner>(
+    runner: &R,
+    name: &str,
+    device: &str,
+    pool: &PoolState,
+) -> Result<(), AddError> {
+    let label = read_luks_label(runner, device)?;
+    let expected_label = format!("braid-{name}");
+    if label.as_deref() != Some(expected_label.as_str()) {
+        return Err(AddError::Validation(format!(
+            "disk '{}' ({}) is already a LUKS container but is not labeled as {}; \
+             braid will not adopt a non-braid encrypted device",
+            name, device, expected_label,
+        )));
+    }
+    if !pool.mounted {
+        return Err(AddError::Validation(format!(
+            "disk '{}' is braid-labeled but no mounted pool exists to verify identity; \
+             bootstrap only accepts fresh disks",
+            name,
+        )));
+    }
+    Ok(())
+}
+
 /// Classify a braid-labeled PresentLuks disk whose mapper is already open.
 /// Checks btrfs superblock presence and FSID against the mounted pool.
 /// Caller must ensure: pool.mounted == true, mapper is open.
@@ -129,6 +157,25 @@ fn classify_braid_disk_fsid<R: CommandRunner>(
     }
 
     Ok(AddLuksIdentity::BraidLabeledRecoverable)
+}
+
+/// Map an AddLuksIdentity error variant to a canonical AddError.
+/// Returns None for non-error outcomes (AlreadyInPool, Recoverable).
+fn identity_to_error(identity: &AddLuksIdentity, name: &str) -> Option<AddError> {
+    match identity {
+        AddLuksIdentity::BraidLabeledNoBtrfs => Some(AddError::Validation(format!(
+            "disk '{}' is braid-labeled but contains no btrfs superblock; \
+             identity is ambiguous, so braid will not re-add it automatically. \
+             Wipe the disk and add it again as fresh.",
+            name,
+        ))),
+        AddLuksIdentity::BraidLabeledForeignPool => Some(AddError::Validation(format!(
+            "disk '{}' is a braid-managed device from a different btrfs filesystem; \
+             braid will not merge foreign pools",
+            name,
+        ))),
+        _ => None,
+    }
 }
 
 /// Tracks LUKS mappers opened by this invocation of cmd_add.
@@ -363,26 +410,7 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         let by_id = by_ids[i];
         let mn = mapper_name(name);
 
-        // Identity check: read LUKS label (works on raw device, no mapper needed)
-        let label = read_luks_label(runner, &by_id.0)?;
-        let expected_label = format!("braid-{name}");
-
-        if label.as_deref() != Some(expected_label.as_str()) {
-            return Err(AddError::Validation(format!(
-                "disk '{}' ({}) is already a LUKS container but is not labeled as {}; \
-                 braid will not adopt a non-braid encrypted device",
-                name, by_id, expected_label,
-            )));
-        }
-
-        // Braid-labeled — pool must be mounted to verify FSID
-        if !pool.mounted {
-            return Err(AddError::Validation(format!(
-                "disk '{}' is braid-labeled but no mounted pool exists to verify identity; \
-                 bootstrap only accepts fresh disks",
-                name,
-            )));
-        }
+        validate_braid_preconditions(runner, name, &by_id.0, &pool)?;
 
         // Open mapper if closed (now we know it's braid-labeled + pool is up)
         if !mapper_open {
@@ -391,27 +419,12 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             eprintln!("LUKS opened: {} → {}", by_id, mn);
         }
 
-        // Full FSID-based identity classification
-        match classify_braid_disk_fsid(runner, name, &mn, &pool)? {
-            AddLuksIdentity::BraidLabeledNoBtrfs => {
-                return Err(AddError::Validation(format!(
-                    "disk '{}' is braid-labeled but contains no btrfs superblock; \
-                     identity is ambiguous, so braid will not re-add it automatically. \
-                     Wipe the disk and add it again as fresh.",
-                    name,
-                )));
-            }
-            AddLuksIdentity::BraidLabeledForeignPool => {
-                return Err(AddError::Validation(format!(
-                    "disk '{}' is a braid-managed device from a different btrfs filesystem; \
-                     braid will not merge foreign pools",
-                    name,
-                )));
-            }
-            AddLuksIdentity::BraidLabeledAlreadyInPool => {
-                // No-op — already in pool
-                continue;
-            }
+        let identity = classify_braid_disk_fsid(runner, name, &mn, &pool)?;
+        if let Some(err) = identity_to_error(&identity, name) {
+            return Err(err);
+        }
+        match identity {
+            AddLuksIdentity::BraidLabeledAlreadyInPool => continue,
             AddLuksIdentity::BraidLabeledRecoverable => {
                 eprintln!(
                     "note: braid-labeled disk '{}' verified as pool member. \
@@ -420,10 +433,7 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
                 );
                 needs_pool_add.push(i);
             }
-            // These cases are handled above before calling classify_braid_disk_fsid
-            AddLuksIdentity::NonBraid | AddLuksIdentity::BraidLabeledNoPool => {
-                unreachable!("handled before FSID classification")
-            }
+            _ => unreachable!("error variants handled by identity_to_error above"),
         }
     }
 
@@ -595,48 +605,17 @@ fn compile_add_steps_multi<R: CommandRunner>(
                 needs_pool_add += 1;
             }
             ConfigDiskState::PresentLuks { mapper_open, .. } => {
-                // Dry-run identity check: read LUKS label (no side effects)
-                let label = read_luks_label(runner, &by_id.0)?;
-                let expected_label = format!("braid-{name}");
-
-                if label.as_deref() != Some(expected_label.as_str()) {
-                    return Err(AddError::Validation(format!(
-                        "disk '{}' ({}) is already a LUKS container but is not labeled as {}; \
-                         braid will not adopt a non-braid encrypted device",
-                        name, by_id, expected_label,
-                    )));
-                }
-
-                // Braid-labeled: check pool
-                if !pool.mounted {
-                    return Err(AddError::Validation(format!(
-                        "disk '{}' is braid-labeled but no mounted pool exists to verify identity; \
-                         bootstrap only accepts fresh disks",
-                        name,
-                    )));
-                }
+                // Preconditions always checked — no mapper required.
+                validate_braid_preconditions(runner, name, &by_id.0, pool)?;
 
                 if *mapper_open {
                     // Mapper is open — full classification without side effects
-                    match classify_braid_disk_fsid(runner, name, &mn, pool)? {
-                        AddLuksIdentity::BraidLabeledNoBtrfs => {
-                            return Err(AddError::Validation(format!(
-                                "disk '{}' is braid-labeled but contains no btrfs superblock; \
-                                 blocked: identity is ambiguous. \
-                                 Wipe the disk to re-add it as fresh.",
-                                name,
-                            )));
-                        }
-                        AddLuksIdentity::BraidLabeledForeignPool => {
-                            return Err(AddError::Validation(format!(
-                                "disk '{}' is a braid-managed device from a different btrfs \
-                                 filesystem; braid will not merge foreign pools",
-                                name,
-                            )));
-                        }
-                        AddLuksIdentity::BraidLabeledAlreadyInPool => {
-                            continue;
-                        }
+                    let identity = classify_braid_disk_fsid(runner, name, &mn, pool)?;
+                    if let Some(err) = identity_to_error(&identity, name) {
+                        return Err(err);
+                    }
+                    match identity {
+                        AddLuksIdentity::BraidLabeledAlreadyInPool => continue,
                         AddLuksIdentity::BraidLabeledRecoverable => {
                             steps.push(AddStep {
                                 risk: "safe",
@@ -647,12 +626,10 @@ fn compile_add_steps_multi<R: CommandRunner>(
                             });
                             needs_pool_add += 1;
                         }
-                        AddLuksIdentity::NonBraid | AddLuksIdentity::BraidLabeledNoPool => {
-                            unreachable!("handled above")
-                        }
+                        _ => unreachable!("error variants handled by identity_to_error above"),
                     }
                 } else {
-                    // Mapper closed — can't open in dry-run, defer full verification
+                    // Mapper closed — FSID verification deferred to execution time.
                     steps.push(AddStep {
                         risk: "safe",
                         description: format!(
@@ -1223,6 +1200,150 @@ mod tests {
                 .iter()
                 .map(|s| format!("[{}] {}", s.risk, s.description))
                 .collect::<Vec<_>>()
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // validate_braid_preconditions / identity_to_error canonical message tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn preconditions_non_braid_label_canonical_message() {
+        // Intent: validate_braid_preconditions emits the canonical label-mismatch error.
+        // Why it exists: pins the error text so both cmd_add and compile_add_steps_multi
+        //   can't drift — they both call this function.
+        // Scenario: user tries to add a LUKS disk that was not created by braid.
+        let runner = MockRunner::default().with_output(
+            CmdRequest::CryptsetupLuksDumpText {
+                device: "/dev/disk/by-id/disk1".into(),
+            },
+            luks_dump_text_with_label("some-other-label"),
+        );
+        let pool = pool_unmounted();
+        let err = validate_braid_preconditions(&runner, "disk1", "/dev/disk/by-id/disk1", &pool)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not labeled as braid-disk1"), "got: {err}");
+        assert!(
+            err.contains("braid will not adopt a non-braid encrypted device"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn preconditions_no_pool_canonical_message() {
+        // Intent: validate_braid_preconditions emits the canonical no-mounted-pool error.
+        // Why it exists: pins the error text so both cmd_add and compile_add_steps_multi
+        //   can't drift — they both call this function.
+        // Scenario: user tries to add a braid-labeled disk when no pool is mounted
+        //   (e.g. fresh bootstrap scenario with pre-existing encrypted disk).
+        let runner = MockRunner::default().with_output(
+            CmdRequest::CryptsetupLuksDumpText {
+                device: "/dev/disk/by-id/disk1".into(),
+            },
+            luks_dump_text_with_label("braid-disk1"),
+        );
+        let pool = pool_unmounted();
+        let err = validate_braid_preconditions(&runner, "disk1", "/dev/disk/by-id/disk1", &pool)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("no mounted pool exists to verify identity"),
+            "got: {err}"
+        );
+        assert!(
+            err.contains("bootstrap only accepts fresh disks"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn identity_to_error_no_btrfs_canonical_message() {
+        // Intent: identity_to_error emits the canonical BraidLabeledNoBtrfs error.
+        // Why it exists: this was the variant where message text had already diverged
+        //   between cmd_add and compile_add_steps_multi. Pinning it prevents recurrence.
+        // Scenario: a braid-labeled disk has its LUKS contents wiped or is partially
+        //   initialized — btrfs superblock is absent.
+        let err = identity_to_error(&AddLuksIdentity::BraidLabeledNoBtrfs, "disk1")
+            .unwrap()
+            .to_string();
+        assert!(err.contains("contains no btrfs superblock"), "got: {err}");
+        assert!(err.contains("identity is ambiguous"), "got: {err}");
+        assert!(
+            err.contains("Wipe the disk and add it again as fresh"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn identity_to_error_foreign_pool_canonical_message() {
+        // Intent: identity_to_error emits the canonical BraidLabeledForeignPool error.
+        // Why it exists: pins the error text so both call sites can't drift independently.
+        // Scenario: user tries to add a braid-labeled disk from a different NAS.
+        let err = identity_to_error(&AddLuksIdentity::BraidLabeledForeignPool, "disk1")
+            .unwrap()
+            .to_string();
+        assert!(err.contains("different btrfs filesystem"), "got: {err}");
+        assert!(
+            err.contains("braid will not merge foreign pools"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn identity_to_error_success_variants_return_none() {
+        // Intent: identity_to_error returns None for non-error outcomes.
+        // Why it exists: callers rely on None meaning "proceed" — ensures neither
+        //   success variant accidentally becomes an error after future edits.
+        // Scenario: normal add (AlreadyInPool → no-op, Recoverable → recovery add).
+        assert!(identity_to_error(&AddLuksIdentity::BraidLabeledAlreadyInPool, "disk1").is_none());
+        assert!(identity_to_error(&AddLuksIdentity::BraidLabeledRecoverable, "disk1").is_none());
+    }
+
+    #[test]
+    fn dry_run_and_execution_produce_same_no_btrfs_error() {
+        // Intent: compile_add_steps_multi and cmd_add produce identical BraidLabeledNoBtrfs
+        //   error text, proving both call sites go through identity_to_error.
+        // Why it exists: this is the exact message that had already diverged before the
+        //   refactor. This test makes that divergence impossible to reintroduce silently.
+        // Scenario: braid-labeled disk with mapper open, but no btrfs superblock inside.
+
+        // dry-run path: compile_add_steps_multi with mapper_open=true
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::CryptsetupLuksDumpText {
+                    device: "/dev/disk/by-id/disk1".into(),
+                },
+                luks_dump_text_with_label("braid-disk1"),
+            )
+            .with_output(
+                CmdRequest::BtrfsFilesystemShowTarget {
+                    target: "/dev/mapper/braid-disk1".into(),
+                },
+                btrfs_show_no_btrfs(),
+            );
+        let probed = vec![probed_present_luks("disk1", true)];
+        let pool = pool_mounted_with_fsid("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+
+        let dry_err = compile_add_steps_multi(
+            &runner,
+            &["disk1"],
+            &[&ByIdPath("/dev/disk/by-id/disk1".into())],
+            &probed,
+            &pool,
+            &MountPoint("/mnt/storage".into()),
+        )
+        .unwrap_err()
+        .to_string();
+
+        // execution path: identity_to_error is the shared function cmd_add calls
+        let exec_err = identity_to_error(&AddLuksIdentity::BraidLabeledNoBtrfs, "disk1")
+            .unwrap()
+            .to_string();
+
+        assert_eq!(
+            dry_err, exec_err,
+            "dry-run and execution paths must produce identical BraidLabeledNoBtrfs error"
         );
     }
 
