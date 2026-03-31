@@ -85,6 +85,7 @@ pub fn cmd_lock<R: CommandRunner, F: Filesystem + ?Sized>(
 
     // 2. If mounted → unmount
     let mut umount_error: Option<LockError> = None;
+    let mut first_mapper_error: Option<LockError> = None;
     if pool_was_mounted {
         let umount_result = runner.run(&CmdRequest::Umount {
             mount_point: mount_point.clone(),
@@ -140,7 +141,12 @@ pub fn cmd_lock<R: CommandRunner, F: Filesystem + ?Sized>(
                         name, msg
                     );
                 }
-                Err(e) => return Err(e),
+                Err(e) => {
+                    eprintln!("[FAIL]  disk: {:<7}{}", name, e);
+                    if first_mapper_error.is_none() {
+                        first_mapper_error = Some(e);
+                    }
+                }
             }
             all_already_closed = false;
         } else {
@@ -172,7 +178,12 @@ pub fn cmd_lock<R: CommandRunner, F: Filesystem + ?Sized>(
                                 disk_name, msg
                             );
                         }
-                        Err(e) => return Err(e),
+                        Err(e) => {
+                            eprintln!("[FAIL]  disk: {:<7}orphan: {}", disk_name, e);
+                            if first_mapper_error.is_none() {
+                                first_mapper_error = Some(e);
+                            }
+                        }
                     }
                     all_already_closed = false;
                 }
@@ -183,9 +194,12 @@ pub fn cmd_lock<R: CommandRunner, F: Filesystem + ?Sized>(
         }
     }
 
-    // 4. Return deferred umount error, if any
-    if let Some(err) = umount_error {
-        return Err(err);
+    // 4. Return first fatal mapper error if any, otherwise deferred umount error
+    if let Some(e) = first_mapper_error {
+        return Err(e);
+    }
+    if let Some(e) = umount_error {
+        return Err(e);
     }
 
     // 5. If nothing was done → short message
@@ -199,11 +213,49 @@ pub fn cmd_lock<R: CommandRunner, F: Filesystem + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cmd::{MockRunner, RawCommandOutput};
+    use crate::cmd::{CmdError, MockRunner, RawCommandOutput};
     use crate::config::Config;
     use crate::membership::{DiskMember, PoolMembership};
     use crate::types::{ByIdPath, MountPoint};
     use std::collections::BTreeMap;
+    use std::sync::Mutex;
+
+    /// A runner that delegates to MockRunner but records which
+    /// CryptsetupClose requests were made.
+    struct RecordingRunner {
+        inner: MockRunner,
+        close_calls: Mutex<Vec<String>>,
+    }
+
+    impl RecordingRunner {
+        fn new(inner: MockRunner) -> Self {
+            Self {
+                inner,
+                close_calls: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn close_calls(&self) -> Vec<String> {
+            self.close_calls.lock().unwrap().clone()
+        }
+    }
+
+    impl CommandRunner for RecordingRunner {
+        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
+            if let CmdRequest::CryptsetupClose { mapper } = request {
+                self.close_calls.lock().unwrap().push(mapper.clone());
+            }
+            self.inner.run(request)
+        }
+
+        fn run_with_stdin(
+            &self,
+            request: &CmdRequest,
+            stdin: &[u8],
+        ) -> Result<RawCommandOutput, CmdError> {
+            self.inner.run_with_stdin(request, stdin)
+        }
+    }
 
     struct MockFs {
         paths: Vec<String>,
@@ -767,15 +819,24 @@ mod tests {
     //   would hide real problems like permission errors or missing devices.
     //   Only the expected busy/in-use errors should be downgraded to warnings.
     // Scenario: umount fails; mapper aaa close fails with "Device is not
-    //   active." (not a busy error). The non-busy error is returned immediately.
+    //   active." (not a busy error). Remaining mappers are still attempted,
+    //   then the non-busy mapper error is returned (takes precedence over
+    //   the umount error).
     #[test]
     fn lock_umount_fails_unexpected_mapper_error_is_fatal() {
-        let runner = umount_failed_runner().with_output(
-            CmdRequest::CryptsetupClose {
-                mapper: "braid-aaa".into(),
-            },
-            err_raw("cryptsetup close braid-aaa", 5, "Device is not active."),
-        );
+        let runner = umount_failed_runner()
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: "braid-aaa".into(),
+                },
+                err_raw("cryptsetup close braid-aaa", 5, "Device is not active."),
+            )
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: "braid-bbb".into(),
+                },
+                ok_raw("cryptsetup close braid-bbb"),
+            );
         let fs = MockFs::new(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]);
         let config = test_config();
         let membership = test_membership();
@@ -793,15 +854,22 @@ mod tests {
     // Why it exists: regression guard — the umount-failure fix must not
     //   accidentally suppress mapper close errors on the normal path.
     // Scenario: umount succeeds; aaa mapper close fails with a non-busy error.
-    //   The mapper error is returned.
+    //   Remaining mappers are still attempted, then the mapper error is returned.
     #[test]
     fn lock_mapper_close_fatal_when_umount_succeeded() {
-        let runner = mounted_runner().with_output(
-            CmdRequest::CryptsetupClose {
-                mapper: "braid-aaa".into(),
-            },
-            err_raw("cryptsetup close braid-aaa", 5, "Device is not active."),
-        );
+        let runner = mounted_runner()
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: "braid-aaa".into(),
+                },
+                err_raw("cryptsetup close braid-aaa", 5, "Device is not active."),
+            )
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: "braid-bbb".into(),
+                },
+                ok_raw("cryptsetup close braid-bbb"),
+            );
         let fs = MockFs::new(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]);
         let config = test_config();
         let membership = test_membership();
@@ -870,8 +938,9 @@ mod tests {
     // Why it exists: the orphan branch must have the same precise suppression
     //   as the membership branch — only DeviceBusy is suppressed.
     // Scenario: umount fails; membership mappers close ok; orphan mapper
-    //   close fails with "Device is not active." (non-busy). The orphan
-    //   error is returned immediately.
+    //   close fails with "Device is not active." (non-busy). All mappers are
+    //   still attempted, then the orphan error is returned (takes precedence
+    //   over the umount error).
     #[test]
     fn lock_umount_fails_orphan_unexpected_error_is_fatal() {
         let runner = umount_failed_runner()
@@ -950,6 +1019,86 @@ mod tests {
         assert!(
             err.to_string().contains("braid-orphan"),
             "error should mention the orphan mapper, got: {err}"
+        );
+    }
+
+    // Intent: when a mapper close fails with a non-busy error, remaining
+    //   mappers are still attempted.
+    // Why it exists: guards against the original bug where a non-busy error
+    //   caused an early return, skipping remaining mappers and leaving LUKS
+    //   devices open.
+    // Scenario: umount succeeds; aaa mapper close fails with "Device is not
+    //   active"; bbb mapper close succeeds. Both mappers were attempted.
+    #[test]
+    fn lock_continues_closing_after_mapper_error() {
+        let inner = mounted_runner()
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: "braid-aaa".into(),
+                },
+                err_raw("cryptsetup close braid-aaa", 5, "Device is not active."),
+            )
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: "braid-bbb".into(),
+                },
+                ok_raw("cryptsetup close braid-bbb"),
+            );
+        let runner = RecordingRunner::new(inner);
+        let fs = MockFs::new(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]);
+        let config = test_config();
+        let membership = test_membership();
+
+        let err = cmd_lock(&runner, &fs, &config, &membership)
+            .expect_err("should fail with mapper error");
+        assert!(
+            err.to_string().contains("braid-aaa"),
+            "expected aaa error, got: {err}"
+        );
+        let calls = runner.close_calls();
+        assert!(
+            calls.contains(&"braid-aaa".to_string()) && calls.contains(&"braid-bbb".to_string()),
+            "expected both mappers attempted, got: {calls:?}"
+        );
+    }
+
+    // Intent: when multiple mapper closes fail with non-busy errors, the
+    //   first error is returned and all mappers were attempted.
+    // Why it exists: ensures error accumulation works end-to-end for the
+    //   multi-failure case — the first error wins, but nothing is skipped.
+    // Scenario: umount succeeds; both aaa and bbb fail with non-busy errors.
+    //   The returned error mentions aaa (first in iteration order).
+    #[test]
+    fn lock_collects_first_mapper_error() {
+        let inner = mounted_runner()
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: "braid-aaa".into(),
+                },
+                err_raw("cryptsetup close braid-aaa", 5, "Device is not active."),
+            )
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: "braid-bbb".into(),
+                },
+                err_raw("cryptsetup close braid-bbb", 1, "permission denied"),
+            );
+        let runner = RecordingRunner::new(inner);
+        let fs = MockFs::new(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]);
+        let config = test_config();
+        let membership = test_membership();
+
+        let err = cmd_lock(&runner, &fs, &config, &membership)
+            .expect_err("should fail with first mapper error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("braid-aaa"),
+            "expected first error (aaa), got: {msg}"
+        );
+        let calls = runner.close_calls();
+        assert!(
+            calls.contains(&"braid-aaa".to_string()) && calls.contains(&"braid-bbb".to_string()),
+            "expected both mappers attempted, got: {calls:?}"
         );
     }
 }
