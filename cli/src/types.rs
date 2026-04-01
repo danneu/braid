@@ -73,11 +73,22 @@ pub struct PoolState {
     /// btrfs filesystem FSID (uuid), populated when pool is mounted.
     pub fsid: Option<String>,
     /// Devids of missing devices (from btrfs filesystem show MISSING sentinels).
+    ///
     /// Authoritative to btrfs — does NOT include null-underlying devices.
+    /// `remove-missing` uses this to resolve destructive removal targets, so
+    /// only devices that btrfs has confirmed as MISSING belong here.
     pub missing_devids: Vec<u64>,
     /// Devices whose LUKS mapper is open but underlying block device is gone
-    /// (hot-unplugged). Alert-only: monitor and ack compute an alert-local
-    /// union with `missing_devids` for alerting purposes.
+    /// (hot-unplugged). Kept separate from `missing_devids` because:
+    ///
+    /// - `missing_devids` is used by `remove-missing` to pick destructive
+    ///   removal targets — a transient hot-unplug must not look removable.
+    /// - `null_underlying` devices still have a mapper path that btrfs reports
+    ///   in `device stats`, so monitor/ack need them in the devid map to avoid
+    ///   `UnmappedDeviceError`.
+    ///
+    /// Monitor and ack compute an alert-local union (`missing_devids ∪
+    /// null_underlying devids`) to fire `MissingDevice` alerts for both cases.
     pub null_underlying: Vec<NullUnderlyingDevice>,
 }
 
