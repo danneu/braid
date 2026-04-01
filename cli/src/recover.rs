@@ -151,6 +151,11 @@ pub fn cmd_recover<R: CommandRunner, F: Filesystem + ?Sized>(
     eprintln!("  target membership:         {:?}", target_names);
     eprintln!("  recovered (live pool):     {:?}", recovered_names);
 
+    eprintln!(
+        "note: {}",
+        recovery_guidance(&journal.op, &pre_names, &target_names, &recovered_names)
+    );
+
     // 6. Write recovered membership
     membership::save_membership(&recovered, paths)?;
     eprintln!("pool.json written from live pool state.");
@@ -172,6 +177,68 @@ fn journal_op_label(journal: &Journal) -> &'static str {
         journal::OpKind::Remove { .. } => "remove",
         journal::OpKind::RemoveMissing { .. } => "remove-missing",
         journal::OpKind::Replace { .. } => "replace",
+    }
+}
+
+/// Compare recovered membership against pre/target to produce a one-sentence guidance message.
+fn recovery_guidance(
+    op: &journal::OpKind,
+    pre_names: &std::collections::BTreeSet<&String>,
+    target_names: &std::collections::BTreeSet<&String>,
+    recovered_names: &std::collections::BTreeSet<&String>,
+) -> String {
+    if recovered_names == target_names {
+        match op {
+            journal::OpKind::Add { disks } => {
+                let names: Vec<_> = disks.keys().map(|n| format!("'{n}'")).collect();
+                format!(
+                    "add completed \u{2014} {} now in the pool.",
+                    names.join(", ")
+                )
+            }
+            journal::OpKind::Remove { name } => {
+                format!("remove completed \u{2014} '{name}' is no longer in the pool.")
+            }
+            journal::OpKind::RemoveMissing { .. } => {
+                "remove-missing completed \u{2014} missing device removed from the pool.".to_owned()
+            }
+            journal::OpKind::Replace {
+                old_name, new_name, ..
+            } => {
+                format!("replace completed \u{2014} '{old_name}' replaced by '{new_name}'.")
+            }
+        }
+    } else if recovered_names == pre_names {
+        match op {
+            journal::OpKind::Add { disks } => {
+                let names: Vec<_> = disks.keys().map(|n| format!("'{n}'")).collect();
+                format!(
+                    "add did not complete \u{2014} {} not in the pool. Re-run braid add to retry.",
+                    names.join(", ")
+                )
+            }
+            journal::OpKind::Remove { name } => {
+                format!(
+                    "remove did not complete \u{2014} '{name}' is still in the pool. \
+                     Re-run braid remove to retry."
+                )
+            }
+            journal::OpKind::RemoveMissing { .. } => {
+                "remove-missing did not complete \u{2014} device still in the pool. \
+                 Re-run braid remove-missing to retry."
+                    .to_owned()
+            }
+            journal::OpKind::Replace { old_name, .. } => {
+                format!(
+                    "replace did not complete \u{2014} pool still has '{old_name}'. \
+                     Re-run braid replace to retry."
+                )
+            }
+        }
+    } else {
+        "pool membership does not match the pre-operation or target state. \
+         Run braid status and decide whether to re-run the operation."
+            .to_owned()
     }
 }
 
@@ -1175,6 +1242,152 @@ mod tests {
         assert!(
             paths.pending_op_json().exists(),
             "journal should still exist"
+        );
+    }
+
+    // --- recovery_guidance tests ---
+
+    fn set_of(names: &[&str]) -> std::collections::BTreeSet<String> {
+        names.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn ref_set(s: &std::collections::BTreeSet<String>) -> std::collections::BTreeSet<&String> {
+        s.iter().collect()
+    }
+
+    #[test]
+    fn guidance_add_completed() {
+        let pre = set_of(&["disk1", "disk2"]);
+        let target = set_of(&["disk1", "disk2", "disk3"]);
+        let recovered = set_of(&["disk1", "disk2", "disk3"]);
+        let mut add_disks = BTreeMap::new();
+        add_disks.insert("disk3".to_owned(), ByIdPath("/dev/disk/by-id/x".into()));
+        let op = OpKind::Add { disks: add_disks };
+
+        assert_eq!(
+            recovery_guidance(&op, &ref_set(&pre), &ref_set(&target), &ref_set(&recovered)),
+            "add completed \u{2014} 'disk3' now in the pool."
+        );
+    }
+
+    #[test]
+    fn guidance_add_rolled_back() {
+        let pre = set_of(&["disk1", "disk2"]);
+        let target = set_of(&["disk1", "disk2", "disk3"]);
+        let recovered = set_of(&["disk1", "disk2"]);
+        let mut add_disks = BTreeMap::new();
+        add_disks.insert("disk3".to_owned(), ByIdPath("/dev/disk/by-id/x".into()));
+        let op = OpKind::Add { disks: add_disks };
+
+        assert_eq!(
+            recovery_guidance(&op, &ref_set(&pre), &ref_set(&target), &ref_set(&recovered)),
+            "add did not complete \u{2014} 'disk3' not in the pool. Re-run braid add to retry."
+        );
+    }
+
+    #[test]
+    fn guidance_remove_completed() {
+        let pre = set_of(&["disk1", "toshiba"]);
+        let target = set_of(&["disk1"]);
+        let recovered = set_of(&["disk1"]);
+        let op = OpKind::Remove {
+            name: "toshiba".to_owned(),
+        };
+
+        assert_eq!(
+            recovery_guidance(&op, &ref_set(&pre), &ref_set(&target), &ref_set(&recovered)),
+            "remove completed \u{2014} 'toshiba' is no longer in the pool."
+        );
+    }
+
+    #[test]
+    fn guidance_remove_rolled_back() {
+        let pre = set_of(&["disk1", "toshiba"]);
+        let target = set_of(&["disk1"]);
+        let recovered = set_of(&["disk1", "toshiba"]);
+        let op = OpKind::Remove {
+            name: "toshiba".to_owned(),
+        };
+
+        assert_eq!(
+            recovery_guidance(&op, &ref_set(&pre), &ref_set(&target), &ref_set(&recovered)),
+            "remove did not complete \u{2014} 'toshiba' is still in the pool. Re-run braid remove to retry."
+        );
+    }
+
+    #[test]
+    fn guidance_remove_missing_completed() {
+        let pre = set_of(&["disk1", "disk2"]);
+        let target = set_of(&["disk1"]);
+        let recovered = set_of(&["disk1"]);
+        let op = OpKind::RemoveMissing { devid: Some(2) };
+
+        assert_eq!(
+            recovery_guidance(&op, &ref_set(&pre), &ref_set(&target), &ref_set(&recovered)),
+            "remove-missing completed \u{2014} missing device removed from the pool."
+        );
+    }
+
+    #[test]
+    fn guidance_remove_missing_rolled_back() {
+        let pre = set_of(&["disk1", "disk2"]);
+        let target = set_of(&["disk1"]);
+        let recovered = set_of(&["disk1", "disk2"]);
+        let op = OpKind::RemoveMissing { devid: Some(2) };
+
+        assert_eq!(
+            recovery_guidance(&op, &ref_set(&pre), &ref_set(&target), &ref_set(&recovered)),
+            "remove-missing did not complete \u{2014} device still in the pool. Re-run braid remove-missing to retry."
+        );
+    }
+
+    #[test]
+    fn guidance_replace_completed() {
+        let pre = set_of(&["disk1", "old"]);
+        let target = set_of(&["disk1", "new"]);
+        let recovered = set_of(&["disk1", "new"]);
+        let op = OpKind::Replace {
+            old_name: "old".to_owned(),
+            new_name: "new".to_owned(),
+            new_by_id: ByIdPath("/dev/disk/by-id/x".into()),
+        };
+
+        assert_eq!(
+            recovery_guidance(&op, &ref_set(&pre), &ref_set(&target), &ref_set(&recovered)),
+            "replace completed \u{2014} 'old' replaced by 'new'."
+        );
+    }
+
+    #[test]
+    fn guidance_replace_rolled_back() {
+        let pre = set_of(&["disk1", "old"]);
+        let target = set_of(&["disk1", "new"]);
+        let recovered = set_of(&["disk1", "old"]);
+        let op = OpKind::Replace {
+            old_name: "old".to_owned(),
+            new_name: "new".to_owned(),
+            new_by_id: ByIdPath("/dev/disk/by-id/x".into()),
+        };
+
+        assert_eq!(
+            recovery_guidance(&op, &ref_set(&pre), &ref_set(&target), &ref_set(&recovered)),
+            "replace did not complete \u{2014} pool still has 'old'. Re-run braid replace to retry."
+        );
+    }
+
+    #[test]
+    fn guidance_partial() {
+        let pre = set_of(&["disk1", "disk2"]);
+        let target = set_of(&["disk1", "disk2", "disk3"]);
+        let recovered = set_of(&["disk1", "disk3"]);
+        let mut add_disks = BTreeMap::new();
+        add_disks.insert("disk3".to_owned(), ByIdPath("/dev/disk/by-id/x".into()));
+        let op = OpKind::Add { disks: add_disks };
+
+        assert_eq!(
+            recovery_guidance(&op, &ref_set(&pre), &ref_set(&target), &ref_set(&recovered)),
+            "pool membership does not match the pre-operation or target state. \
+             Run braid status and decide whether to re-run the operation."
         );
     }
 }
