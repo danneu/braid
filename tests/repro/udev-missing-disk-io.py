@@ -103,17 +103,19 @@ def relevant_blocks(blocks, candidates):
     return out
 
 
+# udev remove events may lack serial/DM properties because the device is
+# already gone when udev queries them. Fall back to matching the raw device
+# path (resolved before removal) so the check isn't racy.
 def is_victim_remove(event):
-    return (
-        event.get("ACTION") == "remove"
-        and victim["label"]
-        in (
-            event.get("DEVNAME", "")
-            + event.get("DM_NAME", "")
-            + event.get("ID_SERIAL", "")
-            + event.get("DEVLINKS", "")
-        )
+    if event.get("ACTION") != "remove":
+        return False
+    haystack = (
+        event.get("DEVNAME", "")
+        + event.get("DM_NAME", "")
+        + event.get("ID_SERIAL", "")
+        + event.get("DEVLINKS", "")
     )
+    return victim["label"] in haystack or event.get("DEVNAME") == victim_devname
 
 
 with subtest("Setup: 3-disk LUKS + btrfs RAID1 pool mounted normally"):
