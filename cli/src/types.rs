@@ -73,7 +73,12 @@ pub struct PoolState {
     /// btrfs filesystem FSID (uuid), populated when pool is mounted.
     pub fsid: Option<String>,
     /// Devids of missing devices (from btrfs filesystem show MISSING sentinels).
+    /// Authoritative to btrfs — does NOT include null-underlying devices.
     pub missing_devids: Vec<u64>,
+    /// Devices whose LUKS mapper is open but underlying block device is gone
+    /// (hot-unplugged). Alert-only: monitor and ack compute an alert-local
+    /// union with `missing_devids` for alerting purposes.
+    pub null_underlying: Vec<NullUnderlyingDevice>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,6 +87,15 @@ pub struct PoolDevice {
     pub luks_uuid: LuksUuid,
     pub devid: u64,
     pub underlying: String,
+}
+
+/// A pool device whose LUKS mapper is open but the underlying block device
+/// is gone (hot-unplugged). These are effectively missing for alerting but
+/// not yet confirmed by btrfs as MISSING.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NullUnderlyingDevice {
+    pub mapper: MapperName,
+    pub devid: u64,
 }
 
 /// Pre-probed state of each config disk (produced by probe, consumed by commands).

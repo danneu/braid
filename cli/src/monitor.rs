@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::alert::{
     self, compute_alert_state_with_devid_map, load_acked_stats, merge_into_latch, save_acked_stats,
@@ -44,17 +44,29 @@ pub fn cmd_monitor<R: CommandRunner>(
     // 3. Load acked stats
     let mut acked = load_acked_stats(paths);
 
-    // 4. Get missing devids from pool probe
-    let missing_devids = &pool.missing_devids;
+    // 4. Compute alert-local missing devids: btrfs MISSING ∪ null-underlying
+    let alert_missing_devids: Vec<u64> = pool
+        .missing_devids
+        .iter()
+        .copied()
+        .chain(pool.null_underlying.iter().map(|d| d.devid))
+        .collect::<BTreeSet<u64>>()
+        .into_iter()
+        .collect();
 
     // 5. Check smartd alert flag
     let smartd_active = alert::smartd_alert_active(paths);
 
-    // 6. Build devid map from pool devices
+    // 6. Build devid map from pool devices + null-underlying devices
     let path_to_devid: BTreeMap<String, u64> = pool
         .devices
         .iter()
         .map(|d| (format!("/dev/mapper/{}", d.mapper.0), d.devid))
+        .chain(
+            pool.null_underlying
+                .iter()
+                .map(|d| (format!("/dev/mapper/{}", d.mapper.0), d.devid)),
+        )
         .collect();
 
     // 7. Self-heal stale ack state: if a devid was missing_acked but is now
@@ -81,7 +93,7 @@ pub fn cmd_monitor<R: CommandRunner>(
     let live_causes = match compute_alert_state_with_devid_map(
         &device_stats,
         &acked,
-        missing_devids,
+        &alert_missing_devids,
         smartd_active,
         &path_to_devid,
     ) {

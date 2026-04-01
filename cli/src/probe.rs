@@ -129,6 +129,7 @@ pub fn probe_pool<R: CommandRunner>(
                 total_devices: 0,
                 fsid: None,
                 missing_devids: vec![],
+                null_underlying: vec![],
             });
         }
         Some(e) => e,
@@ -155,6 +156,7 @@ pub fn probe_pool<R: CommandRunner>(
     })?;
 
     let mut devices = Vec::new();
+    let mut null_underlying = Vec::new();
     for bdev in &show.devices {
         let path = &bdev.path;
 
@@ -183,10 +185,23 @@ pub fn probe_pool<R: CommandRunner>(
         }
 
         // When a backing device is hot-unplugged, cryptsetup reports
-        // device: (null). Skip these — the device is effectively gone.
+        // device: (null). Record these as null-underlying — the mapper
+        // is open but the block device is gone.
         let underlying = match status.device {
-            None => continue,
-            Some(ref d) if d == "(null)" => continue,
+            None => {
+                null_underlying.push(NullUnderlyingDevice {
+                    mapper: MapperName(name),
+                    devid: bdev.devid,
+                });
+                continue;
+            }
+            Some(ref d) if d == "(null)" => {
+                null_underlying.push(NullUnderlyingDevice {
+                    mapper: MapperName(name),
+                    devid: bdev.devid,
+                });
+                continue;
+            }
             Some(d) => d,
         };
 
@@ -212,6 +227,7 @@ pub fn probe_pool<R: CommandRunner>(
         total_devices: show.total_devices,
         fsid: Some(fsid),
         missing_devids: show.missing_devids,
+        null_underlying,
     })
 }
 
@@ -792,6 +808,18 @@ mod tests {
         assert_eq!(result.devices[0].mapper, MapperName("braid-toshiba".into()));
         assert_eq!(result.missing_count, 1);
         assert_eq!(result.total_devices, 2);
+
+        // Null-underlying device is captured for alert path resolution
+        assert_eq!(result.null_underlying.len(), 1);
+        assert_eq!(
+            result.null_underlying[0].mapper,
+            MapperName("braid-ironwolf".into())
+        );
+        assert_eq!(result.null_underlying[0].devid, 2);
+
+        // missing_devids stays btrfs-authoritative — null-underlying devids
+        // are NOT injected (remove-missing uses this for destructive targets)
+        assert!(result.missing_devids.is_empty());
     }
 
     #[test]

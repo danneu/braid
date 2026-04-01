@@ -211,13 +211,17 @@ pub fn snapshot_current(
         );
     }
 
-    // Missing devices get missing_acked = true
+    // Missing devices get missing_acked = true. Use insert-or-update so
+    // that devices which appear in both stats (mapper still exists) and
+    // missing_devids (null-underlying) get missing_acked = true.
     for &devid in missing_devids {
         let key = devid.to_string();
-        map.entry(key).or_insert(AckedDisk {
-            missing_acked: true,
-            device_stats: AckedDeviceCounters::default(),
-        });
+        map.entry(key)
+            .and_modify(|d| d.missing_acked = true)
+            .or_insert(AckedDisk {
+                missing_acked: true,
+                device_stats: AckedDeviceCounters::default(),
+            });
     }
 
     Ok(AckedStats(map))
@@ -731,5 +735,34 @@ mod tests {
         save_acked_stats(&stats, &paths).unwrap();
         let reloaded = load_acked_stats(&paths);
         assert_eq!(reloaded, stats);
+    }
+
+    /// Null-underlying device: btrfs device stats reports the mapper path
+    /// for a hot-unplugged device whose LUKS mapper is still open. The devid
+    /// map must include this path so compute_alert_state_with_devid_map
+    /// resolves it instead of returning UnmappedDeviceError. The device's
+    /// devid must also appear in the alert-local missing_devids so a
+    /// MissingDevice cause fires.
+    #[test]
+    fn null_underlying_device_triggers_missing_alert() {
+        // Device stats include both a healthy device and the null-underlying
+        // device (btrfs still reports its mapper path)
+        let stats = make_stats(vec![
+            zero_device("/dev/mapper/braid-disk1"),
+            zero_device("/dev/mapper/braid-disk2"),
+        ]);
+        let acked = AckedStats::default();
+        // Devid map includes the null-underlying device's mapper→devid mapping
+        let map = devid_map(&[
+            ("/dev/mapper/braid-disk1", 1),
+            ("/dev/mapper/braid-disk2", 2),
+        ]);
+        // Alert-local missing devids includes the null-underlying device's devid
+        let alert_missing = vec![2u64];
+        let alert = compute_alert_state_with_devid_map(&stats, &acked, &alert_missing, false, &map)
+            .unwrap();
+        assert!(alert.active);
+        assert_eq!(alert.causes.len(), 1);
+        assert_eq!(alert.causes[0], AlertCause::MissingDevice { devid: 2 });
     }
 }

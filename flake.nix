@@ -448,6 +448,11 @@
               braid = linuxCrane.braid;
             }
           );
+          monitor-hot-unplug = pkgs.testers.nixosTest (
+            import ./tests/cli/monitor-hot-unplug.nix {
+              braid = linuxCrane.braid;
+            }
+          );
           braid-smartd-alert = pkgs.testers.nixosTest (
             import ./tests/cli/braid-smartd-alert.nix {
               braid = linuxCrane.braid;

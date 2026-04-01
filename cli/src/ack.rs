@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::alert::{self, save_acked_stats, snapshot_current};
 use crate::cmd::{CmdRequest, CommandRunner};
@@ -35,18 +35,30 @@ pub fn cmd_ack<R: CommandRunner>(
     })?;
     let device_stats = parse_btrfs_device_stats(&stats_raw)?;
 
-    // 4. Get missing devids
-    let missing_devids = &pool.missing_devids;
+    // 4. Compute alert-local missing devids: btrfs MISSING ∪ null-underlying
+    let alert_missing_devids: Vec<u64> = pool
+        .missing_devids
+        .iter()
+        .copied()
+        .chain(pool.null_underlying.iter().map(|d| d.devid))
+        .collect::<BTreeSet<u64>>()
+        .into_iter()
+        .collect();
 
-    // 5. Build devid map
+    // 5. Build devid map from pool devices + null-underlying devices
     let path_to_devid: BTreeMap<String, u64> = pool
         .devices
         .iter()
         .map(|d| (format!("/dev/mapper/{}", d.mapper.0), d.devid))
+        .chain(
+            pool.null_underlying
+                .iter()
+                .map(|d| (format!("/dev/mapper/{}", d.mapper.0), d.devid)),
+        )
         .collect();
 
     // 6. Snapshot current state
-    let new_acked = snapshot_current(&device_stats, missing_devids, &path_to_devid)?;
+    let new_acked = snapshot_current(&device_stats, &alert_missing_devids, &path_to_devid)?;
     save_acked_stats(&new_acked, paths)?;
 
     // 7. Remove smartd alert flag + alert latch

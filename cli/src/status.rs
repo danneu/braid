@@ -354,6 +354,7 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
             missing_devids: vec![],
             total_devices: 0,
             fsid: None,
+            null_underlying: vec![],
         },
         Err(e) => return Err(e.into()),
     };
@@ -2821,6 +2822,7 @@ mod tests {
             missing_devids: vec![],
             total_devices: 0,
             fsid: None,
+            null_underlying: vec![],
         };
         let runner = MockRunner::default();
         let stats = BtrfsDeviceStatsOutput { devices: vec![] };
@@ -2877,6 +2879,7 @@ mod tests {
             missing_devids: vec![],
             total_devices: 0,
             fsid: None,
+            null_underlying: vec![],
         };
         let membership = membership_1disk();
         let drives = build_compact_drives(&pool, &membership);

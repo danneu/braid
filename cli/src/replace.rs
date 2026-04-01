@@ -668,6 +668,7 @@ mod tests {
             missing_devids: vec![],
             total_devices: 2,
             fsid: None,
+            null_underlying: vec![],
         }
     }
 

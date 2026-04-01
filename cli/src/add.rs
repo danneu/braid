@@ -873,6 +873,7 @@ mod tests {
             missing_devids: vec![],
             total_devices: 1,
             fsid: Some(fsid.to_owned()),
+            null_underlying: vec![],
         }
     }
 
@@ -884,6 +885,7 @@ mod tests {
             missing_devids: vec![],
             total_devices: 0,
             fsid: None,
+            null_underlying: vec![],
         }
     }
 
@@ -982,6 +984,7 @@ mod tests {
             missing_devids: vec![],
             total_devices: 1,
             fsid: Some(fsid.to_owned()),
+            null_underlying: vec![],
         };
         let mn = MapperName("braid-disk1".into());
 
