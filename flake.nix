@@ -528,7 +528,13 @@
 
       packages = forAllSystems packagesFor;
 
-      checks = forAllSystems checksFor;
+      checks = forAllSystems (
+        system: nixpkgs.lib.filterAttrs (n: _: !(nixpkgs.lib.hasPrefix "repro-" n)) (checksFor system)
+      );
+
+      reproChecks = forAllSystems (
+        system: nixpkgs.lib.filterAttrs (n: _: nixpkgs.lib.hasPrefix "repro-" n) (checksFor system)
+      );
 
     };
 }

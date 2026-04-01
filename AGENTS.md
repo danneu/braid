@@ -108,10 +108,12 @@ The first line of a commit message must not be capitalized (e.g. `fix the foo bu
 
 ## Commands
 
-- `just test` — Run all NixOS VM tests.
+- `just test` — Run NixOS VM tests (excludes repro tests).
 - `just test -v` — Run tests with full VM logs.
 - `just test test1 test2` — Run one or more specific checks.
 - `just test test1 -v` — Run specific checks with verbose output.
+- `just test-repro` — Run repro tests only (same flags as `test`).
+- `just test-all` — Run all tests including repro.
 - `just test-rust` — Run Rust unit tests (`cargo test`).
 
 **Test verbosity:** Run tests without `-v` by default. Only add `-v` to a specific failing test when the non-verbose output doesn't explain the failure. Never run `just test -v` (all tests verbose) — it produces too much output to be useful.

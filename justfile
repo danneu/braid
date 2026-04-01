@@ -1,7 +1,7 @@
 system := `nix eval --impure --expr builtins.currentSystem --raw`
 
-# Run NixOS VM tests (pass test names to run specific tests, add -v for verbose)
-test *args:
+# Internal: shared build logic for VM test commands
+_build-checks flake_attr *args:
     #!/usr/bin/env bash
     set -euo pipefail
     verbose=""
@@ -24,22 +24,30 @@ test *args:
     fi
     rc=0
     if [ ${#tests[@]} -eq 0 ]; then
-        nix flake check --max-jobs 4 "${build_dir[@]}" $verbose || rc=$?
-    else
-        # Build all specified tests in a single `nix build` so nix can run them
-        # concurrently (up to the linux-builder's maxJobs). A single invocation
-        # also evaluates shared dependencies once and avoids SQLite lock
-        # contention that happens when multiple nix processes hit the store.
+        # Build all checks in the given flake attr.
+        # Uses nix eval to enumerate check names, then builds them all in a
+        # single `nix build` so nix can run them concurrently (up to the
+        # linux-builder's maxJobs). A single invocation also evaluates shared
+        # dependencies once and avoids SQLite lock contention that happens
+        # when multiple nix processes hit the store.
         # https://nix.dev/manual/nix/stable/advanced-topics/cores-vs-jobs.html
+        mapfile -t names < <(nix eval ".#{{flake_attr}}.{{system}}" \
+            --apply 'cs: builtins.concatStringsSep "\n" (builtins.attrNames cs)' --raw)
+        installables=()
+        for t in "${names[@]}"; do
+            installables+=(".#{{flake_attr}}.{{system}}.$t")
+        done
+        flags=()
+        if $rebuild; then flags+=(--rebuild); fi
+        nix build "${installables[@]}" "${flags[@]}" --max-jobs 4 "${build_dir[@]}" $keep_going $verbose || rc=$?
+    else
         installables=()
         for t in "${tests[@]}"; do
-            installables+=(".#checks.{{system}}.$t")
+            installables+=(".#{{flake_attr}}.{{system}}.$t")
         done
-        if $rebuild; then
-            nix build "${installables[@]}" --rebuild --max-jobs 4 "${build_dir[@]}" $keep_going $verbose || rc=$?
-        else
-            nix build "${installables[@]}" --max-jobs 4 "${build_dir[@]}" $keep_going $verbose || rc=$?
-        fi
+        flags=()
+        if $rebuild; then flags+=(--rebuild); fi
+        nix build "${installables[@]}" "${flags[@]}" --max-jobs 4 "${build_dir[@]}" $keep_going $verbose || rc=$?
     fi
     if [ $rc -eq 0 ]; then
         printf '\033]777;notify;braid;tests passed\033\\'
@@ -47,6 +55,18 @@ test *args:
         printf '\033]777;notify;braid;tests failed\033\\'
     fi
     exit $rc
+
+# Run NixOS VM tests — excludes repro tests (pass test names to run specific tests, add -v for verbose)
+test *args:
+    just _build-checks checks {{args}}
+
+# Run repro tests only (same flags as `test`: -v, -rebuild, -k, or named tests)
+test-repro *args:
+    just _build-checks reproChecks {{args}}
+
+# Run all tests including repro (zero-arg only — use `test` or `test-repro` for named tests)
+test-all:
+    just _build-checks checks && just _build-checks reproChecks
 
 # Run NixOS VM tests with parallel evaluation (requires nix-fast-build)
 # Add --no-nom to replace the dep graph with a one-liner progress bar
@@ -60,7 +80,7 @@ test-fast:
     else
         echo "build-dir: default"
     fi
-    nix-fast-build --no-link -j 8 --eval-workers 4 "${build_dir[@]}"
+    nix-fast-build --no-link -j 8 --eval-workers 4 -f ".#checks" "${build_dir[@]}"
 
 # Run Rust unit tests
 test-rust:
