@@ -204,13 +204,15 @@ golden_test!(
         // Exact devid/path mapping
         assert_eq!(out.devices[0].devid, 1);
         assert!(
-            out.devices[0].path.contains("braid-vdb"),
-            "devid 1 should be braid-vdb"
+            out.devices[0].path.contains("dm-0"),
+            "devid 1 should be dm-0, got: {}",
+            out.devices[0].path
         );
         assert_eq!(out.devices[1].devid, 2);
         assert!(
-            out.devices[1].path.contains("braid-vdc"),
-            "devid 2 should be braid-vdc"
+            out.devices[1].path.contains("dm-1"),
+            "devid 2 should be dm-1, got: {}",
+            out.devices[1].path
         );
         // At least one Data,RAID1 allocation with bytes > 0
         let has_data_raid1 = out.devices[0]

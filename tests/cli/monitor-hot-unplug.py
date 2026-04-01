@@ -29,8 +29,12 @@ with subtest("Create scsi_debug device for disk2"):
     # LUKS2 headers need ~32 MB, so 256 MB is plenty for a btrfs pool member.
     machine.succeed("modprobe scsi_debug dev_size_mb=256 num_tgts=1 sector_size=512")
     machine.wait_until_succeeds("test -b /dev/sda", timeout=10)
-    # Record the scsi device sysfs path for later deletion
-    scsi_host = machine.succeed("ls /sys/class/scsi_device/").strip().split()[0]
+    # Record the SCSI address that owns /dev/sda (the scsi_debug disk).
+    # Can't blindly take the first /sys/class/scsi_device/ entry — the
+    # QEMU CD-ROM (1:0:0:0) sorts before scsi_debug (2:0:0:0).
+    scsi_host = machine.succeed(
+        "basename $(readlink -f /sys/block/sda/device)"
+    ).strip()
 
 # --- Setup: create 3-disk RAID1 pool ---
 with subtest("Create 3-disk RAID1 pool"):

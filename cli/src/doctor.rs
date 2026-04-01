@@ -544,7 +544,13 @@ mod tests {
     use crate::state_paths::StatePaths;
     use crate::types::MountPoint;
     use std::io::Write;
-    use tempfile::NamedTempFile;
+    use tempfile::{NamedTempFile, TempDir};
+
+    fn isolated_paths() -> (TempDir, StatePaths) {
+        let dir = TempDir::new().unwrap();
+        let paths = StatePaths::custom(dir.path().to_owned());
+        (dir, paths)
+    }
 
     fn valid_config_json() -> &'static str {
         r#"{"disks":{"toshiba":{"by_id":"/dev/disk/by-id/a"}},"mount_point":"/mnt/storage"}"#
@@ -572,7 +578,8 @@ mod tests {
     #[test]
     fn valid_config_parses_ok_disks_warn() {
         let f = write_temp(valid_config_json());
-        let report = run_doctor(f.path(), &mock(), &StatePaths::production());
+        let (_dir, paths) = isolated_paths();
+        let report = run_doctor(f.path(), &mock(), &paths);
         assert_eq!(report.checks.len(), 7);
         assert_eq!(find_check(&report, "config_file").status, CheckStatus::Ok);
         assert_eq!(find_check(&report, "config_schema").status, CheckStatus::Ok);
@@ -792,17 +799,19 @@ mod tests {
     #[test]
     fn declared_disks_skips_when_no_membership() {
         let f = write_temp(r#"{"mount_point":"/mnt/storage"}"#);
-        let report = run_doctor(f.path(), &mock(), &StatePaths::production());
+        let (_dir, paths) = isolated_paths();
+        let report = run_doctor(f.path(), &mock(), &paths);
         let check = find_check(&report, "declared_disks");
         assert_eq!(check.status, CheckStatus::Skip);
     }
 
     #[test]
     fn declared_disks_skip_when_no_config() {
+        let (_dir, paths) = isolated_paths();
         let report = run_doctor(
             Path::new("/tmp/nonexistent-braid-doctor-test.json"),
             &mock(),
-            &StatePaths::production(),
+            &paths,
         );
         let check = find_check(&report, "declared_disks");
         assert_eq!(check.status, CheckStatus::Skip);
@@ -811,7 +820,8 @@ mod tests {
     #[test]
     fn declared_disks_skip_when_bad_schema() {
         let f = write_temp(r#"{"disks":{},"mount_point":"/mnt/storage"}"#);
-        let report = run_doctor(f.path(), &mock(), &StatePaths::production());
+        let (_dir, paths) = isolated_paths();
+        let report = run_doctor(f.path(), &mock(), &paths);
         let check = find_check(&report, "declared_disks");
         assert_eq!(check.status, CheckStatus::Skip);
     }

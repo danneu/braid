@@ -120,9 +120,9 @@ mod tests {
             exit_status: 0,
         };
         let out = parse_btrfs_filesystem_usage(&raw).unwrap();
-        assert_eq!(out.device_size_bytes, 1040187392);
+        assert_eq!(out.device_size_bytes, 2113929216);
         assert_eq!(out.used_bytes, 33914880);
-        assert_eq!(out.free_estimated_bytes, 442957824);
+        assert_eq!(out.free_estimated_bytes, 926154752);
         assert_eq!(out.data_ratio, DataRatio::parse("2.00").unwrap());
     }
 

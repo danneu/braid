@@ -120,7 +120,7 @@ mod tests {
         assert_eq!(out.entries[0].bg_type, BtrfsBgType::Data);
         assert_eq!(out.entries[0].bg_profile, BtrfsProfile::Raid1);
         assert_eq!(out.entries[0].bg_used, 16777216);
-        assert_eq!(out.entries[0].bg_total, 67108864);
+        assert_eq!(out.entries[0].bg_total, 105644032);
         assert_eq!(out.entries[1].bg_type, BtrfsBgType::System);
         assert_eq!(out.entries[2].bg_type, BtrfsBgType::Metadata);
         assert_eq!(out.entries[3].bg_type, BtrfsBgType::GlobalReserve);

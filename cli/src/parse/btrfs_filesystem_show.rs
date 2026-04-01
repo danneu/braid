@@ -1,13 +1,13 @@
 use nom::{
+    IResult,
     bytes::complete::{tag, take_until},
     character::complete::{not_line_ending, space0, space1, u64 as parse_u64},
-    IResult,
 };
 
 use crate::cmd::RawCommandOutput;
 
-use super::types::{BtrfsFilesystemShowOutput, BtrfsShowDevice};
 use super::ParseError;
+use super::types::{BtrfsFilesystemShowOutput, BtrfsShowDevice};
 
 // ---------------------------------------------------------------------------
 // DeviceBtrfsProbe — classify raw btrfs-filesystem-show output
@@ -170,7 +170,7 @@ mod tests {
         assert_eq!(out.devices[0].path, "/dev/mapper/braid-vdb");
         assert_eq!(
             out.uuid.as_deref(),
-            Some("cc86845b-aec3-408e-bef5-553affc1f2b1"),
+            Some("8628ad9b-a48f-45db-a60d-5f866c2aab5b"),
             "FSID must be parsed from uuid line"
         );
         assert_eq!(out.devices[1].devid, 2);

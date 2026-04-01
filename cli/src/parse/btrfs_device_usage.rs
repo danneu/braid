@@ -63,45 +63,48 @@ pub fn parse_btrfs_device_usage(
         }
 
         // Try parsing as device header (unindented line with ", ID:")
-        if !line.starts_with(' ') && !line.starts_with('\t')
-            && let Ok((_, (path, devid))) = parse_device_header(line) {
-                // Finalize previous device if any
-                if let Some(partial) = current.take() {
-                    devices.push(finalize_device(&raw.cmd, partial)?);
-                }
-                current = Some(PartialDevice {
-                    path: path.to_owned(),
-                    devid,
-                    device_size: None,
-                    device_slack: None,
-                    unallocated: None,
-                    allocations: Vec::new(),
-                });
-                continue;
+        if !line.starts_with(' ')
+            && !line.starts_with('\t')
+            && let Ok((_, (path, devid))) = parse_device_header(line)
+        {
+            // Finalize previous device if any
+            if let Some(partial) = current.take() {
+                devices.push(finalize_device(&raw.cmd, partial)?);
             }
+            current = Some(PartialDevice {
+                path: path.to_owned(),
+                devid,
+                device_size: None,
+                device_slack: None,
+                unallocated: None,
+                allocations: Vec::new(),
+            });
+            continue;
+        }
 
         // Try parsing as key-value line (indented)
         if let Some(ref mut dev) = current
-            && let Ok((_, (key, value))) = parse_kv_line(line) {
-                match key {
-                    "Device size" => dev.device_size = Some(value),
-                    "Device slack" => dev.device_slack = Some(value),
-                    "Unallocated" => dev.unallocated = Some(value),
-                    k if k.contains(',') => {
-                        // Allocation line like "Data,RAID1" or "Metadata,RAID1"
-                        if let Some((alloc_type, profile)) = k.split_once(',') {
-                            dev.allocations.push(DeviceAllocation {
-                                alloc_type: alloc_type.trim().to_owned(),
-                                profile: profile.trim().to_owned(),
-                                bytes: value,
-                            });
-                        }
-                    }
-                    _ => {
-                        // Unknown key — silently ignored for forward-compatibility
+            && let Ok((_, (key, value))) = parse_kv_line(line)
+        {
+            match key {
+                "Device size" => dev.device_size = Some(value),
+                "Device slack" => dev.device_slack = Some(value),
+                "Unallocated" => dev.unallocated = Some(value),
+                k if k.contains(',') => {
+                    // Allocation line like "Data,RAID1" or "Metadata,RAID1"
+                    if let Some((alloc_type, profile)) = k.split_once(',') {
+                        dev.allocations.push(DeviceAllocation {
+                            alloc_type: alloc_type.trim().to_owned(),
+                            profile: profile.trim().to_owned(),
+                            bytes: value,
+                        });
                     }
                 }
+                _ => {
+                    // Unknown key — silently ignored for forward-compatibility
+                }
             }
+        }
     }
 
     // Finalize last device
@@ -169,9 +172,9 @@ mod tests {
         };
         let out = parse_btrfs_device_usage(&raw).unwrap();
         assert_eq!(out.devices.len(), 2);
-        assert_eq!(out.devices[0].path, "/dev/mapper/braid-vdb");
+        assert_eq!(out.devices[0].path, "/dev/dm-0");
         assert_eq!(out.devices[0].devid, 1);
-        assert_eq!(out.devices[1].path, "/dev/mapper/braid-vdc");
+        assert_eq!(out.devices[1].path, "/dev/dm-1");
         assert_eq!(out.devices[1].devid, 2);
         assert!(out.devices[0].device_size > 0);
         assert!(out.devices[0].unallocated > 0);

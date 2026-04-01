@@ -2,8 +2,8 @@ use serde::Deserialize;
 
 use crate::cmd::RawCommandOutput;
 
-use super::types::{LsblkDevice, LsblkFieldOutput, LsblkOutput};
 use super::ParseError;
+use super::types::{LsblkDevice, LsblkFieldOutput, LsblkOutput};
 
 // --- Serde helper structs (not exposed to domain code) ---
 
@@ -114,7 +114,7 @@ mod tests {
         assert_eq!(out.blockdevices.len(), 2);
         assert_eq!(out.blockdevices[0].name, "vdb");
         assert_eq!(out.blockdevices[0].device_type, "disk");
-        assert_eq!(out.blockdevices[0].size, Some(536870912));
+        assert_eq!(out.blockdevices[0].size, Some(1073741824));
         assert_eq!(out.blockdevices[0].children.len(), 1);
         assert_eq!(out.blockdevices[0].children[0].device_type, "crypt");
     }
