@@ -63,17 +63,15 @@ with subtest("Healthy pool: monitor exits 0"):
 
 # --- Hot-unplug disk2 via SCSI device deletion ---
 with subtest("Hot-unplug disk2 via sysfs"):
-    # Delete the SCSI device — simulates SATA hot-unplug
+    # Delete the SCSI device — simulates SATA hot-unplug.
     machine.succeed(f"echo 1 > /sys/class/scsi_device/{scsi_host}/device/delete")
-    # Wait for the block device to vanish
-    machine.wait_until_fails("test -b /dev/sda", timeout=15)
-
-with subtest("LUKS mapper still exists with (null) underlying"):
+    # Don't wait for /dev/sda to vanish — dm holds a reference so the kernel
+    # may defer block device removal. The authoritative gate is cryptsetup
+    # reporting (null), which means the LUKS mapper can no longer reach its
+    # backing device.
     machine.succeed("test -e /dev/mapper/braid-disk2")
-    # Wait for dm to propagate the device removal — block device
-    # disappearance and cryptsetup status update are not the same event.
     machine.wait_until_succeeds(
-        "cryptsetup status braid-disk2 | grep '(null)'", timeout=15
+        "cryptsetup status braid-disk2 | grep '(null)'", timeout=30
     )
 
 with subtest("Monitor detects null-underlying as missing (exit 1)"):
