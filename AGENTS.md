@@ -87,6 +87,7 @@ The first line of a commit message must not be capitalized (e.g. `fix the foo bu
 - `just test test1 -v` — Run specific checks with verbose output.
 - `just test-repro` — Run repro tests only (same flags as `test`).
 - `just test-all` — Run all tests including repro.
+- `just test-parsers` — Run parser compatibility canary (CLI parsers against live VM tool output).
 - `just test-rust` — Run Rust unit tests (`cargo test`).
 
 **Test verbosity:** Run tests without `-v` by default. Only add `-v` to a specific failing test when the non-verbose output doesn't explain the failure. Never run `just test -v` (all tests verbose) — it produces too much output to be useful.
@@ -106,6 +107,23 @@ Write failing tests first, confirm they fail for the expected reasons, then impl
 - **Test framework:** NixOS VM tests (`nixos/lib/testing-python.nix`)
 - **Runs on macOS:** Requires `nix.linux-builder.enable = true` in nix-darwin. Tests are `checks.aarch64-darwin`.
 - **Virtual disks:** `virtualisation.emptyDiskImages` creates throwaway virtual drives.
+
+## Parser Compatibility
+
+braid parses output from btrfs-progs, cryptsetup, util-linux, and smartmontools. These parsers can break when tool versions change.
+
+- `just test-parsers` — CLI parser canary. Exercises 15 of 18 parsers against live tool output in VMs. Covers only CLI-reachable parsers.
+- `just test-rust` — validates golden fixtures for all 18 parsers. Fixture-backed coverage stays current only after running `just capture-fixtures` and `just capture-progress-fixtures` when parser-critical tool versions change (e.g. nixpkgs bump).
+- Fixture refresh is a separate obligation: `just test-parsers` passing does not guarantee TUI-only parsers (`parse_lsblk_json`, `parse_cryptsetup_luks_dump`, `parse_smartctl_health`) or unused parsers (`parse_btrfs_scrub_status_per_device`) are compatible with the current toolchain.
+
+Parser-critical tool versions are the pinned `nixpkgs` versions of `btrfs-progs`, `cryptsetup`, and `util-linux`. Treat any change to the `nixpkgs` node in `flake.lock`, any `flake.nix` change that alters the `nixpkgs` input, or any change to `braid.packages.{btrfsProgs,cryptsetup,utilLinux}` as a required fixture-refresh event.
+
+When parser-critical tool versions change, run:
+
+1. `just capture-fixtures`
+2. `just capture-progress-fixtures`
+3. `just test-rust`
+4. `just test-parsers`
 
 ---
 

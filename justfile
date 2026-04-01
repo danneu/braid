@@ -82,6 +82,10 @@ test-fast:
     fi
     nix-fast-build --no-link -j 8 --eval-workers 4 -f ".#checks" "${build_dir[@]}"
 
+# Run parser compatibility canary tests (CLI parsers against live tool output)
+test-parsers *args:
+    just test braid-status-rust braid-status-during-balance braid-idle braid-discover braid-browse {{args}}
+
 # Run Rust unit tests
 test-rust:
     cargo test

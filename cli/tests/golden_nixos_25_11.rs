@@ -255,6 +255,67 @@ fn golden_smartctl_nvme_healthy() {
     );
 }
 
+// --- TUI-only parsers (not exercised by CLI commands in VM tests) ---
+
+golden_test!(
+    golden_cryptsetup_luks_dump,
+    "cryptsetup-luks-dump.json",
+    "cryptsetup luksDump --dump-json-metadata",
+    parse::cryptsetup_luks_dump::parse_cryptsetup_luks_dump,
+    |out: parse::types::CryptsetupLuksDumpOutput| {
+        assert_eq!(out.cipher, "aes-xts-plain64");
+        assert_eq!(out.key_size_bits, 512);
+        assert_eq!(out.keyslot_count, 1);
+    }
+);
+
+golden_test!(
+    golden_btrfs_subvolume_list,
+    "btrfs-subvolume-list.txt",
+    "btrfs subvolume list",
+    parse::btrfs_subvolume_list::parse_btrfs_subvolume_list,
+    |out: parse::types::BtrfsSubvolumeListOutput| {
+        assert_eq!(out.subvolumes.len(), 4, "expected 4 subvolumes");
+        assert_eq!(out.subvolumes[0].path, "data");
+        assert_eq!(out.subvolumes[1].path, "snapshots");
+    }
+);
+
+golden_test!(
+    golden_btrfs_scrub_per_device_finished,
+    "btrfs-scrub-per-device-finished.txt",
+    "btrfs scrub status -d -R",
+    parse::btrfs_scrub_status_per_device::parse_btrfs_scrub_status_per_device,
+    |out: parse::types::BtrfsScrubStatusPerDeviceOutput| {
+        assert_eq!(out.devices.len(), 3, "expected 3 device entries");
+        assert_eq!(
+            out.devices[0].state,
+            parse::types::DeviceScrubState::Finished
+        );
+        assert_eq!(
+            out.devices[1].state,
+            parse::types::DeviceScrubState::Aborted
+        );
+        assert_eq!(
+            out.devices[2].state,
+            parse::types::DeviceScrubState::Finished
+        );
+    }
+);
+
+golden_test!(
+    golden_btrfs_scrub_per_device_running,
+    "btrfs-scrub-per-device-running.txt",
+    "btrfs scrub status -d -R",
+    parse::btrfs_scrub_status_per_device::parse_btrfs_scrub_status_per_device,
+    |out: parse::types::BtrfsScrubStatusPerDeviceOutput| {
+        assert_eq!(out.devices.len(), 3, "expected 3 device entries");
+        for dev in &out.devices {
+            assert_eq!(dev.state, parse::types::DeviceScrubState::Running);
+        }
+    }
+);
+
 // --- In-progress fixtures (captured from progress-monitoring VM test) ---
 
 golden_test!(
