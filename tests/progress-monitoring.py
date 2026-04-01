@@ -16,10 +16,10 @@ DISK3_RAW = "/dev/disk/by-id/virtio-disk3"
 DISK3_DM = "disk3-delay"
 
 
-def dm_delay_table(delay_ms):
-    """dm-delay table for disk3 with given per-I/O delay."""
+def dm_delay_table(write_delay_ms):
+    """dm-delay table for disk3: reads undelayed, writes delayed."""
     sectors = machine.succeed(f"blockdev --getsz {DISK3_RAW}").strip()
-    return f"0 {sectors} delay {DISK3_RAW} 0 {delay_ms}"
+    return f"0 {sectors} delay {DISK3_RAW} 0 0 {DISK3_RAW} 0 {write_delay_ms}"
 
 
 def dm_delay_create():
@@ -123,7 +123,7 @@ with subtest("device remove progress observed"):
 
     # Write more data (~2 GiB) — needs to be large enough that device remove
     # takes long enough for the polling loop to observe bytes decreasing
-    machine.succeed(f"dd if=/dev/urandom of={MOUNT}/bigfile2 bs=1M count=4096")
+    machine.succeed(f"dd if=/dev/urandom of={MOUNT}/bigfile2 bs=1M count=1024")
     machine.succeed("sync")
 
     # Record initial disk3 allocation bytes
@@ -133,10 +133,11 @@ with subtest("device remove progress observed"):
     initial_bytes = int(machine.succeed("cat /tmp/disk3-initial-bytes").strip())
     assert initial_bytes > 0, f"disk3 should have allocations, got {initial_bytes}"
 
-    # Inject 100ms per-I/O delay on disk3 to slow block group relocation
-    # enough for the polling loop to observe bytes decreasing.  Without this,
-    # VM I/O is so fast the remove completes before a single poll fires.
-    dm_delay_activate(100)
+    # Inject 20ms write-only delay on disk3 to slow block group relocation
+    # enough for the polling loop to observe bytes decreasing.  Write-only
+    # so that btrfs device usage reads remain fast.  Without this, VM I/O
+    # is so fast the remove completes before a single poll fires.
+    dm_delay_activate(20)
 
     # Start device remove in background and poll in the same shell command
     # to eliminate host round-trip latency — the remove can finish in ~3s
