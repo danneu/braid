@@ -1,13 +1,13 @@
 use nom::{
-    bytes::complete::{tag, take_till1},
-    character::complete::{space0, space1, u64 as parse_u64, u8 as parse_u8},
     IResult,
+    bytes::complete::{tag, take_till1},
+    character::complete::{space0, space1, u8 as parse_u8, u64 as parse_u64},
 };
 
 use crate::cmd::RawCommandOutput;
 
-use super::types::{BalanceState, BtrfsBalanceStatusOutput};
 use super::ParseError;
+use super::types::{BalanceState, BtrfsBalanceStatusOutput};
 
 // ---------------------------------------------------------------------------
 // nom parsers
@@ -35,8 +35,9 @@ fn parse_chunks_line(input: &str) -> IResult<&str, (u64, u64, u64, u8)> {
 }
 
 // After remount with skip_balance the kernel resets chunk counters to 0/0
-// and prints "nan% left" (0 ÷ 0 = NaN).  Handle this variant explicitly.
-//   "0 out of about 0 chunks balanced (0 considered), nan% left"
+// and btrfs-progs prints a NaN percentage (0 ÷ 0).  glibc formats this as
+// "-nan% left"; other C libraries may produce "nan% left".  Accept both.
+//   "0 out of about 0 chunks balanced (0 considered), -nan% left"
 //   → (0, 0, 0, 0)
 fn parse_chunks_line_nan(input: &str) -> IResult<&str, (u64, u64, u64, u8)> {
     let (input, _) = space0(input)?;
@@ -51,6 +52,7 @@ fn parse_chunks_line_nan(input: &str) -> IResult<&str, (u64, u64, u64, u8)> {
     let (input, _) = space1(input)?;
     let (input, _) = tag("considered),")(input)?;
     let (input, _) = space1(input)?;
+    let input = input.strip_prefix('-').unwrap_or(input);
     let (input, _) = tag("nan% left")(input)?;
     Ok((input, (done, total, considered, 0)))
 }
@@ -296,7 +298,7 @@ mod tests {
     }
 
     // Intent: After remount with skip_balance the kernel resets chunk counters
-    // and prints "nan% left".  The parser must still report Paused.
+    // and btrfs-progs prints a NaN percentage.  The parser must still report Paused.
     // Why: Without this, get_balance_report returns Unknown and braid unlock
     // silently omits the paused-balance warning.
     #[test]
@@ -305,6 +307,32 @@ mod tests {
             cmd: "btrfs balance status".into(),
             stdout: "Balance on '/mnt/storage' is paused\n\
                      0 out of about 0 chunks balanced (0 considered), nan% left\n"
+                .into(),
+            stderr: String::new(),
+            exit_status: 1,
+        };
+        let out = parse_btrfs_balance_status(&raw).unwrap();
+        assert_eq!(
+            out.state,
+            BalanceState::Paused {
+                done_chunks: 0,
+                estimated_total_chunks: 0,
+                considered_chunks: 0,
+                pct_left: 0,
+            }
+        );
+    }
+
+    // Intent: glibc formats 0/0 as "-nan", not "nan".  The parser must handle both.
+    // Why: On NixOS (glibc), btrfs balance status prints "-nan% left" after
+    // skip_balance remount.  Without this, the paused-balance warning is silently
+    // suppressed — unlock succeeds but the user is never told about the paused balance.
+    #[test]
+    fn balance_status_paused_after_remount_negative_nan_pct() {
+        let raw = RawCommandOutput {
+            cmd: "btrfs balance status".into(),
+            stdout: "Balance on '/mnt/storage' is paused\n\
+                     0 out of about 0 chunks balanced (0 considered), -nan% left\n"
                 .into(),
             stderr: String::new(),
             exit_status: 1,
