@@ -2,9 +2,8 @@
    "filesystems": [
       {
          "target": "/mnt/storage",
-         "source": "/dev/mapper/braid-vdb",
-         "fstype": "btrfs",
-         "options": "rw,relatime,ssd,space_cache=v2,subvolid=5,subvol=/"
+         "source": "/dev/dm-0",
+         "fstype": "btrfs"
       }
    ]
 }

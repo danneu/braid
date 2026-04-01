@@ -201,6 +201,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn balance_status_parses_nixos_25_11_paused_skip_balance() {
+        // btrfs exits 1 when a balance is paused
+        let raw = RawCommandOutput {
+            cmd: "btrfs balance status".into(),
+            stdout: fixture("btrfs-balance-status-paused-skip-balance.txt"),
+            stderr: String::new(),
+            exit_status: 1,
+        };
+        let out = parse_btrfs_balance_status(&raw).unwrap();
+        assert_eq!(
+            out.state,
+            BalanceState::Paused {
+                done_chunks: 0,
+                estimated_total_chunks: 0,
+                considered_chunks: 0,
+                pct_left: 0,
+            }
+        );
+    }
+
     // --- Synthetic tests (inline) ---
 
     #[test]

@@ -1,16 +1,16 @@
-/dev/mapper/braid-vdb, ID: 1
-   Device size:           520093696
+/dev/dm-0, ID: 1
+   Device size:          1056964608
    Device slack:                  0
-   Data,RAID1:             67108864
-   Metadata,RAID1:         51970048
+   Data,RAID1:            105644032
+   Metadata,RAID1:        105644032
    System,RAID1:           41943040
-   Unallocated:           359071744
+   Unallocated:           803733504
 
-/dev/mapper/braid-vdc, ID: 2
-   Device size:           520093696
+/dev/dm-1, ID: 2
+   Device size:          1056964608
    Device slack:                  0
-   Data,RAID1:             67108864
-   Metadata,RAID1:         51970048
+   Data,RAID1:            105644032
+   Metadata,RAID1:        105644032
    System,RAID1:           41943040
-   Unallocated:           359071744
+   Unallocated:           803733504
 

@@ -6,5 +6,5 @@
   device:  /dev/vdb
   sector size:  512 [bytes]
   offset:  32768 [512-byte units] (16777216 [bytes])
-  size:    1015808 [512-byte units] (520093696 [bytes])
+  size:    2064384 [512-byte units] (1056964608 [bytes])
   mode:    read/write

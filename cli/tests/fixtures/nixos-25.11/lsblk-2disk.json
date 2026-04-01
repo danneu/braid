@@ -3,39 +3,35 @@
       {
          "name": "vdb",
          "type": "disk",
-         "size": 536870912,
+         "size": 1073741824,
          "model": null,
          "serial": "disk1",
-         "uuid": "1ed27ca2-9765-46ab-a1fc-ca6d7c525f6a",
-         "rota": true,
+         "uuid": "982a320f-99f3-4172-9a22-133447fc6cfb",
          "children": [
             {
                "name": "braid-vdb",
                "type": "crypt",
-               "size": 520093696,
+               "size": 1056964608,
                "model": null,
                "serial": null,
-               "uuid": "cc86845b-aec3-408e-bef5-553affc1f2b1",
-               "rota": true
+               "uuid": "8628ad9b-a48f-45db-a60d-5f866c2aab5b"
             }
          ]
       },{
          "name": "vdc",
          "type": "disk",
-         "size": 536870912,
+         "size": 1073741824,
          "model": null,
          "serial": "disk2",
-         "uuid": "d0f230d1-cffc-45b8-84b9-bf4e5275bd3c",
-         "rota": true,
+         "uuid": "f56a4d43-7edc-4639-8dec-b3c7ef06f2ee",
          "children": [
             {
                "name": "braid-vdc",
                "type": "crypt",
-               "size": 520093696,
+               "size": 1056964608,
                "model": null,
                "serial": null,
-               "uuid": "cc86845b-aec3-408e-bef5-553affc1f2b1",
-               "rota": true
+               "uuid": "8628ad9b-a48f-45db-a60d-5f866c2aab5b"
             }
          ]
       }

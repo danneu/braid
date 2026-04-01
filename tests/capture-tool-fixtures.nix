@@ -11,16 +11,28 @@
 {
   name = "capture-tool-fixtures";
 
-  nodes.machine = { pkgs, ... }: {
-    virtualisation.emptyDiskImages = [
-      { size = 512; driveConfig.deviceExtraOpts.serial = "disk1"; }
-      { size = 512; driveConfig.deviceExtraOpts.serial = "disk2"; }
-    ];
+  nodes.machine =
+    { pkgs, ... }:
+    {
+      virtualisation.emptyDiskImages = [
+        {
+          size = 1024;
+          driveConfig.deviceExtraOpts.serial = "disk1";
+        }
+        {
+          size = 1024;
+          driveConfig.deviceExtraOpts.serial = "disk2";
+        }
+      ];
 
-    environment.systemPackages = with pkgs; [
-      cryptsetup btrfs-progs util-linux jq coreutils
-    ];
-  };
+      environment.systemPackages = with pkgs; [
+        cryptsetup
+        btrfs-progs
+        util-linux
+        jq
+        coreutils
+      ];
+    };
 
   testScript = builtins.readFile ./capture-tool-fixtures.py;
 }

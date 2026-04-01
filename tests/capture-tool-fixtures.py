@@ -106,6 +106,70 @@ machine.succeed(
     f" > {FIXTURE_DIR}/btrfs-device-usage-2disk.txt"
 )
 
+# 14. btrfs balance status (paused after skip_balance remount)
+# Captures the exact output btrfs-progs produces when counters are reset to 0/0.
+# This is the canary for formatting drift (e.g. nan vs -nan).
+import re
+import time
+
+machine.succeed(f"dd if=/dev/urandom of={MOUNT}/balancedata bs=1M count=512")
+machine.succeed("sync")
+
+# Bounded retry: start balance → pause → check for remaining work.
+# Reuses the proven pattern from tests/cli/braid-unlock.py.
+targets = ["single", "raid1"]
+for attempt in range(3):
+    target = targets[attempt % 2]
+
+    machine.execute(
+        f"btrfs balance start -dconvert={target} {MOUNT} "
+        f"> /dev/null 2>&1 & "
+        f"for i in $(seq 1 200); do "
+        f"  btrfs balance pause {MOUNT} 2>/dev/null && break; "
+        f"  sleep 0.02; "
+        f"done"
+    )
+
+    ret = machine.execute(f"btrfs balance status {MOUNT}")
+    output = ret[1]
+
+    if "paused" in output.lower():
+        match = re.search(
+            r"(\d+)\s+out of about\s+(\d+)\s+chunks", output
+        )
+        if match and int(match.group(1)) < int(match.group(2)):
+            break
+
+    machine.execute(f"btrfs balance cancel {MOUNT} 2>/dev/null || true")
+    for _ in range(30):
+        ret = machine.execute(f"btrfs balance status {MOUNT}")
+        if "no balance" in ret[1].lower():
+            break
+        time.sleep(0.2)
+    else:
+        raise Exception(
+            "Balance did not terminate after cancel — cannot retry safely"
+        )
+else:
+    raise Exception(
+        "Could not pause balance with remaining work after 3 full attempts"
+    )
+
+# Unmount and remount with skip_balance to reset kernel counters to 0/0.
+machine.succeed(f"umount {MOUNT}")
+machine.succeed(f"mount -o skip_balance /dev/mapper/braid-vdb {MOUNT}")
+
+machine.execute(
+    f"btrfs balance status {MOUNT}"
+    f" > {FIXTURE_DIR}/btrfs-balance-status-paused-skip-balance.txt"
+)
+
+# Clean up: cancel balance, remove data, remount normally for remaining teardown.
+machine.succeed(f"btrfs balance cancel {MOUNT}")
+machine.succeed(f"rm {MOUNT}/balancedata")
+machine.succeed(f"umount {MOUNT}")
+machine.succeed(f"mount /dev/mapper/braid-vdb {MOUNT}")
+
 # 11. cryptsetup status (inactive stderr/stdout)
 # Must unmount before closing mapper; otherwise cryptsetup reports "still in use".
 machine.succeed(f"umount {MOUNT}")

@@ -6,7 +6,7 @@
     {
       "bg-type": "Data",
       "bg-profile": "RAID1",
-      "total": 67108864,
+      "total": 105644032,
       "used": 16777216
     },
     {
@@ -18,7 +18,7 @@
     {
       "bg-type": "Metadata",
       "bg-profile": "RAID1",
-      "total": 51970048,
+      "total": 105644032,
       "used": 163840
     },
     {
