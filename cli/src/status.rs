@@ -4,16 +4,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::alert::{self, AlertCause, AlertState};
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, LsblkFieldKind};
-use crate::config::{self, mapper_name, Config};
+use crate::config::{self, Config, mapper_name};
 use crate::luks;
 use crate::membership::{self, PoolMembership};
 use crate::parse::types::BalanceState;
 use crate::parse::{
-    parse_btrfs_balance_status, parse_btrfs_device_stats, parse_btrfs_device_usage,
-    parse_btrfs_df_json, parse_btrfs_filesystem_usage, parse_btrfs_scrub_status, parse_lsblk_field,
-    BtrfsDeviceStatsOutput, ParseError, ScrubState,
+    BtrfsDeviceStatsOutput, ParseError, ScrubState, parse_btrfs_balance_status,
+    parse_btrfs_device_stats, parse_btrfs_device_usage, parse_btrfs_df_json,
+    parse_btrfs_filesystem_usage, parse_btrfs_scrub_status, parse_lsblk_field,
 };
-use crate::probe::{probe_config_disk, probe_pool, Filesystem, ProbeError};
+use crate::probe::{Filesystem, ProbeError, probe_config_disk, probe_pool};
 use crate::state_paths::StatePaths;
 use crate::types::*;
 
@@ -827,6 +827,16 @@ fn build_disk_reports<R: CommandRunner>(
 // Human output formatting
 // ---------------------------------------------------------------------------
 
+fn devid_to_name(report: &StatusReport, devid: u64) -> String {
+    let key = devid.to_string();
+    report
+        .disks
+        .iter()
+        .find(|d| d.devid.as_deref() == Some(&key))
+        .map(|d| format!("{} (devid {devid})", d.name))
+        .unwrap_or_else(|| format!("devid {devid}"))
+}
+
 fn format_status_human(
     report: &StatusReport,
     compact_drives: Option<&[CompactDrive]>,
@@ -842,10 +852,12 @@ fn format_status_human(
         for cause in &report.alert_causes {
             match cause {
                 AlertCause::BtrfsDeviceErrors { devid } => {
-                    out.push_str(&format!("  - btrfs device errors on devid {devid}\n"));
+                    let name = devid_to_name(report, *devid);
+                    out.push_str(&format!("  - btrfs device errors on {name}\n"));
                 }
                 AlertCause::MissingDevice { devid } => {
-                    out.push_str(&format!("  - missing device (devid {devid})\n"));
+                    let name = devid_to_name(report, *devid);
+                    out.push_str(&format!("  - missing device: {name}\n"));
                 }
                 AlertCause::SmartdAlert => {
                     out.push_str("  - SMART health warning\n");
@@ -3021,6 +3033,79 @@ mod tests {
         ];
         let human = format_status_human(&report, Some(&compact), None);
         assert!(!human.contains("new"), "got:\n{human}");
+    }
+
+    // =======================================================================
+    // alert display tests
+    // =======================================================================
+
+    fn report_with_alerts(disks: Vec<DiskReport>, causes: Vec<AlertCause>) -> StatusReport {
+        StatusReport {
+            mount_point: MountPoint("/mnt/storage".into()),
+            status: StatusCode::Degraded,
+            total_devices: Some(3),
+            present_count: Some(2),
+            missing_count: Some(1),
+            profile: None,
+            capacity: None,
+            last_scrub: None,
+            balance: None,
+            allocation: None,
+            disks,
+            advisories: vec![],
+            alert_active: true,
+            alert_causes: causes,
+        }
+    }
+
+    fn disk_report_named(name: &str, devid: u64) -> DiskReport {
+        DiskReport {
+            name: name.into(),
+            mapper: format!("braid-{name}"),
+            by_id: format!("/dev/disk/by-id/{name}"),
+            luks_uuid: "00000000-0000-0000-0000-000000000000".into(),
+            devid: Some(devid.to_string()),
+            underlying: None,
+            status: "present".into(),
+            errors: None,
+        }
+    }
+
+    #[test]
+    fn alert_missing_device_shows_name() {
+        let disks = vec![
+            disk_report_named("aaa", 1),
+            disk_report_named("bbb", 2),
+            disk_report_named("ccc", 3),
+        ];
+        let report = report_with_alerts(disks, vec![AlertCause::MissingDevice { devid: 3 }]);
+        let human = format_status_human(&report, None, None);
+        assert!(
+            human.contains("missing device: ccc (devid 3)"),
+            "expected device name in alert, got:\n{human}"
+        );
+    }
+
+    #[test]
+    fn alert_btrfs_errors_shows_name() {
+        let disks = vec![disk_report_named("aaa", 1), disk_report_named("bbb", 2)];
+        let report = report_with_alerts(disks, vec![AlertCause::BtrfsDeviceErrors { devid: 1 }]);
+        let human = format_status_human(&report, None, None);
+        assert!(
+            human.contains("btrfs device errors on aaa (devid 1)"),
+            "expected device name in alert, got:\n{human}"
+        );
+    }
+
+    #[test]
+    fn alert_unknown_devid_falls_back() {
+        let disks = vec![disk_report_named("aaa", 1)];
+        let report = report_with_alerts(disks, vec![AlertCause::MissingDevice { devid: 99 }]);
+        let human = format_status_human(&report, None, None);
+        assert!(
+            human.contains("missing device: devid 99"),
+            "unknown devid should fall back to raw id, got:\n{human}"
+        );
     }
 
     // =======================================================================
