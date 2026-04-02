@@ -117,6 +117,10 @@ cachix:
 test-hw *args:
     sudo python3 tests/hw/runner.py {{args}}
 
+# Fetch/refresh local btrfs-progs RST docs into docs/btrfs-docs/
+fetch-btrfs-docs:
+    ./scripts/fetch-btrfs-docs.sh
+
 # Destroy an entire braid pool (dev use only — wipes LUKS signatures + state files)
 destroy config="/etc/braid/config.json":
     ./scripts/braid-destroy.sh {{config}}
