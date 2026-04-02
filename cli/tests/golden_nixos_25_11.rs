@@ -9,6 +9,16 @@ use braid_cli::parse;
 
 const FIXTURE_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/nixos-25.11");
 
+/// btrfs-progs resolves device paths via path_canonicalize(), which reads
+/// /sys/block/dm-N/dm/name to map kernel dm-N names to /dev/mapper/<name>.
+/// This sysfs lookup succeeds on the macOS aarch64 linux-builder VM but fails
+/// on the x86_64 NixOS machine, so fixtures contain either format:
+///   NixOS machine (x86_64):        /dev/dm-N
+///   macOS linux-builder (aarch64): /dev/mapper/braid-vXX
+fn is_dm_or_mapper_path(s: &str) -> bool {
+    s.starts_with("/dev/dm-") || s.starts_with("/dev/mapper/braid-")
+}
+
 fn fixture(name: &str) -> Option<String> {
     let path = format!("{FIXTURE_DIR}/{name}");
     match std::fs::read_to_string(&path) {
@@ -20,6 +30,9 @@ fn fixture(name: &str) -> Option<String> {
 
 macro_rules! golden_test {
     ($name:ident, $fixture:expr, $cmd:expr, $parse_fn:expr, $assert_fn:expr) => {
+        golden_test!($name, $fixture, $cmd, $parse_fn, $assert_fn, exit_status: 0);
+    };
+    ($name:ident, $fixture:expr, $cmd:expr, $parse_fn:expr, $assert_fn:expr, exit_status: $exit:expr) => {
         #[test]
         fn $name() {
             let Some(content) = fixture($fixture) else {
@@ -33,7 +46,7 @@ macro_rules! golden_test {
                 cmd: $cmd.into(),
                 stdout: content,
                 stderr: String::new(),
-                exit_status: 0,
+                exit_status: $exit,
             };
             let out =
                 $parse_fn(&raw).expect(concat!("parser failed on golden fixture: ", $fixture));
@@ -204,14 +217,14 @@ golden_test!(
         // Exact devid/path mapping
         assert_eq!(out.devices[0].devid, 1);
         assert!(
-            out.devices[0].path.contains("dm-0"),
-            "devid 1 should be dm-0, got: {}",
+            is_dm_or_mapper_path(&out.devices[0].path),
+            "devid 1 path should be dm or mapper, got: {}",
             out.devices[0].path
         );
         assert_eq!(out.devices[1].devid, 2);
         assert!(
-            out.devices[1].path.contains("dm-1"),
-            "devid 2 should be dm-1, got: {}",
+            is_dm_or_mapper_path(&out.devices[1].path),
+            "devid 2 path should be dm or mapper, got: {}",
             out.devices[1].path
         );
         // At least one Data,RAID1 allocation with bytes > 0
@@ -338,7 +351,27 @@ golden_test!(
             }
             ref other => panic!("expected Running state, got {other:?}"),
         }
-    }
+    },
+    exit_status: 1
+);
+
+golden_test!(
+    golden_btrfs_balance_status_paused,
+    "btrfs-balance-status-paused-skip-balance.txt",
+    "btrfs balance status",
+    parse::btrfs_balance_status::parse_btrfs_balance_status,
+    |out: parse::types::BtrfsBalanceStatusOutput| {
+        assert_eq!(
+            out.state,
+            parse::types::BalanceState::Paused {
+                done_chunks: 0,
+                estimated_total_chunks: 0,
+                considered_chunks: 0,
+                pct_left: 0,
+            }
+        );
+    },
+    exit_status: 1
 );
 
 golden_test!(
@@ -352,3 +385,24 @@ golden_test!(
         assert!(has_used, "expected at least one device with used_bytes > 0");
     }
 );
+
+// --- Manual golden tests (don't fit the macro) ---
+
+#[test]
+fn golden_cryptsetup_status_inactive() {
+    let Some(stdout) = fixture("cryptsetup-status-inactive.stdout") else {
+        eprintln!("SKIP: fixture not captured yet");
+        return;
+    };
+    let stderr = fixture("cryptsetup-status-inactive.stderr").unwrap_or_default();
+    let raw = RawCommandOutput {
+        cmd: "cryptsetup status".into(),
+        stdout,
+        stderr,
+        exit_status: 4,
+    };
+    let out = parse::cryptsetup_status::parse_cryptsetup_status(&raw)
+        .expect("parser failed on golden fixture: cryptsetup-status-inactive");
+    assert!(!out.is_active);
+    assert_eq!(out.device, None);
+}

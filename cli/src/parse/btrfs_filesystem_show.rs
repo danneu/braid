@@ -1,13 +1,13 @@
 use nom::{
-    IResult,
     bytes::complete::{tag, take_until},
     character::complete::{not_line_ending, space0, space1, u64 as parse_u64},
+    IResult,
 };
 
 use crate::cmd::RawCommandOutput;
 
-use super::ParseError;
 use super::types::{BtrfsFilesystemShowOutput, BtrfsShowDevice};
+use super::ParseError;
 
 // ---------------------------------------------------------------------------
 // DeviceBtrfsProbe — classify raw btrfs-filesystem-show output
@@ -153,6 +153,10 @@ mod tests {
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("fixture {name}: {e}"))
     }
 
+    fn is_dm_or_mapper_path(s: &str) -> bool {
+        s.starts_with("/dev/dm-") || s.starts_with("/dev/mapper/braid-")
+    }
+
     // --- Contract tests (nixos-25.11 fixtures) ---
 
     #[test]
@@ -167,14 +171,25 @@ mod tests {
         assert_eq!(out.total_devices, 2);
         assert_eq!(out.devices.len(), 2);
         assert_eq!(out.devices[0].devid, 1);
-        assert_eq!(out.devices[0].path, "/dev/mapper/braid-vdb");
-        assert_eq!(
-            out.uuid.as_deref(),
-            Some("8628ad9b-a48f-45db-a60d-5f866c2aab5b"),
-            "FSID must be parsed from uuid line"
+        assert!(
+            is_dm_or_mapper_path(&out.devices[0].path),
+            "devid 1 path should be dm or mapper, got: {}",
+            out.devices[0].path
+        );
+        let uuid = out
+            .uuid
+            .as_deref()
+            .expect("FSID must be parsed from uuid line");
+        assert!(
+            uuid::Uuid::parse_str(uuid).is_ok(),
+            "FSID should be a valid UUID, got: {uuid}"
         );
         assert_eq!(out.devices[1].devid, 2);
-        assert_eq!(out.devices[1].path, "/dev/mapper/braid-vdc");
+        assert!(
+            is_dm_or_mapper_path(&out.devices[1].path),
+            "devid 2 path should be dm or mapper, got: {}",
+            out.devices[1].path
+        );
         assert!(!out.has_missing);
     }
 

@@ -1,7 +1,7 @@
 use nom::{
-    IResult,
     bytes::complete::{tag, take_till1, take_until},
     character::complete::{not_line_ending, space0, space1, u64 as parse_u64},
+    IResult,
 };
 
 use crate::cmd::RawCommandOutput;
@@ -236,6 +236,10 @@ mod tests {
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("fixture {name}: {e}"))
     }
 
+    fn is_dm_or_mapper_path(s: &str) -> bool {
+        s.starts_with("/dev/dm-") || s.starts_with("/dev/mapper/braid-")
+    }
+
     // --- Contract tests (nixos-25.11 fixtures) ---
 
     /// Intent: parse a real 3-device mid-scrub output with one missing device.
@@ -251,12 +255,20 @@ mod tests {
             exit_status: 0,
         };
         let out = parse_btrfs_scrub_status_per_device(&raw).unwrap();
-        assert_eq!(out.uuid, "5c5c88c9-9cdd-42b8-b60b-b670d3ad40fa");
+        assert!(
+            uuid::Uuid::parse_str(&out.uuid).is_ok(),
+            "UUID should be valid, got: {}",
+            out.uuid
+        );
         assert_eq!(out.devices.len(), 3);
 
-        // Device 1: /dev/dm-0
+        // Device 1: present
         assert_eq!(out.devices[0].devid, 1);
-        assert_eq!(out.devices[0].path.as_deref(), Some("/dev/dm-0"));
+        assert!(
+            is_dm_or_mapper_path(out.devices[0].path.as_deref().unwrap()),
+            "device 1 path should be dm or mapper, got: {:?}",
+            out.devices[0].path
+        );
         assert_eq!(out.devices[0].state, DeviceScrubState::Running);
         assert_eq!(out.devices[0].duration_secs, 25);
         assert_eq!(out.devices[0].data_bytes_scrubbed, 541917184);
@@ -269,9 +281,13 @@ mod tests {
         assert_eq!(out.devices[1].state, DeviceScrubState::Running);
         assert_eq!(out.devices[1].duration_secs, 0);
 
-        // Device 3: /dev/dm-1
+        // Device 3: present
         assert_eq!(out.devices[2].devid, 3);
-        assert_eq!(out.devices[2].path.as_deref(), Some("/dev/dm-1"));
+        assert!(
+            is_dm_or_mapper_path(out.devices[2].path.as_deref().unwrap()),
+            "device 3 path should be dm or mapper, got: {:?}",
+            out.devices[2].path
+        );
         assert_eq!(out.devices[2].state, DeviceScrubState::Running);
         assert_eq!(out.devices[2].data_bytes_scrubbed, 534380544);
         assert_eq!(out.devices[2].tree_bytes_scrubbed, 6602752);
@@ -289,12 +305,20 @@ mod tests {
             exit_status: 0,
         };
         let out = parse_btrfs_scrub_status_per_device(&raw).unwrap();
-        assert_eq!(out.uuid, "5c5c88c9-9cdd-42b8-b60b-b670d3ad40fa");
+        assert!(
+            uuid::Uuid::parse_str(&out.uuid).is_ok(),
+            "UUID should be valid, got: {}",
+            out.uuid
+        );
         assert_eq!(out.devices.len(), 3);
 
-        // dm-0: finished
+        // device 1: finished
         assert_eq!(out.devices[0].devid, 1);
-        assert_eq!(out.devices[0].path.as_deref(), Some("/dev/dm-0"));
+        assert!(
+            is_dm_or_mapper_path(out.devices[0].path.as_deref().unwrap()),
+            "device 1 path should be dm or mapper, got: {:?}",
+            out.devices[0].path
+        );
         assert_eq!(out.devices[0].state, DeviceScrubState::Finished);
         assert_eq!(out.devices[0].duration_secs, 195); // 0:03:15
         assert_eq!(out.devices[0].data_bytes_scrubbed, 4102701056);
@@ -306,9 +330,13 @@ mod tests {
         assert_eq!(out.devices[1].path, None);
         assert_eq!(out.devices[1].state, DeviceScrubState::Aborted);
 
-        // dm-1: finished
+        // device 3: finished
         assert_eq!(out.devices[2].devid, 3);
-        assert_eq!(out.devices[2].path.as_deref(), Some("/dev/dm-1"));
+        assert!(
+            is_dm_or_mapper_path(out.devices[2].path.as_deref().unwrap()),
+            "device 3 path should be dm or mapper, got: {:?}",
+            out.devices[2].path
+        );
         assert_eq!(out.devices[2].state, DeviceScrubState::Finished);
         assert_eq!(out.devices[2].duration_secs, 208); // 0:03:28
         assert_eq!(out.devices[2].data_bytes_scrubbed, 4465561600);
@@ -403,7 +431,10 @@ Duration:         0:00:30
             exit_status: 1,
         };
         let err = parse_btrfs_scrub_status_per_device(&raw).unwrap_err();
-        assert!(matches!(err, ParseError::CommandFailed { exit_code: 1, .. }));
+        assert!(matches!(
+            err,
+            ParseError::CommandFailed { exit_code: 1, .. }
+        ));
     }
 
     /// Intent: unknown keys from future btrfs-progs are silently skipped.

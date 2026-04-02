@@ -160,6 +160,10 @@ mod tests {
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("fixture {name}: {e}"))
     }
 
+    fn is_dm_or_mapper_path(s: &str) -> bool {
+        s.starts_with("/dev/dm-") || s.starts_with("/dev/mapper/braid-")
+    }
+
     // --- Contract tests (nixos-25.11 fixtures) ---
 
     #[test]
@@ -172,9 +176,17 @@ mod tests {
         };
         let out = parse_btrfs_device_usage(&raw).unwrap();
         assert_eq!(out.devices.len(), 2);
-        assert_eq!(out.devices[0].path, "/dev/dm-0");
+        assert!(
+            is_dm_or_mapper_path(&out.devices[0].path),
+            "devid 1 path should be dm or mapper, got: {}",
+            out.devices[0].path
+        );
         assert_eq!(out.devices[0].devid, 1);
-        assert_eq!(out.devices[1].path, "/dev/dm-1");
+        assert!(
+            is_dm_or_mapper_path(&out.devices[1].path),
+            "devid 2 path should be dm or mapper, got: {}",
+            out.devices[1].path
+        );
         assert_eq!(out.devices[1].devid, 2);
         assert!(out.devices[0].device_size > 0);
         assert!(out.devices[0].unallocated > 0);
