@@ -167,12 +167,16 @@ pub struct DataRatio(u32);
 impl DataRatio {
     pub fn parse(s: &str) -> Option<Self> {
         let (whole, frac) = s.split_once('.')?;
-        if frac.len() != 2 {
+        if frac.is_empty() {
             return None;
         }
         let whole: u32 = whole.parse().ok()?;
-        let frac: u32 = frac.parse().ok()?;
-        let hundredths = whole * 100 + frac;
+        let frac_val: u32 = frac.parse().ok()?;
+        let hundredths = match frac.len() {
+            1 => whole * 100 + frac_val * 10,
+            2 => whole * 100 + frac_val,
+            _ => return None,
+        };
         if hundredths == 0 {
             return None;
         }
@@ -442,7 +446,12 @@ mod tests {
 
     #[test]
     fn data_ratio_parse_one_frac_digit() {
-        assert_eq!(DataRatio::parse("1.0"), None);
+        assert_eq!(DataRatio::parse("1.0"), Some(DataRatio(100)));
+    }
+
+    #[test]
+    fn data_ratio_parse_one_frac_digit_nonzero() {
+        assert_eq!(DataRatio::parse("1.5"), Some(DataRatio(150)));
     }
 
     #[test]

@@ -1,13 +1,13 @@
 use nom::{
-    IResult,
     bytes::complete::{tag, take_till1},
     character::complete::{not_line_ending, space1},
+    IResult,
 };
 
 use crate::cmd::RawCommandOutput;
 
-use super::ParseError;
 use super::types::{BtrfsFilesystemUsageOutput, DataRatio};
+use super::ParseError;
 
 // ---------------------------------------------------------------------------
 // nom parsers
@@ -165,16 +165,33 @@ mod tests {
                      \tDevice size:\t\t\t1040187392\n\
                      \tUsed:\t\t\t\t33914880\n\
                      \tFree (estimated):\t\t442957824\n\
-                     \tData ratio:\t\t\t1.0\n"
+                     \tData ratio:\t\t\t1.001\n"
                 .into(),
             stderr: String::new(),
             exit_status: 0,
         };
         let err = parse_btrfs_filesystem_usage(&raw).unwrap_err();
         assert!(
-            matches!(err, ParseError::InvalidText { ref detail, .. } if detail.contains("1.0")),
-            "expected InvalidText mentioning 1.0, got: {err:?}"
+            matches!(err, ParseError::InvalidText { ref detail, .. } if detail.contains("1.001")),
+            "expected InvalidText mentioning 1.001, got: {err:?}"
         );
+    }
+
+    #[test]
+    fn usage_parses_one_frac_digit_data_ratio() {
+        let raw = RawCommandOutput {
+            cmd: "btrfs filesystem usage".into(),
+            stdout: "Overall:\n\
+                     \tDevice size:\t\t\t1040187392\n\
+                     \tUsed:\t\t\t\t33914880\n\
+                     \tFree (estimated):\t\t442957824\n\
+                     \tData ratio:\t\t\t1.0\n"
+                .into(),
+            stderr: String::new(),
+            exit_status: 0,
+        };
+        let out = parse_btrfs_filesystem_usage(&raw).unwrap();
+        assert_eq!(out.data_ratio, DataRatio::parse("1.00").unwrap());
     }
 
     #[test]
