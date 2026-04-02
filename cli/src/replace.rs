@@ -75,8 +75,19 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     }
 
     // Preflight
-    preflight::check_no_exclusive_op(runner, config.mount_point().as_str())
-        .map_err(ReplaceError::Validation)?;
+    let fsid = pool.fsid.as_deref().expect("mounted pool must have FSID");
+    match preflight::check_no_exclusive_op(fs, fsid) {
+        Ok(()) => {}
+        Err(preflight::ExclusiveOpError::Busy(preflight::ExclusiveOp::BalancePaused)) => {
+            return Err(ReplaceError::Validation(
+                "a btrfs balance is paused. Resume or cancel it before proceeding.".into(),
+            ));
+        }
+        Err(preflight::ExclusiveOpError::Busy(op)) => {
+            eprintln!("  waiting for in-flight {op} to finish...");
+        }
+        Err(e) => return Err(ReplaceError::Validation(e.to_string())),
+    }
     preflight::check_not_read_only(runner, config.mount_point().as_str())
         .map_err(ReplaceError::Validation)?;
 
@@ -1238,6 +1249,13 @@ mod tests {
         }
         fn is_block_device(&self, _path: &str) -> bool {
             false
+        }
+        fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
+            if path.ends_with("/exclusive_operation") {
+                Ok("none\n".to_owned())
+            } else {
+                Err(std::io::Error::new(std::io::ErrorKind::NotFound, "mock"))
+            }
         }
         fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
             Ok(vec![])

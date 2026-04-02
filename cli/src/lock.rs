@@ -5,7 +5,7 @@ use crate::cmd::{CmdError, CmdRequest, CommandRunner};
 use crate::config::{mapper_name, name_from_mapper, Config};
 use crate::membership::{self, PoolMembership};
 use crate::preflight;
-use crate::probe::Filesystem;
+use crate::probe::{probe_pool, Filesystem};
 
 #[derive(Debug, thiserror::Error)]
 pub enum LockError {
@@ -79,8 +79,22 @@ pub fn cmd_lock<R: CommandRunner, F: Filesystem + ?Sized>(
 
     // Preflight
     if pool_was_mounted {
-        preflight::check_no_exclusive_op(runner, mount_point.as_str())
-            .map_err(LockError::Failed)?;
+        let pool = probe_pool(runner, mount_point.as_str())
+            .map_err(|e| LockError::Failed(format!("cannot probe pool: {e}")))?;
+        let fsid = pool
+            .fsid
+            .as_deref()
+            .ok_or_else(|| LockError::Failed("mounted pool has no FSID".into()))?;
+
+        match preflight::check_no_exclusive_op(fs, fsid) {
+            Ok(()) => {}
+            Err(preflight::ExclusiveOpError::Busy(op)) => {
+                return Err(LockError::Failed(format!(
+                    "cannot lock: {op} is in progress. Wait for it to finish first."
+                )));
+            }
+            Err(e) => return Err(LockError::Failed(e.to_string())),
+        }
     }
 
     // 2. If mounted → unmount
@@ -259,13 +273,20 @@ mod tests {
 
     struct MockFs {
         paths: Vec<String>,
+        exclop: String,
     }
 
     impl MockFs {
         fn new(paths: &[&str]) -> Self {
             Self {
                 paths: paths.iter().map(|s| s.to_string()).collect(),
+                exclop: "none\n".to_owned(),
             }
+        }
+
+        fn with_exclop(mut self, exclop: &str) -> Self {
+            self.exclop = format!("{exclop}\n");
+            self
         }
     }
 
@@ -276,6 +297,14 @@ mod tests {
 
         fn is_block_device(&self, _path: &str) -> bool {
             false
+        }
+
+        fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
+            if path.ends_with("/exclusive_operation") {
+                Ok(self.exclop.clone())
+            } else {
+                Err(std::io::Error::new(std::io::ErrorKind::NotFound, "mock"))
+            }
         }
 
         fn list_dir(&self, dir: &str) -> Result<Vec<String>, std::io::Error> {
@@ -312,6 +341,74 @@ mod tests {
         }
     }
 
+    /// Add probe_pool mock outputs to a runner (FindmntJson, BtrfsFilesystemShow,
+    /// CryptsetupStatus×2, CryptsetupLuksUuid×2).
+    fn with_probe_pool_mocks(runner: MockRunner) -> MockRunner {
+        runner
+            .with_output(
+                CmdRequest::FindmntJson {
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                },
+                RawCommandOutput {
+                    cmd: "findmnt --json".into(),
+                    stdout: r#"{"filesystems":[{"target":"/mnt/storage","source":"/dev/mapper/braid-aaa","fstype":"btrfs","options":"rw"}]}"#.into(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                },
+            )
+            .with_output(
+                CmdRequest::BtrfsFilesystemShow {
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                },
+                RawCommandOutput {
+                    cmd: "btrfs filesystem show".into(),
+                    stdout: "Label: none  uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
+                             \tTotal devices 2 FS bytes used 16.00MiB\n\
+                             \tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-aaa\n\
+                             \tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-bbb\n"
+                        .into(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                },
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus { mapper: "braid-aaa".into() },
+                RawCommandOutput {
+                    cmd: "cryptsetup status braid-aaa".into(),
+                    stdout: "braid-aaa is active and is in use.\n  type:    LUKS2\n  device:  /dev/vda\n".into(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                },
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus { mapper: "braid-bbb".into() },
+                RawCommandOutput {
+                    cmd: "cryptsetup status braid-bbb".into(),
+                    stdout: "braid-bbb is active and is in use.\n  type:    LUKS2\n  device:  /dev/vdb\n".into(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                },
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid { device: "/dev/vda".into() },
+                RawCommandOutput {
+                    cmd: "cryptsetup luksUUID /dev/vda".into(),
+                    stdout: "11111111-1111-1111-1111-111111111111\n".into(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                },
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid { device: "/dev/vdb".into() },
+                RawCommandOutput {
+                    cmd: "cryptsetup luksUUID /dev/vdb".into(),
+                    stdout: "22222222-2222-2222-2222-222222222222\n".into(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                },
+            )
+    }
+
     fn test_config() -> Config {
         Config::new(MountPoint("/mnt/storage".to_owned())).unwrap()
     }
@@ -340,13 +437,73 @@ mod tests {
                 },
                 ok_raw("mountpoint -q /mnt/storage"),
             )
+            // probe_pool needs FindmntJson + BtrfsFilesystemShow + CryptsetupStatus + CryptsetupLuksUuid
             .with_output(
-                CmdRequest::BtrfsBalanceStatus {
+                CmdRequest::FindmntJson {
                     mount_point: MountPoint("/mnt/storage".to_owned()),
                 },
                 RawCommandOutput {
-                    cmd: "btrfs balance status /mnt/storage".into(),
-                    stdout: "No balance found on '/mnt/storage'\n".into(),
+                    cmd: "findmnt --json".into(),
+                    stdout: r#"{"filesystems":[{"target":"/mnt/storage","source":"/dev/mapper/braid-aaa","fstype":"btrfs","options":"rw"}]}"#.into(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                },
+            )
+            .with_output(
+                CmdRequest::BtrfsFilesystemShow {
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                },
+                RawCommandOutput {
+                    cmd: "btrfs filesystem show /mnt/storage".into(),
+                    stdout: "Label: none  uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
+                             \tTotal devices 2 FS bytes used 16.00MiB\n\
+                             \tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-aaa\n\
+                             \tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-bbb\n"
+                        .into(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                },
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-aaa".into(),
+                },
+                RawCommandOutput {
+                    cmd: "cryptsetup status braid-aaa".into(),
+                    stdout: "braid-aaa is active and is in use.\n  type:    LUKS2\n  device:  /dev/vda\n".into(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                },
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-bbb".into(),
+                },
+                RawCommandOutput {
+                    cmd: "cryptsetup status braid-bbb".into(),
+                    stdout: "braid-bbb is active and is in use.\n  type:    LUKS2\n  device:  /dev/vdb\n".into(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                },
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vda".into(),
+                },
+                RawCommandOutput {
+                    cmd: "cryptsetup luksUUID /dev/vda".into(),
+                    stdout: "11111111-1111-1111-1111-111111111111\n".into(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                },
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vdb".into(),
+                },
+                RawCommandOutput {
+                    cmd: "cryptsetup luksUUID /dev/vdb".into(),
+                    stdout: "22222222-2222-2222-2222-222222222222\n".into(),
                     stderr: String::new(),
                     exit_status: 0,
                 },
@@ -431,50 +588,38 @@ mod tests {
     //   ultimately returns the umount error.
     #[test]
     fn lock_umount_busy_fails() {
-        let runner = MockRunner::default()
-            .with_output(
-                CmdRequest::MountpointCheck {
-                    path: MountPoint("/mnt/storage".to_owned()),
-                },
-                ok_raw("mountpoint -q /mnt/storage"),
-            )
-            .with_output(
-                CmdRequest::BtrfsBalanceStatus {
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
-                },
-                RawCommandOutput {
-                    cmd: "btrfs balance status /mnt/storage".into(),
-                    stdout: "No balance found on '/mnt/storage'\n".into(),
-                    stderr: String::new(),
-                    exit_status: 0,
-                },
-            )
-            .with_output(
-                CmdRequest::Umount {
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
-                },
-                err_raw("umount /mnt/storage", 32, "target is busy"),
-            )
-            .with_output(
-                CmdRequest::CryptsetupClose {
-                    mapper: "braid-aaa".into(),
-                },
-                err_raw(
-                    "cryptsetup close braid-aaa",
-                    5,
-                    "Device braid-aaa is still in use.",
-                ),
-            )
-            .with_output(
-                CmdRequest::CryptsetupClose {
-                    mapper: "braid-bbb".into(),
-                },
-                err_raw(
-                    "cryptsetup close braid-bbb",
-                    5,
-                    "Device braid-bbb is still in use.",
-                ),
-            );
+        let runner = with_probe_pool_mocks(MockRunner::default().with_output(
+            CmdRequest::MountpointCheck {
+                path: MountPoint("/mnt/storage".to_owned()),
+            },
+            ok_raw("mountpoint -q /mnt/storage"),
+        ))
+        .with_output(
+            CmdRequest::Umount {
+                mount_point: MountPoint("/mnt/storage".to_owned()),
+            },
+            err_raw("umount /mnt/storage", 32, "target is busy"),
+        )
+        .with_output(
+            CmdRequest::CryptsetupClose {
+                mapper: "braid-aaa".into(),
+            },
+            err_raw(
+                "cryptsetup close braid-aaa",
+                5,
+                "Device braid-aaa is still in use.",
+            ),
+        )
+        .with_output(
+            CmdRequest::CryptsetupClose {
+                mapper: "braid-bbb".into(),
+            },
+            err_raw(
+                "cryptsetup close braid-bbb",
+                5,
+                "Device braid-bbb is still in use.",
+            ),
+        );
         let fs = MockFs::new(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]);
         let config = test_config();
         let membership = test_membership();
@@ -490,50 +635,38 @@ mod tests {
     //   running lsof or fuser to identify the holder.
     #[test]
     fn lock_umount_busy_includes_hint() {
-        let runner = MockRunner::default()
-            .with_output(
-                CmdRequest::MountpointCheck {
-                    path: MountPoint("/mnt/storage".to_owned()),
-                },
-                ok_raw("mountpoint -q /mnt/storage"),
-            )
-            .with_output(
-                CmdRequest::BtrfsBalanceStatus {
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
-                },
-                RawCommandOutput {
-                    cmd: "btrfs balance status /mnt/storage".into(),
-                    stdout: "No balance found on '/mnt/storage'\n".into(),
-                    stderr: String::new(),
-                    exit_status: 0,
-                },
-            )
-            .with_output(
-                CmdRequest::Umount {
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
-                },
-                err_raw("umount /mnt/storage", 32, "target is busy"),
-            )
-            .with_output(
-                CmdRequest::CryptsetupClose {
-                    mapper: "braid-aaa".into(),
-                },
-                err_raw(
-                    "cryptsetup close braid-aaa",
-                    5,
-                    "Device braid-aaa is still in use.",
-                ),
-            )
-            .with_output(
-                CmdRequest::CryptsetupClose {
-                    mapper: "braid-bbb".into(),
-                },
-                err_raw(
-                    "cryptsetup close braid-bbb",
-                    5,
-                    "Device braid-bbb is still in use.",
-                ),
-            );
+        let runner = with_probe_pool_mocks(MockRunner::default().with_output(
+            CmdRequest::MountpointCheck {
+                path: MountPoint("/mnt/storage".to_owned()),
+            },
+            ok_raw("mountpoint -q /mnt/storage"),
+        ))
+        .with_output(
+            CmdRequest::Umount {
+                mount_point: MountPoint("/mnt/storage".to_owned()),
+            },
+            err_raw("umount /mnt/storage", 32, "target is busy"),
+        )
+        .with_output(
+            CmdRequest::CryptsetupClose {
+                mapper: "braid-aaa".into(),
+            },
+            err_raw(
+                "cryptsetup close braid-aaa",
+                5,
+                "Device braid-aaa is still in use.",
+            ),
+        )
+        .with_output(
+            CmdRequest::CryptsetupClose {
+                mapper: "braid-bbb".into(),
+            },
+            err_raw(
+                "cryptsetup close braid-bbb",
+                5,
+                "Device braid-bbb is still in use.",
+            ),
+        );
         let fs = MockFs::new(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]);
         let config = test_config();
         let membership = test_membership();
@@ -572,46 +705,34 @@ mod tests {
 
     #[test]
     fn lock_forget_failure_is_nonfatal() {
-        let runner = MockRunner::default()
-            .with_output(
-                CmdRequest::MountpointCheck {
-                    path: MountPoint("/mnt/storage".to_owned()),
-                },
-                ok_raw("mountpoint -q /mnt/storage"),
-            )
-            .with_output(
-                CmdRequest::BtrfsBalanceStatus {
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
-                },
-                RawCommandOutput {
-                    cmd: "btrfs balance status /mnt/storage".into(),
-                    stdout: "No balance found on '/mnt/storage'\n".into(),
-                    stderr: String::new(),
-                    exit_status: 0,
-                },
-            )
-            .with_output(
-                CmdRequest::Umount {
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
-                },
-                ok_raw("umount /mnt/storage"),
-            )
-            .with_output(
-                CmdRequest::BtrfsDeviceScanForget,
-                err_raw("btrfs device scan --forget", 1, "some error"),
-            )
-            .with_output(
-                CmdRequest::CryptsetupClose {
-                    mapper: "braid-aaa".into(),
-                },
-                ok_raw("cryptsetup close braid-aaa"),
-            )
-            .with_output(
-                CmdRequest::CryptsetupClose {
-                    mapper: "braid-bbb".into(),
-                },
-                ok_raw("cryptsetup close braid-bbb"),
-            );
+        let runner = with_probe_pool_mocks(MockRunner::default().with_output(
+            CmdRequest::MountpointCheck {
+                path: MountPoint("/mnt/storage".to_owned()),
+            },
+            ok_raw("mountpoint -q /mnt/storage"),
+        ))
+        .with_output(
+            CmdRequest::Umount {
+                mount_point: MountPoint("/mnt/storage".to_owned()),
+            },
+            ok_raw("umount /mnt/storage"),
+        )
+        .with_output(
+            CmdRequest::BtrfsDeviceScanForget,
+            err_raw("btrfs device scan --forget", 1, "some error"),
+        )
+        .with_output(
+            CmdRequest::CryptsetupClose {
+                mapper: "braid-aaa".into(),
+            },
+            ok_raw("cryptsetup close braid-aaa"),
+        )
+        .with_output(
+            CmdRequest::CryptsetupClose {
+                mapper: "braid-bbb".into(),
+            },
+            ok_raw("cryptsetup close braid-bbb"),
+        );
         let fs = MockFs::new(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]);
         let config = test_config();
         let membership = test_membership();
@@ -676,6 +797,13 @@ mod tests {
             fn is_block_device(&self, _path: &str) -> bool {
                 false
             }
+            fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
+                if path.ends_with("/exclusive_operation") {
+                    Ok("none\n".to_owned())
+                } else {
+                    Err(std::io::Error::new(std::io::ErrorKind::NotFound, "mock"))
+                }
+            }
             fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
                 Err(std::io::Error::new(
                     std::io::ErrorKind::PermissionDenied,
@@ -708,30 +836,18 @@ mod tests {
     /// (mountpoint check = mounted, balance status = no balance, umount = busy).
     /// No BtrfsDeviceScanForget — forget is gated on successful unmount.
     fn umount_failed_runner() -> MockRunner {
-        MockRunner::default()
-            .with_output(
-                CmdRequest::MountpointCheck {
-                    path: MountPoint("/mnt/storage".to_owned()),
-                },
-                ok_raw("mountpoint -q /mnt/storage"),
-            )
-            .with_output(
-                CmdRequest::BtrfsBalanceStatus {
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
-                },
-                RawCommandOutput {
-                    cmd: "btrfs balance status /mnt/storage".into(),
-                    stdout: "No balance found on '/mnt/storage'\n".into(),
-                    stderr: String::new(),
-                    exit_status: 0,
-                },
-            )
-            .with_output(
-                CmdRequest::Umount {
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
-                },
-                err_raw("umount /mnt/storage", 32, "target is busy"),
-            )
+        with_probe_pool_mocks(MockRunner::default().with_output(
+            CmdRequest::MountpointCheck {
+                path: MountPoint("/mnt/storage".to_owned()),
+            },
+            ok_raw("mountpoint -q /mnt/storage"),
+        ))
+        .with_output(
+            CmdRequest::Umount {
+                mount_point: MountPoint("/mnt/storage".to_owned()),
+            },
+            err_raw("umount /mnt/storage", 32, "target is busy"),
+        )
     }
 
     // Intent: when umount fails, lock still attempts to close LUKS mappers
@@ -1099,6 +1215,57 @@ mod tests {
         assert!(
             calls.contains(&"braid-aaa".to_string()) && calls.contains(&"braid-bbb".to_string()),
             "expected both mappers attempted, got: {calls:?}"
+        );
+    }
+
+    #[test]
+    // Intent: lock refuses when any exclusive op is active (running balance).
+    // Why: unmounting during an exclusive op is unsafe — data corruption risk.
+    // Scenario: a RAID1 balance is in progress, operator runs `braid lock`.
+    //   Lock must refuse without unmounting or closing any mappers.
+    fn lock_refuses_when_exclusive_op_active() {
+        let runner = with_probe_pool_mocks(MockRunner::default().with_output(
+            CmdRequest::MountpointCheck {
+                path: MountPoint("/mnt/storage".to_owned()),
+            },
+            ok_raw("mountpoint -q /mnt/storage"),
+        ));
+        let fs =
+            MockFs::new(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]).with_exclop("balance");
+        let config = test_config();
+        let membership = test_membership();
+
+        let err = cmd_lock(&runner, &fs, &config, &membership)
+            .expect_err("should refuse — balance is active");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("balance") && msg.contains("in progress"),
+            "expected active-op refusal, got: {msg}"
+        );
+    }
+
+    #[test]
+    // Intent: lock refuses when a balance is paused.
+    // Why: a paused balance still holds the exclusive lock — unmounting is unsafe.
+    // Scenario: operator paused a balance and forgot, then runs `braid lock`.
+    fn lock_refuses_when_balance_paused() {
+        let runner = with_probe_pool_mocks(MockRunner::default().with_output(
+            CmdRequest::MountpointCheck {
+                path: MountPoint("/mnt/storage".to_owned()),
+            },
+            ok_raw("mountpoint -q /mnt/storage"),
+        ));
+        let fs = MockFs::new(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"])
+            .with_exclop("balance paused");
+        let config = test_config();
+        let membership = test_membership();
+
+        let err = cmd_lock(&runner, &fs, &config, &membership)
+            .expect_err("should refuse — balance is paused");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("in progress"),
+            "expected paused-balance refusal, got: {msg}"
         );
     }
 }

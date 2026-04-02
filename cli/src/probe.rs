@@ -13,6 +13,7 @@ pub trait Filesystem {
     fn exists(&self, path: &str) -> bool;
     fn is_block_device(&self, path: &str) -> bool;
     fn list_dir(&self, path: &str) -> Result<Vec<String>, std::io::Error>;
+    fn read_to_string(&self, path: &str) -> Result<String, std::io::Error>;
 }
 
 pub struct RealFilesystem;
@@ -27,6 +28,10 @@ impl Filesystem for RealFilesystem {
         std::fs::metadata(path)
             .map(|m| m.file_type().is_block_device())
             .unwrap_or(false)
+    }
+
+    fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
+        std::fs::read_to_string(path)
     }
 
     fn list_dir(&self, path: &str) -> Result<Vec<String>, std::io::Error> {
@@ -261,6 +266,10 @@ mod tests {
 
         fn is_block_device(&self, path: &str) -> bool {
             self.block_devices.contains(&path.to_string())
+        }
+
+        fn read_to_string(&self, _path: &str) -> Result<String, std::io::Error> {
+            Err(std::io::Error::new(std::io::ErrorKind::NotFound, "mock"))
         }
 
         fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {

@@ -249,6 +249,10 @@ mod tests {
             false
         }
 
+        fn read_to_string(&self, _path: &str) -> Result<String, std::io::Error> {
+            Err(std::io::Error::new(std::io::ErrorKind::NotFound, "mock"))
+        }
+
         fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
             Ok(vec![])
         }

@@ -261,8 +261,10 @@ fn main() {
                 false,
             );
             let runner = RealRunner;
+            let fs = RealFilesystem;
             if let Err(e) = braid_cli::remove::cmd_remove(
                 &runner,
+                &fs,
                 Path::new(&config_path),
                 &args.disk,
                 args.common.dry_run,
@@ -281,8 +283,10 @@ fn main() {
                 false,
             );
             let runner = RealRunner;
+            let fs = RealFilesystem;
             if let Err(e) = braid_cli::remove_missing::cmd_remove_missing(
                 &runner,
+                &fs,
                 Path::new(&config_path),
                 args.missing_id,
                 args.common.dry_run,

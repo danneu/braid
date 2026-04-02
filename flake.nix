@@ -154,6 +154,16 @@
               braid = linuxCrane.braid;
             }
           );
+          braid-add-during-balance = pkgs.testers.nixosTest (
+            import ./tests/cli/braid-add-during-balance.nix {
+              braid = linuxCrane.braid;
+            }
+          );
+          braid-exclop-paused-balance = pkgs.testers.nixosTest (
+            import ./tests/cli/braid-exclop-paused-balance.nix {
+              braid = linuxCrane.braid;
+            }
+          );
           luks-header-backup = pkgs.testers.nixosTest (
             import ./tests/storage/luks-header-backup.nix {
               braid = linuxCrane.braid;

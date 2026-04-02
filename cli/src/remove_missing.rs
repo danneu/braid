@@ -5,7 +5,7 @@ use crate::membership;
 use crate::parse::parse_btrfs_device_usage;
 use crate::pool::pool_remove_devid;
 use crate::preflight;
-use crate::probe::{probe_pool, ProbeError};
+use crate::probe::{probe_pool, Filesystem, ProbeError};
 use crate::progress::ProgressOutput;
 use crate::state_paths::StatePaths;
 use crate::types::MountPoint;
@@ -55,8 +55,9 @@ fn resolve_removal_target(
     Ok((devid, name))
 }
 
-pub fn cmd_remove_missing<R: CommandRunner + Sync>(
+pub fn cmd_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     runner: &R,
+    fs: &F,
     config_path: &Path,
     missing_id: u64,
     dry_run: bool,
@@ -85,8 +86,19 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync>(
     }
 
     // Preflight
-    preflight::check_no_exclusive_op(runner, config.mount_point().as_str())
-        .map_err(RemoveMissingError::Validation)?;
+    let fsid = pool.fsid.as_deref().expect("mounted pool must have FSID");
+    match preflight::check_no_exclusive_op(fs, fsid) {
+        Ok(()) => {}
+        Err(preflight::ExclusiveOpError::Busy(preflight::ExclusiveOp::BalancePaused)) => {
+            return Err(RemoveMissingError::Validation(
+                "a btrfs balance is paused. Resume or cancel it before proceeding.".into(),
+            ));
+        }
+        Err(preflight::ExclusiveOpError::Busy(op)) => {
+            eprintln!("  waiting for in-flight {op} to finish...");
+        }
+        Err(e) => return Err(RemoveMissingError::Validation(e.to_string())),
+    }
     preflight::check_not_read_only(runner, config.mount_point().as_str())
         .map_err(RemoveMissingError::Validation)?;
 
@@ -288,8 +300,30 @@ mod tests {
     use super::*;
     use crate::cmd::{CmdError, CmdRequest, CommandRunner, RawCommandOutput};
     use crate::membership::{DiskMember, PoolMembership};
+    use crate::probe::Filesystem;
     use crate::state_paths::StatePaths;
     use crate::types::ByIdPath;
+
+    struct MockFs;
+
+    impl Filesystem for MockFs {
+        fn exists(&self, _path: &str) -> bool {
+            false
+        }
+        fn is_block_device(&self, _path: &str) -> bool {
+            false
+        }
+        fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
+            if path.ends_with("/exclusive_operation") {
+                Ok("none\n".to_owned())
+            } else {
+                Err(std::io::Error::new(std::io::ErrorKind::NotFound, "mock"))
+            }
+        }
+        fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
+            Ok(vec![])
+        }
+    }
 
     /// Create a StatePaths backed by a temp dir, with pool.json pre-populated.
     /// Each entry is (name, by_id_path, optional_devid).
@@ -433,6 +467,7 @@ mod tests {
         let runner = RecordingRunner::new(log.clone());
         cmd_remove_missing(
             &runner,
+            &MockFs,
             &config_path,
             2,
             false,
@@ -795,6 +830,7 @@ mod tests {
         let runner = ThreeDeviceRunner::new(log.clone(), false);
         cmd_remove_missing(
             &runner,
+            &MockFs,
             &config_path,
             3,
             false,
@@ -836,6 +872,7 @@ mod tests {
         let runner = ThreeDeviceRunner::new(log.clone(), true);
         cmd_remove_missing(
             &runner,
+            &MockFs,
             &config_path,
             3,
             false,
@@ -958,6 +995,7 @@ mod tests {
         let runner = FailingSoftBalanceRunner::new(log.clone());
         let result = cmd_remove_missing(
             &runner,
+            &MockFs,
             &config_path,
             3,
             false,
@@ -1038,12 +1076,12 @@ mod tests {
         assert!(lines[0].contains("target specific missing device"));
         assert_eq!(
             lines[1],
-            "               $ btrfs device remove 2 /mnt/storage"
+            "               $ btrfs device remove --enqueue 2 /mnt/storage"
         );
         assert!(lines[2].contains("restore redundancy"));
         assert_eq!(
             lines[3],
-            "               $ btrfs balance start '-dconvert=raid1,soft' '-mconvert=raid1,soft' /mnt/storage"
+            "               $ btrfs balance start --enqueue '-dconvert=raid1,soft' '-mconvert=raid1,soft' /mnt/storage"
         );
     }
 }

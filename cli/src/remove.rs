@@ -5,7 +5,7 @@ use crate::membership;
 use crate::parse::parse_btrfs_device_usage;
 use crate::pool::evict_present_device;
 use crate::preflight;
-use crate::probe::{probe_pool, ProbeError};
+use crate::probe::{probe_pool, Filesystem, ProbeError};
 use crate::progress::ProgressOutput;
 use crate::state_paths::StatePaths;
 use crate::types::*;
@@ -25,8 +25,9 @@ pub enum RemoveError {
     Cmd(#[from] crate::cmd::CmdError),
 }
 
-pub fn cmd_remove<R: CommandRunner + Sync>(
+pub fn cmd_remove<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     runner: &R,
+    fs: &F,
     config_path: &Path,
     name: &str,
     dry_run: bool,
@@ -55,8 +56,19 @@ pub fn cmd_remove<R: CommandRunner + Sync>(
     }
 
     // Preflight
-    preflight::check_no_exclusive_op(runner, config.mount_point().as_str())
-        .map_err(RemoveError::Validation)?;
+    let fsid = pool.fsid.as_deref().expect("mounted pool must have FSID");
+    match preflight::check_no_exclusive_op(fs, fsid) {
+        Ok(()) => {}
+        Err(preflight::ExclusiveOpError::Busy(preflight::ExclusiveOp::BalancePaused)) => {
+            return Err(RemoveError::Validation(
+                "a btrfs balance is paused. Resume or cancel it before proceeding.".into(),
+            ));
+        }
+        Err(preflight::ExclusiveOpError::Busy(op)) => {
+            eprintln!("  waiting for in-flight {op} to finish...");
+        }
+        Err(e) => return Err(RemoveError::Validation(e.to_string())),
+    }
     preflight::check_not_read_only(runner, config.mount_point().as_str())
         .map_err(RemoveError::Validation)?;
 
@@ -269,11 +281,54 @@ mod tests {
     use super::*;
     use crate::cmd::{CmdError, CmdRequest, CommandRunner, RawCommandOutput};
     use crate::membership::{self, PoolMembership};
+    use crate::probe::Filesystem;
     use crate::progress::ProgressOutput;
     use crate::state_paths::StatePaths;
     use crate::types::ByIdPath;
     use std::collections::BTreeMap;
     use std::sync::{Arc, Mutex};
+
+    struct MockFs;
+
+    impl Filesystem for MockFs {
+        fn exists(&self, _path: &str) -> bool {
+            false
+        }
+        fn is_block_device(&self, _path: &str) -> bool {
+            false
+        }
+        fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
+            if path.ends_with("/exclusive_operation") {
+                Ok("none\n".to_owned())
+            } else {
+                Err(std::io::Error::new(std::io::ErrorKind::NotFound, "mock"))
+            }
+        }
+        fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
+            Ok(vec![])
+        }
+    }
+
+    struct MockFsWithExclop(String);
+
+    impl Filesystem for MockFsWithExclop {
+        fn exists(&self, _path: &str) -> bool {
+            false
+        }
+        fn is_block_device(&self, _path: &str) -> bool {
+            false
+        }
+        fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
+            if path.ends_with("/exclusive_operation") {
+                Ok(format!("{}\n", self.0))
+            } else {
+                Err(std::io::Error::new(std::io::ErrorKind::NotFound, "mock"))
+            }
+        }
+        fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
+            Ok(vec![])
+        }
+    }
 
     fn setup_membership(disks: &[(&str, &str)]) -> (tempfile::TempDir, StatePaths) {
         let tmp = tempfile::tempdir().unwrap();
@@ -409,6 +464,7 @@ mod tests {
         let runner = RecordingRunner::new(log.clone());
         cmd_remove(
             &runner,
+            &MockFs,
             Path::new(&config_path),
             "disk2",
             false,
@@ -467,6 +523,7 @@ mod tests {
         let runner = RecordingRunner::new(log.clone());
         cmd_remove(
             &runner,
+            &MockFs,
             Path::new(&config_path),
             "disk2",
             false,
@@ -585,6 +642,7 @@ mod tests {
         let runner = FailingEvictRunner;
         let result = cmd_remove(
             &runner,
+            &MockFs,
             Path::new(&config_path),
             "disk2",
             false,
@@ -645,7 +703,7 @@ mod tests {
         assert!(lines[0].contains("btrfs device remove"));
         assert_eq!(
             lines[1],
-            "               $ btrfs device remove /dev/mapper/braid-disk2 /mnt/storage"
+            "               $ btrfs device remove --enqueue /dev/mapper/braid-disk2 /mnt/storage"
         );
         assert!(lines[2].contains("[safe       ]"));
         assert!(lines[2].contains("cryptsetup close"));
@@ -690,7 +748,101 @@ mod tests {
         assert!(lines[0].contains("RAID1 → single"));
         assert_eq!(
             lines[1],
-            "               $ btrfs balance start '-dconvert=single' '-mconvert=dup' -f /mnt/storage"
+            "               $ btrfs balance start --enqueue '-dconvert=single' '-mconvert=dup' -f /mnt/storage"
+        );
+    }
+
+    #[test]
+    // Intent: `braid remove` fails fast when a balance is paused.
+    // Why: a paused balance holds the exclusive lock and never clears on its own.
+    //   --enqueue would hang forever waiting for it.
+    // Scenario: operator paused a balance and forgot, then runs `braid remove`.
+    fn remove_fails_fast_on_paused_balance() {
+        let (_state_dir, paths) = setup_membership(&[("disk1", "/dev/disk/by-id/virtio-disk1")]);
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.json");
+        let mut disks = BTreeMap::new();
+        disks.insert(
+            "disk1".to_owned(),
+            serde_json::json!({ "by_id": "/dev/disk/by-id/virtio-disk1" }),
+        );
+        let config_json = serde_json::json!({
+            "disks": disks,
+            "mount_point": "/mnt/storage"
+        });
+        std::fs::write(&config_path, serde_json::to_vec(&config_json).unwrap()).unwrap();
+
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let runner = RecordingRunner::new(log.clone());
+        let err = cmd_remove(
+            &runner,
+            &MockFsWithExclop("balance paused".into()),
+            Path::new(&config_path),
+            "disk1",
+            false,
+            true,
+            ProgressOutput::Off,
+            &paths,
+        )
+        .expect_err("should fail — balance is paused");
+        let msg = err.to_string();
+        assert!(msg.contains("paused"), "expected 'paused' in error: {msg}");
+    }
+
+    #[test]
+    // Intent: `braid remove` warns but proceeds when an active op is running.
+    // Why: --enqueue on the btrfs command will block until the slot frees;
+    //   braid prints a wait message so the user knows what's happening.
+    // Scenario: a device remove is already in progress, operator runs `braid remove`.
+    //   The preflight detects the active op, prints a warning, and proceeds.
+    fn remove_warns_and_proceeds_on_active_op() {
+        let (_state_dir, paths) = setup_membership(&[
+            ("disk1", "/dev/disk/by-id/virtio-disk1"),
+            ("disk2", "/dev/disk/by-id/virtio-disk2"),
+            ("disk3", "/dev/disk/by-id/virtio-disk3"),
+        ]);
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.json");
+        let mut disks = BTreeMap::new();
+        disks.insert(
+            "disk1".to_owned(),
+            serde_json::json!({ "by_id": "/dev/disk/by-id/virtio-disk1" }),
+        );
+        disks.insert(
+            "disk2".to_owned(),
+            serde_json::json!({ "by_id": "/dev/disk/by-id/virtio-disk2" }),
+        );
+        disks.insert(
+            "disk3".to_owned(),
+            serde_json::json!({ "by_id": "/dev/disk/by-id/virtio-disk3" }),
+        );
+        let config_json = serde_json::json!({
+            "disks": disks,
+            "mount_point": "/mnt/storage"
+        });
+        std::fs::write(&config_path, serde_json::to_vec(&config_json).unwrap()).unwrap();
+
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let runner = RecordingRunner::new(log.clone());
+        // With an active balance, cmd_remove should NOT error on the preflight —
+        // it prints a warning and proceeds. The command itself will eventually
+        // fail because our mock doesn't seed all the downstream commands,
+        // but the important thing is it does NOT return a Validation error
+        // about the exclusive op.
+        let result = cmd_remove(
+            &runner,
+            &MockFsWithExclop("balance".into()),
+            Path::new(&config_path),
+            "disk2",
+            true, // dry_run — avoids needing all downstream mocks
+            true,
+            ProgressOutput::Off,
+            &paths,
+        );
+        // dry_run should succeed (no actual btrfs commands executed)
+        assert!(
+            result.is_ok(),
+            "expected dry_run to proceed past active-op preflight, got: {result:?}"
         );
     }
 }

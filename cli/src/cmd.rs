@@ -393,6 +393,7 @@ impl CmdRequest {
                 args: vec![
                     "device".into(),
                     "add".into(),
+                    "--enqueue".into(),
                     // We don't need '-f' here to bypass `btrfs device add`'s blkid probe
                     // because at this point we've added a fresh luks header,
                     // the volume is luks-opened, and mapper will be "decrypting"
@@ -412,6 +413,7 @@ impl CmdRequest {
                 args: vec![
                     "device".into(),
                     "remove".into(),
+                    "--enqueue".into(),
                     device.clone(),
                     mount_point.0.clone(),
                 ],
@@ -433,6 +435,7 @@ impl CmdRequest {
                 args: vec![
                     "balance".into(),
                     "start".into(),
+                    "--enqueue".into(),
                     "-dconvert=raid1".into(),
                     "-mconvert=raid1".into(),
                     mount_point.0.clone(),
@@ -443,6 +446,7 @@ impl CmdRequest {
                 args: vec![
                     "balance".into(),
                     "start".into(),
+                    "--enqueue".into(),
                     "-dconvert=raid1,soft".into(),
                     "-mconvert=raid1,soft".into(),
                     mount_point.0.clone(),
@@ -453,6 +457,7 @@ impl CmdRequest {
                 args: vec![
                     "balance".into(),
                     "start".into(),
+                    "--enqueue".into(),
                     "-dconvert=single".into(),
                     // Important: use dup for metadata when converting to single
                     "-mconvert=dup".into(),
@@ -535,6 +540,7 @@ impl CmdRequest {
                 args: vec![
                     "replace".into(),
                     "start".into(),
+                    "--enqueue".into(),
                     // -r: read from mirrors, not the source device. Without -r,
                     // replacing a drive with read errors is extremely slow (kernel
                     // retries every bad sector). In RAID1 there is no downside to
@@ -558,6 +564,7 @@ impl CmdRequest {
                 args: vec![
                     "filesystem".into(),
                     "resize".into(),
+                    "--enqueue".into(),
                     format!("{devid}:max"),
                     mount_point.0.clone(),
                 ],
@@ -1025,6 +1032,7 @@ mod tests {
             vec![
                 "balance",
                 "start",
+                "--enqueue",
                 "-dconvert=raid1,soft",
                 "-mconvert=raid1,soft",
                 "/mnt/storage",
@@ -1254,7 +1262,10 @@ mod tests {
         }
         .to_argv()
         .to_shell_string();
-        assert_eq!(s, "btrfs device add /dev/mapper/braid-aaa /mnt/storage");
+        assert_eq!(
+            s,
+            "btrfs device add --enqueue /dev/mapper/braid-aaa /mnt/storage"
+        );
     }
 
     #[test]

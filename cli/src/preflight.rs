@@ -1,7 +1,10 @@
+use std::fmt;
+
 use crate::cmd::{CmdRequest, CommandRunner};
 use crate::journal;
-use crate::parse::types::{BalanceState, BtrfsDeviceUsageEntry};
-use crate::parse::{parse_btrfs_balance_status, parse_btrfs_device_usage, parse_findmnt_json};
+use crate::parse::types::BtrfsDeviceUsageEntry;
+use crate::parse::{parse_btrfs_device_usage, parse_findmnt_json};
+use crate::probe::Filesystem;
 use crate::state_paths::StatePaths;
 use crate::status::format_bytes;
 use crate::types::MountPoint;
@@ -24,30 +27,87 @@ pub fn check_no_pending_operation(paths: &StatePaths) -> Result<(), String> {
     }
 }
 
-/// Refuse if a btrfs balance or device remove is already running.
-/// Fail-closed: if we can't determine state, refuse. Unmounting or starting
-/// a second exclusive op during an active one risks filesystem corruption.
-pub fn check_no_exclusive_op<R: CommandRunner>(
-    runner: &R,
-    mount_point: &str,
-) -> Result<(), String> {
-    let raw = runner
-        .run(&CmdRequest::BtrfsBalanceStatus {
-            mount_point: MountPoint(mount_point.to_owned()),
-        })
-        .map_err(|e| format!("cannot determine whether an exclusive operation is running: {e}"))?;
+// ---------------------------------------------------------------------------
+// Exclusive operation check (sysfs-based)
+// ---------------------------------------------------------------------------
 
-    let status = parse_btrfs_balance_status(&raw)
-        .map_err(|e| format!("cannot determine whether an exclusive operation is running: {e}"))?;
+/// Kernel exclusive operation state, read from
+/// `/sys/fs/btrfs/{fsid}/exclusive_operation`.
+///
+/// String values follow `exclop_def[]` in btrfs-progs
+/// `common/utils.c:1186-1194` (vendored in `reference/btrfs-progs/`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExclusiveOp {
+    None,
+    Balance,
+    BalancePaused,
+    DeviceAdd,
+    /// The kernel writes "device remove" — not "device delete" as
+    /// btrfs-man5.rst sometimes says.  Follows `exclop_def[]` in
+    /// `reference/btrfs-progs/common/utils.c:1191`.
+    DeviceRemove,
+    DeviceReplace,
+    Resize,
+    SwapActivate,
+}
 
-    match status.state {
-        BalanceState::Running { .. } => {
-            Err("a btrfs balance is already running. Wait for it to complete.".into())
+impl ExclusiveOp {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "none" => Some(Self::None),
+            "balance" => Some(Self::Balance),
+            "balance paused" => Some(Self::BalancePaused),
+            "device add" => Some(Self::DeviceAdd),
+            "device remove" => Some(Self::DeviceRemove),
+            "device replace" => Some(Self::DeviceReplace),
+            "resize" => Some(Self::Resize),
+            "swap activate" => Some(Self::SwapActivate),
+            _ => Option::None,
         }
-        BalanceState::Paused { .. } => {
-            Err("a btrfs balance is paused. Resume or cancel it before proceeding.".into())
+    }
+}
+
+impl fmt::Display for ExclusiveOp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::None => write!(f, "none"),
+            Self::Balance => write!(f, "balance"),
+            Self::BalancePaused => write!(f, "balance (paused)"),
+            Self::DeviceAdd => write!(f, "device add"),
+            Self::DeviceRemove => write!(f, "device remove"),
+            Self::DeviceReplace => write!(f, "device replace"),
+            Self::Resize => write!(f, "resize"),
+            Self::SwapActivate => write!(f, "swap activate"),
         }
-        BalanceState::None => Ok(()),
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ExclusiveOpError {
+    #[error("an exclusive operation is already running: {0}")]
+    Busy(ExclusiveOp),
+    #[error("cannot read exclusive operation status: {0}")]
+    Read(std::io::Error),
+    #[error("unrecognized exclusive operation: {0:?}")]
+    Unrecognized(String),
+}
+
+/// Check `/sys/fs/btrfs/{fsid}/exclusive_operation` for an active exclusive op.
+///
+/// Returns `Ok(())` if the sysfs file reads `"none"`.
+/// Returns `Err(Busy(op))` for any other recognized state.
+/// Fail-closed: unrecognized values and read errors are errors.
+pub fn check_no_exclusive_op<F: Filesystem + ?Sized>(
+    fs: &F,
+    fsid: &str,
+) -> Result<(), ExclusiveOpError> {
+    let path = format!("/sys/fs/btrfs/{fsid}/exclusive_operation");
+    let contents = fs.read_to_string(&path).map_err(ExclusiveOpError::Read)?;
+    let op = ExclusiveOp::parse(contents.trim())
+        .ok_or_else(|| ExclusiveOpError::Unrecognized(contents.trim().to_owned()))?;
+    match op {
+        ExclusiveOp::None => Ok(()),
+        _ => Err(ExclusiveOpError::Busy(op)),
     }
 }
 
@@ -191,81 +251,177 @@ pub fn check_raid1_relocation_space(
 mod tests {
     use super::*;
     use crate::cmd::{CmdRequest, MockRunner, RawCommandOutput};
+    use crate::probe::Filesystem;
+
+    struct MockFs {
+        files: std::collections::HashMap<String, String>,
+    }
+
+    impl MockFs {
+        fn with_sysfs(fsid: &str, content: &str) -> Self {
+            let mut files = std::collections::HashMap::new();
+            files.insert(
+                format!("/sys/fs/btrfs/{fsid}/exclusive_operation"),
+                content.to_owned(),
+            );
+            Self { files }
+        }
+
+        fn empty() -> Self {
+            Self {
+                files: std::collections::HashMap::new(),
+            }
+        }
+    }
+
+    impl Filesystem for MockFs {
+        fn exists(&self, _path: &str) -> bool {
+            false
+        }
+        fn is_block_device(&self, _path: &str) -> bool {
+            false
+        }
+        fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
+            self.files
+                .get(path)
+                .cloned()
+                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "mock"))
+        }
+        fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
+            Ok(vec![])
+        }
+    }
+
+    const FSID: &str = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+
+    // --- ExclusiveOp::parse tests ---
 
     #[test]
-    // Intent: check_no_exclusive_op passes when no balance is active.
+    // Intent: ExclusiveOp::parse recognizes all sysfs strings from exclop_def[].
+    // Why: Ensures the parser covers every value the kernel can write.
+    // Scenario: Kernel writes each possible exclusive_operation value.
+    fn exclusive_op_parse_all_variants() {
+        assert_eq!(ExclusiveOp::parse("none"), Some(ExclusiveOp::None));
+        assert_eq!(ExclusiveOp::parse("balance"), Some(ExclusiveOp::Balance));
+        assert_eq!(
+            ExclusiveOp::parse("balance paused"),
+            Some(ExclusiveOp::BalancePaused)
+        );
+        assert_eq!(
+            ExclusiveOp::parse("device add"),
+            Some(ExclusiveOp::DeviceAdd)
+        );
+        assert_eq!(
+            ExclusiveOp::parse("device remove"),
+            Some(ExclusiveOp::DeviceRemove)
+        );
+        assert_eq!(
+            ExclusiveOp::parse("device replace"),
+            Some(ExclusiveOp::DeviceReplace)
+        );
+        assert_eq!(ExclusiveOp::parse("resize"), Some(ExclusiveOp::Resize));
+        assert_eq!(
+            ExclusiveOp::parse("swap activate"),
+            Some(ExclusiveOp::SwapActivate)
+        );
+    }
+
+    #[test]
+    // Intent: ExclusiveOp::parse returns None for unrecognized values.
+    // Why: Future kernel versions may add new op types; fail-closed is safer.
+    // Scenario: Kernel writes a value not in exclop_def[].
+    fn exclusive_op_parse_unrecognized() {
+        assert_eq!(ExclusiveOp::parse("something new"), Option::None);
+        assert_eq!(ExclusiveOp::parse(""), Option::None);
+    }
+
+    #[test]
+    // Intent: ExclusiveOp Display produces human-readable strings.
+    // Why: These strings appear in user-facing "waiting for..." messages.
+    // Scenario: Each op variant is formatted for display.
+    fn exclusive_op_display() {
+        assert_eq!(format!("{}", ExclusiveOp::Balance), "balance");
+        assert_eq!(
+            format!("{}", ExclusiveOp::BalancePaused),
+            "balance (paused)"
+        );
+        assert_eq!(format!("{}", ExclusiveOp::DeviceRemove), "device remove");
+    }
+
+    // --- check_no_exclusive_op tests ---
+
+    #[test]
+    // Intent: check_no_exclusive_op passes when sysfs reports "none".
     // Why: Confirms the happy path doesn't block valid operations.
     // Scenario: Operator runs a command while the pool is idle.
-    fn exclusive_op_passes_when_no_balance() {
-        let runner = MockRunner::default().with_output(
-            CmdRequest::BtrfsBalanceStatus {
-                mount_point: MountPoint("/mnt/storage".to_owned()),
-            },
-            RawCommandOutput {
-                cmd: "btrfs balance status /mnt/storage".into(),
-                stdout: "No balance found on '/mnt/storage'\n".into(),
-                stderr: String::new(),
-                exit_status: 0,
-            },
-        );
-        assert!(check_no_exclusive_op(&runner, "/mnt/storage").is_ok());
+    fn exclusive_op_passes_when_none() {
+        let fs = MockFs::with_sysfs(FSID, "none\n");
+        assert!(check_no_exclusive_op(&fs, FSID).is_ok());
     }
 
     #[test]
-    // Intent: check_no_exclusive_op refuses when a balance is running.
-    // Why: Proceeding during an active balance risks filesystem corruption.
-    // Scenario: Operator tries `braid remove` while a RAID1 balance is in progress.
-    fn exclusive_op_refuses_when_balance_running() {
-        let runner = MockRunner::default().with_output(
-            CmdRequest::BtrfsBalanceStatus {
-                mount_point: MountPoint("/mnt/storage".to_owned()),
-            },
-            RawCommandOutput {
-                cmd: "btrfs balance status /mnt/storage".into(),
-                stdout: "Balance on '/mnt/storage' is running\n\
-                         3 out of about 10 chunks balanced (7 considered), 70% left\n"
-                    .into(),
-                stderr: String::new(),
-                exit_status: 1,
-            },
-        );
-        let err = check_no_exclusive_op(&runner, "/mnt/storage").unwrap_err();
-        assert!(
-            err.contains("already running"),
-            "expected 'already running' in: {err}"
-        );
+    // Intent: check_no_exclusive_op returns Busy when a balance is running.
+    // Why: Callers need to distinguish active ops to decide wait-vs-error.
+    // Scenario: Operator tries a command while a RAID1 balance is in progress.
+    fn exclusive_op_busy_when_balance_running() {
+        let fs = MockFs::with_sysfs(FSID, "balance\n");
+        match check_no_exclusive_op(&fs, FSID) {
+            Err(ExclusiveOpError::Busy(ExclusiveOp::Balance)) => {}
+            other => panic!("expected Busy(Balance), got: {other:?}"),
+        }
     }
 
     #[test]
-    // Intent: check_no_exclusive_op refuses when a balance is paused.
-    // Why: A paused balance still holds exclusive state; starting another op fails.
+    // Intent: check_no_exclusive_op returns Busy(BalancePaused) for paused balance.
+    // Why: A paused balance never clears on its own — callers must hard-error,
+    //   not enqueue (which would hang forever).
     // Scenario: Operator paused a balance and forgot, then tries `braid add`.
-    fn exclusive_op_refuses_when_balance_paused() {
-        let runner = MockRunner::default().with_output(
-            CmdRequest::BtrfsBalanceStatus {
-                mount_point: MountPoint("/mnt/storage".to_owned()),
-            },
-            RawCommandOutput {
-                cmd: "btrfs balance status /mnt/storage".into(),
-                stdout: "Balance on '/mnt/storage' is paused\n\
-                         5 out of about 12 chunks balanced (8 considered), 58% left\n"
-                    .into(),
-                stderr: String::new(),
-                exit_status: 1,
-            },
-        );
-        let err = check_no_exclusive_op(&runner, "/mnt/storage").unwrap_err();
-        assert!(err.contains("paused"), "expected 'paused' in: {err}");
+    fn exclusive_op_busy_when_balance_paused() {
+        let fs = MockFs::with_sysfs(FSID, "balance paused\n");
+        match check_no_exclusive_op(&fs, FSID) {
+            Err(ExclusiveOpError::Busy(ExclusiveOp::BalancePaused)) => {}
+            other => panic!("expected Busy(BalancePaused), got: {other:?}"),
+        }
     }
 
     #[test]
-    // Intent: check_no_exclusive_op refuses when the probe itself fails.
+    // Intent: check_no_exclusive_op returns Busy for device operations.
+    // Why: Covers the non-balance exclusive ops that the old balance-only
+    //   check could not detect.
+    // Scenario: A device remove is in progress when operator tries `braid add`.
+    fn exclusive_op_busy_when_device_remove() {
+        let fs = MockFs::with_sysfs(FSID, "device remove\n");
+        match check_no_exclusive_op(&fs, FSID) {
+            Err(ExclusiveOpError::Busy(ExclusiveOp::DeviceRemove)) => {}
+            other => panic!("expected Busy(DeviceRemove), got: {other:?}"),
+        }
+    }
+
+    #[test]
+    // Intent: check_no_exclusive_op errors on unrecognized sysfs value.
+    // Why: Fail-closed — unknown state is treated as an error.
+    // Scenario: Kernel version introduces a new exclusive op type.
+    fn exclusive_op_unrecognized_value() {
+        let fs = MockFs::with_sysfs(FSID, "something new\n");
+        match check_no_exclusive_op(&fs, FSID) {
+            Err(ExclusiveOpError::Unrecognized(s)) => {
+                assert_eq!(s, "something new");
+            }
+            other => panic!("expected Unrecognized, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    // Intent: check_no_exclusive_op errors when sysfs file can't be read.
     // Why: Fail-closed — if we can't determine state, refusing is safer than
-    //   proceeding and potentially unmounting during an active balance.
-    // Scenario: btrfs balance status command fails due to permissions or kernel bug.
-    fn exclusive_op_refuses_on_probe_failure() {
-        let runner = MockRunner::default(); // no mock seeded → MissingMock
-        assert!(check_no_exclusive_op(&runner, "/mnt/storage").is_err());
+    //   proceeding and potentially starting a conflicting exclusive op.
+    // Scenario: sysfs not available (container, broken mount).
+    fn exclusive_op_read_failure() {
+        let fs = MockFs::empty();
+        match check_no_exclusive_op(&fs, FSID) {
+            Err(ExclusiveOpError::Read(_)) => {}
+            other => panic!("expected Read error, got: {other:?}"),
+        }
     }
 
     #[test]
