@@ -1320,7 +1320,7 @@ mod tests {
         let pre = set_of(&["disk1", "disk2"]);
         let target = set_of(&["disk1"]);
         let recovered = set_of(&["disk1"]);
-        let op = OpKind::RemoveMissing { devid: Some(2) };
+        let op = OpKind::RemoveMissing { devid: 2 };
 
         assert_eq!(
             recovery_guidance(&op, &ref_set(&pre), &ref_set(&target), &ref_set(&recovered)),
@@ -1333,7 +1333,7 @@ mod tests {
         let pre = set_of(&["disk1", "disk2"]);
         let target = set_of(&["disk1"]);
         let recovered = set_of(&["disk1", "disk2"]);
-        let op = OpKind::RemoveMissing { devid: Some(2) };
+        let op = OpKind::RemoveMissing { devid: 2 };
 
         assert_eq!(
             recovery_guidance(&op, &ref_set(&pre), &ref_set(&target), &ref_set(&recovered)),

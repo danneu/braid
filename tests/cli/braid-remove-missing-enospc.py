@@ -68,11 +68,21 @@ with subtest("Simulate disk3 death and mount degraded"):
     print(f"Pool after death:\n{fi_show}")
     assert "missing" in fi_show.lower()
 
+def get_missing_devid():
+    """Get the devid of the missing device from btrfs fi show."""
+    import re
+    fi_show = machine.succeed("btrfs fi show /mnt/storage")
+    m = re.search(r"devid\s+(\d+)\s+.*missing", fi_show, re.IGNORECASE)
+    assert m, "No missing device found in:\n" + fi_show
+    return m.group(1)
+
 # --- Phase 4: braid remove-missing rejects with space error ---
+
+missing_devid = get_missing_devid()
 
 with subtest("braid remove-missing rejects due to insufficient space"):
     (status, output) = machine.execute(
-        "braid remove-missing --yes 2>&1"
+        f"braid remove-missing --missing-id {missing_devid} --yes 2>&1"
     )
     print(f"braid remove-missing output (exit {status}):\n{output}")
     assert status != 0, f"Expected failure, got exit 0: {output}"

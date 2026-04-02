@@ -74,9 +74,6 @@ pub enum CmdRequest {
         device: String,
         mount_point: MountPoint,
     },
-    BtrfsDeviceRemoveMissing {
-        mount_point: MountPoint,
-    },
     BtrfsDeviceScan {
         device: String,
     },
@@ -403,15 +400,6 @@ impl CmdRequest {
                     "device".into(),
                     "remove".into(),
                     device.clone(),
-                    mount_point.0.clone(),
-                ],
-            },
-            CmdRequest::BtrfsDeviceRemoveMissing { mount_point } => CmdArgs {
-                program: "btrfs",
-                args: vec![
-                    "device".into(),
-                    "remove".into(),
-                    "missing".into(),
                     mount_point.0.clone(),
                 ],
             },

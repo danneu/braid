@@ -45,9 +45,18 @@ def remove_cmd(key, extra=""):
     return f"braid remove {key} --yes {extra}"
 
 
-def remove_missing_cmd(extra=""):
-    """Build a `braid remove-missing --yes` command."""
-    return f"braid remove-missing --yes {extra}"
+def get_missing_devid():
+    """Get the devid of the missing device from btrfs fi show."""
+    import re
+    fi_show = machine.succeed("btrfs fi show /mnt/storage")
+    m = re.search(r"devid\s+(\d+)\s+.*missing", fi_show, re.IGNORECASE)
+    assert m, "No missing device found in:\n" + fi_show
+    return m.group(1)
+
+
+def remove_missing_cmd(devid, extra=""):
+    """Build a `braid remove-missing --missing-id <devid> --yes` command."""
+    return f"braid remove-missing --missing-id {devid} --yes {extra}"
 
 
 # --- Phase 0: Build 3-drive RAID1 pool ---
@@ -89,7 +98,7 @@ with subtest("Remove nonexistent disk fails with 'not found in pool'"):
 # --- Phase 1b: remove-missing with no missing devices ---
 
 with subtest("remove-missing fails when no devices are missing"):
-    (status, output) = machine.execute(remove_missing_cmd() + " 2>&1")
+    (status, output) = machine.execute(remove_missing_cmd(99) + " 2>&1")
     assert status != 0, f"Expected failure, got exit 0: {output}"
     assert "no missing" in output.lower(), f"Expected 'no missing' in error:\n{output}"
 
@@ -197,8 +206,13 @@ with subtest("Pool membership unchanged after failed remove"):
 
 # --- Phase 5: Explicit remove-missing succeeds ---
 
+with subtest("remove-missing without --missing-id is rejected by CLI"):
+    (status, output) = machine.execute("braid remove-missing --yes 2>&1")
+    assert status != 0, f"Expected failure, got exit 0: {output}"
+    assert "missing-id" in output.lower(), f"Expected '--missing-id' in error:\n{output}"
+
 with subtest("remove-missing succeeds for dead disk"):
-    machine.succeed(remove_missing_cmd())
+    machine.succeed(remove_missing_cmd(get_missing_devid()))
 
 with subtest("No missing devices after remove-missing"):
     fi_show = machine.succeed("btrfs fi show /mnt/storage")
@@ -215,10 +229,8 @@ with subtest("Data intact after remove-missing"):
     content = machine.succeed("cat /mnt/storage/precious.txt").strip()
     assert content == "important data", f"Expected 'important data', got '{content}'"
 
-# Phase 5b (multi-missing disambiguation) is not tested here because btrfs
-# RAID1 refuses writable mount with 2 of 3 devices missing ("max tolerance
-# is 1 for writable mount"). The disambiguation logic (multiple missing →
-# require --missing-id) is validated by the error path in remove_missing.rs.
-# A dedicated test with 4+ disks could cover this if needed.
+# --missing-id is always required (tested above in "remove-missing without
+# --missing-id is rejected by CLI"). The devid is discovered via
+# `braid status --json` in the get_missing_devid() helper.
 
 machine.shutdown()

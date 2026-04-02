@@ -18,7 +18,7 @@ Replace plan/apply with five intent commands:
 |---------|---------|------|
 | `braid add <name=by_id>...` | Format + join pool, or recover identity-verified LUKS device | Destructive (new disk), safe (returning braid disk with matching FSID), or refused (non-braid LUKS, foreign pool, no pool to verify) |
 | `braid remove <name>` | Migrate data off present disk, detach from pool | Long-running |
-| `braid remove-missing` | Clean up a stale missing-device entry; restores RAID1 profiles if this clears the last missing device | Long-running |
+| `braid remove-missing --missing-id <devid>` | Clean up a stale missing-device entry; restores RAID1 profiles if this clears the last missing device | Long-running |
 | `braid replace --old <name> --new <name=by_id>` | Replace a disk (live or dead) using `btrfs replace start`; restores RAID1 profiles for missing-path when clearing the last missing device | In-place swap (preserves devid) |
 | `braid status` | Display pool health and disk info | Read-only |
 

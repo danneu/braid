@@ -1,236 +1,307 @@
-# Plan: Show actual commands in dry-run output
+# Plan: Add --dry-run to enroll, unlock, lock, recover
 
 ## Context
 
-Dry-run currently shows human-readable descriptions like `[destructive] LUKS format /dev/disk/by-id/disk1` but not the actual commands that would execute. Users want to see the exact commands (e.g., `cryptsetup luksFormat --type luks2 --batch-mode ...`) for transparency, debugging, and learning.
+Four mutating commands lack `--dry-run`: `enroll`, `unlock`, `lock`, and `recover`. The shared `Step` infrastructure (`cmd.rs`) and `$`-prefixed shell command rendering are already in place from the previous work on add/remove/replace. This plan extends dry-run to the remaining commands.
 
-Four commands already support `--dry-run`: **add**, **remove**, **remove-missing**, **replace**. Each defines its own identical step struct and print loop. This plan unifies them and adds command rendering.
+## Design principle
 
-## Target output shape
+Dry-run must run the same read-only validation as execution. The plan is derived from the same probe + validate code path — not a separate, weaker approximation. Dry-run diverges only at the point where the first mutation would happen.
 
-```
-[destructive] LUKS format /dev/disk/by-id/disk1
-                → cryptsetup luksFormat --type luks2 --batch-mode '--key-file=-' --label braid-aaa /dev/disk/by-id/disk1
-[safe       ] LUKS header backup
-                → cryptsetup luksHeaderBackup '--header-backup-file=/var/lib/braid/luks-headers/braid-aaa.luksheader' /dev/disk/by-id/disk1
-[safe       ] LUKS open → braid-aaa
-                → cryptsetup open --type luks '--key-file=-' /dev/disk/by-id/disk1 braid-aaa
-[safe       ] btrfs device add /dev/mapper/braid-aaa /mnt/storage
-                → btrfs device add /dev/mapper/braid-aaa /mnt/storage
-[long       ] btrfs balance to RAID1
-                → btrfs balance start -dconvert=raid1 -mconvert=raid1 /mnt/storage
-```
+Pattern (same as add/remove/replace):
+1. Probe + validate (read-only, same errors as execution)
+2. Compile steps → `Vec<Step>`
+3. If `--dry-run`: `Step::print_dry_run()` and return
+4. Execute
 
-Steps with no concrete command (deferred verification) show only the description line. Every `CmdRequest` that the execution path would fire is represented.
+Dry-run must not prompt for a passphrase — the plan is derivable from pool.json + filesystem state alone.
 
-## Architecture changes
+---
 
-### 1. Shell-safe rendering — `cli/src/cmd.rs`
+## Shared helper: `plan_open_pool()` in `mount.rs`
 
-Use `shell_words::join` (already a dependency) for correct quoting:
+### Problem
 
-```rust
-impl CmdArgs {
-    pub fn to_shell_string(&self) -> String {
-        let argv: Vec<&str> = std::iter::once(self.program)
-            .chain(self.args.iter().map(|s| s.as_str()))
-            .collect();
-        shell_words::join(&argv)
-    }
-}
-```
+`open_and_mount_pool()` (mount.rs:45-220) interleaves read-only validation with mutations. Both `unlock` and `recover` need the read-only part (probe disks, UUID mismatch check, "no unlockable disks" error, degraded refusal) separated from execution.
 
-This handles args with `=`, `-`, spaces, or other shell-significant characters correctly. Add unit tests for quoting edge cases (paths with spaces, `--key-file=-`).
+### Solution
 
-### 2. Shared `Step` type with `Vec<CmdRequest>` — `cli/src/cmd.rs`
-
-Store typed `CmdRequest`s on the step; render at print time. Keeps dry-run output derived from the same source as execution, avoids string drift, and centralizes quoting.
+Extract the read-only probe + validate logic from `open_and_mount_pool()` into a new `plan_open_pool()` function. This returns a validated `OpenPlan` that both dry-run and execution consume.
 
 ```rust
-/// A step in a dry-run plan.
-#[derive(Debug)]
-pub struct Step {
-    pub risk: &'static str,
-    pub description: String,
-    pub commands: Vec<CmdRequest>,
+/// Result of the read-only probe + validate phase.
+pub struct OpenPlan {
+    /// Disks that need LUKS open (name, by_id pairs).
+    pub to_unlock: Vec<(String, ByIdPath)>,
+    /// At least one mapper was already open.
+    pub any_open: bool,
+    /// At least one membership disk was absent/damaged.
+    pub any_missing_member: bool,
+    /// First mapper device path to use for mount (from to_unlock or existing open mapper).
+    pub mount_device: String,
 }
 
-impl Step {
-    /// Pure renderer — returns the formatted dry-run lines. Testable without stdout capture.
-    pub fn render_dry_run(steps: &[Step]) -> String {
-        let mut out = String::new();
-        for step in steps {
-            out.push_str(&format!("[{:<11}] {}\n", step.risk, step.description));
-            for cmd in &step.commands {
-                out.push_str(&format!("               → {}\n", cmd.to_argv().to_shell_string()));
-            }
-        }
-        out
-    }
-
-    /// Print dry-run plan to stdout.
-    pub fn print_dry_run(steps: &[Step]) {
-        print!("{}", Self::render_dry_run(steps));
-    }
-}
+/// Probe membership disks, validate UUIDs, check degraded policy.
+/// Returns the same errors that open_and_mount_pool() would.
+/// No mutations — safe for dry-run.
+pub fn plan_open_pool<R: CommandRunner, F: Filesystem + ?Sized>(
+    runner: &R,
+    fs: &F,
+    config: &Config,
+    membership: &PoolMembership,
+    allow_degraded: bool,
+    command_hint: &str,
+) -> Result<Option<OpenPlan>, MountError>
 ```
 
-### 3. Delete per-command step structs
+Returns `Ok(None)` when pool is already mounted.
 
-Remove these 4 identical structs:
-- `AddStep` — `cli/src/add.rs:43-46`
-- `RemoveStep` — `cli/src/remove.rs:28-31`
-- `RemoveMissingStep` — `cli/src/remove_missing.rs:28-31`
-- `ReplaceStep` — `cli/src/replace.rs:36-39`
+Errors raised (same as current `open_and_mount_pool`):
+- LUKS UUID mismatch → `MountError::Failed("disk '...' LUKS UUID mismatch ...")`
+- No unlockable disks and none open → `MountError::Failed("no unlockable disks found")`
+- Missing members + `!allow_degraded` → `MountError::DegradedRefused(...)`
 
-Each file switches to `use crate::cmd::Step;`
+Then refactor `open_and_mount_pool()` to call `plan_open_pool()` internally, consuming the `OpenPlan` for execution. This guarantees dry-run and execution share the identical validation code — zero drift.
 
-### 4. Replace per-command print loops with `Step::print_dry_run`
+### compile_open_steps()
 
-All 4 identical loops at:
-- `cli/src/add.rs:341-345`
-- `cli/src/remove.rs:112-116`
-- `cli/src/remove_missing.rs:146-149`
-- `cli/src/replace.rs:122-126`
+Takes a validated `OpenPlan` and produces `Vec<Step>`:
 
-become: `Step::print_dry_run(&steps);`
+```rust
+pub fn compile_open_steps(
+    plan: &OpenPlan,
+    mount_point: &MountPoint,
+    key_file: Option<&Path>,
+) -> Vec<Step>
+```
 
-### 5. Add parameters to compile functions
+Steps produced:
+- Per `to_unlock` entry: `CryptsetupLuksOpen` or `CryptsetupLuksOpenKeyFile`
+- `BtrfsDeviceScanAll`
+- `Mount` or `MountWithOptions { options: ["degraded"] }` (if `any_missing_member`)
 
-Two compile functions need additional params for `CmdRequest` construction:
+Used by both `unlock` and `recover` for dry-run rendering.
 
-- `compile_remove_present_steps` (`cli/src/remove.rs:230`) — add `mount_point: &MountPoint`
-- `compile_steps` (`cli/src/remove_missing.rs:276`) — add `mount_point: &MountPoint`
+---
 
-For complete command coverage in add/replace, the compile functions also need:
+## 1. enroll (`cli/src/enroll_key_file.rs`)
 
-- `compile_add_steps_multi` (`cli/src/add.rs:573`) — add `paths: &StatePaths`, `enroll_key_file: Option<&Path>`
-- `compile_replace_steps` (`cli/src/replace.rs:464`) — add `paths: &StatePaths`, `enroll_key_file: Option<&Path>`
+### Current structure
 
-All callers already have these values available.
+Clean phase separation:
+- `discover_enrollment_candidates()` → probes pool.json, skips absent/non-LUKS, errors if none eligible
+- `plan_enrollment()` → verifies passphrase, checks slots, classifies as `NeedsEnroll`/`AlreadyEnrolled`
+- `generate_key_file()` → writes keyfile (if `--generate`)
+- `apply_enrollment()` → runs `luksAddKey` + header backup per disk
 
-### 6. Update step construction sites — full command coverage
+### Dry-run approach
 
-Each step carries `commands: vec![CmdRequest::...]` matching the exact CmdRequests the execution path fires.
+Keep all existing read-only validation in the dry-run path:
+1. `preflight::check_no_pending_operation()` — same as execution
+2. Keyfile path validation — same as execution (exists check for `--generate`, metadata check otherwise)
+3. `discover_enrollment_candidates()` — same as execution (probes disks, errors on zero candidates)
+4. If dry-run: compile steps from discovered candidates and return (skip passphrase + plan_enrollment + apply)
 
-#### add.rs — `compile_add_steps_multi`
+Since dry-run skips `plan_enrollment()` (which needs a passphrase), it assumes all discovered candidates need enrollment (worst-case). Disks already enrolled will be skipped at execution time — this is a safe over-approximation.
 
-Call `luks_opts_from_env()` at top of function for LUKS format steps.
+### Steps to show
 
-**PresentNotLuks disk (fresh disk init):**
-
-| Step | Risk | Commands |
-|------|------|----------|
-| LUKS format {by_id} | destructive | `CryptsetupLuksFormat { device, extra_opts: env_opts + [--label, braid-{name}] }` |
-| LUKS header backup | safe | `CryptsetupLuksHeaderBackup { device, backup_path }` |
-| LUKS open → {mn} | safe | `CryptsetupLuksOpen { device, mapper }` |
-| keyfile enroll (if --enroll-key-file) | safe | `CryptsetupLuksAddKeyFile { device, key_file_path }` |
-
-**PresentLuks (recovery, mapper open):**
-
-| Step | Risk | Commands |
-|------|------|----------|
-| btrfs device add (recovery) | safe | `BtrfsDeviceAdd { device: mapper_path, mount_point }` |
-
-**PresentLuks (mapper closed, deferred):**
+**If `--generate`:**
 
 | Step | Risk | Commands |
 |------|------|----------|
-| LUKS open + identity verification at execution time | safe | `CryptsetupLuksOpen { device, mapper }` |
+| generate keyfile → {path} | safe | (no CmdRequest — file I/O) |
 
-**Pool phase (no pool mounted):**
-
-| Step | Risk | Commands |
-|------|------|----------|
-| mkfs.btrfs RAID1 (≥2 disks) | safe | `MkfsBtrfsRaid1 { devices }` |
-| mkfs.btrfs (1 disk) | safe | `MkfsBtrfs { device }` |
-| mount | safe | `Mount { device: first_mapper, mount_point }` |
-
-**Pool phase (pool already mounted):**
+**Per discovered candidate:**
 
 | Step | Risk | Commands |
 |------|------|----------|
-| btrfs device add | safe | `BtrfsDeviceAdd { device, mount_point }` |
-| btrfs balance to RAID1 | long | `BtrfsBalanceRaid1 { mount_point }` |
+| enroll keyfile → LUKS slot 1 on {by_id} | safe | `CryptsetupLuksAddKeyFile { device, key_file_path }` |
+| LUKS header backup → {backup_path} | safe | `CryptsetupLuksHeaderBackup { device, backup_path }` |
 
-#### remove.rs — `compile_remove_present_steps`
+### Changes
 
-Add `mount_point: &MountPoint`.
+- `main.rs`: Add `--dry-run` to `EnrollKeyFileArgs` clap struct, pass to `cmd_enroll_key_file`
+- `enroll_key_file.rs`:
+  - Add `dry_run: bool` parameter to `cmd_enroll_key_file`
+  - Add `compile_enroll_steps()` that takes candidates + key_file_path + generate + paths → `Vec<Step>`
+  - Insert dry-run check after discovery (step 3), before passphrase read
+  - Keep preflight, keyfile validation, and discovery in dry-run path
 
-| Step | Risk | Commands |
-|------|------|----------|
-| btrfs balance RAID1→single (if remaining==1) | long | `BtrfsBalanceSingle { mount_point }` |
-| btrfs device remove | long | `BtrfsDeviceRemove { device: mapper_path, mount_point }` |
-| cryptsetup close | safe | `CryptsetupClose { mapper }` |
+### Tests
 
-#### remove_missing.rs — `compile_steps`
+- `dry_run_render_enroll_generate_3_disks` — happy path, shows generate + 3× (enroll + backup)
+- `dry_run_enroll_no_candidates_errors` — all disks absent → same error as execution
+- `dry_run_enroll_generate_keyfile_exists_errors` — keyfile already present → same error as execution
 
-Add `mount_point: &MountPoint`.
+---
 
-| Step | Risk | Commands |
-|------|------|----------|
-| btrfs device remove {devid} / missing | long | `BtrfsDeviceRemove { device: devid }` or `BtrfsDeviceRemoveMissing { mount_point }` |
-| btrfs balance soft RAID1 (if clearing last missing) | long | `BtrfsBalanceRaid1Soft { mount_point }` |
+## 2. unlock (`cli/src/unlock.rs`)
 
-#### replace.rs — `compile_replace_steps`
+### Current structure
 
-Add `paths: &StatePaths`, `enroll_key_file: Option<&Path>`. Call `luks_opts_from_env()` at top.
+Calls `mount::open_and_mount_pool()` which interleaves probing and mutating.
 
-**PresentNotLuks (fresh disk):**
+### Dry-run approach
 
-| Step | Risk | Commands |
-|------|------|----------|
-| LUKS format {by_id} | destructive | `CryptsetupLuksFormat { device, extra_opts }` |
-| LUKS header backup | safe | `CryptsetupLuksHeaderBackup { device, backup_path }` |
-| LUKS open → {mn} | safe | `CryptsetupLuksOpen { device, mapper }` |
-| keyfile enroll (if --enroll-key-file) | safe | `CryptsetupLuksAddKeyFile { device, key_file_path }` |
+1. `preflight::check_no_pending_operation()` — same as execution
+2. `plan_open_pool()` — shared read-only probe + validate (UUID check, degraded refusal, etc.)
+3. If dry-run: `compile_open_steps()` → `Step::print_dry_run()` and return
+4. Otherwise: proceed to `open_and_mount_pool()` as before
 
-**PresentLuks (mapper closed):**
+No passphrase required for dry-run.
 
-| Step | Risk | Commands |
-|------|------|----------|
-| LUKS open → {mn} | safe | `CryptsetupLuksOpen { device, mapper }` |
-
-**Replace operation (both Live and Missing source):**
+### Steps to show
 
 | Step | Risk | Commands |
 |------|------|----------|
-| btrfs replace start | long | `BtrfsReplaceStart { devid, target_device, mount_point }` |
-| btrfs filesystem resize | safe | `BtrfsFilesystemResize { devid, mount_point }` |
-| cryptsetup close (Live only) | safe | `CryptsetupClose { mapper: old_mapper }` |
-| btrfs balance soft RAID1 (Missing, last missing) | long | `BtrfsBalanceRaid1Soft { mount_point }` |
+| LUKS open {by_id} → {mapper} (per closed disk) | safe | `CryptsetupLuksOpen` or `CryptsetupLuksOpenKeyFile` |
+| btrfs device scan | safe | `BtrfsDeviceScanAll` |
+| mount → {mount_point} | safe | `Mount` or `MountWithOptions` (if degraded) |
+
+If pool already mounted: `plan_open_pool()` returns `None` → "pool already mounted" message.
+
+### Changes
+
+- `main.rs`: Add `--dry-run` to `UnlockArgs` clap struct, pass to `cmd_unlock`
+- `unlock.rs`:
+  - Add `dry_run: bool` parameter to `cmd_unlock`
+  - Call `plan_open_pool()` before credential handling
+  - If dry-run: compile + print + return
+  - If not dry-run: `open_and_mount_pool()` as before (which now calls `plan_open_pool()` internally)
+
+### Tests
+
+- `dry_run_render_unlock_2_closed_disks` — happy path, shows 2× LUKS open + scan + mount
+- `dry_run_unlock_already_mounted` — plan_open_pool returns None → "already mounted"
+- `dry_run_unlock_uuid_mismatch_errors` — same UUID mismatch error as execution
+- `dry_run_unlock_degraded_refused` — missing disk + no `--allow-degraded` → same error
+- `dry_run_unlock_no_unlockable_disks_errors` — all absent → same error
+
+---
+
+## 3. lock (`cli/src/lock.rs`)
+
+### Current structure
+
+Simple: check mounted → umount → scan forget → close each mapper → close orphans.
+
+### Dry-run approach
+
+1. `MountpointCheck` — same as execution
+2. If mounted: `preflight::check_no_exclusive_op()` — same as execution
+3. Probe which mappers are open (via `fs.exists`) — same as execution
+4. Scan for orphaned braid-* mappers — same as execution
+5. Compile steps from this state
+6. If dry-run: print and return
+
+### Steps to show
+
+| Step | Risk | Commands |
+|------|------|----------|
+| unmount {mount_point} (if mounted) | safe | `Umount { mount_point }` |
+| btrfs device scan --forget (if mounted) | safe | `BtrfsDeviceScanForget` |
+| close LUKS mapper {mapper} (per open disk) | safe | `CryptsetupClose { mapper }` |
+| close LUKS mapper {mapper} (per orphan) | safe | `CryptsetupClose { mapper }` |
+
+If pool not mounted and no mappers open: "nothing to do."
+
+### Changes
+
+- `main.rs`: Add `LockArgs` struct with `--dry-run`, update Lock dispatch
+- `lock.rs`:
+  - Add `dry_run: bool` parameter to `cmd_lock`
+  - Add `compile_lock_steps()` that takes mounted status + open mappers + orphan mappers + mount_point → `Vec<Step>`
+  - Insert dry-run check after probing, before execution
+
+### Tests
+
+- `dry_run_render_lock_mounted_2_disks` — happy path, shows umount + scan forget + 2× close
+- `dry_run_lock_not_mounted_1_open` — skip umount/scan, show 1× close
+- `dry_run_lock_nothing_to_do` — not mounted, all closed → empty/nothing message
+
+---
+
+## 4. recover (`cli/src/recover.rs`)
+
+### Current structure
+
+Reads journal → `open_and_mount_pool()` with union membership → probes live state → writes pool.json → clears journal.
+
+### Dry-run approach
+
+1. Load journal — same as execution (errors if absent)
+2. Build union membership — same as execution
+3. `plan_open_pool()` — shared read-only probe + validate
+4. If dry-run: compile steps → print and return
+
+No passphrase required for dry-run.
+
+Unlike `unlock`, `recover` is not a no-op when the pool is already mounted — execution still probes the live pool, writes `pool.json`, and clears `pending-op.json`. So:
+
+- **`plan_open_pool()` returns `Some(plan)`**: render open steps (LUKS open + scan + mount) *and* state recovery steps.
+- **`plan_open_pool()` returns `None` (already mounted)**: skip open/scan/mount steps but still render the state recovery steps (write pool.json, clear journal). The pool is up — recover just needs to reconcile state.
+
+### Steps to show
+
+**Open pool (from `compile_open_steps`, only if pool not already mounted):**
+
+| Step | Risk | Commands |
+|------|------|----------|
+| LUKS open {by_id} → {mapper} (per closed disk) | safe | `CryptsetupLuksOpen` |
+| btrfs device scan | safe | `BtrfsDeviceScanAll` |
+| mount → {mount_point} | safe | `Mount` or `MountWithOptions` |
+
+**State recovery (always shown):**
+
+| Step | Risk | Commands |
+|------|------|----------|
+| write recovered pool.json | safe | (no CmdRequest — file I/O) |
+| clear pending-op.json | safe | (no CmdRequest — file I/O) |
+
+### Changes
+
+- `main.rs`: Add `--dry-run` to `RecoverArgs` clap struct, pass to `cmd_recover`
+- `recover.rs`:
+  - Add `dry_run: bool` parameter to `cmd_recover`
+  - Call `plan_open_pool()` after loading journal + building union membership
+  - If dry-run: compile open steps + recovery steps → print and return
+
+### Tests
+
+- `dry_run_render_recover_2_disks` — happy path (not mounted), shows open + mount + state recovery
+- `dry_run_render_recover_already_mounted` — pool up, shows only state recovery steps (no open/scan/mount)
+- `dry_run_recover_no_journal_errors` — no journal → same error as execution
+- `dry_run_recover_degraded_refused` — missing disk + no `--allow-degraded` → same error
+
+---
 
 ## Files modified
 
 | File | Change |
 |------|--------|
-| `cli/src/cmd.rs` | Add `CmdArgs::to_shell_string()`, `Step` struct with `Vec<CmdRequest>`, `Step::print_dry_run()` |
-| `cli/src/add.rs` | Delete `AddStep`, use `Step`, add `paths`/`enroll_key_file` to compile fn, add header backup + keyfile enrollment steps |
-| `cli/src/remove.rs` | Delete `RemoveStep`, use `Step`, add `mount_point` to compile fn |
-| `cli/src/remove_missing.rs` | Delete `RemoveMissingStep`, use `Step`, add `mount_point` to compile fn |
-| `cli/src/replace.rs` | Delete `ReplaceStep`, use `Step`, add `paths`/`enroll_key_file` to compile fn, add header backup + keyfile enrollment steps |
+| `cli/src/mount.rs` | Extract `plan_open_pool()` + `OpenPlan` struct, add `compile_open_steps()`, refactor `open_and_mount_pool()` to consume `OpenPlan` |
+| `cli/src/main.rs` | Add `--dry-run` flag to `EnrollKeyFileArgs`, `UnlockArgs`, `RecoverArgs`; add `LockArgs` struct; pass dry_run to cmd_* functions |
+| `cli/src/enroll_key_file.rs` | Add `dry_run` param, `compile_enroll_steps()`, early return after discovery |
+| `cli/src/unlock.rs` | Add `dry_run` param, call `plan_open_pool()` + `compile_open_steps()` |
+| `cli/src/lock.rs` | Add `dry_run` param, `compile_lock_steps()`, early return |
+| `cli/src/recover.rs` | Add `dry_run` param, call `plan_open_pool()` + `compile_open_steps()` + recovery steps |
 
 ## Verification — TDD approach
 
 ### Step 1: Write failing tests first
 
-Add tests in each command's `mod tests` that assert exact dry-run output for representative scenarios. Tests call the compile function then `Step::render_dry_run()` and assert against the returned string:
-- Correct step ordering
-- Exact command strings (via `to_shell_string()`)
-- Multi-command steps (LUKS format + header backup + open)
-- Presence/absence of conditional steps (keyfile enrollment, balance)
-- Shell quoting correctness
+For each command, add tests for both happy-path rendering and error branches (listed in each section above). Tests call compile functions + `Step::render_dry_run()` and assert output. Error-branch tests verify dry-run returns the same errors as execution.
 
-Also add unit tests for `CmdArgs::to_shell_string()` in `cmd.rs::tests`:
-- Simple args: `btrfs device add /dev/mapper/braid-aaa /mnt/storage`
-- Args with `=` and `-`: `cryptsetup luksFormat --type luks2 --key-file=-`
-- Path with spaces (defensive): mount point like `/mnt/my storage` gets quoted
+### Step 2: Implement
 
-### Step 2: Implement the refactor
-
-Apply all architecture changes above to make the failing tests pass.
+1. Extract `plan_open_pool()` from `open_and_mount_pool()` in mount.rs (refactor, no behavior change)
+2. Add `compile_open_steps()` in mount.rs
+3. Add clap flags in main.rs
+4. Add compile functions and dry-run checks in each command file
+5. Make failing tests pass
 
 ### Step 3: Run full suite
 
-1. `just test-rust` — all unit tests including new ones
-2. `just test` — VM integration tests (no regressions)
+1. `just test-rust` — all unit tests
+2. `just test` — VM integration tests (ensure refactored mount path is unchanged)

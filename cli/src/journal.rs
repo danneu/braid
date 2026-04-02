@@ -30,7 +30,7 @@ pub enum OpKind {
         name: String,
     },
     RemoveMissing {
-        devid: Option<u64>,
+        devid: u64,
     },
     Replace {
         old_name: String,
@@ -236,7 +236,7 @@ mod tests {
         let journal = build_journal(
             sample_membership(),
             PoolMembership::empty(),
-            OpKind::RemoveMissing { devid: Some(3) },
+            OpKind::RemoveMissing { devid: 3 },
         );
         write_journal(&paths, &journal).unwrap();
         let loaded = load_journal(&paths).unwrap().unwrap();

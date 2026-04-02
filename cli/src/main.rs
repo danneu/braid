@@ -112,9 +112,9 @@ struct RemoveArgs {
 
 #[derive(Debug, Args)]
 struct RemoveMissingArgs {
-    /// Target a specific missing device by btrfs devid
+    /// Target missing device by btrfs devid (use 'braid status' to find it)
     #[arg(long)]
-    missing_id: Option<u64>,
+    missing_id: u64,
     #[command(flatten)]
     common: CommonArgs,
 }

@@ -155,24 +155,6 @@ pub fn pool_remove_device<R: CommandRunner + Sync>(
     Ok(())
 }
 
-/// Remove all missing devices from the pool.
-pub fn pool_remove_missing<R: CommandRunner + Sync>(
-    runner: &R,
-    mount_point: &str,
-) -> Result<(), PoolError> {
-    let result = runner.run(&CmdRequest::BtrfsDeviceRemoveMissing {
-        mount_point: MountPoint(mount_point.to_owned()),
-    })?;
-    if result.exit_status != 0 {
-        return Err(PoolError::Failed(format!(
-            "btrfs device remove missing failed (exit {}): {}",
-            result.exit_status,
-            result.stderr.trim()
-        )));
-    }
-    Ok(())
-}
-
 /// Remove a specific device by devid from the pool.
 pub fn pool_remove_devid<R: CommandRunner + Sync>(
     runner: &R,

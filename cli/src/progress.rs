@@ -129,8 +129,7 @@ fn clear_progress_line() {
 // ---------------------------------------------------------------------------
 
 /// Run a blocking btrfs command with progress polling.
-/// Works for BtrfsBalanceRaid1, BtrfsBalanceSingle, BtrfsDeviceRemove,
-/// and BtrfsDeviceRemoveMissing.
+/// Works for BtrfsBalanceRaid1, BtrfsBalanceSingle, and BtrfsDeviceRemove.
 pub fn run_with_progress<R: CommandRunner + Sync>(
     runner: &R,
     request: &CmdRequest,

@@ -68,8 +68,18 @@ with subtest("Make membership dir read-only"):
     machine.succeed("mount --bind /var/lib/braid /var/lib/braid")
     machine.succeed("mount -o remount,bind,ro /var/lib/braid")
 
+def get_missing_devid():
+    """Get the devid of the missing device from btrfs fi show."""
+    import re
+    fi_show = machine.succeed("btrfs fi show /mnt/storage")
+    m = re.search(r"devid\s+(\d+)\s+.*missing", fi_show, re.IGNORECASE)
+    assert m, "No missing device found in:\n" + fi_show
+    return m.group(1)
+
+missing_devid = get_missing_devid()
+
 with subtest("remove-missing with read-only membership dir fails"):
-    (status, output) = machine.execute("braid remove-missing --yes 2>&1")
+    (status, output) = machine.execute(f"braid remove-missing --missing-id {missing_devid} --yes 2>&1")
     print("remove-missing with readonly dir (exit " + str(status) + "):\n" + output)
     assert status != 0, "Expected failure, got exit 0: " + output
 

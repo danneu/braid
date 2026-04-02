@@ -1,11 +1,45 @@
 # braid
 
-NixOS-native cli tool for managing an encrypted, redundant (raid1) pool of hard drives, especially on a NAS device.
+braid is a NixOS-native cli + systemd tool for managing an encrypted, redundant (raid1) pool of hard drives, especially for the NAS use-case.
 
 It wraps two standard tools:
 
 - **[luks](https://en.wikipedia.org/wiki/Linux_Unified_Key_Setup)** full disk encryption
 - **[btrfs](https://btrfs.readthedocs.io/en/latest/)** file system for native raid1 redundancy, checksumming, self-healing
+
+## Example
+
+You've plugged three 12TB Toshiba HDDs into the SATA ports of your motherboard.
+
+Now create a braid pool out of them:
+
+```sh
+sudo braid add \
+  toshiba1=/dev/by-id/aaa \
+  toshiba2=/dev/by-id/bbb \
+  toshiba3=/dev/by-id/bbb
+# Type in luks passphrase
+# Creates luks-encrypted btrfs pool
+# Writes state to /etc/braid/pool.json
+
+sudo braid unlock
+# Type in luks passphrase, mounts pool at /mnt/storage
+
+cat "Test file" > test.txt
+mv test.txt /mnt/storage/
+
+sudo braid remove toshiba3
+# Rebalances toshiba3's data across remaining disks
+# Removes toshiba3 from pool
+# Updates /etc/braid/pool.json
+
+sudo braid replace \
+  --old toshiba2 \
+  --new toshiba3=/dev/disk/by-id/ata-TOSHIBA_MN07ACA12T_NEWSERIAL
+
+sudo braid lock
+# Unmount pool, close mappers
+```
 
 ## Features
 
@@ -157,8 +191,7 @@ Data migrates off the drive before it's detached. If removing would leave a sing
 Forgets a stale missing-device entry from the pool. This does **not** rebuild data — use `braid replace` for that. When clearing the last missing device with ≥2 survivors, automatically runs a soft RAID1 balance to restore redundancy for chunks written during degraded operation.
 
 ```
-sudo braid remove-missing                    # 1 missing device: auto-detected
-sudo braid remove-missing --missing-id 3     # multiple missing: target by devid
+sudo braid remove-missing --missing-id 3
 ```
 
 Use `braid status` to see device IDs.
