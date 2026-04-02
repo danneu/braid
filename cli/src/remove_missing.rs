@@ -1,4 +1,4 @@
-use crate::cmd::{CmdRequest, CommandRunner};
+use crate::cmd::{CmdRequest, CommandRunner, Step};
 use crate::config::config_read;
 use crate::journal;
 use crate::membership;
@@ -23,11 +23,6 @@ pub enum RemoveMissingError {
     Config(#[from] crate::config::ConfigError),
     #[error("command error: {0}")]
     Cmd(#[from] crate::cmd::CmdError),
-}
-
-pub struct RemoveMissingStep {
-    pub risk: &'static str,
-    pub description: String,
 }
 
 /// Resolve the missing-device removal target to a (devid, membership-name) pair.
@@ -141,12 +136,15 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync>(
         Some(_) => pool.missing_count == 1,
     };
     let remaining_present = pool.devices.len();
-    let steps = compile_steps(missing_id, will_clear_last_missing, remaining_present);
+    let steps = compile_steps(
+        missing_id,
+        will_clear_last_missing,
+        remaining_present,
+        config.mount_point(),
+    );
 
     if dry_run {
-        for step in &steps {
-            println!("[{:<11}] {}", step.risk, step.description);
-        }
+        Step::print_dry_run(&steps);
         return Ok(());
     }
 
@@ -277,28 +275,39 @@ fn compile_steps(
     missing_id: Option<u64>,
     will_clear_last_missing: bool,
     remaining_present: usize,
-) -> Vec<RemoveMissingStep> {
+    mount_point: &MountPoint,
+) -> Vec<Step> {
     let mut steps = Vec::new();
     if let Some(devid) = missing_id {
-        steps.push(RemoveMissingStep {
+        steps.push(Step {
             risk: "long",
             description: format!(
                 "btrfs device remove {} (target specific missing device)",
                 devid
             ),
+            commands: vec![CmdRequest::BtrfsDeviceRemove {
+                device: devid.to_string(),
+                mount_point: mount_point.clone(),
+            }],
         });
     } else {
-        steps.push(RemoveMissingStep {
+        steps.push(Step {
             risk: "long",
             description: "btrfs device remove missing".into(),
+            commands: vec![CmdRequest::BtrfsDeviceRemoveMissing {
+                mount_point: mount_point.clone(),
+            }],
         });
     }
     if will_clear_last_missing && remaining_present >= 2 {
-        steps.push(RemoveMissingStep {
+        steps.push(Step {
             risk: "long",
             description:
                 "btrfs balance -dconvert=raid1,soft -mconvert=raid1,soft (restore redundancy)"
                     .into(),
+            commands: vec![CmdRequest::BtrfsBalanceRaid1Soft {
+                mount_point: mount_point.clone(),
+            }],
         });
     }
     steps
@@ -639,7 +648,7 @@ mod tests {
     // Why: operator should see the soft balance step in the plan.
     // Scenario: 3-disk pool, 1 disk failed. Dry run should show the balance.
     fn compile_steps_shows_rebalance_when_clearing_last_missing() {
-        let steps = compile_steps(None, true, 2);
+        let steps = compile_steps(None, true, 2, &MountPoint("/mnt/storage".into()));
         assert!(
             steps
                 .iter()
@@ -654,7 +663,7 @@ mod tests {
     // Why: can't have RAID1 with only 1 device.
     // Scenario: 2-disk pool, 1 died. Only 1 survivor — no balance.
     fn compile_steps_omits_rebalance_with_single_survivor() {
-        let steps = compile_steps(None, true, 1);
+        let steps = compile_steps(None, true, 1, &MountPoint("/mnt/storage".into()));
         assert!(
             !steps
                 .iter()
@@ -669,7 +678,7 @@ mod tests {
     // Why: if more missing devices remain, balance would be premature.
     // Scenario: 4-disk pool, 2 missing, removing 1 of them.
     fn compile_steps_omits_rebalance_when_not_last_missing() {
-        let steps = compile_steps(Some(3), false, 2);
+        let steps = compile_steps(Some(3), false, 2, &MountPoint("/mnt/storage".into()));
         assert!(
             !steps
                 .iter()
@@ -1033,6 +1042,49 @@ mod tests {
         assert!(
             msg.contains("not found in pool.json"),
             "expected pool.json membership error; got: {msg}"
+        );
+    }
+
+    #[test]
+    // Intent: dry-run for targeted missing-device removal shows the devid command.
+    // Why: verifies CmdRequest integration for the targeted removal path.
+    // Scenario: one missing device (devid 2), last missing, 2 present → includes balance.
+    fn dry_run_render_targeted_removal_with_balance() {
+        let mount_point = MountPoint("/mnt/storage".into());
+        let steps = compile_steps(Some(2), true, 2, &mount_point);
+        let output = Step::render_dry_run(&steps);
+        let lines: Vec<&str> = output.lines().collect();
+
+        // 2 steps: device remove + balance, each with 1 command = 4 lines
+        assert_eq!(lines.len(), 4, "expected 4 lines, got:\n{output}");
+        assert!(lines[0].contains("target specific missing device"));
+        assert_eq!(
+            lines[1],
+            "               $ btrfs device remove 2 /mnt/storage"
+        );
+        assert!(lines[2].contains("restore redundancy"));
+        assert_eq!(
+            lines[3],
+            "               $ btrfs balance start '-dconvert=raid1,soft' '-mconvert=raid1,soft' /mnt/storage"
+        );
+    }
+
+    #[test]
+    // Intent: dry-run for untargeted removal uses "missing" sentinel.
+    // Why: verifies the BtrfsDeviceRemoveMissing variant is used when no devid given.
+    // Scenario: remove-missing without --missing-id, not last missing, no balance.
+    fn dry_run_render_untargeted_removal_no_balance() {
+        let mount_point = MountPoint("/mnt/storage".into());
+        let steps = compile_steps(None, false, 2, &mount_point);
+        let output = Step::render_dry_run(&steps);
+        let lines: Vec<&str> = output.lines().collect();
+
+        // 1 step: device remove missing, 1 command = 2 lines
+        assert_eq!(lines.len(), 2, "expected 2 lines, got:\n{output}");
+        assert!(lines[0].contains("btrfs device remove missing"));
+        assert_eq!(
+            lines[1],
+            "               $ btrfs device remove missing /mnt/storage"
         );
     }
 }

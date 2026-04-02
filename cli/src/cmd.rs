@@ -194,6 +194,46 @@ pub struct CmdArgs {
     pub args: Vec<String>,
 }
 
+impl CmdArgs {
+    /// Render as a shell-safe command string using proper quoting.
+    pub fn to_shell_string(&self) -> String {
+        let argv: Vec<&str> = std::iter::once(self.program)
+            .chain(self.args.iter().map(|s| s.as_str()))
+            .collect();
+        shell_words::join(&argv)
+    }
+}
+
+/// A step in a dry-run plan.
+#[derive(Debug)]
+pub struct Step {
+    pub risk: &'static str,
+    pub description: String,
+    pub commands: Vec<CmdRequest>,
+}
+
+impl Step {
+    /// Pure renderer — returns the formatted dry-run lines.
+    pub fn render_dry_run(steps: &[Step]) -> String {
+        let mut out = String::new();
+        for step in steps {
+            out.push_str(&format!("[{:<11}] {}\n", step.risk, step.description));
+            for cmd in &step.commands {
+                out.push_str(&format!(
+                    "               $ {}\n",
+                    cmd.to_argv().to_shell_string()
+                ));
+            }
+        }
+        out
+    }
+
+    /// Print dry-run plan to stdout.
+    pub fn print_dry_run(steps: &[Step]) {
+        print!("{}", Self::render_dry_run(steps));
+    }
+}
+
 /// Base mount options braid always applies.
 ///
 /// noatime: relatime (default) turns reads into CoW metadata writes across all
@@ -1199,6 +1239,111 @@ mod tests {
                 "/dev/mapper/braid-disk1",
                 "/mnt/storage",
             ]
+        );
+    }
+
+    #[test]
+    // Intent: to_shell_string renders simple args without unnecessary quoting.
+    // Why: dry-run output should be readable and copy-pasteable.
+    // Scenario: typical btrfs command with paths and flags.
+    fn to_shell_string_simple_args() {
+        let s = CmdRequest::BtrfsDeviceAdd {
+            device: "/dev/mapper/braid-aaa".to_owned(),
+            mount_point: MountPoint("/mnt/storage".to_owned()),
+        }
+        .to_argv()
+        .to_shell_string();
+        assert_eq!(s, "btrfs device add /dev/mapper/braid-aaa /mnt/storage");
+    }
+
+    #[test]
+    // Intent: to_shell_string quotes args containing shell-significant characters.
+    // Why: --key-file=- contains = which shell_words may quote; paths with spaces
+    // must be quoted to remain copy-pasteable.
+    // Scenario: cryptsetup luksFormat with key-file flag.
+    fn to_shell_string_quotes_special_chars() {
+        let s = CmdArgs {
+            program: "cryptsetup",
+            args: vec![
+                "luksFormat".into(),
+                "--key-file=-".into(),
+                "/mnt/my storage/key".into(),
+            ],
+        }
+        .to_shell_string();
+        // shell_words::join quotes args that contain spaces
+        assert!(
+            s.contains("/mnt/my storage") || s.contains("'/mnt/my storage"),
+            "path with spaces must be quoted, got: {s}"
+        );
+        assert!(s.starts_with("cryptsetup luksFormat"));
+    }
+
+    #[test]
+    // Intent: to_shell_string produces correct output for LUKS format with label.
+    // Why: this is the most complex real command with env opts + label.
+    // Scenario: dry-run of braid add with a fresh disk.
+    fn to_shell_string_luks_format_with_label() {
+        let s = CmdRequest::CryptsetupLuksFormat {
+            device: "/dev/disk/by-id/disk1".to_owned(),
+            extra_opts: vec!["--label".into(), "braid-aaa".into()],
+        }
+        .to_argv()
+        .to_shell_string();
+        assert_eq!(
+            s,
+            "cryptsetup luksFormat --type luks2 --batch-mode '--key-file=-' --label braid-aaa /dev/disk/by-id/disk1"
+        );
+    }
+
+    #[test]
+    // Intent: Step::render_dry_run formats steps with commands correctly.
+    // Why: user-facing dry-run output shape must be stable and readable.
+    // Scenario: two-step dry-run plan with one command each.
+    fn render_dry_run_formats_steps_with_commands() {
+        let steps = vec![
+            Step {
+                risk: "destructive",
+                description: "LUKS format /dev/disk/by-id/disk1".into(),
+                commands: vec![CmdRequest::CryptsetupLuksFormat {
+                    device: "/dev/disk/by-id/disk1".to_owned(),
+                    extra_opts: vec!["--label".into(), "braid-aaa".into()],
+                }],
+            },
+            Step {
+                risk: "safe",
+                description: "LUKS open → braid-aaa".into(),
+                commands: vec![CmdRequest::CryptsetupLuksOpen {
+                    device: "/dev/disk/by-id/disk1".to_owned(),
+                    mapper: "braid-aaa".to_owned(),
+                }],
+            },
+        ];
+        let output = Step::render_dry_run(&steps);
+        let lines: Vec<&str> = output.lines().collect();
+        assert_eq!(lines.len(), 4);
+        assert_eq!(lines[0], "[destructive] LUKS format /dev/disk/by-id/disk1");
+        assert!(lines[1].contains("$ cryptsetup luksFormat"));
+        assert_eq!(lines[2], "[safe       ] LUKS open → braid-aaa");
+        assert!(lines[3].contains("$ cryptsetup open --type luks"));
+    }
+
+    #[test]
+    // Intent: Steps with no commands render description only.
+    // Why: deferred verification steps have no concrete command.
+    // Scenario: LUKS open + identity verification at execution time.
+    fn render_dry_run_step_without_commands() {
+        let steps = vec![Step {
+            risk: "safe",
+            description: "identity verification at execution time".into(),
+            commands: vec![],
+        }];
+        let output = Step::render_dry_run(&steps);
+        let lines: Vec<&str> = output.lines().collect();
+        assert_eq!(lines.len(), 1);
+        assert_eq!(
+            lines[0],
+            "[safe       ] identity verification at execution time"
         );
     }
 }

@@ -1,4 +1,4 @@
-use crate::cmd::{CmdError, CmdRequest, CommandRunner};
+use crate::cmd::{CmdError, CmdRequest, CommandRunner, Step};
 use crate::config::{config_read, mapper_name};
 use crate::journal;
 use crate::luks::{
@@ -36,13 +36,6 @@ pub enum AddError {
     Parse(#[from] crate::parse::ParseError),
     #[error("membership error: {0}")]
     Membership(#[from] membership::MembershipError),
-}
-
-/// A step in the add operation, for dry-run display.
-#[derive(Debug)]
-pub struct AddStep {
-    pub risk: &'static str, // "destructive", "safe", "long", "blocked"
-    pub description: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -336,12 +329,12 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         &probed,
         &pool,
         config.mount_point(),
+        paths,
+        enroll_key_file,
     )?;
 
     if dry_run {
-        for step in &steps {
-            println!("[{:<11}] {}", step.risk, step.description);
-        }
+        Step::print_dry_run(&steps);
         return Ok(());
     }
 
@@ -577,7 +570,10 @@ fn compile_add_steps_multi<R: CommandRunner>(
     probed: &[ConfigDisk],
     pool: &PoolState,
     mount_point: &MountPoint,
-) -> Result<Vec<AddStep>, AddError> {
+    paths: &StatePaths,
+    enroll_key_file: Option<&Path>,
+) -> Result<Vec<Step>, AddError> {
+    let luks_extra_opts = luks_opts_from_env();
     let mut steps = Vec::new();
     let mut needs_pool_add = 0usize;
 
@@ -594,14 +590,46 @@ fn compile_add_steps_multi<R: CommandRunner>(
                 )));
             }
             ConfigDiskState::PresentNotLuks => {
-                steps.push(AddStep {
+                let mut extra_opts = luks_extra_opts.clone();
+                extra_opts.push("--label".into());
+                extra_opts.push(format!("braid-{name}"));
+                steps.push(Step {
                     risk: "destructive",
                     description: format!("LUKS format {}", by_id),
+                    commands: vec![CmdRequest::CryptsetupLuksFormat {
+                        device: by_id.0.clone(),
+                        extra_opts,
+                    }],
                 });
-                steps.push(AddStep {
+                let backup_path = paths
+                    .luks_headers_dir()
+                    .join(format!("{}.luksheader", mn.0));
+                steps.push(Step {
+                    risk: "safe",
+                    description: format!("LUKS header backup → {}", backup_path.display()),
+                    commands: vec![CmdRequest::CryptsetupLuksHeaderBackup {
+                        device: by_id.0.clone(),
+                        backup_path: backup_path.display().to_string(),
+                    }],
+                });
+                steps.push(Step {
                     risk: "safe",
                     description: format!("LUKS open → {}", mn),
+                    commands: vec![CmdRequest::CryptsetupLuksOpen {
+                        device: by_id.0.clone(),
+                        mapper: mn.0.clone(),
+                    }],
                 });
+                if let Some(kf) = enroll_key_file {
+                    steps.push(Step {
+                        risk: "safe",
+                        description: format!("enroll keyfile → LUKS slot 1 on {}", by_id),
+                        commands: vec![CmdRequest::CryptsetupLuksAddKeyFile {
+                            device: by_id.0.clone(),
+                            key_file_path: kf.display().to_string(),
+                        }],
+                    });
+                }
                 needs_pool_add += 1;
             }
             ConfigDiskState::PresentLuks { mapper_open, .. } => {
@@ -617,12 +645,17 @@ fn compile_add_steps_multi<R: CommandRunner>(
                     match identity {
                         AddLuksIdentity::BraidLabeledAlreadyInPool => continue,
                         AddLuksIdentity::BraidLabeledRecoverable => {
-                            steps.push(AddStep {
+                            let mapper_path = format!("/dev/mapper/{}", mn);
+                            steps.push(Step {
                                 risk: "safe",
                                 description: format!(
                                     "btrfs device add /dev/mapper/{} {} (recovery)",
                                     mn, mount_point
                                 ),
+                                commands: vec![CmdRequest::BtrfsDeviceAdd {
+                                    device: mapper_path,
+                                    mount_point: mount_point.clone(),
+                                }],
                             });
                             needs_pool_add += 1;
                         }
@@ -630,12 +663,16 @@ fn compile_add_steps_multi<R: CommandRunner>(
                     }
                 } else {
                     // Mapper closed — FSID verification deferred to execution time.
-                    steps.push(AddStep {
+                    steps.push(Step {
                         risk: "safe",
                         description: format!(
                             "LUKS open + identity verification at execution time → {}",
                             mn
                         ),
+                        commands: vec![CmdRequest::CryptsetupLuksOpen {
+                            device: by_id.0.clone(),
+                            mapper: mn.0.clone(),
+                        }],
                     });
                     needs_pool_add += 1;
                 }
@@ -653,9 +690,21 @@ fn compile_add_steps_multi<R: CommandRunner>(
                 .iter()
                 .map(|n| format!("/dev/mapper/{}", mapper_name(n).0))
                 .collect();
-            steps.push(AddStep {
+            steps.push(Step {
                 risk: "safe",
                 description: format!("mkfs.btrfs RAID1 {}", mapper_list.join(" ")),
+                commands: vec![CmdRequest::MkfsBtrfsRaid1 {
+                    devices: mapper_list.clone(),
+                }],
+            });
+            // Mount uses first device
+            steps.push(Step {
+                risk: "safe",
+                description: format!("mount → {}", mount_point),
+                commands: vec![CmdRequest::Mount {
+                    device: mapper_list[0].clone(),
+                    mount_point: mount_point.clone(),
+                }],
             });
         } else {
             // Single disk — find the one that needs pool add
@@ -663,35 +712,51 @@ fn compile_add_steps_multi<R: CommandRunner>(
                 let mn = mapper_name(&names[i]);
                 let skip = matches!(&p.state, ConfigDiskState::PresentLuks { mapper_open, .. } if *mapper_open && pool.devices.iter().any(|d| d.mapper == mn));
                 if !skip {
-                    steps.push(AddStep {
+                    let mapper_path = format!("/dev/mapper/{}", mn);
+                    steps.push(Step {
                         risk: "safe",
                         description: format!("mkfs.btrfs /dev/mapper/{}", mn),
+                        commands: vec![CmdRequest::MkfsBtrfs {
+                            device: mapper_path.clone(),
+                        }],
+                    });
+                    steps.push(Step {
+                        risk: "safe",
+                        description: format!("mount → {}", mount_point),
+                        commands: vec![CmdRequest::Mount {
+                            device: mapper_path,
+                            mount_point: mount_point.clone(),
+                        }],
                     });
                     break;
                 }
             }
         }
-        steps.push(AddStep {
-            risk: "safe",
-            description: format!("mount → {}", mount_point),
-        });
     } else {
         for (i, p) in probed.iter().enumerate() {
             let mn = mapper_name(&names[i]);
             // PresentNotLuks disks still need the device-add step
             if matches!(&p.state, ConfigDiskState::PresentNotLuks) {
-                steps.push(AddStep {
+                let mapper_path = format!("/dev/mapper/{}", mn);
+                steps.push(Step {
                     risk: "safe",
                     description: format!("btrfs device add /dev/mapper/{} {}", mn, mount_point),
+                    commands: vec![CmdRequest::BtrfsDeviceAdd {
+                        device: mapper_path,
+                        mount_point: mount_point.clone(),
+                    }],
                 });
             }
             // PresentLuks recovery steps already added above
         }
         let total_after = pool.devices.len() + needs_pool_add;
         if total_after >= 2 {
-            steps.push(AddStep {
+            steps.push(Step {
                 risk: "long",
                 description: "btrfs balance to RAID1".into(),
+                commands: vec![CmdRequest::BtrfsBalanceRaid1 {
+                    mount_point: mount_point.clone(),
+                }],
             });
         }
     }
@@ -718,6 +783,10 @@ fn add_confirm_message_multi(disks: &[(&str, &str)]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_paths() -> StatePaths {
+        StatePaths::custom("/var/lib/braid".into())
+    }
 
     #[test]
     fn add_confirm_message_single_disk() {
@@ -1071,6 +1140,8 @@ mod tests {
             &probed,
             &pool,
             &MountPoint("/mnt/storage".into()),
+            &test_paths(),
+            None,
         );
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
@@ -1108,6 +1179,8 @@ mod tests {
             &probed,
             &pool,
             &MountPoint("/mnt/storage".into()),
+            &test_paths(),
+            None,
         );
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
@@ -1135,6 +1208,8 @@ mod tests {
             &probed,
             &pool,
             &MountPoint("/mnt/storage".into()),
+            &test_paths(),
+            None,
         )
         .unwrap();
 
@@ -1165,6 +1240,8 @@ mod tests {
             &probed,
             &pool,
             &MountPoint("/mnt/storage".into()),
+            &test_paths(),
+            None,
         );
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
@@ -1191,6 +1268,8 @@ mod tests {
             &probed,
             &pool,
             &MountPoint("/mnt/storage".into()),
+            &test_paths(),
+            None,
         )
         .unwrap();
 
@@ -1335,6 +1414,8 @@ mod tests {
             &probed,
             &pool,
             &MountPoint("/mnt/storage".into()),
+            &test_paths(),
+            None,
         )
         .unwrap_err()
         .to_string();
@@ -1811,6 +1892,107 @@ mod tests {
         assert!(
             err.contains("bootstrap only accepts fresh disks"),
             "expected bootstrap rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    // Intent: dry-run for fresh single-disk bootstrap shows LUKS init + mkfs + mount commands.
+    // Why: verifies header backup and mount commands appear, with correct CmdRequests.
+    // Scenario: first disk added to an empty pool (no pool mounted yet).
+    fn dry_run_render_fresh_single_disk_bootstrap() {
+        let runner = MockRunner::default();
+        let probed = vec![ConfigDisk {
+            name: "disk1".to_owned(),
+            by_id_path: ByIdPath("/dev/disk/by-id/disk1".to_owned()),
+            state: ConfigDiskState::PresentNotLuks,
+        }];
+        let pool = pool_unmounted();
+
+        let steps = compile_add_steps_multi(
+            &runner,
+            &["disk1"],
+            &[&ByIdPath("/dev/disk/by-id/disk1".into())],
+            &probed,
+            &pool,
+            &MountPoint("/mnt/storage".into()),
+            &test_paths(),
+            None,
+        )
+        .unwrap();
+        let output = Step::render_dry_run(&steps);
+        let lines: Vec<&str> = output.lines().collect();
+
+        // Steps: LUKS format, header backup, LUKS open, mkfs, mount = 5 steps × 2 lines = 10
+        assert_eq!(lines.len(), 10, "expected 10 lines, got:\n{output}");
+
+        // LUKS format
+        assert!(lines[0].contains("[destructive]"));
+        assert!(lines[0].contains("LUKS format"));
+        assert!(lines[1].contains("$ cryptsetup luksFormat"));
+        assert!(lines[1].contains("--label braid-disk1"));
+
+        // Header backup
+        assert!(lines[2].contains("LUKS header backup"));
+        assert!(lines[3].contains("$ cryptsetup luksHeaderBackup"));
+
+        // LUKS open
+        assert!(lines[4].contains("LUKS open"));
+        assert!(lines[5].contains("$ cryptsetup open --type luks"));
+
+        // mkfs
+        assert!(lines[6].contains("mkfs.btrfs"));
+        assert!(lines[7].contains("$ mkfs.btrfs"));
+
+        // mount
+        assert!(lines[8].contains("mount"));
+        assert!(lines[9].contains("$ mount"));
+        assert!(lines[9].contains("/mnt/storage"));
+    }
+
+    #[test]
+    // Intent: dry-run for adding to existing pool shows device add + balance commands.
+    // Why: verifies the pool-mounted path includes balance to RAID1.
+    // Scenario: adding a fresh disk to a 1-disk pool (pool already mounted).
+    fn dry_run_render_add_to_existing_pool_with_balance() {
+        let runner = MockRunner::default();
+        let probed = vec![ConfigDisk {
+            name: "disk2".to_owned(),
+            by_id_path: ByIdPath("/dev/disk/by-id/disk2".to_owned()),
+            state: ConfigDiskState::PresentNotLuks,
+        }];
+        let pool = pool_mounted_with_fsid("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+
+        let steps = compile_add_steps_multi(
+            &runner,
+            &["disk2"],
+            &[&ByIdPath("/dev/disk/by-id/disk2".into())],
+            &probed,
+            &pool,
+            &MountPoint("/mnt/storage".into()),
+            &test_paths(),
+            None,
+        )
+        .unwrap();
+        let output = Step::render_dry_run(&steps);
+
+        // Should contain: LUKS format, header backup, LUKS open, device add, balance
+        assert!(output.contains("LUKS format"), "missing LUKS format step");
+        assert!(
+            output.contains("LUKS header backup"),
+            "missing header backup step"
+        );
+        assert!(output.contains("LUKS open"), "missing LUKS open step");
+        assert!(
+            output.contains("btrfs device add"),
+            "missing device add step"
+        );
+        assert!(
+            output.contains("btrfs balance to RAID1"),
+            "missing balance step"
+        );
+        assert!(
+            output.contains("$ btrfs balance start"),
+            "missing balance command"
         );
     }
 }

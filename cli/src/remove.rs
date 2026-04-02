@@ -1,4 +1,4 @@
-use crate::cmd::{CmdRequest, CommandRunner};
+use crate::cmd::{CmdRequest, CommandRunner, Step};
 use crate::config::{config_read, mapper_name};
 use crate::journal;
 use crate::membership;
@@ -23,11 +23,6 @@ pub enum RemoveError {
     Config(#[from] crate::config::ConfigError),
     #[error("command error: {0}")]
     Cmd(#[from] crate::cmd::CmdError),
-}
-
-pub struct RemoveStep {
-    pub risk: &'static str,
-    pub description: String,
 }
 
 pub fn cmd_remove<R: CommandRunner + Sync>(
@@ -107,12 +102,10 @@ pub fn cmd_remove<R: CommandRunner + Sync>(
         }
     }
 
-    let steps = compile_remove_present_steps(&mn, &pool)?;
+    let steps = compile_remove_present_steps(&mn, &pool, config.mount_point())?;
 
     if dry_run {
-        for step in &steps {
-            println!("[{:<11}] {}", step.risk, step.description);
-        }
+        Step::print_dry_run(&steps);
         return Ok(());
     }
 
@@ -230,7 +223,8 @@ fn check_eviction_space<R: CommandRunner>(
 fn compile_remove_present_steps(
     mn: &MapperName,
     pool: &PoolState,
-) -> Result<Vec<RemoveStep>, RemoveError> {
+    mount_point: &MountPoint,
+) -> Result<Vec<Step>, RemoveError> {
     let remaining = pool.devices.len() - 1;
     if remaining == 0 {
         return Err(RemoveError::Validation(
@@ -238,23 +232,34 @@ fn compile_remove_present_steps(
         ));
     }
 
+    let mapper_path = format!("/dev/mapper/{}", mn);
     let mut steps = Vec::new();
     if remaining == 1 {
-        steps.push(RemoveStep {
+        steps.push(Step {
             risk: "long",
             description: "btrfs balance -dconvert=single -mconvert=dup -f (RAID1 → single)".into(),
+            commands: vec![CmdRequest::BtrfsBalanceSingle {
+                mount_point: mount_point.clone(),
+            }],
         });
     }
-    steps.push(RemoveStep {
+    steps.push(Step {
         risk: "long",
         description: format!(
             "btrfs device remove /dev/mapper/{} (data migrates off disk)",
             mn
         ),
+        commands: vec![CmdRequest::BtrfsDeviceRemove {
+            device: mapper_path,
+            mount_point: mount_point.clone(),
+        }],
     });
-    steps.push(RemoveStep {
+    steps.push(Step {
         risk: "safe",
         description: format!("cryptsetup close {}", mn),
+        commands: vec![CmdRequest::CryptsetupClose {
+            mapper: mn.0.clone(),
+        }],
     });
     Ok(steps)
 }
@@ -592,6 +597,100 @@ mod tests {
         assert!(
             journal::load_journal(&paths).unwrap().is_some(),
             "pending-op.json must survive error exit so braid recover can reconcile"
+        );
+    }
+
+    #[test]
+    // Intent: dry-run output shows exact commands for a 3→2 removal.
+    // Why: verifies the Step/CmdRequest integration produces correct shell strings.
+    // Scenario: 3-disk pool, removing one disk (remaining=2, no balance to single).
+    fn dry_run_render_3disk_removal() {
+        let mn = MapperName("braid-disk2".into());
+        let pool = PoolState {
+            mounted: true,
+            devices: vec![
+                PoolDevice {
+                    devid: 1,
+                    mapper: MapperName("braid-disk1".into()),
+                    luks_uuid: LuksUuid("11111111-1111-1111-1111-111111111111".into()),
+                    underlying: "/dev/vda".into(),
+                },
+                PoolDevice {
+                    devid: 2,
+                    mapper: MapperName("braid-disk2".into()),
+                    luks_uuid: LuksUuid("22222222-2222-2222-2222-222222222222".into()),
+                    underlying: "/dev/vdb".into(),
+                },
+                PoolDevice {
+                    devid: 3,
+                    mapper: MapperName("braid-disk3".into()),
+                    luks_uuid: LuksUuid("33333333-3333-3333-3333-333333333333".into()),
+                    underlying: "/dev/vdc".into(),
+                },
+            ],
+            missing_count: 0,
+            missing_devids: vec![],
+            total_devices: 3,
+            fsid: Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into()),
+            null_underlying: vec![],
+        };
+        let mount_point = MountPoint("/mnt/storage".into());
+        let steps = compile_remove_present_steps(&mn, &pool, &mount_point).unwrap();
+        let output = Step::render_dry_run(&steps);
+        let lines: Vec<&str> = output.lines().collect();
+
+        // 2 steps (device remove + close), each with 1 command line = 4 lines
+        assert_eq!(lines.len(), 4, "expected 4 lines, got:\n{output}");
+        assert!(lines[0].contains("[long       ]"));
+        assert!(lines[0].contains("btrfs device remove"));
+        assert_eq!(
+            lines[1],
+            "               $ btrfs device remove /dev/mapper/braid-disk2 /mnt/storage"
+        );
+        assert!(lines[2].contains("[safe       ]"));
+        assert!(lines[2].contains("cryptsetup close"));
+        assert_eq!(lines[3], "               $ cryptsetup close braid-disk2");
+    }
+
+    #[test]
+    // Intent: dry-run output includes balance-to-single when 2→1 removal.
+    // Why: verifies the conditional balance step renders with its command.
+    // Scenario: 2-disk pool, removing one disk leaves no redundancy.
+    fn dry_run_render_2disk_removal_includes_balance() {
+        let mn = MapperName("braid-disk2".into());
+        let pool = PoolState {
+            mounted: true,
+            devices: vec![
+                PoolDevice {
+                    devid: 1,
+                    mapper: MapperName("braid-disk1".into()),
+                    luks_uuid: LuksUuid("11111111-1111-1111-1111-111111111111".into()),
+                    underlying: "/dev/vda".into(),
+                },
+                PoolDevice {
+                    devid: 2,
+                    mapper: MapperName("braid-disk2".into()),
+                    luks_uuid: LuksUuid("22222222-2222-2222-2222-222222222222".into()),
+                    underlying: "/dev/vdb".into(),
+                },
+            ],
+            missing_count: 0,
+            missing_devids: vec![],
+            total_devices: 2,
+            fsid: Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into()),
+            null_underlying: vec![],
+        };
+        let mount_point = MountPoint("/mnt/storage".into());
+        let steps = compile_remove_present_steps(&mn, &pool, &mount_point).unwrap();
+        let output = Step::render_dry_run(&steps);
+        let lines: Vec<&str> = output.lines().collect();
+
+        // 3 steps (balance + device remove + close), each with 1 command = 6 lines
+        assert_eq!(lines.len(), 6, "expected 6 lines, got:\n{output}");
+        assert!(lines[0].contains("RAID1 → single"));
+        assert_eq!(
+            lines[1],
+            "               $ btrfs balance start '-dconvert=single' '-mconvert=dup' -f /mnt/storage"
         );
     }
 }

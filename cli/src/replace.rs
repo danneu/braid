@@ -1,4 +1,4 @@
-use crate::cmd::{CmdRequest, CommandRunner};
+use crate::cmd::{CmdRequest, CommandRunner, Step};
 use crate::config::{config_read, mapper_name};
 use crate::journal;
 use crate::luks::{
@@ -31,11 +31,6 @@ pub enum ReplaceError {
     Cmd(#[from] crate::cmd::CmdError),
     #[error("parse error: {0}")]
     Parse(#[from] crate::parse::ParseError),
-}
-
-pub struct ReplaceStep {
-    pub risk: &'static str,
-    pub description: String,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -117,12 +112,12 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         config.mount_point(),
         will_clear_last_missing,
         pool.total_devices,
+        paths,
+        enroll_key_file,
     )?;
 
     if dry_run {
-        for step in &steps {
-            println!("[{:<11}] {}", step.risk, step.description);
-        }
+        Step::print_dry_run(&steps);
         return Ok(());
     }
 
@@ -469,7 +464,9 @@ fn compile_replace_steps(
     mount_point: &MountPoint,
     will_clear_last_missing: bool,
     total_devices: u64,
-) -> Result<Vec<ReplaceStep>, ReplaceError> {
+    paths: &StatePaths,
+    enroll_key_file: Option<&Path>,
+) -> Result<Vec<Step>, ReplaceError> {
     let new_mn = mapper_name(new_name);
     let mut steps = Vec::new();
 
@@ -481,61 +478,122 @@ fn compile_replace_steps(
             )));
         }
         ConfigDiskState::PresentNotLuks => {
-            steps.push(ReplaceStep {
+            let mut extra_opts = luks_opts_from_env();
+            extra_opts.push("--label".into());
+            extra_opts.push(format!("braid-{new_name}"));
+            steps.push(Step {
                 risk: "destructive",
                 description: format!("LUKS format {}", new_by_id),
+                commands: vec![CmdRequest::CryptsetupLuksFormat {
+                    device: new_by_id.0.clone(),
+                    extra_opts,
+                }],
             });
-            steps.push(ReplaceStep {
+            let backup_path = paths
+                .luks_headers_dir()
+                .join(format!("{}.luksheader", new_mn.0));
+            steps.push(Step {
+                risk: "safe",
+                description: format!("LUKS header backup → {}", backup_path.display()),
+                commands: vec![CmdRequest::CryptsetupLuksHeaderBackup {
+                    device: new_by_id.0.clone(),
+                    backup_path: backup_path.display().to_string(),
+                }],
+            });
+            steps.push(Step {
                 risk: "safe",
                 description: format!("LUKS open → {}", new_mn),
+                commands: vec![CmdRequest::CryptsetupLuksOpen {
+                    device: new_by_id.0.clone(),
+                    mapper: new_mn.0.clone(),
+                }],
             });
+            if let Some(kf) = enroll_key_file {
+                steps.push(Step {
+                    risk: "safe",
+                    description: format!("enroll keyfile → LUKS slot 1 on {}", new_by_id),
+                    commands: vec![CmdRequest::CryptsetupLuksAddKeyFile {
+                        device: new_by_id.0.clone(),
+                        key_file_path: kf.display().to_string(),
+                    }],
+                });
+            }
         }
         ConfigDiskState::PresentLuks { mapper_open, .. } => {
             if !mapper_open {
-                steps.push(ReplaceStep {
+                steps.push(Step {
                     risk: "safe",
                     description: format!("LUKS open → {}", new_mn),
+                    commands: vec![CmdRequest::CryptsetupLuksOpen {
+                        device: new_by_id.0.clone(),
+                        mapper: new_mn.0.clone(),
+                    }],
                 });
             }
         }
     }
 
+    let new_mapper_path = format!("/dev/mapper/{}", new_mn.0);
     match replace_source {
         ReplaceSource::Live { mapper, devid } => {
-            steps.push(ReplaceStep {
+            steps.push(Step {
                 risk: "long",
                 description: format!(
                     "btrfs replace start {} /dev/mapper/{} {}",
                     devid, new_mn, mount_point
                 ),
+                commands: vec![CmdRequest::BtrfsReplaceStart {
+                    devid: *devid,
+                    target_device: new_mapper_path,
+                    mount_point: mount_point.clone(),
+                }],
             });
-            steps.push(ReplaceStep {
+            steps.push(Step {
                 risk: "safe",
                 description: format!("btrfs filesystem resize {}:max {}", devid, mount_point),
+                commands: vec![CmdRequest::BtrfsFilesystemResize {
+                    devid: *devid,
+                    mount_point: mount_point.clone(),
+                }],
             });
-            steps.push(ReplaceStep {
+            steps.push(Step {
                 risk: "safe",
                 description: format!("cryptsetup close {}", mapper),
+                commands: vec![CmdRequest::CryptsetupClose {
+                    mapper: mapper.0.clone(),
+                }],
             });
         }
         ReplaceSource::Missing { devid } => {
-            steps.push(ReplaceStep {
+            steps.push(Step {
                 risk: "long",
                 description: format!(
                     "btrfs replace start {} /dev/mapper/{} {}",
                     devid, new_mn, mount_point
                 ),
+                commands: vec![CmdRequest::BtrfsReplaceStart {
+                    devid: *devid,
+                    target_device: new_mapper_path,
+                    mount_point: mount_point.clone(),
+                }],
             });
-            steps.push(ReplaceStep {
+            steps.push(Step {
                 risk: "safe",
                 description: format!("btrfs filesystem resize {}:max {}", devid, mount_point),
+                commands: vec![CmdRequest::BtrfsFilesystemResize {
+                    devid: *devid,
+                    mount_point: mount_point.clone(),
+                }],
             });
             if will_clear_last_missing && total_devices >= 2 {
-                steps.push(ReplaceStep {
+                steps.push(Step {
                     risk: "long",
                     description:
                         "btrfs balance -dconvert=raid1,soft -mconvert=raid1,soft (restore redundancy)"
                             .into(),
+                    commands: vec![CmdRequest::BtrfsBalanceRaid1Soft {
+                        mount_point: mount_point.clone(),
+                    }],
                 });
             }
         }
@@ -597,6 +655,11 @@ fn build_replacement_membership(
 mod tests {
     use super::*;
     use crate::cmd::{CmdRequest, MockRunner, RawCommandOutput};
+    use crate::state_paths::StatePaths;
+
+    fn test_paths() -> StatePaths {
+        StatePaths::custom("/var/lib/braid".into())
+    }
 
     #[test]
     fn replace_confirm_warns_about_luks_format_for_non_luks_disk() {
@@ -833,6 +896,8 @@ mod tests {
             &MountPoint("/mnt/storage".into()),
             false,
             2,
+            &test_paths(),
+            None,
         )
         .unwrap();
         let descriptions: Vec<&str> = steps.iter().map(|s| s.description.as_str()).collect();
@@ -891,6 +956,8 @@ mod tests {
             &MountPoint("/mnt/storage".into()),
             true,
             2,
+            &test_paths(),
+            None,
         )
         .unwrap();
         let descriptions: Vec<&str> = steps.iter().map(|s| s.description.as_str()).collect();
@@ -1109,6 +1176,8 @@ mod tests {
             &MountPoint("/mnt/storage".into()),
             false,
             3,
+            &test_paths(),
+            None,
         )
         .unwrap();
         let descriptions: Vec<&str> = steps.iter().map(|s| s.description.as_str()).collect();
@@ -1136,6 +1205,8 @@ mod tests {
             &MountPoint("/mnt/storage".into()),
             true,
             1,
+            &test_paths(),
+            None,
         )
         .unwrap();
         let descriptions: Vec<&str> = steps.iter().map(|s| s.description.as_str()).collect();
@@ -1149,7 +1220,6 @@ mod tests {
 
     use crate::cmd::{CmdError, CommandRunner as CmdRunner2};
     use crate::membership::{self, DiskMember, PoolMembership};
-    use crate::state_paths::StatePaths;
 
     fn mock_ok(cmd: &str, stdout: &str) -> RawCommandOutput {
         RawCommandOutput {
@@ -1317,6 +1387,8 @@ mod tests {
             &MountPoint("/mnt/storage".into()),
             false,
             2,
+            &test_paths(),
+            None,
         )
         .unwrap();
         let descriptions: Vec<&str> = steps.iter().map(|s| s.description.as_str()).collect();
@@ -1326,5 +1398,65 @@ mod tests {
                 .any(|d| d.contains("-dconvert=raid1,soft")),
             "live path should NOT show soft balance, got: {descriptions:?}"
         );
+    }
+
+    #[test]
+    // Intent: dry-run for fresh-disk live replace shows full LUKS init + replace commands.
+    // Why: verifies header backup and keyfile enrollment appear in dry-run.
+    // Scenario: replacing disk2 with a fresh disk3, with keyfile enrollment.
+    fn dry_run_render_fresh_disk_live_replace_with_keyfile() {
+        let new_probed = new_probed_not_luks();
+        let source = ReplaceSource::Live {
+            mapper: MapperName("braid-disk2".into()),
+            devid: 2,
+        };
+        let kf = Path::new("/mnt/usb/braid.key");
+        let steps = compile_replace_steps(
+            "disk3",
+            &ByIdPath("/dev/disk/by-id/virtio-disk3".into()),
+            &new_probed,
+            &source,
+            &MountPoint("/mnt/storage".into()),
+            false,
+            2,
+            &test_paths(),
+            Some(kf),
+        )
+        .unwrap();
+        let output = Step::render_dry_run(&steps);
+        let lines: Vec<&str> = output.lines().collect();
+
+        // Steps: LUKS format, header backup, LUKS open, keyfile enroll,
+        //        replace start, resize, close old = 7 steps × 2 lines each = 14
+        assert_eq!(lines.len(), 14, "expected 14 lines, got:\n{output}");
+
+        // LUKS format
+        assert!(lines[0].contains("[destructive]"));
+        assert!(lines[1].contains("$ cryptsetup luksFormat"));
+        assert!(lines[1].contains("--label braid-disk3"));
+
+        // Header backup
+        assert!(lines[2].contains("LUKS header backup"));
+        assert!(lines[3].contains("$ cryptsetup luksHeaderBackup"));
+
+        // LUKS open
+        assert!(lines[4].contains("LUKS open"));
+        assert!(lines[5].contains("$ cryptsetup open --type luks"));
+
+        // Keyfile enrollment
+        assert!(lines[6].contains("enroll keyfile"));
+        assert!(lines[7].contains("$ cryptsetup luksAddKey"));
+        assert!(lines[7].contains("/mnt/usb/braid.key"));
+
+        // Replace start
+        assert!(lines[8].contains("[long       ]"));
+        assert!(lines[9].contains("$ btrfs replace start"));
+
+        // Resize
+        assert!(lines[10].contains("btrfs filesystem resize"));
+
+        // Close old mapper
+        assert!(lines[12].contains("cryptsetup close"));
+        assert_eq!(lines[13], "               $ cryptsetup close braid-disk2");
     }
 }
