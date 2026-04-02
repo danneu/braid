@@ -74,6 +74,7 @@ with subtest("braid status --json has schema fields and disk details"):
     assert s["total_devices"] == 3, f"Bad total_devices: {s['total_devices']}"
     assert s["present_count"] == 3, f"Bad present_count: {s['present_count']}"
     assert s["missing_count"] == 0, f"Bad missing_count: {s['missing_count']}"
+    assert "missing_devids" not in s, f"missing_devids should be omitted when empty: {s}"
     assert s["profile"] == "RAID1", f"Bad profile: {s['profile']}"
     assert "total_bytes" in s["capacity"], "Missing capacity.total_bytes"
     assert "used_bytes" in s["capacity"], "Missing capacity.used_bytes"

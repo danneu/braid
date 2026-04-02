@@ -4,16 +4,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::alert::{self, AlertCause, AlertState};
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, LsblkFieldKind};
-use crate::config::{self, Config, mapper_name};
+use crate::config::{self, mapper_name, Config};
 use crate::luks;
 use crate::membership::{self, PoolMembership};
 use crate::parse::types::BalanceState;
 use crate::parse::{
-    BtrfsDeviceStatsOutput, ParseError, ScrubState, parse_btrfs_balance_status,
-    parse_btrfs_device_stats, parse_btrfs_device_usage, parse_btrfs_df_json,
-    parse_btrfs_filesystem_usage, parse_btrfs_scrub_status, parse_lsblk_field,
+    parse_btrfs_balance_status, parse_btrfs_device_stats, parse_btrfs_device_usage,
+    parse_btrfs_df_json, parse_btrfs_filesystem_usage, parse_btrfs_scrub_status, parse_lsblk_field,
+    BtrfsDeviceStatsOutput, ParseError, ScrubState,
 };
-use crate::probe::{Filesystem, ProbeError, probe_config_disk, probe_pool};
+use crate::probe::{probe_config_disk, probe_pool, Filesystem, ProbeError};
 use crate::state_paths::StatePaths;
 use crate::types::*;
 
@@ -67,6 +67,8 @@ pub struct StatusReport {
     pub alert_active: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub alert_causes: Vec<AlertCause>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing_devids: Vec<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -269,6 +271,7 @@ pub fn build_status_report<R: CommandRunner, F: Filesystem>(
                 advisories: advisories.clone(),
                 alert_active: alert_state.active,
                 alert_causes: alert_state.causes,
+                missing_devids: vec![],
             });
         }
         Err(e) => return Err(e.into()),
@@ -292,6 +295,7 @@ pub fn build_status_report<R: CommandRunner, F: Filesystem>(
             advisories: advisories.clone(),
             alert_active: alert_state.active,
             alert_causes: alert_state.causes,
+            missing_devids: vec![],
         });
     }
 
@@ -332,6 +336,7 @@ pub fn build_status_report<R: CommandRunner, F: Filesystem>(
         advisories,
         alert_active: alert_state.active,
         alert_causes: alert_state.causes,
+        missing_devids: pool.missing_devids.clone(),
     })
 }
 
@@ -378,6 +383,7 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
             advisories: advisories.clone(),
             alert_active: alert_state.active,
             alert_causes: alert_state.causes,
+            missing_devids: vec![],
         };
         if json {
             println!("{}", serde_json::to_string_pretty(&report)?);
@@ -441,6 +447,7 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
         advisories,
         alert_active: alert_state.active,
         alert_causes: alert_state.causes,
+        missing_devids: pool.missing_devids.clone(),
     };
 
     // 9. Output
@@ -1562,6 +1569,7 @@ mod tests {
             advisories: vec![],
             alert_active: false,
             alert_causes: vec![],
+            missing_devids: vec![],
         };
 
         let json_str = serde_json::to_string_pretty(&report).unwrap();
@@ -1619,6 +1627,7 @@ mod tests {
             advisories: vec![],
             alert_active: false,
             alert_causes: vec![],
+            missing_devids: vec![],
         };
 
         let json_str = serde_json::to_string_pretty(&report).unwrap();
@@ -1643,6 +1652,12 @@ mod tests {
         assert_eq!(alloc[0]["allocated_bytes"], 67108864);
         assert_eq!(alloc[1]["bg_type"], "Metadata");
         assert_eq!(alloc[2]["bg_type"], "System");
+
+        // missing_devids omitted when empty (skip_serializing_if)
+        assert!(
+            !obj.contains_key("missing_devids"),
+            "missing_devids should be omitted when empty"
+        );
     }
 
     #[test]
@@ -1667,6 +1682,7 @@ mod tests {
             advisories: vec![],
             alert_active: false,
             alert_causes: vec![],
+            missing_devids: vec![3],
         };
 
         let json_str = serde_json::to_string_pretty(&report).unwrap();
@@ -1674,6 +1690,7 @@ mod tests {
         let obj = v.as_object().unwrap();
 
         assert_eq!(obj["status"], "degraded");
+        assert_eq!(obj["missing_devids"], serde_json::json!([3]));
     }
 
     #[test]
@@ -1724,6 +1741,7 @@ mod tests {
             advisories: vec![],
             alert_active: false,
             alert_causes: vec![],
+            missing_devids: vec![],
         };
 
         let json_str = serde_json::to_string_pretty(&report).unwrap();
@@ -1773,6 +1791,7 @@ mod tests {
             advisories: vec![],
             alert_active: false,
             alert_causes: vec![],
+            missing_devids: vec![],
         };
         let json_str = serde_json::to_string_pretty(&report).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
@@ -1802,6 +1821,7 @@ mod tests {
             advisories: vec![],
             alert_active: false,
             alert_causes: vec![],
+            missing_devids: vec![],
         };
         let json_str = serde_json::to_string_pretty(&report).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
@@ -1845,6 +1865,7 @@ mod tests {
             advisories: vec![],
             alert_active: false,
             alert_causes: vec![],
+            missing_devids: vec![],
         };
         let json_str = serde_json::to_string_pretty(&report).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
@@ -1874,6 +1895,7 @@ mod tests {
             advisories: vec![],
             alert_active: false,
             alert_causes: vec![],
+            missing_devids: vec![],
         };
         let human = format_status_human(&report, None, None);
         assert!(human.contains("not mounted"), "got:\n{human}");
@@ -1922,6 +1944,7 @@ mod tests {
             advisories: vec![],
             alert_active: false,
             alert_causes: vec![],
+            missing_devids: vec![],
         };
         let compact = vec![CompactDrive {
             name: "disk1".to_owned(),
@@ -1986,6 +2009,7 @@ mod tests {
             advisories: vec![],
             alert_active: false,
             alert_causes: vec![],
+            missing_devids: vec![],
         };
         let compact = vec![
             CompactDrive {
@@ -2040,6 +2064,7 @@ mod tests {
             advisories: vec![],
             alert_active: false,
             alert_causes: vec![],
+            missing_devids: vec![],
         };
         let compact = vec![
             CompactDrive {
@@ -2092,6 +2117,7 @@ mod tests {
             advisories: vec![],
             alert_active: false,
             alert_causes: vec![],
+            missing_devids: vec![],
         };
         let human = format_status_human(&report, None, None);
         assert!(
@@ -2143,6 +2169,7 @@ mod tests {
             advisories: vec![],
             alert_active: false,
             alert_causes: vec![],
+            missing_devids: vec![],
         };
 
         let human = format_status_human(&report, None, Some(&human_disks));
@@ -2187,6 +2214,7 @@ mod tests {
             advisories: vec![],
             alert_active: false,
             alert_causes: vec![],
+            missing_devids: vec![],
         };
 
         let human = format_status_human(&report, None, Some(&human_disks));
@@ -2234,6 +2262,7 @@ mod tests {
             advisories: vec![],
             alert_active: false,
             alert_causes: vec![],
+            missing_devids: vec![],
         };
 
         let human = format_status_human(&report, None, Some(&human_disks));
@@ -2466,6 +2495,7 @@ mod tests {
             advisories: vec![],
             alert_active: false,
             alert_causes: vec![],
+            missing_devids: vec![],
         };
         let human = format_status_human(&report, None, None);
         assert!(
@@ -2496,6 +2526,7 @@ mod tests {
             advisories: vec![],
             alert_active: false,
             alert_causes: vec![],
+            missing_devids: vec![],
         };
         let human = format_status_human(&report, None, None);
         assert!(human.contains("Balance:  unknown"), "got:\n{human}");
@@ -2523,6 +2554,7 @@ mod tests {
             advisories: vec![],
             alert_active: false,
             alert_causes: vec![],
+            missing_devids: vec![],
         };
         let human = format_status_human(&report, None, None);
         assert!(
@@ -2876,6 +2908,7 @@ mod tests {
             advisories: vec![],
             alert_active: false,
             alert_causes: vec![],
+            missing_devids: vec![],
         };
         let human = format_status_human(&report, Some(&compact), None);
         assert!(human.contains("new"), "got:\n{human}");
@@ -2936,6 +2969,7 @@ mod tests {
             advisories: vec![],
             alert_active: false,
             alert_causes: vec![],
+            missing_devids: vec![],
         };
 
         let human = format_status_human(&report, None, Some(&human_disks));
@@ -2977,6 +3011,7 @@ mod tests {
             advisories: vec![],
             alert_active: false,
             alert_causes: vec![],
+            missing_devids: vec![],
         };
 
         let human = format_status_human(&report, None, Some(&human_disks));
@@ -3010,6 +3045,7 @@ mod tests {
             advisories: vec![],
             alert_active: false,
             alert_causes: vec![],
+            missing_devids: vec![],
         };
         let compact = vec![
             CompactDrive {
@@ -3055,6 +3091,7 @@ mod tests {
             advisories: vec![],
             alert_active: true,
             alert_causes: causes,
+            missing_devids: vec![],
         }
     }
 

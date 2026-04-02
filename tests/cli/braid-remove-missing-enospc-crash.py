@@ -105,12 +105,13 @@ with subtest("Simulate disk3 death and mount degraded"):
     print(f"Device usage after death:\n{dev_usage}")
 
 def get_missing_devid():
-    """Get the devid of the missing device from btrfs fi show."""
-    import re
-    fi_show = machine.succeed("btrfs fi show /mnt/storage")
-    m = re.search(r"devid\s+(\d+)\s+.*missing", fi_show, re.IGNORECASE)
-    assert m, "No missing device found in:\n" + fi_show
-    return m.group(1)
+    """Get the devid of the missing device from braid status --json."""
+    import json
+    raw = machine.succeed("braid status --json")
+    report = json.loads(raw)
+    devids = report.get("missing_devids", [])
+    assert len(devids) > 0, "No missing devids in braid status:\n" + raw
+    return str(devids[0])
 
 # --- Phase 4: braid remove-missing rejects with space error ---
 

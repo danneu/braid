@@ -69,12 +69,13 @@ with subtest("Make membership dir read-only"):
     machine.succeed("mount -o remount,bind,ro /var/lib/braid")
 
 def get_missing_devid():
-    """Get the devid of the missing device from btrfs fi show."""
-    import re
-    fi_show = machine.succeed("btrfs fi show /mnt/storage")
-    m = re.search(r"devid\s+(\d+)\s+.*missing", fi_show, re.IGNORECASE)
-    assert m, "No missing device found in:\n" + fi_show
-    return m.group(1)
+    """Get the devid of the missing device from braid status --json."""
+    import json
+    raw = machine.succeed("braid status --json")
+    report = json.loads(raw)
+    devids = report.get("missing_devids", [])
+    assert len(devids) > 0, "No missing devids in braid status:\n" + raw
+    return str(devids[0])
 
 missing_devid = get_missing_devid()
 
