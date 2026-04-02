@@ -1,28 +1,35 @@
-use nom::{
-    bytes::complete::take_till1,
-    character::complete::{char, digit1, space1},
-    combinator::eof,
-    IResult,
-};
+use serde::Deserialize;
 
 use crate::cmd::RawCommandOutput;
 
 use super::types::{BtrfsDeviceStatsOutput, DeviceErrorStats, DeviceStatsTarget};
 use super::ParseError;
 
-// Parses: "[/dev/mapper/braid-vda].write_io_errs    0"
-//      → ("/dev/mapper/braid-vda", "write_io_errs", "0")
-fn parse_stats_line(input: &str) -> IResult<&str, (&str, &str, &str)> {
-    let (input, _) = char('[')(input)?;
-    let (input, device) = take_till1(|c| c == ']')(input)?;
-    let (input, _) = char(']')(input)?;
-    let (input, _) = char('.')(input)?;
-    let (input, field) = take_till1(|c: char| c.is_ascii_whitespace())(input)?;
-    let (input, _) = space1(input)?;
-    let (input, value) = digit1(input)?;
-    let (input, _) = eof(input)?;
-    Ok((input, (device, field, value)))
+// --- Serde helper structs (not exposed to domain code) ---
+
+#[derive(Deserialize)]
+struct RawDeviceStatsOutput {
+    #[serde(rename = "__header")]
+    _header: Option<serde_json::Value>,
+
+    #[serde(rename = "device-stats")]
+    device_stats: Vec<RawDeviceStatsEntry>,
 }
+
+// No deny_unknown_fields: forward-compatible with future fields like discard_errs.
+#[derive(Deserialize)]
+struct RawDeviceStatsEntry {
+    device: String,
+    #[allow(dead_code)]
+    devid: u64,
+    write_io_errs: u64,
+    read_io_errs: u64,
+    flush_io_errs: u64,
+    corruption_errs: u64,
+    generation_errs: u64,
+}
+
+// --- Public parse function ---
 
 pub fn parse_btrfs_device_stats(
     raw: &RawCommandOutput,
@@ -35,57 +42,32 @@ pub fn parse_btrfs_device_stats(
         });
     }
 
-    // Collect stats keyed by device target, preserving order
-    let mut device_order: Vec<DeviceStatsTarget> = Vec::new();
-    let mut stats_map: std::collections::HashMap<DeviceStatsTarget, DeviceErrorStats> =
-        std::collections::HashMap::new();
-
-    for line in raw.stdout.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let (_, (device, field_name, value_str)) =
-            parse_stats_line(trimmed).map_err(|_| ParseError::InvalidText {
-                cmd: raw.cmd.clone(),
-                detail: format!("unexpected device stats line: {trimmed:?}"),
-            })?;
-
-        let target = if device == "<missing disk>" {
-            DeviceStatsTarget::MissingDisk
-        } else {
-            DeviceStatsTarget::Path(device.to_owned())
-        };
-        let value: u64 = value_str.parse().map_err(|_| ParseError::InvalidText {
+    let parsed: RawDeviceStatsOutput =
+        serde_json::from_str(&raw.stdout).map_err(|e| ParseError::InvalidJson {
             cmd: raw.cmd.clone(),
-            detail: format!("non-numeric stat value in: {trimmed:?}"),
+            detail: e.to_string(),
         })?;
 
-        let entry = stats_map.entry(target.clone()).or_insert_with(|| {
-            device_order.push(target.clone());
-            DeviceErrorStats {
-                target: target.clone(),
-                read_io_errs: 0,
-                write_io_errs: 0,
-                corruption_errs: 0,
-                generation_errs: 0,
-                flush_io_errs: 0,
-            }
-        });
-
-        match field_name {
-            "read_io_errs" => entry.read_io_errs = value,
-            "write_io_errs" => entry.write_io_errs = value,
-            "flush_io_errs" => entry.flush_io_errs = value,
-            "corruption_errs" => entry.corruption_errs = value,
-            "generation_errs" => entry.generation_errs = value,
-            _ => {} // Ignore unknown fields — forward-compatible
-        }
-    }
-
-    let devices = device_order
+    let devices = parsed
+        .device_stats
         .into_iter()
-        .map(|t| stats_map.remove(&t).unwrap())
+        .map(|e| {
+            // Missing devices have no real path; btrfs-progs synthesizes "devid:<n>"
+            // (see reference/btrfs-progs/cmds/device.c:634).
+            let target = if e.device.starts_with("devid:") {
+                DeviceStatsTarget::MissingDisk
+            } else {
+                DeviceStatsTarget::Path(e.device)
+            };
+            DeviceErrorStats {
+                target,
+                read_io_errs: e.read_io_errs,
+                write_io_errs: e.write_io_errs,
+                flush_io_errs: e.flush_io_errs,
+                corruption_errs: e.corruption_errs,
+                generation_errs: e.generation_errs,
+            }
+        })
         .collect();
 
     Ok(BtrfsDeviceStatsOutput { devices })
@@ -109,7 +91,7 @@ mod tests {
     fn device_stats_parses_nixos_25_11_2disk() {
         let raw = RawCommandOutput {
             cmd: "btrfs device stats".into(),
-            stdout: fixture("btrfs-device-stats-2disk.txt"),
+            stdout: fixture("btrfs-device-stats-2disk.json"),
             stderr: String::new(),
             exit_status: 0,
         };
@@ -132,17 +114,29 @@ mod tests {
     fn device_stats_parses_errors_inline() {
         let raw = RawCommandOutput {
             cmd: "btrfs device stats".into(),
-            stdout: "[/dev/mapper/braid-vda].write_io_errs    0\n\
-                     [/dev/mapper/braid-vda].read_io_errs     3\n\
-                     [/dev/mapper/braid-vda].flush_io_errs    0\n\
-                     [/dev/mapper/braid-vda].corruption_errs  1\n\
-                     [/dev/mapper/braid-vda].generation_errs  0\n\
-                     [/dev/mapper/braid-vdb].write_io_errs    0\n\
-                     [/dev/mapper/braid-vdb].read_io_errs     0\n\
-                     [/dev/mapper/braid-vdb].flush_io_errs    0\n\
-                     [/dev/mapper/braid-vdb].corruption_errs  0\n\
-                     [/dev/mapper/braid-vdb].generation_errs  0\n"
-                .into(),
+            stdout: r#"{
+                "device-stats": [
+                    {
+                        "device": "/dev/mapper/braid-vda",
+                        "devid": 1,
+                        "write_io_errs": 0,
+                        "read_io_errs": 3,
+                        "flush_io_errs": 0,
+                        "corruption_errs": 1,
+                        "generation_errs": 0
+                    },
+                    {
+                        "device": "/dev/mapper/braid-vdb",
+                        "devid": 2,
+                        "write_io_errs": 0,
+                        "read_io_errs": 0,
+                        "flush_io_errs": 0,
+                        "corruption_errs": 0,
+                        "generation_errs": 0
+                    }
+                ]
+            }"#
+            .into(),
             stderr: String::new(),
             exit_status: 0,
         };
@@ -158,13 +152,21 @@ mod tests {
     fn device_stats_ignores_unknown_fields_parses_known() {
         let raw = RawCommandOutput {
             cmd: "btrfs device stats".into(),
-            stdout: "[/dev/mapper/braid-vda].write_io_errs    0\n\
-                     [/dev/mapper/braid-vda].read_io_errs     2\n\
-                     [/dev/mapper/braid-vda].flush_io_errs    0\n\
-                     [/dev/mapper/braid-vda].corruption_errs  0\n\
-                     [/dev/mapper/braid-vda].generation_errs  0\n\
-                     [/dev/mapper/braid-vda].discard_errs     7\n"
-                .into(),
+            stdout: r#"{
+                "device-stats": [
+                    {
+                        "device": "/dev/mapper/braid-vda",
+                        "devid": 1,
+                        "write_io_errs": 0,
+                        "read_io_errs": 2,
+                        "flush_io_errs": 0,
+                        "corruption_errs": 0,
+                        "generation_errs": 0,
+                        "discard_errs": 7
+                    }
+                ]
+            }"#
+            .into(),
             stderr: String::new(),
             exit_status: 0,
         };
@@ -175,24 +177,36 @@ mod tests {
         // discard_errs (unknown) is silently dropped — not in DeviceErrorStats
     }
 
-    /// Parser contract: `<missing disk>` sentinel is converted to
-    /// `DeviceStatsTarget::MissingDisk` at parse time so downstream code
-    /// never sees the raw string.
+    /// Parser contract: missing devices are detected via the "devid:<n>" path
+    /// synthesized by btrfs-progs when path_canonicalize returns NULL
+    /// (see reference/btrfs-progs/cmds/device.c:634).
     #[test]
     fn device_stats_parses_missing_disk_sentinel() {
         let raw = RawCommandOutput {
             cmd: "btrfs device stats".into(),
-            stdout: "[/dev/mapper/braid-vda].write_io_errs    0\n\
-                     [/dev/mapper/braid-vda].read_io_errs     0\n\
-                     [/dev/mapper/braid-vda].flush_io_errs    0\n\
-                     [/dev/mapper/braid-vda].corruption_errs  0\n\
-                     [/dev/mapper/braid-vda].generation_errs  0\n\
-                     [<missing disk>].write_io_errs    0\n\
-                     [<missing disk>].read_io_errs     0\n\
-                     [<missing disk>].flush_io_errs    0\n\
-                     [<missing disk>].corruption_errs  0\n\
-                     [<missing disk>].generation_errs  0\n"
-                .into(),
+            stdout: r#"{
+                "device-stats": [
+                    {
+                        "device": "/dev/mapper/braid-vda",
+                        "devid": 1,
+                        "write_io_errs": 0,
+                        "read_io_errs": 0,
+                        "flush_io_errs": 0,
+                        "corruption_errs": 0,
+                        "generation_errs": 0
+                    },
+                    {
+                        "device": "devid:2",
+                        "devid": 2,
+                        "write_io_errs": 0,
+                        "read_io_errs": 0,
+                        "flush_io_errs": 0,
+                        "corruption_errs": 0,
+                        "generation_errs": 0
+                    }
+                ]
+            }"#
+            .into(),
             stderr: String::new(),
             exit_status: 0,
         };
@@ -209,7 +223,7 @@ mod tests {
     fn device_stats_empty_output_gives_no_devices() {
         let raw = RawCommandOutput {
             cmd: "btrfs device stats".into(),
-            stdout: String::new(),
+            stdout: r#"{"device-stats": []}"#.into(),
             stderr: String::new(),
             exit_status: 0,
         };

@@ -36,7 +36,7 @@ pub fn cmd_monitor<R: CommandRunner>(
     }
 
     // 2. Run btrfs device stats
-    let stats_raw = runner.run(&CmdRequest::BtrfsDeviceStats {
+    let stats_raw = runner.run(&CmdRequest::BtrfsDeviceStatsJson {
         mount_point: MountPoint(mount_point.to_owned()),
     })?;
     let device_stats = parse_btrfs_device_stats(&stats_raw)?;

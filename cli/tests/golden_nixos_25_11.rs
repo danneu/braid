@@ -123,7 +123,7 @@ golden_test!(
 
 golden_test!(
     golden_btrfs_device_stats,
-    "btrfs-device-stats-2disk.txt",
+    "btrfs-device-stats-2disk.json",
     "btrfs device stats",
     parse::btrfs_device_stats::parse_btrfs_device_stats,
     |out: parse::types::BtrfsDeviceStatsOutput| {

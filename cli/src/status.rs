@@ -584,7 +584,7 @@ fn get_device_stats<R: CommandRunner>(
     runner: &R,
     mount_point: &str,
 ) -> Result<BtrfsDeviceStatsOutput, StatusError> {
-    let raw = runner.run(&CmdRequest::BtrfsDeviceStats {
+    let raw = runner.run(&CmdRequest::BtrfsDeviceStatsJson {
         mount_point: MountPoint(mount_point.to_owned()),
     })?;
     let stats = parse_btrfs_device_stats(&raw)?;
@@ -1301,21 +1301,11 @@ mod tests {
     fn btrfs_device_stats_3disk() -> RawCommandOutput {
         ok_raw(
             "btrfs device stats",
-            "[/dev/mapper/disk1].write_io_errs    0\n\
-             [/dev/mapper/disk1].read_io_errs     0\n\
-             [/dev/mapper/disk1].flush_io_errs    0\n\
-             [/dev/mapper/disk1].corruption_errs  0\n\
-             [/dev/mapper/disk1].generation_errs  0\n\
-             [/dev/mapper/disk2].write_io_errs    0\n\
-             [/dev/mapper/disk2].read_io_errs     0\n\
-             [/dev/mapper/disk2].flush_io_errs    0\n\
-             [/dev/mapper/disk2].corruption_errs  0\n\
-             [/dev/mapper/disk2].generation_errs  0\n\
-             [/dev/mapper/disk3].write_io_errs    0\n\
-             [/dev/mapper/disk3].read_io_errs     0\n\
-             [/dev/mapper/disk3].flush_io_errs    0\n\
-             [/dev/mapper/disk3].corruption_errs  0\n\
-             [/dev/mapper/disk3].generation_errs  0\n",
+            r#"{"device-stats": [
+                {"device": "/dev/mapper/disk1", "devid": 1, "write_io_errs": 0, "read_io_errs": 0, "flush_io_errs": 0, "corruption_errs": 0, "generation_errs": 0},
+                {"device": "/dev/mapper/disk2", "devid": 2, "write_io_errs": 0, "read_io_errs": 0, "flush_io_errs": 0, "corruption_errs": 0, "generation_errs": 0},
+                {"device": "/dev/mapper/disk3", "devid": 3, "write_io_errs": 0, "read_io_errs": 0, "flush_io_errs": 0, "corruption_errs": 0, "generation_errs": 0}
+            ]}"#,
         )
     }
 
@@ -1433,7 +1423,7 @@ mod tests {
                 btrfs_scrub_never(),
             )
             .with_output(
-                CmdRequest::BtrfsDeviceStats {
+                CmdRequest::BtrfsDeviceStatsJson {
                     mount_point: MountPoint("/mnt/storage".to_owned()),
                 },
                 btrfs_device_stats_3disk(),
@@ -1473,7 +1463,7 @@ mod tests {
             )
             // device stats
             .with_output(
-                CmdRequest::BtrfsDeviceStats {
+                CmdRequest::BtrfsDeviceStatsJson {
                     mount_point: MountPoint("/mnt/storage".to_owned()),
                 },
                 btrfs_device_stats_3disk(),
@@ -2590,7 +2580,7 @@ mod tests {
     #[test]
     fn status_device_stats_failure_fatal() {
         let runner = MockRunner::default().with_output(
-            CmdRequest::BtrfsDeviceStats {
+            CmdRequest::BtrfsDeviceStatsJson {
                 mount_point: MountPoint("/mnt/storage".to_owned()),
             },
             err_raw("btrfs device stats", 1, "error"),
@@ -2727,7 +2717,7 @@ mod tests {
                 btrfs_scrub_never(),
             )
             .with_output(
-                CmdRequest::BtrfsDeviceStats {
+                CmdRequest::BtrfsDeviceStatsJson {
                     mount_point: MountPoint("/mnt/storage".to_owned()),
                 },
                 btrfs_device_stats_3disk(),
@@ -2819,16 +2809,14 @@ mod tests {
                 btrfs_scrub_never(),
             )
             .with_output(
-                CmdRequest::BtrfsDeviceStats {
+                CmdRequest::BtrfsDeviceStatsJson {
                     mount_point: MountPoint("/mnt/storage".to_owned()),
                 },
                 ok_raw(
                     "btrfs device stats",
-                    "[/dev/mapper/disk1].write_io_errs    0\n\
-                     [/dev/mapper/disk1].read_io_errs     0\n\
-                     [/dev/mapper/disk1].flush_io_errs    0\n\
-                     [/dev/mapper/disk1].corruption_errs  0\n\
-                     [/dev/mapper/disk1].generation_errs  0\n",
+                    r#"{"device-stats": [
+                        {"device": "/dev/mapper/disk1", "devid": 1, "write_io_errs": 0, "read_io_errs": 0, "flush_io_errs": 0, "corruption_errs": 0, "generation_errs": 0}
+                    ]}"#,
                 ),
             )
             // probe_config_disk for disk1 (by-id path)

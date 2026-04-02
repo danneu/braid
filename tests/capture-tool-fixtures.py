@@ -57,10 +57,10 @@ machine.succeed(
     f" > {FIXTURE_DIR}/btrfs-usage-raw.txt"
 )
 
-# 5. btrfs device stats (text)
+# 5. btrfs device stats (JSON)
 machine.succeed(
-    f"btrfs device stats {MOUNT}"
-    f" > {FIXTURE_DIR}/btrfs-device-stats-2disk.txt"
+    f"btrfs --format json device stats {MOUNT}"
+    f" > {FIXTURE_DIR}/btrfs-device-stats-2disk.json"
 )
 
 # 6. btrfs scrub status — before any scrub (should say "no stats available")

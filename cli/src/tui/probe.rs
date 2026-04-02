@@ -131,7 +131,7 @@ pub fn probe_pool_for_tui<R: CommandRunner>(
     // Device error stats
     let mut device_errors = HashMap::new();
     let device_stats_raw = runner
-        .run(&CmdRequest::BtrfsDeviceStats {
+        .run(&CmdRequest::BtrfsDeviceStatsJson {
             mount_point: MountPoint(mount_point.to_owned()),
         })
         .ok();

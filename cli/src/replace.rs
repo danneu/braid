@@ -246,7 +246,7 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     match &replace_source {
         ReplaceSource::Live { mapper, devid } => {
             // Pre-flight: warn if source device has I/O errors (informational only).
-            let stats_raw = runner.run(&CmdRequest::BtrfsDeviceStats {
+            let stats_raw = runner.run(&CmdRequest::BtrfsDeviceStatsJson {
                 mount_point: config.mount_point().clone(),
             });
             if let Ok(ref raw) = stats_raw {
@@ -1279,7 +1279,7 @@ mod tests {
                     "btrfs balance status",
                     "No balance found on '/mnt/storage'\n",
                 )),
-                CmdRequest::BtrfsDeviceStats { .. } => Ok(mock_ok("btrfs device stats", "")),
+                CmdRequest::BtrfsDeviceStatsJson { .. } => Ok(mock_ok("btrfs device stats", r#"{"device-stats": []}"#)),
                 CmdRequest::BtrfsReplaceStart { .. } => Ok(RawCommandOutput {
                     cmd: "btrfs replace start".into(),
                     stdout: String::new(),

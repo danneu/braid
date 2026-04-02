@@ -51,6 +51,9 @@ pub enum CmdRequest {
     BtrfsDeviceStats {
         mount_point: MountPoint,
     },
+    BtrfsDeviceStatsJson {
+        mount_point: MountPoint,
+    },
     LsblkField {
         device: String,
         field: LsblkFieldKind,
@@ -325,6 +328,16 @@ impl CmdRequest {
             CmdRequest::BtrfsDeviceStats { mount_point } => CmdArgs {
                 program: "btrfs",
                 args: vec!["device".into(), "stats".into(), mount_point.0.clone()],
+            },
+            CmdRequest::BtrfsDeviceStatsJson { mount_point } => CmdArgs {
+                program: "btrfs",
+                args: vec![
+                    "--format".into(),
+                    "json".into(),
+                    "device".into(),
+                    "stats".into(),
+                    mount_point.0.clone(),
+                ],
             },
             CmdRequest::BtrfsBalanceStatus { mount_point } => CmdArgs {
                 program: "btrfs",
