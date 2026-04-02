@@ -56,24 +56,22 @@ Decision docs must include an explicit status: `Draft`, `Active`, `Superseded`, 
 
 [`README.md`](README.md) is the end-user guide. Keep it updated when adding features or changing behavior. Style: brief, cookbook-like — short descriptions with copy-paste examples. Not reference material.
 
-## References
+## Documentation
 
-- [User stories](docs/1-user-stories.md) — full UX walkthrough from first disk to third
+[`docs/index.md`](docs/index.md) is the directory of all design docs and decision records. Check there before searching the codebase for context.
 
-## btrfs Documentation Reference
+Local btrfs-progs reference lives in [`docs/btrfs-docs/`](docs/btrfs-docs/). Fetch/refresh with `scripts/fetch-btrfs-docs.sh`. Use before searching the web.
 
-Local copy of the official btrfs-progs documentation lives in [`docs/btrfs-docs/`](docs/btrfs-docs/). Fetch/refresh it with `scripts/fetch-btrfs-docs.sh`. Use these docs before searching the web. Entry point: `docs/btrfs-docs/index.rst`.
-
-| Topic | File(s) |
-|---|---|
-| Adding/removing devices | `Volume-management.rst`, `btrfs-device.rst` |
-| Device replacement | `btrfs-replace.rst` |
-| Rebalancing | `Balance.rst`, `btrfs-balance.rst` |
-| RAID profiles (RAID1 etc.) | `mkfs.btrfs.rst` (search for "profiles") |
-| Mount options | `btrfs-man5.rst` |
-| Scrub / self-healing | `Scrub.rst` |
-| Filesystem limits & storage model | `btrfs-man5.rst` |
-| Administration overview | `Administration.rst` |
+| Topic                             | File(s)                                     |
+| --------------------------------- | ------------------------------------------- |
+| Adding/removing devices           | `Volume-management.rst`, `btrfs-device.rst` |
+| Device replacement                | `btrfs-replace.rst`                         |
+| Rebalancing                       | `Balance.rst`, `btrfs-balance.rst`          |
+| RAID profiles (RAID1 etc.)        | `mkfs.btrfs.rst` (search for "profiles")    |
+| Mount options                     | `btrfs-man5.rst`                            |
+| Scrub / self-healing              | `Scrub.rst`                                 |
+| Filesystem limits & storage model | `btrfs-man5.rst`                            |
+| Administration overview           | `Administration.rst`                        |
 
 ## Git Commits
 
