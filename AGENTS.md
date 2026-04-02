@@ -60,7 +60,14 @@ Decision docs must include an explicit status: `Draft`, `Active`, `Superseded`, 
 
 [`docs/index.md`](docs/index.md) is the directory of all design docs and decision records. Check there before searching the codebase for context.
 
-Local btrfs-progs reference lives in [`docs/btrfs-docs/`](docs/btrfs-docs/). Fetch/refresh with `scripts/fetch-btrfs-docs.sh`. Use before searching the web.
+### btrfs reference (docs + source)
+
+Before searching the web for btrfs behavior, consult local resources first:
+
+- **Docs:** [`docs/btrfs-docs/`](docs/btrfs-docs/) — RST docs from btrfs-progs. Start with `index.rst` for a full table of contents, or use the topic table below for common lookups. Glob by keyword for anything not in the table. Fetch/refresh with `just fetch-btrfs-docs`.
+- **Source:** [`reference/btrfs-progs/`](reference/btrfs-progs/) — vendored btrfs-progs source. `cmds/<subcommand>.c` has one file per btrfs subcommand (e.g. `cmds/scrub.c`). Consult when working on parsers, output format assumptions, or understanding exact tool behavior.
+
+**When to look:** Any time you're implementing, modifying, or debugging code that interacts with btrfs — especially parsers. Read the relevant doc *and* the corresponding source before making assumptions about output format or behavior.
 
 | Topic                             | File(s)                                     |
 | --------------------------------- | ------------------------------------------- |
