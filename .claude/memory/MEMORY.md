@@ -11,3 +11,4 @@
 - [feedback_dont_change_api_for_tests.md](feedback_dont_change_api_for_tests.md) — Don't warp command signatures just for testability; test the helper directly
 - [feedback_check_vendored_source.md](feedback_check_vendored_source.md) — Check vendored reference/ source before assuming JSON schemas or feature availability
 - [feedback_flag_required_followups.md](feedback_flag_required_followups.md) — Proactively flag required follow-up actions (like fixture capture) at end of implementation
+- [feedback_plan_lifecycle.md](feedback_plan_lifecycle.md) — Move plans/wip → plans/impl as final implementation step, same commit

@@ -27,5 +27,6 @@
       "Bash(gh api:*)"
     ]
   },
-  "plansDirectory": "./plans/wip"
+  "plansDirectory": "./plans/wip",
+  "autoMemoryDirectory": "/Users/dan/Code/braid/.claude/memory"
 }
