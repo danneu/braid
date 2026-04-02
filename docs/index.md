@@ -1,10 +1,21 @@
 # docs/
 
+## Frontmatter
+
+Docs should have YAML frontmatter. Add incrementally: when creating a new doc or substantively editing an existing one.
+
+- `intent`: (required) What this doc is focused on documenting and why; when to read it.
+
+```yaml
+---
+intent: Map device-disappearance states to btrfs, cryptsetup, and kernel output and how braid maps each to internal types. Read before modifying probe, monitor, or alert code.
+---
+```
+
 ## Top-level docs
 
 - [principles.md](principles.md) — Five canonical invariants: resilient boot, CLI-owned membership, safe operations, single passphrase, stable identifiers.
 - [1-user-stories.md](1-user-stories.md) — End-to-end user workflows from first disk through pool expansion and daily operation.
-- [btrfs-device-states.md](btrfs-device-states.md) — Device failure states mapped to tool output (`btrfs show`, `cryptsetup`, `device stats`) and braid's internal representation.
 - [btrfs-balance-profiles.md](btrfs-balance-profiles.md) — RAID profile conversions for data/metadata/system chunks; commands for single↔RAID1 transitions.
 - [btrfs-balance-soft.md](btrfs-balance-soft.md) — The `--soft` flag optimization for resuming interrupted profile conversions without rewriting already-converted chunks.
 - [btrfs-luks-sector-size.md](btrfs-luks-sector-size.md) — Why LUKS 4096-byte sector size is unnecessary — btrfs always writes 4096-byte blocks regardless.
@@ -35,6 +46,18 @@ Architecture decision records. Each has a status: `Draft`, `Active`, `Superseded
 - [decisions/toolchain-pinning.md](decisions/toolchain-pinning.md) — Pin parser-critical tools (btrfs-progs, cryptsetup, util-linux) to stable nixos-25.11.
 - [decisions/two-phase-apply.md](decisions/two-phase-apply.md) — **Superseded.** LUKS pre-phase to unlock drives before pool probing.
 - [decisions/unified-cli.md](decisions/unified-cli.md) — **Superseded.** Unified Rust CLI replacing multiple scripts with plan/apply workflow.
+
+## tool-behavior/
+
+How external tools (btrfs-progs, cryptsetup, util-linux) actually behave in specific scenarios. These map tool output to braid's internal types. Read before modifying code that parses or reacts to tool output.
+
+- [tool-behavior/device-disappearance.md](tool-behavior/device-disappearance.md) — Device failure states mapped to `btrfs show`, `device stats`, and `cryptsetup status` output, and how braid maps each.
+
+## real-world/
+
+Empirical observations from physical hardware testing. These validate the state models and assumptions in the design docs above. Each doc lists the code paths it validates — changes to those paths should prompt re-verification.
+
+- [real-world/sata-hot-unplug.md](real-world/sata-hot-unplug.md) — SATA hot-unplug/replug behavior: btrfs, cryptsetup, and kernel state transitions on real hardware.
 
 ## btrfs-docs/
 

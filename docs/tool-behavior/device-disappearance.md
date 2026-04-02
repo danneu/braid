@@ -1,19 +1,24 @@
-# btrfs Device States
+---
+intent: Map every device-disappearance state to the output of btrfs, cryptsetup, and the kernel, and show how braid maps each combination to internal types. Read this before modifying probe, monitor, or alert code.
+status: Draft
+---
 
-Status: **Draft**
+# Device Disappearance States
 
 When a physical drive disappears from a btrfs pool (hot-unplug, cable failure, drive death), the system passes through several states depending on how far the failure has progressed and whether the LUKS mapper is still open. Each state produces different output from `btrfs filesystem show`, `btrfs device stats`, and `cryptsetup status` — and braid must handle each combination correctly.
 
-This document maps real-world device states to tool output and braid's internal representation. It exists because this mapping is not derivable from reading braid's code or btrfs docs alone — it requires cross-tool knowledge that's easy to get wrong.
+This mapping is not derivable from reading braid's code or btrfs docs alone — it requires cross-tool knowledge that's easy to get wrong.
 
 ## State Table
 
-| State | `btrfs filesystem show` | `btrfs device stats` | `cryptsetup status` | braid maps to |
-|---|---|---|---|---|
-| **Healthy** | `path /dev/mapper/X` | `[/dev/mapper/X]` | `device: /dev/sdY` | `pool.devices` |
-| **Null-underlying** | `path /dev/mapper/X` | `[/dev/mapper/X]` | `device: (null)` | `pool.null_underlying` |
-| **MISSING with path** | `path /dev/mapper/X MISSING` | `[/dev/mapper/X]` (??) | not queried | `missing_devids` only — **gap, see below** |
-| **Fully gone** | `path MISSING` | `[<missing disk>]` | not queried | `missing_devids` |
+| State                 | `btrfs filesystem show`      | `btrfs device stats`   | `cryptsetup status` | braid maps to                              |
+| --------------------- | ---------------------------- | ---------------------- | ------------------- | ------------------------------------------ |
+| **Healthy**           | `path /dev/mapper/X`         | `[/dev/mapper/X]`      | `device: /dev/sdY`  | `pool.devices`                             |
+| **Null-underlying**   | `path /dev/mapper/X`         | `[/dev/mapper/X]`      | `device: (null)`    | `pool.null_underlying`                     |
+| **MISSING with path** | `path /dev/mapper/X MISSING` | `[/dev/mapper/X]` (??) | not queried         | `missing_devids` only — **gap, see below** |
+| **Fully gone**        | `path MISSING`               | `[<missing disk>]`     | not queried         | `missing_devids`                           |
+
+**Empirical note**: SATA hot-unplug on real hardware enters Null-underlying immediately and stays there for at least 5 minutes without I/O pressure. We have not yet observed the MISSING-with-path state in practice. See [`real-world/sata-hot-unplug.md`](../real-world/sata-hot-unplug.md) for full test results.
 
 ### Healthy
 
