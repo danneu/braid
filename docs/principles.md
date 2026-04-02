@@ -10,6 +10,8 @@ Data drives never block boot. The pool is unlocked and mounted by explicit CLI c
 
 Disk membership is runtime state owned by the CLI, stored in `/var/lib/braid/pool.json`. Adding or removing a drive is `braid add name=/dev/disk/by-id/...` — no `nixos-rebuild` required. The NixOS module provides the mount point, services, and toolchain; the CLI owns which disks are in the pool. `unlock` requires `pool.json` to exist and be valid — it never creates or repairs it. Recovery is explicit via `braid discover --write`. [Why →](decisions/runtime-disk-membership.md)
 
+`pool.json` is a best-effort operational snapshot — it tells braid which drives to attempt unlocking, not what the pool actually looks like. Any state that can be read from live btrfs (devids, device counts, FSID) must come from btrfs, not pool.json. Commands like `status` must never surface pool.json-sourced devids; devids are authoritative only when read from a mounted filesystem via `btrfs device usage` or equivalent.
+
 ## 3. Safe-by-construction operations
 
 - Each intent command (`add`, `remove`, `remove-missing`, `replace`) does exactly one thing with risk-appropriate confirmation. `replace` always uses `btrfs replace start` — for live disks it replaces in-place, for missing disks it rebuilds from RAID redundancy using the missing device's devid. `remove-missing` cleans up a stale missing-device entry; it never rebuilds data onto a new device (that is `replace`). When clearing the last missing device with ≥2 devices remaining, both `remove-missing` and `replace` (missing path) run a follow-up soft balance to restore RAID1 profiles for chunks written during degraded operation.
