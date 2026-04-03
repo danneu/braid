@@ -1,5 +1,6 @@
 use crate::cmd::{CmdRequest, CommandRunner, Step};
 use crate::config::{config_read, mapper_name};
+use crate::confirm;
 use crate::journal;
 use crate::luks::{
     backup_luks_header, ensure_luks_open, luks_format, luks_opts_from_env, read_passphrase,
@@ -125,39 +126,40 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
 
     // Confirm
     if !params.yes {
+        let old_underlying = match &replace_source {
+            ReplaceSource::Live { .. } => pool
+                .devices
+                .iter()
+                .find(|d| d.mapper == old_mn)
+                .map(|d| d.underlying.as_str()),
+            ReplaceSource::Missing { .. } => None,
+        };
+        let old_hw = old_underlying.map(|u| confirm::query_disk_hw_info(runner, u));
+        let new_hw = confirm::query_disk_hw_info(runner, &new_by_id.0);
+        let is_missing = matches!(&replace_source, ReplaceSource::Missing { .. });
+
         eprintln!(
             "{}",
-            replace_confirm_message(
-                &new_probed.state,
-                params.old_name,
-                new_name,
-                &new_by_id.0,
-                &replace_source,
+            format_replace_confirm(
+                &ReplaceConfirmOld {
+                    name: params.old_name,
+                    hw: old_hw.as_ref(),
+                    source: &replace_source,
+                },
+                &ReplaceConfirmNew {
+                    name: new_name,
+                    by_id: &new_by_id.0,
+                    hw: &new_hw,
+                    needs_luks_format: matches!(new_probed.state, ConfigDiskState::PresentNotLuks),
+                    is_rebuild: is_missing,
+                },
+                pool.total_devices,
             )
         );
-
-        // If the operation ends with a single device, require stronger confirmation.
-        let projected_remaining = pool.total_devices; // replace preserves device count
-        if projected_remaining == 1 {
-            eprintln!("WARNING: This replace leaves only 1 disk — no redundancy.");
-            eprint!("Type 'replace without redundancy' to confirm: ");
-            let mut input = String::new();
-            std::io::stdin().read_line(&mut input).map_err(|e| {
-                ReplaceError::Validation(format!("failed to read confirmation: {e}"))
-            })?;
-            if input.trim() != "replace without redundancy" {
-                return Err(ReplaceError::Validation("aborted by user".into()));
-            }
-        } else {
-            eprint!("Type 'yes' to continue: ");
-            let mut input = String::new();
-            std::io::stdin().read_line(&mut input).map_err(|e| {
-                ReplaceError::Validation(format!("failed to read confirmation: {e}"))
-            })?;
-            if input.trim() != "yes" {
-                return Err(ReplaceError::Validation("aborted by user".into()));
-            }
+        if pool.total_devices == 1 {
+            eprintln!("WARNING: This replace leaves only 1 disk \u{2014} no redundancy.\n");
         }
+        confirm::confirm_yes().map_err(ReplaceError::Validation)?;
     }
 
     // Read passphrase
@@ -612,35 +614,89 @@ fn compile_replace_steps(input: &ReplaceStepsInput<'_>) -> Result<Vec<Step>, Rep
     Ok(steps)
 }
 
-fn replace_confirm_message(
-    new_state: &ConfigDiskState,
-    old_name: &str,
-    new_name: &str,
-    by_id: &str,
-    replace_source: &ReplaceSource,
+// ---------------------------------------------------------------------------
+// Confirmation formatter
+// ---------------------------------------------------------------------------
+
+struct ReplaceConfirmOld<'a> {
+    name: &'a str,
+    hw: Option<&'a confirm::DiskHwInfo>,
+    source: &'a ReplaceSource,
+}
+
+struct ReplaceConfirmNew<'a> {
+    name: &'a str,
+    by_id: &'a str,
+    hw: &'a confirm::DiskHwInfo,
+    needs_luks_format: bool,
+    is_rebuild: bool,
+}
+
+fn format_replace_confirm(
+    old: &ReplaceConfirmOld,
+    new: &ReplaceConfirmNew,
+    total_devices: u64,
 ) -> String {
-    let mut msg = if matches!(new_state, ConfigDiskState::PresentNotLuks) {
-        format!(
-            "WARNING: This will LUKS-format {} ({}). Existing data will be inaccessible.\n",
-            new_name, by_id
-        )
-    } else {
-        String::new()
-    };
-    match replace_source {
+    let mut msg = "Replace disk:\n".to_string();
+
+    // Old disk
+    match old.source {
         ReplaceSource::Live { devid, .. } => {
-            msg.push_str(&format!(
-                "Old disk '{}' (devid {}) is present and will be replaced in-place by '{}'.",
-                old_name, devid, new_name
-            ));
+            let old_hw_line = old.hw.and_then(confirm::format_hw_info_line);
+            if let Some(hw) = &old_hw_line {
+                msg.push_str(&format!("  old: {}   {}\n", old.name, hw));
+                msg.push_str(&format!(
+                    "  {:width$}devid {} \u{00b7} will be replaced in-place\n",
+                    "",
+                    devid,
+                    width = old.name.len() + 7,
+                ));
+            } else {
+                msg.push_str(&format!(
+                    "  old: {}   devid {} \u{00b7} will be replaced in-place\n",
+                    old.name, devid
+                ));
+            }
         }
         ReplaceSource::Missing { devid } => {
             msg.push_str(&format!(
-                "Missing device (devid {}) will be rebuilt onto new disk '{}' from RAID redundancy.",
-                devid, new_name
+                "  old: {} (devid {})  missing \u{2014} no hardware info available\n",
+                old.name, devid
             ));
         }
     }
+
+    // New disk
+    let new_hw_line = confirm::format_hw_info_line(new.hw);
+    let indent = new.name.len() + 7; // "  new: " + name + "  "
+    msg.push_str(&format!("  new: {}  {}\n", new.name, new.by_id));
+    if let Some(hw) = &new_hw_line {
+        msg.push_str(&format!("  {:width$}{}\n", "", hw, width = indent));
+    }
+    if new.needs_luks_format {
+        msg.push_str(&format!(
+            "  {:width$}Will be LUKS-formatted (existing data will be inaccessible)\n",
+            "",
+            width = indent,
+        ));
+    }
+    if new.is_rebuild {
+        msg.push_str(&format!(
+            "  {:width$}Data will be rebuilt from RAID redundancy.\n",
+            "",
+            width = indent,
+        ));
+    }
+
+    // Pool summary
+    msg.push_str(&format!(
+        "\nPool: {} {} \u{2192} {} {}\n",
+        total_devices,
+        if total_devices == 1 { "disk" } else { "disks" },
+        total_devices,
+        if total_devices == 1 { "disk" } else { "disks" },
+    ));
+
     msg
 }
 
@@ -673,14 +729,27 @@ mod tests {
 
     #[test]
     fn replace_confirm_warns_about_luks_format_for_non_luks_disk() {
-        let msg = replace_confirm_message(
-            &ConfigDiskState::PresentNotLuks,
-            "old1",
-            "new1",
-            "/dev/disk/by-id/usb-WD_5678",
-            &ReplaceSource::Missing { devid: 2 },
+        let new_hw = confirm::DiskHwInfo {
+            model: Some("WD Elements".into()),
+            serial: Some("5678EFGH".into()),
+            size: Some(12_000_000_000_000),
+        };
+        let msg = format_replace_confirm(
+            &ReplaceConfirmOld {
+                name: "old1",
+                hw: None,
+                source: &ReplaceSource::Missing { devid: 2 },
+            },
+            &ReplaceConfirmNew {
+                name: "new1",
+                by_id: "/dev/disk/by-id/usb-WD_5678",
+                hw: &new_hw,
+                needs_luks_format: true,
+                is_rebuild: true,
+            },
+            3,
         );
-        assert!(msg.contains("LUKS-format"), "should mention LUKS-format");
+        assert!(msg.contains("LUKS-formatted"), "should mention LUKS-format");
         assert!(msg.contains("new1"), "should mention new disk name");
         assert!(
             msg.contains("/dev/disk/by-id/usb-WD_5678"),
@@ -694,28 +763,39 @@ mod tests {
 
     #[test]
     fn replace_confirm_missing_shows_rebuild_message() {
-        let msg = replace_confirm_message(
-            &ConfigDiskState::PresentLuks {
-                uuid: LuksUuid("abc-123".into()),
-                mapper_open: false,
+        let new_hw = confirm::DiskHwInfo::default();
+        let msg = format_replace_confirm(
+            &ReplaceConfirmOld {
+                name: "old1",
+                hw: None,
+                source: &ReplaceSource::Missing { devid: 2 },
             },
-            "old1",
-            "new1",
-            "/dev/disk/by-id/usb-WD_5678",
-            &ReplaceSource::Missing { devid: 2 },
+            &ReplaceConfirmNew {
+                name: "new1",
+                by_id: "/dev/disk/by-id/usb-WD_5678",
+                hw: &new_hw,
+                needs_luks_format: false,
+                is_rebuild: true,
+            },
+            3,
         );
         assert!(
-            msg.contains("Missing device (devid 2)"),
+            msg.contains("devid 2"),
             "should mention missing devid, got: {}",
             msg
         );
         assert!(
-            msg.contains("rebuilt onto new disk 'new1'"),
+            msg.contains("missing"),
+            "should indicate missing device, got: {}",
+            msg
+        );
+        assert!(
+            msg.contains("rebuilt from RAID redundancy"),
             "should mention rebuild, got: {}",
             msg
         );
         assert!(
-            !msg.contains("LUKS-format"),
+            !msg.contains("LUKS-formatted"),
             "should not warn about formatting"
         );
     }
@@ -1036,25 +1116,36 @@ mod tests {
     // Why: calling a live disk "dead" is confusing.
     // Scenario: operator sees confirmation prompt for live replace.
     fn replace_confirm_live_does_not_say_dead() {
-        let msg = replace_confirm_message(
-            &ConfigDiskState::PresentLuks {
-                uuid: LuksUuid("abc-123".into()),
-                mapper_open: false,
+        let old_hw = confirm::DiskHwInfo {
+            model: Some("Toshiba MN07".into()),
+            serial: None,
+            size: Some(12_000_000_000_000),
+        };
+        let new_hw = confirm::DiskHwInfo::default();
+        let msg = format_replace_confirm(
+            &ReplaceConfirmOld {
+                name: "disk2",
+                hw: Some(&old_hw),
+                source: &ReplaceSource::Live {
+                    mapper: MapperName("braid-disk2".into()),
+                    devid: 2,
+                },
             },
-            "disk2",
-            "disk3",
-            "/dev/disk/by-id/virtio-disk3",
-            &ReplaceSource::Live {
-                mapper: MapperName("braid-disk2".into()),
-                devid: 2,
+            &ReplaceConfirmNew {
+                name: "disk3",
+                by_id: "/dev/disk/by-id/virtio-disk3",
+                hw: &new_hw,
+                needs_luks_format: false,
+                is_rebuild: false,
             },
+            3,
         );
         assert!(
             !msg.contains("dead"),
             "live replace prompt should not say 'dead', got: {msg}"
         );
         assert!(
-            msg.contains("is present and will be replaced in-place"),
+            msg.contains("replaced in-place"),
             "expected in-place replace prompt, got: {msg}"
         );
     }

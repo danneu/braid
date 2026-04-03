@@ -1,5 +1,6 @@
 use crate::cmd::{CmdRequest, CommandRunner, Step};
 use crate::config::{config_read, mapper_name};
+use crate::confirm;
 use crate::journal;
 use crate::membership;
 use crate::parse::parse_btrfs_device_usage;
@@ -87,11 +88,7 @@ pub fn cmd_remove<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         .map_err(RemoveError::Validation)?;
 
     let remaining = pool.devices.len() - 1;
-    let target_devid = pool
-        .devices
-        .iter()
-        .find(|d| d.mapper == mn)
-        .map(|d| d.devid);
+    let target_device = pool.devices.iter().find(|d| d.mapper == mn);
     // Pre-flight: reject if other devices lack space to absorb data from
     // the device being removed. Without this, btrfs will either ENOSPC
     // instantly or crash the filesystem to read-only mid-relocation
@@ -101,7 +98,7 @@ pub fn cmd_remove<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     // path balances RAID1→single first, which handles data redistribution.
     // This does not match the reproduced relocation-failure mode.
     if remaining > 1
-        && let Some(devid) = target_devid {
+        && let Some(devid) = target_device.map(|d| d.devid) {
             check_eviction_space(runner, config.mount_point().as_str(), devid)?;
         }
 
@@ -124,30 +121,26 @@ pub fn cmd_remove<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
                 "cannot remove the last disk from the pool".into(),
             ));
         }
+        let hw = target_device
+            .map(|d| confirm::query_disk_hw_info(runner, &d.underlying));
+        let devid = target_device.expect("in_pool check guarantees device exists").devid;
+        let total = pool.devices.len();
+        eprintln!(
+            "{}",
+            format_remove_confirm(
+                &RemoveConfirmDisk {
+                    name: params.name,
+                    hw: hw.as_ref(),
+                    devid,
+                },
+                remaining,
+                total,
+            )
+        );
         if remaining == 1 {
-            eprintln!("WARNING: Removing this disk leaves only 1 disk — no redundancy.");
-            eprint!("Type 'remove without redundancy' to confirm: ");
-            let mut input = String::new();
-            std::io::stdin().read_line(&mut input).map_err(|e| {
-                RemoveError::Validation(format!("failed to read confirmation: {e}"))
-            })?;
-            if input.trim() != "remove without redundancy" {
-                return Err(RemoveError::Validation("aborted by user".into()));
-            }
-        } else {
-            eprintln!(
-                "Remove {} from pool? Data will migrate off this disk.",
-                params.name
-            );
-            eprint!("Type 'yes' to continue: ");
-            let mut input = String::new();
-            std::io::stdin().read_line(&mut input).map_err(|e| {
-                RemoveError::Validation(format!("failed to read confirmation: {e}"))
-            })?;
-            if input.trim() != "yes" {
-                return Err(RemoveError::Validation("aborted by user".into()));
-            }
+            eprintln!("WARNING: Pool will have 1 disk \u{2014} no RAID1 redundancy.\n");
         }
+        confirm::confirm_yes().map_err(RemoveError::Validation)?;
     }
 
     // Build target membership and write journal before irreversible disk op.
@@ -271,6 +264,44 @@ fn compile_remove_present_steps(
         }],
     });
     Ok(steps)
+}
+
+// ---------------------------------------------------------------------------
+// Confirmation formatter
+// ---------------------------------------------------------------------------
+
+struct RemoveConfirmDisk<'a> {
+    name: &'a str,
+    hw: Option<&'a confirm::DiskHwInfo>,
+    devid: u64,
+}
+
+fn format_remove_confirm(disk: &RemoveConfirmDisk, remaining: usize, total: usize) -> String {
+    let mut msg = "Remove from pool:\n".to_string();
+    let hw_line = disk
+        .hw
+        .and_then(confirm::format_hw_info_line);
+    if let Some(hw) = &hw_line {
+        msg.push_str(&format!("  {}  {}\n", disk.name, hw));
+    } else {
+        msg.push_str(&format!("  {}\n", disk.name));
+    }
+    let migrate_word = if remaining == 1 { "disk" } else { "disks" };
+    msg.push_str(&format!(
+        "  {:width$}devid {} \u{00b7} data will migrate to remaining {}\n",
+        "",
+        disk.devid,
+        migrate_word,
+        width = disk.name.len() + 2,
+    ));
+    msg.push_str(&format!(
+        "\nPool: {} {} \u{2192} {} {}\n",
+        total,
+        if total == 1 { "disk" } else { "disks" },
+        remaining,
+        if remaining == 1 { "disk" } else { "disks" },
+    ));
+    msg
 }
 
 #[cfg(test)]
@@ -851,5 +882,68 @@ mod tests {
             result.is_ok(),
             "expected dry_run to proceed past active-op preflight, got: {result:?}"
         );
+    }
+
+    // --- Confirmation formatter tests ---
+
+    #[test]
+    fn remove_confirm_normal() {
+        let hw = confirm::DiskHwInfo {
+            model: Some("Toshiba MN07ACA12T".into()),
+            serial: Some("1234ABCD".into()),
+            size: Some(12_000_138_625_024),
+        };
+        let msg = format_remove_confirm(
+            &RemoveConfirmDisk {
+                name: "toshiba",
+                hw: Some(&hw),
+                devid: 2,
+            },
+            2,
+            3,
+        );
+        assert!(msg.contains("Remove from pool:"));
+        assert!(msg.contains("toshiba"));
+        assert!(msg.contains("Toshiba MN07ACA12T"));
+        assert!(msg.contains("serial 1234ABCD"));
+        assert!(msg.contains("devid 2"));
+        assert!(msg.contains("remaining disks"));
+        assert!(msg.contains("3 disks \u{2192} 2 disks"));
+    }
+
+    #[test]
+    fn remove_confirm_degraded() {
+        let hw = confirm::DiskHwInfo {
+            model: Some("Toshiba MN07ACA12T".into()),
+            serial: None,
+            size: Some(12_000_138_625_024),
+        };
+        let msg = format_remove_confirm(
+            &RemoveConfirmDisk {
+                name: "toshiba",
+                hw: Some(&hw),
+                devid: 2,
+            },
+            1,
+            2,
+        );
+        assert!(msg.contains("remaining disk"), "singular 'disk' when 1 remaining");
+        assert!(msg.contains("2 disks \u{2192} 1 disk"));
+    }
+
+    #[test]
+    fn remove_confirm_no_hw_info() {
+        let msg = format_remove_confirm(
+            &RemoveConfirmDisk {
+                name: "toshiba",
+                hw: None,
+                devid: 2,
+            },
+            2,
+            3,
+        );
+        assert!(msg.contains("toshiba"));
+        assert!(msg.contains("devid 2"));
+        assert!(!msg.contains("\u{00b7} \u{00b7}"), "no double dots when hw missing");
     }
 }

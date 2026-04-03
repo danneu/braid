@@ -184,7 +184,7 @@ Steps reflect actual disk state — if a disk is already LUKS-formatted, the des
 sudo braid remove ironwolf
 ```
 
-Data migrates off the drive before it's detached. If removing would leave a single disk (losing redundancy), confirmation is required. The disk is removed from pool membership (`pool.json`) automatically.
+Data migrates off the drive before it's detached. The confirmation prompt shows device details (model, size, serial) for sanity-checking, and warns if the removal would leave a single disk with no RAID1 redundancy. The disk is removed from pool membership (`pool.json`) automatically.
 
 ### Remove a missing/dead device (cleanup only)
 

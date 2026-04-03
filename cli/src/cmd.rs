@@ -13,6 +13,7 @@ pub struct RawCommandOutput {
 pub enum LsblkFieldKind {
     Model,
     Serial,
+    Size,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -361,10 +362,18 @@ impl CmdRequest {
                 let field_name = match field {
                     LsblkFieldKind::Model => "MODEL",
                     LsblkFieldKind::Serial => "SERIAL",
+                    LsblkFieldKind::Size => "SIZE",
                 };
                 CmdArgs {
                     program: "lsblk",
-                    args: vec!["-ndo".into(), field_name.into(), device.clone()],
+                    args: vec![
+                        "-n".into(), // no header
+                        "-d".into(), // device only (no partitions)
+                        "-b".into(), // sizes in bytes (no-op for string fields)
+                        "-o".into(), // output column
+                        field_name.into(),
+                        device.clone(),
+                    ],
                 }
             }
             CmdRequest::CryptsetupLuksOpen { device, mapper } => CmdArgs {

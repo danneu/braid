@@ -1,5 +1,6 @@
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, Step};
 use crate::config::{config_read, mapper_name};
+use crate::confirm;
 use crate::journal;
 use crate::luks::{
     backup_luks_header, ensure_luks_open, luks_format, luks_opts_from_env, read_passphrase,
@@ -353,31 +354,34 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         return Ok(());
     }
 
+    // Confirmation — show device details for sanity-check
+    if !params.yes {
+        let confirm_disks: Vec<AddConfirmDisk> = names
+            .iter()
+            .zip(by_ids.iter())
+            .zip(probed.iter())
+            .map(|((name, by_id), p)| {
+                let hw = confirm::query_disk_hw_info(runner, &by_id.0);
+                AddConfirmDisk {
+                    name,
+                    by_id: &by_id.0,
+                    hw,
+                    needs_luks_format: matches!(p.state, ConfigDiskState::PresentNotLuks),
+                }
+            })
+            .collect();
+        eprintln!("{}", format_add_confirm(&confirm_disks));
+        confirm::confirm_yes().map_err(AddError::Validation)?;
+    }
+
     // Read passphrase (once)
     let passphrase = read_passphrase(params.passphrase_file, params.passphrase_stdin)?;
 
-    // Confirmation — collect all disks that need LUKS format
-    let needs_format: Vec<(&str, &str)> = probed
-        .iter()
-        .enumerate()
-        .filter(|(_, p)| matches!(p.state, ConfigDiskState::PresentNotLuks))
-        .map(|(i, _)| (names[i], by_ids[i].0.as_str()))
-        .collect();
-
-    if !needs_format.is_empty() && !params.yes {
-        eprintln!("{}", add_confirm_message_multi(&needs_format));
-        eprint!("Type 'yes' to continue: ");
-        let mut input = String::new();
-        std::io::stdin()
-            .read_line(&mut input)
-            .map_err(|e| AddError::Validation(format!("failed to read confirmation: {e}")))?;
-        if input.trim() != "yes" {
-            return Err(AddError::Validation("aborted by user".into()));
-        }
-    }
-
     // Verify passphrase against existing pool member (once)
-    if !needs_format.is_empty()
+    let any_needs_format = probed
+        .iter()
+        .any(|p| matches!(p.state, ConfigDiskState::PresentNotLuks));
+    if any_needs_format
         && let Some(existing) = pool.devices.first() {
             let status_raw = runner.run(&crate::cmd::CmdRequest::CryptsetupStatus {
                 mapper: existing.mapper.0.clone(),
@@ -778,18 +782,27 @@ fn compile_add_steps_multi<R: CommandRunner>(
     Ok(steps)
 }
 
-fn add_confirm_message_multi(disks: &[(&str, &str)]) -> String {
-    if disks.len() == 1 {
-        return format!(
-            "WARNING: This will LUKS-format {} ({}). Existing data will be inaccessible.",
-            disks[0].0, disks[0].1
-        );
-    }
-    let mut msg =
-        "WARNING: This will LUKS-format the following disks. Existing data will be inaccessible.\n"
-            .to_string();
-    for (name, by_id) in disks {
-        msg.push_str(&format!("  - {} ({})\n", name, by_id));
+struct AddConfirmDisk<'a> {
+    name: &'a str,
+    by_id: &'a str,
+    hw: confirm::DiskHwInfo,
+    needs_luks_format: bool,
+}
+
+fn format_add_confirm(disks: &[AddConfirmDisk]) -> String {
+    let mut msg = "Add to pool:\n".to_string();
+    for d in disks {
+        msg.push_str(&format!("  {}  {}\n", d.name, d.by_id));
+        if let Some(hw_line) = confirm::format_hw_info_line(&d.hw) {
+            msg.push_str(&format!("  {:width$}{}\n", "", hw_line, width = d.name.len() + 2));
+        }
+        if d.needs_luks_format {
+            msg.push_str(&format!(
+                "  {:width$}Will be LUKS-formatted (existing data will be inaccessible)\n",
+                "",
+                width = d.name.len() + 2
+            ));
+        }
     }
     msg
 }
@@ -803,34 +816,75 @@ mod tests {
     }
 
     #[test]
-    fn add_confirm_message_single_disk() {
-        let msg = add_confirm_message_multi(&[("data1", "/dev/disk/by-id/usb-WD_1234")]);
-        assert!(msg.contains("LUKS-format"), "should mention LUKS-format");
-        assert!(msg.contains("data1"), "should mention disk name");
+    fn add_confirm_single_disk_with_luks_format() {
+        let disks = vec![AddConfirmDisk {
+            name: "data1",
+            by_id: "/dev/disk/by-id/usb-WD_1234",
+            hw: confirm::DiskHwInfo {
+                model: Some("WD Elements".into()),
+                serial: Some("1234ABCD".into()),
+                size: Some(12_000_138_625_024),
+            },
+            needs_luks_format: true,
+        }];
+        let msg = format_add_confirm(&disks);
+        assert!(msg.contains("Add to pool:"));
+        assert!(msg.contains("data1"));
+        assert!(msg.contains("/dev/disk/by-id/usb-WD_1234"));
+        assert!(msg.contains("WD Elements"));
+        assert!(msg.contains("TiB"));
+        assert!(msg.contains("serial 1234ABCD"));
+        assert!(msg.contains("LUKS-formatted"));
+        assert!(msg.contains("inaccessible"));
+    }
+
+    #[test]
+    fn add_confirm_multi_disk() {
+        let disks = vec![
+            AddConfirmDisk {
+                name: "toshiba",
+                by_id: "/dev/disk/by-id/ata-Toshiba",
+                hw: confirm::DiskHwInfo {
+                    model: Some("Toshiba MN07".into()),
+                    serial: None,
+                    size: Some(12_000_000_000_000),
+                },
+                needs_luks_format: true,
+            },
+            AddConfirmDisk {
+                name: "ironwolf",
+                by_id: "/dev/disk/by-id/ata-Ironwolf",
+                hw: confirm::DiskHwInfo::default(),
+                needs_luks_format: false,
+            },
+        ];
+        let msg = format_add_confirm(&disks);
+        assert!(msg.contains("toshiba"), "should mention first disk");
+        assert!(msg.contains("ironwolf"), "should mention second disk");
+        assert!(msg.contains("Toshiba MN07"), "should show model");
+        // ironwolf has no hw info and doesn't need format — minimal entry
         assert!(
-            msg.contains("/dev/disk/by-id/usb-WD_1234"),
-            "should mention by-id"
-        );
-        assert!(
-            msg.contains("inaccessible"),
-            "should say data will be inaccessible"
-        );
-        assert!(
-            !msg.contains("DESTROY"),
-            "should not use inaccurate 'DESTROY' wording"
+            msg.matches("LUKS-formatted").count() == 1,
+            "only toshiba needs format"
         );
     }
 
     #[test]
-    fn add_confirm_message_multi_disk() {
-        let msg = add_confirm_message_multi(&[
-            ("toshiba", "/dev/disk/by-id/ata-Toshiba"),
-            ("ironwolf", "/dev/disk/by-id/ata-Ironwolf"),
-        ]);
-        assert!(msg.contains("LUKS-format"), "should mention LUKS-format");
-        assert!(msg.contains("toshiba"), "should mention first disk");
-        assert!(msg.contains("ironwolf"), "should mention second disk");
-        assert!(msg.contains("inaccessible"), "should warn about data loss");
+    fn add_confirm_already_luks_disk() {
+        let disks = vec![AddConfirmDisk {
+            name: "data1",
+            by_id: "/dev/disk/by-id/usb-WD_1234",
+            hw: confirm::DiskHwInfo {
+                model: Some("WD Elements".into()),
+                serial: None,
+                size: Some(1_000_000_000_000),
+            },
+            needs_luks_format: false,
+        }];
+        let msg = format_add_confirm(&disks);
+        assert!(msg.contains("Add to pool:"));
+        assert!(msg.contains("data1"));
+        assert!(!msg.contains("LUKS-formatted"), "no format warning for existing LUKS");
     }
 
     #[test]

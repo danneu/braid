@@ -1,5 +1,6 @@
 use crate::cmd::{CmdRequest, CommandRunner, Step};
 use crate::config::config_read;
+use crate::confirm;
 use crate::journal;
 use crate::membership;
 use crate::parse::parse_btrfs_device_usage;
@@ -146,34 +147,28 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         return Ok(());
     }
 
-    // Confirm
-    if !params.yes {
-        let device_label = format!("missing device entry (devid {})", params.missing_id);
-        if remaining_present >= 2 {
-            eprintln!(
-                "Remove {device_label} from pool? Data on remaining devices will be rebalanced (long-running). This does not add a replacement — use `braid replace` for that."
-            );
-        } else {
-            eprintln!(
-                "Remove {device_label} from pool? The surviving disk already has all data. This does not add a replacement — use `braid replace` for that."
-            );
-        }
-        eprint!("Type 'remove missing' to confirm: ");
-        let mut input = String::new();
-        std::io::stdin().read_line(&mut input).map_err(|e| {
-            RemoveMissingError::Validation(format!("failed to read confirmation: {e}"))
-        })?;
-        if input.trim() != "remove missing" {
-            return Err(RemoveMissingError::Validation("aborted by user".into()));
-        }
-    }
-
-    // Resolve devid→name from enriched pool.json and build journal before btrfs operation.
+    // Resolve devid→name from enriched pool.json before confirmation and journal.
     let pre_membership = membership::load_membership(params.paths).map_err(|e| {
         RemoveMissingError::Validation(format!("failed to load pool membership: {e}"))
     })?;
     let (resolved_devid, name_to_remove) =
         resolve_removal_target(Some(params.missing_id), &pre_membership)?;
+
+    // Confirm
+    if !params.yes {
+        eprintln!(
+            "{}",
+            format_remove_missing_confirm(
+                &name_to_remove,
+                resolved_devid,
+                remaining_present,
+                pool.missing_count,
+            )
+        );
+        confirm::confirm_yes().map_err(RemoveMissingError::Validation)?;
+    }
+
+    // Build journal before btrfs operation.
     let mut target_membership = pre_membership.clone();
     target_membership.disks.remove(&name_to_remove);
     let journal = journal::build_journal(
@@ -292,6 +287,40 @@ fn compile_steps(
         });
     }
     steps
+}
+
+// ---------------------------------------------------------------------------
+// Confirmation formatter
+// ---------------------------------------------------------------------------
+
+fn format_remove_missing_confirm(
+    name: &str,
+    devid: u64,
+    remaining_present: usize,
+    missing_count: u64,
+) -> String {
+    let mut msg = "Remove missing device from pool:\n".to_string();
+    msg.push_str(&format!(
+        "  {} (devid {})  missing \u{2014} no hardware info available\n",
+        name, devid
+    ));
+    if remaining_present >= 2 {
+        msg.push_str("  Data on remaining disks will be rebalanced.\n");
+    } else {
+        msg.push_str("  Surviving disk already has all data.\n");
+    }
+    msg.push_str(&format!(
+        "\nPool: {} present + {} missing \u{2192} {} {}\n",
+        remaining_present,
+        missing_count,
+        remaining_present,
+        if remaining_present == 1 {
+            "disk"
+        } else {
+            "disks"
+        },
+    ));
+    msg
 }
 
 #[cfg(test)]
@@ -1090,5 +1119,25 @@ mod tests {
             lines[3],
             "               $ btrfs balance start --enqueue '-dconvert=raid1,soft' '-mconvert=raid1,soft' /mnt/storage"
         );
+    }
+
+    // --- Confirmation formatter tests ---
+
+    #[test]
+    fn remove_missing_confirm_with_rebalance() {
+        let msg = format_remove_missing_confirm("toshiba", 2, 2, 1);
+        assert!(msg.contains("Remove missing device from pool:"));
+        assert!(msg.contains("toshiba (devid 2)"));
+        assert!(msg.contains("missing"));
+        assert!(msg.contains("no hardware info available"));
+        assert!(msg.contains("rebalanced"));
+        assert!(msg.contains("2 present + 1 missing \u{2192} 2 disks"));
+    }
+
+    #[test]
+    fn remove_missing_confirm_single_survivor() {
+        let msg = format_remove_missing_confirm("toshiba", 2, 1, 1);
+        assert!(msg.contains("Surviving disk already has all data"));
+        assert!(msg.contains("1 present + 1 missing \u{2192} 1 disk"));
     }
 }

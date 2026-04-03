@@ -3,6 +3,7 @@ pub mod add;
 pub mod alert;
 pub mod browse;
 pub mod cmd;
+pub mod confirm;
 pub mod config;
 pub mod discover;
 pub mod doctor;

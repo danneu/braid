@@ -44,7 +44,7 @@ The old architecture used a structural code boundary — `luksFormat` was litera
    c. Opened mapper's btrfs FSID must match the current pool — foreign-pool disks are refused.
    d. Braid-labeled LUKS with no btrfs superblock is refused — this state is ambiguous (clean eviction, partial init, manual wipe, stale data) and cannot be distinguished without tombstones. A previously removed disk must be wiped before re-add.
    e. Superblock guard remains as defense-in-depth within the FSID-matching path.
-3. **Confirmation calibrated to risk**: destructive operations (LUKS format) require explicit confirmation; safe operations (opening existing LUKS, adding to pool) proceed after simple yes/no.
+3. **Unified confirmation with device context**: all mutating commands (`add`, `remove`, `remove-missing`, `replace`) show a rich device-info block (model, size, serial via lsblk) and confirm with `Type 'yes' to continue:`. Degraded-path warnings are informational text, not special confirmation phrases. `--yes` skips the prompt for scripting.
 4. **Disk name immutability**: mutating commands validate names against recorded disk identity and reject name rename/reassignment. Operators must use explicit `replace` or `remove`+`add` workflows instead of renaming.
 5. **Journal-protected mutations**: mutating commands write `pending-op.json` before the first irreversible step; it is cleared only after the full operation (including follow-up work like soft balance) succeeds. On any error exit, the journal persists to enable `braid recover`.
 

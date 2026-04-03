@@ -4,13 +4,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::alert::{self, AlertCause, AlertState};
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, LsblkFieldKind};
+use crate::confirm::get_lsblk_field;
 use crate::config::{self, mapper_name, Config};
 use crate::luks;
 use crate::membership::{self, PoolMembership};
 use crate::parse::types::BalanceState;
 use crate::parse::{
     parse_btrfs_balance_status, parse_btrfs_device_stats, parse_btrfs_device_usage,
-    parse_btrfs_df_json, parse_btrfs_filesystem_usage, parse_btrfs_scrub_status, parse_lsblk_field,
+    parse_btrfs_df_json, parse_btrfs_filesystem_usage, parse_btrfs_scrub_status,
     BtrfsDeviceStatsOutput, ParseError, ScrubState,
 };
 use crate::probe::{probe_config_disk, probe_pool, Filesystem, ProbeError};
@@ -740,19 +741,6 @@ pub fn emit_paused_balance_warning<R: CommandRunner>(
     }
 }
 
-fn get_lsblk_field<R: CommandRunner>(
-    runner: &R,
-    device: &str,
-    field: LsblkFieldKind,
-) -> Option<String> {
-    let raw = runner
-        .run(&CmdRequest::LsblkField {
-            device: device.to_owned(),
-            field,
-        })
-        .ok()?;
-    parse_lsblk_field(&raw).ok()?.value
-}
 
 // ---------------------------------------------------------------------------
 // build_disk_reports
@@ -1108,24 +1096,7 @@ fn format_status_human(
     out
 }
 
-pub fn format_bytes(bytes: u64) -> String {
-    const KIB: u64 = 1024;
-    const MIB: u64 = 1024 * KIB;
-    const GIB: u64 = 1024 * MIB;
-    const TIB: u64 = 1024 * GIB;
-
-    if bytes >= TIB {
-        format!("{:.2} TiB", bytes as f64 / TIB as f64)
-    } else if bytes >= GIB {
-        format!("{:.2} GiB", bytes as f64 / GIB as f64)
-    } else if bytes >= MIB {
-        format!("{:.2} MiB", bytes as f64 / MIB as f64)
-    } else if bytes >= KIB {
-        format!("{:.2} KiB", bytes as f64 / KIB as f64)
-    } else {
-        format!("{bytes} B")
-    }
-}
+pub use crate::confirm::format_bytes;
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -2816,17 +2787,6 @@ mod tests {
     // =======================================================================
     // format_bytes tests
     // =======================================================================
-
-    #[test]
-    fn format_bytes_units() {
-        assert_eq!(format_bytes(0), "0 B");
-        assert_eq!(format_bytes(1), "1 B");
-        assert_eq!(format_bytes(1023), "1023 B");
-        assert_eq!(format_bytes(1024), "1.00 KiB");
-        assert_eq!(format_bytes(1048576), "1.00 MiB");
-        assert_eq!(format_bytes(1073741824), "1.00 GiB");
-        assert_eq!(format_bytes(1099511627776), "1.00 TiB");
-    }
 
     // =======================================================================
     // Integration-style tests (cmd_status end-to-end with mocks)
