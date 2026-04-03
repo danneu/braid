@@ -49,11 +49,13 @@ pub enum JournalError {
     Parse(String),
     #[error("failed to delete journal: {0}")]
     Delete(#[source] std::io::Error),
+    #[error("failed to serialize journal: {0}")]
+    Serialize(#[source] serde_json::Error),
 }
 
 /// Write the pending operation journal atomically.
 pub fn write_journal(paths: &StatePaths, journal: &Journal) -> Result<(), JournalError> {
-    let json = serde_json::to_string_pretty(journal).expect("Journal serialization cannot fail");
+    let json = serde_json::to_string_pretty(journal).map_err(JournalError::Serialize)?;
     atomic_write(&paths.pending_op_json(), json.as_bytes()).map_err(JournalError::Write)
 }
 

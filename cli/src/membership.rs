@@ -22,6 +22,8 @@ pub enum MembershipError {
     InvalidDiskName(String),
     #[error("invalid by_id path '{0}': must start with /dev/disk/by-id/")]
     InvalidByIdPath(String),
+    #[error("failed to serialize pool membership: {0}")]
+    Serialize(#[source] serde_json::Error),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -100,7 +102,7 @@ pub fn save_membership(m: &PoolMembership, paths: &StatePaths) -> Result<(), Mem
 }
 
 pub fn save_membership_to(m: &PoolMembership, path: &Path) -> Result<(), MembershipError> {
-    let json = serde_json::to_string_pretty(m).expect("PoolMembership serialization cannot fail");
+    let json = serde_json::to_string_pretty(m).map_err(MembershipError::Serialize)?;
     state_io::atomic_write(path, json.as_bytes()).map_err(MembershipError::Write)
 }
 

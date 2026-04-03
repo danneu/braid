@@ -2,6 +2,7 @@ use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 use crate::cmd::{CmdRequest, CommandRunner, RealRunner};
 use crate::config::Config;
@@ -504,13 +505,12 @@ pub fn format_doctor_human(report: &DoctorReport) -> String {
 // Command entry point
 // ---------------------------------------------------------------------------
 
-#[derive(Debug)]
-pub struct DoctorError;
-
-impl std::fmt::Display for DoctorError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "doctor found failures")
-    }
+#[derive(Debug, Error)]
+pub enum DoctorError {
+    #[error("doctor found failures")]
+    Failed,
+    #[error("failed to serialize doctor report: {0}")]
+    Serialize(#[source] serde_json::Error),
 }
 
 pub fn cmd_doctor(config_path: &Path, paths: &StatePaths, json: bool) -> Result<(), DoctorError> {
@@ -521,14 +521,14 @@ pub fn cmd_doctor(config_path: &Path, paths: &StatePaths, json: bool) -> Result<
         // serde_json::to_string_pretty won't fail on our types
         println!(
             "{}",
-            serde_json::to_string_pretty(&report).expect("serialize doctor report")
+            serde_json::to_string_pretty(&report).map_err(DoctorError::Serialize)?
         );
     } else {
         print!("{}", format_doctor_human(&report));
     }
 
     match report.status {
-        CheckStatus::Fail => Err(DoctorError),
+        CheckStatus::Fail => Err(DoctorError::Failed),
         _ => Ok(()),
     }
 }
