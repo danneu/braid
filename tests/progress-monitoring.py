@@ -178,7 +178,7 @@ with subtest("device remove progress observed"):
     # on fast VM I/O, so any gap between start and poll risks missing it.
     machine.succeed(
         f"btrfs device remove /dev/mapper/disk3 {MOUNT} "
-        f"> {FIXTURE_DIR}/device-remove.log 2>&1 < /dev/null & "
+        f"> /dev/null 2>&1 < /dev/null & "
         f"initial=$(cat /tmp/disk3-initial-bytes); "
         f"for i in $(seq 1 2400); do "
         f"out=\"$(btrfs device usage --raw {MOUNT} 2>&1)\" || {{ sleep 0.05; continue; }}; "
