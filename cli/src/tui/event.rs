@@ -28,7 +28,7 @@ pub enum Event {
         id: CmdId,
         status: ExitStatus,
     },
-    PoolProbeFinished(Result<Option<PoolState>, String>, Duration),
+    PoolProbeFinished(Box<Result<Option<PoolState>, String>>, Duration),
     PollRefresh { mount_point: MountPoint },
     Tick,
 }

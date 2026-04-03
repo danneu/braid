@@ -63,6 +63,12 @@ machine.succeed(
     f" > {FIXTURE_DIR}/btrfs-device-stats-2disk.json"
 )
 
+# 5b. btrfs device stats (text)
+machine.succeed(
+    f"btrfs device stats {MOUNT}"
+    f" > {FIXTURE_DIR}/btrfs-device-stats-2disk.txt"
+)
+
 # 6. btrfs scrub status — before any scrub (should say "no stats available")
 machine.succeed(
     f"btrfs scrub status --raw {MOUNT}"
@@ -79,6 +85,12 @@ machine.succeed(
 machine.succeed(
     f"cryptsetup luksUUID /dev/vdb"
     f" > {FIXTURE_DIR}/cryptsetup-luks-uuid.txt"
+)
+
+# 8b. cryptsetup luksDump --dump-json-metadata
+machine.succeed(
+    f"cryptsetup luksDump --dump-json-metadata /dev/vdb"
+    f" > {FIXTURE_DIR}/cryptsetup-luks-dump.json"
 )
 
 # 9. findmnt (JSON)
@@ -104,6 +116,14 @@ machine.succeed(
 machine.succeed(
     f"btrfs device usage --raw {MOUNT}"
     f" > {FIXTURE_DIR}/btrfs-device-usage-2disk.txt"
+)
+
+# 14b. btrfs subvolume list (requires creating subvolumes first)
+machine.succeed(f"btrfs subvolume create {MOUNT}/data")
+machine.succeed(f"btrfs subvolume create {MOUNT}/snapshots")
+machine.succeed(
+    f"btrfs subvolume list {MOUNT}"
+    f" > {FIXTURE_DIR}/btrfs-subvolume-list.txt"
 )
 
 # 14. btrfs balance status (paused after skip_balance remount)

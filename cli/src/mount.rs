@@ -462,7 +462,7 @@ mod tests {
             "unlock",
         );
 
-        assert_eq!(result.unwrap(), false);
+        assert!(!result.unwrap());
     }
 
     /// Intent: Two healthy disks with LUKS closed should be opened, scanned,
@@ -550,7 +550,7 @@ mod tests {
             "unlock",
         );
 
-        assert_eq!(result.unwrap(), true);
+        assert!(result.unwrap());
     }
 
     /// Intent: When a disk is absent and --allow-degraded is passed, the pool
@@ -641,7 +641,7 @@ mod tests {
             "unlock",
         );
 
-        assert_eq!(result.unwrap(), true);
+        assert!(result.unwrap());
     }
 
     /// Intent: When a disk is absent and --allow-degraded is NOT passed, the
@@ -929,7 +929,7 @@ mod tests {
             "unlock",
         );
 
-        assert_eq!(result.unwrap(), true);
+        assert!(result.unwrap());
     }
 
     /// Intent: When a disk's probed LUKS UUID doesn't match pool.json's stored

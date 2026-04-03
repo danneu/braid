@@ -50,7 +50,7 @@ pub fn execute_effect(effect: Effect, cmd_tx: &mpsc::Sender<Event>) {
                     &paths,
                 );
                 let elapsed = start.elapsed();
-                let _ = tx.send(Event::PoolProbeFinished(result, elapsed));
+                let _ = tx.send(Event::PoolProbeFinished(Box::new(result), elapsed));
             });
         }
         Effect::ScheduleProbe { mount_point, delay } => {

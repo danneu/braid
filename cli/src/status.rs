@@ -1369,23 +1369,6 @@ mod tests {
         Config::new(MountPoint("/mnt/storage".to_owned())).unwrap()
     }
 
-    fn membership_3disk() -> PoolMembership {
-        let mut disks = BTreeMap::new();
-        disks.insert(
-            "disk1".to_owned(),
-            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/disk1".to_owned())),
-        );
-        disks.insert(
-            "disk2".to_owned(),
-            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/disk2".to_owned())),
-        );
-        disks.insert(
-            "disk3".to_owned(),
-            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/disk3".to_owned())),
-        );
-        PoolMembership { disks }
-    }
-
     fn config_1disk() -> Config {
         Config::new(MountPoint("/mnt/storage".to_owned())).unwrap()
     }
@@ -1912,7 +1895,7 @@ mod tests {
         let json_str = serde_json::to_string_pretty(&report).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
         assert!(v["disks"].is_array());
-        assert!(v["disks"].as_array().unwrap().len() > 0);
+        assert!(!v["disks"].as_array().unwrap().is_empty());
     }
 
     // =======================================================================

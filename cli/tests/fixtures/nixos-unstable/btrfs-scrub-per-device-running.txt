@@ -1,13 +1,13 @@
-UUID:             3e9e7111-3999-4d3f-b91e-845c122fd1c2
+UUID:             8d4e4d4f-1930-4a67-809d-4b8371c6c7f4
 
 Scrub device /dev/mapper/disk1 (id 1) history
-Scrub started:    Fri Apr  3 17:14:44 2026
+Scrub started:    Fri Apr  3 17:16:49 2026
 Status:           running
 Duration:         0:00:01
-	data_extents_scrubbed: 24544
-	tree_extents_scrubbed: 108
-	data_bytes_scrubbed: 1608515584
-	tree_bytes_scrubbed: 1769472
+	data_extents_scrubbed: 24576
+	tree_extents_scrubbed: 1
+	data_bytes_scrubbed: 1610612736
+	tree_bytes_scrubbed: 16384
 	read_errors: 0
 	csum_errors: 0
 	verify_errors: 0
@@ -18,16 +18,16 @@ Duration:         0:00:01
 	uncorrectable_errors: 0
 	unverified_errors: 0
 	corrected_errors: 0
-	last_physical: 2502950912
+	last_physical: 2505048064
 
 Scrub device /dev/mapper/disk2 (id 2) history
-Scrub started:    Fri Apr  3 17:14:44 2026
+Scrub started:    Fri Apr  3 17:16:49 2026
 Status:           running
-Duration:         0:00:01
-	data_extents_scrubbed: 8224
-	tree_extents_scrubbed: 0
-	data_bytes_scrubbed: 538968064
-	tree_bytes_scrubbed: 0
+Duration:         0:00:00
+	data_extents_scrubbed: 8192
+	tree_extents_scrubbed: 107
+	data_bytes_scrubbed: 536870912
+	tree_bytes_scrubbed: 1753088
 	read_errors: 0
 	csum_errors: 0
 	verify_errors: 0
@@ -38,15 +38,15 @@ Duration:         0:00:01
 	uncorrectable_errors: 0
 	unverified_errors: 0
 	corrected_errors: 0
-	last_physical: 3206610944
+	last_physical: 1343225856
 
 Scrub device /dev/mapper/disk3 (id 3) status
-Scrub started:    Fri Apr  3 17:14:44 2026
+Scrub started:    Fri Apr  3 17:16:49 2026
 Status:           running
 Duration:         0:00:05
-	data_extents_scrubbed: 8224
+	data_extents_scrubbed: 8576
 	tree_extents_scrubbed: 108
-	data_bytes_scrubbed: 538968064
+	data_bytes_scrubbed: 562036736
 	tree_bytes_scrubbed: 1769472
 	read_errors: 0
 	csum_errors: 0
@@ -58,4 +58,4 @@ Duration:         0:00:05
 	uncorrectable_errors: 0
 	unverified_errors: 0
 	corrected_errors: 0
-	last_physical: 1913651200
+	last_physical: 865075200

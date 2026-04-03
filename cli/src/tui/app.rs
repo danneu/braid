@@ -30,7 +30,7 @@ pub enum Message {
         id: CmdId,
         status: ExitStatus,
     },
-    PoolProbeFinished(Result<Option<PoolState>, String>, Duration),
+    PoolProbeFinished(Box<Result<Option<PoolState>, String>>, Duration),
 }
 
 pub fn update(model: &mut Model, msg: Message) -> Vec<Effect> {
@@ -122,7 +122,7 @@ pub fn update(model: &mut Model, msg: Message) -> Vec<Effect> {
         }
         Message::PoolProbeFinished(result, elapsed) => {
             let stale = model.pool.current().cloned();
-            model.pool = match result {
+            model.pool = match *result {
                 Ok(Some(pool)) => PoolStatus::Mounted(pool),
                 Ok(None) => PoolStatus::NotMounted,
                 Err(e) => match stale {
@@ -181,7 +181,7 @@ mod tests {
         let pool = sample_pool();
         update(
             &mut model,
-            Message::PoolProbeFinished(Ok(Some(pool)), Duration::from_millis(50)),
+            Message::PoolProbeFinished(Box::new(Ok(Some(pool))), Duration::from_millis(50)),
         );
         assert!(model.spinner_deadline.is_some());
     }

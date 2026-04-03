@@ -9,7 +9,9 @@
 //!   a few labeled lines).
 //! - Do not use free-form `str::contains` for command-output classification in
 //!   domain code; keep text interpretation in `parse/*` and return typed enums.
-//! - File-based fixtures must come from `tests/fixtures/nixos-25.11` only.
+//! - Stable contract fixtures live in `tests/fixtures/nixos-25.11/` (authoritative).
+//! - Unstable forecast fixtures live in `tests/fixtures/nixos-unstable/` (tracked, non-authoritative).
+//! - Parser module unit tests use stable fixtures only.
 //! - Synthetic scenarios (variant happy-paths, negative/malformed inputs) must
 //!   be inline string literals in tests.
 //! - Compatibility aliases are out of contract unless explicitly documented.

@@ -1,4 +1,4 @@
-# Observe and capture in-progress btrfs output during balance and device-remove.
+# Observe and capture in-progress btrfs output during balance, scrub, and device-remove.
 #
 # Starts operations in background on larger disks, polls progress commands
 # inside VM shell loops (to avoid test-driver round-trip latency), and asserts
@@ -16,22 +16,22 @@ DISK3_RAW = "/dev/disk/by-id/virtio-disk3"
 DISK3_DM = "disk3-delay"
 
 
-def dm_delay_table(write_delay_ms):
-    """dm-delay table for disk3: reads undelayed, writes delayed."""
+def dm_delay_table(read_delay_ms=0, write_delay_ms=0):
+    """dm-delay table for disk3 with independent read/write delays."""
     sectors = machine.succeed(f"blockdev --getsz {DISK3_RAW}").strip()
-    return f"0 {sectors} delay {DISK3_RAW} 0 0 {DISK3_RAW} 0 {write_delay_ms}"
+    return f"0 {sectors} delay {DISK3_RAW} 0 {read_delay_ms} {DISK3_RAW} 0 {write_delay_ms}"
 
 
 def dm_delay_create():
     """Create dm-delay wrapper on disk3 with zero delay."""
     machine.succeed("modprobe dm-delay")
-    machine.succeed(f"dmsetup create {DISK3_DM} --table '{dm_delay_table(0)}'")
+    machine.succeed(f"dmsetup create {DISK3_DM} --table '{dm_delay_table()}'")
 
 
-def dm_delay_activate(delay_ms):
+def dm_delay_activate(read_delay_ms=0, write_delay_ms=0):
     """Live-swap dm-delay table to inject real I/O delay."""
     machine.succeed(f"dmsetup suspend {DISK3_DM}")
-    machine.succeed(f"dmsetup reload {DISK3_DM} --table '{dm_delay_table(delay_ms)}'")
+    machine.succeed(f"dmsetup reload {DISK3_DM} --table '{dm_delay_table(read_delay_ms, write_delay_ms)}'")
     machine.succeed(f"dmsetup resume {DISK3_DM}")
 
 
@@ -112,20 +112,54 @@ AWK_DISK3_BYTES = (
 )
 
 
-with subtest("device remove progress observed"):
-    # Add disk3 to pool
-    machine.succeed(f"btrfs device add -f /dev/mapper/disk3 {MOUNT}")
+# Add disk3 to pool and spread data across all 3 devices.
+# Shared setup for scrub and device-remove subtests.
+machine.succeed(f"btrfs device add -f /dev/mapper/disk3 {MOUNT}")
+machine.succeed(
+    f"btrfs balance start -dconvert=raid1 -mconvert=raid1 {MOUNT}"
+)
+machine.succeed(f"dd if=/dev/urandom of={MOUNT}/bigfile2 bs=1M count=1024")
+machine.succeed("sync")
 
-    # Balance synchronous — spread data across all 3 devices
+
+with subtest("scrub per-device progress observed"):
+    # Inject 50ms read delay on disk3 so scrub takes observable time.
+    # Without this, VM I/O is so fast the scrub finishes before a single poll.
+    # 5ms is insufficient (~3s scrub); 50ms stretches disk3's scrub to ~10s+.
+    dm_delay_activate(read_delay_ms=50)
+
+    # Start scrub in background
     machine.succeed(
-        f"btrfs balance start -dconvert=raid1 -mconvert=raid1 {MOUNT}"
+        f"btrfs scrub start {MOUNT} "
+        f"> /dev/null 2>&1 < /dev/null &"
     )
 
-    # Write more data (~2 GiB) — needs to be large enough that device remove
-    # takes long enough for the polling loop to observe bytes decreasing
-    machine.succeed(f"dd if=/dev/urandom of={MOUNT}/bigfile2 bs=1M count=1024")
-    machine.succeed("sync")
+    # Poll inside VM shell for in-progress scrub status
+    machine.succeed(
+        "for i in $(seq 1 2400); do "
+        "out=\"$(btrfs scrub status -d -R /mnt/storage 2>&1 || true)\"; "
+        "if printf '%s\\n' \"$out\" | grep -q 'Status:.*running'; then "
+        "printf '%s\\n' \"$out\" > /tmp/fixtures/btrfs-scrub-per-device-running.txt; "
+        "exit 0; fi; sleep 0.05; done; exit 1"
+    )
 
+    # Wait for scrub to finish
+    machine.wait_until_succeeds(
+        f"btrfs scrub status {MOUNT} | grep -q 'finished'",
+        timeout=300,
+    )
+
+    # Capture finished state
+    machine.succeed(
+        f"btrfs scrub status -d -R {MOUNT}"
+        f" > {FIXTURE_DIR}/btrfs-scrub-per-device-finished.txt"
+    )
+
+    # Remove read delay before device-remove subtest
+    dm_delay_activate()
+
+
+with subtest("device remove progress observed"):
     # Record initial disk3 allocation bytes
     machine.succeed(
         f"btrfs device usage --raw {MOUNT} | {AWK_DISK3_BYTES} > /tmp/disk3-initial-bytes"
@@ -137,7 +171,7 @@ with subtest("device remove progress observed"):
     # enough for the polling loop to observe bytes decreasing.  Write-only
     # so that btrfs device usage reads remain fast.  Without this, VM I/O
     # is so fast the remove completes before a single poll fires.
-    dm_delay_activate(20)
+    dm_delay_activate(write_delay_ms=20)
 
     # Start device remove in background and poll in the same shell command
     # to eliminate host round-trip latency — the remove can finish in ~3s

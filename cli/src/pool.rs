@@ -243,6 +243,7 @@ pub enum EvictResult {
 ///
 /// Idempotent: if target mapper is already absent from the pool, returns
 /// `EvictResult::AlreadyAbsent`.
+#[allow(clippy::doc_overindented_list_items)]
 pub fn evict_present_device<R: CommandRunner + Sync>(
     runner: &R,
     mapper: &str,
