@@ -128,11 +128,14 @@ fn classify_sata(parsed: &RawSmartctlOutput) -> SmartHealth {
     let Some(attrs) = &parsed.ata_smart_attributes else {
         return SmartHealth::Healthy;
     };
-    let bad = attrs.table.iter().any(|a| {
-        matches!(
-            a.name.as_str(),
-            "Reallocated_Sector_Ct" | "Current_Pending_Sector" | "Offline_Uncorrectable"
-        ) && a.raw.value > 0
+    let bad = attrs.table.iter().any(|a| match a.name.as_str() {
+        // raw16(raw16) format: sector count is lower 16 bits
+        // (https://github.com/smartmontools/smartmontools/blob/RELEASE_7_5/smartmontools/drivedb.h#L83)
+        "Reallocated_Sector_Ct" => a.raw.value & 0xFFFF > 0,
+        // raw48 format: full value is the count
+        // (https://github.com/smartmontools/smartmontools/blob/RELEASE_7_5/smartmontools/drivedb.h#L118-L119)
+        "Current_Pending_Sector" | "Offline_Uncorrectable" => a.raw.value > 0,
+        _ => false,
     });
     if bad {
         SmartHealth::Degraded
@@ -266,6 +269,30 @@ mod tests {
             }
         }"#;
         assert_eq!(parse_smartctl_health(&raw(json)), SmartHealth::Degraded);
+    }
+
+    #[test]
+    fn sata_healthy_reallocated_zero_with_nonzero_upper_bytes() {
+        // Intent: Reallocated_Sector_Ct with 0 sectors must not false-positive
+        //   as Degraded when upper bytes of the raw value are non-zero.
+        // Why: smartctl raw.value is the full 48-bit raw. Attribute 5 uses
+        //   raw16(raw16) format where only the lower 16 bits are the sector
+        //   count; upper words carry supplementary event data.
+        // Scenario: a Toshiba N300 (or similar HDD using the drivedb default
+        //   for attribute 5) reports 0 reallocated sectors but 5 reallocation
+        //   events in the middle word → raw.value = 5 << 16 = 327680.
+        let json = r#"{
+            "smart_status": {"passed": true},
+            "device": {"protocol": "ATA"},
+            "ata_smart_attributes": {
+                "table": [
+                    {"name": "Reallocated_Sector_Ct", "raw": {"value": 327680}},
+                    {"name": "Current_Pending_Sector", "raw": {"value": 0}},
+                    {"name": "Offline_Uncorrectable", "raw": {"value": 0}}
+                ]
+            }
+        }"#;
+        assert_eq!(parse_smartctl_health(&raw(json)), SmartHealth::Healthy);
     }
 
     #[test]
