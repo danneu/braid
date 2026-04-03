@@ -60,10 +60,10 @@ _build-checks flake_attr *args:
     exit $rc
 
 # Run NixOS VM tests — excludes repro tests (pass test names to run specific tests, add -v for verbose)
-test *args:
+test-vm *args:
     just _build-checks checks {{args}}
 
-# Run repro tests only (same flags as `test`: -v, -rebuild, -k, or named tests)
+# Run repro tests only (same flags as `test-vm`: -v, -rebuild, -k, or named tests)
 test-repro *args:
     just _build-checks reproChecks {{args}}
 
@@ -76,7 +76,7 @@ supertest:
     just test-rust-unstable
     just test-all-unstable
 
-# Run all tests including repro (zero-arg only — use `test` or `test-repro` for named tests)
+# Run all tests including repro (zero-arg only — use `test-vm` or `test-repro` for named tests)
 test-all:
     just _build-checks checks && just _build-checks reproChecks
 
@@ -96,7 +96,7 @@ test-fast:
 
 # Run parser compatibility canary tests (CLI parsers against live tool output)
 test-parsers *args:
-    just test braid-status-rust braid-status-during-balance braid-idle braid-discover braid-browse {{args}}
+    just test-vm braid-status-rust braid-status-during-balance braid-idle braid-discover braid-browse {{args}}
 
 # Run Rust unit tests (excludes unstable golden tests)
 test-rust:

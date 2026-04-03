@@ -674,16 +674,16 @@ Typical loop:
 
 ```bash
 # run one test while iterating
-just test braid-add-disk
+just test-vm braid-add-disk
 
 # run a few specific tests
-just test braid-add-disk braid-remove-disk
+just test-vm braid-add-disk braid-remove-disk
 
 # add verbose VM logs
-just test braid-add-disk -v
+just test-vm braid-add-disk -v
 
 # run full suite before finishing
-just test
+just test-vm
 ```
 
 ### Faster tests with tmpfs
@@ -701,7 +701,7 @@ fileSystems."/tmp-braid" = {
 };
 ```
 
-Then pass `--option build-dir /tmp-braid` to nix commands, or use `just test` / `just test-fast` which do this automatically.
+Then pass `--option build-dir /tmp-braid` to nix commands, or use `just test-vm` / `just test-fast` which do this automatically.
 
 Rust CLI code lives in `cli/`. Build it directly with:
 
@@ -751,5 +751,5 @@ just capture-fixtures
 just capture-progress-fixtures
 just test-rust
 just test-parsers
-just test
+just test-vm
 ```

@@ -95,11 +95,11 @@ The first line of a commit message must not be capitalized (e.g. `fix the foo bu
 
 ## Commands
 
-- `just test` — Run NixOS VM tests (excludes repro tests).
-- `just test -v` — Run tests with full VM logs.
-- `just test test1 test2` — Run one or more specific checks.
-- `just test test1 -v` — Run specific checks with verbose output.
-- `just test-repro` — Run repro tests only (same flags as `test`).
+- `just test-vm` — Run NixOS VM tests (excludes repro tests).
+- `just test-vm -v` — Run tests with full VM logs.
+- `just test-vm test1 test2` — Run one or more specific checks.
+- `just test-vm test1 -v` — Run specific checks with verbose output.
+- `just test-repro` — Run repro tests only (same flags as `test-vm`).
 - `just test-all` — Run all tests including repro.
 - `just test-parsers` — Run parser compatibility canary (CLI parsers against live VM tool output).
 - `just test-rust` — Run Rust unit tests (`cargo test`).
@@ -108,9 +108,9 @@ The first line of a commit message must not be capitalized (e.g. `fix the foo bu
 - `just capture-all-fixtures-unstable` — Capture all unstable fixtures (base + progress).
 - `just test-rust-unstable` — Run golden parser tests against unstable fixtures.
 
-`just test` and `just test-repro` accept `--unstable` to run VM tests against nixos-unstable (e.g. `just test hello-world --unstable`). For fixture capture and Rust golden tests, use the dedicated `-unstable` recipes above.
+`just test-vm` and `just test-repro` accept `--unstable` to run VM tests against nixos-unstable (e.g. `just test-vm hello-world --unstable`). For fixture capture and Rust golden tests, use the dedicated `-unstable` recipes above.
 
-**Test verbosity:** Run tests without `-v` by default. Only add `-v` to a specific failing test when the non-verbose output doesn't explain the failure. Never run `just test -v` (all tests verbose) — it produces too much output to be useful.
+**Test verbosity:** Run tests without `-v` by default. Only add `-v` to a specific failing test when the non-verbose output doesn't explain the failure. Never run `just test-vm -v` (all tests verbose) — it produces too much output to be useful.
 
 ## Test Conventions
 
