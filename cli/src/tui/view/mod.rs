@@ -443,15 +443,10 @@ fn view_data(model: &Model, frame: &mut Frame, area: Rect, now: PrimitiveDateTim
         None => 1 + 1,
     };
     let disk_height: u16 = model.disk_names.len() as u16 + 2; // +1 border, +1 header
-    let scrub_height: u16 = match model.pool.current() {
-        Some(p) => scrub_lines(&p.scrub) + 1,
-        None => 0,
-    };
     let chunks = Layout::vertical([
-        Constraint::Length(pool_height),  // [0] pool
-        Constraint::Length(disk_height),  // [1] disks
-        Constraint::Length(scrub_height), // [2] scrub
-        Constraint::Min(0),               // [3] spacer
+        Constraint::Length(pool_height), // [0] pool
+        Constraint::Length(disk_height), // [1] disks
+        Constraint::Min(0),              // [2] spacer
     ])
     .spacing(1)
     .split(area);
@@ -508,10 +503,6 @@ fn view_data(model: &Model, frame: &mut Frame, area: Rect, now: PrimitiveDateTim
 
     let mut table_state = TableState::default().with_selected(Some(model.selected_disk));
     frame.render_stateful_widget(disk_table(model, page_unit), chunks[1], &mut table_state);
-
-    if let Some(pool) = model.pool.current() {
-        frame.render_widget(scrub_table(&pool.scrub, now), chunks[2]);
-    }
 }
 
 fn view_placeholder(frame: &mut Frame, area: Rect, name: &str) {
@@ -519,6 +510,43 @@ fn view_placeholder(frame: &mut Frame, area: Rect, name: &str) {
         Paragraph::new(format!("{name} — coming soon")).style(Style::default().fg(Color::DarkGray)),
         area,
     );
+}
+
+fn view_scrub(model: &Model, frame: &mut Frame, area: Rect, now: PrimitiveDateTime) {
+    match &model.pool {
+        PoolStatus::Loading => {
+            frame.render_widget(
+                Paragraph::new("loading...")
+                    .style(Style::default().fg(Color::DarkGray))
+                    .block(section_block("Scrub")),
+                area,
+            );
+        }
+        PoolStatus::NotMounted => {
+            frame.render_widget(
+                Paragraph::new("not mounted")
+                    .style(Style::default().fg(Color::Yellow))
+                    .block(section_block("Scrub")),
+                area,
+            );
+        }
+        PoolStatus::Mounted(pool)
+        | PoolStatus::Refreshing(pool)
+        | PoolStatus::ErrorStale(_, pool) => {
+            let scrub_height = scrub_lines(&pool.scrub) + 1;
+            let chunks = Layout::vertical([Constraint::Length(scrub_height), Constraint::Min(0)])
+                .split(area);
+            frame.render_widget(scrub_table(&pool.scrub, now), chunks[0]);
+        }
+        PoolStatus::Error(msg) => {
+            frame.render_widget(
+                Paragraph::new(format!("error: {msg}"))
+                    .style(Style::default().fg(Color::Red))
+                    .block(section_block("Scrub")),
+                area,
+            );
+        }
+    }
 }
 
 fn view_disk_detail(model: &Model, frame: &mut Frame, area: Rect) {
@@ -724,6 +752,7 @@ pub fn view(model: &Model, frame: &mut Frame, now: PrimitiveDateTime) {
 
     match model.tab {
         Tab::Data => view_data(model, frame, outer[off + 2], now),
+        Tab::Scrub => view_scrub(model, frame, outer[off + 2], now),
         Tab::Sharing => view_placeholder(frame, outer[off + 2], "Sharing"),
     }
 
@@ -1120,6 +1149,39 @@ pub(crate) mod tests {
             "LUKS header backups exist in /var/lib/braid/luks-headers — copy offsite and delete local copies".to_owned(),
         ];
         let terminal = render(&model, 80, 26);
+        snap!(buffer_to_string(&terminal));
+    }
+
+    /*
+     * Intent: Scrub tab renders scrub details when the pool is mounted.
+     *
+     * Why it exists: Scrub info moved from the Data tab to its own top-level
+     * tab; this verifies the new tab renders the scrub table correctly.
+     *
+     * Scenario: User switches to the Scrub tab on a healthy mounted pool
+     * that has completed a scrub.
+     */
+    #[test]
+    fn snapshot_scrub_tab() {
+        let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(sample_pool()));
+        model.tab = Tab::Scrub;
+        let terminal = render(&model, 60, 22);
+        snap!(buffer_to_string(&terminal));
+    }
+
+    /*
+     * Intent: Scrub tab shows "not mounted" when the pool is offline.
+     *
+     * Why it exists: view_scrub must handle non-mounted states distinctly
+     * rather than collapsing them into a generic loading message.
+     *
+     * Scenario: User switches to the Scrub tab while the pool is not mounted.
+     */
+    #[test]
+    fn snapshot_scrub_tab_not_mounted() {
+        let mut model = Model::new_demo(sample_disk_names(), PoolStatus::NotMounted);
+        model.tab = Tab::Scrub;
+        let terminal = render(&model, 60, 22);
         snap!(buffer_to_string(&terminal));
     }
 }

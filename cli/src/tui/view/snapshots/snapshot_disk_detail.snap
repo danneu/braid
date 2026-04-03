@@ -2,23 +2,22 @@
 source: cli/src/tui/view/mod.rs
 expression: buffer_to_string(&terminal)
 ---
-Data  Sharing
+Data  Scrub  Sharing
  Pool ──────────────────────────────────────────────────────
-      ┌ Disk Detail ─────────────────────────────────┐
- Type │ Disk       toshiba                           │
- Data │ Status     unlocked                          │
- Metad│ Cipher     aes-xts-plain64                   │
- Syste│ Key size   512 bits                          │
-      │ Keyslots   1 of 32 slots used                │
- Disks│                                              │──────
-     N│ Allocations ──────────────────────────────── │
- ▶ 1 t│ Type        Profile     Size                 │
-   2 i│ Data        RAID1       1.3 TiB              │
-   3 w│ Metadata    DUP         1.5 GiB              │
-      │ System      DUP         16.0 MiB             │
- Scrub│ Unallocated             4.1 TiB              │──────
- Last │                                              │
- Error│ r reload · Esc to go back                    │
- Total└──────────────────────────────────────────────┘
- Rate         32.34MiB/s
+ Path ┌ Disk Detail ─────────────────────────────────┐
+ Usage│ Disk       toshiba                           │
+      │ Status     unlocked                          │
+ Type │ Cipher     aes-xts-plain64                   │
+ Data │ Key size   512 bits                          │
+ Metad│ Keyslots   1 of 32 slots used                │
+ Syste│                                              │
+      │ Allocations ──────────────────────────────── │
+ Disks│ Type        Profile     Size                 │──────
+     N│ Data        RAID1       1.3 TiB              │
+ ▶ 1 t│ Metadata    DUP         1.5 GiB              │
+   2 i│ System      DUP         16.0 MiB             │
+   3 w│ Unallocated             4.1 TiB              │
+      │                                              │
+      │ r reload · Esc to go back                    │
+      └──────────────────────────────────────────────┘
 Quit: q │ Help: ? │ Reload: r

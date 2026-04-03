@@ -1,0 +1,12 @@
+---
+source: cli/src/tui/view/mod.rs
+expression: buffer_to_string(&terminal)
+---
+Data  Scrub  Sharing
+ Scrub ─────────────────────────────────────────────────────
+ Last run     Tue Feb 24 02:00:07 2026 (11 min ago)
+ Errors       0
+ Total        32.36MiB
+ Rate         32.34MiB/s
+ Duration     0:00:00
+Quit: q │ Help: ? │ Reload: r

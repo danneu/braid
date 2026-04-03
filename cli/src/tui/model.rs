@@ -12,22 +12,25 @@ use crate::types::MountPoint;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
     Data,
+    Scrub,
     Sharing,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 2] = [Tab::Data, Tab::Sharing];
+    pub const ALL: [Tab; 3] = [Tab::Data, Tab::Scrub, Tab::Sharing];
 
     pub fn label(self) -> &'static str {
         match self {
             Tab::Data => "Data",
+            Tab::Scrub => "Scrub",
             Tab::Sharing => "Sharing",
         }
     }
 
     pub fn next(self) -> Tab {
         match self {
-            Tab::Data => Tab::Sharing,
+            Tab::Data => Tab::Scrub,
+            Tab::Scrub => Tab::Sharing,
             Tab::Sharing => Tab::Data,
         }
     }
@@ -35,7 +38,8 @@ impl Tab {
     pub fn prev(self) -> Tab {
         match self {
             Tab::Data => Tab::Sharing,
-            Tab::Sharing => Tab::Data,
+            Tab::Scrub => Tab::Data,
+            Tab::Sharing => Tab::Scrub,
         }
     }
 }

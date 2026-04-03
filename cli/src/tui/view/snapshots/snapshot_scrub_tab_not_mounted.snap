@@ -1,0 +1,8 @@
+---
+source: cli/src/tui/view/mod.rs
+expression: buffer_to_string(&terminal)
+---
+Data  Scrub  Sharing
+ Scrub ─────────────────────────────────────────────────────
+ not mounted
+Quit: q │ Help: ? │ Reload: r

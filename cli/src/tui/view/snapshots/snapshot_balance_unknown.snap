@@ -2,7 +2,7 @@
 source: cli/src/tui/view/mod.rs
 expression: buffer_to_string(&terminal)
 ---
-Data  Sharing
+Data  Scrub  Sharing
  Pool ──────────────────────────────────────────────────────
  Path       /mnt/storage
  Balance    unknown
@@ -16,10 +16,4 @@ Data  Sharing
  ▶ 1 toshiba  sata ok      25%  1.4 / 5.5 TiB
    2 ironwolf sata warning 25%  1.4 / 5.5 TiB
    3 wdc      usb  -       21%  0.8 / 3.6 TiB
- Scrub ─────────────────────────────────────────────────────
- Last run     Tue Feb 24 02:00:07 2026 (11 min ago)
- Errors       0
- Total        32.36MiB
- Rate         32.34MiB/s
- Duration     0:00:00
 Quit: q │ Help: ? │ Reload: r

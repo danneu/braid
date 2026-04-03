@@ -2,7 +2,7 @@
 source: cli/src/tui/view/mod.rs
 expression: buffer_to_string(&terminal)
 ---
-Data  Sharing
+Data  Scrub  Sharing
  Pool ──────────────────────────────────────────────────────
  error: command failed: findmnt exited 1
  Disks ─────────────────────────────────────────────────────
