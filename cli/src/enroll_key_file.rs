@@ -1,4 +1,4 @@
-use crate::cmd::CommandRunner;
+use crate::cmd::{CmdRequest, CommandRunner, Step};
 use crate::config::mapper_name;
 use crate::luks::{self, KeySlotState, LuksError, KEYFILE_SIZE, LUKS_SLOT_KEYFILE};
 use crate::membership::PoolMembership;
@@ -185,6 +185,49 @@ fn generate_key_file(path: &Path) -> Result<(), std::io::Error> {
     Ok(())
 }
 
+/// Compile dry-run steps from discovered candidates.
+pub fn compile_enroll_steps(
+    candidates: &[(String, ByIdPath)],
+    key_file_path: &Path,
+    generate: bool,
+    paths: &StatePaths,
+) -> Vec<Step> {
+    let mut steps = Vec::new();
+
+    if generate {
+        steps.push(Step {
+            risk: "safe",
+            description: format!("generate keyfile → {}", key_file_path.display()),
+            commands: vec![],
+        });
+    }
+
+    for (name, by_id) in candidates {
+        let mn = mapper_name(name);
+        steps.push(Step {
+            risk: "safe",
+            description: format!("enroll keyfile → LUKS slot 1 on {}", by_id),
+            commands: vec![CmdRequest::CryptsetupLuksAddKeyFile {
+                device: by_id.0.clone(),
+                key_file_path: key_file_path.display().to_string(),
+            }],
+        });
+        let backup_path = paths
+            .luks_headers_dir()
+            .join(format!("{}.luksheader", mn.0));
+        steps.push(Step {
+            risk: "safe",
+            description: format!("LUKS header backup → {}", backup_path.display()),
+            commands: vec![CmdRequest::CryptsetupLuksHeaderBackup {
+                device: by_id.0.clone(),
+                backup_path: backup_path.display().to_string(),
+            }],
+        });
+    }
+
+    steps
+}
+
 pub fn cmd_enroll_key_file<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
@@ -193,6 +236,7 @@ pub fn cmd_enroll_key_file<R: CommandRunner, F: Filesystem + ?Sized>(
     generate: bool,
     passphrase_stdin: bool,
     passphrase_file: Option<&Path>,
+    dry_run: bool,
     paths: &StatePaths,
 ) -> Result<(), EnrollKeyFileError> {
     preflight::check_no_pending_operation(paths).map_err(EnrollKeyFileError::Validation)?;
@@ -208,6 +252,13 @@ pub fn cmd_enroll_key_file<R: CommandRunner, F: Filesystem + ?Sized>(
 
         // 1. Discover candidates
         let candidates = discover_enrollment_candidates(runner, fs, membership)?;
+
+        // Dry-run: show what would happen, skip passphrase + mutations
+        if dry_run {
+            let steps = compile_enroll_steps(&candidates, key_file_path, generate, paths);
+            Step::print_dry_run(&steps);
+            return Ok(());
+        }
 
         // 2. Read passphrase
         let passphrase = luks::read_passphrase(passphrase_file, passphrase_stdin)?;
@@ -243,6 +294,14 @@ pub fn cmd_enroll_key_file<R: CommandRunner, F: Filesystem + ?Sized>(
         }
 
         let candidates = discover_enrollment_candidates(runner, fs, membership)?;
+
+        // Dry-run: show what would happen, skip passphrase + mutations
+        if dry_run {
+            let steps = compile_enroll_steps(&candidates, key_file_path, generate, paths);
+            Step::print_dry_run(&steps);
+            return Ok(());
+        }
+
         let passphrase = luks::read_passphrase(passphrase_file, passphrase_stdin)?;
         let plan = plan_enrollment(runner, &candidates, key_file_path, &passphrase)?;
         apply_enrollment(runner, &plan, &passphrase, key_file_path, paths)?;
@@ -949,12 +1008,75 @@ mod tests {
         let membership = make_membership(&[("d1", "/dev/disk/by-id/d1")]);
         let kf = tmp.path().join("braid.key");
 
-        let err = cmd_enroll_key_file(&runner, &fs, &membership, &kf, false, false, None, &paths)
-            .unwrap_err();
+        let err = cmd_enroll_key_file(
+            &runner,
+            &fs,
+            &membership,
+            &kf,
+            false,
+            false,
+            None,
+            false,
+            &paths,
+        )
+        .unwrap_err();
 
         assert!(
             err.to_string().contains("interrupted operation"),
             "expected 'interrupted operation' in: {err}"
         );
+    }
+
+    #[test]
+    // Intent: dry-run for --generate with 3 disks shows generate + 3× (enroll + backup).
+    // Why: verifies compile_enroll_steps produces correct output for the common case.
+    // Scenario: 3-disk pool, all present LUKS, --generate --dry-run.
+    fn dry_run_render_enroll_generate_3_disks() {
+        let candidates = vec![
+            ("aaa".to_owned(), by_id("/dev/disk/by-id/disk-aaa")),
+            ("bbb".to_owned(), by_id("/dev/disk/by-id/disk-bbb")),
+            ("ccc".to_owned(), by_id("/dev/disk/by-id/disk-ccc")),
+        ];
+        let paths = StatePaths::custom("/var/lib/braid".into());
+        let steps =
+            compile_enroll_steps(&candidates, Path::new("/mnt/usb/braid.key"), true, &paths);
+        let output = Step::render_dry_run(&steps);
+
+        // 1 generate + 3× (enroll + backup) = 7 steps
+        // generate has no command (1 line), others have 1 command each (2 lines each) = 1 + 6×2 = 13 lines
+        assert_eq!(
+            output.lines().count(),
+            13,
+            "expected 13 lines, got:\n{output}"
+        );
+        assert!(output.contains("generate keyfile"));
+        assert!(output.contains("enroll keyfile"));
+        assert!(output.contains("LUKS header backup"));
+        assert!(output.contains("cryptsetup luksAddKey"));
+        assert!(output.contains("cryptsetup luksHeaderBackup"));
+    }
+
+    #[test]
+    // Intent: dry-run for existing keyfile with 2 disks omits generate step.
+    // Why: verifies generate=false skips the keyfile generation step.
+    // Scenario: 2-disk pool, existing keyfile, --dry-run (no --generate).
+    fn dry_run_render_enroll_existing_keyfile() {
+        let candidates = vec![
+            ("aaa".to_owned(), by_id("/dev/disk/by-id/disk-aaa")),
+            ("bbb".to_owned(), by_id("/dev/disk/by-id/disk-bbb")),
+        ];
+        let paths = StatePaths::custom("/var/lib/braid".into());
+        let steps =
+            compile_enroll_steps(&candidates, Path::new("/mnt/usb/braid.key"), false, &paths);
+        let output = Step::render_dry_run(&steps);
+
+        // No generate step. 2× (enroll + backup) = 4 steps, each 2 lines = 8
+        assert_eq!(
+            output.lines().count(),
+            8,
+            "expected 8 lines, got:\n{output}"
+        );
+        assert!(!output.contains("generate keyfile"));
+        assert!(output.contains("enroll keyfile"));
     }
 }

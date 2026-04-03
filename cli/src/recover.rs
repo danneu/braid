@@ -1,4 +1,4 @@
-use crate::cmd::{CmdRequest, CommandRunner};
+use crate::cmd::{CmdRequest, CommandRunner, Step};
 use crate::config::{self, Config};
 use crate::journal::{self, Journal};
 use crate::membership::{self, DiskMember, PoolMembership};
@@ -35,6 +35,7 @@ pub fn cmd_recover<R: CommandRunner, F: Filesystem + ?Sized>(
     passphrase_stdin: bool,
     passphrase_file: Option<&std::path::Path>,
     allow_degraded: bool,
+    dry_run: bool,
 ) -> Result<(), RecoverError> {
     // 1. Load journal (required — nothing to recover if absent)
     let journal = match journal::load_journal(paths) {
@@ -55,6 +56,60 @@ pub fn cmd_recover<R: CommandRunner, F: Filesystem + ?Sized>(
 
     // 2. Open LUKS devices and mount the pool if needed
     let union = union_memberships(&journal);
+
+    // Dry-run: probe + validate (same errors as execution), then print plan
+    if dry_run {
+        let plan = mount::plan_open_pool(runner, fs, config, &union, allow_degraded, "recover")?;
+        let mut steps = Vec::new();
+        if plan.is_some() {
+            steps.extend(mount::compile_open_steps(
+                plan.as_ref().unwrap(),
+                &config.mount_point(),
+                None,
+            ));
+        } else {
+            // Pool is already mounted — run the same read-only reconciliation
+            // validation that execution does (probe_pool + membership construction).
+            // This catches errors like "device X has no by-id path in either snapshot"
+            // before claiming recovery is ready.
+            let mount_point = config.mount_point();
+            let pool = probe::probe_pool(runner, mount_point.as_str())?;
+            for dev in &pool.devices {
+                let Some(name) = config::name_from_mapper(&dev.mapper.0) else {
+                    continue;
+                };
+                if union.disks.get(name).is_none() {
+                    return Err(RecoverError::Failed(format!(
+                        "device {} is in the live pool but has no by-id path in either \
+                         the pre-operation or target membership snapshot.\n\
+                         This must be resolved manually — provide the correct \
+                         /dev/disk/by-id/ path and re-run recovery.",
+                        dev.mapper.0
+                    )));
+                }
+            }
+        }
+        // State recovery steps are always shown (recover writes pool.json even when mounted)
+        steps.push(Step {
+            risk: "safe",
+            description: format!(
+                "write recovered pool.json → {}",
+                paths.pool_json().display()
+            ),
+            commands: vec![],
+        });
+        steps.push(Step {
+            risk: "safe",
+            description: format!(
+                "clear pending-op.json → {}",
+                paths.pending_op_json().display()
+            ),
+            commands: vec![],
+        });
+        Step::print_dry_run(&steps);
+        return Ok(());
+    }
+
     let credential = Credential::Passphrase {
         passphrase_stdin,
         passphrase_file,
@@ -496,7 +551,7 @@ mod tests {
                 cryptsetup_uuid_ok("/dev/vdb", "22222222-2222-2222-2222-222222222222"),
             );
 
-        let result = cmd_recover(&runner, &fs, &config, &paths, false, None, false);
+        let result = cmd_recover(&runner, &fs, &config, &paths, false, None, false, false);
 
         // Must fail with an error mentioning the unknown device
         let err = result.unwrap_err();
@@ -661,6 +716,7 @@ mod tests {
             false,
             Some(passphrase_file.path()),
             true, // allow_degraded (disk3 is absent)
+            false,
         );
 
         result.expect("recover should self-mount and succeed");
@@ -769,6 +825,7 @@ mod tests {
             false,
             Some(passphrase_file.path()),
             false, // allow_degraded = false
+            false,
         );
 
         let err = result.expect_err("should refuse degraded mount");
@@ -854,7 +911,7 @@ mod tests {
             );
 
         // No passphrase — pool is already mounted
-        let result = cmd_recover(&runner, &fs, &config, &paths, false, None, false);
+        let result = cmd_recover(&runner, &fs, &config, &paths, false, None, false, false);
 
         result.expect("recover should succeed when pool already mounted");
 
@@ -988,6 +1045,7 @@ mod tests {
             false,
             Some(passphrase_file.path()),
             false,
+            false,
         );
 
         let err = result.expect_err("should fail with bootstrap instructions");
@@ -1072,6 +1130,7 @@ mod tests {
             false,
             Some(passphrase_file.path()),
             false,
+            false,
         );
 
         let err = result.expect_err("should fail with passphrase error");
@@ -1114,7 +1173,7 @@ mod tests {
         let (mp_req, mp_out) = mountpoint_fail();
         let runner = MockRunner::default().with_output(mp_req, mp_out);
 
-        let result = cmd_recover(&runner, &fs, &config, &paths, false, None, false);
+        let result = cmd_recover(&runner, &fs, &config, &paths, false, None, false, false);
 
         let err = result.expect_err("should fail with mount error");
         let msg = err.to_string();
@@ -1228,6 +1287,7 @@ mod tests {
             &paths,
             false,
             Some(passphrase_file.path()),
+            false,
             false,
         );
 

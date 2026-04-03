@@ -1,9 +1,10 @@
-use crate::cmd::{CmdError, CmdRequest, CommandRunner};
+use crate::cmd::{CmdError, CmdRequest, CommandRunner, Step};
 use crate::config::{mapper_name, Config};
 use crate::luks::{self, LuksError};
 use crate::membership::PoolMembership;
 use crate::probe::{self, Filesystem, ProbeError};
-use crate::types::ConfigDiskState;
+use crate::types::{ByIdPath, ConfigDiskState, MountPoint};
+use std::path::Path;
 
 #[derive(Debug, thiserror::Error)]
 pub enum MountError {
@@ -35,35 +36,44 @@ fn tag(label: &str) -> String {
     format!("[{:<4}]", label)
 }
 
-/// Open LUKS devices from a membership set and mount the btrfs pool.
+/// Result of the read-only probe + validate phase.
+pub struct OpenPlan {
+    /// Disks that need LUKS open (name, by_id pairs).
+    pub to_unlock: Vec<(String, ByIdPath)>,
+    /// At least one mapper was already open.
+    pub any_open: bool,
+    /// At least one membership disk was absent/damaged.
+    pub any_missing_member: bool,
+    /// Device path to use for mount (e.g. "/dev/mapper/braid-disk1").
+    pub mount_device: String,
+}
+
+/// Probe membership disks, validate UUIDs, check degraded policy.
+/// Returns the same errors that open_and_mount_pool() would.
+/// No mutations — safe for dry-run.
 ///
-/// Steps: check if already mounted, probe each disk, verify credentials
-/// and open LUKS, btrfs device scan, degraded check, mkdir + mount.
-///
-/// Returns `Ok(true)` if the mount was performed, `Ok(false)` if already mounted.
-/// `command_hint` is used in the `--allow-degraded` hint message (e.g. "unlock" or "recover").
-pub fn open_and_mount_pool<R: CommandRunner, F: Filesystem + ?Sized>(
+/// Returns `Ok(None)` when pool is already mounted.
+pub fn plan_open_pool<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
     config: &Config,
     membership: &PoolMembership,
-    credential: Credential<'_>,
     allow_degraded: bool,
     command_hint: &str,
-) -> Result<bool, MountError> {
+) -> Result<Option<OpenPlan>, MountError> {
     let mount_point = config.mount_point();
 
-    // 1. If pool already mounted → return false
+    // 1. If pool already mounted → None
     let mp_result = runner.run(&CmdRequest::MountpointCheck {
         path: mount_point.clone(),
     })?;
     if mp_result.exit_status == 0 {
         eprintln!("pool already mounted at {mount_point}");
-        return Ok(false);
+        return Ok(None);
     }
 
     // 2. Probe each membership disk
-    let mut to_unlock = Vec::new(); // (name, by_id) pairs needing unlock
+    let mut to_unlock = Vec::new();
     let mut any_open = false;
     let mut any_missing_member = false;
 
@@ -106,11 +116,123 @@ pub fn open_and_mount_pool<R: CommandRunner, F: Filesystem + ?Sized>(
         return Err(MountError::Failed("no unlockable disks found".into()));
     }
 
-    // 4. If disks need opening → verify credential, then open each disk
-    if !to_unlock.is_empty() {
+    // 4. Degraded check (before any mutations)
+    if any_missing_member && !allow_degraded {
+        return Err(MountError::DegradedRefused(format!(
+            "pool has missing devices — refusing to mount degraded\n\
+             new writes would have ZERO redundancy (single-profile chunks)\n\
+             hint: braid {} --allow-degraded",
+            command_hint
+        )));
+    }
+
+    // 5. Compute mount device
+    let mount_key = to_unlock
+        .first()
+        .map(|(k, _)| k.as_str())
+        .or_else(|| membership.disks.keys().next().map(|k| k.as_str()))
+        .unwrap_or("unknown");
+    let mount_device = format!("/dev/mapper/{}", mapper_name(mount_key).0);
+
+    Ok(Some(OpenPlan {
+        to_unlock,
+        any_open,
+        any_missing_member,
+        mount_device,
+    }))
+}
+
+/// Compile dry-run steps from a validated OpenPlan.
+pub fn compile_open_steps(
+    plan: &OpenPlan,
+    mount_point: &MountPoint,
+    key_file: Option<&Path>,
+) -> Vec<Step> {
+    let mut steps = Vec::new();
+
+    for (name, by_id) in &plan.to_unlock {
+        let mn = mapper_name(name);
+        if let Some(kf) = key_file {
+            steps.push(Step {
+                risk: "safe",
+                description: format!("LUKS open {} → {}", by_id, mn),
+                commands: vec![CmdRequest::CryptsetupLuksOpenKeyFile {
+                    device: by_id.0.clone(),
+                    mapper: mn.0.clone(),
+                    key_file_path: kf.display().to_string(),
+                }],
+            });
+        } else {
+            steps.push(Step {
+                risk: "safe",
+                description: format!("LUKS open {} → {}", by_id, mn),
+                commands: vec![CmdRequest::CryptsetupLuksOpen {
+                    device: by_id.0.clone(),
+                    mapper: mn.0.clone(),
+                }],
+            });
+        }
+    }
+
+    steps.push(Step {
+        risk: "safe",
+        description: "btrfs device scan".into(),
+        commands: vec![CmdRequest::BtrfsDeviceScanAll],
+    });
+
+    if plan.any_missing_member {
+        steps.push(Step {
+            risk: "safe",
+            description: format!("mount → {} (degraded)", mount_point),
+            commands: vec![CmdRequest::MountWithOptions {
+                device: plan.mount_device.clone(),
+                mount_point: mount_point.clone(),
+                options: vec!["degraded".to_owned()],
+            }],
+        });
+    } else {
+        steps.push(Step {
+            risk: "safe",
+            description: format!("mount → {}", mount_point),
+            commands: vec![CmdRequest::Mount {
+                device: plan.mount_device.clone(),
+                mount_point: mount_point.clone(),
+            }],
+        });
+    }
+
+    steps
+}
+
+/// Open LUKS devices from a membership set and mount the btrfs pool.
+///
+/// Steps: plan (probe + validate), verify credentials, open LUKS, btrfs
+/// device scan, mkdir + mount.
+///
+/// Returns `Ok(true)` if the mount was performed, `Ok(false)` if already mounted.
+/// `command_hint` is used in the `--allow-degraded` hint message (e.g. "unlock" or "recover").
+pub fn open_and_mount_pool<R: CommandRunner, F: Filesystem + ?Sized>(
+    runner: &R,
+    fs: &F,
+    config: &Config,
+    membership: &PoolMembership,
+    credential: Credential<'_>,
+    allow_degraded: bool,
+    command_hint: &str,
+) -> Result<bool, MountError> {
+    let mount_point = config.mount_point();
+
+    // 1. Plan: probe + validate (read-only)
+    let plan = match plan_open_pool(runner, fs, config, membership, allow_degraded, command_hint)? {
+        Some(p) => p,
+        None => return Ok(false), // already mounted
+    };
+
+    // 2. If disks need opening → verify credential, then open each disk
+    if !plan.to_unlock.is_empty() {
         match &credential {
             Credential::KeyFile(kf) => {
-                let (ref first_name, ref first_by_id) = to_unlock[0];
+                let (ref first_name, ref first_by_id) = plan.to_unlock[0];
                 let ok = luks::verify_key_file(runner, &first_by_id.0, kf)?;
                 if !ok {
                     return Err(MountError::Failed(format!(
@@ -119,7 +241,7 @@ pub fn open_and_mount_pool<R: CommandRunner, F: Filesystem + ?Sized>(
                     )));
                 }
 
-                for (name, by_id) in &to_unlock {
+                for (name, by_id) in &plan.to_unlock {
                     luks::ensure_luks_open_with_key_file(runner, fs, name, by_id, kf).map_err(
                         |_| {
                             MountError::Failed(format!(
@@ -139,7 +261,7 @@ pub fn open_and_mount_pool<R: CommandRunner, F: Filesystem + ?Sized>(
             } => {
                 let passphrase = luks::read_passphrase(*passphrase_file, *passphrase_stdin)?;
 
-                let (ref first_name, ref first_by_id) = to_unlock[0];
+                let (ref first_name, ref first_by_id) = plan.to_unlock[0];
                 let ok = luks::verify_passphrase(runner, &first_by_id.0, &passphrase)?;
                 if !ok {
                     return Err(MountError::Failed(format!(
@@ -148,7 +270,7 @@ pub fn open_and_mount_pool<R: CommandRunner, F: Filesystem + ?Sized>(
                     )));
                 }
 
-                for (name, by_id) in &to_unlock {
+                for (name, by_id) in &plan.to_unlock {
                     luks::ensure_luks_open(runner, fs, name, by_id, &passphrase).map_err(|_| {
                         MountError::Failed(format!(
                             "failed to open disk '{}': passphrase was verified \
@@ -164,7 +286,7 @@ pub fn open_and_mount_pool<R: CommandRunner, F: Filesystem + ?Sized>(
         }
     }
 
-    // 5. btrfs device scan
+    // 3. btrfs device scan
     let scan = runner.run(&CmdRequest::BtrfsDeviceScanAll)?;
     if scan.exit_status != 0 {
         return Err(MountError::Failed(format!(
@@ -174,34 +296,18 @@ pub fn open_and_mount_pool<R: CommandRunner, F: Filesystem + ?Sized>(
         )));
     }
 
-    // 6. Degraded check
-    if any_missing_member && !allow_degraded {
-        return Err(MountError::DegradedRefused(format!(
-            "pool has missing devices — refusing to mount degraded\n\
-             new writes would have ZERO redundancy (single-profile chunks)\n\
-             hint: braid {} --allow-degraded",
-            command_hint
-        )));
-    }
-
-    // 7. mkdir + mount
+    // 4. mkdir + mount
     let _ = std::fs::create_dir_all(mount_point);
 
-    let mount_key = to_unlock
-        .first()
-        .map(|(k, _)| k.as_str())
-        .or_else(|| membership.disks.keys().next().map(|k| k.as_str()))
-        .unwrap_or("unknown");
-
-    let mount_result = if any_missing_member {
+    let mount_result = if plan.any_missing_member {
         runner.run(&CmdRequest::MountWithOptions {
-            device: format!("/dev/mapper/{}", mapper_name(mount_key).0),
+            device: plan.mount_device.clone(),
             mount_point: mount_point.clone(),
             options: vec!["degraded".to_owned()],
         })?
     } else {
         runner.run(&CmdRequest::Mount {
-            device: format!("/dev/mapper/{}", mapper_name(mount_key).0),
+            device: plan.mount_device.clone(),
             mount_point: mount_point.clone(),
         })?
     };

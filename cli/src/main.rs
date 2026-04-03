@@ -37,7 +37,7 @@ enum Commands {
     /// Unlock LUKS volumes and mount the pool
     Unlock(UnlockArgs),
     /// Lock the pool: unmount and close LUKS volumes
-    Lock,
+    Lock(LockArgs),
     /// Enroll a binary keyfile into LUKS slot 1 on all pool disks
     #[command(name = "enroll")]
     EnrollKeyFile(EnrollKeyFileArgs),
@@ -68,6 +68,16 @@ struct RecoverArgs {
     /// Allow mounting with missing devices (degraded mode — new writes have no redundancy)
     #[arg(long)]
     allow_degraded: bool,
+    /// Show what would be done without making changes
+    #[arg(long)]
+    dry_run: bool,
+}
+
+#[derive(Debug, Args)]
+struct LockArgs {
+    /// Show what would be done without making changes
+    #[arg(long)]
+    dry_run: bool,
 }
 
 #[derive(Debug, Args)]
@@ -163,6 +173,9 @@ struct UnlockArgs {
     /// Allow mounting with missing devices (degraded mode — new writes have no redundancy)
     #[arg(long)]
     allow_degraded: bool,
+    /// Show what would be done without making changes
+    #[arg(long)]
+    dry_run: bool,
 }
 
 #[derive(Debug, Args)]
@@ -178,6 +191,9 @@ struct EnrollKeyFileArgs {
     /// Read passphrase from file instead of TTY prompt
     #[arg(long)]
     passphrase_file: Option<std::path::PathBuf>,
+    /// Show what would be done without making changes
+    #[arg(long)]
+    dry_run: bool,
 }
 
 #[derive(Debug, Args)]
@@ -378,6 +394,7 @@ fn main() {
                 args.passphrase_file.as_deref(),
                 args.key_file.as_deref(),
                 args.allow_degraded,
+                args.dry_run,
             ) {
                 Ok(()) => {}
                 Err(braid_cli::unlock::UnlockError::Mount(
@@ -411,13 +428,14 @@ fn main() {
                 args.generate,
                 args.passphrase_stdin,
                 args.passphrase_file.as_deref(),
+                args.dry_run,
                 &paths,
             ) {
                 print_cli_error(&e.to_string());
                 std::process::exit(1);
             }
         }
-        Commands::Lock => {
+        Commands::Lock(args) => {
             let config = match config_read(Path::new(&config_path)) {
                 Ok(c) => c,
                 Err(e) => {
@@ -434,7 +452,9 @@ fn main() {
             };
             let runner = RealRunner;
             let fs = RealFilesystem;
-            if let Err(e) = braid_cli::lock::cmd_lock(&runner, &fs, &config, &membership) {
+            if let Err(e) =
+                braid_cli::lock::cmd_lock(&runner, &fs, &config, &membership, args.dry_run)
+            {
                 print_cli_error(&e.to_string());
                 std::process::exit(1);
             }
@@ -583,6 +603,7 @@ fn main() {
                 args.passphrase_stdin,
                 args.passphrase_file.as_deref(),
                 args.allow_degraded,
+                args.dry_run,
             ) {
                 Ok(()) => {}
                 Err(braid_cli::recover::RecoverError::Mount(

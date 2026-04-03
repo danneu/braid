@@ -1,4 +1,4 @@
-use crate::cmd::CommandRunner;
+use crate::cmd::{CommandRunner, Step};
 use crate::config::Config;
 use crate::membership::{self, PoolMembership};
 use crate::mount::{self, Credential, MountError};
@@ -26,8 +26,19 @@ pub fn cmd_unlock<R: CommandRunner, F: Filesystem + ?Sized>(
     passphrase_file: Option<&std::path::Path>,
     key_file: Option<&std::path::Path>,
     allow_degraded: bool,
+    dry_run: bool,
 ) -> Result<(), UnlockError> {
     preflight::check_no_pending_operation(paths).map_err(UnlockError::Failed)?;
+
+    // Dry-run: probe + validate (same errors as execution), then print plan
+    if dry_run {
+        let plan = mount::plan_open_pool(runner, fs, config, membership, allow_degraded, "unlock")?;
+        if let Some(ref p) = plan {
+            let steps = mount::compile_open_steps(p, &config.mount_point(), key_file);
+            Step::print_dry_run(&steps);
+        }
+        return Ok(());
+    }
 
     // Contract:
     // - Pure operator command: bring the pool online from authoritative state.
@@ -289,6 +300,7 @@ mod tests {
             Some(tmp.path()),
             None,
             true, // allow_degraded
+            false,
         );
 
         // If the code incorrectly uses Mount instead of MountWithOptions,
@@ -398,6 +410,7 @@ mod tests {
             Some(tmp.path()),
             None,
             false, // allow_degraded = false
+            false,
         );
 
         let err = result.expect_err("should refuse degraded mount without --allow-degraded");
@@ -530,6 +543,7 @@ mod tests {
             false,
             Some(tmp.path()),
             None,
+            false,
             false,
         );
 
@@ -687,9 +701,150 @@ mod tests {
             Some(tmp.path()),
             None,
             false,
+            false,
         );
 
         // The paused balance warning must not cause unlock to fail.
         result.expect("unlock should succeed even with paused balance");
+    }
+
+    // Intent: dry-run for unlock with 2 closed disks shows LUKS open + scan + mount.
+    // Why: verifies plan_open_pool + compile_open_steps integration via cmd_unlock.
+    // Scenario: 2-disk pool, both present, both closed, --dry-run.
+    #[test]
+    fn dry_run_render_unlock_2_closed_disks() {
+        let config = Config::new(MountPoint("/mnt/storage".to_owned())).unwrap();
+        let mut disks = BTreeMap::new();
+        for (name, path) in [
+            ("disk1", "/dev/disk/by-id/virtio-disk1"),
+            ("disk2", "/dev/disk/by-id/virtio-disk2"),
+        ] {
+            disks.insert(
+                name.to_owned(),
+                DiskMember::from_by_id(ByIdPath(path.to_owned())),
+            );
+        }
+        let membership = PoolMembership { disks };
+        let fs = MockFs::new(&[
+            "/dev/disk/by-id/virtio-disk1",
+            "/dev/disk/by-id/virtio-disk2",
+        ]);
+
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::MountpointCheck {
+                    path: MountPoint("/mnt/storage".to_owned()),
+                },
+                err_raw("mountpoint", 1, ""),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                RawCommandOutput {
+                    cmd: "cryptsetup luksUUID".into(),
+                    stdout: "aaaaaaaa-1111-2222-3333-444444444444\n".into(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                },
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                },
+                RawCommandOutput {
+                    cmd: "cryptsetup luksUUID".into(),
+                    stdout: "bbbbbbbb-1111-2222-3333-444444444444\n".into(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                },
+            );
+
+        // dry_run = true, no passphrase needed
+        let result = cmd_unlock(
+            &runner,
+            &fs,
+            &config,
+            &membership,
+            &StatePaths::production(),
+            false,
+            None,
+            None,
+            false,
+            true, // dry_run
+        );
+        result.expect("dry-run unlock should succeed");
+    }
+
+    // Intent: dry-run for unlock with degraded refusal returns the same error.
+    // Why: dry-run must run the same validation as execution.
+    // Scenario: 3-disk pool, disk3 absent, --dry-run without --allow-degraded.
+    #[test]
+    fn dry_run_unlock_degraded_refused() {
+        let config = three_disk_config();
+        let membership = three_disk_membership();
+        let fs = MockFs::new(&[
+            "/dev/disk/by-id/virtio-disk1",
+            "/dev/disk/by-id/virtio-disk2",
+        ]);
+
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::MountpointCheck {
+                    path: MountPoint("/mnt/storage".to_owned()),
+                },
+                err_raw("mountpoint", 1, ""),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                RawCommandOutput {
+                    cmd: "cryptsetup luksUUID".into(),
+                    stdout: "aaaaaaaa-1111-2222-3333-444444444444\n".into(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                },
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                },
+                RawCommandOutput {
+                    cmd: "cryptsetup luksUUID".into(),
+                    stdout: "bbbbbbbb-1111-2222-3333-444444444444\n".into(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                },
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk3".into(),
+                },
+                err_raw(
+                    "cryptsetup luksUUID",
+                    1,
+                    "Device is not a valid LUKS device.",
+                ),
+            );
+
+        let result = cmd_unlock(
+            &runner,
+            &fs,
+            &config,
+            &membership,
+            &StatePaths::production(),
+            false,
+            None,
+            None,
+            false, // allow_degraded
+            true,  // dry_run
+        );
+
+        let err = result.expect_err("dry-run should refuse degraded mount");
+        assert!(
+            matches!(&err, UnlockError::Mount(MountError::DegradedRefused(_))),
+            "expected DegradedRefused, got: {err:?}"
+        );
     }
 }

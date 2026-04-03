@@ -1,7 +1,7 @@
 use std::thread;
 use std::time::Duration;
 
-use crate::cmd::{CmdError, CmdRequest, CommandRunner};
+use crate::cmd::{CmdError, CmdRequest, CommandRunner, Step};
 use crate::config::{mapper_name, name_from_mapper, Config};
 use crate::membership::{self, PoolMembership};
 use crate::preflight;
@@ -63,11 +63,59 @@ fn close_mapper_with_retry<R: CommandRunner>(runner: &R, mapper: &str) -> Result
     unreachable!()
 }
 
+/// Compile dry-run steps for lock.
+pub fn compile_lock_steps(
+    pool_was_mounted: bool,
+    open_mappers: &[String],
+    orphan_mappers: &[String],
+    mount_point: &crate::types::MountPoint,
+) -> Vec<Step> {
+    let mut steps = Vec::new();
+
+    if pool_was_mounted {
+        steps.push(Step {
+            risk: "safe",
+            description: format!("unmount {}", mount_point),
+            commands: vec![CmdRequest::Umount {
+                mount_point: mount_point.clone(),
+            }],
+        });
+        steps.push(Step {
+            risk: "safe",
+            description: "btrfs device scan --forget".into(),
+            commands: vec![CmdRequest::BtrfsDeviceScanForget],
+        });
+    }
+
+    for mapper in open_mappers {
+        steps.push(Step {
+            risk: "safe",
+            description: format!("close LUKS mapper {}", mapper),
+            commands: vec![CmdRequest::CryptsetupClose {
+                mapper: mapper.clone(),
+            }],
+        });
+    }
+
+    for mapper in orphan_mappers {
+        steps.push(Step {
+            risk: "safe",
+            description: format!("close LUKS mapper {} (orphan)", mapper),
+            commands: vec![CmdRequest::CryptsetupClose {
+                mapper: mapper.clone(),
+            }],
+        });
+    }
+
+    steps
+}
+
 pub fn cmd_lock<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
     config: &Config,
     membership: &PoolMembership,
+    dry_run: bool,
 ) -> Result<(), LockError> {
     let mount_point = config.mount_point();
 
@@ -95,6 +143,43 @@ pub fn cmd_lock<R: CommandRunner, F: Filesystem + ?Sized>(
             }
             Err(e) => return Err(LockError::Failed(e.to_string())),
         }
+    }
+
+    // Dry-run: probe mapper state, compile steps, print
+    if dry_run {
+        let mut open_mappers = Vec::new();
+        for name in membership.disks.keys() {
+            let mn = mapper_name(name);
+            if fs.exists(&format!("/dev/mapper/{}", mn.0)) {
+                open_mappers.push(mn.0.clone());
+            }
+        }
+        let mut orphan_mappers = Vec::new();
+        if let Ok(entries) = fs.list_dir("/dev/mapper") {
+            for entry in entries {
+                let Some(disk_name) = name_from_mapper(&entry) else {
+                    continue;
+                };
+                if membership.disks.contains_key(disk_name) {
+                    continue;
+                }
+                if fs.exists(&format!("/dev/mapper/{entry}")) {
+                    orphan_mappers.push(entry);
+                }
+            }
+        }
+        let steps = compile_lock_steps(
+            pool_was_mounted,
+            &open_mappers,
+            &orphan_mappers,
+            &mount_point,
+        );
+        if steps.is_empty() {
+            eprintln!("nothing to do.");
+        } else {
+            Step::print_dry_run(&steps);
+        }
+        return Ok(());
     }
 
     // 2. If mounted → unmount
@@ -539,7 +624,7 @@ mod tests {
         let config = test_config();
         let membership = test_membership();
 
-        cmd_lock(&runner, &fs, &config, &membership).expect("lock should succeed");
+        cmd_lock(&runner, &fs, &config, &membership, false).expect("lock should succeed");
     }
 
     #[test]
@@ -554,7 +639,8 @@ mod tests {
         let config = test_config();
         let membership = test_membership();
 
-        cmd_lock(&runner, &fs, &config, &membership).expect("lock should succeed (already locked)");
+        cmd_lock(&runner, &fs, &config, &membership, false)
+            .expect("lock should succeed (already locked)");
     }
 
     #[test]
@@ -577,7 +663,7 @@ mod tests {
         let config = test_config();
         let membership = test_membership();
 
-        cmd_lock(&runner, &fs, &config, &membership).expect("lock should succeed (partial)");
+        cmd_lock(&runner, &fs, &config, &membership, false).expect("lock should succeed (partial)");
     }
 
     // Intent: lock fails when umount reports the mount is busy.
@@ -624,7 +710,8 @@ mod tests {
         let config = test_config();
         let membership = test_membership();
 
-        let err = cmd_lock(&runner, &fs, &config, &membership).expect_err("should fail on busy");
+        let err =
+            cmd_lock(&runner, &fs, &config, &membership, false).expect_err("should fail on busy");
         assert!(err.to_string().contains("target is busy"));
     }
 
@@ -671,7 +758,8 @@ mod tests {
         let config = test_config();
         let membership = test_membership();
 
-        let err = cmd_lock(&runner, &fs, &config, &membership).expect_err("should fail on busy");
+        let err =
+            cmd_lock(&runner, &fs, &config, &membership, false).expect_err("should fail on busy");
         let msg = err.to_string();
         assert!(
             msg.contains("lsof") && msg.contains("fuser"),
@@ -700,7 +788,8 @@ mod tests {
 
         // If BtrfsDeviceScanForget were not called, MockRunner would return
         // MissingMock and the test would fail.
-        cmd_lock(&runner, &fs, &config, &membership).expect("lock should succeed with forget");
+        cmd_lock(&runner, &fs, &config, &membership, false)
+            .expect("lock should succeed with forget");
     }
 
     #[test]
@@ -737,7 +826,7 @@ mod tests {
         let config = test_config();
         let membership = test_membership();
 
-        cmd_lock(&runner, &fs, &config, &membership)
+        cmd_lock(&runner, &fs, &config, &membership, false)
             .expect("lock should succeed even when forget fails");
     }
 
@@ -778,7 +867,7 @@ mod tests {
         let config = test_config();
         let membership = test_membership();
 
-        cmd_lock(&runner, &fs, &config, &membership).expect("lock should close orphan too");
+        cmd_lock(&runner, &fs, &config, &membership, false).expect("lock should close orphan too");
     }
 
     // Intent: I/O errors scanning /dev/mapper don't prevent closing known
@@ -828,7 +917,7 @@ mod tests {
         let config = test_config();
         let membership = test_membership();
 
-        cmd_lock(&runner, &FailListDirFs, &config, &membership)
+        cmd_lock(&runner, &FailListDirFs, &config, &membership, false)
             .expect("lock should succeed despite list_dir failure");
     }
 
@@ -877,7 +966,7 @@ mod tests {
         let config = test_config();
         let membership = test_membership();
 
-        let err = cmd_lock(&runner, &fs, &config, &membership)
+        let err = cmd_lock(&runner, &fs, &config, &membership, false)
             .expect_err("should fail — umount error is the root cause");
         let msg = err.to_string();
         assert!(
@@ -920,7 +1009,7 @@ mod tests {
         let config = test_config();
         let membership = test_membership();
 
-        let err = cmd_lock(&runner, &fs, &config, &membership)
+        let err = cmd_lock(&runner, &fs, &config, &membership, false)
             .expect_err("should fail with umount error");
         let msg = err.to_string();
         assert!(
@@ -957,7 +1046,7 @@ mod tests {
         let config = test_config();
         let membership = test_membership();
 
-        let err = cmd_lock(&runner, &fs, &config, &membership)
+        let err = cmd_lock(&runner, &fs, &config, &membership, false)
             .expect_err("should fail with mapper error");
         let msg = err.to_string();
         assert!(
@@ -990,8 +1079,8 @@ mod tests {
         let config = test_config();
         let membership = test_membership();
 
-        let err =
-            cmd_lock(&runner, &fs, &config, &membership).expect_err("should fail on mapper close");
+        let err = cmd_lock(&runner, &fs, &config, &membership, false)
+            .expect_err("should fail on mapper close");
         let msg = err.to_string();
         assert!(
             msg.contains("braid-aaa"),
@@ -1040,7 +1129,7 @@ mod tests {
         let config = test_config();
         let membership = test_membership();
 
-        let err = cmd_lock(&runner, &fs, &config, &membership)
+        let err = cmd_lock(&runner, &fs, &config, &membership, false)
             .expect_err("should fail with umount error");
         let msg = err.to_string();
         assert!(
@@ -1086,7 +1175,7 @@ mod tests {
         let config = test_config();
         let membership = test_membership();
 
-        let err = cmd_lock(&runner, &fs, &config, &membership)
+        let err = cmd_lock(&runner, &fs, &config, &membership, false)
             .expect_err("should fail with orphan error");
         let msg = err.to_string();
         assert!(
@@ -1130,8 +1219,8 @@ mod tests {
         let config = test_config();
         let membership = test_membership();
 
-        let err =
-            cmd_lock(&runner, &fs, &config, &membership).expect_err("should fail on orphan close");
+        let err = cmd_lock(&runner, &fs, &config, &membership, false)
+            .expect_err("should fail on orphan close");
         assert!(
             err.to_string().contains("braid-orphan"),
             "error should mention the orphan mapper, got: {err}"
@@ -1165,7 +1254,7 @@ mod tests {
         let config = test_config();
         let membership = test_membership();
 
-        let err = cmd_lock(&runner, &fs, &config, &membership)
+        let err = cmd_lock(&runner, &fs, &config, &membership, false)
             .expect_err("should fail with mapper error");
         assert!(
             err.to_string().contains("braid-aaa"),
@@ -1204,7 +1293,7 @@ mod tests {
         let config = test_config();
         let membership = test_membership();
 
-        let err = cmd_lock(&runner, &fs, &config, &membership)
+        let err = cmd_lock(&runner, &fs, &config, &membership, false)
             .expect_err("should fail with first mapper error");
         let msg = err.to_string();
         assert!(
@@ -1235,7 +1324,7 @@ mod tests {
         let config = test_config();
         let membership = test_membership();
 
-        let err = cmd_lock(&runner, &fs, &config, &membership)
+        let err = cmd_lock(&runner, &fs, &config, &membership, false)
             .expect_err("should refuse — balance is active");
         let msg = err.to_string();
         assert!(
@@ -1260,12 +1349,62 @@ mod tests {
         let config = test_config();
         let membership = test_membership();
 
-        let err = cmd_lock(&runner, &fs, &config, &membership)
+        let err = cmd_lock(&runner, &fs, &config, &membership, false)
             .expect_err("should refuse — balance is paused");
         let msg = err.to_string();
         assert!(
             msg.contains("in progress"),
             "expected paused-balance refusal, got: {msg}"
         );
+    }
+
+    // Intent: dry-run for lock shows umount + scan forget + close per open mapper.
+    // Why: verifies compile_lock_steps produces correct output.
+    // Scenario: pool mounted, 2 open mappers, no orphans.
+    #[test]
+    fn dry_run_render_lock_mounted_2_disks() {
+        use crate::types::MountPoint;
+        let mount_point = MountPoint("/mnt/storage".into());
+        let open_mappers = vec!["braid-disk1".into(), "braid-disk2".into()];
+        let steps = compile_lock_steps(true, &open_mappers, &[], &mount_point);
+        let output = Step::render_dry_run(&steps);
+        let lines: Vec<&str> = output.lines().collect();
+
+        // 4 steps (umount + scan forget + 2× close), each with 1 command = 8 lines
+        assert_eq!(lines.len(), 8, "expected 8 lines, got:\n{output}");
+        assert!(lines[0].contains("unmount"));
+        assert!(lines[1].contains("$ umount"));
+        assert!(lines[2].contains("btrfs device scan --forget"));
+        assert!(lines[4].contains("close LUKS mapper braid-disk1"));
+        assert!(lines[6].contains("close LUKS mapper braid-disk2"));
+    }
+
+    // Intent: dry-run when not mounted skips umount/scan, shows only close.
+    // Why: verifies conditional step omission.
+    // Scenario: pool not mounted, 1 mapper still open.
+    #[test]
+    fn dry_run_lock_not_mounted_1_open() {
+        use crate::types::MountPoint;
+        let mount_point = MountPoint("/mnt/storage".into());
+        let open_mappers = vec!["braid-disk1".into()];
+        let steps = compile_lock_steps(false, &open_mappers, &[], &mount_point);
+        let output = Step::render_dry_run(&steps);
+        let lines: Vec<&str> = output.lines().collect();
+
+        // 1 step (close), 2 lines
+        assert_eq!(lines.len(), 2, "expected 2 lines, got:\n{output}");
+        assert!(lines[0].contains("close LUKS mapper"));
+        assert!(!output.contains("unmount"));
+    }
+
+    // Intent: dry-run when nothing to do returns empty steps.
+    // Why: verifies the "nothing to do" case.
+    // Scenario: pool not mounted, all mappers closed, no orphans.
+    #[test]
+    fn dry_run_lock_nothing_to_do() {
+        use crate::types::MountPoint;
+        let mount_point = MountPoint("/mnt/storage".into());
+        let steps = compile_lock_steps(false, &[], &[], &mount_point);
+        assert!(steps.is_empty());
     }
 }
