@@ -359,7 +359,7 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         let label = if names.len() == 1 {
             names[0].to_owned()
         } else {
-            names.iter().copied().collect::<Vec<_>>().join(", ")
+            names.to_vec().join(", ")
         };
         eprintln!("Nothing to do — {} already in pool.", label);
         return Ok(());
@@ -389,8 +389,8 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     }
 
     // Verify passphrase against existing pool member (once)
-    if !needs_format.is_empty() {
-        if let Some(existing) = pool.devices.first() {
+    if !needs_format.is_empty()
+        && let Some(existing) = pool.devices.first() {
             let status_raw = runner.run(&crate::cmd::CmdRequest::CryptsetupStatus {
                 mapper: existing.mapper.0.clone(),
             })?;
@@ -405,7 +405,6 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
                 }
             }
         }
-    }
 
     // Pass 1: validate PresentLuks disk identities before any irreversible operation.
     // Guard closes any mappers we opened for FSID verification if validation fails.
@@ -456,7 +455,7 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         let label = if names.len() == 1 {
             names[0].to_owned()
         } else {
-            names.iter().copied().collect::<Vec<_>>().join(", ")
+            names.to_vec().join(", ")
         };
         eprintln!("Nothing to do — {} already in pool.", label);
         return Ok(());

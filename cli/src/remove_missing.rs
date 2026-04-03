@@ -211,7 +211,7 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         pool.missing_count,
         params.progress,
     )
-    .map_err(|e| RemoveMissingError::Pool(e))?;
+    .map_err(RemoveMissingError::Pool)?;
 
     // Post-commit: write pool.json and clear journal only after the full operation succeeds.
     membership::save_membership(&target_membership, params.paths).map_err(|e| {

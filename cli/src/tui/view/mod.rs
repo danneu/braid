@@ -425,7 +425,7 @@ fn tab_bar(active: Tab) -> Line<'static> {
     Line::from(spans)
 }
 
-fn view_data(model: &Model, frame: &mut Frame, area: Rect, now: PrimitiveDateTime) {
+fn view_data(model: &Model, frame: &mut Frame, area: Rect, _now: PrimitiveDateTime) {
     let page_unit = page_unit(model);
 
     // +1 per section for top border
@@ -757,7 +757,7 @@ pub fn view(model: &Model, frame: &mut Frame, now: PrimitiveDateTime) {
     }
 
     let spinning =
-        model.pool.is_inflight() || model.spinner_deadline.map_or(false, |d| Instant::now() < d);
+        model.pool.is_inflight() || model.spinner_deadline.is_some_and(|d| Instant::now() < d);
 
     let reload = if spinning {
         const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];

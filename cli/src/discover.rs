@@ -68,9 +68,9 @@ fn discover_from_dir<R: CommandRunner>(
         };
 
         // Check if label matches braid-<name>
-        if let Some(label) = label {
-            if let Some(disk_name) = crate::config::name_from_mapper(&label) {
-                if crate::membership::is_valid_disk_name(disk_name) {
+        if let Some(label) = label
+            && let Some(disk_name) = crate::config::name_from_mapper(&label)
+                && crate::membership::is_valid_disk_name(disk_name) {
                     match members.entry(disk_name.to_owned()) {
                         Entry::Vacant(e) => {
                             e.insert(ByIdPath(path_str));
@@ -89,8 +89,6 @@ fn discover_from_dir<R: CommandRunner>(
                         }
                     }
                 }
-            }
-        }
     }
 
     Ok(members)

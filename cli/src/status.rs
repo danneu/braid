@@ -916,8 +916,8 @@ fn format_status_human(
         return out;
     }
 
-    if let Some(ref alloc) = report.allocation {
-        if !alloc.is_empty() {
+    if let Some(ref alloc) = report.allocation
+        && !alloc.is_empty() {
             out.push_str("Allocation:\n");
             out.push_str("  Type       Profile  Used        Allocated\n");
             for a in alloc {
@@ -930,7 +930,6 @@ fn format_status_human(
                 ));
             }
         }
-    }
 
     if let Some(ref balance) = report.balance {
         match balance {
@@ -1072,12 +1071,7 @@ fn format_status_human(
             };
 
             // Action guidance
-            if has_errors {
-                out.push_str(&format!(
-                    "    Action:  add replacement disk to config, then: braid replace --old {} --new <new-name>\n",
-                    d.name
-                ));
-            } else if d.status == "missing" {
+            if has_errors || d.status == "missing" {
                 out.push_str(&format!(
                     "    Action:  add replacement disk to config, then: braid replace --old {} --new <new-name>\n",
                     d.name

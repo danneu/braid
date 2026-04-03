@@ -184,8 +184,8 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         )));
     }
 
-    if matches!(new_probed.state, ConfigDiskState::PresentNotLuks) {
-        if let Some(existing) = pool.devices.first() {
+    if matches!(new_probed.state, ConfigDiskState::PresentNotLuks)
+        && let Some(existing) = pool.devices.first() {
             let status_raw = runner.run(&crate::cmd::CmdRequest::CryptsetupStatus {
                 mapper: existing.mapper.0.clone(),
             })?;
@@ -199,7 +199,6 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
                 }
             }
         }
-    }
 
     // Guard: new disk must not already be in the pool.
     check_new_not_in_pool(new_name, &new_mn, &pool)?;
@@ -264,8 +263,8 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             let stats_raw = runner.run(&CmdRequest::BtrfsDeviceStatsJson {
                 mount_point: config.mount_point().clone(),
             });
-            if let Ok(ref raw) = stats_raw {
-                if let Ok(stats) = parse_btrfs_device_stats(raw) {
+            if let Ok(ref raw) = stats_raw
+                && let Ok(stats) = parse_btrfs_device_stats(raw) {
                     let expected_path = format!("/dev/mapper/{}", mapper.0);
                     let has_errs = stats.devices.iter().any(|d| {
                         d.target.as_path() == Some(expected_path.as_str())
@@ -283,7 +282,6 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
                         );
                     }
                 }
-            }
 
             eprintln!("Replacing device (devid {devid}) with {}...", new_mn);
             pool_replace_device(
@@ -343,7 +341,7 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             pre_op_missing_count,
             params.progress,
         )
-        .map_err(|e| ReplaceError::Pool(e))?;
+        .map_err(ReplaceError::Pool)?;
     }
 
     // Post-commit: write pool.json with enriched metadata and clear journal.
@@ -901,7 +899,7 @@ mod tests {
             },
             "mount_point": "/mnt/storage"
         });
-        let config: crate::config::Config =
+        let _config: crate::config::Config =
             serde_json::from_value(config_json).expect("valid config");
         let new_probed = ConfigDisk {
             name: "disk3".into(),
@@ -964,7 +962,7 @@ mod tests {
             },
             "mount_point": "/mnt/storage"
         });
-        let config: crate::config::Config =
+        let _config: crate::config::Config =
             serde_json::from_value(config_json).expect("valid config");
         let new_probed = ConfigDisk {
             name: "disk3".into(),
@@ -1189,7 +1187,7 @@ mod tests {
     // Why: if other missing devices remain, a rebalance would be premature.
     // Scenario: 3-disk pool, 2 missing, replacing 1 — still degraded after.
     fn dry_run_missing_not_last_omits_rebalance() {
-        let config = make_replace_config();
+        let _config = make_replace_config();
         let new_probed = new_probed_not_luks();
         let source = ReplaceSource::Missing { devid: 2 };
         let steps = compile_replace_steps(&ReplaceStepsInput {
@@ -1218,7 +1216,7 @@ mod tests {
     // Why: can't have RAID1 with 1 device.
     // Scenario: single-device pool with a missing ghost entry.
     fn dry_run_missing_single_device_omits_rebalance() {
-        let config = make_replace_config();
+        let _config = make_replace_config();
         let new_probed = new_probed_not_luks();
         let source = ReplaceSource::Missing { devid: 2 };
         let steps = compile_replace_steps(&ReplaceStepsInput {
@@ -1406,7 +1404,7 @@ mod tests {
     // Why: live replace doesn't create single-profile chunks — no degraded mode involved.
     // Scenario: swapping a working drive for a bigger one.
     fn dry_run_live_path_no_soft_balance() {
-        let config = make_replace_config();
+        let _config = make_replace_config();
         let new_probed = new_probed_not_luks();
         let source = ReplaceSource::Live {
             mapper: MapperName("braid-disk2".into()),

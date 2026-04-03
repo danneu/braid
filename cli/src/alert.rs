@@ -39,6 +39,7 @@ pub struct UnmappedDeviceError {
 /// Keyed by btrfs devid (e.g. "1", "2").
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(transparent)]
+#[derive(Default)]
 pub struct AckedStats(pub BTreeMap<String, AckedDisk>);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -56,11 +57,6 @@ pub struct AckedDeviceCounters {
     pub generation_errs: u64,
 }
 
-impl Default for AckedStats {
-    fn default() -> Self {
-        Self(BTreeMap::new())
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Load / save

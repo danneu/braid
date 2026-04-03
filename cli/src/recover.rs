@@ -72,10 +72,10 @@ pub fn cmd_recover<R: CommandRunner, F: Filesystem + ?Sized>(
             "recover",
         )?;
         let mut steps = Vec::new();
-        if plan.is_some() {
+        if let Some(plan) = &plan {
             steps.extend(mount::compile_open_steps(
-                plan.as_ref().unwrap(),
-                &params.config.mount_point(),
+                plan,
+                params.config.mount_point(),
                 None,
             ));
         } else {
@@ -89,7 +89,7 @@ pub fn cmd_recover<R: CommandRunner, F: Filesystem + ?Sized>(
                 let Some(name) = config::name_from_mapper(&dev.mapper.0) else {
                     continue;
                 };
-                if union.disks.get(name).is_none() {
+                if !union.disks.contains_key(name) {
                     return Err(RecoverError::Failed(format!(
                         "device {} is in the live pool but has no by-id path in either \
                          the pre-operation or target membership snapshot.\n\
@@ -136,9 +136,9 @@ pub fn cmd_recover<R: CommandRunner, F: Filesystem + ?Sized>(
     ) {
         // Bootstrap mount failure: probe the target devices to confirm no btrfs
         // superblock exists — only then is it safe to advise wiping.
-        if journal.pre_membership.disks.is_empty() {
-            if let mount::MountError::MountFailed(_) = &e {
-                if let journal::OpKind::Add { ref disks } = journal.op {
+        if journal.pre_membership.disks.is_empty()
+            && let mount::MountError::MountFailed(_) = &e
+                && let journal::OpKind::Add { ref disks } = journal.op {
                     let all_no_btrfs = disks.keys().all(|name| {
                         let mapper = format!("/dev/mapper/{}", config::mapper_name(name).0);
                         match runner.run(&CmdRequest::BtrfsFilesystemShowTarget { target: mapper })
@@ -171,8 +171,6 @@ pub fn cmd_recover<R: CommandRunner, F: Filesystem + ?Sized>(
                         )));
                     }
                 }
-            }
-        }
         return Err(e.into());
     }
 

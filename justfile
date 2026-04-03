@@ -92,7 +92,11 @@ test-rust:
 
 # Run clippy lints
 clippy:
-    cargo clippy --manifest-path cli/Cargo.toml
+    cargo clippy --manifest-path cli/Cargo.toml --tests
+
+# Auto-fix compiler warnings in CLI tests where possible
+clippy-fix:
+    cargo fix --manifest-path cli/Cargo.toml --tests --allow-dirty
 
 # Capture tool output fixtures into cli/tests/fixtures/nixos-25.11/
 capture-fixtures:

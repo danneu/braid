@@ -46,7 +46,7 @@ pub fn cmd_unlock<R: CommandRunner, F: Filesystem + ?Sized>(
             "unlock",
         )?;
         if let Some(ref p) = plan {
-            let steps = mount::compile_open_steps(p, &params.config.mount_point(), params.key_file);
+            let steps = mount::compile_open_steps(p, params.config.mount_point(), params.key_file);
             Step::print_dry_run(&steps);
         }
         return Ok(());

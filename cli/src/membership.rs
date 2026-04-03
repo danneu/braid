@@ -112,14 +112,13 @@ pub fn validate_no_conflicts(
     by_id: &str,
 ) -> Result<(), MembershipError> {
     // Check name reassignment: name exists with different by_id
-    if let Some(current) = existing.disks.get(name) {
-        if current.by_id.0 != by_id {
+    if let Some(current) = existing.disks.get(name)
+        && current.by_id.0 != by_id {
             return Err(MembershipError::Conflict(format!(
                 "disk '{}' already exists with by_id '{}', cannot reassign to '{}'",
                 name, current.by_id, by_id
             )));
         }
-    }
 
     // Check by_id rename: by_id exists under different name
     for (existing_name, existing_member) in &existing.disks {

@@ -112,11 +112,10 @@ pub fn cmd_remove<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     // Skip for single-survivor removals (remaining == 1): the eviction
     // path balances RAID1→single first, which handles data redistribution.
     // This does not match the reproduced relocation-failure mode.
-    if remaining > 1 {
-        if let Some(devid) = target_devid {
+    if remaining > 1
+        && let Some(devid) = target_devid {
             check_eviction_space(runner, config.mount_point().as_str(), devid)?;
         }
-    }
 
     let steps = compile_remove_present_steps(&mn, &pool, config.mount_point())?;
 

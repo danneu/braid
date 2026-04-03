@@ -134,14 +134,13 @@ pub fn check_not_read_only<R: CommandRunner>(runner: &R, mount_point: &str) -> R
     };
 
     let entry = findmnt.filesystems.iter().find(|e| e.target == mount_point);
-    if let Some(entry) = entry {
-        if entry.options.split(',').any(|opt| opt.trim() == "ro") {
+    if let Some(entry) = entry
+        && entry.options.split(',').any(|opt| opt.trim() == "ro") {
             return Err(format!(
                 "pool is mounted read-only. Remount read-write first:\n  \
                  mount -o remount,rw {mount_point}"
             ));
         }
-    }
     Ok(())
 }
 

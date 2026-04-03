@@ -3,10 +3,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::tui::app::Message;
 
 pub fn handle_key(key: KeyEvent, show_help: bool, show_disk_detail: bool) -> Option<Message> {
-    match (key.code, key.modifiers) {
-        (KeyCode::Char('c'), KeyModifiers::CONTROL) => return Some(Message::Quit),
-        _ => {}
-    }
+    if let (KeyCode::Char('c'), KeyModifiers::CONTROL) = (key.code, key.modifiers) { return Some(Message::Quit) }
     if show_help {
         return Some(Message::ToggleHelp);
     }

@@ -74,20 +74,17 @@ pub fn cmd_monitor<R: CommandRunner>(
     let mut ack_changed = false;
     let present_devids: Vec<u64> = pool.devices.iter().map(|d| d.devid).collect();
     for (key, disk) in acked.0.iter_mut() {
-        if disk.missing_acked {
-            if let Ok(devid) = key.parse::<u64>() {
-                if present_devids.contains(&devid) {
+        if disk.missing_acked
+            && let Ok(devid) = key.parse::<u64>()
+                && present_devids.contains(&devid) {
                     disk.missing_acked = false;
                     ack_changed = true;
                 }
-            }
-        }
     }
-    if ack_changed {
-        if let Err(e) = save_acked_stats(&acked, paths) {
+    if ack_changed
+        && let Err(e) = save_acked_stats(&acked, paths) {
             eprintln!("Warning: failed to update acked stats: {e}");
         }
-    }
 
     // 8. Compute live alert state
     let live_causes = match compute_alert_state_with_devid_map(
@@ -120,11 +117,10 @@ pub fn cmd_monitor<R: CommandRunner>(
     let merged = merge_into_latch(existing_latch.as_ref(), &live_causes);
 
     // 11. If merged state active → write latch
-    if merged.active {
-        if let Err(e) = alert::save_alert_latch(&merged, paths) {
+    if merged.active
+        && let Err(e) = alert::save_alert_latch(&merged, paths) {
             eprintln!("Warning: failed to write alert latch: {e}");
         }
-    }
 
     // 12. Return result based on merged state
     if merged.active {

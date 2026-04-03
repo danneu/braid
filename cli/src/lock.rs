@@ -172,7 +172,7 @@ pub fn cmd_lock<R: CommandRunner, F: Filesystem + ?Sized>(
             pool_was_mounted,
             &open_mappers,
             &orphan_mappers,
-            &mount_point,
+            mount_point,
         );
         if steps.is_empty() {
             eprintln!("nothing to do.");

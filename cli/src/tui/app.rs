@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::process::ExitStatus;
 use std::time::{Duration, Instant};
 
-use crate::tui::effect::{Effect, PROBE_INTERVAL};
+use crate::tui::effect::Effect;
 use crate::tui::model::{Model, PoolState, PoolStatus};
 use crate::tui::state::{CmdId, CmdStatus, CommandState, Stream, MAX_LINES};
 

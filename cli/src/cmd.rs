@@ -835,8 +835,8 @@ impl CommandRunner for MockRunner {
             .get(&format!("{request:?}"))
             .cloned()
             .ok_or(CmdError::MissingMock)?;
-        if let CmdRequest::CryptsetupLuksHeaderBackup { backup_path, .. } = request {
-            if output.exit_status == 0 {
+        if let CmdRequest::CryptsetupLuksHeaderBackup { backup_path, .. } = request
+            && output.exit_status == 0 {
                 if let Some(parent) = std::path::Path::new(backup_path.as_str()).parent() {
                     std::fs::create_dir_all(parent)
                         .map_err(|e| CmdError::Failed(format!("mock: create_dir_all: {e}")))?;
@@ -844,7 +844,6 @@ impl CommandRunner for MockRunner {
                 std::fs::write(backup_path, b"")
                     .map_err(|e| CmdError::Failed(format!("mock: write backup: {e}")))?;
             }
-        }
         Ok(output)
     }
 

@@ -89,8 +89,8 @@ pub fn plan_open_pool<R: CommandRunner, F: Filesystem + ?Sized>(
                 any_missing_member = true;
             }
             ConfigDiskState::PresentLuks { uuid, mapper_open } => {
-                if let Some(expected) = &member.luks_uuid {
-                    if expected != uuid {
+                if let Some(expected) = &member.luks_uuid
+                    && expected != uuid {
                         return Err(MountError::Failed(format!(
                             "disk '{}' LUKS UUID mismatch at {}:\n  \
                              expected  {}\n  \
@@ -98,7 +98,6 @@ pub fn plan_open_pool<R: CommandRunner, F: Filesystem + ?Sized>(
                             name, member.by_id, expected, uuid
                         )));
                     }
-                }
 
                 if *mapper_open {
                     eprintln!("{}  disk: {:<10}already open", tag("ok"), name);

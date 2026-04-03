@@ -309,7 +309,7 @@ fn header_backup_advisories_in(dir: &std::path::Path) -> Vec<String> {
         Ok(entries) => entries.filter_map(|e| e.ok()).any(|e| {
             e.path()
                 .extension()
-                .map_or(false, |ext| ext == "luksheader" || ext == "img")
+                .is_some_and(|ext| ext == "luksheader" || ext == "img")
         }),
         Err(_) => false,
     };

@@ -89,8 +89,8 @@ pub fn probe_pool_for_tui<R: CommandRunner>(
 
         if let Ok(raw) = runner.run(&CmdRequest::CryptsetupLuksDump {
             device: by_id_path.clone(),
-        }) {
-            if let Ok(dump) = parse_cryptsetup_luks_dump(&raw) {
+        })
+            && let Ok(dump) = parse_cryptsetup_luks_dump(&raw) {
                 luks_info.insert(
                     disk_name.clone(),
                     DiskLuksInfo {
@@ -100,15 +100,14 @@ pub fn probe_pool_for_tui<R: CommandRunner>(
                     },
                 );
             }
-        }
     }
 
     // Extract transport type (sata, nvme, usb, etc.) from lsblk tree.
     // Walk parent devices: for each child named "braid-{name}", take the
     // parent's TRAN value. TRAN is only set on physical devices, not dm-crypt.
     let mut disk_transport = HashMap::new();
-    if let Ok(lsblk_raw) = runner.run(&CmdRequest::LsblkJson) {
-        if let Ok(lsblk) = parse_lsblk_json(&lsblk_raw) {
+    if let Ok(lsblk_raw) = runner.run(&CmdRequest::LsblkJson)
+        && let Ok(lsblk) = parse_lsblk_json(&lsblk_raw) {
             for dev in &lsblk.blockdevices {
                 if let Some(tran) = &dev.tran {
                     for child in &dev.children {
@@ -119,7 +118,6 @@ pub fn probe_pool_for_tui<R: CommandRunner>(
                 }
             }
         }
-    }
 
     let fs_usage_raw = runner
         .run(&CmdRequest::BtrfsFilesystemUsageRaw {

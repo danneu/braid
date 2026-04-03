@@ -342,7 +342,7 @@ mod tests {
     use crate::cmd::{CmdRequest, MockRunner, RawCommandOutput};
     use crate::membership::DiskMember;
     use crate::probe::Filesystem;
-    use crate::types::{ByIdPath, MountPoint};
+    use crate::types::ByIdPath;
     use std::collections::BTreeMap;
 
     struct MockFs {
