@@ -7,5 +7,5 @@ result-*
 /target
 /.claude/worktrees
 target/
-/reference/btrfs-progs
+/reference/
 __pycache__/

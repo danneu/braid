@@ -33,8 +33,8 @@ Unlock:
 - `tests/` — NixOS VM tests (`.py` scripts, `module/` NixOS configs, `hw/` hardware canary tests)
 - `docs/decisions/` — architecture decision records
 - `docs/btrfs-docs/` — local btrfs-progs reference (RST)
-- `scripts/` — helper scripts (fetch btrfs docs, destroy pool)
-- `reference/` — vendored upstream source (`btrfs-progs`, `autosuspend`) for code-level reference
+- `scripts/` — helper scripts (fetch btrfs docs, fetch references, destroy pool)
+- `reference/` — upstream source checkouts (`btrfs-progs`, `systemd`, `autosuspend`, `cryptsetup`, `util-linux`, `smartmontools`) for reading, not shipped. Refresh with `just fetch-references`.
 
 ## Systemd Lifecycle
 
@@ -60,14 +60,24 @@ Decision docs must include an explicit status: `Draft`, `Active`, `Superseded`, 
 
 [`docs/index.md`](docs/index.md) is the directory of all design docs and decision records. Check there before searching the codebase for context.
 
-### btrfs reference (docs + source)
+### Reference source
 
-Before searching the web for btrfs behavior, consult local resources first:
+Before searching the web for tool behavior, consult local resources first. `reference/` contains shallow clones of upstream repos at the versions pinned in nixpkgs. Refresh with `just fetch-references`.
+
+| Directory                    | Upstream                                          | What to look for                                                          |
+| ---------------------------- | ------------------------------------------------- | ------------------------------------------------------------------------- |
+| `reference/btrfs-progs/`     | [kdave/btrfs-progs](https://github.com/kdave/btrfs-progs)           | `cmds/<subcommand>.c` — one file per btrfs subcommand (e.g. `cmds/scrub.c`). Parser output formats, exit codes. |
+| `reference/systemd/`         | [systemd/systemd](https://github.com/systemd/systemd)               | Unit lifecycle, `systemd-ask-password`, mount/automount behavior.         |
+| `reference/autosuspend/`     | [languitar/autosuspend](https://github.com/languitar/autosuspend)    | Check classes, config schema, wakeup scheduling.                          |
+| `reference/cryptsetup/`      | [cryptsetup/cryptsetup](https://gitlab.com/cryptsetup/cryptsetup)    | `luksDump` output format, LUKS2 header structure, keyslot operations.     |
+| `reference/util-linux/`      | [util-linux/util-linux](https://github.com/util-linux/util-linux)    | `lsblk` JSON schema, `blkid` output, mount/unmount behavior.             |
+| `reference/smartmontools/`   | [smartmontools/smartmontools](https://github.com/smartmontools/smartmontools) | `smartctl` output format, SMART attribute definitions, exit codes.        |
+
+**When to look:** Any time you're implementing, modifying, or debugging code that interacts with these tools — especially parsers. Read the relevant source before making assumptions about output format or behavior.
+
+### btrfs docs
 
 - **Docs:** [`docs/btrfs-docs/`](docs/btrfs-docs/) — RST docs from btrfs-progs. Start with `index.rst` for a full table of contents, or use the topic table below for common lookups. Glob by keyword for anything not in the table. Fetch/refresh with `just fetch-btrfs-docs`.
-- **Source:** [`reference/btrfs-progs/`](reference/btrfs-progs/) — vendored btrfs-progs source. `cmds/<subcommand>.c` has one file per btrfs subcommand (e.g. `cmds/scrub.c`). Consult when working on parsers, output format assumptions, or understanding exact tool behavior.
-
-**When to look:** Any time you're implementing, modifying, or debugging code that interacts with btrfs — especially parsers. Read the relevant doc *and* the corresponding source before making assumptions about output format or behavior.
 
 | Topic                             | File(s)                                     |
 | --------------------------------- | ------------------------------------------- |

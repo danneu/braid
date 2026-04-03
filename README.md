@@ -708,3 +708,48 @@ Rust CLI code lives in `cli/`. Build it directly with:
 ```bash
 nix build .#braid
 ```
+
+## Upgrading dependencies
+
+braid targets the latest stable NixOS release (`nixos-25.11`) and uses whatever package versions that channel provides — no custom pins or overlays. Versions are locked to a specific nixpkgs commit in `flake.lock`.
+
+### Update to latest nixpkgs
+
+```bash
+nix flake update
+```
+
+### Check dependency versions
+
+After updating, verify what versions you're now pinned to:
+
+```bash
+nix eval --raw nixpkgs#btrfs-progs.version
+nix eval --raw nixpkgs#systemd.version
+nix eval --raw nixpkgs#autosuspend.version
+nix eval --raw nixpkgs#cryptsetup.version
+nix eval --raw nixpkgs#util-linux.version
+nix eval --raw nixpkgs#smartmontools.version
+```
+
+### Update vendored reference source
+
+`reference/` contains shallow clones of upstream repos used for code-level reference (source of truth for parser behavior, output formats, config schemas, etc.). After a flake update, refresh them to match the new versions:
+
+```bash
+just fetch-references
+```
+
+This reads each package version from nixpkgs and shallow-clones the matching upstream tag for btrfs-progs, systemd, autosuspend, cryptsetup, util-linux, and smartmontools.
+
+### Run the test sequence
+
+A nixpkgs bump can change tool output formats, which breaks parsers. Run the full validation sequence:
+
+```bash
+just capture-fixtures
+just capture-progress-fixtures
+just test-rust
+just test-parsers
+just test
+```

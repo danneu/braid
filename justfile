@@ -125,6 +125,10 @@ test-hw *args:
 fetch-btrfs-docs:
     ./scripts/fetch-btrfs-docs.sh
 
+# Fetch/refresh vendored reference repos (btrfs-progs, systemd, autosuspend) at nixpkgs-pinned versions
+fetch-references:
+    python3 scripts/fetch-references.py
+
 # Destroy an entire braid pool (dev use only — wipes LUKS signatures + state files)
 destroy config="/etc/braid/config.json":
     ./scripts/braid-destroy.sh {{config}}
