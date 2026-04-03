@@ -90,6 +90,10 @@ test-parsers *args:
 test-rust:
     cargo test
 
+# Run clippy lints
+clippy:
+    cargo clippy --manifest-path cli/Cargo.toml
+
 # Capture tool output fixtures into cli/tests/fixtures/nixos-25.11/
 capture-fixtures:
     nix build .#checks.{{system}}.capture-tool-fixtures -L
