@@ -196,8 +196,9 @@ pub fn probe_missing_devids<R: CommandRunner>(
 ///      two devices with capacity to write a new chunk).
 ///   2. Effective RAID1 capacity = min(largest, rest) where largest is the
 ///      biggest device's unallocated space and rest is the sum of all others.
-///      This accounts for the pairing constraint: a large device can only pair
-///      with what the other devices can collectively provide.
+///      Each RAID1 chunk needs space on 2 devices, so a device with more
+///      free space than all others combined is bottlenecked by what those
+///      others can provide.
 pub fn check_raid1_relocation_space(
     target_devs: &[&BtrfsDeviceUsageEntry],
     remaining_devs: &[&BtrfsDeviceUsageEntry],
@@ -628,19 +629,20 @@ mod tests {
     }
 
     #[test]
-    // Intent: check_raid1_relocation_space fails when RAID1 pairing capacity is
-    //   insufficient despite large total unallocated.
+    // Intent: check_raid1_relocation_space fails when RAID1 chunk-level capacity
+    //   is insufficient despite large total unallocated.
     // Why: The naive sum/2 can be misleading when one device dominates —
-    //   the dominant device can only pair with what others can provide.
+    //   each RAID1 chunk needs 2 devices, so the dominant device is
+    //   bottlenecked by what others can provide.
     // Scenario: 3 remaining devices with [200MB, 10MB, 10MB] unallocated.
     //   RAID1 capacity = rest = 20MB (not 110MB). Target has 500MB Data.
-    fn raid1_space_fails_pairing_constraint() {
+    fn raid1_space_fails_chunk_capacity_constraint() {
         let target = make_dev(1, 0, &[("Data", 500_000_000)]);
         let rem1 = make_dev(2, 200_000_000, &[]);
         let rem2 = make_dev(3, 10_000_000, &[]);
         let rem3 = make_dev(4, 10_000_000, &[]);
         let result = check_raid1_relocation_space(&[&target], &[&rem1, &rem2, &rem3]);
-        let err = result.expect_err("should fail: pairing constraint");
+        let err = result.expect_err("should fail: chunk capacity constraint");
         assert!(err.contains("Data"), "expected 'Data' in error: {err}");
     }
 
