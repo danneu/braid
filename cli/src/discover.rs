@@ -48,13 +48,12 @@ fn discover_from_dir<R: CommandRunner>(
         let path_str = path.to_string_lossy().to_string();
 
         // Check if LUKS
-        if runner
-            .run(&CmdRequest::CryptsetupIsLuks {
-                device: path_str.clone(),
-            })
-            .is_err()
-        {
-            continue;
+        match runner.run(&CmdRequest::CryptsetupIsLuks {
+            device: path_str.clone(),
+        }) {
+            Ok(raw) if raw.exit_status != 0 => continue,
+            Err(_) => continue,
+            _ => {}
         }
 
         // Read LUKS label via luksDump text output
@@ -138,29 +137,39 @@ mod tests {
     use super::*;
     use crate::cmd::{CmdError, CmdRequest, CommandRunner, RawCommandOutput};
     use std::collections::HashMap;
+    use std::sync::Mutex;
 
-    fn mock_ok(cmd: &str, stdout: &str) -> RawCommandOutput {
+    fn mock_output(cmd: &str, stdout: &str, exit_status: i32) -> RawCommandOutput {
         RawCommandOutput {
             cmd: cmd.to_owned(),
             stdout: stdout.to_owned(),
             stderr: String::new(),
-            exit_status: 0,
+            exit_status,
         }
     }
 
     /// Test runner that maps full by-id paths to LUKS labels.
-    /// - CryptsetupIsLuks: OK for known paths, Err otherwise.
-    /// - CryptsetupLuksDumpText: returns a luksDump stub with the mapped label.
-    struct LabelMap(HashMap<String, String>);
+    /// Returns realistic Ok(RawCommandOutput) for all commands — uses non-zero
+    /// exit status for unknown devices, never Err (matching RealRunner behavior).
+    /// Tracks which (command, device) pairs were called.
+    struct LabelMap {
+        labels: HashMap<String, String>,
+        calls: Mutex<Vec<(String, String)>>,
+    }
 
     impl LabelMap {
         fn new(entries: &[(&str, &str)]) -> Self {
-            LabelMap(
-                entries
+            LabelMap {
+                labels: entries
                     .iter()
                     .map(|(path, label)| (path.to_string(), label.to_string()))
                     .collect(),
-            )
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn calls(&self) -> Vec<(String, String)> {
+            self.calls.lock().unwrap().clone()
         }
     }
 
@@ -168,18 +177,28 @@ mod tests {
         fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
             match request {
                 CmdRequest::CryptsetupIsLuks { device } => {
-                    if self.0.contains_key(device.as_str()) {
-                        Ok(mock_ok("cryptsetup", ""))
+                    self.calls.lock().unwrap().push(("isLuks".into(), device.clone()));
+                    if self.labels.contains_key(device.as_str()) {
+                        Ok(mock_output("cryptsetup", "", 0))
                     } else {
-                        Err(CmdError::Failed("not luks".into()))
+                        Ok(mock_output("cryptsetup", "", 1))
                     }
                 }
                 CmdRequest::CryptsetupLuksDumpText { device } => {
-                    let label = self.0.get(device.as_str()).ok_or(CmdError::MissingMock)?;
-                    Ok(mock_ok(
-                        "cryptsetup",
-                        &format!("LUKS header information\nLabel:\t{label}\n"),
-                    ))
+                    self.calls.lock().unwrap().push(("luksDump".into(), device.clone()));
+                    if let Some(label) = self.labels.get(device.as_str()) {
+                        Ok(mock_output(
+                            "cryptsetup",
+                            &format!("LUKS header information\nLabel:\t{label}\n"),
+                            0,
+                        ))
+                    } else {
+                        Ok(mock_output(
+                            "cryptsetup",
+                            "Device /dev/foo is not a valid LUKS device.\n",
+                            1,
+                        ))
+                    }
                 }
                 _ => Err(CmdError::MissingMock),
             }
@@ -198,6 +217,38 @@ mod tests {
         let path = dir.join(name);
         std::fs::write(&path, b"").unwrap();
         path.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn non_luks_device_never_reaches_luks_dump() {
+        /*
+         * Intent: the isLuks gate must prevent non-LUKS devices from reaching luksDump.
+         * Why it exists: the gate checked .is_err() instead of exit status, making it
+         *   a no-op — non-LUKS devices leaked through to luksDump and were only caught
+         *   downstream by the parser.
+         * Scenario: a NAS has both LUKS-encrypted braid drives and a non-LUKS device
+         *   (e.g. a USB stick) in /dev/disk/by-id/. Discovery should never call
+         *   luksDump on the non-LUKS device.
+         */
+        let dir = tempfile::tempdir().unwrap();
+        let luks_path = create_file(dir.path(), "ata-TOSHIBA_BRAID");
+        create_file(dir.path(), "ata-USB_STICK");
+
+        // Only the LUKS device is in the label map; the USB stick is unknown.
+        let runner = LabelMap::new(&[(&luks_path, "braid-sda")]);
+        let _members = discover_from_dir(&runner, dir.path()).unwrap();
+
+        let luks_dump_calls: Vec<_> = runner
+            .calls()
+            .into_iter()
+            .filter(|(cmd, _)| cmd == "luksDump")
+            .collect();
+
+        assert!(
+            luks_dump_calls.iter().all(|(_, dev)| dev == &luks_path),
+            "luksDump was called for a non-LUKS device: {:?}",
+            luks_dump_calls,
+        );
     }
 
     #[test]
