@@ -160,6 +160,12 @@ pub struct DiskErrors {
     pub generation: u64,
 }
 
+impl DiskErrors {
+    pub fn total(&self) -> u64 {
+        self.read + self.write + self.flush + self.corruption + self.generation
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Compact drive (always-on summary)
 // ---------------------------------------------------------------------------

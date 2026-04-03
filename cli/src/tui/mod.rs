@@ -28,6 +28,7 @@ use crate::parse::types::{
     SmartHealth,
 };
 use crate::state_paths::StatePaths;
+use crate::status::DiskErrors;
 use crate::types::MountPoint;
 
 pub fn run(config_path: &Path, paths: &StatePaths) -> io::Result<()> {
@@ -201,7 +202,11 @@ pub fn run_demo() -> io::Result<()> {
         disk_transport,
         smart_health,
         luks_info,
-        device_errors: HashMap::new(),
+        device_errors: HashMap::from([
+            ("toshiba".to_owned(), DiskErrors { read: 0, write: 0, flush: 0, corruption: 0, generation: 0 }),
+            ("ironwolf".to_owned(), DiskErrors { read: 3, write: 0, flush: 0, corruption: 0, generation: 0 }),
+            ("wdc".to_owned(), DiskErrors { read: 0, write: 0, flush: 0, corruption: 0, generation: 0 }),
+        ]),
         alert_state: crate::alert::AlertState { active: false, causes: vec![] },
         scrub: ScrubState::Completed {
             started_at: ScrubTimestamp(time::macros::datetime!(2026-02-24 02:00:07)),

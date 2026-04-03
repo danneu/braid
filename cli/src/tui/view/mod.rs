@@ -11,7 +11,7 @@ use time::macros::format_description;
 use time::PrimitiveDateTime;
 
 use crate::parse::types::{BtrfsBgType, ScrubState, SmartHealth};
-use crate::status::BalanceReport;
+use crate::status::{BalanceReport, DiskErrors};
 use crate::tui::model::{Model, PoolState, PoolStatus, Tab};
 
 fn format_timestamp(dt: &PrimitiveDateTime) -> String {
@@ -318,12 +318,22 @@ fn smart_cell(health: &SmartHealth) -> Span<'static> {
     }
 }
 
+fn btrfs_cell(errors: &DiskErrors) -> Span<'static> {
+    let total = errors.total();
+    if total == 0 {
+        Span::styled("0 err", Style::default().fg(Color::DarkGray))
+    } else {
+        Span::styled(format!("{total} err"), Style::default().fg(Color::Red))
+    }
+}
+
 fn disk_table(model: &Model, unit: ByteUnit) -> Table<'_> {
     let pool = model.pool.current();
     let disk_usage = pool.map(|p| &p.disk_usage);
     let disk_transport = pool.map(|p| &p.disk_transport);
     let smart_health = pool.map(|p| &p.smart_health);
-    let header = Row::new(["", "Name", "Bus", "SMART", "Allocated"])
+    let device_errors = pool.map(|p| &p.device_errors);
+    let header = Row::new(["", "Name", "Bus", "SMART", "btrfs", "Allocated"])
         .style(Style::default().fg(Color::DarkGray));
     let rows: Vec<Row> = model
         .disk_names
@@ -343,12 +353,17 @@ fn disk_table(model: &Model, unit: ByteUnit) -> Table<'_> {
             });
             let num = Line::from(format!("{}", i + 1));
             let name_cell = Line::from(name.clone());
+            let btrfs_line = Line::from(match device_errors.and_then(|e| e.get(name)) {
+                Some(errors) => btrfs_cell(errors),
+                None => Span::raw(""),
+            });
             match disk_usage.and_then(|u| u.get(name)) {
                 Some(usage) => Row::new(vec![
                     num,
                     name_cell,
                     transport_cell,
                     smart_line,
+                    btrfs_line,
                     Line::from(format!(
                         "{:.0}%  {} / {} {}",
                         percent(usage.allocated(), usage.size),
@@ -362,6 +377,7 @@ fn disk_table(model: &Model, unit: ByteUnit) -> Table<'_> {
                     name_cell,
                     transport_cell,
                     smart_line,
+                    btrfs_line,
                     Line::from(Span::styled("missing", Style::default().fg(Color::Yellow))),
                 ])
                 .style(Style::default().add_modifier(Modifier::DIM)),
@@ -370,6 +386,7 @@ fn disk_table(model: &Model, unit: ByteUnit) -> Table<'_> {
                     name_cell,
                     transport_cell,
                     smart_line,
+                    btrfs_line,
                     Line::default(),
                 ]),
             }
@@ -406,11 +423,24 @@ fn disk_table(model: &Model, unit: ByteUnit) -> Table<'_> {
         })
         .unwrap_or(0)
         .max("SMART".len()) as u16;
+    let btrfs_width = device_errors
+        .map(|e| {
+            model
+                .disk_names
+                .iter()
+                .filter_map(|name| e.get(name))
+                .map(|err| btrfs_cell(err).width())
+                .max()
+                .unwrap_or(0)
+        })
+        .unwrap_or(0)
+        .max("btrfs".len()) as u16;
     let widths = [
         Constraint::Length(1),
         Constraint::Length(longest_name_len),
         Constraint::Length(transport_width),
         Constraint::Length(smart_width),
+        Constraint::Length(btrfs_width),
         Constraint::Min(10),
     ];
     Table::new(rows, widths)
@@ -670,6 +700,34 @@ fn view_disk_detail(model: &Model, frame: &mut Frame, area: Rect) {
             )
         });
 
+    let errors_table = pool
+        .and_then(|p| p.device_errors.get(&disk_name))
+        .map(|errors| {
+            let err_rows: Vec<Row> = [
+                ("read", errors.read),
+                ("write", errors.write),
+                ("flush", errors.flush),
+                ("corruption", errors.corruption),
+                ("generation", errors.generation),
+            ]
+            .into_iter()
+            .map(|(label, count)| {
+                let style = if count > 0 {
+                    Style::default().fg(Color::Red)
+                } else {
+                    Style::default()
+                };
+                Row::new([Span::raw(label), Span::styled(count.to_string(), style)])
+            })
+            .collect();
+            Table::new(err_rows, [Constraint::Length(15), Constraint::Min(5)]).block(
+                Block::new()
+                    .borders(Borders::TOP)
+                    .title("btrfs Device Errors ")
+                    .border_style(Style::default().fg(Color::Cyan)),
+            )
+        });
+
     let info_height = lines.len() as u16;
     // alloc section: 1 border + 1 header + data rows (incl. unallocated) + 1 padding left
     let alloc_height = alloc_table
@@ -682,8 +740,13 @@ fn view_disk_detail(model: &Model, frame: &mut Frame, area: Rect) {
             1 + 1 + 1 + data_rows // spacer + border + header + rows
         })
         .unwrap_or(0);
+    let errors_height = if errors_table.is_some() {
+        1 + 1 + 5u16 // spacer + border + 5 error rows
+    } else {
+        0
+    };
     let footer_height = 2u16; // blank line + text
-    let total_content = info_height + alloc_height + footer_height;
+    let total_content = info_height + alloc_height + errors_height + footer_height;
 
     let width = 48u16.min(area.width);
     let height = (total_content + 2).min(area.height); // +2 for popup border
@@ -700,25 +763,55 @@ fn view_disk_detail(model: &Model, frame: &mut Frame, area: Rect) {
     let inner = outer_block.inner(popup);
     frame.render_widget(outer_block, popup);
 
-    if let Some(table) = alloc_table {
-        let regions = Layout::vertical([
-            Constraint::Length(info_height),
-            Constraint::Length(1), // spacer
-            Constraint::Length(alloc_height - 1),
-            Constraint::Length(footer_height),
-        ])
-        .split(inner);
-        frame.render_widget(Paragraph::new(lines), regions[0]);
-        frame.render_widget(table, regions[2]);
-        frame.render_widget(footer, regions[3]);
-    } else {
-        let regions = Layout::vertical([
-            Constraint::Length(info_height),
-            Constraint::Length(footer_height),
-        ])
-        .split(inner);
-        frame.render_widget(Paragraph::new(lines), regions[0]);
-        frame.render_widget(footer, regions[1]);
+    match (alloc_table, errors_table) {
+        (Some(alloc), Some(errors)) => {
+            let regions = Layout::vertical([
+                Constraint::Length(info_height),
+                Constraint::Length(1), // spacer
+                Constraint::Length(alloc_height - 1),
+                Constraint::Length(1), // spacer
+                Constraint::Length(errors_height - 1),
+                Constraint::Length(footer_height),
+            ])
+            .split(inner);
+            frame.render_widget(Paragraph::new(lines), regions[0]);
+            frame.render_widget(alloc, regions[2]);
+            frame.render_widget(errors, regions[4]);
+            frame.render_widget(footer, regions[5]);
+        }
+        (Some(alloc), None) => {
+            let regions = Layout::vertical([
+                Constraint::Length(info_height),
+                Constraint::Length(1),
+                Constraint::Length(alloc_height - 1),
+                Constraint::Length(footer_height),
+            ])
+            .split(inner);
+            frame.render_widget(Paragraph::new(lines), regions[0]);
+            frame.render_widget(alloc, regions[2]);
+            frame.render_widget(footer, regions[3]);
+        }
+        (None, Some(errors)) => {
+            let regions = Layout::vertical([
+                Constraint::Length(info_height),
+                Constraint::Length(1),
+                Constraint::Length(errors_height - 1),
+                Constraint::Length(footer_height),
+            ])
+            .split(inner);
+            frame.render_widget(Paragraph::new(lines), regions[0]);
+            frame.render_widget(errors, regions[2]);
+            frame.render_widget(footer, regions[3]);
+        }
+        (None, None) => {
+            let regions = Layout::vertical([
+                Constraint::Length(info_height),
+                Constraint::Length(footer_height),
+            ])
+            .split(inner);
+            frame.render_widget(Paragraph::new(lines), regions[0]);
+            frame.render_widget(footer, regions[1]);
+        }
     }
 }
 
@@ -1018,7 +1111,38 @@ pub(crate) mod tests {
             disk_transport,
             smart_health,
             luks_info,
-            device_errors: HashMap::new(),
+            device_errors: HashMap::from([
+                (
+                    "toshiba".to_owned(),
+                    DiskErrors {
+                        read: 0,
+                        write: 0,
+                        flush: 0,
+                        corruption: 0,
+                        generation: 0,
+                    },
+                ),
+                (
+                    "ironwolf".to_owned(),
+                    DiskErrors {
+                        read: 3,
+                        write: 0,
+                        flush: 0,
+                        corruption: 0,
+                        generation: 0,
+                    },
+                ),
+                (
+                    "wdc".to_owned(),
+                    DiskErrors {
+                        read: 0,
+                        write: 0,
+                        flush: 0,
+                        corruption: 0,
+                        generation: 0,
+                    },
+                ),
+            ]),
             alert_state: crate::alert::AlertState {
                 active: false,
                 causes: vec![],
@@ -1048,7 +1172,7 @@ pub(crate) mod tests {
     fn snapshot_disk_detail() {
         let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(sample_pool()));
         model.show_disk_detail = true;
-        let terminal = render(&model, 60, 22);
+        let terminal = render(&model, 60, 30);
         snap!(buffer_to_string(&terminal));
     }
 

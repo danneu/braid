@@ -1,5 +1,6 @@
 ---
 source: cli/src/tui/view/mod.rs
+assertion_line: 1176
 expression: buffer_to_string(&terminal)
 ---
 Data  Scrub  Sharing
@@ -17,6 +18,13 @@ Data  Scrub  Sharing
  ▶ 1 t│ Metadata    DUP         1.5 GiB              │
    2 i│ System      DUP         16.0 MiB             │
    3 w│ Unallocated             4.1 TiB              │
+      │                                              │
+      │ btrfs Device Errors ──────────────────────── │
+      │ read            0                            │
+      │ write           0                            │
+      │ flush           0                            │
+      │ corruption      0                            │
+      │ generation      0                            │
       │                                              │
       │ r reload · Esc to go back                    │
       └──────────────────────────────────────────────┘

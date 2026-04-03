@@ -1,12 +1,13 @@
 ---
 source: cli/src/tui/view/mod.rs
+assertion_line: 1249
 expression: buffer_to_string(&terminal)
 ---
 Data  Scrub  Sharing
  Pool ──────────────────────────────────────────────────────
  error: command failed: findmnt exited 1
  Disks ─────────────────────────────────────────────────────
-     Name     Bus SMART Allocated
+     Name     Bus SMART btrfs Allocated
  ▶ 1 toshiba  —
    2 ironwolf —
    3 wdc      —
