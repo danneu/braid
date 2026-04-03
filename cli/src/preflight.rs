@@ -37,7 +37,7 @@ pub fn check_no_pending_operation(paths: &StatePaths) -> Result<(), String> {
 /// String values follow `exclop_def[]` in btrfs-progs
 /// `common/utils.c:1186-1194` (vendored in `reference/btrfs-progs/`).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ExclusiveOp {
+enum ExclusiveOp {
     None,
     Balance,
     BalancePaused,
@@ -83,7 +83,7 @@ impl fmt::Display for ExclusiveOp {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum ExclusiveOpError {
+enum ExclusiveOpError {
     #[error("an exclusive operation is already running: {0}")]
     Busy(ExclusiveOp),
     #[error("cannot read exclusive operation status: {0}")]
@@ -92,12 +92,60 @@ pub enum ExclusiveOpError {
     Unrecognized(String),
 }
 
+/// How to handle `/sys/fs/btrfs/<fsid>/exclusive_operation` when it is not
+/// `none`.
+enum ExclusiveOpPolicy {
+    /// `braid lock` behavior:
+    /// hard-fail on any active exclusive op.
+    ///
+    /// Why: lock is teardown (unmount + close). It must not proceed while btrfs
+    /// is mid balance/device-add/device-remove/device-replace/resize.
+    RejectAnyBusy,
+
+    /// Mutating command behavior (`add`, `remove`, `remove-missing`, `replace`):
+    /// - `balance paused` => hard error (operator must resume/cancel)
+    /// - any other busy state => warn and proceed
+    ///
+    /// Why: these commands invoke btrfs with `--enqueue`, so kernel serialization
+    /// is the correctness mechanism and avoids TOCTOU-style preflight busy failures.
+    /// Paused balance is the exception because it can block indefinitely.
+    RejectPausedBalanceElseEnqueue,
+}
+
+/// Apply `policy` to the current exclusive-op state read from sysfs.
+///
+/// Returns `Err(String)` on rejection, `Ok(())` when the caller may proceed.
+fn check_exclusive_op_with_policy<F: Filesystem + ?Sized>(
+    fs: &F,
+    fsid: &str,
+    policy: ExclusiveOpPolicy,
+) -> Result<(), String> {
+    match check_no_exclusive_op(fs, fsid) {
+        Ok(()) => Ok(()),
+        Err(ExclusiveOpError::Busy(op)) => match policy {
+            ExclusiveOpPolicy::RejectAnyBusy => {
+                Err(format!("cannot lock: {op} is in progress. Wait for it to finish first."))
+            }
+            ExclusiveOpPolicy::RejectPausedBalanceElseEnqueue => match op {
+                ExclusiveOp::BalancePaused => {
+                    Err("a btrfs balance is paused. Resume or cancel it before proceeding.".into())
+                }
+                _ => {
+                    eprintln!("  waiting for in-flight {op} to finish...");
+                    Ok(())
+                }
+            },
+        },
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 /// Check `/sys/fs/btrfs/{fsid}/exclusive_operation` for an active exclusive op.
 ///
 /// Returns `Ok(())` if the sysfs file reads `"none"`.
 /// Returns `Err(Busy(op))` for any other recognized state.
 /// Fail-closed: unrecognized values and read errors are errors.
-pub fn check_no_exclusive_op<F: Filesystem + ?Sized>(
+fn check_no_exclusive_op<F: Filesystem + ?Sized>(
     fs: &F,
     fsid: &str,
 ) -> Result<(), ExclusiveOpError> {
@@ -114,7 +162,7 @@ pub fn check_no_exclusive_op<F: Filesystem + ?Sized>(
 /// Refuse if the pool is mounted read-only.
 /// Runs its own findmnt probe — avoids adding mount_options to PoolState
 /// and touching all 7+ PoolState construction sites.
-pub fn check_not_read_only<R: CommandRunner>(runner: &R, mount_point: &str) -> Result<(), String> {
+fn check_not_read_only<R: CommandRunner>(runner: &R, mount_point: &str) -> Result<(), String> {
     let raw = match runner.run(&CmdRequest::FindmntJson {
         mount_point: MountPoint(mount_point.to_owned()),
     }) {
@@ -245,6 +293,39 @@ pub fn check_raid1_relocation_space(
         }
     }
     Ok(())
+}
+
+/// Guard for mutating pool commands (add, remove, remove-missing, replace).
+///
+/// Checks three preconditions before the caller touches the pool:
+///   1. No paused balance is blocking the exclusive-op lock (hard error).
+///   2. No other in-flight exclusive op — prints a wait message and proceeds
+///      on the assumption the kernel will serialize access.
+///   3. The filesystem is not mounted read-only.
+///
+/// Returns `Err(String)` suitable for wrapping in a command's
+/// `Validation` error variant.
+pub fn require_mutation_preflight<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
+    runner: &R,
+    fs: &F,
+    fsid: &str,
+    mount_point: &str,
+) -> Result<(), String> {
+    check_exclusive_op_with_policy(fs, fsid, ExclusiveOpPolicy::RejectPausedBalanceElseEnqueue)?;
+    check_not_read_only(runner, mount_point)
+}
+
+/// Guard for `braid lock` (teardown: unmount + close LUKS).
+///
+/// Hard-fails on any active exclusive op. Lock must not proceed while btrfs
+/// is mid balance/device-add/device-remove/device-replace/resize.
+///
+/// Returns `Err(String)` suitable for wrapping in `LockError::Failed`.
+pub fn require_lock_preflight<F: Filesystem + ?Sized>(
+    fs: &F,
+    fsid: &str,
+) -> Result<(), String> {
+    check_exclusive_op_with_policy(fs, fsid, ExclusiveOpPolicy::RejectAnyBusy)
 }
 
 #[cfg(test)]
@@ -758,6 +839,113 @@ mod tests {
         assert!(
             err.contains("cannot read"),
             "expected 'cannot read' in: {err}"
+        );
+    }
+
+    // --- require_lock_preflight tests ---
+
+    #[test]
+    // Intent: require_lock_preflight passes when sysfs says "none".
+    // Why: Lock teardown should proceed when nothing is running.
+    // Scenario: No active exclusive op.
+    fn lock_preflight_passes_when_none() {
+        let fs = MockFs::with_sysfs(FSID, "none\n");
+        assert!(require_lock_preflight(&fs, FSID).is_ok());
+    }
+
+    #[test]
+    // Intent: require_lock_preflight rejects on any busy op, including non-paused ones.
+    // Why: Lock is teardown — must not proceed while btrfs is mid-operation.
+    // Scenario: sysfs says "device add".
+    fn lock_preflight_rejects_busy_op() {
+        let fs = MockFs::with_sysfs(FSID, "device add\n");
+        let err = require_lock_preflight(&fs, FSID).unwrap_err();
+        assert!(
+            err.contains("device add") && err.contains("in progress"),
+            "expected 'device add' + 'in progress' in: {err}"
+        );
+    }
+
+    #[test]
+    // Intent: require_lock_preflight also rejects paused balance (not just running ops).
+    // Why: A paused balance is still an active exclusive-op holder.
+    // Scenario: sysfs says "balance paused".
+    fn lock_preflight_rejects_balance_paused() {
+        let fs = MockFs::with_sysfs(FSID, "balance paused\n");
+        let err = require_lock_preflight(&fs, FSID).unwrap_err();
+        assert!(
+            err.contains("balance (paused)") && err.contains("in progress"),
+            "expected 'balance (paused)' + 'in progress' in: {err}"
+        );
+    }
+
+    // --- require_mutation_preflight tests ---
+
+    const MOUNT: &str = "/mnt/storage";
+
+    #[test]
+    // Intent: require_mutation_preflight passes when no exclusive op is running
+    //   and pool is writable.
+    // Why: Baseline happy path — mutating commands should proceed on a healthy pool.
+    // Scenario: sysfs says "none", findmnt mock absent (swallowed as warning).
+    fn mutation_preflight_passes_when_none() {
+        let fs = MockFs::with_sysfs(FSID, "none\n");
+        let runner = MockRunner::default();
+        assert!(require_mutation_preflight(&runner, &fs, FSID, MOUNT).is_ok());
+    }
+
+    #[test]
+    // Intent: require_mutation_preflight rejects when a balance is paused.
+    // Why: A paused balance holds the exclusive-op lock indefinitely; proceeding
+    //   would deadlock.
+    // Scenario: sysfs says "balance paused".
+    fn mutation_preflight_rejects_balance_paused() {
+        let fs = MockFs::with_sysfs(FSID, "balance paused\n");
+        let runner = MockRunner::default();
+        let err = require_mutation_preflight(&runner, &fs, FSID, MOUNT).unwrap_err();
+        assert!(
+            err.contains("balance is paused"),
+            "expected 'balance is paused' in: {err}"
+        );
+    }
+
+    #[test]
+    // Intent: require_mutation_preflight proceeds (with stderr warning) when
+    //   another exclusive op is in-flight.
+    // Why: The kernel serializes exclusive ops, so waiting is safe. Blocking
+    //   would prevent queuing.
+    // Scenario: sysfs says "device add" — function returns Ok and prints a
+    //   wait message to stderr (stderr side-effect not captured in unit tests).
+    fn mutation_preflight_proceeds_on_busy_op() {
+        let fs = MockFs::with_sysfs(FSID, "device add\n");
+        let runner = MockRunner::default();
+        assert!(require_mutation_preflight(&runner, &fs, FSID, MOUNT).is_ok());
+    }
+
+    #[test]
+    // Intent: require_mutation_preflight rejects when the pool is mounted read-only.
+    // Why: Mutating commands will fail at the filesystem layer; better to fail
+    //   early with a clear message.
+    // Scenario: sysfs says "none", findmnt returns ro mount option.
+    fn mutation_preflight_rejects_read_only() {
+        let fs = MockFs::with_sysfs(FSID, "none\n");
+        let runner = MockRunner::default().with_output(
+            CmdRequest::FindmntJson {
+                mount_point: MountPoint(MOUNT.to_owned()),
+            },
+            RawCommandOutput {
+                cmd: "findmnt".into(),
+                stdout: format!(
+                    r#"{{"filesystems": [{{"target": "{MOUNT}", "source": "/dev/mapper/braid-a", "fstype": "btrfs", "options": "ro,space_cache=v2"}}]}}"#
+                ),
+                stderr: String::new(),
+                exit_status: 0,
+            },
+        );
+        let err = require_mutation_preflight(&runner, &fs, FSID, MOUNT).unwrap_err();
+        assert!(
+            err.contains("read-only"),
+            "expected 'read-only' in: {err}"
         );
     }
 }

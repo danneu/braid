@@ -91,19 +91,7 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
 
     // Preflight
     let fsid = pool.fsid.as_deref().expect("mounted pool must have FSID");
-    match preflight::check_no_exclusive_op(fs, fsid) {
-        Ok(()) => {}
-        Err(preflight::ExclusiveOpError::Busy(preflight::ExclusiveOp::BalancePaused)) => {
-            return Err(RemoveMissingError::Validation(
-                "a btrfs balance is paused. Resume or cancel it before proceeding.".into(),
-            ));
-        }
-        Err(preflight::ExclusiveOpError::Busy(op)) => {
-            eprintln!("  waiting for in-flight {op} to finish...");
-        }
-        Err(e) => return Err(RemoveMissingError::Validation(e.to_string())),
-    }
-    preflight::check_not_read_only(runner, config.mount_point().as_str())
+    preflight::require_mutation_preflight(runner, fs, fsid, config.mount_point().as_str())
         .map_err(RemoveMissingError::Validation)?;
 
     if pool.missing_count == 0 {

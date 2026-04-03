@@ -134,15 +134,7 @@ pub fn cmd_lock<R: CommandRunner, F: Filesystem + ?Sized>(
             .as_deref()
             .ok_or_else(|| LockError::Failed("mounted pool has no FSID".into()))?;
 
-        match preflight::check_no_exclusive_op(fs, fsid) {
-            Ok(()) => {}
-            Err(preflight::ExclusiveOpError::Busy(op)) => {
-                return Err(LockError::Failed(format!(
-                    "cannot lock: {op} is in progress. Wait for it to finish first."
-                )));
-            }
-            Err(e) => return Err(LockError::Failed(e.to_string())),
-        }
+        preflight::require_lock_preflight(fs, fsid).map_err(LockError::Failed)?;
     }
 
     // Dry-run: probe mapper state, compile steps, print
