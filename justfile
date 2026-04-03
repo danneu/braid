@@ -67,6 +67,15 @@ test *args:
 test-repro *args:
     just _build-checks reproChecks {{args}}
 
+# Full stable + unstable pipeline: capture fixtures, run parser tests, run all VM tests
+supertest:
+    just capture-all-fixtures
+    just test-rust
+    just test-all
+    just capture-all-fixtures-unstable
+    just test-rust-unstable
+    just test-all-unstable
+
 # Run all tests including repro (zero-arg only — use `test` or `test-repro` for named tests)
 test-all:
     just _build-checks checks && just _build-checks reproChecks
