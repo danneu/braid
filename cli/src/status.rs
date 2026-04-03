@@ -2397,12 +2397,20 @@ mod tests {
 
     #[test]
     fn scrub_report_json_never() {
+        // Intent: verify JSON shape of ScrubReport::Never.
+        // Why it exists: last_scrub changed from a flat string to a tagged object;
+        // each variant's serialization must be covered.
+        // Scenario: pool has never been scrubbed, JSON consumers see {"state":"never"}.
         let json: serde_json::Value = serde_json::to_value(&ScrubReport::Never).unwrap();
         assert_eq!(json["state"], "never");
     }
 
     #[test]
     fn scrub_report_json_running_with_pct() {
+        // Intent: verify JSON shape of ScrubReport::Running with progress.
+        // Why it exists: last_scrub changed from a flat string to a tagged object;
+        // each variant's serialization must be covered.
+        // Scenario: scrub is in progress at 42%, JSON consumers see pct field.
         let report = ScrubReport::Running { pct: Some(42) };
         let json: serde_json::Value = serde_json::to_value(&report).unwrap();
         assert_eq!(json["state"], "running");
@@ -2411,6 +2419,10 @@ mod tests {
 
     #[test]
     fn scrub_report_json_running_no_pct() {
+        // Intent: verify pct is omitted (not null) when unavailable.
+        // Why it exists: serde skip_serializing_if must actually omit the key,
+        // not emit null, to match our JSON contract.
+        // Scenario: scrub just started, no progress yet — pct absent from JSON.
         let report = ScrubReport::Running { pct: None };
         let json: serde_json::Value = serde_json::to_value(&report).unwrap();
         assert_eq!(json["state"], "running");
