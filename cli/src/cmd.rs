@@ -744,8 +744,11 @@ pub struct RealRunner;
 impl RealRunner {
     fn exec(cmd: &CmdArgs) -> Result<RawCommandOutput, CmdError> {
         let cmd_str = format!("{} {}", cmd.program, cmd.args.join(" "));
+        // Force POSIX locale so error strings (strerror, %m) are always English —
+        // braid matches stderr substrings for ENOSPC, device-busy, etc.
         let output = std::process::Command::new(cmd.program)
             .args(&cmd.args)
+            .env("LC_ALL", "C")
             .output()
             .map_err(|e| CmdError::Failed(format!("{cmd_str}: {e}")))?;
 
@@ -764,8 +767,11 @@ impl RealRunner {
         use std::process::Stdio;
 
         let cmd_str = format!("{} {}", cmd.program, cmd.args.join(" "));
+        // Force POSIX locale so error strings (strerror, %m) are always English —
+        // braid matches stderr substrings for ENOSPC, device-busy, etc.
         let mut child = std::process::Command::new(cmd.program)
             .args(&cmd.args)
+            .env("LC_ALL", "C")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

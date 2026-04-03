@@ -1050,6 +1050,43 @@ mod tests {
         );
     }
 
+    #[test]
+    // Intent: when soft balance fails with ENOSPC, the surfaced error includes
+    //   the recovery hint with a concrete `dusage=0` command.
+    // Why: the hint is appended in pool::balance_error, but it must survive
+    //   PoolError → RemoveMissingError::Pool → Display without being lost.
+    // Scenario: 3-disk NAS, one drive dies. Operator runs remove-missing. Device
+    //   removal succeeds but the post-removal soft balance hits ENOSPC. The error
+    //   message should guide the user to free empty block groups.
+    fn enospc_hint_surfaces_through_error_chain() {
+        let (_tmp, config_path, _state_tmp, state_paths) = three_device_config();
+
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let runner = FailingSoftBalanceRunner::new(log.clone());
+        let result = cmd_remove_missing(
+            &runner,
+            &MockFs,
+            &RemoveMissingParams {
+                config_path: &config_path,
+                missing_id: 3,
+                dry_run: false,
+                yes: true,
+                progress: crate::progress::ProgressOutput::Off,
+                paths: &state_paths,
+            },
+        );
+
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("hint:"),
+            "error should contain recovery hint: {err}"
+        );
+        assert!(
+            err.contains("dusage=0"),
+            "error should suggest dusage=0 filter: {err}"
+        );
+    }
+
     // --- resolve_removal_target tests ---
 
     #[test]

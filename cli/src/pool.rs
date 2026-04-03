@@ -1,4 +1,4 @@
-use crate::cmd::{CmdError, CmdRequest, CommandRunner};
+use crate::cmd::{CmdError, CmdRequest, CommandRunner, RawCommandOutput};
 use crate::probe::probe_pool;
 use crate::progress::{run_replace_with_progress, run_with_progress, ProgressOutput};
 use crate::types::MountPoint;
@@ -31,6 +31,25 @@ pub fn pool_add_device<R: CommandRunner + Sync>(
     Ok(())
 }
 
+/// Build a `PoolError::Failed` for a balance command, detecting ENOSPC and
+/// appending a recovery hint when present.
+fn balance_error(label: &str, mount_point: &str, result: &RawCommandOutput) -> PoolError {
+    let stderr = result.stderr.to_lowercase();
+    if stderr.contains("no space left") {
+        PoolError::Failed(format!(
+            "{label} failed (exit {}): {}\nhint: run `btrfs balance start -dusage=0 {mount_point}` to free empty block groups, then retry",
+            result.exit_status,
+            result.stderr.trim(),
+        ))
+    } else {
+        PoolError::Failed(format!(
+            "{label} failed (exit {}): {}",
+            result.exit_status,
+            result.stderr.trim(),
+        ))
+    }
+}
+
 /// Balance pool to RAID1 with progress display.
 pub fn pool_balance_raid1<R: CommandRunner + Sync>(
     runner: &R,
@@ -46,11 +65,11 @@ pub fn pool_balance_raid1<R: CommandRunner + Sync>(
         progress,
     )?;
     if result.exit_status != 0 {
-        return Err(PoolError::Failed(format!(
-            "btrfs balance to RAID1 failed (exit {}): {}",
-            result.exit_status,
-            result.stderr.trim()
-        )));
+        return Err(balance_error(
+            "btrfs balance to RAID1",
+            mount_point,
+            &result,
+        ));
     }
     Ok(())
 }
@@ -70,11 +89,11 @@ pub fn pool_balance_single<R: CommandRunner + Sync>(
         progress,
     )?;
     if result.exit_status != 0 {
-        return Err(PoolError::Failed(format!(
-            "btrfs balance to single failed (exit {}): {}",
-            result.exit_status,
-            result.stderr.trim()
-        )));
+        return Err(balance_error(
+            "btrfs balance to single",
+            mount_point,
+            &result,
+        ));
     }
     Ok(())
 }
@@ -95,11 +114,11 @@ pub fn pool_balance_raid1_soft<R: CommandRunner + Sync>(
         progress,
     )?;
     if result.exit_status != 0 {
-        return Err(PoolError::Failed(format!(
-            "btrfs soft balance to RAID1 failed (exit {}): {}",
-            result.exit_status,
-            result.stderr.trim()
-        )));
+        return Err(balance_error(
+            "btrfs soft balance to RAID1",
+            mount_point,
+            &result,
+        ));
     }
     Ok(())
 }
@@ -581,6 +600,52 @@ mod tests {
         assert!(
             err.contains("post-operation pool probe failed"),
             "error should mention probe: {err}"
+        );
+    }
+
+    #[test]
+    // Intent: balance_error appends a recovery hint when stderr contains ENOSPC.
+    // Why: ENOSPC is a common balance failure with a well-known recovery
+    //   (dusage=0). Without a hint, users must search for the fix.
+    // Scenario: pool is near-full, balance fails with "No space left on device".
+    fn balance_error_detects_enospc() {
+        let result = RawCommandOutput {
+            cmd: String::new(),
+            stdout: String::new(),
+            stderr: "ERROR: error during balancing '/mnt/storage': No space left on device"
+                .to_owned(),
+            exit_status: 1,
+        };
+        let err = balance_error("btrfs balance to RAID1", "/mnt/storage", &result);
+        let msg = err.to_string();
+        assert!(msg.contains("hint:"), "should contain recovery hint: {msg}");
+        assert!(
+            msg.contains("dusage=0"),
+            "should suggest dusage=0 filter: {msg}"
+        );
+        assert!(
+            msg.contains("/mnt/storage"),
+            "should include concrete mount point: {msg}"
+        );
+    }
+
+    #[test]
+    // Intent: balance_error returns a plain error (no hint) for non-ENOSPC failures.
+    // Why: the hint should only appear for ENOSPC, not for unrelated errors.
+    // Scenario: balance fails because the filesystem is read-only.
+    fn balance_error_no_hint_for_other_failures() {
+        let result = RawCommandOutput {
+            cmd: String::new(),
+            stdout: String::new(),
+            stderr: "ERROR: error during balancing '/mnt/storage': Read-only file system"
+                .to_owned(),
+            exit_status: 1,
+        };
+        let err = balance_error("btrfs balance to RAID1", "/mnt/storage", &result);
+        let msg = err.to_string();
+        assert!(
+            !msg.contains("hint:"),
+            "should NOT contain recovery hint for non-ENOSPC: {msg}"
         );
     }
 

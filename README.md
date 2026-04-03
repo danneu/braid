@@ -640,6 +640,19 @@ services.udev.extraRules = ''
 '';
 ```
 
+### Balance fails with "No space left on device"
+
+btrfs balance can fail with ENOSPC when the pool is nearly full, even if `df` shows free space. This happens because balance needs temporary space to relocate block groups.
+
+braid detects this and suggests the fix: run a cleanup pass to free empty block groups first, then retry:
+
+```sh
+sudo btrfs balance start -dusage=0 /mnt/storage
+# then retry your original braid command
+```
+
+The `-dusage=0` filter relocates only completely empty block groups, which always succeeds and frees enough space for a full balance.
+
 ## Usage/NAS recommendations
 
 ### Create btrfs subvolumes for different silos of data
