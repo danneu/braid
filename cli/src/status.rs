@@ -1319,33 +1319,33 @@ mod tests {
 
     fn btrfs_scrub_never() -> RawCommandOutput {
         ok_raw(
-            "btrfs scrub status",
+            "btrfs scrub status --raw",
             "UUID:             aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\nScrub started:    no stats available\n",
         )
     }
 
     fn btrfs_scrub_completed() -> RawCommandOutput {
         ok_raw(
-            "btrfs scrub status",
+            "btrfs scrub status --raw",
             "UUID:             aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
              Scrub started:    Mon Feb 23 10:00:00 2026\n\
              Status:           finished\n\
              Duration:         0:00:01\n\
-             Total to scrub:   1.00GiB\n\
-             Rate:             1.00GiB/s\n\
+             Total to scrub:   1073741824\n\
+             Rate:             1073741824/s\n\
              Error summary:    no errors found\n",
         )
     }
 
     fn btrfs_scrub_completed_with_errors() -> RawCommandOutput {
         ok_raw(
-            "btrfs scrub status",
+            "btrfs scrub status --raw",
             "UUID:             aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
              Scrub started:    Mon Feb 23 10:00:00 2026\n\
              Status:           finished\n\
              Duration:         0:00:01\n\
-             Total to scrub:   1.00GiB\n\
-             Rate:             1.00GiB/s\n\
+             Total to scrub:   1073741824\n\
+             Rate:             1073741824/s\n\
              Error summary:    csum=50\n",
         )
     }

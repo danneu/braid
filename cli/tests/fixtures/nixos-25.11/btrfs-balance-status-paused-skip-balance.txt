@@ -1,2 +1,2 @@
 Balance on '/mnt/storage' is paused
-0 out of about 0 chunks balanced (0 considered), -nan% left
+0 out of about 0 chunks balanced (0 considered), nan% left

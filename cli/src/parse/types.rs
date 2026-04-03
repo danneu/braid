@@ -201,21 +201,21 @@ pub struct BtrfsFilesystemUsageOutput {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScrubTimestamp(pub time::PrimitiveDateTime);
 
-/// btrfs scrub status
+/// btrfs scrub status --raw
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScrubState {
     Never,
     Running {
         pct: Option<u8>,
-        total: Option<String>,
-        rate: Option<String>,
+        total_bytes: Option<u64>,
+        rate_bytes_per_sec: Option<u64>,
     },
     Completed {
         started_at: ScrubTimestamp,
         error_count: u64,
         duration: Option<String>,
-        total: Option<String>,
-        rate: Option<String>,
+        total_bytes: Option<u64>,
+        rate_bytes_per_sec: Option<u64>,
     },
     Unknown,
 }

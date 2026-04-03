@@ -2,7 +2,7 @@
    "filesystems": [
       {
          "target": "/mnt/storage",
-         "source": "/dev/mapper/braid-vdb",
+         "source": "/dev/dm-0",
          "fstype": "btrfs"
       }
    ]

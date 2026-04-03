@@ -65,7 +65,7 @@ machine.succeed(
 
 # 6. btrfs scrub status — before any scrub (should say "no stats available")
 machine.succeed(
-    f"btrfs scrub status {MOUNT}"
+    f"btrfs scrub status --raw {MOUNT}"
     f" > {FIXTURE_DIR}/btrfs-scrub-never.txt"
 )
 
@@ -90,7 +90,7 @@ machine.succeed(
 # 10. Run a scrub, then capture completed status
 machine.succeed(f"btrfs scrub start -B {MOUNT}")
 machine.succeed(
-    f"btrfs scrub status {MOUNT}"
+    f"btrfs scrub status --raw {MOUNT}"
     f" > {FIXTURE_DIR}/btrfs-scrub-completed.txt"
 )
 

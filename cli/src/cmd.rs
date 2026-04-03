@@ -313,7 +313,12 @@ impl CmdRequest {
             },
             CmdRequest::BtrfsScrubStatus { mount_point } => CmdArgs {
                 program: "btrfs",
-                args: vec!["scrub".into(), "status".into(), mount_point.0.clone()],
+                args: vec![
+                    "scrub".into(),
+                    "status".into(),
+                    "--raw".into(),
+                    mount_point.0.clone(),
+                ],
             },
             CmdRequest::BtrfsScrubStatusPerDevice { mount_point } => CmdArgs {
                 program: "btrfs",

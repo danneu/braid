@@ -1,7 +1,7 @@
-UUID:             9a30dae0-e71e-4992-9234-f6628a490396
-Scrub started:    Fri Apr  3 01:07:15 2026
+UUID:             39eefdab-ae65-42b5-a5e4-5a25821fab76
+Scrub started:    Fri Apr  3 16:25:45 2026
 Status:           finished
-Duration:         0:00:01
-Total to scrub:   32.36MiB
-Rate:             32.34MiB/s
+Duration:         0:00:00
+Total to scrub:   33931264
+Rate:             33914880/s
 Error summary:    no errors found

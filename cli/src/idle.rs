@@ -148,13 +148,13 @@ mod tests {
                 mount_point: MountPoint(MP.to_owned()),
             },
             RawCommandOutput {
-                cmd: "btrfs scrub status /mnt/storage".into(),
+                cmd: "btrfs scrub status --raw /mnt/storage".into(),
                 stdout: "UUID:             12345678-1234-1234-1234-123456789abc\n\
                          Scrub started:    Mon Jan  1 00:00:00 2024\n\
                          Status:           finished\n\
                          Duration:         0:00:01\n\
-                         Total to scrub:   1.00GiB\n\
-                         Rate:             1.00GiB/s\n\
+                         Total to scrub:   1073741824\n\
+                         Rate:             1073741824/s\n\
                          Error summary:    no errors found\n"
                     .into(),
                 stderr: String::new(),
@@ -169,14 +169,14 @@ mod tests {
                 mount_point: MountPoint(MP.to_owned()),
             },
             RawCommandOutput {
-                cmd: "btrfs scrub status /mnt/storage".into(),
+                cmd: "btrfs scrub status --raw /mnt/storage".into(),
                 stdout: format!(
                     "UUID:             12345678-1234-1234-1234-123456789abc\n\
                      Scrub started:    Mon Jan  1 00:00:00 2024\n\
                      Status:           running\n\
                      Duration:         0:00:05\n\
-                     Total to scrub:   28.32GiB\n\
-                     Rate:             2.75GiB/s\n\
+                     Total to scrub:   30408704000\n\
+                     Rate:             2952790016/s\n\
                      {pct}.00% done\n\
                      Error summary:    no errors found\n"
                 ),

@@ -62,8 +62,8 @@ pub fn parse_btrfs_scrub_status(
     let mut error_count: u64 = 0;
     let mut pct: Option<u8> = None;
     let mut duration: Option<String> = None;
-    let mut total: Option<String> = None;
-    let mut rate: Option<String> = None;
+    let mut total_bytes: Option<u64> = None;
+    let mut rate_bytes_per_sec: Option<u64> = None;
 
     for line in stdout.lines() {
         let trimmed = line.trim();
@@ -86,9 +86,15 @@ pub fn parse_btrfs_scrub_status(
         } else if let Some(rest) = trimmed.strip_prefix("Duration:") {
             duration = Some(rest.trim().to_owned());
         } else if let Some(rest) = trimmed.strip_prefix("Total to scrub:") {
-            total = Some(rest.trim().to_owned());
+            total_bytes = rest.trim().parse::<u64>().ok();
         } else if let Some(rest) = trimmed.strip_prefix("Rate:") {
-            rate = Some(rest.trim().to_owned());
+            // --raw output: "33910682/s" or "33910682/s (limit 52428800/s)"
+            // Split on '/' to extract the rate number before the unit suffix.
+            rate_bytes_per_sec = rest
+                .trim()
+                .split('/')
+                .next()
+                .and_then(|s| s.trim().parse::<u64>().ok());
         } else if trimmed.ends_with("% done") {
             // e.g. "  8.00% done" on some versions, or embedded in other lines
             if let Some(pct_str) = trimmed.split('%').next() {
@@ -99,7 +105,11 @@ pub fn parse_btrfs_scrub_status(
 
     if is_running {
         return Ok(BtrfsScrubStatusOutput {
-            state: ScrubState::Running { pct, total, rate },
+            state: ScrubState::Running {
+                pct,
+                total_bytes,
+                rate_bytes_per_sec,
+            },
         });
     }
 
@@ -109,8 +119,8 @@ pub fn parse_btrfs_scrub_status(
                 started_at: ScrubTimestamp(ts),
                 error_count,
                 duration,
-                total,
-                rate,
+                total_bytes,
+                rate_bytes_per_sec,
             },
         });
     }
@@ -149,7 +159,7 @@ mod tests {
     #[test]
     fn scrub_parses_nixos_25_11_completed() {
         let raw = RawCommandOutput {
-            cmd: "btrfs scrub status".into(),
+            cmd: "btrfs scrub status --raw".into(),
             stdout: fixture("btrfs-scrub-completed.txt"),
             stderr: String::new(),
             exit_status: 0,
@@ -167,10 +177,14 @@ mod tests {
             ScrubState::Completed {
                 started_at,
                 error_count,
+                total_bytes,
+                rate_bytes_per_sec,
                 ..
             } => {
                 assert_eq!(started_at.0, expected_dt);
                 assert_eq!(*error_count, 0);
+                assert_eq!(*total_bytes, Some(33_931_264));
+                assert_eq!(*rate_bytes_per_sec, Some(33_914_880));
             }
             other => panic!("expected Completed, got {other:?}"),
         }
@@ -181,14 +195,14 @@ mod tests {
     #[test]
     fn scrub_running_inline() {
         let raw = RawCommandOutput {
-            cmd: "btrfs scrub status".into(),
+            cmd: "btrfs scrub status --raw".into(),
             stdout: "\
 UUID:             cc86845b-aec3-408e-bef5-553affc1f2b1
 Scrub started:    Tue Feb 25 10:00:00 2026
 Status:           running
 Duration:         0:00:05
-Total to scrub:   1.00GiB
-Rate:             100.00MiB/s
+Total to scrub:   1073741824
+Rate:             104857600/s
 Error summary:    no errors found
 "
             .into(),
@@ -196,20 +210,31 @@ Error summary:    no errors found
             exit_status: 0,
         };
         let out = parse_btrfs_scrub_status(&raw).unwrap();
-        assert!(matches!(out.state, ScrubState::Running { pct: None, .. }));
+        match out.state {
+            ScrubState::Running {
+                pct,
+                total_bytes,
+                rate_bytes_per_sec,
+            } => {
+                assert_eq!(pct, None);
+                assert_eq!(total_bytes, Some(1_073_741_824));
+                assert_eq!(rate_bytes_per_sec, Some(104_857_600));
+            }
+            other => panic!("expected Running, got {other:?}"),
+        }
     }
 
     #[test]
     fn scrub_completed_with_errors_inline() {
         let raw = RawCommandOutput {
-            cmd: "btrfs scrub status".into(),
+            cmd: "btrfs scrub status --raw".into(),
             stdout: "\
 UUID:             cc86845b-aec3-408e-bef5-553affc1f2b1
 Scrub started:    Tue Feb 25 10:00:00 2026
 Status:           finished
 Duration:         0:00:10
-Total to scrub:   1.00GiB
-Rate:             100.00MiB/s
+Total to scrub:   1073741824
+Rate:             104857600/s
 Error summary:    read=1 csum=2
 "
             .into(),
@@ -221,6 +246,8 @@ Error summary:    read=1 csum=2
             ScrubState::Completed {
                 started_at,
                 error_count,
+                total_bytes,
+                rate_bytes_per_sec,
                 ..
             } => {
                 assert_eq!(
@@ -228,6 +255,41 @@ Error summary:    read=1 csum=2
                     parse_ctime("Tue Feb 25 10:00:00 2026").unwrap()
                 );
                 assert_eq!(*error_count, 3);
+                assert_eq!(*total_bytes, Some(1_073_741_824));
+                assert_eq!(*rate_bytes_per_sec, Some(104_857_600));
+            }
+            other => panic!("expected Completed, got {other:?}"),
+        }
+    }
+
+    /// Intent: Rate line with a scrub limit suffix must still parse correctly.
+    /// Why: btrfs-progs appends ` (limit <bytes>/s)` when per-device scrub
+    /// limits are set (scrub.c lines 216-218). The parser must extract only the
+    /// rate number before the first `/`.
+    /// Scenario: user has configured a per-device scrub rate limit.
+    #[test]
+    fn scrub_completed_with_rate_limit() {
+        let raw = RawCommandOutput {
+            cmd: "btrfs scrub status --raw".into(),
+            stdout: "\
+UUID:             cc86845b-aec3-408e-bef5-553affc1f2b1
+Scrub started:    Tue Feb 25 10:00:00 2026
+Status:           finished
+Duration:         0:00:10
+Total to scrub:   1073741824
+Rate:             104857600/s (limit 52428800/s)
+Error summary:    no errors found
+"
+            .into(),
+            stderr: String::new(),
+            exit_status: 0,
+        };
+        let out = parse_btrfs_scrub_status(&raw).unwrap();
+        match &out.state {
+            ScrubState::Completed {
+                rate_bytes_per_sec, ..
+            } => {
+                assert_eq!(*rate_bytes_per_sec, Some(104_857_600));
             }
             other => panic!("expected Completed, got {other:?}"),
         }

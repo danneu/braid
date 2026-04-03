@@ -215,17 +215,29 @@ fn scrub_table(scrub: &ScrubState, now: PrimitiveDateTime) -> Table<'_> {
             vec![Row::new(["Last run".to_owned(), "never".to_owned()])],
             None,
         ),
-        ScrubState::Running { pct, total, rate } => {
+        ScrubState::Running {
+            pct,
+            total_bytes,
+            rate_bytes_per_sec,
+        } => {
             let detail = match pct {
                 Some(p) => format!("now ({}% completed)", p),
                 None => "now".to_owned(),
             };
             let mut rows = vec![Row::new(["Last run".to_owned(), detail])];
-            if let Some(t) = total {
-                rows.push(Row::new(["Total".to_owned(), t.clone()]));
+            if let Some(t) = total_bytes {
+                let u = ByteUnit::friendliest(*t);
+                rows.push(Row::new([
+                    "Total".to_owned(),
+                    format!("{} {}", u.format(*t), u.suffix()),
+                ]));
             }
-            if let Some(r) = rate {
-                rows.push(Row::new(["Rate".to_owned(), r.clone()]));
+            if let Some(r) = rate_bytes_per_sec {
+                let u = ByteUnit::friendliest(*r);
+                rows.push(Row::new([
+                    "Rate".to_owned(),
+                    format!("{} {}/s", u.format(*r), u.suffix()),
+                ]));
             }
             (rows, None)
         }
@@ -233,8 +245,8 @@ fn scrub_table(scrub: &ScrubState, now: PrimitiveDateTime) -> Table<'_> {
             started_at,
             error_count,
             duration,
-            total,
-            rate,
+            total_bytes,
+            rate_bytes_per_sec,
         } => {
             let display = match timeago(&started_at.0, now) {
                 Some(ago) => format!("{} ({})", format_timestamp(&started_at.0), ago),
@@ -244,11 +256,19 @@ fn scrub_table(scrub: &ScrubState, now: PrimitiveDateTime) -> Table<'_> {
                 Row::new(["Last run".to_owned(), display]),
                 Row::new(["Errors".to_owned(), error_count.to_string()]),
             ];
-            if let Some(t) = total {
-                rows.push(Row::new(["Total".to_owned(), t.clone()]));
+            if let Some(t) = total_bytes {
+                let u = ByteUnit::friendliest(*t);
+                rows.push(Row::new([
+                    "Total".to_owned(),
+                    format!("{} {}", u.format(*t), u.suffix()),
+                ]));
             }
-            if let Some(r) = rate {
-                rows.push(Row::new(["Rate".to_owned(), r.clone()]));
+            if let Some(r) = rate_bytes_per_sec {
+                let u = ByteUnit::friendliest(*r);
+                rows.push(Row::new([
+                    "Rate".to_owned(),
+                    format!("{} {}/s", u.format(*r), u.suffix()),
+                ]));
             }
             if let Some(d) = duration {
                 rows.push(Row::new(["Duration".to_owned(), d.clone()]));
@@ -270,15 +290,21 @@ fn scrub_table(scrub: &ScrubState, now: PrimitiveDateTime) -> Table<'_> {
 
 fn scrub_lines(scrub: &ScrubState) -> u16 {
     match scrub {
-        ScrubState::Running { total, rate, .. } => {
-            1 + total.is_some() as u16 + rate.is_some() as u16
-        }
+        ScrubState::Running {
+            total_bytes,
+            rate_bytes_per_sec,
+            ..
+        } => 1 + total_bytes.is_some() as u16 + rate_bytes_per_sec.is_some() as u16,
         ScrubState::Completed {
-            total,
-            rate,
+            total_bytes,
+            rate_bytes_per_sec,
             duration,
             ..
-        } => 2 + total.is_some() as u16 + rate.is_some() as u16 + duration.is_some() as u16,
+        } => {
+            2 + total_bytes.is_some() as u16
+                + rate_bytes_per_sec.is_some() as u16
+                + duration.is_some() as u16
+        }
         _ => 1,
     }
 }
@@ -1001,8 +1027,8 @@ pub(crate) mod tests {
                 started_at: ScrubTimestamp(time::macros::datetime!(2026-02-24 02:00:07)),
                 error_count: 0,
                 duration: Some("0:00:00".to_owned()),
-                total: Some("32.36MiB".to_owned()),
-                rate: Some("32.34MiB/s".to_owned()),
+                total_bytes: Some(33_931_264),
+                rate_bytes_per_sec: Some(33_910_682),
             },
             balance: BalanceReport::Idle,
             capacity_total_bytes: Some(8_001_568_641_024),
