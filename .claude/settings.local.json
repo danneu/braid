@@ -24,7 +24,9 @@
       "Bash(modinfo:*)",
       "Bash(zstdcat:*)",
       "Bash(cd:*)",
-      "Bash(gh api:*)"
+      "Bash(gh api:*)",
+      "Bash(just clippy:*)",
+      "Read(//tmp/**)"
     ]
   },
   "plansDirectory": "./plans/wip",
