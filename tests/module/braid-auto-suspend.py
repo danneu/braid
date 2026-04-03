@@ -69,7 +69,7 @@ with subtest("Smb check exists (auto-detected from samba)"):
 
 with subtest("BtrfsScrub wakeup exists"):
     assert "[wakeup.BtrfsScrub]" in config, "Missing [wakeup.BtrfsScrub] in config"
-    assert "btrfs-scrub@" in config, "Missing btrfs-scrub@ match pattern in config"
+    assert "braid-scrub" in config, "Missing braid-scrub match pattern in config"
 
 with subtest("General settings"):
     assert "idle_time=900" in config, "Missing idle_time=900 in config"

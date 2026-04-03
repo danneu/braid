@@ -37,7 +37,7 @@ Auto-healing checksums, dynamic drive pooling, in-kernel (no out-of-tree modules
 
 ## 7. Sane defaults
 
-If a knowledgeable admin would always enable it, braid enables it by default. Defaults use `lib.mkDefault` so users override with normal NixOS config. Only wrap in a `braid.*` option when the mapping is non-obvious or one braid option controls many underlying options. Examples: monthly auto-scrub, `storageGroup` for mount root access (`root:storage 2770`). [Why →](decisions/sane-defaults.md)
+If a knowledgeable admin would always enable it, braid enables it by default. Use `lib.mkDefault` for simple pass-through defaults on stable NixOS options. Wrap in a `braid.*` option when the feature is inside braid's product boundary and benefits from lifecycle control, discoverability, or a unified config surface — even if the mapping is 1:1. Examples: `braid.autoScrub` (periodic scrub with lifecycle binding to pool online state), `storageGroup` for mount root access (`root:storage 2770`). [Why →](decisions/sane-defaults.md)
 
 ## 8. Test every design decision
 

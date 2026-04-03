@@ -23,10 +23,49 @@ in
       "d /run/braid-key 0700 root root -"
     ];
 
-    services.btrfs.autoScrub = {
-      enable = lib.mkDefault true;
-      interval = lib.mkDefault "monthly";
-      fileSystems = [ cfg.mountPoint ];
+    # --- Scrub scheduling ---
+    # braid-owned scrub timer + service, replacing services.btrfs.autoScrub.
+    # Timer lifecycle is tied to braid-online.service: starts when pool comes
+    # online, stops when pool goes offline. Persistent=true handles catch-up
+    # for overdue scrubs on activation (e.g., pool was locked past a monthly
+    # boundary, then unlocked days later).
+    systemd.timers.braid-scrub = lib.mkIf cfg.autoScrub.enable {
+      description = "Periodic btrfs scrub for braid pool";
+      wantedBy = [ "braid-online.service" ];
+      bindsTo = [ "braid-online.service" ];
+      after = [ "braid-online.service" ];
+      timerConfig = {
+        OnCalendar = cfg.autoScrub.interval;
+        AccuracySec = "1d";
+        Persistent = true;
+      };
+    };
+
+    systemd.services.braid-scrub = lib.mkIf cfg.autoScrub.enable {
+      description = "btrfs scrub on ${cfg.mountPoint}";
+      documentation = [ "man:btrfs-scrub(8)" ];
+      conflicts = [
+        "shutdown.target"
+        "sleep.target"
+      ];
+      before = [
+        "shutdown.target"
+        "sleep.target"
+      ];
+      bindsTo = [ "braid-online.service" ];
+      after = [ "braid-online.service" ];
+      unitConfig.ConditionPathIsMountPoint = cfg.mountPoint;
+      serviceConfig = {
+        # simple (not oneshot) so ExecStop is invoked on stop.
+        Type = "simple";
+        Nice = 19;
+        IOSchedulingClass = "idle";
+        ExecStart = "${btrfsProgs}/bin/btrfs scrub start -B ${cfg.mountPoint}";
+        # If the service is stopped before scrub finishes, cancel it.
+        ExecStop = pkgs.writeShellScript "braid-scrub-maybe-cancel" ''
+          (${btrfsProgs}/bin/btrfs scrub status ${cfg.mountPoint} | ${pkgs.gnugrep}/bin/grep finished) || ${btrfsProgs}/bin/btrfs scrub cancel ${cfg.mountPoint}
+        '';
+      };
     };
 
     # Lifecycle owner: "pool is online."

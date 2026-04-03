@@ -100,7 +100,7 @@ in
       wakeups = {
         BtrfsScrub = {
           class = "SystemdTimer";
-          match = "btrfs-scrub@.*";
+          match = "braid-scrub";
         };
       };
     };

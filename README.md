@@ -404,14 +404,14 @@ Disk name candidates are read from `/var/lib/braid/pool.json` on every tab press
 
 Braid enables these automatically when `braid.enable = true`:
 
-- **Monthly btrfs scrub** — detects and repairs bit rot before it can compound. Override or disable with normal NixOS config:
+- **Monthly btrfs scrub** — detects and repairs bit rot before it can compound. The scrub timer only runs while the pool is online and automatically catches up if a scrub was missed while the pool was locked. Configure in your NixOS config:
 
   ```nix
   # change to weekly
-  services.btrfs.autoScrub.interval = "weekly";
+  braid.autoScrub.interval = "weekly";
 
   # or disable
-  services.btrfs.autoScrub.enable = false;
+  braid.autoScrub.enable = false;
   ```
 
 - **Resilient boot** — a dead or missing drive never blocks boot. The pool stays locked until you unlock it, and the system remains reachable via SSH.

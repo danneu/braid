@@ -55,6 +55,16 @@ in
         description = "Mount degraded when devices are missing during auto-unlock. New writes will have zero redundancy.";
       };
     };
+
+    autoScrub = {
+      enable = lib.mkEnableOption "periodic btrfs scrub" // { default = true; };
+
+      interval = lib.mkOption {
+        type = lib.types.str;
+        default = "monthly";
+        description = "systemd calendar expression for periodic scrub scheduling.";
+      };
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -70,6 +80,10 @@ in
       {
         assertion = cfg.autoUnlock.enable -> lib.hasPrefix "/dev/disk/by-id/" cfg.autoUnlock.keyDevice;
         message = "braid.autoUnlock.keyDevice must start with /dev/disk/by-id/.";
+      }
+      {
+        assertion = !(cfg.autoScrub.enable && config.services.btrfs.autoScrub.enable);
+        message = "braid.autoScrub replaces services.btrfs.autoScrub. Disable one to avoid duplicate scrubs.";
       }
       {
         assertion = cfg.autoUnlock.enable -> cfg.autoUnlock.timeoutSec > 0;

@@ -17,8 +17,8 @@ Braid sets opinionated defaults for the underlying NixOS options using `lib.mkDe
 Use `lib.mkDefault` to set an underlying NixOS option directly when:
 
 - The NixOS option is **stable and well-known** — wrapping it adds no clarity.
-- The meaning **doesn't change** if braid's internals change — braid is always btrfs, so `services.btrfs.autoScrub` isn't leaking an implementation detail.
-- The mapping is **1:1** — a braid option would just be a passthrough.
+- The meaning **doesn't change** if braid's internals change.
+- The mapping is **1:1** and braid doesn't need lifecycle control.
 
 The user overrides by setting the NixOS option in their own config. `mkDefault` gives way automatically.
 
@@ -30,21 +30,21 @@ Create a `braid.*` option when:
 - **The underlying tech could change** — the abstraction survives an implementation swap.
 - **The raw option requires braid-specific context** — e.g., the pool membership encodes LUKS + mapper naming conventions. Exposing the raw options would require the user to understand braid's internals.
 - **The mapping is non-obvious or must stay in sync** — e.g., if braid supported multiple pools, scrub `fileSystems` would need to track all mount points automatically.
+- **Braid needs lifecycle control** — the feature must be tied to the pool's online state, not the host system's always-on timers. Example: `braid.autoScrub` wraps a 1:1 mapping but needs the timer bound to `braid-online.service` so `Persistent=true` catches up missed scrubs after unlock.
 
 ## Defaults applied
 
 | Setting | Value | Rationale |
 |---------|-------|-----------|
-| `services.btrfs.autoScrub.enable` | `true` | Scrub detects bit rot before it compounds. Every NAS should do this. |
-| `services.btrfs.autoScrub.interval` | `"monthly"` | Btrfs community consensus. Weekly is aggressive for spinning disks; quarterly risks undetected corruption on a small RAID1. TrueNAS defaults to weekly (ZFS); Synology doesn't enable it by default. Monthly is the sweet spot. |
-| `services.btrfs.autoScrub.fileSystems` | `[ cfg.mountPoint ]` | Targets braid's pool. Not mkDefault — this must always include the pool. |
+| `braid.autoScrub.enable` | `true` | Scrub detects bit rot before it compounds. Every NAS should do this. Wrapped in a braid option for lifecycle binding to `braid-online.service`. |
+| `braid.autoScrub.interval` | `"monthly"` | Btrfs community consensus. Weekly is aggressive for spinning disks; quarterly risks undetected corruption on a small RAID1. TrueNAS defaults to weekly (ZFS); Synology doesn't enable it by default. Monthly is the sweet spot. |
 | `braid.storageGroup` | `"storage"` | Mount root set to `root:storage 2770`. Users in the group can read/write the mount root. Setgid ensures new entries inherit the group. Same pattern as TrueNAS/OMV. Does not override per-file umask. |
 
 ## Alternatives considered
 
-### Wrap scrub in braid.scrub.interval
+### Wrap scrub in braid.autoScrub
 
-Rejected. Braid is always btrfs — `services.btrfs.autoScrub` is not an implementation detail. A wrapper adds indirection with no insulation benefit.
+Accepted (reversed). Initially rejected because wrapping a 1:1 mapping seemed like unnecessary indirection. Reversed because braid needs lifecycle control over the scrub timer: the timer must be bound to `braid-online.service` so it only runs while the pool is online, and `Persistent=true` can catch up missed scrubs on unlock. The nixpkgs `services.btrfs.autoScrub` timer fires on calendar boundaries regardless of pool state, causing silent failures when the pool is locked.
 
 ### Don't enable scrub by default
 

@@ -35,6 +35,10 @@ braid needs systemd integration for three things: interactive unlock, unattended
 
   braid-monitor.timer → braid-monitor.service → braid-alert.service
   ConditionPathIsMountPoint            (health polling, skipped when pool not mounted)
+
+  braid-scrub.timer → braid-scrub.service
+  BindsTo + After braid-online.service    (lifecycle-bound periodic scrub)
+  Persistent=true                          (catch-up on activation)
 ```
 
 RAE = `RemainAfterExit = true`
@@ -88,6 +92,17 @@ Periodic oneshot (default: every 5 minutes). Pure detector — checks `btrfs dev
 - Exit code 1 from `braid monitor` → starts `braid-alert.service`.
 - Wrapper always exits 0 (errors logged, not propagated).
 
+### braid-scrub.timer + braid-scrub.service — lifecycle-bound scrub
+
+Periodic scrub (default: monthly). Uses a timer-lifecycle pattern distinct from the monitor's `ConditionPathIsMountPoint`-only approach.
+
+- Timer is `wantedBy`, `BindsTo`, and `After` `braid-online.service`. Starts when pool comes online, stops when pool goes offline.
+- `Persistent=true` + `AccuracySec=1d`. When the timer activates (pool unlock), systemd compares the last-trigger stamp against `OnCalendar`. If a scrub was overdue during the offline period, it fires immediately.
+- Service also uses `BindsTo` + `After` `braid-online.service`. On shutdown or `systemctl stop braid-online.service`, systemd stops the scrub service first (due to `After` ordering), triggering `ExecStop`'s cancel script before `braid lock` runs.
+- `ConditionPathIsMountPoint` on the service is defense-in-depth.
+- `Type=simple` with `ExecStop` cancel script — same pattern as the nixpkgs btrfs scrub service. Ensures in-flight scrub is cancelled on lock or shutdown rather than leaving a busy mount.
+- `Conflicts` + `Before` `shutdown.target` and `sleep.target`.
+
 ### braid-alert.service — notification
 
 Started by monitor on error detection. Beeps via PC speaker (if enabled) and/or runs a custom alert command. Stopped by `braid ack`.
@@ -104,9 +119,10 @@ The wrapper (`braid-wrapper.sh`) bridges CLI operations and systemd state. This 
 5. If activation fails: prints WARNING to stderr, exits 0. Pool is mounted and usable; only the shutdown hook is missing.
 
 **On `lock`:**
-1. CLI unmounts pool + closes LUKS.
-2. Wrapper checks mount is gone.
-3. `systemctl stop braid-online.service`.
+1. Wrapper stops `braid-scrub.timer` then `braid-scrub.service` (cancels in-flight scrub; timer must stop first to prevent re-triggering the service).
+2. CLI unmounts pool + closes LUKS.
+3. Wrapper checks mount is gone.
+4. `systemctl stop braid-online.service`.
 
 **On system shutdown:**
 1. systemd stops `braid-online.service` (if active).
@@ -119,9 +135,11 @@ Pool-mutating commands (`unlock`, `add`, `recover`) are serialized by `flock /ru
 
 ## Consumer dependency contracts
 
-Services that depend on the pool being mounted use one of two patterns:
+Services that depend on the pool being mounted use one of three patterns:
 
-**Oneshot/periodic services** (monitor, scrub): `ConditionPathIsMountPoint` only. Neither `After` nor `BindsTo` on `mnt-storage.mount` — those directives force systemd to load the unit, which doesn't exist until the CLI mounts the pool at runtime (auto-generated from `/proc/mounts`). The condition gate silently skips the service when unmounted, and the oneshot completes too quickly for mid-run unmount to matter.
+**Frequent periodic services** (monitor): `ConditionPathIsMountPoint` only. Neither `After` nor `BindsTo` on `mnt-storage.mount` — those directives force systemd to load the unit, which doesn't exist until the CLI mounts the pool at runtime (auto-generated from `/proc/mounts`). The condition gate silently skips the service when unmounted. Fires every 5 minutes — missed fires are cheap, so lifecycle binding is unnecessary.
+
+**Infrequent periodic services** (scrub): Timer and service both use `BindsTo` + `After` on `braid-online.service`, plus `wantedBy` on the timer for auto-start. The timer's active lifecycle matches the pool's online period. `Persistent=true` handles catch-up for overdue fires. Unlike the monitor timer (which fires every 5 minutes and can afford missed runs), the monthly scrub timer cannot wait until next month if it misses — lifecycle binding ensures it fires on the next unlock. The scrub service also gets `ConditionPathIsMountPoint` as defense-in-depth. For manual lock, the wrapper stops the timer and service before the CLI runs (see above).
 
 **Long-running services holding open files** (samba, nfs): Must additionally use `After=braid-online.service` + `BindsTo=braid-online.service`. This ensures systemd stops them *before* `braid lock` runs `ExecStop`, preventing unmount failures from busy filesystems.
 
