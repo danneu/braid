@@ -25,11 +25,6 @@
         monitor.alertCommand = "touch /root/alert-fired";
       };
 
-      # braid state directory for the smartd flag file.
-      systemd.tmpfiles.rules = [
-        "d /var/lib/braid 0755 root root -"
-      ];
-
       # Minimal disks — smartd config generation needs the module to evaluate,
       # but the test does not exercise storage.
       virtualisation.emptyDiskImages = [

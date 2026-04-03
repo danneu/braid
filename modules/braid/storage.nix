@@ -16,6 +16,10 @@ in
     # Mount point directory — replaces the old fileSystems entry.
     # Permissions are set by the braid wrapper post-unlock (root:storageGroup 2770).
     systemd.tmpfiles.rules = [
+      # State directory — pool config, LUKS header backups, alert flag files.
+      # The CLI creates this on first write, but the smartd shell hook needs it
+      # to exist before the CLI has ever run.
+      "d /var/lib/braid 0750 root root -"
       "d ${cfg.mountPoint} 0755 root root -"
     ]
     ++ lib.optionals cfg.autoUnlock.enable [
