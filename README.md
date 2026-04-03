@@ -17,10 +17,10 @@ Now create a braid pool out of them:
 sudo braid add \
   toshiba1=/dev/by-id/aaa \
   toshiba2=/dev/by-id/bbb \
-  toshiba3=/dev/by-id/bbb
+  toshiba3=/dev/by-id/ccc
 # Type in luks passphrase
 # Creates luks-encrypted btrfs pool
-# Writes state to /etc/braid/pool.json
+# Writes state to /var/lib/braid/pool.json
 
 sudo braid unlock
 # Type in luks passphrase, mounts pool at /mnt/storage
@@ -31,7 +31,7 @@ mv test.txt /mnt/storage/
 sudo braid remove toshiba3
 # Rebalances toshiba3's data across remaining disks
 # Removes toshiba3 from pool
-# Updates /etc/braid/pool.json
+# Updates /var/lib/braid/pool.json
 
 sudo braid replace \
   --old toshiba2 \
