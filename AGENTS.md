@@ -63,14 +63,14 @@ Decision docs must include an explicit status: `Draft`, `Active`, `Superseded`, 
 
 Before searching the web for tool behavior, consult local resources first. `reference/` contains shallow clones of upstream repos at the versions pinned in nixpkgs. Refresh with `just fetch-references`.
 
-| Directory                    | Upstream                                          | What to look for                                                          |
-| ---------------------------- | ------------------------------------------------- | ------------------------------------------------------------------------- |
-| `reference/btrfs-progs/`     | [kdave/btrfs-progs](https://github.com/kdave/btrfs-progs)           | `cmds/<subcommand>.c` — one file per btrfs subcommand (e.g. `cmds/scrub.c`). Parser output formats, exit codes. |
-| `reference/systemd/`         | [systemd/systemd](https://github.com/systemd/systemd)               | Unit lifecycle, `systemd-ask-password`, mount/automount behavior.         |
-| `reference/autosuspend/`     | [languitar/autosuspend](https://github.com/languitar/autosuspend)    | Check classes, config schema, wakeup scheduling.                          |
-| `reference/cryptsetup/`      | [cryptsetup/cryptsetup](https://gitlab.com/cryptsetup/cryptsetup)    | `luksDump` output format, LUKS2 header structure, keyslot operations.     |
-| `reference/util-linux/`      | [util-linux/util-linux](https://github.com/util-linux/util-linux)    | `lsblk` JSON schema, `blkid` output, mount/unmount behavior.             |
-| `reference/smartmontools/`   | [smartmontools/smartmontools](https://github.com/smartmontools/smartmontools) | `smartctl` output format, SMART attribute definitions, exit codes.        |
+| Directory                  | Upstream                                                                      | What to look for                                                                                                |
+| -------------------------- | ----------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `reference/btrfs-progs/`   | [kdave/btrfs-progs](https://github.com/kdave/btrfs-progs)                     | `cmds/<subcommand>.c` — one file per btrfs subcommand (e.g. `cmds/scrub.c`). Parser output formats, exit codes. |
+| `reference/systemd/`       | [systemd/systemd](https://github.com/systemd/systemd)                         | Unit lifecycle, `systemd-ask-password`, mount/automount behavior.                                               |
+| `reference/autosuspend/`   | [languitar/autosuspend](https://github.com/languitar/autosuspend)             | Check classes, config schema, wakeup scheduling.                                                                |
+| `reference/cryptsetup/`    | [cryptsetup/cryptsetup](https://gitlab.com/cryptsetup/cryptsetup)             | `luksDump` output format, LUKS2 header structure, keyslot operations.                                           |
+| `reference/util-linux/`    | [util-linux/util-linux](https://github.com/util-linux/util-linux)             | `lsblk` JSON schema, `blkid` output, mount/unmount behavior.                                                    |
+| `reference/smartmontools/` | [smartmontools/smartmontools](https://github.com/smartmontools/smartmontools) | `smartctl` output format, SMART attribute definitions, exit codes.                                              |
 
 **When to look:** Any time you're implementing, modifying, or debugging code that interacts with these tools — especially parsers. Read the relevant source before making assumptions about output format or behavior.
 
@@ -161,16 +161,6 @@ Full unstable canary workflow:
 3. `just test-rust-unstable`
 
 ---
-
-## Plan Lifecycle
-
-Plans start in `plans/wip/` with random codenames (e.g. `bubbly-toasting-cerf.md`). When finishing implementation of a plan, rename it to `YYYY-MM-DD-description.md` and move it to `plans/impl/` in the same commit as the implementation.
-
-```
-git mv plans/wip/bubbly-toasting-cerf.md plans/impl/2026-04-02-pool-unlock-retry.md
-```
-
-Use today's date and a short kebab-case description. This is a required step — do not leave implemented plans in `plans/wip/`.
 
 ## Plan Review Protocol
 
