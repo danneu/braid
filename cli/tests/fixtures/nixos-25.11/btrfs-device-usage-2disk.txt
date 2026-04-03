@@ -1,4 +1,4 @@
-/dev/dm-0, ID: 1
+/dev/mapper/braid-vdb, ID: 1
    Device size:          1056964608
    Device slack:                  0
    Data,RAID1:            105644032

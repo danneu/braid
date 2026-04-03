@@ -13,17 +13,17 @@ Overall:
     Multiple profiles:		                no
 
 Data,RAID1: Size:105644032, Used:16777216 (15.88%)
-   /dev/dm-0	 105644032
+   /dev/mapper/braid-vdb	 105644032
    /dev/dm-1	 105644032
 
 Metadata,RAID1: Size:105644032, Used:163840 (0.16%)
-   /dev/dm-0	 105644032
+   /dev/mapper/braid-vdb	 105644032
    /dev/dm-1	 105644032
 
 System,RAID1: Size:8388608, Used:16384 (0.20%)
-   /dev/dm-0	   8388608
+   /dev/mapper/braid-vdb	   8388608
    /dev/dm-1	   8388608
 
 Unallocated:
-   /dev/dm-0	 837287936
+   /dev/mapper/braid-vdb	 837287936
    /dev/dm-1	 837287936
