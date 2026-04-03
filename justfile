@@ -121,11 +121,7 @@ cachix:
 test-hw *args:
     sudo python3 tests/hw/runner.py {{args}}
 
-# Fetch/refresh local btrfs-progs RST docs into docs/btrfs-docs/
-fetch-btrfs-docs:
-    ./scripts/fetch-btrfs-docs.sh
-
-# Fetch/refresh vendored reference repos (btrfs-progs, systemd, autosuspend) at nixpkgs-pinned versions
+# Fetch/refresh reference source repos + btrfs docs at nixpkgs-pinned versions
 fetch-references:
     python3 scripts/fetch-references.py
 

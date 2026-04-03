@@ -59,6 +59,6 @@ Empirical observations from physical hardware testing. These validate the state 
 
 - [real-world/sata-hot-unplug.md](real-world/sata-hot-unplug.md) — SATA hot-unplug/replug behavior: btrfs, cryptsetup, and kernel state transitions on real hardware.
 
-## btrfs-docs/
+## btrfs-progs docs
 
-Vendored btrfs-progs documentation. See [AGENTS.md](../AGENTS.md) for the topic→file lookup table. Refresh with `scripts/fetch-btrfs-docs.sh`.
+btrfs-progs RST docs live in `reference/btrfs-progs/Documentation/`. See [AGENTS.md](../AGENTS.md) for the topic→file lookup table. Refresh with `just fetch-references`.

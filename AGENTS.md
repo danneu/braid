@@ -32,8 +32,7 @@ Unlock:
 - `modules/braid/` — NixOS module (options, systemd units, storage config)
 - `tests/` — NixOS VM tests (`.py` scripts, `module/` NixOS configs, `hw/` hardware canary tests)
 - `docs/decisions/` — architecture decision records
-- `docs/btrfs-docs/` — local btrfs-progs reference (RST)
-- `scripts/` — helper scripts (fetch btrfs docs, fetch references, destroy pool)
+- `scripts/` — helper scripts (fetch references, destroy pool)
 - `reference/` — upstream source checkouts (`btrfs-progs`, `systemd`, `autosuspend`, `cryptsetup`, `util-linux`, `smartmontools`) for reading, not shipped. Refresh with `just fetch-references`.
 
 ## Systemd Lifecycle
@@ -77,7 +76,7 @@ Before searching the web for tool behavior, consult local resources first. `refe
 
 ### btrfs docs
 
-- **Docs:** [`docs/btrfs-docs/`](docs/btrfs-docs/) — RST docs from btrfs-progs. Start with `index.rst` for a full table of contents, or use the topic table below for common lookups. Glob by keyword for anything not in the table. Fetch/refresh with `just fetch-btrfs-docs`.
+- **Docs:** [`reference/btrfs-progs/Documentation/`](reference/btrfs-progs/Documentation/) — RST docs from btrfs-progs. Start with `index.rst` for a full table of contents, or use the topic table below for common lookups. Glob by keyword for anything not in the table. `ch-*` fragments are inlined by `just fetch-references`.
 
 | Topic                             | File(s)                                     |
 | --------------------------------- | ------------------------------------------- |
