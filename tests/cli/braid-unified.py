@@ -80,7 +80,8 @@ with subtest("braid status --json has schema fields and disk details"):
     assert "used_bytes" in s["capacity"], "Missing capacity.used_bytes"
     assert "free_bytes" in s["capacity"], "Missing capacity.free_bytes"
     assert s["capacity"]["total_bytes"] > 0, "total_bytes should be positive"
-    assert "last_scrub" in s, "Missing last_scrub"
+    assert isinstance(s["last_scrub"], dict), "last_scrub should be an object"
+    assert "state" in s["last_scrub"], "last_scrub should have a state field"
     assert len(s["disks"]) == 3, f"Expected 3 disks: {s['disks']}"
     for disk in s["disks"]:
         assert "mapper" in disk, f"Disk missing mapper: {disk}"

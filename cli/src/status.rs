@@ -55,7 +55,7 @@ pub struct StatusReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capacity: Option<CapacityReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub last_scrub: Option<String>,
+    pub last_scrub: Option<ScrubReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub balance: Option<BalanceReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -121,6 +121,21 @@ pub enum BalanceReport {
         considered_chunks: u64,
         pct_left: u8,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "state")]
+pub enum ScrubReport {
+    Never,
+    Running {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pct: Option<u8>,
+    },
+    Completed {
+        started_at: String,
+        error_count: u64,
+    },
+    Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -301,7 +316,7 @@ pub fn build_status_report<R: CommandRunner, F: Filesystem>(
 
     let df_summary = summarize_df(runner, config.mount_point().as_str())?;
     let capacity = get_capacity(runner, config.mount_point().as_str(), pool.missing_count)?;
-    let last_scrub = get_scrub_string(runner, config.mount_point().as_str());
+    let last_scrub = get_scrub_report(runner, config.mount_point().as_str());
     let balance = get_balance_report(runner, config.mount_point().as_str());
 
     let code = if pool.missing_count == 0 {
@@ -403,7 +418,7 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
     // 4. Strict data gathering
     let df_summary = summarize_df(runner, config.mount_point().as_str())?;
     let capacity = get_capacity(runner, config.mount_point().as_str(), pool.missing_count)?;
-    let last_scrub = get_scrub_string(runner, config.mount_point().as_str());
+    let last_scrub = get_scrub_report(runner, config.mount_point().as_str());
     let balance = get_balance_report(runner, config.mount_point().as_str());
 
     // 5. Compute status code
@@ -595,31 +610,39 @@ fn get_device_stats<R: CommandRunner>(
 // Private helpers — tolerant (never fail)
 // ---------------------------------------------------------------------------
 
-fn get_scrub_string<R: CommandRunner>(runner: &R, mount_point: &str) -> String {
+fn get_scrub_report<R: CommandRunner>(runner: &R, mount_point: &str) -> ScrubReport {
     let raw = match runner.run(&CmdRequest::BtrfsScrubStatus {
         mount_point: MountPoint(mount_point.to_owned()),
     }) {
         Ok(r) => r,
-        Err(_) => return "unknown".to_owned(),
+        Err(_) => return ScrubReport::Unknown,
     };
 
     match parse_btrfs_scrub_status(&raw) {
         Ok(out) => match out.state {
-            ScrubState::Never => "never".to_owned(),
-            ScrubState::Running { .. } => "running".to_owned(),
-            ScrubState::Completed { started_at, .. } => {
+            ScrubState::Never => ScrubReport::Never,
+            ScrubState::Running { pct, .. } => ScrubReport::Running { pct },
+            ScrubState::Completed {
+                started_at,
+                error_count,
+                ..
+            } => {
                 use time::macros::format_description;
                 let fmt = format_description!(
                     "[weekday repr:short] [month repr:short] [day padding:space] [hour]:[minute]:[second] [year]"
                 );
-                started_at
+                let ts = started_at
                     .0
                     .format(&fmt)
-                    .unwrap_or_else(|_| "unknown".to_owned())
+                    .unwrap_or_else(|_| "unknown".to_owned());
+                ScrubReport::Completed {
+                    started_at: ts,
+                    error_count,
+                }
             }
-            ScrubState::Unknown => "unknown".to_owned(),
+            ScrubState::Unknown => ScrubReport::Unknown,
         },
-        Err(_) => "unknown".to_owned(),
+        Err(_) => ScrubReport::Unknown,
     }
 }
 
@@ -966,7 +989,25 @@ fn format_status_human(
     }
 
     if let Some(ref scrub) = report.last_scrub {
-        out.push_str(&format!("\nLast scrub: {scrub}\n"));
+        let line = match scrub {
+            ScrubReport::Never => "never".to_owned(),
+            ScrubReport::Running { pct } => match pct {
+                Some(p) => format!("running ({p}%)"),
+                None => "running".to_owned(),
+            },
+            ScrubReport::Completed {
+                started_at,
+                error_count,
+            } => {
+                if *error_count == 0 {
+                    format!("{started_at} (no errors)")
+                } else {
+                    format!("{started_at} ({error_count} errors)")
+                }
+            }
+            ScrubReport::Unknown => "unknown".to_owned(),
+        };
+        out.push_str(&format!("\nLast scrub: {line}\n"));
     }
 
     // Verbose: per-disk section
@@ -1302,6 +1343,19 @@ mod tests {
         )
     }
 
+    fn btrfs_scrub_completed_with_errors() -> RawCommandOutput {
+        ok_raw(
+            "btrfs scrub status",
+            "UUID:             aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
+             Scrub started:    Mon Feb 23 10:00:00 2026\n\
+             Status:           finished\n\
+             Duration:         0:00:01\n\
+             Total to scrub:   1.00GiB\n\
+             Rate:             1.00GiB/s\n\
+             Error summary:    csum=50\n",
+        )
+    }
+
     fn btrfs_device_stats_3disk() -> RawCommandOutput {
         ok_raw(
             "btrfs device stats",
@@ -1603,7 +1657,7 @@ mod tests {
 
         let df_summary = summarize_df(&runner, "/mnt/storage").unwrap();
         let capacity = get_capacity(&runner, "/mnt/storage", 0).unwrap();
-        let last_scrub = get_scrub_string(&runner, "/mnt/storage");
+        let last_scrub = get_scrub_report(&runner, "/mnt/storage");
 
         let code = StatusCode::Intact;
         let report = StatusReport {
@@ -1669,7 +1723,7 @@ mod tests {
                 used_bytes: 33914880,
                 free_bytes: 442957824,
             }),
-            last_scrub: Some("never".to_owned()),
+            last_scrub: Some(ScrubReport::Never),
             balance: None,
             allocation: None,
             disks: vec![],
@@ -1728,7 +1782,7 @@ mod tests {
                 used_bytes: 33914880,
                 free_bytes: 442957824,
             }),
-            last_scrub: Some("never".to_owned()),
+            last_scrub: Some(ScrubReport::Never),
             balance: None,
             allocation: None,
             disks: vec![present, missing],
@@ -1808,7 +1862,7 @@ mod tests {
                 used_bytes: 33914880,
                 free_bytes: 442957824,
             }),
-            last_scrub: Some("never".to_owned()),
+            last_scrub: Some(ScrubReport::Never),
             balance: None,
             allocation: None,
             disks: vec![],
@@ -1837,7 +1891,7 @@ mod tests {
                 used_bytes: 536870912,
                 free_bytes: 536870912,
             }),
-            last_scrub: Some("never".to_owned()),
+            last_scrub: Some(ScrubReport::Never),
             balance: None,
             allocation: None,
             disks: vec![DiskReport {
@@ -1912,7 +1966,7 @@ mod tests {
                 used_bytes: 536870912,
                 free_bytes: 536870912,
             }),
-            last_scrub: Some("never".to_owned()),
+            last_scrub: Some(ScrubReport::Never),
             balance: None,
             allocation: Some(vec![
                 AllocationEntry {
@@ -1977,7 +2031,7 @@ mod tests {
                 used_bytes: 33914880,
                 free_bytes: 442957824,
             }),
-            last_scrub: Some("never".to_owned()),
+            last_scrub: Some(ScrubReport::Never),
             balance: None,
             allocation: Some(vec![
                 AllocationEntry {
@@ -2051,7 +2105,7 @@ mod tests {
                 used_bytes: 33914880,
                 free_bytes: 442957824,
             }),
-            last_scrub: Some("never".to_owned()),
+            last_scrub: Some(ScrubReport::Never),
             balance: None,
             allocation: None,
             disks: vec![],
@@ -2104,7 +2158,7 @@ mod tests {
                 used_bytes: 33914880,
                 free_bytes: 442957824,
             }),
-            last_scrub: Some("never".to_owned()),
+            last_scrub: Some(ScrubReport::Never),
             balance: None,
             allocation: None,
             disks: vec![],
@@ -2156,7 +2210,7 @@ mod tests {
                 used_bytes: 536870912,
                 free_bytes: 536870912,
             }),
-            last_scrub: Some("never".to_owned()),
+            last_scrub: Some(ScrubReport::Never),
             balance: None,
             allocation: None,
             disks: vec![],
@@ -2201,7 +2255,7 @@ mod tests {
                 used_bytes: 33914880,
                 free_bytes: 442957824,
             }),
-            last_scrub: Some("never".to_owned()),
+            last_scrub: Some(ScrubReport::Never),
             balance: None,
             allocation: None,
             disks: vec![],
@@ -2249,7 +2303,7 @@ mod tests {
                 used_bytes: 536870912,
                 free_bytes: 536870912,
             }),
-            last_scrub: Some("never".to_owned()),
+            last_scrub: Some(ScrubReport::Never),
             balance: None,
             allocation: None,
             disks: vec![],
@@ -2275,8 +2329,42 @@ mod tests {
             },
             btrfs_scrub_completed(),
         );
-        let result = get_scrub_string(&runner, "/mnt/storage");
-        assert!(result.contains("Mon Feb 23"), "got: {result}");
+        let result = get_scrub_report(&runner, "/mnt/storage");
+        match result {
+            ScrubReport::Completed {
+                started_at,
+                error_count,
+            } => {
+                assert!(started_at.contains("Mon Feb 23"), "got: {started_at}");
+                assert_eq!(error_count, 0);
+            }
+            other => panic!("expected Completed, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn status_scrub_completed_with_errors() {
+        // Intent: verify that scrub error counts survive the get_scrub_report path.
+        // Why it exists: get_scrub_string previously discarded error_count via `..`,
+        // making a scrub with 50 errors look identical to a clean scrub.
+        // Scenario: btrfs scrub finishes with csum=50 — the report must carry that count.
+        let runner = MockRunner::default().with_output(
+            CmdRequest::BtrfsScrubStatus {
+                mount_point: MountPoint("/mnt/storage".to_owned()),
+            },
+            btrfs_scrub_completed_with_errors(),
+        );
+        let result = get_scrub_report(&runner, "/mnt/storage");
+        match result {
+            ScrubReport::Completed {
+                started_at,
+                error_count,
+            } => {
+                assert!(started_at.contains("Mon Feb 23"), "got: {started_at}");
+                assert_eq!(error_count, 50);
+            }
+            other => panic!("expected Completed, got: {other:?}"),
+        }
     }
 
     #[test]
@@ -2287,8 +2375,110 @@ mod tests {
             },
             err_raw("btrfs scrub status", 1, "some error"),
         );
-        let result = get_scrub_string(&runner, "/mnt/storage");
-        assert_eq!(result, "unknown");
+        let result = get_scrub_report(&runner, "/mnt/storage");
+        assert_eq!(result, ScrubReport::Unknown);
+    }
+
+    #[test]
+    fn scrub_report_json_completed() {
+        // Intent: verify the JSON shape of ScrubReport::Completed.
+        // Why it exists: the old last_scrub was a flat string — we need to ensure
+        // the new tagged enum serializes to the expected object shape.
+        // Scenario: JSON consumers (scripts, monitoring) parse the last_scrub field.
+        let report = ScrubReport::Completed {
+            started_at: "Mon Feb 23 10:00:00 2026".to_owned(),
+            error_count: 3,
+        };
+        let json: serde_json::Value = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["state"], "completed");
+        assert_eq!(json["started_at"], "Mon Feb 23 10:00:00 2026");
+        assert_eq!(json["error_count"], 3);
+    }
+
+    #[test]
+    fn scrub_report_json_never() {
+        let json: serde_json::Value = serde_json::to_value(&ScrubReport::Never).unwrap();
+        assert_eq!(json["state"], "never");
+    }
+
+    #[test]
+    fn scrub_report_json_running_with_pct() {
+        let report = ScrubReport::Running { pct: Some(42) };
+        let json: serde_json::Value = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["state"], "running");
+        assert_eq!(json["pct"], 42);
+    }
+
+    #[test]
+    fn scrub_report_json_running_no_pct() {
+        let report = ScrubReport::Running { pct: None };
+        let json: serde_json::Value = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["state"], "running");
+        assert!(json.get("pct").is_none(), "pct should be omitted when None");
+    }
+
+    #[test]
+    fn human_scrub_shows_no_errors() {
+        // Intent: verify human output includes "(no errors)" for clean scrub.
+        // Why it exists: the old code showed only the timestamp with no error info.
+        // Scenario: user runs `braid status` after a clean scrub.
+        let report = StatusReport {
+            mount_point: MountPoint("/mnt/storage".to_owned()),
+            status: StatusCode::Intact,
+            total_devices: Some(3),
+            present_count: Some(3),
+            missing_count: Some(0),
+            profile: Some("RAID1".to_owned()),
+            capacity: None,
+            last_scrub: Some(ScrubReport::Completed {
+                started_at: "Mon Feb 23 10:00:00 2026".to_owned(),
+                error_count: 0,
+            }),
+            balance: None,
+            allocation: None,
+            disks: vec![],
+            advisories: vec![],
+            alert_active: false,
+            alert_causes: vec![],
+            missing_devids: vec![],
+        };
+        let human = format_status_human(&report, None, None);
+        assert!(
+            human.contains("(no errors)"),
+            "expected '(no errors)' in output, got:\n{human}"
+        );
+    }
+
+    #[test]
+    fn human_scrub_shows_error_count() {
+        // Intent: verify human output includes error count for failed scrub.
+        // Why it exists: the old code showed only the timestamp — errors were invisible.
+        // Scenario: user runs `braid status` after a scrub found 3 errors.
+        let report = StatusReport {
+            mount_point: MountPoint("/mnt/storage".to_owned()),
+            status: StatusCode::Intact,
+            total_devices: Some(3),
+            present_count: Some(3),
+            missing_count: Some(0),
+            profile: Some("RAID1".to_owned()),
+            capacity: None,
+            last_scrub: Some(ScrubReport::Completed {
+                started_at: "Mon Feb 23 10:00:00 2026".to_owned(),
+                error_count: 3,
+            }),
+            balance: None,
+            allocation: None,
+            disks: vec![],
+            advisories: vec![],
+            alert_active: false,
+            alert_causes: vec![],
+            missing_devids: vec![],
+        };
+        let human = format_status_human(&report, None, None);
+        assert!(
+            human.contains("(3 errors)"),
+            "expected '(3 errors)' in output, got:\n{human}"
+        );
     }
 
     // =======================================================================
@@ -2477,7 +2667,7 @@ mod tests {
                 used_bytes: 33914880,
                 free_bytes: 442957824,
             }),
-            last_scrub: Some("never".to_owned()),
+            last_scrub: Some(ScrubReport::Never),
             balance: Some(BalanceReport::Running {
                 done_chunks: 108,
                 estimated_total_chunks: 160,
@@ -2513,7 +2703,7 @@ mod tests {
                 used_bytes: 33914880,
                 free_bytes: 442957824,
             }),
-            last_scrub: Some("never".to_owned()),
+            last_scrub: Some(ScrubReport::Never),
             balance: Some(BalanceReport::Unknown),
             allocation: None,
             disks: vec![],
@@ -2541,7 +2731,7 @@ mod tests {
                 used_bytes: 33914880,
                 free_bytes: 442957824,
             }),
-            last_scrub: Some("never".to_owned()),
+            last_scrub: Some(ScrubReport::Never),
             balance: Some(BalanceReport::Idle),
             allocation: None,
             disks: vec![],
@@ -2893,7 +3083,7 @@ mod tests {
                 used_bytes: 536870912,
                 free_bytes: 536870912,
             }),
-            last_scrub: Some("never".to_owned()),
+            last_scrub: Some(ScrubReport::Never),
             balance: None,
             allocation: None,
             disks: vec![],
@@ -2954,7 +3144,7 @@ mod tests {
                 used_bytes: 536870912,
                 free_bytes: 536870912,
             }),
-            last_scrub: Some("never".to_owned()),
+            last_scrub: Some(ScrubReport::Never),
             balance: None,
             allocation: None,
             disks: vec![],
@@ -2996,7 +3186,7 @@ mod tests {
                 used_bytes: 536870912,
                 free_bytes: 536870912,
             }),
-            last_scrub: Some("never".to_owned()),
+            last_scrub: Some(ScrubReport::Never),
             balance: None,
             allocation: None,
             disks: vec![],
@@ -3030,7 +3220,7 @@ mod tests {
                 used_bytes: 33914880,
                 free_bytes: 442957824,
             }),
-            last_scrub: Some("never".to_owned()),
+            last_scrub: Some(ScrubReport::Never),
             balance: None,
             allocation: None,
             disks: vec![],

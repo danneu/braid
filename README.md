@@ -273,6 +273,15 @@ Balance:  running, 108/160 chunks (68% complete)
 
 The `--json` output includes a `"balance"` object with `"state"` (`running`, `paused`, `idle`, or `unknown`) and chunk progress fields.
 
+Human output includes last scrub result with error count:
+
+```
+Last scrub: Wed Jan 15 10:30:00 2025 (no errors)
+Last scrub: Wed Jan 15 10:30:00 2025 (3 errors)
+```
+
+The `--json` output includes a `"last_scrub"` object with `"state"` (`never`, `running`, `completed`, or `unknown`). The `completed` state includes `"started_at"` (timestamp) and `"error_count"`. The `running` state includes an optional `"pct"` (percent complete).
+
 ### Diagnostics
 
 ```sh
