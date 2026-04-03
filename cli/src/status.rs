@@ -138,6 +138,26 @@ pub enum ScrubReport {
     Unknown,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DiskStatus {
+    Present,
+    Missing,
+    Unknown,
+    New,
+}
+
+impl std::fmt::Display for DiskStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Present => f.write_str("present"),
+            Self::Missing => f.write_str("missing"),
+            Self::Unknown => f.write_str("unknown"),
+            Self::New => f.write_str("new"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiskReport {
     pub name: String,
@@ -146,7 +166,7 @@ pub struct DiskReport {
     pub luks_uuid: String,
     pub devid: Option<String>,
     pub underlying: Option<String>,
-    pub status: String,
+    pub status: DiskStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub errors: Option<DiskErrors>,
 }
@@ -174,7 +194,7 @@ struct CompactDrive {
     name: String,
     device_short: String,
     devid: Option<u64>,
-    status: &'static str,
+    status: DiskStatus,
 }
 
 fn build_compact_drives(pool: &PoolState, membership: &PoolMembership) -> Vec<CompactDrive> {
@@ -195,7 +215,7 @@ fn build_compact_drives(pool: &PoolState, membership: &PoolMembership) -> Vec<Co
             name,
             device_short,
             devid: Some(pd.devid),
-            status: "present",
+            status: DiskStatus::Present,
         });
     }
 
@@ -207,7 +227,7 @@ fn build_compact_drives(pool: &PoolState, membership: &PoolMembership) -> Vec<Co
                 name: name.clone(),
                 device_short: "-".to_owned(),
                 devid: None,
-                status: "missing",
+                status: DiskStatus::Missing,
             });
         }
     }
@@ -253,7 +273,7 @@ struct HumanDisk {
     by_id: String,
     luks_uuid: String,
     devid: Option<String>,
-    status: String,
+    status: DiskStatus,
     model: Option<String>,
     serial: Option<String>,
     errors: Option<DiskErrors>,
@@ -794,7 +814,7 @@ fn build_disk_reports<R: CommandRunner>(
             luks_uuid: pd.luks_uuid.0.clone(),
             devid: Some(pd.devid.to_string()),
             underlying: Some(pd.underlying.clone()),
-            status: "present".to_owned(),
+            status: DiskStatus::Present,
             errors: errors.clone(),
         });
 
@@ -803,7 +823,7 @@ fn build_disk_reports<R: CommandRunner>(
             by_id: by_id.clone(),
             luks_uuid: pd.luks_uuid.0.clone(),
             devid: Some(pd.devid.to_string()),
-            status: "present".to_owned(),
+            status: DiskStatus::Present,
             model,
             serial,
             errors,
@@ -823,11 +843,10 @@ fn build_disk_reports<R: CommandRunner>(
         }
 
         let status = match &cd.state {
-            ConfigDiskState::Absent => "missing",
-            ConfigDiskState::PresentLuks { .. } => "unknown",
-            ConfigDiskState::PresentNotLuks => "unknown",
-        }
-        .to_owned();
+            ConfigDiskState::Absent => DiskStatus::Missing,
+            ConfigDiskState::PresentLuks { .. } => DiskStatus::Unknown,
+            ConfigDiskState::PresentNotLuks => DiskStatus::Unknown,
+        };
         let mapper = mapper_name(&cd.name).0;
 
         disk_reports.push(DiskReport {
@@ -837,7 +856,7 @@ fn build_disk_reports<R: CommandRunner>(
             luks_uuid: String::new(),
             devid: None,
             underlying: None,
-            status: status.clone(),
+            status,
             errors: None,
         });
 
@@ -1021,11 +1040,11 @@ fn format_status_human(
         for d in disks {
             out.push('\n');
             // show disk name
-            if d.status == "missing" {
+            if d.status == DiskStatus::Missing {
                 out.push_str(&format!("  {:<18}MISSING\n", d.name));
-            } else if d.status == "new" {
+            } else if d.status == DiskStatus::New {
                 out.push_str(&format!("  {:<18}NEW\n", d.name));
-            } else if d.status == "unknown" {
+            } else if d.status == DiskStatus::Unknown {
                 out.push_str(&format!("  {:<18}UNKNOWN\n", d.name));
             } else {
                 let devid_str = d
@@ -1037,14 +1056,14 @@ fn format_status_human(
             }
 
             // Device path
-            if d.status == "missing" {
+            if d.status == DiskStatus::Missing {
                 out.push_str(&format!("    Device:  {}  (not found)\n", d.by_id));
             } else {
                 out.push_str(&format!("    Device:  {}\n", d.by_id));
             }
 
             // Model/Serial (present only)
-            if d.status == "present" {
+            if d.status == DiskStatus::Present {
                 let model_str = d.model.as_deref().unwrap_or("(unknown)");
                 let serial_str = d.serial.as_deref().unwrap_or("(unknown)");
                 out.push_str(&format!("    Model:   {model_str}\n"));
@@ -1065,11 +1084,11 @@ fn format_status_human(
                     ));
                     e.read + e.write + e.flush + e.corruption + e.generation > 0
                 }
-                None if d.status == "missing" => {
+                None if d.status == DiskStatus::Missing => {
                     out.push_str("    Errors:  unknown (device absent)\n");
                     false
                 }
-                None if d.status == "unknown" => {
+                None if d.status == DiskStatus::Unknown => {
                     out.push_str("    Errors:  unknown (metadata unavailable)\n");
                     false
                 }
@@ -1077,7 +1096,7 @@ fn format_status_human(
             };
 
             // Action guidance
-            if has_errors || d.status == "missing" {
+            if has_errors || d.status == DiskStatus::Missing {
                 out.push_str(&format!(
                     "    Action:  add replacement disk to config, then: braid replace --old {} --new <new-name>\n",
                     d.name
@@ -1733,7 +1752,7 @@ mod tests {
             luks_uuid: "11111111-1111-1111-1111-111111111111".to_owned(),
             devid: Some("1".to_owned()),
             underlying: Some("/dev/vda".to_owned()),
-            status: "present".to_owned(),
+            status: DiskStatus::Present,
             errors: Some(DiskErrors {
                 read: 0,
                 write: 0,
@@ -1749,7 +1768,7 @@ mod tests {
             luks_uuid: String::new(),
             devid: None,
             underlying: None,
-            status: "missing".to_owned(),
+            status: DiskStatus::Missing,
             errors: None,
         };
 
@@ -1884,7 +1903,7 @@ mod tests {
                 luks_uuid: "11111111-1111-1111-1111-111111111111".to_owned(),
                 devid: Some("1".to_owned()),
                 underlying: Some("/dev/vda".to_owned()),
-                status: "present".to_owned(),
+                status: DiskStatus::Present,
                 errors: Some(DiskErrors {
                     read: 0,
                     write: 0,
@@ -1981,7 +2000,7 @@ mod tests {
             name: "disk1".to_owned(),
             device_short: "vda".to_owned(),
             devid: Some(1),
-            status: "present",
+            status: DiskStatus::Present,
         }];
         let human = format_status_human(&report, Some(&compact), None);
         assert!(human.contains("intact"), "got:\n{human}");
@@ -2047,19 +2066,19 @@ mod tests {
                 name: "disk1".into(),
                 device_short: "vda".into(),
                 devid: Some(1),
-                status: "present",
+                status: DiskStatus::Present,
             },
             CompactDrive {
                 name: "disk2".into(),
                 device_short: "vdb".into(),
                 devid: Some(2),
-                status: "present",
+                status: DiskStatus::Present,
             },
             CompactDrive {
                 name: "disk3".into(),
                 device_short: "vdc".into(),
                 devid: Some(3),
-                status: "present",
+                status: DiskStatus::Present,
             },
         ];
         let human = format_status_human(&report, Some(&compact), None);
@@ -2102,19 +2121,19 @@ mod tests {
                 name: "disk1".into(),
                 device_short: "vda".into(),
                 devid: Some(1),
-                status: "present",
+                status: DiskStatus::Present,
             },
             CompactDrive {
                 name: "disk2".into(),
                 device_short: "vdb".into(),
                 devid: Some(2),
-                status: "present",
+                status: DiskStatus::Present,
             },
             CompactDrive {
                 name: "disk3".into(),
                 device_short: "-".into(),
                 devid: None,
-                status: "missing",
+                status: DiskStatus::Missing,
             },
         ];
         let human = format_status_human(&report, Some(&compact), None);
@@ -2168,7 +2187,7 @@ mod tests {
             by_id: "/dev/disk/by-id/disk1".to_owned(),
             luks_uuid: "11111111-1111-1111-1111-111111111111".to_owned(),
             devid: Some("1".to_owned()),
-            status: "present".to_owned(),
+            status: DiskStatus::Present,
             model: Some("VBOX HARDDISK".to_owned()),
             serial: Some("disk1".to_owned()),
             errors: Some(DiskErrors {
@@ -2219,7 +2238,7 @@ mod tests {
             by_id: "/dev/disk/by-id/disk3".to_owned(),
             luks_uuid: String::new(),
             devid: None,
-            status: "missing".to_owned(),
+            status: DiskStatus::Missing,
             model: None,
             serial: None,
             errors: None,
@@ -2261,7 +2280,7 @@ mod tests {
             by_id: "/dev/disk/by-id/disk1".to_owned(),
             luks_uuid: "11111111-1111-1111-1111-111111111111".to_owned(),
             devid: Some("1".to_owned()),
-            status: "present".to_owned(),
+            status: DiskStatus::Present,
             model: None,
             serial: None,
             errors: Some(DiskErrors {
@@ -3050,7 +3069,7 @@ mod tests {
 
         let ctx = build_disk_reports(&runner, &config_disks, &pool, &stats);
         assert_eq!(ctx.disks.len(), 1);
-        assert_eq!(ctx.disks[0].status, "unknown");
+        assert_eq!(ctx.disks[0].status, DiskStatus::Unknown);
     }
 
     // =======================================================================
@@ -3063,7 +3082,7 @@ mod tests {
             name: "disk2".to_owned(),
             device_short: "-".to_owned(),
             devid: None,
-            status: "new",
+            status: DiskStatus::New,
         }];
         let code = StatusCode::Intact;
         let report = StatusReport {
@@ -3106,7 +3125,7 @@ mod tests {
         let membership = membership_1disk();
         let drives = build_compact_drives(&pool, &membership);
         assert_eq!(drives.len(), 1);
-        assert_eq!(drives[0].status, "missing");
+        assert_eq!(drives[0].status, DiskStatus::Missing);
     }
 
     // =======================================================================
@@ -3120,7 +3139,7 @@ mod tests {
             by_id: "/dev/disk/by-id/disk2".to_owned(),
             luks_uuid: String::new(),
             devid: None,
-            status: "new".to_owned(),
+            status: DiskStatus::New,
             model: None,
             serial: None,
             errors: None,
@@ -3162,7 +3181,7 @@ mod tests {
             by_id: "/dev/disk/by-id/disk2".to_owned(),
             luks_uuid: String::new(),
             devid: None,
-            status: "unknown".to_owned(),
+            status: DiskStatus::Unknown,
             model: None,
             serial: None,
             errors: None,
@@ -3229,19 +3248,19 @@ mod tests {
                 name: "disk1".into(),
                 device_short: "vda".into(),
                 devid: Some(1),
-                status: "present",
+                status: DiskStatus::Present,
             },
             CompactDrive {
                 name: "disk2".into(),
                 device_short: "vdb".into(),
                 devid: Some(2),
-                status: "present",
+                status: DiskStatus::Present,
             },
             CompactDrive {
                 name: "disk3".into(),
                 device_short: "vdc".into(),
                 devid: Some(3),
-                status: "present",
+                status: DiskStatus::Present,
             },
         ];
         let human = format_status_human(&report, Some(&compact), None);
@@ -3280,7 +3299,7 @@ mod tests {
             luks_uuid: "00000000-0000-0000-0000-000000000000".into(),
             devid: Some(devid.to_string()),
             underlying: None,
-            status: "present".into(),
+            status: DiskStatus::Present,
             errors: None,
         }
     }
