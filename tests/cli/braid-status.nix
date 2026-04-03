@@ -1,4 +1,4 @@
-# Test: braid unified CLI
+# Test: braid status
 #
 # What: Exercises `braid status` (human, --json), verifies the full add
 # workflow, and validates error cases.
@@ -9,7 +9,7 @@
 # Dependencies: braid add (pool setup).
 { braid }:
 {
-  name = "braid-unified";
+  name = "braid-status";
 
   nodes.machine = { pkgs, ... }: {
     virtualisation.emptyDiskImages = [
@@ -30,5 +30,5 @@
     };
   };
 
-  testScript = builtins.readFile ./braid-unified.py;
+  testScript = builtins.readFile ./braid-status.py;
 }

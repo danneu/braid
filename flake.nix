@@ -139,8 +139,8 @@
               braid = linuxCrane.braid;
             }
           );
-          braid-unified = pkgs.testers.nixosTest (
-            import ./tests/cli/braid-unified.nix {
+          braid-status = pkgs.testers.nixosTest (
+            import ./tests/cli/braid-status.nix {
               braid = linuxCrane.braid;
             }
           );
