@@ -12,6 +12,14 @@ use super::ParseError;
 pub fn parse_btrfs_replace_status(
     raw: &RawCommandOutput,
 ) -> Result<BtrfsReplaceStatusOutput, ParseError> {
+    if raw.exit_status != 0 {
+        return Err(ParseError::CommandFailed {
+            cmd: raw.cmd.clone(),
+            exit_code: raw.exit_status,
+            stderr: raw.stderr.clone(),
+        });
+    }
+
     let stdout = &raw.stdout;
 
     // "finished on" indicates completion
@@ -119,5 +127,58 @@ mod tests {
     fn garbage_output_treated_as_none() {
         let out = parse_btrfs_replace_status(&raw("something unexpected here\n")).unwrap();
         assert_eq!(out.state, ReplaceState::None);
+    }
+
+    #[test]
+    // Intent: non-zero exit from btrfs replace status must be a parse error
+    //   that preserves the full diagnostic payload (cmd, exit_code, stderr).
+    // Why: the parser previously fell through to Ok(ReplaceState::None) for any
+    //   unrecognised output, silently masking command failures.
+    // Scenario: typo in mount path → btrfs exits 1 with empty stdout.
+    fn nonzero_exit_is_error() {
+        let result = parse_btrfs_replace_status(&RawCommandOutput {
+            cmd: "btrfs replace status /mnt/storage".into(),
+            stdout: String::new(),
+            stderr: "ERROR: not a btrfs filesystem: /mnt/stoarge".into(),
+            exit_status: 1,
+        });
+        match result.unwrap_err() {
+            ParseError::CommandFailed {
+                cmd,
+                exit_code,
+                stderr,
+            } => {
+                assert_eq!(cmd, "btrfs replace status /mnt/storage");
+                assert_eq!(exit_code, 1);
+                assert_eq!(stderr, "ERROR: not a btrfs filesystem: /mnt/stoarge");
+            }
+            other => panic!("expected CommandFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    // Intent: non-zero exit takes precedence even when stdout contains text.
+    // Why: a command can write partial output before failing; the exit code is
+    //   the authoritative success/failure signal.
+    // Scenario: btrfs replace status writes garbage to stdout but exits non-zero.
+    fn nonzero_exit_with_garbage_stdout_is_error() {
+        let result = parse_btrfs_replace_status(&RawCommandOutput {
+            cmd: "btrfs replace status /mnt/storage".into(),
+            stdout: "something unexpected here\n".into(),
+            stderr: "some error".into(),
+            exit_status: 1,
+        });
+        match result.unwrap_err() {
+            ParseError::CommandFailed {
+                cmd,
+                exit_code,
+                stderr,
+            } => {
+                assert_eq!(cmd, "btrfs replace status /mnt/storage");
+                assert_eq!(exit_code, 1);
+                assert_eq!(stderr, "some error");
+            }
+            other => panic!("expected CommandFailed, got {other:?}"),
+        }
     }
 }

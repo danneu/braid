@@ -415,4 +415,42 @@ mod tests {
             IdleResult::Busy(BusyReason::ScrubRunning { pct: Some(10) })
         );
     }
+
+    #[test]
+    // Intent: replace status command fails → cmd_idle returns
+    //   IdleError::Parse(CommandFailed), not Idle.
+    // Why: a failed status check must not be mistaken for "no replace running" —
+    //   that would allow autosuspend during an active replace.
+    // Scenario: typo in mount path causes btrfs replace status to exit non-zero.
+    fn replace_status_failure_is_not_idle() {
+        let (fmnt_req, fmnt_out) = findmnt_mounted();
+        let (scrub_req, scrub_out) = scrub_completed();
+        let (bal_req, bal_out) = balance_none();
+
+        let runner = MockRunner::default()
+            .with_output(fmnt_req, fmnt_out)
+            .with_output(scrub_req, scrub_out)
+            .with_output(bal_req, bal_out)
+            .with_output(
+                CmdRequest::BtrfsReplaceStatus {
+                    mount_point: MountPoint(MP.to_owned()),
+                },
+                RawCommandOutput {
+                    cmd: "btrfs replace status /mnt/storage".into(),
+                    stdout: String::new(),
+                    stderr: "ERROR: not a btrfs filesystem".into(),
+                    exit_status: 1,
+                },
+            );
+
+        let result = cmd_idle(&runner, MP);
+        let err = result.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                IdleError::Parse(ParseError::CommandFailed { exit_code: 1, .. })
+            ),
+            "expected IdleError::Parse(CommandFailed {{ exit_code: 1 }}), got {err:?}"
+        );
+    }
 }
