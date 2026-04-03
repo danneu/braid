@@ -226,26 +226,30 @@ impl<R: CommandRunner> Drop for LuksCleanupGuard<'_, R> {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+pub struct AddParams<'a> {
+    pub config_path: &'a Path,
+    pub disk_specs: &'a [String],
+    pub dry_run: bool,
+    pub yes: bool,
+    pub passphrase_stdin: bool,
+    pub passphrase_file: Option<&'a Path>,
+    pub enroll_key_file: Option<&'a Path>,
+    pub progress: ProgressOutput,
+    pub paths: &'a StatePaths,
+}
+
 pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
-    config_path: &Path,
-    disk_specs: &[String],
-    dry_run: bool,
-    yes: bool,
-    passphrase_stdin: bool,
-    passphrase_file: Option<&Path>,
-    enroll_key_file: Option<&Path>,
-    progress: ProgressOutput,
-    paths: &StatePaths,
+    params: &AddParams<'_>,
 ) -> Result<(), AddError> {
-    preflight::check_no_pending_operation(paths).map_err(AddError::Validation)?;
+    preflight::check_no_pending_operation(params.paths).map_err(AddError::Validation)?;
 
-    let config = config_read(config_path)?;
+    let config = config_read(params.config_path)?;
 
     // Parse disk specs: name=by_id
-    let parsed: Vec<(String, ByIdPath)> = disk_specs
+    let parsed: Vec<(String, ByIdPath)> = params
+        .disk_specs
         .iter()
         .map(|s| membership::parse_disk_spec(s))
         .collect::<Result<Vec<_>, _>>()?;
@@ -266,7 +270,7 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     }
 
     // Load existing membership (or empty if first add)
-    let pool_membership = match membership::load_membership(paths) {
+    let pool_membership = match membership::load_membership(params.paths) {
         Ok(m) => m,
         Err(membership::MembershipError::NotFound(_)) => PoolMembership::empty(),
         Err(e) => return Err(e.into()),
@@ -335,16 +339,18 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     // Compile steps for dry-run display
     let steps = compile_add_steps_multi(
         runner,
-        &names,
-        &by_ids,
-        &probed,
-        &pool,
-        config.mount_point(),
-        paths,
-        enroll_key_file,
+        &AddStepsInput {
+            names: &names,
+            by_ids: &by_ids,
+            probed: &probed,
+            pool: &pool,
+            mount_point: config.mount_point(),
+            paths: params.paths,
+            enroll_key_file: params.enroll_key_file,
+        },
     )?;
 
-    if dry_run {
+    if params.dry_run {
         Step::print_dry_run(&steps);
         return Ok(());
     }
@@ -360,7 +366,7 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     }
 
     // Read passphrase (once)
-    let passphrase = read_passphrase(passphrase_file, passphrase_stdin)?;
+    let passphrase = read_passphrase(params.passphrase_file, params.passphrase_stdin)?;
 
     // Confirmation — collect all disks that need LUKS format
     let needs_format: Vec<(&str, &str)> = probed
@@ -370,7 +376,7 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         .map(|(i, _)| (names[i], by_ids[i].0.as_str()))
         .collect();
 
-    if !needs_format.is_empty() && !yes {
+    if !needs_format.is_empty() && !params.yes {
         eprintln!("{}", add_confirm_message_multi(&needs_format));
         eprint!("Type 'yes' to continue: ");
         let mut input = String::new();
@@ -471,7 +477,8 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             disks: parsed.iter().map(|(n, b)| (n.clone(), b.clone())).collect(),
         },
     );
-    journal::write_journal(paths, &journal).map_err(|e| AddError::Validation(e.to_string()))?;
+    journal::write_journal(params.paths, &journal)
+        .map_err(|e| AddError::Validation(e.to_string()))?;
 
     // Pass 2: execute irreversible operations for PresentNotLuks disks.
     for (i, p) in probed.iter().enumerate() {
@@ -488,14 +495,14 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         luks_format(runner, &by_id.0, &passphrase, &luks_opts)?;
         eprintln!("LUKS formatted: {}", by_id);
 
-        let backup_path = backup_luks_header(runner, &by_id.0, &mn.0, paths)?;
+        let backup_path = backup_luks_header(runner, &by_id.0, &mn.0, params.paths)?;
         eprintln!("LUKS header backed up: {}", backup_path.display());
 
         ensure_luks_open(runner, fs, name, by_id, &passphrase)?;
         luks_guard.track(mn.0.clone());
         eprintln!("LUKS opened: {} → {}", by_id, mn);
 
-        if let Some(kf) = enroll_key_file {
+        if let Some(kf) = params.enroll_key_file {
             crate::luks::enroll_key_file(runner, &by_id.0, &passphrase, kf)?;
             eprintln!("Keyfile enrolled in slot 1: {}", by_id);
         }
@@ -536,7 +543,7 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         let total_after = pool.devices.len() + mapper_paths.len();
         if total_after >= 2 {
             eprintln!("Balancing to RAID1...");
-            pool_balance_raid1(runner, config.mount_point().as_str(), progress)?;
+            pool_balance_raid1(runner, config.mount_point().as_str(), params.progress)?;
             eprintln!("Balance complete.");
         }
     }
@@ -562,8 +569,8 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     // fails (disk full, permissions), the journal survives and braid recover can
     // reconstruct pool.json from the live pool. The reverse order (clear first,
     // then save fails) would leave no recovery path.
-    membership::save_membership(&final_membership, paths)?;
-    journal::clear_journal(paths).map_err(|e| AddError::Validation(e.to_string()))?;
+    membership::save_membership(&final_membership, params.paths)?;
+    journal::clear_journal(params.paths).map_err(|e| AddError::Validation(e.to_string()))?;
 
     let label = if names.len() == 1 {
         format!("{} is", names[0])
@@ -574,23 +581,27 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     Ok(())
 }
 
+struct AddStepsInput<'a> {
+    names: &'a [&'a str],
+    by_ids: &'a [&'a ByIdPath],
+    probed: &'a [ConfigDisk],
+    pool: &'a PoolState,
+    mount_point: &'a MountPoint,
+    paths: &'a StatePaths,
+    enroll_key_file: Option<&'a Path>,
+}
+
 fn compile_add_steps_multi<R: CommandRunner>(
     runner: &R,
-    names: &[&str],
-    by_ids: &[&ByIdPath],
-    probed: &[ConfigDisk],
-    pool: &PoolState,
-    mount_point: &MountPoint,
-    paths: &StatePaths,
-    enroll_key_file: Option<&Path>,
+    input: &AddStepsInput<'_>,
 ) -> Result<Vec<Step>, AddError> {
     let luks_extra_opts = luks_opts_from_env();
     let mut steps = Vec::new();
     let mut needs_pool_add = 0usize;
 
-    for (i, p) in probed.iter().enumerate() {
-        let name = names[i];
-        let by_id = by_ids[i];
+    for (i, p) in input.probed.iter().enumerate() {
+        let name = input.names[i];
+        let by_id = input.by_ids[i];
         let mn = mapper_name(name);
 
         match &p.state {
@@ -612,7 +623,8 @@ fn compile_add_steps_multi<R: CommandRunner>(
                         extra_opts,
                     }],
                 });
-                let backup_path = paths
+                let backup_path = input
+                    .paths
                     .luks_headers_dir()
                     .join(format!("{}.luksheader", mn.0));
                 steps.push(Step {
@@ -631,7 +643,7 @@ fn compile_add_steps_multi<R: CommandRunner>(
                         mapper: mn.0.clone(),
                     }],
                 });
-                if let Some(kf) = enroll_key_file {
+                if let Some(kf) = input.enroll_key_file {
                     steps.push(Step {
                         risk: "safe",
                         description: format!("enroll keyfile → LUKS slot 1 on {}", by_id),
@@ -645,11 +657,11 @@ fn compile_add_steps_multi<R: CommandRunner>(
             }
             ConfigDiskState::PresentLuks { mapper_open, .. } => {
                 // Preconditions always checked — no mapper required.
-                validate_braid_preconditions(runner, name, &by_id.0, pool)?;
+                validate_braid_preconditions(runner, name, &by_id.0, input.pool)?;
 
                 if *mapper_open {
                     // Mapper is open — full classification without side effects
-                    let identity = classify_braid_disk_fsid(runner, name, &mn, pool)?;
+                    let identity = classify_braid_disk_fsid(runner, name, &mn, input.pool)?;
                     if let Some(err) = identity_to_error(&identity, name) {
                         return Err(err);
                     }
@@ -661,11 +673,11 @@ fn compile_add_steps_multi<R: CommandRunner>(
                                 risk: "safe",
                                 description: format!(
                                     "btrfs device add /dev/mapper/{} {} (recovery)",
-                                    mn, mount_point
+                                    mn, input.mount_point
                                 ),
                                 commands: vec![CmdRequest::BtrfsDeviceAdd {
                                     device: mapper_path,
-                                    mount_point: mount_point.clone(),
+                                    mount_point: input.mount_point.clone(),
                                 }],
                             });
                             needs_pool_add += 1;
@@ -695,9 +707,10 @@ fn compile_add_steps_multi<R: CommandRunner>(
         return Ok(vec![]);
     }
 
-    if !pool.mounted {
+    if !input.pool.mounted {
         if needs_pool_add >= 2 {
-            let mapper_list: Vec<String> = names
+            let mapper_list: Vec<String> = input
+                .names
                 .iter()
                 .map(|n| format!("/dev/mapper/{}", mapper_name(n).0))
                 .collect();
@@ -711,17 +724,17 @@ fn compile_add_steps_multi<R: CommandRunner>(
             // Mount uses first device
             steps.push(Step {
                 risk: "safe",
-                description: format!("mount → {}", mount_point),
+                description: format!("mount → {}", input.mount_point),
                 commands: vec![CmdRequest::Mount {
                     device: mapper_list[0].clone(),
-                    mount_point: mount_point.clone(),
+                    mount_point: input.mount_point.clone(),
                 }],
             });
         } else {
             // Single disk — find the one that needs pool add
-            for (i, p) in probed.iter().enumerate() {
-                let mn = mapper_name(&names[i]);
-                let skip = matches!(&p.state, ConfigDiskState::PresentLuks { mapper_open, .. } if *mapper_open && pool.devices.iter().any(|d| d.mapper == mn));
+            for (i, p) in input.probed.iter().enumerate() {
+                let mn = mapper_name(input.names[i]);
+                let skip = matches!(&p.state, ConfigDiskState::PresentLuks { mapper_open, .. } if *mapper_open && input.pool.devices.iter().any(|d| d.mapper == mn));
                 if !skip {
                     let mapper_path = format!("/dev/mapper/{}", mn);
                     steps.push(Step {
@@ -733,10 +746,10 @@ fn compile_add_steps_multi<R: CommandRunner>(
                     });
                     steps.push(Step {
                         risk: "safe",
-                        description: format!("mount → {}", mount_point),
+                        description: format!("mount → {}", input.mount_point),
                         commands: vec![CmdRequest::Mount {
                             device: mapper_path,
-                            mount_point: mount_point.clone(),
+                            mount_point: input.mount_point.clone(),
                         }],
                     });
                     break;
@@ -744,29 +757,32 @@ fn compile_add_steps_multi<R: CommandRunner>(
             }
         }
     } else {
-        for (i, p) in probed.iter().enumerate() {
-            let mn = mapper_name(&names[i]);
+        for (i, p) in input.probed.iter().enumerate() {
+            let mn = mapper_name(input.names[i]);
             // PresentNotLuks disks still need the device-add step
             if matches!(&p.state, ConfigDiskState::PresentNotLuks) {
                 let mapper_path = format!("/dev/mapper/{}", mn);
                 steps.push(Step {
                     risk: "safe",
-                    description: format!("btrfs device add /dev/mapper/{} {}", mn, mount_point),
+                    description: format!(
+                        "btrfs device add /dev/mapper/{} {}",
+                        mn, input.mount_point
+                    ),
                     commands: vec![CmdRequest::BtrfsDeviceAdd {
                         device: mapper_path,
-                        mount_point: mount_point.clone(),
+                        mount_point: input.mount_point.clone(),
                     }],
                 });
             }
             // PresentLuks recovery steps already added above
         }
-        let total_after = pool.devices.len() + needs_pool_add;
+        let total_after = input.pool.devices.len() + needs_pool_add;
         if total_after >= 2 {
             steps.push(Step {
                 risk: "long",
                 description: "btrfs balance to RAID1".into(),
                 commands: vec![CmdRequest::BtrfsBalanceRaid1 {
-                    mount_point: mount_point.clone(),
+                    mount_point: input.mount_point.clone(),
                 }],
             });
         }
@@ -868,18 +884,20 @@ mod tests {
         let result = cmd_add(
             &runner,
             &fs,
-            &config_path,
-            &[
-                "d1=/dev/disk/by-id/ata-D1".into(),
-                "d1=/dev/disk/by-id/ata-D1".into(),
-            ],
-            true,
-            true,
-            false,
-            None,
-            None,
-            ProgressOutput::Off,
-            &StatePaths::production(),
+            &AddParams {
+                config_path: &config_path,
+                disk_specs: &[
+                    "d1=/dev/disk/by-id/ata-D1".into(),
+                    "d1=/dev/disk/by-id/ata-D1".into(),
+                ],
+                dry_run: true,
+                yes: true,
+                passphrase_stdin: false,
+                passphrase_file: None,
+                enroll_key_file: None,
+                progress: ProgressOutput::Off,
+                paths: &StatePaths::production(),
+            },
         );
         let err = result.unwrap_err().to_string();
         assert!(
@@ -1149,13 +1167,15 @@ mod tests {
 
         let result = compile_add_steps_multi(
             &runner,
-            &["disk1"],
-            &[&ByIdPath("/dev/disk/by-id/disk1".into())],
-            &probed,
-            &pool,
-            &MountPoint("/mnt/storage".into()),
-            &test_paths(),
-            None,
+            &AddStepsInput {
+                names: &["disk1"],
+                by_ids: &[&ByIdPath("/dev/disk/by-id/disk1".into())],
+                probed: &probed,
+                pool: &pool,
+                mount_point: &MountPoint("/mnt/storage".into()),
+                paths: &test_paths(),
+                enroll_key_file: None,
+            },
         );
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
@@ -1188,13 +1208,15 @@ mod tests {
 
         let result = compile_add_steps_multi(
             &runner,
-            &["disk1"],
-            &[&ByIdPath("/dev/disk/by-id/disk1".into())],
-            &probed,
-            &pool,
-            &MountPoint("/mnt/storage".into()),
-            &test_paths(),
-            None,
+            &AddStepsInput {
+                names: &["disk1"],
+                by_ids: &[&ByIdPath("/dev/disk/by-id/disk1".into())],
+                probed: &probed,
+                pool: &pool,
+                mount_point: &MountPoint("/mnt/storage".into()),
+                paths: &test_paths(),
+                enroll_key_file: None,
+            },
         );
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
@@ -1217,13 +1239,15 @@ mod tests {
 
         let steps = compile_add_steps_multi(
             &runner,
-            &["disk1"],
-            &[&ByIdPath("/dev/disk/by-id/disk1".into())],
-            &probed,
-            &pool,
-            &MountPoint("/mnt/storage".into()),
-            &test_paths(),
-            None,
+            &AddStepsInput {
+                names: &["disk1"],
+                by_ids: &[&ByIdPath("/dev/disk/by-id/disk1".into())],
+                probed: &probed,
+                pool: &pool,
+                mount_point: &MountPoint("/mnt/storage".into()),
+                paths: &test_paths(),
+                enroll_key_file: None,
+            },
         )
         .unwrap();
 
@@ -1249,13 +1273,15 @@ mod tests {
 
         let result = compile_add_steps_multi(
             &runner,
-            &["disk1"],
-            &[&ByIdPath("/dev/disk/by-id/disk1".into())],
-            &probed,
-            &pool,
-            &MountPoint("/mnt/storage".into()),
-            &test_paths(),
-            None,
+            &AddStepsInput {
+                names: &["disk1"],
+                by_ids: &[&ByIdPath("/dev/disk/by-id/disk1".into())],
+                probed: &probed,
+                pool: &pool,
+                mount_point: &MountPoint("/mnt/storage".into()),
+                paths: &test_paths(),
+                enroll_key_file: None,
+            },
         );
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
@@ -1277,13 +1303,15 @@ mod tests {
 
         let steps = compile_add_steps_multi(
             &runner,
-            &["disk1"],
-            &[&ByIdPath("/dev/disk/by-id/disk1".into())],
-            &probed,
-            &pool,
-            &MountPoint("/mnt/storage".into()),
-            &test_paths(),
-            None,
+            &AddStepsInput {
+                names: &["disk1"],
+                by_ids: &[&ByIdPath("/dev/disk/by-id/disk1".into())],
+                probed: &probed,
+                pool: &pool,
+                mount_point: &MountPoint("/mnt/storage".into()),
+                paths: &test_paths(),
+                enroll_key_file: None,
+            },
         )
         .unwrap();
 
@@ -1423,13 +1451,15 @@ mod tests {
 
         let dry_err = compile_add_steps_multi(
             &runner,
-            &["disk1"],
-            &[&ByIdPath("/dev/disk/by-id/disk1".into())],
-            &probed,
-            &pool,
-            &MountPoint("/mnt/storage".into()),
-            &test_paths(),
-            None,
+            &AddStepsInput {
+                names: &["disk1"],
+                by_ids: &[&ByIdPath("/dev/disk/by-id/disk1".into())],
+                probed: &probed,
+                pool: &pool,
+                mount_point: &MountPoint("/mnt/storage".into()),
+                paths: &test_paths(),
+                enroll_key_file: None,
+            },
         )
         .unwrap_err()
         .to_string();
@@ -1738,15 +1768,17 @@ mod tests {
         cmd_add(
             &runner,
             &fs,
-            &config_path,
-            &["disk2=/dev/disk/by-id/virtio-disk2".into()],
-            false,
-            true,
-            false,
-            Some(pass_path.as_path()),
-            None,
-            ProgressOutput::Off,
-            &paths,
+            &AddParams {
+                config_path: &config_path,
+                disk_specs: &["disk2=/dev/disk/by-id/virtio-disk2".into()],
+                dry_run: false,
+                yes: true,
+                passphrase_stdin: false,
+                passphrase_file: Some(pass_path.as_path()),
+                enroll_key_file: None,
+                progress: ProgressOutput::Off,
+                paths: &paths,
+            },
         )
         .expect("no-op add should succeed");
 
@@ -1780,15 +1812,17 @@ mod tests {
         let result = cmd_add(
             &runner,
             &fs,
-            &config_path,
-            &["disk2=/dev/disk/by-id/virtio-disk2".into()],
-            false,
-            true,
-            false,
-            Some(pass_path.as_path()),
-            None,
-            ProgressOutput::Off,
-            &paths,
+            &AddParams {
+                config_path: &config_path,
+                disk_specs: &["disk2=/dev/disk/by-id/virtio-disk2".into()],
+                dry_run: false,
+                yes: true,
+                passphrase_stdin: false,
+                passphrase_file: Some(pass_path.as_path()),
+                enroll_key_file: None,
+                progress: ProgressOutput::Off,
+                paths: &paths,
+            },
         );
 
         assert!(
@@ -1828,15 +1862,17 @@ mod tests {
         let result = cmd_add(
             &runner,
             &fs,
-            &config_path,
-            &["disk2=/dev/disk/by-id/virtio-disk2".into()],
-            false,
-            true,
-            false,
-            Some(pass_path.as_path()),
-            None,
-            ProgressOutput::Off,
-            &paths,
+            &AddParams {
+                config_path: &config_path,
+                disk_specs: &["disk2=/dev/disk/by-id/virtio-disk2".into()],
+                dry_run: false,
+                yes: true,
+                passphrase_stdin: false,
+                passphrase_file: Some(pass_path.as_path()),
+                enroll_key_file: None,
+                progress: ProgressOutput::Off,
+                paths: &paths,
+            },
         );
 
         assert!(result.is_err(), "add should fail on BraidLabeledNoBtrfs");
@@ -1898,15 +1934,17 @@ mod tests {
         let result = cmd_add(
             &runner,
             &fs,
-            &config_path,
-            &["disk2=/dev/disk/by-id/virtio-disk2".into()],
-            false,
-            true,
-            false,
-            Some(pass_path.as_path()),
-            None,
-            ProgressOutput::Off,
-            &paths,
+            &AddParams {
+                config_path: &config_path,
+                disk_specs: &["disk2=/dev/disk/by-id/virtio-disk2".into()],
+                dry_run: false,
+                yes: true,
+                passphrase_stdin: false,
+                passphrase_file: Some(pass_path.as_path()),
+                enroll_key_file: None,
+                progress: ProgressOutput::Off,
+                paths: &paths,
+            },
         );
 
         let err = result.unwrap_err().to_string();
@@ -1931,13 +1969,15 @@ mod tests {
 
         let steps = compile_add_steps_multi(
             &runner,
-            &["disk1"],
-            &[&ByIdPath("/dev/disk/by-id/disk1".into())],
-            &probed,
-            &pool,
-            &MountPoint("/mnt/storage".into()),
-            &test_paths(),
-            None,
+            &AddStepsInput {
+                names: &["disk1"],
+                by_ids: &[&ByIdPath("/dev/disk/by-id/disk1".into())],
+                probed: &probed,
+                pool: &pool,
+                mount_point: &MountPoint("/mnt/storage".into()),
+                paths: &test_paths(),
+                enroll_key_file: None,
+            },
         )
         .unwrap();
         let output = Step::render_dry_run(&steps);
@@ -1985,13 +2025,15 @@ mod tests {
 
         let steps = compile_add_steps_multi(
             &runner,
-            &["disk2"],
-            &[&ByIdPath("/dev/disk/by-id/disk2".into())],
-            &probed,
-            &pool,
-            &MountPoint("/mnt/storage".into()),
-            &test_paths(),
-            None,
+            &AddStepsInput {
+                names: &["disk2"],
+                by_ids: &[&ByIdPath("/dev/disk/by-id/disk2".into())],
+                probed: &probed,
+                pool: &pool,
+                mount_point: &MountPoint("/mnt/storage".into()),
+                paths: &test_paths(),
+                enroll_key_file: None,
+            },
         )
         .unwrap();
         let output = Step::render_dry_run(&steps);

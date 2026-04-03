@@ -5,6 +5,7 @@ use crate::mount::{self, Credential, MountError};
 use crate::preflight;
 use crate::probe::{self, Filesystem};
 use crate::state_paths::StatePaths;
+use std::path::Path;
 
 #[derive(Debug, thiserror::Error)]
 pub enum UnlockError {
@@ -16,25 +17,36 @@ pub enum UnlockError {
     Failed(String),
 }
 
+pub struct UnlockParams<'a> {
+    pub config: &'a Config,
+    pub membership: &'a PoolMembership,
+    pub paths: &'a StatePaths,
+    pub passphrase_stdin: bool,
+    pub passphrase_file: Option<&'a Path>,
+    pub key_file: Option<&'a Path>,
+    pub allow_degraded: bool,
+    pub dry_run: bool,
+}
+
 pub fn cmd_unlock<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
-    config: &Config,
-    membership: &PoolMembership,
-    paths: &StatePaths,
-    passphrase_stdin: bool,
-    passphrase_file: Option<&std::path::Path>,
-    key_file: Option<&std::path::Path>,
-    allow_degraded: bool,
-    dry_run: bool,
+    params: &UnlockParams<'_>,
 ) -> Result<(), UnlockError> {
-    preflight::check_no_pending_operation(paths).map_err(UnlockError::Failed)?;
+    preflight::check_no_pending_operation(params.paths).map_err(UnlockError::Failed)?;
 
     // Dry-run: probe + validate (same errors as execution), then print plan
-    if dry_run {
-        let plan = mount::plan_open_pool(runner, fs, config, membership, allow_degraded, "unlock")?;
+    if params.dry_run {
+        let plan = mount::plan_open_pool(
+            runner,
+            fs,
+            params.config,
+            params.membership,
+            params.allow_degraded,
+            "unlock",
+        )?;
         if let Some(ref p) = plan {
-            let steps = mount::compile_open_steps(p, &config.mount_point(), key_file);
+            let steps = mount::compile_open_steps(p, &params.config.mount_point(), params.key_file);
             Step::print_dry_run(&steps);
         }
         return Ok(());
@@ -48,22 +60,22 @@ pub fn cmd_unlock<R: CommandRunner, F: Filesystem + ?Sized>(
     // - After a successful mount, pool.json enriched fields (luks_uuid, devid) are
     //   refreshed best-effort, but correctness never depends on that write.
 
-    let credential = if let Some(kf) = key_file {
+    let credential = if let Some(kf) = params.key_file {
         Credential::KeyFile(kf)
     } else {
         Credential::Passphrase {
-            passphrase_stdin,
-            passphrase_file,
+            passphrase_stdin: params.passphrase_stdin,
+            passphrase_file: params.passphrase_file,
         }
     };
 
     let mounted = mount::open_and_mount_pool(
         runner,
         fs,
-        config,
-        membership,
+        params.config,
+        params.membership,
         credential,
-        allow_degraded,
+        params.allow_degraded,
         "unlock",
     )?;
 
@@ -72,11 +84,11 @@ pub fn cmd_unlock<R: CommandRunner, F: Filesystem + ?Sized>(
         return Ok(());
     }
 
-    let mount_point = config.mount_point();
+    let mount_point = params.config.mount_point();
 
     // Enrich pool.json with live metadata (luks_uuid, devid) — best-effort.
     if let Ok(pool_after) = probe::probe_pool(runner, mount_point.as_str()) {
-        membership::refresh_pool_metadata(&pool_after, paths);
+        membership::refresh_pool_metadata(&pool_after, params.paths);
     }
 
     // Best-effort: warn if a paused balance was found on mount.
@@ -293,14 +305,16 @@ mod tests {
         let result = cmd_unlock(
             &runner,
             &fs,
-            &config,
-            &membership,
-            &StatePaths::production(),
-            false,
-            Some(tmp.path()),
-            None,
-            true, // allow_degraded
-            false,
+            &UnlockParams {
+                config: &config,
+                membership: &membership,
+                paths: &StatePaths::production(),
+                passphrase_stdin: false,
+                passphrase_file: Some(tmp.path()),
+                key_file: None,
+                allow_degraded: true,
+                dry_run: false,
+            },
         );
 
         // If the code incorrectly uses Mount instead of MountWithOptions,
@@ -403,14 +417,16 @@ mod tests {
         let result = cmd_unlock(
             &runner,
             &fs,
-            &config,
-            &membership,
-            &StatePaths::production(),
-            false,
-            Some(tmp.path()),
-            None,
-            false, // allow_degraded = false
-            false,
+            &UnlockParams {
+                config: &config,
+                membership: &membership,
+                paths: &StatePaths::production(),
+                passphrase_stdin: false,
+                passphrase_file: Some(tmp.path()),
+                key_file: None,
+                allow_degraded: false,
+                dry_run: false,
+            },
         );
 
         let err = result.expect_err("should refuse degraded mount without --allow-degraded");
@@ -537,14 +553,16 @@ mod tests {
         let result = cmd_unlock(
             &runner,
             &fs,
-            &config,
-            &membership,
-            &StatePaths::production(),
-            false,
-            Some(tmp.path()),
-            None,
-            false,
-            false,
+            &UnlockParams {
+                config: &config,
+                membership: &membership,
+                paths: &StatePaths::production(),
+                passphrase_stdin: false,
+                passphrase_file: Some(tmp.path()),
+                key_file: None,
+                allow_degraded: false,
+                dry_run: false,
+            },
         );
 
         let err = result.expect_err("should fail when disk2 rejects passphrase");
@@ -694,14 +712,16 @@ mod tests {
         let result = cmd_unlock(
             &runner,
             &fs,
-            &config,
-            &membership,
-            &StatePaths::production(),
-            false,
-            Some(tmp.path()),
-            None,
-            false,
-            false,
+            &UnlockParams {
+                config: &config,
+                membership: &membership,
+                paths: &StatePaths::production(),
+                passphrase_stdin: false,
+                passphrase_file: Some(tmp.path()),
+                key_file: None,
+                allow_degraded: false,
+                dry_run: false,
+            },
         );
 
         // The paused balance warning must not cause unlock to fail.
@@ -764,14 +784,16 @@ mod tests {
         let result = cmd_unlock(
             &runner,
             &fs,
-            &config,
-            &membership,
-            &StatePaths::production(),
-            false,
-            None,
-            None,
-            false,
-            true, // dry_run
+            &UnlockParams {
+                config: &config,
+                membership: &membership,
+                paths: &StatePaths::production(),
+                passphrase_stdin: false,
+                passphrase_file: None,
+                key_file: None,
+                allow_degraded: false,
+                dry_run: true,
+            },
         );
         result.expect("dry-run unlock should succeed");
     }
@@ -831,14 +853,16 @@ mod tests {
         let result = cmd_unlock(
             &runner,
             &fs,
-            &config,
-            &membership,
-            &StatePaths::production(),
-            false,
-            None,
-            None,
-            false, // allow_degraded
-            true,  // dry_run
+            &UnlockParams {
+                config: &config,
+                membership: &membership,
+                paths: &StatePaths::production(),
+                passphrase_stdin: false,
+                passphrase_file: None,
+                key_file: None,
+                allow_degraded: false,
+                dry_run: true,
+            },
         );
 
         let err = result.expect_err("dry-run should refuse degraded mount");

@@ -25,19 +25,23 @@ pub enum RemoveError {
     Cmd(#[from] crate::cmd::CmdError),
 }
 
+pub struct RemoveParams<'a> {
+    pub config_path: &'a Path,
+    pub name: &'a str,
+    pub dry_run: bool,
+    pub yes: bool,
+    pub progress: ProgressOutput,
+    pub paths: &'a StatePaths,
+}
+
 pub fn cmd_remove<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
-    config_path: &Path,
-    name: &str,
-    dry_run: bool,
-    yes: bool,
-    progress: ProgressOutput,
-    paths: &StatePaths,
+    params: &RemoveParams<'_>,
 ) -> Result<(), RemoveError> {
-    preflight::check_no_pending_operation(paths).map_err(RemoveError::Validation)?;
+    preflight::check_no_pending_operation(params.paths).map_err(RemoveError::Validation)?;
 
-    let config = config_read(config_path)?;
+    let config = config_read(params.config_path)?;
 
     let pool = match probe_pool(runner, config.mount_point().as_str()) {
         Ok(p) => p,
@@ -72,13 +76,13 @@ pub fn cmd_remove<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     preflight::check_not_read_only(runner, config.mount_point().as_str())
         .map_err(RemoveError::Validation)?;
 
-    let mn = mapper_name(name);
+    let mn = mapper_name(params.name);
 
     // Is the disk present in the pool?
     let in_pool = pool.devices.iter().any(|d| d.mapper == mn);
 
     if !in_pool {
-        let mut msg = format!("disk '{}' not found in pool.", name);
+        let mut msg = format!("disk '{}' not found in pool.", params.name);
         if pool.missing_count > 0 {
             msg.push_str(&format!(
                 " ({} missing device{} detected. \
@@ -116,7 +120,7 @@ pub fn cmd_remove<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
 
     let steps = compile_remove_present_steps(&mn, &pool, config.mount_point())?;
 
-    if dry_run {
+    if params.dry_run {
         Step::print_dry_run(&steps);
         return Ok(());
     }
@@ -127,7 +131,7 @@ pub fn cmd_remove<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     }
 
     // Confirm
-    if !yes {
+    if !params.yes {
         if remaining == 0 {
             return Err(RemoveError::Validation(
                 "cannot remove the last disk from the pool".into(),
@@ -146,7 +150,7 @@ pub fn cmd_remove<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         } else {
             eprintln!(
                 "Remove {} from pool? Data will migrate off this disk.",
-                name
+                params.name
             );
             eprint!("Type 'yes' to continue: ");
             let mut input = String::new();
@@ -160,28 +164,34 @@ pub fn cmd_remove<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     }
 
     // Build target membership and write journal before irreversible disk op.
-    let pre_membership = membership::load_membership(paths)
+    let pre_membership = membership::load_membership(params.paths)
         .map_err(|e| RemoveError::Validation(format!("failed to load pool membership: {e}")))?;
     let mut target_membership = pre_membership.clone();
-    target_membership.disks.remove(name);
+    target_membership.disks.remove(params.name);
     let journal = journal::build_journal(
         pre_membership,
         target_membership.clone(),
         journal::OpKind::Remove {
-            name: name.to_owned(),
+            name: params.name.to_owned(),
         },
     );
-    journal::write_journal(paths, &journal).map_err(|e| RemoveError::Validation(e.to_string()))?;
+    journal::write_journal(params.paths, &journal)
+        .map_err(|e| RemoveError::Validation(e.to_string()))?;
 
     // Execute
-    evict_present_device(runner, &mn.0, config.mount_point().as_str(), progress)?;
+    evict_present_device(
+        runner,
+        &mn.0,
+        config.mount_point().as_str(),
+        params.progress,
+    )?;
 
     // Post-commit: write pool.json and clear journal.
-    membership::save_membership(&target_membership, paths)
+    membership::save_membership(&target_membership, params.paths)
         .map_err(|e| RemoveError::Validation(format!("failed to persist pool membership: {e}")))?;
-    journal::clear_journal(paths).map_err(|e| RemoveError::Validation(e.to_string()))?;
+    journal::clear_journal(params.paths).map_err(|e| RemoveError::Validation(e.to_string()))?;
 
-    eprintln!("Done. Disk '{}' removed from pool.", name);
+    eprintln!("Done. Disk '{}' removed from pool.", params.name);
     Ok(())
 }
 
@@ -465,12 +475,14 @@ mod tests {
         cmd_remove(
             &runner,
             &MockFs,
-            Path::new(&config_path),
-            "disk2",
-            false,
-            true,
-            ProgressOutput::Off,
-            &paths,
+            &RemoveParams {
+                config_path: Path::new(&config_path),
+                name: "disk2",
+                dry_run: false,
+                yes: true,
+                progress: ProgressOutput::Off,
+                paths: &paths,
+            },
         )
         .expect("remove should succeed");
 
@@ -524,12 +536,14 @@ mod tests {
         cmd_remove(
             &runner,
             &MockFs,
-            Path::new(&config_path),
-            "disk2",
-            false,
-            true,
-            ProgressOutput::Off,
-            &paths,
+            &RemoveParams {
+                config_path: Path::new(&config_path),
+                name: "disk2",
+                dry_run: false,
+                yes: true,
+                progress: ProgressOutput::Off,
+                paths: &paths,
+            },
         )
         .expect("remove should succeed");
 
@@ -643,12 +657,14 @@ mod tests {
         let result = cmd_remove(
             &runner,
             &MockFs,
-            Path::new(&config_path),
-            "disk2",
-            false,
-            true,
-            ProgressOutput::Off,
-            &paths,
+            &RemoveParams {
+                config_path: Path::new(&config_path),
+                name: "disk2",
+                dry_run: false,
+                yes: true,
+                progress: ProgressOutput::Off,
+                paths: &paths,
+            },
         );
 
         assert!(result.is_err(), "remove should fail when eviction fails");
@@ -777,12 +793,14 @@ mod tests {
         let err = cmd_remove(
             &runner,
             &MockFsWithExclop("balance paused".into()),
-            Path::new(&config_path),
-            "disk1",
-            false,
-            true,
-            ProgressOutput::Off,
-            &paths,
+            &RemoveParams {
+                config_path: Path::new(&config_path),
+                name: "disk1",
+                dry_run: false,
+                yes: true,
+                progress: ProgressOutput::Off,
+                paths: &paths,
+            },
         )
         .expect_err("should fail — balance is paused");
         let msg = err.to_string();
@@ -832,12 +850,14 @@ mod tests {
         let result = cmd_remove(
             &runner,
             &MockFsWithExclop("balance".into()),
-            Path::new(&config_path),
-            "disk2",
-            true, // dry_run — avoids needing all downstream mocks
-            true,
-            ProgressOutput::Off,
-            &paths,
+            &RemoveParams {
+                config_path: Path::new(&config_path),
+                name: "disk2",
+                dry_run: true,
+                yes: true,
+                progress: ProgressOutput::Off,
+                paths: &paths,
+            },
         );
         // dry_run should succeed (no actual btrfs commands executed)
         assert!(

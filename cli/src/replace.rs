@@ -33,28 +33,31 @@ pub enum ReplaceError {
     Parse(#[from] crate::parse::ParseError),
 }
 
-#[allow(clippy::too_many_arguments)]
+pub struct ReplaceParams<'a> {
+    pub config_path: &'a Path,
+    pub old_name: &'a str,
+    pub new_name: &'a str,
+    pub missing_id: Option<u64>,
+    pub dry_run: bool,
+    pub yes: bool,
+    pub passphrase_stdin: bool,
+    pub passphrase_file: Option<&'a Path>,
+    pub enroll_key_file: Option<&'a Path>,
+    pub progress: ProgressOutput,
+    pub paths: &'a StatePaths,
+}
+
 pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
-    config_path: &Path,
-    old_name: &str,
-    new_name: &str,
-    missing_id: Option<u64>,
-    dry_run: bool,
-    yes: bool,
-    passphrase_stdin: bool,
-    passphrase_file: Option<&Path>,
-    enroll_key_file: Option<&Path>,
-    progress: ProgressOutput,
-    paths: &StatePaths,
+    params: &ReplaceParams<'_>,
 ) -> Result<(), ReplaceError> {
-    preflight::check_no_pending_operation(paths).map_err(ReplaceError::Validation)?;
+    preflight::check_no_pending_operation(params.paths).map_err(ReplaceError::Validation)?;
 
-    let config = config_read(config_path)?;
+    let config = config_read(params.config_path)?;
 
     // Parse new_name as name=by_id spec
-    let (new_name_parsed, new_by_id) = membership::parse_disk_spec(new_name)
+    let (new_name_parsed, new_by_id) = membership::parse_disk_spec(params.new_name)
         .map_err(|e| ReplaceError::Validation(e.to_string()))?;
     let new_name = new_name_parsed.as_str();
 
@@ -92,19 +95,19 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         .map_err(ReplaceError::Validation)?;
 
     // --old == --new: reject early.
-    if old_name == new_name {
+    if params.old_name == new_name {
         return Err(ReplaceError::Validation(
             "--old and --new must be different disks".into(),
         ));
     }
 
     // Resolve --old: live or missing (by devid).
-    let old_mn = mapper_name(old_name);
+    let old_mn = mapper_name(params.old_name);
     let replace_source = resolve_replace_source(
         runner,
-        old_name,
+        params.old_name,
         &old_mn,
-        missing_id,
+        params.missing_id,
         &pool,
         config.mount_point().as_str(),
     )?;
@@ -115,30 +118,30 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     // Compile steps
     let will_clear_last_missing =
         matches!(&replace_source, ReplaceSource::Missing { .. }) && pool.missing_count == 1;
-    let steps = compile_replace_steps(
+    let steps = compile_replace_steps(&ReplaceStepsInput {
         new_name,
-        &new_by_id,
-        &new_probed,
-        &replace_source,
-        config.mount_point(),
+        new_by_id: &new_by_id,
+        new_probed: &new_probed,
+        replace_source: &replace_source,
+        mount_point: config.mount_point(),
         will_clear_last_missing,
-        pool.total_devices,
-        paths,
-        enroll_key_file,
-    )?;
+        total_devices: pool.total_devices,
+        paths: params.paths,
+        enroll_key_file: params.enroll_key_file,
+    })?;
 
-    if dry_run {
+    if params.dry_run {
         Step::print_dry_run(&steps);
         return Ok(());
     }
 
     // Confirm
-    if !yes {
+    if !params.yes {
         eprintln!(
             "{}",
             replace_confirm_message(
                 &new_probed.state,
-                old_name,
+                params.old_name,
                 new_name,
                 &new_by_id.0,
                 &replace_source,
@@ -170,7 +173,7 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     }
 
     // Read passphrase
-    let passphrase = read_passphrase(passphrase_file, passphrase_stdin)?;
+    let passphrase = read_passphrase(params.passphrase_file, params.passphrase_stdin)?;
     let new_mn = mapper_name(new_name);
 
     // Reversible checks: reject absent disk, verify passphrase, check not already in pool.
@@ -202,20 +205,21 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     check_new_not_in_pool(new_name, &new_mn, &pool)?;
 
     // Build target membership and write journal before irreversible disk ops.
-    let pre_membership = membership::load_membership(paths)
+    let pre_membership = membership::load_membership(params.paths)
         .map_err(|e| ReplaceError::Validation(format!("failed to load pool membership: {e}")))?;
     let target_membership =
-        build_replacement_membership(&pre_membership, old_name, new_name, &new_by_id)?;
+        build_replacement_membership(&pre_membership, params.old_name, new_name, &new_by_id)?;
     let journal = journal::build_journal(
         pre_membership,
         target_membership.clone(),
         journal::OpKind::Replace {
-            old_name: old_name.to_owned(),
+            old_name: params.old_name.to_owned(),
             new_name: new_name.to_owned(),
             new_by_id: new_by_id.clone(),
         },
     );
-    journal::write_journal(paths, &journal).map_err(|e| ReplaceError::Validation(e.to_string()))?;
+    journal::write_journal(params.paths, &journal)
+        .map_err(|e| ReplaceError::Validation(e.to_string()))?;
 
     // Step 1: Init new disk (LUKS format/open) — irreversible from here.
     match new_probed.state {
@@ -228,13 +232,13 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             luks_format(runner, &new_by_id.0, &passphrase, &luks_opts)?;
             eprintln!("LUKS formatted: {}", new_by_id);
 
-            let backup_path = backup_luks_header(runner, &new_by_id.0, &new_mn.0, paths)?;
+            let backup_path = backup_luks_header(runner, &new_by_id.0, &new_mn.0, params.paths)?;
             eprintln!("LUKS header backed up: {}", backup_path.display());
 
             ensure_luks_open(runner, fs, new_name, &new_by_id, &passphrase)?;
             eprintln!("LUKS opened: {} → {}", new_by_id, new_mn);
 
-            if let Some(kf) = enroll_key_file {
+            if let Some(kf) = params.enroll_key_file {
                 crate::luks::enroll_key_file(runner, &new_by_id.0, &passphrase, kf)?;
                 eprintln!("Keyfile enrolled in slot 1: {}", new_by_id);
             }
@@ -287,7 +291,7 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
                 *devid,
                 &new_mapper_path,
                 config.mount_point().as_str(),
-                progress,
+                params.progress,
             )?;
             eprintln!("Replace complete.");
 
@@ -319,7 +323,7 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
                 *devid,
                 &new_mapper_path,
                 config.mount_point().as_str(),
-                progress,
+                params.progress,
             )?;
             eprintln!("Replace complete.");
 
@@ -337,7 +341,7 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             runner,
             config.mount_point().as_str(),
             pre_op_missing_count,
-            progress,
+            params.progress,
         )
         .map_err(|e| ReplaceError::Pool(e))?;
     }
@@ -358,11 +362,11 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             }
         }
     }
-    membership::save_membership(&final_membership, paths)
+    membership::save_membership(&final_membership, params.paths)
         .map_err(|e| ReplaceError::Validation(format!("failed to persist pool membership: {e}")))?;
-    journal::clear_journal(paths).map_err(|e| ReplaceError::Validation(e.to_string()))?;
+    journal::clear_journal(params.paths).map_err(|e| ReplaceError::Validation(e.to_string()))?;
 
-    eprintln!("Done. Replaced {} with {}.", old_name, new_name);
+    eprintln!("Done. Replaced {} with {}.", params.old_name, new_name);
     Ok(())
 }
 
@@ -467,47 +471,50 @@ fn resolve_replace_source<R: CommandRunner>(
     )))
 }
 
-fn compile_replace_steps(
-    new_name: &str,
-    new_by_id: &ByIdPath,
-    new_probed: &ConfigDisk,
-    replace_source: &ReplaceSource,
-    mount_point: &MountPoint,
+struct ReplaceStepsInput<'a> {
+    new_name: &'a str,
+    new_by_id: &'a ByIdPath,
+    new_probed: &'a ConfigDisk,
+    replace_source: &'a ReplaceSource,
+    mount_point: &'a MountPoint,
     will_clear_last_missing: bool,
     total_devices: u64,
-    paths: &StatePaths,
-    enroll_key_file: Option<&Path>,
-) -> Result<Vec<Step>, ReplaceError> {
-    let new_mn = mapper_name(new_name);
+    paths: &'a StatePaths,
+    enroll_key_file: Option<&'a Path>,
+}
+
+fn compile_replace_steps(input: &ReplaceStepsInput<'_>) -> Result<Vec<Step>, ReplaceError> {
+    let new_mn = mapper_name(input.new_name);
     let mut steps = Vec::new();
 
-    match &new_probed.state {
+    match &input.new_probed.state {
         ConfigDiskState::Absent => {
             return Err(ReplaceError::Validation(format!(
                 "new disk '{}' ({}) is not present. Is it plugged in?",
-                new_name, new_by_id
+                input.new_name, input.new_by_id
             )));
         }
         ConfigDiskState::PresentNotLuks => {
             let mut extra_opts = luks_opts_from_env();
             extra_opts.push("--label".into());
-            extra_opts.push(format!("braid-{new_name}"));
+            extra_opts.push(format!("braid-{}", input.new_name));
             steps.push(Step {
                 risk: "destructive",
-                description: format!("LUKS format {}", new_by_id),
+                description: format!("LUKS format {}", input.new_by_id),
                 commands: vec![CmdRequest::CryptsetupLuksFormat {
-                    device: new_by_id.0.clone(),
+                    device: input.new_by_id.0.clone(),
                     extra_opts,
                 }],
             });
-            let backup_path = paths
+            let backup_path = input
+                .paths
                 .luks_headers_dir()
                 .join(format!("{}.luksheader", new_mn.0));
             steps.push(Step {
                 risk: "safe",
                 description: format!("LUKS header backup → {}", backup_path.display()),
                 commands: vec![CmdRequest::CryptsetupLuksHeaderBackup {
-                    device: new_by_id.0.clone(),
+                    device: input.new_by_id.0.clone(),
                     backup_path: backup_path.display().to_string(),
                 }],
             });
@@ -515,16 +522,16 @@ fn compile_replace_steps(
                 risk: "safe",
                 description: format!("LUKS open → {}", new_mn),
                 commands: vec![CmdRequest::CryptsetupLuksOpen {
-                    device: new_by_id.0.clone(),
+                    device: input.new_by_id.0.clone(),
                     mapper: new_mn.0.clone(),
                 }],
             });
-            if let Some(kf) = enroll_key_file {
+            if let Some(kf) = input.enroll_key_file {
                 steps.push(Step {
                     risk: "safe",
-                    description: format!("enroll keyfile → LUKS slot 1 on {}", new_by_id),
+                    description: format!("enroll keyfile → LUKS slot 1 on {}", input.new_by_id),
                     commands: vec![CmdRequest::CryptsetupLuksAddKeyFile {
-                        device: new_by_id.0.clone(),
+                        device: input.new_by_id.0.clone(),
                         key_file_path: kf.display().to_string(),
                     }],
                 });
@@ -536,7 +543,7 @@ fn compile_replace_steps(
                     risk: "safe",
                     description: format!("LUKS open → {}", new_mn),
                     commands: vec![CmdRequest::CryptsetupLuksOpen {
-                        device: new_by_id.0.clone(),
+                        device: input.new_by_id.0.clone(),
                         mapper: new_mn.0.clone(),
                     }],
                 });
@@ -545,26 +552,29 @@ fn compile_replace_steps(
     }
 
     let new_mapper_path = format!("/dev/mapper/{}", new_mn.0);
-    match replace_source {
+    match input.replace_source {
         ReplaceSource::Live { mapper, devid } => {
             steps.push(Step {
                 risk: "long",
                 description: format!(
                     "btrfs replace start {} /dev/mapper/{} {}",
-                    devid, new_mn, mount_point
+                    devid, new_mn, input.mount_point
                 ),
                 commands: vec![CmdRequest::BtrfsReplaceStart {
                     devid: *devid,
                     target_device: new_mapper_path,
-                    mount_point: mount_point.clone(),
+                    mount_point: input.mount_point.clone(),
                 }],
             });
             steps.push(Step {
                 risk: "safe",
-                description: format!("btrfs filesystem resize {}:max {}", devid, mount_point),
+                description: format!(
+                    "btrfs filesystem resize {}:max {}",
+                    devid, input.mount_point
+                ),
                 commands: vec![CmdRequest::BtrfsFilesystemResize {
                     devid: *devid,
-                    mount_point: mount_point.clone(),
+                    mount_point: input.mount_point.clone(),
                 }],
             });
             steps.push(Step {
@@ -580,30 +590,33 @@ fn compile_replace_steps(
                 risk: "long",
                 description: format!(
                     "btrfs replace start {} /dev/mapper/{} {}",
-                    devid, new_mn, mount_point
+                    devid, new_mn, input.mount_point
                 ),
                 commands: vec![CmdRequest::BtrfsReplaceStart {
                     devid: *devid,
                     target_device: new_mapper_path,
-                    mount_point: mount_point.clone(),
+                    mount_point: input.mount_point.clone(),
                 }],
             });
             steps.push(Step {
                 risk: "safe",
-                description: format!("btrfs filesystem resize {}:max {}", devid, mount_point),
+                description: format!(
+                    "btrfs filesystem resize {}:max {}",
+                    devid, input.mount_point
+                ),
                 commands: vec![CmdRequest::BtrfsFilesystemResize {
                     devid: *devid,
-                    mount_point: mount_point.clone(),
+                    mount_point: input.mount_point.clone(),
                 }],
             });
-            if will_clear_last_missing && total_devices >= 2 {
+            if input.will_clear_last_missing && input.total_devices >= 2 {
                 steps.push(Step {
                     risk: "long",
                     description:
                         "btrfs balance -dconvert=raid1,soft -mconvert=raid1,soft (restore redundancy)"
                             .into(),
                     commands: vec![CmdRequest::BtrfsBalanceRaid1Soft {
-                        mount_point: mount_point.clone(),
+                        mount_point: input.mount_point.clone(),
                     }],
                 });
             }
@@ -899,17 +912,17 @@ mod tests {
             mapper: MapperName("braid-disk2".into()),
             devid: 2,
         };
-        let steps = compile_replace_steps(
-            "disk3",
-            &ByIdPath("/dev/disk/by-id/virtio-disk3".into()),
-            &new_probed,
-            &source,
-            &MountPoint("/mnt/storage".into()),
-            false,
-            2,
-            &test_paths(),
-            None,
-        )
+        let steps = compile_replace_steps(&ReplaceStepsInput {
+            new_name: "disk3",
+            new_by_id: &ByIdPath("/dev/disk/by-id/virtio-disk3".into()),
+            new_probed: &new_probed,
+            replace_source: &source,
+            mount_point: &MountPoint("/mnt/storage".into()),
+            will_clear_last_missing: false,
+            total_devices: 2,
+            paths: &test_paths(),
+            enroll_key_file: None,
+        })
         .unwrap();
         let descriptions: Vec<&str> = steps.iter().map(|s| s.description.as_str()).collect();
         assert!(
@@ -959,17 +972,17 @@ mod tests {
             state: ConfigDiskState::PresentNotLuks,
         };
         let source = ReplaceSource::Missing { devid: 2 };
-        let steps = compile_replace_steps(
-            "disk3",
-            &ByIdPath("/dev/disk/by-id/virtio-disk3".into()),
-            &new_probed,
-            &source,
-            &MountPoint("/mnt/storage".into()),
-            true,
-            2,
-            &test_paths(),
-            None,
-        )
+        let steps = compile_replace_steps(&ReplaceStepsInput {
+            new_name: "disk3",
+            new_by_id: &ByIdPath("/dev/disk/by-id/virtio-disk3".into()),
+            new_probed: &new_probed,
+            replace_source: &source,
+            mount_point: &MountPoint("/mnt/storage".into()),
+            will_clear_last_missing: true,
+            total_devices: 2,
+            paths: &test_paths(),
+            enroll_key_file: None,
+        })
         .unwrap();
         let descriptions: Vec<&str> = steps.iter().map(|s| s.description.as_str()).collect();
         assert!(
@@ -1179,17 +1192,17 @@ mod tests {
         let config = make_replace_config();
         let new_probed = new_probed_not_luks();
         let source = ReplaceSource::Missing { devid: 2 };
-        let steps = compile_replace_steps(
-            "disk3",
-            &ByIdPath("/dev/disk/by-id/virtio-disk3".into()),
-            &new_probed,
-            &source,
-            &MountPoint("/mnt/storage".into()),
-            false,
-            3,
-            &test_paths(),
-            None,
-        )
+        let steps = compile_replace_steps(&ReplaceStepsInput {
+            new_name: "disk3",
+            new_by_id: &ByIdPath("/dev/disk/by-id/virtio-disk3".into()),
+            new_probed: &new_probed,
+            replace_source: &source,
+            mount_point: &MountPoint("/mnt/storage".into()),
+            will_clear_last_missing: false,
+            total_devices: 3,
+            paths: &test_paths(),
+            enroll_key_file: None,
+        })
         .unwrap();
         let descriptions: Vec<&str> = steps.iter().map(|s| s.description.as_str()).collect();
         assert!(
@@ -1208,17 +1221,17 @@ mod tests {
         let config = make_replace_config();
         let new_probed = new_probed_not_luks();
         let source = ReplaceSource::Missing { devid: 2 };
-        let steps = compile_replace_steps(
-            "disk3",
-            &ByIdPath("/dev/disk/by-id/virtio-disk3".into()),
-            &new_probed,
-            &source,
-            &MountPoint("/mnt/storage".into()),
-            true,
-            1,
-            &test_paths(),
-            None,
-        )
+        let steps = compile_replace_steps(&ReplaceStepsInput {
+            new_name: "disk3",
+            new_by_id: &ByIdPath("/dev/disk/by-id/virtio-disk3".into()),
+            new_probed: &new_probed,
+            replace_source: &source,
+            mount_point: &MountPoint("/mnt/storage".into()),
+            will_clear_last_missing: true,
+            total_devices: 1,
+            paths: &test_paths(),
+            enroll_key_file: None,
+        })
         .unwrap();
         let descriptions: Vec<&str> = steps.iter().map(|s| s.description.as_str()).collect();
         assert!(
@@ -1363,17 +1376,19 @@ mod tests {
         let result = cmd_replace(
             &runner,
             &fs,
-            &config_path,
-            "disk2",
-            "disk3=/dev/disk/by-id/virtio-disk3",
-            None,
-            false,
-            true,
-            false,
-            Some(pass_path.as_path()),
-            None,
-            crate::progress::ProgressOutput::Off,
-            &paths,
+            &ReplaceParams {
+                config_path: &config_path,
+                old_name: "disk2",
+                new_name: "disk3=/dev/disk/by-id/virtio-disk3",
+                missing_id: None,
+                dry_run: false,
+                yes: true,
+                passphrase_stdin: false,
+                passphrase_file: Some(pass_path.as_path()),
+                enroll_key_file: None,
+                progress: crate::progress::ProgressOutput::Off,
+                paths: &paths,
+            },
         );
 
         assert!(
@@ -1397,17 +1412,17 @@ mod tests {
             mapper: MapperName("braid-disk2".into()),
             devid: 2,
         };
-        let steps = compile_replace_steps(
-            "disk3",
-            &ByIdPath("/dev/disk/by-id/virtio-disk3".into()),
-            &new_probed,
-            &source,
-            &MountPoint("/mnt/storage".into()),
-            false,
-            2,
-            &test_paths(),
-            None,
-        )
+        let steps = compile_replace_steps(&ReplaceStepsInput {
+            new_name: "disk3",
+            new_by_id: &ByIdPath("/dev/disk/by-id/virtio-disk3".into()),
+            new_probed: &new_probed,
+            replace_source: &source,
+            mount_point: &MountPoint("/mnt/storage".into()),
+            will_clear_last_missing: false,
+            total_devices: 2,
+            paths: &test_paths(),
+            enroll_key_file: None,
+        })
         .unwrap();
         let descriptions: Vec<&str> = steps.iter().map(|s| s.description.as_str()).collect();
         assert!(
@@ -1429,17 +1444,17 @@ mod tests {
             devid: 2,
         };
         let kf = Path::new("/mnt/usb/braid.key");
-        let steps = compile_replace_steps(
-            "disk3",
-            &ByIdPath("/dev/disk/by-id/virtio-disk3".into()),
-            &new_probed,
-            &source,
-            &MountPoint("/mnt/storage".into()),
-            false,
-            2,
-            &test_paths(),
-            Some(kf),
-        )
+        let steps = compile_replace_steps(&ReplaceStepsInput {
+            new_name: "disk3",
+            new_by_id: &ByIdPath("/dev/disk/by-id/virtio-disk3".into()),
+            new_probed: &new_probed,
+            replace_source: &source,
+            mount_point: &MountPoint("/mnt/storage".into()),
+            will_clear_last_missing: false,
+            total_devices: 2,
+            paths: &test_paths(),
+            enroll_key_file: Some(kf),
+        })
         .unwrap();
         let output = Step::render_dry_run(&steps);
         let lines: Vec<&str> = output.lines().collect();

@@ -228,83 +228,109 @@ pub fn compile_enroll_steps(
     steps
 }
 
+pub struct EnrollKeyFileParams<'a> {
+    pub membership: &'a PoolMembership,
+    pub key_file_path: &'a Path,
+    pub generate: bool,
+    pub passphrase_stdin: bool,
+    pub passphrase_file: Option<&'a Path>,
+    pub dry_run: bool,
+    pub paths: &'a StatePaths,
+}
+
 pub fn cmd_enroll_key_file<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
-    membership: &PoolMembership,
-    key_file_path: &Path,
-    generate: bool,
-    passphrase_stdin: bool,
-    passphrase_file: Option<&Path>,
-    dry_run: bool,
-    paths: &StatePaths,
+    params: &EnrollKeyFileParams<'_>,
 ) -> Result<(), EnrollKeyFileError> {
-    preflight::check_no_pending_operation(paths).map_err(EnrollKeyFileError::Validation)?;
+    preflight::check_no_pending_operation(params.paths).map_err(EnrollKeyFileError::Validation)?;
 
-    if generate {
+    if params.generate {
         // --generate: keyfile must NOT exist
-        if key_file_path.exists() {
+        if params.key_file_path.exists() {
             return Err(EnrollKeyFileError::Validation(format!(
                 "braid.key already exists at {}; remove it manually if you want to generate a new one",
-                key_file_path.display()
+                params.key_file_path.display()
             )));
         }
 
         // 1. Discover candidates
-        let candidates = discover_enrollment_candidates(runner, fs, membership)?;
+        let candidates = discover_enrollment_candidates(runner, fs, params.membership)?;
 
         // Dry-run: show what would happen, skip passphrase + mutations
-        if dry_run {
-            let steps = compile_enroll_steps(&candidates, key_file_path, generate, paths);
+        if params.dry_run {
+            let steps = compile_enroll_steps(
+                &candidates,
+                params.key_file_path,
+                params.generate,
+                params.paths,
+            );
             Step::print_dry_run(&steps);
             return Ok(());
         }
 
         // 2. Read passphrase
-        let passphrase = luks::read_passphrase(passphrase_file, passphrase_stdin)?;
+        let passphrase = luks::read_passphrase(params.passphrase_file, params.passphrase_stdin)?;
 
         // 3. Plan enrollment (preflight: passphrase + slot conflict detection)
-        let plan = plan_enrollment(runner, &candidates, key_file_path, &passphrase)?;
+        let plan = plan_enrollment(runner, &candidates, params.key_file_path, &passphrase)?;
 
         // 4. Only if preflight passes: generate keyfile
-        generate_key_file(key_file_path)?;
-        eprintln!("ok: generated {}", key_file_path.display());
+        generate_key_file(params.key_file_path)?;
+        eprintln!("ok: generated {}", params.key_file_path.display());
 
         // 5. Apply enrollment
-        apply_enrollment(runner, &plan, &passphrase, key_file_path, paths)?;
+        apply_enrollment(
+            runner,
+            &plan,
+            &passphrase,
+            params.key_file_path,
+            params.paths,
+        )?;
     } else {
         // Existing flow: keyfile must exist
-        if !key_file_path.exists() {
+        if !params.key_file_path.exists() {
             return Err(EnrollKeyFileError::Validation(format!(
                 "keyfile not found: {}",
-                key_file_path.display()
+                params.key_file_path.display()
             )));
         }
-        let meta = std::fs::metadata(key_file_path).map_err(|e| {
+        let meta = std::fs::metadata(params.key_file_path).map_err(|e| {
             EnrollKeyFileError::Validation(format!(
                 "cannot read keyfile {}: {e}",
-                key_file_path.display()
+                params.key_file_path.display()
             ))
         })?;
         if !meta.is_file() {
             return Err(EnrollKeyFileError::Validation(format!(
                 "keyfile is not a regular file: {}",
-                key_file_path.display()
+                params.key_file_path.display()
             )));
         }
 
-        let candidates = discover_enrollment_candidates(runner, fs, membership)?;
+        let candidates = discover_enrollment_candidates(runner, fs, params.membership)?;
 
         // Dry-run: show what would happen, skip passphrase + mutations
-        if dry_run {
-            let steps = compile_enroll_steps(&candidates, key_file_path, generate, paths);
+        if params.dry_run {
+            let steps = compile_enroll_steps(
+                &candidates,
+                params.key_file_path,
+                params.generate,
+                params.paths,
+            );
             Step::print_dry_run(&steps);
             return Ok(());
         }
 
-        let passphrase = luks::read_passphrase(passphrase_file, passphrase_stdin)?;
-        let plan = plan_enrollment(runner, &candidates, key_file_path, &passphrase)?;
-        apply_enrollment(runner, &plan, &passphrase, key_file_path, paths)?;
+        let passphrase = luks::read_passphrase(params.passphrase_file, params.passphrase_stdin)?;
+        let plan = plan_enrollment(runner, &candidates, params.key_file_path, &passphrase)?;
+        apply_enrollment(
+            runner,
+            &plan,
+            &passphrase,
+            params.key_file_path,
+            params.paths,
+        )?;
     }
 
     Ok(())
@@ -1011,13 +1037,15 @@ mod tests {
         let err = cmd_enroll_key_file(
             &runner,
             &fs,
-            &membership,
-            &kf,
-            false,
-            false,
-            None,
-            false,
-            &paths,
+            &EnrollKeyFileParams {
+                membership: &membership,
+                key_file_path: &kf,
+                generate: false,
+                passphrase_stdin: false,
+                passphrase_file: None,
+                dry_run: false,
+                paths: &paths,
+            },
         )
         .unwrap_err();
 

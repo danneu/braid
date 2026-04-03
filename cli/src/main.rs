@@ -256,15 +256,17 @@ fn main() {
             if let Err(e) = braid_cli::add::cmd_add(
                 &runner,
                 &fs,
-                Path::new(&config_path),
-                &args.disks,
-                args.common.dry_run,
-                args.common.yes,
-                args.common.passphrase_stdin,
-                args.common.passphrase_file.as_deref(),
-                enroll_kf.as_deref(),
-                progress,
-                &paths,
+                &braid_cli::add::AddParams {
+                    config_path: Path::new(&config_path),
+                    disk_specs: &args.disks,
+                    dry_run: args.common.dry_run,
+                    yes: args.common.yes,
+                    passphrase_stdin: args.common.passphrase_stdin,
+                    passphrase_file: args.common.passphrase_file.as_deref(),
+                    enroll_key_file: enroll_kf.as_deref(),
+                    progress,
+                    paths: &paths,
+                },
             ) {
                 print_cli_error(&e.to_string());
                 std::process::exit(1);
@@ -281,12 +283,14 @@ fn main() {
             if let Err(e) = braid_cli::remove::cmd_remove(
                 &runner,
                 &fs,
-                Path::new(&config_path),
-                &args.disk,
-                args.common.dry_run,
-                args.common.yes,
-                progress,
-                &paths,
+                &braid_cli::remove::RemoveParams {
+                    config_path: Path::new(&config_path),
+                    name: &args.disk,
+                    dry_run: args.common.dry_run,
+                    yes: args.common.yes,
+                    progress,
+                    paths: &paths,
+                },
             ) {
                 print_cli_error(&e.to_string());
                 std::process::exit(1);
@@ -303,12 +307,14 @@ fn main() {
             if let Err(e) = braid_cli::remove_missing::cmd_remove_missing(
                 &runner,
                 &fs,
-                Path::new(&config_path),
-                args.missing_id,
-                args.common.dry_run,
-                args.common.yes,
-                progress,
-                &paths,
+                &braid_cli::remove_missing::RemoveMissingParams {
+                    config_path: Path::new(&config_path),
+                    missing_id: args.missing_id,
+                    dry_run: args.common.dry_run,
+                    yes: args.common.yes,
+                    progress,
+                    paths: &paths,
+                },
             ) {
                 print_cli_error(&e.to_string());
                 std::process::exit(1);
@@ -329,17 +335,19 @@ fn main() {
             if let Err(e) = braid_cli::replace::cmd_replace(
                 &runner,
                 &fs,
-                Path::new(&config_path),
-                &args.old,
-                &args.new,
-                args.missing_id,
-                args.common.dry_run,
-                args.common.yes,
-                args.common.passphrase_stdin,
-                args.common.passphrase_file.as_deref(),
-                enroll_kf.as_deref(),
-                progress,
-                &paths,
+                &braid_cli::replace::ReplaceParams {
+                    config_path: Path::new(&config_path),
+                    old_name: &args.old,
+                    new_name: &args.new,
+                    missing_id: args.missing_id,
+                    dry_run: args.common.dry_run,
+                    yes: args.common.yes,
+                    passphrase_stdin: args.common.passphrase_stdin,
+                    passphrase_file: args.common.passphrase_file.as_deref(),
+                    enroll_key_file: enroll_kf.as_deref(),
+                    progress,
+                    paths: &paths,
+                },
             ) {
                 print_cli_error(&e.to_string());
                 std::process::exit(1);
@@ -387,14 +395,16 @@ fn main() {
             match braid_cli::unlock::cmd_unlock(
                 &runner,
                 &fs,
-                &config,
-                &membership,
-                &paths,
-                args.passphrase_stdin,
-                args.passphrase_file.as_deref(),
-                args.key_file.as_deref(),
-                args.allow_degraded,
-                args.dry_run,
+                &braid_cli::unlock::UnlockParams {
+                    config: &config,
+                    membership: &membership,
+                    paths: &paths,
+                    passphrase_stdin: args.passphrase_stdin,
+                    passphrase_file: args.passphrase_file.as_deref(),
+                    key_file: args.key_file.as_deref(),
+                    allow_degraded: args.allow_degraded,
+                    dry_run: args.dry_run,
+                },
             ) {
                 Ok(()) => {}
                 Err(braid_cli::unlock::UnlockError::Mount(
@@ -423,13 +433,15 @@ fn main() {
             if let Err(e) = braid_cli::enroll_key_file::cmd_enroll_key_file(
                 &runner,
                 &fs,
-                &membership,
-                &key_file_path,
-                args.generate,
-                args.passphrase_stdin,
-                args.passphrase_file.as_deref(),
-                args.dry_run,
-                &paths,
+                &braid_cli::enroll_key_file::EnrollKeyFileParams {
+                    membership: &membership,
+                    key_file_path: &key_file_path,
+                    generate: args.generate,
+                    passphrase_stdin: args.passphrase_stdin,
+                    passphrase_file: args.passphrase_file.as_deref(),
+                    dry_run: args.dry_run,
+                    paths: &paths,
+                },
             ) {
                 print_cli_error(&e.to_string());
                 std::process::exit(1);
@@ -598,12 +610,14 @@ fn main() {
             match braid_cli::recover::cmd_recover(
                 &runner,
                 &fs,
-                &config,
-                &paths,
-                args.passphrase_stdin,
-                args.passphrase_file.as_deref(),
-                args.allow_degraded,
-                args.dry_run,
+                &braid_cli::recover::RecoverParams {
+                    config: &config,
+                    paths: &paths,
+                    passphrase_stdin: args.passphrase_stdin,
+                    passphrase_file: args.passphrase_file.as_deref(),
+                    allow_degraded: args.allow_degraded,
+                    dry_run: args.dry_run,
+                },
             ) {
                 Ok(()) => {}
                 Err(braid_cli::recover::RecoverError::Mount(

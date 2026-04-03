@@ -55,19 +55,23 @@ fn resolve_removal_target(
     Ok((devid, name))
 }
 
+pub struct RemoveMissingParams<'a> {
+    pub config_path: &'a Path,
+    pub missing_id: u64,
+    pub dry_run: bool,
+    pub yes: bool,
+    pub progress: ProgressOutput,
+    pub paths: &'a StatePaths,
+}
+
 pub fn cmd_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
-    config_path: &Path,
-    missing_id: u64,
-    dry_run: bool,
-    yes: bool,
-    progress: ProgressOutput,
-    paths: &StatePaths,
+    params: &RemoveMissingParams<'_>,
 ) -> Result<(), RemoveMissingError> {
-    preflight::check_no_pending_operation(paths).map_err(RemoveMissingError::Validation)?;
+    preflight::check_no_pending_operation(params.paths).map_err(RemoveMissingError::Validation)?;
 
-    let config = config_read(config_path)?;
+    let config = config_read(params.config_path)?;
 
     let pool = match probe_pool(runner, config.mount_point().as_str()) {
         Ok(p) => p,
@@ -108,18 +112,20 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         ));
     }
 
-    if pool.devices.iter().any(|d| d.devid == missing_id) {
+    if pool.devices.iter().any(|d| d.devid == params.missing_id) {
         return Err(RemoveMissingError::Validation(format!(
-            "devid {missing_id} is a live device, not a missing one. \
-             Use 'braid remove' to remove live devices."
+            "devid {} is a live device, not a missing one. \
+             Use 'braid remove' to remove live devices.",
+            params.missing_id
         )));
     }
     let missing_devids = preflight::probe_missing_devids(runner, config.mount_point().as_str())
         .map_err(RemoveMissingError::Validation)?;
-    if !missing_devids.contains(&missing_id) {
+    if !missing_devids.contains(&params.missing_id) {
         return Err(RemoveMissingError::Validation(format!(
-            "devid {missing_id} is not a device in this pool. \
-             Use 'braid status' to see device IDs."
+            "devid {} is not a device in this pool. \
+             Use 'braid status' to see device IDs.",
+            params.missing_id
         )));
     }
 
@@ -131,26 +137,30 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     // survivor already has all data (every chunk is mirrored). This does
     // not match the reproduced relocation-failure mode.
     if pool.devices.len() >= 2 {
-        check_relocation_space(runner, config.mount_point().as_str(), Some(missing_id))?;
+        check_relocation_space(
+            runner,
+            config.mount_point().as_str(),
+            Some(params.missing_id),
+        )?;
     }
 
     let will_clear_last_missing = pool.missing_count == 1;
     let remaining_present = pool.devices.len();
     let steps = compile_steps(
-        missing_id,
+        params.missing_id,
         will_clear_last_missing,
         remaining_present,
         config.mount_point(),
     );
 
-    if dry_run {
+    if params.dry_run {
         Step::print_dry_run(&steps);
         return Ok(());
     }
 
     // Confirm
-    if !yes {
-        let device_label = format!("missing device entry (devid {missing_id})");
+    if !params.yes {
+        let device_label = format!("missing device entry (devid {})", params.missing_id);
         if remaining_present >= 2 {
             eprintln!(
                 "Remove {device_label} from pool? Data on remaining devices will be rebalanced (long-running). This does not add a replacement — use `braid replace` for that."
@@ -171,11 +181,11 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     }
 
     // Resolve devid→name from enriched pool.json and build journal before btrfs operation.
-    let pre_membership = membership::load_membership(paths).map_err(|e| {
+    let pre_membership = membership::load_membership(params.paths).map_err(|e| {
         RemoveMissingError::Validation(format!("failed to load pool membership: {e}"))
     })?;
     let (resolved_devid, name_to_remove) =
-        resolve_removal_target(Some(missing_id), &pre_membership)?;
+        resolve_removal_target(Some(params.missing_id), &pre_membership)?;
     let mut target_membership = pre_membership.clone();
     target_membership.disks.remove(&name_to_remove);
     let journal = journal::build_journal(
@@ -185,7 +195,7 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             devid: resolved_devid,
         },
     );
-    journal::write_journal(paths, &journal)
+    journal::write_journal(params.paths, &journal)
         .map_err(|e| RemoveMissingError::Validation(e.to_string()))?;
 
     // Execute
@@ -199,15 +209,16 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         runner,
         config.mount_point().as_str(),
         pool.missing_count,
-        progress,
+        params.progress,
     )
     .map_err(|e| RemoveMissingError::Pool(e))?;
 
     // Post-commit: write pool.json and clear journal only after the full operation succeeds.
-    membership::save_membership(&target_membership, paths).map_err(|e| {
+    membership::save_membership(&target_membership, params.paths).map_err(|e| {
         RemoveMissingError::Validation(format!("failed to persist pool membership: {e}"))
     })?;
-    journal::clear_journal(paths).map_err(|e| RemoveMissingError::Validation(e.to_string()))?;
+    journal::clear_journal(params.paths)
+        .map_err(|e| RemoveMissingError::Validation(e.to_string()))?;
 
     eprintln!("Done. Missing device removed from pool.");
     Ok(())
@@ -468,12 +479,14 @@ mod tests {
         cmd_remove_missing(
             &runner,
             &MockFs,
-            &config_path,
-            2,
-            false,
-            true,
-            crate::progress::ProgressOutput::Off,
-            &state_paths,
+            &RemoveMissingParams {
+                config_path: &config_path,
+                missing_id: 2,
+                dry_run: false,
+                yes: true,
+                progress: crate::progress::ProgressOutput::Off,
+                paths: &state_paths,
+            },
         )
         .expect("remove-missing should succeed");
 
@@ -831,12 +844,14 @@ mod tests {
         cmd_remove_missing(
             &runner,
             &MockFs,
-            &config_path,
-            3,
-            false,
-            true,
-            crate::progress::ProgressOutput::Off,
-            &state_paths,
+            &RemoveMissingParams {
+                config_path: &config_path,
+                missing_id: 3,
+                dry_run: false,
+                yes: true,
+                progress: crate::progress::ProgressOutput::Off,
+                paths: &state_paths,
+            },
         )
         .expect("remove-missing should succeed");
 
@@ -873,12 +888,14 @@ mod tests {
         cmd_remove_missing(
             &runner,
             &MockFs,
-            &config_path,
-            3,
-            false,
-            true,
-            crate::progress::ProgressOutput::Off,
-            &state_paths,
+            &RemoveMissingParams {
+                config_path: &config_path,
+                missing_id: 3,
+                dry_run: false,
+                yes: true,
+                progress: crate::progress::ProgressOutput::Off,
+                paths: &state_paths,
+            },
         )
         .expect("remove-missing should succeed");
 
@@ -996,12 +1013,14 @@ mod tests {
         let result = cmd_remove_missing(
             &runner,
             &MockFs,
-            &config_path,
-            3,
-            false,
-            true,
-            crate::progress::ProgressOutput::Off,
-            &state_paths,
+            &RemoveMissingParams {
+                config_path: &config_path,
+                missing_id: 3,
+                dry_run: false,
+                yes: true,
+                progress: crate::progress::ProgressOutput::Off,
+                paths: &state_paths,
+            },
         );
 
         assert!(

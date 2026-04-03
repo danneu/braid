@@ -27,18 +27,22 @@ pub enum RecoverError {
 /// This is the only path out of recovery mode. It opens LUKS devices and mounts
 /// the pool if needed, then probes the actual btrfs pool topology (not LUKS
 /// labels) and builds membership from live state.
+pub struct RecoverParams<'a> {
+    pub config: &'a Config,
+    pub paths: &'a StatePaths,
+    pub passphrase_stdin: bool,
+    pub passphrase_file: Option<&'a std::path::Path>,
+    pub allow_degraded: bool,
+    pub dry_run: bool,
+}
+
 pub fn cmd_recover<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
-    config: &Config,
-    paths: &StatePaths,
-    passphrase_stdin: bool,
-    passphrase_file: Option<&std::path::Path>,
-    allow_degraded: bool,
-    dry_run: bool,
+    params: &RecoverParams<'_>,
 ) -> Result<(), RecoverError> {
     // 1. Load journal (required — nothing to recover if absent)
-    let journal = match journal::load_journal(paths) {
+    let journal = match journal::load_journal(params.paths) {
         Ok(Some(j)) => j,
         Ok(None) => {
             return Err(RecoverError::Failed(
@@ -58,13 +62,20 @@ pub fn cmd_recover<R: CommandRunner, F: Filesystem + ?Sized>(
     let union = union_memberships(&journal);
 
     // Dry-run: probe + validate (same errors as execution), then print plan
-    if dry_run {
-        let plan = mount::plan_open_pool(runner, fs, config, &union, allow_degraded, "recover")?;
+    if params.dry_run {
+        let plan = mount::plan_open_pool(
+            runner,
+            fs,
+            params.config,
+            &union,
+            params.allow_degraded,
+            "recover",
+        )?;
         let mut steps = Vec::new();
         if plan.is_some() {
             steps.extend(mount::compile_open_steps(
                 plan.as_ref().unwrap(),
-                &config.mount_point(),
+                &params.config.mount_point(),
                 None,
             ));
         } else {
@@ -72,7 +83,7 @@ pub fn cmd_recover<R: CommandRunner, F: Filesystem + ?Sized>(
             // validation that execution does (probe_pool + membership construction).
             // This catches errors like "device X has no by-id path in either snapshot"
             // before claiming recovery is ready.
-            let mount_point = config.mount_point();
+            let mount_point = params.config.mount_point();
             let pool = probe::probe_pool(runner, mount_point.as_str())?;
             for dev in &pool.devices {
                 let Some(name) = config::name_from_mapper(&dev.mapper.0) else {
@@ -94,7 +105,7 @@ pub fn cmd_recover<R: CommandRunner, F: Filesystem + ?Sized>(
             risk: "safe",
             description: format!(
                 "write recovered pool.json → {}",
-                paths.pool_json().display()
+                params.paths.pool_json().display()
             ),
             commands: vec![],
         });
@@ -102,7 +113,7 @@ pub fn cmd_recover<R: CommandRunner, F: Filesystem + ?Sized>(
             risk: "safe",
             description: format!(
                 "clear pending-op.json → {}",
-                paths.pending_op_json().display()
+                params.paths.pending_op_json().display()
             ),
             commands: vec![],
         });
@@ -111,16 +122,16 @@ pub fn cmd_recover<R: CommandRunner, F: Filesystem + ?Sized>(
     }
 
     let credential = Credential::Passphrase {
-        passphrase_stdin,
-        passphrase_file,
+        passphrase_stdin: params.passphrase_stdin,
+        passphrase_file: params.passphrase_file,
     };
     if let Err(e) = mount::open_and_mount_pool(
         runner,
         fs,
-        config,
+        params.config,
         &union,
         credential,
-        allow_degraded,
+        params.allow_degraded,
         "recover",
     ) {
         // Bootstrap mount failure: probe the target devices to confirm no btrfs
@@ -155,7 +166,7 @@ pub fn cmd_recover<R: CommandRunner, F: Filesystem + ?Sized>(
                                 added:\n{}\n\
                                 e.g.: wipefs -a /dev/disk/by-id/<device>\n\
                              3. Re-run braid add",
-                            paths.pending_op_json().display(),
+                            params.paths.pending_op_json().display(),
                             disk_list.join("\n"),
                         )));
                     }
@@ -166,7 +177,7 @@ pub fn cmd_recover<R: CommandRunner, F: Filesystem + ?Sized>(
     }
 
     // 3. Probe live pool state
-    let mount_point = config.mount_point().as_str();
+    let mount_point = params.config.mount_point().as_str();
     let pool = probe::probe_pool(runner, mount_point)?;
 
     // 4. Build new membership from live pool state
@@ -212,11 +223,11 @@ pub fn cmd_recover<R: CommandRunner, F: Filesystem + ?Sized>(
     );
 
     // 6. Write recovered membership
-    membership::save_membership(&recovered, paths)?;
+    membership::save_membership(&recovered, params.paths)?;
     eprintln!("pool.json written from live pool state.");
 
     // 7. Clear journal
-    journal::clear_journal(paths).map_err(|e| RecoverError::Journal(e.to_string()))?;
+    journal::clear_journal(params.paths).map_err(|e| RecoverError::Journal(e.to_string()))?;
     eprintln!("pending-op.json cleared. Recovery complete.");
 
     // Best-effort: warn if a paused balance was detected (e.g. crash during
@@ -551,7 +562,18 @@ mod tests {
                 cryptsetup_uuid_ok("/dev/vdb", "22222222-2222-2222-2222-222222222222"),
             );
 
-        let result = cmd_recover(&runner, &fs, &config, &paths, false, None, false, false);
+        let result = cmd_recover(
+            &runner,
+            &fs,
+            &RecoverParams {
+                config: &config,
+                paths: &paths,
+                passphrase_stdin: false,
+                passphrase_file: None,
+                allow_degraded: false,
+                dry_run: false,
+            },
+        );
 
         // Must fail with an error mentioning the unknown device
         let err = result.unwrap_err();
@@ -711,12 +733,14 @@ mod tests {
         let result = cmd_recover(
             &runner,
             &fs,
-            &config,
-            &paths,
-            false,
-            Some(passphrase_file.path()),
-            true, // allow_degraded (disk3 is absent)
-            false,
+            &RecoverParams {
+                config: &config,
+                paths: &paths,
+                passphrase_stdin: false,
+                passphrase_file: Some(passphrase_file.path()),
+                allow_degraded: true, // disk3 is absent
+                dry_run: false,
+            },
         );
 
         result.expect("recover should self-mount and succeed");
@@ -820,12 +844,14 @@ mod tests {
         let result = cmd_recover(
             &runner,
             &fs,
-            &config,
-            &paths,
-            false,
-            Some(passphrase_file.path()),
-            false, // allow_degraded = false
-            false,
+            &RecoverParams {
+                config: &config,
+                paths: &paths,
+                passphrase_stdin: false,
+                passphrase_file: Some(passphrase_file.path()),
+                allow_degraded: false,
+                dry_run: false,
+            },
         );
 
         let err = result.expect_err("should refuse degraded mount");
@@ -911,7 +937,18 @@ mod tests {
             );
 
         // No passphrase — pool is already mounted
-        let result = cmd_recover(&runner, &fs, &config, &paths, false, None, false, false);
+        let result = cmd_recover(
+            &runner,
+            &fs,
+            &RecoverParams {
+                config: &config,
+                paths: &paths,
+                passphrase_stdin: false,
+                passphrase_file: None,
+                allow_degraded: false,
+                dry_run: false,
+            },
+        );
 
         result.expect("recover should succeed when pool already mounted");
 
@@ -1040,12 +1077,14 @@ mod tests {
         let result = cmd_recover(
             &runner,
             &fs,
-            &config,
-            &paths,
-            false,
-            Some(passphrase_file.path()),
-            false,
-            false,
+            &RecoverParams {
+                config: &config,
+                paths: &paths,
+                passphrase_stdin: false,
+                passphrase_file: Some(passphrase_file.path()),
+                allow_degraded: false,
+                dry_run: false,
+            },
         );
 
         let err = result.expect_err("should fail with bootstrap instructions");
@@ -1125,12 +1164,14 @@ mod tests {
         let result = cmd_recover(
             &runner,
             &fs,
-            &config,
-            &paths,
-            false,
-            Some(passphrase_file.path()),
-            false,
-            false,
+            &RecoverParams {
+                config: &config,
+                paths: &paths,
+                passphrase_stdin: false,
+                passphrase_file: Some(passphrase_file.path()),
+                allow_degraded: false,
+                dry_run: false,
+            },
         );
 
         let err = result.expect_err("should fail with passphrase error");
@@ -1173,7 +1214,18 @@ mod tests {
         let (mp_req, mp_out) = mountpoint_fail();
         let runner = MockRunner::default().with_output(mp_req, mp_out);
 
-        let result = cmd_recover(&runner, &fs, &config, &paths, false, None, false, false);
+        let result = cmd_recover(
+            &runner,
+            &fs,
+            &RecoverParams {
+                config: &config,
+                paths: &paths,
+                passphrase_stdin: false,
+                passphrase_file: None,
+                allow_degraded: false,
+                dry_run: false,
+            },
+        );
 
         let err = result.expect_err("should fail with mount error");
         let msg = err.to_string();
@@ -1283,12 +1335,14 @@ mod tests {
         let result = cmd_recover(
             &runner,
             &fs,
-            &config,
-            &paths,
-            false,
-            Some(passphrase_file.path()),
-            false,
-            false,
+            &RecoverParams {
+                config: &config,
+                paths: &paths,
+                passphrase_stdin: false,
+                passphrase_file: Some(passphrase_file.path()),
+                allow_degraded: false,
+                dry_run: false,
+            },
         );
 
         let err = result.expect_err("should fail with original mount error");
