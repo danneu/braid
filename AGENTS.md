@@ -132,6 +132,16 @@ When parser-critical tool versions change, run:
 
 ---
 
+## Plan Lifecycle
+
+Plans start in `plans/wip/` with random codenames (e.g. `bubbly-toasting-cerf.md`). When finishing implementation of a plan, rename it to `YYYY-MM-DD-description.md` and move it to `plans/impl/` in the same commit as the implementation.
+
+```
+git mv plans/wip/bubbly-toasting-cerf.md plans/impl/2026-04-02-pool-unlock-retry.md
+```
+
+Use today's date and a short kebab-case description. This is a required step — do not leave implemented plans in `plans/wip/`.
+
 ## Plan Review Protocol
 
 When reviewing a plan:
