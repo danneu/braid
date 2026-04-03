@@ -1,15 +1,15 @@
 use nom::{
+    IResult,
     bytes::complete::tag,
     character::complete::{not_line_ending, space0},
-    IResult,
 };
-use time::macros::format_description;
 use time::PrimitiveDateTime;
+use time::macros::format_description;
 
 use crate::cmd::RawCommandOutput;
 
-use super::types::{BtrfsScrubStatusOutput, ScrubState, ScrubTimestamp};
 use super::ParseError;
+use super::types::{BtrfsScrubStatusOutput, ScrubState, ScrubTimestamp};
 
 pub(super) fn parse_ctime(s: &str) -> Option<PrimitiveDateTime> {
     // "Tue Feb 24 02:00:07 2026" — ctime format from btrfs scrub status
@@ -98,7 +98,13 @@ pub fn parse_btrfs_scrub_status(
         } else if trimmed.ends_with("% done") {
             // e.g. "  8.00% done" on some versions, or embedded in other lines
             if let Some(pct_str) = trimmed.split('%').next() {
-                pct = pct_str.trim().parse::<f64>().ok().map(|v| v as u8);
+                pct = pct_str
+                    .trim()
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|v| (0.0..=100.0).contains(v))
+                    // Truncate towards zero; 99.5% shouldn't round to 100%
+                    .map(|v| v as u8);
             }
         }
     }
