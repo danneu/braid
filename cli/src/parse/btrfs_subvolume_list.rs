@@ -1,8 +1,8 @@
 use nom::{
     bytes::complete::tag,
     character::complete::{digit1, space1},
-    combinator::rest,
-    IResult,
+    combinator::{map_res, rest},
+    IResult, Parser,
 };
 
 use crate::cmd::RawCommandOutput;
@@ -18,17 +18,17 @@ use super::ParseError;
 fn parse_subvolume_line(input: &str) -> IResult<&str, BtrfsSubvolume> {
     let (input, _) = tag("ID")(input)?;
     let (input, _) = space1(input)?;
-    let (input, id_str) = digit1(input)?;
+    let (input, id) = map_res(digit1, str::parse::<u64>).parse(input)?;
     let (input, _) = space1(input)?;
     let (input, _) = tag("gen")(input)?;
     let (input, _) = space1(input)?;
-    let (input, gen_str) = digit1(input)?;
+    let (input, generation) = map_res(digit1, str::parse::<u64>).parse(input)?;
     let (input, _) = space1(input)?;
     let (input, _) = tag("top")(input)?;
     let (input, _) = space1(input)?;
     let (input, _) = tag("level")(input)?;
     let (input, _) = space1(input)?;
-    let (input, top_level_str) = digit1(input)?;
+    let (input, top_level) = map_res(digit1, str::parse::<u64>).parse(input)?;
     let (input, _) = space1(input)?;
     let (input, _) = tag("path")(input)?;
     let (input, _) = space1(input)?;
@@ -37,9 +37,9 @@ fn parse_subvolume_line(input: &str) -> IResult<&str, BtrfsSubvolume> {
     Ok((
         input,
         BtrfsSubvolume {
-            id: id_str.parse().unwrap(),
-            generation: gen_str.parse().unwrap(),
-            top_level: top_level_str.parse().unwrap(),
+            id,
+            generation,
+            top_level,
             path: path.to_owned(),
         },
     ))
