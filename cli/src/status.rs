@@ -1361,6 +1361,12 @@ mod tests {
         ok_raw(cmd, &format!("{value}\n"))
     }
 
+    fn test_paths() -> (tempfile::TempDir, StatePaths) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        (tmp, paths)
+    }
+
     fn config_3disk() -> Config {
         Config::new(MountPoint("/mnt/storage".to_owned())).unwrap()
     }
@@ -1620,7 +1626,8 @@ mod tests {
         );
 
         // Also verify cmd_status doesn't error
-        let _ = cmd_status(&runner, &fs, &config, false, &StatePaths::production());
+        let (_tmp, paths) = test_paths();
+        let _ = cmd_status(&runner, &fs, &config, false, &paths);
     }
 
     #[test]
@@ -2780,7 +2787,8 @@ mod tests {
         let config = config_3disk();
 
         // cmd_status should succeed (not error), treating it as not-mounted
-        let result = cmd_status(&runner, &fs, &config, false, &StatePaths::production());
+        let (_tmp, paths) = test_paths();
+        let result = cmd_status(&runner, &fs, &config, false, &paths);
         assert!(result.is_ok(), "expected Ok, got: {result:?}");
     }
 
@@ -2803,8 +2811,9 @@ mod tests {
         let fs = MockFs::new(&[]);
         let config = config_3disk();
 
-        let result = cmd_status(&runner, &fs, &config, false, &StatePaths::production());
-        assert!(result.is_ok());
+        let (_tmp, paths) = test_paths();
+        let result = cmd_status(&runner, &fs, &config, false, &paths);
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
     }
 
     #[test]
@@ -2813,7 +2822,8 @@ mod tests {
         let fs = fs_3disk();
         let config = config_3disk();
 
-        let result = cmd_status(&runner, &fs, &config, false, &StatePaths::production());
+        let (_tmp, paths) = test_paths();
+        let result = cmd_status(&runner, &fs, &config, false, &paths);
         assert!(result.is_ok());
     }
 
@@ -2823,7 +2833,8 @@ mod tests {
         let fs = fs_3disk();
         let config = config_3disk();
 
-        let result = cmd_status(&runner, &fs, &config, true, &StatePaths::production());
+        let (_tmp, paths) = test_paths();
+        let result = cmd_status(&runner, &fs, &config, true, &paths);
         assert!(result.is_ok());
     }
 
@@ -2921,7 +2932,8 @@ mod tests {
         let fs = fs_3disk();
         let config = config_3disk();
 
-        let result = cmd_status(&runner, &fs, &config, false, &StatePaths::production());
+        let (_tmp, paths) = test_paths();
+        let result = cmd_status(&runner, &fs, &config, false, &paths);
         assert!(result.is_ok());
     }
 
@@ -3000,7 +3012,8 @@ mod tests {
         let fs = fs_1disk();
         let config = config_1disk();
 
-        let result = cmd_status(&runner, &fs, &config, false, &StatePaths::production());
+        let (_tmp, paths) = test_paths();
+        let result = cmd_status(&runner, &fs, &config, false, &paths);
         assert!(result.is_ok());
     }
 

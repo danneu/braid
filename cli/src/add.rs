@@ -811,8 +811,10 @@ fn format_add_confirm(disks: &[AddConfirmDisk]) -> String {
 mod tests {
     use super::*;
 
-    fn test_paths() -> StatePaths {
-        StatePaths::custom("/var/lib/braid".into())
+    fn test_paths() -> (tempfile::TempDir, StatePaths) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        (tmp, paths)
     }
 
     #[test]
@@ -921,6 +923,7 @@ mod tests {
 
         let runner = MockRunner::default();
         let fs = MockFs;
+        let (_state_dir, sp) = test_paths();
 
         let result = cmd_add(
             &runner,
@@ -937,7 +940,7 @@ mod tests {
                 passphrase_file: None,
                 enroll_key_file: None,
                 progress: ProgressOutput::Off,
-                paths: &StatePaths::production(),
+                paths: &sp,
             },
         );
         let err = result.unwrap_err().to_string();
@@ -1214,7 +1217,7 @@ mod tests {
                 probed: &probed,
                 pool: &pool,
                 mount_point: &MountPoint("/mnt/storage".into()),
-                paths: &test_paths(),
+                paths: &test_paths().1,
                 enroll_key_file: None,
             },
         );
@@ -1255,7 +1258,7 @@ mod tests {
                 probed: &probed,
                 pool: &pool,
                 mount_point: &MountPoint("/mnt/storage".into()),
-                paths: &test_paths(),
+                paths: &test_paths().1,
                 enroll_key_file: None,
             },
         );
@@ -1286,7 +1289,7 @@ mod tests {
                 probed: &probed,
                 pool: &pool,
                 mount_point: &MountPoint("/mnt/storage".into()),
-                paths: &test_paths(),
+                paths: &test_paths().1,
                 enroll_key_file: None,
             },
         )
@@ -1320,7 +1323,7 @@ mod tests {
                 probed: &probed,
                 pool: &pool,
                 mount_point: &MountPoint("/mnt/storage".into()),
-                paths: &test_paths(),
+                paths: &test_paths().1,
                 enroll_key_file: None,
             },
         );
@@ -1350,7 +1353,7 @@ mod tests {
                 probed: &probed,
                 pool: &pool,
                 mount_point: &MountPoint("/mnt/storage".into()),
-                paths: &test_paths(),
+                paths: &test_paths().1,
                 enroll_key_file: None,
             },
         )
@@ -1498,7 +1501,7 @@ mod tests {
                 probed: &probed,
                 pool: &pool,
                 mount_point: &MountPoint("/mnt/storage".into()),
-                paths: &test_paths(),
+                paths: &test_paths().1,
                 enroll_key_file: None,
             },
         )
@@ -2016,7 +2019,7 @@ mod tests {
                 probed: &probed,
                 pool: &pool,
                 mount_point: &MountPoint("/mnt/storage".into()),
-                paths: &test_paths(),
+                paths: &test_paths().1,
                 enroll_key_file: None,
             },
         )
@@ -2072,7 +2075,7 @@ mod tests {
                 probed: &probed,
                 pool: &pool,
                 mount_point: &MountPoint("/mnt/storage".into()),
-                paths: &test_paths(),
+                paths: &test_paths().1,
                 enroll_key_file: None,
             },
         )

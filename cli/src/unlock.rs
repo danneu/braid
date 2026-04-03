@@ -115,6 +115,12 @@ mod tests {
     use crate::types::{ByIdPath, MountPoint};
     use std::collections::BTreeMap;
 
+    fn test_paths() -> (tempfile::TempDir, StatePaths) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        (tmp, paths)
+    }
+
     struct MockFs {
         paths: Vec<String>,
     }
@@ -191,6 +197,7 @@ mod tests {
     /// btrfs will see a missing member device.
     #[test]
     fn unlock_bricked_disk_uses_degraded_mount() {
+        let (_state_dir, sp) = test_paths();
         let config = three_disk_config();
         let membership = three_disk_membership();
 
@@ -308,7 +315,7 @@ mod tests {
             &UnlockParams {
                 config: &config,
                 membership: &membership,
-                paths: &StatePaths::production(),
+                paths: &sp,
                 passphrase_stdin: false,
                 passphrase_file: Some(tmp.path()),
                 key_file: None,
@@ -329,6 +336,7 @@ mod tests {
     /// the flag. The error must tell the user how to proceed.
     #[test]
     fn unlock_bricked_disk_refuses_without_flag() {
+        let (_state_dir, sp) = test_paths();
         let config = three_disk_config();
         let membership = three_disk_membership();
 
@@ -420,7 +428,7 @@ mod tests {
             &UnlockParams {
                 config: &config,
                 membership: &membership,
-                paths: &StatePaths::production(),
+                paths: &sp,
                 passphrase_stdin: false,
                 passphrase_file: Some(tmp.path()),
                 key_file: None,
@@ -461,6 +469,7 @@ mod tests {
     /// naming both disks.
     #[test]
     fn passphrase_mismatch_names_failing_disk() {
+        let (_state_dir, sp) = test_paths();
         let config = Config::new(MountPoint("/mnt/storage".to_owned())).unwrap();
         let mut membership_disks = BTreeMap::new();
         for (name, path) in [
@@ -556,7 +565,7 @@ mod tests {
             &UnlockParams {
                 config: &config,
                 membership: &membership,
-                paths: &StatePaths::production(),
+                paths: &sp,
                 passphrase_stdin: false,
                 passphrase_file: Some(tmp.path()),
                 key_file: None,
@@ -594,6 +603,7 @@ mod tests {
     /// prints a warning. Unlock still succeeds.
     #[test]
     fn unlock_warns_on_paused_balance() {
+        let (_state_dir, sp) = test_paths();
         let config = three_disk_config();
         let membership = three_disk_membership();
         let fs = MockFs::new(&[
@@ -715,7 +725,7 @@ mod tests {
             &UnlockParams {
                 config: &config,
                 membership: &membership,
-                paths: &StatePaths::production(),
+                paths: &sp,
                 passphrase_stdin: false,
                 passphrase_file: Some(tmp.path()),
                 key_file: None,
@@ -733,6 +743,7 @@ mod tests {
     // Scenario: 2-disk pool, both present, both closed, --dry-run.
     #[test]
     fn dry_run_render_unlock_2_closed_disks() {
+        let (_state_dir, sp) = test_paths();
         let config = Config::new(MountPoint("/mnt/storage".to_owned())).unwrap();
         let mut disks = BTreeMap::new();
         for (name, path) in [
@@ -787,7 +798,7 @@ mod tests {
             &UnlockParams {
                 config: &config,
                 membership: &membership,
-                paths: &StatePaths::production(),
+                paths: &sp,
                 passphrase_stdin: false,
                 passphrase_file: None,
                 key_file: None,
@@ -803,6 +814,7 @@ mod tests {
     // Scenario: 3-disk pool, disk3 absent, --dry-run without --allow-degraded.
     #[test]
     fn dry_run_unlock_degraded_refused() {
+        let (_state_dir, sp) = test_paths();
         let config = three_disk_config();
         let membership = three_disk_membership();
         let fs = MockFs::new(&[
@@ -856,7 +868,7 @@ mod tests {
             &UnlockParams {
                 config: &config,
                 membership: &membership,
-                paths: &StatePaths::production(),
+                paths: &sp,
                 passphrase_stdin: false,
                 passphrase_file: None,
                 key_file: None,

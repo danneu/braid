@@ -723,8 +723,10 @@ mod tests {
     use crate::cmd::{CmdRequest, MockRunner, RawCommandOutput};
     use crate::state_paths::StatePaths;
 
-    fn test_paths() -> StatePaths {
-        StatePaths::custom("/var/lib/braid".into())
+    fn test_paths() -> (tempfile::TempDir, StatePaths) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        (tmp, paths)
     }
 
     #[test]
@@ -986,7 +988,7 @@ mod tests {
             mount_point: &MountPoint("/mnt/storage".into()),
             will_clear_last_missing: false,
             total_devices: 2,
-            paths: &test_paths(),
+            paths: &test_paths().1,
             enroll_key_file: None,
         })
         .unwrap();
@@ -1046,7 +1048,7 @@ mod tests {
             mount_point: &MountPoint("/mnt/storage".into()),
             will_clear_last_missing: true,
             total_devices: 2,
-            paths: &test_paths(),
+            paths: &test_paths().1,
             enroll_key_file: None,
         })
         .unwrap();
@@ -1277,7 +1279,7 @@ mod tests {
             mount_point: &MountPoint("/mnt/storage".into()),
             will_clear_last_missing: false,
             total_devices: 3,
-            paths: &test_paths(),
+            paths: &test_paths().1,
             enroll_key_file: None,
         })
         .unwrap();
@@ -1306,7 +1308,7 @@ mod tests {
             mount_point: &MountPoint("/mnt/storage".into()),
             will_clear_last_missing: true,
             total_devices: 1,
-            paths: &test_paths(),
+            paths: &test_paths().1,
             enroll_key_file: None,
         })
         .unwrap();
@@ -1497,7 +1499,7 @@ mod tests {
             mount_point: &MountPoint("/mnt/storage".into()),
             will_clear_last_missing: false,
             total_devices: 2,
-            paths: &test_paths(),
+            paths: &test_paths().1,
             enroll_key_file: None,
         })
         .unwrap();
@@ -1529,7 +1531,7 @@ mod tests {
             mount_point: &MountPoint("/mnt/storage".into()),
             will_clear_last_missing: false,
             total_devices: 2,
-            paths: &test_paths(),
+            paths: &test_paths().1,
             enroll_key_file: Some(kf),
         })
         .unwrap();

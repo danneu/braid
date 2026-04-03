@@ -345,6 +345,12 @@ mod tests {
     use crate::types::ByIdPath;
     use std::collections::BTreeMap;
 
+    fn test_paths() -> (tempfile::TempDir, StatePaths) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        (tmp, paths)
+    }
+
     struct MockFs {
         paths: Vec<String>,
     }
@@ -904,7 +910,7 @@ mod tests {
             by_id: by_id(d1),
         }];
 
-        let paths = crate::state_paths::StatePaths::production();
+        let (_state_dir, paths) = test_paths();
         apply_enrollment(&runner, &plan, pass, Path::new(kf), &paths).unwrap();
     }
 
@@ -1065,7 +1071,7 @@ mod tests {
             ("bbb".to_owned(), by_id("/dev/disk/by-id/disk-bbb")),
             ("ccc".to_owned(), by_id("/dev/disk/by-id/disk-ccc")),
         ];
-        let paths = StatePaths::custom("/var/lib/braid".into());
+        let (_state_dir, paths) = test_paths();
         let steps =
             compile_enroll_steps(&candidates, Path::new("/mnt/usb/braid.key"), true, &paths);
         let output = Step::render_dry_run(&steps);
@@ -1093,7 +1099,7 @@ mod tests {
             ("aaa".to_owned(), by_id("/dev/disk/by-id/disk-aaa")),
             ("bbb".to_owned(), by_id("/dev/disk/by-id/disk-bbb")),
         ];
-        let paths = StatePaths::custom("/var/lib/braid".into());
+        let (_state_dir, paths) = test_paths();
         let steps =
             compile_enroll_steps(&candidates, Path::new("/mnt/usb/braid.key"), false, &paths);
         let output = Step::render_dry_run(&steps);

@@ -595,7 +595,7 @@ mod tests {
         let report = run_doctor(
             Path::new("/tmp/nonexistent-braid-doctor-test.json"),
             &mock(),
-            &StatePaths::production(),
+            &isolated_paths().1,
         );
         assert_eq!(report.status, CheckStatus::Fail);
         assert_eq!(find_check(&report, "config_file").status, CheckStatus::Fail);
@@ -612,7 +612,7 @@ mod tests {
     #[test]
     fn invalid_json_fail_skip() {
         let f = write_temp("not json at all {{{");
-        let report = run_doctor(f.path(), &mock(), &StatePaths::production());
+        let report = run_doctor(f.path(), &mock(), &isolated_paths().1);
         assert_eq!(report.status, CheckStatus::Fail);
         assert_eq!(find_check(&report, "config_file").status, CheckStatus::Fail);
         assert_eq!(
@@ -629,7 +629,7 @@ mod tests {
     fn valid_json_with_extra_fields_parses_ok() {
         // Config no longer has disks — extra fields are ignored.
         let f = write_temp(r#"{"disks":{},"mount_point":"/mnt/storage"}"#);
-        let report = run_doctor(f.path(), &mock(), &StatePaths::production());
+        let report = run_doctor(f.path(), &mock(), &isolated_paths().1);
         assert_eq!(find_check(&report, "config_file").status, CheckStatus::Ok);
         assert_eq!(find_check(&report, "config_schema").status, CheckStatus::Ok);
     }
@@ -637,7 +637,7 @@ mod tests {
     #[test]
     fn valid_json_bad_schema_empty_mount() {
         let f = write_temp(r#"{"disks":{"a":{"by_id":"/dev/disk/by-id/a"}},"mount_point":""}"#);
-        let report = run_doctor(f.path(), &mock(), &StatePaths::production());
+        let report = run_doctor(f.path(), &mock(), &isolated_paths().1);
         assert_eq!(find_check(&report, "config_file").status, CheckStatus::Ok);
         let schema = find_check(&report, "config_schema");
         assert_eq!(schema.status, CheckStatus::Fail);
@@ -716,7 +716,7 @@ mod tests {
     #[test]
     fn human_format_contains_tags() {
         let f = write_temp(valid_config_json());
-        let report = run_doctor(f.path(), &mock(), &StatePaths::production());
+        let report = run_doctor(f.path(), &mock(), &isolated_paths().1);
         let human = format_doctor_human(&report);
         assert!(human.contains("[ok  ]"), "expected [ok  ] tag:\n{human}");
         assert!(
@@ -734,7 +734,7 @@ mod tests {
         let report = run_doctor(
             Path::new("/tmp/nonexistent-braid-doctor-test.json"),
             &mock(),
-            &StatePaths::production(),
+            &isolated_paths().1,
         );
         let human = format_doctor_human(&report);
         assert!(human.contains("[FAIL]"), "expected [FAIL] tag:\n{human}");
@@ -746,7 +746,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let f = write_temp(valid_config_json());
         std::fs::set_permissions(f.path(), std::fs::Permissions::from_mode(0o666)).unwrap();
-        let report = run_doctor(f.path(), &mock(), &StatePaths::production());
+        let report = run_doctor(f.path(), &mock(), &isolated_paths().1);
         let perm = find_check(&report, "config_permissions");
         assert_eq!(perm.status, CheckStatus::Warn);
         assert!(perm.message.contains("world-writable"), "{}", perm.message);
@@ -758,7 +758,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let f = write_temp(valid_config_json());
         std::fs::set_permissions(f.path(), std::fs::Permissions::from_mode(0o600)).unwrap();
-        let report = run_doctor(f.path(), &mock(), &StatePaths::production());
+        let report = run_doctor(f.path(), &mock(), &isolated_paths().1);
         let perm = find_check(&report, "config_permissions");
         // May still warn about uid (tests don't run as root), but should not
         // warn about world/group bits.
@@ -779,7 +779,7 @@ mod tests {
         let report = run_doctor(
             Path::new("/tmp/nonexistent-braid-doctor-test.json"),
             &mock(),
-            &StatePaths::production(),
+            &isolated_paths().1,
         );
         let perm = find_check(&report, "config_permissions");
         assert_eq!(perm.status, CheckStatus::Skip);
@@ -788,7 +788,7 @@ mod tests {
     #[test]
     fn human_format_contains_perms_label() {
         let f = write_temp(valid_config_json());
-        let report = run_doctor(f.path(), &mock(), &StatePaths::production());
+        let report = run_doctor(f.path(), &mock(), &isolated_paths().1);
         let human = format_doctor_human(&report);
         assert!(
             human.contains("config perms"),
@@ -829,7 +829,7 @@ mod tests {
     #[test]
     fn human_format_contains_declared_disks_label() {
         let f = write_temp(valid_config_json());
-        let report = run_doctor(f.path(), &mock(), &StatePaths::production());
+        let report = run_doctor(f.path(), &mock(), &isolated_paths().1);
         let human = format_doctor_human(&report);
         assert!(
             human.contains("declared disks"),
@@ -922,7 +922,7 @@ mod tests {
             .with_output(mp_req, mp_out)
             .with_output(df_req, df_out);
         let f = write_temp(valid_config_json());
-        let report = run_doctor(f.path(), &runner, &StatePaths::production());
+        let report = run_doctor(f.path(), &runner, &isolated_paths().1);
         let check = find_check(&report, "data_profile_mismatch");
         assert_eq!(check.status, CheckStatus::Ok);
         assert!(
@@ -940,7 +940,7 @@ mod tests {
             .with_output(mp_req, mp_out)
             .with_output(df_req, df_out);
         let f = write_temp(valid_config_json());
-        let report = run_doctor(f.path(), &runner, &StatePaths::production());
+        let report = run_doctor(f.path(), &runner, &isolated_paths().1);
         let check = find_check(&report, "data_profile_mismatch");
         assert_eq!(check.status, CheckStatus::Warn);
         assert!(
@@ -970,7 +970,7 @@ mod tests {
             .with_output(mp_req, mp_out)
             .with_output(df_req, df_out);
         let f = write_temp(valid_config_json());
-        let report = run_doctor(f.path(), &runner, &StatePaths::production());
+        let report = run_doctor(f.path(), &runner, &isolated_paths().1);
         let check = find_check(&report, "data_profile_mismatch");
         assert_eq!(check.status, CheckStatus::Ok);
     }
@@ -980,7 +980,7 @@ mod tests {
         let report = run_doctor(
             Path::new("/tmp/nonexistent-braid-doctor-test.json"),
             &mock(),
-            &StatePaths::production(),
+            &isolated_paths().1,
         );
         let check = find_check(&report, "data_profile_mismatch");
         assert_eq!(check.status, CheckStatus::Skip);
@@ -996,7 +996,7 @@ mod tests {
         let (mp_req, mp_out) = mountpoint_fail();
         let runner = mock().with_output(mp_req, mp_out);
         let f = write_temp(valid_config_json());
-        let report = run_doctor(f.path(), &runner, &StatePaths::production());
+        let report = run_doctor(f.path(), &runner, &isolated_paths().1);
         let check = find_check(&report, "data_profile_mismatch");
         assert_eq!(check.status, CheckStatus::Skip);
         assert!(check.message.contains("not mounted"), "{}", check.message);
@@ -1010,7 +1010,7 @@ mod tests {
             .with_output(mp_req, mp_out)
             .with_output(df_req, df_out);
         let f = write_temp(valid_config_json());
-        let report = run_doctor(f.path(), &runner, &StatePaths::production());
+        let report = run_doctor(f.path(), &runner, &isolated_paths().1);
         let check = find_check(&report, "data_profile_mismatch");
         assert_eq!(check.status, CheckStatus::Warn);
         assert!(
@@ -1043,7 +1043,7 @@ mod tests {
             .with_output(mp_req, mp_out)
             .with_output(df_req, df_out);
         let f = write_temp(valid_config_json());
-        let report = run_doctor(f.path(), &runner, &StatePaths::production());
+        let report = run_doctor(f.path(), &runner, &isolated_paths().1);
         let check = find_check(&report, "metadata_profile_mismatch");
         assert_eq!(check.status, CheckStatus::Ok);
         assert!(
@@ -1066,7 +1066,7 @@ mod tests {
             .with_output(mp_req, mp_out)
             .with_output(df_req, df_out);
         let f = write_temp(valid_config_json());
-        let report = run_doctor(f.path(), &runner, &StatePaths::production());
+        let report = run_doctor(f.path(), &runner, &isolated_paths().1);
         let check = find_check(&report, "metadata_profile_mismatch");
         assert_eq!(check.status, CheckStatus::Warn);
         assert!(
@@ -1090,7 +1090,7 @@ mod tests {
         let report = run_doctor(
             Path::new("/tmp/nonexistent-braid-doctor-test.json"),
             &mock(),
-            &StatePaths::production(),
+            &isolated_paths().1,
         );
         let check = find_check(&report, "metadata_profile_mismatch");
         assert_eq!(check.status, CheckStatus::Skip);
@@ -1109,7 +1109,7 @@ mod tests {
         let (mp_req, mp_out) = mountpoint_fail();
         let runner = mock().with_output(mp_req, mp_out);
         let f = write_temp(valid_config_json());
-        let report = run_doctor(f.path(), &runner, &StatePaths::production());
+        let report = run_doctor(f.path(), &runner, &isolated_paths().1);
         let check = find_check(&report, "metadata_profile_mismatch");
         assert_eq!(check.status, CheckStatus::Skip);
         assert!(check.message.contains("not mounted"), "{}", check.message);
@@ -1126,7 +1126,7 @@ mod tests {
             .with_output(mp_req, mp_out)
             .with_output(df_req, df_out);
         let f = write_temp(valid_config_json());
-        let report = run_doctor(f.path(), &runner, &StatePaths::production());
+        let report = run_doctor(f.path(), &runner, &isolated_paths().1);
         let human = format_doctor_human(&report);
         assert!(
             human.contains("meta profiles"),
@@ -1199,7 +1199,7 @@ mod tests {
             .with_output(df_req, df_out)
             .with_output(du_req, du_out);
         let f = write_temp(valid_config_json());
-        let report = run_doctor(f.path(), &runner, &StatePaths::production());
+        let report = run_doctor(f.path(), &runner, &isolated_paths().1);
         let check = find_check(&report, "pool_missing_devices");
         assert_eq!(check.status, CheckStatus::Ok);
         assert!(check.message.contains("no missing"), "{}", check.message);
@@ -1218,7 +1218,7 @@ mod tests {
             .with_output(df_req, df_out)
             .with_output(du_req, du_out);
         let f = write_temp(valid_config_json());
-        let report = run_doctor(f.path(), &runner, &StatePaths::production());
+        let report = run_doctor(f.path(), &runner, &isolated_paths().1);
         let check = find_check(&report, "pool_missing_devices");
         assert_eq!(check.status, CheckStatus::Warn);
         assert!(
@@ -1251,7 +1251,7 @@ mod tests {
         let (mp_req, mp_out) = mountpoint_fail();
         let runner = mock().with_output(mp_req, mp_out);
         let f = write_temp(valid_config_json());
-        let report = run_doctor(f.path(), &runner, &StatePaths::production());
+        let report = run_doctor(f.path(), &runner, &isolated_paths().1);
         let check = find_check(&report, "pool_missing_devices");
         assert_eq!(check.status, CheckStatus::Skip);
     }
@@ -1269,7 +1269,7 @@ mod tests {
             .with_output(df_req, df_out)
             .with_output(du_req, du_out);
         let f = write_temp(valid_config_json());
-        let report = run_doctor(f.path(), &runner, &StatePaths::production());
+        let report = run_doctor(f.path(), &runner, &isolated_paths().1);
         let human = format_doctor_human(&report);
         assert!(
             human.contains("missing devs"),

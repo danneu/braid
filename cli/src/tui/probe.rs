@@ -189,6 +189,12 @@ mod tests {
     use crate::cmd::{MockRunner, RawCommandOutput};
     use crate::parse::types::DeviceAllocation;
 
+    fn test_paths() -> (tempfile::TempDir, StatePaths) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        (tmp, paths)
+    }
+
     fn ok_raw(cmd: &str, stdout: &str) -> RawCommandOutput {
         RawCommandOutput {
             cmd: cmd.to_owned(),
@@ -321,7 +327,7 @@ mod tests {
             &runner,
             "/mnt/storage",
             &HashMap::new(),
-            &StatePaths::production(),
+            &test_paths().1,
         )
         .unwrap();
         let pool = result.expect("pool should be Some");
