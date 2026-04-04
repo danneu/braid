@@ -45,7 +45,15 @@ with subtest("Precondition: pool offline after boot"):
     machine.fail("test -e /dev/mapper/braid-disk1")
     machine.fail("test -e /dev/mapper/braid-disk2")
 
-# --- Subtest 2: Direct start skipped when pool unmounted ---
+# --- Subtest 2: braid-online has generous stop timeout ---
+
+with subtest("braid-online has generous stop timeout"):
+    timeout = machine.succeed(
+        "systemctl show braid-online.service -p TimeoutStopUSec --value"
+    ).strip()
+    assert timeout == "5min", "Expected TimeoutStopUSec=5min, got {}".format(timeout)
+
+# --- Subtest 3: Direct start skipped when pool unmounted ---
 
 with subtest("Direct start of braid-online.service skipped when pool unmounted"):
     # ConditionPathIsMountPoint causes systemd to skip activation (exit 0)

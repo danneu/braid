@@ -93,6 +93,9 @@ in
         RemainAfterExit = true;
         ExecStart = "${pkgs.coreutils}/bin/true";
         ExecStop = "${braidWrapped}/bin/braid lock";
+        # Raise the stop timeout from the 90s default so a slow braid lock
+        # isn't SIGKILL'd mid-operation.
+        TimeoutStopSec = "5min";
       };
     };
 

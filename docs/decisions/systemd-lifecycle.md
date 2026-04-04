@@ -78,6 +78,7 @@ State-ownership service. Its only purpose is to mark "pool is online" and run `b
 - `ExecStop = braid lock` — unmounts pool and closes all LUKS on shutdown or manual stop.
 - `RemainAfterExit = true` — persists "active" state.
 - `ConditionPathIsMountPoint = ${mountPoint}` — systemd skips activation when the pool is not mounted (`systemctl start` returns 0 but the unit stays inactive). Defense-in-depth: the wrapper's `mountpoint -q` check is the primary gate, but this condition prevents direct `systemctl start` from leaving the unit active while unmounted.
+- `TimeoutStopSec = 5min` — raises the stop timeout from the 90s default so a slow braid lock isn't SIGKILL'd mid-operation.
 - **Not in any dependency chain.** Neither the target nor unlock services want/require it. Activated exclusively by the CLI wrapper after `mountpoint -q` confirms the pool is mounted.
 
 ### mnt-storage.mount — readiness contract
