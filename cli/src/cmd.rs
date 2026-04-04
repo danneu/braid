@@ -1,4 +1,5 @@
 use crate::types::MountPoint;
+use std::os::unix::process::ExitStatusExt;
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -739,6 +740,52 @@ pub trait CommandRunner: Sync {
     ) -> Result<RawCommandOutput, CmdError>;
 }
 
+fn signal_name(sig: i32) -> &'static str {
+    match sig {
+        libc::SIGHUP => "SIGHUP",
+        libc::SIGINT => "SIGINT",
+        libc::SIGQUIT => "SIGQUIT",
+        libc::SIGILL => "SIGILL",
+        libc::SIGABRT => "SIGABRT",
+        libc::SIGBUS => "SIGBUS",
+        libc::SIGFPE => "SIGFPE",
+        libc::SIGKILL => "SIGKILL",
+        libc::SIGSEGV => "SIGSEGV",
+        libc::SIGPIPE => "SIGPIPE",
+        libc::SIGALRM => "SIGALRM",
+        libc::SIGTERM => "SIGTERM",
+        _ => "unknown",
+    }
+}
+
+fn output_to_raw(
+    cmd_str: String,
+    output: std::process::Output,
+) -> Result<RawCommandOutput, CmdError> {
+    let exit_status = match output.status.code() {
+        Some(code) => code,
+        None => {
+            let sig = output.status.signal().unwrap_or(0);
+            let name = signal_name(sig);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stderr = stderr.trim();
+            let detail = if stderr.is_empty() {
+                format!("{cmd_str}: killed by signal {sig} ({name})")
+            } else {
+                format!("{cmd_str}: killed by signal {sig} ({name}): {stderr}")
+            };
+            return Err(CmdError::Failed(detail));
+        }
+    };
+
+    Ok(RawCommandOutput {
+        cmd: cmd_str,
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        exit_status,
+    })
+}
+
 pub struct RealRunner;
 
 impl RealRunner {
@@ -752,14 +799,7 @@ impl RealRunner {
             .output()
             .map_err(|e| CmdError::Failed(format!("{cmd_str}: {e}")))?;
 
-        let exit_status = output.status.code().unwrap_or(-1);
-
-        Ok(RawCommandOutput {
-            cmd: cmd_str,
-            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-            exit_status,
-        })
+        output_to_raw(cmd_str, output)
     }
 
     fn exec_with_stdin(cmd: &CmdArgs, stdin_bytes: &[u8]) -> Result<RawCommandOutput, CmdError> {
@@ -788,14 +828,7 @@ impl RealRunner {
             .wait_with_output()
             .map_err(|e| CmdError::Failed(format!("{cmd_str}: {e}")))?;
 
-        let exit_status = output.status.code().unwrap_or(-1);
-
-        Ok(RawCommandOutput {
-            cmd: cmd_str,
-            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-            exit_status,
-        })
+        output_to_raw(cmd_str, output)
     }
 }
 
@@ -1376,5 +1409,60 @@ mod tests {
             lines[0],
             "[safe       ] identity verification at execution time"
         );
+    }
+
+    // Intent: output_to_raw returns CmdError::Failed with signal number and name
+    //   when the child was killed by a signal.
+    // Why: Without this, signal kills silently become exit_status=-1, producing
+    //   confusing "failed (exit -1)" messages with no indication of what happened.
+    // Scenario: OOM-killer sends SIGKILL to cryptsetup during luksOpen — braid
+    //   must report the signal, not a mysterious -1.
+    #[test]
+    fn output_to_raw_signal_killed_returns_error() {
+        use std::process::ExitStatus;
+
+        let status = ExitStatus::from_raw(libc::SIGKILL);
+        let output = std::process::Output {
+            status,
+            stdout: Vec::new(),
+            stderr: b"partial output".to_vec(),
+        };
+        let result = output_to_raw("cryptsetup luksOpen /dev/sda".into(), output);
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("signal 9"), "expected signal 9 in: {msg}");
+        assert!(msg.contains("SIGKILL"), "expected SIGKILL in: {msg}");
+        assert!(msg.contains("partial output"), "expected stderr in: {msg}");
+    }
+
+    // Intent: output_to_raw returns Ok(RawCommandOutput) for normal exits.
+    // Why: Refactoring exec()/exec_with_stdin() to use output_to_raw must not
+    //   change behavior for the normal (non-signal) path.
+    // Scenario: Any normal command execution — exit 0 or non-zero exit code.
+    #[test]
+    fn output_to_raw_normal_exit_returns_output() {
+        use std::process::ExitStatus;
+
+        let status = ExitStatus::from_raw(5 << 8);
+        let output = std::process::Output {
+            status,
+            stdout: b"some stdout".to_vec(),
+            stderr: b"some stderr".to_vec(),
+        };
+        let raw = output_to_raw("test cmd".into(), output).unwrap();
+        assert_eq!(raw.exit_status, 5);
+        assert_eq!(raw.stdout, "some stdout");
+        assert_eq!(raw.stderr, "some stderr");
+    }
+
+    // Intent: signal_name returns correct POSIX names for common signals and
+    //   "unknown" for unrecognized values.
+    // Why: Wrong signal names in error messages would mislead debugging.
+    // Scenario: User sees "killed by signal 9 (SIGKILL)" — the name must match.
+    #[test]
+    fn signal_name_maps_known_signals() {
+        assert_eq!(signal_name(libc::SIGKILL), "SIGKILL");
+        assert_eq!(signal_name(libc::SIGTERM), "SIGTERM");
+        assert_eq!(signal_name(libc::SIGPIPE), "SIGPIPE");
+        assert_eq!(signal_name(999), "unknown");
     }
 }
