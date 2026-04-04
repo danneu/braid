@@ -48,14 +48,11 @@ in
     systemd.services.braid-scrub = lib.mkIf cfg.autoScrub.enable {
       description = "btrfs scrub on ${cfg.mountPoint}";
       documentation = [ "man:btrfs-scrub(8)" ];
-      conflicts = [
-        "shutdown.target"
-        "sleep.target"
-      ];
-      before = [
-        "shutdown.target"
-        "sleep.target"
-      ];
+      # DefaultDependencies=yes (systemd default) already provides
+      # Conflicts=shutdown.target + Before=shutdown.target.
+      # Only sleep.target needs explicit declaration.
+      conflicts = [ "sleep.target" ];
+      before = [ "sleep.target" ];
       bindsTo = [ "braid-online.service" ];
       after = [ "braid-online.service" ];
       unitConfig.ConditionPathIsMountPoint = cfg.mountPoint;

@@ -82,7 +82,7 @@ with subtest("defaults: scrub service has ConditionPathIsMountPoint"):
         + svc_content
     )
 
-with subtest("defaults: scrub service conflicts with shutdown and sleep"):
+with subtest("defaults: scrub service conflicts with shutdown (default deps) and sleep (explicit)"):
     conflicts = show(defaults, SERVICE, "Conflicts")
     assert "shutdown.target" in conflicts, (
         "Expected shutdown.target in Conflicts, got: " + conflicts
