@@ -394,7 +394,13 @@ impl CmdRequest {
             },
             CmdRequest::CryptsetupIsLuks { device } => CmdArgs {
                 program: "cryptsetup",
-                args: vec!["isLuks".into(), device.clone()],
+                args: vec![
+                    "isLuks".into(),
+                    // We only care about luks2
+                    "--type".into(),
+                    "luks2".into(),
+                    device.clone(),
+                ],
             },
             CmdRequest::CryptsetupClose { mapper } => CmdArgs {
                 program: "cryptsetup",
@@ -889,14 +895,15 @@ impl CommandRunner for MockRunner {
             .cloned()
             .ok_or(CmdError::MissingMock)?;
         if let CmdRequest::CryptsetupLuksHeaderBackup { backup_path, .. } = request
-            && output.exit_status == 0 {
-                if let Some(parent) = std::path::Path::new(backup_path.as_str()).parent() {
-                    std::fs::create_dir_all(parent)
-                        .map_err(|e| CmdError::Failed(format!("mock: create_dir_all: {e}")))?;
-                }
-                std::fs::write(backup_path, b"")
-                    .map_err(|e| CmdError::Failed(format!("mock: write backup: {e}")))?;
+            && output.exit_status == 0
+        {
+            if let Some(parent) = std::path::Path::new(backup_path.as_str()).parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| CmdError::Failed(format!("mock: create_dir_all: {e}")))?;
             }
+            std::fs::write(backup_path, b"")
+                .map_err(|e| CmdError::Failed(format!("mock: write backup: {e}")))?;
+        }
         Ok(output)
     }
 
