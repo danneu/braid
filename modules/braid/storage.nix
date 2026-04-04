@@ -67,6 +67,10 @@ in
         ExecStart = "${btrfsProgs}/bin/btrfs scrub start -B ${cfg.mountPoint}";
         # If the service is stopped before scrub finishes, cancel it.
         ExecStop = pkgs.writeShellScript "braid-scrub-maybe-cancel" ''
+          # If pool is already unmounted during shutdown race, nothing remains to cancel.
+          ${utilLinux}/bin/mountpoint -q ${cfg.mountPoint} || exit 0
+
+          # Mounted path: keep original behavior so genuine cancel failures still surface.
           (${btrfsProgs}/bin/btrfs scrub status ${cfg.mountPoint} | ${pkgs.gnugrep}/bin/grep finished) || ${btrfsProgs}/bin/btrfs scrub cancel ${cfg.mountPoint}
         '';
       };
