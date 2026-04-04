@@ -32,6 +32,13 @@ pub enum LuksError {
         hint: &'static str,
         stderr: String,
     },
+    #[error("cryptsetup luksFormat failed for {device} (exit {exit_code}): {hint} — {stderr}")]
+    FormatFailed {
+        device: String,
+        exit_code: i32,
+        hint: &'static str,
+        stderr: String,
+    },
     #[error("command failed: {0}")]
     Cmd(#[from] CmdError),
     #[error("I/O error: {0}")]
@@ -92,11 +99,12 @@ pub fn luks_format<R: CommandRunner>(
         passphrase.as_bytes(),
     )?;
     if result.exit_status != 0 {
-        return Err(LuksError::Validation(format!(
-            "cryptsetup luksFormat failed (exit {}): {}",
-            result.exit_status,
-            result.stderr.trim()
-        )));
+        return Err(LuksError::FormatFailed {
+            device: device.to_owned(),
+            exit_code: result.exit_status,
+            hint: cryptsetup_format_hint(result.exit_status),
+            stderr: result.stderr.trim().to_owned(),
+        });
     }
     Ok(())
 }
@@ -164,19 +172,47 @@ pub fn verify_passphrase<R: CommandRunner>(
     Ok(result.exit_status == 0)
 }
 
-/// Map a cryptsetup exit code to a human-readable hint.
-///
-/// Exit codes from cryptsetup's `translate_errno` (utils_tools.c):
-///   1 = generic failure, 2 = wrong passphrase / permission denied,
-///   3 = out of memory, 4 = device not found, 5 = device already open / busy.
+/// Semantic classification of cryptsetup exit codes.
+/// Single source of truth — maps cryptsetup's `translate_errno` (utils_tools.c).
+enum CryptsetupExitKind {
+    GenericFailure,   // exit 1: EINVAL / ENOENT / ENOSYS / default
+    PermissionDenied, // exit 2: EPERM
+    OutOfMemory,      // exit 3: ENOMEM
+    DeviceNotFound,   // exit 4: ENOTBLK / ENODEV
+    DeviceBusy,       // exit 5: EEXIST / EBUSY
+    Unknown,
+}
+
+fn classify_cryptsetup_exit(code: i32) -> CryptsetupExitKind {
+    match code {
+        1 => CryptsetupExitKind::GenericFailure,
+        2 => CryptsetupExitKind::PermissionDenied,
+        3 => CryptsetupExitKind::OutOfMemory,
+        4 => CryptsetupExitKind::DeviceNotFound,
+        5 => CryptsetupExitKind::DeviceBusy,
+        _ => CryptsetupExitKind::Unknown,
+    }
+}
+
 fn cryptsetup_open_hint(exit_code: i32) -> &'static str {
-    match exit_code {
-        1 => "generic failure",
-        2 => "wrong passphrase or permission denied",
-        3 => "out of memory",
-        4 => "device not found or not a block device",
-        5 => "device is already open or busy",
-        _ => "unknown error",
+    match classify_cryptsetup_exit(exit_code) {
+        CryptsetupExitKind::GenericFailure => "generic failure",
+        CryptsetupExitKind::PermissionDenied => "wrong passphrase or permission denied",
+        CryptsetupExitKind::OutOfMemory => "out of memory",
+        CryptsetupExitKind::DeviceNotFound => "device not found or not a block device",
+        CryptsetupExitKind::DeviceBusy => "device is already open or busy",
+        CryptsetupExitKind::Unknown => "unknown error",
+    }
+}
+
+fn cryptsetup_format_hint(exit_code: i32) -> &'static str {
+    match classify_cryptsetup_exit(exit_code) {
+        CryptsetupExitKind::GenericFailure => "generic failure",
+        CryptsetupExitKind::PermissionDenied => "permission denied (not root?)",
+        CryptsetupExitKind::OutOfMemory => "out of memory",
+        CryptsetupExitKind::DeviceNotFound => "device not found or not a block device",
+        CryptsetupExitKind::DeviceBusy => "device busy or already formatted",
+        CryptsetupExitKind::Unknown => "unknown error",
     }
 }
 
@@ -426,6 +462,39 @@ mod tests {
     }
 
     /*
+     * Intent: verify the format hint maps exit 2 to permission denied (not passphrase).
+     * Why: luksFormat creates a passphrase, it doesn't verify one — exit 2 is purely EPERM.
+     * Scenario: non-root user runs `braid add`, cryptsetup luksFormat returns EPERM.
+     */
+    #[test]
+    fn hint_format_exit_2_is_permission() {
+        assert_eq!(cryptsetup_format_hint(2), "permission denied (not root?)");
+    }
+
+    /*
+     * Intent: verify the format hint maps exit 5 to busy/already-formatted.
+     * Why: exit 5 means EBUSY or EEXIST — for format, "already formatted" is the likely cause.
+     * Scenario: user tries to format a device that already has a LUKS header.
+     */
+    #[test]
+    fn hint_format_exit_5_is_busy() {
+        assert_eq!(
+            cryptsetup_format_hint(5),
+            "device busy or already formatted"
+        );
+    }
+
+    /*
+     * Intent: verify the format hint returns a fallback for unknown exit codes.
+     * Why: upstream may add new exit codes; the helper must not panic.
+     * Scenario: future cryptsetup version returns an unmapped exit code during format.
+     */
+    #[test]
+    fn hint_format_unknown_code() {
+        assert_eq!(cryptsetup_format_hint(42), "unknown error");
+    }
+
+    /*
      * Intent: verify ensure_luks_open produces an exit-code-specific error for exit 2.
      * Why: previously all failures said "Wrong passphrase?" regardless of cause.
      * Scenario: cryptsetup open returns exit 2 (EPERM) with diagnostic stderr.
@@ -584,6 +653,74 @@ mod tests {
             kf.path(),
         )
         .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("exit 4"),
+            "should contain exit code, got: {msg}"
+        );
+        assert!(
+            msg.contains("device not found"),
+            "should contain hint, got: {msg}"
+        );
+    }
+
+    /*
+     * Intent: verify luks_format produces an exit-code-specific error for exit 2.
+     * Why: previously all format failures said "cryptsetup luksFormat failed (exit N)" generically.
+     * Scenario: non-root user runs `braid add`, cryptsetup luksFormat returns EPERM.
+     */
+    #[test]
+    fn luks_format_exit_2_mentions_permission() {
+        let runner = MockRunner::default().with_output_stdin(
+            CmdRequest::CryptsetupLuksFormat {
+                device: "/dev/sda".into(),
+                extra_opts: vec![],
+            },
+            b"pass".to_vec(),
+            RawCommandOutput {
+                cmd: "cryptsetup luksFormat".into(),
+                stdout: String::new(),
+                stderr: "Cannot format device /dev/sda, permission denied.\n".into(),
+                exit_status: 2,
+            },
+        );
+        let err = luks_format(&runner, "/dev/sda", "pass", &[]).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("exit 2"),
+            "should contain exit code, got: {msg}"
+        );
+        assert!(
+            msg.contains("permission denied"),
+            "should contain hint, got: {msg}"
+        );
+        assert!(
+            msg.contains("Cannot format device"),
+            "should contain stderr, got: {msg}"
+        );
+    }
+
+    /*
+     * Intent: verify luks_format produces a device-not-found error for exit 4.
+     * Why: exit 4 (ENODEV) was previously indistinguishable from any other failure.
+     * Scenario: device path is stale or mistyped, cryptsetup luksFormat returns ENODEV.
+     */
+    #[test]
+    fn luks_format_exit_4_mentions_device_not_found() {
+        let runner = MockRunner::default().with_output_stdin(
+            CmdRequest::CryptsetupLuksFormat {
+                device: "/dev/sdz".into(),
+                extra_opts: vec![],
+            },
+            b"pass".to_vec(),
+            RawCommandOutput {
+                cmd: "cryptsetup luksFormat".into(),
+                stdout: String::new(),
+                stderr: "Device /dev/sdz does not exist.\n".into(),
+                exit_status: 4,
+            },
+        );
+        let err = luks_format(&runner, "/dev/sdz", "pass", &[]).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("exit 4"),
