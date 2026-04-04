@@ -72,22 +72,17 @@ with subtest("balance progress observed"):
     machine.succeed(f"dd if=/dev/urandom of={MOUNT}/bigfile bs=1M count=512")
     machine.succeed("sync")
 
-    # Start balance in background (redirect all fds so the test driver's
-    # pipe closes immediately — otherwise the backgrounded process holds the
-    # stdout fd open and machine.succeed blocks until it finishes)
+    # Start balance in background and poll in the same shell command
+    # to eliminate host round-trip latency — balance can finish in ~5s
+    # on fast VM I/O, so any gap between start and poll risks missing it.
     machine.succeed(
         f"btrfs balance start -dconvert=raid1 -mconvert=raid1 {MOUNT} "
-        f"> /tmp/balance-start.log 2>&1 < /dev/null &"
-    )
-
-    # Poll inside VM shell — balance can finish in ~5s, too fast for
-    # host-side Python polling due to machine.execute() round-trip latency
-    machine.succeed(
-        "for i in $(seq 1 2400); do "
-        "out=\"$(btrfs balance status /mnt/storage 2>&1 || true)\"; "
-        "if printf '%s\\n' \"$out\" | grep -Eq 'is (running|paused)'; then "
-        "printf '%s\\n' \"$out\" > /tmp/fixtures/btrfs-balance-status-running.txt; "
-        "exit 0; fi; sleep 0.05; done; exit 1"
+        f"> /tmp/balance-start.log 2>&1 < /dev/null & "
+        f"for i in $(seq 1 300); do "
+        f"out=\"$(btrfs balance status {MOUNT} 2>&1 || true)\"; "
+        f"if printf '%s\\n' \"$out\" | grep -Eq 'is (running|paused)'; then "
+        f"printf '%s\\n' \"$out\" > {FIXTURE_DIR}/btrfs-balance-status-running.txt; "
+        f"exit 0; fi; sleep 0.05; done; exit 1"
     )
 
     # Wait for balance to finish
@@ -128,19 +123,16 @@ with subtest("scrub per-device progress observed"):
     # 5ms is insufficient (~3s scrub); 50ms stretches disk3's scrub to ~10s+.
     dm_delay_activate(read_delay_ms=50)
 
-    # Start scrub in background
+    # Start scrub in background and poll in the same shell command
+    # to eliminate host round-trip latency.
     machine.succeed(
         f"btrfs scrub start {MOUNT} "
-        f"> /dev/null 2>&1 < /dev/null &"
-    )
-
-    # Poll inside VM shell for in-progress scrub status
-    machine.succeed(
-        "for i in $(seq 1 2400); do "
-        "out=\"$(btrfs scrub status -d -R /mnt/storage 2>&1 || true)\"; "
-        "if printf '%s\\n' \"$out\" | grep -q 'Status:.*running'; then "
-        "printf '%s\\n' \"$out\" > /tmp/fixtures/btrfs-scrub-per-device-running.txt; "
-        "exit 0; fi; sleep 0.05; done; exit 1"
+        f"> /dev/null 2>&1 < /dev/null & "
+        f"for i in $(seq 1 600); do "
+        f"out=\"$(btrfs scrub status -d -R {MOUNT} 2>&1 || true)\"; "
+        f"if printf '%s\\n' \"$out\" | grep -q 'Status:.*running'; then "
+        f"printf '%s\\n' \"$out\" > {FIXTURE_DIR}/btrfs-scrub-per-device-running.txt; "
+        f"exit 0; fi; sleep 0.05; done; exit 1"
     )
 
     # Wait for scrub to finish
@@ -180,7 +172,7 @@ with subtest("device remove progress observed"):
         f"btrfs device remove /dev/mapper/disk3 {MOUNT} "
         f"> /dev/null 2>&1 < /dev/null & "
         f"initial=$(cat /tmp/disk3-initial-bytes); "
-        f"for i in $(seq 1 2400); do "
+        f"for i in $(seq 1 1200); do "
         f"out=\"$(btrfs device usage --raw {MOUNT} 2>&1)\" || {{ sleep 0.05; continue; }}; "
         f"if ! printf '%s\\n' \"$out\" | grep -q '/dev/mapper/disk3'; then exit 1; fi; "
         f"current=$(printf '%s\\n' \"$out\" | {AWK_DISK3_BYTES}); "
