@@ -27,10 +27,16 @@ with subtest("discover --write creates pool.json"):
     machine.succeed("test -f /var/lib/braid/pool.json")
 
 with subtest("pool.json contains disk entries with by-id paths"):
-    pool_json = machine.succeed("cat /var/lib/braid/pool.json")
-    assert "disk1" in pool_json, "expected disk1 in pool.json"
-    assert "disk2" in pool_json, "expected disk2 in pool.json"
-    assert "/dev/disk/by-id/" in pool_json, "expected by-id path in pool.json"
+    import json
+    pool_raw = machine.succeed("cat /var/lib/braid/pool.json")
+    pool = json.loads(pool_raw)
+    disks = pool["disks"]
+    recovered = {name: entry["by_id"] for name, entry in disks.items()}
+    expected = {
+        "disk1": "/dev/disk/by-id/virtio-disk1",
+        "disk2": "/dev/disk/by-id/virtio-disk2",
+    }
+    assert recovered == expected, f"pool.json mismatch: got {recovered}, expected {expected}"
 
 with subtest("recovered pool.json is usable — unlock succeeds"):
     machine.succeed("echo -n 'testpassphrase' | braid unlock --passphrase-stdin")
