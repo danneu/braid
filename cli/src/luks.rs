@@ -57,31 +57,41 @@ pub fn read_passphrase(
                 path.display()
             ))
         })?;
-        // Strip only trailing newline(s), not all whitespace — leading/trailing
-        // spaces may be intentional passphrase characters.
-        return Ok(contents.trim_end_matches('\n').to_owned());
+        return validate_passphrase(&contents, &format!("file {}", path.display()));
     }
     if passphrase_stdin {
         let mut buf = String::new();
         std::io::stdin().read_line(&mut buf)?;
-        let passphrase = buf.trim_end_matches('\n').trim_end_matches('\r').to_owned();
-        if passphrase.is_empty() {
-            return Err(LuksError::Validation("passphrase must not be empty".into()));
-        }
-        return Ok(passphrase);
+        return validate_passphrase(&buf, "stdin");
     }
     prompt_passphrase_tty()
 }
 
-fn prompt_passphrase_tty() -> Result<String, LuksError> {
-    eprint!("LUKS passphrase: ");
-    let passphrase = rpassword::read_password().map_err(|e| {
-        LuksError::Validation(format!("failed to read passphrase from terminal: {e}"))
-    })?;
+/// Normalize and validate a raw passphrase string.
+/// Strips trailing line-break characters, then rejects empty values
+/// and embedded line-breaks.
+fn validate_passphrase(raw: &str, source: &str) -> Result<String, LuksError> {
+    let passphrase = raw.trim_end_matches(['\n', '\r']).to_owned();
     if passphrase.is_empty() {
-        return Err(LuksError::Validation("passphrase must not be empty".into()));
+        return Err(LuksError::Validation(format!(
+            "passphrase from {source} must not be empty"
+        )));
+    }
+    if passphrase.contains('\n') || passphrase.contains('\r') {
+        return Err(LuksError::Validation(format!(
+            "passphrase from {source} contains line-break characters — \
+             this passphrase would be impossible to enter interactively"
+        )));
     }
     Ok(passphrase)
+}
+
+fn prompt_passphrase_tty() -> Result<String, LuksError> {
+    eprint!("LUKS passphrase: ");
+    let raw = rpassword::read_password().map_err(|e| {
+        LuksError::Validation(format!("failed to read passphrase from terminal: {e}"))
+    })?;
+    validate_passphrase(&raw, "terminal")
 }
 
 /// LUKS format a device with the given passphrase.
@@ -812,5 +822,147 @@ mod tests {
         let advisories = header_backup_advisories(&paths);
         assert_eq!(advisories.len(), 1);
         assert!(advisories[0].contains("copy offsite"));
+    }
+
+    // ── read_passphrase (file path) ──────────────────────────────────
+
+    /*
+     * Intent: passphrase file with trailing newline returns trimmed value.
+     * Why: most text editors append a trailing newline; stripping it is
+     *   the expected default so users don't have to think about it.
+     * Scenario: user creates passphrase file with `echo "hunter2" > pw.txt`.
+     */
+    #[test]
+    fn read_passphrase_file_simple() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("pw.txt");
+        std::fs::write(&file, "hunter2\n").unwrap();
+        let result = read_passphrase(Some(file.as_path()), false).unwrap();
+        assert_eq!(result, "hunter2");
+    }
+
+    /*
+     * Intent: passphrase file without trailing newline still works.
+     * Why: `printf` and some tooling produce files without a final newline.
+     * Scenario: user creates passphrase file with `printf "hunter2" > pw.txt`.
+     */
+    #[test]
+    fn read_passphrase_file_no_trailing_newline() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("pw.txt");
+        std::fs::write(&file, "hunter2").unwrap();
+        let result = read_passphrase(Some(file.as_path()), false).unwrap();
+        assert_eq!(result, "hunter2");
+    }
+
+    /*
+     * Intent: passphrase file with CRLF line ending returns trimmed value.
+     * Why: Windows-origin files use \r\n; both characters must be stripped
+     *   from the trailing position.
+     * Scenario: user edits passphrase file on Windows, copies to NAS.
+     */
+    #[test]
+    fn read_passphrase_file_crlf_trailing() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("pw.txt");
+        std::fs::write(&file, "hunter2\r\n").unwrap();
+        let result = read_passphrase(Some(file.as_path()), false).unwrap();
+        assert_eq!(result, "hunter2");
+    }
+
+    /*
+     * Intent: passphrase file with embedded newline is rejected.
+     * Why: a multi-line passphrase works via --key-file=- but cannot be
+     *   entered interactively (TTY/stdin read one line), locking the user
+     *   into file-only input.
+     * Scenario: user accidentally pastes two lines into their passphrase file.
+     */
+    #[test]
+    fn read_passphrase_file_embedded_newline_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("pw.txt");
+        std::fs::write(&file, "line1\nline2\n").unwrap();
+        let err = read_passphrase(Some(file.as_path()), false).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("line-break"),
+            "expected 'line-break' in: {msg}"
+        );
+    }
+
+    /*
+     * Intent: passphrase file with embedded carriage return is rejected.
+     * Why: \r is also a line-break character that cannot be typed at a
+     *   TTY prompt; same lock-in risk as \n.
+     * Scenario: corrupted or binary-pasted passphrase file.
+     */
+    #[test]
+    fn read_passphrase_file_embedded_cr_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("pw.txt");
+        std::fs::write(&file, "ab\rcd\n").unwrap();
+        let err = read_passphrase(Some(file.as_path()), false).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("line-break"),
+            "expected 'line-break' in: {msg}"
+        );
+    }
+
+    /*
+     * Intent: passphrase file containing only a newline is rejected as empty.
+     * Why: after trimming the trailing newline, the passphrase is empty;
+     *   stdin and TTY paths already reject empty passphrases.
+     * Scenario: user creates file with `echo > pw.txt` (writes just "\n").
+     */
+    #[test]
+    fn read_passphrase_file_empty_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("pw.txt");
+        std::fs::write(&file, "\n").unwrap();
+        let err = read_passphrase(Some(file.as_path()), false).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("empty"), "expected 'empty' in: {msg}");
+    }
+
+    /*
+     * Intent: passphrase file containing only CRLF is rejected as empty.
+     * Why: same as above but for Windows-style line endings.
+     * Scenario: empty passphrase file created on Windows.
+     */
+    #[test]
+    fn read_passphrase_file_only_crlf_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("pw.txt");
+        std::fs::write(&file, "\r\n").unwrap();
+        let err = read_passphrase(Some(file.as_path()), false).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("empty"), "expected 'empty' in: {msg}");
+    }
+
+    /*
+     * Intent: leading/trailing spaces are preserved in the passphrase.
+     * Why: spaces may be intentional passphrase characters; only line-break
+     *   characters should be stripped, not whitespace in general.
+     * Scenario: user deliberately includes spaces in their passphrase.
+     */
+    #[test]
+    fn read_passphrase_file_preserves_spaces() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("pw.txt");
+        std::fs::write(&file, " spaced \n").unwrap();
+        let result = read_passphrase(Some(file.as_path()), false).unwrap();
+        assert_eq!(result, " spaced ");
+    }
+
+    /*
+     * Intent: nonexistent passphrase file returns an error.
+     * Why: clear error message is better than a panic or generic I/O error.
+     * Scenario: user typos the path in --passphrase-file.
+     */
+    #[test]
+    fn read_passphrase_file_missing() {
+        let result = read_passphrase(Some(std::path::Path::new("/no/such/file")), false);
+        assert!(result.is_err());
     }
 }
