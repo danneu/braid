@@ -57,7 +57,7 @@ Single orchestrator: opens all LUKS devices and mounts the btrfs pool in one sho
 
 - `Type = oneshot` — runs once, returns to inactive on completion. `ConditionPathIsMountPoint` (below) prevents re-run while mounted; the inactive state allows `systemctl start braid-pool.target` to re-unlock after a prior `braid lock`.
 - `ConditionPathIsMountPoint = !${mountPoint}` — skips if pool already mounted.
-- Calls `systemd-ask-password --id=braid | braid unlock --passphrase-stdin`.
+- Calls `systemd-ask-password --timeout=0 --id=braid | braid unlock --passphrase-stdin`.
 
 ### braid-auto-unlock.service — unattended USB keyfile unlock
 

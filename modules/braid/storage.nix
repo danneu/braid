@@ -113,8 +113,10 @@ in
         utilLinux
       ];
       script = ''
+        # --timeout=0: override the 90s default so the passphrase prompt
+        # waits indefinitely
         ${pkgs.systemd}/bin/systemd-ask-password \
-          --id=braid "LUKS passphrase for braid pool:" \
+          --timeout=0 --id=braid "LUKS passphrase for braid pool:" \
         | braid unlock --passphrase-stdin
       '';
     };
