@@ -548,7 +548,7 @@ mod tests {
                 b"testpass".to_vec(),
                 err_raw(
                     "cryptsetup open",
-                    5,
+                    2,
                     "No key available with this passphrase.",
                 ),
             );

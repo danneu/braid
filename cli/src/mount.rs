@@ -242,13 +242,20 @@ pub fn open_and_mount_pool<R: CommandRunner, F: Filesystem + ?Sized>(
 
                 for (name, by_id) in &plan.to_unlock {
                     luks::ensure_luks_open_with_key_file(runner, fs, name, by_id, kf).map_err(
-                        |_| {
-                            MountError::Failed(format!(
+                        |e| match &e {
+                            LuksError::OpenFailed {
+                                exit_code: 2,
+                                hint,
+                                stderr,
+                                ..
+                            } => MountError::Failed(format!(
                                 "failed to open disk '{}': keyfile was verified against \
-                                 '{}' but rejected here (single-passphrase invariant \
-                                 may be violated by external LUKS manipulation)",
-                                name, first_name
-                            ))
+                                 '{}' but rejected here — {} ({}). \
+                                 If the keyfile is correct, the single-passphrase \
+                                 invariant may be violated by external LUKS manipulation",
+                                name, first_name, hint, stderr
+                            )),
+                            _ => MountError::Luks(e),
                         },
                     )?;
                     eprintln!("{}  disk: {:<10}unlocked", tag("ok"), name);
@@ -270,15 +277,23 @@ pub fn open_and_mount_pool<R: CommandRunner, F: Filesystem + ?Sized>(
                 }
 
                 for (name, by_id) in &plan.to_unlock {
-                    luks::ensure_luks_open(runner, fs, name, by_id, &passphrase).map_err(|_| {
-                        MountError::Failed(format!(
-                            "failed to open disk '{}': passphrase was verified \
-                                 against '{}' but rejected here (single-passphrase \
-                                 invariant may be violated by external LUKS \
-                                 manipulation)",
-                            name, first_name
-                        ))
-                    })?;
+                    luks::ensure_luks_open(runner, fs, name, by_id, &passphrase).map_err(
+                        |e| match &e {
+                            LuksError::OpenFailed {
+                                exit_code: 2,
+                                hint,
+                                stderr,
+                                ..
+                            } => MountError::Failed(format!(
+                                "failed to open disk '{}': passphrase was verified \
+                                 against '{}' but rejected here — {} ({}). \
+                                 If the passphrase is correct, the single-passphrase \
+                                 invariant may be violated by external LUKS manipulation",
+                                name, first_name, hint, stderr
+                            )),
+                            _ => MountError::Luks(e),
+                        },
+                    )?;
                     eprintln!("{}  disk: {:<10}unlocked", tag("ok"), name);
                 }
             }
@@ -793,7 +808,7 @@ mod tests {
                 b"testpass".to_vec(),
                 err_raw(
                     "cryptsetup open",
-                    5,
+                    2,
                     "No key available with this passphrase.",
                 ),
             );
@@ -1067,6 +1082,195 @@ mod tests {
         assert!(
             msg.contains("ffffffff"),
             "error should show found UUID, got: {msg}"
+        );
+    }
+
+    /// Intent: When cryptsetup open fails with a non-auth exit code (e.g. exit 4,
+    /// device not found), the error must propagate as-is — not be rewritten as a
+    /// single-passphrase invariant violation.
+    ///
+    /// Why: The mount helper previously replaced all open failures with the
+    /// invariant message, masking non-auth causes like device disappearance.
+    ///
+    /// Scenario: 2-disk RAID1, passphrase verified against disk1, disk2 disappears
+    /// (hot-unplug) before cryptsetup open runs.
+    #[test]
+    fn mount_non_auth_open_failure_propagates_passphrase() {
+        let config = test_config();
+        let membership = two_disk_membership();
+        let fs = MockFs::new(&[
+            "/dev/disk/by-id/virtio-disk1",
+            "/dev/disk/by-id/virtio-disk2",
+        ]);
+
+        let (uuid1_req, uuid1_out) = luks_uuid_ok(
+            "/dev/disk/by-id/virtio-disk1",
+            "aaaaaaaa-1111-2222-3333-444444444444",
+        );
+        let (uuid2_req, uuid2_out) = luks_uuid_ok(
+            "/dev/disk/by-id/virtio-disk2",
+            "bbbbbbbb-1111-2222-3333-444444444444",
+        );
+
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::MountpointCheck {
+                    path: MountPoint("/mnt/storage".to_owned()),
+                },
+                err_raw("mountpoint", 1, ""),
+            )
+            .with_output(uuid1_req, uuid1_out)
+            .with_output(uuid2_req, uuid2_out)
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw("cryptsetup open --test-passphrase"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupLuksOpen {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                    mapper: "braid-disk1".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw("cryptsetup open"),
+            )
+            // disk2 disappears → exit 4 (ENODEV)
+            .with_output_stdin(
+                CmdRequest::CryptsetupLuksOpen {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                    mapper: "braid-disk2".into(),
+                },
+                b"testpass".to_vec(),
+                err_raw(
+                    "cryptsetup open",
+                    4,
+                    "Device /dev/disk/by-id/virtio-disk2 does not exist.",
+                ),
+            );
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        {
+            use std::io::Write;
+            tmp.as_file().write_all(b"testpass").unwrap();
+        }
+
+        let result = open_and_mount_pool(
+            &runner,
+            &fs,
+            &config,
+            &membership,
+            Credential::Passphrase {
+                passphrase_stdin: false,
+                passphrase_file: Some(tmp.path()),
+            },
+            false,
+            "unlock",
+        );
+
+        let err = result.expect_err("should fail when disk2 disappears");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("device not found"),
+            "non-auth failure should propagate original hint, got: {msg}"
+        );
+        assert!(
+            !msg.contains("single-passphrase invariant"),
+            "non-auth failure should not be rewritten as invariant violation, got: {msg}"
+        );
+    }
+
+    /// Intent: When cryptsetup open with keyfile fails with a non-auth exit code
+    /// (e.g. exit 4), the error must propagate as-is.
+    ///
+    /// Why: Same masking bug as the passphrase path — all keyfile open failures
+    /// were rewritten as invariant violations.
+    ///
+    /// Scenario: 2-disk RAID1 with keyfile unlock, disk2 disappears before open.
+    #[test]
+    fn mount_non_auth_open_failure_propagates_keyfile() {
+        let config = test_config();
+        let membership = two_disk_membership();
+        let fs = MockFs::new(&[
+            "/dev/disk/by-id/virtio-disk1",
+            "/dev/disk/by-id/virtio-disk2",
+        ]);
+
+        let (uuid1_req, uuid1_out) = luks_uuid_ok(
+            "/dev/disk/by-id/virtio-disk1",
+            "aaaaaaaa-1111-2222-3333-444444444444",
+        );
+        let (uuid2_req, uuid2_out) = luks_uuid_ok(
+            "/dev/disk/by-id/virtio-disk2",
+            "bbbbbbbb-1111-2222-3333-444444444444",
+        );
+
+        let kf = tempfile::NamedTempFile::new().unwrap();
+        {
+            use std::io::Write;
+            kf.as_file().write_all(b"keydata").unwrap();
+        }
+
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::MountpointCheck {
+                    path: MountPoint("/mnt/storage".to_owned()),
+                },
+                err_raw("mountpoint", 1, ""),
+            )
+            .with_output(uuid1_req, uuid1_out)
+            .with_output(uuid2_req, uuid2_out)
+            // verify keyfile against disk1 → success
+            .with_output(
+                CmdRequest::CryptsetupTestKeyFile {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                    key_file_path: kf.path().display().to_string(),
+                },
+                ok_raw("cryptsetup open --test-passphrase"),
+            )
+            // open disk1 with keyfile → success
+            .with_output(
+                CmdRequest::CryptsetupLuksOpenKeyFile {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                    mapper: "braid-disk1".into(),
+                    key_file_path: kf.path().display().to_string(),
+                },
+                ok_raw("cryptsetup open"),
+            )
+            // disk2 disappears → exit 4 (ENODEV)
+            .with_output(
+                CmdRequest::CryptsetupLuksOpenKeyFile {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                    mapper: "braid-disk2".into(),
+                    key_file_path: kf.path().display().to_string(),
+                },
+                err_raw(
+                    "cryptsetup open",
+                    4,
+                    "Device /dev/disk/by-id/virtio-disk2 does not exist.",
+                ),
+            );
+
+        let result = open_and_mount_pool(
+            &runner,
+            &fs,
+            &config,
+            &membership,
+            Credential::KeyFile(kf.path()),
+            false,
+            "unlock",
+        );
+
+        let err = result.expect_err("should fail when disk2 disappears");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("device not found"),
+            "non-auth failure should propagate original hint, got: {msg}"
+        );
+        assert!(
+            !msg.contains("single-passphrase invariant"),
+            "non-auth failure should not be rewritten as invariant violation, got: {msg}"
         );
     }
 }

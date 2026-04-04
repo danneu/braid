@@ -25,6 +25,13 @@ pub enum KeySlotState {
 pub enum LuksError {
     #[error("{0}")]
     Validation(String),
+    #[error("cryptsetup open failed for {device} (exit {exit_code}): {hint} — {stderr}")]
+    OpenFailed {
+        device: String,
+        exit_code: i32,
+        hint: &'static str,
+        stderr: String,
+    },
     #[error("command failed: {0}")]
     Cmd(#[from] CmdError),
     #[error("I/O error: {0}")]
@@ -157,6 +164,22 @@ pub fn verify_passphrase<R: CommandRunner>(
     Ok(result.exit_status == 0)
 }
 
+/// Map a cryptsetup exit code to a human-readable hint.
+///
+/// Exit codes from cryptsetup's `translate_errno` (utils_tools.c):
+///   1 = generic failure, 2 = wrong passphrase / permission denied,
+///   3 = out of memory, 4 = device not found, 5 = device already open / busy.
+fn cryptsetup_open_hint(exit_code: i32) -> &'static str {
+    match exit_code {
+        1 => "generic failure",
+        2 => "wrong passphrase or permission denied",
+        3 => "out of memory",
+        4 => "device not found or not a block device",
+        5 => "device is already open or busy",
+        _ => "unknown error",
+    }
+}
+
 /// Open a LUKS device if not already open.
 pub fn ensure_luks_open<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
@@ -179,10 +202,12 @@ pub fn ensure_luks_open<R: CommandRunner, F: Filesystem + ?Sized>(
         passphrase.as_bytes(),
     )?;
     if result.exit_status != 0 {
-        return Err(LuksError::Validation(format!(
-            "failed to open LUKS device {}. Wrong passphrase?",
-            by_id
-        )));
+        return Err(LuksError::OpenFailed {
+            device: by_id.0.clone(),
+            exit_code: result.exit_status,
+            hint: cryptsetup_open_hint(result.exit_status),
+            stderr: result.stderr.trim().to_owned(),
+        });
     }
     Ok(())
 }
@@ -229,10 +254,12 @@ pub fn ensure_luks_open_with_key_file<R: CommandRunner, F: Filesystem + ?Sized>(
         key_file_path: key_file_path.display().to_string(),
     })?;
     if result.exit_status != 0 {
-        return Err(LuksError::Validation(format!(
-            "failed to open LUKS device {} with keyfile. Wrong keyfile?",
-            by_id
-        )));
+        return Err(LuksError::OpenFailed {
+            device: by_id.0.clone(),
+            exit_code: result.exit_status,
+            hint: cryptsetup_open_hint(result.exit_status),
+            stderr: result.stderr.trim().to_owned(),
+        });
     }
     Ok(())
 }
@@ -331,6 +358,242 @@ pub fn header_backup_advisories(paths: &StatePaths) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cmd::{CmdRequest, MockRunner, RawCommandOutput};
+    use crate::probe::Filesystem;
+    use crate::types::ByIdPath;
+
+    struct MockFs {
+        paths: Vec<String>,
+    }
+
+    impl MockFs {
+        fn new(paths: &[&str]) -> Self {
+            Self {
+                paths: paths.iter().map(|s| s.to_string()).collect(),
+            }
+        }
+    }
+
+    impl Filesystem for MockFs {
+        fn exists(&self, path: &str) -> bool {
+            self.paths.contains(&path.to_string())
+        }
+
+        fn is_block_device(&self, _path: &str) -> bool {
+            false
+        }
+
+        fn read_to_string(&self, _path: &str) -> Result<String, std::io::Error> {
+            Err(std::io::Error::new(std::io::ErrorKind::NotFound, "mock"))
+        }
+
+        fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
+            Ok(vec![])
+        }
+    }
+
+    /*
+     * Intent: verify the hint helper maps exit 2 to passphrase/permission text.
+     * Why: exit 2 is the most common open failure; a wrong mapping misleads users.
+     * Scenario: cryptsetup open returns EPERM (wrong passphrase or permission denied).
+     */
+    #[test]
+    fn hint_exit_2_is_passphrase() {
+        assert_eq!(
+            cryptsetup_open_hint(2),
+            "wrong passphrase or permission denied"
+        );
+    }
+
+    /*
+     * Intent: verify the hint helper maps exit 5 to busy/already-open text.
+     * Why: exit 5 was previously reported as "Wrong passphrase?" — the original bug.
+     * Scenario: cryptsetup open returns EBUSY (device already open).
+     */
+    #[test]
+    fn hint_exit_5_is_busy() {
+        assert_eq!(cryptsetup_open_hint(5), "device is already open or busy");
+    }
+
+    /*
+     * Intent: verify the hint helper returns a fallback for unknown exit codes.
+     * Why: upstream may add new exit codes; the helper must not panic.
+     * Scenario: future cryptsetup version returns an unmapped exit code.
+     */
+    #[test]
+    fn hint_unknown_code() {
+        assert_eq!(cryptsetup_open_hint(42), "unknown error");
+    }
+
+    /*
+     * Intent: verify ensure_luks_open produces an exit-code-specific error for exit 2.
+     * Why: previously all failures said "Wrong passphrase?" regardless of cause.
+     * Scenario: cryptsetup open returns exit 2 (EPERM) with diagnostic stderr.
+     */
+    #[test]
+    fn ensure_luks_open_exit_2_mentions_passphrase() {
+        let fs = MockFs::new(&[]);
+        let runner = MockRunner::default().with_output_stdin(
+            CmdRequest::CryptsetupLuksOpen {
+                device: "/dev/disk/by-id/test-disk".into(),
+                mapper: "braid-testdisk".into(),
+            },
+            b"wrong".to_vec(),
+            RawCommandOutput {
+                cmd: "cryptsetup open".into(),
+                stdout: String::new(),
+                stderr: "No key available with this passphrase.\n".into(),
+                exit_status: 2,
+            },
+        );
+        let err = ensure_luks_open(
+            &runner,
+            &fs,
+            "testdisk",
+            &ByIdPath("/dev/disk/by-id/test-disk".into()),
+            "wrong",
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("exit 2"),
+            "should contain exit code, got: {msg}"
+        );
+        assert!(
+            msg.contains("wrong passphrase or permission denied"),
+            "should contain hint, got: {msg}"
+        );
+        assert!(
+            msg.contains("No key available with this passphrase."),
+            "should contain stderr, got: {msg}"
+        );
+    }
+
+    /*
+     * Intent: verify ensure_luks_open produces a device-not-found error for exit 4.
+     * Why: exit 4 (ENODEV) was previously reported as "Wrong passphrase?".
+     * Scenario: device disappears between probe and open (e.g. hot-unplug).
+     */
+    #[test]
+    fn ensure_luks_open_exit_4_mentions_device_not_found() {
+        let fs = MockFs::new(&[]);
+        let runner = MockRunner::default().with_output_stdin(
+            CmdRequest::CryptsetupLuksOpen {
+                device: "/dev/disk/by-id/vanished-disk".into(),
+                mapper: "braid-vanished".into(),
+            },
+            b"pass".to_vec(),
+            RawCommandOutput {
+                cmd: "cryptsetup open".into(),
+                stdout: String::new(),
+                stderr: "Device /dev/disk/by-id/vanished-disk does not exist.\n".into(),
+                exit_status: 4,
+            },
+        );
+        let err = ensure_luks_open(
+            &runner,
+            &fs,
+            "vanished",
+            &ByIdPath("/dev/disk/by-id/vanished-disk".into()),
+            "pass",
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("exit 4"),
+            "should contain exit code, got: {msg}"
+        );
+        assert!(
+            msg.contains("device not found"),
+            "should contain hint, got: {msg}"
+        );
+    }
+
+    /*
+     * Intent: verify ensure_luks_open_with_key_file produces an exit-code-specific
+     *   error for exit 2.
+     * Why: the keyfile path had the same generic "Wrong keyfile?" bug.
+     * Scenario: cryptsetup open with keyfile returns exit 2 (wrong key material).
+     */
+    #[test]
+    fn ensure_luks_open_with_key_file_exit_2_mentions_passphrase() {
+        let fs = MockFs::new(&[]);
+        let kf = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(kf.path(), b"badkey").unwrap();
+        let runner = MockRunner::default().with_output(
+            CmdRequest::CryptsetupLuksOpenKeyFile {
+                device: "/dev/disk/by-id/test-disk".into(),
+                mapper: "braid-testdisk".into(),
+                key_file_path: kf.path().display().to_string(),
+            },
+            RawCommandOutput {
+                cmd: "cryptsetup open".into(),
+                stdout: String::new(),
+                stderr: "No key available with this passphrase.\n".into(),
+                exit_status: 2,
+            },
+        );
+        let err = ensure_luks_open_with_key_file(
+            &runner,
+            &fs,
+            "testdisk",
+            &ByIdPath("/dev/disk/by-id/test-disk".into()),
+            kf.path(),
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("exit 2"),
+            "should contain exit code, got: {msg}"
+        );
+        assert!(
+            msg.contains("wrong passphrase or permission denied"),
+            "should contain hint, got: {msg}"
+        );
+    }
+
+    /*
+     * Intent: verify ensure_luks_open_with_key_file produces a device-not-found
+     *   error for exit 4.
+     * Why: exit 4 (ENODEV) was previously reported as "Wrong keyfile?".
+     * Scenario: device disappears between probe and keyfile-based open.
+     */
+    #[test]
+    fn ensure_luks_open_with_key_file_exit_4_mentions_device_not_found() {
+        let fs = MockFs::new(&[]);
+        let kf = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(kf.path(), b"key").unwrap();
+        let runner = MockRunner::default().with_output(
+            CmdRequest::CryptsetupLuksOpenKeyFile {
+                device: "/dev/disk/by-id/vanished-disk".into(),
+                mapper: "braid-vanished".into(),
+                key_file_path: kf.path().display().to_string(),
+            },
+            RawCommandOutput {
+                cmd: "cryptsetup open".into(),
+                stdout: String::new(),
+                stderr: "Device does not exist.\n".into(),
+                exit_status: 4,
+            },
+        );
+        let err = ensure_luks_open_with_key_file(
+            &runner,
+            &fs,
+            "vanished",
+            &ByIdPath("/dev/disk/by-id/vanished-disk".into()),
+            kf.path(),
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("exit 4"),
+            "should contain exit code, got: {msg}"
+        );
+        assert!(
+            msg.contains("device not found"),
+            "should contain hint, got: {msg}"
+        );
+    }
 
     /*
      * Intent: verify advisory returns empty when directory doesn't exist.
