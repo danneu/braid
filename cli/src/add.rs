@@ -3,8 +3,8 @@ use crate::config::{config_read, mapper_name};
 use crate::confirm;
 use crate::journal;
 use crate::luks::{
-    backup_luks_header, ensure_luks_open, luks_format, luks_opts_from_env, read_passphrase,
-    verify_passphrase,
+    backup_luks_header, ensure_luks_open, luks_format, luks_opts_from_env,
+    pool_has_keyfile_enrollment, read_passphrase, verify_passphrase,
 };
 use crate::membership::{self, PoolMembership};
 use crate::parse::btrfs_filesystem_show::{classify_btrfs_probe, DeviceBtrfsProbe};
@@ -325,6 +325,23 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         );
     }
 
+    let any_needs_format = probed
+        .iter()
+        .any(|p| matches!(p.state, ConfigDiskState::PresentNotLuks));
+
+    if any_needs_format
+        && params.enroll_key_file.is_none()
+        && pool_has_keyfile_enrollment(runner, &pool.devices)
+    {
+        eprintln!(
+            "WARNING: Existing pool drives have a keyfile (keyslot-1) for auto-unlock, \
+             but the new drive will not.\n  \
+             Passphrase unlock still works, but the keyfile won't unlock the new drive \
+             until it's enrolled.\n  \
+             Fix: re-run with --enroll <dir>, or run `braid enroll <dir>` afterward.\n"
+        );
+    }
+
     // Compile steps for dry-run display
     let steps = compile_add_steps_multi(
         runner,
@@ -378,9 +395,6 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     let passphrase = read_passphrase(params.passphrase_file, params.passphrase_stdin)?;
 
     // Verify passphrase against existing pool member (once)
-    let any_needs_format = probed
-        .iter()
-        .any(|p| matches!(p.state, ConfigDiskState::PresentNotLuks));
     if any_needs_format
         && let Some(existing) = pool.devices.first() {
             let status_raw = runner.run(&crate::cmd::CmdRequest::CryptsetupStatus {

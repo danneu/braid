@@ -3,8 +3,8 @@ use crate::config::{config_read, mapper_name};
 use crate::confirm;
 use crate::journal;
 use crate::luks::{
-    backup_luks_header, ensure_luks_open, luks_format, luks_opts_from_env, read_passphrase,
-    verify_passphrase,
+    backup_luks_header, ensure_luks_open, luks_format, luks_opts_from_env,
+    pool_has_keyfile_enrollment, read_passphrase, verify_passphrase,
 };
 use crate::membership;
 use crate::parse::parse_btrfs_device_stats;
@@ -158,6 +158,18 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         );
         if pool.total_devices == 1 {
             eprintln!("WARNING: This replace leaves only 1 disk \u{2014} no redundancy.\n");
+        }
+        if matches!(new_probed.state, ConfigDiskState::PresentNotLuks)
+            && params.enroll_key_file.is_none()
+            && pool_has_keyfile_enrollment(runner, &pool.devices)
+        {
+            eprintln!(
+                "WARNING: Existing pool drives have a keyfile (keyslot-1) for auto-unlock, \
+                 but the new drive will not.\n  \
+                 Passphrase unlock still works, but the keyfile won't unlock the new drive \
+                 until it's enrolled.\n  \
+                 Fix: re-run with --enroll <dir>, or run `braid enroll <dir>` afterward.\n"
+            );
         }
         confirm::confirm_yes().map_err(ReplaceError::Validation)?;
     }

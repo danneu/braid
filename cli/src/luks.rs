@@ -2,7 +2,7 @@ use crate::cmd::{CmdError, CmdRequest, CommandRunner};
 use crate::config::mapper_name;
 use crate::probe::Filesystem;
 use crate::state_paths::StatePaths;
-use crate::types::ByIdPath;
+use crate::types::{ByIdPath, PoolDevice};
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
@@ -373,6 +373,25 @@ pub fn check_key_slot<R: CommandRunner>(
         Some(_) => Ok(KeySlotState::Occupied),
         None => Ok(KeySlotState::Empty),
     }
+}
+
+/// Best-effort check: does any live pool device have a keyfile in slot 1?
+/// Scans all devices; returns true on first occupied slot 1.
+/// Never fails the caller — probe errors are logged and skipped.
+pub fn pool_has_keyfile_enrollment<R: CommandRunner>(runner: &R, devices: &[PoolDevice]) -> bool {
+    for dev in devices {
+        match check_key_slot(runner, &dev.underlying, LUKS_SLOT_KEYFILE) {
+            Ok(KeySlotState::Occupied) => return true,
+            Ok(KeySlotState::Empty) => {}
+            Err(e) => {
+                eprintln!(
+                    "note: could not check keyfile enrollment on {}: {e}",
+                    dev.underlying
+                );
+            }
+        }
+    }
+    false
 }
 
 /// Scan `dir` for `.luksheader` or `.img` files and return advisories.
@@ -964,5 +983,127 @@ mod tests {
     fn read_passphrase_file_missing() {
         let result = read_passphrase(Some(std::path::Path::new("/no/such/file")), false);
         assert!(result.is_err());
+    }
+
+    // -- pool_has_keyfile_enrollment tests --
+
+    use crate::types::{LuksUuid, MapperName, PoolDevice};
+
+    fn make_pool_device(name: &str, underlying: &str) -> PoolDevice {
+        PoolDevice {
+            mapper: MapperName(format!("braid-{name}")),
+            luks_uuid: LuksUuid("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into()),
+            devid: 1,
+            underlying: underlying.into(),
+        }
+    }
+
+    fn luks_dump_slot1_empty(device: &str) -> (CmdRequest, RawCommandOutput) {
+        (
+            CmdRequest::CryptsetupLuksDump {
+                device: device.to_owned(),
+            },
+            RawCommandOutput {
+                cmd: format!("cryptsetup luksDump {device}"),
+                stdout: r#"{"keyslots":{"0":{"type":"luks2"}}}"#.into(),
+                stderr: String::new(),
+                exit_status: 0,
+            },
+        )
+    }
+
+    fn luks_dump_slot1_occupied(device: &str) -> (CmdRequest, RawCommandOutput) {
+        (
+            CmdRequest::CryptsetupLuksDump {
+                device: device.to_owned(),
+            },
+            RawCommandOutput {
+                cmd: format!("cryptsetup luksDump {device}"),
+                stdout: r#"{"keyslots":{"0":{"type":"luks2"},"1":{"type":"luks2"}}}"#.into(),
+                stderr: String::new(),
+                exit_status: 0,
+            },
+        )
+    }
+
+    fn luks_dump_error(device: &str) -> (CmdRequest, RawCommandOutput) {
+        (
+            CmdRequest::CryptsetupLuksDump {
+                device: device.to_owned(),
+            },
+            RawCommandOutput {
+                cmd: format!("cryptsetup luksDump {device}"),
+                stdout: String::new(),
+                stderr: "Device not found".into(),
+                exit_status: 5,
+            },
+        )
+    }
+
+    /*
+     * Intent: empty device list returns false (no enrollment detected).
+     * Why: bootstrap case — no existing pool members to inspect.
+     * Scenario: first `braid add` creating a new pool.
+     */
+    #[test]
+    fn enrollment_check_empty_devices() {
+        let runner = MockRunner::default();
+        assert!(!pool_has_keyfile_enrollment(&runner, &[]));
+    }
+
+    /*
+     * Intent: detect enrollment when a device has slot 1 occupied.
+     * Why: core positive case for the warning.
+     * Scenario: pool with USB keyfile auto-unlock, user runs `braid add` without --enroll.
+     */
+    #[test]
+    fn enrollment_check_slot1_occupied() {
+        let dev = make_pool_device("data1", "/dev/sda");
+        let (req, resp) = luks_dump_slot1_occupied("/dev/sda");
+        let runner = MockRunner::default().with_output(req, resp);
+        assert!(pool_has_keyfile_enrollment(&runner, &[dev]));
+    }
+
+    /*
+     * Intent: no enrollment when slot 1 is empty.
+     * Why: core negative case — no warning needed.
+     * Scenario: pool using passphrase only, no keyfile enrolled.
+     */
+    #[test]
+    fn enrollment_check_slot1_empty() {
+        let dev = make_pool_device("data1", "/dev/sda");
+        let (req, resp) = luks_dump_slot1_empty("/dev/sda");
+        let runner = MockRunner::default().with_output(req, resp);
+        assert!(!pool_has_keyfile_enrollment(&runner, &[dev]));
+    }
+
+    /*
+     * Intent: scan all devices, not just the first.
+     * Why: mixed pools (first disk unenrolled, second enrolled) must still detect.
+     * Scenario: user enrolled keyfile on some drives but not all.
+     */
+    #[test]
+    fn enrollment_check_scans_all_devices() {
+        let dev1 = make_pool_device("data1", "/dev/sda");
+        let dev2 = make_pool_device("data2", "/dev/sdb");
+        let (req1, resp1) = luks_dump_slot1_empty("/dev/sda");
+        let (req2, resp2) = luks_dump_slot1_occupied("/dev/sdb");
+        let runner = MockRunner::default()
+            .with_output(req1, resp1)
+            .with_output(req2, resp2);
+        assert!(pool_has_keyfile_enrollment(&runner, &[dev1, dev2]));
+    }
+
+    /*
+     * Intent: probe errors are swallowed, not propagated.
+     * Why: enrollment check is best-effort — must not abort the command.
+     * Scenario: luksDump fails on a device (transient I/O error).
+     */
+    #[test]
+    fn enrollment_check_error_is_best_effort() {
+        let dev = make_pool_device("data1", "/dev/sda");
+        let (req, resp) = luks_dump_error("/dev/sda");
+        let runner = MockRunner::default().with_output(req, resp);
+        assert!(!pool_has_keyfile_enrollment(&runner, &[dev]));
     }
 }
