@@ -209,6 +209,11 @@
               braid = linuxCrane.braid;
             }
           );
+          replace-inhibits-suspend = pkgs.testers.nixosTest (
+            import ./tests/cli/replace-inhibits-suspend.nix {
+              braid = linuxCrane.braid;
+            }
+          );
           replace-luks-label = pkgs.testers.nixosTest (
             import ./tests/cli/replace-luks-label.nix {
               braid = linuxCrane.braid;

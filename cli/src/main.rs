@@ -332,6 +332,7 @@ fn main() {
                 .enroll_key_file
                 .as_ref()
                 .map(|dir| dir.join(braid_cli::luks::KEYFILE_NAME));
+            let sleep_inhibitor = braid_cli::inhibit::RealSleepInhibitor;
             if let Err(e) = braid_cli::replace::cmd_replace(
                 &runner,
                 &fs,
@@ -347,6 +348,7 @@ fn main() {
                     enroll_key_file: enroll_kf.as_deref(),
                     progress,
                     paths: &paths,
+                    sleep_inhibitor: &sleep_inhibitor,
                 },
             ) {
                 print_cli_error(&e.to_string());

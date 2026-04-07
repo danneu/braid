@@ -34,6 +34,7 @@ Architecture decision records. Each has a status: `Draft`, `Active`, `Superseded
 - [decisions/config-first-workflow.md](decisions/config-first-workflow.md) — **Superseded.** Hybrid: NixOS config as source of truth, then imperative script execution.
 - [decisions/disk-pool-management.md](decisions/disk-pool-management.md) — **Superseded.** Symmetric config-first workflow for add/remove/replace.
 - [decisions/hdd-defaults.md](decisions/hdd-defaults.md) — braid optimized for HDD workloads; no flash/SSD support in operational defaults.
+- [decisions/inhibit-sleep.md](decisions/inhibit-sleep.md) — When braid should hold a systemd sleep inhibitor: only for the non-interruptible mutation window, not during prompts or reversible preflight.
 - [decisions/intent-cli.md](decisions/intent-cli.md) — Five intent commands (`braid add/remove/replace/...`) replacing plan/apply complexity.
 - [decisions/mount-permissions.md](decisions/mount-permissions.md) — Group-based mount point permissions enabling regular user write access.
 - [decisions/nix-native.md](decisions/nix-native.md) — Targets NixOS exclusively using standard module conventions and nixpkgs patterns.

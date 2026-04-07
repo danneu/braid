@@ -1,6 +1,7 @@
 use crate::cmd::{CmdRequest, CommandRunner, Step};
 use crate::config::{config_read, mapper_name};
 use crate::confirm;
+use crate::inhibit::AcquireSleepInhibitor;
 use crate::journal;
 use crate::luks::{
     backup_luks_header, ensure_luks_open, luks_format, luks_opts_from_env,
@@ -46,6 +47,10 @@ pub struct ReplaceParams<'a> {
     pub enroll_key_file: Option<&'a Path>,
     pub progress: ProgressOutput,
     pub paths: &'a StatePaths,
+    /// Seam for acquiring a logind sleep inhibitor before the irreversible
+    /// portion of the replace. Production passes `&RealSleepInhibitor`;
+    /// unit tests pass `&NoopSleepInhibitor` to avoid spawning subprocesses.
+    pub sleep_inhibitor: &'a dyn AcquireSleepInhibitor,
 }
 
 pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
@@ -204,6 +209,28 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
 
     // Guard: new disk must not already be in the pool.
     check_new_not_in_pool(new_name, &new_mn, &pool)?;
+
+    // Hold a logind sleep inhibitor for the rest of the replace operation —
+    // covers Step 1 LUKS init, the long-running btrfs replace start, and
+    // the post-replace soft balance for missing-path replaces. Suspending
+    // mid-replace produces kernel-level topology corruption on every kernel
+    // — see issues #45 and #48 and the upstream warning at
+    // reference/btrfs-progs/Documentation/btrfs-replace.rst:49-50.
+    //
+    // Acquired here, AFTER all interactive/reversible work (confirmation,
+    // passphrase read+verify, check_new_not_in_pool) and BEFORE
+    // journal::write_journal, so that:
+    //   - operator-idle prompts do not block suspend
+    //   - a logind failure aborts cleanly without stranding pending-op.json
+    //     and forcing the user into recovery mode for a preflight failure.
+    let _sleep_inhibitor_guard = params
+        .sleep_inhibitor
+        .acquire("replace in progress")
+        .map_err(|e| {
+            ReplaceError::Validation(format!(
+                "could not acquire sleep inhibitor (is logind running?): {e}"
+            ))
+        })?;
 
     // Build target membership and write journal before irreversible disk ops.
     let pre_membership = membership::load_membership(params.paths)
@@ -1464,6 +1491,7 @@ mod tests {
         ]);
 
         let runner = FailingReplaceRunner;
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
         let result = cmd_replace(
             &runner,
             &fs,
@@ -1479,6 +1507,7 @@ mod tests {
                 enroll_key_file: None,
                 progress: crate::progress::ProgressOutput::Off,
                 paths: &paths,
+                sleep_inhibitor: &inhibitor,
             },
         );
 
@@ -1489,6 +1518,90 @@ mod tests {
         assert!(
             journal::load_journal(&paths).unwrap().is_some(),
             "pending-op.json must survive error exit so braid recover can reconcile"
+        );
+        // The journal exists, which proves we got past journal::write_journal,
+        // which proves the inhibitor was acquired exactly once on the way in.
+        // Locks in the seam placement: if a refactor moves the acquire to a
+        // post-journal point or skips it entirely, this assert flips.
+        assert_eq!(
+            inhibitor.acquire_count(),
+            1,
+            "sleep inhibitor must be acquired exactly once on the path through journal::write_journal"
+        );
+    }
+
+    #[test]
+    // Intent: --dry-run must not acquire the sleep inhibitor.
+    //
+    // Why it exists: dry-run takes no irreversible action and never reaches
+    //   the irreversible section that the inhibitor is meant to protect. If
+    //   acquisition leaks into the dry-run path it would spawn systemd-inhibit
+    //   for nothing — wasteful and a UX surprise (operators do not expect
+    //   --dry-run to require logind).
+    //
+    // Scenario: operator runs `braid replace --old disk2 --new disk3=... --dry-run`
+    //   to preview the plan. cmd_replace must short-circuit at the dry-run
+    //   branch before the inhibitor seam fires.
+    fn dry_run_does_not_acquire_inhibitor() {
+        let state_tmp = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(state_tmp.path().into());
+        let mut m = PoolMembership::empty();
+        m.disks.insert(
+            "disk1".into(),
+            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
+        );
+        m.disks.insert(
+            "disk2".into(),
+            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk2".into())),
+        );
+        membership::save_membership(&m, &paths).unwrap();
+
+        let config_tmp = tempfile::tempdir().unwrap();
+        let config_path = config_tmp.path().join("config.json");
+        std::fs::write(
+            &config_path,
+            serde_json::to_vec(&serde_json::json!({ "mount_point": "/mnt/storage" })).unwrap(),
+        )
+        .unwrap();
+
+        let pass_path = config_tmp.path().join("passphrase");
+        std::fs::write(&pass_path, b"test-passphrase\n").unwrap();
+
+        let fs = ReplaceMockFs(vec![
+            "/dev/disk/by-id/virtio-disk3".into(),
+            "/dev/mapper/braid-disk3".into(),
+        ]);
+
+        let runner = FailingReplaceRunner;
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let result = cmd_replace(
+            &runner,
+            &fs,
+            &ReplaceParams {
+                config_path: &config_path,
+                old_name: "disk2",
+                new_name: "disk3=/dev/disk/by-id/virtio-disk3",
+                missing_id: None,
+                dry_run: true,
+                yes: true,
+                passphrase_stdin: false,
+                passphrase_file: Some(pass_path.as_path()),
+                enroll_key_file: None,
+                progress: crate::progress::ProgressOutput::Off,
+                paths: &paths,
+                sleep_inhibitor: &inhibitor,
+            },
+        );
+
+        assert!(result.is_ok(), "dry-run should succeed: {result:?}");
+        assert_eq!(
+            inhibitor.acquire_count(),
+            0,
+            "dry-run must NOT acquire the sleep inhibitor — it has no irreversible work to protect"
+        );
+        assert!(
+            journal::load_journal(&paths).unwrap().is_none(),
+            "dry-run must not write the journal"
         );
     }
 
