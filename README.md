@@ -285,7 +285,7 @@ The `--json` output includes a `"last_scrub"` object with `"state"` (`never`, `r
 ### Diagnostics
 
 ```sh
-sudo braid doctor           # check config, pool health, profile consistency
+sudo braid doctor           # check config, pool health, profile consistency, LUKS headers
 sudo braid doctor --json    # machine-readable output
 ```
 

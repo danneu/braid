@@ -173,6 +173,171 @@ fn check_config_permissions<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) ->
     }
 }
 
+/// Per-disk health classification used by `check_declared_disks`.
+///
+/// The `Luks*` variants describe what cryptsetup probes saw on disk; the rest
+/// describe earlier failure modes (filesystem-level or runner-level) where we
+/// never reached a probe. Keeping them in one enum lets `summarize_declared_disks`
+/// produce a single aggregated finding per disk.
+#[derive(Debug, Clone)]
+enum DiskState {
+    /// Both `cryptsetup isLuks` and `cryptsetup luksDump` succeeded.
+    LuksHeaderOk,
+    /// `std::fs::metadata` returned `Err` — the by-id symlink target is gone.
+    Missing,
+    /// Path exists but is not a block device.
+    NotBlock,
+    /// The cryptsetup command itself failed to execute (missing binary, IPC
+    /// failure, etc.). NOT the same as cryptsetup inspecting the device and
+    /// finding it damaged — this is a tooling problem and must never produce
+    /// a "repair the LUKS header" suggestion.
+    ProbeFailed(String),
+    /// `cryptsetup isLuks` exited non-zero — the LUKS magic is gone or the
+    /// header is otherwise unreadable. Severe.
+    LuksHeaderUnreadable,
+    /// `cryptsetup isLuks` succeeded but `cryptsetup luksDump` failed —
+    /// the magic is intact but metadata is damaged. Less severe;
+    /// `cryptsetup repair --type luks2` may be able to fix it.
+    LuksHeaderDamaged,
+}
+
+/// Probe a single declared disk to figure out its `DiskState`.
+///
+/// This is the impure half of `check_declared_disks`: it touches the filesystem
+/// (`std::fs::metadata`) and the runner. It is intentionally tiny so the only
+/// untested code path is the unavoidable filesystem gate; the rendering logic
+/// lives in `summarize_declared_disks`, which is pure and unit-tested.
+fn classify_disk_state<R: CommandRunner>(runner: &R, path: &Path) -> DiskState {
+    match std::fs::metadata(path) {
+        Err(_) => return DiskState::Missing,
+        Ok(meta) if !meta.file_type().is_block_device() => return DiskState::NotBlock,
+        Ok(_) => {}
+    }
+
+    let device = path.to_string_lossy().into_owned();
+
+    match runner.run(&CmdRequest::CryptsetupIsLuks {
+        device: device.clone(),
+    }) {
+        Err(e) => return DiskState::ProbeFailed(e.to_string()),
+        Ok(raw) if raw.exit_status != 0 => return DiskState::LuksHeaderUnreadable,
+        Ok(_) => {}
+    }
+
+    match runner.run(&CmdRequest::CryptsetupLuksDumpText { device }) {
+        Err(e) => DiskState::ProbeFailed(e.to_string()),
+        Ok(raw) if raw.exit_status != 0 => DiskState::LuksHeaderDamaged,
+        Ok(_) => DiskState::LuksHeaderOk,
+    }
+}
+
+/// Pure rendering function: takes pre-classified per-disk states and returns
+/// the `CheckResult` for `declared_disks`.
+///
+/// **Product invariant — never reference `/var/lib/braid/luks-headers/`:**
+/// `braid status` and the TUI already warn about persistent local copies of
+/// LUKS header backups, because the intended workflow is for users to export
+/// the header off-system and remove the local copy. doctor must be consistent
+/// with that posture and never instruct users to restore from a local file.
+/// All recovery guidance here is generic ("your off-system LUKS header
+/// backup"). See `plans/wip/cheeky-questing-popcorn.md` for the full rationale.
+fn summarize_declared_disks(classifications: &[(String, String, DiskState)]) -> CheckResult {
+    let total = classifications.len();
+    let mut missing: Vec<String> = Vec::new();
+    let mut not_block: Vec<String> = Vec::new();
+    let mut probe_failed: Vec<String> = Vec::new();
+    let mut header_unreadable: Vec<String> = Vec::new();
+    let mut header_damaged: Vec<String> = Vec::new();
+
+    for (name, by_id, state) in classifications {
+        match state {
+            DiskState::LuksHeaderOk => {}
+            DiskState::Missing => missing.push(format!("{name} ({by_id})")),
+            DiskState::NotBlock => not_block.push(format!("{name} ({by_id})")),
+            DiskState::ProbeFailed(err) => {
+                probe_failed.push(format!("{name} ({by_id}): {err}"));
+            }
+            DiskState::LuksHeaderUnreadable => {
+                header_unreadable.push(format!(
+                    "{name} ({by_id}): LUKS header unreadable. \
+                    Restore from your off-system LUKS header backup if you have one \
+                    (cryptsetup luksHeaderRestore). Without an off-system backup, \
+                    recovery may be limited or impossible."
+                ));
+            }
+            DiskState::LuksHeaderDamaged => {
+                header_damaged.push(format!(
+                    "{name} ({by_id}): LUKS header metadata damaged. \
+                    To attempt repair manually: cryptsetup repair --type luks2 {by_id} \
+                    — make a safe backup of the device header before running repair."
+                ));
+            }
+        }
+    }
+
+    let problem_count = missing.len()
+        + not_block.len()
+        + probe_failed.len()
+        + header_unreadable.len()
+        + header_damaged.len();
+
+    if problem_count == 0 {
+        return CheckResult {
+            name: "declared_disks".into(),
+            status: CheckStatus::Ok,
+            message: format!("all {total} declared disk(s) present"),
+        };
+    }
+
+    let mut parts: Vec<String> = Vec::new();
+    if !missing.is_empty() {
+        parts.push(format!(
+            "{} not found: {}",
+            missing.len(),
+            missing.join(", ")
+        ));
+    }
+    if !not_block.is_empty() {
+        parts.push(format!(
+            "{} not a block device: {}",
+            not_block.len(),
+            not_block.join(", ")
+        ));
+    }
+    if !header_unreadable.is_empty() {
+        parts.push(format!(
+            "{} with unreadable LUKS header: {}",
+            header_unreadable.len(),
+            header_unreadable.join("; ")
+        ));
+    }
+    if !header_damaged.is_empty() {
+        parts.push(format!(
+            "{} with damaged LUKS header metadata: {}",
+            header_damaged.len(),
+            header_damaged.join("; ")
+        ));
+    }
+    if !probe_failed.is_empty() {
+        parts.push(format!(
+            "{} with LUKS header probe failures: {}",
+            probe_failed.len(),
+            probe_failed.join("; ")
+        ));
+    }
+
+    CheckResult {
+        name: "declared_disks".into(),
+        status: CheckStatus::Warn,
+        message: format!(
+            "{}/{} disk(s) have problems: {}",
+            problem_count,
+            total,
+            parts.join("; ")
+        ),
+    }
+}
+
 fn check_declared_disks<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> CheckResult {
     let pool_membership = match membership::load_membership(ctx.paths) {
         Ok(m) => m,
@@ -192,51 +357,17 @@ fn check_declared_disks<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> Che
         }
     };
 
-    let mut missing: Vec<String> = Vec::new();
-    let mut not_block: Vec<String> = Vec::new();
-    let total = pool_membership.disks.len();
-    for (name, member) in &pool_membership.disks {
-        let path = Path::new(member.by_id.0.as_str());
-        match std::fs::metadata(path) {
-            Ok(meta) if meta.file_type().is_block_device() => {}
-            Ok(_) => not_block.push(format!("{name} ({})", member.by_id)),
-            Err(_) => missing.push(format!("{name} ({})", member.by_id)),
-        }
-    }
+    let classifications: Vec<(String, String, DiskState)> = pool_membership
+        .disks
+        .iter()
+        .map(|(name, member)| {
+            let by_id = member.by_id.0.clone();
+            let state = classify_disk_state(ctx.runner, Path::new(&by_id));
+            (name.clone(), by_id, state)
+        })
+        .collect();
 
-    if missing.is_empty() && not_block.is_empty() {
-        CheckResult {
-            name: "declared_disks".into(),
-            status: CheckStatus::Ok,
-            message: format!("all {total} declared disk(s) present"),
-        }
-    } else {
-        let mut parts: Vec<String> = Vec::new();
-        if !missing.is_empty() {
-            parts.push(format!(
-                "{} not found: {}",
-                missing.len(),
-                missing.join(", ")
-            ));
-        }
-        if !not_block.is_empty() {
-            parts.push(format!(
-                "{} not a block device: {}",
-                not_block.len(),
-                not_block.join(", ")
-            ));
-        }
-        CheckResult {
-            name: "declared_disks".into(),
-            status: CheckStatus::Warn,
-            message: format!(
-                "{}/{} disk(s) have problems: {}",
-                missing.len() + not_block.len(),
-                total,
-                parts.join("; ")
-            ),
-        }
-    }
+    summarize_declared_disks(&classifications)
 }
 
 fn ensure_df_snapshot<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) {
@@ -824,6 +955,229 @@ mod tests {
         let report = run_doctor(f.path(), &mock(), &paths);
         let check = find_check(&report, "declared_disks");
         assert_eq!(check.status, CheckStatus::Skip);
+    }
+
+    // --- summarize_declared_disks: pure rendering tests ---
+    //
+    // These tests target the pure summarizer directly, building DiskState
+    // classifications by hand. They never touch the filesystem, the runner,
+    // or StatePaths — by design, since the impure classifier is exercised by
+    // the VM test in tests/cli/braid-doctor.py.
+
+    fn cls(name: &str, by_id: &str, state: DiskState) -> (String, String, DiskState) {
+        (name.to_owned(), by_id.to_owned(), state)
+    }
+
+    #[test]
+    fn summarize_ok_when_all_headers_intact() {
+        /*
+         * Intent: when every declared disk passes both LUKS probes, the check
+         *   returns Ok with the existing "all N declared disk(s) present"
+         *   message.
+         * Why it exists: protects the happy path against regressions introduced
+         *   by extracting DiskState classification from the original check.
+         * Scenario: a healthy multi-disk NAS with no header damage on any drive.
+         */
+        let inputs = [
+            cls("disk1", "/dev/disk/by-id/wwn-0x1", DiskState::LuksHeaderOk),
+            cls("disk2", "/dev/disk/by-id/wwn-0x2", DiskState::LuksHeaderOk),
+        ];
+        let result = summarize_declared_disks(&inputs);
+        assert_eq!(result.status, CheckStatus::Ok);
+        assert_eq!(result.message, "all 2 declared disk(s) present");
+    }
+
+    #[test]
+    fn summarize_warn_luks_header_unreadable() {
+        /*
+         * Intent: when a disk's LUKS header cannot even be recognized as LUKS
+         *   (isLuks fails), the check warns and points the user at an
+         *   off-system header backup with luksHeaderRestore — never at a
+         *   local /var/lib/braid/luks-headers/ file.
+         * Why it exists: this is the worst recoverable state — the on-disk
+         *   header is gone or zeroed. Without specific guidance, users see a
+         *   generic exit code from later cryptsetup operations and have no
+         *   actionable next step. The negative assertions also pin the
+         *   cross-command product invariant: braid status and the TUI already
+         *   warn about persistent local .luksheader files, and doctor must be
+         *   consistent with that posture rather than directing users at them.
+         * Scenario: an HDD whose first sectors got clobbered by a misdirected
+         *   dd or a controller bug — the dm-crypt mapping in kernel may still
+         *   be active, but cryptsetup probes against the raw device fail.
+         */
+        let inputs = [cls(
+            "disk1",
+            "/dev/disk/by-id/wwn-0xABCD",
+            DiskState::LuksHeaderUnreadable,
+        )];
+        let result = summarize_declared_disks(&inputs);
+        assert_eq!(result.status, CheckStatus::Warn);
+        let msg = &result.message;
+        assert!(msg.contains("disk1"), "missing disk name: {msg}");
+        assert!(
+            msg.contains("header unreadable"),
+            "missing 'header unreadable': {msg}"
+        );
+        assert!(msg.contains("off-system"), "missing 'off-system': {msg}");
+        assert!(
+            msg.contains("luksHeaderRestore"),
+            "missing 'luksHeaderRestore': {msg}"
+        );
+        // Cross-command consistency invariant.
+        assert!(
+            !msg.contains("/var/lib/braid/luks-headers/"),
+            "doctor must not reference local backup directory: {msg}"
+        );
+        assert!(
+            !msg.contains(".luksheader"),
+            "doctor must not reference local .luksheader files: {msg}"
+        );
+    }
+
+    #[test]
+    fn summarize_warn_luks_header_damaged() {
+        /*
+         * Intent: when a disk has LUKS magic intact but luksDump fails, the
+         *   check warns and suggests `cryptsetup repair --type luks2` with an
+         *   explicit "make a safe backup first" warning.
+         * Why it exists: this is the less-severe LUKS-corruption case — one
+         *   header copy or some metadata field is bad but the magic is still
+         *   there. The right tool is `cryptsetup repair`, but it mutates the
+         *   header, so users must back up first. Negative assertions also
+         *   pin the no-local-backup-references invariant.
+         * Scenario: a disk with one corrupted LUKS2 header copy (the on-disk
+         *   format keeps two copies for redundancy), or damaged keyslot
+         *   metadata.
+         */
+        let inputs = [cls(
+            "disk1",
+            "/dev/disk/by-id/wwn-0xCAFE",
+            DiskState::LuksHeaderDamaged,
+        )];
+        let result = summarize_declared_disks(&inputs);
+        assert_eq!(result.status, CheckStatus::Warn);
+        let msg = &result.message;
+        assert!(msg.contains("disk1"), "missing disk name: {msg}");
+        assert!(
+            msg.contains("metadata damaged"),
+            "missing 'metadata damaged': {msg}"
+        );
+        assert!(
+            msg.contains("cryptsetup repair --type luks2"),
+            "missing repair command: {msg}"
+        );
+        assert!(
+            msg.contains("safe backup"),
+            "missing safe-backup warning: {msg}"
+        );
+        assert!(
+            !msg.contains("/var/lib/braid/luks-headers/"),
+            "doctor must not reference local backup directory: {msg}"
+        );
+        assert!(
+            !msg.contains(".luksheader"),
+            "doctor must not reference local .luksheader files: {msg}"
+        );
+    }
+
+    #[test]
+    fn summarize_warn_probe_failed_does_not_suggest_repair() {
+        /*
+         * Intent: when the cryptsetup probe itself fails to execute (Err from
+         *   the runner — e.g. binary missing, IPC failure), the check reports
+         *   the tooling problem but must NOT suggest `cryptsetup repair` or
+         *   `luksHeaderRestore`.
+         * Why it exists: conflating execution failure with header corruption
+         *   could tell users to repair or restore a healthy disk. This test is
+         *   the executable form of that invariant.
+         * Scenario: cryptsetup binary missing from PATH on a misconfigured
+         *   machine, or any other runner-level execution error.
+         */
+        let inputs = [cls(
+            "disk1",
+            "/dev/disk/by-id/wwn-0x1",
+            DiskState::ProbeFailed("simulated runner error".into()),
+        )];
+        let result = summarize_declared_disks(&inputs);
+        assert_eq!(result.status, CheckStatus::Warn);
+        let msg = &result.message;
+        assert!(msg.contains("disk1"), "missing disk name: {msg}");
+        assert!(
+            msg.contains("simulated runner error"),
+            "missing error string: {msg}"
+        );
+        assert!(
+            !msg.contains("cryptsetup repair"),
+            "execution failure must not suggest repair: {msg}"
+        );
+        assert!(
+            !msg.contains("luksHeaderRestore"),
+            "execution failure must not suggest restore: {msg}"
+        );
+    }
+
+    #[test]
+    fn summarize_preserves_missing_and_not_block_messages() {
+        /*
+         * Intent: the existing "not found" and "not a block device"
+         *   classifications continue to render with the same phrasing they had
+         *   before the refactor.
+         * Why it exists: protects against accidental wording regressions in
+         *   the categories that were already covered by the original check.
+         * Scenario: a NAS where one declared disk's /dev/disk/by-id/ symlink
+         *   is gone (cabling issue) and another points at a regular file
+         *   (config bug).
+         */
+        let inputs = [
+            cls("disk1", "/dev/disk/by-id/wwn-0x1", DiskState::Missing),
+            cls("disk2", "/dev/disk/by-id/wwn-0x2", DiskState::NotBlock),
+            cls("disk3", "/dev/disk/by-id/wwn-0x3", DiskState::LuksHeaderOk),
+        ];
+        let result = summarize_declared_disks(&inputs);
+        assert_eq!(result.status, CheckStatus::Warn);
+        let msg = &result.message;
+        assert!(msg.contains("not found"), "missing 'not found': {msg}");
+        assert!(
+            msg.contains("not a block device"),
+            "missing 'not a block device': {msg}"
+        );
+        assert!(msg.contains("disk1"), "missing disk1: {msg}");
+        assert!(msg.contains("disk2"), "missing disk2: {msg}");
+    }
+
+    #[test]
+    fn summarize_mixed_states_reports_all() {
+        /*
+         * Intent: when multiple disks fail in different ways, every failing
+         *   disk's name appears in the message and the count is correct.
+         * Why it exists: a real failure scenario rarely involves a single
+         *   category; the check must aggregate findings instead of reporting
+         *   only the first.
+         * Scenario: a degraded NAS with one missing disk, one with an
+         *   unreadable LUKS header, and one with damaged LUKS metadata
+         *   simultaneously.
+         */
+        let inputs = [
+            cls("disk1", "/dev/disk/by-id/wwn-0x1", DiskState::Missing),
+            cls(
+                "disk2",
+                "/dev/disk/by-id/wwn-0x2",
+                DiskState::LuksHeaderUnreadable,
+            ),
+            cls(
+                "disk3",
+                "/dev/disk/by-id/wwn-0x3",
+                DiskState::LuksHeaderDamaged,
+            ),
+            cls("disk4", "/dev/disk/by-id/wwn-0x4", DiskState::LuksHeaderOk),
+        ];
+        let result = summarize_declared_disks(&inputs);
+        assert_eq!(result.status, CheckStatus::Warn);
+        let msg = &result.message;
+        assert!(msg.contains("3/4"), "expected '3/4' problem count: {msg}");
+        assert!(msg.contains("disk1"), "missing disk1: {msg}");
+        assert!(msg.contains("disk2"), "missing disk2: {msg}");
+        assert!(msg.contains("disk3"), "missing disk3: {msg}");
     }
 
     #[test]

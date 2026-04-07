@@ -170,4 +170,78 @@ with subtest("Data profile mismatch — human output contains label"):
     assert "data profiles" in output, f"Expected 'data profiles':\n{output}"
     assert "meta profiles" in output, f"Expected 'meta profiles':\n{output}"
 
+# --- Corrupted LUKS header ---
+#
+# Intent: end-to-end coverage that braid doctor's declared_disks check
+#   detects an unreadable LUKS header on a real device via real cryptsetup,
+#   and that the rendered remediation message tells the user to restore from
+#   an off-system backup — never from a local /var/lib/braid/luks-headers/
+#   file. The unit tests in cli/src/doctor.rs cover the message-rendering
+#   half; this subtest covers the detection half that unit tests cannot
+#   reach (no MockRunner can fabricate a real block device).
+# Why it exists: previously, doctor never probed LUKS header health on
+#   declared disks, so a wiped header passed silently and surfaced only as
+#   a generic exit-1 from cryptsetup at unlock time. The product invariant
+#   is that doctor must not point users at local .luksheader files; status
+#   and the TUI already warn about persistent local copies.
+# Scenario: an HDD whose first sectors get clobbered by a misdirected dd or
+#   a controller bug. The dm-crypt mapping in kernel is still active so the
+#   pool keeps running, but cryptsetup probes against the raw device fail.
+with subtest("Corrupted LUKS header — declared_disks warns and stays generic"):
+    # Diagnostic: confirm what /dev/disk/by-id/virtio-disk1 actually points at
+    # and that the LUKS magic is in fact at offset 0 of the underlying device.
+    print("by-id listing before:")
+    print(machine.succeed("ls -la /dev/disk/by-id/"))
+    print("hex dump of disk1 first 16 bytes BEFORE corruption:")
+    print(machine.succeed("od -An -tx1 -N 16 /dev/disk/by-id/virtio-disk1"))
+
+    # Wipe 16 MiB at offset 0. LUKS2's primary header + binary keyslot area is
+    # within the first ~16 MiB, and 16 MiB is large enough that a misalignment
+    # or partial-write bug cannot leave the magic intact. Without oflag=direct,
+    # the write would land in the page cache and cryptsetup's later read could
+    # bypass it. After the write, drop_caches invalidates any read caches that
+    # might still be holding a stale header.
+    machine.succeed(
+        "dd if=/dev/zero of=/dev/disk/by-id/virtio-disk1 bs=1M count=16 "
+        "conv=notrunc oflag=direct status=none"
+    )
+    machine.succeed("sync && echo 3 > /proc/sys/vm/drop_caches")
+
+    print("hex dump of disk1 first 16 bytes AFTER corruption:")
+    print(machine.succeed("od -An -tx1 -N 16 /dev/disk/by-id/virtio-disk1"))
+
+    # Sanity-check: confirm cryptsetup itself now rejects the header. If this
+    # fails, the dd above did not actually corrupt the on-disk header and the
+    # later assertions would mis-diagnose the failure.
+    is_luks_exit, is_luks_out = machine.execute(
+        "cryptsetup isLuks /dev/disk/by-id/virtio-disk1"
+    )
+    print(f"cryptsetup isLuks after dd (exit {is_luks_exit}):\n{is_luks_out}")
+    assert is_luks_exit != 0, (
+        "dd did not corrupt the LUKS header: cryptsetup isLuks still succeeds"
+    )
+    raw = machine.succeed("braid doctor --json")
+    print(f"Corrupted header JSON:\n{raw}")
+    report = json.loads(raw)
+    checks = {c["name"]: c for c in report["checks"]}
+    declared = checks["declared_disks"]
+    assert declared["status"] == "warn", f"declared_disks: {declared}"
+    msg = declared["message"]
+    assert "disk1" in msg, f"missing disk1 in message: {msg}"
+    assert "header unreadable" in msg, f"missing 'header unreadable' in message: {msg}"
+    assert "luksHeaderRestore" in msg, f"missing 'luksHeaderRestore' in message: {msg}"
+    # Classified as unreadable (severe), not damaged — must NOT recommend repair.
+    assert "cryptsetup repair" not in msg, (
+        f"unreadable header must not suggest cryptsetup repair: {msg}"
+    )
+    # Cross-command consistency invariant: doctor must NEVER reference local
+    # /var/lib/braid/luks-headers/ files. status and the TUI already warn
+    # about local copies; doctor must be consistent with that posture.
+    assert "/var/lib/braid/luks-headers/" not in msg, (
+        f"doctor must not reference local backup directory: {msg}"
+    )
+    assert ".luksheader" not in msg, (
+        f"doctor must not reference local .luksheader files: {msg}"
+    )
+
 machine.shutdown()
