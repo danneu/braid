@@ -393,6 +393,11 @@
           repro-btrfs-replace-rejects-smaller = pkgs.testers.nixosTest (
             import ./tests/repro/btrfs-replace-rejects-smaller-target.nix
           );
+          repro-btrfs-replace-interrupted-mid-flight = pkgs.testers.nixosTest (
+            import ./tests/repro/btrfs-replace-interrupted-mid-flight.nix {
+              braid = linuxCrane.braid;
+            }
+          );
           repro-remove-without-balance = pkgs.testers.nixosTest (
             import ./tests/repro/remove-without-balance.nix
           );
