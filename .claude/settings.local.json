@@ -26,7 +26,9 @@
       "Bash(cd:*)",
       "Bash(gh api:*)",
       "Bash(just clippy:*)",
-      "Read(//tmp/**)"
+      "Read(//tmp/**)",
+      "Bash(just test-repro:*)",
+      "Bash(cargo clippy:*)"
     ]
   },
   "plansDirectory": "./plans/wip",

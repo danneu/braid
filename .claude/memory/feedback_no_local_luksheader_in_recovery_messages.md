@@ -1,0 +1,11 @@
+---
+name: no-local-luksheader-in-recovery-messages
+description: braid doctor and other user-facing recovery messages must not reference local /var/lib/braid/luks-headers/*.luksheader files
+type: feedback
+---
+
+User-facing recovery, restoration, or backup-status messages — in `doctor`, `status`, `unlock` errors, TUI, or new commands — must NOT reference local `/var/lib/braid/luks-headers/*.luksheader` files. Recovery guidance must be generic ("restore from your off-system LUKS header backup if you have one"). Never branch on whether a local `.luksheader` file exists, never call `Path::exists` on `paths.luks_headers_dir().join(...)` for the purpose of changing user-visible advice, and never tell users to run `cryptsetup luksHeaderRestore --header-backup-file /var/lib/braid/...`.
+
+**Why:** The local `.luksheader` files created by `braid add`, `replace`, and `enroll_key_file` are transient artifacts, not the intended backup target. The intended product workflow is for the user to export the header off-system and then remove the local copy. `braid status` and the TUI already warn when local copies persist on the same machine because their continued presence is itself a problem. If `doctor` pointed users at those local files, the product would be internally inconsistent — one command would warn about the same artifact another command tells users to depend on. Dan corrected an earlier draft of the LUKS-header-corruption detection plan that proposed branching doctor's remediation message on local-backup existence; the correction was explicit that this would make the product internally inconsistent.
+
+**How to apply:** When designing or reviewing any user-visible message about LUKS header recovery, restoration, or backup status, audit the message text and the surrounding code for `/var/lib/braid/luks-headers/`, `.luksheader`, `luks_headers_dir()`, and any `Path::exists` against a backup path. All four are red flags. The same posture applies even if the local backup *would* technically work — consistency with `status` and the TUI is the product invariant, not whether the file exists. If you're tempted to make the message "more helpful" by pointing at a local file because it happens to be there, stop and reconsider. Generic guidance is the right answer.
