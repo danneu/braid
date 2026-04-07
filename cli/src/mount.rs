@@ -36,6 +36,47 @@ fn tag(label: &str) -> String {
     format!("[{:<4}]", label)
 }
 
+/// Why a membership disk is missing from the pool at unlock time.
+/// Used to format the structured `DegradedRefused` error in probe order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MissingReason {
+    /// Device file does not exist on the host (`ConfigDiskState::Absent`).
+    Unplugged,
+    /// Device exists but `cryptsetup luksUuid` failed
+    /// (`ConfigDiskState::PresentNotLuks`). The header is unreadable.
+    LuksHeaderUnreadable,
+}
+
+/// Format a structured `DegradedRefused` error message that names each
+/// missing disk and the reason in probe order. Preserves the substrings
+/// `"refusing to mount degraded"` and
+/// `"braid <command_hint> --allow-degraded"` that existing tests anchor on.
+///
+/// `missing` is guaranteed non-empty by the caller.
+fn format_degraded_refused(
+    missing: &[(String, MissingReason)],
+    command_hint: &str,
+) -> String {
+    let total = missing.len();
+    let header = if total == 1 {
+        "pool has 1 missing device — refusing to mount degraded".to_owned()
+    } else {
+        format!("pool has {total} missing devices — refusing to mount degraded")
+    };
+
+    let mut lines = vec![header];
+    for (name, reason) in missing {
+        let reason_text = match reason {
+            MissingReason::Unplugged => "not found (unplugged?)",
+            MissingReason::LuksHeaderUnreadable => "LUKS header unreadable",
+        };
+        lines.push(format!("  {name}: {reason_text}"));
+    }
+    lines.push("new writes would have ZERO redundancy (single-profile chunks)".to_owned());
+    lines.push(format!("hint: braid {command_hint} --allow-degraded"));
+    lines.join("\n")
+}
+
 /// Result of the read-only probe + validate phase.
 pub struct OpenPlan {
     /// Disks that need LUKS open (name, by_id pairs).
@@ -75,18 +116,18 @@ pub fn plan_open_pool<R: CommandRunner, F: Filesystem + ?Sized>(
     // 2. Probe each membership disk
     let mut to_unlock = Vec::new();
     let mut any_open = false;
-    let mut any_missing_member = false;
+    let mut missing: Vec<(String, MissingReason)> = Vec::new();
 
     for (name, member) in &membership.disks {
         let probed = probe::probe_config_disk(runner, fs, name, &member.by_id)?;
         match &probed.state {
             ConfigDiskState::Absent => {
                 eprintln!("{}  disk: {:<10}not found (unplugged?)", tag("skip"), name);
-                any_missing_member = true;
+                missing.push((name.clone(), MissingReason::Unplugged));
             }
             ConfigDiskState::PresentNotLuks => {
-                eprintln!("{}  disk: {:<10}LUKS header damaged", tag("skip"), name);
-                any_missing_member = true;
+                eprintln!("{}  disk: {:<10}LUKS header unreadable", tag("skip"), name);
+                missing.push((name.clone(), MissingReason::LuksHeaderUnreadable));
             }
             ConfigDiskState::PresentLuks { uuid, mapper_open } => {
                 if let Some(expected) = &member.luks_uuid
@@ -115,13 +156,13 @@ pub fn plan_open_pool<R: CommandRunner, F: Filesystem + ?Sized>(
         return Err(MountError::Failed("no unlockable disks found".into()));
     }
 
+    let any_missing_member = !missing.is_empty();
+
     // 4. Degraded check (before any mutations)
     if any_missing_member && !allow_degraded {
-        return Err(MountError::DegradedRefused(format!(
-            "pool has missing devices — refusing to mount degraded\n\
-             new writes would have ZERO redundancy (single-profile chunks)\n\
-             hint: braid {} --allow-degraded",
-            command_hint
+        return Err(MountError::DegradedRefused(format_degraded_refused(
+            &missing,
+            command_hint,
         )));
     }
 
@@ -845,6 +886,174 @@ mod tests {
         assert!(
             msg.contains("braid recover --allow-degraded"),
             "hint should reference 'braid recover --allow-degraded', got: {msg}"
+        );
+    }
+
+    /// Intent: format_degraded_refused must surface the disk name, the
+    /// reason ("LUKS header unreadable"), the substring contracts that
+    /// existing tests anchor on, and the singular "1 missing device" form
+    /// for a single-disk failure.
+    ///
+    /// Why: The Test 7 VM scenario hits exactly this shape (one raw
+    /// member in a 2-disk pool). If any of these substrings drift, both
+    /// the existing degraded-refused unit tests and the VM test would
+    /// fail with confusing diffs.
+    ///
+    /// Scenario: A pool has one missing member ("raw") with an unreadable
+    /// LUKS header, command_hint is "unlock".
+    #[test]
+    fn format_degraded_refused_single_unreadable_includes_disk_name_and_reason() {
+        let msg = format_degraded_refused(
+            &[("raw".to_owned(), MissingReason::LuksHeaderUnreadable)],
+            "unlock",
+        );
+        assert!(
+            msg.contains("refusing to mount degraded"),
+            "missing 'refusing to mount degraded': {msg}"
+        );
+        assert!(
+            msg.contains("braid unlock --allow-degraded"),
+            "missing 'braid unlock --allow-degraded': {msg}"
+        );
+        assert!(
+            msg.contains("raw: LUKS header unreadable"),
+            "missing per-disk line 'raw: LUKS header unreadable': {msg}"
+        );
+        assert!(
+            msg.contains("1 missing device"),
+            "expected singular '1 missing device': {msg}"
+        );
+        // Make sure the singular form is not "1 missing devices"
+        assert!(
+            !msg.contains("1 missing devices"),
+            "singular form should not have trailing 's': {msg}"
+        );
+        assert!(
+            msg.contains("new writes would have ZERO redundancy"),
+            "missing redundancy warning preserved from old message: {msg}"
+        );
+    }
+
+    /// Intent: format_degraded_refused must enumerate disks in probe
+    /// order, even when reasons are interleaved (unplugged → unreadable
+    /// → unplugged).
+    ///
+    /// Why: This is the regression test for the parallel-vector design
+    /// considered in an earlier draft. Two parallel `Vec<String>` lists
+    /// would group all unplugged disks before all unreadable ones,
+    /// reordering the final error relative to the preceding eprintln!
+    /// status stream. The test asserts byte-offset ordering to make any
+    /// future regression to a category-grouped layout fail loudly.
+    ///
+    /// Scenario: A 3-missing-disk pool: disk2 unplugged, disk3
+    /// unreadable, disk5 unplugged. command_hint is "recover".
+    #[test]
+    fn format_degraded_refused_mixed_reasons_enumerates_each_disk_in_order() {
+        let msg = format_degraded_refused(
+            &[
+                ("disk2".to_owned(), MissingReason::Unplugged),
+                ("disk3".to_owned(), MissingReason::LuksHeaderUnreadable),
+                ("disk5".to_owned(), MissingReason::Unplugged),
+            ],
+            "recover",
+        );
+
+        assert!(
+            msg.contains("disk2: not found (unplugged?)"),
+            "missing disk2 line: {msg}"
+        );
+        assert!(
+            msg.contains("disk3: LUKS header unreadable"),
+            "missing disk3 line: {msg}"
+        );
+        assert!(
+            msg.contains("disk5: not found (unplugged?)"),
+            "missing disk5 line: {msg}"
+        );
+
+        // Probe-order assertion: disk2 < disk3 < disk5 in byte offsets.
+        let pos_disk2 = msg.find("disk2:").expect("disk2 should appear");
+        let pos_disk3 = msg.find("disk3:").expect("disk3 should appear");
+        let pos_disk5 = msg.find("disk5:").expect("disk5 should appear");
+        assert!(
+            pos_disk2 < pos_disk3,
+            "disk2 must appear before disk3 (probe order): {msg}"
+        );
+        assert!(
+            pos_disk3 < pos_disk5,
+            "disk3 must appear before disk5 (probe order): {msg}"
+        );
+
+        assert!(
+            msg.contains("3 missing devices"),
+            "expected plural '3 missing devices': {msg}"
+        );
+        assert!(
+            msg.contains("braid recover --allow-degraded"),
+            "missing 'braid recover --allow-degraded': {msg}"
+        );
+    }
+
+    /// Intent: format_degraded_refused must use "1 missing device" for a
+    /// single missing disk and "N missing devices" for two or more.
+    ///
+    /// Why: User-facing pluralization is small but cumulative — trivial
+    /// to get right with a one-line check, distracting if wrong.
+    ///
+    /// Scenario: One call with one entry, one call with two entries;
+    /// assert the singular and plural forms are correct.
+    #[test]
+    fn format_degraded_refused_uses_singular_for_one_disk_and_plural_otherwise() {
+        let one = format_degraded_refused(
+            &[("raw".to_owned(), MissingReason::LuksHeaderUnreadable)],
+            "unlock",
+        );
+        assert!(
+            one.contains("1 missing device") && !one.contains("1 missing devices"),
+            "expected singular '1 missing device' (no trailing s): {one}"
+        );
+
+        let two = format_degraded_refused(
+            &[
+                ("disk2".to_owned(), MissingReason::Unplugged),
+                ("disk3".to_owned(), MissingReason::LuksHeaderUnreadable),
+            ],
+            "unlock",
+        );
+        assert!(
+            two.contains("2 missing devices"),
+            "expected plural '2 missing devices': {two}"
+        );
+    }
+
+    /// Intent: format_degraded_refused must never reference local LUKS
+    /// header backup paths.
+    ///
+    /// Why: The cross-command negative invariant established in
+    /// `plans/wip/cheeky-questing-popcorn.md` says that user-facing
+    /// recovery messages must use generic off-system backup language and
+    /// must not point at `/var/lib/braid/luks-headers/` or `.luksheader`
+    /// files. Locking this in at the formatter level means the invariant
+    /// holds for every caller of `DegradedRefused`, present and future.
+    ///
+    /// Scenario: A non-empty input with both reason kinds. Both negative
+    /// substrings must be absent.
+    #[test]
+    fn format_degraded_refused_does_not_reference_local_header_backups() {
+        let msg = format_degraded_refused(
+            &[
+                ("disk2".to_owned(), MissingReason::Unplugged),
+                ("disk3".to_owned(), MissingReason::LuksHeaderUnreadable),
+            ],
+            "unlock",
+        );
+        assert!(
+            !msg.contains("/var/lib/braid/luks-headers/"),
+            "must not reference local backup directory: {msg}"
+        );
+        assert!(
+            !msg.contains(".luksheader"),
+            "must not reference local .luksheader files: {msg}"
         );
     }
 

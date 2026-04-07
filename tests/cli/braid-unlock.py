@@ -190,31 +190,73 @@ with subtest("Test 6: wrong passphrase rejected"):
 
 # --- Test 7: Uninitialized disk ---
 
-with subtest("Test 7: uninitialized disk detected"):
+# Intent: a raw (never-LUKS-formatted) disk listed in pool.json must be
+#   detected at unlock time and surfaced through the structured
+#   DegradedRefused error path with per-disk reason text.
+# Why it exists: previously the per-disk status line said "LUKS header
+#   damaged" (wrong vocabulary — the cryptsetup probe failed to read the
+#   header at all, so it is "unreadable" in the canonical luks.rs sense)
+#   and the final error was a generic "pool has missing devices" string
+#   that did not name the disk or the cause. The new structured error
+#   names each missing disk with its reason in probe order.
+# Scenario: a 2-disk pool.json mixes one valid LUKS member (disk1, which
+#   was braid add'd during setup with the test passphrase) and one
+#   raw/unreadable member ('raw' pointing at virtio-disk4). disk1's
+#   mapper is closed by close_all() above, so plan_open_pool classifies
+#   disk1 as PresentLuks (closed) → goes into to_unlock, and raw as
+#   PresentNotLuks → adds to missing. to_unlock is non-empty, so the
+#   "no unlockable disks found" early return is skipped, and the
+#   degraded check fires deterministically.
+with subtest("Test 7: uninitialized disk detected — degraded-refused enumerates per-disk reasons"):
     close_all()
 
     # Save original pool.json for restoration
     original_pool = machine.succeed("cat /var/lib/braid/pool.json")
 
-    # Write a pool.json pointing at disk4 (raw, never braid add'd)
-    raw_pool = json.dumps({
+    # Two-disk pool: disk1 is real (already LUKS-formatted), 'raw' is
+    # virtio-disk4 which has never been braid add'd.
+    mixed_pool = json.dumps({
         "disks": {
-            "raw": {"by_id": "/dev/disk/by-id/virtio-disk4"},
+            "disk1": {"by_id": "/dev/disk/by-id/virtio-disk1"},
+            "raw":   {"by_id": "/dev/disk/by-id/virtio-disk4"},
         },
     })
-    machine.succeed(f"echo '{raw_pool}' > /var/lib/braid/pool.json")
+    machine.succeed(f"echo '{mixed_pool}' > /var/lib/braid/pool.json")
 
     # Redirect stderr to stdout so we can capture the error message
     cmd = unlock_cmd(passphrase) + " 2>&1"
     ret = machine.execute(cmd)
-    assert ret[0] != 0, "Expected non-zero exit for uninitialized disk"
-    # A raw (never LUKS-formatted) disk in pool.json looks like a damaged
-    # member to unlock — the device exists but has no LUKS header.
-    assert "LUKS header damaged" in ret[1] or "no unlockable disks" in ret[1], \
-        f"Expected 'LUKS header damaged' or 'no unlockable disks' in output, got: {ret}"
+    assert ret[0] != 0, f"Expected non-zero exit for raw member in pool, got: {ret}"
+    output = ret[1]
+
+    # Deterministic: must reach the structured DegradedRefused path.
+    assert "refusing to mount degraded" in output, \
+        f"Expected DegradedRefused path, got: {output}"
+    assert "raw: LUKS header unreadable" in output, \
+        f"Expected per-disk reason 'raw: LUKS header unreadable', got: {output}"
+    assert "braid unlock --allow-degraded" in output, \
+        f"Expected --allow-degraded hint, got: {output}"
+
+    # The renamed status line at mount.rs:88 must use the new vocabulary,
+    # never the old "LUKS header damaged" wording.
+    assert "LUKS header damaged" not in output, \
+        f"Old 'LUKS header damaged' string must not appear after rename: {output}"
+
+    # Cross-command negative invariant: unlock errors never point users at
+    # local /var/lib/braid/luks-headers/ files (those are off-system).
+    assert "/var/lib/braid/luks-headers/" not in output, \
+        f"degraded-refused must not reference local backup directory: {output}"
+    assert ".luksheader" not in output, \
+        f"degraded-refused must not reference local .luksheader files: {output}"
 
     # Restore original pool.json
     machine.succeed(f"echo '{original_pool}' > /var/lib/braid/pool.json")
+
+    # Defensive cleanup: today plan_open_pool returns DegradedRefused
+    # before any cryptsetup open call, so disk1's mapper is never opened.
+    # If a future refactor reorders things, this keeps Test 8 from
+    # inheriting an open mapper.
+    close_all()
 
 # --- Test 8: Paused balance survives unlock (skip_balance) ---
 
