@@ -197,6 +197,9 @@ with subtest("braid sleep inhibitor is held during replace"):
     assert inh["what"] == "sleep", f"expected what=sleep, got {inh!r}"
     assert inh["mode"] == "block", f"expected mode=block, got {inh!r}"
     assert "replace" in inh["why"], f"expected why mentioning replace, got {inh!r}"
+    # Capture the inhibitor pid so Phase 6 can verify the entire process
+    # group is torn down on release (not just the systemd-inhibit parent).
+    inhibitor_pid = inh["pid"]
 
 # --- Phase 5: Wait for the replace to finish ---
 
@@ -234,6 +237,36 @@ with subtest("braid sleep inhibitor is released after replace"):
 
     post = list_inhibitors()
     print(f"=== inhibitors post-replace: {post} ===")
+
+with subtest("inhibitor process group is torn down (no leaked sh/sleep)"):
+    # Regression test: SleepInhibitor::Drop must kill the entire process
+    # group, not just the systemd-inhibit parent. Without process_group(0)
+    # + kill(-pgid, SIGKILL), the supervised `sh -c '...; exec sleep
+    # infinity'` child would survive the parent's death and accumulate as
+    # an orphan reparented to init on every replace.
+    #
+    # SleepInhibitor spawns systemd-inhibit with process_group(0), so the
+    # pgid equals the systemd-inhibit pid. After teardown, `pgrep -g <pgid>`
+    # must find no live members. Allow a brief settle window since the
+    # child reap is async with respect to the inhibitor release we asserted
+    # above.
+    def pgroup_empty():
+        ret = machine.execute(f"pgrep -g {inhibitor_pid}")
+        # pgrep exits non-zero (1) when no processes match.
+        return ret[0] != 0
+
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if pgroup_empty():
+            break
+        time.sleep(0.2)
+    else:
+        leaked = machine.execute(f"pgrep -agf -g {inhibitor_pid} 2>&1")[1]
+        raise AssertionError(
+            f"process group {inhibitor_pid} still has live members 10s "
+            f"after the inhibitor was released — SleepInhibitor::Drop "
+            f"leaked one or more children:\n{leaked}"
+        )
 
 # --- Phase 7: Pool integrity ---
 

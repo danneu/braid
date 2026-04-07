@@ -19,7 +19,25 @@
 //! killed by its parent.
 
 use std::io::{self, Read};
+use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
+
+/// Kill the entire process group rooted at `child` and reap the direct
+/// child. Used by both the `Drop` path and the failure path inside
+/// `SleepInhibitor::acquire`, so the systemd-inhibit + sh + sleep tree is
+/// always torn down as a unit instead of leaving the descendants as
+/// orphans reparented to init.
+fn kill_pgroup_and_reap(child: &mut Child) {
+    // SAFETY: `libc::kill(-pgid, SIGKILL)` is the documented kernel
+    // interface for signalling an entire process group. The pgid equals
+    // the direct child's pid because we spawned with `process_group(0)`.
+    // The pid is still valid in the kernel until we `wait()` on the
+    // direct child below, so there is no pid-reuse window here.
+    unsafe {
+        libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL);
+    }
+    let _ = child.wait();
+}
 
 /// Marker trait for sleep-inhibitor guards.
 ///
@@ -80,9 +98,13 @@ impl AcquireSleepInhibitor for RecordingInhibitor {
 
 /// RAII guard holding a `What=sleep, Who=braid, Mode=block` logind inhibitor.
 ///
-/// Spawns a `systemd-inhibit` child that holds the lock for as long as the
-/// guard is alive. Drop SIGTERMs the child and reaps it; logind releases the
-/// inhibitor when the holding process exits.
+/// Spawns `systemd-inhibit` (which itself supervises a `sh + sleep` child
+/// to keep the inhibitor open) in its own process group. The lock is held
+/// for as long as the guard is alive. `Drop` SIGKILLs the entire process
+/// group via `kill(-pgid, ...)` and reaps the direct child, so the
+/// supervised `sh`/`sleep` is torn down with the parent instead of leaking
+/// as an orphan reparented to init. logind releases the inhibitor as soon
+/// as the holding process exits.
 pub struct SleepInhibitor {
     child: Child,
 }
@@ -100,16 +122,23 @@ impl SleepInhibitor {
     /// Returns an io error if `systemd-inhibit` cannot be spawned or exits
     /// before printing the sentinel (e.g. logind is unreachable).
     pub fn acquire(why: &str) -> io::Result<Self> {
+        // process_group(0) puts systemd-inhibit (and the sh/sleep child it
+        // supervises) in a fresh process group rooted at the systemd-inhibit
+        // pid, so teardown can SIGKILL the whole group via `kill(-pgid, ...)`
+        // instead of just the direct child. Without this the supervised
+        // sleep would survive systemd-inhibit's death and leak as an orphan
+        // reparented to init on every replace.
         let mut child = Command::new("systemd-inhibit")
             .args(["--what=sleep", "--who=braid", "--mode=block"])
             .arg(format!("--why={why}"))
             .args(["sh", "-c", "printf READY; exec sleep infinity"])
             .stdout(Stdio::piped())
+            .process_group(0)
             .spawn()?;
 
         // Run the handshake in an inner closure so any failure (read_exact
         // EOF/io error, sentinel mismatch) flows through a single cleanup
-        // branch below — never leak the spawned child.
+        // branch below — never leak the spawned process group.
         let handshake = (|| -> io::Result<()> {
             let mut buf = [0u8; 5];
             child
@@ -130,8 +159,7 @@ impl SleepInhibitor {
         match handshake {
             Ok(()) => Ok(Self { child }),
             Err(e) => {
-                let _ = child.kill();
-                let _ = child.wait();
+                kill_pgroup_and_reap(&mut child);
                 Err(e)
             }
         }
@@ -140,7 +168,6 @@ impl SleepInhibitor {
 
 impl Drop for SleepInhibitor {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        kill_pgroup_and_reap(&mut self.child);
     }
 }
