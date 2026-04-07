@@ -185,3 +185,7 @@ Example (single finding):
 - High: Plan makes `braid status` mutate disk-map state.
   Impact: A read command causes side effects, which breaks safety expectations and complicates debugging.
   Recommended fix: Keep `braid status` read-only; perform disk-map reconciliation only in explicit mutating commands (`add`, `remove`, `remove-missing`, `replace`).
+
+## Git commits
+
+Use Conventional Commits-style commit messages.
