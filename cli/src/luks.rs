@@ -233,6 +233,10 @@ fn cryptsetup_format_hint(exit_code: i32) -> &'static str {
 /// Outcome of probing a LUKS device's on-disk header. Used by both
 /// `braid doctor` (for declared-disk health checks) and `braid unlock`
 /// (for enriching open-failure errors with the real cause).
+///
+/// Terminology contract:
+/// - `Unreadable` means braid cannot read or recognize a LUKS header at all.
+/// - `Damaged` means braid recognized LUKS, but the header metadata is broken.
 #[derive(Debug, Clone)]
 pub(crate) enum LuksHeaderState {
     /// Both `isLuks` and `luksDump` succeeded; the header is intact.
