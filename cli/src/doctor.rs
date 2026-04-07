@@ -6,6 +6,7 @@ use thiserror::Error;
 
 use crate::cmd::{CmdRequest, CommandRunner, RealRunner};
 use crate::config::Config;
+use crate::luks;
 use crate::membership;
 use crate::parse::parse_btrfs_df_json;
 use crate::parse::types::{BtrfsBgType, BtrfsDfOutput, BtrfsProfile};
@@ -207,6 +208,10 @@ enum DiskState {
 /// (`std::fs::metadata`) and the runner. It is intentionally tiny so the only
 /// untested code path is the unavoidable filesystem gate; the rendering logic
 /// lives in `summarize_declared_disks`, which is pure and unit-tested.
+///
+/// The LUKS-specific probe sequence is delegated to `luks::probe_luks_header`
+/// so that `doctor` and `unlock` share the same classification (and the same
+/// remediation message strings downstream).
 fn classify_disk_state<R: CommandRunner>(runner: &R, path: &Path) -> DiskState {
     match std::fs::metadata(path) {
         Err(_) => return DiskState::Missing,
@@ -215,32 +220,24 @@ fn classify_disk_state<R: CommandRunner>(runner: &R, path: &Path) -> DiskState {
     }
 
     let device = path.to_string_lossy().into_owned();
-
-    match runner.run(&CmdRequest::CryptsetupIsLuks {
-        device: device.clone(),
-    }) {
-        Err(e) => return DiskState::ProbeFailed(e.to_string()),
-        Ok(raw) if raw.exit_status != 0 => return DiskState::LuksHeaderUnreadable,
-        Ok(_) => {}
-    }
-
-    match runner.run(&CmdRequest::CryptsetupLuksDumpText { device }) {
-        Err(e) => DiskState::ProbeFailed(e.to_string()),
-        Ok(raw) if raw.exit_status != 0 => DiskState::LuksHeaderDamaged,
-        Ok(_) => DiskState::LuksHeaderOk,
+    match luks::probe_luks_header(runner, &device) {
+        luks::LuksHeaderState::Ok => DiskState::LuksHeaderOk,
+        luks::LuksHeaderState::Unreadable => DiskState::LuksHeaderUnreadable,
+        luks::LuksHeaderState::Damaged => DiskState::LuksHeaderDamaged,
+        luks::LuksHeaderState::ProbeFailed(err) => DiskState::ProbeFailed(err),
     }
 }
 
 /// Pure rendering function: takes pre-classified per-disk states and returns
 /// the `CheckResult` for `declared_disks`.
 ///
-/// **Product invariant — never reference `/var/lib/braid/luks-headers/`:**
-/// `braid status` and the TUI already warn about persistent local copies of
-/// LUKS header backups, because the intended workflow is for users to export
-/// the header off-system and remove the local copy. doctor must be consistent
-/// with that posture and never instruct users to restore from a local file.
-/// All recovery guidance here is generic ("your off-system LUKS header
-/// backup"). See `plans/wip/cheeky-questing-popcorn.md` for the full rationale.
+/// Remediation messages delegate to `luks::luks_header_unreadable_guidance`
+/// and `luks::luks_header_damaged_guidance`, which are shared with the unlock
+/// error-enrichment path. Those helpers enforce the cross-command invariant
+/// that no user-facing message ever references local
+/// `/var/lib/braid/luks-headers/` files — `braid status` and the TUI already
+/// warn about persistent local copies, because the intended workflow is to
+/// export headers off-system and remove the local copy.
 fn summarize_declared_disks(classifications: &[(String, String, DiskState)]) -> CheckResult {
     let total = classifications.len();
     let mut missing: Vec<String> = Vec::new();
@@ -259,17 +256,14 @@ fn summarize_declared_disks(classifications: &[(String, String, DiskState)]) -> 
             }
             DiskState::LuksHeaderUnreadable => {
                 header_unreadable.push(format!(
-                    "{name} ({by_id}): LUKS header unreadable. \
-                    Restore from your off-system LUKS header backup if you have one \
-                    (cryptsetup luksHeaderRestore). Without an off-system backup, \
-                    recovery may be limited or impossible."
+                    "{name} ({by_id}): {}",
+                    luks::luks_header_unreadable_guidance()
                 ));
             }
             DiskState::LuksHeaderDamaged => {
                 header_damaged.push(format!(
-                    "{name} ({by_id}): LUKS header metadata damaged. \
-                    To attempt repair manually: cryptsetup repair --type luks2 {by_id} \
-                    — make a safe backup of the device header before running repair."
+                    "{name} ({by_id}): {}",
+                    luks::luks_header_damaged_guidance(by_id)
                 ));
             }
         }

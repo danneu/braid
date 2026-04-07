@@ -226,6 +226,74 @@ fn cryptsetup_format_hint(exit_code: i32) -> &'static str {
     }
 }
 
+// ---------------------------------------------------------------------------
+// LUKS header probe + remediation guidance
+// ---------------------------------------------------------------------------
+
+/// Outcome of probing a LUKS device's on-disk header. Used by both
+/// `braid doctor` (for declared-disk health checks) and `braid unlock`
+/// (for enriching open-failure errors with the real cause).
+#[derive(Debug, Clone)]
+pub(crate) enum LuksHeaderState {
+    /// Both `isLuks` and `luksDump` succeeded; the header is intact.
+    Ok,
+    /// `isLuks` exited non-zero — the LUKS magic is gone or the header
+    /// is otherwise unreadable. Severe.
+    Unreadable,
+    /// `isLuks` succeeded but `luksDump` exited non-zero — the magic is
+    /// intact but LUKS2 metadata is damaged.
+    Damaged,
+    /// The cryptsetup command failed to execute (missing binary, IPC
+    /// failure). NOT the same as cryptsetup finding corruption — callers
+    /// must never emit repair/restore suggestions in this state.
+    ProbeFailed(String),
+}
+
+/// Read-only LUKS header probe. Runs `cryptsetup isLuks` then
+/// `cryptsetup luksDump` and classifies the result. Safe to call on a
+/// device that is currently open via dm-crypt — the probe reads the
+/// raw block device, not the mapper.
+pub(crate) fn probe_luks_header<R: CommandRunner>(runner: &R, device: &str) -> LuksHeaderState {
+    match runner.run(&CmdRequest::CryptsetupIsLuks {
+        device: device.to_owned(),
+    }) {
+        Err(e) => return LuksHeaderState::ProbeFailed(e.to_string()),
+        Ok(raw) if raw.exit_status != 0 => return LuksHeaderState::Unreadable,
+        Ok(_) => {}
+    }
+    match runner.run(&CmdRequest::CryptsetupLuksDumpText {
+        device: device.to_owned(),
+    }) {
+        Err(e) => LuksHeaderState::ProbeFailed(e.to_string()),
+        Ok(raw) if raw.exit_status != 0 => LuksHeaderState::Damaged,
+        Ok(_) => LuksHeaderState::Ok,
+    }
+}
+
+/// Guidance text for an unreadable LUKS header. Deliberately generic —
+/// never references local `/var/lib/braid/luks-headers/` files. `braid
+/// status` and the TUI already warn when local header backups persist
+/// on the same machine because the intended product workflow is to
+/// export them off-system and remove the local copy; doctor and unlock
+/// must not contradict that posture by instructing users to rely on
+/// local copies as a safety net.
+pub(crate) fn luks_header_unreadable_guidance() -> &'static str {
+    "LUKS header unreadable. Restore from your off-system LUKS header \
+    backup if you have one (cryptsetup luksHeaderRestore). Without an \
+    off-system backup, recovery may be limited or impossible."
+}
+
+/// Guidance text for a damaged-metadata LUKS header. Always pairs the
+/// `cryptsetup repair` suggestion with an explicit safe-backup warning
+/// because repair mutates the header.
+pub(crate) fn luks_header_damaged_guidance(device: &str) -> String {
+    format!(
+        "LUKS header metadata damaged. To attempt repair manually: \
+        cryptsetup repair --type luks2 {device} — make a safe backup of \
+        the device header before running repair."
+    )
+}
+
 /// Open a LUKS device if not already open.
 pub fn ensure_luks_open<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
@@ -1105,5 +1173,206 @@ mod tests {
         let (req, resp) = luks_dump_error("/dev/sda");
         let runner = MockRunner::default().with_output(req, resp);
         assert!(!pool_has_keyfile_enrollment(&runner, &[dev]));
+    }
+
+    // --- probe_luks_header and guidance helpers ---
+
+    fn is_luks_ok(device: &str) -> (CmdRequest, RawCommandOutput) {
+        (
+            CmdRequest::CryptsetupIsLuks {
+                device: device.to_owned(),
+            },
+            RawCommandOutput {
+                cmd: format!("cryptsetup isLuks {device}"),
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_status: 0,
+            },
+        )
+    }
+
+    fn is_luks_fail(device: &str) -> (CmdRequest, RawCommandOutput) {
+        (
+            CmdRequest::CryptsetupIsLuks {
+                device: device.to_owned(),
+            },
+            RawCommandOutput {
+                cmd: format!("cryptsetup isLuks {device}"),
+                stdout: String::new(),
+                stderr: format!("Device {device} is not a valid LUKS device.\n"),
+                exit_status: 1,
+            },
+        )
+    }
+
+    fn luks_dump_text_ok(device: &str) -> (CmdRequest, RawCommandOutput) {
+        (
+            CmdRequest::CryptsetupLuksDumpText {
+                device: device.to_owned(),
+            },
+            RawCommandOutput {
+                cmd: format!("cryptsetup luksDump {device}"),
+                stdout: "LUKS header information\nVersion: 2\n".into(),
+                stderr: String::new(),
+                exit_status: 0,
+            },
+        )
+    }
+
+    fn luks_dump_text_fail(device: &str) -> (CmdRequest, RawCommandOutput) {
+        (
+            CmdRequest::CryptsetupLuksDumpText {
+                device: device.to_owned(),
+            },
+            RawCommandOutput {
+                cmd: format!("cryptsetup luksDump {device}"),
+                stdout: String::new(),
+                stderr: "Cannot read LUKS header metadata.\n".into(),
+                exit_status: 1,
+            },
+        )
+    }
+
+    /*
+     * Intent: probe returns Ok when both isLuks and luksDump succeed.
+     * Why it exists: this is the happy path — doctor's healthy-disk case and
+     *   unlock's "header intact, failure must be passphrase/invariant" case
+     *   both depend on this classification being reliable.
+     * Scenario: a LUKS2 device with an intact header.
+     */
+    #[test]
+    fn probe_luks_header_ok() {
+        let device = "/dev/disk/by-id/wwn-0xOK";
+        let (is_req, is_out) = is_luks_ok(device);
+        let (dump_req, dump_out) = luks_dump_text_ok(device);
+        let runner = MockRunner::default()
+            .with_output(is_req, is_out)
+            .with_output(dump_req, dump_out);
+        assert!(matches!(
+            probe_luks_header(&runner, device),
+            LuksHeaderState::Ok
+        ));
+    }
+
+    /*
+     * Intent: probe returns Unreadable (and skips luksDump) when isLuks fails.
+     * Why it exists: classifying "magic bytes gone" must not cascade into a
+     *   second cryptsetup call and must not confuse the Unreadable case with
+     *   the ProbeFailed case. The mock for luksDump is deliberately absent —
+     *   if probe_luks_header tried to call it, MissingMock would turn the
+     *   return into ProbeFailed and this test would fail.
+     * Scenario: an HDD whose first sectors were clobbered by a misdirected dd.
+     */
+    #[test]
+    fn probe_luks_header_unreadable_when_is_luks_fails() {
+        let device = "/dev/disk/by-id/wwn-0xDEAD";
+        let (is_req, is_out) = is_luks_fail(device);
+        let runner = MockRunner::default().with_output(is_req, is_out);
+        assert!(matches!(
+            probe_luks_header(&runner, device),
+            LuksHeaderState::Unreadable
+        ));
+    }
+
+    /*
+     * Intent: probe returns Damaged when isLuks passes but luksDump fails.
+     * Why it exists: this is the less-severe LUKS2 metadata corruption case
+     *   that cryptsetup repair --type luks2 may be able to fix. The test
+     *   requires both probes to run in order; it is the only test that
+     *   exercises the second probe succeeding after the first.
+     * Scenario: a disk with one corrupted LUKS2 header copy (LUKS2 stores two
+     *   header copies for redundancy) or damaged keyslot metadata.
+     */
+    #[test]
+    fn probe_luks_header_damaged_when_dump_fails() {
+        let device = "/dev/disk/by-id/wwn-0xCAFE";
+        let (is_req, is_out) = is_luks_ok(device);
+        let (dump_req, dump_out) = luks_dump_text_fail(device);
+        let runner = MockRunner::default()
+            .with_output(is_req, is_out)
+            .with_output(dump_req, dump_out);
+        assert!(matches!(
+            probe_luks_header(&runner, device),
+            LuksHeaderState::Damaged
+        ));
+    }
+
+    /*
+     * Intent: probe returns ProbeFailed (not Unreadable) when the runner
+     *   itself errors before cryptsetup can respond.
+     * Why it exists: conflating execution failure with header corruption
+     *   would tell users to repair or restore a healthy disk. This test
+     *   pins the distinction at the probe layer.
+     * Scenario: cryptsetup binary missing from PATH, or any IPC failure.
+     */
+    #[test]
+    fn probe_luks_header_probe_failed_on_runner_error() {
+        let runner = MockRunner::default();
+        let state = probe_luks_header(&runner, "/dev/disk/by-id/wwn-0xGONE");
+        match state {
+            LuksHeaderState::ProbeFailed(_) => {}
+            other => panic!("expected ProbeFailed, got {other:?}"),
+        }
+    }
+
+    /*
+     * Intent: the unreadable guidance text is generic and never references
+     *   local /var/lib/braid/luks-headers/ files.
+     * Why it exists: this helper is the single source of truth for the
+     *   cross-command invariant that doctor, unlock, status, and the TUI
+     *   all tell the same story about LUKS header corruption recovery. If
+     *   a maintainer ever adds a local-backup-path reference here, every
+     *   downstream caller regresses silently.
+     * Scenario: code review for any future edit to the helper.
+     */
+    #[test]
+    fn luks_header_unreadable_guidance_is_generic() {
+        let msg = luks_header_unreadable_guidance();
+        assert!(msg.contains("header unreadable"), "missing phrase: {msg}");
+        assert!(msg.contains("off-system"), "missing 'off-system': {msg}");
+        assert!(
+            msg.contains("luksHeaderRestore"),
+            "missing 'luksHeaderRestore': {msg}"
+        );
+        assert!(
+            !msg.contains("/var/lib/braid/luks-headers/"),
+            "must not reference local backup directory: {msg}"
+        );
+        assert!(
+            !msg.contains(".luksheader"),
+            "must not reference local .luksheader files: {msg}"
+        );
+    }
+
+    /*
+     * Intent: the damaged guidance text interpolates the device path, pairs
+     *   cryptsetup repair with an explicit safe-backup warning, and does
+     *   not reference local .luksheader files.
+     * Why it exists: cryptsetup repair mutates the header, so any mention
+     *   of it must always come with a "back up first" warning (cryptsetup
+     *   docs require this). The test also pins the no-local-backup invariant.
+     * Scenario: code review for any future edit to the helper.
+     */
+    #[test]
+    fn luks_header_damaged_guidance_interpolates_device_and_warns() {
+        let device = "/dev/disk/by-id/wwn-0xCAFE";
+        let msg = luks_header_damaged_guidance(device);
+        assert!(msg.contains("metadata damaged"), "missing phrase: {msg}");
+        assert!(
+            msg.contains(&format!("cryptsetup repair --type luks2 {device}")),
+            "missing repair command with device: {msg}"
+        );
+        assert!(
+            msg.contains("safe backup"),
+            "missing safe-backup warning: {msg}"
+        );
+        assert!(
+            !msg.contains("/var/lib/braid/luks-headers/"),
+            "must not reference local backup directory: {msg}"
+        );
+        assert!(
+            !msg.contains(".luksheader"),
+            "must not reference local .luksheader files: {msg}"
+        );
     }
 }

@@ -307,4 +307,29 @@ with subtest("Test 8: paused balance survives unlock"):
     machine.succeed("btrfs balance cancel /mnt/storage")
     machine.succeed("rm /mnt/storage/balancedata")
 
+# NOTE on LUKS-header-corruption testing at the VM level:
+#
+# The new unlock error-enrichment path (verify/open-loop failure → probe
+# header → emit off-system backup or cryptsetup repair guidance) is NOT
+# reachable via dd-based corruption in a VM test. The `plan_open_pool`
+# probe phase runs `cryptsetup luksUUID` before the per-disk open loop
+# ever starts; `luksUUID` validates enough of the LUKS2 header that any
+# dd-based corruption reliably destroys it first. The disk gets
+# classified as `ConfigDiskState::PresentNotLuks` and the pool fails
+# with the existing "LUKS header damaged" + degraded-refused path,
+# which is out of scope for this PR.
+#
+# The enrichment path IS proven by unit tests in cli/src/mount.rs:
+#
+#   - `explain_open_failure_*` (5 tests): classify branches of the pure
+#     helper (Unreadable/Damaged/Ok/ProbeFailed).
+#   - `unlock_*` (5 tests): drive `open_and_mount_pool` end-to-end with
+#     MockRunner through all four enrichment call sites (keyfile/passphrase
+#     × verify/open-loop) and the critical ProbeFailed-at-exit-2 case.
+#
+# The probe primitive itself (cli/src/luks.rs::probe_luks_header) is
+# shared with `braid doctor` and validated at the VM level by
+# tests/cli/braid-doctor.py, which wipes a real LUKS header and proves
+# doctor's detection works end-to-end against real cryptsetup.
+
 machine.shutdown()

@@ -1323,6 +1323,27 @@ mod tests {
                 },
                 b"wrongpass".to_vec(),
                 err_raw("cryptsetup open --test-passphrase", 2, "No key available"),
+            )
+            // Header probe after verify failure must classify disk1 as Ok so
+            // the enrichment path falls through to the existing "wrong
+            // passphrase" message rather than emitting the "diagnosis
+            // incomplete" text.
+            .with_output(
+                CmdRequest::CryptsetupIsLuks {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                ok_raw("cryptsetup isLuks", ""),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksDumpText {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                RawCommandOutput {
+                    cmd: "cryptsetup luksDump".into(),
+                    stdout: "LUKS header information\nVersion: 2\n".into(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                },
             );
 
         let passphrase_file = tempfile::NamedTempFile::new().unwrap();

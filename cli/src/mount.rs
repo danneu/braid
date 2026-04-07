@@ -203,6 +203,53 @@ pub fn compile_open_steps(
     steps
 }
 
+/// Classify an unlock-time failure against the LUKS header state of the
+/// affected disk, producing the best user-facing error.
+///
+/// The four match arms each represent a distinct user story:
+///
+/// - `Unreadable` → corruption is confirmed severe; emit the off-system
+///   backup guidance regardless of what cryptsetup originally said.
+/// - `Damaged` → corruption is confirmed at the metadata level; emit
+///   the `cryptsetup repair` guidance with a safe-backup warning.
+/// - `Ok` → the header is intact, so the failure really is about the
+///   caller-supplied context (passphrase, invariant, device state,
+///   generic I/O error, etc.); use `ok_fallback` unchanged.
+/// - `ProbeFailed` → we genuinely do not know whether the header is
+///   sound, so we must NOT confidently pick a narrative. Emit a
+///   dedicated "diagnosis incomplete" message that surfaces both the
+///   original cryptsetup signal (`original_summary`) and the probe
+///   error, without narrowing the cause to any particular class of
+///   failure. This is load-bearing: `explain_open_failure` is called
+///   from all four unlock-failure sites, including the generic
+///   non-auth open-loop path, so the wording cannot assume the
+///   underlying cause was auth-related.
+fn explain_open_failure(
+    disk_name: &str,
+    device: &str,
+    header_state: luks::LuksHeaderState,
+    original_summary: &str,
+    ok_fallback: MountError,
+) -> MountError {
+    match header_state {
+        luks::LuksHeaderState::Unreadable => MountError::Failed(format!(
+            "failed to unlock disk '{disk_name}' ({device}): {}",
+            luks::luks_header_unreadable_guidance()
+        )),
+        luks::LuksHeaderState::Damaged => MountError::Failed(format!(
+            "failed to unlock disk '{disk_name}' ({device}): {}",
+            luks::luks_header_damaged_guidance(device)
+        )),
+        luks::LuksHeaderState::Ok => ok_fallback,
+        luks::LuksHeaderState::ProbeFailed(probe_err) => MountError::Failed(format!(
+            "failed to unlock disk '{disk_name}' ({device}): {original_summary}. \
+             LUKS header diagnosis could not be completed: {probe_err}. \
+             Cannot determine whether this failure is due to LUKS header damage \
+             or the reported cryptsetup error — inspect the disk manually."
+        )),
+    }
+}
+
 /// Open LUKS devices from a membership set and mount the btrfs pool.
 ///
 /// Steps: plan (probe + validate), verify credentials, open LUKS, btrfs
@@ -234,30 +281,56 @@ pub fn open_and_mount_pool<R: CommandRunner, F: Filesystem + ?Sized>(
                 let (ref first_name, ref first_by_id) = plan.to_unlock[0];
                 let ok = luks::verify_key_file(runner, &first_by_id.0, kf)?;
                 if !ok {
-                    return Err(MountError::Failed(format!(
-                        "wrong keyfile (verified against {})",
-                        first_name
-                    )));
+                    let original_summary = format!("keyfile rejected on '{first_name}'");
+                    let ok_fallback = MountError::Failed(format!(
+                        "wrong keyfile (verified against {first_name})"
+                    ));
+                    let header_state = luks::probe_luks_header(runner, &first_by_id.0);
+                    return Err(explain_open_failure(
+                        first_name,
+                        &first_by_id.0,
+                        header_state,
+                        &original_summary,
+                        ok_fallback,
+                    ));
                 }
 
                 for (name, by_id) in &plan.to_unlock {
-                    luks::ensure_luks_open_with_key_file(runner, fs, name, by_id, kf).map_err(
-                        |e| match &e {
+                    if let Err(e) =
+                        luks::ensure_luks_open_with_key_file(runner, fs, name, by_id, kf)
+                    {
+                        let header_state = luks::probe_luks_header(runner, &by_id.0);
+                        let (original_summary, ok_fallback) = match &e {
                             LuksError::OpenFailed {
                                 exit_code: 2,
                                 hint,
                                 stderr,
                                 ..
-                            } => MountError::Failed(format!(
-                                "failed to open disk '{}': keyfile was verified against \
-                                 '{}' but rejected here — {} ({}). \
-                                 If the keyfile is correct, the single-passphrase \
-                                 invariant may be violated by external LUKS manipulation",
-                                name, first_name, hint, stderr
-                            )),
-                            _ => MountError::Luks(e),
-                        },
-                    )?;
+                            } => (
+                                format!(
+                                    "cryptsetup open rejected on '{name}' despite verified keyfile on '{first_name}' — {hint} ({stderr})"
+                                ),
+                                MountError::Failed(format!(
+                                    "failed to open disk '{}': keyfile was verified against \
+                                     '{}' but rejected here — {} ({}). \
+                                     If the keyfile is correct, the single-passphrase \
+                                     invariant may be violated by external LUKS manipulation",
+                                    name, first_name, hint, stderr
+                                )),
+                            ),
+                            _ => {
+                                let summary = format!("cryptsetup open failed on '{name}': {e}");
+                                (summary, MountError::Luks(e))
+                            }
+                        };
+                        return Err(explain_open_failure(
+                            name,
+                            &by_id.0,
+                            header_state,
+                            &original_summary,
+                            ok_fallback,
+                        ));
+                    }
                     eprintln!("{}  disk: {:<10}unlocked", tag("ok"), name);
                 }
             }
@@ -270,30 +343,55 @@ pub fn open_and_mount_pool<R: CommandRunner, F: Filesystem + ?Sized>(
                 let (ref first_name, ref first_by_id) = plan.to_unlock[0];
                 let ok = luks::verify_passphrase(runner, &first_by_id.0, &passphrase)?;
                 if !ok {
-                    return Err(MountError::Failed(format!(
-                        "wrong passphrase (verified against {})",
-                        first_name
-                    )));
+                    let original_summary = format!("passphrase rejected on '{first_name}'");
+                    let ok_fallback = MountError::Failed(format!(
+                        "wrong passphrase (verified against {first_name})"
+                    ));
+                    let header_state = luks::probe_luks_header(runner, &first_by_id.0);
+                    return Err(explain_open_failure(
+                        first_name,
+                        &first_by_id.0,
+                        header_state,
+                        &original_summary,
+                        ok_fallback,
+                    ));
                 }
 
                 for (name, by_id) in &plan.to_unlock {
-                    luks::ensure_luks_open(runner, fs, name, by_id, &passphrase).map_err(
-                        |e| match &e {
+                    if let Err(e) = luks::ensure_luks_open(runner, fs, name, by_id, &passphrase)
+                    {
+                        let header_state = luks::probe_luks_header(runner, &by_id.0);
+                        let (original_summary, ok_fallback) = match &e {
                             LuksError::OpenFailed {
                                 exit_code: 2,
                                 hint,
                                 stderr,
                                 ..
-                            } => MountError::Failed(format!(
-                                "failed to open disk '{}': passphrase was verified \
-                                 against '{}' but rejected here — {} ({}). \
-                                 If the passphrase is correct, the single-passphrase \
-                                 invariant may be violated by external LUKS manipulation",
-                                name, first_name, hint, stderr
-                            )),
-                            _ => MountError::Luks(e),
-                        },
-                    )?;
+                            } => (
+                                format!(
+                                    "cryptsetup open rejected on '{name}' despite verified passphrase on '{first_name}' — {hint} ({stderr})"
+                                ),
+                                MountError::Failed(format!(
+                                    "failed to open disk '{}': passphrase was verified \
+                                     against '{}' but rejected here — {} ({}). \
+                                     If the passphrase is correct, the single-passphrase \
+                                     invariant may be violated by external LUKS manipulation",
+                                    name, first_name, hint, stderr
+                                )),
+                            ),
+                            _ => {
+                                let summary = format!("cryptsetup open failed on '{name}': {e}");
+                                (summary, MountError::Luks(e))
+                            }
+                        };
+                        return Err(explain_open_failure(
+                            name,
+                            &by_id.0,
+                            header_state,
+                            &original_summary,
+                            ok_fallback,
+                        ));
+                    }
                     eprintln!("{}  disk: {:<10}unlocked", tag("ok"), name);
                 }
             }
@@ -1271,6 +1369,697 @@ mod tests {
         assert!(
             !msg.contains("single-passphrase invariant"),
             "non-auth failure should not be rewritten as invariant violation, got: {msg}"
+        );
+    }
+
+    // --- explain_open_failure pure-helper tests ---
+    //
+    // These target the classification logic directly. The mount-level
+    // integration tests further down prove the call sites are wired up
+    // correctly; these tests prove the helper itself picks the right
+    // branch for each header state.
+
+    fn arbitrary_fallback() -> MountError {
+        MountError::Failed("ARBITRARY FALLBACK TEXT".into())
+    }
+
+    /*
+     * Intent: Unreadable overrides whatever cryptsetup originally reported.
+     * Why it exists: the whole point of probing is that header corruption
+     *   should win over exit-code interpretation — an exit 2 from
+     *   cryptsetup open should not surface "wrong passphrase" when the
+     *   header is actually gone. Also pins the cross-command invariant
+     *   that no message references local /var/lib/braid/luks-headers/.
+     * Scenario: disk2's LUKS magic has been wiped by a misdirected dd,
+     *   and cryptsetup open (unsurprisingly) also fails.
+     */
+    #[test]
+    fn explain_open_failure_unreadable_overrides_fallback() {
+        let err = explain_open_failure(
+            "disk2",
+            "/dev/disk/by-id/wwn-0xDEAD",
+            luks::LuksHeaderState::Unreadable,
+            "some original summary",
+            arbitrary_fallback(),
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("disk2"), "missing disk name: {msg}");
+        assert!(
+            msg.contains("header unreadable"),
+            "missing 'header unreadable': {msg}"
+        );
+        assert!(
+            msg.contains("luksHeaderRestore"),
+            "missing 'luksHeaderRestore': {msg}"
+        );
+        assert!(msg.contains("off-system"), "missing 'off-system': {msg}");
+        assert!(
+            !msg.contains("ARBITRARY FALLBACK TEXT"),
+            "unreadable branch must override fallback: {msg}"
+        );
+        assert!(
+            !msg.contains("/var/lib/braid/luks-headers/"),
+            "must not reference local backup directory: {msg}"
+        );
+        assert!(
+            !msg.contains(".luksheader"),
+            "must not reference local .luksheader files: {msg}"
+        );
+    }
+
+    /*
+     * Intent: Damaged overrides fallback and suggests cryptsetup repair
+     *   with a safe-backup warning.
+     * Why it exists: damaged metadata is recoverable via cryptsetup repair,
+     *   but repair mutates the header so the user MUST back up first. This
+     *   is the pairing that makes the suggestion safe to follow.
+     * Scenario: disk2's LUKS2 metadata was corrupted but the magic bytes
+     *   survived, so cryptsetup open fails on keyslot validation.
+     */
+    #[test]
+    fn explain_open_failure_damaged_overrides_fallback() {
+        let device = "/dev/disk/by-id/wwn-0xCAFE";
+        let err = explain_open_failure(
+            "disk2",
+            device,
+            luks::LuksHeaderState::Damaged,
+            "some original summary",
+            arbitrary_fallback(),
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("disk2"), "missing disk name: {msg}");
+        assert!(
+            msg.contains("metadata damaged"),
+            "missing 'metadata damaged': {msg}"
+        );
+        assert!(
+            msg.contains(&format!("cryptsetup repair --type luks2 {device}")),
+            "missing repair command with device path: {msg}"
+        );
+        assert!(
+            msg.contains("safe backup"),
+            "missing safe-backup warning: {msg}"
+        );
+        assert!(
+            !msg.contains("ARBITRARY FALLBACK TEXT"),
+            "damaged branch must override fallback: {msg}"
+        );
+        assert!(
+            !msg.contains("/var/lib/braid/luks-headers/"),
+            "must not reference local backup directory: {msg}"
+        );
+        assert!(
+            !msg.contains(".luksheader"),
+            "must not reference local .luksheader files: {msg}"
+        );
+    }
+
+    /*
+     * Intent: Ok uses the caller's fallback verbatim.
+     * Why it exists: when the header is proven intact, the failure really
+     *   is about the passphrase/invariant/device — the existing error
+     *   messages are correct and must be preserved untouched.
+     * Scenario: user types the wrong passphrase on a healthy pool.
+     */
+    #[test]
+    fn explain_open_failure_ok_uses_fallback_verbatim() {
+        let fallback_text = "wrong passphrase (verified against disk1)";
+        let err = explain_open_failure(
+            "disk1",
+            "/dev/disk/by-id/wwn-0xOK",
+            luks::LuksHeaderState::Ok,
+            "original summary not used in Ok branch",
+            MountError::Failed(fallback_text.into()),
+        );
+        assert_eq!(err.to_string(), fallback_text);
+    }
+
+    /*
+     * Intent: Ok preserves the single-passphrase-invariant message exactly
+     *   for the exit-2-on-subsequent-disk scenario.
+     * Why it exists: the invariant-violation message is the subtlest existing
+     *   message, and misrouting it would either break a valid warning or
+     *   misdiagnose corruption as an invariant violation. This is a specific
+     *   regression test pinning the fallback path.
+     * Scenario: disk2 rejects a verified passphrase but its header is intact,
+     *   indicating real external LUKS manipulation.
+     */
+    #[test]
+    fn explain_open_failure_ok_preserves_invariant_message() {
+        let fallback_text =
+            "failed to open disk 'disk2': passphrase was verified against 'disk1' but \
+             rejected here — wrong passphrase or permission denied (EPERM). If the \
+             passphrase is correct, the single-passphrase invariant may be violated \
+             by external LUKS manipulation";
+        let err = explain_open_failure(
+            "disk2",
+            "/dev/disk/by-id/wwn-0xOK",
+            luks::LuksHeaderState::Ok,
+            "unused",
+            MountError::Failed(fallback_text.into()),
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("single-passphrase invariant"),
+            "Ok branch must preserve invariant-violation text: {msg}"
+        );
+    }
+
+    // --- integration tests for enrichment wiring in open_and_mount_pool ---
+    //
+    // These prove the four call sites pass the right arguments into
+    // `explain_open_failure`. The pure helper tests (above) cover each
+    // classification branch; these cover the wiring.
+
+    fn test_passphrase_fail(device: &str) -> (CmdRequest, RawCommandOutput) {
+        (
+            CmdRequest::CryptsetupTestPassphrase {
+                device: device.into(),
+            },
+            err_raw(
+                "cryptsetup open --test-passphrase",
+                2,
+                "No key available with this passphrase.",
+            ),
+        )
+    }
+
+    fn test_keyfile_fail(device: &str, key_file_path: &str) -> (CmdRequest, RawCommandOutput) {
+        (
+            CmdRequest::CryptsetupTestKeyFile {
+                device: device.into(),
+                key_file_path: key_file_path.into(),
+            },
+            err_raw(
+                "cryptsetup open --test-passphrase",
+                2,
+                "No key available with this passphrase.",
+            ),
+        )
+    }
+
+    fn is_luks_fail(device: &str) -> (CmdRequest, RawCommandOutput) {
+        (
+            CmdRequest::CryptsetupIsLuks {
+                device: device.into(),
+            },
+            err_raw(
+                "cryptsetup isLuks",
+                1,
+                &format!("Device {device} is not a valid LUKS device.\n"),
+            ),
+        )
+    }
+
+    fn is_luks_ok(device: &str) -> (CmdRequest, RawCommandOutput) {
+        (
+            CmdRequest::CryptsetupIsLuks {
+                device: device.into(),
+            },
+            ok_raw("cryptsetup isLuks"),
+        )
+    }
+
+    fn luks_dump_text_ok(device: &str) -> (CmdRequest, RawCommandOutput) {
+        (
+            CmdRequest::CryptsetupLuksDumpText {
+                device: device.into(),
+            },
+            RawCommandOutput {
+                cmd: "cryptsetup luksDump".into(),
+                stdout: "LUKS header information\nVersion: 2\n".into(),
+                stderr: String::new(),
+                exit_status: 0,
+            },
+        )
+    }
+
+    fn luks_dump_text_fail(device: &str) -> (CmdRequest, RawCommandOutput) {
+        (
+            CmdRequest::CryptsetupLuksDumpText {
+                device: device.into(),
+            },
+            err_raw("cryptsetup luksDump", 1, "Cannot read LUKS header metadata."),
+        )
+    }
+
+    /// Common setup: a 2-disk pool where both disks are probed as LUKS ok.
+    /// Returns a MockRunner with the base cryptsetup mocks seeded.
+    fn base_two_disk_runner() -> MockRunner {
+        let (uuid1_req, uuid1_out) = luks_uuid_ok(
+            "/dev/disk/by-id/virtio-disk1",
+            "aaaaaaaa-1111-2222-3333-444444444444",
+        );
+        let (uuid2_req, uuid2_out) = luks_uuid_ok(
+            "/dev/disk/by-id/virtio-disk2",
+            "bbbbbbbb-1111-2222-3333-444444444444",
+        );
+        MockRunner::default()
+            .with_output(
+                CmdRequest::MountpointCheck {
+                    path: MountPoint("/mnt/storage".to_owned()),
+                },
+                err_raw("mountpoint", 1, ""),
+            )
+            .with_output(uuid1_req, uuid1_out)
+            .with_output(uuid2_req, uuid2_out)
+    }
+
+    fn two_disk_fs() -> MockFs {
+        MockFs::new(&[
+            "/dev/disk/by-id/virtio-disk1",
+            "/dev/disk/by-id/virtio-disk2",
+        ])
+    }
+
+    /*
+     * Intent: When verify_passphrase fails on disk1 AND disk1's LUKS header
+     *   is unreadable, the error tells the user to restore from an off-system
+     *   backup — not that the passphrase is wrong.
+     * Why it exists: a fully-wiped disk1 header causes cryptsetup
+     *   --test-passphrase to fail, which looks exactly like a wrong
+     *   passphrase at the boolean level. Without probing, the user gets
+     *   pointed at the wrong problem. This is the Ultraplan Medium
+     *   coverage for the passphrase verify-step wiring.
+     * Scenario: disk1's header was clobbered by a misdirected dd; the
+     *   user tries to unlock with a perfectly correct passphrase.
+     */
+    #[test]
+    fn unlock_passphrase_verify_fails_unreadable_header_emits_guidance() {
+        let config = test_config();
+        let membership = two_disk_membership();
+        let fs = two_disk_fs();
+
+        let (tp_req, tp_out) = test_passphrase_fail("/dev/disk/by-id/virtio-disk1");
+        let (is_req, is_out) = is_luks_fail("/dev/disk/by-id/virtio-disk1");
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        {
+            use std::io::Write;
+            tmp.as_file().write_all(b"testpass").unwrap();
+        }
+
+        let runner = base_two_disk_runner()
+            .with_output_stdin(tp_req, b"testpass".to_vec(), tp_out)
+            .with_output(is_req, is_out);
+
+        let result = open_and_mount_pool(
+            &runner,
+            &fs,
+            &config,
+            &membership,
+            Credential::Passphrase {
+                passphrase_stdin: false,
+                passphrase_file: Some(tmp.path()),
+            },
+            false,
+            "unlock",
+        );
+
+        let msg = result.expect_err("expected failure").to_string();
+        assert!(msg.contains("disk1"), "missing disk name: {msg}");
+        assert!(
+            msg.contains("header unreadable"),
+            "missing 'header unreadable': {msg}"
+        );
+        assert!(
+            msg.contains("luksHeaderRestore"),
+            "missing 'luksHeaderRestore': {msg}"
+        );
+        assert!(
+            !msg.contains("wrong passphrase"),
+            "unreadable header must not blame passphrase: {msg}"
+        );
+        assert!(
+            !msg.contains("/var/lib/braid/luks-headers/"),
+            "must not reference local backup directory: {msg}"
+        );
+    }
+
+    /*
+     * Intent: When verify_passphrase fails on disk1 AND disk1's LUKS header
+     *   is intact, the existing "wrong passphrase" message is preserved.
+     * Why it exists: the intact-header fallback must still wire through
+     *   the enrichment path unchanged — any regression would break the
+     *   most common wrong-passphrase UX.
+     * Scenario: user types a wrong passphrase on a healthy pool.
+     */
+    #[test]
+    fn unlock_passphrase_verify_fails_ok_header_preserves_wrong_passphrase() {
+        let config = test_config();
+        let membership = two_disk_membership();
+        let fs = two_disk_fs();
+
+        let (tp_req, tp_out) = test_passphrase_fail("/dev/disk/by-id/virtio-disk1");
+        let (is_req, is_out) = is_luks_ok("/dev/disk/by-id/virtio-disk1");
+        let (dump_req, dump_out) = luks_dump_text_ok("/dev/disk/by-id/virtio-disk1");
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        {
+            use std::io::Write;
+            tmp.as_file().write_all(b"wrongpass").unwrap();
+        }
+
+        let runner = base_two_disk_runner()
+            .with_output_stdin(tp_req, b"wrongpass".to_vec(), tp_out)
+            .with_output(is_req, is_out)
+            .with_output(dump_req, dump_out);
+
+        let result = open_and_mount_pool(
+            &runner,
+            &fs,
+            &config,
+            &membership,
+            Credential::Passphrase {
+                passphrase_stdin: false,
+                passphrase_file: Some(tmp.path()),
+            },
+            false,
+            "unlock",
+        );
+
+        let msg = result.expect_err("expected failure").to_string();
+        assert!(
+            msg.contains("wrong passphrase (verified against"),
+            "intact header must preserve existing wrong-passphrase message: {msg}"
+        );
+        assert!(
+            !msg.contains("header unreadable"),
+            "intact header must not route to unreadable guidance: {msg}"
+        );
+    }
+
+    /*
+     * Intent: When verify_key_file fails on disk1 AND disk1's LUKS header
+     *   has damaged metadata, the error suggests `cryptsetup repair` with
+     *   a safe-backup warning.
+     * Why it exists: the keyfile verify path needs the same enrichment
+     *   wiring as the passphrase path. This test proves the keyfile
+     *   branch hits the damaged helper.
+     * Scenario: disk1's LUKS2 keyslot metadata is partially corrupted
+     *   but the magic is intact; auto-unlock via keyfile fails.
+     */
+    #[test]
+    fn unlock_keyfile_verify_fails_damaged_header_emits_repair_guidance() {
+        let config = test_config();
+        let membership = two_disk_membership();
+        let fs = two_disk_fs();
+
+        let kf = tempfile::NamedTempFile::new().unwrap();
+        {
+            use std::io::Write;
+            kf.as_file().write_all(b"keydata").unwrap();
+        }
+        let kf_path = kf.path().display().to_string();
+
+        let (tk_req, tk_out) = test_keyfile_fail("/dev/disk/by-id/virtio-disk1", &kf_path);
+        let (is_req, is_out) = is_luks_ok("/dev/disk/by-id/virtio-disk1");
+        let (dump_req, dump_out) = luks_dump_text_fail("/dev/disk/by-id/virtio-disk1");
+
+        let runner = base_two_disk_runner()
+            .with_output(tk_req, tk_out)
+            .with_output(is_req, is_out)
+            .with_output(dump_req, dump_out);
+
+        let result = open_and_mount_pool(
+            &runner,
+            &fs,
+            &config,
+            &membership,
+            Credential::KeyFile(kf.path()),
+            false,
+            "unlock",
+        );
+
+        let msg = result.expect_err("expected failure").to_string();
+        assert!(msg.contains("disk1"), "missing disk name: {msg}");
+        assert!(
+            msg.contains("metadata damaged"),
+            "missing 'metadata damaged': {msg}"
+        );
+        assert!(
+            msg.contains("cryptsetup repair --type luks2"),
+            "missing repair command: {msg}"
+        );
+        assert!(
+            msg.contains("safe backup"),
+            "missing safe-backup warning: {msg}"
+        );
+        assert!(
+            !msg.contains("wrong keyfile"),
+            "damaged header must not blame keyfile: {msg}"
+        );
+        assert!(
+            !msg.contains("/var/lib/braid/luks-headers/"),
+            "must not reference local backup directory: {msg}"
+        );
+    }
+
+    /*
+     * Intent: When ensure_luks_open fails with exit 2 on disk2 AND the
+     *   header probe itself fails to execute, the error must surface
+     *   diagnostic uncertainty — NOT confidently blame the single-
+     *   passphrase invariant.
+     * Why it exists: this is the Ultraplan High finding coverage at the
+     *   integration level. With cryptsetup missing from PATH (or any
+     *   runner error during the probe), the old fallback would have
+     *   silently reverted to the "single-passphrase invariant may be
+     *   violated" text, which is exactly the misdiagnosis this plan is
+     *   meant to stop. The probe mocks are deliberately not seeded so
+     *   MockRunner returns CmdError::MissingMock, which classifies as
+     *   ProbeFailed.
+     * Scenario: disk2 rejects a verified passphrase (could be real
+     *   invariant violation OR corruption), and cryptsetup is missing
+     *   from PATH on the machine.
+     */
+    #[test]
+    fn unlock_passphrase_open_exit2_probe_failed_does_not_blame_invariant() {
+        let config = test_config();
+        let membership = two_disk_membership();
+        let fs = two_disk_fs();
+
+        let (tp_req, tp_out) = (
+            CmdRequest::CryptsetupTestPassphrase {
+                device: "/dev/disk/by-id/virtio-disk1".into(),
+            },
+            ok_raw("cryptsetup open --test-passphrase"),
+        );
+        let (open1_req, open1_out) = (
+            CmdRequest::CryptsetupLuksOpen {
+                device: "/dev/disk/by-id/virtio-disk1".into(),
+                mapper: "braid-disk1".into(),
+            },
+            ok_raw("cryptsetup open"),
+        );
+        let (open2_req, open2_out) = (
+            CmdRequest::CryptsetupLuksOpen {
+                device: "/dev/disk/by-id/virtio-disk2".into(),
+                mapper: "braid-disk2".into(),
+            },
+            err_raw(
+                "cryptsetup open",
+                2,
+                "No key available with this passphrase.",
+            ),
+        );
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        {
+            use std::io::Write;
+            tmp.as_file().write_all(b"testpass").unwrap();
+        }
+
+        // Deliberately NOT seeding CryptsetupIsLuks on disk2 → MissingMock
+        // → ProbeFailed. This is the point of the test.
+        let runner = base_two_disk_runner()
+            .with_output_stdin(tp_req, b"testpass".to_vec(), tp_out)
+            .with_output_stdin(open1_req, b"testpass".to_vec(), open1_out)
+            .with_output_stdin(open2_req, b"testpass".to_vec(), open2_out);
+
+        let result = open_and_mount_pool(
+            &runner,
+            &fs,
+            &config,
+            &membership,
+            Credential::Passphrase {
+                passphrase_stdin: false,
+                passphrase_file: Some(tmp.path()),
+            },
+            false,
+            "unlock",
+        );
+
+        let msg = result.expect_err("expected failure").to_string();
+        assert!(msg.contains("disk2"), "missing failing disk: {msg}");
+        assert!(
+            msg.contains("disk1"),
+            "missing verification disk in original summary: {msg}"
+        );
+        assert!(
+            msg.contains("diagnosis could not be completed"),
+            "missing 'diagnosis could not be completed': {msg}"
+        );
+        // Load-bearing: the old design would leak the invariant-violation
+        // text here; the new design must not.
+        assert!(
+            !msg.contains("single-passphrase invariant"),
+            "ProbeFailed must not blame invariant: {msg}"
+        );
+    }
+
+    /*
+     * Intent: When ensure_luks_open_with_key_file fails with a non-2 exit
+     *   on disk2 AND disk2's LUKS header is unreadable, the error emits
+     *   the off-system backup guidance.
+     * Why it exists: covers the keyfile-open-loop wiring with the
+     *   Unreadable classification. Also verifies the fallback-construction
+     *   path for non-exit-2 cases (the `_` arm in the match).
+     * Scenario: a keyfile-driven auto-unlock where disk2's header has
+     *   been wiped; cryptsetup open reports a generic failure (exit 1).
+     */
+    #[test]
+    fn unlock_keyfile_open_exit_nonzero_unreadable_header_emits_guidance() {
+        let config = test_config();
+        let membership = two_disk_membership();
+        let fs = two_disk_fs();
+
+        let kf = tempfile::NamedTempFile::new().unwrap();
+        {
+            use std::io::Write;
+            kf.as_file().write_all(b"keydata").unwrap();
+        }
+        let kf_path = kf.path().display().to_string();
+
+        let (tk_req, tk_out) = (
+            CmdRequest::CryptsetupTestKeyFile {
+                device: "/dev/disk/by-id/virtio-disk1".into(),
+                key_file_path: kf_path.clone(),
+            },
+            ok_raw("cryptsetup open --test-passphrase"),
+        );
+        let (open1_req, open1_out) = (
+            CmdRequest::CryptsetupLuksOpenKeyFile {
+                device: "/dev/disk/by-id/virtio-disk1".into(),
+                mapper: "braid-disk1".into(),
+                key_file_path: kf_path.clone(),
+            },
+            ok_raw("cryptsetup open"),
+        );
+        let (open2_req, open2_out) = (
+            CmdRequest::CryptsetupLuksOpenKeyFile {
+                device: "/dev/disk/by-id/virtio-disk2".into(),
+                mapper: "braid-disk2".into(),
+                key_file_path: kf_path,
+            },
+            err_raw("cryptsetup open", 1, "Cannot read LUKS header"),
+        );
+        let (is_req, is_out) = is_luks_fail("/dev/disk/by-id/virtio-disk2");
+
+        let runner = base_two_disk_runner()
+            .with_output(tk_req, tk_out)
+            .with_output(open1_req, open1_out)
+            .with_output(open2_req, open2_out)
+            .with_output(is_req, is_out);
+
+        let result = open_and_mount_pool(
+            &runner,
+            &fs,
+            &config,
+            &membership,
+            Credential::KeyFile(kf.path()),
+            false,
+            "unlock",
+        );
+
+        let msg = result.expect_err("expected failure").to_string();
+        assert!(msg.contains("disk2"), "missing disk name: {msg}");
+        assert!(
+            msg.contains("header unreadable"),
+            "missing 'header unreadable': {msg}"
+        );
+        assert!(
+            msg.contains("luksHeaderRestore"),
+            "missing 'luksHeaderRestore': {msg}"
+        );
+        assert!(
+            !msg.contains("/var/lib/braid/luks-headers/"),
+            "must not reference local backup directory: {msg}"
+        );
+        assert!(
+            !msg.contains(".luksheader"),
+            "must not reference local .luksheader files: {msg}"
+        );
+    }
+
+    /*
+     * Intent: ProbeFailed emits a distinct "diagnosis could not be completed"
+     *   message and does NOT fall back to passphrase or invariant wording.
+     * Why it exists: this is the executable form of an Ultraplan High
+     *   finding. If the probe itself errors (e.g. cryptsetup missing from
+     *   PATH), a naive design would route to the fallback — which is exactly
+     *   the "wrong passphrase" or "single-passphrase invariant" text this
+     *   enrichment is meant to stop. Probe-execution failure must surface
+     *   as uncertainty, not as confident blame of the passphrase.
+     * Scenario: cryptsetup binary is missing from PATH while a disk has
+     *   also legitimately failed to open for an unknown reason.
+     */
+    #[test]
+    fn explain_open_failure_probe_failed_emits_diagnosis_incomplete() {
+        let fallback_text =
+            "failed to open disk 'disk2': passphrase was verified against 'disk1' but \
+             rejected here. If the passphrase is correct, the single-passphrase \
+             invariant may be violated by external LUKS manipulation";
+        let err = explain_open_failure(
+            "disk2",
+            "/dev/disk/by-id/wwn-0xDEAD",
+            luks::LuksHeaderState::ProbeFailed("simulated probe error".into()),
+            "cryptsetup open rejected on 'disk2' despite verified passphrase on 'disk1'",
+            MountError::Failed(fallback_text.into()),
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("diagnosis could not be completed"),
+            "missing 'diagnosis could not be completed': {msg}"
+        );
+        assert!(
+            msg.contains("simulated probe error"),
+            "missing probe error surface: {msg}"
+        );
+        assert!(
+            msg.contains("cryptsetup open rejected on 'disk2'"),
+            "missing original summary: {msg}"
+        );
+        // The new wording must stay neutral about the underlying cause —
+        // the helper is used for non-auth failures too (device not found,
+        // busy, generic I/O), so it cannot narrow to "passphrase".
+        assert!(
+            msg.contains("Cannot determine whether this failure"),
+            "missing neutral 'Cannot determine' framing: {msg}"
+        );
+        // Load-bearing negative assertions: probe-failed must NOT leak the
+        // misleading passphrase/invariant wording from the fallback, and
+        // must NOT narrow the cause to "passphrase" (the review finding
+        // this test's wording pins).
+        assert!(
+            !msg.contains("wrong passphrase"),
+            "ProbeFailed must not blame passphrase: {msg}"
+        );
+        assert!(
+            !msg.contains("single-passphrase invariant"),
+            "ProbeFailed must not blame invariant: {msg}"
+        );
+        assert!(
+            !msg.contains("passphrase problem"),
+            "ProbeFailed must not narrow cause to 'passphrase problem' — the \
+             helper is called from non-auth failure sites too: {msg}"
+        );
+        assert!(
+            !msg.contains("/var/lib/braid/luks-headers/"),
+            "must not reference local backup directory: {msg}"
+        );
+        assert!(
+            !msg.contains(".luksheader"),
+            "must not reference local .luksheader files: {msg}"
         );
     }
 }
