@@ -607,9 +607,11 @@ fn main() {
             };
             let runner = RealRunner;
             let fs = RealFilesystem;
+            let by_id_resolver = braid_cli::recover::RealByIdResolver;
             match braid_cli::recover::cmd_recover(
                 &runner,
                 &fs,
+                &by_id_resolver,
                 &braid_cli::recover::RecoverParams {
                     config: &config,
                     paths: &paths,

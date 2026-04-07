@@ -1,11 +1,13 @@
 use crate::cmd::{CmdRequest, CommandRunner, Step};
 use crate::config::{self, Config};
+use crate::discover;
 use crate::journal::{self, Journal};
 use crate::membership::{self, DiskMember, PoolMembership};
 use crate::mount::{self, Credential, MountError};
 use crate::parse::btrfs_filesystem_show::{classify_btrfs_probe, DeviceBtrfsProbe};
 use crate::probe::{self, Filesystem, ProbeError};
 use crate::state_paths::StatePaths;
+use crate::types::ByIdPath;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -20,6 +22,99 @@ pub enum RecoverError {
     Mount(#[from] MountError),
     #[error("{0}")]
     Failed(String),
+}
+
+/// Resolve `/dev/disk/by-id/` symlinks against live device identity during recovery.
+///
+/// Narrow recovery-local abstraction so the production code path can read symlinks
+/// without widening the shared `probe::Filesystem` trait (which has 14 mock impls).
+/// `RealByIdResolver` is the production implementation; tests inject their own.
+pub trait ByIdResolver {
+    /// List filenames under `/dev/disk/by-id/`. Returns an empty vec if the
+    /// directory does not exist (mirrors `Filesystem::list_dir` semantics).
+    fn list_by_id_entries(&self) -> Result<Vec<String>, std::io::Error>;
+
+    /// Canonicalize `path` (resolve all symlinks to an absolute path).
+    fn canonicalize(&self, path: &str) -> Result<String, std::io::Error>;
+}
+
+pub struct RealByIdResolver;
+
+impl ByIdResolver for RealByIdResolver {
+    fn list_by_id_entries(&self) -> Result<Vec<String>, std::io::Error> {
+        match std::fs::read_dir("/dev/disk/by-id") {
+            Ok(entries) => entries
+                .map(|e| e.map(|e| e.file_name().to_string_lossy().into_owned()))
+                .collect(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn canonicalize(&self, path: &str) -> Result<String, std::io::Error> {
+        std::fs::canonicalize(path).map(|p| p.to_string_lossy().into_owned())
+    }
+}
+
+/// Find the `/dev/disk/by-id/` symlink whose canonical target matches `underlying`.
+///
+/// `underlying` is a live pool device's backing kernel path (from `cryptsetup status`).
+/// We pick the highest-priority match by `discover::by_id_priority` so the recorded
+/// `by_id` is the most stable identifier the kernel exposes for this device.
+///
+/// Hard-fails if no by-id symlink resolves to `underlying` — recovery refuses to
+/// guess a stable identifier when none exists.
+fn resolve_by_id_for_underlying(
+    resolver: &dyn ByIdResolver,
+    underlying: &str,
+) -> Result<ByIdPath, RecoverError> {
+    let by_id_dir = "/dev/disk/by-id";
+
+    // Canonical kernel path of the live pool device, used as the join key.
+    let target = resolver.canonicalize(underlying).map_err(|e| {
+        RecoverError::Failed(format!(
+            "cannot canonicalize live pool device {underlying}: {e}"
+        ))
+    })?;
+
+    let entries = resolver
+        .list_by_id_entries()
+        .map_err(|e| RecoverError::Failed(format!("cannot read {by_id_dir}: {e}")))?;
+
+    // (priority, filename, full_path) for every by-id entry that resolves to `target`.
+    let mut matches: Vec<(u8, String, String)> = Vec::new();
+    for name in entries {
+        if discover::is_partition_entry(&name) {
+            continue;
+        }
+        let full = format!("{by_id_dir}/{name}");
+        // Skip dangling/broken symlinks silently — they cannot match anything.
+        let Ok(resolved) = resolver.canonicalize(&full) else {
+            continue;
+        };
+        if resolved == target {
+            matches.push((discover::by_id_priority(&name), name, full));
+        }
+    }
+
+    if matches.is_empty() {
+        return Err(RecoverError::Failed(format!(
+            "live pool device '{underlying}' has no /dev/disk/by-id/ symlink \
+             resolving to it. Recovery cannot persist a stable identifier for \
+             this device.\n\
+             To inspect the udev-created symlinks for this device, run:\n  \
+             udevadm info --query=symlink --name {underlying}\n\
+             If the output contains no `disk/by-id/...` entries, ensure udev \
+             is running and the device's hardware identifiers are exposed by \
+             the kernel, then re-run `braid recover`. If by-id entries exist \
+             but none match this device's canonical path, file a braid bug \
+             with the udevadm output."
+        )));
+    }
+
+    // Stable highest-priority pick: lowest by_id_priority wins, ties broken by filename.
+    matches.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
+    Ok(ByIdPath(matches.into_iter().next().unwrap().2))
 }
 
 /// Rebuild pool.json from the live mounted pool and clear the pending-operation journal.
@@ -39,6 +134,7 @@ pub struct RecoverParams<'a> {
 pub fn cmd_recover<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
+    by_id_resolver: &dyn ByIdResolver,
     params: &RecoverParams<'_>,
 ) -> Result<(), RecoverError> {
     // 1. Load journal (required — nothing to recover if absent)
@@ -185,20 +281,24 @@ pub fn cmd_recover<R: CommandRunner, F: Filesystem + ?Sized>(
             eprintln!("  skip: device {} has no braid- prefix", dev.mapper.0);
             continue;
         };
-        // Get by_id from whichever membership snapshot knows about this device
-        let by_id = union
-            .disks
-            .get(name)
-            .map(|m| m.by_id.clone())
-            .ok_or_else(|| {
-                RecoverError::Failed(format!(
-                    "device {} is in the live pool but has no by-id path in either \
-                     the pre-operation or target membership snapshot.\n\
-                     This must be resolved manually — provide the correct \
-                     /dev/disk/by-id/ path and re-run recovery.",
-                    dev.mapper.0
-                ))
-            })?;
+        // Sanity check: refuse to handle live pool members the journal never recorded.
+        // The journal still records intent (which devices the operation was acting on);
+        // an unknown device means something bypassed braid and we should not silently
+        // adopt it.
+        if !union.disks.contains_key(name) {
+            return Err(RecoverError::Failed(format!(
+                "device {} is in the live pool but has no by-id path in either \
+                 the pre-operation or target membership snapshot.\n\
+                 This must be resolved manually — provide the correct \
+                 /dev/disk/by-id/ path and re-run recovery.",
+                dev.mapper.0
+            )));
+        }
+        // Resolve by_id from the live device's identity, not from the journal.
+        // The journal value can be stale if hardware enumeration changed since the
+        // mutation started; resolving against /dev/disk/by-id/ at recovery time
+        // gives us a fresh, identity-bound symlink.
+        let by_id = resolve_by_id_for_underlying(by_id_resolver, &dev.underlying)?;
         recovered.disks.insert(
             name.to_owned(),
             DiskMember::enriched(by_id, dev.luks_uuid.clone(), dev.devid),
@@ -356,6 +456,62 @@ mod tests {
         fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
             Ok(vec![])
         }
+    }
+
+    /// Test resolver for `ByIdResolver`. `entries` is what `list_by_id_entries`
+    /// returns; `canonicalize_results` is the symlink → canonical-path map used
+    /// by `canonicalize`. Unmocked paths return `NotFound`.
+    #[derive(Default)]
+    struct MockByIdResolver {
+        entries: Vec<String>,
+        canonicalize_results: BTreeMap<String, String>,
+    }
+
+    impl MockByIdResolver {
+        fn with_entries<I, S>(mut self, entries: I) -> Self
+        where
+            I: IntoIterator<Item = S>,
+            S: Into<String>,
+        {
+            self.entries = entries.into_iter().map(Into::into).collect();
+            self
+        }
+
+        fn with_canonical(mut self, path: &str, target: &str) -> Self {
+            self.canonicalize_results
+                .insert(path.to_string(), target.to_string());
+            self
+        }
+    }
+
+    impl ByIdResolver for MockByIdResolver {
+        fn list_by_id_entries(&self) -> Result<Vec<String>, std::io::Error> {
+            Ok(self.entries.clone())
+        }
+
+        fn canonicalize(&self, path: &str) -> Result<String, std::io::Error> {
+            self.canonicalize_results.get(path).cloned().ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::NotFound, format!("mock: {path}"))
+            })
+        }
+    }
+
+    /// Build a `MockByIdResolver` from `(underlying, by_id_filename)` pairs.
+    /// For each pair, the by-id entry is registered and both the entry and the
+    /// underlying canonicalize to the underlying path. Use this for success-path
+    /// tests where the resolver should find a matching entry per pool device.
+    fn resolver_for(mappings: &[(&str, &str)]) -> MockByIdResolver {
+        let mut resolver = MockByIdResolver::default();
+        for (underlying, filename) in mappings {
+            resolver.entries.push((*filename).to_string());
+            resolver
+                .canonicalize_results
+                .insert(format!("/dev/disk/by-id/{filename}"), (*underlying).to_string());
+            resolver
+                .canonicalize_results
+                .insert((*underlying).to_string(), (*underlying).to_string());
+        }
+        resolver
     }
 
     fn ok_raw(cmd: &str, stdout: &str) -> RawCommandOutput {
@@ -560,9 +716,13 @@ mod tests {
                 cryptsetup_uuid_ok("/dev/vdb", "22222222-2222-2222-2222-222222222222"),
             );
 
+        // Toshiba (devid 1) iterates first; resolver must succeed for /dev/vda
+        // so the loop reaches the unknown 'mystery' device.
+        let resolver = resolver_for(&[("/dev/vda", "ata-TOSHIBA")]);
         let result = cmd_recover(
             &runner,
             &fs,
+            &resolver,
             &RecoverParams {
                 config: &config,
                 paths: &paths,
@@ -728,9 +888,14 @@ mod tests {
             passphrase_file.as_file().write_all(b"testpass").unwrap();
         }
 
+        let resolver = resolver_for(&[
+            ("/dev/vda", "virtio-disk1"),
+            ("/dev/vdb", "virtio-disk2"),
+        ]);
         let result = cmd_recover(
             &runner,
             &fs,
+            &resolver,
             &RecoverParams {
                 config: &config,
                 paths: &paths,
@@ -842,6 +1007,7 @@ mod tests {
         let result = cmd_recover(
             &runner,
             &fs,
+            &MockByIdResolver::default(),
             &RecoverParams {
                 config: &config,
                 paths: &paths,
@@ -935,9 +1101,14 @@ mod tests {
             );
 
         // No passphrase — pool is already mounted
+        let resolver = resolver_for(&[
+            ("/dev/vda", "virtio-disk1"),
+            ("/dev/vdb", "virtio-disk2"),
+        ]);
         let result = cmd_recover(
             &runner,
             &fs,
+            &resolver,
             &RecoverParams {
                 config: &config,
                 paths: &paths,
@@ -1075,6 +1246,7 @@ mod tests {
         let result = cmd_recover(
             &runner,
             &fs,
+            &MockByIdResolver::default(),
             &RecoverParams {
                 config: &config,
                 paths: &paths,
@@ -1162,6 +1334,7 @@ mod tests {
         let result = cmd_recover(
             &runner,
             &fs,
+            &MockByIdResolver::default(),
             &RecoverParams {
                 config: &config,
                 paths: &paths,
@@ -1215,6 +1388,7 @@ mod tests {
         let result = cmd_recover(
             &runner,
             &fs,
+            &MockByIdResolver::default(),
             &RecoverParams {
                 config: &config,
                 paths: &paths,
@@ -1333,6 +1507,7 @@ mod tests {
         let result = cmd_recover(
             &runner,
             &fs,
+            &MockByIdResolver::default(),
             &RecoverParams {
                 config: &config,
                 paths: &paths,
@@ -1358,6 +1533,279 @@ mod tests {
         assert!(
             paths.pending_op_json().exists(),
             "journal should still exist"
+        );
+    }
+
+    // --- by_id resolver tests ---
+
+    /// Intent: When the journal's recorded by_id is stale (e.g. cable swap or
+    /// USB re-enumeration changed /dev/disk/by-id/ between the mutation start
+    /// and recovery), the recovered pool.json must contain the live by-id
+    /// path, not the stale journal value.
+    ///
+    /// Why: The previous code copied by_id from the journal snapshot, which
+    /// could persist a path that no longer exists on disk. The next braid
+    /// unlock would then fail to find the device.
+    ///
+    /// Scenario: 2-disk pool already mounted. Journal has the old paths
+    /// (virtio-disk1/2). Resolver returns multiple new symlinks per device;
+    /// recovery must persist the highest-priority by-id (wwn-) for each.
+    #[test]
+    fn recover_uses_live_by_id_when_journal_is_stale() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let fs = MockFs::new(&[]);
+
+        let journal = two_disk_journal();
+        journal::write_journal(&paths, &journal).unwrap();
+
+        let (mp_req, mp_out) = mountpoint_ok();
+        let runner = MockRunner::default()
+            .with_output(mp_req, mp_out)
+            .with_output(
+                CmdRequest::FindmntJson {
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                ok_raw(
+                    "findmnt",
+                    r#"{"filesystems": [{"target":"/mnt/storage","source":"/dev/mapper/braid-disk1","fstype":"btrfs"}]}"#,
+                ),
+            )
+            .with_output(
+                CmdRequest::BtrfsFilesystemShow {
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                btrfs_show_two_disks(),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-disk1".into(),
+                },
+                cryptsetup_status_active("braid-disk1", "/dev/vda"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vda".into(),
+                },
+                cryptsetup_uuid_ok("/dev/vda", "11111111-1111-1111-1111-111111111111"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-disk2".into(),
+                },
+                cryptsetup_status_active("braid-disk2", "/dev/vdb"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vdb".into(),
+                },
+                cryptsetup_uuid_ok("/dev/vdb", "22222222-2222-2222-2222-222222222222"),
+            );
+
+        // Resolver: each /dev/vdN has a wwn (highest priority), an ata
+        // (lower priority), and a -part1 partition entry that must be filtered.
+        let mut resolver = MockByIdResolver::default()
+            .with_entries([
+                "wwn-0xAAAA",
+                "ata-FOO",
+                "ata-FOO-part1",
+                "wwn-0xBBBB",
+                "ata-BAR",
+                "ata-BAR-part1",
+            ])
+            .with_canonical("/dev/vda", "/dev/vda")
+            .with_canonical("/dev/disk/by-id/wwn-0xAAAA", "/dev/vda")
+            .with_canonical("/dev/disk/by-id/ata-FOO", "/dev/vda")
+            .with_canonical("/dev/disk/by-id/ata-FOO-part1", "/dev/vda1")
+            .with_canonical("/dev/vdb", "/dev/vdb")
+            .with_canonical("/dev/disk/by-id/wwn-0xBBBB", "/dev/vdb")
+            .with_canonical("/dev/disk/by-id/ata-BAR", "/dev/vdb")
+            .with_canonical("/dev/disk/by-id/ata-BAR-part1", "/dev/vdb1");
+        // Suppress unused-mut by re-borrowing through the binding.
+        let _ = &mut resolver;
+
+        let result = cmd_recover(
+            &runner,
+            &fs,
+            &resolver,
+            &RecoverParams {
+                config: &config,
+                paths: &paths,
+                passphrase_stdin: false,
+                passphrase_file: None,
+                allow_degraded: false,
+                dry_run: false,
+            },
+        );
+
+        result.expect("recover should succeed");
+
+        let recovered = membership::load_membership(&paths).unwrap();
+        assert_eq!(
+            recovered.disks["disk1"].by_id.0, "/dev/disk/by-id/wwn-0xAAAA",
+            "disk1 should resolve to highest-priority wwn-, not stale journal value"
+        );
+        assert_eq!(
+            recovered.disks["disk2"].by_id.0, "/dev/disk/by-id/wwn-0xBBBB",
+            "disk2 should resolve to highest-priority wwn-, not stale journal value"
+        );
+    }
+
+    /// Intent: When a live pool device has no /dev/disk/by-id/ symlink
+    /// resolving to it, recovery must hard-fail with an actionable error
+    /// rather than silently fall back to a stale journal value.
+    ///
+    /// Why: Falling back to the journal would defeat the purpose of the fix
+    /// in exactly the case where the journal value is most likely to be wrong.
+    /// The operator needs a concrete remediation, not a guess.
+    ///
+    /// Scenario: Pool already mounted, journal known. Resolver returns no
+    /// matching by-id entry. Recovery must fail loudly and not write pool.json.
+    #[test]
+    fn recover_hard_fails_when_underlying_has_no_by_id() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let fs = MockFs::new(&[]);
+
+        let journal = two_disk_journal();
+        journal::write_journal(&paths, &journal).unwrap();
+
+        let (mp_req, mp_out) = mountpoint_ok();
+        let runner = MockRunner::default()
+            .with_output(mp_req, mp_out)
+            .with_output(
+                CmdRequest::FindmntJson {
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                ok_raw(
+                    "findmnt",
+                    r#"{"filesystems": [{"target":"/mnt/storage","source":"/dev/mapper/braid-disk1","fstype":"btrfs"}]}"#,
+                ),
+            )
+            .with_output(
+                CmdRequest::BtrfsFilesystemShow {
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                btrfs_show_two_disks(),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-disk1".into(),
+                },
+                cryptsetup_status_active("braid-disk1", "/dev/vda"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vda".into(),
+                },
+                cryptsetup_uuid_ok("/dev/vda", "11111111-1111-1111-1111-111111111111"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-disk2".into(),
+                },
+                cryptsetup_status_active("braid-disk2", "/dev/vdb"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vdb".into(),
+                },
+                cryptsetup_uuid_ok("/dev/vdb", "22222222-2222-2222-2222-222222222222"),
+            );
+
+        // Resolver: only canonicalize the underlying paths to themselves; no
+        // by-id entries match. resolve_by_id_for_underlying must hard-fail.
+        let resolver = MockByIdResolver::default()
+            .with_canonical("/dev/vda", "/dev/vda")
+            .with_canonical("/dev/vdb", "/dev/vdb");
+
+        let result = cmd_recover(
+            &runner,
+            &fs,
+            &resolver,
+            &RecoverParams {
+                config: &config,
+                paths: &paths,
+                passphrase_stdin: false,
+                passphrase_file: None,
+                allow_degraded: false,
+                dry_run: false,
+            },
+        );
+
+        let err = result.expect_err("recovery should hard-fail when no by-id resolves");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("has no /dev/disk/by-id/ symlink resolving to it"),
+            "error should explain the missing-symlink condition, got: {msg}"
+        );
+        assert!(
+            msg.contains("/dev/vda"),
+            "error should name the concrete underlying device, got: {msg}"
+        );
+        assert!(
+            msg.contains("udevadm info --query=symlink --name"),
+            "error should suggest the udevadm remediation command, got: {msg}"
+        );
+
+        // pool.json must NOT have been written
+        assert!(
+            !paths.pool_json().exists(),
+            "pool.json should not exist after failed recovery"
+        );
+        // journal must NOT have been cleared
+        assert!(
+            paths.pending_op_json().exists(),
+            "journal should still exist after failed recovery"
+        );
+    }
+
+    /// Intent: When several /dev/disk/by-id/ symlinks resolve to the same live
+    /// device (the normal case for any SATA drive), the resolver must pick the
+    /// most stable identifier per `discover::by_id_priority`.
+    ///
+    /// Why: SATA drives normally expose wwn-, ata-, and scsi- aliases pointing
+    /// at the same kernel device. We want pool.json to record the wwn (most
+    /// stable across kernel/firmware changes), exactly like `discover --write`.
+    #[test]
+    fn resolve_by_id_picks_highest_priority_when_multiple_match() {
+        let resolver = MockByIdResolver::default()
+            .with_entries(["ata-Y", "scsi-Z", "wwn-X", "ata-OTHER"])
+            .with_canonical("/dev/sda", "/dev/sda")
+            .with_canonical("/dev/disk/by-id/wwn-X", "/dev/sda")
+            .with_canonical("/dev/disk/by-id/scsi-Z", "/dev/sda")
+            .with_canonical("/dev/disk/by-id/ata-Y", "/dev/sda")
+            .with_canonical("/dev/disk/by-id/ata-OTHER", "/dev/sdb");
+
+        let resolved = resolve_by_id_for_underlying(&resolver, "/dev/sda")
+            .expect("resolution should succeed");
+        assert_eq!(
+            resolved.0, "/dev/disk/by-id/wwn-X",
+            "wwn- has highest priority and must win"
+        );
+    }
+
+    /// Intent: by-id partition entries (e.g. ata-FOO-part1) must be filtered
+    /// out, even when their canonical target matches the live device.
+    ///
+    /// Why: braid uses whole-disk LUKS, never partition LUKS. Picking a
+    /// partition entry would record a misleading path in pool.json.
+    #[test]
+    fn resolve_by_id_skips_partition_entries() {
+        let resolver = MockByIdResolver::default()
+            .with_entries(["ata-FOO", "ata-FOO-part1", "ata-FOO-part2"])
+            .with_canonical("/dev/sda", "/dev/sda")
+            .with_canonical("/dev/disk/by-id/ata-FOO", "/dev/sda")
+            .with_canonical("/dev/disk/by-id/ata-FOO-part1", "/dev/sda")
+            .with_canonical("/dev/disk/by-id/ata-FOO-part2", "/dev/sda");
+
+        let resolved = resolve_by_id_for_underlying(&resolver, "/dev/sda")
+            .expect("resolution should succeed");
+        assert_eq!(
+            resolved.0, "/dev/disk/by-id/ata-FOO",
+            "partition entries must be filtered, leaving only the whole-disk by-id"
         );
     }
 

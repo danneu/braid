@@ -58,7 +58,7 @@ When `pending-op.json` exists, braid enters recovery mode. All commands except `
 ### Recovery
 
 Recovery is always explicit, never implicit:
-- `braid recover` opens LUKS devices and mounts the pool if needed (using the union of pre/target membership from the journal), then rebuilds `pool.json` from the live btrfs pool. This is the only path out of recovery mode (journal present). It probes actual pool topology, not LUKS labels.
+- `braid recover` opens LUKS devices and mounts the pool if needed (using the union of pre/target membership from the journal), then rebuilds `pool.json` from the live btrfs pool. This is the only path out of recovery mode (journal present). It probes actual pool topology, not LUKS labels. Each member's `by_id` is resolved at recovery time by walking `/dev/disk/by-id/` and matching the symlink whose canonical target equals the live device's backing kernel path — `by_id` is never copied from the journal snapshot, which can be stale if hardware enumeration changed since the mutation started. If no by-id symlink resolves to a live pool member, recovery hard-fails with an actionable remediation message rather than persisting a guess.
 - `braid discover` scans `/dev/disk/by-id/*` for LUKS devices with `braid-*` labels. Displays what it finds. With `--write`, persists to `pool.json`. This is for initial setup recovery (lost pool.json), not for crash recovery.
 - The normal path to create `pool.json` is `braid add`.
 

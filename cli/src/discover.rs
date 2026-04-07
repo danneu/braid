@@ -103,7 +103,7 @@ fn discover_from_dir<R: CommandRunner>(
 /// | ata-    | Model + serial via kernel ATA driver                 | Yes (format can vary by kernel)   |
 /// | usb-    | USB device serial number                             | Yes (absent on cheap drives)      |
 /// | other   | Everything else (dm-uuid, etc.)                      | Varies                            |
-fn by_id_priority(filename: &str) -> u8 {
+pub(crate) fn by_id_priority(filename: &str) -> u8 {
     if filename.starts_with("wwn-") {
         return 0;
     }
@@ -122,7 +122,7 @@ fn by_id_priority(filename: &str) -> u8 {
     5
 }
 
-fn is_partition_entry(name: &str) -> bool {
+pub(crate) fn is_partition_entry(name: &str) -> bool {
     // Match -part1, -part2, etc. at end of name
     if let Some(idx) = name.rfind("-part") {
         let rest = &name[idx + 5..];
