@@ -12,7 +12,7 @@ use time::PrimitiveDateTime;
 
 use crate::parse::types::{BtrfsBgType, ScrubState, SmartHealth};
 use crate::status::{BalanceReport, DiskErrors};
-use crate::tui::model::{Model, PoolState, PoolStatus, Tab};
+use crate::tui::model::{Model, PoolState, PoolStatus, Tab, UnpooledDiskRender};
 
 fn format_timestamp(dt: &PrimitiveDateTime) -> String {
     let fmt = format_description!(
@@ -327,6 +327,29 @@ fn btrfs_cell(errors: &DiskErrors) -> Span<'static> {
     }
 }
 
+/// Status cell for a disk that is NOT in the live pool's `disk_usage`.
+/// Resolves the configured render classification populated by
+/// `tui::probe::probe_pool_for_tui` and returns the styled span.
+///
+/// Returns `None` when the disk has no entry in `unpooled_disks` — caller
+/// should fall back to its existing "missing" rendering, which preserves
+/// behavior for disks the unpooled probe couldn't classify (e.g. probe
+/// errors).
+fn unpooled_disk_status_cell(state: &PoolState, name: &str) -> Option<Span<'static>> {
+    state.unpooled_disks.get(name).map(|render| match render {
+        UnpooledDiskRender::Missing => Span::styled("missing", Style::default().fg(Color::Yellow)),
+        UnpooledDiskRender::UnknownLuks => {
+            Span::styled("unknown", Style::default().fg(Color::Yellow))
+        }
+        UnpooledDiskRender::LuksHeaderUnreadable => {
+            Span::styled("LUKS header unreadable", Style::default().fg(Color::Red))
+        }
+        UnpooledDiskRender::LuksHeaderDamaged => {
+            Span::styled("LUKS header damaged", Style::default().fg(Color::Red))
+        }
+    })
+}
+
 fn disk_table(model: &Model, unit: ByteUnit) -> Table<'_> {
     let pool = model.pool.current();
     let disk_usage = pool.map(|p| &p.disk_usage);
@@ -372,15 +395,22 @@ fn disk_table(model: &Model, unit: ByteUnit) -> Table<'_> {
                         unit.suffix()
                     )),
                 ]),
-                None if disk_usage.is_some() => Row::new(vec![
-                    num,
-                    name_cell,
-                    transport_cell,
-                    smart_line,
-                    btrfs_line,
-                    Line::from(Span::styled("missing", Style::default().fg(Color::Yellow))),
-                ])
-                .style(Style::default().add_modifier(Modifier::DIM)),
+                None if disk_usage.is_some() => {
+                    let status_span = pool
+                        .and_then(|p| unpooled_disk_status_cell(p, name))
+                        .unwrap_or_else(|| {
+                            Span::styled("missing", Style::default().fg(Color::Yellow))
+                        });
+                    Row::new(vec![
+                        num,
+                        name_cell,
+                        transport_cell,
+                        smart_line,
+                        btrfs_line,
+                        Line::from(status_span),
+                    ])
+                    .style(Style::default().add_modifier(Modifier::DIM))
+                }
                 None => Row::new(vec![
                     num,
                     name_cell,
@@ -1143,6 +1173,7 @@ pub(crate) mod tests {
                     },
                 ),
             ]),
+            unpooled_disks: HashMap::new(),
             alert_state: crate::alert::AlertState {
                 active: false,
                 causes: vec![],
@@ -1333,5 +1364,49 @@ pub(crate) mod tests {
         model.tab = Tab::Scrub;
         let terminal = render(&model, 60, 22);
         snap!(buffer_to_string(&terminal));
+    }
+
+    /// Intent: unpooled_disk_status_cell must surface a distinct label per
+    /// UnpooledDiskRender variant so the disk table can differentiate
+    /// "missing", "valid LUKS not in pool", "header unreadable", and
+    /// "header damaged" instead of collapsing them all into "missing".
+    ///
+    /// Why: prior to the unpooled-disks plumbing, the TUI rendered every
+    /// declared-but-unrepresented disk as plain "missing", hiding the
+    /// distinction between an unplugged cable, a stale-LUKS disk, and a
+    /// corrupted header. The helper is the single point that materializes
+    /// the new vocabulary into ratatui spans.
+    ///
+    /// Scenario: a fake PoolState with one entry per UnpooledDiskRender
+    /// variant in `unpooled_disks`. Each name resolves to its expected
+    /// label.
+    #[test]
+    fn unpooled_disk_status_cell_renders_each_variant() {
+        let mut pool = sample_pool();
+        pool.unpooled_disks = HashMap::from([
+            ("alpha".to_owned(), UnpooledDiskRender::Missing),
+            ("bravo".to_owned(), UnpooledDiskRender::UnknownLuks),
+            (
+                "charlie".to_owned(),
+                UnpooledDiskRender::LuksHeaderUnreadable,
+            ),
+            ("delta".to_owned(), UnpooledDiskRender::LuksHeaderDamaged),
+        ]);
+
+        let cell = |name: &str| {
+            unpooled_disk_status_cell(&pool, name)
+                .expect("expected an entry")
+                .content
+                .into_owned()
+        };
+
+        assert_eq!(cell("alpha"), "missing");
+        assert_eq!(cell("bravo"), "unknown");
+        assert_eq!(cell("charlie"), "LUKS header unreadable");
+        assert_eq!(cell("delta"), "LUKS header damaged");
+        assert!(
+            unpooled_disk_status_cell(&pool, "echo").is_none(),
+            "names not in unpooled_disks must return None so callers can fall back"
+        );
     }
 }

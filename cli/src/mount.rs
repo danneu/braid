@@ -42,9 +42,24 @@ fn tag(label: &str) -> String {
 enum MissingReason {
     /// Device file does not exist on the host (`ConfigDiskState::Absent`).
     Unplugged,
-    /// Device exists but `cryptsetup luksUuid` failed
-    /// (`ConfigDiskState::PresentNotLuks`). The header is unreadable.
+    /// Device exists but `cryptsetup isLuks` exits non-zero — the LUKS
+    /// magic is gone or otherwise unrecognizable. Distinct from Damaged
+    /// because there is no metadata structure left to repair via
+    /// `cryptsetup repair`.
     LuksHeaderUnreadable,
+    /// Device exists, has valid LUKS magic, but `cryptsetup luksDump`
+    /// fails to parse the metadata blocks. Potentially repairable via
+    /// `cryptsetup repair --type luks2 <device>`.
+    LuksHeaderDamaged,
+}
+
+impl MissingReason {
+    fn is_luks_header_state(self) -> bool {
+        matches!(
+            self,
+            MissingReason::LuksHeaderUnreadable | MissingReason::LuksHeaderDamaged
+        )
+    }
 }
 
 /// Format a structured `DegradedRefused` error message that names each
@@ -69,11 +84,15 @@ fn format_degraded_refused(
         let reason_text = match reason {
             MissingReason::Unplugged => "not found (unplugged?)",
             MissingReason::LuksHeaderUnreadable => "LUKS header unreadable",
+            MissingReason::LuksHeaderDamaged => "LUKS header metadata damaged",
         };
         lines.push(format!("  {name}: {reason_text}"));
     }
     lines.push("new writes would have ZERO redundancy (single-profile chunks)".to_owned());
     lines.push(format!("hint: braid {command_hint} --allow-degraded"));
+    if missing.iter().any(|(_, r)| r.is_luks_header_state()) {
+        lines.push("run 'braid doctor' for recovery guidance".to_owned());
+    }
     lines.join("\n")
 }
 
@@ -126,8 +145,28 @@ pub fn plan_open_pool<R: CommandRunner, F: Filesystem + ?Sized>(
                 missing.push((name.clone(), MissingReason::Unplugged));
             }
             ConfigDiskState::PresentNotLuks => {
-                eprintln!("{}  disk: {:<10}LUKS header unreadable", tag("skip"), name);
-                missing.push((name.clone(), MissingReason::LuksHeaderUnreadable));
+                // Refine PresentNotLuks (luksUuid failed) into Unreadable vs
+                // Damaged for diagnostic reporting only — do NOT propagate
+                // this back into ConfigDiskState. add/replace must keep
+                // seeing the coarse PresentNotLuks state to preserve their
+                // destructive-format guards on potentially recoverable
+                // damaged headers.
+                let reason = match luks::probe_luks_header(runner, &member.by_id.0) {
+                    luks::LuksHeaderState::Damaged => MissingReason::LuksHeaderDamaged,
+                    // Unreadable, the inconsistent Ok-but-luksUuid-failed
+                    // case, and ProbeFailed all collapse to Unreadable.
+                    // Damaged is the only refinement we promote out of
+                    // this branch because it has a distinct
+                    // `cryptsetup repair` recovery story; everything else
+                    // gets the conservative Unreadable label.
+                    _ => MissingReason::LuksHeaderUnreadable,
+                };
+                let reason_text = match reason {
+                    MissingReason::LuksHeaderDamaged => "LUKS header metadata damaged",
+                    _ => "LUKS header unreadable",
+                };
+                eprintln!("{}  disk: {:<10}{reason_text}", tag("skip"), name);
+                missing.push((name.clone(), reason));
             }
             ConfigDiskState::PresentLuks { uuid, mapper_open } => {
                 if let Some(expected) = &member.luks_uuid
@@ -1054,6 +1093,127 @@ mod tests {
         assert!(
             !msg.contains(".luksheader"),
             "must not reference local .luksheader files: {msg}"
+        );
+    }
+
+    /// Intent: format_degraded_refused must surface a distinct
+    /// "LUKS header metadata damaged" line for `MissingReason::LuksHeaderDamaged`.
+    ///
+    /// Why: damaged metadata has a different recovery story
+    /// (`cryptsetup repair`) than an unreadable header. Collapsing both
+    /// into the same label would hide the actionable distinction the
+    /// upstream probe just made.
+    ///
+    /// Scenario: a single declared disk whose LUKS magic is intact but
+    /// luksDump fails to parse the metadata blocks.
+    #[test]
+    fn format_degraded_refused_damaged_includes_disk_name_and_reason() {
+        let msg = format_degraded_refused(
+            &[("raw".to_owned(), MissingReason::LuksHeaderDamaged)],
+            "unlock",
+        );
+        assert!(
+            msg.contains("raw: LUKS header metadata damaged"),
+            "missing damaged label: {msg}"
+        );
+        assert!(
+            msg.contains("1 missing device") && !msg.contains("1 missing devices"),
+            "expected singular: {msg}"
+        );
+    }
+
+    /// Intent: format_degraded_refused must append a doctor-guidance footer
+    /// when at least one disk has an Unreadable LUKS header.
+    ///
+    /// Why: the inline list keeps short labels; the proactive doctor
+    /// command holds the full recovery guidance. The footer is the bridge
+    /// between the two.
+    ///
+    /// Scenario: a single LuksHeaderUnreadable disk; the footer is the
+    /// last line of the message.
+    #[test]
+    fn format_degraded_refused_unreadable_includes_doctor_footer() {
+        let msg = format_degraded_refused(
+            &[("raw".to_owned(), MissingReason::LuksHeaderUnreadable)],
+            "unlock",
+        );
+        assert!(
+            msg.contains("run 'braid doctor' for recovery guidance"),
+            "missing doctor footer: {msg}"
+        );
+    }
+
+    /// Intent: format_degraded_refused must append a doctor-guidance footer
+    /// when at least one disk has a Damaged LUKS header.
+    ///
+    /// Why: same bridge as the unreadable case — the per-disk label is
+    /// short, and `braid doctor` carries the full repair guidance.
+    ///
+    /// Scenario: a single LuksHeaderDamaged disk.
+    #[test]
+    fn format_degraded_refused_damaged_includes_doctor_footer() {
+        let msg = format_degraded_refused(
+            &[("raw".to_owned(), MissingReason::LuksHeaderDamaged)],
+            "unlock",
+        );
+        assert!(
+            msg.contains("run 'braid doctor' for recovery guidance"),
+            "missing doctor footer: {msg}"
+        );
+    }
+
+    /// Intent: format_degraded_refused must NOT append the doctor footer
+    /// for an Unplugged-only failure.
+    ///
+    /// Why: a hot-unplugged cable does not need recovery guidance — the
+    /// fix is to plug the cable back in. Adding doctor noise to that case
+    /// would dilute the signal where it actually matters.
+    ///
+    /// Scenario: a single Unplugged disk.
+    #[test]
+    fn format_degraded_refused_unplugged_only_omits_doctor_footer() {
+        let msg = format_degraded_refused(
+            &[("raw".to_owned(), MissingReason::Unplugged)],
+            "unlock",
+        );
+        assert!(
+            !msg.contains("braid doctor"),
+            "unplugged-only must not include doctor footer: {msg}"
+        );
+    }
+
+    /// Intent: format_degraded_refused must include the doctor footer at
+    /// most once, even when multiple LUKS-header-state disks are present
+    /// alongside an unplugged disk.
+    ///
+    /// Why: emitting the footer per-disk would be noisy and could
+    /// confuse the user about whether each line is a separate
+    /// recommendation. The footer is a single trailing instruction.
+    ///
+    /// Scenario: one Unplugged + one Damaged disk; both labels appear,
+    /// the footer appears exactly once.
+    #[test]
+    fn format_degraded_refused_mixed_includes_doctor_footer_once() {
+        let msg = format_degraded_refused(
+            &[
+                ("disk2".to_owned(), MissingReason::Unplugged),
+                ("disk3".to_owned(), MissingReason::LuksHeaderDamaged),
+            ],
+            "unlock",
+        );
+        assert!(
+            msg.contains("disk2: not found (unplugged?)"),
+            "missing unplugged line: {msg}"
+        );
+        assert!(
+            msg.contains("disk3: LUKS header metadata damaged"),
+            "missing damaged line: {msg}"
+        );
+        assert_eq!(
+            msg.matches("run 'braid doctor' for recovery guidance")
+                .count(),
+            1,
+            "doctor footer must appear exactly once: {msg}"
         );
     }
 

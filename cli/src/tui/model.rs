@@ -64,6 +64,32 @@ impl DiskUsage {
     }
 }
 
+/// Render classification for a declared disk that is NOT currently
+/// represented in the live pool's `disk_usage`. Populated by `tui::probe`
+/// from the read-only `probe_config_disk` result so the disk table can
+/// distinguish unplugged, valid-but-unrelated, and broken-header states
+/// instead of collapsing them all into a generic "missing".
+///
+/// Variants are deliberately prefixed with `LuksHeader` (not just
+/// `Header`) to avoid ambiguity in the view layer — `Header` alone could
+/// read as a btrfs header, an lsblk column header, etc.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnpooledDiskRender {
+    /// `ConfigDiskState::Absent` — device file does not exist.
+    Missing,
+    /// `ConfigDiskState::PresentLuks` whose UUID is not in the live pool.
+    /// LUKS header is valid but the disk does not belong to this pool.
+    UnknownLuks,
+    /// `ConfigDiskState::PresentNotLuks` refined to
+    /// `LuksHeaderState::Unreadable` (or fallback). Severe — needs
+    /// off-system header backup restore.
+    LuksHeaderUnreadable,
+    /// `ConfigDiskState::PresentNotLuks` refined to
+    /// `LuksHeaderState::Damaged`. Potentially repairable via
+    /// `cryptsetup repair`.
+    LuksHeaderDamaged,
+}
+
 #[derive(Clone)]
 pub struct PoolState {
     pub mount_point: MountPoint,
@@ -73,6 +99,11 @@ pub struct PoolState {
     pub smart_health: HashMap<String, SmartHealth>,
     pub luks_info: HashMap<String, DiskLuksInfo>,
     pub device_errors: HashMap<String, DiskErrors>,
+    /// Per-declared-disk render classification for disks NOT in
+    /// `disk_usage`. Populated by `tui::probe` via `probe_config_disk`
+    /// so the disk table can render Unreadable / Damaged / UnknownLuks /
+    /// Missing distinctly. Disks present in `disk_usage` are omitted.
+    pub unpooled_disks: HashMap<String, UnpooledDiskRender>,
     pub alert_state: AlertState,
     pub scrub: ScrubState,
     pub balance: BalanceReport,

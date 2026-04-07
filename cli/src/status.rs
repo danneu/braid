@@ -140,10 +140,12 @@ pub enum ScrubReport {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "kebab-case")]
 pub enum DiskStatus {
     Present,
     Missing,
+    LuksHeaderUnreadable,
+    LuksHeaderDamaged,
     Unknown,
     New,
 }
@@ -153,6 +155,8 @@ impl std::fmt::Display for DiskStatus {
         match self {
             Self::Present => f.write_str("present"),
             Self::Missing => f.write_str("missing"),
+            Self::LuksHeaderUnreadable => f.write_str("luks-header-unreadable"),
+            Self::LuksHeaderDamaged => f.write_str("luks-header-damaged"),
             Self::Unknown => f.write_str("unknown"),
             Self::New => f.write_str("new"),
         }
@@ -833,7 +837,24 @@ fn build_disk_reports<R: CommandRunner>(
         let status = match &cd.state {
             ConfigDiskState::Absent => DiskStatus::Missing,
             ConfigDiskState::PresentLuks { .. } => DiskStatus::Unknown,
-            ConfigDiskState::PresentNotLuks => DiskStatus::Unknown,
+            ConfigDiskState::PresentNotLuks => {
+                // luksUuid failed during the initial probe. Refine here for
+                // diagnostic reporting only — do NOT propagate this back into
+                // ConfigDiskState (mutating commands like add/replace must keep
+                // seeing the coarse PresentNotLuks state to preserve their
+                // destructive-format guards).
+                match luks::probe_luks_header(runner, &cd.by_id_path.0) {
+                    luks::LuksHeaderState::Unreadable => DiskStatus::LuksHeaderUnreadable,
+                    luks::LuksHeaderState::Damaged => DiskStatus::LuksHeaderDamaged,
+                    // luksUuid failed but isLuks + luksDump succeeded — treat
+                    // as Damaged (the less destructive recovery suggestion).
+                    luks::LuksHeaderState::Ok => DiskStatus::LuksHeaderDamaged,
+                    // Probe itself could not run; collapse to the generic
+                    // Unknown bucket rather than guessing at Unreadable vs
+                    // Damaged.
+                    luks::LuksHeaderState::ProbeFailed(_) => DiskStatus::Unknown,
+                }
+            }
         };
         let mapper = mapper_name(&cd.name).0;
 
@@ -1028,19 +1049,30 @@ fn format_status_human(
         for d in disks {
             out.push('\n');
             // show disk name
-            if d.status == DiskStatus::Missing {
-                out.push_str(&format!("  {:<18}MISSING\n", d.name));
-            } else if d.status == DiskStatus::New {
-                out.push_str(&format!("  {:<18}NEW\n", d.name));
-            } else if d.status == DiskStatus::Unknown {
-                out.push_str(&format!("  {:<18}UNKNOWN\n", d.name));
-            } else {
-                let devid_str = d
-                    .devid
-                    .as_deref()
-                    .map(|id| format!("devid {id}"))
-                    .unwrap_or_default();
-                out.push_str(&format!("  {:<18}{:<10}{}\n", d.name, devid_str, d.status));
+            match d.status {
+                DiskStatus::Missing => {
+                    out.push_str(&format!("  {:<18}MISSING\n", d.name));
+                }
+                DiskStatus::New => {
+                    out.push_str(&format!("  {:<18}NEW\n", d.name));
+                }
+                DiskStatus::Unknown => {
+                    out.push_str(&format!("  {:<18}UNKNOWN\n", d.name));
+                }
+                DiskStatus::LuksHeaderUnreadable => {
+                    out.push_str(&format!("  {:<18}LUKS HEADER UNREADABLE\n", d.name));
+                }
+                DiskStatus::LuksHeaderDamaged => {
+                    out.push_str(&format!("  {:<18}LUKS HEADER DAMAGED\n", d.name));
+                }
+                DiskStatus::Present => {
+                    let devid_str = d
+                        .devid
+                        .as_deref()
+                        .map(|id| format!("devid {id}"))
+                        .unwrap_or_default();
+                    out.push_str(&format!("  {:<18}{:<10}{}\n", d.name, devid_str, d.status));
+                }
             }
 
             // Device path
@@ -1076,6 +1108,14 @@ fn format_status_human(
                     out.push_str("    Errors:  unknown (device absent)\n");
                     false
                 }
+                None if d.status == DiskStatus::LuksHeaderUnreadable => {
+                    out.push_str("    Errors:  unknown (LUKS header unreadable)\n");
+                    false
+                }
+                None if d.status == DiskStatus::LuksHeaderDamaged => {
+                    out.push_str("    Errors:  unknown (LUKS header damaged)\n");
+                    false
+                }
                 None if d.status == DiskStatus::Unknown => {
                     out.push_str("    Errors:  unknown (metadata unavailable)\n");
                     false
@@ -1084,11 +1124,17 @@ fn format_status_human(
             };
 
             // Action guidance
+            let needs_doctor = matches!(
+                d.status,
+                DiskStatus::LuksHeaderUnreadable | DiskStatus::LuksHeaderDamaged
+            );
             if has_errors || d.status == DiskStatus::Missing {
                 out.push_str(&format!(
                     "    Action:  add replacement disk to config, then: braid replace --old {} --new <new-name>\n",
                     d.name
                 ));
+            } else if needs_doctor {
+                out.push_str("    Action:  run 'braid doctor' for recovery guidance\n");
             }
         }
     }
@@ -1749,6 +1795,26 @@ mod tests {
             status: DiskStatus::Missing,
             errors: None,
         };
+        let unreadable = DiskReport {
+            name: "disk4".to_owned(),
+            mapper: "disk4".to_owned(),
+            by_id: "/dev/disk/by-id/disk4".to_owned(),
+            luks_uuid: String::new(),
+            devid: None,
+            underlying: None,
+            status: DiskStatus::LuksHeaderUnreadable,
+            errors: None,
+        };
+        let damaged = DiskReport {
+            name: "disk5".to_owned(),
+            mapper: "disk5".to_owned(),
+            by_id: "/dev/disk/by-id/disk5".to_owned(),
+            luks_uuid: String::new(),
+            devid: None,
+            underlying: None,
+            status: DiskStatus::LuksHeaderDamaged,
+            errors: None,
+        };
 
         let report = StatusReport {
             mount_point: MountPoint("/mnt/storage".to_owned()),
@@ -1765,7 +1831,7 @@ mod tests {
             last_scrub: Some(ScrubReport::Never),
             balance: None,
             allocation: None,
-            disks: vec![present, missing],
+            disks: vec![present, missing, unreadable, damaged],
             advisories: vec![],
             alert_active: false,
             alert_causes: vec![],
@@ -1775,7 +1841,7 @@ mod tests {
         let json_str = serde_json::to_string_pretty(&report).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
         let disks = v["disks"].as_array().unwrap();
-        assert_eq!(disks.len(), 2);
+        assert_eq!(disks.len(), 4);
 
         // Present disk
         let d0 = &disks[0];
@@ -1795,6 +1861,18 @@ mod tests {
         assert_eq!(d1["status"], "missing");
         assert!(d1["errors"].is_null());
         assert!(d1["devid"].is_null());
+
+        // LUKS header unreadable disk
+        let d2 = &disks[2];
+        assert_eq!(d2["mapper"], "disk4");
+        assert_eq!(d2["status"], "luks-header-unreadable");
+        assert!(d2["errors"].is_null());
+
+        // LUKS header damaged disk
+        let d3 = &disks[3];
+        assert_eq!(d3["mapper"], "disk5");
+        assert_eq!(d3["status"], "luks-header-damaged");
+        assert!(d3["errors"].is_null());
     }
 
     // =======================================================================
@@ -2249,6 +2327,127 @@ mod tests {
         assert!(human.contains("MISSING"), "got:\n{human}");
         assert!(human.contains("not found"), "got:\n{human}");
         assert!(human.contains("device absent"), "got:\n{human}");
+    }
+
+    /// Intent: a disk classified as `LuksHeaderUnreadable` in the verbose
+    /// human output must show the dedicated label, the LUKS-header-specific
+    /// errors line, and the doctor action guidance.
+    ///
+    /// Why: previously every unpooled non-LUKS disk collapsed into the
+    /// generic `unknown (metadata unavailable)` bucket, so users had no
+    /// signal that recovery from a header backup might be possible.
+    ///
+    /// Scenario: declared pool member whose `cryptsetup isLuks` fails
+    /// (e.g. fully zeroed header). status.rs refines `PresentNotLuks` into
+    /// `LuksHeaderUnreadable` and the human output renders the new label.
+    #[test]
+    fn status_verbose_luks_header_unreadable_disk() {
+        let human_disks = vec![HumanDisk {
+            name: "disk4".to_owned(),
+            by_id: "/dev/disk/by-id/disk4".to_owned(),
+            luks_uuid: String::new(),
+            devid: None,
+            status: DiskStatus::LuksHeaderUnreadable,
+            model: None,
+            serial: None,
+            errors: None,
+        }];
+
+        let report = StatusReport {
+            mount_point: MountPoint("/mnt/storage".to_owned()),
+            status: StatusCode::Degraded,
+            total_devices: Some(2),
+            present_count: Some(1),
+            missing_count: Some(1),
+            profile: Some("RAID1".to_owned()),
+            capacity: Some(CapacityReport {
+                total_bytes: None,
+                used_bytes: 33914880,
+                free_bytes: 442957824,
+            }),
+            last_scrub: Some(ScrubReport::Never),
+            balance: None,
+            allocation: None,
+            disks: vec![],
+            advisories: vec![],
+            alert_active: false,
+            alert_causes: vec![],
+            missing_devids: vec![],
+        };
+
+        let human = format_status_human(&report, None, Some(&human_disks));
+        assert!(human.contains("LUKS HEADER UNREADABLE"), "got:\n{human}");
+        assert!(
+            human.contains("unknown (LUKS header unreadable)"),
+            "got:\n{human}"
+        );
+        assert!(human.contains("braid doctor"), "got:\n{human}");
+        // Must NOT use the destructive `replace` action — Damaged or
+        // Unreadable headers may be recoverable.
+        assert!(
+            !human.contains("braid replace"),
+            "header-state disks must not surface a replace action; got:\n{human}"
+        );
+    }
+
+    /// Intent: a disk classified as `LuksHeaderDamaged` in the verbose human
+    /// output must show its dedicated label, the damaged-specific errors
+    /// line, and the doctor action guidance.
+    ///
+    /// Why: damaged metadata is potentially repairable via
+    /// `cryptsetup repair`, which has a different recovery story than
+    /// header restoration. Status output must signal the distinction so
+    /// users do not skip straight to a destructive replace.
+    ///
+    /// Scenario: declared pool member whose `isLuks` succeeds but
+    /// `luksDump` fails. status.rs refines `PresentNotLuks` into
+    /// `LuksHeaderDamaged` and the human output renders the new label.
+    #[test]
+    fn status_verbose_luks_header_damaged_disk() {
+        let human_disks = vec![HumanDisk {
+            name: "disk5".to_owned(),
+            by_id: "/dev/disk/by-id/disk5".to_owned(),
+            luks_uuid: String::new(),
+            devid: None,
+            status: DiskStatus::LuksHeaderDamaged,
+            model: None,
+            serial: None,
+            errors: None,
+        }];
+
+        let report = StatusReport {
+            mount_point: MountPoint("/mnt/storage".to_owned()),
+            status: StatusCode::Degraded,
+            total_devices: Some(2),
+            present_count: Some(1),
+            missing_count: Some(1),
+            profile: Some("RAID1".to_owned()),
+            capacity: Some(CapacityReport {
+                total_bytes: None,
+                used_bytes: 33914880,
+                free_bytes: 442957824,
+            }),
+            last_scrub: Some(ScrubReport::Never),
+            balance: None,
+            allocation: None,
+            disks: vec![],
+            advisories: vec![],
+            alert_active: false,
+            alert_causes: vec![],
+            missing_devids: vec![],
+        };
+
+        let human = format_status_human(&report, None, Some(&human_disks));
+        assert!(human.contains("LUKS HEADER DAMAGED"), "got:\n{human}");
+        assert!(
+            human.contains("unknown (LUKS header damaged)"),
+            "got:\n{human}"
+        );
+        assert!(human.contains("braid doctor"), "got:\n{human}");
+        assert!(
+            !human.contains("braid replace"),
+            "header-state disks must not surface a replace action; got:\n{human}"
+        );
     }
 
     #[test]
@@ -3021,14 +3220,8 @@ mod tests {
     // build_disk_reports: PresentNotLuks classification
     // =======================================================================
 
-    #[test]
-    fn build_disk_reports_present_not_luks_missing() {
-        let config_disks = vec![ConfigDisk {
-            name: "disk1".to_owned(),
-            by_id_path: ByIdPath("/dev/disk/by-id/disk1".to_owned()),
-            state: ConfigDiskState::PresentNotLuks,
-        }];
-        let pool = PoolState {
+    fn pool_empty() -> PoolState {
+        PoolState {
             mounted: true,
             devices: vec![],
             missing_count: 0,
@@ -3036,13 +3229,161 @@ mod tests {
             total_devices: 0,
             fsid: None,
             null_underlying: vec![],
-        };
+        }
+    }
+
+    fn cfg_present_not_luks(name: &str, by_id: &str) -> Vec<ConfigDisk> {
+        vec![ConfigDisk {
+            name: name.to_owned(),
+            by_id_path: ByIdPath(by_id.to_owned()),
+            state: ConfigDiskState::PresentNotLuks,
+        }]
+    }
+
+    fn is_luks_raw(device: &str, exit: i32, stderr: &str) -> RawCommandOutput {
+        RawCommandOutput {
+            cmd: format!("cryptsetup isLuks {device}"),
+            stdout: String::new(),
+            stderr: stderr.to_owned(),
+            exit_status: exit,
+        }
+    }
+
+    fn luks_dump_text_raw(device: &str, exit: i32, stdout: &str, stderr: &str) -> RawCommandOutput {
+        RawCommandOutput {
+            cmd: format!("cryptsetup luksDump {device}"),
+            stdout: stdout.to_owned(),
+            stderr: stderr.to_owned(),
+            exit_status: exit,
+        }
+    }
+
+    /// Intent: when probe_luks_header itself cannot run (no mock outputs),
+    /// build_disk_reports must collapse the unpooled PresentNotLuks disk to
+    /// the generic Unknown bucket rather than guess at Unreadable/Damaged.
+    ///
+    /// Why: if we cannot prove which header state caused the luksUuid
+    /// failure, surfacing a confident "unreadable" or "damaged" label would
+    /// mislead users.
+    ///
+    /// Scenario: a declared pool member with PresentNotLuks state, no
+    /// CryptsetupIsLuks/LuksDumpText outputs configured on the runner.
+    #[test]
+    fn build_disk_reports_present_not_luks_probe_failed_falls_back_to_unknown() {
+        let config_disks = cfg_present_not_luks("disk1", "/dev/disk/by-id/disk1");
         let runner = MockRunner::default();
         let stats = BtrfsDeviceStatsOutput { devices: vec![] };
 
-        let ctx = build_disk_reports(&runner, &config_disks, &pool, &stats);
+        let ctx = build_disk_reports(&runner, &config_disks, &pool_empty(), &stats);
         assert_eq!(ctx.disks.len(), 1);
         assert_eq!(ctx.disks[0].status, DiskStatus::Unknown);
+    }
+
+    /// Intent: when probe_luks_header reports Unreadable on the
+    /// PresentNotLuks branch, build_disk_reports must surface
+    /// DiskStatus::LuksHeaderUnreadable.
+    ///
+    /// Why: status reporting is the user-facing surface for the
+    /// Unreadable/Damaged distinction; without this mapping the diagnostic
+    /// would stay collapsed in the generic Unknown bucket.
+    ///
+    /// Scenario: PresentNotLuks config disk where cryptsetup isLuks exits
+    /// non-zero (LUKS magic absent or corrupted).
+    #[test]
+    fn build_disk_reports_present_not_luks_unreadable_maps_to_luks_header_unreadable() {
+        let config_disks = cfg_present_not_luks("disk1", "/dev/disk/by-id/disk1");
+        let runner = MockRunner::default().with_output(
+            CmdRequest::CryptsetupIsLuks {
+                device: "/dev/disk/by-id/disk1".to_owned(),
+            },
+            is_luks_raw(
+                "/dev/disk/by-id/disk1",
+                1,
+                "Device /dev/disk/by-id/disk1 is not a valid LUKS device.\n",
+            ),
+        );
+        let stats = BtrfsDeviceStatsOutput { devices: vec![] };
+
+        let ctx = build_disk_reports(&runner, &config_disks, &pool_empty(), &stats);
+        assert_eq!(ctx.disks.len(), 1);
+        assert_eq!(ctx.disks[0].status, DiskStatus::LuksHeaderUnreadable);
+    }
+
+    /// Intent: when probe_luks_header reports Damaged (isLuks ok, luksDump
+    /// fails), build_disk_reports must surface DiskStatus::LuksHeaderDamaged.
+    ///
+    /// Why: damaged metadata has a different recovery story
+    /// (`cryptsetup repair`) than unreadable headers; status output must
+    /// preserve the distinction.
+    ///
+    /// Scenario: PresentNotLuks config disk where isLuks succeeds but
+    /// luksDump fails to parse the header metadata blocks.
+    #[test]
+    fn build_disk_reports_present_not_luks_damaged_maps_to_luks_header_damaged() {
+        let config_disks = cfg_present_not_luks("disk1", "/dev/disk/by-id/disk1");
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::CryptsetupIsLuks {
+                    device: "/dev/disk/by-id/disk1".to_owned(),
+                },
+                is_luks_raw("/dev/disk/by-id/disk1", 0, ""),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksDumpText {
+                    device: "/dev/disk/by-id/disk1".to_owned(),
+                },
+                luks_dump_text_raw(
+                    "/dev/disk/by-id/disk1",
+                    1,
+                    "",
+                    "Cannot read LUKS header metadata.\n",
+                ),
+            );
+        let stats = BtrfsDeviceStatsOutput { devices: vec![] };
+
+        let ctx = build_disk_reports(&runner, &config_disks, &pool_empty(), &stats);
+        assert_eq!(ctx.disks.len(), 1);
+        assert_eq!(ctx.disks[0].status, DiskStatus::LuksHeaderDamaged);
+    }
+
+    /// Intent: when probe_luks_header reports Ok (luksUuid failed but both
+    /// isLuks and luksDump succeeded — an inconsistent state),
+    /// build_disk_reports must classify the disk as LuksHeaderDamaged
+    /// rather than guess.
+    ///
+    /// Why: luksUuid reads the same header blocks as luksDump, so the
+    /// observed luksUuid failure is a real signal that something is wrong.
+    /// Damaged is the less destructive recovery story (`cryptsetup repair`),
+    /// so we prefer it over the more aggressive Unreadable.
+    ///
+    /// Scenario: PresentNotLuks config disk where isLuks succeeds, luksDump
+    /// also succeeds, but the original luksUuid call failed during probe.
+    #[test]
+    fn build_disk_reports_present_not_luks_inconsistent_falls_back_to_damaged() {
+        let config_disks = cfg_present_not_luks("disk1", "/dev/disk/by-id/disk1");
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::CryptsetupIsLuks {
+                    device: "/dev/disk/by-id/disk1".to_owned(),
+                },
+                is_luks_raw("/dev/disk/by-id/disk1", 0, ""),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksDumpText {
+                    device: "/dev/disk/by-id/disk1".to_owned(),
+                },
+                luks_dump_text_raw(
+                    "/dev/disk/by-id/disk1",
+                    0,
+                    "LUKS header information\nVersion: 2\n",
+                    "",
+                ),
+            );
+        let stats = BtrfsDeviceStatsOutput { devices: vec![] };
+
+        let ctx = build_disk_reports(&runner, &config_disks, &pool_empty(), &stats);
+        assert_eq!(ctx.disks.len(), 1);
+        assert_eq!(ctx.disks[0].status, DiskStatus::LuksHeaderDamaged);
     }
 
     // =======================================================================

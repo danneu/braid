@@ -43,8 +43,10 @@ pub fn execute_effect(effect: Effect, cmd_tx: &mpsc::Sender<Event>) {
             thread::spawn(move || {
                 let start = std::time::Instant::now();
                 let runner = RealRunner;
+                let fs = crate::probe::RealFilesystem;
                 let result = crate::tui::probe::probe_pool_for_tui(
                     &runner,
+                    &fs,
                     mount_point.as_str(),
                     &disk_by_id,
                     &paths,

@@ -207,6 +207,7 @@ pub fn run_demo() -> io::Result<()> {
             ("ironwolf".to_owned(), DiskErrors { read: 3, write: 0, flush: 0, corruption: 0, generation: 0 }),
             ("wdc".to_owned(), DiskErrors { read: 0, write: 0, flush: 0, corruption: 0, generation: 0 }),
         ]),
+        unpooled_disks: HashMap::new(),
         alert_state: crate::alert::AlertState { active: false, causes: vec![] },
         scrub: ScrubState::Completed {
             started_at: ScrubTimestamp(time::macros::datetime!(2026-02-24 02:00:07)),
