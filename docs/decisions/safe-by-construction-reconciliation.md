@@ -1,6 +1,6 @@
 # Decision: Safe-by-Construction Reconciliation
 
-Status: Active
+**Status: Superseded by [intent-cli.md](intent-cli.md)**
 
 > Principle: [Safe-by-construction operations](../principles.md#3-safe-by-construction-operations)
 

@@ -14,7 +14,7 @@ intent: Map device-disappearance states to btrfs, cryptsetup, and kernel output 
 
 ## Top-level docs
 
-- [principles.md](principles.md) — Five canonical invariants: resilient boot, CLI-owned membership, safe operations, single passphrase, stable identifiers.
+- [principles.md](principles.md) — Twelve canonical invariants spanning resilient boot, CLI-owned membership, safe-by-construction operations, identifier stability, NixOS-native conventions, pinned parser toolchain, and pool-mutation serialization.
 - [1-user-stories.md](1-user-stories.md) — End-to-end user workflows from first disk through pool expansion and daily operation.
 - [btrfs-balance-profiles.md](btrfs-balance-profiles.md) — RAID profile conversions for data/metadata/system chunks; commands for single↔RAID1 transitions.
 - [btrfs-balance-soft.md](btrfs-balance-soft.md) — The `--soft` flag optimization for resuming interrupted profile conversions without rewriting already-converted chunks.
@@ -40,7 +40,7 @@ Architecture decision records. Each has a status: `Draft`, `Active`, `Superseded
 - [decisions/nix-native.md](decisions/nix-native.md) — Targets NixOS exclusively using standard module conventions and nixpkgs patterns.
 - [decisions/resilient-boot.md](decisions/resilient-boot.md) — Pool fails gracefully without blocking boot; data drives treated like external mounts.
 - [decisions/runtime-disk-membership.md](decisions/runtime-disk-membership.md) — Disk membership moved from NixOS config to CLI-owned runtime state file.
-- [decisions/safe-by-construction-reconciliation.md](decisions/safe-by-construction-reconciliation.md) — Separate destructive formatting from repeatable reconciliation structurally.
+- [decisions/safe-by-construction-reconciliation.md](decisions/safe-by-construction-reconciliation.md) — **Superseded.** Separate destructive formatting from repeatable reconciliation structurally.
 - [decisions/sane-defaults.md](decisions/sane-defaults.md) — Opinionated NixOS defaults via `mkDefault`; settings knowledgeable admins would enable anyway.
 - [decisions/single-passphrase.md](decisions/single-passphrase.md) — Single passphrase for all LUKS devices, verified at format time.
 - [decisions/systemd-lifecycle.md](decisions/systemd-lifecycle.md) — Thin systemd layer for unlock/mount entry points; CLI owns LUKS and btrfs operations.

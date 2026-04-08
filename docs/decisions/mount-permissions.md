@@ -23,11 +23,11 @@ Mount point permissions are OS-level access policy. The Rust CLI manages LUKS + 
 
 ### Why wrapper-based fixup
 
-The NixOS module already wraps the `braid` CLI binary to inject tool packages onto `PATH`. The wrapper is extended to apply `chown root:<group>` + `chmod 2770` on the mount point after successful mount-producing commands (`unlock`, `add`).
+The NixOS module already wraps the `braid` CLI binary to inject tool packages onto `PATH`. The wrapper is extended to apply `chown root:<group>` + `chmod 2770` on the mount point after successful mount-producing commands (`unlock`, `add`, `recover`).
 
 **Properties:**
 - **Explicit** — runs synchronously after the braid binary exits, before control returns to the caller
-- **Covers all mount paths** — `braid unlock` (direct CLI, systemd service, auto-unlock) and `braid add` (bootstrap) all go through the wrapper
+- **Covers all mount paths** — `braid unlock` (direct CLI, systemd service, auto-unlock), `braid add` (bootstrap), and `braid recover` (recovery) all go through the wrapper
 - **No async race** — unlike a systemd ExecStartPost or path watch, the fixup completes before the caller sees success
 - **Idempotent** — permissions persist in btrfs metadata; re-running is a no-op
 - **Failure-tolerant** — warns to stderr if chown/chmod fails; never overrides the wrapped command's exit code

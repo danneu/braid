@@ -14,7 +14,7 @@ braid has first-class Alerts. An Alert represents "something happened that needs
 
 ### Shared alert computation
 
-A single `compute_alert_state()` function produces an `AlertState` consumed by all surfaces — `braid monitor` (exit code), `braid status` (banner + causes), TUI (banner + indicators). No surface re-encodes alert logic.
+A single shared computation produces an `AlertState` consumed by all surfaces — `braid monitor` (exit code), `braid status` (banner + causes), TUI (banner + indicators). No surface re-encodes alert logic.
 
 ### Alert causes
 
@@ -22,12 +22,13 @@ A single `compute_alert_state()` function produces an `AlertState` consumed by a
 - `BtrfsDeviceErrors { devid }` — non-zero btrfs device stat counters above acked baseline
 - `MissingDevice { devid }` — device missing from pool
 - `SmartdAlert` — smartd SMART health warning
+- `ComputationError { detail }` — probe or parse failed before a structured cause could be determined
 
 The status banner is cause-neutral ("disk health issue detected"); cause details appear below it and in JSON output.
 
 ### Two detection sources, one alert model
 
-braid owns btrfs device stats + missing device detection. smartd owns SMART monitoring and writes a flag file (`/var/lib/braid/smartd-alert`) when triggered. `compute_alert_state()` checks btrfs stats, missing devices, and smartd.
+braid owns btrfs device stats + missing device detection. smartd owns SMART monitoring and writes a flag file (`/var/lib/braid/smartd-alert`) when triggered. The shared computation checks btrfs stats, missing devices, and smartd.
 
 ### All five btrfs device stat counters trigger alerts
 
@@ -41,7 +42,7 @@ Alerts persist until `braid ack` — even if the triggering condition disappears
 
 devid is btrfs-native — no cross-referencing config or disk-map needed. The parser captures missing device devids from MISSING sentinel lines.
 
-### Ack state separate from disk-map.json
+### Ack state separate from pool.json
 
 Different concerns (identity vs acknowledgment), different write patterns, different risk profiles (precious vs disposable). Stored at `/var/lib/braid/acked-stats.json`.
 
