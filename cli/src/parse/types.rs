@@ -160,6 +160,12 @@ pub struct CryptsetupLuksLabelOutput {
     pub label: Option<String>,
 }
 
+/// cryptsetup luksDump (text output) — LUKS version field
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CryptsetupLuksVersionOutput {
+    pub version: u32,
+}
+
 /// Fixed-point data ratio in hundredths (100 = 1.00, 200 = 2.00).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct DataRatio(u32);

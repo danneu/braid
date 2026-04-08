@@ -199,6 +199,37 @@ golden_test!(
     }
 );
 
+golden_test!(
+    golden_cryptsetup_luks_version,
+    "cryptsetup-luks-dump.txt",
+    "cryptsetup luksDump",
+    parse::cryptsetup_luks_version::parse_cryptsetup_luks_version,
+    |out: parse::types::CryptsetupLuksVersionOutput| {
+        // braid only formats LUKS2; the captured fixture must be LUKS2
+        // because capture-tool-fixtures.py uses `cryptsetup luksFormat`
+        // (which defaults to LUKS2 on every supported nixpkgs version).
+        assert_eq!(out.version, 2);
+    }
+);
+
+golden_test!(
+    golden_cryptsetup_luks_label,
+    "cryptsetup-luks-dump.txt",
+    "cryptsetup luksDump",
+    parse::cryptsetup_luks_label::parse_cryptsetup_luks_label,
+    |out: parse::types::CryptsetupLuksLabelOutput| {
+        // capture-tool-fixtures.py formats with `cryptsetup luksFormat`
+        // and does not pass --label, so the captured fixture has no
+        // label set. The parser must convert the cryptsetup-rendered
+        // "(no label)" placeholder into None.
+        assert!(
+            out.label.is_none(),
+            "captured fixture has no Label set (got: {:?})",
+            out.label
+        );
+    }
+);
+
 // --- Progress-monitoring parsers ---
 
 golden_test!(

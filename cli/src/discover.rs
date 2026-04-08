@@ -1,5 +1,5 @@
 use crate::cmd::{CmdRequest, CommandRunner};
-use crate::parse::parse_cryptsetup_luks_label;
+use crate::parse::{parse_cryptsetup_luks_label, parse_cryptsetup_luks_version};
 use crate::types::ByIdPath;
 use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
@@ -56,15 +56,32 @@ fn discover_from_dir<R: CommandRunner>(
             _ => {}
         }
 
-        // Read LUKS label via luksDump text output
-        let label = match runner.run(&CmdRequest::CryptsetupLuksDumpText {
+        // Read LUKS label + version via luksDump text output. One luksDump
+        // call, two parses on the same RawCommandOutput. The version check
+        // enforces braid's LUKS2-only invariant at this gateway so a
+        // braid-labeled LUKS1 disk never reaches pool.json via
+        // `braid discover --write`.
+        let dump_raw = match runner.run(&CmdRequest::CryptsetupLuksDumpText {
             device: path_str.clone(),
         }) {
-            Ok(raw) => parse_cryptsetup_luks_label(&raw)
-                .ok()
-                .and_then(|out| out.label),
+            Ok(raw) => raw,
             Err(_) => continue,
         };
+
+        let version = match parse_cryptsetup_luks_version(&dump_raw) {
+            Ok(out) => out.version,
+            Err(_) => continue,
+        };
+        if version != 2 {
+            eprintln!(
+                "warning: skipping {path_str}: LUKS{version} (braid requires LUKS2)"
+            );
+            continue;
+        }
+
+        let label = parse_cryptsetup_luks_label(&dump_raw)
+            .ok()
+            .and_then(|out| out.label);
 
         // Check if label matches braid-<name>
         if let Some(label) = label
@@ -148,12 +165,14 @@ mod tests {
         }
     }
 
-    /// Test runner that maps full by-id paths to LUKS labels.
+    /// Test runner that maps full by-id paths to LUKS labels and versions.
     /// Returns realistic Ok(RawCommandOutput) for all commands — uses non-zero
     /// exit status for unknown devices, never Err (matching RealRunner behavior).
-    /// Tracks which (command, device) pairs were called.
+    /// Tracks which (command, device) pairs were called. Default version
+    /// for known devices is LUKS2 (matching what braid actually formats).
     struct LabelMap {
         labels: HashMap<String, String>,
+        versions: HashMap<String, u32>,
         calls: Mutex<Vec<(String, String)>>,
     }
 
@@ -164,8 +183,16 @@ mod tests {
                     .iter()
                     .map(|(path, label)| (path.to_string(), label.to_string()))
                     .collect(),
+                versions: HashMap::new(),
                 calls: Mutex::new(Vec::new()),
             }
+        }
+
+        /// Override the LUKS version reported for a specific path. Defaults
+        /// to 2 (LUKS2) for any path not explicitly set.
+        fn with_version(mut self, path: &str, version: u32) -> Self {
+            self.versions.insert(path.to_string(), version);
+            self
         }
 
         fn calls(&self) -> Vec<(String, String)> {
@@ -187,9 +214,16 @@ mod tests {
                 CmdRequest::CryptsetupLuksDumpText { device } => {
                     self.calls.lock().unwrap().push(("luksDump".into(), device.clone()));
                     if let Some(label) = self.labels.get(device.as_str()) {
+                        let version = self
+                            .versions
+                            .get(device.as_str())
+                            .copied()
+                            .unwrap_or(2);
                         Ok(mock_output(
                             "cryptsetup",
-                            &format!("LUKS header information\nLabel:\t{label}\n"),
+                            &format!(
+                                "LUKS header information\nVersion:\t{version}\nLabel:\t{label}\n"
+                            ),
                             0,
                         ))
                     } else {
@@ -322,6 +356,43 @@ mod tests {
             members["sda"].0.ends_with("ata-AAAAA_DISK"),
             "expected lexicographically earlier path, got: {}",
             members["sda"].0
+        );
+    }
+
+    #[test]
+    fn discover_skips_luks1_disk() {
+        /*
+         * Intent: a braid-labeled LUKS1 disk must NOT be written into the
+         *   discovered membership map. The version check at this gateway
+         *   prevents `braid discover --write` from persisting an
+         *   unsupported disk into pool.json.
+         * Why it exists: this is the discovery-side counterpart to the
+         *   probe_config_disk gateway check. Without it, dropping
+         *   `--type luks2` from CryptsetupIsLuks (which is necessary to
+         *   stop probe_luks_header from misclassifying LUKS1 as
+         *   "Unreadable") would silently allow LUKS1 disks into pool.json
+         *   instead of being filtered upstream.
+         * Scenario: a user has a single braid-labeled LUKS1 disk
+         *   (perhaps externally formatted) plugged in alongside a normal
+         *   LUKS2 braid disk; only the LUKS2 disk should be discovered.
+         */
+        let dir = tempfile::tempdir().unwrap();
+        let luks1_path = create_file(dir.path(), "ata-LEGACY_DISK");
+        let luks2_path = create_file(dir.path(), "ata-MODERN_DISK");
+        let runner = LabelMap::new(&[
+            (&luks1_path, "braid-legacy"),
+            (&luks2_path, "braid-modern"),
+        ])
+        .with_version(&luks1_path, 1);
+        let members = discover_from_dir(&runner, dir.path()).unwrap();
+        assert_eq!(members.len(), 1, "expected only the LUKS2 disk: {members:?}");
+        assert!(
+            members.contains_key("modern"),
+            "modern (LUKS2) disk should be present: {members:?}"
+        );
+        assert!(
+            !members.contains_key("legacy"),
+            "legacy (LUKS1) disk should be skipped: {members:?}"
         );
     }
 

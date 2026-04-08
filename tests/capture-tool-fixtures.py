@@ -93,6 +93,15 @@ machine.succeed(
     f" > {FIXTURE_DIR}/cryptsetup-luks-dump.json"
 )
 
+# 8c. cryptsetup luksDump (text)
+# Used by parse_cryptsetup_luks_label and parse_cryptsetup_luks_version.
+# The version parser is the gateway check that enforces braid's
+# LUKS2-only invariant in probe_config_disk and discover.rs.
+machine.succeed(
+    f"cryptsetup luksDump /dev/vdb"
+    f" > {FIXTURE_DIR}/cryptsetup-luks-dump.txt"
+)
+
 # 9. findmnt (JSON)
 machine.succeed(
     f"findmnt --json --output TARGET,SOURCE,FSTYPE --mountpoint {MOUNT}"

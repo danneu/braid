@@ -347,6 +347,10 @@ fn unpooled_disk_status_cell(state: &PoolState, name: &str) -> Option<Span<'stat
         UnpooledDiskRender::LuksHeaderDamaged => {
             Span::styled("LUKS header damaged", Style::default().fg(Color::Red))
         }
+        UnpooledDiskRender::WrongLuksVersion(v) => Span::styled(
+            format!("LUKS{v} (unsupported)"),
+            Style::default().fg(Color::Red),
+        ),
     })
 }
 
@@ -1391,6 +1395,7 @@ pub(crate) mod tests {
                 UnpooledDiskRender::LuksHeaderUnreadable,
             ),
             ("delta".to_owned(), UnpooledDiskRender::LuksHeaderDamaged),
+            ("echo".to_owned(), UnpooledDiskRender::WrongLuksVersion(1)),
         ]);
 
         let cell = |name: &str| {
@@ -1404,8 +1409,9 @@ pub(crate) mod tests {
         assert_eq!(cell("bravo"), "unknown");
         assert_eq!(cell("charlie"), "LUKS header unreadable");
         assert_eq!(cell("delta"), "LUKS header damaged");
+        assert_eq!(cell("echo"), "LUKS1 (unsupported)");
         assert!(
-            unpooled_disk_status_cell(&pool, "echo").is_none(),
+            unpooled_disk_status_cell(&pool, "foxtrot").is_none(),
             "names not in unpooled_disks must return None so callers can fall back"
         );
     }

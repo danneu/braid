@@ -394,13 +394,7 @@ impl CmdRequest {
             },
             CmdRequest::CryptsetupIsLuks { device } => CmdArgs {
                 program: "cryptsetup",
-                args: vec![
-                    "isLuks".into(),
-                    // We only care about luks2
-                    "--type".into(),
-                    "luks2".into(),
-                    device.clone(),
-                ],
+                args: vec!["isLuks".into(), device.clone()],
             },
             CmdRequest::CryptsetupClose { mapper } => CmdArgs {
                 program: "cryptsetup",
@@ -896,6 +890,32 @@ impl MockRunner {
         self.outputs.insert(key.clone(), output);
         self.stdin_expectations.insert(key, expected_stdin);
         self
+    }
+
+    /// Test helper: stub `cryptsetup luksDump <device>` (text form) to
+    /// emit a minimal LUKS2 header so `probe_config_disk`'s gateway
+    /// version check passes. Use this alongside any existing
+    /// `CryptsetupLuksUuid` mock that should reach `PresentLuks`.
+    pub fn with_luks_dump_text_luks2(self, device: &str) -> Self {
+        self.with_output(
+            CmdRequest::CryptsetupLuksDumpText {
+                device: device.into(),
+            },
+            RawCommandOutput {
+                cmd: "cryptsetup luksDump".into(),
+                stdout: "LUKS header information\nVersion:       \t2\n".into(),
+                stderr: String::new(),
+                exit_status: 0,
+            },
+        )
+    }
+
+    /// Test helper: stub LUKS2 luksDump output for every device in the
+    /// slice. Convenience wrapper around `with_luks_dump_text_luks2`.
+    pub fn with_luks_dump_text_luks2_for(self, devices: &[&str]) -> Self {
+        devices
+            .iter()
+            .fold(self, |acc, d| acc.with_luks_dump_text_luks2(d))
     }
 }
 

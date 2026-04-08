@@ -1,4 +1,4 @@
-Label: none  uuid: 05fadb0e-175d-47b1-b378-0d11df0b95bc
+Label: none  uuid: de2b8517-f972-45fc-b121-3e160c8ea432
 	Total devices 2 FS bytes used 16.17MiB
 	devid    1 size 1008.00MiB used 209.50MiB path /dev/mapper/braid-vdb
 	devid    2 size 1008.00MiB used 209.50MiB path /dev/mapper/braid-vdc

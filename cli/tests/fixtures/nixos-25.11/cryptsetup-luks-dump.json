@@ -18,9 +18,9 @@
       "kdf":{
         "type":"argon2id",
         "time":6,
-        "memory":407460,
+        "memory":408014,
         "cpus":1,
-        "salt":"1FpRhvoOee43Cp5M2QXfYV1s1r7LugjHj1uj7wEDeDc="
+        "salt":"BvCz21GP16c12euMUfv+VYoLjwGRKmx2QGhS37trl6M="
       }
     }
   },
@@ -45,9 +45,9 @@
         "0"
       ],
       "hash":"sha256",
-      "iterations":622669,
-      "salt":"DKYYK1syTuZlxK8FVMr3pe/ba/NtR8tYSNSZ7HC2rLA=",
-      "digest":"gyEOto51pHSuUDW0UZETi61wq5gdANKIGannB96cCvk="
+      "iterations":640938,
+      "salt":"8ijDdCUYdbr8XQJ/jIwdk7HN+Kzzf7qe2cAs/vNY0sE=",
+      "digest":"qRPPWjEpHt50EF70qC71AN9ombAhL1JsSMkD1ZgnbJQ="
     }
   },
   "config":{

@@ -1199,7 +1199,11 @@ mod tests {
                     device: "/dev/vdb".into(),
                 },
                 cryptsetup_uuid_ok("/dev/vdb", "22222222-2222-2222-2222-222222222222"),
-            );
+            )
+            .with_luks_dump_text_luks2_for(&[
+                "/dev/disk/by-id/virtio-disk1",
+                "/dev/disk/by-id/virtio-disk2",
+            ]);
 
         let passphrase_file = tempfile::NamedTempFile::new().unwrap();
         {
@@ -1429,7 +1433,11 @@ mod tests {
                     device: "/dev/vdb".into(),
                 },
                 cryptsetup_uuid_ok("/dev/vdb", "22222222-2222-2222-2222-222222222222"),
-            );
+            )
+            .with_luks_dump_text_luks2_for(&[
+                "/dev/disk/by-id/virtio-disk1",
+                "/dev/disk/by-id/virtio-disk2",
+            ]);
 
         let runner = MapperClosingRunner {
             inner,
@@ -1578,7 +1586,11 @@ mod tests {
                     mount_point: MountPoint("/mnt/storage".into()),
                 },
                 err_raw("umount", 32, "umount: target is busy"),
-            );
+            )
+            .with_luks_dump_text_luks2_for(&[
+                "/dev/disk/by-id/virtio-disk1",
+                "/dev/disk/by-id/virtio-disk2",
+            ]);
         // No probe_pool / save_membership / clear_journal mocks — those must
         // not be reached.
 
@@ -1693,7 +1705,11 @@ mod tests {
             .with_output(
                 CmdRequest::BtrfsDeviceScanAll,
                 ok_raw_empty("btrfs device scan"),
-            );
+            )
+            .with_luks_dump_text_luks2_for(&[
+                "/dev/disk/by-id/virtio-disk1",
+                "/dev/disk/by-id/virtio-disk2",
+            ]);
         // No mount mock — should not reach mount
 
         let passphrase_file = tempfile::NamedTempFile::new().unwrap();
@@ -1933,7 +1949,8 @@ mod tests {
                     1,
                     "not a valid btrfs filesystem on /dev/mapper/braid-disk1",
                 ),
-            );
+            )
+            .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk1");
 
         let passphrase_file = tempfile::NamedTempFile::new().unwrap();
         {
@@ -2227,7 +2244,8 @@ mod tests {
                      \tTotal devices 1 FS bytes used 256.00KiB\n\
                      \tdevid    1 size 10.00GiB used 536.00MiB path /dev/mapper/braid-disk1\n",
                 ),
-            );
+            )
+            .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk1");
 
         let passphrase_file = tempfile::NamedTempFile::new().unwrap();
         {

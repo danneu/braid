@@ -8,7 +8,7 @@ use crate::parse::{
     parse_btrfs_device_stats, parse_btrfs_device_usage, parse_btrfs_filesystem_usage,
     parse_btrfs_scrub_status, parse_cryptsetup_luks_dump, parse_lsblk_json, parse_smartctl_health,
 };
-use crate::probe::{probe_config_disk, probe_pool, Filesystem};
+use crate::probe::{probe_config_disk, probe_pool, Filesystem, ProbeError};
 use crate::state_paths::StatePaths;
 use crate::status::resolve_alert_state;
 use crate::status::{estimate_pool_capacity, get_balance_report, DiskErrors};
@@ -184,6 +184,16 @@ pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
         let by_id = ByIdPath(by_id_path.clone());
         let probed = match probe_config_disk(runner, fs, disk_name, &by_id) {
             Ok(p) => p,
+            Err(ProbeError::UnsupportedLuksVersion { version, .. }) => {
+                // Surface the wrong-version disk explicitly instead of
+                // silently skipping it. The TUI is the only diagnostic
+                // path that doesn't bail on the gateway error.
+                unpooled_disks.insert(
+                    disk_name.clone(),
+                    UnpooledDiskRender::WrongLuksVersion(version),
+                );
+                continue;
+            }
             Err(_) => continue, // degrade gracefully — skip this disk
         };
         let render = match probed.state {
@@ -618,15 +628,25 @@ mod tests {
     /// disk has a valid LUKS header reporting UUID `99999999...`.
     #[test]
     fn unpooled_disk_present_luks_unknown_uuid_classified_as_unknown_luks() {
-        let runner = one_disk_mounted_pool_runner().with_output(
-            CmdRequest::CryptsetupLuksUuid {
-                device: "/dev/disk/by-id/braid-ironwolf".into(),
-            },
-            ok_raw(
-                "cryptsetup luksUUID",
-                "99999999-9999-9999-9999-999999999999\n",
-            ),
-        );
+        let runner = one_disk_mounted_pool_runner()
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/braid-ironwolf".into(),
+                },
+                ok_raw(
+                    "cryptsetup luksUUID",
+                    "99999999-9999-9999-9999-999999999999\n",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksDumpText {
+                    device: "/dev/disk/by-id/braid-ironwolf".into(),
+                },
+                ok_raw(
+                    "cryptsetup luksDump",
+                    "LUKS header information\nVersion:       \t2\n",
+                ),
+            );
         let fs = StubFs::with_paths(&[
             "/dev/disk/by-id/braid-toshiba",
             "/dev/disk/by-id/braid-ironwolf",
@@ -783,6 +803,68 @@ mod tests {
         assert_eq!(
             pool.unpooled_disks.get("ironwolf"),
             Some(&UnpooledDiskRender::LuksHeaderDamaged)
+        );
+    }
+
+    /// Intent: probe_pool_for_tui must surface a wrong-LUKS-version disk
+    /// as `UnpooledDiskRender::WrongLuksVersion(version)` rather than
+    /// silently skipping it (which is what the catch-all `Err(_) => continue`
+    /// would otherwise do).
+    ///
+    /// Why: the gateway probe `probe_config_disk` returns a hard error for
+    /// non-LUKS2 disks. The CLI command paths bail loudly with that error,
+    /// but the TUI degrades gracefully — it must still tell the user the
+    /// disk exists and explain why it's unusable, otherwise the disk would
+    /// disappear from the table without explanation.
+    ///
+    /// Scenario: 1-disk live pool. Second declared disk is on-disk LUKS1
+    /// (luksUuid succeeds, luksDump reports `Version: 1`).
+    #[test]
+    fn unpooled_disk_wrong_luks_version_classified_correctly() {
+        let runner = one_disk_mounted_pool_runner()
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/braid-ironwolf".into(),
+                },
+                ok_raw(
+                    "cryptsetup luksUUID",
+                    "22222222-2222-2222-2222-222222222222\n",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksDumpText {
+                    device: "/dev/disk/by-id/braid-ironwolf".into(),
+                },
+                ok_raw(
+                    "cryptsetup luksDump",
+                    "LUKS header information\n\
+                     Version:       \t1\n\
+                     Cipher name:   \taes\n",
+                ),
+            );
+        let fs = StubFs::with_paths(&[
+            "/dev/disk/by-id/braid-toshiba",
+            "/dev/disk/by-id/braid-ironwolf",
+        ]);
+
+        let disk_by_id = HashMap::from([
+            ("toshiba".to_owned(), "/dev/disk/by-id/braid-toshiba".to_owned()),
+            ("ironwolf".to_owned(), "/dev/disk/by-id/braid-ironwolf".to_owned()),
+        ]);
+
+        let pool = probe_pool_for_tui(
+            &runner,
+            &fs,
+            &MountPoint("/mnt/storage".into()),
+            &disk_by_id,
+            &test_paths().1,
+        )
+            .unwrap()
+            .expect("pool should be Some");
+
+        assert_eq!(
+            pool.unpooled_disks.get("ironwolf"),
+            Some(&UnpooledDiskRender::WrongLuksVersion(1))
         );
     }
 }

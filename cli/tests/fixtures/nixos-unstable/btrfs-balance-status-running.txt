@@ -1,2 +1,0 @@
-Balance on '/mnt/storage' is running
-0 out of about 4 chunks balanced (1 considered), 100% left

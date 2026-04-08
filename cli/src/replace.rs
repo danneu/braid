@@ -1426,6 +1426,10 @@ mod tests {
                     };
                     Ok(mock_ok(&format!("cryptsetup luksUUID {device}"), &format!("{uuid}\n")))
                 }
+                CmdRequest::CryptsetupLuksDumpText { device } => Ok(mock_ok(
+                    &format!("cryptsetup luksDump {device}"),
+                    "LUKS header information\nVersion:       \t2\n",
+                )),
                 CmdRequest::BtrfsBalanceStatus { .. } => Ok(mock_ok(
                     "btrfs balance status",
                     "No balance found on '/mnt/storage'\n",

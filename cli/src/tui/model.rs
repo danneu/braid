@@ -88,6 +88,10 @@ pub enum UnpooledDiskRender {
     /// `LuksHeaderState::Damaged`. Potentially repairable via
     /// `cryptsetup repair`.
     LuksHeaderDamaged,
+    /// `probe_config_disk` returned `ProbeError::UnsupportedLuksVersion`.
+    /// The disk is on-disk LUKS but the wrong version (LUKS1 — braid
+    /// requires LUKS2). Recovery: back up data, re-add via `braid add`.
+    WrongLuksVersion(u32),
 }
 
 #[derive(Clone)]

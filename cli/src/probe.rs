@@ -1,7 +1,8 @@
 use crate::cmd::{CmdError, CmdRequest, CommandRunner};
 use crate::config::mapper_name;
 use crate::parse::{
-    parse_btrfs_filesystem_show, parse_cryptsetup_luks_uuid, parse_cryptsetup_status, ParseError,
+    parse_btrfs_filesystem_show, parse_cryptsetup_luks_uuid, parse_cryptsetup_luks_version,
+    parse_cryptsetup_status, ParseError,
 };
 use crate::types::*;
 
@@ -63,6 +64,12 @@ pub enum ProbeError {
     PoolDevice { mapper: String, detail: String },
     #[error("{mount_point} is mounted but fstype is {fstype}, not btrfs")]
     NotBtrfs { mount_point: String, fstype: String },
+    #[error(
+        "disk '{name}' is LUKS{version}; braid requires LUKS2. \
+         To use this disk with braid, back up its data and re-add it \
+         (braid will reformat it as LUKS2)."
+    )]
+    UnsupportedLuksVersion { name: String, version: u32 },
 }
 
 // ---------------------------------------------------------------------------
@@ -98,6 +105,28 @@ pub fn probe_config_disk<R: CommandRunner, F: Filesystem + ?Sized>(
         }
         Err(e) => return Err(ProbeError::Parse(e)),
     };
+
+    // Enforce braid's LUKS2-only invariant at the gateway. The luksUuid
+    // call above accepts both LUKS1 and LUKS2 (it does not pass --type),
+    // so we have to ask luksDump for the version explicitly.
+    //
+    // We deliberately propagate luksDump exit-non-zero (typically damaged
+    // LUKS2 metadata) as a hard error rather than falling through to
+    // PresentLuks. The gateway must not lie about a configured disk's
+    // state: a damaged-metadata disk is not a healthy PresentLuks disk,
+    // and downstream code paths must not be allowed to treat it as such.
+    // The user-facing error is technical (cryptsetup's stderr) but
+    // accurate; cryptsetup repair is the documented recovery.
+    let dump_raw = runner.run(&CmdRequest::CryptsetupLuksDumpText {
+        device: by_id.0.clone(),
+    })?;
+    let version = parse_cryptsetup_luks_version(&dump_raw)?.version;
+    if version != 2 {
+        return Err(ProbeError::UnsupportedLuksVersion {
+            name: name.to_owned(),
+            version,
+        });
+    }
 
     let mn = mapper_name(name);
     let mapper_open = fs.exists(&format!("/dev/mapper/{}", mn.0));
@@ -373,17 +402,44 @@ mod tests {
         );
     }
 
+    fn luks_dump_text_luks2() -> RawCommandOutput {
+        ok_raw(
+            "cryptsetup luksDump",
+            "LUKS header information\n\
+             Version:       \t2\n\
+             UUID:          \ta1b2c3d4-e5f6-7890-abcd-ef1234567890\n\
+             Label:         \tbraid-toshiba\n",
+        )
+    }
+
+    fn luks_dump_text_luks1() -> RawCommandOutput {
+        ok_raw(
+            "cryptsetup luksDump",
+            "LUKS header information\n\
+             Version:       \t1\n\
+             Cipher name:   \taes\n\
+             Cipher mode:   \txts-plain64\n",
+        )
+    }
+
     #[test]
     fn probe_config_disk_present_luks_closed() {
-        let runner = MockRunner::default().with_output(
-            CmdRequest::CryptsetupLuksUuid {
-                device: "/dev/disk/by-id/disk-1".into(),
-            },
-            ok_raw(
-                "cryptsetup luksUUID /dev/disk/by-id/disk-1",
-                "a1b2c3d4-e5f6-7890-abcd-ef1234567890\n",
-            ),
-        );
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/disk-1".into(),
+                },
+                ok_raw(
+                    "cryptsetup luksUUID /dev/disk/by-id/disk-1",
+                    "a1b2c3d4-e5f6-7890-abcd-ef1234567890\n",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksDumpText {
+                    device: "/dev/disk/by-id/disk-1".into(),
+                },
+                luks_dump_text_luks2(),
+            );
         let fs = MockFs::new(&["/dev/disk/by-id/disk-1"]);
         let d = by_id("/dev/disk/by-id/disk-1");
 
@@ -400,15 +456,22 @@ mod tests {
 
     #[test]
     fn probe_config_disk_present_luks_open() {
-        let runner = MockRunner::default().with_output(
-            CmdRequest::CryptsetupLuksUuid {
-                device: "/dev/disk/by-id/disk-1".into(),
-            },
-            ok_raw(
-                "cryptsetup luksUUID /dev/disk/by-id/disk-1",
-                "a1b2c3d4-e5f6-7890-abcd-ef1234567890\n",
-            ),
-        );
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/disk-1".into(),
+                },
+                ok_raw(
+                    "cryptsetup luksUUID /dev/disk/by-id/disk-1",
+                    "a1b2c3d4-e5f6-7890-abcd-ef1234567890\n",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksDumpText {
+                    device: "/dev/disk/by-id/disk-1".into(),
+                },
+                luks_dump_text_luks2(),
+            );
         // Named mapper: braid-toshiba
         let fs = MockFs::new(&["/dev/disk/by-id/disk-1", "/dev/mapper/braid-toshiba"]);
         let d = by_id("/dev/disk/by-id/disk-1");
@@ -420,6 +483,120 @@ mod tests {
                 uuid: LuksUuid("a1b2c3d4-e5f6-7890-abcd-ef1234567890".into()),
                 mapper_open: true,
             }
+        );
+    }
+
+    /*
+     * Intent: a LUKS1-formatted disk that braid is configured to use must
+     *   surface as ProbeError::UnsupportedLuksVersion at the gateway, not
+     *   silently flow through to mutating commands.
+     * Why it exists: this is the primary failure-layer test for the
+     *   "braid only supports LUKS2" invariant. Per
+     *   feedback_test_at_failure_layer.md, the bug fix's primary test
+     *   must FAIL when the bug is reintroduced — re-adding `--type luks2`
+     *   to the header probe alone would not be caught by this test, but
+     *   removing the version check from probe_config_disk would.
+     * Scenario: a user externally formats a disk as LUKS1 and tries to
+     *   use it via any braid command (status, mount, add, etc.).
+     */
+    #[test]
+    fn probe_config_disk_luks1_returns_unsupported_version() {
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/disk-1".into(),
+                },
+                ok_raw(
+                    "cryptsetup luksUUID /dev/disk/by-id/disk-1",
+                    "a1b2c3d4-e5f6-7890-abcd-ef1234567890\n",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksDumpText {
+                    device: "/dev/disk/by-id/disk-1".into(),
+                },
+                luks_dump_text_luks1(),
+            );
+        let fs = MockFs::new(&["/dev/disk/by-id/disk-1"]);
+        let d = by_id("/dev/disk/by-id/disk-1");
+
+        let err = probe_config_disk(&runner, &fs, "toshiba", &d).unwrap_err();
+        match err {
+            ProbeError::UnsupportedLuksVersion { name, version } => {
+                assert_eq!(name, "toshiba");
+                assert_eq!(version, 1);
+            }
+            other => panic!("expected UnsupportedLuksVersion, got: {other:?}"),
+        }
+    }
+
+    /*
+     * Intent: if luksDump itself fails to spawn after luksUuid succeeds,
+     *   the error must propagate as ProbeError::Cmd, not silently coerce
+     *   into a "valid LUKS2" branch.
+     * Why it exists: defensive against the version-check sneaking past
+     *   real cryptsetup failures (e.g., binary missing, permission denied).
+     * Scenario: cryptsetup binary disappears between the luksUuid and
+     *   luksDump calls — pathological, but the gateway must surface it.
+     */
+    #[test]
+    fn probe_config_disk_luksdump_failure_propagates_as_cmd_error() {
+        // luksUuid mock present; luksDump intentionally absent → MissingMock.
+        let runner = MockRunner::default().with_output(
+            CmdRequest::CryptsetupLuksUuid {
+                device: "/dev/disk/by-id/disk-1".into(),
+            },
+            ok_raw(
+                "cryptsetup luksUUID /dev/disk/by-id/disk-1",
+                "a1b2c3d4-e5f6-7890-abcd-ef1234567890\n",
+            ),
+        );
+        let fs = MockFs::new(&["/dev/disk/by-id/disk-1"]);
+        let d = by_id("/dev/disk/by-id/disk-1");
+
+        let err = probe_config_disk(&runner, &fs, "toshiba", &d).unwrap_err();
+        assert!(
+            matches!(err, ProbeError::Cmd(_)),
+            "expected ProbeError::Cmd, got: {err:?}"
+        );
+    }
+
+    /*
+     * Intent: if luksDump succeeds (exit 0) but the output has no
+     *   parseable Version field, surface ProbeError::Parse.
+     * Why it exists: a future cryptsetup output drift that drops the
+     *   Version field must fail loudly at the probe layer rather than
+     *   silently passing the gateway.
+     * Scenario: hypothetical upstream output change.
+     */
+    #[test]
+    fn probe_config_disk_luksdump_garbled_propagates_as_parse_error() {
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/disk-1".into(),
+                },
+                ok_raw(
+                    "cryptsetup luksUUID /dev/disk/by-id/disk-1",
+                    "a1b2c3d4-e5f6-7890-abcd-ef1234567890\n",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksDumpText {
+                    device: "/dev/disk/by-id/disk-1".into(),
+                },
+                ok_raw(
+                    "cryptsetup luksDump",
+                    "LUKS header information\nUUID: foo\n",
+                ),
+            );
+        let fs = MockFs::new(&["/dev/disk/by-id/disk-1"]);
+        let d = by_id("/dev/disk/by-id/disk-1");
+
+        let err = probe_config_disk(&runner, &fs, "toshiba", &d).unwrap_err();
+        assert!(
+            matches!(err, ProbeError::Parse(_)),
+            "expected ProbeError::Parse, got: {err:?}"
         );
     }
 

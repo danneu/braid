@@ -793,6 +793,8 @@ mod tests {
             )
             .with_output(uuid1_req, uuid1_out)
             .with_output(uuid2_req, uuid2_out)
+            .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk1")
+            .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk2")
             .with_output_stdin(
                 CmdRequest::CryptsetupTestPassphrase {
                     device: "/dev/disk/by-id/virtio-disk1".into(),
@@ -874,6 +876,8 @@ mod tests {
             )
             .with_output(uuid1_req, uuid1_out)
             .with_output(uuid2_req, uuid2_out)
+            .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk1")
+            .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk2")
             .with_output_stdin(
                 CmdRequest::CryptsetupTestPassphrase {
                     device: "/dev/disk/by-id/virtio-disk1".into(),
@@ -954,6 +958,8 @@ mod tests {
             )
             .with_output(uuid1_req, uuid1_out)
             .with_output(uuid2_req, uuid2_out)
+            .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk1")
+            .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk2")
             .with_output_stdin(
                 CmdRequest::CryptsetupTestPassphrase {
                     device: "/dev/disk/by-id/virtio-disk1".into(),
@@ -1326,6 +1332,8 @@ mod tests {
             )
             .with_output(uuid1_req, uuid1_out)
             .with_output(uuid2_req, uuid2_out)
+            .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk1")
+            .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk2")
             .with_output_stdin(
                 CmdRequest::CryptsetupTestPassphrase {
                     device: "/dev/disk/by-id/virtio-disk1".into(),
@@ -1450,6 +1458,8 @@ mod tests {
             )
             .with_output(uuid1_req, uuid1_out)
             .with_output(uuid2_req, uuid2_out)
+            .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk1")
+            .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk2")
             // No passphrase or LUKS open mocks — should not be called
             .with_output(CmdRequest::BtrfsDeviceScanAll, ok_raw("btrfs device scan"))
             .with_output(
@@ -1511,7 +1521,9 @@ mod tests {
                 err_raw("mountpoint", 1, ""),
             )
             .with_output(uuid1_req, uuid1_out)
-            .with_output(uuid2_req, uuid2_out);
+            .with_output(uuid2_req, uuid2_out)
+            .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk1")
+            .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk2");
 
         let result = open_and_mount_for_test(
             &runner,
@@ -1577,7 +1589,9 @@ mod tests {
                 err_raw("mountpoint", 1, ""),
             )
             .with_output(uuid1_req, uuid1_out)
-            .with_output(uuid2_req, uuid2_out);
+            .with_output(uuid2_req, uuid2_out)
+            .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk1")
+            .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk2");
 
         let result = open_and_mount_for_test(
             &runner,
@@ -1641,6 +1655,8 @@ mod tests {
             )
             .with_output(uuid1_req, uuid1_out)
             .with_output(uuid2_req, uuid2_out)
+            .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk1")
+            .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk2")
             .with_output_stdin(
                 CmdRequest::CryptsetupTestPassphrase {
                     device: "/dev/disk/by-id/virtio-disk1".into(),
@@ -1732,6 +1748,8 @@ mod tests {
             )
             .with_output(uuid1_req, uuid1_out)
             .with_output(uuid2_req, uuid2_out)
+            .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk1")
+            .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk2")
             // verify keyfile against disk1 → success
             .with_output(
                 CmdRequest::CryptsetupTestKeyFile {
@@ -1957,20 +1975,6 @@ mod tests {
         )
     }
 
-    fn test_keyfile_fail(device: &str, key_file_path: &str) -> (CmdRequest, RawCommandOutput) {
-        (
-            CmdRequest::CryptsetupTestKeyFile {
-                device: device.into(),
-                key_file_path: key_file_path.into(),
-            },
-            err_raw(
-                "cryptsetup open --test-passphrase",
-                2,
-                "No key available with this passphrase.",
-            ),
-        )
-    }
-
     fn is_luks_fail(device: &str) -> (CmdRequest, RawCommandOutput) {
         (
             CmdRequest::CryptsetupIsLuks {
@@ -2036,6 +2040,8 @@ mod tests {
             )
             .with_output(uuid1_req, uuid1_out)
             .with_output(uuid2_req, uuid2_out)
+            .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk1")
+            .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk2")
     }
 
     fn two_disk_fs() -> MockFs {
@@ -2107,6 +2113,70 @@ mod tests {
     }
 
     /*
+     * Intent: A configured pool member with damaged LUKS2 metadata must
+     *   fail at the gateway probe (probe_config_disk → luksDump exit
+     *   non-zero → ProbeError::Parse) BEFORE any unlock attempt runs.
+     * Why it exists: braid's gateway invariant says probe_config_disk is
+     *   the single source of truth for "is this configured disk usable?".
+     *   The previous code path enriched a verify-passphrase failure with
+     *   probe_luks_header's Damaged classification, but that diagnostic
+     *   path is now unreachable for configured disks because the gateway
+     *   catches damaged metadata first. This test pins the gateway
+     *   behavior so a future regression that loosens probe_config_disk
+     *   (e.g., a CommandFailed swallow) is caught.
+     * Scenario: disk1's LUKS2 keyslot metadata is corrupted; the user
+     *   tries to unlock via keyfile.
+     */
+    #[test]
+    fn unlock_damaged_luks2_metadata_fails_at_gateway() {
+        let config = test_config();
+        let membership = two_disk_membership();
+        let fs = two_disk_fs();
+
+        let kf = tempfile::NamedTempFile::new().unwrap();
+        {
+            use std::io::Write;
+            kf.as_file().write_all(b"keydata").unwrap();
+        }
+
+        let (dump_req, dump_out) = luks_dump_text_fail("/dev/disk/by-id/virtio-disk1");
+        let runner = base_two_disk_runner().with_output(dump_req, dump_out);
+
+        let result = open_and_mount_for_test(
+            &runner,
+            &fs,
+            &config,
+            &membership,
+            Some(OpenCredential::KeyFile(kf.path().to_path_buf())),
+            false,
+            "unlock",
+        );
+
+        let msg = result.expect_err("expected gateway failure").to_string();
+        // The gateway propagates the cryptsetup luksDump error verbatim;
+        // we don't try to fabricate "metadata damaged" guidance here.
+        // The user gets enough to investigate (cryptsetup, luksDump, the
+        // verbatim stderr), and `cryptsetup repair --type luks2` is the
+        // documented recovery they can run themselves.
+        assert!(
+            msg.contains("luksDump"),
+            "gateway error must surface luksDump as the failing command: {msg}"
+        );
+        assert!(
+            msg.contains("Cannot read LUKS header metadata"),
+            "gateway error must include cryptsetup stderr: {msg}"
+        );
+        assert!(
+            !msg.contains("wrong keyfile"),
+            "gateway must reject before keyfile verification runs: {msg}"
+        );
+        assert!(
+            !msg.contains("/var/lib/braid/luks-headers/"),
+            "must not reference local backup directory: {msg}"
+        );
+    }
+
+    /*
      * Intent: When verify_passphrase fails on disk1 AND disk1's LUKS header
      *   is intact, the existing "wrong passphrase" message is preserved.
      * Why it exists: the intact-header fallback must still wire through
@@ -2147,72 +2217,6 @@ mod tests {
         assert!(
             !msg.contains("header unreadable"),
             "intact header must not route to unreadable guidance: {msg}"
-        );
-    }
-
-    /*
-     * Intent: When verify_key_file fails on disk1 AND disk1's LUKS header
-     *   has damaged metadata, the error suggests `cryptsetup repair` with
-     *   a safe-backup warning.
-     * Why it exists: the keyfile verify path needs the same enrichment
-     *   wiring as the passphrase path. This test proves the keyfile
-     *   branch hits the damaged helper.
-     * Scenario: disk1's LUKS2 keyslot metadata is partially corrupted
-     *   but the magic is intact; auto-unlock via keyfile fails.
-     */
-    #[test]
-    fn unlock_keyfile_verify_fails_damaged_header_emits_repair_guidance() {
-        let config = test_config();
-        let membership = two_disk_membership();
-        let fs = two_disk_fs();
-
-        let kf = tempfile::NamedTempFile::new().unwrap();
-        {
-            use std::io::Write;
-            kf.as_file().write_all(b"keydata").unwrap();
-        }
-        let kf_path = kf.path().display().to_string();
-
-        let (tk_req, tk_out) = test_keyfile_fail("/dev/disk/by-id/virtio-disk1", &kf_path);
-        let (is_req, is_out) = is_luks_ok("/dev/disk/by-id/virtio-disk1");
-        let (dump_req, dump_out) = luks_dump_text_fail("/dev/disk/by-id/virtio-disk1");
-
-        let runner = base_two_disk_runner()
-            .with_output(tk_req, tk_out)
-            .with_output(is_req, is_out)
-            .with_output(dump_req, dump_out);
-
-        let result = open_and_mount_for_test(
-            &runner,
-            &fs,
-            &config,
-            &membership,
-            Some(OpenCredential::KeyFile(kf.path().to_path_buf())),
-            false,
-            "unlock",
-        );
-
-        let msg = result.expect_err("expected failure").to_string();
-        assert!(msg.contains("disk1"), "missing disk name: {msg}");
-        assert!(
-            msg.contains("metadata damaged"),
-            "missing 'metadata damaged': {msg}"
-        );
-        assert!(
-            msg.contains("cryptsetup repair --type luks2"),
-            "missing repair command: {msg}"
-        );
-        assert!(
-            msg.contains("safe backup"),
-            "missing safe-backup warning: {msg}"
-        );
-        assert!(
-            !msg.contains("wrong keyfile"),
-            "damaged header must not blame keyfile: {msg}"
-        );
-        assert!(
-            !msg.contains("/var/lib/braid/luks-headers/"),
-            "must not reference local backup directory: {msg}"
         );
     }
 

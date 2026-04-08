@@ -540,7 +540,9 @@ mod tests {
         let (req2, out2) = luks_uuid_ok("/dev/disk/by-id/d2");
         let runner = MockRunner::default()
             .with_output(req1, out1)
-            .with_output(req2, out2);
+            .with_output(req2, out2)
+            .with_luks_dump_text_luks2("/dev/disk/by-id/d1")
+            .with_luks_dump_text_luks2("/dev/disk/by-id/d2");
         let fs = MockFs::new(&["/dev/disk/by-id/d1", "/dev/disk/by-id/d2"]);
         let membership = make_membership(&[
             ("disk1", "/dev/disk/by-id/d1"),
@@ -561,7 +563,9 @@ mod tests {
     #[test]
     fn discover_one_absent_one_present() {
         let (req, out) = luks_uuid_ok("/dev/disk/by-id/d2");
-        let runner = MockRunner::default().with_output(req, out);
+        let runner = MockRunner::default()
+            .with_output(req, out)
+            .with_luks_dump_text_luks2("/dev/disk/by-id/d2");
         let fs = MockFs::new(&["/dev/disk/by-id/d2"]);
         let membership = make_membership(&[
             ("disk1", "/dev/disk/by-id/d1"),
@@ -584,7 +588,8 @@ mod tests {
         let (req2, out2) = luks_uuid_ok("/dev/disk/by-id/d2");
         let runner = MockRunner::default()
             .with_output(req1, out1)
-            .with_output(req2, out2);
+            .with_output(req2, out2)
+            .with_luks_dump_text_luks2("/dev/disk/by-id/d2");
         let fs = MockFs::new(&["/dev/disk/by-id/d1", "/dev/disk/by-id/d2"]);
         let membership = make_membership(&[
             ("disk1", "/dev/disk/by-id/d1"),
