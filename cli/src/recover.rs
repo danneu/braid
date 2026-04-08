@@ -2,9 +2,8 @@ use crate::cmd::{CmdRequest, CommandRunner, Step};
 use crate::config::{self, Config};
 use crate::discover;
 use crate::journal::{self, Journal};
-use crate::luks;
 use crate::membership::{self, DiskMember, PoolMembership};
-use crate::mount::{self, Credential, MountError};
+use crate::mount::{self, MountError, OpenCredential};
 use crate::parse::btrfs_filesystem_show::{classify_btrfs_probe, DeviceBtrfsProbe};
 use crate::parse::{parse_btrfs_replace_status, ReplaceState};
 use crate::probe::{self, Filesystem, ProbeError};
@@ -219,91 +218,96 @@ pub fn cmd_recover<R: CommandRunner, F: Filesystem + ?Sized>(
         return Ok(());
     }
 
-    // The post-mount remount cycle (below) needs to re-supply the passphrase
-    // when re-opening LUKS, so we can't lean on the lazy stdin-backed
-    // Credential::Passphrase variant — that would require consuming stdin
-    // twice. Read the secret once into a String and use it via
-    // Credential::InMemoryPassphrase for both calls.
-    //
-    // The mountpoint check is the same one plan_open_pool does internally —
-    // we hoist it here so we can skip the passphrase read entirely on the
-    // already-mounted path (no LUKS open will happen).
-    let mountpoint_check = runner
-        .run(&CmdRequest::MountpointCheck {
-            path: params.config.mount_point().clone(),
-        })
-        .map_err(|e| RecoverError::Failed(format!("recover: mountpoint check: {e}")))?;
-    let already_mounted = mountpoint_check.exit_status == 0;
-
-    let passphrase: Option<String> = if already_mounted {
-        None
-    } else {
-        Some(
-            luks::read_passphrase(params.passphrase_file, params.passphrase_stdin)
-                .map_err(|e| RecoverError::Failed(format!("recover: {e}")))?,
-        )
-    };
-
-    // Build the credential from a clone so the original String stays
-    // available for the cycle's reopen below. The clone is consumed by
-    // open_and_mount_pool; the kept copy is only dropped at end of
-    // cmd_recover.
-    let credential = match passphrase.as_ref() {
-        Some(pp) => Credential::InMemoryPassphrase(pp.clone()),
-        None => Credential::Passphrase {
-            passphrase_stdin: false,
-            passphrase_file: None,
-        },
-    };
-    let just_mounted = match mount::open_and_mount_pool(
+    // Plan once. plan_open_pool returns None when the pool is already
+    // mounted (this replaces the manual MountpointCheck the previous
+    // implementation hoisted here for the same purpose).
+    let plan = mount::plan_open_pool(
         runner,
         fs,
         params.config,
         &union,
-        credential,
         params.allow_degraded,
         "recover",
-    ) {
-        Ok(b) => b,
-        Err(e) => {
-            // Bootstrap mount failure: probe the target devices to confirm no btrfs
-            // superblock exists — only then is it safe to advise wiping.
-            if journal.pre_membership.disks.is_empty()
-                && let mount::MountError::MountFailed(_) = &e
-                && let journal::OpKind::Add { ref disks } = journal.op
-            {
-                let all_no_btrfs = disks.keys().all(|name| {
-                    let mapper = format!("/dev/mapper/{}", config::mapper_name(name).0);
-                    match runner.run(&CmdRequest::BtrfsFilesystemShowTarget { target: mapper }) {
-                        Ok(raw) => {
-                            matches!(classify_btrfs_probe(&raw), DeviceBtrfsProbe::NoBtrfs)
+    )?;
+
+    // Recover-specific gate: resolve a credential whenever we have a plan
+    // (i.e. the pool is not already mounted). This is EAGER on purpose —
+    // even if the initial plan's `to_unlock` is empty (every mapper already
+    // open), the post-mount relock cycle below closes every mapper and must
+    // reopen them, so a credential is required regardless. The resolved
+    // credential lives in this local across both execute_open_plan calls.
+    let credential = match plan.as_ref() {
+        Some(_) => {
+            let source = mount::CredentialSource {
+                passphrase_stdin: params.passphrase_stdin,
+                passphrase_file: params.passphrase_file,
+                key_file: None, // recover does not expose --key-file today
+            };
+            Some(
+                mount::resolve_credential(&source)
+                    .map_err(|e| RecoverError::Failed(format!("recover: {e}")))?,
+            )
+        }
+        None => None, // already mounted, no cycle, no credential needed
+    };
+
+    // Initial mount. Pass the credential to execute_open_plan ONLY if the
+    // initial plan needs it — execute_open_plan strict-validates both
+    // directions. The resolved credential stays alive in `credential` for
+    // the cycle below either way.
+    let just_mounted = match plan.as_ref() {
+        None => false, // already mounted
+        Some(p) => {
+            let cred_for_initial = if p.to_unlock.is_empty() {
+                None
+            } else {
+                credential.as_ref()
+            };
+            match mount::execute_open_plan(runner, fs, params.config, p, cred_for_initial) {
+                Ok(b) => b,
+                Err(e) => {
+                    // Bootstrap mount failure: probe the target devices to confirm no btrfs
+                    // superblock exists — only then is it safe to advise wiping.
+                    if journal.pre_membership.disks.is_empty()
+                        && let mount::MountError::MountFailed(_) = &e
+                        && let journal::OpKind::Add { ref disks } = journal.op
+                    {
+                        let all_no_btrfs = disks.keys().all(|name| {
+                            let mapper = format!("/dev/mapper/{}", config::mapper_name(name).0);
+                            match runner
+                                .run(&CmdRequest::BtrfsFilesystemShowTarget { target: mapper })
+                            {
+                                Ok(raw) => {
+                                    matches!(classify_btrfs_probe(&raw), DeviceBtrfsProbe::NoBtrfs)
+                                }
+                                Err(_) => false,
+                            }
+                        });
+                        if all_no_btrfs {
+                            let disk_list: Vec<_> = union
+                                .disks
+                                .iter()
+                                .map(|(name, m)| format!("  {} ({})", name, m.by_id))
+                                .collect();
+                            return Err(RecoverError::Failed(format!(
+                                "bootstrap add was interrupted before the filesystem was \
+                                 created.\n\
+                                 The pool does not exist yet, so there is nothing to \
+                                 recover.\n\n\
+                                 To return to a clean state:\n\
+                                 1. rm {}\n\
+                                 2. Wipe the LUKS container from each disk that was being \
+                                    added:\n{}\n\
+                                    e.g.: wipefs -a /dev/disk/by-id/<device>\n\
+                                 3. Re-run braid add",
+                                params.paths.pending_op_json().display(),
+                                disk_list.join("\n"),
+                            )));
                         }
-                        Err(_) => false,
                     }
-                });
-                if all_no_btrfs {
-                    let disk_list: Vec<_> = union
-                        .disks
-                        .iter()
-                        .map(|(name, m)| format!("  {} ({})", name, m.by_id))
-                        .collect();
-                    return Err(RecoverError::Failed(format!(
-                        "bootstrap add was interrupted before the filesystem was \
-                         created.\n\
-                         The pool does not exist yet, so there is nothing to \
-                         recover.\n\n\
-                         To return to a clean state:\n\
-                         1. rm {}\n\
-                         2. Wipe the LUKS container from each disk that was being \
-                            added:\n{}\n\
-                            e.g.: wipefs -a /dev/disk/by-id/<device>\n\
-                         3. Re-run braid add",
-                        params.paths.pending_op_json().display(),
-                        disk_list.join("\n"),
-                    )));
+                    return Err(e.into());
                 }
             }
-            return Err(e.into());
         }
     };
 
@@ -339,17 +343,18 @@ pub fn cmd_recover<R: CommandRunner, F: Filesystem + ?Sized>(
     // the kernel resume, which is one we just opened ourselves.
     if just_mounted {
         wait_for_kernel_replace_to_finish(runner, params.config.mount_point());
-        // We mounted, so we read the passphrase above; it is non-None.
-        let pp = passphrase
-            .as_deref()
-            .expect("just_mounted implies passphrase was read");
+        // We mounted, so plan was Some, so credential was eagerly resolved
+        // above (recover always reads the passphrase when not already mounted).
+        let cred = credential
+            .as_ref()
+            .expect("just_mounted implies plan was Some and credential was resolved");
         relock_and_remount(
             runner,
             fs,
             params.config,
             &union,
             params.allow_degraded,
-            pp,
+            cred,
         )?;
     }
 
@@ -462,8 +467,8 @@ fn wait_for_kernel_replace_to_finish<R: CommandRunner>(runner: &R, mount_point: 
 ///
 /// This mirrors what `braid lock; braid unlock` does end-to-end: umount,
 /// `btrfs device scan --forget` (drop cached fs_devices), close every LUKS
-/// mapper for the membership union, then re-open + remount via the standard
-/// `open_and_mount_pool` helper.
+/// mapper for the membership union, then re-plan + re-open + remount via
+/// the standard `plan_open_pool` + `execute_open_plan` flow.
 ///
 /// The LUKS close+reopen is load-bearing: empirically, an `umount + scan
 /// --forget + remount` cycle that leaves the dm devices alive does NOT clear
@@ -474,7 +479,7 @@ fn relock_and_remount<R: CommandRunner, F: Filesystem + ?Sized>(
     config: &Config,
     membership: &PoolMembership,
     allow_degraded: bool,
-    passphrase: &str,
+    credential: &OpenCredential,
 ) -> Result<(), RecoverError> {
     let mount_point = config.mount_point();
 
@@ -541,16 +546,19 @@ fn relock_and_remount<R: CommandRunner, F: Filesystem + ?Sized>(
     //    devices freshly recreated and the cached fs_devices dropped, the
     //    kernel reads the chunk tree from disk and rebuilds a fresh
     //    fs_devices reflecting the post-resume on-disk state.
-    mount::open_and_mount_pool(
-        runner,
-        fs,
-        config,
-        membership,
-        Credential::InMemoryPassphrase(passphrase.to_owned()),
-        allow_degraded,
-        "recover",
-    )
-    .map_err(|e| RecoverError::Failed(format!("recover remount cycle: re-mount: {e}")))?;
+    //
+    // The cycle just closed every mapper, so the cycle's plan ALWAYS has
+    // `to_unlock` non-empty — we always pass the credential. (If somehow
+    // plan_open_pool returns None here it means another mounter raced us.)
+    let cycle_plan = mount::plan_open_pool(runner, fs, config, membership, allow_degraded, "recover")
+        .map_err(|e| RecoverError::Failed(format!("recover remount cycle: plan: {e}")))?
+        .ok_or_else(|| {
+            RecoverError::Failed(
+                "recover remount cycle: pool already mounted after umount?".into(),
+            )
+        })?;
+    mount::execute_open_plan(runner, fs, config, &cycle_plan, Some(credential))
+        .map_err(|e| RecoverError::Failed(format!("recover remount cycle: re-mount: {e}")))?;
 
     Ok(())
 }
@@ -675,6 +683,83 @@ mod tests {
 
         fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
             Ok(vec![])
+        }
+    }
+
+    /// Shared `(Arc<Mutex<HashSet<String>>>)` so the StatefulMockFs and
+    /// MapperClosingRunner can both observe path mutations.
+    /// `CommandRunner: Sync`, so `Rc<RefCell<...>>` is not usable here.
+    type SharedPaths = std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>;
+
+    /// Mock filesystem with interior mutability so test code can model
+    /// device-mapper paths disappearing when `cryptsetup close` runs.
+    /// Used together with `MapperClosingRunner` for tests that exercise
+    /// the recover relock cycle on initially-open mappers.
+    struct StatefulMockFs {
+        paths: SharedPaths,
+    }
+
+    impl StatefulMockFs {
+        fn new(initial: &[&str]) -> Self {
+            Self {
+                paths: std::sync::Arc::new(std::sync::Mutex::new(
+                    initial.iter().map(|s| s.to_string()).collect(),
+                )),
+            }
+        }
+
+        fn handle(&self) -> SharedPaths {
+            std::sync::Arc::clone(&self.paths)
+        }
+    }
+
+    impl Filesystem for StatefulMockFs {
+        fn exists(&self, path: &str) -> bool {
+            self.paths.lock().unwrap().contains(path)
+        }
+
+        fn is_block_device(&self, _path: &str) -> bool {
+            false
+        }
+
+        fn read_to_string(&self, _path: &str) -> Result<String, std::io::Error> {
+            Err(std::io::Error::new(std::io::ErrorKind::NotFound, "mock"))
+        }
+
+        fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
+            Ok(vec![])
+        }
+    }
+
+    /// Wraps a `MockRunner` and removes `/dev/mapper/<mapper>` from a shared
+    /// `StatefulMockFs` whenever a `CryptsetupClose` request succeeds. This
+    /// makes the post-close world visible to subsequent `plan_open_pool`
+    /// calls in the recover relock cycle, mirroring real-kernel behavior.
+    struct MapperClosingRunner {
+        inner: MockRunner,
+        fs_paths: SharedPaths,
+    }
+
+    impl CommandRunner for MapperClosingRunner {
+        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, crate::cmd::CmdError> {
+            let result = self.inner.run(request)?;
+            if let CmdRequest::CryptsetupClose { mapper } = request
+                && result.exit_status == 0
+            {
+                self.fs_paths
+                    .lock()
+                    .unwrap()
+                    .remove(&format!("/dev/mapper/{}", mapper));
+            }
+            Ok(result)
+        }
+
+        fn run_with_stdin(
+            &self,
+            request: &CmdRequest,
+            stdin: &[u8],
+        ) -> Result<RawCommandOutput, crate::cmd::CmdError> {
+            self.inner.run_with_stdin(request, stdin)
         }
     }
 
@@ -1155,6 +1240,250 @@ mod tests {
         );
 
         // pending-op.json must have been cleared
+        assert!(
+            !paths.pending_op_json().exists(),
+            "journal should be cleared after recovery"
+        );
+    }
+
+    /// Intent: Recover MUST resolve a credential up-front whenever the pool
+    /// is not already mounted, even if every LUKS mapper happens to be open
+    /// at probe time. The post-mount relock/remount cycle closes every
+    /// mapper and must reopen them with the same credential — so the cycle
+    /// only works if the credential was eagerly resolved before the initial
+    /// mount, NOT lazily based on `plan.to_unlock`.
+    ///
+    /// Why it exists: A natural-looking refactor of `resolve_credential`
+    /// (gating the read on `plan.to_unlock.is_empty()`, the way `cmd_unlock`
+    /// does) silently breaks this path. The initial plan would see
+    /// `to_unlock.is_empty()` and skip the read; recover would later try to
+    /// hand a `None` credential to `relock_and_remount` and panic. The cycle
+    /// itself works fine in production because cryptsetup close empties
+    /// `to_unlock` for the cycle's plan — but a unit test needs an
+    /// interior-mutable `StatefulMockFs` + `MapperClosingRunner` to model
+    /// the post-close world correctly. Without this test the credential-flow
+    /// regression can pass `cargo test` while leaving recover unable to
+    /// complete its cycle in production.
+    ///
+    /// Scenario: 2-disk RAID1, interrupted add of disk3, both disk1 and
+    /// disk2 LUKS mappers manually opened by an operator (`cryptsetup open`
+    /// outside braid) before recovery is invoked. The pool is NOT mounted.
+    /// Recover must (1) read the passphrase upfront, (2) reach the initial
+    /// mount with `to_unlock` empty (mount-only path), (3) run the cycle
+    /// which closes both mappers and reopens them with the same passphrase,
+    /// (4) complete recovery successfully.
+    #[test]
+    fn recover_with_all_mappers_open_still_resolves_credential_for_cycle() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+
+        // StatefulMockFs starts with both by-id paths AND both mapper paths.
+        // The MapperClosingRunner removes mapper paths when CryptsetupClose
+        // succeeds, modeling the post-close kernel state.
+        let fs = StatefulMockFs::new(&[
+            "/dev/disk/by-id/virtio-disk1",
+            "/dev/disk/by-id/virtio-disk2",
+            "/dev/mapper/braid-disk1",
+            "/dev/mapper/braid-disk2",
+        ]);
+        let fs_handle = fs.handle();
+
+        let journal = two_disk_journal();
+        journal::write_journal(&paths, &journal).unwrap();
+
+        let inner = MockRunner::default()
+            // ── Initial plan_open_pool ──────────────────────────────────
+            // mountpoint check → not mounted
+            .with_output(mountpoint_fail().0, mountpoint_fail().1)
+            // probe disk1 → LUKS, mapper_open=true (mapper path is in fs)
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/virtio-disk1",
+                    "11111111-1111-1111-1111-111111111111",
+                ),
+            )
+            // probe disk2 → LUKS, mapper_open=true
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/virtio-disk2",
+                    "22222222-2222-2222-2222-222222222222",
+                ),
+            )
+            // ── Initial execute_open_plan: mount-only (no LUKS open) ────
+            // (no CryptsetupTestPassphrase / LuksOpen mocks here — should not be called)
+            .with_output(
+                CmdRequest::BtrfsDeviceScanAll,
+                ok_raw_empty("btrfs device scan"),
+            )
+            .with_output(
+                CmdRequest::MountWithOptions {
+                    device: "/dev/mapper/braid-disk1".into(),
+                    mount_point: MountPoint("/mnt/storage".into()),
+                    options: vec!["degraded".to_owned()],
+                },
+                ok_raw_empty("mount"),
+            )
+            // ── relock_and_remount cycle ────────────────────────────────
+            // 1. Umount
+            .with_output(
+                CmdRequest::Umount {
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                ok_raw_empty("umount"),
+            )
+            // 2. scan --forget
+            .with_output(
+                CmdRequest::BtrfsDeviceScanForget,
+                ok_raw_empty("btrfs device scan --forget"),
+            )
+            // 3. close each mapper. The wrapper runner removes the mapper
+            //    path from the StatefulMockFs after each successful close.
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: "braid-disk1".into(),
+                },
+                ok_raw_empty("cryptsetup close braid-disk1"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: "braid-disk2".into(),
+                },
+                ok_raw_empty("cryptsetup close braid-disk2"),
+            )
+            // 4. cycle re-plan: mountpoint check → not mounted (same mock as above
+            //    is reused via MockRunner's HashMap lookup)
+            // 4. cycle re-plan: probe disk1, disk2 LUKS UUIDs (same mocks reused).
+            //    NOW mapper_open=false because the close hooks removed the mapper
+            //    paths from the StatefulMockFs.
+            // 5. cycle execute: verify passphrase against disk1, then open both.
+            //    This is the LOAD-BEARING assertion: if the credential was not
+            //    eagerly resolved before the initial mount, this stdin-bearing
+            //    mock would never be called and the test would error with
+            //    MissingMock or panic in cmd_recover's `expect`.
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw_empty("cryptsetup open --test-passphrase"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupLuksOpen {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                    mapper: "braid-disk1".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw_empty("cryptsetup open"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupLuksOpen {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                    mapper: "braid-disk2".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw_empty("cryptsetup open"),
+            )
+            // ── probe_pool after the cycle ──────────────────────────────
+            .with_output(
+                CmdRequest::FindmntJson {
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                ok_raw(
+                    "findmnt",
+                    r#"{"filesystems": [{"target":"/mnt/storage","source":"/dev/mapper/braid-disk1","fstype":"btrfs"}]}"#,
+                ),
+            )
+            .with_output(
+                CmdRequest::BtrfsFilesystemShow {
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                btrfs_show_two_disks(),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-disk1".into(),
+                },
+                cryptsetup_status_active("braid-disk1", "/dev/vda"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vda".into(),
+                },
+                cryptsetup_uuid_ok("/dev/vda", "11111111-1111-1111-1111-111111111111"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-disk2".into(),
+                },
+                cryptsetup_status_active("braid-disk2", "/dev/vdb"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vdb".into(),
+                },
+                cryptsetup_uuid_ok("/dev/vdb", "22222222-2222-2222-2222-222222222222"),
+            );
+
+        let runner = MapperClosingRunner {
+            inner,
+            fs_paths: fs_handle,
+        };
+
+        // Passphrase file with the canonical "testpass" — the cycle's
+        // CryptsetupTestPassphrase mock asserts on this exact value.
+        let passphrase_file = tempfile::NamedTempFile::new().unwrap();
+        {
+            use std::io::Write;
+            passphrase_file.as_file().write_all(b"testpass").unwrap();
+        }
+
+        let resolver = resolver_for(&[
+            ("/dev/vda", "virtio-disk1"),
+            ("/dev/vdb", "virtio-disk2"),
+        ]);
+        let result = cmd_recover(
+            &runner,
+            &fs,
+            &resolver,
+            &RecoverParams {
+                config: &config,
+                paths: &paths,
+                passphrase_stdin: false,
+                passphrase_file: Some(passphrase_file.path()),
+                allow_degraded: true, // disk3 is "absent" (not in fs paths)
+                dry_run: false,
+            },
+        );
+
+        // If credential resolution were lazily gated on plan.to_unlock the
+        // initial plan would skip the read, the cycle would have no
+        // credential, and cmd_recover would panic on `credential.as_ref()
+        // .expect(...)` — failing the test with an unwrap-on-None message.
+        result.expect(
+            "recover should resolve credential eagerly and complete the relock cycle, \
+             even though the initial plan has nothing to unlock",
+        );
+
+        // pool.json must have been written from live pool state.
+        assert!(paths.pool_json().exists(), "pool.json should exist");
+        let recovered = membership::load_membership(&paths).unwrap();
+        assert!(
+            recovered.disks.contains_key("disk1"),
+            "recovered membership should contain disk1"
+        );
+        assert!(
+            recovered.disks.contains_key("disk2"),
+            "recovered membership should contain disk2"
+        );
+
+        // pending-op.json must have been cleared.
         assert!(
             !paths.pending_op_json().exists(),
             "journal should be cleared after recovery"

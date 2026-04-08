@@ -1,7 +1,7 @@
 use crate::cmd::{CommandRunner, Step};
 use crate::config::Config;
 use crate::membership::{self, PoolMembership};
-use crate::mount::{self, Credential, MountError};
+use crate::mount::{self, MountError};
 use crate::preflight;
 use crate::probe::{self, Filesystem};
 use crate::state_paths::StatePaths;
@@ -35,16 +35,18 @@ pub fn cmd_unlock<R: CommandRunner, F: Filesystem + ?Sized>(
 ) -> Result<(), UnlockError> {
     preflight::check_no_pending_operation(params.paths).map_err(UnlockError::Failed)?;
 
-    // Dry-run: probe + validate (same errors as execution), then print plan
+    // Plan once (read-only). Reused by dry-run and execution.
+    let plan = mount::plan_open_pool(
+        runner,
+        fs,
+        params.config,
+        params.membership,
+        params.allow_degraded,
+        "unlock",
+    )?;
+
+    // Dry-run: print steps and exit. plan_open_pool already validated.
     if params.dry_run {
-        let plan = mount::plan_open_pool(
-            runner,
-            fs,
-            params.config,
-            params.membership,
-            params.allow_degraded,
-            "unlock",
-        )?;
         if let Some(ref p) = plan {
             let steps = mount::compile_open_steps(p, params.config.mount_point(), params.key_file);
             Step::print_dry_run(&steps);
@@ -60,27 +62,29 @@ pub fn cmd_unlock<R: CommandRunner, F: Filesystem + ?Sized>(
     // - After a successful mount, pool.json enriched fields (luks_uuid, devid) are
     //   refreshed best-effort, but correctness never depends on that write.
 
-    let credential = if let Some(kf) = params.key_file {
-        Credential::KeyFile(kf)
-    } else {
-        Credential::Passphrase {
-            passphrase_stdin: params.passphrase_stdin,
-            passphrase_file: params.passphrase_file,
-        }
+    let Some(plan) = plan else {
+        // Pool was already mounted (plan_open_pool returned None).
+        return Ok(());
     };
 
-    let mounted = mount::open_and_mount_pool(
-        runner,
-        fs,
-        params.config,
-        params.membership,
-        credential,
-        params.allow_degraded,
-        "unlock",
-    )?;
+    // Unlock-specific gate: only resolve a credential if there is something
+    // to unlock. Preserves the "no prompt when every mapper is already open"
+    // UX rule that used to live inside open_and_mount_pool.
+    let credential = if plan.to_unlock.is_empty() {
+        None
+    } else {
+        let source = mount::CredentialSource {
+            passphrase_stdin: params.passphrase_stdin,
+            passphrase_file: params.passphrase_file,
+            key_file: params.key_file,
+        };
+        Some(mount::resolve_credential(&source)?)
+    };
+
+    let mounted = mount::execute_open_plan(runner, fs, params.config, &plan, credential.as_ref())?;
 
     if !mounted {
-        // Pool was already mounted
+        // Pool was already mounted (defensive — plan should have caught this)
         return Ok(());
     }
 

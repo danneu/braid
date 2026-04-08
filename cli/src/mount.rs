@@ -4,7 +4,8 @@ use crate::luks::{self, LuksError};
 use crate::membership::PoolMembership;
 use crate::probe::{self, Filesystem, ProbeError};
 use crate::types::{ByIdPath, ConfigDiskState, MountPoint};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use zeroize::Zeroizing;
 
 #[derive(Debug, thiserror::Error)]
 pub enum MountError {
@@ -22,26 +23,48 @@ pub enum MountError {
     DegradedRefused(String),
 }
 
-/// Credential source for opening LUKS devices.
+/// A fully-resolved credential ready to drive `cryptsetup open`. Owned (no
+/// lifetime parameter); plaintext is scrubbed on drop via `Zeroizing`.
 ///
-/// `Passphrase` is the lazy source-based form: `open_and_mount_pool` reads
-/// from stdin/file/TTY only if `plan.to_unlock` is non-empty, so callers like
-/// `cmd_unlock` never prompt when every mapper is already open.
+/// Constructed by `resolve_credential` from a `CredentialSource`. Callers
+/// hold the resolved value and pass it (by reference, optionally) to
+/// `execute_open_plan`, which strict-validates that the credential's
+/// presence matches the plan's `to_unlock` state.
+pub enum OpenCredential {
+    Passphrase(Zeroizing<String>),
+    KeyFile(PathBuf),
+}
+
+/// Where to read a credential from. Mirrors the existing
+/// `passphrase_stdin`/`passphrase_file`/`key_file` fields on `UnlockParams`
+/// and `RecoverParams`. Constructed at the callsite, consumed by
+/// `resolve_credential`.
+pub struct CredentialSource<'a> {
+    pub passphrase_stdin: bool,
+    pub passphrase_file: Option<&'a Path>,
+    pub key_file: Option<&'a Path>,
+}
+
+/// Resolve a credential source into an owned, fully-resolved
+/// `OpenCredential`. ALWAYS reads — callers decide whether to invoke this,
+/// because the "should we prompt now?" rule differs by command:
 ///
-/// `InMemoryPassphrase` is the eager form: the caller has already read the
-/// secret into memory and is responsible for its lifetime. It exists for
-/// `cmd_recover`, which needs the same passphrase across two
-/// `open_and_mount_pool` calls (initial mount + the post-resume remount
-/// cycle) and therefore can't afford to re-consume stdin or to round-trip
-/// the secret through a tempfile. Owned `String` so the variant is
-/// forward-compatible with `Zeroizing<String>` if/when braid adopts zeroize.
-pub enum Credential<'a> {
-    Passphrase {
-        passphrase_stdin: bool,
-        passphrase_file: Option<&'a std::path::Path>,
-    },
-    KeyFile(&'a std::path::Path),
-    InMemoryPassphrase(String),
+/// - `cmd_unlock` skips this call entirely when `plan.to_unlock` is empty
+///   (the no-prompt-when-all-mappers-open UX rule).
+/// - `cmd_recover` calls this whenever the pool is not yet mounted, even
+///   if the initial plan's `to_unlock` is empty, because the post-mount
+///   relock cycle will close every mapper and need to reopen them.
+///
+/// Resolution order: `key_file` (if provided) → passphrase
+/// (file/stdin/TTY).
+pub fn resolve_credential(
+    source: &CredentialSource<'_>,
+) -> Result<OpenCredential, MountError> {
+    if let Some(kf) = source.key_file {
+        return Ok(OpenCredential::KeyFile(kf.to_path_buf()));
+    }
+    let pp = luks::read_passphrase(source.passphrase_file, source.passphrase_stdin)?;
+    Ok(OpenCredential::Passphrase(Zeroizing::new(pp)))
 }
 
 /// Status line tag for output.
@@ -122,7 +145,8 @@ pub struct OpenPlan {
 }
 
 /// Probe membership disks, validate UUIDs, check degraded policy.
-/// Returns the same errors that open_and_mount_pool() would.
+/// Returns the planning errors that `execute_open_plan` would otherwise
+/// surface (degraded refusal, UUID mismatch, no unlockable disks).
 /// No mutations — safe for dry-run.
 ///
 /// Returns `Ok(None)` when pool is already mounted.
@@ -344,11 +368,10 @@ fn explain_open_failure(
 }
 
 /// Verify a passphrase against the first to-unlock disk and then open every
-/// to-unlock disk with it. Shared between `Credential::Passphrase` (which
-/// reads the secret first) and `Credential::InMemoryPassphrase` (which has
-/// it already). Mirrors the structure of the `KeyFile` arm in
-/// `open_and_mount_pool`: explain_open_failure handles header-state
-/// classification for both verification and per-disk open failures.
+/// to-unlock disk with it. Called from the `OpenCredential::Passphrase`
+/// arm of `execute_open_plan`. Mirrors the structure of the `KeyFile` arm:
+/// `explain_open_failure` handles header-state classification for both
+/// verification and per-disk open failures.
 fn open_disks_with_passphrase<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
@@ -412,34 +435,54 @@ fn open_disks_with_passphrase<R: CommandRunner, F: Filesystem + ?Sized>(
     Ok(())
 }
 
-/// Open LUKS devices from a membership set and mount the btrfs pool.
+/// Execute a pre-built `OpenPlan`: open LUKS devices (if any) and mount
+/// the btrfs pool.
 ///
-/// Steps: plan (probe + validate), verify credentials, open LUKS, btrfs
-/// device scan, mkdir + mount.
+/// Phases: validate credential/plan agreement → open LUKS (if needed) →
+/// btrfs device scan → mkdir + mount.
 ///
-/// Returns `Ok(true)` if the mount was performed, `Ok(false)` if already mounted.
-/// `command_hint` is used in the `--allow-degraded` hint message (e.g. "unlock" or "recover").
-pub fn open_and_mount_pool<R: CommandRunner, F: Filesystem + ?Sized>(
+/// Planning + probing + validation lives in `plan_open_pool`, which the
+/// caller invokes first. This function does NOT plan; it only executes.
+///
+/// `credential` must be `Some` iff `plan.to_unlock` is non-empty:
+/// - `(false, false)` (need a credential, none provided) → `MountError::Failed`
+/// - `(true, true)` (provided a credential we don't need) → `MountError::Failed`
+/// - `(true, false)` and `(false, true)` are the normal cases.
+///
+/// Returns `Ok(true)` once the mount succeeds. (Callers detect the
+/// already-mounted case earlier, by `plan_open_pool` returning `None`.)
+pub fn execute_open_plan<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
     config: &Config,
-    membership: &PoolMembership,
-    credential: Credential<'_>,
-    allow_degraded: bool,
-    command_hint: &str,
+    plan: &OpenPlan,
+    credential: Option<&OpenCredential>,
 ) -> Result<bool, MountError> {
     let mount_point = config.mount_point();
 
-    // 1. Plan: probe + validate (read-only)
-    let plan = match plan_open_pool(runner, fs, config, membership, allow_degraded, command_hint)? {
-        Some(p) => p,
-        None => return Ok(false), // already mounted
-    };
+    // 1. Validate credential/plan agreement, STRICTLY in both directions.
+    //    Each caller is expected to gate credential presence to match
+    //    `plan.to_unlock` itself; mismatches mean a caller bug.
+    match (credential.is_some(), plan.to_unlock.is_empty()) {
+        (false, false) => {
+            return Err(MountError::Failed(
+                "internal: credential required for unlock but none was provided".into(),
+            ));
+        }
+        (true, true) => {
+            return Err(MountError::Failed(
+                "internal: credential provided but plan has no disks to unlock".into(),
+            ));
+        }
+        // (false, true): mount-only path. (true, false): normal unlock.
+        _ => {}
+    }
 
-    // 2. If disks need opening → verify credential, then open each disk
+    // 2. If disks need opening → verify credential, then open each disk.
     if !plan.to_unlock.is_empty() {
-        match &credential {
-            Credential::KeyFile(kf) => {
+        match credential.expect("checked above") {
+            OpenCredential::KeyFile(kf) => {
+                let kf = kf.as_path();
                 let (ref first_name, ref first_by_id) = plan.to_unlock[0];
                 let ok = luks::verify_key_file(runner, &first_by_id.0, kf)?;
                 if !ok {
@@ -496,15 +539,8 @@ pub fn open_and_mount_pool<R: CommandRunner, F: Filesystem + ?Sized>(
                     eprintln!("{}  disk: {:<10}unlocked", tag("ok"), name);
                 }
             }
-            Credential::Passphrase {
-                passphrase_stdin,
-                passphrase_file,
-            } => {
-                let passphrase = luks::read_passphrase(*passphrase_file, *passphrase_stdin)?;
-                open_disks_with_passphrase(runner, fs, &plan.to_unlock, &passphrase)?;
-            }
-            Credential::InMemoryPassphrase(passphrase) => {
-                open_disks_with_passphrase(runner, fs, &plan.to_unlock, passphrase)?;
+            OpenCredential::Passphrase(pp) => {
+                open_disks_with_passphrase(runner, fs, &plan.to_unlock, pp.as_str())?;
             }
         }
     }
@@ -605,6 +641,43 @@ mod tests {
         }
     }
 
+    /// Test-only helper that mirrors the legacy `open_and_mount_pool` flow
+    /// (plan + optional resolve + execute) so existing test bodies don't
+    /// need to spell out both phases. Production callers (`cmd_unlock`,
+    /// `cmd_recover`) compose the phases explicitly per the refactor's
+    /// design — this helper exists ONLY for the test module.
+    ///
+    /// Mirrors the unlock-style gating: if `plan.to_unlock` is empty, the
+    /// credential is dropped before reaching `execute_open_plan` (so the
+    /// strict `(true, true)` validation does not fire). Tests for the
+    /// recover-specific (true, true) path live in recover.rs.
+    fn open_and_mount_for_test<R: CommandRunner, F: Filesystem + ?Sized>(
+        runner: &R,
+        fs: &F,
+        config: &Config,
+        membership: &PoolMembership,
+        credential: Option<OpenCredential>,
+        allow_degraded: bool,
+        command_hint: &str,
+    ) -> Result<bool, MountError> {
+        let plan =
+            match plan_open_pool(runner, fs, config, membership, allow_degraded, command_hint)? {
+                Some(p) => p,
+                None => return Ok(false),
+            };
+        let cred_for_plan = if plan.to_unlock.is_empty() {
+            None
+        } else {
+            credential.as_ref()
+        };
+        execute_open_plan(runner, fs, config, &plan, cred_for_plan)
+    }
+
+    /// Convenience constructor used in tests.
+    fn test_passphrase() -> OpenCredential {
+        OpenCredential::Passphrase(Zeroizing::new("testpass".to_owned()))
+    }
+
     fn test_config() -> Config {
         Config::new(MountPoint("/mnt/storage".to_owned())).unwrap()
     }
@@ -673,15 +746,12 @@ mod tests {
             ok_raw("mountpoint"),
         );
 
-        let result = open_and_mount_pool(
+        let result = open_and_mount_for_test(
             &runner,
             &fs,
             &config,
             &membership,
-            Credential::Passphrase {
-                passphrase_stdin: false,
-                passphrase_file: None,
-            },
+            None,
             false,
             "unlock",
         );
@@ -755,21 +825,12 @@ mod tests {
                 ok_raw("mount"),
             );
 
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        {
-            use std::io::Write;
-            tmp.as_file().write_all(b"testpass").unwrap();
-        }
-
-        let result = open_and_mount_pool(
+        let result = open_and_mount_for_test(
             &runner,
             &fs,
             &config,
             &membership,
-            Credential::Passphrase {
-                passphrase_stdin: false,
-                passphrase_file: Some(tmp.path()),
-            },
+            Some(test_passphrase()),
             false,
             "unlock",
         );
@@ -846,21 +907,12 @@ mod tests {
                 ok_raw("mount -o degraded"),
             );
 
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        {
-            use std::io::Write;
-            tmp.as_file().write_all(b"testpass").unwrap();
-        }
-
-        let result = open_and_mount_pool(
+        let result = open_and_mount_for_test(
             &runner,
             &fs,
             &config,
             &membership,
-            Credential::Passphrase {
-                passphrase_stdin: false,
-                passphrase_file: Some(tmp.path()),
-            },
+            Some(test_passphrase()),
             true,
             "unlock",
         );
@@ -928,21 +980,12 @@ mod tests {
             .with_output(CmdRequest::BtrfsDeviceScanAll, ok_raw("btrfs device scan"));
         // No mount mock — should never reach mount
 
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        {
-            use std::io::Write;
-            tmp.as_file().write_all(b"testpass").unwrap();
-        }
-
-        let result = open_and_mount_pool(
+        let result = open_and_mount_for_test(
             &runner,
             &fs,
             &config,
             &membership,
-            Credential::Passphrase {
-                passphrase_stdin: false,
-                passphrase_file: Some(tmp.path()),
-            },
+            Some(test_passphrase()),
             false,
             "recover",
         );
@@ -1311,21 +1354,12 @@ mod tests {
                 ),
             );
 
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        {
-            use std::io::Write;
-            tmp.as_file().write_all(b"testpass").unwrap();
-        }
-
-        let result = open_and_mount_pool(
+        let result = open_and_mount_for_test(
             &runner,
             &fs,
             &config,
             &membership,
-            Credential::Passphrase {
-                passphrase_stdin: false,
-                passphrase_file: Some(tmp.path()),
-            },
+            Some(test_passphrase()),
             false,
             "unlock",
         );
@@ -1361,15 +1395,12 @@ mod tests {
             err_raw("mountpoint", 1, ""),
         );
 
-        let result = open_and_mount_pool(
+        let result = open_and_mount_for_test(
             &runner,
             &fs,
             &config,
             &membership,
-            Credential::Passphrase {
-                passphrase_stdin: false,
-                passphrase_file: None,
-            },
+            None,
             false,
             "unlock",
         );
@@ -1429,15 +1460,12 @@ mod tests {
                 ok_raw("mount"),
             );
 
-        let result = open_and_mount_pool(
+        let result = open_and_mount_for_test(
             &runner,
             &fs,
             &config,
             &membership,
-            Credential::Passphrase {
-                passphrase_stdin: false,
-                passphrase_file: None,
-            },
+            None,
             false,
             "unlock",
         );
@@ -1485,15 +1513,12 @@ mod tests {
             .with_output(uuid1_req, uuid1_out)
             .with_output(uuid2_req, uuid2_out);
 
-        let result = open_and_mount_pool(
+        let result = open_and_mount_for_test(
             &runner,
             &fs,
             &config,
             &membership,
-            Credential::Passphrase {
-                passphrase_stdin: false,
-                passphrase_file: None,
-            },
+            None,
             false,
             "unlock",
         );
@@ -1554,15 +1579,12 @@ mod tests {
             .with_output(uuid1_req, uuid1_out)
             .with_output(uuid2_req, uuid2_out);
 
-        let result = open_and_mount_pool(
+        let result = open_and_mount_for_test(
             &runner,
             &fs,
             &config,
             &membership,
-            Credential::Passphrase {
-                passphrase_stdin: false,
-                passphrase_file: None,
-            },
+            None,
             false,
             "unlock",
         );
@@ -1648,21 +1670,12 @@ mod tests {
                 ),
             );
 
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        {
-            use std::io::Write;
-            tmp.as_file().write_all(b"testpass").unwrap();
-        }
-
-        let result = open_and_mount_pool(
+        let result = open_and_mount_for_test(
             &runner,
             &fs,
             &config,
             &membership,
-            Credential::Passphrase {
-                passphrase_stdin: false,
-                passphrase_file: Some(tmp.path()),
-            },
+            Some(test_passphrase()),
             false,
             "unlock",
         );
@@ -1750,12 +1763,12 @@ mod tests {
                 ),
             );
 
-        let result = open_and_mount_pool(
+        let result = open_and_mount_for_test(
             &runner,
             &fs,
             &config,
             &membership,
-            Credential::KeyFile(kf.path()),
+            Some(OpenCredential::KeyFile(kf.path().to_path_buf())),
             false,
             "unlock",
         );
@@ -2063,15 +2076,12 @@ mod tests {
             .with_output_stdin(tp_req, b"testpass".to_vec(), tp_out)
             .with_output(is_req, is_out);
 
-        let result = open_and_mount_pool(
+        let result = open_and_mount_for_test(
             &runner,
             &fs,
             &config,
             &membership,
-            Credential::Passphrase {
-                passphrase_stdin: false,
-                passphrase_file: Some(tmp.path()),
-            },
+            Some(test_passphrase()),
             false,
             "unlock",
         );
@@ -2114,26 +2124,17 @@ mod tests {
         let (is_req, is_out) = is_luks_ok("/dev/disk/by-id/virtio-disk1");
         let (dump_req, dump_out) = luks_dump_text_ok("/dev/disk/by-id/virtio-disk1");
 
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        {
-            use std::io::Write;
-            tmp.as_file().write_all(b"wrongpass").unwrap();
-        }
-
         let runner = base_two_disk_runner()
             .with_output_stdin(tp_req, b"wrongpass".to_vec(), tp_out)
             .with_output(is_req, is_out)
             .with_output(dump_req, dump_out);
 
-        let result = open_and_mount_pool(
+        let result = open_and_mount_for_test(
             &runner,
             &fs,
             &config,
             &membership,
-            Credential::Passphrase {
-                passphrase_stdin: false,
-                passphrase_file: Some(tmp.path()),
-            },
+            Some(OpenCredential::Passphrase(Zeroizing::new("wrongpass".to_owned()))),
             false,
             "unlock",
         );
@@ -2181,12 +2182,12 @@ mod tests {
             .with_output(is_req, is_out)
             .with_output(dump_req, dump_out);
 
-        let result = open_and_mount_pool(
+        let result = open_and_mount_for_test(
             &runner,
             &fs,
             &config,
             &membership,
-            Credential::KeyFile(kf.path()),
+            Some(OpenCredential::KeyFile(kf.path().to_path_buf())),
             false,
             "unlock",
         );
@@ -2276,15 +2277,12 @@ mod tests {
             .with_output_stdin(open1_req, b"testpass".to_vec(), open1_out)
             .with_output_stdin(open2_req, b"testpass".to_vec(), open2_out);
 
-        let result = open_and_mount_pool(
+        let result = open_and_mount_for_test(
             &runner,
             &fs,
             &config,
             &membership,
-            Credential::Passphrase {
-                passphrase_stdin: false,
-                passphrase_file: Some(tmp.path()),
-            },
+            Some(test_passphrase()),
             false,
             "unlock",
         );
@@ -2361,12 +2359,12 @@ mod tests {
             .with_output(open2_req, open2_out)
             .with_output(is_req, is_out);
 
-        let result = open_and_mount_pool(
+        let result = open_and_mount_for_test(
             &runner,
             &fs,
             &config,
             &membership,
-            Credential::KeyFile(kf.path()),
+            Some(OpenCredential::KeyFile(kf.path().to_path_buf())),
             false,
             "unlock",
         );
