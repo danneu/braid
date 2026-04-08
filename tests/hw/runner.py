@@ -17,6 +17,9 @@ Usage:
 
     # Run specific tests:
     sudo python3 tests/hw/runner.py --tests test_add_canary test_lock_unlock_canary
+
+    # Run an opt-in slow test (not part of the default suite):
+    sudo python3 tests/hw/runner.py --tests test_remove_under_pressure
 """
 
 import argparse
@@ -35,12 +38,20 @@ MOUNT_POINT = "/mnt/braid-hw-test"
 RUNTIME_STATE = "/var/lib/braid"
 STATE_BACKUP = os.path.join(CONFIG_DIR, "state-backup")
 
-ALL_TESTS = [
+# Tests run by default. Fast enough to run as a regular pre-flight suite.
+DEFAULT_TESTS = [
     "test_add_canary",
     "test_lock_unlock_canary",
     "test_replace_live_canary",
+]
+
+# Opt-in only — too slow for the default suite (e.g. fills the whole pool).
+# Run explicitly by name: `just test-hw --tests test_remove_under_pressure`.
+OPT_IN_TESTS = [
     "test_remove_under_pressure",
 ]
+
+ALL_TESTS = DEFAULT_TESTS + OPT_IN_TESTS
 
 
 def die(msg):
@@ -228,7 +239,7 @@ def main():
     )
     parser.add_argument(
         "--tests", nargs="+", metavar="TEST",
-        help="Run only specific tests",
+        help="Run only specific tests (use this to opt into slow tests like test_remove_under_pressure)",
     )
     parser.add_argument(
         "--yes-destroy-these-disks", action="store_true",
@@ -258,7 +269,7 @@ def main():
             sys.exit(1)
         print()
 
-    tests_to_run = args.tests if args.tests else ALL_TESTS
+    tests_to_run = args.tests if args.tests else DEFAULT_TESTS
     for t in tests_to_run:
         if t not in ALL_TESTS:
             die(f"Unknown test: {t}\nAvailable: {', '.join(ALL_TESTS)}")
