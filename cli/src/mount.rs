@@ -556,7 +556,7 @@ pub fn execute_open_plan<R: CommandRunner, F: Filesystem + ?Sized>(
     }
 
     // 4. mkdir + mount
-    let _ = std::fs::create_dir_all(mount_point);
+    let _ = std::fs::create_dir_all(mount_point.as_str());
 
     let mount_result = if plan.any_missing_member {
         runner.run(&CmdRequest::MountWithOptions {

@@ -9,7 +9,7 @@ use crate::types::MountPoint;
 
 pub fn cmd_ack<R: CommandRunner>(
     runner: &R,
-    mount_point: &str,
+    mount_point: &MountPoint,
     paths: &StatePaths,
 ) -> Result<(), AckError> {
     // 1. Read latch for count (authoritative alert state)
@@ -31,7 +31,7 @@ pub fn cmd_ack<R: CommandRunner>(
 
     // 3. Run btrfs device stats
     let stats_raw = runner.run(&CmdRequest::BtrfsDeviceStatsJson {
-        mount_point: MountPoint(mount_point.to_owned()),
+        mount_point: mount_point.clone(),
     })?;
     let device_stats = parse_btrfs_device_stats(&stats_raw)?;
 

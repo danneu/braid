@@ -127,7 +127,7 @@ pub fn cmd_lock<R: CommandRunner, F: Filesystem + ?Sized>(
 
     // Preflight
     if pool_was_mounted {
-        let pool = probe_pool(runner, mount_point.as_str())
+        let pool = probe_pool(runner, mount_point)
             .map_err(|e| LockError::Failed(format!("cannot probe pool: {e}")))?;
         let fsid = pool
             .fsid

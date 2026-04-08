@@ -47,7 +47,7 @@ pub fn execute_effect(effect: Effect, cmd_tx: &mpsc::Sender<Event>) {
                 let result = crate::tui::probe::probe_pool_for_tui(
                     &runner,
                     &fs,
-                    mount_point.as_str(),
+                    &mount_point,
                     &disk_by_id,
                     &paths,
                 );

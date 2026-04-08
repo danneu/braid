@@ -115,15 +115,18 @@ pub fn probe_config_disk<R: CommandRunner, F: Filesystem + ?Sized>(
 
 pub fn probe_pool<R: CommandRunner>(
     runner: &R,
-    mount_point: &str,
+    mount_point: &MountPoint,
 ) -> Result<PoolState, ProbeError> {
     let findmnt_raw = runner.run(&CmdRequest::FindmntJson {
-        mount_point: MountPoint(mount_point.to_owned()),
+        mount_point: mount_point.clone(),
     })?;
     let findmnt = crate::parse::parse_findmnt_json(&findmnt_raw)?;
 
     // Defensive: only consider entries whose target exactly matches mount_point.
-    let exact = findmnt.filesystems.iter().find(|e| e.target == mount_point);
+    let exact = findmnt
+        .filesystems
+        .iter()
+        .find(|e| e.target == mount_point.as_str());
 
     let entry = match exact {
         None => {
@@ -142,13 +145,13 @@ pub fn probe_pool<R: CommandRunner>(
 
     if entry.fstype != "btrfs" {
         return Err(ProbeError::NotBtrfs {
-            mount_point: mount_point.to_owned(),
+            mount_point: mount_point.0.clone(),
             fstype: entry.fstype.clone(),
         });
     }
 
     let show_raw = runner.run(&CmdRequest::BtrfsFilesystemShow {
-        mount_point: MountPoint(mount_point.to_owned()),
+        mount_point: mount_point.clone(),
     })?;
     let show = parse_btrfs_filesystem_show(&show_raw)?;
 
@@ -156,7 +159,7 @@ pub fn probe_pool<R: CommandRunner>(
     // parser couldn't extract the uuid line — a broken invariant, not a
     // state we should silently propagate to consumers.
     let fsid = show.uuid.ok_or_else(|| ProbeError::PoolDevice {
-        mapper: mount_point.to_owned(),
+        mapper: mount_point.0.clone(),
         detail: "mounted pool has no FSID in btrfs filesystem show output".into(),
     })?;
 
@@ -297,6 +300,10 @@ mod tests {
 
     fn by_id(path: &str) -> ByIdPath {
         ByIdPath(path.to_owned())
+    }
+
+    fn mp() -> MountPoint {
+        MountPoint("/mnt/storage".into())
     }
 
     // -- probe_config_disk tests --
@@ -490,7 +497,7 @@ mod tests {
             findmnt_empty(),
         );
 
-        let result = probe_pool(&runner, "/mnt/storage").unwrap();
+        let result = probe_pool(&runner, &mp()).unwrap();
         assert!(!result.mounted);
         assert!(result.devices.is_empty());
         assert_eq!(result.missing_count, 0);
@@ -508,7 +515,7 @@ mod tests {
             ),
         );
 
-        let result = probe_pool(&runner, "/mnt/storage").unwrap();
+        let result = probe_pool(&runner, &mp()).unwrap();
         assert!(!result.mounted);
         assert!(result.devices.is_empty());
         assert_eq!(result.missing_count, 0);
@@ -523,7 +530,7 @@ mod tests {
             findmnt_ext4(),
         );
 
-        let result = probe_pool(&runner, "/mnt/storage");
+        let result = probe_pool(&runner, &mp());
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
@@ -572,7 +579,7 @@ mod tests {
                 cryptsetup_uuid_ok("/dev/vdb", "22222222-2222-2222-2222-222222222222"),
             );
 
-        let result = probe_pool(&runner, "/mnt/storage").unwrap();
+        let result = probe_pool(&runner, &mp()).unwrap();
         assert!(result.mounted);
         assert_eq!(result.devices.len(), 2);
         assert_eq!(result.missing_count, 0);
@@ -634,7 +641,7 @@ mod tests {
                 cryptsetup_uuid_ok("/dev/vdb", "22222222-2222-2222-2222-222222222222"),
             );
 
-        let result = probe_pool(&runner, "/mnt/storage").unwrap();
+        let result = probe_pool(&runner, &mp()).unwrap();
         assert!(result.mounted);
         assert_eq!(result.devices.len(), 2);
         assert_eq!(result.missing_count, 1);
@@ -676,7 +683,7 @@ mod tests {
                 cryptsetup_uuid_ok("/dev/vda", "11111111-1111-1111-1111-111111111111"),
             );
 
-        let result = probe_pool(&runner, "/mnt/storage").unwrap();
+        let result = probe_pool(&runner, &mp()).unwrap();
         assert!(result.mounted);
         assert_eq!(result.devices.len(), 1, "MISSING device must be excluded");
         assert_eq!(result.missing_count, 1);
@@ -715,7 +722,7 @@ mod tests {
                 ),
             );
 
-        let result = probe_pool(&runner, "/mnt/storage");
+        let result = probe_pool(&runner, &mp());
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
@@ -745,7 +752,7 @@ mod tests {
                 ),
             );
 
-        let result = probe_pool(&runner, "/mnt/storage");
+        let result = probe_pool(&runner, &mp());
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
@@ -807,7 +814,7 @@ mod tests {
                 ),
             );
 
-        let result = probe_pool(&runner, "/mnt/storage").unwrap();
+        let result = probe_pool(&runner, &mp()).unwrap();
         assert!(result.mounted);
         assert_eq!(
             result.devices.len(),
@@ -864,7 +871,7 @@ mod tests {
                 cryptsetup_uuid_ok("/dev/vda", "11111111-1111-1111-1111-111111111111"),
             );
 
-        let result = probe_pool(&runner, "/mnt/storage").unwrap();
+        let result = probe_pool(&runner, &mp()).unwrap();
         assert_eq!(
             result.missing_count, 0,
             "saturating_sub should prevent underflow"
@@ -895,7 +902,7 @@ mod tests {
                 ),
             );
 
-        let result = probe_pool(&runner, "/mnt/storage");
+        let result = probe_pool(&runner, &mp());
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(

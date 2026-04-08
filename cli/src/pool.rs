@@ -15,11 +15,11 @@ pub enum PoolError {
 pub fn pool_add_device<R: CommandRunner + Sync>(
     runner: &R,
     device: &str,
-    mount_point: &str,
+    mount_point: &MountPoint,
 ) -> Result<(), PoolError> {
     let result = runner.run(&CmdRequest::BtrfsDeviceAdd {
         device: device.to_owned(),
-        mount_point: MountPoint(mount_point.to_owned()),
+        mount_point: mount_point.clone(),
     })?;
     if result.exit_status != 0 {
         return Err(PoolError::Failed(format!(
@@ -33,7 +33,7 @@ pub fn pool_add_device<R: CommandRunner + Sync>(
 
 /// Build a `PoolError::Failed` for a balance command, detecting ENOSPC and
 /// appending a recovery hint when present.
-fn balance_error(label: &str, mount_point: &str, result: &RawCommandOutput) -> PoolError {
+fn balance_error(label: &str, mount_point: &MountPoint, result: &RawCommandOutput) -> PoolError {
     let stderr = result.stderr.to_lowercase();
     if stderr.contains("no space left") {
         PoolError::Failed(format!(
@@ -53,13 +53,13 @@ fn balance_error(label: &str, mount_point: &str, result: &RawCommandOutput) -> P
 /// Balance pool to RAID1 with progress display.
 pub fn pool_balance_raid1<R: CommandRunner + Sync>(
     runner: &R,
-    mount_point: &str,
+    mount_point: &MountPoint,
     progress: ProgressOutput,
 ) -> Result<(), PoolError> {
     let result = run_with_progress(
         runner,
         &CmdRequest::BtrfsBalanceRaid1 {
-            mount_point: MountPoint(mount_point.to_owned()),
+            mount_point: mount_point.clone(),
         },
         mount_point,
         progress,
@@ -77,13 +77,13 @@ pub fn pool_balance_raid1<R: CommandRunner + Sync>(
 /// Balance pool to single profile (pre-remove conversion) with progress.
 pub fn pool_balance_single<R: CommandRunner + Sync>(
     runner: &R,
-    mount_point: &str,
+    mount_point: &MountPoint,
     progress: ProgressOutput,
 ) -> Result<(), PoolError> {
     let result = run_with_progress(
         runner,
         &CmdRequest::BtrfsBalanceSingle {
-            mount_point: MountPoint(mount_point.to_owned()),
+            mount_point: mount_point.clone(),
         },
         mount_point,
         progress,
@@ -102,13 +102,13 @@ pub fn pool_balance_single<R: CommandRunner + Sync>(
 /// Used after degraded operations to restore redundancy for single-profile chunks.
 pub fn pool_balance_raid1_soft<R: CommandRunner + Sync>(
     runner: &R,
-    mount_point: &str,
+    mount_point: &MountPoint,
     progress: ProgressOutput,
 ) -> Result<(), PoolError> {
     let result = run_with_progress(
         runner,
         &CmdRequest::BtrfsBalanceRaid1Soft {
-            mount_point: MountPoint(mount_point.to_owned()),
+            mount_point: mount_point.clone(),
         },
         mount_point,
         progress,
@@ -131,7 +131,7 @@ pub fn pool_balance_raid1_soft<R: CommandRunner + Sync>(
 /// operation and pool.json update have completed.
 pub fn maybe_restore_raid1<R: CommandRunner + Sync>(
     runner: &R,
-    mount_point: &str,
+    mount_point: &MountPoint,
     pre_op_missing_count: u64,
     progress: ProgressOutput,
 ) -> Result<(), PoolError> {
@@ -152,14 +152,14 @@ pub fn maybe_restore_raid1<R: CommandRunner + Sync>(
 pub fn pool_remove_device<R: CommandRunner + Sync>(
     runner: &R,
     device: &str,
-    mount_point: &str,
+    mount_point: &MountPoint,
     progress: ProgressOutput,
 ) -> Result<(), PoolError> {
     let result = run_with_progress(
         runner,
         &CmdRequest::BtrfsDeviceRemove {
             device: device.to_owned(),
-            mount_point: MountPoint(mount_point.to_owned()),
+            mount_point: mount_point.clone(),
         },
         mount_point,
         progress,
@@ -177,12 +177,12 @@ pub fn pool_remove_device<R: CommandRunner + Sync>(
 /// Remove a specific device by devid from the pool.
 pub fn pool_remove_devid<R: CommandRunner + Sync>(
     runner: &R,
-    mount_point: &str,
+    mount_point: &MountPoint,
     devid: u64,
 ) -> Result<(), PoolError> {
     let result = runner.run(&CmdRequest::BtrfsDeviceRemove {
         device: devid.to_string(),
-        mount_point: MountPoint(mount_point.to_owned()),
+        mount_point: mount_point.clone(),
     })?;
     if result.exit_status != 0 {
         return Err(PoolError::Failed(format!(
@@ -199,7 +199,7 @@ pub fn pool_replace_device<R: CommandRunner + Sync>(
     runner: &R,
     devid: u64,
     target_device: &str,
-    mount_point: &str,
+    mount_point: &MountPoint,
     progress: ProgressOutput,
 ) -> Result<(), PoolError> {
     let result = run_replace_with_progress(
@@ -207,7 +207,7 @@ pub fn pool_replace_device<R: CommandRunner + Sync>(
         &CmdRequest::BtrfsReplaceStart {
             devid,
             target_device: target_device.to_owned(),
-            mount_point: MountPoint(mount_point.to_owned()),
+            mount_point: mount_point.clone(),
         },
         mount_point,
         progress,
@@ -226,11 +226,11 @@ pub fn pool_replace_device<R: CommandRunner + Sync>(
 pub fn pool_resize_device<R: CommandRunner + Sync>(
     runner: &R,
     devid: u64,
-    mount_point: &str,
+    mount_point: &MountPoint,
 ) -> Result<(), PoolError> {
     let result = runner.run(&CmdRequest::BtrfsFilesystemResize {
         devid,
-        mount_point: MountPoint(mount_point.to_owned()),
+        mount_point: mount_point.clone(),
     })?;
     if result.exit_status != 0 {
         return Err(PoolError::Failed(format!(
@@ -266,7 +266,7 @@ pub enum EvictResult {
 pub fn evict_present_device<R: CommandRunner + Sync>(
     runner: &R,
     mapper: &str,
-    mount_point: &str,
+    mount_point: &MountPoint,
     progress: ProgressOutput,
 ) -> Result<EvictResult, PoolError> {
     let pool = probe_pool(runner, mount_point).map_err(|e| PoolError::Failed(e.to_string()))?;
@@ -311,7 +311,7 @@ pub fn evict_present_device<R: CommandRunner + Sync>(
 pub fn pool_bootstrap_mount<R: CommandRunner + Sync>(
     runner: &R,
     device: &str,
-    mount_point: &str,
+    mount_point: &MountPoint,
 ) -> Result<(), PoolError> {
     // Check for existing btrfs superblock
     let scan = runner.run(&CmdRequest::BtrfsDeviceScan {
@@ -332,11 +332,11 @@ pub fn pool_bootstrap_mount<R: CommandRunner + Sync>(
     }
 
     // Create mount point directory if needed
-    let _ = std::fs::create_dir_all(mount_point);
+    let _ = std::fs::create_dir_all(mount_point.as_str());
 
     let mount = runner.run(&CmdRequest::Mount {
         device: device.to_owned(),
-        mount_point: MountPoint(mount_point.to_owned()),
+        mount_point: mount_point.clone(),
     })?;
     if mount.exit_status != 0 {
         return Err(PoolError::Failed(format!(
@@ -353,7 +353,7 @@ pub fn pool_bootstrap_mount<R: CommandRunner + Sync>(
 pub fn pool_bootstrap_mount_raid1<R: CommandRunner + Sync>(
     runner: &R,
     devices: &[String],
-    mount_point: &str,
+    mount_point: &MountPoint,
 ) -> Result<(), PoolError> {
     let mkfs = runner.run(&CmdRequest::MkfsBtrfsRaid1 {
         devices: devices.to_vec(),
@@ -366,11 +366,11 @@ pub fn pool_bootstrap_mount_raid1<R: CommandRunner + Sync>(
         )));
     }
 
-    let _ = std::fs::create_dir_all(mount_point);
+    let _ = std::fs::create_dir_all(mount_point.as_str());
 
     let mount = runner.run(&CmdRequest::Mount {
         device: devices[0].clone(),
-        mount_point: MountPoint(mount_point.to_owned()),
+        mount_point: mount_point.clone(),
     })?;
     if mount.exit_status != 0 {
         return Err(PoolError::Failed(format!(
@@ -395,6 +395,10 @@ mod tests {
             stderr: String::new(),
             exit_status: 0,
         }
+    }
+
+    fn mp() -> MountPoint {
+        MountPoint("/mnt/storage".into())
     }
 
     use crate::cmd::CmdError;
@@ -523,7 +527,7 @@ mod tests {
     // (e.g., already cleaned up).
     fn maybe_restore_raid1_noop_when_not_degraded() {
         let runner = RestoreRunner::failing_probe(); // should never be called
-        let result = maybe_restore_raid1(&runner, "/mnt/storage", 0, ProgressOutput::Off);
+        let result = maybe_restore_raid1(&runner, &mp(), 0, ProgressOutput::Off);
         assert!(result.is_ok(), "should be no-op: {result:?}");
         assert!(
             runner.calls().is_empty(),
@@ -539,7 +543,7 @@ mod tests {
     // Scenario: 3-disk pool had 1 missing, remove-missing clears it, 2 remain.
     fn maybe_restore_raid1_runs_soft_balance() {
         let runner = RestoreRunner::new(0, 2); // post-op: 0 missing, 2 present
-        let result = maybe_restore_raid1(&runner, "/mnt/storage", 1, ProgressOutput::Off);
+        let result = maybe_restore_raid1(&runner, &mp(), 1, ProgressOutput::Off);
         assert!(result.is_ok(), "should succeed: {result:?}");
         assert!(
             runner
@@ -559,7 +563,7 @@ mod tests {
     // Scenario: 4-disk pool had 2 missing, operator removes 1, 1 still missing.
     fn maybe_restore_raid1_skips_when_still_degraded() {
         let runner = RestoreRunner::new(1, 2); // post-op: 1 still missing
-        let result = maybe_restore_raid1(&runner, "/mnt/storage", 2, ProgressOutput::Off);
+        let result = maybe_restore_raid1(&runner, &mp(), 2, ProgressOutput::Off);
         assert!(result.is_ok(), "should succeed: {result:?}");
         assert!(
             !runner
@@ -576,7 +580,7 @@ mod tests {
     // Scenario: 2-disk pool, 1 missing, remove-missing leaves 1 survivor.
     fn maybe_restore_raid1_skips_single_device() {
         let runner = RestoreRunner::new(0, 1); // post-op: 0 missing, 1 present
-        let result = maybe_restore_raid1(&runner, "/mnt/storage", 1, ProgressOutput::Off);
+        let result = maybe_restore_raid1(&runner, &mp(), 1, ProgressOutput::Off);
         assert!(result.is_ok(), "should succeed: {result:?}");
         assert!(
             !runner
@@ -594,7 +598,7 @@ mod tests {
     // Scenario: btrfs filesystem show fails after remove-missing.
     fn maybe_restore_raid1_propagates_probe_failure() {
         let runner = RestoreRunner::failing_probe();
-        let result = maybe_restore_raid1(&runner, "/mnt/storage", 1, ProgressOutput::Off);
+        let result = maybe_restore_raid1(&runner, &mp(), 1, ProgressOutput::Off);
         assert!(result.is_err(), "should propagate probe failure");
         let err = result.unwrap_err().to_string();
         assert!(
@@ -616,7 +620,7 @@ mod tests {
                 .to_owned(),
             exit_status: 1,
         };
-        let err = balance_error("btrfs balance to RAID1", "/mnt/storage", &result);
+        let err = balance_error("btrfs balance to RAID1", &mp(), &result);
         let msg = err.to_string();
         assert!(msg.contains("hint:"), "should contain recovery hint: {msg}");
         assert!(
@@ -641,7 +645,7 @@ mod tests {
                 .to_owned(),
             exit_status: 1,
         };
-        let err = balance_error("btrfs balance to RAID1", "/mnt/storage", &result);
+        let err = balance_error("btrfs balance to RAID1", &mp(), &result);
         let msg = err.to_string();
         assert!(
             !msg.contains("hint:"),
@@ -671,7 +675,7 @@ mod tests {
             &runner,
             2,
             "/dev/mapper/braid-new",
-            "/mnt/storage",
+            &mp(),
             ProgressOutput::Off,
         );
         assert!(
@@ -704,7 +708,7 @@ mod tests {
             &runner,
             2,
             "/dev/mapper/braid-new",
-            "/mnt/storage",
+            &mp(),
             ProgressOutput::Off,
         );
         assert!(result.is_err(), "should propagate btrfs replace failure");

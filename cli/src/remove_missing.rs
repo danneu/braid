@@ -74,7 +74,7 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
 
     let config = config_read(params.config_path)?;
 
-    let pool = match probe_pool(runner, config.mount_point().as_str()) {
+    let pool = match probe_pool(runner, config.mount_point()) {
         Ok(p) => p,
         Err(ProbeError::NotBtrfs { .. }) => {
             return Err(RemoveMissingError::Validation(
@@ -92,7 +92,7 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
 
     // Preflight
     let fsid = pool.fsid.as_deref().expect("mounted pool must have FSID");
-    preflight::require_mutation_preflight(runner, fs, fsid, config.mount_point().as_str())
+    preflight::require_mutation_preflight(runner, fs, fsid, config.mount_point())
         .map_err(RemoveMissingError::Validation)?;
 
     if pool.missing_count == 0 {
@@ -108,7 +108,7 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             params.missing_id
         )));
     }
-    let missing_devids = preflight::probe_missing_devids(runner, config.mount_point().as_str())
+    let missing_devids = preflight::probe_missing_devids(runner, config.mount_point())
         .map_err(RemoveMissingError::Validation)?;
     if !missing_devids.contains(&params.missing_id) {
         return Err(RemoveMissingError::Validation(format!(
@@ -126,11 +126,7 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     // survivor already has all data (every chunk is mirrored). This does
     // not match the reproduced relocation-failure mode.
     if pool.devices.len() >= 2 {
-        check_relocation_space(
-            runner,
-            config.mount_point().as_str(),
-            Some(params.missing_id),
-        )?;
+        check_relocation_space(runner, config.mount_point(), Some(params.missing_id))?;
     }
 
     let will_clear_last_missing = pool.missing_count == 1;
@@ -186,11 +182,11 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         "Removing missing device (devid {}) from pool...",
         resolved_devid
     );
-    pool_remove_devid(runner, config.mount_point().as_str(), resolved_devid)?;
+    pool_remove_devid(runner, config.mount_point(), resolved_devid)?;
 
     crate::pool::maybe_restore_raid1(
         runner,
-        config.mount_point().as_str(),
+        config.mount_point(),
         pool.missing_count,
         params.progress,
     )
@@ -221,11 +217,11 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
 /// proceed — a bug in the safety net shouldn't block a valid operation.
 fn check_relocation_space<R: CommandRunner>(
     runner: &R,
-    mount_point: &str,
+    mount_point: &MountPoint,
     missing_id: Option<u64>,
 ) -> Result<(), RemoveMissingError> {
     let raw = match runner.run(&CmdRequest::BtrfsDeviceUsageRaw {
-        mount_point: MountPoint(mount_point.to_owned()),
+        mount_point: mount_point.clone(),
     }) {
         Ok(r) => r,
         Err(e) => {
@@ -331,6 +327,10 @@ mod tests {
     use crate::probe::Filesystem;
     use crate::state_paths::StatePaths;
     use crate::types::ByIdPath;
+
+    fn mp() -> MountPoint {
+        MountPoint("/mnt/storage".into())
+    }
 
     struct MockFs;
 
@@ -563,7 +563,7 @@ mod tests {
             device_usage_stdout: fixture,
         };
 
-        let result = check_relocation_space(&runner, "/mnt/storage", None);
+        let result = check_relocation_space(&runner, &mp(), None);
         let err = result.expect_err("should reject insufficient space");
         let msg = err.to_string();
         assert!(
@@ -606,7 +606,7 @@ mod tests {
             device_usage_stdout: fixture,
         };
 
-        let result = check_relocation_space(&runner, "/mnt/storage", None);
+        let result = check_relocation_space(&runner, &mp(), None);
         assert!(result.is_ok(), "should pass: {result:?}");
     }
 
@@ -654,11 +654,11 @@ mod tests {
         };
 
         // Targeting devid 2 (50 MB Data) — should pass: RAID1 capacity = 200 MB >= 50 MB
-        let result = check_relocation_space(&runner, "/mnt/storage", Some(2));
+        let result = check_relocation_space(&runner, &mp(), Some(2));
         assert!(result.is_ok(), "targeting devid 2 should pass: {result:?}");
 
         // Targeting devid 3 (5 GB Data) — should fail: RAID1 capacity = 200 MB < 5 GB
-        let result = check_relocation_space(&runner, "/mnt/storage", Some(3));
+        let result = check_relocation_space(&runner, &mp(), Some(3));
         assert!(result.is_err(), "targeting devid 3 should fail");
     }
 
@@ -683,7 +683,7 @@ mod tests {
             }
         }
 
-        let result = check_relocation_space(&FailingRunner, "/mnt/storage", None);
+        let result = check_relocation_space(&FailingRunner, &mp(), None);
         assert!(result.is_ok(), "should proceed on error: {result:?}");
     }
 

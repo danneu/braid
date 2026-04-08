@@ -44,7 +44,7 @@ pub fn cmd_remove<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
 
     let config = config_read(params.config_path)?;
 
-    let pool = match probe_pool(runner, config.mount_point().as_str()) {
+    let pool = match probe_pool(runner, config.mount_point()) {
         Ok(p) => p,
         Err(ProbeError::NotBtrfs { .. }) => {
             return Err(RemoveError::Validation(
@@ -62,7 +62,7 @@ pub fn cmd_remove<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
 
     // Preflight
     let fsid = pool.fsid.as_deref().expect("mounted pool must have FSID");
-    preflight::require_mutation_preflight(runner, fs, fsid, config.mount_point().as_str())
+    preflight::require_mutation_preflight(runner, fs, fsid, config.mount_point())
         .map_err(RemoveError::Validation)?;
 
     let mn = mapper_name(params.name);
@@ -99,7 +99,7 @@ pub fn cmd_remove<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     // This does not match the reproduced relocation-failure mode.
     if remaining > 1
         && let Some(devid) = target_device.map(|d| d.devid) {
-            check_eviction_space(runner, config.mount_point().as_str(), devid)?;
+            check_eviction_space(runner, config.mount_point(), devid)?;
         }
 
     let steps = compile_remove_present_steps(&mn, &pool, config.mount_point())?;
@@ -159,12 +159,7 @@ pub fn cmd_remove<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         .map_err(|e| RemoveError::Validation(e.to_string()))?;
 
     // Execute
-    evict_present_device(
-        runner,
-        &mn.0,
-        config.mount_point().as_str(),
-        params.progress,
-    )?;
+    evict_present_device(runner, &mn.0, config.mount_point(), params.progress)?;
 
     // Post-commit: write pool.json and clear journal.
     membership::save_membership(&target_membership, params.paths)
@@ -183,11 +178,11 @@ pub fn cmd_remove<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
 /// proceed — a bug in the safety net shouldn't block a valid operation.
 fn check_eviction_space<R: CommandRunner>(
     runner: &R,
-    mount_point: &str,
+    mount_point: &MountPoint,
     target_devid: u64,
 ) -> Result<(), RemoveError> {
     let raw = match runner.run(&CmdRequest::BtrfsDeviceUsageRaw {
-        mount_point: MountPoint(mount_point.to_owned()),
+        mount_point: mount_point.clone(),
     }) {
         Ok(r) => r,
         Err(e) => {

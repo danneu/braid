@@ -181,7 +181,7 @@ pub fn cmd_recover<R: CommandRunner, F: Filesystem + ?Sized>(
             // This catches errors like "device X has no by-id path in either snapshot"
             // before claiming recovery is ready.
             let mount_point = params.config.mount_point();
-            let pool = probe::probe_pool(runner, mount_point.as_str())?;
+            let pool = probe::probe_pool(runner, mount_point)?;
             for dev in &pool.devices {
                 let Some(name) = config::name_from_mapper(&dev.mapper.0) else {
                     continue;
@@ -359,7 +359,7 @@ pub fn cmd_recover<R: CommandRunner, F: Filesystem + ?Sized>(
     }
 
     // 3. Probe live pool state
-    let mount_point = params.config.mount_point().as_str();
+    let mount_point = params.config.mount_point();
     let pool = probe::probe_pool(runner, mount_point)?;
 
     // 4. Build new membership from live pool state

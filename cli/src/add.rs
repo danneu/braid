@@ -299,7 +299,7 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     }
 
     // Probe pool + preflight (once)
-    let pool = match probe_pool(runner, config.mount_point().as_str()) {
+    let pool = match probe_pool(runner, config.mount_point()) {
         Ok(p) => p,
         Err(ProbeError::NotBtrfs { fstype, .. }) => {
             return Err(AddError::Validation(format!(
@@ -312,7 +312,7 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
 
     if pool.mounted {
         let fsid = pool.fsid.as_deref().expect("mounted pool must have FSID");
-        preflight::require_mutation_preflight(runner, fs, fsid, config.mount_point().as_str())
+        preflight::require_mutation_preflight(runner, fs, fsid, config.mount_point())
             .map_err(AddError::Validation)?;
     }
     if pool.missing_count > 0 {
@@ -527,20 +527,20 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     if !pool.mounted {
         if mapper_paths.len() >= 2 {
             // Bootstrap with mkfs.btrfs RAID1
-            pool_bootstrap_mount_raid1(runner, &mapper_paths, config.mount_point().as_str())?;
+            pool_bootstrap_mount_raid1(runner, &mapper_paths, config.mount_point())?;
             eprintln!(
                 "Pool created (RAID1) and mounted at {}",
                 config.mount_point()
             );
         } else {
             // Single disk bootstrap
-            pool_bootstrap_mount(runner, &mapper_paths[0], config.mount_point().as_str())?;
+            pool_bootstrap_mount(runner, &mapper_paths[0], config.mount_point())?;
             eprintln!("Pool created and mounted at {}", config.mount_point());
         }
     } else {
         // Add each to existing pool
         for mp in &mapper_paths {
-            pool_add_device(runner, mp, config.mount_point().as_str())?;
+            pool_add_device(runner, mp, config.mount_point())?;
             eprintln!("Device added to pool: {}", mp);
         }
 
@@ -548,7 +548,7 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         let total_after = pool.devices.len() + mapper_paths.len();
         if total_after >= 2 {
             eprintln!("Balancing to RAID1...");
-            pool_balance_raid1(runner, config.mount_point().as_str(), params.progress)?;
+            pool_balance_raid1(runner, config.mount_point(), params.progress)?;
             eprintln!("Balance complete.");
         }
     }
@@ -556,7 +556,7 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     // Post-commit persist: write pool.json only after all disk ops succeed.
     // Enrich with live metadata (luks_uuid, devid) from pool probe.
     let mut final_membership = journal.target_membership.clone();
-    if let Ok(pool_after) = probe_pool(runner, config.mount_point().as_str()) {
+    if let Ok(pool_after) = probe_pool(runner, config.mount_point()) {
         for dev in &pool_after.devices {
             let Some(name) = crate::config::name_from_mapper(&dev.mapper.0) else {
                 continue;

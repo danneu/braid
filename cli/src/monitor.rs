@@ -19,7 +19,7 @@ pub enum MonitorResult {
 
 pub fn cmd_monitor<R: CommandRunner>(
     runner: &R,
-    mount_point: &str,
+    mount_point: &MountPoint,
     paths: &StatePaths,
 ) -> Result<MonitorResult, MonitorError> {
     // 1. Check if pool is mounted
@@ -37,7 +37,7 @@ pub fn cmd_monitor<R: CommandRunner>(
 
     // 2. Run btrfs device stats
     let stats_raw = runner.run(&CmdRequest::BtrfsDeviceStatsJson {
-        mount_point: MountPoint(mount_point.to_owned()),
+        mount_point: mount_point.clone(),
     })?;
     let device_stats = parse_btrfs_device_stats(&stats_raw)?;
 

@@ -91,18 +91,14 @@ pub fn cmd_unlock<R: CommandRunner, F: Filesystem + ?Sized>(
     let mount_point = params.config.mount_point();
 
     // Enrich pool.json with live metadata (luks_uuid, devid) — best-effort.
-    if let Ok(pool_after) = probe::probe_pool(runner, mount_point.as_str()) {
+    if let Ok(pool_after) = probe::probe_pool(runner, mount_point) {
         membership::refresh_pool_metadata(&pool_after, params.paths);
     }
 
     // Best-effort: warn if a paused balance was found on mount.
     // skip_balance prevents the kernel from resuming it silently, but the user
     // should know so they can resume or cancel explicitly.
-    crate::status::emit_paused_balance_warning(
-        runner,
-        mount_point.as_str(),
-        &mut std::io::stderr(),
-    );
+    crate::status::emit_paused_balance_warning(runner, mount_point, &mut std::io::stderr());
 
     Ok(())
 }

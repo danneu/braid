@@ -18,7 +18,7 @@ use crate::types::{ByIdPath, ConfigDiskState, LuksUuid, MountPoint};
 pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
-    mount_point: &str,
+    mount_point: &MountPoint,
     disk_by_id: &HashMap<String, String>,
     paths: &StatePaths,
 ) -> Result<Option<PoolState>, String> {
@@ -30,14 +30,14 @@ pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
 
     let df_raw = runner
         .run(&CmdRequest::BtrfsFilesystemDfJson {
-            mount_point: MountPoint(mount_point.to_owned()),
+            mount_point: mount_point.clone(),
         })
         .map_err(|e| e.to_string())?;
     let df = crate::parse::parse_btrfs_df_json(&df_raw).map_err(|e| e.to_string())?;
 
     let dev_usage_raw = runner
         .run(&CmdRequest::BtrfsDeviceUsageRaw {
-            mount_point: MountPoint(mount_point.to_owned()),
+            mount_point: mount_point.clone(),
         })
         .map_err(|e| e.to_string())?;
     let dev_usage = parse_btrfs_device_usage(&dev_usage_raw).map_err(|e| e.to_string())?;
@@ -69,7 +69,7 @@ pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
 
     let scrub = runner
         .run(&CmdRequest::BtrfsScrubStatus {
-            mount_point: MountPoint(mount_point.to_owned()),
+            mount_point: mount_point.clone(),
         })
         .ok()
         .and_then(|raw| parse_btrfs_scrub_status(&raw).ok())
@@ -123,7 +123,7 @@ pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
 
     let fs_usage_raw = runner
         .run(&CmdRequest::BtrfsFilesystemUsageRaw {
-            mount_point: MountPoint(mount_point.to_owned()),
+            mount_point: mount_point.clone(),
         })
         .map_err(|e| e.to_string())?;
     let fs_usage = parse_btrfs_filesystem_usage(&fs_usage_raw).map_err(|e| e.to_string())?;
@@ -132,7 +132,7 @@ pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
     let mut device_errors = HashMap::new();
     let device_stats_raw = runner
         .run(&CmdRequest::BtrfsDeviceStatsJson {
-            mount_point: MountPoint(mount_point.to_owned()),
+            mount_point: mount_point.clone(),
         })
         .ok();
     let device_stats = device_stats_raw
@@ -216,7 +216,7 @@ pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
     }
 
     Ok(Some(PoolState {
-        mount_point: MountPoint(mount_point.to_owned()),
+        mount_point: mount_point.clone(),
         df_entries: df.entries,
         disk_usage,
         disk_transport,
@@ -415,7 +415,7 @@ mod tests {
         let result = probe_pool_for_tui(
             &runner,
             &StubFs::empty(),
-            "/mnt/storage",
+            &MountPoint("/mnt/storage".into()),
             &HashMap::new(),
             &test_paths().1,
         )
@@ -584,7 +584,13 @@ mod tests {
             ("ironwolf".to_owned(), "/dev/disk/by-id/braid-ironwolf".to_owned()),
         ]);
 
-        let pool = probe_pool_for_tui(&runner, &fs, "/mnt/storage", &disk_by_id, &test_paths().1)
+        let pool = probe_pool_for_tui(
+            &runner,
+            &fs,
+            &MountPoint("/mnt/storage".into()),
+            &disk_by_id,
+            &test_paths().1,
+        )
             .unwrap()
             .expect("pool should be Some");
 
@@ -631,7 +637,13 @@ mod tests {
             ("ironwolf".to_owned(), "/dev/disk/by-id/braid-ironwolf".to_owned()),
         ]);
 
-        let pool = probe_pool_for_tui(&runner, &fs, "/mnt/storage", &disk_by_id, &test_paths().1)
+        let pool = probe_pool_for_tui(
+            &runner,
+            &fs,
+            &MountPoint("/mnt/storage".into()),
+            &disk_by_id,
+            &test_paths().1,
+        )
             .unwrap()
             .expect("pool should be Some");
 
@@ -686,7 +698,13 @@ mod tests {
             ("ironwolf".to_owned(), "/dev/disk/by-id/braid-ironwolf".to_owned()),
         ]);
 
-        let pool = probe_pool_for_tui(&runner, &fs, "/mnt/storage", &disk_by_id, &test_paths().1)
+        let pool = probe_pool_for_tui(
+            &runner,
+            &fs,
+            &MountPoint("/mnt/storage".into()),
+            &disk_by_id,
+            &test_paths().1,
+        )
             .unwrap()
             .expect("pool should be Some");
 
@@ -752,7 +770,13 @@ mod tests {
             ("ironwolf".to_owned(), "/dev/disk/by-id/braid-ironwolf".to_owned()),
         ]);
 
-        let pool = probe_pool_for_tui(&runner, &fs, "/mnt/storage", &disk_by_id, &test_paths().1)
+        let pool = probe_pool_for_tui(
+            &runner,
+            &fs,
+            &MountPoint("/mnt/storage".into()),
+            &disk_by_id,
+            &test_paths().1,
+        )
             .unwrap()
             .expect("pool should be Some");
 

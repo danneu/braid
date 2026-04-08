@@ -297,7 +297,7 @@ pub fn build_status_report<R: CommandRunner, F: Filesystem>(
 ) -> Result<StatusReport, StatusError> {
     let advisories = luks::header_backup_advisories(paths);
 
-    let pool = match probe_pool(runner, config.mount_point().as_str()) {
+    let pool = match probe_pool(runner, config.mount_point()) {
         Ok(p) => p,
         Err(ProbeError::NotBtrfs { .. }) => {
             let code = StatusCode::NotMounted;
@@ -345,10 +345,10 @@ pub fn build_status_report<R: CommandRunner, F: Filesystem>(
         });
     }
 
-    let df_summary = summarize_df(runner, config.mount_point().as_str())?;
-    let capacity = get_capacity(runner, config.mount_point().as_str(), pool.missing_count)?;
-    let last_scrub = get_scrub_report(runner, config.mount_point().as_str());
-    let balance = get_balance_report(runner, config.mount_point().as_str());
+    let df_summary = summarize_df(runner, config.mount_point())?;
+    let capacity = get_capacity(runner, config.mount_point(), pool.missing_count)?;
+    let last_scrub = get_scrub_report(runner, config.mount_point());
+    let balance = get_balance_report(runner, config.mount_point());
 
     let code = if pool.missing_count == 0 {
         StatusCode::Intact
@@ -361,7 +361,7 @@ pub fn build_status_report<R: CommandRunner, F: Filesystem>(
         .iter()
         .map(|(name, member)| probe_config_disk(runner, fs, name, &member.by_id))
         .collect::<Result<Vec<_>, _>>()?;
-    let device_stats = get_device_stats(runner, config.mount_point().as_str())?;
+    let device_stats = get_device_stats(runner, config.mount_point())?;
     let verbose_ctx = build_disk_reports(runner, &config_disks, &pool, &device_stats);
 
     let alert_state = resolve_alert_state(paths);
@@ -396,7 +396,7 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
     let advisories = luks::header_backup_advisories(paths);
 
     // 1. Probe pool, mapping NotBtrfs to not-mounted
-    let pool = match probe_pool(runner, config.mount_point().as_str()) {
+    let pool = match probe_pool(runner, config.mount_point()) {
         Ok(p) => p,
         Err(ProbeError::NotBtrfs { .. }) => PoolState {
             mounted: false,
@@ -447,10 +447,10 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
     };
 
     // 4. Strict data gathering
-    let df_summary = summarize_df(runner, config.mount_point().as_str())?;
-    let capacity = get_capacity(runner, config.mount_point().as_str(), pool.missing_count)?;
-    let last_scrub = get_scrub_report(runner, config.mount_point().as_str());
-    let balance = get_balance_report(runner, config.mount_point().as_str());
+    let df_summary = summarize_df(runner, config.mount_point())?;
+    let capacity = get_capacity(runner, config.mount_point(), pool.missing_count)?;
+    let last_scrub = get_scrub_report(runner, config.mount_point());
+    let balance = get_balance_report(runner, config.mount_point());
 
     // 5. Compute status code
     let code = if pool.missing_count == 0 {
@@ -467,7 +467,7 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
 
     // 8. Per-disk detail
     let verbose_ctx = {
-        let device_stats = get_device_stats(runner, config.mount_point().as_str())?;
+        let device_stats = get_device_stats(runner, config.mount_point())?;
         let config_disks: Vec<ConfigDisk> = membership
             .disks
             .iter()
@@ -558,9 +558,12 @@ struct DfSummary {
     allocation: Vec<AllocationEntry>,
 }
 
-fn summarize_df<R: CommandRunner>(runner: &R, mount_point: &str) -> Result<DfSummary, StatusError> {
+fn summarize_df<R: CommandRunner>(
+    runner: &R,
+    mount_point: &MountPoint,
+) -> Result<DfSummary, StatusError> {
     let raw = runner.run(&CmdRequest::BtrfsFilesystemDfJson {
-        mount_point: MountPoint(mount_point.to_owned()),
+        mount_point: mount_point.clone(),
     })?;
     let df = parse_btrfs_df_json(&raw)?;
 
@@ -600,17 +603,17 @@ fn summarize_df<R: CommandRunner>(runner: &R, mount_point: &str) -> Result<DfSum
 
 fn get_capacity<R: CommandRunner>(
     runner: &R,
-    mount_point: &str,
+    mount_point: &MountPoint,
     missing_count: u64,
 ) -> Result<CapacityReport, StatusError> {
     let raw = runner.run(&CmdRequest::BtrfsFilesystemUsageRaw {
-        mount_point: MountPoint(mount_point.to_owned()),
+        mount_point: mount_point.clone(),
     })?;
     let usage = parse_btrfs_filesystem_usage(&raw)?;
 
     let total_bytes = if missing_count == 0 {
         let dev_raw = runner.run(&CmdRequest::BtrfsDeviceUsageRaw {
-            mount_point: MountPoint(mount_point.to_owned()),
+            mount_point: mount_point.clone(),
         })?;
         let dev_usage = parse_btrfs_device_usage(&dev_raw)?;
         let sizes: Vec<u64> = dev_usage.devices.iter().map(|d| d.device_size).collect();
@@ -628,10 +631,10 @@ fn get_capacity<R: CommandRunner>(
 
 fn get_device_stats<R: CommandRunner>(
     runner: &R,
-    mount_point: &str,
+    mount_point: &MountPoint,
 ) -> Result<BtrfsDeviceStatsOutput, StatusError> {
     let raw = runner.run(&CmdRequest::BtrfsDeviceStatsJson {
-        mount_point: MountPoint(mount_point.to_owned()),
+        mount_point: mount_point.clone(),
     })?;
     let stats = parse_btrfs_device_stats(&raw)?;
     Ok(stats)
@@ -641,9 +644,9 @@ fn get_device_stats<R: CommandRunner>(
 // Private helpers — tolerant (never fail)
 // ---------------------------------------------------------------------------
 
-fn get_scrub_report<R: CommandRunner>(runner: &R, mount_point: &str) -> ScrubReport {
+fn get_scrub_report<R: CommandRunner>(runner: &R, mount_point: &MountPoint) -> ScrubReport {
     let raw = match runner.run(&CmdRequest::BtrfsScrubStatus {
-        mount_point: MountPoint(mount_point.to_owned()),
+        mount_point: mount_point.clone(),
     }) {
         Ok(r) => r,
         Err(_) => return ScrubReport::Unknown,
@@ -677,9 +680,12 @@ fn get_scrub_report<R: CommandRunner>(runner: &R, mount_point: &str) -> ScrubRep
     }
 }
 
-pub(crate) fn get_balance_report<R: CommandRunner>(runner: &R, mount_point: &str) -> BalanceReport {
+pub(crate) fn get_balance_report<R: CommandRunner>(
+    runner: &R,
+    mount_point: &MountPoint,
+) -> BalanceReport {
     let raw = match runner.run(&CmdRequest::BtrfsBalanceStatus {
-        mount_point: MountPoint(mount_point.to_owned()),
+        mount_point: mount_point.clone(),
     }) {
         Ok(r) => r,
         Err(_) => return BalanceReport::Unknown,
@@ -716,7 +722,10 @@ pub(crate) fn get_balance_report<R: CommandRunner>(runner: &R, mount_point: &str
 
 /// Returns a warning message if a paused balance is detected, None otherwise.
 /// Best-effort: command or parse failures return None.
-pub fn paused_balance_warning<R: CommandRunner>(runner: &R, mount_point: &str) -> Option<String> {
+pub fn paused_balance_warning<R: CommandRunner>(
+    runner: &R,
+    mount_point: &MountPoint,
+) -> Option<String> {
     match get_balance_report(runner, mount_point) {
         BalanceReport::Paused { .. } => Some(format!(
             "paused balance detected \u{2014} will not auto-resume\n  \
@@ -731,7 +740,7 @@ pub fn paused_balance_warning<R: CommandRunner>(runner: &R, mount_point: &str) -
 /// Returns true if a warning was emitted.
 pub fn emit_paused_balance_warning<R: CommandRunner>(
     runner: &R,
-    mount_point: &str,
+    mount_point: &MountPoint,
     out: &mut dyn std::io::Write,
 ) -> bool {
     if let Some(warning) = paused_balance_warning(runner, mount_point) {
@@ -1204,6 +1213,10 @@ mod tests {
             stderr: stderr.to_owned(),
             exit_status: exit_code,
         }
+    }
+
+    fn mp() -> MountPoint {
+        MountPoint("/mnt/storage".into())
     }
 
     // --- Mock data builders ---
@@ -1681,9 +1694,9 @@ mod tests {
         let runner = runner_healthy_3disk_base();
         let config = config_3disk();
 
-        let df_summary = summarize_df(&runner, "/mnt/storage").unwrap();
-        let capacity = get_capacity(&runner, "/mnt/storage", 0).unwrap();
-        let last_scrub = get_scrub_report(&runner, "/mnt/storage");
+        let df_summary = summarize_df(&runner, &mp()).unwrap();
+        let capacity = get_capacity(&runner, &mp(), 0).unwrap();
+        let last_scrub = get_scrub_report(&runner, &mp());
 
         let code = StatusCode::Intact;
         let report = StatusReport {
@@ -2508,7 +2521,7 @@ mod tests {
             },
             btrfs_scrub_completed(),
         );
-        let result = get_scrub_report(&runner, "/mnt/storage");
+        let result = get_scrub_report(&runner, &mp());
         match result {
             ScrubReport::Completed {
                 started_at,
@@ -2533,7 +2546,7 @@ mod tests {
             },
             btrfs_scrub_completed_with_errors(),
         );
-        let result = get_scrub_report(&runner, "/mnt/storage");
+        let result = get_scrub_report(&runner, &mp());
         match result {
             ScrubReport::Completed {
                 started_at,
@@ -2554,7 +2567,7 @@ mod tests {
             },
             err_raw("btrfs scrub status", 1, "some error"),
         );
-        let result = get_scrub_report(&runner, "/mnt/storage");
+        let result = get_scrub_report(&runner, &mp());
         assert_eq!(result, ScrubReport::Unknown);
     }
 
@@ -2688,7 +2701,7 @@ mod tests {
             ),
         );
         assert_eq!(
-            get_balance_report(&runner, "/mnt/storage"),
+            get_balance_report(&runner, &mp()),
             BalanceReport::Idle
         );
     }
@@ -2709,7 +2722,7 @@ mod tests {
             },
         );
         assert_eq!(
-            get_balance_report(&runner, "/mnt/storage"),
+            get_balance_report(&runner, &mp()),
             BalanceReport::Running {
                 done_chunks: 3,
                 estimated_total_chunks: 10,
@@ -2735,7 +2748,7 @@ mod tests {
             },
         );
         assert_eq!(
-            get_balance_report(&runner, "/mnt/storage"),
+            get_balance_report(&runner, &mp()),
             BalanceReport::Paused {
                 done_chunks: 5,
                 estimated_total_chunks: 12,
@@ -2754,7 +2767,7 @@ mod tests {
             err_raw("btrfs balance status", 2, "ERROR: not a btrfs filesystem"),
         );
         assert_eq!(
-            get_balance_report(&runner, "/mnt/storage"),
+            get_balance_report(&runner, &mp()),
             BalanceReport::Unknown
         );
     }
@@ -2774,7 +2787,7 @@ mod tests {
                 exit_status: 1,
             },
         );
-        let warning = paused_balance_warning(&runner, "/mnt/storage");
+        let warning = paused_balance_warning(&runner, &mp());
         assert!(
             warning.is_some(),
             "should return warning for paused balance"
@@ -2797,7 +2810,7 @@ mod tests {
             ),
         );
         assert!(
-            paused_balance_warning(&runner, "/mnt/storage").is_none(),
+            paused_balance_warning(&runner, &mp()).is_none(),
             "should return None when no balance is paused"
         );
     }
@@ -2818,7 +2831,7 @@ mod tests {
             },
         );
         let mut buf = Vec::new();
-        let warned = emit_paused_balance_warning(&runner, "/mnt/storage", &mut buf);
+        let warned = emit_paused_balance_warning(&runner, &mp(), &mut buf);
         assert!(warned, "should return true for paused balance");
         let output = String::from_utf8(buf).unwrap();
         assert!(output.contains("paused balance"), "output: {output}");
@@ -2838,7 +2851,7 @@ mod tests {
             ),
         );
         let mut buf = Vec::new();
-        let warned = emit_paused_balance_warning(&runner, "/mnt/storage", &mut buf);
+        let warned = emit_paused_balance_warning(&runner, &mp(), &mut buf);
         assert!(!warned, "should return false when no balance is paused");
         assert!(buf.is_empty(), "should write nothing when idle");
     }
@@ -2946,7 +2959,7 @@ mod tests {
             },
             err_raw("btrfs filesystem df", 1, "not a btrfs filesystem"),
         );
-        let result = summarize_df(&runner, "/mnt/storage");
+        let result = summarize_df(&runner, &mp());
         assert!(result.is_err());
     }
 
@@ -2958,7 +2971,7 @@ mod tests {
             },
             err_raw("btrfs filesystem usage", 1, "error"),
         );
-        let result = get_capacity(&runner, "/mnt/storage", 0);
+        let result = get_capacity(&runner, &mp(), 0);
         assert!(result.is_err());
     }
 
@@ -2970,7 +2983,7 @@ mod tests {
             },
             err_raw("btrfs device stats", 1, "error"),
         );
-        let result = get_device_stats(&runner, "/mnt/storage");
+        let result = get_device_stats(&runner, &mp());
         assert!(result.is_err());
     }
 

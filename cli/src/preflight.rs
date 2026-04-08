@@ -162,9 +162,12 @@ fn check_no_exclusive_op<F: Filesystem + ?Sized>(
 /// Refuse if the pool is mounted read-only.
 /// Runs its own findmnt probe — avoids adding mount_options to PoolState
 /// and touching all 7+ PoolState construction sites.
-fn check_not_read_only<R: CommandRunner>(runner: &R, mount_point: &str) -> Result<(), String> {
+fn check_not_read_only<R: CommandRunner>(
+    runner: &R,
+    mount_point: &MountPoint,
+) -> Result<(), String> {
     let raw = match runner.run(&CmdRequest::FindmntJson {
-        mount_point: MountPoint(mount_point.to_owned()),
+        mount_point: mount_point.clone(),
     }) {
         Ok(r) => r,
         Err(e) => {
@@ -181,7 +184,10 @@ fn check_not_read_only<R: CommandRunner>(runner: &R, mount_point: &str) -> Resul
         }
     };
 
-    let entry = findmnt.filesystems.iter().find(|e| e.target == mount_point);
+    let entry = findmnt
+        .filesystems
+        .iter()
+        .find(|e| e.target == mount_point.as_str());
     if let Some(entry) = entry
         && entry.options.split(',').any(|opt| opt.trim() == "ro") {
             return Err(format!(
@@ -213,11 +219,11 @@ pub fn check_no_missing_devices(missing_count: u64, action: &str) -> Result<(), 
 /// device usage output). Used to validate --missing-id arguments.
 pub fn probe_missing_devids<R: CommandRunner>(
     runner: &R,
-    mount_point: &str,
+    mount_point: &MountPoint,
 ) -> Result<Vec<u64>, String> {
     let raw = runner
         .run(&CmdRequest::BtrfsDeviceUsageRaw {
-            mount_point: MountPoint(mount_point.to_owned()),
+            mount_point: mount_point.clone(),
         })
         .map_err(|e| format!("failed to probe device usage: {e}"))?;
 
@@ -309,7 +315,7 @@ pub fn require_mutation_preflight<R: CommandRunner + Sync, F: Filesystem + ?Size
     runner: &R,
     fs: &F,
     fsid: &str,
-    mount_point: &str,
+    mount_point: &MountPoint,
 ) -> Result<(), String> {
     check_exclusive_op_with_policy(fs, fsid, ExclusiveOpPolicy::RejectPausedBalanceElseEnqueue)?;
     check_not_read_only(runner, mount_point)
@@ -511,9 +517,7 @@ mod tests {
     // Scenario: Normal pool mount with default options.
     fn read_only_passes_when_rw() {
         let runner = MockRunner::default().with_output(
-            CmdRequest::FindmntJson {
-                mount_point: MountPoint("/mnt/storage".to_owned()),
-            },
+            CmdRequest::FindmntJson { mount_point: mp() },
             RawCommandOutput {
                 cmd: "findmnt --json --output TARGET,SOURCE,FSTYPE,OPTIONS --mountpoint /mnt/storage".into(),
                 stdout: r#"{"filesystems":[{"target":"/mnt/storage","source":"/dev/mapper/braid-vdb","fstype":"btrfs","options":"rw,relatime,ssd,space_cache=v2,subvolid=5,subvol=/"}]}"#.into(),
@@ -521,7 +525,7 @@ mod tests {
                 exit_status: 0,
             },
         );
-        assert!(check_not_read_only(&runner, "/mnt/storage").is_ok());
+        assert!(check_not_read_only(&runner, &mp()).is_ok());
     }
 
     #[test]
@@ -530,9 +534,7 @@ mod tests {
     // Scenario: Pool crashed, operator tries `braid remove` on the ro mount.
     fn read_only_refuses_when_ro() {
         let runner = MockRunner::default().with_output(
-            CmdRequest::FindmntJson {
-                mount_point: MountPoint("/mnt/storage".to_owned()),
-            },
+            CmdRequest::FindmntJson { mount_point: mp() },
             RawCommandOutput {
                 cmd: "findmnt --json --output TARGET,SOURCE,FSTYPE,OPTIONS --mountpoint /mnt/storage".into(),
                 stdout: r#"{"filesystems":[{"target":"/mnt/storage","source":"/dev/mapper/braid-vdb","fstype":"btrfs","options":"ro,relatime,ssd,space_cache=v2,subvolid=5,subvol=/"}]}"#.into(),
@@ -540,7 +542,7 @@ mod tests {
                 exit_status: 0,
             },
         );
-        let err = check_not_read_only(&runner, "/mnt/storage").unwrap_err();
+        let err = check_not_read_only(&runner, &mp()).unwrap_err();
         assert!(err.contains("read-only"), "expected 'read-only' in: {err}");
         assert!(
             err.contains("remount"),
@@ -554,7 +556,7 @@ mod tests {
     // Scenario: findmnt not found or permissions issue.
     fn read_only_proceeds_on_probe_failure() {
         let runner = MockRunner::default(); // no mock → MissingMock
-        assert!(check_not_read_only(&runner, "/mnt/storage").is_ok());
+        assert!(check_not_read_only(&runner, &mp()).is_ok());
     }
 
     #[test]
@@ -603,9 +605,7 @@ mod tests {
     // Scenario: 3-disk pool with one missing device (devid 3).
     fn probe_missing_devids_returns_missing() {
         let runner = MockRunner::default().with_output(
-            CmdRequest::BtrfsDeviceUsageRaw {
-                mount_point: MountPoint("/mnt/storage".to_owned()),
-            },
+            CmdRequest::BtrfsDeviceUsageRaw { mount_point: mp() },
             RawCommandOutput {
                 cmd: "btrfs device usage --raw /mnt/storage".into(),
                 stdout: "\
@@ -633,7 +633,7 @@ mod tests {
                 exit_status: 0,
             },
         );
-        let missing = probe_missing_devids(&runner, "/mnt/storage").unwrap();
+        let missing = probe_missing_devids(&runner, &mp()).unwrap();
         assert_eq!(missing, vec![3]);
     }
 
@@ -643,9 +643,7 @@ mod tests {
     // Scenario: Normal 2-disk pool, all present.
     fn probe_missing_devids_returns_empty_when_healthy() {
         let runner = MockRunner::default().with_output(
-            CmdRequest::BtrfsDeviceUsageRaw {
-                mount_point: MountPoint("/mnt/storage".to_owned()),
-            },
+            CmdRequest::BtrfsDeviceUsageRaw { mount_point: mp() },
             RawCommandOutput {
                 cmd: "btrfs device usage --raw /mnt/storage".into(),
                 stdout: "\
@@ -667,7 +665,7 @@ mod tests {
                 exit_status: 0,
             },
         );
-        let missing = probe_missing_devids(&runner, "/mnt/storage").unwrap();
+        let missing = probe_missing_devids(&runner, &mp()).unwrap();
         assert!(missing.is_empty());
     }
 
@@ -881,7 +879,9 @@ mod tests {
 
     // --- require_mutation_preflight tests ---
 
-    const MOUNT: &str = "/mnt/storage";
+    fn mp() -> MountPoint {
+        MountPoint("/mnt/storage".into())
+    }
 
     #[test]
     // Intent: require_mutation_preflight passes when no exclusive op is running
@@ -891,7 +891,7 @@ mod tests {
     fn mutation_preflight_passes_when_none() {
         let fs = MockFs::with_sysfs(FSID, "none\n");
         let runner = MockRunner::default();
-        assert!(require_mutation_preflight(&runner, &fs, FSID, MOUNT).is_ok());
+        assert!(require_mutation_preflight(&runner, &fs, FSID, &mp()).is_ok());
     }
 
     #[test]
@@ -902,7 +902,7 @@ mod tests {
     fn mutation_preflight_rejects_balance_paused() {
         let fs = MockFs::with_sysfs(FSID, "balance paused\n");
         let runner = MockRunner::default();
-        let err = require_mutation_preflight(&runner, &fs, FSID, MOUNT).unwrap_err();
+        let err = require_mutation_preflight(&runner, &fs, FSID, &mp()).unwrap_err();
         assert!(
             err.contains("balance is paused"),
             "expected 'balance is paused' in: {err}"
@@ -919,7 +919,7 @@ mod tests {
     fn mutation_preflight_proceeds_on_busy_op() {
         let fs = MockFs::with_sysfs(FSID, "device add\n");
         let runner = MockRunner::default();
-        assert!(require_mutation_preflight(&runner, &fs, FSID, MOUNT).is_ok());
+        assert!(require_mutation_preflight(&runner, &fs, FSID, &mp()).is_ok());
     }
 
     #[test]
@@ -930,19 +930,18 @@ mod tests {
     fn mutation_preflight_rejects_read_only() {
         let fs = MockFs::with_sysfs(FSID, "none\n");
         let runner = MockRunner::default().with_output(
-            CmdRequest::FindmntJson {
-                mount_point: MountPoint(MOUNT.to_owned()),
-            },
+            CmdRequest::FindmntJson { mount_point: mp() },
             RawCommandOutput {
                 cmd: "findmnt".into(),
                 stdout: format!(
-                    r#"{{"filesystems": [{{"target": "{MOUNT}", "source": "/dev/mapper/braid-a", "fstype": "btrfs", "options": "ro,space_cache=v2"}}]}}"#
+                    r#"{{"filesystems": [{{"target": "{mount}", "source": "/dev/mapper/braid-a", "fstype": "btrfs", "options": "ro,space_cache=v2"}}]}}"#,
+                    mount = mp(),
                 ),
                 stderr: String::new(),
                 exit_status: 0,
             },
         );
-        let err = require_mutation_preflight(&runner, &fs, FSID, MOUNT).unwrap_err();
+        let err = require_mutation_preflight(&runner, &fs, FSID, &mp()).unwrap_err();
         assert!(
             err.contains("read-only"),
             "expected 'read-only' in: {err}"

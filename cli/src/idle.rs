@@ -46,17 +46,18 @@ pub enum IdleError {
     Parse(#[from] ParseError),
 }
 
-pub fn cmd_idle<R: CommandRunner>(runner: &R, mount_point: &str) -> Result<IdleResult, IdleError> {
+pub fn cmd_idle<R: CommandRunner>(
+    runner: &R,
+    mount_point: &MountPoint,
+) -> Result<IdleResult, IdleError> {
     // 1. Check if pool is mounted
     if !is_btrfs_mounted(runner, mount_point)? {
         return Ok(IdleResult::PoolOffline);
     }
 
-    let mp = MountPoint(mount_point.to_owned());
-
     // 2. Check scrub
     let scrub_raw = runner.run(&CmdRequest::BtrfsScrubStatus {
-        mount_point: mp.clone(),
+        mount_point: mount_point.clone(),
     })?;
     let scrub = parse_btrfs_scrub_status(&scrub_raw)?;
     if let ScrubState::Running { pct, .. } = scrub.state {
@@ -65,7 +66,7 @@ pub fn cmd_idle<R: CommandRunner>(runner: &R, mount_point: &str) -> Result<IdleR
 
     // 3. Check balance / device-remove
     let balance_raw = runner.run(&CmdRequest::BtrfsBalanceStatus {
-        mount_point: mp.clone(),
+        mount_point: mount_point.clone(),
     })?;
     let balance = parse_btrfs_balance_status(&balance_raw)?;
     match balance.state {
@@ -79,7 +80,9 @@ pub fn cmd_idle<R: CommandRunner>(runner: &R, mount_point: &str) -> Result<IdleR
     }
 
     // 4. Check replace
-    let replace_raw = runner.run(&CmdRequest::BtrfsReplaceStatus { mount_point: mp })?;
+    let replace_raw = runner.run(&CmdRequest::BtrfsReplaceStatus {
+        mount_point: mount_point.clone(),
+    })?;
     let replace = parse_btrfs_replace_status(&replace_raw)?;
     if let ReplaceState::Running { pct } = replace.state {
         return Ok(IdleResult::Busy(BusyReason::ReplaceRunning { pct }));
@@ -90,12 +93,18 @@ pub fn cmd_idle<R: CommandRunner>(runner: &R, mount_point: &str) -> Result<IdleR
 
 /// Check whether the mount point is a mounted btrfs filesystem.
 /// Returns false if not mounted or not btrfs.
-fn is_btrfs_mounted<R: CommandRunner>(runner: &R, mount_point: &str) -> Result<bool, IdleError> {
+fn is_btrfs_mounted<R: CommandRunner>(
+    runner: &R,
+    mount_point: &MountPoint,
+) -> Result<bool, IdleError> {
     let findmnt_raw = runner.run(&CmdRequest::FindmntJson {
-        mount_point: MountPoint(mount_point.to_owned()),
+        mount_point: mount_point.clone(),
     })?;
     let findmnt = parse_findmnt_json(&findmnt_raw)?;
-    let entry = findmnt.filesystems.iter().find(|e| e.target == mount_point);
+    let entry = findmnt
+        .filesystems
+        .iter()
+        .find(|e| e.target == mount_point.as_str());
     match entry {
         None => Ok(false),
         Some(e) => Ok(e.fstype == "btrfs"),
@@ -107,7 +116,9 @@ mod tests {
     use super::*;
     use crate::cmd::{MockRunner, RawCommandOutput};
 
-    const MP: &str = "/mnt/storage";
+    fn mp() -> MountPoint {
+        MountPoint("/mnt/storage".into())
+    }
 
     fn findmnt_json(mounted: bool) -> RawCommandOutput {
         let stdout = if mounted {
@@ -126,27 +137,21 @@ mod tests {
 
     fn findmnt_mounted() -> (CmdRequest, RawCommandOutput) {
         (
-            CmdRequest::FindmntJson {
-                mount_point: MountPoint(MP.to_owned()),
-            },
+            CmdRequest::FindmntJson { mount_point: mp() },
             findmnt_json(true),
         )
     }
 
     fn findmnt_not_mounted() -> (CmdRequest, RawCommandOutput) {
         (
-            CmdRequest::FindmntJson {
-                mount_point: MountPoint(MP.to_owned()),
-            },
+            CmdRequest::FindmntJson { mount_point: mp() },
             findmnt_json(false),
         )
     }
 
     fn scrub_completed() -> (CmdRequest, RawCommandOutput) {
         (
-            CmdRequest::BtrfsScrubStatus {
-                mount_point: MountPoint(MP.to_owned()),
-            },
+            CmdRequest::BtrfsScrubStatus { mount_point: mp() },
             RawCommandOutput {
                 cmd: "btrfs scrub status --raw /mnt/storage".into(),
                 stdout: "UUID:             12345678-1234-1234-1234-123456789abc\n\
@@ -165,9 +170,7 @@ mod tests {
 
     fn scrub_running(pct: u8) -> (CmdRequest, RawCommandOutput) {
         (
-            CmdRequest::BtrfsScrubStatus {
-                mount_point: MountPoint(MP.to_owned()),
-            },
+            CmdRequest::BtrfsScrubStatus { mount_point: mp() },
             RawCommandOutput {
                 cmd: "btrfs scrub status --raw /mnt/storage".into(),
                 stdout: format!(
@@ -188,9 +191,7 @@ mod tests {
 
     fn balance_none() -> (CmdRequest, RawCommandOutput) {
         (
-            CmdRequest::BtrfsBalanceStatus {
-                mount_point: MountPoint(MP.to_owned()),
-            },
+            CmdRequest::BtrfsBalanceStatus { mount_point: mp() },
             RawCommandOutput {
                 cmd: "btrfs balance status /mnt/storage".into(),
                 stdout: "No balance found on '/mnt/storage'\n".into(),
@@ -202,9 +203,7 @@ mod tests {
 
     fn balance_running(pct_left: u8) -> (CmdRequest, RawCommandOutput) {
         (
-            CmdRequest::BtrfsBalanceStatus {
-                mount_point: MountPoint(MP.to_owned()),
-            },
+            CmdRequest::BtrfsBalanceStatus { mount_point: mp() },
             RawCommandOutput {
                 cmd: "btrfs balance status /mnt/storage".into(),
                 stdout: format!(
@@ -219,9 +218,7 @@ mod tests {
 
     fn balance_paused(pct_left: u8) -> (CmdRequest, RawCommandOutput) {
         (
-            CmdRequest::BtrfsBalanceStatus {
-                mount_point: MountPoint(MP.to_owned()),
-            },
+            CmdRequest::BtrfsBalanceStatus { mount_point: mp() },
             RawCommandOutput {
                 cmd: "btrfs balance status /mnt/storage".into(),
                 stdout: format!(
@@ -236,9 +233,7 @@ mod tests {
 
     fn replace_none() -> (CmdRequest, RawCommandOutput) {
         (
-            CmdRequest::BtrfsReplaceStatus {
-                mount_point: MountPoint(MP.to_owned()),
-            },
+            CmdRequest::BtrfsReplaceStatus { mount_point: mp() },
             RawCommandOutput {
                 cmd: "btrfs replace status /mnt/storage".into(),
                 stdout: String::new(),
@@ -251,7 +246,7 @@ mod tests {
     fn replace_running(pct: f64) -> (CmdRequest, RawCommandOutput) {
         (
             CmdRequest::BtrfsReplaceStatus {
-                mount_point: MountPoint(MP.to_owned()),
+                mount_point: mp(),
             },
             RawCommandOutput {
                 cmd: "btrfs replace status /mnt/storage".into(),
@@ -271,7 +266,7 @@ mod tests {
     fn idle_when_pool_offline() {
         let (req, out) = findmnt_not_mounted();
         let runner = MockRunner::default().with_output(req, out);
-        let result = cmd_idle(&runner, MP).unwrap();
+        let result = cmd_idle(&runner, &mp()).unwrap();
         assert_eq!(result, IdleResult::PoolOffline);
     }
 
@@ -291,7 +286,7 @@ mod tests {
             .with_output(bal_req, bal_out)
             .with_output(rep_req, rep_out);
 
-        let result = cmd_idle(&runner, MP).unwrap();
+        let result = cmd_idle(&runner, &mp()).unwrap();
         assert_eq!(result, IdleResult::Idle);
     }
 
@@ -307,7 +302,7 @@ mod tests {
             .with_output(fmnt_req, fmnt_out)
             .with_output(scrub_req, scrub_out);
 
-        let result = cmd_idle(&runner, MP).unwrap();
+        let result = cmd_idle(&runner, &mp()).unwrap();
         assert_eq!(
             result,
             IdleResult::Busy(BusyReason::ScrubRunning { pct: Some(45) })
@@ -328,7 +323,7 @@ mod tests {
             .with_output(scrub_req, scrub_out)
             .with_output(bal_req, bal_out);
 
-        let result = cmd_idle(&runner, MP).unwrap();
+        let result = cmd_idle(&runner, &mp()).unwrap();
         assert_eq!(
             result,
             IdleResult::Busy(BusyReason::BalanceRunning { pct_left: 70 })
@@ -350,7 +345,7 @@ mod tests {
             .with_output(scrub_req, scrub_out)
             .with_output(bal_req, bal_out);
 
-        let result = cmd_idle(&runner, MP).unwrap();
+        let result = cmd_idle(&runner, &mp()).unwrap();
         assert_eq!(
             result,
             IdleResult::Busy(BusyReason::BalancePaused { pct_left: 58 })
@@ -373,7 +368,7 @@ mod tests {
             .with_output(bal_req, bal_out)
             .with_output(rep_req, rep_out);
 
-        let result = cmd_idle(&runner, MP).unwrap();
+        let result = cmd_idle(&runner, &mp()).unwrap();
         assert_eq!(
             result,
             IdleResult::Busy(BusyReason::ReplaceRunning { pct: 45.3 })
@@ -390,7 +385,7 @@ mod tests {
         // No scrub mock → MissingMock error when scrub is queried
         let runner = MockRunner::default().with_output(fmnt_req, fmnt_out);
 
-        let result = cmd_idle(&runner, MP);
+        let result = cmd_idle(&runner, &mp());
         assert!(result.is_err());
     }
 
@@ -409,7 +404,7 @@ mod tests {
             .with_output(fmnt_req, fmnt_out)
             .with_output(scrub_req, scrub_out);
 
-        let result = cmd_idle(&runner, MP).unwrap();
+        let result = cmd_idle(&runner, &mp()).unwrap();
         assert_eq!(
             result,
             IdleResult::Busy(BusyReason::ScrubRunning { pct: Some(10) })
@@ -432,9 +427,7 @@ mod tests {
             .with_output(scrub_req, scrub_out)
             .with_output(bal_req, bal_out)
             .with_output(
-                CmdRequest::BtrfsReplaceStatus {
-                    mount_point: MountPoint(MP.to_owned()),
-                },
+                CmdRequest::BtrfsReplaceStatus { mount_point: mp() },
                 RawCommandOutput {
                     cmd: "btrfs replace status /mnt/storage".into(),
                     stdout: String::new(),
@@ -443,7 +436,7 @@ mod tests {
                 },
             );
 
-        let result = cmd_idle(&runner, MP);
+        let result = cmd_idle(&runner, &mp());
         let err = result.unwrap_err();
         assert!(
             matches!(

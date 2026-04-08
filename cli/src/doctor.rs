@@ -505,9 +505,9 @@ fn check_pool_missing_devices<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) 
         _ => {}
     }
 
-    let mount_point = ctx.config.as_ref().unwrap().mount_point().to_owned();
+    let mount_point = ctx.config.as_ref().unwrap().mount_point().clone();
 
-    match preflight::probe_missing_devids(ctx.runner, mount_point.as_str()) {
+    match preflight::probe_missing_devids(ctx.runner, &mount_point) {
         Ok(missing) if missing.is_empty() => CheckResult {
             name: "pool_missing_devices".into(),
             status: CheckStatus::Ok,

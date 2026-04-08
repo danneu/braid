@@ -482,7 +482,7 @@ fn main() {
                 }
             };
             let runner = RealRunner;
-            match braid_cli::idle::cmd_idle(&runner, config.mount_point().as_str()) {
+            match braid_cli::idle::cmd_idle(&runner, config.mount_point()) {
                 Ok(braid_cli::idle::IdleResult::PoolOffline) => {
                     println!("idle: pool is offline");
                     std::process::exit(0);
@@ -510,7 +510,7 @@ fn main() {
                 }
             };
             let runner = RealRunner;
-            match braid_cli::monitor::cmd_monitor(&runner, config.mount_point().as_str(), &paths) {
+            match braid_cli::monitor::cmd_monitor(&runner, config.mount_point(), &paths) {
                 Ok(braid_cli::monitor::MonitorResult::PoolOffline) => {
                     std::process::exit(0);
                 }
@@ -535,8 +535,7 @@ fn main() {
                 }
             };
             let runner = RealRunner;
-            if let Err(e) = braid_cli::ack::cmd_ack(&runner, config.mount_point().as_str(), &paths)
-            {
+            if let Err(e) = braid_cli::ack::cmd_ack(&runner, config.mount_point(), &paths) {
                 print_cli_error(&e.to_string());
                 std::process::exit(1);
             }

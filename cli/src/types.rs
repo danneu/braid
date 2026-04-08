@@ -47,18 +47,6 @@ impl fmt::Display for MountPoint {
     }
 }
 
-impl AsRef<str> for MountPoint {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
-
-impl AsRef<std::path::Path> for MountPoint {
-    fn as_ref(&self) -> &std::path::Path {
-        std::path::Path::new(&self.0)
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Planner input types (produced by probe, consumed by commands)
 // ---------------------------------------------------------------------------

@@ -67,7 +67,7 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         .map_err(|e| ReplaceError::Validation(e.to_string()))?;
     let new_name = new_name_parsed.as_str();
 
-    let pool = match probe_pool(runner, config.mount_point().as_str()) {
+    let pool = match probe_pool(runner, config.mount_point()) {
         Ok(p) => p,
         Err(ProbeError::NotBtrfs { .. }) => {
             return Err(ReplaceError::Validation(
@@ -85,7 +85,7 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
 
     // Preflight
     let fsid = pool.fsid.as_deref().expect("mounted pool must have FSID");
-    preflight::require_mutation_preflight(runner, fs, fsid, config.mount_point().as_str())
+    preflight::require_mutation_preflight(runner, fs, fsid, config.mount_point())
         .map_err(ReplaceError::Validation)?;
 
     // --old == --new: reject early.
@@ -103,7 +103,7 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         &old_mn,
         params.missing_id,
         &pool,
-        config.mount_point().as_str(),
+        config.mount_point(),
     )?;
 
     // Probe --new disk state
@@ -317,12 +317,12 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
                 runner,
                 *devid,
                 &new_mapper_path,
-                config.mount_point().as_str(),
+                config.mount_point(),
                 params.progress,
             )?;
             eprintln!("Replace complete.");
 
-            pool_resize_device(runner, *devid, config.mount_point().as_str())?;
+            pool_resize_device(runner, *devid, config.mount_point())?;
 
             // Best-effort LUKS close of old mapper.
             let close_result = runner.run(&CmdRequest::CryptsetupClose {
@@ -349,12 +349,12 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
                 runner,
                 *devid,
                 &new_mapper_path,
-                config.mount_point().as_str(),
+                config.mount_point(),
                 params.progress,
             )?;
             eprintln!("Replace complete.");
 
-            pool_resize_device(runner, *devid, config.mount_point().as_str())?;
+            pool_resize_device(runner, *devid, config.mount_point())?;
             // No old mapper to close — device was already missing.
         }
     }
@@ -366,7 +366,7 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     if matches!(&replace_source, ReplaceSource::Missing { .. }) {
         crate::pool::maybe_restore_raid1(
             runner,
-            config.mount_point().as_str(),
+            config.mount_point(),
             pre_op_missing_count,
             params.progress,
         )
@@ -375,7 +375,7 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
 
     // Post-commit: write pool.json with enriched metadata and clear journal.
     let mut final_membership = target_membership;
-    if let Ok(pool_after) = probe_pool(runner, config.mount_point().as_str()) {
+    if let Ok(pool_after) = probe_pool(runner, config.mount_point()) {
         for dev in &pool_after.devices {
             let Some(name) = crate::config::name_from_mapper(&dev.mapper.0) else {
                 continue;
@@ -425,7 +425,7 @@ fn resolve_replace_source<R: CommandRunner>(
     old_mn: &MapperName,
     missing_id: Option<u64>,
     pool: &PoolState,
-    mount_point: &str,
+    mount_point: &MountPoint,
 ) -> Result<ReplaceSource, ReplaceError> {
     let old_in_pool = pool.devices.iter().any(|d| d.mapper == *old_mn);
 
@@ -768,6 +768,10 @@ mod tests {
         (tmp, paths)
     }
 
+    fn mp() -> MountPoint {
+        MountPoint("/mnt/storage".into())
+    }
+
     #[test]
     fn replace_confirm_warns_about_luks_format_for_non_luks_disk() {
         let new_hw = confirm::DiskHwInfo {
@@ -883,9 +887,7 @@ mod tests {
             output.push_str("   Unallocated:                  0\n\n");
         }
         MockRunner::default().with_output(
-            CmdRequest::BtrfsDeviceUsageRaw {
-                mount_point: MountPoint("/mnt/storage".to_owned()),
-            },
+            CmdRequest::BtrfsDeviceUsageRaw { mount_point: mp() },
             RawCommandOutput {
                 cmd: "btrfs device usage --raw /mnt/storage".into(),
                 stdout: output,
@@ -903,7 +905,7 @@ mod tests {
         let pool = two_device_pool();
         let runner = MockRunner::default();
         let mn = MapperName("braid-disk2".into());
-        let result = resolve_replace_source(&runner, "disk2", &mn, None, &pool, "/mnt/storage");
+        let result = resolve_replace_source(&runner, "disk2", &mn, None, &pool, &mp());
         assert!(
             matches!(result, Ok(ReplaceSource::Live { .. })),
             "expected Live target, got: {result:?}"
@@ -918,7 +920,7 @@ mod tests {
         let pool = two_device_pool();
         let runner = MockRunner::default();
         let mn = MapperName("braid-disk2".into());
-        let err = resolve_replace_source(&runner, "disk2", &mn, Some(99), &pool, "/mnt/storage")
+        let err = resolve_replace_source(&runner, "disk2", &mn, Some(99), &pool, &mp())
             .unwrap_err();
         assert!(
             err.to_string().contains("--missing-id cannot be used"),
@@ -937,7 +939,7 @@ mod tests {
         let runner = MockRunner::default();
         let mn = MapperName("braid-disk2".into());
         let err =
-            resolve_replace_source(&runner, "disk2", &mn, None, &pool, "/mnt/storage").unwrap_err();
+            resolve_replace_source(&runner, "disk2", &mn, None, &pool, &mp()).unwrap_err();
         assert!(
             err.to_string().contains("missing device"),
             "unexpected error: {err}"
@@ -1203,7 +1205,7 @@ mod tests {
         pool.total_devices = 2;
         let runner = mock_with_missing_devids(&[2]);
         let mn = MapperName("braid-disk2".into());
-        let result = resolve_replace_source(&runner, "disk2", &mn, None, &pool, "/mnt/storage");
+        let result = resolve_replace_source(&runner, "disk2", &mn, None, &pool, &mp());
         assert!(
             matches!(result, Ok(ReplaceSource::Missing { devid: 2 })),
             "expected Missing {{ devid: 2 }}, got: {result:?}"
@@ -1221,7 +1223,7 @@ mod tests {
         pool.total_devices = 2;
         let runner = mock_with_missing_devids(&[2]);
         let mn = MapperName("braid-disk2".into());
-        let result = resolve_replace_source(&runner, "disk2", &mn, Some(2), &pool, "/mnt/storage");
+        let result = resolve_replace_source(&runner, "disk2", &mn, Some(2), &pool, &mp());
         assert!(
             matches!(result, Ok(ReplaceSource::Missing { devid: 2 })),
             "expected Missing {{ devid: 2 }}, got: {result:?}"
@@ -1241,7 +1243,7 @@ mod tests {
         let runner = mock_with_missing_devids(&[2]);
         let mn = MapperName("braid-disk2".into());
         // Devid 1 is live (in pool.devices)
-        let err = resolve_replace_source(&runner, "disk2", &mn, Some(1), &pool, "/mnt/storage")
+        let err = resolve_replace_source(&runner, "disk2", &mn, Some(1), &pool, &mp())
             .unwrap_err();
         assert!(
             err.to_string().contains("live device"),
@@ -1260,7 +1262,7 @@ mod tests {
         pool.total_devices = 2;
         let runner = mock_with_missing_devids(&[2]);
         let mn = MapperName("braid-disk2".into());
-        let err = resolve_replace_source(&runner, "disk2", &mn, Some(99), &pool, "/mnt/storage")
+        let err = resolve_replace_source(&runner, "disk2", &mn, Some(99), &pool, &mp())
             .unwrap_err();
         assert!(
             err.to_string().contains("not a missing device"),
@@ -1280,7 +1282,7 @@ mod tests {
         let runner = mock_with_missing_devids(&[2, 3]);
         let mn = MapperName("braid-disk2".into());
         let err =
-            resolve_replace_source(&runner, "disk2", &mn, None, &pool, "/mnt/storage").unwrap_err();
+            resolve_replace_source(&runner, "disk2", &mn, None, &pool, &mp()).unwrap_err();
         assert!(
             err.to_string().contains("multiple missing"),
             "expected 'multiple missing' error, got: {err}"

@@ -133,7 +133,7 @@ fn clear_progress_line() {
 pub fn run_with_progress<R: CommandRunner + Sync>(
     runner: &R,
     request: &CmdRequest,
-    mount_point: &str,
+    mount_point: &MountPoint,
     output: ProgressOutput,
 ) -> Result<RawCommandOutput, CmdError> {
     if output == ProgressOutput::Off {
@@ -154,7 +154,7 @@ pub fn run_with_progress<R: CommandRunner + Sync>(
 
             // Poll balance status
             let poll = runner.run(&CmdRequest::BtrfsBalanceStatus {
-                mount_point: MountPoint(mount_point.to_owned()),
+                mount_point: mount_point.clone(),
             });
             if let Ok(ref raw) = poll
                 && let Ok(status) = parse_btrfs_balance_status(raw) {
@@ -208,7 +208,7 @@ pub fn run_with_progress<R: CommandRunner + Sync>(
 pub fn run_replace_with_progress<R: CommandRunner + Sync>(
     runner: &R,
     request: &CmdRequest,
-    mount_point: &str,
+    mount_point: &MountPoint,
     output: ProgressOutput,
 ) -> Result<RawCommandOutput, CmdError> {
     if output == ProgressOutput::Off {
@@ -227,7 +227,7 @@ pub fn run_replace_with_progress<R: CommandRunner + Sync>(
             std::thread::sleep(std::time::Duration::from_secs(1));
 
             let poll = runner.run(&CmdRequest::BtrfsReplaceStatus {
-                mount_point: MountPoint(mount_point.to_owned()),
+                mount_point: mount_point.clone(),
             });
             if let Ok(ref raw) = poll
                 && let Ok(status) = parse_btrfs_replace_status(raw) {
@@ -396,6 +396,10 @@ mod tests {
         }
     }
 
+    fn mp() -> MountPoint {
+        MountPoint("/mnt/storage".into())
+    }
+
     #[test]
     fn balance_progress_fast_finish_before_first_poll() {
         // MockRunner returns instantly — command finishes before any poll happens.
@@ -412,7 +416,7 @@ mod tests {
             &CmdRequest::BtrfsBalanceRaid1 {
                 mount_point: MountPoint("/mnt/storage".to_owned()),
             },
-            "/mnt/storage",
+            &mp(),
             ProgressOutput::Human,
         );
         assert!(result.is_ok());
@@ -440,7 +444,7 @@ mod tests {
             &CmdRequest::BtrfsBalanceRaid1 {
                 mount_point: MountPoint("/mnt/storage".to_owned()),
             },
-            "/mnt/storage",
+            &mp(),
             ProgressOutput::Human,
         );
         assert!(result.is_ok());
@@ -461,7 +465,7 @@ mod tests {
             &CmdRequest::BtrfsBalanceRaid1 {
                 mount_point: MountPoint("/mnt/storage".to_owned()),
             },
-            "/mnt/storage",
+            &mp(),
             ProgressOutput::Human,
         );
         // The raw result has exit_status=1, but CmdError is not returned for non-zero exits.
@@ -485,7 +489,7 @@ mod tests {
             &CmdRequest::BtrfsBalanceRaid1 {
                 mount_point: MountPoint("/mnt/storage".to_owned()),
             },
-            "/mnt/storage",
+            &mp(),
             ProgressOutput::Off,
         );
         assert!(result.is_ok());
@@ -524,7 +528,7 @@ mod tests {
                 target_device: "/dev/mapper/new".to_owned(),
                 mount_point: MountPoint("/mnt/storage".to_owned()),
             },
-            "/mnt/storage",
+            &mp(),
             ProgressOutput::Human,
         );
         assert!(result.is_ok());
@@ -555,7 +559,7 @@ mod tests {
                 target_device: "/dev/mapper/new".to_owned(),
                 mount_point: MountPoint("/mnt/storage".to_owned()),
             },
-            "/mnt/storage",
+            &mp(),
             ProgressOutput::Human,
         );
         assert!(result.is_ok());
@@ -579,7 +583,7 @@ mod tests {
                 target_device: "/dev/mapper/new".to_owned(),
                 mount_point: MountPoint("/mnt/storage".to_owned()),
             },
-            "/mnt/storage",
+            &mp(),
             ProgressOutput::Human,
         );
         let raw = result.unwrap();
