@@ -3,11 +3,11 @@ use crate::cmd::RawCommandOutput;
 use super::types::{BtrfsReplaceStatusOutput, ReplaceState};
 use super::ParseError;
 
-/// Parse the output of `btrfs replace status <mount_point>`.
+/// Parse the output of `btrfs replace status -1 <mount_point>`.
 ///
-/// Possible outputs:
-/// - Running: "Started on ...  45.3% done, ..."
-/// - Finished: "Started on ... finished on ..."
+/// Possible outputs (per reference/btrfs-progs/cmds/replace.c:451-505):
+/// - Running:  "45.3% done, 0 write errs, 0 uncorr. read errs"
+/// - Finished: "Started on <t1>, finished on <t2>, 0 write errs, 0 uncorr. read errs"
 /// - Not running: "no operation running" or empty stdout
 pub fn parse_btrfs_replace_status(
     raw: &RawCommandOutput,
@@ -75,11 +75,17 @@ mod tests {
     }
 
     #[test]
+    // Intent: parse the real upstream STARTED-state output of
+    //   `btrfs replace status -1`.
+    // Why: replace.c:451-505 prints "<pct>% done, <n> write errs, <n> uncorr.
+    //   read errs" — there is no "Started on …, running, pid: …" prefix in
+    //   the running state. Earlier versions of this test used a fictional
+    //   prefix that production never produces, masking the fact that the
+    //   `Running { pct }` branch was untested against real bytes.
     fn running_with_percentage() {
-        let out = parse_btrfs_replace_status(&raw(
-            "Started on 27.Feb 10:30:00, running, pid: 1234, 45.3% done, 0 write errs, 0 uncorr. read errs\n",
-        ))
-        .unwrap();
+        let out =
+            parse_btrfs_replace_status(&raw("45.3% done, 0 write errs, 0 uncorr. read errs\n"))
+                .unwrap();
         match out.state {
             ReplaceState::Running { pct } => {
                 assert!((pct - 45.3).abs() < 0.01, "expected 45.3, got {pct}");
@@ -110,11 +116,14 @@ mod tests {
     }
 
     #[test]
+    // Intent: parse the real upstream STARTED-state output at the upper bound.
+    // Why: the kernel reports progress as a per-mille count (replace.c via
+    //   `progress2string`); 1000/1000 renders as "100.0% done". Same fictional
+    //   prefix removal as `running_with_percentage`.
     fn running_100_percent() {
-        let out = parse_btrfs_replace_status(&raw(
-            "Started on 27.Feb 10:30:00, running, pid: 5678, 100.0% done, 0 write errs, 0 uncorr. read errs\n",
-        ))
-        .unwrap();
+        let out =
+            parse_btrfs_replace_status(&raw("100.0% done, 0 write errs, 0 uncorr. read errs\n"))
+                .unwrap();
         match out.state {
             ReplaceState::Running { pct } => {
                 assert!((pct - 100.0).abs() < 0.01, "expected 100.0, got {pct}");

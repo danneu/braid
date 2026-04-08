@@ -578,7 +578,19 @@ impl CmdRequest {
             },
             CmdRequest::BtrfsReplaceStatus { mount_point } => CmdArgs {
                 program: "btrfs",
-                args: vec!["replace".into(), "status".into(), mount_point.0.clone()],
+                // -1: print one snapshot and return immediately. Without this,
+                // `btrfs replace status` loops with sleep(1) on the STARTED
+                // state until the kernel reports FINISHED — see
+                // reference/btrfs-progs/cmds/replace.c:451-505. Every braid
+                // caller (idle, progress, recover) assumes a single-shot
+                // read; without -1 they all block until the replace finishes,
+                // which breaks the autosuspend integration in idle.rs.
+                args: vec![
+                    "replace".into(),
+                    "status".into(),
+                    "-1".into(),
+                    mount_point.0.clone(),
+                ],
             },
             CmdRequest::BtrfsFilesystemResize { devid, mount_point } => CmdArgs {
                 program: "btrfs",
@@ -1120,6 +1132,30 @@ mod tests {
             cmd.args.iter().any(|a| a == "-r"),
             "btrfs replace start must include -r flag to read from mirrors, got: {:?}",
             cmd.args
+        );
+    }
+
+    #[test]
+    // Intent: Lock the `-1` flag into BtrfsReplaceStatus's argv so the cmd
+    // helper always asks btrfs for a single status snapshot.
+    // Why: Without `-1`, btrfs replace status loops with sleep(1) on the
+    // STARTED state until the kernel reports FINISHED — see
+    // reference/btrfs-progs/cmds/replace.c:451-505. Every braid caller
+    // (idle, progress, recover) blocks for the entire duration of an
+    // in-flight replace, breaking the autosuspend integration in idle.rs.
+    // Scenario: a future refactor strips `-1` from the args (e.g. while
+    // adding a continuous-poll variant). This test fails immediately.
+    fn btrfs_replace_status_includes_minus_one() {
+        let cmd = CmdRequest::BtrfsReplaceStatus {
+            mount_point: MountPoint("/mnt/storage".to_owned()),
+        }
+        .to_argv();
+        assert_eq!(cmd.program, "btrfs");
+        assert_eq!(
+            cmd.args,
+            vec!["replace", "status", "-1", "/mnt/storage"],
+            "BtrfsReplaceStatus must pass `-1` to avoid blocking until the \
+             replace finishes — see reference/btrfs-progs/cmds/replace.c:451-505",
         );
     }
 
