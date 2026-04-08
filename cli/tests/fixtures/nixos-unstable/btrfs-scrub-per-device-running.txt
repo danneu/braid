@@ -1,0 +1,61 @@
+UUID:             c0a70e4b-3551-4f26-85ed-4f46fcc65384
+
+Scrub device /dev/mapper/disk1 (id 1) history
+Scrub started:    Wed Apr  8 17:07:26 2026
+Status:           running
+Duration:         0:00:01
+	data_extents_scrubbed: 24448
+	tree_extents_scrubbed: 109
+	data_bytes_scrubbed: 1602224128
+	tree_bytes_scrubbed: 1785856
+	read_errors: 0
+	csum_errors: 0
+	verify_errors: 0
+	no_csum: 0
+	csum_discards: 0
+	super_errors: 0
+	malloc_errors: 0
+	uncorrectable_errors: 0
+	unverified_errors: 0
+	corrected_errors: 0
+	last_physical: 2505048064
+
+Scrub device /dev/mapper/disk2 (id 2) history
+Scrub started:    Wed Apr  8 17:07:26 2026
+Status:           running
+Duration:         0:00:01
+	data_extents_scrubbed: 8320
+	tree_extents_scrubbed: 0
+	data_bytes_scrubbed: 545259520
+	tree_bytes_scrubbed: 0
+	read_errors: 0
+	csum_errors: 0
+	verify_errors: 0
+	no_csum: 0
+	csum_discards: 0
+	super_errors: 0
+	malloc_errors: 0
+	uncorrectable_errors: 0
+	unverified_errors: 0
+	corrected_errors: 0
+	last_physical: 4212129792
+
+Scrub device /dev/mapper/disk3 (id 3) status
+Scrub started:    Wed Apr  8 17:07:26 2026
+Status:           running
+Duration:         0:00:05
+	data_extents_scrubbed: 8832
+	tree_extents_scrubbed: 109
+	data_bytes_scrubbed: 578813952
+	tree_bytes_scrubbed: 1785856
+	read_errors: 0
+	csum_errors: 0
+	verify_errors: 0
+	no_csum: 0
+	csum_discards: 0
+	super_errors: 0
+	malloc_errors: 0
+	uncorrectable_errors: 0
+	unverified_errors: 0
+	corrected_errors: 0
+	last_physical: 1947205632
