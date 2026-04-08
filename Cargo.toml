@@ -1,5 +1,6 @@
 # Workspace root — lets cargo commands run from braid/ instead of braid/cli/.
 # Cargo.lock lives here (workspace root) rather than in cli/.
 [workspace]
+resolver = "3"
 members = ["cli"]
 default-members = ["cli"]
