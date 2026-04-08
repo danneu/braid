@@ -63,16 +63,26 @@ Decision docs must include an explicit status: `Draft`, `Active`, `Superseded`, 
 
 Before searching the web for tool behavior, consult local resources first. `reference/` contains shallow clones of upstream repos at the versions pinned in nixpkgs. Refresh with `just fetch-references`.
 
-| Directory                  | Upstream                                                                      | What to look for                                                                                                |
-| -------------------------- | ----------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| `reference/btrfs-progs/`   | [kdave/btrfs-progs](https://github.com/kdave/btrfs-progs)                     | `cmds/<subcommand>.c` — one file per btrfs subcommand (e.g. `cmds/scrub.c`). Parser output formats, exit codes. |
-| `reference/systemd/`       | [systemd/systemd](https://github.com/systemd/systemd)                         | Unit lifecycle, `systemd-ask-password`, mount/automount behavior.                                               |
-| `reference/autosuspend/`   | [languitar/autosuspend](https://github.com/languitar/autosuspend)             | Check classes, config schema, wakeup scheduling.                                                                |
-| `reference/cryptsetup/`    | [cryptsetup/cryptsetup](https://gitlab.com/cryptsetup/cryptsetup)             | `luksDump` output format, LUKS2 header structure, keyslot operations.                                           |
-| `reference/util-linux/`    | [util-linux/util-linux](https://github.com/util-linux/util-linux)             | `lsblk` JSON schema, `blkid` output, mount/unmount behavior.                                                    |
-| `reference/smartmontools/` | [smartmontools/smartmontools](https://github.com/smartmontools/smartmontools) | `smartctl` output format, SMART attribute definitions, exit codes.                                              |
-
 **When to look:** Any time you're implementing, modifying, or debugging code that interacts with these tools — especially parsers. Read the relevant source before making assumptions about output format or behavior.
+
+- **btrfs-progs** — [kdave/btrfs-progs](https://github.com/kdave/btrfs-progs)
+  - **Source:** [`reference/btrfs-progs/cmds/`](reference/btrfs-progs/cmds/) — one file per subcommand (e.g. `cmds/scrub.c`). Parser output formats, exit codes.
+  - **Docs:** [`reference/btrfs-progs/Documentation/`](reference/btrfs-progs/Documentation/) — RST. See [btrfs docs](#btrfs-docs) below for the topic table.
+- **systemd** — [systemd/systemd](https://github.com/systemd/systemd)
+  - **Source:** [`reference/systemd/src/`](reference/systemd/src/) — unit lifecycle internals, `systemd-ask-password`, mount/automount.
+  - **Docs:** [`reference/systemd/docs/`](reference/systemd/docs/) — markdown design docs (`BOOT.md`, `INHIBITOR_LOCKS.md`, `MOUNT_REQUIREMENTS.md`, `CREDENTIALS.md`, `PASSWORD_AGENTS.md`, etc.). [`reference/systemd/man/`](reference/systemd/man/) — XML man-page sources for unit/option reference (`systemd.service.xml`, `systemd.mount.xml`, …).
+- **autosuspend** — [languitar/autosuspend](https://github.com/languitar/autosuspend)
+  - **Source:** [`reference/autosuspend/src/`](reference/autosuspend/src/) — check classes, config schema, wakeup scheduling.
+  - **Docs:** [`reference/autosuspend/doc/source/`](reference/autosuspend/doc/source/) — RST (`available_checks.rst`, `available_wakeups.rst`, `configuration_file.rst`, `systemd_integration.rst`).
+- **cryptsetup** — [cryptsetup/cryptsetup](https://gitlab.com/cryptsetup/cryptsetup)
+  - **Source:** [`reference/cryptsetup/src/`](reference/cryptsetup/src/) (CLI), [`reference/cryptsetup/lib/`](reference/cryptsetup/lib/) (libcryptsetup) — `luksDump` output, LUKS2 header structure, keyslot operations.
+  - **Docs:** [`reference/cryptsetup/man/`](reference/cryptsetup/man/) — `*.8.adoc` man pages (`cryptsetup-luksDump.8.adoc`, `cryptsetup-open.8.adoc`, …). [`reference/cryptsetup/docs/`](reference/cryptsetup/docs/) — design notes including `LUKS2-locking.txt` and `on-disk-format-luks2.pdf`.
+- **util-linux** — [util-linux/util-linux](https://github.com/util-linux/util-linux)
+  - **Source:** [`reference/util-linux/misc-utils/`](reference/util-linux/misc-utils/) (`lsblk`, `blkid`), [`reference/util-linux/sys-utils/`](reference/util-linux/sys-utils/) (`mount`, `umount`), [`reference/util-linux/libmount/`](reference/util-linux/libmount/), [`reference/util-linux/libblkid/`](reference/util-linux/libblkid/) — `lsblk` JSON schema, `blkid` output, mount/unmount behavior.
+  - **Docs:** Man pages live next to source as `*.8.adoc` (e.g. `misc-utils/lsblk.8.adoc`, `sys-utils/mount.8.adoc`). [`reference/util-linux/Documentation/`](reference/util-linux/Documentation/) is project meta (build/test/contribution notes), not user reference.
+- **smartmontools** — [smartmontools/smartmontools](https://github.com/smartmontools/smartmontools)
+  - **Source:** [`reference/smartmontools/smartmontools/`](reference/smartmontools/smartmontools/) — flat layout. `smartctl` output format, SMART attribute definitions, exit codes.
+  - **Docs:** No separate docs dir. Man-page sources are inline alongside the code: `smartctl.8.in`, `smartd.8.in`, `smartd.conf.5.in`.
 
 ### btrfs docs
 
