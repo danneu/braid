@@ -1,20 +1,25 @@
 # Repro: btrfs replace interrupted mid-flight by unclean VM crash
 #
-# Intent: Pin down what happens to a btrfs RAID1 pool when a `braid replace`
-# operation is interrupted by an unclean kill (qemu SIGKILL → kernel dies),
-# on the pinned NixOS toolchain. Captures post-crash state from btrfs,
-# cryptsetup, and braid into the test transcript and asserts a small set of
-# safety-floor invariants plus observation locks that pin in the current
-# kernel-resume + braid-recover behavior.
+# Intent: Pin down end-to-end recovery from a `braid replace` interrupted
+# by an unclean kill (qemu SIGKILL → kernel dies). After reboot, `braid
+# recover` must read the post-resume on-disk topology and write a clean
+# pool.json — no phantom MISSING devid, no DEGRADED status, no manual
+# cleanup recipe.
 #
 # Why it exists: tests/cli/recover-replace-not-started.py covers crash before
 # `btrfs replace start` runs, and tests/cli/recover-replace-completed.py
 # covers crash after the replace completes. The in-flight crash window between
-# them is uncovered. The kernel's resume-on-mount path
-# (btrfs_resume_dev_replace_async, called from mount when the on-disk
-# dev_replace_item is in STARTED) re-enters the scrub-copy loop from the saved
-# cursor when the original mount died unclean — and produces a non-standard
-# topology when it finishes mid-recover, which is what this test pins down.
+# them used to leave the pool in a known-broken state because the kernel's
+# resume-on-mount path (btrfs_resume_dev_replace_async, called from mount
+# when the on-disk dev_replace_item is in STARTED) commits the post-completion
+# devid swap to disk correctly but does NOT update the in-memory
+# btrfs_fs_devices for the mount session that triggered the resume. Without
+# the recover-side fix, recover's probe_pool reads from that stale in-memory
+# state and persists a snapshot containing a phantom MISSING devid 0 and
+# both the source and target devices. cmd_recover now cycles the mount
+# (umount + btrfs device scan --forget + remount) before probing so the
+# kernel rebuilds fs_devices from the post-resume on-disk chunk tree. This
+# test pins that fix in place.
 #
 # Scope: this test exercises ONLY the unclean-kill path. It does NOT exercise
 # the v6.19+ freeze/signal cancellation path (try_to_freeze /
@@ -26,8 +31,9 @@
 # Scenario: 3-disk RAID1 pool with a 400 MiB urandom payload. Operator starts
 # `braid replace disk2 disk4` and the VM is forcibly crashed (qemu SIGKILL via
 # machine.crash) once the kernel reports non-zero replace progress. After
-# reboot, the test unlocks the pool and captures every relevant state for
-# inspection.
+# reboot, the test runs braid recover and asserts the recovered topology is
+# clean: 3 devices (disk1, disk3, disk4), no MISSING, status intact, pool.json
+# matches the post-replace target membership.
 
 import shlex
 import time
@@ -222,15 +228,13 @@ with subtest("Safety floor: at least one of disk2 or disk4 in live pool"):
 
 # --- Phase 7: Observation-lock assertions ---
 #
-# These assertions encode the CURRENT observed behavior of the kernel
-# resume-on-mount path (btrfs_resume_dev_replace_async, unchanged across the
-# kernels braid currently targets) and braid recover, on the pinned NixOS
-# stable lane. See plans/wip/sharded-drifting-beaver-findings.md for the full
-# transcript and analysis. They are not statements of correctness: the
-# locked-in behavior includes a known-broken degraded-pool outcome that a
-# follow-up plan will address. The asserts exist so that any drift in either
-# the kernel resume semantics or the braid recover flow fails the test loudly,
-# which is the signal to revisit the follow-up plan.
+# These assertions pin the FIXED behavior end-to-end: braid recover handles
+# the kernel-resume-on-mount staleness via its remount cycle (umount +
+# scan --forget + remount) and writes a clean pool.json. Any drift —
+# kernel resume semantics changing, the recover-side cycle being removed,
+# the journal handling shifting — fails the test loudly so the regression
+# is visible in CI. See plans/wip/sharded-drifting-beaver-findings.md for
+# the full investigation that motivated the fix.
 
 with subtest("Observation lock: braid unlock refuses with journal-detected error"):
     # Locks in cmd_unlock's interrupted-operation guard.
@@ -257,10 +261,10 @@ with subtest("Observation lock: kernel resumed and finished the replace on mount
     # The kernel resume-on-mount path (btrfs_resume_dev_replace_async) restarts
     # the in-progress replace from the on-disk cursor (effectively 0% in this
     # scenario) and runs it to completion synchronously during the recover
-    # mount. After braid recover, disk4 must be visible in btrfs filesystem
-    # show as a participating device. This assert flipping would mean either
-    # the kernel resume path got rewritten or braid stopped triggering it from
-    # recover — both worth investigating.
+    # mount. After braid recover (and its remount cycle), disk4 must be the
+    # surviving target visible in btrfs filesystem show. If this assert
+    # flips, either the kernel resume path got rewritten or braid stopped
+    # triggering it from recover — both worth investigating.
     assert "braid-disk4" in final_fs_show, (
         "Kernel did not resume the replace on mount — disk4 is missing from "
         "the live pool after recovery. The resume-on-mount code path may have "
@@ -268,52 +272,109 @@ with subtest("Observation lock: kernel resumed and finished the replace on mount
         + final_fs_show
     )
 
-with subtest("Observation lock: post-recovery topology has phantom MISSING device"):
-    # Locks in the broken outcome: the resumed replace finishes the data
-    # copy but does not perform the post-completion devid swap, leaving the
-    # pool with five device entries — disk2 still as devid 2, disk4 added at
-    # devid 0, and a phantom MISSING devid 0. This is the bug a follow-up
-    # plan needs to address.
-    assert "MISSING" in final_fs_show, (
-        "Expected a phantom MISSING device in the post-recovery topology — "
-        "the broken outcome has gone away. This may be a kernel fix to the "
-        "resume-on-mount swap path, or a braid recover fix landing; revisit "
-        "plans/wip/sharded-drifting-beaver-findings.md.\n"
+with subtest("Observation lock: post-recovery topology is clean (3 devices, no MISSING)"):
+    # Pins the recover fix: cmd_recover's remount cycle drops the cached
+    # in-memory btrfs_fs_devices left by the kernel resume worker, so the
+    # second mount reads the post-completion swap from disk. The result is
+    # a clean three-device topology with disk4 in disk2's old devid 2 slot.
+    # If this assert fires, the recover-side fix has regressed (or the
+    # kernel resume's on-disk handling changed).
+    assert "MISSING" not in final_fs_show, (
+        "phantom MISSING entry survived braid recover — the remount cycle "
+        "in cmd_recover must have regressed (cli/src/recover.rs). Without "
+        "it, the kernel's stale in-memory fs_devices for the original mount "
+        "session is what probe_pool reads.\n" + final_fs_show
+    )
+    assert "Total devices 3" in final_fs_show, (
+        "post-recovery topology should have exactly 3 devices (disk1, disk3, "
+        "disk4) but does not. Either the recover fix regressed or the kernel "
+        "resume completed unexpectedly.\n" + final_fs_show
+    )
+    # Source disk2 must be evicted; target disk4 must be present.
+    assert "braid-disk2" not in final_fs_show, (
+        "replace source disk2 still appears in the live pool — the kernel's "
+        "post-completion swap was not picked up by braid recover.\n"
         + final_fs_show
     )
-    assert "Total devices 5" in final_fs_show, (
-        "Expected 5 device entries (3 originals + disk4 + phantom MISSING) in "
-        "the post-recovery topology. Topology has shifted; revisit "
-        "plans/wip/sharded-drifting-beaver-findings.md.\n" + final_fs_show
-    )
 
-with subtest("Observation lock: braid status reports DEGRADED after recovery"):
-    # The phantom MISSING device causes braid status to report degraded,
-    # even though all four physical disks are present.
-    assert "DEGRADED" in final_braid_status, (
-        "braid status no longer reports DEGRADED after recovery from an "
-        "interrupted replace. This may be a kernel fix or a braid recover "
-        "fix landing; revisit plans/wip/sharded-drifting-beaver-findings.md.\n"
+with subtest("Observation lock: braid status reports intact after recovery"):
+    # No phantom MISSING means braid status reports a clean pool. If this
+    # asserts fires, the recover fix has regressed.
+    assert "DEGRADED" not in final_braid_status, (
+        "braid status reports DEGRADED after recovery from an interrupted "
+        "replace — the recover-side remount cycle has regressed. Revisit "
+        "plans/wip/sharded-drifting-beaver-findings.md.\n"
         + final_braid_status
     )
 
-with subtest("Observation lock: braid recover succeeds despite the broken topology"):
-    # Locks in the current behavior: braid recover prints a `note:` about
-    # the membership mismatch but exits 0 and clears the journal anyway.
-    # The follow-up plan is expected to escalate this to a hard error;
-    # when that lands, this assert flips and the test reminds us to update.
+with subtest("Observation lock: braid recover succeeds with replace-completed guidance"):
+    # The recover fix means the live pool matches the journal's
+    # target_membership exactly, so recovery_guidance picks the
+    # replace-completed branch.
     assert recover_exit == 0, (
-        f"braid recover exit code changed from 0 to {recover_exit}. "
-        f"This is likely the follow-up fix landing — revisit "
-        f"plans/wip/sharded-drifting-beaver-findings.md and update the test.\n"
+        f"braid recover failed (exit {recover_exit}). With the remount-cycle "
+        f"fix in place, recover should succeed cleanly on this scenario.\n"
         f"{recover_out}"
     )
-    assert "membership does not match" in recover_out, (
-        "braid recover no longer prints the 'membership does not match' note. "
-        "Either the topology is now clean (good) or the message wording "
-        "changed (update the assert). Revisit findings note.\n" + recover_out
+    assert "replace completed" in recover_out, (
+        "braid recover did not emit the 'replace completed' guidance — the "
+        "recovered membership does not match journal.target_membership. "
+        "Either the cycle wrote a stale snapshot (recover regression) or "
+        "the kernel resume did not finish on this run.\n" + recover_out
+    )
+    assert "membership does not match" not in recover_out, (
+        "braid recover still prints 'membership does not match' — the cycle "
+        "is reading stale state. Revisit cli/src/recover.rs and the findings "
+        "note.\n" + recover_out
     )
     # Journal should have been cleared after recovery succeeded.
     machine.fail("test -f /var/lib/braid/pending-op.json")
+
+with subtest("Observation lock: pool.json reflects the post-replace target membership"):
+    # The recovered pool.json must have exactly disk1, disk3, disk4 — the
+    # post-replace target. If disk2 reappears, the cycle picked up stale
+    # state; if disk4 is missing, the kernel resume did not run.
+    final_pool_json = machine.succeed("cat /var/lib/braid/pool.json")
+    print(f"=== final pool.json ===\n{final_pool_json}")
+    assert '"disk1"' in final_pool_json, (
+        f"pool.json missing disk1 after recovery:\n{final_pool_json}"
+    )
+    assert '"disk3"' in final_pool_json, (
+        f"pool.json missing disk3 after recovery:\n{final_pool_json}"
+    )
+    assert '"disk4"' in final_pool_json, (
+        f"pool.json missing disk4 after recovery — kernel resume did not "
+        f"finish or recover wrote a stale snapshot:\n{final_pool_json}"
+    )
+    assert '"disk2"' not in final_pool_json, (
+        f"pool.json still contains the evicted disk2 — recover wrote a "
+        f"stale in-memory snapshot. cmd_recover's remount cycle has "
+        f"regressed.\n{final_pool_json}"
+    )
+
+with subtest("Observation lock: subsequent lock/unlock cycle stays clean"):
+    # A clean recover should leave the pool in a state where a normal
+    # (non-degraded) braid lock + braid unlock cycle works without
+    # re-introducing any MISSING entries. This is the strongest end-to-end
+    # check: it proves the on-disk state matches what pool.json now claims.
+    machine.succeed("braid lock")
+    cycle_unlock_exit, cycle_unlock_out = machine.execute(
+        f"printf '%s\\n' {pq} | braid unlock --passphrase-stdin 2>&1"
+    )
+    print(f"=== braid unlock after lock cycle (exit {cycle_unlock_exit}) ===")
+    print(cycle_unlock_out)
+    assert cycle_unlock_exit == 0, (
+        "braid unlock (no --allow-degraded) failed after a clean recover — "
+        f"recover may have left pool.json out of sync with the live pool.\n"
+        f"{cycle_unlock_out}"
+    )
+    cycle_fs_show = machine.succeed("btrfs filesystem show /mnt/storage")
+    print(f"=== fs show after lock/unlock cycle ===\n{cycle_fs_show}")
+    assert "MISSING" not in cycle_fs_show, (
+        f"MISSING re-appeared after a lock/unlock cycle:\n{cycle_fs_show}"
+    )
+    assert "Total devices 3" in cycle_fs_show, (
+        f"pool no longer has 3 devices after a lock/unlock cycle:\n{cycle_fs_show}"
+    )
 
 machine.shutdown()

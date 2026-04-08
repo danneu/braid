@@ -2,12 +2,14 @@ use crate::cmd::{CmdRequest, CommandRunner, Step};
 use crate::config::{self, Config};
 use crate::discover;
 use crate::journal::{self, Journal};
+use crate::luks;
 use crate::membership::{self, DiskMember, PoolMembership};
 use crate::mount::{self, Credential, MountError};
 use crate::parse::btrfs_filesystem_show::{classify_btrfs_probe, DeviceBtrfsProbe};
+use crate::parse::{parse_btrfs_replace_status, ReplaceState};
 use crate::probe::{self, Filesystem, ProbeError};
 use crate::state_paths::StatePaths;
-use crate::types::ByIdPath;
+use crate::types::{ByIdPath, MountPoint};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -217,11 +219,43 @@ pub fn cmd_recover<R: CommandRunner, F: Filesystem + ?Sized>(
         return Ok(());
     }
 
-    let credential = Credential::Passphrase {
-        passphrase_stdin: params.passphrase_stdin,
-        passphrase_file: params.passphrase_file,
+    // The post-mount remount cycle (below) needs to re-supply the passphrase
+    // when re-opening LUKS, so we can't lean on the lazy stdin-backed
+    // Credential::Passphrase variant — that would require consuming stdin
+    // twice. Read the secret once into a String and use it via
+    // Credential::InMemoryPassphrase for both calls.
+    //
+    // The mountpoint check is the same one plan_open_pool does internally —
+    // we hoist it here so we can skip the passphrase read entirely on the
+    // already-mounted path (no LUKS open will happen).
+    let mountpoint_check = runner
+        .run(&CmdRequest::MountpointCheck {
+            path: params.config.mount_point().clone(),
+        })
+        .map_err(|e| RecoverError::Failed(format!("recover: mountpoint check: {e}")))?;
+    let already_mounted = mountpoint_check.exit_status == 0;
+
+    let passphrase: Option<String> = if already_mounted {
+        None
+    } else {
+        Some(
+            luks::read_passphrase(params.passphrase_file, params.passphrase_stdin)
+                .map_err(|e| RecoverError::Failed(format!("recover: {e}")))?,
+        )
     };
-    if let Err(e) = mount::open_and_mount_pool(
+
+    // Build the credential from a clone so the original String stays
+    // available for the cycle's reopen below. The clone is consumed by
+    // open_and_mount_pool; the kept copy is only dropped at end of
+    // cmd_recover.
+    let credential = match passphrase.as_ref() {
+        Some(pp) => Credential::InMemoryPassphrase(pp.clone()),
+        None => Credential::Passphrase {
+            passphrase_stdin: false,
+            passphrase_file: None,
+        },
+    };
+    let just_mounted = match mount::open_and_mount_pool(
         runner,
         fs,
         params.config,
@@ -230,44 +264,93 @@ pub fn cmd_recover<R: CommandRunner, F: Filesystem + ?Sized>(
         params.allow_degraded,
         "recover",
     ) {
-        // Bootstrap mount failure: probe the target devices to confirm no btrfs
-        // superblock exists — only then is it safe to advise wiping.
-        if journal.pre_membership.disks.is_empty()
-            && let mount::MountError::MountFailed(_) = &e
-                && let journal::OpKind::Add { ref disks } = journal.op {
-                    let all_no_btrfs = disks.keys().all(|name| {
-                        let mapper = format!("/dev/mapper/{}", config::mapper_name(name).0);
-                        match runner.run(&CmdRequest::BtrfsFilesystemShowTarget { target: mapper })
-                        {
-                            Ok(raw) => {
-                                matches!(classify_btrfs_probe(&raw), DeviceBtrfsProbe::NoBtrfs)
-                            }
-                            Err(_) => false,
+        Ok(b) => b,
+        Err(e) => {
+            // Bootstrap mount failure: probe the target devices to confirm no btrfs
+            // superblock exists — only then is it safe to advise wiping.
+            if journal.pre_membership.disks.is_empty()
+                && let mount::MountError::MountFailed(_) = &e
+                && let journal::OpKind::Add { ref disks } = journal.op
+            {
+                let all_no_btrfs = disks.keys().all(|name| {
+                    let mapper = format!("/dev/mapper/{}", config::mapper_name(name).0);
+                    match runner.run(&CmdRequest::BtrfsFilesystemShowTarget { target: mapper }) {
+                        Ok(raw) => {
+                            matches!(classify_btrfs_probe(&raw), DeviceBtrfsProbe::NoBtrfs)
                         }
-                    });
-                    if all_no_btrfs {
-                        let disk_list: Vec<_> = union
-                            .disks
-                            .iter()
-                            .map(|(name, m)| format!("  {} ({})", name, m.by_id))
-                            .collect();
-                        return Err(RecoverError::Failed(format!(
-                            "bootstrap add was interrupted before the filesystem was \
-                             created.\n\
-                             The pool does not exist yet, so there is nothing to \
-                             recover.\n\n\
-                             To return to a clean state:\n\
-                             1. rm {}\n\
-                             2. Wipe the LUKS container from each disk that was being \
-                                added:\n{}\n\
-                                e.g.: wipefs -a /dev/disk/by-id/<device>\n\
-                             3. Re-run braid add",
-                            params.paths.pending_op_json().display(),
-                            disk_list.join("\n"),
-                        )));
+                        Err(_) => false,
                     }
+                });
+                if all_no_btrfs {
+                    let disk_list: Vec<_> = union
+                        .disks
+                        .iter()
+                        .map(|(name, m)| format!("  {} ({})", name, m.by_id))
+                        .collect();
+                    return Err(RecoverError::Failed(format!(
+                        "bootstrap add was interrupted before the filesystem was \
+                         created.\n\
+                         The pool does not exist yet, so there is nothing to \
+                         recover.\n\n\
+                         To return to a clean state:\n\
+                         1. rm {}\n\
+                         2. Wipe the LUKS container from each disk that was being \
+                            added:\n{}\n\
+                            e.g.: wipefs -a /dev/disk/by-id/<device>\n\
+                         3. Re-run braid add",
+                        params.paths.pending_op_json().display(),
+                        disk_list.join("\n"),
+                    )));
                 }
-        return Err(e.into());
+            }
+            return Err(e.into());
+        }
+    };
+
+    // 2.5 Force fresh kernel state before probing.
+    //
+    // When the kernel resumes an interrupted btrfs replace during the
+    // mount call above, two problems compound:
+    //
+    //   (a) The resume worker (btrfs_resume_dev_replace_async) runs
+    //       asynchronously in a kthread, so umount does NOT wait for it
+    //       to finish. probe_pool can run while the resume is still in
+    //       progress and read transient mid-resume topology.
+    //   (b) The kernel commits the post-completion devid swap to disk
+    //       correctly but the in-memory `btrfs_fs_devices` for this
+    //       mount session retains the pre-resume topology — including a
+    //       phantom MISSING devid for the temporary replace target —
+    //       even after the resume finishes.
+    //
+    // The fix is two steps:
+    //
+    //   1. Wait for the kernel resume to actually finish (poll
+    //      `btrfs replace status` until it reports Finished or None).
+    //   2. Cycle the mount end-to-end (umount + scan --forget + close
+    //      LUKS + reopen + remount) so the kernel rebuilds fs_devices
+    //      from the on-disk chunk tree. Empirically (see
+    //      plans/wip/sharded-drifting-beaver-findings.md), `umount +
+    //      scan --forget + remount` ALONE is not enough — the LUKS
+    //      close+reopen is load-bearing.
+    //
+    // Skipped when the pool was already mounted before recover started:
+    // we don't know who's using that mount and umount could fail with
+    // EBUSY. The bug only manifests on the mount session that triggered
+    // the kernel resume, which is one we just opened ourselves.
+    if just_mounted {
+        wait_for_kernel_replace_to_finish(runner, params.config.mount_point());
+        // We mounted, so we read the passphrase above; it is non-None.
+        let pp = passphrase
+            .as_deref()
+            .expect("just_mounted implies passphrase was read");
+        relock_and_remount(
+            runner,
+            fs,
+            params.config,
+            &union,
+            params.allow_degraded,
+            pp,
+        )?;
     }
 
     // 3. Probe live pool state
@@ -331,6 +414,143 @@ pub fn cmd_recover<R: CommandRunner, F: Filesystem + ?Sized>(
     // Best-effort: warn if a paused balance was detected (e.g. crash during
     // RAID1 conversion). skip_balance prevents kernel auto-resume.
     crate::status::emit_paused_balance_warning(runner, mount_point, &mut std::io::stderr());
+
+    Ok(())
+}
+
+/// Block until any kernel-resumed btrfs dev_replace on `mount_point` finishes.
+///
+/// `btrfs_resume_dev_replace_async` runs as an unrelated kthread and is NOT
+/// waited on by umount, so without this wait the relock_and_remount cycle can
+/// race the resume worker and the second mount sees the same in-flight state.
+///
+/// Best-effort: if the status command fails for any reason, we return early
+/// rather than blocking forever — relock_and_remount and probe_pool will catch
+/// any remaining staleness as a clear test failure rather than a hang.
+fn wait_for_kernel_replace_to_finish<R: CommandRunner>(runner: &R, mount_point: &MountPoint) {
+    let mut last_pct: Option<f64> = None;
+    loop {
+        let raw = match runner.run(&CmdRequest::BtrfsReplaceStatus {
+            mount_point: mount_point.clone(),
+        }) {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+        let parsed = match parse_btrfs_replace_status(&raw) {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        match parsed.state {
+            ReplaceState::Finished | ReplaceState::None => return,
+            ReplaceState::Running { pct } => {
+                if last_pct != Some(pct) {
+                    eprintln!(
+                        "  waiting for kernel to finish resumed dev_replace... {pct:.1}%"
+                    );
+                    last_pct = Some(pct);
+                }
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+}
+
+/// Drop all kernel state for the recovery mount and re-establish it from
+/// scratch, so a subsequent probe_pool reads the post-resume on-disk topology
+/// instead of the stale in-memory btrfs_fs_devices the kernel can carry
+/// across a resumed dev_replace.
+///
+/// This mirrors what `braid lock; braid unlock` does end-to-end: umount,
+/// `btrfs device scan --forget` (drop cached fs_devices), close every LUKS
+/// mapper for the membership union, then re-open + remount via the standard
+/// `open_and_mount_pool` helper.
+///
+/// The LUKS close+reopen is load-bearing: empirically, an `umount + scan
+/// --forget + remount` cycle that leaves the dm devices alive does NOT clear
+/// the staleness — see plans/wip/sharded-drifting-beaver-findings.md.
+fn relock_and_remount<R: CommandRunner, F: Filesystem + ?Sized>(
+    runner: &R,
+    fs: &F,
+    config: &Config,
+    membership: &PoolMembership,
+    allow_degraded: bool,
+    passphrase: &str,
+) -> Result<(), RecoverError> {
+    let mount_point = config.mount_point();
+
+    // 1. Umount. The kernel waits for in-flight operations (including the
+    //    dev_replace resume worker) to drain before releasing the mount.
+    let umount = runner
+        .run(&CmdRequest::Umount {
+            mount_point: mount_point.clone(),
+        })
+        .map_err(|e| RecoverError::Failed(format!("recover remount cycle: umount: {e}")))?;
+    if umount.exit_status != 0 {
+        return Err(RecoverError::Failed(format!(
+            "recover remount cycle: umount {} failed (exit {}): {}",
+            mount_point,
+            umount.exit_status,
+            umount.stderr.trim()
+        )));
+    }
+
+    // 2. Drop cached btrfs_fs_devices. Without this, the kernel may
+    //    re-attach the next mount to a still-cached structure that retains
+    //    the stale post-resume topology, defeating the cycle.
+    let forget = runner
+        .run(&CmdRequest::BtrfsDeviceScanForget)
+        .map_err(|e| RecoverError::Failed(format!("recover remount cycle: scan --forget: {e}")))?;
+    if forget.exit_status != 0 {
+        return Err(RecoverError::Failed(format!(
+            "recover remount cycle: btrfs device scan --forget failed (exit {}): {}",
+            forget.exit_status,
+            forget.stderr.trim()
+        )));
+    }
+
+    // 3. Close every LUKS mapper from the union. The dm devices must be
+    //    destroyed (not just unmounted) for the next mount to bypass the
+    //    kernel's stale fs_devices cache.
+    for name in membership.disks.keys() {
+        let mn = config::mapper_name(name);
+        let mapper_path = format!("/dev/mapper/{}", mn.0);
+        if !fs.exists(&mapper_path) {
+            continue;
+        }
+        let close = runner
+            .run(&CmdRequest::CryptsetupClose {
+                mapper: mn.0.clone(),
+            })
+            .map_err(|e| {
+                RecoverError::Failed(format!(
+                    "recover remount cycle: cryptsetup close {}: {e}",
+                    mn.0
+                ))
+            })?;
+        if close.exit_status != 0 {
+            return Err(RecoverError::Failed(format!(
+                "recover remount cycle: cryptsetup close {} failed (exit {}): {}",
+                mn.0,
+                close.exit_status,
+                close.stderr.trim()
+            )));
+        }
+    }
+
+    // 4. Re-open LUKS and mount via the standard helper. With the dm
+    //    devices freshly recreated and the cached fs_devices dropped, the
+    //    kernel reads the chunk tree from disk and rebuilds a fresh
+    //    fs_devices reflecting the post-resume on-disk state.
+    mount::open_and_mount_pool(
+        runner,
+        fs,
+        config,
+        membership,
+        Credential::InMemoryPassphrase(passphrase.to_owned()),
+        allow_degraded,
+        "recover",
+    )
+    .map_err(|e| RecoverError::Failed(format!("recover remount cycle: re-mount: {e}")))?;
 
     Ok(())
 }
@@ -839,6 +1059,20 @@ mod tests {
                 },
                 ok_raw_empty("mount"),
             )
+            // remount cycle: umount
+            .with_output(
+                CmdRequest::Umount {
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                ok_raw_empty("umount"),
+            )
+            // remount cycle: scan --forget (drop cached fs_devices)
+            .with_output(
+                CmdRequest::BtrfsDeviceScanForget,
+                ok_raw_empty("btrfs device scan --forget"),
+            )
+            // remount cycle: re-mount via the same MountWithOptions mock above
+            // (MockRunner serves the same response for repeated requests)
             // probe_pool: findmnt
             .with_output(
                 CmdRequest::FindmntJson {
@@ -924,6 +1158,141 @@ mod tests {
         assert!(
             !paths.pending_op_json().exists(),
             "journal should be cleared after recovery"
+        );
+    }
+
+    /// Intent: When the post-mount remount cycle's umount fails, recover must
+    /// abort with the umount failure before writing pool.json or clearing the
+    /// journal — otherwise we would persist a snapshot read from a stale
+    /// in-memory mount session.
+    ///
+    /// Why: The cycle exists to drop cached btrfs_fs_devices that may carry a
+    /// post-resume phantom MISSING devid (see recover.rs comment near
+    /// remount_for_fresh_kernel_state). If umount fails, we cannot trust
+    /// probe_pool's view, so the only safe action is to fail recovery and
+    /// leave the journal in place for retry.
+    ///
+    /// Scenario: 2-disk RAID1 with disk3 absent (interrupted add). LUKS opens
+    /// and the first mount succeeds, but the cycle's umount returns EBUSY.
+    #[test]
+    fn recover_remount_cycle_umount_failure_aborts_before_pool_json() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let fs = MockFs::new(&[
+            "/dev/disk/by-id/virtio-disk1",
+            "/dev/disk/by-id/virtio-disk2",
+        ]);
+
+        let journal = two_disk_journal();
+        journal::write_journal(&paths, &journal).unwrap();
+
+        let (mp_req, mp_out) = mountpoint_fail();
+        let runner = MockRunner::default()
+            .with_output(mp_req, mp_out)
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/virtio-disk1",
+                    "11111111-1111-1111-1111-111111111111",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/virtio-disk2",
+                    "22222222-2222-2222-2222-222222222222",
+                ),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw_empty("cryptsetup open --test-passphrase"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupLuksOpen {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                    mapper: "braid-disk1".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw_empty("cryptsetup open"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupLuksOpen {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                    mapper: "braid-disk2".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw_empty("cryptsetup open"),
+            )
+            .with_output(
+                CmdRequest::BtrfsDeviceScanAll,
+                ok_raw_empty("btrfs device scan"),
+            )
+            .with_output(
+                CmdRequest::MountWithOptions {
+                    device: "/dev/mapper/braid-disk1".into(),
+                    mount_point: MountPoint("/mnt/storage".into()),
+                    options: vec!["degraded".to_owned()],
+                },
+                ok_raw_empty("mount"),
+            )
+            // Cycle umount fails with EBUSY.
+            .with_output(
+                CmdRequest::Umount {
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                err_raw("umount", 32, "umount: target is busy"),
+            );
+        // No probe_pool / save_membership / clear_journal mocks — those must
+        // not be reached.
+
+        let passphrase_file = tempfile::NamedTempFile::new().unwrap();
+        {
+            use std::io::Write;
+            passphrase_file.as_file().write_all(b"testpass").unwrap();
+        }
+
+        let result = cmd_recover(
+            &runner,
+            &fs,
+            &MockByIdResolver::default(),
+            &RecoverParams {
+                config: &config,
+                paths: &paths,
+                passphrase_stdin: false,
+                passphrase_file: Some(passphrase_file.path()),
+                allow_degraded: true,
+                dry_run: false,
+            },
+        );
+
+        let err = result.expect_err("cycle umount failure must abort recover");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("recover remount cycle"),
+            "error should name the remount cycle as the failure point, got: {msg}"
+        );
+        assert!(
+            msg.contains("umount"),
+            "error should mention umount, got: {msg}"
+        );
+
+        // pool.json must NOT have been written.
+        assert!(
+            !paths.pool_json().exists(),
+            "pool.json must not be written when the remount cycle aborts"
+        );
+        // Journal must be intact for retry.
+        assert!(
+            paths.pending_op_json().exists(),
+            "journal must remain in place after a failed remount cycle"
         );
     }
 
@@ -1406,6 +1775,18 @@ mod tests {
         let (mp_req, mp_out) = mountpoint_fail();
         let runner = MockRunner::default().with_output(mp_req, mp_out);
 
+        // Passphrase must be supplied even though no LUKS open will succeed:
+        // cmd_recover reads the passphrase eagerly when the pool is not
+        // already mounted so it has it on hand for the post-mount remount
+        // cycle (see cmd_recover comment on the credential setup). The mount
+        // still fails with "no unlockable disks" because fs has no by-id
+        // paths, which is what this test pins down.
+        let passphrase_file = tempfile::NamedTempFile::new().unwrap();
+        {
+            use std::io::Write;
+            passphrase_file.as_file().write_all(b"testpass").unwrap();
+        }
+
         let result = cmd_recover(
             &runner,
             &fs,
@@ -1414,7 +1795,7 @@ mod tests {
                 config: &config,
                 paths: &paths,
                 passphrase_stdin: false,
-                passphrase_file: None,
+                passphrase_file: Some(passphrase_file.path()),
                 allow_degraded: false,
                 dry_run: false,
             },

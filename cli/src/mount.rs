@@ -23,12 +23,25 @@ pub enum MountError {
 }
 
 /// Credential source for opening LUKS devices.
+///
+/// `Passphrase` is the lazy source-based form: `open_and_mount_pool` reads
+/// from stdin/file/TTY only if `plan.to_unlock` is non-empty, so callers like
+/// `cmd_unlock` never prompt when every mapper is already open.
+///
+/// `InMemoryPassphrase` is the eager form: the caller has already read the
+/// secret into memory and is responsible for its lifetime. It exists for
+/// `cmd_recover`, which needs the same passphrase across two
+/// `open_and_mount_pool` calls (initial mount + the post-resume remount
+/// cycle) and therefore can't afford to re-consume stdin or to round-trip
+/// the secret through a tempfile. Owned `String` so the variant is
+/// forward-compatible with `Zeroizing<String>` if/when braid adopts zeroize.
 pub enum Credential<'a> {
     Passphrase {
         passphrase_stdin: bool,
         passphrase_file: Option<&'a std::path::Path>,
     },
     KeyFile(&'a std::path::Path),
+    InMemoryPassphrase(String),
 }
 
 /// Status line tag for output.
@@ -330,6 +343,75 @@ fn explain_open_failure(
     }
 }
 
+/// Verify a passphrase against the first to-unlock disk and then open every
+/// to-unlock disk with it. Shared between `Credential::Passphrase` (which
+/// reads the secret first) and `Credential::InMemoryPassphrase` (which has
+/// it already). Mirrors the structure of the `KeyFile` arm in
+/// `open_and_mount_pool`: explain_open_failure handles header-state
+/// classification for both verification and per-disk open failures.
+fn open_disks_with_passphrase<R: CommandRunner, F: Filesystem + ?Sized>(
+    runner: &R,
+    fs: &F,
+    to_unlock: &[(String, ByIdPath)],
+    passphrase: &str,
+) -> Result<(), MountError> {
+    let (ref first_name, ref first_by_id) = to_unlock[0];
+    let ok = luks::verify_passphrase(runner, &first_by_id.0, passphrase)?;
+    if !ok {
+        let original_summary = format!("passphrase rejected on '{first_name}'");
+        let ok_fallback = MountError::Failed(format!(
+            "wrong passphrase (verified against {first_name})"
+        ));
+        let header_state = luks::probe_luks_header(runner, &first_by_id.0);
+        return Err(explain_open_failure(
+            first_name,
+            &first_by_id.0,
+            header_state,
+            &original_summary,
+            ok_fallback,
+        ));
+    }
+
+    for (name, by_id) in to_unlock {
+        if let Err(e) = luks::ensure_luks_open(runner, fs, name, by_id, passphrase) {
+            let header_state = luks::probe_luks_header(runner, &by_id.0);
+            let (original_summary, ok_fallback) = match &e {
+                LuksError::OpenFailed {
+                    exit_code: 2,
+                    hint,
+                    stderr,
+                    ..
+                } => (
+                    format!(
+                        "cryptsetup open rejected on '{name}' despite verified passphrase on '{first_name}' — {hint} ({stderr})"
+                    ),
+                    MountError::Failed(format!(
+                        "failed to open disk '{}': passphrase was verified \
+                         against '{}' but rejected here — {} ({}). \
+                         If the passphrase is correct, the single-passphrase \
+                         invariant may be violated by external LUKS manipulation",
+                        name, first_name, hint, stderr
+                    )),
+                ),
+                _ => {
+                    let summary = format!("cryptsetup open failed on '{name}': {e}");
+                    (summary, MountError::Luks(e))
+                }
+            };
+            return Err(explain_open_failure(
+                name,
+                &by_id.0,
+                header_state,
+                &original_summary,
+                ok_fallback,
+            ));
+        }
+        eprintln!("{}  disk: {:<10}unlocked", tag("ok"), name);
+    }
+
+    Ok(())
+}
+
 /// Open LUKS devices from a membership set and mount the btrfs pool.
 ///
 /// Steps: plan (probe + validate), verify credentials, open LUKS, btrfs
@@ -419,61 +501,10 @@ pub fn open_and_mount_pool<R: CommandRunner, F: Filesystem + ?Sized>(
                 passphrase_file,
             } => {
                 let passphrase = luks::read_passphrase(*passphrase_file, *passphrase_stdin)?;
-
-                let (ref first_name, ref first_by_id) = plan.to_unlock[0];
-                let ok = luks::verify_passphrase(runner, &first_by_id.0, &passphrase)?;
-                if !ok {
-                    let original_summary = format!("passphrase rejected on '{first_name}'");
-                    let ok_fallback = MountError::Failed(format!(
-                        "wrong passphrase (verified against {first_name})"
-                    ));
-                    let header_state = luks::probe_luks_header(runner, &first_by_id.0);
-                    return Err(explain_open_failure(
-                        first_name,
-                        &first_by_id.0,
-                        header_state,
-                        &original_summary,
-                        ok_fallback,
-                    ));
-                }
-
-                for (name, by_id) in &plan.to_unlock {
-                    if let Err(e) = luks::ensure_luks_open(runner, fs, name, by_id, &passphrase)
-                    {
-                        let header_state = luks::probe_luks_header(runner, &by_id.0);
-                        let (original_summary, ok_fallback) = match &e {
-                            LuksError::OpenFailed {
-                                exit_code: 2,
-                                hint,
-                                stderr,
-                                ..
-                            } => (
-                                format!(
-                                    "cryptsetup open rejected on '{name}' despite verified passphrase on '{first_name}' — {hint} ({stderr})"
-                                ),
-                                MountError::Failed(format!(
-                                    "failed to open disk '{}': passphrase was verified \
-                                     against '{}' but rejected here — {} ({}). \
-                                     If the passphrase is correct, the single-passphrase \
-                                     invariant may be violated by external LUKS manipulation",
-                                    name, first_name, hint, stderr
-                                )),
-                            ),
-                            _ => {
-                                let summary = format!("cryptsetup open failed on '{name}': {e}");
-                                (summary, MountError::Luks(e))
-                            }
-                        };
-                        return Err(explain_open_failure(
-                            name,
-                            &by_id.0,
-                            header_state,
-                            &original_summary,
-                            ok_fallback,
-                        ));
-                    }
-                    eprintln!("{}  disk: {:<10}unlocked", tag("ok"), name);
-                }
+                open_disks_with_passphrase(runner, fs, &plan.to_unlock, &passphrase)?;
+            }
+            Credential::InMemoryPassphrase(passphrase) => {
+                open_disks_with_passphrase(runner, fs, &plan.to_unlock, passphrase)?;
             }
         }
     }
