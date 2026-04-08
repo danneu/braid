@@ -105,7 +105,7 @@ This goes in `braid-remove-disk.py` after the "simulate disk3 death" phase so th
 - Remove "auto-detected" / "multiple missing" comments — always required now
 - Keep "Use `braid status` to see device IDs."
 
-**`docs/decisions/intent-cli.md`** (line 21):
+**`docs/decisions/012-intent-cli.md`** (line 21):
 - Table row: `braid remove-missing` → `braid remove-missing --missing-id <devid>`
 
 ### 8. Shell completion test — `tests/cli/shell-completion.py`

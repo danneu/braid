@@ -277,7 +277,7 @@ Flow:
 
 **The `mkfs.btrfs` gate**: only runs during bootstrap when the opened device has no btrfs superblock. An existing pool never triggers mkfs — `btrfs device add` is the only mutation path. This prevents over-formatting a returning member.
 
-**Safety argument** (addresses the collapsed init-disk/apply boundary): The old architecture used a structural code boundary — `luksFormat` literally unreachable from `apply`. The new architecture replaces this with a **superblock guard**: before any `mkfs.btrfs`, the code opens the LUKS device and checks for an existing btrfs superblock matching the pool. If found, the device is a returning member and `add` becomes a no-op. The btrfs superblock check is effectively an idempotent "is this already formatted?" primitive — the exact "revisit trigger" described in `safe-by-construction-reconciliation.md`. Combined with the explicit operator intent (user names a specific disk + confirms), this provides equivalent safety to the structural boundary. The decision doc (`intent-cli.md`) must argue this explicitly.
+**Safety argument** (addresses the collapsed init-disk/apply boundary): The old architecture used a structural code boundary — `luksFormat` literally unreachable from `apply`. The new architecture replaces this with a **superblock guard**: before any `mkfs.btrfs`, the code opens the LUKS device and checks for an existing btrfs superblock matching the pool. If found, the device is a returning member and `add` becomes a no-op. The btrfs superblock check is effectively an idempotent "is this already formatted?" primitive — the exact "revisit trigger" described in `009-safe-by-construction-reconciliation.md`. Combined with the explicit operator intent (user names a specific disk + confirms), this provides equivalent safety to the structural boundary. The decision doc (`012-intent-cli.md`) must argue this explicitly.
 
 **Reuse from existing code:**
 - `init_disk.rs`: passphrase verification, LUKS format, header backup, LUKS opts → extracted to `luks.rs`
@@ -514,11 +514,11 @@ Fundamental tests (LUKS, btrfs, degraded boot, remote unlock, samba, shell compl
 
 ### 6a. Decision doc
 
-**New: `docs/decisions/intent-cli.md`** — Status: Active. Supersedes `docs/decisions/unified-cli.md` and `docs/decisions/two-phase-apply.md` (both exist in repo today).
+**New: `docs/decisions/012-intent-cli.md`** — Status: Active. Supersedes `docs/decisions/008-unified-cli.md` and `docs/decisions/011-two-phase-apply.md` (both exist in repo today).
 
 Must address head-on:
 - Why plan/apply was replaced (usage pattern mismatch, complexity budget)
-- Why collapsing init-disk into add is safe (superblock guard = the "idempotent format primitive" revisit trigger from `safe-by-construction-reconciliation.md`)
+- Why collapsing init-disk into add is safe (superblock guard = the "idempotent format primitive" revisit trigger from `009-safe-by-construction-reconciliation.md`)
 - The new safety model: explicit operator intent + btrfs superblock membership check + confirmation calibrated to risk
 - Resumability: per-command checkpoint with staleness rules
 
@@ -562,7 +562,7 @@ Commands section, test conventions for new test names.
 - `cli/src/luks.rs` — LUKS helpers (format, verify, passphrase input, superblock check)
 - `cli/src/pool.rs` — pool helpers (add device, balance, remove, bootstrap mount)
 - `cli/src/checkpoint.rs` — per-command checkpoint/resume with staleness rules
-- `docs/decisions/intent-cli.md` — supersedes unified-cli.md + two-phase-apply.md
+- `docs/decisions/012-intent-cli.md` — supersedes 008-unified-cli.md + 011-two-phase-apply.md
 
 ### Deleted
 - `cli/src/plan.rs`

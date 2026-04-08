@@ -1,6 +1,6 @@
 # Two-Phase Apply (LUKS Pre-Phase)
 
-**Status: Superseded by [intent-cli.md](intent-cli.md)**
+**Status: Superseded by [012-intent-cli.md](012-intent-cli.md)**
 
 ## Context
 

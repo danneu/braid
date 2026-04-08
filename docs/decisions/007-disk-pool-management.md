@@ -1,6 +1,6 @@
 # Decision: Disk Pool Management
 
-Status: Superseded by [intent-cli.md](intent-cli.md) and [runtime-disk-membership.md](runtime-disk-membership.md)
+Status: Superseded by [012-intent-cli.md](012-intent-cli.md) and [017-runtime-disk-membership.md](017-runtime-disk-membership.md)
 
 > Principle: [CLI-owned membership](../principles.md#2-cli-owned-membership)
 
@@ -112,5 +112,5 @@ Separate scripts (`braid-add-disk`, `braid-remove-disk`, `braid-status`) — not
 - `scripts/braid-add-disk.sh` — existing add script with auto-evict
 - `modules/braid/options.nix` — `braid.disks` option definition
 - `modules/braid/storage.nix` — config export and LUKS entry generation
-- `docs/decisions/config-first-workflow.md` — original config-first decision
+- `docs/decisions/002-config-first-workflow.md` — original config-first decision
 

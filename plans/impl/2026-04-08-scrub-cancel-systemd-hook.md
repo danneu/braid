@@ -30,7 +30,7 @@ Replace the inline grep with a new CLI subcommand that:
 
 Model the new command on `cli/src/idle.rs` — the simplest existing handler that takes a runner + mount point and returns a typed result. Reuse `CmdRequest::BtrfsScrubStatus` (already exists) and add a new `CmdRequest::BtrfsScrubCancel` variant.
 
-**Mount point comes from an explicit `--mount <path>` arg, not config.** The systemd unit already has `${cfg.mountPoint}` at unit-generation time, so introducing a config-file read into the `ExecStop` shutdown path would be a regression — it adds an unnecessary failure surface (`/etc/braid/config.json` missing/corrupt would fail ExecStop) and violates the thin-systemd-layer principle in [`docs/decisions/systemd-lifecycle.md:9`](../../docs/decisions/systemd-lifecycle.md). The hook passes the mount directly.
+**Mount point comes from an explicit `--mount <path>` arg, not config.** The systemd unit already has `${cfg.mountPoint}` at unit-generation time, so introducing a config-file read into the `ExecStop` shutdown path would be a regression — it adds an unnecessary failure surface (`/etc/braid/config.json` missing/corrupt would fail ExecStop) and violates the thin-systemd-layer principle in [`docs/decisions/018-systemd-lifecycle.md:9`](../../docs/decisions/018-systemd-lifecycle.md). The hook passes the mount directly.
 
 ## Detailed changes
 

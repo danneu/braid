@@ -159,7 +159,7 @@ Update `compile_add_steps_multi` (`cli/src/add.rs:344-450`) accordingly.
 
 ### 7. Update docs
 
-**`docs/decisions/intent-cli.md`** (authoritative design doc):
+**`docs/decisions/012-intent-cli.md`** (authoritative design doc):
 
 - Table row for `braid add` (line 19): change "safe (existing LUKS)" to
   reflect that existing LUKS is only safe when it passes identity checks
@@ -202,7 +202,7 @@ Update `compile_add_steps_multi` (`cli/src/add.rs:344-450`) accordingly.
 | `cli/src/parse/mod.rs` | Register new parser module |
 | `cli/src/probe.rs` | Add `fsid` to `PoolState`, populated from parsed FSID |
 | `cli/src/add.rs` | Add `AddLuksIdentity` enum + classification helper; rewrite `PresentLuks` handling; update `compile_add_steps_multi` dry-run logic |
-| `docs/decisions/intent-cli.md` | Expand safety model with layered identity checks; update `braid add` risk description; document dry-run contract |
+| `docs/decisions/012-intent-cli.md` | Expand safety model with layered identity checks; update `braid add` risk description; document dry-run contract |
 | `docs/principles.md` | Expand Principle #3 to include LUKS-label + FSID identity checks |
 | `README.md` | Document the three `braid add` cases (fresh, returning, refused) |
 

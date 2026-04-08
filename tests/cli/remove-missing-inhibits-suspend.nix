@@ -10,7 +10,7 @@
 # single-profile chunks (created during degraded operation) back to RAID1
 # and can leave new data unprotected. braid enables autosuspend by default,
 # so this is reachable in normal operation. See
-# docs/decisions/inhibit-sleep.md for the boundary rule.
+# docs/decisions/019-inhibit-sleep.md for the boundary rule.
 #
 # 3 disks, each 512 MiB. The 3-disk pool is the minimum that satisfies
 # maybe_restore_raid1's "≥2 surviving devices" gate after a 1-missing

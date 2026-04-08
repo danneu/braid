@@ -29,4 +29,4 @@ Defaults are chosen for HDD NAS deployments. Flash media (SSDs, NVMe, USB sticks
 
 - `cli/src/cmd.rs` — `CryptsetupLuksOpen` and `CryptsetupLuksOpenKeyFile` omit `--allow-discards`
 - `modules/braid/storage.nix` — `noatime` rationale references HDD spindown
-- [Sane defaults](sane-defaults.md) — scrub interval tuned for spinning disks
+- [Sane defaults](005-sane-defaults.md) — scrub interval tuned for spinning disks

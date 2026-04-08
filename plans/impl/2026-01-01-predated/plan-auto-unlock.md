@@ -154,8 +154,8 @@ Document and apply where relevant:
   - already created — research reference for USB naming stability,
     passphrase vs keyfile semantics, Unraid CVE, boot resilience, mount
     permissions
-- docs/decisions/single-passphrase.md (/Users/dan/Code/braid/docs/decisions/
-  single-passphrase.md)
+- docs/decisions/004-single-passphrase.md (/Users/dan/Code/braid/docs/decisions/
+  004-single-passphrase.md)
   - already updated — “Constraint: No keyfiles” replaced with “Scope”
     section clarifying that additional unlock mechanisms (USB keyfiles, TPM)
     are orthogonal to the shared passphrase

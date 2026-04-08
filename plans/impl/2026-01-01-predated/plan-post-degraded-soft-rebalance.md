@@ -145,7 +145,7 @@ assert!(check.message.contains("-dconvert=raid1,soft"), "expected soft flag: {}"
 
 > `remove-missing` cleans up a stale missing-device entry; it never rebuilds data onto a new device (that is `replace`). When clearing the last missing device with ≥2 devices remaining, it runs a follow-up soft balance to restore RAID1 profiles for chunks written during degraded operation.
 
-**`docs/decisions/intent-cli.md` line 21:** Update the command table:
+**`docs/decisions/012-intent-cli.md` line 21:** Update the command table:
 
 | `braid remove-missing` | Clean up a stale missing-device entry; restores RAID1 profiles if this clears the last missing device | Long-running |
 | `braid replace --old <key> --new <key>` | Replace a disk (live or dead) using `btrfs replace start`; restores RAID1 profiles for missing-path when clearing the last missing device | In-place swap (preserves devid) |
@@ -188,6 +188,6 @@ This proves the `,soft` flag is sufficient (not just the non-soft variant proven
 | `cli/src/main.rs` | Resolve + pass `progress` to `cmd_remove_missing` |
 | `cli/src/doctor.rs` | Suggest `,soft` flag + tighten 2 existing tests |
 | `docs/principles.md` | Update `remove-missing` description |
-| `docs/decisions/intent-cli.md` | Update command table for `remove-missing` and `replace` |
+| `docs/decisions/012-intent-cli.md` | Update command table for `remove-missing` and `replace` |
 | `README.md` | Update `remove-missing` and `replace` sections |
 | `tests/repro/degraded-soft-balance.nix` + `.py` | New repro proving `,soft` restores RAID1 |

@@ -226,11 +226,11 @@ Update existing tests (`replace_confirm_warns_about_luks_format_for_non_luks_dis
 - Line 187: Update remove section — confirmation is now always `yes` with device info shown; mention the degraded-path warning is informational
 - No changes needed for add/replace/remove-missing sections (they don't document specific confirmation phrases)
 
-**File:** `docs/decisions/intent-cli.md`
+**File:** `docs/decisions/012-intent-cli.md`
 
 - Line 47: Update point 3 — all destructive operations now use unified `yes` confirmation with rich device-info context; the old "calibrated to risk" phrasing is replaced by "informational warnings + uniform confirmation"
 
-**Leave `docs/decisions/disk-pool-management.md` untouched** — it is superseded and should not be updated.
+**Leave `docs/decisions/007-disk-pool-management.md` untouched** — it is superseded and should not be updated.
 
 ## Testing
 
@@ -264,4 +264,4 @@ Update existing tests (`replace_confirm_warns_about_luks_format_for_non_luks_dis
 | `cli/src/remove_missing.rs` | Move membership load + resolve earlier (hard error on failure), new pure formatter, `confirm_yes` |
 | `cli/src/replace.rs` | New pure formatter using live underlying for hw info, updated tests |
 | `README.md` | Update remove section confirmation wording |
-| `docs/decisions/intent-cli.md` | Update safety model point 3 |
+| `docs/decisions/012-intent-cli.md` | Update safety model point 3 |

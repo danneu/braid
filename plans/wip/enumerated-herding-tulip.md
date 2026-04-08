@@ -8,7 +8,7 @@ The decision doc and storage.nix both assert `"braid-online active" ⟺ "pool mo
 
 ### 1. Rewrite invariant #2 in the decision doc
 
-**File:** `docs/decisions/systemd-lifecycle.md:131`
+**File:** `docs/decisions/018-systemd-lifecycle.md:131`
 
 Replace the current equality claim:
 

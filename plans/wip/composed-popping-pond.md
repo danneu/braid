@@ -4,7 +4,7 @@
 
 ## Context
 
-`braid replace` follows the project's mutation ordering rule (`runtime-disk-membership.md:31`):
+`braid replace` follows the project's mutation ordering rule (`017-runtime-disk-membership.md:31`):
 validate → persist membership → irreversible disk operation → disk-map update.
 
 The pre-commit write at `replace.rs:196-202` ensures that if the persist itself fails, no disk is touched. But if disk operations fail *after* the persist succeeds, `pool.json` is left pointing at the replacement disk while the live pool still depends on the old one. The next `braid unlock` probes the wrong disk set.
@@ -146,7 +146,7 @@ Current text:
 Updated text:
 > Pre-commit persist: mutating commands write membership to `pool.json` before the irreversible disk operation. If the write fails, the command aborts before touching any disk. If the disk operation fails before the command's commit point (the point where pool topology actually changes), the original membership is restored so that `pool.json` matches real pool topology at command exit.
 
-### `docs/decisions/runtime-disk-membership.md:30-33`
+### `docs/decisions/017-runtime-disk-membership.md:30-33`
 
 Current text:
 > All mutating commands: validate → persist membership to `pool.json` → irreversible disk operation → disk-map update.
@@ -158,7 +158,7 @@ Updated text:
 >
 > Pre-commit writes ensure that if the persist fails, the command aborts before touching any disk. If the disk operation fails before the command's commit point — the step where pool topology actually changes (e.g., `pool_replace_device()` for `replace`) — the original membership is restored. After the commit point, the pre-committed membership is authoritative because it already matches the new topology.
 
-### `docs/decisions/intent-cli.md` — replace safety constraints section
+### `docs/decisions/012-intent-cli.md` — replace safety constraints section
 
 Add after the existing replace safety constraints (after line 58):
 
@@ -222,8 +222,8 @@ replace-rollback-on-failure = pkgs.testers.nixosTest (
 | `tests/cli/replace-rollback-on-failure.nix` | New VM test config |
 | `flake.nix` | Register new test |
 | `docs/principles.md` | Add commit-point rollback to pre-commit persist description (line 16) |
-| `docs/decisions/runtime-disk-membership.md` | Add rollback semantics to mutation ordering section (lines 30-33) |
-| `docs/decisions/intent-cli.md` | Add commit-point rollback to replace safety constraints (after line 58) |
+| `docs/decisions/017-runtime-disk-membership.md` | Add rollback semantics to mutation ordering section (lines 30-33) |
+| `docs/decisions/012-intent-cli.md` | Add commit-point rollback to replace safety constraints (after line 58) |
 
 ## Verification
 
@@ -233,4 +233,4 @@ replace-rollback-on-failure = pkgs.testers.nixosTest (
 4. `just test replace-rollback-on-failure` — passes
 5. `just test replace-live-disk replace-dead-disk replace-passphrase-mismatch` — no regressions
 6. `just test-rust` — unit tests pass
-7. Review doc changes for consistency across principles.md, runtime-disk-membership.md, and intent-cli.md
+7. Review doc changes for consistency across principles.md, 017-runtime-disk-membership.md, and 012-intent-cli.md

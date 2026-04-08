@@ -12,7 +12,7 @@ The fix: when pool.json already has a `luks_uuid` for a member, compare it again
 
 - `cli/src/mount.rs` — add UUID cross-check in the probe loop, add two failing tests
 - `docs/principles.md` — update Principle 3 identity check list
-- `docs/decisions/runtime-disk-membership.md` — document UUID enforcement in state contract
+- `docs/decisions/017-runtime-disk-membership.md` — document UUID enforcement in state contract
 - `README.md` — document UUID mismatch behavior in Pool unlock section
 
 ## Implementation
@@ -82,7 +82,7 @@ This replaces the current two separate arms (lines 79-91).
 
 Update to include LUKS UUID verification during unlock.
 
-**`docs/decisions/runtime-disk-membership.md`** — State contract section (line 54): currently reads:
+**`docs/decisions/017-runtime-disk-membership.md`** — State contract section (line 54): currently reads:
 
 > If pool.json is readable but stale (a member fails to probe), unlock warns and proceeds with the members it can probe.
 

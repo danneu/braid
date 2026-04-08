@@ -128,7 +128,7 @@ All new test files must start with block comment: what is tested, why it exists,
 3. Document mixed-state rejection and `--missing-id` scoping.
 4. Clarify redundancy semantics (add-first, final count, explicit confirmation for single-device).
 
-### docs/decisions/intent-cli.md
+### docs/decisions/012-intent-cli.md
 1. Command purpose: "evict target disk (live or missing)."
 2. Add mixed-state rejection rule and `--missing-id` scoping.
 3. Record shared eviction constraint.

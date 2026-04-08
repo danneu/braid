@@ -15,7 +15,7 @@ interactive-unlock mechanism; the keyfile is for auto-unlock only.
 Prep work already done:
 - `docs/luks-unlock.md` — research notes (USB naming, passphrase vs keyfile
   semantics, Unraid CVE, boot resilience, mount permissions)
-- `docs/decisions/single-passphrase.md` — updated Scope section (keyfiles
+- `docs/decisions/004-single-passphrase.md` — updated Scope section (keyfiles
   are orthogonal to the shared passphrase)
 
 ## Phase 1: CmdRequest variants + luks.rs helpers

@@ -310,7 +310,7 @@ braid-sleep = pkgs.testers.nixosTest (import ./tests/module/braid-sleep.nix { ..
 
 Add auto-suspend section with minimal config example and WoL note.
 
-### `docs/decisions/auto-suspend.md`
+### `docs/decisions/016-auto-suspend.md`
 
 Status: Active. Document:
 - Why autosuspend (external daemon) rather than custom braid timer
@@ -334,7 +334,7 @@ Status: Active. Document:
 9. `flake.nix` — register tests
 10. `just test braid-idle braid-sleep` — verify VM tests
 11. `README.md` — add sleep section
-12. `docs/decisions/auto-suspend.md` — decision record
+12. `docs/decisions/016-auto-suspend.md` — decision record
 
 ---
 
@@ -353,4 +353,4 @@ Status: Active. Document:
 | `tests/module/braid-sleep.py` | **Create** — test script |
 | `flake.nix` | Edit — register tests |
 | `README.md` | Edit — add sleep section |
-| `docs/decisions/auto-suspend.md` | **Create** — ADR |
+| `docs/decisions/016-auto-suspend.md` | **Create** — ADR |

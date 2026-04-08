@@ -2,7 +2,7 @@
 
 ## Context
 
-`docs/decisions/inhibit-sleep.md` documents braid's rule for holding a logind sleep inhibitor across irreversible storage mutations. Today only `braid replace` implements that rule (`cli/src/replace.rs:213-233`, wired in `cli/src/main.rs:335`). Three other long-running mutating commands cross the same threshold but currently hold no inhibitor:
+`docs/decisions/019-inhibit-sleep.md` documents braid's rule for holding a logind sleep inhibitor across irreversible storage mutations. Today only `braid replace` implements that rule (`cli/src/replace.rs:213-233`, wired in `cli/src/main.rs:335`). Three other long-running mutating commands cross the same threshold but currently hold no inhibitor:
 
 - **`braid remove`** — `cli/src/remove.rs`: writes a journal, then runs `evict_present_device`, which optionally rebalances RAID1→single and always runs `btrfs device remove` (data migration, hours on a real pool).
 - **`braid remove-missing`** — `cli/src/remove_missing.rs`: writes a journal, removes the missing devid, and conditionally runs `maybe_restore_raid1` (a soft `-dconvert=raid1` balance) when clearing the last missing device on a multi-disk pool.
@@ -147,7 +147,7 @@ add-inhibits-suspend = pkgs.testers.nixosTest (
 
 ## Documentation
 
-Update `docs/decisions/inhibit-sleep.md` "Current application" section (`docs/decisions/inhibit-sleep.md:56-77`) to document the three new commands alongside `replace`, with the same structure: protected scope (journal write through journal clear, including the long-running phases) and excluded scope (dry-run, confirmation, passphrase, reversible validation). Add to the "Consequences" section that `add`/`remove`/`remove-missing` now follow the same boundary rule.
+Update `docs/decisions/019-inhibit-sleep.md` "Current application" section (`docs/decisions/019-inhibit-sleep.md:56-77`) to document the three new commands alongside `replace`, with the same structure: protected scope (journal write through journal clear, including the long-running phases) and excluded scope (dry-run, confirmation, passphrase, reversible validation). Add to the "Consequences" section that `add`/`remove`/`remove-missing` now follow the same boundary rule.
 
 `docs/index.md` does not need an update — the decision doc is already indexed there.
 
@@ -165,7 +165,7 @@ Update `docs/decisions/inhibit-sleep.md` "Current application" section (`docs/de
 2. `just test-vm replace-inhibits-suspend` — existing replace VM test still passes after the helper extraction (regression check; this is the test that catches the helper-move bug if it exists).
 3. `just test-vm remove-inhibits-suspend remove-missing-inhibits-suspend add-inhibits-suspend` — three new VM tests pass: each observes a held braid inhibitor mid-operation, sees it released afterward, and confirms no orphaned systemd-inhibit / sh / sleep PIDs.
 4. `just test-vm` — full VM suite green (no regression in `add`, `remove`, `remove-missing`, `replace`, or any other command from the params-struct signature changes).
-5. `just test-rust` again after the `docs/decisions/inhibit-sleep.md` update lands (cheap, catches typos in any doc test that may exist).
+5. `just test-rust` again after the `docs/decisions/019-inhibit-sleep.md` update lands (cheap, catches typos in any doc test that may exist).
 
 ## Out of scope
 

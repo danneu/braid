@@ -276,13 +276,13 @@ server.succeed("chmod 2770 /mnt/storage")
 
 ### 4. Update docs
 
-#### 4a. `docs/decisions/sane-defaults.md` — add to defaults table
+#### 4a. `docs/decisions/005-sane-defaults.md` — add to defaults table
 
 | Setting | Value | Rationale |
 |---------|-------|-----------|
 | `braid.storageGroup` | `"storage"` | Mount root set to `root:storage 2770`. Users in the group can read/write the mount root. Setgid ensures new entries inherit the group. Same pattern as TrueNAS/OMV. Does not override per-file umask. |
 
-#### 4b. New: `docs/decisions/mount-permissions.md`
+#### 4b. New: `docs/decisions/013-mount-permissions.md`
 
 Status: Active. Documents:
 - Why group-based mount-root permissions (not ACLs, not per-user subvolumes)
@@ -334,8 +334,8 @@ Disable automatic permissions:
 | `tests/samba.nix` | Group + Samba config |
 | `tests/samba.py` | Group-based chown/chmod |
 | `flake.nix` | Register `braid-module-add-bootstrap` test |
-| `docs/decisions/sane-defaults.md` | Add storageGroup to defaults table |
-| `docs/decisions/mount-permissions.md` | **New** — decision doc |
+| `docs/decisions/005-sane-defaults.md` | Add storageGroup to defaults table |
+| `docs/decisions/013-mount-permissions.md` | **New** — decision doc |
 | `docs/principles.md` | Extend principle 7 |
 | `README.md` | Document storage group |
 

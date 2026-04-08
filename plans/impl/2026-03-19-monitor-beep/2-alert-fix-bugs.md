@@ -42,7 +42,7 @@ script = ''
 '';
 ```
 
-### `docs/decisions/alerts.md`
+### `docs/decisions/014-alerts.md`
 
 Add exit codes to the "`braid monitor` is a pure detector" section: 0 = ok/offline, 1 = alert, 2 = error.
 

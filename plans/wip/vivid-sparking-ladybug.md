@@ -4,7 +4,7 @@
 
 `braid-unlock.service` has `RemainAfterExit = true`, which keeps it "active (exited)" after a successful unlock. This blocks re-use of `systemctl start braid-pool.target` as a re-unlock path after `braid lock`, because systemd sees the service as already active and skips it. The existing test (`systemd-lifecycle.py:76-81`) already works around this with a manual `systemctl stop braid-unlock.service`. The `ConditionPathIsMountPoint = !mountPoint` guard already prevents double-unlock, so RAE adds no value — `braid-online` is the sole status signal.
 
-Precedent: `braid-auto-unlock.service` intentionally omits RAE for exactly this reason (`systemd-lifecycle.md:65`).
+Precedent: `braid-auto-unlock.service` intentionally omits RAE for exactly this reason (`018-systemd-lifecycle.md:65`).
 
 ## Changes
 
@@ -12,7 +12,7 @@ Precedent: `braid-auto-unlock.service` intentionally omits RAE for exactly this 
 
 Delete `RemainAfterExit = true;` from the `braid-unlock` serviceConfig. The `Type = "oneshot"` stays.
 
-### 2. Update decision doc — `docs/decisions/systemd-lifecycle.md`
+### 2. Update decision doc — `docs/decisions/018-systemd-lifecycle.md`
 
 - **Line 21** (ASCII diagram): Change `oneshot, RAE` to `oneshot` for braid-unlock.
 - **Line 54**: Rewrite "runs once, stays 'active (exited)' to prevent re-run" — the condition guard prevents re-run, and the service now returns to inactive after completion. Note this enables `systemctl start braid-pool.target` as a re-unlock path after lock.
@@ -56,7 +56,7 @@ After the existing sentence "One passphrase prompt opens all available LUKS devi
 ## Files modified
 
 - `modules/braid/storage.nix` — remove one line
-- `docs/decisions/systemd-lifecycle.md` — update diagram + description
+- `docs/decisions/018-systemd-lifecycle.md` — update diagram + description
 - `AGENTS.md` — update table
 - `tests/module/systemd-lifecycle.py` — remove workaround, add re-unlock subtest
 - `README.md` — note re-unlock via same command

@@ -1,6 +1,6 @@
 # Decision: Safe-by-Construction Reconciliation
 
-**Status: Superseded by [intent-cli.md](intent-cli.md)**
+**Status: Superseded by [012-intent-cli.md](012-intent-cli.md)**
 
 > Principle: [Safe-by-construction operations](../principles.md#3-safe-by-construction-operations)
 
@@ -58,5 +58,5 @@ If NixOS or LUKS ever provides an idempotent "ensure formatted" primitive that i
 ## See
 
 - `cli/src/` — Rust CLI (`init-disk`, `plan`, `apply`, `status`)
-- [config-first-workflow.md](config-first-workflow.md) — config-first principle
-- [unified-cli.md](unified-cli.md) — plan/apply architecture and action types
+- [002-config-first-workflow.md](002-config-first-workflow.md) — config-first principle
+- [008-unified-cli.md](008-unified-cli.md) — plan/apply architecture and action types

@@ -87,7 +87,7 @@ With:
 
 > Parser-critical tools (btrfs-progs, cryptsetup, util-linux) are pinned to a specific NixOS stable release via the flake input. Wrappers execute with an explicit PATH built from module-controlled packages (`braid.packages.*`). Parsers assume the output format of the pinned version — upgrading those tools requires updating fixtures and parser tests. These pinned defaults are a compatibility baseline, not a lock; users may override `braid.packages.*` to pick up newer system versions when needed. Generic helpers (coreutils, systemd) come from the consumer's package set and are not part of braid's parser contract.
 
-### 6. `docs/decisions/toolchain-pinning.md` — update to reflect selective policy
+### 6. `docs/decisions/010-toolchain-pinning.md` — update to reflect selective policy
 
 Update the Context, Decision, and How-it-works sections to describe the selective pinning policy. Key changes:
 - Module options list becomes three (`cryptsetup`, `btrfsProgs`, `utilLinux`), not five.
@@ -130,7 +130,7 @@ Line 382 already says "runtime tools (btrfs-progs, cryptsetup, util-linux) are p
 | `flake.nix:457-462` | Remove jq, coreutils from module defaults |
 | `modules/braid/wrapper.nix:10,20-21` | Remove jq/coreutils from toolPackages; use `pkgs.coreutils` for chown/chmod |
 | `docs/principles.md:48-50` | Update principle 10 text |
-| `docs/decisions/toolchain-pinning.md` | Update to describe selective pinning + classification guideline |
+| `docs/decisions/010-toolchain-pinning.md` | Update to describe selective pinning + classification guideline |
 
 ## Verification
 

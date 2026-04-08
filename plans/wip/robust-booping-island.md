@@ -58,7 +58,7 @@ All variables (`parsed`, `pool_membership`, `paths`) remain in scope. Error prop
 
 **Early-return path** (lines 449-457, `needs_pool_add.is_empty()`): No pool.json write needed — if all disks are already in pool, pool.json already has them.
 
-### 2. `docs/decisions/runtime-disk-membership.md` — update mutation ordering
+### 2. `docs/decisions/017-runtime-disk-membership.md` — update mutation ordering
 
 Line 31, change "validate → persist membership → irreversible disk operation" to "validate → irreversible disk operation → persist membership". Update the rationale line (33) to explain the post-commit approach.
 

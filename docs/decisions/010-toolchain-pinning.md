@@ -65,5 +65,5 @@ Previously active, now superseded. Blanket pinning created unnecessary closure d
 
 ## See
 
-- [NixOS-native](nix-native.md) — follow NixOS conventions (PATH wrapping via makeWrapper)
+- [NixOS-native](006-nix-native.md) — follow NixOS conventions (PATH wrapping via makeWrapper)
 - Principle 10 in [principles.md](../principles.md)

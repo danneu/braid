@@ -53,7 +53,7 @@ This fails hard (exit 1) on any config/disk-map identity mismatch — before any
 - MockRunner only needs the mountpoint check mock
 - This proves identity enforcement is unconditional, not tied to degraded classification
 
-### 5. Update decision doc (`docs/decisions/resilient-boot.md`)
+### 5. Update decision doc (`docs/decisions/003-resilient-boot.md`)
 
 Add to the Implementation section: `braid unlock` enforces disk-map/config identity for all unlocks — not only degraded scenarios. Any name reassignment or rename detected between config and disk-map is a hard error before any disk is probed or mounted. `--allow-degraded` only bypasses degraded-mount refusal, never identity mismatches.
 
@@ -79,7 +79,7 @@ Add two subtests:
 
 - `cli/src/unlock.rs` — add error variant, add validation call, add 3 unit tests
 - `cli/src/disk_map.rs` — remove "in v1.0" from error messages
-- `docs/decisions/resilient-boot.md` — one paragraph addition
+- `docs/decisions/003-resilient-boot.md` — one paragraph addition
 - `tests/cli/braid-unlock.py` — 2 new subtests (with disk-map save/restore)
 
 ## Why up-front check instead of per-disk inline check

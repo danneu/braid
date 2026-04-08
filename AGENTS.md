@@ -37,7 +37,7 @@ Unlock:
 
 ## Systemd Lifecycle
 
-Systemd lifecycle design: [`docs/decisions/systemd-lifecycle.md`](docs/decisions/systemd-lifecycle.md). Read before modifying units, the wrapper, or writing systemd-related tests.
+Systemd lifecycle design: [`docs/decisions/018-systemd-lifecycle.md`](docs/decisions/018-systemd-lifecycle.md). Read before modifying units, the wrapper, or writing systemd-related tests.
 
 ## No backwards compatibility
 

@@ -445,8 +445,8 @@ For each: replace `disk-map.json` assertions with pool.json assertions checking 
 | File | Change |
 |---|---|
 | `docs/principles.md:16` | "Pre-commit persist" → "Post-commit persist with journal": intent journaled, membership written only after success, recovery via `braid recover` from live pool state |
-| `docs/decisions/runtime-disk-membership.md:27-33` | Remove disk-map.json reference. Update mutation ordering. Add recovery mode section: journal present → hard-fail, `braid recover` rebuilds from live pool |
-| `docs/decisions/intent-cli.md` | Update replace safety constraints: post-commit eliminates rollback need |
+| `docs/decisions/017-runtime-disk-membership.md:27-33` | Remove disk-map.json reference. Update mutation ordering. Add recovery mode section: journal present → hard-fail, `braid recover` rebuilds from live pool |
+| `docs/decisions/012-intent-cli.md` | Update replace safety constraints: post-commit eliminates rollback need |
 | `plans/wip/composed-popping-pond.md` | Mark: Superseded by this plan |
 | `plans/wip/robust-booping-island.md` | Mark: Superseded by this plan |
 

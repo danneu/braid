@@ -28,25 +28,25 @@ intent: Map device-disappearance states to btrfs, cryptsetup, and kernel output 
 
 Architecture decision records. Each has a status: `Draft`, `Active`, `Superseded`, or `Deprecated`.
 
-- [decisions/alerts.md](decisions/alerts.md) — First-class alerting: shared alert computation across CLI, TUI, and monitor surfaces.
-- [decisions/auto-suspend.md](decisions/auto-suspend.md) — Whole-system suspend-to-RAM using autosuspend for power efficiency and quiet operation.
-- [decisions/btrfs-raid1.md](decisions/btrfs-raid1.md) — Why btrfs RAID1 over ZFS/mdadm: checksumming, self-healing, dynamic pooling.
-- [decisions/config-first-workflow.md](decisions/config-first-workflow.md) — **Superseded.** Hybrid: NixOS config as source of truth, then imperative script execution.
-- [decisions/disk-pool-management.md](decisions/disk-pool-management.md) — **Superseded.** Symmetric config-first workflow for add/remove/replace.
-- [decisions/hdd-defaults.md](decisions/hdd-defaults.md) — braid optimized for HDD workloads; no flash/SSD support in operational defaults.
-- [decisions/inhibit-sleep.md](decisions/inhibit-sleep.md) — When braid should hold a systemd sleep inhibitor: only for the non-interruptible mutation window, not during prompts or reversible preflight.
-- [decisions/intent-cli.md](decisions/intent-cli.md) — Five intent commands (`braid add/remove/replace/...`) replacing plan/apply complexity.
-- [decisions/mount-permissions.md](decisions/mount-permissions.md) — Group-based mount point permissions enabling regular user write access.
-- [decisions/nix-native.md](decisions/nix-native.md) — Targets NixOS exclusively using standard module conventions and nixpkgs patterns.
-- [decisions/resilient-boot.md](decisions/resilient-boot.md) — Pool fails gracefully without blocking boot; data drives treated like external mounts.
-- [decisions/runtime-disk-membership.md](decisions/runtime-disk-membership.md) — Disk membership moved from NixOS config to CLI-owned runtime state file.
-- [decisions/safe-by-construction-reconciliation.md](decisions/safe-by-construction-reconciliation.md) — **Superseded.** Separate destructive formatting from repeatable reconciliation structurally.
-- [decisions/sane-defaults.md](decisions/sane-defaults.md) — Opinionated NixOS defaults via `mkDefault`; settings knowledgeable admins would enable anyway.
-- [decisions/single-passphrase.md](decisions/single-passphrase.md) — Single passphrase for all LUKS devices, verified at format time.
-- [decisions/systemd-lifecycle.md](decisions/systemd-lifecycle.md) — Thin systemd layer for unlock/mount entry points; CLI owns LUKS and btrfs operations.
-- [decisions/toolchain-pinning.md](decisions/toolchain-pinning.md) — Pin parser-critical tools (btrfs-progs, cryptsetup, util-linux) to stable nixos-25.11.
-- [decisions/two-phase-apply.md](decisions/two-phase-apply.md) — **Superseded.** LUKS pre-phase to unlock drives before pool probing.
-- [decisions/unified-cli.md](decisions/unified-cli.md) — **Superseded.** Unified Rust CLI replacing multiple scripts with plan/apply workflow.
+- [decisions/001-btrfs-raid1.md](decisions/001-btrfs-raid1.md) — Why btrfs RAID1 over ZFS/mdadm: checksumming, self-healing, dynamic pooling.
+- [decisions/002-config-first-workflow.md](decisions/002-config-first-workflow.md) — **Superseded.** Hybrid: NixOS config as source of truth, then imperative script execution.
+- [decisions/003-resilient-boot.md](decisions/003-resilient-boot.md) — Pool fails gracefully without blocking boot; data drives treated like external mounts.
+- [decisions/004-single-passphrase.md](decisions/004-single-passphrase.md) — Single passphrase for all LUKS devices, verified at format time.
+- [decisions/005-sane-defaults.md](decisions/005-sane-defaults.md) — Opinionated NixOS defaults via `mkDefault`; settings knowledgeable admins would enable anyway.
+- [decisions/006-nix-native.md](decisions/006-nix-native.md) — Targets NixOS exclusively using standard module conventions and nixpkgs patterns.
+- [decisions/007-disk-pool-management.md](decisions/007-disk-pool-management.md) — **Superseded.** Symmetric config-first workflow for add/remove/replace.
+- [decisions/008-unified-cli.md](decisions/008-unified-cli.md) — **Superseded.** Unified Rust CLI replacing multiple scripts with plan/apply workflow.
+- [decisions/009-safe-by-construction-reconciliation.md](decisions/009-safe-by-construction-reconciliation.md) — **Superseded.** Separate destructive formatting from repeatable reconciliation structurally.
+- [decisions/010-toolchain-pinning.md](decisions/010-toolchain-pinning.md) — Pin parser-critical tools (btrfs-progs, cryptsetup, util-linux) to stable nixos-25.11.
+- [decisions/011-two-phase-apply.md](decisions/011-two-phase-apply.md) — **Superseded.** LUKS pre-phase to unlock drives before pool probing.
+- [decisions/012-intent-cli.md](decisions/012-intent-cli.md) — Five intent commands (`braid add/remove/replace/...`) replacing plan/apply complexity.
+- [decisions/013-mount-permissions.md](decisions/013-mount-permissions.md) — Group-based mount point permissions enabling regular user write access.
+- [decisions/014-alerts.md](decisions/014-alerts.md) — First-class alerting: shared alert computation across CLI, TUI, and monitor surfaces.
+- [decisions/015-hdd-defaults.md](decisions/015-hdd-defaults.md) — braid optimized for HDD workloads; no flash/SSD support in operational defaults.
+- [decisions/016-auto-suspend.md](decisions/016-auto-suspend.md) — Whole-system suspend-to-RAM using autosuspend for power efficiency and quiet operation.
+- [decisions/017-runtime-disk-membership.md](decisions/017-runtime-disk-membership.md) — Disk membership moved from NixOS config to CLI-owned runtime state file.
+- [decisions/018-systemd-lifecycle.md](decisions/018-systemd-lifecycle.md) — Thin systemd layer for unlock/mount entry points; CLI owns LUKS and btrfs operations.
+- [decisions/019-inhibit-sleep.md](decisions/019-inhibit-sleep.md) — When braid should hold a systemd sleep inhibitor: only for the non-interruptible mutation window, not during prompts or reversible preflight.
 
 ## tool-behavior/
 

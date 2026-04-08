@@ -2,7 +2,7 @@
 
 ## Context
 
-The invariant "braid-online active ⟺ pool is mounted" is documented in `docs/decisions/systemd-lifecycle.md` but only enforced by the wrapper's `mountpoint -q` check. A direct `systemctl start braid-online.service` bypasses the wrapper and activates the unit even when the pool is unmounted. This breaks the invariant and could confuse shutdown behavior.
+The invariant "braid-online active ⟺ pool is mounted" is documented in `docs/decisions/018-systemd-lifecycle.md` but only enforced by the wrapper's `mountpoint -q` check. A direct `systemctl start braid-online.service` bypasses the wrapper and activates the unit even when the pool is unmounted. This breaks the invariant and could confuse shutdown behavior.
 
 ## Changes
 
@@ -72,7 +72,7 @@ With:
 
 ### 4. Update lifecycle decision doc
 
-**File:** `docs/decisions/systemd-lifecycle.md`
+**File:** `docs/decisions/018-systemd-lifecycle.md`
 
 Two updates:
 
@@ -98,7 +98,7 @@ Enforced at two layers: the wrapper only activates it after `mountpoint -q` succ
 
 - `modules/braid/storage.nix` — add `unitConfig.ConditionPathIsMountPoint`
 - `tests/module/systemd-lifecycle.py` — add new subtest + fix subtest 7 sanity check
-- `docs/decisions/systemd-lifecycle.md` — document the condition guard
+- `docs/decisions/018-systemd-lifecycle.md` — document the condition guard
 
 ## Verification
 

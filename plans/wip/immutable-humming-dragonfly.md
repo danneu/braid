@@ -127,11 +127,11 @@ This ensures `braid-online.service` activates after recover mounts the pool, mai
 
 ### 7. Doc updates
 
-**`docs/decisions/systemd-lifecycle.md` line 98:**
+**`docs/decisions/018-systemd-lifecycle.md` line 98:**
 - Change "On successful `unlock` or `add`:" → "On successful `unlock`, `add`, or `recover`:"
 - Add: "`recover` follows the same post-mount path because it may self-mount the pool when recovering from an interrupted operation."
 
-**`docs/decisions/runtime-disk-membership.md` lines 47 and 60:**
+**`docs/decisions/017-runtime-disk-membership.md` lines 47 and 60:**
 - Update recovery mode description: "`braid recover` opens LUKS devices, mounts the pool (with `--allow-degraded` if needed), rebuilds membership from the live mounted btrfs pool topology, and clears the journal."
 
 **`docs/principles.md` line 7 (Principle 1):**
@@ -198,8 +198,8 @@ New subtest 8: "braid recover activates braid-online.service"
 | `cli/src/main.rs` | `RecoverArgs`, update `Commands::Recover`, DegradedRefused exit code 2 |
 | `modules/braid/braid-wrapper.sh` | Add `recover` to `unlock|add)` case arm |
 | `docs/principles.md` | Add recover as recovery-only mount path in Principle 1 |
-| `docs/decisions/systemd-lifecycle.md` | Add recover to wrapper doc |
-| `docs/decisions/runtime-disk-membership.md` | Update recovery mode description |
+| `docs/decisions/018-systemd-lifecycle.md` | Add recover to wrapper doc |
+| `docs/decisions/017-runtime-disk-membership.md` | Update recovery mode description |
 | `README.md` | Update pending-op.json description |
 | `tests/cli/braid-recover.nix` | **New** — VM test harness |
 | `tests/cli/braid-recover.py` | **New** — VM test script |

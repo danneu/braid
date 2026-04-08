@@ -255,7 +255,7 @@ fn main() {
 
     // Hoisted once: shared by add/remove/remove-missing/replace. Each command's
     // cmd_* function holds the inhibitor only across its irreversible mutation
-    // window — see docs/decisions/inhibit-sleep.md for the boundary rule.
+    // window — see docs/decisions/019-inhibit-sleep.md for the boundary rule.
     let sleep_inhibitor = braid_cli::inhibit::RealSleepInhibitor;
 
     match cli.command {
@@ -524,7 +524,7 @@ fn main() {
         Commands::ScrubCancel(args) => {
             // Mount comes from --mount, NOT config_read. ExecStop must have zero
             // filesystem dependencies beyond the binary itself — see
-            // docs/decisions/systemd-lifecycle.md (thin-systemd-layer principle).
+            // docs/decisions/018-systemd-lifecycle.md (thin-systemd-layer principle).
             let runner = RealRunner;
             let mount_point = braid_cli::types::MountPoint(args.mount.clone());
             match braid_cli::scrub_cancel::cmd_scrub_cancel(&runner, &mount_point) {

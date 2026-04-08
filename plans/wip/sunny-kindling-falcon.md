@@ -24,7 +24,7 @@ serviceConfig = {
 };
 ```
 
-### 2. Update ADR — `docs/decisions/systemd-lifecycle.md:73-81`
+### 2. Update ADR — `docs/decisions/018-systemd-lifecycle.md:73-81`
 
 Add `TimeoutStopSec = 5min` to the `braid-online.service` bullet list with rationale. Something like:
 

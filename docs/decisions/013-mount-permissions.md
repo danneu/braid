@@ -52,4 +52,4 @@ The setgid bit (2770) ensures new files/directories in the mount root inherit th
 - `modules/braid/braid-wrapper.sh` — the wrapper template
 - `modules/braid/wrapper.nix` — Nix derivation that builds the wrapper
 - `modules/braid/options.nix` — `storageGroup` option definition
-- [Sane defaults](sane-defaults.md) — philosophy on opinionated defaults
+- [Sane defaults](005-sane-defaults.md) — philosophy on opinionated defaults

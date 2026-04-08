@@ -57,4 +57,4 @@ Rejected. TrueNAS runs ZFS on always-on servers. Braid targets home NAS with spi
 ## See
 
 - `modules/braid/storage.nix` — where defaults are applied
-- [Resilient by default](resilient-boot.md) — related philosophy: protect by default, no toggles
+- [Resilient by default](003-resilient-boot.md) — related philosophy: protect by default, no toggles

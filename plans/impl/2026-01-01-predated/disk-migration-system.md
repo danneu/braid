@@ -12,8 +12,8 @@ Current system behavior is implemented and tested via:
 - `scripts/braid-add-disk.sh`
 - `scripts/braid-remove-disk.sh`
 - `scripts/braid-status.sh`
-- `docs/decisions/config-first-workflow.md`
-- `docs/decisions/disk-pool-management.md`
+- `docs/decisions/002-config-first-workflow.md`
+- `docs/decisions/007-disk-pool-management.md`
 
 Current operator flow is safe but split across multiple commands. The new system
 should unify mutation workflows while preserving all existing invariants.

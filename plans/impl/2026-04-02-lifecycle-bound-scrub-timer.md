@@ -49,7 +49,7 @@ systemd stores the last-trigger timestamp in a stamp file (`/var/lib/systemd/tim
 
 ### New consumer pattern
 
-This is a third pattern for `systemd-lifecycle.md`, distinct from the existing two:
+This is a third pattern for `018-systemd-lifecycle.md`, distinct from the existing two:
 
 - **Frequent periodic** (monitor): `ConditionPathIsMountPoint` only. Fires every 5min; missed fires are cheap.
 - **Long-running** (samba/nfs): `BindsTo + After braid-online.service`. Must stop before lock.
@@ -57,7 +57,7 @@ This is a third pattern for `systemd-lifecycle.md`, distinct from the existing t
 
 ### Why BindsTo on braid-online, not mnt-storage.mount
 
-Per `systemd-lifecycle.md`: `mnt-storage.mount` doesn't exist until the CLI mounts the pool at runtime (auto-generated from `/proc/mounts`). `BindsTo`/`After` on it forces systemd to load the unit, which fails before first unlock. `braid-online.service` is declared in the NixOS config and always exists.
+Per `018-systemd-lifecycle.md`: `mnt-storage.mount` doesn't exist until the CLI mounts the pool at runtime (auto-generated from `/proc/mounts`). `BindsTo`/`After` on it forces systemd to load the unit, which fails before first unlock. `braid-online.service` is declared in the NixOS config and always exists.
 
 ## Changes
 
@@ -298,13 +298,13 @@ scrub-lifecycle = pkgs.testers.nixosTest (
 
 ### 9. Documentation updates
 
-**`docs/decisions/systemd-lifecycle.md`:**
+**`docs/decisions/018-systemd-lifecycle.md`:**
 - Add `braid-scrub.timer → braid-scrub.service` to the ASCII diagram
 - Add subsection documenting the timer-lifecycle pattern and both lock paths (manual vs shutdown)
 - Update "Consumer dependency contracts" with the third pattern (infrequent periodic)
 - Update "CLI wrapper as synchronization layer" to document the new lock pre-processing
 
-**`docs/decisions/sane-defaults.md`:**
+**`docs/decisions/005-sane-defaults.md`:**
 - Replace `services.btrfs.autoScrub.*` rows in the defaults table with `braid.autoScrub.*` rows
 - Change "Wrap scrub" alternative from Rejected → Accepted with rationale
 - Add case study to "When to wrap" section
@@ -333,8 +333,8 @@ Remove `plans/wip/sprightly-tickling-kahn.md` (superseded by this plan, which wi
 | `tests/module/scrub-lifecycle.py` | **New** — Persistent catch-up on unlock, safe lock during scrub |
 | `tests/module/braid-auto-suspend.py` | Update scrub wakeup assertion (line 72) |
 | `flake.nix` | Register `braid-auto-scrub` and `scrub-lifecycle` tests |
-| `docs/decisions/systemd-lifecycle.md` | Document scrub units, timer-lifecycle pattern, wrapper pre-lock |
-| `docs/decisions/sane-defaults.md` | Reverse "Wrap scrub" rejection; update defaults table |
+| `docs/decisions/018-systemd-lifecycle.md` | Document scrub units, timer-lifecycle pattern, wrapper pre-lock |
+| `docs/decisions/005-sane-defaults.md` | Reverse "Wrap scrub" rejection; update defaults table |
 | `docs/principles.md` | Update Principle 7 wording |
 | `README.md` | Update scrub config section |
 | `plans/wip/sprightly-tickling-kahn.md` | Remove (superseded) |

@@ -1,6 +1,6 @@
 # Intent CLI
 
-**Status: Active** — Supersedes `unified-cli.md` and `two-phase-apply.md`.
+**Status: Active** — Supersedes `008-unified-cli.md` and `011-two-phase-apply.md`.
 
 ## Context
 
@@ -24,7 +24,7 @@ Replace plan/apply with five intent commands:
 
 ### Disk keys
 
-Disk membership is CLI-owned runtime state in `/var/lib/braid/pool.json` (see [runtime-disk-membership.md](runtime-disk-membership.md)). Disks are added with `name=by_id` syntax:
+Disk membership is CLI-owned runtime state in `/var/lib/braid/pool.json` (see [017-runtime-disk-membership.md](017-runtime-disk-membership.md)). Disks are added with `name=by_id` syntax:
 
 ```sh
 braid add toshiba=/dev/disk/by-id/ata-Toshiba_MN07_XXXX \

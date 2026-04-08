@@ -4,11 +4,11 @@ Canonical invariants for braid. Each principle is authoritative — if code or c
 
 ## 1. Resilient by default
 
-Data drives never block boot. The pool is unlocked and mounted by explicit CLI invocations (`braid unlock`, the `braid-auto-unlock.service` unit, or `braid recover` during recovery), not by systemd mount units. No LUKS or btrfs units are generated at build time. Degraded mounts require explicit `--allow-degraded` — braid refuses to silently run with zero redundancy. [Why →](decisions/resilient-boot.md)
+Data drives never block boot. The pool is unlocked and mounted by explicit CLI invocations (`braid unlock`, the `braid-auto-unlock.service` unit, or `braid recover` during recovery), not by systemd mount units. No LUKS or btrfs units are generated at build time. Degraded mounts require explicit `--allow-degraded` — braid refuses to silently run with zero redundancy. [Why →](decisions/003-resilient-boot.md)
 
 ## 2. CLI-owned membership
 
-Disk membership is runtime state owned by the CLI, stored in `/var/lib/braid/pool.json`. Adding or removing a drive is `braid add name=/dev/disk/by-id/...` — no `nixos-rebuild` required. The NixOS module provides the mount point, services, and toolchain; the CLI owns which disks are in the pool. `unlock` requires `pool.json` to exist and be valid — it never creates or repairs it. Recovery is explicit via `braid discover --write`. [Why →](decisions/runtime-disk-membership.md)
+Disk membership is runtime state owned by the CLI, stored in `/var/lib/braid/pool.json`. Adding or removing a drive is `braid add name=/dev/disk/by-id/...` — no `nixos-rebuild` required. The NixOS module provides the mount point, services, and toolchain; the CLI owns which disks are in the pool. `unlock` requires `pool.json` to exist and be valid — it never creates or repairs it. Recovery is explicit via `braid discover --write`. [Why →](decisions/017-runtime-disk-membership.md)
 
 `pool.json` is a best-effort operational snapshot — it tells braid which drives to attempt unlocking, not what the pool actually looks like. Any state that can be read from live btrfs (devids, device counts, FSID) must come from btrfs, not pool.json. Commands like `status` must never surface pool.json-sourced devids; devids are authoritative only when read from a mounted filesystem via `btrfs device usage` or equivalent.
 
@@ -20,11 +20,11 @@ Disk membership is runtime state owned by the CLI, stored in `/var/lib/braid/poo
 - `mkfs.btrfs` is gated on bootstrap only (no existing superblock).
 - An existing LUKS device or pool member is never reformatted — a multi-layer identity check (LUKS label match, LUKS UUID cross-check against pool.json, pool-mounted requirement, btrfs FSID comparison) prevents accidental data loss, with the btrfs superblock guard as defense-in-depth.
 - Mounts always include `skip_balance` — btrfs silently resumes interrupted balances on mount by default, which can re-trigger ENOSPC or surprise the user with heavy I/O. braid manages balance lifecycle explicitly; `unlock` warns if a paused balance is detected.
-- [Why →](decisions/intent-cli.md)
+- [Why →](decisions/012-intent-cli.md)
 
 ## 4. Single passphrase
 
-All drives share one LUKS passphrase. `braid unlock` and `braid add` depend on this — one passphrase unlocks all drives. Enforced at format time: subsequent disks verify against an existing pool member via `cryptsetup --test-passphrase`. [Why →](decisions/single-passphrase.md)
+All drives share one LUKS passphrase. `braid unlock` and `braid add` depend on this — one passphrase unlocks all drives. Enforced at format time: subsequent disks verify against an existing pool member via `cryptsetup --test-passphrase`. [Why →](decisions/004-single-passphrase.md)
 
 Binary keyfile support is available via `braid enroll` (slot 1) and `braid.autoUnlock` (NixOS module). The passphrase (slot 0) remains the interactive-unlock mechanism; keyfiles are for unattended auto-unlock only.
 
@@ -33,11 +33,11 @@ Binary keyfile support is available via `braid enroll` (slot 1) and `braid.autoU
 All persistent storage config uses `/dev/disk/by-id/` paths. Never `/dev/sdX`. Mapper names are `braid-<disk-name>` (e.g., `braid-toshiba`) — deterministic, human-friendly, debuggable in `lsblk`, systemd logs, and error messages.
 ## 6. btrfs RAID1
 
-Auto-healing checksums, dynamic drive pooling, in-kernel (no out-of-tree modules). 50% space overhead is accepted. btrfs RAID5/6 is not production-ready. [Why →](decisions/btrfs-raid1.md)
+Auto-healing checksums, dynamic drive pooling, in-kernel (no out-of-tree modules). 50% space overhead is accepted. btrfs RAID5/6 is not production-ready. [Why →](decisions/001-btrfs-raid1.md)
 
 ## 7. Sane defaults
 
-If a knowledgeable admin would always enable it, braid enables it by default. Use `lib.mkDefault` for simple pass-through defaults on stable NixOS options. Wrap in a `braid.*` option when the feature is inside braid's product boundary and benefits from lifecycle control, discoverability, or a unified config surface — even if the mapping is 1:1. Examples: `braid.autoScrub` (periodic scrub with lifecycle binding to pool online state), `storageGroup` for mount root access (`root:storage 2770`). [Why →](decisions/sane-defaults.md)
+If a knowledgeable admin would always enable it, braid enables it by default. Use `lib.mkDefault` for simple pass-through defaults on stable NixOS options. Wrap in a `braid.*` option when the feature is inside braid's product boundary and benefits from lifecycle control, discoverability, or a unified config surface — even if the mapping is 1:1. Examples: `braid.autoScrub` (periodic scrub with lifecycle binding to pool online state), `storageGroup` for mount root access (`root:storage 2770`). [Why →](decisions/005-sane-defaults.md)
 
 ## 8. Test every design decision
 
@@ -45,15 +45,15 @@ NixOS VM tests validate behavior, not just command success. TDD: write failing t
 
 ## 9. NixOS-native
 
-Braid only targets NixOS. No portability abstractions, no generic Linux fallbacks. Follow NixOS module conventions — same option types, patterns, and idioms as nixpkgs. When in doubt, nixpkgs is the tiebreaker. [Why →](decisions/nix-native.md)
+Braid only targets NixOS. No portability abstractions, no generic Linux fallbacks. Follow NixOS module conventions — same option types, patterns, and idioms as nixpkgs. When in doubt, nixpkgs is the tiebreaker. [Why →](decisions/006-nix-native.md)
 
 ## 10. Pinned toolchain
 
-Parser-critical tools (btrfs-progs, cryptsetup, util-linux) are pinned to a specific NixOS stable release via the flake input. Wrappers execute with an explicit PATH built from module-controlled packages (`braid.packages.*`). Parsers assume the output format of the pinned version — upgrading those tools requires updating fixtures and parser tests. These pinned defaults are a compatibility baseline, not a lock; users may override `braid.packages.*` to pick up newer system versions when needed. Generic helpers (coreutils, systemd) come from the consumer's package set and are not part of braid's parser contract. [Why →](decisions/toolchain-pinning.md)
+Parser-critical tools (btrfs-progs, cryptsetup, util-linux) are pinned to a specific NixOS stable release via the flake input. Wrappers execute with an explicit PATH built from module-controlled packages (`braid.packages.*`). Parsers assume the output format of the pinned version — upgrading those tools requires updating fixtures and parser tests. These pinned defaults are a compatibility baseline, not a lock; users may override `braid.packages.*` to pick up newer system versions when needed. Generic helpers (coreutils, systemd) come from the consumer's package set and are not part of braid's parser contract. [Why →](decisions/010-toolchain-pinning.md)
 
 ## 11. HDD defaults
 
-Mount options, LUKS flags, and scrub scheduling are chosen for HDD NAS deployments. [Why →](decisions/hdd-defaults.md)
+Mount options, LUKS flags, and scrub scheduling are chosen for HDD NAS deployments. [Why →](decisions/015-hdd-defaults.md)
 
 ## 12. One pool operation at a time
 

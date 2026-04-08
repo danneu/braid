@@ -1,6 +1,6 @@
 # Decision: Runtime Disk Membership
 
-Status: Active — Supersedes [config-first-workflow.md](config-first-workflow.md).
+Status: Active — Supersedes [002-config-first-workflow.md](002-config-first-workflow.md).
 
 > Principle: [CLI-owned membership](../principles.md#2-cli-owned-membership)
 

@@ -6,7 +6,7 @@ Status: Active
 
 ## Context
 
-braid needs systemd integration for three things: interactive unlock, unattended unlock, and clean shutdown (LUKS close before power-off). The module must not generate `fileSystems` or `boot.initrd.luks.devices` entries — those create hard boot dependencies on the data pool (see [resilient-boot.md](resilient-boot.md)). Instead, the CLI owns LUKS open/close and btrfs mount/unmount at runtime, and a thin systemd layer provides the entry points and shutdown hook.
+braid needs systemd integration for three things: interactive unlock, unattended unlock, and clean shutdown (LUKS close before power-off). The module must not generate `fileSystems` or `boot.initrd.luks.devices` entries — those create hard boot dependencies on the data pool (see [003-resilient-boot.md](003-resilient-boot.md)). Instead, the CLI owns LUKS open/close and btrfs mount/unmount at runtime, and a thin systemd layer provides the entry points and shutdown hook.
 
 ## Units
 
@@ -157,6 +157,6 @@ Services that depend on the pool being mounted use one of three patterns:
 - `modules/braid/storage.nix` — unit definitions
 - `modules/braid/monitor.nix` — monitor/alert units
 - `modules/braid/braid-wrapper.sh` — CLI/systemd synchronization
-- [resilient-boot.md](resilient-boot.md) — why no hard dependencies
-- [runtime-disk-membership.md](runtime-disk-membership.md) — lifecycle model context
+- [003-resilient-boot.md](003-resilient-boot.md) — why no hard dependencies
+- [017-runtime-disk-membership.md](017-runtime-disk-membership.md) — lifecycle model context
 - `tests/module/systemd-lifecycle.py` — state machine test suite

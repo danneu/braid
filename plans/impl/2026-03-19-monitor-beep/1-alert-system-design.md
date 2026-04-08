@@ -392,7 +392,7 @@ Intent: Verify systemd units exist and can be started/stopped.
 ### Step 10: Docs
 
 - Update `README.md` with Alerts section: braid has first-class Alerts. Beeping is the default audible notifier. `braid status` is the primary place to understand active alerts. `braid ack` acknowledges current alerts and silences notifications.
-- Add `docs/decisions/alerts.md` (ADR, status: Active): first-class alert concept, shared `compute_alert_state()`, alert causes, latched alerts, ack workflow, two detection sources.
+- Add `docs/decisions/014-alerts.md` (ADR, status: Active): first-class alert concept, shared `compute_alert_state()`, alert causes, latched alerts, ack workflow, two detection sources.
 
 ## Files to create
 
@@ -408,7 +408,7 @@ Intent: Verify systemd units exist and can be started/stopped.
 | `tests/cli/braid-smartd-alert.nix` | VM test: NixOS config |
 | `tests/module/braid-alert.py` | VM test: alert service |
 | `tests/module/braid-alert.nix` | VM test: NixOS config |
-| `docs/decisions/alerts.md` | ADR: first-class alerts |
+| `docs/decisions/014-alerts.md` | ADR: first-class alerts |
 
 ## Files to modify
 

@@ -29,7 +29,7 @@
 # Why it exists:
 # - cmd_remove's mutation window is one of the four storage operations
 #   covered by the inhibit-sleep decision (see
-#   docs/decisions/inhibit-sleep.md). The wiring is identical in shape
+#   docs/decisions/019-inhibit-sleep.md). The wiring is identical in shape
 #   to cmd_replace's, but a copy-paste regression in cmd_remove would
 #   not be caught by replace's existing end-to-end test. The unit tests
 #   in cli/src/remove.rs already assert acquire_count == 1; this VM

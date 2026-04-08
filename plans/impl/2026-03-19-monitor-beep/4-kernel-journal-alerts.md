@@ -348,7 +348,7 @@ Remain as-is.
 
 ## 11. ADR + README updates
 
-**File: `docs/decisions/alerts.md`**
+**File: `docs/decisions/014-alerts.md`**
 
 - Add `KernelJournalError { message, cursor, disk_name }` to "Alert causes" list.
 - Rename "Two detection sources" → "Three detection sources."
@@ -400,7 +400,7 @@ Update the "Monitoring and Alerts" section:
 | 6 | `cli/src/ack.rs` | Derive count from latch. Add `journal::advance_cursor_to_now()` in both online and offline paths. |
 | 7 | `cli/src/status.rs` | Add `KernelJournalError` match arm in `format_status_human`. |
 | 8 | `cli/tests/fixtures/nixos-25.11/journalctl-btrfs-error.jsonl` (new) | Fixture for unit tests. |
-| 9 | `docs/decisions/alerts.md` | ADR update (new cause, exit codes, latch-as-log, journal section). |
+| 9 | `docs/decisions/014-alerts.md` | ADR update (new cause, exit codes, latch-as-log, journal section). |
 | 10 | `README.md` | Update monitor description (exit codes, journal mention). |
 | 11 | `tests/cli/braid-journal-alert.nix` + `.py` (new), `flake.nix` | Integration test. |
 
@@ -417,7 +417,7 @@ Update the "Monitoring and Alerts" section:
 | `cli/src/status.rs` | Human display of new cause |
 | `cli/src/main.rs` | Exit code for `PoolOfflineJournalAlert` |
 | `cli/src/state_io.rs` | Reuse `atomic_write` for cursor persistence |
-| `docs/decisions/alerts.md` | ADR (new cause, exit codes, latch-as-log, journal section) |
+| `docs/decisions/014-alerts.md` | ADR (new cause, exit codes, latch-as-log, journal section) |
 | `README.md` | Monitor description update (exit codes, journal mention) |
 
 ---

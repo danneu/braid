@@ -298,9 +298,9 @@ with subtest("braid unlock --allow-degraded mounts degraded"):
 > Data drives never block boot. LUKS devices use `nofail` + bounded timeouts.
 > btrfs-device-scan uses `wants`, not `requires`. The mount uses `nofail`.
 > Degraded mounts require explicit `--allow-degraded` — braid refuses to
-> silently run with zero redundancy. [Why →](decisions/resilient-boot.md)
+> silently run with zero redundancy. [Why →](decisions/003-resilient-boot.md)
 
-**`docs/decisions/resilient-boot.md`:**
+**`docs/decisions/003-resilient-boot.md`:**
 - Update lines 15, 27: remove `degraded` from "everywhere" language
 - Line 35: update "one drive dead" tier to say `braid unlock` refuses by
   default; user must pass `--allow-degraded` or configure
@@ -312,7 +312,7 @@ with subtest("braid unlock --allow-degraded mounts degraded"):
 > Works from TTY, SSH, or scripted. If disks are missing, use
 > `--allow-degraded` to mount with reduced redundancy.
 
-**`docs/decisions/disk-pool-management.md` line 66:**
+**`docs/decisions/007-disk-pool-management.md` line 66:**
 Update reference to degraded mounting.
 
 ## Files modified (summary)
@@ -328,9 +328,9 @@ Update reference to degraded mounting.
 | `tests/module/no-silent-degraded.py` | Add refusal subtest, add `--allow-degraded` to existing |
 | `cli/src/unlock.rs` (tests) | Update existing + add refusal + uninitialized tests |
 | `docs/principles.md` | Update Principle 1 |
-| `docs/decisions/resilient-boot.md` | Update degraded references |
+| `docs/decisions/003-resilient-boot.md` | Update degraded references |
 | `README.md` | Update unlock and "resilient boot" descriptions |
-| `docs/decisions/disk-pool-management.md` | Update degraded reference |
+| `docs/decisions/007-disk-pool-management.md` | Update degraded reference |
 
 ## Verification
 

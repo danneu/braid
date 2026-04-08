@@ -177,7 +177,7 @@ pub fn cmd_recover<R: CommandRunner, F: Filesystem + ?Sized>(
 - **`cli/src/main.rs`**
   - At line 610 (the production `cmd_recover` call), pass `&braid_cli::recover::RealByIdResolver` as the new third argument.
 
-- **`docs/decisions/runtime-disk-membership.md`**
+- **`docs/decisions/017-runtime-disk-membership.md`**
   - Append one sentence to the Recovery section (around line 61) explaining the new invariant: `pool.json` `by_id` paths are resolved at recovery time by matching each live pool device's underlying kernel path against `/dev/disk/by-id/` symlinks, never copied from the journal. Note that recovery hard-fails if no symlink resolves.
   - Lines 47 and 61's existing wording about "rebuilds membership from the live btrfs pool topology — not from LUKS label scanning" is **still accurate** under the new design (membership still comes from the live pool; `by_id` resolution is path-based, not label-based) and does not need changes.
 
@@ -210,4 +210,4 @@ The mocks for `cmd::CryptsetupStatus` (already required by `probe_pool`) are unc
 4. `cargo test -p braid recover::tests::resolve_by_id_picks_highest_priority_when_multiple_match recover::tests::resolve_by_id_skips_partition_entries` — confirms helper-level invariants.
 5. `just test-vm recover` — full VM recovery test suite. Exercises `RealByIdResolver` against a real `/dev/disk/by-id/` and confirms the new code path runs end-to-end.
 6. Manual sanity: `git grep 'union.disks.get' cli/src/recover.rs` should return zero matches inside the recovered-membership loop after the fix lands; only the union sanity-check call site (the "no by-id path in either snapshot" guard) should remain.
-7. Manual doc sanity: re-read the updated `docs/decisions/runtime-disk-membership.md` recovery section to confirm the new sentence accurately describes the resolver's behaviour.
+7. Manual doc sanity: re-read the updated `docs/decisions/017-runtime-disk-membership.md` recovery section to confirm the new sentence accurately describes the resolver's behaviour.

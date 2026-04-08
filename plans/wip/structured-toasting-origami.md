@@ -26,6 +26,6 @@ that completes in <1s, `BindsTo`'s "stop if mount goes away" behavior has no pra
 1. **`modules/braid/monitor.nix`** — Removed `bindsTo`, added `unitConfig.ConditionPathIsMountPoint = cfg.mountPoint`
 2. **`tests/module/monitor-lifecycle.py`** — Subtests 2 and 8: `machine.execute` → `machine.succeed` (asserts clean condition-skip, not dependency failure). Updated header comments.
 3. **`tests/module/monitor-lifecycle.nix`** — Updated header comment.
-4. **`docs/decisions/systemd-lifecycle.md`** — Updated monitor contract and consumer dependency docs.
+4. **`docs/decisions/018-systemd-lifecycle.md`** — Updated monitor contract and consumer dependency docs.
 5. **`AGENTS.md`** — Updated monitor unit description and consumer dependency summary.
 6. **`cli/src/status.rs:2715`** — Fixed pre-existing test (`"missing"` → `"unknown"`) from commit 1a639f2.

@@ -1,6 +1,6 @@
 # Decision: Config-First Workflow
 
-Status: Superseded by [runtime-disk-membership.md](runtime-disk-membership.md)
+Status: Superseded by [017-runtime-disk-membership.md](017-runtime-disk-membership.md)
 
 > Principle: [CLI-owned membership](../principles.md#2-cli-owned-membership) (successor)
 
@@ -41,7 +41,7 @@ Config-first applies to all pool operations, not just add. The guard works in bo
 - `braid init-disk` refuses disks **not** in `braid.disks`
 - `braid apply` removes disks from pool when they are **no longer** in `braid.disks`
 
-Remove workflow: remove disk from `braid.disks` → `nixos-rebuild switch` → `sudo braid apply`. See [disk-pool-management.md](disk-pool-management.md) for full spec.
+Remove workflow: remove disk from `braid.disks` → `nixos-rebuild switch` → `sudo braid apply`. See [007-disk-pool-management.md](007-disk-pool-management.md) for full spec.
 
 ## Constraint
 

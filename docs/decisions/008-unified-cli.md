@@ -1,6 +1,6 @@
 # Decision: Unified CLI with Plan/Apply
 
-Status: Superseded by [intent-cli.md](intent-cli.md)
+Status: Superseded by [012-intent-cli.md](012-intent-cli.md)
 
 > Principle: [CLI-owned membership](../principles.md#2-cli-owned-membership) (successor)
 
@@ -34,7 +34,7 @@ Packaged via Crane + `makeWrapper` in `flake.nix`.
 
 ### Hard boundary
 
-`cryptsetup luksFormat` is forbidden in the `plan` and `apply` code paths. Only `init-disk` may invoke `luksFormat`. See [safe-by-construction-reconciliation.md](safe-by-construction-reconciliation.md).
+`cryptsetup luksFormat` is forbidden in the `plan` and `apply` code paths. Only `init-disk` may invoke `luksFormat`. See [009-safe-by-construction-reconciliation.md](009-safe-by-construction-reconciliation.md).
 
 ### Plan status model
 
@@ -80,8 +80,8 @@ Two commands (`plan` then `apply`) instead of one. This is intentional — deter
 
 ## See
 
-- `docs/decisions/config-first-workflow.md` — config-first principle this builds on
-- `docs/decisions/safe-by-construction-reconciliation.md` — destructive boundary principle
-- `docs/decisions/disk-pool-management.md` — existing pool management spec
+- `docs/decisions/002-config-first-workflow.md` — config-first principle this builds on
+- `docs/decisions/009-safe-by-construction-reconciliation.md` — destructive boundary principle
+- `docs/decisions/007-disk-pool-management.md` — existing pool management spec
 - `cli/src/` — Rust CLI implementation
 - `scripts/braid-add-disk.sh` — error stub directing to `init-disk` + `apply`

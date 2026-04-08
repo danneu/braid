@@ -38,5 +38,5 @@ Rejected. "Generic" means reimplementing what NixOS already provides (shell scri
 
 ## See
 
-- [Sane defaults](sane-defaults.md) — use `lib.mkDefault` instead of braid-specific wrappers
-- [Config-first workflow](config-first-workflow.md) — NixOS rebuild as the entry point
+- [Sane defaults](005-sane-defaults.md) — use `lib.mkDefault` instead of braid-specific wrappers
+- [Config-first workflow](002-config-first-workflow.md) — NixOS rebuild as the entry point

@@ -61,7 +61,7 @@ Add new principle **12. One pool operation at a time**:
 
 > Pool-mutating commands (`unlock`, `add`, `recover`) hold an exclusive `flock` on `/run/braid-pool.lock` for their duration. This serializes concurrent entry points (e.g. `braid-auto-unlock` at boot racing a manual `braid-pool.target` start) at the critical section itself, not via systemd unit topology. After acquiring the lock, `unlock` re-checks `mountpoint -q` and exits cleanly if the pool was already mounted by the winner. `add` and `recover` do not fast-exit — they legitimately operate on mounted pools.
 
-### 4. `docs/decisions/systemd-lifecycle.md` — reference the mutex
+### 4. `docs/decisions/018-systemd-lifecycle.md` — reference the mutex
 
 Add a new section **"Unlock path mutual exclusion"** after "CLI wrapper as synchronization layer", referencing the principle:
 
@@ -107,7 +107,7 @@ with subtest("Concurrent unlock attempts serialize via flock"):
 | `modules/braid/braid-wrapper.sh` | Restructure: parse subcommand first, add flock + unlock-only re-check |
 | `modules/braid/wrapper.nix` | Add `flockBin` substitution variable |
 | `docs/principles.md` | Add principle 12: one pool operation at a time |
-| `docs/decisions/systemd-lifecycle.md` | Add mutex section + design constraint #5, referencing principle 12 |
+| `docs/decisions/018-systemd-lifecycle.md` | Add mutex section + design constraint #5, referencing principle 12 |
 | `tests/module/systemd-lifecycle.py` | Add concurrent unlock subtest |
 
 ## Verification
