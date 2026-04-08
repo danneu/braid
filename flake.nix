@@ -468,6 +468,11 @@
               braid = linuxCrane.braid-cli-unwrapped;
             }
           );
+          pool-lock-contention = pkgs.testers.nixosTest (
+            import ./tests/module/pool-lock-contention.nix {
+              braid = linuxCrane.braid-cli-unwrapped;
+            }
+          );
           auto-unlock-key-missing = pkgs.testers.nixosTest (
             import ./tests/module/auto-unlock-key-missing.nix {
               braid = linuxCrane.braid-cli-unwrapped;

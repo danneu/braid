@@ -27,22 +27,28 @@ for arg in "$@"; do
   esac
 done
 
-# Pool-mutating commands (unlock, add, recover) hold an exclusive flock for
-# their duration. This serializes concurrent entry points (e.g. braid-auto-
-# unlock at boot racing a manual braid-pool.target start) at the critical
-# section itself, not via systemd unit topology. See Principle 12.
+# Pool-mutating commands (unlock, add, recover) acquire an exclusive
+# non-blocking flock on /run/braid-pool.lock. braid does not queue pool
+# operations: a concurrent attempt fails fast with a clear message and
+# the user must retry once the active operation finishes. This enforces
+# mutual exclusion at the critical section itself, not via systemd unit
+# topology. See Principle 12.
 case "$subcmd" in
   unlock|add|recover)
     if ! $skip_fixup; then
       exec 9>/run/braid-pool.lock
-      @flockBin@ 9
+      if ! @flockBin@ -n 9; then
+        echo "braid: another braid operation is already in progress (pool lock /run/braid-pool.lock is held); retry once it finishes" >&2
+        exit 1
+      fi
     fi
     ;;
 esac
 
-# For unlock specifically: re-check after acquiring the lock — another
-# unlock path may have already mounted the pool while we waited.
-# Does NOT apply to add/recover, which operate on a mounted pool.
+# For unlock specifically: re-check after acquiring the lock — a prior
+# unlock that ran sequentially (and released the lock) may have already
+# mounted the pool. Does NOT apply to add/recover, which operate on a
+# mounted pool.
 case "$subcmd" in
   unlock)
     if ! $skip_fixup; then

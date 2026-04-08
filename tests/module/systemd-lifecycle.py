@@ -23,8 +23,9 @@
 # (4) braid add via CLI wrapper activates braid-online.service,
 # (5) wrapper prints warning but still succeeds when braid-online.service
 #     cannot be activated,
-# (6) two concurrent braid add invocations serialize via the wrapper's flock
-#     and both complete successfully,
+# (6) two concurrent braid add invocations: the wrapper's non-blocking
+#     flock lets exactly one complete and rejects the other with the
+#     contention error, leaving pool.json corruption-free,
 # (7) actual VM shutdown/reboot runs ExecStop=braid lock to completion.
 
 import json
@@ -122,38 +123,78 @@ with subtest("braid lock deactivates braid-online.service"):
     machine.fail("test -e /dev/mapper/braid-disk1")
     machine.fail("test -e /dev/mapper/braid-disk2")
 
-# --- Subtest 6: Concurrent unlock attempts serialize via flock ---
+# --- Subtest 6: Concurrent unlocks: one wins, the other fast-fails or sees mounted ---
 
-with subtest("Concurrent unlock attempts serialize via flock"):
-    # Intent: Two concurrent `braid unlock` invocations must not race into
-    # cryptsetup open on the same devices. The wrapper's flock on
-    # /run/braid-pool.lock serializes them — the winner unlocks, the loser
-    # acquires the lock, re-checks mountpoint, and exits cleanly.
+with subtest("Concurrent unlocks: one wins, the other fast-fails or sees mounted"):
+    # Intent: Two concurrent `braid unlock` invocations must not race
+    # into cryptsetup open on the same devices. The wrapper's
+    # non-blocking flock on /run/braid-pool.lock enforces mutual
+    # exclusion — exactly one process unlocks the pool. The loser
+    # either fast-fails on contention (lost the flock race) or, if it
+    # acquired the lock sequentially after the winner released, sees
+    # the pool already mounted and exits cleanly.
     #
-    # Why it exists: braid-auto-unlock and braid-unlock can both pass their
-    # ConditionPathIsMountPoint gate before either mounts the pool. Without
-    # the flock, the second cryptsetup open fails with EBUSY, leaving
-    # partial LUKS state requiring manual cleanup.
+    # Why it exists: braid-auto-unlock and braid-unlock can both pass
+    # their ConditionPathIsMountPoint gate before either mounts the
+    # pool. Without the flock, the second cryptsetup open fails with
+    # EBUSY, leaving partial LUKS state requiring manual cleanup.
     #
     # Scenario: User SSHs in and runs `systemctl start braid-pool.target`
     # while braid-auto-unlock is still in-flight at boot.
     machine.fail("mountpoint -q /mnt/storage")
 
-    # Launch two concurrent unlock attempts through the wrapper.
+    # Launch two concurrent unlocks, capture per-process exit codes.
+    # NixOS test driver wraps every command with `set -euo pipefail`
+    # (see test_driver/machine/__init__.py:858), so a bare
+    # `wait $pid_loser` returning non-zero would abort the chain
+    # before the exit-file writes. The `wait $pid || ec=$?` idiom
+    # consumes the non-zero return into a variable so errexit does
+    # not fire.
     machine.succeed(
-        f"printf '%s\\n' {pq} | braid unlock --passphrase-stdin >/tmp/unlock-a 2>&1 & "
-        f"printf '%s\\n' {pq} | braid unlock --passphrase-stdin >/tmp/unlock-b 2>&1 & "
-        f"wait"
+        f"printf '%s\\n' {pq} | braid unlock --passphrase-stdin "
+        f">/tmp/unlock-a 2>&1 & pid_a=$! ; "
+        f"printf '%s\\n' {pq} | braid unlock --passphrase-stdin "
+        f">/tmp/unlock-b 2>&1 & pid_b=$! ; "
+        f"ec_a=0 ; wait $pid_a || ec_a=$? ; echo $ec_a > /tmp/unlock-exit-a ; "
+        f"ec_b=0 ; wait $pid_b || ec_b=$? ; echo $ec_b > /tmp/unlock-exit-b"
     )
+
+    exit_a = int(machine.succeed("cat /tmp/unlock-exit-a").strip())
+    exit_b = int(machine.succeed("cat /tmp/unlock-exit-b").strip())
+    out_a = machine.succeed("cat /tmp/unlock-a")
+    out_b = machine.succeed("cat /tmp/unlock-b")
 
     machine.succeed("mountpoint -q /mnt/storage")
     machine.succeed("systemctl is-active braid-online.service")
 
-    out_a = machine.succeed("cat /tmp/unlock-a")
-    out_b = machine.succeed("cat /tmp/unlock-b")
-    assert "pool already mounted" in out_a or "pool already mounted" in out_b, (
-        f"Expected one 'pool already mounted' message.\nA: {out_a}\nB: {out_b}"
+    def loser_ok(exit_code: int, out: str) -> bool:
+        # Loser acceptable outcomes:
+        #   exit 0 + "pool already mounted" — sequential winner: lost
+        #     the flock race after the winner released, then re-checked
+        #     and bailed cleanly.
+        #   exit 1 + contention message — concurrent loser: lost the
+        #     flock race while the winner still held it.
+        if exit_code == 0 and "pool already mounted" in out:
+            return True
+        if exit_code == 1 and "another braid operation is already in progress" in out:
+            return True
+        return False
+
+    a_winner = exit_a == 0 and "pool already mounted" not in out_a
+    b_winner = exit_b == 0 and "pool already mounted" not in out_b
+    assert a_winner ^ b_winner, (
+        "Expected exactly one winner.\n"
+        "A: exit={} out={}\nB: exit={} out={}".format(exit_a, out_a, exit_b, out_b)
     )
+
+    if a_winner:
+        assert loser_ok(exit_b, out_b), (
+            "Loser B has unexpected outcome: exit={} out={}".format(exit_b, out_b)
+        )
+    else:
+        assert loser_ok(exit_a, out_a), (
+            "Loser A has unexpected outcome: exit={} out={}".format(exit_a, out_a)
+        )
 
     machine.succeed("braid lock")
     machine.fail("systemctl is-active braid-online.service")
@@ -281,29 +322,34 @@ with subtest("braid recover activates braid-online.service"):
     machine.succeed("braid lock")
     machine.fail("systemctl is-active braid-online.service")
 
-# --- Subtest 9: Concurrent add attempts serialize via flock ---
+# --- Subtest 9: Concurrent adds reject the loser cleanly ---
 
-with subtest("Concurrent add attempts serialize via flock"):
-    # Intent: Two concurrent `braid add` invocations must serialize via the
-    # wrapper's flock — the winner adds its disk, then the loser acquires the
-    # lock, reads the updated pool.json, and adds its own disk.
+with subtest("Concurrent adds reject the loser cleanly"):
+    # Intent: When two `braid add` invocations race, the wrapper's
+    # non-blocking flock must let exactly one win. The loser fails
+    # fast with the contention message; pool.json reflects only the
+    # winner's disk, btrfs sees only the winner's device, and no
+    # residual pending-op.json is left from the rejected attempt.
     #
-    # Why it exists: The unlock flock test (subtest 6) covers the early-exit
-    # re-check path. The add path is structurally different — the loser runs
-    # the full add command after acquiring the lock. Without a test, a
-    # regression that breaks flock for add would let concurrent adds race on
-    # pool.json: the second write could lose the first's disk entry.
+    # Why it exists: braid does not queue pool operations. The
+    # earlier serialization contract ("both adds complete") was
+    # incompatible with non-blocking flock. This test guards the
+    # new contract: rejection without state corruption.
     #
-    # Scenario: A script bug launches two `braid add` commands at the same
-    # time. The flock serializes them so both complete and pool.json reflects
-    # all disks.
+    # Scenario: A script bug launches two `braid add` commands at
+    # the same time. One succeeds, the other reports the contention
+    # error and exits 1; the operator sees the error and retries
+    # the rejected disk after the first completes.
 
     machine.succeed(
         f"printf '%s\\n' {pq} | braid unlock --passphrase-stdin"
     )
     machine.succeed("mountpoint -q /mnt/storage")
 
-    # Launch two concurrent adds, capture PIDs for independent exit checks.
+    # Launch two concurrent adds, capture per-process exit codes.
+    # See subtest 6 above for why we use `wait $pid || ec=$?` —
+    # NixOS test driver wraps commands with `set -e`, so a bare
+    # `wait $pid_loser` would abort the chain before exit-file writes.
     machine.succeed(
         f"printf '%s\\n' {pq} | BRAID_LUKS_OPTS='{luks_opts}' "
         f"braid add disk4=/dev/disk/by-id/virtio-disk4 --passphrase-stdin --yes "
@@ -311,34 +357,60 @@ with subtest("Concurrent add attempts serialize via flock"):
         f"printf '%s\\n' {pq} | BRAID_LUKS_OPTS='{luks_opts}' "
         f"braid add disk5=/dev/disk/by-id/virtio-disk5 --passphrase-stdin --yes "
         f">/tmp/add-b 2>&1 & pid_b=$! ; "
-        f"wait $pid_a ; echo $? > /tmp/exit-a ; "
-        f"wait $pid_b ; echo $? > /tmp/exit-b"
+        f"ec_a=0 ; wait $pid_a || ec_a=$? ; echo $ec_a > /tmp/exit-a ; "
+        f"ec_b=0 ; wait $pid_b || ec_b=$? ; echo $ec_b > /tmp/exit-b"
     )
 
-    # Assert each add succeeded independently.
     exit_a = int(machine.succeed("cat /tmp/exit-a").strip())
     exit_b = int(machine.succeed("cat /tmp/exit-b").strip())
     out_a = machine.succeed("cat /tmp/add-a")
     out_b = machine.succeed("cat /tmp/add-b")
-    assert exit_a == 0, f"add-a failed (exit {exit_a}):\n{out_a}"
-    assert exit_b == 0, f"add-b failed (exit {exit_b}):\n{out_b}"
 
-    # pool.json must contain all 5 disks.
-    pool_raw = machine.succeed("cat /var/lib/braid/pool.json")
-    pool = json.loads(pool_raw)
-    for d in ["disk1", "disk2", "disk3", "disk4", "disk5"]:
-        assert d in pool["disks"], (
-            f"{d} missing from pool.json: {set(pool['disks'].keys())}"
-        )
-
-    # btrfs must show 5 devices.
-    fi_show = machine.succeed("btrfs fi show /mnt/storage")
-    devid_count = fi_show.count("devid")
-    assert devid_count == 5, (
-        f"Expected 5 btrfs devices, got {devid_count}:\n{fi_show}"
+    # Exactly one must succeed and one must fail.
+    assert (exit_a == 0) ^ (exit_b == 0), (
+        "Expected exactly one winner.\n"
+        "A: exit={} out={}\nB: exit={} out={}".format(exit_a, out_a, exit_b, out_b)
     )
 
-    # No residual journal.
+    if exit_a == 0:
+        winner_disk = "disk4"
+        loser_disk = "disk5"
+        loser_exit = exit_b
+        loser_out = out_b
+    else:
+        winner_disk = "disk5"
+        loser_disk = "disk4"
+        loser_exit = exit_a
+        loser_out = out_a
+
+    assert loser_exit == 1, (
+        "Loser exited {}, expected 1: {}".format(loser_exit, loser_out)
+    )
+    assert "another braid operation is already in progress" in loser_out, (
+        "Loser missing contention message: {}".format(loser_out)
+    )
+
+    # pool.json must contain disks 1-3 plus exactly the winner.
+    pool_raw = machine.succeed("cat /var/lib/braid/pool.json")
+    pool = json.loads(pool_raw)
+    expected = {"disk1", "disk2", "disk3", winner_disk}
+    actual = set(pool["disks"].keys())
+    assert actual == expected, (
+        "pool.json mismatch.\nexpected: {}\nactual:   {}".format(expected, actual)
+    )
+    assert loser_disk not in actual, (
+        "Loser disk {} leaked into pool.json: {}".format(loser_disk, actual)
+    )
+
+    # btrfs must show 4 devices, not 5.
+    fi_show = machine.succeed("btrfs fi show /mnt/storage")
+    devid_count = fi_show.count("devid")
+    assert devid_count == 4, (
+        "Expected 4 btrfs devices, got {}:\n{}".format(devid_count, fi_show)
+    )
+
+    # The wrapper's flock check fires BEFORE the CLI writes its
+    # journal, so the rejected attempt must leave no pending-op.json.
     machine.fail("test -f /var/lib/braid/pending-op.json")
 
     # Cleanup

@@ -132,7 +132,7 @@ The wrapper (`braid-wrapper.sh`) bridges CLI operations and systemd state. This 
 
 ## Unlock path mutual exclusion
 
-Pool-mutating commands (`unlock`, `add`, `recover`) are serialized by `flock /run/braid-pool.lock` in the wrapper. The lock is acquired before the CLI runs and held through post-processing (permissions, `braid-online` activation). After acquiring the lock, `unlock` re-checks `mountpoint -q` and exits cleanly if the pool was already mounted — `add` and `recover` do not fast-exit because they operate on mounted pools. See [Principle 12](../principles.md#12-one-pool-operation-at-a-time).
+Pool-mutating commands (`unlock`, `add`, `recover`) acquire an exclusive **non-blocking** `flock` on `/run/braid-pool.lock` in the wrapper before invoking the CLI. **braid does not queue pool operations** — if the lock is already held by another braid process, the wrapper exits 1 immediately with `braid: another braid operation is already in progress` and the user must retry once the active operation completes. The lock is held through post-processing (permissions, `braid-online` activation). After acquiring the lock, `unlock` re-checks `mountpoint -q` and exits cleanly if a prior winner already mounted the pool sequentially — `add` and `recover` do not fast-exit because they operate on mounted pools. See [Principle 12](../principles.md#12-one-pool-operation-at-a-time).
 
 ## Consumer dependency contracts
 
@@ -150,7 +150,7 @@ Services that depend on the pool being mounted use one of three patterns:
 2. **Wrapper-synchronized lifecycle.** For wrapper-managed operations, the wrapper keeps `braid-online` synchronized with pool mount state: it activates the service only after `mountpoint -q` succeeds, and deactivates it after a successful lock. `ConditionPathIsMountPoint` on the unit is defense-in-depth against direct `systemctl start` when unmounted. Out-of-band mount or unmount bypasses the wrapper and can leave `braid-online` stale; `braid lock` handles already-unmounted pools gracefully.
 3. **One passphrase prompt.** `braid-unlock.service` is the sole interactive prompt source. The CLI opens all LUKS devices from that single passphrase.
 4. **Graceful degradation.** If `braid-online` activation fails, the pool is still mounted and usable — only the shutdown hook is missing (warned to stderr).
-5. **One pool operation at a time.** Enforced by `flock` in the wrapper, not unit topology. See [Principle 12](../principles.md#12-one-pool-operation-at-a-time).
+5. **One pool operation at a time.** Enforced by a non-blocking `flock` in the wrapper, not unit topology — concurrent attempts are rejected, not queued. See [Principle 12](../principles.md#12-one-pool-operation-at-a-time).
 
 ## See
 
