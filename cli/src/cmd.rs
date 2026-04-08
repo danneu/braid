@@ -191,18 +191,29 @@ pub enum CmdRequest {
     BtrfsSubvolumeShow {
         path: String,
     },
+    /// Run the canonical `braid-beep-probe` wrapper. The path is read at
+    /// runtime from `/etc/braid/notifier-config.json` (written by the NixOS
+    /// monitor module). Used by `braid doctor` to play the alert test tone
+    /// — the same code path the alert service uses, so a successful run is
+    /// both a notifier-health check and a preview of the real alert tone.
+    BraidBeepProbe {
+        path: String,
+    },
 }
 
 #[derive(Debug)]
 pub struct CmdArgs {
-    pub program: &'static str,
+    /// Program to invoke. `String` (not `&'static str`) so variants like
+    /// `BraidBeepProbe` can carry a runtime-resolved Nix store path read
+    /// from `/etc/braid/notifier-config.json`.
+    pub program: String,
     pub args: Vec<String>,
 }
 
 impl CmdArgs {
     /// Render as a shell-safe command string using proper quoting.
     pub fn to_shell_string(&self) -> String {
-        let argv: Vec<&str> = std::iter::once(self.program)
+        let argv: Vec<&str> = std::iter::once(self.program.as_str())
             .chain(self.args.iter().map(|s| s.as_str()))
             .collect();
         shell_words::join(&argv)
@@ -263,7 +274,7 @@ impl CmdRequest {
     pub fn to_argv(&self) -> CmdArgs {
         match self {
             CmdRequest::LsblkJson => CmdArgs {
-                program: "lsblk",
+                program: "lsblk".to_owned(),
                 args: vec![
                     "--json".into(),
                     "--bytes".into(),
@@ -272,7 +283,7 @@ impl CmdRequest {
                 ],
             },
             CmdRequest::FindmntJson { mount_point } => CmdArgs {
-                program: "findmnt",
+                program: "findmnt".to_owned(),
                 args: vec![
                     "--json".into(),
                     "--output".into(),
@@ -282,23 +293,23 @@ impl CmdRequest {
                 ],
             },
             CmdRequest::BtrfsFilesystemShow { mount_point } => CmdArgs {
-                program: "btrfs",
+                program: "btrfs".to_owned(),
                 args: vec!["filesystem".into(), "show".into(), mount_point.0.clone()],
             },
             CmdRequest::BtrfsFilesystemShowTarget { target } => CmdArgs {
-                program: "btrfs",
+                program: "btrfs".to_owned(),
                 args: vec!["filesystem".into(), "show".into(), target.clone()],
             },
             CmdRequest::CryptsetupStatus { mapper } => CmdArgs {
-                program: "cryptsetup",
+                program: "cryptsetup".to_owned(),
                 args: vec!["status".into(), mapper.clone()],
             },
             CmdRequest::CryptsetupLuksUuid { device } => CmdArgs {
-                program: "cryptsetup",
+                program: "cryptsetup".to_owned(),
                 args: vec!["luksUUID".into(), device.clone()],
             },
             CmdRequest::BtrfsFilesystemDfJson { mount_point } => CmdArgs {
-                program: "btrfs",
+                program: "btrfs".to_owned(),
                 args: vec![
                     "--format".into(),
                     "json".into(),
@@ -308,7 +319,7 @@ impl CmdRequest {
                 ],
             },
             CmdRequest::BtrfsFilesystemUsageRaw { mount_point } => CmdArgs {
-                program: "btrfs",
+                program: "btrfs".to_owned(),
                 args: vec![
                     "filesystem".into(),
                     "usage".into(),
@@ -317,7 +328,7 @@ impl CmdRequest {
                 ],
             },
             CmdRequest::BtrfsScrubStatus { mount_point } => CmdArgs {
-                program: "btrfs",
+                program: "btrfs".to_owned(),
                 args: vec![
                     "scrub".into(),
                     "status".into(),
@@ -326,11 +337,11 @@ impl CmdRequest {
                 ],
             },
             CmdRequest::BtrfsScrubCancel { mount_point } => CmdArgs {
-                program: "btrfs",
+                program: "btrfs".to_owned(),
                 args: vec!["scrub".into(), "cancel".into(), mount_point.0.clone()],
             },
             CmdRequest::BtrfsScrubStatusPerDevice { mount_point } => CmdArgs {
-                program: "btrfs",
+                program: "btrfs".to_owned(),
                 args: vec![
                     "scrub".into(),
                     "status".into(),
@@ -340,11 +351,11 @@ impl CmdRequest {
                 ],
             },
             CmdRequest::BtrfsDeviceStats { mount_point } => CmdArgs {
-                program: "btrfs",
+                program: "btrfs".to_owned(),
                 args: vec!["device".into(), "stats".into(), mount_point.0.clone()],
             },
             CmdRequest::BtrfsDeviceStatsJson { mount_point } => CmdArgs {
-                program: "btrfs",
+                program: "btrfs".to_owned(),
                 args: vec![
                     "--format".into(),
                     "json".into(),
@@ -354,11 +365,11 @@ impl CmdRequest {
                 ],
             },
             CmdRequest::BtrfsBalanceStatus { mount_point } => CmdArgs {
-                program: "btrfs",
+                program: "btrfs".to_owned(),
                 args: vec!["balance".into(), "status".into(), mount_point.0.clone()],
             },
             CmdRequest::BtrfsDeviceUsageRaw { mount_point } => CmdArgs {
-                program: "btrfs",
+                program: "btrfs".to_owned(),
                 args: vec![
                     "device".into(),
                     "usage".into(),
@@ -373,7 +384,7 @@ impl CmdRequest {
                     LsblkFieldKind::Size => "SIZE",
                 };
                 CmdArgs {
-                    program: "lsblk",
+                    program: "lsblk".to_owned(),
                     args: vec![
                         "-n".into(), // no header
                         "-d".into(), // device only (no partitions)
@@ -385,7 +396,7 @@ impl CmdRequest {
                 }
             }
             CmdRequest::CryptsetupLuksOpen { device, mapper } => CmdArgs {
-                program: "cryptsetup",
+                program: "cryptsetup".to_owned(),
                 args: vec![
                     "open".into(),
                     "--type".into(),
@@ -400,18 +411,18 @@ impl CmdRequest {
                 ],
             },
             CmdRequest::CryptsetupIsLuks { device } => CmdArgs {
-                program: "cryptsetup",
+                program: "cryptsetup".to_owned(),
                 args: vec!["isLuks".into(), device.clone()],
             },
             CmdRequest::CryptsetupClose { mapper } => CmdArgs {
-                program: "cryptsetup",
+                program: "cryptsetup".to_owned(),
                 args: vec!["close".into(), mapper.clone()],
             },
             CmdRequest::BtrfsDeviceAdd {
                 device,
                 mount_point,
             } => CmdArgs {
-                program: "btrfs",
+                program: "btrfs".to_owned(),
                 args: vec![
                     "device".into(),
                     "add".into(),
@@ -431,7 +442,7 @@ impl CmdRequest {
                 device,
                 mount_point,
             } => CmdArgs {
-                program: "btrfs",
+                program: "btrfs".to_owned(),
                 args: vec![
                     "device".into(),
                     "remove".into(),
@@ -441,19 +452,19 @@ impl CmdRequest {
                 ],
             },
             CmdRequest::BtrfsDeviceScan { device } => CmdArgs {
-                program: "btrfs",
+                program: "btrfs".to_owned(),
                 args: vec!["device".into(), "scan".into(), device.clone()],
             },
             CmdRequest::BtrfsDeviceScanAll => CmdArgs {
-                program: "btrfs",
+                program: "btrfs".to_owned(),
                 args: vec!["device".into(), "scan".into()],
             },
             CmdRequest::BtrfsDeviceScanForget => CmdArgs {
-                program: "btrfs",
+                program: "btrfs".to_owned(),
                 args: vec!["device".into(), "scan".into(), "--forget".into()],
             },
             CmdRequest::BtrfsBalanceRaid1 { mount_point } => CmdArgs {
-                program: "btrfs",
+                program: "btrfs".to_owned(),
                 args: vec![
                     "balance".into(),
                     "start".into(),
@@ -464,7 +475,7 @@ impl CmdRequest {
                 ],
             },
             CmdRequest::BtrfsBalanceRaid1Soft { mount_point } => CmdArgs {
-                program: "btrfs",
+                program: "btrfs".to_owned(),
                 args: vec![
                     "balance".into(),
                     "start".into(),
@@ -475,7 +486,7 @@ impl CmdRequest {
                 ],
             },
             CmdRequest::BtrfsBalanceSingle { mount_point } => CmdArgs {
-                program: "btrfs",
+                program: "btrfs".to_owned(),
                 args: vec![
                     "balance".into(),
                     "start".into(),
@@ -488,7 +499,7 @@ impl CmdRequest {
                 ],
             },
             CmdRequest::MkfsBtrfs { device } => CmdArgs {
-                program: "mkfs.btrfs",
+                program: "mkfs.btrfs".to_owned(),
                 args: vec![
                     "-f".into(),
                     "-d".into(),
@@ -508,7 +519,7 @@ impl CmdRequest {
                 ];
                 args.extend(devices.iter().cloned());
                 CmdArgs {
-                    program: "mkfs.btrfs",
+                    program: "mkfs.btrfs".to_owned(),
                     args,
                 }
             }
@@ -523,7 +534,7 @@ impl CmdRequest {
                     mount_point.0.clone(),
                 ];
                 CmdArgs {
-                    program: "mount",
+                    program: "mount".to_owned(),
                     args,
                 }
             }
@@ -541,16 +552,16 @@ impl CmdRequest {
                     mount_point.0.clone(),
                 ];
                 CmdArgs {
-                    program: "mount",
+                    program: "mount".to_owned(),
                     args,
                 }
             }
             CmdRequest::Umount { mount_point } => CmdArgs {
-                program: "umount",
+                program: "umount".to_owned(),
                 args: vec![mount_point.0.clone()],
             },
             CmdRequest::MountpointCheck { path } => CmdArgs {
-                program: "mountpoint",
+                program: "mountpoint".to_owned(),
                 args: vec!["-q".into(), path.0.clone()],
             },
             CmdRequest::BtrfsReplaceStart {
@@ -558,7 +569,7 @@ impl CmdRequest {
                 target_device,
                 mount_point,
             } => CmdArgs {
-                program: "btrfs",
+                program: "btrfs".to_owned(),
                 args: vec![
                     "replace".into(),
                     "start".into(),
@@ -578,7 +589,7 @@ impl CmdRequest {
                 ],
             },
             CmdRequest::BtrfsReplaceStatus { mount_point } => CmdArgs {
-                program: "btrfs",
+                program: "btrfs".to_owned(),
                 // -1: print one snapshot and return immediately. Without this,
                 // `btrfs replace status` loops with sleep(1) on the STARTED
                 // state until the kernel reports FINISHED — see
@@ -594,7 +605,7 @@ impl CmdRequest {
                 ],
             },
             CmdRequest::BtrfsFilesystemResize { devid, mount_point } => CmdArgs {
-                program: "btrfs",
+                program: "btrfs".to_owned(),
                 args: vec![
                     "filesystem".into(),
                     "resize".into(),
@@ -607,7 +618,7 @@ impl CmdRequest {
                 device,
                 backup_path,
             } => CmdArgs {
-                program: "cryptsetup",
+                program: "cryptsetup".to_owned(),
                 args: vec![
                     "luksHeaderBackup".into(),
                     "--header-backup-file".into(),
@@ -629,12 +640,12 @@ impl CmdRequest {
                 }
                 args.push(device.clone());
                 CmdArgs {
-                    program: "cryptsetup",
+                    program: "cryptsetup".to_owned(),
                     args,
                 }
             }
             CmdRequest::CryptsetupTestPassphrase { device } => CmdArgs {
-                program: "cryptsetup",
+                program: "cryptsetup".to_owned(),
                 args: vec![
                     "open".into(),
                     "--test-passphrase".into(),
@@ -643,11 +654,11 @@ impl CmdRequest {
                 ],
             },
             CmdRequest::SmartctlHealthJson { device } => CmdArgs {
-                program: "smartctl",
+                program: "smartctl".to_owned(),
                 args: vec!["-H".into(), "-A".into(), device.clone(), "--json".into()],
             },
             CmdRequest::CryptsetupLuksDump { device } => CmdArgs {
-                program: "cryptsetup",
+                program: "cryptsetup".to_owned(),
                 args: vec![
                     "luksDump".into(),
                     "--dump-json-metadata".into(),
@@ -655,7 +666,7 @@ impl CmdRequest {
                 ],
             },
             CmdRequest::CryptsetupLuksDumpText { device } => CmdArgs {
-                program: "cryptsetup",
+                program: "cryptsetup".to_owned(),
                 args: vec!["luksDump".into(), device.clone()],
             },
             CmdRequest::CryptsetupLuksOpenKeyFile {
@@ -663,7 +674,7 @@ impl CmdRequest {
                 mapper,
                 key_file_path,
             } => CmdArgs {
-                program: "cryptsetup",
+                program: "cryptsetup".to_owned(),
                 args: vec![
                     "open".into(),
                     "--type".into(),
@@ -682,7 +693,7 @@ impl CmdRequest {
                 device,
                 key_file_path,
             } => CmdArgs {
-                program: "cryptsetup",
+                program: "cryptsetup".to_owned(),
                 args: vec![
                     "open".into(),
                     "--test-passphrase".into(),
@@ -697,7 +708,7 @@ impl CmdRequest {
                 device,
                 key_file_path,
             } => CmdArgs {
-                program: "cryptsetup",
+                program: "cryptsetup".to_owned(),
                 args: vec![
                     "luksAddKey".into(),
                     "--key-slot".into(),
@@ -709,24 +720,28 @@ impl CmdRequest {
                 ],
             },
             CmdRequest::BtrfsFilesystemUsage { mount_point } => CmdArgs {
-                program: "btrfs",
+                program: "btrfs".to_owned(),
                 args: vec!["filesystem".into(), "usage".into(), mount_point.0.clone()],
             },
             CmdRequest::BtrfsFilesystemDf { mount_point } => CmdArgs {
-                program: "btrfs",
+                program: "btrfs".to_owned(),
                 args: vec!["filesystem".into(), "df".into(), mount_point.0.clone()],
             },
             CmdRequest::BtrfsDeviceUsage { mount_point } => CmdArgs {
-                program: "btrfs",
+                program: "btrfs".to_owned(),
                 args: vec!["device".into(), "usage".into(), mount_point.0.clone()],
             },
             CmdRequest::BtrfsSubvolumeList { mount_point } => CmdArgs {
-                program: "btrfs",
+                program: "btrfs".to_owned(),
                 args: vec!["subvolume".into(), "list".into(), mount_point.0.clone()],
             },
             CmdRequest::BtrfsSubvolumeShow { path } => CmdArgs {
-                program: "btrfs",
+                program: "btrfs".to_owned(),
                 args: vec!["subvolume".into(), "show".into(), path.clone()],
+            },
+            CmdRequest::BraidBeepProbe { path } => CmdArgs {
+                program: path.clone(),
+                args: vec![],
             },
         }
     }
@@ -812,7 +827,7 @@ impl RealRunner {
         let cmd_str = format!("{} {}", cmd.program, cmd.args.join(" "));
         // Force POSIX locale so error strings (strerror, %m) are always English —
         // braid matches stderr substrings for ENOSPC, device-busy, etc.
-        let output = std::process::Command::new(cmd.program)
+        let output = std::process::Command::new(&cmd.program)
             .args(&cmd.args)
             .env("LC_ALL", "C")
             .output()
@@ -828,7 +843,7 @@ impl RealRunner {
         let cmd_str = format!("{} {}", cmd.program, cmd.args.join(" "));
         // Force POSIX locale so error strings (strerror, %m) are always English —
         // braid matches stderr substrings for ENOSPC, device-busy, etc.
-        let mut child = std::process::Command::new(cmd.program)
+        let mut child = std::process::Command::new(&cmd.program)
             .args(&cmd.args)
             .env("LC_ALL", "C")
             .stdin(Stdio::piped())
@@ -1397,7 +1412,7 @@ mod tests {
     // Scenario: cryptsetup luksFormat with key-file flag.
     fn to_shell_string_quotes_special_chars() {
         let s = CmdArgs {
-            program: "cryptsetup",
+            program: "cryptsetup".to_owned(),
             args: vec![
                 "luksFormat".into(),
                 "--key-file=-".into(),

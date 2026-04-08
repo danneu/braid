@@ -4,6 +4,17 @@ let
   beepEnabled = cfg.monitor.beep;
   braidWrapped = import ./wrapper.nix { inherit cfg pkgs lib; };
 
+  # Canonical privilege-dropped beep wrapper. This is the SINGLE source of
+  # truth for the alert tone argv: both the alert service script and the
+  # /etc/braid/notifier-config.json file reference this derivation by Nix
+  # store path, so they cannot drift. Doctor reads the path from the config
+  # file and runs this same wrapper as a subprocess.
+  braidBeepProbe = pkgs.writeShellScriptBin "braid-beep-probe" ''
+    exec ${pkgs.util-linux}/bin/setpriv \
+      --reuid=nobody --regid=beep --groups=beep -- \
+      ${pkgs.beep}/bin/beep -f 1000 -l 500
+  '';
+
   smartdAlertScript = pkgs.writeShellScript "braid-smartd-alert" ''
     touch /var/lib/braid/smartd-alert
     ${pkgs.systemd}/bin/systemctl start braid-alert.service 2>/dev/null || true
@@ -56,6 +67,18 @@ in
       ACTION=="add", SUBSYSTEM=="input", ATTRS{name}=="PC Speaker", ENV{DEVNAME}!="", GROUP="beep", MODE="0620"
     '';
 
+    # --- Notifier config (consumed by `braid doctor`) ---
+    # Explicit, braid-owned contract: doctor reads this file to discover
+    # the canonical beep wrapper path. Doctor never inspects rendered
+    # systemd unit text, so a refactor of the alert service script cannot
+    # silently break the speaker probe.
+    environment.etc."braid/notifier-config.json".text = builtins.toJSON {
+      beep_probe_path =
+        if beepEnabled
+        then "${braidBeepProbe}/bin/braid-beep-probe"
+        else null;
+    };
+
     # --- Alert service ---
     systemd.services.braid-alert = {
       description = "Braid disk health alert (audible beep if enabled)";
@@ -74,7 +97,7 @@ in
         ''}
         ${lib.optionalString beepEnabled ''
           while true; do
-            ${pkgs.util-linux}/bin/setpriv --reuid=nobody --regid=beep --groups=beep -- ${pkgs.beep}/bin/beep -f 1000 -l 500 2>/dev/null || true
+            ${braidBeepProbe}/bin/braid-beep-probe 2>/dev/null || true
             sleep 15
           done
         ''}

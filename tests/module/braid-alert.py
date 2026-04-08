@@ -23,20 +23,40 @@ with subtest("Alert service unit exists"):
     # but the unit file must be loadable.
     machine.succeed("systemctl cat braid-alert.service")
 
-with subtest("Service script has modprobe fallback and setpriv wrapper"):
+with subtest("Service script has modprobe fallback and references the canonical beep wrapper"):
     # Verify the rendered service script includes the modprobe fallback
-    # (for nixos-rebuild switch without reboot) and wraps beep with setpriv
-    # (beep refuses to run as root). The VM lacks pcspkr hardware so we
-    # can't test actual module loading, but we can verify the script shape.
-    # systemctl cat shows the unit file; the actual script is in ExecStart=.
+    # (for nixos-rebuild switch without reboot) and invokes the canonical
+    # braid-beep-probe wrapper. The wrapper itself is the single source of
+    # truth for the privilege-dropped beep argv: both this service script
+    # and /etc/braid/notifier-config.json (consumed by `braid doctor`)
+    # reference it by Nix store path so they cannot drift.
+    #
+    # The setpriv/reuid=nobody/regid=beep invariants moved into the wrapper
+    # body when monitor.nix was refactored — we resolve the wrapper's store
+    # path from the rendered alert script and assert against its contents
+    # one indirection deeper.
     exec_start = machine.succeed(
         "systemctl cat braid-alert.service | grep '^ExecStart=' | sed 's/ExecStart=//'"
     ).strip()
     script = machine.succeed(f"cat {exec_start}")
     assert "modprobe" in script and "pcspkr" in script, "must include modprobe pcspkr fallback"
-    assert "setpriv" in script, "must use setpriv for beep"
-    assert "reuid=nobody" in script, "setpriv must drop to nobody"
-    assert "regid=beep" in script, "setpriv must drop to beep group"
+    assert "braid-beep-probe" in script, (
+        f"alert script must reference the canonical braid-beep-probe wrapper:\n{script}"
+    )
+
+    # The rendered script line looks like:
+    #   /nix/store/xxxx-braid-beep-probe/bin/braid-beep-probe 2>/dev/null || true
+    # Extract that absolute store path so we can read the wrapper body.
+    wrapper_path = machine.succeed(
+        f"grep -oE '/nix/store/[^[:space:]]*braid-beep-probe' {exec_start} | head -1"
+    ).strip()
+    assert wrapper_path.endswith("braid-beep-probe"), (
+        f"could not extract wrapper path from alert script:\n{script}"
+    )
+    wrapper_body = machine.succeed(f"cat {wrapper_path}")
+    assert "setpriv" in wrapper_body, f"wrapper must use setpriv for beep:\n{wrapper_body}"
+    assert "reuid=nobody" in wrapper_body, f"wrapper must drop to nobody:\n{wrapper_body}"
+    assert "regid=beep" in wrapper_body, f"wrapper must drop to beep group:\n{wrapper_body}"
 
 with subtest("Privilege drop to beep group works"):
     # Prove the privilege drop mechanism works on this system — beep group

@@ -189,6 +189,11 @@
               braid = linuxCrane.braid;
             }
           );
+          braid-doctor-beep = pkgs.testers.nixosTest (
+            import ./tests/cli/braid-doctor-beep.nix {
+              braid = linuxCrane.braid;
+            }
+          );
           doctor-metadata-mixed = pkgs.testers.nixosTest (
             import ./tests/cli/doctor-metadata-mixed.nix {
               braid = linuxCrane.braid;

@@ -34,6 +34,14 @@ with subtest("Valid config — JSON output"):
     assert checks["config_file"]["status"] == "ok", f"config_file: {checks['config_file']}"
     assert checks["config_schema"]["status"] == "ok", f"config_schema: {checks['config_schema']}"
     assert checks["config_permissions"]["status"] == "ok", f"config_permissions: {checks['config_permissions']}"
+    # This VM does not import the braid NixOS module, so the notifier
+    # config file does not exist. The new beep_path check must skip with
+    # the "monitor not configured" message — never Fail. Pinning this
+    # branch here avoids needing a second VM just for the no-notifier case.
+    assert checks["beep_path"]["status"] == "skip", f"beep_path: {checks['beep_path']}"
+    assert "monitor not configured" in checks["beep_path"]["message"], (
+        f"beep_path message: {checks['beep_path']['message']}"
+    )
 
 # --- Missing config ---
 
