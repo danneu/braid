@@ -124,6 +124,11 @@
               braid = linuxCrane.braid;
             }
           );
+          add-inhibits-suspend = pkgs.testers.nixosTest (
+            import ./tests/cli/add-inhibits-suspend.nix {
+              braid = linuxCrane.braid;
+            }
+          );
           braid-remove-disk = pkgs.testers.nixosTest (
             import ./tests/cli/braid-remove-disk.nix {
               braid = linuxCrane.braid;
@@ -136,6 +141,16 @@
           );
           remove-metadata-dup = pkgs.testers.nixosTest (
             import ./tests/cli/remove-metadata-dup.nix {
+              braid = linuxCrane.braid;
+            }
+          );
+          remove-inhibits-suspend = pkgs.testers.nixosTest (
+            import ./tests/cli/remove-inhibits-suspend.nix {
+              braid = linuxCrane.braid;
+            }
+          );
+          remove-missing-inhibits-suspend = pkgs.testers.nixosTest (
+            import ./tests/cli/remove-missing-inhibits-suspend.nix {
               braid = linuxCrane.braid;
             }
           );

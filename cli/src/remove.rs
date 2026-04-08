@@ -1,6 +1,7 @@
 use crate::cmd::{CmdRequest, CommandRunner, Step};
 use crate::config::{config_read, mapper_name};
 use crate::confirm;
+use crate::inhibit::AcquireSleepInhibitor;
 use crate::journal;
 use crate::membership;
 use crate::parse::parse_btrfs_device_usage;
@@ -33,6 +34,10 @@ pub struct RemoveParams<'a> {
     pub yes: bool,
     pub progress: ProgressOutput,
     pub paths: &'a StatePaths,
+    /// Seam for acquiring a logind sleep inhibitor before the irreversible
+    /// portion of the remove. Production passes `&RealSleepInhibitor`;
+    /// unit tests pass `&RecordingInhibitor` to avoid spawning subprocesses.
+    pub sleep_inhibitor: &'a dyn AcquireSleepInhibitor,
 }
 
 pub fn cmd_remove<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
@@ -142,6 +147,27 @@ pub fn cmd_remove<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         }
         confirm::confirm_yes().map_err(RemoveError::Validation)?;
     }
+
+    // Hold a logind sleep inhibitor for the rest of the remove operation —
+    // covers the optional pre-remove RAID1→single balance, the long-running
+    // btrfs device remove (data migration), and the post-op LUKS close +
+    // membership persist. Suspending mid-remove can leave the kernel-side
+    // device-remove state machine in a partially-relocated state requiring
+    // recovery.
+    //
+    // Acquired here, AFTER all interactive/reversible work (confirmation)
+    // and BEFORE journal::write_journal, so that:
+    //   - operator-idle prompts do not block suspend
+    //   - a logind failure aborts cleanly without stranding pending-op.json
+    //     and forcing the user into recovery mode for an environmental error.
+    let _sleep_inhibitor_guard = params
+        .sleep_inhibitor
+        .acquire("removing disk from pool")
+        .map_err(|e| {
+            RemoveError::Validation(format!(
+                "could not acquire sleep inhibitor (is logind running?): {e}"
+            ))
+        })?;
 
     // Build target membership and write journal before irreversible disk op.
     let pre_membership = membership::load_membership(params.paths)
@@ -485,6 +511,7 @@ mod tests {
 
         let log = Arc::new(Mutex::new(Vec::new()));
         let runner = RecordingRunner::new(log.clone());
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
         cmd_remove(
             &runner,
             &MockFs,
@@ -495,6 +522,7 @@ mod tests {
                 yes: true,
                 progress: ProgressOutput::Off,
                 paths: &paths,
+                sleep_inhibitor: &inhibitor,
             },
         )
         .expect("remove should succeed");
@@ -505,6 +533,13 @@ mod tests {
                 .iter()
                 .any(|c| matches!(c, CmdRequest::BtrfsDeviceUsageRaw { .. })),
             "ENOSPC pre-flight should not be invoked for 2→1 removal; calls: {calls:?}"
+        );
+        // Locks in the seam placement: a successful 2→1 remove must take the
+        // inhibitor exactly once before journal::write_journal.
+        assert_eq!(
+            inhibitor.acquire_count(),
+            1,
+            "sleep inhibitor must be acquired exactly once on the path through journal::write_journal"
         );
     }
 
@@ -546,6 +581,7 @@ mod tests {
 
         let log = Arc::new(Mutex::new(Vec::new()));
         let runner = RecordingRunner::new(log.clone());
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
         cmd_remove(
             &runner,
             &MockFs,
@@ -556,6 +592,7 @@ mod tests {
                 yes: true,
                 progress: ProgressOutput::Off,
                 paths: &paths,
+                sleep_inhibitor: &inhibitor,
             },
         )
         .expect("remove should succeed");
@@ -667,6 +704,7 @@ mod tests {
         std::fs::write(&config_path, serde_json::to_vec(&config_json).unwrap()).unwrap();
 
         let runner = FailingEvictRunner;
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
         let result = cmd_remove(
             &runner,
             &MockFs,
@@ -677,6 +715,7 @@ mod tests {
                 yes: true,
                 progress: ProgressOutput::Off,
                 paths: &paths,
+                sleep_inhibitor: &inhibitor,
             },
         );
 
@@ -684,6 +723,15 @@ mod tests {
         assert!(
             journal::load_journal(&paths).unwrap().is_some(),
             "pending-op.json must survive error exit so braid recover can reconcile"
+        );
+        // The journal exists, which proves we got past journal::write_journal,
+        // which proves the inhibitor was acquired exactly once on the way in.
+        // Locks in the seam placement: if a refactor moves the acquire to a
+        // post-journal point or skips it entirely, this assert flips.
+        assert_eq!(
+            inhibitor.acquire_count(),
+            1,
+            "sleep inhibitor must be acquired exactly once on the path through journal::write_journal"
         );
     }
 
@@ -803,6 +851,7 @@ mod tests {
 
         let log = Arc::new(Mutex::new(Vec::new()));
         let runner = RecordingRunner::new(log.clone());
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
         let err = cmd_remove(
             &runner,
             &MockFsWithExclop("balance paused".into()),
@@ -813,11 +862,21 @@ mod tests {
                 yes: true,
                 progress: ProgressOutput::Off,
                 paths: &paths,
+                sleep_inhibitor: &inhibitor,
             },
         )
         .expect_err("should fail — balance is paused");
         let msg = err.to_string();
         assert!(msg.contains("paused"), "expected 'paused' in error: {msg}");
+        // Preflight failure must NOT acquire the inhibitor — the failure is
+        // reversible and the user should not be stranded in a state where
+        // logind unavailability and a paused balance both have to clear before
+        // the same braid command can run.
+        assert_eq!(
+            inhibitor.acquire_count(),
+            0,
+            "preflight failure (paused balance) must NOT acquire the sleep inhibitor"
+        );
     }
 
     #[test]
@@ -855,6 +914,7 @@ mod tests {
 
         let log = Arc::new(Mutex::new(Vec::new()));
         let runner = RecordingRunner::new(log.clone());
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
         // With an active balance, cmd_remove should NOT error on the preflight —
         // it prints a warning and proceeds. The command itself will eventually
         // fail because our mock doesn't seed all the downstream commands,
@@ -870,12 +930,20 @@ mod tests {
                 yes: true,
                 progress: ProgressOutput::Off,
                 paths: &paths,
+                sleep_inhibitor: &inhibitor,
             },
         );
         // dry_run should succeed (no actual btrfs commands executed)
         assert!(
             result.is_ok(),
             "expected dry_run to proceed past active-op preflight, got: {result:?}"
+        );
+        // dry-run must NOT acquire the inhibitor — it has no irreversible work
+        // to protect.
+        assert_eq!(
+            inhibitor.acquire_count(),
+            0,
+            "dry-run must NOT acquire the sleep inhibitor"
         );
     }
 

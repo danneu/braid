@@ -1,6 +1,7 @@
 use crate::cmd::{CmdRequest, CommandRunner, Step};
 use crate::config::config_read;
 use crate::confirm;
+use crate::inhibit::AcquireSleepInhibitor;
 use crate::journal;
 use crate::membership;
 use crate::parse::parse_btrfs_device_usage;
@@ -63,6 +64,10 @@ pub struct RemoveMissingParams<'a> {
     pub yes: bool,
     pub progress: ProgressOutput,
     pub paths: &'a StatePaths,
+    /// Seam for acquiring a logind sleep inhibitor before the irreversible
+    /// portion of the remove-missing. Production passes `&RealSleepInhibitor`;
+    /// unit tests pass `&RecordingInhibitor` to avoid spawning subprocesses.
+    pub sleep_inhibitor: &'a dyn AcquireSleepInhibitor,
 }
 
 pub fn cmd_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
@@ -163,6 +168,27 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         );
         confirm::confirm_yes().map_err(RemoveMissingError::Validation)?;
     }
+
+    // Hold a logind sleep inhibitor for the rest of the remove-missing
+    // operation — covers the btrfs device remove (fast metadata-only) and
+    // the post-op maybe_restore_raid1 soft balance, which converts
+    // single-profile chunks created during degraded operation back to RAID1
+    // and can be long-running. Suspending mid-soft-balance interrupts the
+    // restoration and leaves chunks unprotected.
+    //
+    // Acquired here, AFTER all interactive/reversible work (confirmation)
+    // and BEFORE journal::write_journal, so that:
+    //   - operator-idle prompts do not block suspend
+    //   - a logind failure aborts cleanly without stranding pending-op.json
+    //     and forcing the user into recovery mode for an environmental error.
+    let _sleep_inhibitor_guard = params
+        .sleep_inhibitor
+        .acquire("removing missing device from pool")
+        .map_err(|e| {
+            RemoveMissingError::Validation(format!(
+                "could not acquire sleep inhibitor (is logind running?): {e}"
+            ))
+        })?;
 
     // Build journal before btrfs operation.
     let mut target_membership = pre_membership.clone();
@@ -493,6 +519,7 @@ mod tests {
 
         let log = Arc::new(Mutex::new(Vec::new()));
         let runner = RecordingRunner::new(log.clone());
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
         cmd_remove_missing(
             &runner,
             &MockFs,
@@ -503,6 +530,7 @@ mod tests {
                 yes: true,
                 progress: crate::progress::ProgressOutput::Off,
                 paths: &state_paths,
+                sleep_inhibitor: &inhibitor,
             },
         )
         .expect("remove-missing should succeed");
@@ -519,6 +547,13 @@ mod tests {
             usage_calls, 1,
             "Expected exactly 1 BtrfsDeviceUsageRaw call (probe_missing_devids only); \
              ENOSPC pre-flight should be skipped for single-survivor removal"
+        );
+        // Locks in the seam placement: a successful remove-missing must take
+        // the inhibitor exactly once before journal::write_journal.
+        assert_eq!(
+            inhibitor.acquire_count(),
+            1,
+            "sleep inhibitor must be acquired exactly once on the path through journal::write_journal"
         );
     }
 
@@ -858,6 +893,7 @@ mod tests {
         let (_tmp, config_path, _state_tmp, state_paths) = three_device_config();
         let log = Arc::new(Mutex::new(Vec::new()));
         let runner = ThreeDeviceRunner::new(log.clone(), false);
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
         cmd_remove_missing(
             &runner,
             &MockFs,
@@ -868,6 +904,7 @@ mod tests {
                 yes: true,
                 progress: crate::progress::ProgressOutput::Off,
                 paths: &state_paths,
+                sleep_inhibitor: &inhibitor,
             },
         )
         .expect("remove-missing should succeed");
@@ -891,6 +928,14 @@ mod tests {
             remove_pos.unwrap() < balance_pos.unwrap(),
             "remove-missing must happen before soft balance"
         );
+        // Locks in the seam placement: a remove-missing that triggers the soft
+        // balance must take the inhibitor exactly once before journal::write_journal,
+        // and hold it across both the device remove and the soft balance.
+        assert_eq!(
+            inhibitor.acquire_count(),
+            1,
+            "sleep inhibitor must be acquired exactly once on the path through journal::write_journal"
+        );
     }
 
     #[test]
@@ -902,6 +947,7 @@ mod tests {
         let (_tmp, config_path, _state_tmp, state_paths) = three_device_config();
         let log = Arc::new(Mutex::new(Vec::new()));
         let runner = ThreeDeviceRunner::new(log.clone(), true);
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
         cmd_remove_missing(
             &runner,
             &MockFs,
@@ -912,6 +958,7 @@ mod tests {
                 yes: true,
                 progress: crate::progress::ProgressOutput::Off,
                 paths: &state_paths,
+                sleep_inhibitor: &inhibitor,
             },
         )
         .expect("remove-missing should succeed");
@@ -922,6 +969,15 @@ mod tests {
                 .iter()
                 .any(|c| matches!(c, CmdRequest::BtrfsBalanceRaid1Soft { .. })),
             "should NOT call BtrfsBalanceRaid1Soft when still degraded; calls: {calls:?}"
+        );
+        // Even when no soft balance runs, the inhibitor must still be acquired
+        // unconditionally before journal::write_journal — the rule is "acquire
+        // before journal", not "acquire when slow phase will run".
+        assert_eq!(
+            inhibitor.acquire_count(),
+            1,
+            "sleep inhibitor must be acquired exactly once before journal::write_journal, \
+             even when no soft balance runs"
         );
     }
 
@@ -1027,6 +1083,7 @@ mod tests {
 
         let log = Arc::new(Mutex::new(Vec::new()));
         let runner = FailingSoftBalanceRunner::new(log.clone());
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
         let result = cmd_remove_missing(
             &runner,
             &MockFs,
@@ -1037,6 +1094,7 @@ mod tests {
                 yes: true,
                 progress: crate::progress::ProgressOutput::Off,
                 paths: &state_paths,
+                sleep_inhibitor: &inhibitor,
             },
         );
 
@@ -1047,6 +1105,13 @@ mod tests {
         assert!(
             journal::load_journal(&state_paths).unwrap().is_some(),
             "pending-op.json must survive error exit so braid recover can reconcile"
+        );
+        // The journal exists, which proves we got past journal::write_journal,
+        // which proves the inhibitor was acquired exactly once on the way in.
+        assert_eq!(
+            inhibitor.acquire_count(),
+            1,
+            "sleep inhibitor must be acquired exactly once on the path through journal::write_journal"
         );
     }
 
@@ -1063,6 +1128,7 @@ mod tests {
 
         let log = Arc::new(Mutex::new(Vec::new()));
         let runner = FailingSoftBalanceRunner::new(log.clone());
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
         let result = cmd_remove_missing(
             &runner,
             &MockFs,
@@ -1073,6 +1139,7 @@ mod tests {
                 yes: true,
                 progress: crate::progress::ProgressOutput::Off,
                 paths: &state_paths,
+                sleep_inhibitor: &inhibitor,
             },
         );
 

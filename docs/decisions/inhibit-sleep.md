@@ -14,7 +14,7 @@ Status: Active
 
 braid enables whole-system suspend via autosuspend. That is the right default for a quiet, low-power NAS, but it creates a failure mode for long-running storage operations that should not be interrupted mid-flight.
 
-`btrfs replace` is the motivating example. Upstream btrfs explicitly warns that suspend/hibernate can interrupt device replace and recommends inhibiting sleep before running it. On newer kernels, suspend can cancel the replace outright; on older kernels, suspend can leave braid to recover a broken topology after wake.
+`btrfs replace` is the motivating example. Upstream btrfs explicitly warns that suspend/hibernate can interrupt device replace and recommends inhibiting sleep before running it. On newer kernels, suspend can cancel the replace outright; on older kernels, suspend can leave braid to recover a broken topology after wake. The same risk profile applies to `btrfs device remove` (long-running data migration) and to the conditional balances in `add` and `remove-missing` (`pool_balance_raid1` after add to ≥2 disks; `maybe_restore_raid1` after clearing the last missing device).
 
 braid needs a clear rule for when to hold a sleep inhibitor, because "just acquire it for the whole command" is too broad:
 
@@ -55,9 +55,18 @@ braid must not hold a sleep inhibitor during:
 
 ## Current application
 
-### `braid replace`
+`braid replace`, `braid remove`, `braid remove-missing`, and `braid add` all hold a `What=sleep, Mode=block, Who=braid` logind inhibitor for their respective mutation windows. Each command acquires the inhibitor immediately before `journal::write_journal()`, after all interactive/reversible work, and holds it until the function returns (success, error, or signal-driven unwind).
 
-`braid replace` holds a `block` sleep inhibitor only after interactive/reversible work is complete and just before the mutation window starts.
+For all four commands, the protected scope is the post-journal critical section, and the excluded scope is the same:
+
+- `--dry-run`
+- confirmation prompt
+- passphrase reads
+- reversible validation and identity checks
+
+Failure to acquire the inhibitor returns a `Validation`-shaped error before the journal is written, so an environmental logind failure does not strand the user in recovery mode.
+
+### `braid replace`
 
 The protected scope includes:
 
@@ -66,19 +75,44 @@ The protected scope includes:
 - `btrfs replace start`
 - post-replace `maybe_restore_raid1` soft balance for missing-path replacements
 
-The protected scope excludes:
+### `braid remove`
 
-- `--dry-run`
-- confirmation prompt
-- passphrase reads
-- reversible validation and identity checks
+The protected scope includes:
 
-This matches braid's journal rule: the inhibitor is acquired before the first irreversible step, but failure to acquire it must not strand the user in recovery mode for a purely environmental error.
+- journal write
+- the optional pre-remove `pool_balance_single` (RAID1→single) when only one device will remain
+- `btrfs device remove` data migration
+- post-remove LUKS mapper close and membership persistence
+
+### `braid remove-missing`
+
+The protected scope includes:
+
+- journal write
+- `pool_remove_devid` (fast metadata-only)
+- the conditional `maybe_restore_raid1` soft balance that converts single-profile chunks (created during degraded operation) back to RAID1 when clearing the last missing device on a multi-disk pool
+- post-op membership persistence
+
+The inhibitor is acquired unconditionally before journal write, even in the cases where `maybe_restore_raid1` will be a no-op. This keeps the boundary rule simple ("acquire before journal") and matches the rest of the suite. The "savings" of skipping acquisition when the soft balance will not run are tiny on a NAS that is idle most of the time.
+
+### `braid add`
+
+The protected scope includes:
+
+- journal write
+- LUKS format/header backup/open of fresh disks
+- `pool_bootstrap_mount` / `pool_bootstrap_mount_raid1` (bootstrap path) or `pool_add_device` followed by the conditional `pool_balance_raid1` (add-to-existing-pool path) when the post-add pool has ≥2 devices
+- post-op membership persistence
+
+As with `remove-missing`, the inhibitor is acquired unconditionally before journal write. The bootstrap path's mkfs phase is fast but still irreversible across the journal boundary; the add-to-existing path's RAID1 balance is the long-running phase that the inhibitor primarily protects.
+
+The no-op early-return path (all requested disks already in the pool) returns before the inhibitor seam fires — no journal is written, so no protection is required.
 
 ## Consequences
 
 - suspend is blocked only when interruption is actually dangerous
 - operators are not prevented from suspending the host while braid is still waiting on human input
-- future long-running commands should reuse the same boundary rule instead of inventing command-specific behavior
+- `add`, `remove`, `remove-missing`, and `replace` all follow the same boundary rule; future long-running commands should reuse it instead of inventing command-specific behavior
+- failure to acquire the inhibitor (e.g. logind unreachable) is a clean validation error before the journal is written, never a recovery-mode lockout
 
-Likely future candidates include explicit balance-style commands or other long-running pool mutations. The same default does not automatically apply to every long-running task; the deciding question is whether suspend would make the operation incorrect, unsafe, or expensive to restart.
+The same default does not automatically apply to every long-running task; the deciding question is whether suspend would make the operation incorrect, unsafe, or expensive to restart.

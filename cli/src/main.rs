@@ -240,6 +240,11 @@ fn main() {
     let config_path = cli.config;
     let paths = StatePaths::production();
 
+    // Hoisted once: shared by add/remove/remove-missing/replace. Each command's
+    // cmd_* function holds the inhibitor only across its irreversible mutation
+    // window — see docs/decisions/inhibit-sleep.md for the boundary rule.
+    let sleep_inhibitor = braid_cli::inhibit::RealSleepInhibitor;
+
     match cli.command {
         Commands::Add(args) => {
             let progress = resolve_progress_output(
@@ -266,6 +271,7 @@ fn main() {
                     enroll_key_file: enroll_kf.as_deref(),
                     progress,
                     paths: &paths,
+                    sleep_inhibitor: &sleep_inhibitor,
                 },
             ) {
                 print_cli_error(&e.to_string());
@@ -290,6 +296,7 @@ fn main() {
                     yes: args.common.yes,
                     progress,
                     paths: &paths,
+                    sleep_inhibitor: &sleep_inhibitor,
                 },
             ) {
                 print_cli_error(&e.to_string());
@@ -314,6 +321,7 @@ fn main() {
                     yes: args.common.yes,
                     progress,
                     paths: &paths,
+                    sleep_inhibitor: &sleep_inhibitor,
                 },
             ) {
                 print_cli_error(&e.to_string());
@@ -332,7 +340,6 @@ fn main() {
                 .enroll_key_file
                 .as_ref()
                 .map(|dir| dir.join(braid_cli::luks::KEYFILE_NAME));
-            let sleep_inhibitor = braid_cli::inhibit::RealSleepInhibitor;
             if let Err(e) = braid_cli::replace::cmd_replace(
                 &runner,
                 &fs,

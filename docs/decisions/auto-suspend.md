@@ -14,7 +14,7 @@ The entire NixOS machine suspends when idle. This preserves LUKS keys and the mo
 
 ### autosuspend as the daemon
 
-[autosuspend](https://github.com/languitar/autosuspend) is an existing Python daemon in nixpkgs that handles idle countdown, suspend/wake lifecycle, systemd inhibitor respect, and RTC wakeup scheduling. Writing a custom daemon for this would reimplement what autosuspend already does well.
+[autosuspend](https://github.com/languitar/autosuspend) is an existing Python daemon in nixpkgs that handles idle countdown, periodic activity checks, and RTC wakeup scheduling. When the host is idle, it executes the configured suspend command (typically `systemctl suspend`). systemd/logind then applies the actual sleep request semantics, including honoring active high-level `sleep` inhibitor locks. Writing a custom daemon for this would reimplement what autosuspend already does well.
 
 braid configures autosuspend via the existing NixOS module (`services.autosuspend`). The user writes `braid.autoSuspend.enable = true;` and gets sensible defaults.
 

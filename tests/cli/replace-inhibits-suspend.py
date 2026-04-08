@@ -30,7 +30,13 @@
 #     multi-hour replace. The inhibitor must block that suspend until the
 #     replace (and its post-replace soft balance, if applicable) finishes.
 
-import shlex
+# list_inhibitors() and find_braid_sleep_inhibitor() come from
+# inhibitor_helpers.py, which the .nix harness concatenates onto the front
+# of this script at Nix-eval time. They are not imported — the helpers and
+# this file are joined into a single script string before the runner sees
+# them. shlex is imported by inhibitor_helpers.py, so it is already in
+# scope here; re-importing it would trip the test driver's lint check.
+
 import time
 
 start_all()
@@ -59,77 +65,6 @@ def replace_cmd_bg(old, new):
         f"braid replace --old {old} --new {new}=/dev/disk/by-id/virtio-{new} "
         f"--passphrase-stdin --yes) > /tmp/replace.log 2>&1 &"
     )
-
-
-def list_inhibitors():
-    # Query logind directly via D-Bus. We avoid `systemd-inhibit --list`
-    # because it depends on TTY/terminal context that NixOS VM tests do not
-    # provide.
-    #
-    # ListInhibitors returns a(ssssuu) — an array of (what, who, why, mode,
-    # uid, pid) tuples. busctl's default text output renders this as:
-    #
-    #   a(ssssuu) <count> "what1" "who1" "why1" "mode1" uid1 pid1 ...
-    #
-    # Strings containing spaces (e.g. "replace in progress") are
-    # double-quoted, so shlex.split parses them correctly.
-    #
-    # Defensive parsing: assert the expected token shape before indexing
-    # so a busctl format change fails loudly with a clear message instead
-    # of an opaque IndexError or ValueError on a downstream test assert.
-    out = machine.succeed(
-        "busctl call org.freedesktop.login1 /org/freedesktop/login1 "
-        "org.freedesktop.login1.Manager ListInhibitors"
-    ).strip()
-    tokens = shlex.split(out)
-    assert len(tokens) >= 2, (
-        f"busctl ListInhibitors output too short to parse: {out!r}"
-    )
-    assert tokens[0] == "a(ssssuu)", (
-        f"busctl ListInhibitors returned unexpected type signature "
-        f"{tokens[0]!r} (expected 'a(ssssuu)'). Output: {out!r}"
-    )
-    try:
-        count = int(tokens[1])
-    except ValueError as e:
-        raise AssertionError(
-            f"busctl ListInhibitors count token {tokens[1]!r} is not an int. "
-            f"Output: {out!r}"
-        ) from e
-    expected_token_count = 2 + count * 6
-    assert len(tokens) == expected_token_count, (
-        f"busctl ListInhibitors token count {len(tokens)} does not match "
-        f"expected {expected_token_count} for {count} inhibitor(s) "
-        f"(2 header + 6-tuple per entry). Output: {out!r}"
-    )
-    inhibitors = []
-    for i in range(count):
-        base = 2 + i * 6
-        try:
-            uid = int(tokens[base + 4])
-            pid = int(tokens[base + 5])
-        except ValueError as e:
-            raise AssertionError(
-                f"busctl ListInhibitors uid/pid tokens at entry {i} are not "
-                f"ints: {tokens[base + 4]!r} / {tokens[base + 5]!r}. "
-                f"Output: {out!r}"
-            ) from e
-        inhibitors.append({
-            "what": tokens[base],
-            "who": tokens[base + 1],
-            "why": tokens[base + 2],
-            "mode": tokens[base + 3],
-            "uid": uid,
-            "pid": pid,
-        })
-    return inhibitors
-
-
-def find_braid_sleep_inhibitor(inhibitors):
-    for inh in inhibitors:
-        if inh["who"] == "braid" and "sleep" in inh["what"] and inh["mode"] == "block":
-            return inh
-    return None
 
 
 # --- Phase 1: Build a 3-disk pool and write a payload ---

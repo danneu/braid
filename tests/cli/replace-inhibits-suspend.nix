@@ -37,5 +37,13 @@
     };
   };
 
-  testScript = builtins.readFile ./replace-inhibits-suspend.py;
+  # Inhibitor query helpers (list_inhibitors / find_braid_sleep_inhibitor)
+  # are concatenated into the test script's global namespace at Nix-eval
+  # time. NixOS VM tests run testScript as a single Python string with no
+  # module path, so a normal `import` would not work — see
+  # tests/cli/inhibitor_helpers.py for details.
+  testScript =
+    builtins.readFile ./inhibitor_helpers.py
+    + "\n\n"
+    + builtins.readFile ./replace-inhibits-suspend.py;
 }

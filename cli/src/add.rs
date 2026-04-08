@@ -1,6 +1,7 @@
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, Step};
 use crate::config::{config_read, mapper_name};
 use crate::confirm;
+use crate::inhibit::AcquireSleepInhibitor;
 use crate::journal;
 use crate::luks::{
     backup_luks_header, ensure_luks_open, luks_format, luks_opts_from_env,
@@ -237,6 +238,10 @@ pub struct AddParams<'a> {
     pub enroll_key_file: Option<&'a Path>,
     pub progress: ProgressOutput,
     pub paths: &'a StatePaths,
+    /// Seam for acquiring a logind sleep inhibitor before the irreversible
+    /// portion of the add. Production passes `&RealSleepInhibitor`;
+    /// unit tests pass `&RecordingInhibitor` to avoid spawning subprocesses.
+    pub sleep_inhibitor: &'a dyn AcquireSleepInhibitor,
 }
 
 pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
@@ -466,6 +471,28 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         eprintln!("Nothing to do — {} already in pool.", label);
         return Ok(());
     }
+
+    // Hold a logind sleep inhibitor for the rest of the add operation —
+    // covers Pass-2 LUKS format/open of fresh disks, the bootstrap-or-add
+    // pool phase, and the conditional pool_balance_raid1 that converts
+    // single-profile data to RAID1 when the post-add pool has ≥2 devices.
+    // The balance is the long-running phase; suspending mid-balance
+    // interrupts the conversion and leaves new data unprotected.
+    //
+    // Acquired here, AFTER all interactive/reversible work (confirmation,
+    // passphrase read+verify, PresentLuks identity checks) and BEFORE
+    // journal::write_journal, so that:
+    //   - operator-idle prompts do not block suspend
+    //   - a logind failure aborts cleanly without stranding pending-op.json
+    //     and forcing the user into recovery mode for an environmental error.
+    let _sleep_inhibitor_guard = params
+        .sleep_inhibitor
+        .acquire("adding disk(s) to pool")
+        .map_err(|e| {
+            AddError::Validation(format!(
+                "could not acquire sleep inhibitor (is logind running?): {e}"
+            ))
+        })?;
 
     // All identity checks passed. Write journal before irreversible disk operations.
     let mut target_membership = pool_membership.clone();
@@ -938,6 +965,7 @@ mod tests {
         let runner = MockRunner::default();
         let fs = MockFs;
         let (_state_dir, sp) = test_paths();
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
 
         let result = cmd_add(
             &runner,
@@ -955,12 +983,19 @@ mod tests {
                 enroll_key_file: None,
                 progress: ProgressOutput::Off,
                 paths: &sp,
+                sleep_inhibitor: &inhibitor,
             },
         );
         let err = result.unwrap_err().to_string();
         assert!(
             err.contains("duplicate disk name"),
             "expected duplicate error, got: {err}"
+        );
+        // Validation failure (duplicate disk name) must NOT acquire the inhibitor.
+        assert_eq!(
+            inhibitor.acquire_count(),
+            0,
+            "validation failure must NOT acquire the sleep inhibitor"
         );
     }
 
@@ -1822,6 +1857,7 @@ mod tests {
             fail_device_add: false,
             no_btrfs_superblock: false,
         };
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
 
         cmd_add(
             &runner,
@@ -1836,6 +1872,7 @@ mod tests {
                 enroll_key_file: None,
                 progress: ProgressOutput::Off,
                 paths: &paths,
+                sleep_inhibitor: &inhibitor,
             },
         )
         .expect("no-op add should succeed");
@@ -1843,6 +1880,14 @@ mod tests {
         assert!(
             journal::load_journal(&paths).unwrap().is_none(),
             "pending-op.json should be cleared after no-op add"
+        );
+        // No-op add returns before journal::write_journal — the inhibitor seam
+        // sits AFTER the no-op early-return at line ~466, so it must NOT have
+        // been acquired.
+        assert_eq!(
+            inhibitor.acquire_count(),
+            0,
+            "no-op add must NOT acquire the sleep inhibitor — the inhibitor seam sits after the early-return"
         );
     }
 
@@ -1866,6 +1911,7 @@ mod tests {
             fail_device_add: true,
             no_btrfs_superblock: false,
         };
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
 
         let result = cmd_add(
             &runner,
@@ -1880,6 +1926,7 @@ mod tests {
                 enroll_key_file: None,
                 progress: ProgressOutput::Off,
                 paths: &paths,
+                sleep_inhibitor: &inhibitor,
             },
         );
 
@@ -1890,6 +1937,13 @@ mod tests {
         assert!(
             journal::load_journal(&paths).unwrap().is_some(),
             "pending-op.json must survive error exit so braid recover can reconcile"
+        );
+        // The journal exists, which proves we got past journal::write_journal,
+        // which proves the inhibitor was acquired exactly once on the way in.
+        assert_eq!(
+            inhibitor.acquire_count(),
+            1,
+            "sleep inhibitor must be acquired exactly once on the path through journal::write_journal"
         );
     }
 
@@ -1916,6 +1970,7 @@ mod tests {
             fail_device_add: false,
             no_btrfs_superblock: true,
         };
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
 
         let result = cmd_add(
             &runner,
@@ -1930,6 +1985,7 @@ mod tests {
                 enroll_key_file: None,
                 progress: ProgressOutput::Off,
                 paths: &paths,
+                sleep_inhibitor: &inhibitor,
             },
         );
 
@@ -1937,6 +1993,14 @@ mod tests {
         assert!(
             journal::load_journal(&paths).unwrap().is_none(),
             "no journal should exist after pre-mutation identity failure"
+        );
+        // Identity validation failure happens BEFORE the inhibitor seam, so
+        // the inhibitor must NOT be acquired. This is the same property as
+        // "no journal" — both seams are gated on identity validation passing.
+        assert_eq!(
+            inhibitor.acquire_count(),
+            0,
+            "pre-mutation identity failure must NOT acquire the sleep inhibitor"
         );
     }
 
@@ -1989,6 +2053,7 @@ mod tests {
                 },
             );
 
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
         let result = cmd_add(
             &runner,
             &fs,
@@ -2002,6 +2067,7 @@ mod tests {
                 enroll_key_file: None,
                 progress: ProgressOutput::Off,
                 paths: &paths,
+                sleep_inhibitor: &inhibitor,
             },
         );
 
@@ -2009,6 +2075,13 @@ mod tests {
         assert!(
             err.contains("bootstrap only accepts fresh disks"),
             "expected bootstrap rejection, got: {err}"
+        );
+        // Validation failure (bootstrap rejection) happens BEFORE the inhibitor
+        // seam, so the inhibitor must NOT be acquired.
+        assert_eq!(
+            inhibitor.acquire_count(),
+            0,
+            "bootstrap rejection must NOT acquire the sleep inhibitor"
         );
     }
 
