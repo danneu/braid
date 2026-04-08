@@ -67,8 +67,12 @@ in
           # If pool is already unmounted during shutdown race, nothing remains to cancel.
           ${utilLinux}/bin/mountpoint -q ${cfg.mountPoint} || exit 0
 
-          # Mounted path: keep original behavior so genuine cancel failures still surface.
-          (${btrfsProgs}/bin/btrfs scrub status ${cfg.mountPoint} | ${pkgs.gnugrep}/bin/grep finished) || ${btrfsProgs}/bin/btrfs scrub cancel ${cfg.mountPoint}
+          # Use the typed scrub-status parser instead of grep — see
+          # cli/src/scrub_cancel.rs. Only cancels if status is Running; clean
+          # no-op for Never/Completed; hard-fails on Unknown so parser drift
+          # surfaces instead of silently masking a busy mount. Mount is passed
+          # explicitly — ExecStop has no config-file dependency.
+          exec ${braidWrapped}/bin/braid scrub-cancel --mount ${cfg.mountPoint}
         '';
       };
     };

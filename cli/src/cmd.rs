@@ -47,6 +47,9 @@ pub enum CmdRequest {
     BtrfsScrubStatus {
         mount_point: MountPoint,
     },
+    BtrfsScrubCancel {
+        mount_point: MountPoint,
+    },
     BtrfsScrubStatusPerDevice {
         mount_point: MountPoint,
     },
@@ -321,6 +324,10 @@ impl CmdRequest {
                     "--raw".into(),
                     mount_point.0.clone(),
                 ],
+            },
+            CmdRequest::BtrfsScrubCancel { mount_point } => CmdArgs {
+                program: "btrfs",
+                args: vec!["scrub".into(), "cancel".into(), mount_point.0.clone()],
             },
             CmdRequest::BtrfsScrubStatusPerDevice { mount_point } => CmdArgs {
                 program: "btrfs",

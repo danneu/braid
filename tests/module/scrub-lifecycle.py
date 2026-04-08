@@ -114,4 +114,14 @@ with subtest("cancel: lock succeeds while scrub holds mount busy"):
     cancel.fail("test -e /dev/mapper/braid-disk1")
     cancel.fail("test -e /dev/mapper/braid-disk2")
 
+with subtest("cancel: ExecStop succeeded (no false-fail in Never state)"):
+    # The fake scrub never ran `btrfs scrub start`, so scrub state is `Never`.
+    # The old shell hook would unconditionally call `btrfs scrub cancel`, which
+    # exits non-zero with "not running" and marks the service as `failed`. The
+    # new typed handler matches `ScrubState::Never` and exits 0 cleanly. This
+    # subtest is the failure-layer guard for that bug — it must FAIL on the
+    # old grep pipeline and PASS on the new `braid scrub-cancel`.
+    result = show(cancel, SERVICE, "Result")
+    assert result == "success", f"braid-scrub.service ExecStop failed: Result={result}"
+
 cancel.shutdown()

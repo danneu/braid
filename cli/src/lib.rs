@@ -27,6 +27,7 @@ pub mod progress;
 pub mod remove;
 pub mod remove_missing;
 pub mod replace;
+pub mod scrub_cancel;
 pub mod state_io;
 pub mod state_paths;
 pub mod status;

@@ -43,6 +43,12 @@ enum Commands {
     EnrollKeyFile(EnrollKeyFileArgs),
     /// Check if pool is idle (no scrub/balance/replace): exit 0 = idle, exit 1 = busy, exit 2 = error
     Idle,
+    /// Internal: invoked by `braid-scrub.service` ExecStop during lock/shutdown
+    /// to cancel an in-flight scrub. Probes scrub state via the typed parser
+    /// and only issues `btrfs scrub cancel` when state is `Running`; silent
+    /// no-op for `Never`/`Completed`. Hidden from `braid --help`.
+    #[command(hide = true)]
+    ScrubCancel(ScrubCancelArgs),
     /// Check disk health: exit 0 = ok/offline, exit 1 = alert, exit 2 = error
     Monitor,
     /// Acknowledge current alerts and silence notifications
@@ -219,6 +225,13 @@ struct DiscoverArgs {
     /// Write discovered membership to pool.json
     #[arg(long)]
     write: bool,
+}
+
+#[derive(Debug, Args)]
+struct ScrubCancelArgs {
+    /// Mount point of the braid pool to check
+    #[arg(long)]
+    mount: String,
 }
 
 fn main() {
@@ -505,6 +518,20 @@ fn main() {
                 Err(e) => {
                     print_cli_error(&e.to_string());
                     std::process::exit(2);
+                }
+            }
+        }
+        Commands::ScrubCancel(args) => {
+            // Mount comes from --mount, NOT config_read. ExecStop must have zero
+            // filesystem dependencies beyond the binary itself — see
+            // docs/decisions/systemd-lifecycle.md (thin-systemd-layer principle).
+            let runner = RealRunner;
+            let mount_point = braid_cli::types::MountPoint(args.mount.clone());
+            match braid_cli::scrub_cancel::cmd_scrub_cancel(&runner, &mount_point) {
+                Ok(_) => std::process::exit(0),
+                Err(e) => {
+                    print_cli_error(&e.to_string());
+                    std::process::exit(1);
                 }
             }
         }
