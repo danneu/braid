@@ -2,6 +2,9 @@
 
 ## Project: braid
 
+Github: https://github.com/danneu/braid (private, use `gh` cli tool for
+access)
+
 braid is a Rust CLI tool + NixOS module for managing a NixOS-based NAS of full-disk-encrypted drives (luks) in a btrfs raid1 array.
 
 braid wraps luks + btrfs to provide higher level UX to make things easier, more accessible, and less error-prone for people just trying to manage their NAS without fiddling or reading manpages to do everything.
