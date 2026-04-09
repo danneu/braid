@@ -1,0 +1,6 @@
+[book]
+title = "braid manual"
+src = "."
+
+[output.html]
+git-repository-url = "https://github.com/danneu/braid"

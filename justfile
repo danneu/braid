@@ -180,6 +180,36 @@ test-hw *args:
 fetch-references +ARGS="":
     python3 scripts/fetch-references.py {{ARGS}}
 
+# Build and serve the manual locally
+docs:
+    nix run nixpkgs#mdbook -- serve manual --open
+
+# Verify SUMMARY.md and manual pages are in sync
+check-docs:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Set A: .md files on disk (excluding SUMMARY.md itself)
+    disk=$(find manual -name '*.md' ! -name SUMMARY.md -type f \
+           | sed 's|^manual/||' | sort)
+    # Set B: link targets extracted from SUMMARY.md markdown links
+    summary=$(sed -n 's/.*](\([^)]*\.md\)).*/\1/p' manual/SUMMARY.md | sort)
+    # Compare
+    missing=$(comm -23 <(echo "$disk") <(echo "$summary"))
+    stale=$(comm -13 <(echo "$disk") <(echo "$summary"))
+    rc=0
+    if [ -n "$missing" ]; then
+        printf 'files missing from SUMMARY.md:\n'
+        printf '  %s\n' $missing
+        rc=1
+    fi
+    if [ -n "$stale" ]; then
+        printf 'stale entries in SUMMARY.md (no file on disk):\n'
+        printf '  %s\n' $stale
+        rc=1
+    fi
+    if [ $rc -eq 0 ]; then echo "SUMMARY.md is in sync"; fi
+    exit $rc
+
 # Destroy an entire braid pool (dev use only — wipes LUKS signatures + state files)
 destroy config="/etc/braid/config.json":
     ./scripts/braid-destroy.sh {{config}}
