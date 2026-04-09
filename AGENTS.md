@@ -83,6 +83,9 @@ Before searching the web for tool behavior, consult local resources first. `refe
 - **smartmontools** — [smartmontools/smartmontools](https://github.com/smartmontools/smartmontools)
   - **Source:** [`reference/smartmontools/smartmontools/`](reference/smartmontools/smartmontools/) — flat layout. `smartctl` output format, SMART attribute definitions, exit codes.
   - **Docs:** No separate docs dir. Man-page sources are inline alongside the code: `smartctl.8.in`, `smartd.8.in`, `smartd.conf.5.in`.
+- **linux** — [torvalds/linux](https://github.com/torvalds/linux)
+  - **Source:** [`reference/linux/`](reference/linux/) — kernel source at the exact version pinned in nixpkgs. Look in `fs/btrfs/` for btrfs-specific I/O scheduling, raid handling, and read balancing logic. `drivers/md/` for raid and block layer behavior.
+  - **Use for:** Understanding kernel-level I/O behavior, raid1 read balancing, mount semantics, block device management.
 
 ### btrfs docs
 

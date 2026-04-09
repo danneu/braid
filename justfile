@@ -173,8 +173,12 @@ test-hw *args:
     sudo python3 tests/hw/runner.py {{args}}
 
 # Fetch/refresh reference source repos + btrfs docs at nixpkgs-pinned versions
-fetch-references:
-    python3 scripts/fetch-references.py
+# Fetch reference source/docs at versions pinned in flake.lock
+# Usage: just fetch-references              (fetch all resources)
+#        just fetch-references linux        (fetch only linux kernel)
+#        just fetch-references --list       (list available resources)
+fetch-references +ARGS="":
+    python3 scripts/fetch-references.py {{ARGS}}
 
 # Destroy an entire braid pool (dev use only — wipes LUKS signatures + state files)
 destroy config="/etc/braid/config.json":
