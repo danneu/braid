@@ -10,6 +10,20 @@ braid is a NixOS CLI tool for managing an encrypted btrfs RAID1 NAS. This manual
 - **Set up disk health alerts** -- [Monitoring and alerts](guides/monitoring-and-alerts.md)
 - **Suspend when idle, wake on demand** -- [Power management](guides/power-management.md)
 
+## Guides
+
+| Guide | Description |
+| --- | --- |
+| [Getting started](guides/getting-started.md) | First-time setup: find disks, create pool, unlock |
+| [Day-to-day NAS usage](guides/day-to-day-nas-usage.md) | Subvolumes, file permissions, Samba shares |
+| [Auto-unlock](guides/auto-unlock.md) | USB keyfile setup for unattended reboots |
+| [Monitoring and alerts](guides/monitoring-and-alerts.md) | Disk health alerts, beeper, alert commands |
+| [Power management](guides/power-management.md) | Auto-suspend, Wake-on-LAN, RTC wakeups |
+| [NixOS configuration](guides/nixos-configuration.md) | Module options, scrub scheduling, pinned toolchain |
+| [Sharing and permissions](guides/sharing-and-permissions.md) | Storage group, mount permissions, Samba |
+| [Troubleshooting](guides/troubleshooting.md) | ENOSPC balance, paused balance, missing devices |
+| [Recovery scenarios](guides/recovery-scenarios.md) | Interrupted operations, lost pool.json, degraded mount |
+
 ## Commands
 
 | Command | Description |
@@ -30,20 +44,6 @@ braid is a NixOS CLI tool for managing an encrypted btrfs RAID1 NAS. This manual
 | [recover](commands/recover.md) | Recover from an interrupted operation |
 | [tui](commands/tui.md) | Interactive dashboard |
 | [browse](commands/browse.md) | Read-only browser for raw btrfs output |
-
-## Guides
-
-| Guide | Description |
-| --- | --- |
-| [Getting started](guides/getting-started.md) | First-time setup: find disks, create pool, unlock |
-| [Day-to-day NAS usage](guides/day-to-day-nas-usage.md) | Subvolumes, file permissions, Samba shares |
-| [Auto-unlock](guides/auto-unlock.md) | USB keyfile setup for unattended reboots |
-| [Monitoring and alerts](guides/monitoring-and-alerts.md) | Disk health alerts, beeper, alert commands |
-| [Power management](guides/power-management.md) | Auto-suspend, Wake-on-LAN, RTC wakeups |
-| [NixOS configuration](guides/nixos-configuration.md) | Module options, scrub scheduling, pinned toolchain |
-| [Sharing and permissions](guides/sharing-and-permissions.md) | Storage group, mount permissions, Samba |
-| [Troubleshooting](guides/troubleshooting.md) | ENOSPC balance, paused balance, missing devices |
-| [Recovery scenarios](guides/recovery-scenarios.md) | Interrupted operations, lost pool.json, degraded mount |
 
 ## Development
 

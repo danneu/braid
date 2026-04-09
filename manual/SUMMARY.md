@@ -2,6 +2,18 @@
 
 [braid manual](index.md)
 
+# Guides
+
+- [Getting started](guides/getting-started.md)
+- [Day-to-day NAS usage](guides/day-to-day-nas-usage.md)
+- [Auto-unlock](guides/auto-unlock.md)
+- [Monitoring and alerts](guides/monitoring-and-alerts.md)
+- [Power management](guides/power-management.md)
+- [NixOS configuration](guides/nixos-configuration.md)
+- [Sharing and permissions](guides/sharing-and-permissions.md)
+- [Troubleshooting](guides/troubleshooting.md)
+- [Recovery scenarios](guides/recovery-scenarios.md)
+
 # Commands
 
 - [add](commands/add.md)
@@ -20,18 +32,6 @@
 - [recover](commands/recover.md)
 - [tui](commands/tui.md)
 - [browse](commands/browse.md)
-
-# Guides
-
-- [Getting started](guides/getting-started.md)
-- [Day-to-day NAS usage](guides/day-to-day-nas-usage.md)
-- [Auto-unlock](guides/auto-unlock.md)
-- [Monitoring and alerts](guides/monitoring-and-alerts.md)
-- [Power management](guides/power-management.md)
-- [NixOS configuration](guides/nixos-configuration.md)
-- [Sharing and permissions](guides/sharing-and-permissions.md)
-- [Troubleshooting](guides/troubleshooting.md)
-- [Recovery scenarios](guides/recovery-scenarios.md)
 
 # Development
 
