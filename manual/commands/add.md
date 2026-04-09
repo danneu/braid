@@ -1,0 +1,121 @@
+[← Manual](../index.md)
+
+# braid add
+
+Add one or more disks to the braid pool. Creates a new pool if none exists, or expands an existing one.
+
+## When to use it
+
+- Setting up a new NAS (bootstrap with one or more disks)
+- Expanding storage by adding a new drive to an existing pool
+
+## Basic example
+
+```
+sudo braid add toshiba1=/dev/disk/by-id/ata-TOSHIBA_MN07ACA12T_1234
+```
+
+## Common variations
+
+Bootstrap a new pool with two disks (creates RAID1 immediately):
+
+```
+sudo braid add \
+  toshiba1=/dev/disk/by-id/ata-TOSHIBA_MN07ACA12T_1234 \
+  toshiba2=/dev/disk/by-id/ata-TOSHIBA_MN07ACA12T_5678
+```
+
+Add a disk to an existing pool:
+
+```
+sudo braid add toshiba3=/dev/disk/by-id/ata-TOSHIBA_MN07ACA12T_9012
+```
+
+Preview what would happen without making changes:
+
+```
+sudo braid add toshiba1=/dev/disk/by-id/ata-TOSHIBA_MN07ACA12T_1234 --dry-run
+```
+
+Skip the confirmation prompt (for scripting):
+
+```
+sudo braid add toshiba1=/dev/disk/by-id/ata-TOSHIBA_MN07ACA12T_1234 --yes
+```
+
+Pass passphrase non-interactively:
+
+```
+echo -n 'hunter2' | sudo braid add toshiba1=/dev/disk/by-id/ata-TOSHIBA_MN07ACA12T_1234 --passphrase-stdin
+sudo braid add toshiba1=/dev/disk/by-id/ata-TOSHIBA_MN07ACA12T_1234 --passphrase-file /tmp/pass.txt
+```
+
+Enroll a keyfile for auto-unlock at the same time:
+
+```
+sudo braid add toshiba1=/dev/disk/by-id/ata-TOSHIBA_MN07ACA12T_1234 --enroll /etc/braid/keys
+```
+
+## Important flags
+
+| Flag | Purpose |
+|---|---|
+| `--dry-run` | Show what would happen without executing |
+| `--yes` | Skip interactive confirmation |
+| `--passphrase-stdin` | Read passphrase from stdin instead of TTY prompt |
+| `--passphrase-file <path>` | Read passphrase from a file |
+| `--enroll <dir>` | Enroll `braid.key` from this directory into LUKS slot 1 on new disks |
+| `--progress auto\|on\|off` | Control progress display (default: auto) |
+
+## Disk spec format
+
+Each disk is specified as `NAME=PATH`, where:
+
+- **NAME** is a short label you choose (e.g. `toshiba1`)
+- **PATH** is the `/dev/disk/by-id/` stable device path
+
+The name is used in pool.json, LUKS mapper names (`braid-toshiba1`), and all future commands.
+
+## What happens under the hood
+
+1. Probes each disk to determine its state (fresh, braid-labeled, or foreign)
+2. Shows a confirmation prompt with disk model, serial, and size
+3. For fresh disks: LUKS-formats the disk with the pool passphrase, creates a LUKS header backup, and opens the LUKS mapper
+4. If no pool exists: creates a btrfs filesystem (RAID1 if 2+ disks, single if 1 disk)
+5. If a pool exists: adds the device to the existing btrfs filesystem, then balances data to RAID1
+6. Saves the updated pool membership to pool.json
+
+A sleep inhibitor is held during all irreversible operations to prevent the system from suspending mid-operation.
+
+## Disk acceptance rules
+
+braid classifies each disk before acting:
+
+- **Fresh disk** (no LUKS): accepted. LUKS-formatted with the pool passphrase.
+- **Returning braid disk** (braid-labeled LUKS, btrfs FSID matches the pool): accepted as a recovery add. The disk is re-joined to the pool without reformatting.
+- **Non-braid LUKS**: refused. braid will not adopt a LUKS device it did not create.
+- **Braid-labeled, wrong pool**: refused. The disk belongs to a different btrfs filesystem.
+- **Braid-labeled, no btrfs superblock**: refused. The disk's identity is ambiguous (could be partial init, clean eviction, or manual wipe). Wipe the disk and add as fresh.
+- **Braid-labeled, pool not mounted**: refused during bootstrap. Identity cannot be verified without a mounted pool.
+
+## Safety checks / refusal cases
+
+- Rejects duplicate disk names in the same command
+- Rejects disks that conflict with existing pool membership (same name or same by-id path)
+- Rejects absent disks (not plugged in)
+- Verifies the passphrase against an existing pool member before formatting new disks
+- Warns if the pool has missing devices (suggests `braid replace` first)
+- Warns if existing pool drives have a keyfile but `--enroll` was not passed
+- Refuses to proceed if another braid operation is pending (pending-op.json exists)
+- Refuses if a btrfs exclusive operation (balance, device remove, resize) is already running on the pool
+
+## Related commands
+
+- [braid status](status.md) -- check pool health and disk info
+- [braid remove](remove.md) -- remove a live disk from the pool
+- [braid replace](replace.md) -- replace a dead or live disk
+- [braid unlock](unlock.md) -- open LUKS devices and mount the pool
+
+## Related guides
+
+- [Getting started](../guides/getting-started.md) -- initial setup walkthrough
