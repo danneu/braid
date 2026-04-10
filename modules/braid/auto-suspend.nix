@@ -46,7 +46,7 @@ in
         assertion = cfg.autoSuspend.wolInterface == null
           || !(lib.hasPrefix "wl" cfg.autoSuspend.wolInterface);
         message = "braid.autoSuspend.wolInterface is set to \"${cfg.autoSuspend.wolInterface}\" which looks like a WiFi interface. "
-          + "Wake-on-LAN requires a wired ethernet interface — the NixOS wakeOnLan option uses ethtool, "
+          + "Wake-on-LAN requires a wired ethernet interface -- the NixOS wakeOnLan option uses ethtool, "
           + "which does not work for WiFi (silently fails). WiFi wake (WoWLAN) is a separate mechanism "
           + "and is unreliable in practice.";
       }

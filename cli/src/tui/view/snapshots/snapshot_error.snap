@@ -8,7 +8,7 @@ Data  Scrub  Sharing
  error: command failed: findmnt exited 1
  Disks ─────────────────────────────────────────────────────
      Name     Bus SMART btrfs Allocated
- ▶ 1 toshiba  —
-   2 ironwolf —
-   3 wdc      —
+ ▶ 1 toshiba  --
+   2 ironwolf --
+   3 wdc      --
 Quit: q │ Help: ? │ Reload: r

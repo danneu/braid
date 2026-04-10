@@ -48,7 +48,7 @@ fn resolve_removal_target(
         .map(|(name, _)| name.clone())
         .ok_or_else(|| {
             RemoveMissingError::Validation(format!(
-                "devid {devid} not found in pool.json membership — \
+                "devid {devid} not found in pool.json membership -- \
                  no disk entry has this device ID. \
                  Pool membership may need manual repair."
             ))

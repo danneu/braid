@@ -86,7 +86,7 @@ fn plan_enrollment<R: CommandRunner>(
     for (name, by_id) in candidates {
         // Check if keyfile already works (idempotent)
         if luks::verify_key_file(runner, &by_id.0, key_file_path)? {
-            eprintln!("ok: {} — keyfile already enrolled", name);
+            eprintln!("ok: {} -- keyfile already enrolled", name);
             plan.push(DiskEnrollAction::AlreadyEnrolled {
                 name: name.clone(),
                 by_id: by_id.clone(),
@@ -104,7 +104,7 @@ fn plan_enrollment<R: CommandRunner>(
             )));
         }
 
-        eprintln!("enroll: {} — will add keyfile to slot 1", name);
+        eprintln!("enroll: {} -- will add keyfile to slot 1", name);
         plan.push(DiskEnrollAction::NeedsEnroll {
             name: name.clone(),
             by_id: by_id.clone(),
@@ -148,7 +148,7 @@ fn apply_enrollment_with_backup_dir<R: CommandRunner>(
             }
             DiskEnrollAction::NeedsEnroll { name, by_id } => {
                 luks::enroll_key_file(runner, &by_id.0, passphrase, key_file_path)?;
-                eprintln!("ok: {} — keyfile enrolled in slot 1", name);
+                eprintln!("ok: {} -- keyfile enrolled in slot 1", name);
 
                 let mn = mapper_name(name);
                 let backup_path = luks::backup_luks_header_to(runner, &by_id.0, &mn.0, backup_dir)?;

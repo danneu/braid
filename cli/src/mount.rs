@@ -110,9 +110,9 @@ fn format_degraded_refused(
 ) -> String {
     let total = missing.len();
     let header = if total == 1 {
-        "pool has 1 missing device — refusing to mount degraded".to_owned()
+        "pool has 1 missing device -- refusing to mount degraded".to_owned()
     } else {
-        format!("pool has {total} missing devices — refusing to mount degraded")
+        format!("pool has {total} missing devices -- refusing to mount degraded")
     };
 
     let mut lines = vec![header];
@@ -362,7 +362,7 @@ fn explain_open_failure(
             "failed to unlock disk '{disk_name}' ({device}): {original_summary}. \
              LUKS header diagnosis could not be completed: {probe_err}. \
              Cannot determine whether this failure is due to LUKS header damage \
-             or the reported cryptsetup error — inspect the disk manually."
+             or the reported cryptsetup error -- inspect the disk manually."
         )),
     }
 }
@@ -406,11 +406,11 @@ fn open_disks_with_passphrase<R: CommandRunner, F: Filesystem + ?Sized>(
                     ..
                 } => (
                     format!(
-                        "cryptsetup open rejected on '{name}' despite verified passphrase on '{first_name}' — {hint} ({stderr})"
+                        "cryptsetup open rejected on '{name}' despite verified passphrase on '{first_name}' -- {hint} ({stderr})"
                     ),
                     MountError::Failed(format!(
                         "failed to open disk '{}': passphrase was verified \
-                         against '{}' but rejected here — {} ({}). \
+                         against '{}' but rejected here -- {} ({}). \
                          If the passphrase is correct, the single-passphrase \
                          invariant may be violated by external LUKS manipulation",
                         name, first_name, hint, stderr
@@ -513,11 +513,11 @@ pub fn execute_open_plan<R: CommandRunner, F: Filesystem + ?Sized>(
                                 ..
                             } => (
                                 format!(
-                                    "cryptsetup open rejected on '{name}' despite verified keyfile on '{first_name}' — {hint} ({stderr})"
+                                    "cryptsetup open rejected on '{name}' despite verified keyfile on '{first_name}' -- {hint} ({stderr})"
                                 ),
                                 MountError::Failed(format!(
                                     "failed to open disk '{}': keyfile was verified against \
-                                     '{}' but rejected here — {} ({}). \
+                                     '{}' but rejected here -- {} ({}). \
                                      If the keyfile is correct, the single-passphrase \
                                      invariant may be violated by external LUKS manipulation",
                                     name, first_name, hint, stderr
@@ -1939,7 +1939,7 @@ mod tests {
     fn explain_open_failure_ok_preserves_invariant_message() {
         let fallback_text =
             "failed to open disk 'disk2': passphrase was verified against 'disk1' but \
-             rejected here — wrong passphrase or permission denied (EPERM). If the \
+             rejected here -- wrong passphrase or permission denied (EPERM). If the \
              passphrase is correct, the single-passphrase invariant may be violated \
              by external LUKS manipulation";
         let err = explain_open_failure(

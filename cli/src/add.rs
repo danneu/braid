@@ -372,7 +372,7 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         } else {
             names.to_vec().join(", ")
         };
-        eprintln!("Nothing to do — {} already in pool.", label);
+        eprintln!("Nothing to do -- {} already in pool.", label);
         return Ok(());
     }
 
@@ -468,7 +468,7 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         } else {
             names.to_vec().join(", ")
         };
-        eprintln!("Nothing to do — {} already in pool.", label);
+        eprintln!("Nothing to do -- {} already in pool.", label);
         return Ok(());
     }
 

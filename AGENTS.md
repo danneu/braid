@@ -109,6 +109,12 @@ Before searching the web for tool behavior, consult local resources first. `refe
 
 The first line of a commit message must not be capitalized (e.g. `fix the foo bug`, not `Fix the foo bug`).
 
+## CLI Output Style
+
+Use `--` (double hyphen), not `—` (em-dash), in all user-facing CLI output -- error messages, help text, TUI strings, shell `echo` lines. Em-dashes render poorly over SSH and in non-UTF-8 locales.
+
+Example: `pool is not mounted -- nothing to acknowledge`
+
 ## Commands
 
 - `just test-vm` — Run NixOS VM tests (excludes repro tests).

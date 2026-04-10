@@ -203,9 +203,9 @@ pub fn check_no_missing_devices(missing_count: u64, action: &str) -> Result<(), 
     if missing_count > 0 {
         Err(format!(
             "pool has {missing_count} missing device{}. \
-             Resolve the missing device{} first — repair with \
+             Resolve the missing device{} first -- repair with \
              `braid replace --missing-id <devid>`, or forget the entry with \
-             `braid remove-missing` — then {action}. \
+             `braid remove-missing` -- then {action}. \
              Use `braid status` to see device IDs.",
             if missing_count == 1 { "" } else { "s" },
             if missing_count == 1 { "" } else { "s" },

@@ -257,7 +257,7 @@ pub fn cmd_lock<R: CommandRunner, F: Filesystem + ?Sized>(
                 }
                 if fs.exists(&format!("/dev/mapper/{entry}")) {
                     eprintln!(
-                        "[warn]  orphaned mapper {entry} (not in pool.json — likely a prior crash)"
+                        "[warn]  orphaned mapper {entry} (not in pool.json -- likely a prior crash)"
                     );
                     match close_mapper_with_retry(runner, &entry) {
                         Ok(()) => {

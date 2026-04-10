@@ -25,14 +25,14 @@ pub enum KeySlotState {
 pub enum LuksError {
     #[error("{0}")]
     Validation(String),
-    #[error("cryptsetup open failed for {device} (exit {exit_code}): {hint} — {stderr}")]
+    #[error("cryptsetup open failed for {device} (exit {exit_code}): {hint} -- {stderr}")]
     OpenFailed {
         device: String,
         exit_code: i32,
         hint: &'static str,
         stderr: String,
     },
-    #[error("cryptsetup luksFormat failed for {device} (exit {exit_code}): {hint} — {stderr}")]
+    #[error("cryptsetup luksFormat failed for {device} (exit {exit_code}): {hint} -- {stderr}")]
     FormatFailed {
         device: String,
         exit_code: i32,
@@ -79,7 +79,7 @@ fn validate_passphrase(raw: &str, source: &str) -> Result<String, LuksError> {
     }
     if passphrase.contains('\n') || passphrase.contains('\r') {
         return Err(LuksError::Validation(format!(
-            "passphrase from {source} contains line-break characters — \
+            "passphrase from {source} contains line-break characters -- \
              this passphrase would be impossible to enter interactively"
         )));
     }
@@ -293,7 +293,7 @@ pub(crate) fn luks_header_unreadable_guidance() -> &'static str {
 pub(crate) fn luks_header_damaged_guidance(device: &str) -> String {
     format!(
         "LUKS header metadata damaged. To attempt repair manually: \
-        cryptsetup repair --type luks2 {device} — make a safe backup of \
+        cryptsetup repair --type luks2 {device} -- make a safe backup of \
         the device header before running repair."
     )
 }
@@ -479,7 +479,7 @@ fn header_backup_advisories_in(dir: &std::path::Path) -> Vec<String> {
     };
     if has_backups {
         vec![format!(
-            "LUKS header backups exist in {} — copy offsite and delete local copies",
+            "LUKS header backups exist in {} -- copy offsite and delete local copies",
             dir.display()
         )]
     } else {

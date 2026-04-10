@@ -222,7 +222,7 @@ in
           else
             ret=$?
             if [ $ret -eq 2 ]; then
-              echo "braid-auto-unlock: pool has missing devices — not mounted" >&2
+              echo "braid-auto-unlock: pool has missing devices -- not mounted" >&2
               echo "braid-auto-unlock: set braid.autoUnlock.allowDegraded = true to allow degraded mount" >&2
             else
               echo "braid-auto-unlock: unlock failed (exit $ret), skipping" >&2

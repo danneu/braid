@@ -11,7 +11,7 @@ use braid_cli::state_paths::StatePaths;
 
 #[derive(Debug, Parser)]
 #[command(name = "braid", version)]
-#[command(about = "braid — encrypted NAS storage", long_about = None)]
+#[command(about = "braid -- encrypted NAS storage", long_about = None)]
 struct Cli {
     #[arg(long, global = true, default_value = "/etc/braid/config.json")]
     config: String,
@@ -26,7 +26,7 @@ enum Commands {
     Add(AddArgs),
     /// Remove a disk from the pool
     Remove(RemoveArgs),
-    /// Clean up a missing/dead device entry from the pool (does not rebuild data — use `replace` for that)
+    /// Clean up a missing/dead device entry from the pool (does not rebuild data -- use `replace` for that)
     RemoveMissing(RemoveMissingArgs),
     /// Replace a disk with a new one
     Replace(ReplaceArgs),
@@ -71,7 +71,7 @@ struct RecoverArgs {
     /// Read passphrase from file instead of TTY prompt
     #[arg(long)]
     passphrase_file: Option<std::path::PathBuf>,
-    /// Allow mounting with missing devices (degraded mode — new writes have no redundancy)
+    /// Allow mounting with missing devices (degraded mode -- new writes have no redundancy)
     #[arg(long)]
     allow_degraded: bool,
     /// Show what would be done without making changes
@@ -176,7 +176,7 @@ struct UnlockArgs {
     /// Unlock with a binary keyfile instead of passphrase
     #[arg(long, conflicts_with_all = ["passphrase_stdin", "passphrase_file"])]
     key_file: Option<std::path::PathBuf>,
-    /// Allow mounting with missing devices (degraded mode — new writes have no redundancy)
+    /// Allow mounting with missing devices (degraded mode -- new writes have no redundancy)
     #[arg(long)]
     allow_degraded: bool,
     /// Show what would be done without making changes
@@ -593,7 +593,7 @@ fn main() {
             let pool_json = paths.pool_json();
             if pool_json.exists() {
                 print_cli_error(&format!(
-                    "pool.json already exists at {} — use 'braid add' to add disks",
+                    "pool.json already exists at {} -- use 'braid add' to add disks",
                     pool_json.display()
                 ));
                 std::process::exit(1);

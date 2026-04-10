@@ -31,3 +31,5 @@
 - [feedback_audit_narrative_after_dropping_assumption.md](feedback_audit_narrative_after_dropping_assumption.md) — When a mid-edit drops a test assumption, audit the entire file's narrative for stale references, not just the lines being edited
 - [feedback_callsite_sweep_via_grep.md](feedback_callsite_sweep_via_grep.md) — Callsite inventories for renames/refactors must come from `git ls-files`+grep, never from a hand-curated list
 - [feedback_git_creation_use_full_iso_timestamp.md](feedback_git_creation_use_full_iso_timestamp.md) — Order files by git creation using `%aI` (full ISO author timestamp), never `--date=short`
+- [feedback_check_local_before_web.md](feedback_check_local_before_web.md) — Clone repos or check local source before web searching for tool behavior
+- [feedback_no_emdash.md](feedback_no_emdash.md) — Use double hyphens (`--`) instead of em dash characters

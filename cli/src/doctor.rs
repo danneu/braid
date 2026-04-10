@@ -652,7 +652,7 @@ fn check_beep_path_inner<R: CommandRunner>(
         return CheckResult {
             name,
             status: CheckStatus::Skip,
-            message: "skipped in --json mode — run without --json to play \
+            message: "skipped in --json mode -- run without --json to play \
                       the alert test beep"
                 .into(),
         };
@@ -669,7 +669,7 @@ fn check_beep_path_inner<R: CommandRunner>(
         Ok(out) if out.exit_status == 0 => CheckResult {
             name,
             status: CheckStatus::Ok,
-            message: "alert test beep played (1 kHz, 500 ms) — \
+            message: "alert test beep played (1 kHz, 500 ms) -- \
                       same beep braid will use for real disk alerts"
                 .into(),
         },
@@ -678,7 +678,7 @@ fn check_beep_path_inner<R: CommandRunner>(
             status: CheckStatus::Fail,
             message: format!(
                 "could not play alert test beep (braid-beep-probe exited {}) \
-                 — speaker likely broken: missing pcspkr device, evdev \
+                 -- speaker likely broken: missing pcspkr device, evdev \
                  permissions wrong, or kmod blacklist still active: {}",
                 out.exit_status,
                 out.stderr.trim()

@@ -10,7 +10,7 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum MembershipError {
-    #[error("pool membership not found at {0} — run 'braid add' to create a pool or 'braid discover --write' to rebuild from existing disks")]
+    #[error("pool membership not found at {0} -- run 'braid add' to create a pool or 'braid discover --write' to rebuild from existing disks")]
     NotFound(String),
     #[error("pool membership file corrupt at {0}: {1}")]
     Corrupt(String, String),

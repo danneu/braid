@@ -3,7 +3,7 @@ source: cli/src/tui/view/mod.rs
 assertion_line: 1302
 expression: buffer_to_string(&terminal)
 ---
-warning: LUKS header backups exist in /var/lib/braid/luks-headers — copy offsite
+warning: LUKS header backups exist in /var/lib/braid/luks-headers -- copy offsit
 Data  Scrub  Sharing
  Pool ──────────────────────────────────────────────────────────────────────────
  Path       /mnt/storage

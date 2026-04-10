@@ -91,7 +91,7 @@ if [ "$ret" -eq 0 ] && ! $skip_fixup; then
           fi
         fi
         if ! @systemctlBin@ start braid-online.service 2>/dev/null; then
-          echo "braid: WARNING: failed to activate braid-online.service — pool is mounted but shutdown may not lock automatically" >&2
+          echo "braid: WARNING: failed to activate braid-online.service -- pool is mounted but shutdown may not lock automatically" >&2
         fi
       fi
       ;;

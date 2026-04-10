@@ -112,7 +112,7 @@ fn pool_info(pool: &PoolState) -> Paragraph<'_> {
                 Span::styled("Balance    ", Style::default().fg(Color::Yellow)),
                 Span::styled(
                     format!(
-                        "rebalancing — {done_chunks}/{estimated_total_chunks} chunks ({pct_complete}% complete)"
+                        "rebalancing -- {done_chunks}/{estimated_total_chunks} chunks ({pct_complete}% complete)"
                     ),
                     Style::default().fg(Color::Yellow),
                 ),
@@ -129,7 +129,7 @@ fn pool_info(pool: &PoolState) -> Paragraph<'_> {
                 Span::styled("Balance    ", Style::default().fg(Color::Yellow)),
                 Span::styled(
                     format!(
-                        "paused — {done_chunks}/{estimated_total_chunks} chunks ({pct_complete}% complete)"
+                        "paused -- {done_chunks}/{estimated_total_chunks} chunks ({pct_complete}% complete)"
                     ),
                     Style::default().fg(Color::Yellow),
                 ),
@@ -371,7 +371,7 @@ fn disk_table(model: &Model, unit: ByteUnit) -> Table<'_> {
                 disk_transport
                     .and_then(|t| t.get(name))
                     .map(|s| s.as_str())
-                    .unwrap_or("\u{2014}"),
+                    .unwrap_or("--"),
             );
             let smart_val = smart_health.and_then(|s| s.get(name));
             let smart_line = Line::from(match smart_val {
@@ -597,7 +597,8 @@ fn view_data(model: &Model, frame: &mut Frame, area: Rect, _now: PrimitiveDateTi
 
 fn view_placeholder(frame: &mut Frame, area: Rect, name: &str) {
     frame.render_widget(
-        Paragraph::new(format!("{name} — coming soon")).style(Style::default().fg(Color::DarkGray)),
+        Paragraph::new(format!("{name} -- coming soon"))
+            .style(Style::default().fg(Color::DarkGray)),
         area,
     );
 }
@@ -1331,7 +1332,7 @@ pub(crate) mod tests {
     fn snapshot_with_advisory() {
         let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(sample_pool()));
         model.advisories = vec![
-            "LUKS header backups exist in /var/lib/braid/luks-headers — copy offsite and delete local copies".to_owned(),
+            "LUKS header backups exist in /var/lib/braid/luks-headers -- copy offsite and delete local copies".to_owned(),
         ];
         let terminal = render(&model, 80, 26);
         snap!(buffer_to_string(&terminal));

@@ -143,7 +143,7 @@ pub fn cmd_recover<R: CommandRunner, F: Filesystem + ?Sized>(
         Ok(Some(j)) => j,
         Ok(None) => {
             return Err(RecoverError::Failed(
-                "no pending operation journal found — nothing to recover".into(),
+                "no pending operation journal found -- nothing to recover".into(),
             ));
         }
         Err(e) => return Err(RecoverError::Journal(e.to_string())),
@@ -190,7 +190,7 @@ pub fn cmd_recover<R: CommandRunner, F: Filesystem + ?Sized>(
                     return Err(RecoverError::Failed(format!(
                         "device {} is in the live pool but has no by-id path in either \
                          the pre-operation or target membership snapshot.\n\
-                         This must be resolved manually — provide the correct \
+                         This must be resolved manually -- provide the correct \
                          /dev/disk/by-id/ path and re-run recovery.",
                         dev.mapper.0
                     )));
@@ -377,7 +377,7 @@ pub fn cmd_recover<R: CommandRunner, F: Filesystem + ?Sized>(
             return Err(RecoverError::Failed(format!(
                 "device {} is in the live pool but has no by-id path in either \
                  the pre-operation or target membership snapshot.\n\
-                 This must be resolved manually — provide the correct \
+                 This must be resolved manually -- provide the correct \
                  /dev/disk/by-id/ path and re-run recovery.",
                 dev.mapper.0
             )));

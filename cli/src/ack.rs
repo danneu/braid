@@ -104,7 +104,7 @@ fn stop_beeper() {
 
 #[derive(Debug, thiserror::Error)]
 pub enum AckError {
-    #[error("pool is not mounted — nothing to acknowledge")]
+    #[error("pool is not mounted -- nothing to acknowledge")]
     PoolNotMounted,
     #[error("probe error: {0}")]
     Probe(#[from] ProbeError),

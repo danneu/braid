@@ -28,7 +28,8 @@
       "Bash(just clippy:*)",
       "Read(//tmp/**)",
       "Bash(just test-repro:*)",
-      "Bash(cargo clippy:*)"
+      "Bash(cargo clippy:*)",
+      "Bash(python3 scripts/fetch-references.py)"
     ]
   },
   "plansDirectory": "./plans/wip",
