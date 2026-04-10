@@ -46,7 +46,7 @@ None.
 
 ## Safety checks
 
-- If the pool is not mounted and no alerts are latched, ack refuses with "pool is not mounted -- nothing to acknowledge."
+- If the pool is not mounted and no alerts are latched, ack refuses with "pool is not mounted -- nothing to acknowledge"
 
 ## Related commands
 

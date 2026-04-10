@@ -53,7 +53,11 @@ Demo mode shows three fake disks with sample data, useful for exploring the inte
 
 **Disk detail popup** (press Enter on a disk) -- LUKS cipher, key size, keyslot count, device errors breakdown (read/write/flush/corruption/generation), and SMART health.
 
-**Tabs** -- the dashboard has a single view (no tab switching in the TUI; for tabbed raw btrfs output, see `braid browse`).
+**Tabs** -- three tabs, switched with Tab / Shift-Tab:
+
+- **Data** (default) -- pool allocation breakdown, disk table, capacity bar.
+- **Scrub** -- per-device scrub state, progress, and timing.
+- **Sharing** -- placeholder (coming soon).
 
 ## Related commands
 
