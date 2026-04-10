@@ -66,7 +66,7 @@ sudo nano /mnt/etc/nixos/configuration.nix
 # users.users.dan = {
 #   isNormalUser = true;
 #   extraGroups = [ "wheel" ];
-#   initialPassword = "changeme";
+#   initialPassword = "changeme"; # Something temporary just for first log-in
 # };
 #
 # services.openssh.enable = true;
@@ -88,25 +88,19 @@ ip a # look for LAN ip address
 
 # e.g. On your laptop
 ssh dan@192.168.1.158
+
+# Once logged in on NAS, remember to change your password
+passwd
 ```
 
-### Install vim, git, and other basics
+### Install vim
 
-We'll add more packages later. For now I just want vim to make the rest of the setup easier.
+We'll add more packages later. For now I just want vim on the system to make the rest of the setup easier.
 
 ```sh
 sudo nano /etc/nixos/configuration.nix
 
-environment.systemPackages = with pkgs; [ vim lazygit ];
-environment.variables.EDITOR = "vim";
-
-programs.git = {
-  enable = true;
-  config = {
-    user.name = "Your Name";
-    user.email = "your@email.com";
-  };
-};
+environment.systemPackages = with pkgs; [ vim ];
 
 sudo nixos-rebuild switch
 ```
@@ -124,21 +118,22 @@ I'll name my NAS "caja" here.
 ```
 ~/world/
 ├── flake.nix
-├── hosts/
-│   ├── caja/              # NAS (NixOS)
-│   │   ├── configuration.nix
-│   │   └── hardware-configuration.nix
-│   └── mac/               # MacBook (nix-darwin)
-│       └── configuration.nix
-└── common/                # shared modules
-    └── default.nix
+└── hosts/
+    ├── caja/                        # NAS (NixOS)
+    │   ├── configuration.nix        # System config (boot, networking, services)
+    │   ├── hardware-configuration.nix
+    │   └── home.nix                 # User config (packages, shell, git, etc.)
+    └── mac/                         # MacBook (nix-darwin)
+        └── ...
 ```
 
 Let's stub out that folder tree:
 
 ```sh
-mkdir -p ~/world/hosts/{caja,mac} ~/world/common
+mkdir -p ~/world/hosts/{caja,mac}
 ```
+
+We use [home-manager](https://github.com/nix-community/home-manager) to manage user-level config (packages, git, shell, etc.) separately from the system config. This keeps `configuration.nix` lean — just boot, networking, and services — while `home.nix` handles everything specific to your user.
 
 In `~/world/flake.nix`:
 
@@ -148,17 +143,35 @@ In `~/world/flake.nix`:
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
     nix-darwin.url = "github:nix-darwin/nix-darwin";
     nix-darwin.inputs.nixpkgs.follows = "nixpkgs";
+    home-manager.url = "github:nix-community/home-manager/release-25.11";
+    home-manager.inputs.nixpkgs.follows = "nixpkgs";
   };
 
-  outputs = { nixpkgs, nix-darwin, ... }: {
+  outputs = { nixpkgs, nix-darwin, home-manager, ... }: {
     nixosConfigurations.caja = nixpkgs.lib.nixosSystem {
       system = "x86_64-linux";
-      modules = [ ./hosts/caja/configuration.nix ];
+      modules = [
+        ./hosts/caja/configuration.nix
+        home-manager.nixosModules.home-manager
+        {
+          home-manager.useGlobalPkgs = true;
+          home-manager.useUserPackages = true;
+          home-manager.users.dan = import ./hosts/caja/home.nix;
+        }
+      ];
     };
 
     darwinConfigurations.mac = nix-darwin.lib.darwinSystem {
       system = "aarch64-darwin";
-      modules = [ ./hosts/mac/configuration.nix ];
+      modules = [
+        ./hosts/mac/configuration.nix
+        home-manager.darwinModules.home-manager
+        {
+          home-manager.useGlobalPkgs = true;
+          home-manager.useUserPackages = true;
+          home-manager.users.dan = import ./hosts/mac/home.nix;
+        }
+      ];
     };
   };
 }
@@ -177,13 +190,50 @@ Make sure `hosts/caja/configuration.nix` imports the hardware config with a rela
 imports = [ ./hardware-configuration.nix ];
 ```
 
+Create `hosts/caja/home.nix` for your user-level config:
+
+```nix
+{ pkgs, ... }:
+
+{
+  home.username = "dan";
+  home.homeDirectory = "/home/dan";
+  home.stateVersion = "25.11";
+  programs.home-manager.enable = true;
+
+  home.sessionVariables = {
+    EDITOR = "vim";
+    VISUAL = "vim";
+  };
+
+  programs.git = {
+    enable = true;
+    settings = {
+      user.name = "Your Name";
+      user.email = "your@email.com";
+      init.defaultBranch = "master";
+      pull.rebase = true;
+      push.autoSetupRemote = true;
+    };
+  };
+
+  home.packages = with pkgs; [
+    lazygit   # Terminal UI for git
+    ripgrep   # Fast recursive grep (rg)
+    fd        # Fast find alternative
+    jq        # JSON processor
+    htop      # Interactive process viewer
+  ];
+}
+```
+
 Now rebuild from the flake instead of /etc/nixos:
 
 ```sh
 sudo nixos-rebuild switch --flake ~/world#caja
 ```
 
-From now on, you edit `~/world/` as your normal user and only `sudo` for the rebuild.
+From now on, you edit `~/world/` as your normal user and only `sudo` for the rebuild. System-level config goes in `configuration.nix`, user-level config goes in `home.nix`.
 
 ### Set up git and push to GitHub
 
@@ -246,9 +296,9 @@ services.openssh = {
 
 ### Set up Claude Code
 
-[danneu/claude-code-nix](https://github.com/danneu/claude-code-nix) is an autoupdating nix flake for Claude Code.
+[danneu/claude-code-nix](https://github.com/danneu/claude-code-nix) is an autoupdating nix flake for Claude Code. It provides a home-manager module.
 
-Add it as a flake input in `~/world/flake.nix`:
+Add it as a flake input in `~/world/flake.nix` and wire up its home-manager module via `sharedModules`:
 
 ```nix
 {
@@ -256,15 +306,26 @@ Add it as a flake input in `~/world/flake.nix`:
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
     nix-darwin.url = "github:nix-darwin/nix-darwin";
     nix-darwin.inputs.nixpkgs.follows = "nixpkgs";
+    home-manager.url = "github:nix-community/home-manager/release-25.11";
+    home-manager.inputs.nixpkgs.follows = "nixpkgs";
     claude-code.url = "github:danneu/claude-code-nix";
   };
 
-  outputs = { nixpkgs, nix-darwin, claude-code, ... }: {
+  outputs = { nixpkgs, nix-darwin, home-manager, claude-code, ... }: {
     nixosConfigurations.caja = nixpkgs.lib.nixosSystem {
       system = "x86_64-linux";
       modules = [
         ./hosts/caja/configuration.nix
         { nixpkgs.overlays = [ claude-code.overlays.default ]; }
+        home-manager.nixosModules.home-manager
+        {
+          home-manager.useGlobalPkgs = true;
+          home-manager.useUserPackages = true;
+          home-manager.sharedModules = [
+            claude-code.homeManagerModules.default
+          ];
+          home-manager.users.dan = import ./hosts/caja/home.nix;
+        }
       ];
     };
 
@@ -273,19 +334,27 @@ Add it as a flake input in `~/world/flake.nix`:
       modules = [
         ./hosts/mac/configuration.nix
         { nixpkgs.overlays = [ claude-code.overlays.default ]; }
+        home-manager.darwinModules.home-manager
+        {
+          home-manager.useGlobalPkgs = true;
+          home-manager.useUserPackages = true;
+          home-manager.sharedModules = [
+            claude-code.homeManagerModules.default
+          ];
+          home-manager.users.dan = import ./hosts/mac/home.nix;
+        }
       ];
     };
   };
 }
 ```
 
-Then in `hosts/caja/configuration.nix`, add Claude Code to your packages:
+Then in `hosts/caja/home.nix`, enable Claude Code:
 
 ```nix
-environment.systemPackages = with pkgs; [
-  vim
-  claude-code
-];
+programs.claude-code = {
+  enable = true;
+};
 ```
 
 Rebuild:
