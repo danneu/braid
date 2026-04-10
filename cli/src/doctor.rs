@@ -565,12 +565,12 @@ fn check_metadata_profile_mismatch<R: CommandRunner>(
 
 /// Doctor check for the PC speaker alert path.
 ///
-/// Plays a short alert test tone (1 kHz, 500 ms) via the canonical
+/// Plays a short alert test beep (1 kHz, 500 ms) via the canonical
 /// `braid-beep-probe` wrapper — the same code path the alert service uses.
 /// A successful run is *both* a notifier-health check and a positive
-/// guarantee that future disk alerts will produce the same audible tone.
+/// guarantee that future disk alerts will produce the same audible beep.
 ///
-/// `--json` mode (`json_output = true`) suppresses the tone: machine-readable
+/// `--json` mode (`json_output = true`) suppresses the beep: machine-readable
 /// output must never produce audible side effects. The check still appears in
 /// the JSON report (as `Skip`) so scripts auditing doctor output can see it.
 ///
@@ -640,7 +640,7 @@ fn check_beep_path_inner<R: CommandRunner>(
         return CheckResult {
             name,
             status: CheckStatus::Skip,
-            message: "skipped (requires root to play the alert test tone)".into(),
+            message: "skipped (requires root to play the alert test beep)".into(),
         };
     }
 
@@ -653,14 +653,14 @@ fn check_beep_path_inner<R: CommandRunner>(
             name,
             status: CheckStatus::Skip,
             message: "skipped in --json mode — run without --json to play \
-                      the alert test tone"
+                      the alert test beep"
                 .into(),
         };
     }
 
-    // 6. Run the canonical wrapper. This PLAYS the real short alert tone
+    // 6. Run the canonical wrapper. This PLAYS the real short alert beep
     //    (1 kHz, 500 ms) — same code path the alert service uses. Hearing
-    //    the tone is both the success signal AND a preview of what real
+    //    the beep is both the success signal AND a preview of what real
     //    disk alerts will sound like.
     match ctx
         .runner
@@ -669,15 +669,15 @@ fn check_beep_path_inner<R: CommandRunner>(
         Ok(out) if out.exit_status == 0 => CheckResult {
             name,
             status: CheckStatus::Ok,
-            message: "alert test tone played (1 kHz, 500 ms) — \
-                      same tone braid will use for real disk alerts"
+            message: "alert test beep played (1 kHz, 500 ms) — \
+                      same beep braid will use for real disk alerts"
                 .into(),
         },
         Ok(out) => CheckResult {
             name,
             status: CheckStatus::Fail,
             message: format!(
-                "could not play alert test tone (braid-beep-probe exited {}) \
+                "could not play alert test beep (braid-beep-probe exited {}) \
                  — speaker likely broken: missing pcspkr device, evdev \
                  permissions wrong, or kmod blacklist still active: {}",
                 out.exit_status,
@@ -688,7 +688,7 @@ fn check_beep_path_inner<R: CommandRunner>(
             name,
             status: CheckStatus::Fail,
             message: format!(
-                "could not play alert test tone (braid-beep-probe failed to spawn): {e}"
+                "could not play alert test beep (braid-beep-probe failed to spawn): {e}"
             ),
         },
     }
@@ -768,7 +768,7 @@ pub fn format_doctor_human(report: &DoctorReport) -> String {
             // The internal identifier `beep_path` stays stable for the JSON
             // schema; the human label reflects the product framing — what
             // the operator hears, not what the code does.
-            "beep_path" => "alert tone",
+            "beep_path" => "alert beep",
             other => other,
         };
         out.push_str(&format!("[{tag:<4}]  {label:<14}  {}\n", c.message));
@@ -1866,7 +1866,7 @@ mod tests {
     //   check skips with the "beep monitoring disabled" message.
     // Why: users who explicitly opt out of beep alerting must not see a
     //   misleading Fail or Warn — they have intentionally disabled the
-    //   feature, so absence of a tone is correct behavior.
+    //   feature, so absence of a beep is correct behavior.
     // Scenario: NAS user who prefers email or webhook alerts and has set
     //   `braid.monitor.beep = false` in their NixOS configuration.
     #[test]
@@ -1913,8 +1913,8 @@ mod tests {
             result.message
         );
         assert!(
-            result.message.contains("alert test tone"),
-            "skip message must mention the alert test tone (product framing): {}",
+            result.message.contains("alert test beep"),
+            "skip message must mention the alert test beep (product framing): {}",
             result.message
         );
     }
@@ -1953,19 +1953,19 @@ mod tests {
             result.message
         );
         assert!(
-            result.message.contains("alert test tone"),
-            "skip message must mention the alert test tone (product framing): {}",
+            result.message.contains("alert test beep"),
+            "skip message must mention the alert test beep (product framing): {}",
             result.message
         );
     }
 
     // Intent: when the wrapper exits 0, the check returns Ok and the
-    //   message explicitly mentions the alert test tone (product framing).
+    //   message explicitly mentions the alert test beep (product framing).
     // Why: pins the dual-purpose "health check + alert preview" framing in
     //   the user-facing copy. A regression that says "path invokable" or
     //   similar implementation language would silently degrade the framing
     //   even though the status is still Ok.
-    // Scenario: healthy NAS, root user, `braid doctor` plays the tone end
+    // Scenario: healthy NAS, root user, `braid doctor` plays the beep end
     //   to end and reports success.
     #[test]
     fn beep_path_ok_on_zero_exit() {
@@ -1987,15 +1987,15 @@ mod tests {
         let result = check_beep_path_inner(&mut ctx, f.path(), true, false);
         assert_eq!(result.status, CheckStatus::Ok);
         assert!(
-            result.message.contains("alert test tone"),
-            "Ok message must mention the alert test tone: {}",
+            result.message.contains("alert test beep"),
+            "Ok message must mention the alert test beep: {}",
             result.message
         );
     }
 
     // Intent: when the wrapper exits non-zero, the check returns Fail and
     //   the message both names the user-visible problem (could not play the
-    //   tone) AND retains diagnostic detail ("speaker likely broken" plus
+    //   beep) AND retains diagnostic detail ("speaker likely broken" plus
     //   the wrapper's stderr).
     // Why: a broken PC speaker silently swallows alerts in production.
     // Doctor exists to surface that condition with enough context for the
@@ -2022,7 +2022,7 @@ mod tests {
         let result = check_beep_path_inner(&mut ctx, f.path(), true, false);
         assert_eq!(result.status, CheckStatus::Fail);
         assert!(
-            result.message.contains("could not play alert test tone"),
+            result.message.contains("could not play alert test beep"),
             "Fail message must lead with the user-visible problem: {}",
             result.message
         );

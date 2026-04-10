@@ -61,7 +61,7 @@ When monitor writes an active alert latch, the systemd alert service activates t
 ## Related commands
 
 - [ack](ack.md) -- acknowledge alerts and silence the beeper
-- [doctor](doctor.md) -- one-time diagnostic (includes alert tone test)
+- [doctor](doctor.md) -- one-time diagnostic (includes alert beep test)
 - [status](status.md) -- shows active alerts in the status output
 
 ## Related guides

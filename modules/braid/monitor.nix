@@ -5,7 +5,7 @@ let
   braidWrapped = import ./wrapper.nix { inherit cfg pkgs lib; };
 
   # Canonical privilege-dropped beep wrapper. This is the SINGLE source of
-  # truth for the alert tone argv: both the alert service script and the
+  # truth for the alert beep argv: both the alert service script and the
   # /etc/braid/notifier-config.json file reference this derivation by Nix
   # store path, so they cannot drift. Doctor reads the path from the config
   # file and runs this same wrapper as a subprocess.

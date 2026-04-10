@@ -1,8 +1,8 @@
 # Test: braid doctor — PC speaker probe (beep_path check)
 #
 # Intent: Verify the new doctor `beep_path` check across its live branches:
-#   human-mode Ok (working wrapper plays the tone), human-mode Fail (broken
-#   wrapper), recovery, and JSON-mode Skip (the tone is suppressed for
+#   human-mode Ok (working wrapper plays the beep), human-mode Fail (broken
+#   wrapper), recovery, and JSON-mode Skip (the beep is suppressed for
 #   programmatic consumption regardless of speaker state).
 #
 # Why it exists: Doctor is the proactive diagnostic surface for "is braid
@@ -30,7 +30,7 @@ with subtest("Notifier config was written by the module"):
 
 # Human-mode subtests: these actually invoke the wrapper (the mock beep).
 # `braid doctor` without --json is the operator-facing path, where playing
-# the tone is the entire point of the check.
+# the beep is the entire point of the check.
 
 with subtest("Healthy beep (human mode): doctor exits 0"):
     machine.succeed("rm -f /tmp/beep-broken")
@@ -45,9 +45,9 @@ with subtest("Recovery (human mode): clearing the flag returns to exit 0"):
     machine.succeed("rm -f /tmp/beep-broken")
     machine.succeed("braid doctor")
 
-# JSON-mode subtest: must NEVER play the tone regardless of speaker state.
+# JSON-mode subtest: must NEVER play the beep regardless of speaker state.
 
-with subtest("JSON mode: beep_path is always Skip (tone never played)"):
+with subtest("JSON mode: beep_path is always Skip (beep never played)"):
     # Use broken beep to prove that the wrapper is not invoked even when it
     # would fail — the Skip must happen before any subprocess is spawned.
     # Broken speaker in human mode → exit 1, but JSON mode → exit 0 (Skip ≠ Fail).

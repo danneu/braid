@@ -1,6 +1,6 @@
 # Summary
 
-[braid manual](index.md)
+[braid](index.md)
 
 # Guides
 

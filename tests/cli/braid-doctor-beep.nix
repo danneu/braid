@@ -1,7 +1,7 @@
 # Test: braid doctor — PC speaker probe (beep_path check)
 #
 # What: Validates that the doctor `beep_path` check plays the alert test
-# tone in human mode (Ok when the wrapper works, Fail when it does not,
+# beep in human mode (Ok when the wrapper works, Fail when it does not,
 # recovery when the underlying issue is resolved) and skips silently in
 # `--json` mode regardless of speaker state.
 #

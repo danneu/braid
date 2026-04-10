@@ -26,7 +26,7 @@ Output:
 [ok  ]  missing devs    no missing devices
 [ok  ]  data profiles   data profile: RAID1
 [ok  ]  meta profiles   metadata profile: RAID1
-[ok  ]  alert tone      alert test tone played (1 kHz, 500 ms) — same tone braid will use for real disk alerts
+[ok  ]  alert beep      alert test beep played (1 kHz, 500 ms) — same beep braid will use for real disk alerts
 ```
 
 ## Machine-readable output
@@ -37,7 +37,7 @@ sudo braid doctor --json
 
 Prints a JSON object with `status` (one of `ok`, `warn`, `fail`, `skip`) and a `checks` array. Each check has `name`, `status`, and `message`.
 
-Note: `--json` mode skips the alert tone test (no audible side effects in machine-readable output). The check still appears in the report as `skip`.
+Note: `--json` mode skips the alert beep test (no audible side effects in machine-readable output). The check still appears in the report as `skip`.
 
 ## What it checks
 
@@ -50,13 +50,13 @@ Note: `--json` mode skips the alert tone test (no audible side effects in machin
 | `pool_missing_devices` | No btrfs missing devices in the live pool |
 | `data_profile_mismatch` | Data block groups all use the same RAID profile |
 | `metadata_profile_mismatch` | Metadata block groups all use the same RAID profile |
-| `beep_path` | PC speaker alert tone plays successfully |
+| `beep_path` | PC speaker alert beep plays successfully |
 
 ## Flags
 
 | Flag | Effect |
 | --- | --- |
-| `--json` | Machine-readable JSON output (suppresses alert tone test) |
+| `--json` | Machine-readable JSON output (suppresses alert beep test) |
 
 ## Exit codes
 
@@ -68,7 +68,7 @@ Note: `--json` mode skips the alert tone test (no audible side effects in machin
 1. Reads and validates `/etc/braid/config.json`.
 2. Loads `pool.json` and probes each declared disk via `cryptsetup isLuks` and `cryptsetup luksDump`.
 3. If the pool is mounted, queries `btrfs filesystem df` to check RAID profile consistency and probes for missing devices.
-4. If the braid monitor NixOS module is configured and running as root (not `--json`), plays a short test tone through the canonical beep wrapper.
+4. If the braid monitor NixOS module is configured and running as root (not `--json`), plays a short test beep through the canonical beep wrapper.
 5. Aggregates results and prints a summary.
 
 ## Related commands
