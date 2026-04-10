@@ -4,6 +4,7 @@
 
 # Guides
 
+- [Install and set up NixOS](guides/install-nixos.md)
 - [Getting started](guides/getting-started.md)
 - [Day-to-day NAS usage](guides/day-to-day-nas-usage.md)
 - [Auto-unlock](guides/auto-unlock.md)
