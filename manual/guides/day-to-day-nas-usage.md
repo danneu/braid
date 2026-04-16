@@ -122,7 +122,7 @@ You can add new drives to an existing pool without rebuilding or reformatting:
 
 ```sh
 # Find the new drive
-lsblk -d -o NAME,SIZE,ID-LINK
+lsblk -d -o NAME,SIZE,MODEL,ID-LINK
 
 # Add it
 sudo braid add newdisk=/dev/disk/by-id/ata-NEWDISK_SERIAL

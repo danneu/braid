@@ -25,7 +25,7 @@ This means removing the USB key is all it takes to go back to manual unlock.
 Plug in a USB drive and find its by-id path:
 
 ```sh
-lsblk -d -o NAME,SIZE,ID-LINK
+lsblk -d -o NAME,SIZE,MODEL,ID-LINK
 ```
 
 Mount it somewhere temporary:
@@ -63,7 +63,7 @@ The `--enroll` flag points to the directory containing `braid.key`. The new disk
 Find your USB key's by-id path (use the raw device, not a partition, if your USB has no partition table):
 
 ```sh
-lsblk -d -o NAME,SIZE,ID-LINK
+lsblk -d -o NAME,SIZE,MODEL,ID-LINK
 ```
 
 Add to your NixOS configuration:

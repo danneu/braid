@@ -66,17 +66,17 @@ sudo nixos-rebuild switch
 Use `lsblk` to identify the drives you want to add:
 
 ```sh
-lsblk -d -o NAME,SIZE,ID-LINK
+lsblk -d -o NAME,SIZE,MODEL,ID-LINK
 ```
 
 Example output:
 
 ```
-NAME  SIZE ID-LINK
-sda   12T  ata-TOSHIBA_MN07ACA12T_XXXX
-sdb   12T  ata-TOSHIBA_MN07ACA12T_YYYY
-sdc   12T  ata-TOSHIBA_MN07ACA12T_ZZZZ
-sdd  500G  ata-Samsung_SSD_860_AAAA       # boot drive -- leave this alone
+NAME  SIZE MODEL               ID-LINK
+sda   12T  TOSHIBA MN07ACA12T  ata-TOSHIBA_MN07ACA12T_XXXX
+sdb   12T  TOSHIBA MN07ACA12T  ata-TOSHIBA_MN07ACA12T_YYYY
+sdc   12T  TOSHIBA MN07ACA12T  ata-TOSHIBA_MN07ACA12T_ZZZZ
+sdd  500G  Samsung SSD 860     ata-Samsung_SSD_860_AAAA      # boot drive -- leave this alone
 ```
 
 You need the `ID-LINK` values. braid always uses `/dev/disk/by-id/` paths -- never `/dev/sdX`, which can change between reboots.

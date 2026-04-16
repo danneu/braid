@@ -82,7 +82,7 @@ braid = {
 
 ```sh
 # Find your disks
-lsblk -d -o NAME,SIZE,ID-LINK
+lsblk -d -o NAME,SIZE,MODEL,ID-LINK
 
 # Add disks to the pool
 sudo braid add toshiba=/dev/disk/by-id/ata-Toshiba_MN07_XXXX \
