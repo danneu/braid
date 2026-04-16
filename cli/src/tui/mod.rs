@@ -201,6 +201,7 @@ pub fn run_demo() -> io::Result<()> {
         disk_usage,
         disk_transport,
         smart_health,
+        disk_temperature_readings: HashMap::new(),
         luks_info,
         device_errors: HashMap::from([
             ("toshiba".to_owned(), DiskErrors { read: 0, write: 0, flush: 0, corruption: 0, generation: 0 }),

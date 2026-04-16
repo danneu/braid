@@ -1,14 +1,14 @@
 ---
 source: cli/src/tui/view/mod.rs
-assertion_line: 968
+assertion_line: 1059
 expression: buffer_to_string(&terminal)
 ---
 Data  Scrub  Sharing
  Pool ──────────────────────────────────────────────────────
  not mounted
  Disks ─────────────────────────────────────────────────────
-     Name     Bus SMART btrfs Allocated
+     Name     Bus SMART Temp btrfs Allocated
  ▶ 1 toshiba  --
    2 ironwolf --
    3 wdc      --
-Quit: q │ Help: ? │ Reload: r
+Quit: q │ Help: ? │ Reset temp hi/lo: R │ Reload: r

@@ -1,6 +1,6 @@
 ---
 source: cli/src/tui/view/mod.rs
-assertion_line: 1176
+assertion_line: 1333
 expression: buffer_to_string(&terminal)
 ---
 Data  Scrub  Sharing
@@ -15,9 +15,9 @@ Data  Scrub  Sharing
       │ Allocations ──────────────────────────────── │
  Disks│ Type        Profile     Size                 │──────
      N│ Data        RAID1       1.3 TiB              │
- ▶ 1 t│ Metadata    DUP         1.5 GiB              │
-   2 i│ System      DUP         16.0 MiB             │
-   3 w│ Unallocated             4.1 TiB              │
+ ▶ 1 t│ Metadata    DUP         1.5 GiB              │iB
+   2 i│ System      DUP         16.0 MiB             │iB
+   3 w│ Unallocated             4.1 TiB              │iB
       │                                              │
       │ btrfs Device Errors ──────────────────────── │
       │ read            0                            │
@@ -28,4 +28,4 @@ Data  Scrub  Sharing
       │                                              │
       │ r reload · Esc to go back                    │
       └──────────────────────────────────────────────┘
-Quit: q │ Help: ? │ Reload: r
+Quit: q │ Help: ? │ Reset temp hi/lo: R │ Reload: r

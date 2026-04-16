@@ -359,6 +359,17 @@ pub enum SmartHealth {
     Unknown,
 }
 
+/// smartctl per-probe result: health classification plus optional current
+/// temperature in Celsius. `celsius` is `None` when the drive doesn't emit
+/// `temperature.current` (USB-bridged drives, NVMe without thermal reporting,
+/// parser failure, etc.). `celsius` is independent of `health`: a drive can
+/// report temperature while health is Unknown, or vice versa.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SmartProbe {
+    pub health: SmartHealth,
+    pub celsius: Option<i16>,
+}
+
 /// btrfs replace status
 #[derive(Debug, Clone, PartialEq)]
 pub enum ReplaceState {

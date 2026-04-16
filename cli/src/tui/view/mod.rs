@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::time::Instant;
 
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -12,7 +13,10 @@ use time::PrimitiveDateTime;
 
 use crate::parse::types::{BtrfsBgType, ScrubState, SmartHealth};
 use crate::status::{BalanceReport, DiskErrors};
-use crate::tui::model::{Model, PoolState, PoolStatus, Tab, UnpooledDiskRender};
+use crate::tui::model::{
+    Model, PoolState, PoolStatus, Tab, TemperatureDiskId, TemperatureReading, TemperatureWatermark,
+    UnpooledDiskRender,
+};
 
 fn format_timestamp(dt: &PrimitiveDateTime) -> String {
     let fmt = format_description!(
@@ -318,6 +322,30 @@ fn smart_cell(health: &SmartHealth) -> Span<'static> {
     }
 }
 
+/// Temperature cell for the disks table.
+///
+/// - `reading` is `None` (no temp reported this tick) -> `-`.
+/// - `reading` present with `sample_count < 2` -> `<C>° --/--`.
+/// - `reading` present with `sample_count >= 2` -> `<C>° <min>/<max>`.
+fn temperature_cell(
+    reading: Option<&TemperatureReading>,
+    stats: &HashMap<TemperatureDiskId, TemperatureWatermark>,
+) -> Line<'static> {
+    let style = Style::default().fg(Color::DarkGray);
+    match reading {
+        None => Line::from(Span::styled("-", style)),
+        Some(r) => {
+            let range = match stats.get(&r.id) {
+                Some(w) if w.sample_count >= 2 => {
+                    format!("{}/{}", w.min_celsius, w.max_celsius)
+                }
+                _ => "--/--".to_owned(),
+            };
+            Line::from(Span::styled(format!("{}° {range}", r.celsius), style))
+        }
+    }
+}
+
 fn btrfs_cell(errors: &DiskErrors) -> Span<'static> {
     let total = errors.total();
     if total == 0 {
@@ -360,7 +388,7 @@ fn disk_table(model: &Model, unit: ByteUnit) -> Table<'_> {
     let disk_transport = pool.map(|p| &p.disk_transport);
     let smart_health = pool.map(|p| &p.smart_health);
     let device_errors = pool.map(|p| &p.device_errors);
-    let header = Row::new(["", "Name", "Bus", "SMART", "btrfs", "Allocated"])
+    let header = Row::new(["", "Name", "Bus", "SMART", "Temp", "btrfs", "Allocated"])
         .style(Style::default().fg(Color::DarkGray));
     let rows: Vec<Row> = model
         .disk_names
@@ -378,6 +406,13 @@ fn disk_table(model: &Model, unit: ByteUnit) -> Table<'_> {
                 Some(h) => smart_cell(h),
                 None => Span::raw(""),
             });
+            let temperature_line = match pool {
+                Some(p) => temperature_cell(
+                    p.disk_temperature_readings.get(name),
+                    &model.session_temperature_stats,
+                ),
+                None => Line::from(Span::raw("")),
+            };
             let num = Line::from(format!("{}", i + 1));
             let name_cell = Line::from(name.clone());
             let btrfs_line = Line::from(match device_errors.and_then(|e| e.get(name)) {
@@ -390,6 +425,7 @@ fn disk_table(model: &Model, unit: ByteUnit) -> Table<'_> {
                     name_cell,
                     transport_cell,
                     smart_line,
+                    temperature_line,
                     btrfs_line,
                     Line::from(format!(
                         "{:.0}%  {} / {} {}",
@@ -410,6 +446,7 @@ fn disk_table(model: &Model, unit: ByteUnit) -> Table<'_> {
                         name_cell,
                         transport_cell,
                         smart_line,
+                        temperature_line,
                         btrfs_line,
                         Line::from(status_span),
                     ])
@@ -420,6 +457,7 @@ fn disk_table(model: &Model, unit: ByteUnit) -> Table<'_> {
                     name_cell,
                     transport_cell,
                     smart_line,
+                    temperature_line,
                     btrfs_line,
                     Line::default(),
                 ]),
@@ -457,6 +495,23 @@ fn disk_table(model: &Model, unit: ByteUnit) -> Table<'_> {
         })
         .unwrap_or(0)
         .max("SMART".len()) as u16;
+    let temperature_width = pool
+        .map(|p| {
+            model
+                .disk_names
+                .iter()
+                .map(|name| {
+                    temperature_cell(
+                        p.disk_temperature_readings.get(name),
+                        &model.session_temperature_stats,
+                    )
+                    .width()
+                })
+                .max()
+                .unwrap_or(0)
+        })
+        .unwrap_or(0)
+        .max("Temp".len()) as u16;
     let btrfs_width = device_errors
         .map(|e| {
             model
@@ -474,6 +529,7 @@ fn disk_table(model: &Model, unit: ByteUnit) -> Table<'_> {
         Constraint::Length(longest_name_len),
         Constraint::Length(transport_width),
         Constraint::Length(smart_width),
+        Constraint::Length(temperature_width),
         Constraint::Length(btrfs_width),
         Constraint::Min(10),
     ];
@@ -923,7 +979,7 @@ pub fn view(model: &Model, frame: &mut Frame, now: PrimitiveDateTime) {
             None => "Reload: r".to_owned(),
         }
     };
-    let footer = format!("Quit: q │ Help: ? │ {reload}");
+    let footer = format!("Quit: q │ Help: ? │ Reset temp hi/lo: R │ {reload}");
     frame.render_widget(
         Paragraph::new(footer).style(Style::default().fg(Color::DarkGray)),
         outer[off + 3],
@@ -1145,6 +1201,7 @@ pub(crate) mod tests {
             disk_usage,
             disk_transport,
             smart_health,
+            disk_temperature_readings: HashMap::new(),
             luks_info,
             device_errors: HashMap::from([
                 (
@@ -1201,6 +1258,70 @@ pub(crate) mod tests {
     fn snapshot_with_pool() {
         let model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(sample_pool()));
         let terminal = render(&model, 60, 24);
+        snap!(buffer_to_string(&terminal));
+    }
+
+    // Intent: verify that the Temp column renders all three of its branches
+    //         in the same frame -- `<C>° <min>/<max>` once we have >=2
+    //         samples, `<C>° --/--` right after the first sample, and `-`
+    //         when smartctl didn't surface a temperature for the drive.
+    // Why: these three render rules are the contract with users testing
+    //      fan setups; a silent regression in any of them (e.g. showing
+    //      a degenerate `38/38` before history exists, or dropping the
+    //      current temperature when history is missing) would quietly
+    //      break the feature without tripping any other test.
+    // Scenario: 3-drive pool; toshiba has two samples recorded (32/45);
+    //           ironwolf has one sample (no range yet); wdc is USB and
+    //           smartctl returned no temperature at all.
+    #[test]
+    fn snapshot_temperature_column() {
+        use crate::types::LuksUuid;
+        let mut pool = sample_pool();
+        pool.disk_temperature_readings = HashMap::from([
+            (
+                "toshiba".to_owned(),
+                TemperatureReading {
+                    id: TemperatureDiskId::LuksUuid(LuksUuid(
+                        "11111111-1111-1111-1111-111111111111".to_owned(),
+                    )),
+                    celsius: 38,
+                },
+            ),
+            (
+                "ironwolf".to_owned(),
+                TemperatureReading {
+                    id: TemperatureDiskId::LuksUuid(LuksUuid(
+                        "22222222-2222-2222-2222-222222222222".to_owned(),
+                    )),
+                    celsius: 41,
+                },
+            ),
+            // wdc intentionally absent -- simulates USB drive / SMART unavailable.
+        ]);
+        let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(pool));
+        model.session_temperature_stats = HashMap::from([
+            (
+                TemperatureDiskId::LuksUuid(LuksUuid(
+                    "11111111-1111-1111-1111-111111111111".to_owned(),
+                )),
+                TemperatureWatermark {
+                    min_celsius: 32,
+                    max_celsius: 45,
+                    sample_count: 7,
+                },
+            ),
+            (
+                TemperatureDiskId::LuksUuid(LuksUuid(
+                    "22222222-2222-2222-2222-222222222222".to_owned(),
+                )),
+                TemperatureWatermark {
+                    min_celsius: 41,
+                    max_celsius: 41,
+                    sample_count: 1,
+                },
+            ),
+        ]);
+        let terminal = render(&model, 70, 24);
         snap!(buffer_to_string(&terminal));
     }
 

@@ -1,5 +1,5 @@
 use crate::cmd::RawCommandOutput;
-use crate::parse::types::SmartHealth;
+use crate::parse::types::{SmartHealth, SmartProbe};
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,6 +18,8 @@ struct RawSmartctlOutput {
     nvme_smart_health_information_log: Option<RawNvmeHealth>,
     #[serde(default)]
     ata_smart_attributes: Option<RawAtaSmartAttributes>,
+    #[serde(default)]
+    temperature: Option<RawTemperature>,
 }
 
 #[derive(Deserialize)]
@@ -65,20 +67,45 @@ struct RawAtaAttributeValue {
     value: u64,
 }
 
-pub fn parse_smartctl_health(raw: &RawCommandOutput) -> SmartHealth {
+#[derive(Deserialize)]
+struct RawTemperature {
+    #[serde(default)]
+    current: Option<i32>,
+}
+
+pub fn parse_smartctl(raw: &RawCommandOutput) -> SmartProbe {
     if raw.exit_status != 0 && raw.exit_status & 0x07 != 0 {
         // Bits 0-2 indicate command-line/device errors (not SMART failures)
-        // Bits 3+ are SMART status bits — we still parse JSON for those
+        // Bits 3+ are SMART status bits -- we still parse JSON for those
         if raw.stdout.is_empty() {
-            return SmartHealth::Unknown;
+            return SmartProbe {
+                health: SmartHealth::Unknown,
+                celsius: None,
+            };
         }
     }
 
     let parsed: RawSmartctlOutput = match serde_json::from_str(&raw.stdout) {
         Ok(v) => v,
-        Err(_) => return SmartHealth::Unknown,
+        Err(_) => {
+            return SmartProbe {
+                health: SmartHealth::Unknown,
+                celsius: None,
+            }
+        }
     };
 
+    let celsius = parsed
+        .temperature
+        .as_ref()
+        .and_then(|t| t.current)
+        .and_then(|v| i16::try_from(v).ok());
+
+    let health = classify_health(&parsed);
+    SmartProbe { health, celsius }
+}
+
+fn classify_health(parsed: &RawSmartctlOutput) -> SmartHealth {
     let passed = match &parsed.smart_status {
         Some(s) => s.passed,
         None => return SmartHealth::Unknown,
@@ -102,8 +129,8 @@ pub fn parse_smartctl_health(raw: &RawCommandOutput) -> SmartHealth {
         .unwrap_or(DiskProtocol::Sata);
 
     match protocol {
-        DiskProtocol::Nvme => classify_nvme(&parsed),
-        DiskProtocol::Sata => classify_sata(&parsed),
+        DiskProtocol::Nvme => classify_nvme(parsed),
+        DiskProtocol::Sata => classify_sata(parsed),
     }
 }
 
@@ -171,7 +198,7 @@ mod tests {
             }
             Err(e) => panic!("reading fixture: {e}"),
         };
-        assert_eq!(parse_smartctl_health(&raw(&content)), SmartHealth::Healthy);
+        assert_eq!(parse_smartctl(&raw(&content)).health, SmartHealth::Healthy);
     }
 
     #[test]
@@ -187,7 +214,7 @@ mod tests {
                 "percentage_used": 0
             }
         }"#;
-        assert_eq!(parse_smartctl_health(&raw(json)), SmartHealth::Degraded);
+        assert_eq!(parse_smartctl(&raw(json)).health, SmartHealth::Degraded);
     }
 
     #[test]
@@ -203,7 +230,7 @@ mod tests {
                 "percentage_used": 0
             }
         }"#;
-        assert_eq!(parse_smartctl_health(&raw(json)), SmartHealth::Degraded);
+        assert_eq!(parse_smartctl(&raw(json)).health, SmartHealth::Degraded);
     }
 
     #[test]
@@ -219,7 +246,7 @@ mod tests {
                 "percentage_used": 0
             }
         }"#;
-        assert_eq!(parse_smartctl_health(&raw(json)), SmartHealth::Degraded);
+        assert_eq!(parse_smartctl(&raw(json)).health, SmartHealth::Degraded);
     }
 
     #[test]
@@ -235,7 +262,7 @@ mod tests {
                 "percentage_used": 90
             }
         }"#;
-        assert_eq!(parse_smartctl_health(&raw(json)), SmartHealth::Degraded);
+        assert_eq!(parse_smartctl(&raw(json)).health, SmartHealth::Degraded);
     }
 
     #[test]
@@ -251,7 +278,7 @@ mod tests {
                 "percentage_used": 0
             }
         }"#;
-        assert_eq!(parse_smartctl_health(&raw(json)), SmartHealth::Failing);
+        assert_eq!(parse_smartctl(&raw(json)).health, SmartHealth::Failing);
     }
 
     #[test]
@@ -268,7 +295,7 @@ mod tests {
                 ]
             }
         }"#;
-        assert_eq!(parse_smartctl_health(&raw(json)), SmartHealth::Degraded);
+        assert_eq!(parse_smartctl(&raw(json)).health, SmartHealth::Degraded);
     }
 
     #[test]
@@ -280,7 +307,7 @@ mod tests {
         //   count; upper words carry supplementary event data.
         // Scenario: a Toshiba N300 (or similar HDD using the drivedb default
         //   for attribute 5) reports 0 reallocated sectors but 5 reallocation
-        //   events in the middle word → raw.value = 5 << 16 = 327680.
+        //   events in the middle word -> raw.value = 5 << 16 = 327680.
         let json = r#"{
             "smart_status": {"passed": true},
             "device": {"protocol": "ATA"},
@@ -292,7 +319,7 @@ mod tests {
                 ]
             }
         }"#;
-        assert_eq!(parse_smartctl_health(&raw(json)), SmartHealth::Healthy);
+        assert_eq!(parse_smartctl(&raw(json)).health, SmartHealth::Healthy);
     }
 
     #[test]
@@ -308,21 +335,20 @@ mod tests {
                 ]
             }
         }"#;
-        assert_eq!(parse_smartctl_health(&raw(json)), SmartHealth::Healthy);
+        assert_eq!(parse_smartctl(&raw(json)).health, SmartHealth::Healthy);
     }
 
     #[test]
     fn unknown_bad_json() {
-        assert_eq!(
-            parse_smartctl_health(&raw("not json")),
-            SmartHealth::Unknown
-        );
+        let probe = parse_smartctl(&raw("not json"));
+        assert_eq!(probe.health, SmartHealth::Unknown);
+        assert_eq!(probe.celsius, None);
     }
 
     #[test]
     fn unknown_missing_smart_status() {
         let json = r#"{"device": {"protocol": "NVMe"}}"#;
-        assert_eq!(parse_smartctl_health(&raw(json)), SmartHealth::Unknown);
+        assert_eq!(parse_smartctl(&raw(json)).health, SmartHealth::Unknown);
     }
 
     #[test]
@@ -333,6 +359,88 @@ mod tests {
             stderr: "device not found".into(),
             exit_status: 2,
         };
-        assert_eq!(parse_smartctl_health(&r), SmartHealth::Unknown);
+        let probe = parse_smartctl(&r);
+        assert_eq!(probe.health, SmartHealth::Unknown);
+        assert_eq!(probe.celsius, None);
+    }
+
+    // Intent: verify that `temperature.current` in smartctl JSON is surfaced
+    //         as `SmartProbe.celsius`.
+    // Why: the TUI's session hi/lo watermark column depends on this value;
+    //      a silent None here would leave every drive showing "-" in the
+    //      Temp column regardless of what smartctl reported.
+    // Scenario: a SATA drive reports `temperature.current = 38` via the
+    //          SCT / SMART attribute 194 pathway.
+    #[test]
+    fn celsius_extracted_when_present() {
+        let json = r#"{
+            "smart_status": {"passed": true},
+            "device": {"protocol": "ATA"},
+            "temperature": {"current": 38}
+        }"#;
+        assert_eq!(parse_smartctl(&raw(json)).celsius, Some(38));
+    }
+
+    // Intent: drives that don't emit a "temperature" block produce
+    //         `celsius: None` rather than defaulting to 0.
+    // Why: USB-bridged drives frequently omit the block entirely; 0 would
+    //      be read as "very cold" and pollute watermarks.
+    // Scenario: SATA drive JSON with smart_status and attributes but no
+    //           top-level "temperature" key.
+    #[test]
+    fn celsius_none_when_temperature_missing() {
+        let json = r#"{
+            "smart_status": {"passed": true},
+            "device": {"protocol": "ATA"}
+        }"#;
+        assert_eq!(parse_smartctl(&raw(json)).celsius, None);
+    }
+
+    // Intent: a "temperature" block that's present but empty (no `current`)
+    //         still produces `celsius: None`.
+    // Why: smartctl emits other temperature fields (op_limit_max,
+    //      critical_limit_max on NVMe) without always emitting `current`;
+    //      we must not treat the block's mere presence as a reading.
+    // Scenario: NVMe drive where smartctl emits op/critical limits but no
+    //           current temp.
+    #[test]
+    fn celsius_none_when_current_missing() {
+        let json = r#"{
+            "smart_status": {"passed": true},
+            "device": {"protocol": "NVMe"},
+            "temperature": {"op_limit_max": 80, "critical_limit_max": 84}
+        }"#;
+        assert_eq!(parse_smartctl(&raw(json)).celsius, None);
+    }
+
+    // Intent: negative temperatures are preserved (signed i16).
+    // Why: cold-storage drives or uncalibrated sensors can legitimately
+    //      report sub-zero Celsius; narrowing through u16 would corrupt
+    //      them.
+    // Scenario: a drive reports -5 C.
+    #[test]
+    fn celsius_negative_preserved() {
+        let json = r#"{
+            "smart_status": {"passed": true},
+            "device": {"protocol": "ATA"},
+            "temperature": {"current": -5}
+        }"#;
+        assert_eq!(parse_smartctl(&raw(json)).celsius, Some(-5));
+    }
+
+    // Intent: health and celsius are independent -- health=Unknown does
+    //         not suppress a valid temperature reading.
+    // Why: the TUI's Temp column should light up even if SMART status
+    //      couldn't be classified; they're separate signals.
+    // Scenario: a drive that returned temperature but no smart_status block.
+    #[test]
+    fn celsius_survives_unknown_health() {
+        let json = r#"{
+            "device": {"protocol": "ATA"},
+            "temperature": {"current": 42}
+        }"#;
+        let probe = parse_smartctl(&raw(json));
+        assert_eq!(probe.health, SmartHealth::Unknown);
+        assert_eq!(probe.celsius, Some(42));
     }
 }
