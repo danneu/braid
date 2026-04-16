@@ -1,8 +1,9 @@
 ---
 source: cli/src/tui/view/mod.rs
+assertion_line: 1492
 expression: buffer_to_string(&terminal)
 ---
 Data  Scrub  Sharing
  Scrub ─────────────────────────────────────────────────────
  not mounted
-Quit: q │ Help: ? │ Reload: r
+Quit: q │ Help: ? │ Reset temp hi/lo: R │ Reload: r

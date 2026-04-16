@@ -7,7 +7,7 @@ use crate::state_paths::StatePaths;
 use crate::status::{BalanceReport, DiskErrors};
 use crate::tui::effect::Effect;
 use crate::tui::state::{CmdId, CommandState};
-use crate::types::MountPoint;
+use crate::types::{ByIdPath, LuksUuid, MountPoint};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
@@ -49,6 +49,34 @@ pub struct DiskLuksInfo {
     pub cipher: String,
     pub key_size_bits: u32,
     pub keyslot_count: u32,
+}
+
+/// Physical identity of a disk for session-scoped temperature tracking.
+/// LUKS UUID is preferred so watermarks survive device-path changes on
+/// unplug/replug; by-id path is a fallback for disks whose UUID isn't
+/// available in the probe.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum TemperatureDiskId {
+    LuksUuid(LuksUuid),
+    ByIdPath(ByIdPath),
+}
+
+/// Current temperature reading for one disk, produced per probe tick.
+/// `celsius` is signed because SMART can legitimately report sub-zero values.
+#[derive(Debug, Clone)]
+pub struct TemperatureReading {
+    pub id: TemperatureDiskId,
+    pub celsius: i16,
+}
+
+/// Session-scoped hi/lo watermarks for one disk. Reset via Shift+R.
+/// No `last` field: the current value is always read from the latest
+/// `PoolState` so a failed probe can't produce a stale current temp.
+#[derive(Debug, Clone, Copy)]
+pub struct TemperatureWatermark {
+    pub min_celsius: i16,
+    pub max_celsius: i16,
+    pub sample_count: u32,
 }
 
 #[derive(Clone)]
@@ -101,6 +129,7 @@ pub struct PoolState {
     pub disk_usage: HashMap<String, DiskUsage>,
     pub disk_transport: HashMap<String, String>,
     pub smart_health: HashMap<String, SmartHealth>,
+    pub disk_temperature_readings: HashMap<String, TemperatureReading>,
     pub luks_info: HashMap<String, DiskLuksInfo>,
     pub device_errors: HashMap<String, DiskErrors>,
     /// Per-declared-disk render classification for disks NOT in
@@ -156,6 +185,7 @@ pub struct Model {
     pub spinner_deadline: Option<Instant>,
     pub advisories: Vec<String>,
     pub paths: StatePaths,
+    pub session_temperature_stats: HashMap<TemperatureDiskId, TemperatureWatermark>,
     next_cmd_id: u64,
 }
 
@@ -189,6 +219,7 @@ impl Model {
             spinner_deadline: Some(Instant::now() + Duration::from_millis(500)),
             advisories,
             paths,
+            session_temperature_stats: HashMap::new(),
             next_cmd_id: 0,
         };
         (model, effects)
@@ -211,6 +242,7 @@ impl Model {
             spinner_deadline: None,
             advisories: vec![],
             paths: StatePaths::production(),
+            session_temperature_stats: HashMap::new(),
             next_cmd_id: 0,
         }
     }

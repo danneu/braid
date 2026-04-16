@@ -3,16 +3,18 @@ use std::time::Instant;
 
 use crate::cmd::{CmdRequest, CommandRunner};
 use crate::luks;
-use crate::parse::types::{ScrubState, SmartHealth};
+use crate::parse::types::{ScrubState, SmartHealth, SmartProbe};
 use crate::parse::{
     parse_btrfs_device_stats, parse_btrfs_device_usage, parse_btrfs_filesystem_usage,
-    parse_btrfs_scrub_status, parse_cryptsetup_luks_dump, parse_lsblk_json, parse_smartctl_health,
+    parse_btrfs_scrub_status, parse_cryptsetup_luks_dump, parse_lsblk_json, parse_smartctl,
 };
 use crate::probe::{probe_config_disk, probe_pool, Filesystem, ProbeError};
 use crate::state_paths::StatePaths;
 use crate::status::resolve_alert_state;
 use crate::status::{estimate_pool_capacity, get_balance_report, DiskErrors};
-use crate::tui::model::{DiskLuksInfo, DiskUsage, PoolState, UnpooledDiskRender};
+use crate::tui::model::{
+    DiskLuksInfo, DiskUsage, PoolState, TemperatureDiskId, TemperatureReading, UnpooledDiskRender,
+};
 use crate::types::{ByIdPath, ConfigDiskState, LuksUuid, MountPoint};
 
 pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
@@ -51,6 +53,17 @@ pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
         .filter_map(|d| crate::config::name_from_mapper(&d.mapper.0).map(|name| (d.devid, name)))
         .collect();
 
+    // Map disk name -> LuksUuid for physical-identity keying of the TUI's
+    // session temperature watermarks. Same pattern as devid_to_name --
+    // mapper-name parse keys both onto the config disk name.
+    let name_to_luks_uuid: HashMap<&str, LuksUuid> = domain
+        .devices
+        .iter()
+        .filter_map(|d| {
+            crate::config::name_from_mapper(&d.mapper.0).map(|name| (name, d.luks_uuid.clone()))
+        })
+        .collect();
+
     let mut disk_usage = HashMap::new();
     for entry in &dev_usage.devices {
         let disk_name = match devid_to_name.get(&entry.devid) {
@@ -79,15 +92,28 @@ pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
     let balance = get_balance_report(runner, mount_point);
 
     let mut smart_health = HashMap::new();
+    let mut disk_temperature_readings = HashMap::new();
     let mut luks_info = HashMap::new();
     for (disk_name, by_id_path) in disk_by_id {
-        let health = runner
+        let probe = runner
             .run(&CmdRequest::SmartctlHealthJson {
                 device: by_id_path.clone(),
             })
-            .map(|raw| parse_smartctl_health(&raw))
-            .unwrap_or(SmartHealth::Unknown);
-        smart_health.insert(disk_name.clone(), health);
+            .map(|raw| parse_smartctl(&raw))
+            .unwrap_or(SmartProbe {
+                health: SmartHealth::Unknown,
+                celsius: None,
+            });
+        smart_health.insert(disk_name.clone(), probe.health);
+
+        if let Some(celsius) = probe.celsius {
+            let id = match name_to_luks_uuid.get(disk_name.as_str()) {
+                Some(uuid) => TemperatureDiskId::LuksUuid(uuid.clone()),
+                None => TemperatureDiskId::ByIdPath(ByIdPath(by_id_path.clone())),
+            };
+            disk_temperature_readings
+                .insert(disk_name.clone(), TemperatureReading { id, celsius });
+        }
 
         if let Ok(raw) = runner.run(&CmdRequest::CryptsetupLuksDump {
             device: by_id_path.clone(),
@@ -231,6 +257,7 @@ pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
         disk_usage,
         disk_transport,
         smart_health,
+        disk_temperature_readings,
         luks_info,
         device_errors,
         unpooled_disks,

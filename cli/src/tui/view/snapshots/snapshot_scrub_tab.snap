@@ -1,5 +1,6 @@
 ---
 source: cli/src/tui/view/mod.rs
+assertion_line: 1476
 expression: buffer_to_string(&terminal)
 ---
 Data  Scrub  Sharing
@@ -9,4 +10,4 @@ Data  Scrub  Sharing
  Total        32.4 MiB
  Rate         32.3 MiB/s
  Duration     0:00:00
-Quit: q │ Help: ? │ Reload: r
+Quit: q │ Help: ? │ Reset temp hi/lo: R │ Reload: r
