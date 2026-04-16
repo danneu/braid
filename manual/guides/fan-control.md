@@ -236,6 +236,83 @@ Vanilla fancontrol's one-input-per-PWM limit is fine for most small NAS builds. 
 
 Adopt one of these and replace `hardware.fancontrol.enable` if you need that level of control. Not covered further here.
 
+## Worked example: ASRock Industrial IMB-X1231
+
+A concrete walk-through of the discovery phase on one board, to show what the unknown-chip and ACPI-busy paths look like in practice.
+
+### Hardware
+
+- Board: ASRock Industrial IMB-X1231 (mini-ITX, 12th/13th gen Intel)
+- CPU: Intel i3-14100T (35W TDP)
+- Memory: ECC SODIMM with a jc42-compatible thermal sensor on SMBus
+- Chassis fan: single 120mm rear, voltage-controlled (not 4-pin PWM)
+
+### sensors-detect reported an unknown chip
+
+```
+Probing for Super-I/O at 0x2e/0x2f
+Trying family `VIA/Winbond/Nuvoton/Fintek'...               Yes
+Found unknown chip with ID 0x1502
+    (logical device 4 has address 0x290, could be sensors)
+...
+Probing for `National Semiconductor LM78' at 0x290...       Success!
+    (confidence 6, driver `lm78')
+```
+
+The `lm78` hit is a **false positive**: it's a 1995 chip whose ISA probe signature collides with anything living at 0x290. The real chip is whatever has devid 0x1502. Ignore the `lm78` recommendation.
+
+### Finding the right driver in kernel source
+
+A grep of `drivers/hwmon/` in torvalds/linux for `0x1502` pointed at `f71882fg.c`:
+
+```c
+#define SIO_F81866_ID    0x1010
+#define SIO_F81966_ID    0x1502
+/* ... */
+case SIO_F81866_ID:
+case SIO_F81966_ID:
+```
+
+So: Fintek F81966, register-compatible with the F81866, driven by the `f71882fg` module -- which has supported this ID since kernel 5.16. lm_sensors 3.6.2's chip-ID table just hadn't caught up.
+
+### ACPI held the hwmon I/O region
+
+After adding `f71882fg` to `boot.kernelModules` and rebuilding, the driver identified the chip in `dmesg`:
+
+```
+f71882fg: Found f81866a chip at 0x290, revision 48, devid: 1502
+```
+
+But `modprobe` failed with `Device or resource busy`. Added `boot.kernelParams = [ "acpi_enforce_resources=lax" ]`, rebooted, and `sensors` showed the full Super I/O block:
+
+```
+f81866a-isa-0290
+  fan1: 1489 RPM       <- rear chassis, voltage-controlled
+  fan2: 1573 RPM       <- CPU cooler
+  fan3:    0 RPM       <- unpopulated header
+  pwm1: 58%  pwm2: 58%  pwm3: 72%
+  temp1: 36.0 C  temp2: 20.0 C  temp3: 37.0 C
+```
+
+### pwmconfig mapped the fans
+
+The spin-down test confirmed:
+
+- `pwm1 -> fan1` (chassis fan; voltage-controlled -- RPM floors at ~395 and never fully stops regardless of PWM). Configured under fancontrol, driven by the hottest-bay `drivetemp` input.
+- `pwm2 -> fan2` (4-pin PWM CPU fan; stopped cleanly at PWM=60). Skipped in fancontrol, left on BIOS auto.
+- `pwm3 -> no fan` (unpopulated header). Also left on auto.
+
+### Final modules and kernel params
+
+```nix
+boot.kernelModules = [ "coretemp" "f71882fg" "jc42" "drivetemp" ];
+boot.kernelParams  = [ "acpi_enforce_resources=lax" ];
+```
+
+### End-to-end check
+
+With drive temp at 32 C and the curve set to MINTEMP=30, MAXTEMP=40, MAXPWM=255: expected `pwm1` = `(32 - 30) / (40 - 30) * 255` = 51. Observed `pwm1` = 51, observed fan RPM = 656 -- matching the pwmconfig correlation table (PWM 45 -> 636, PWM 60 -> 843). Control loop arithmetically correct.
+
 ## What's next
 
 - [Power management](power-management.md) -- suspend/resume and WoL, which interact with fan control
