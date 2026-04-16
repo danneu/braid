@@ -10,6 +10,7 @@
 - [Auto-unlock](guides/auto-unlock.md)
 - [Monitoring and alerts](guides/monitoring-and-alerts.md)
 - [Power management](guides/power-management.md)
+- [Fan control](guides/fan-control.md)
 - [NixOS configuration](guides/nixos-configuration.md)
 - [Sharing and permissions](guides/sharing-and-permissions.md)
 - [Troubleshooting](guides/troubleshooting.md)
