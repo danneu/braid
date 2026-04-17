@@ -8,9 +8,9 @@
 # misconfiguration is silent until a user reports broken fan control on real
 # hardware. This test catches wiring regressions at generation time.
 #
-# Scenario: NixOS VM with braid.fanControl enabled and a fake PWM path. No real
-# hwmon devices -- inspects generated unit files and udev rules, not runtime
-# behavior.
+# Scenario: NixOS VM with braid.fanControl enabled and a fake platform device
+# and PWM number. No real hwmon devices -- inspects generated unit files and
+# udev rules, not runtime behavior.
 { braid }:
 {
   name = "fan-control";
@@ -24,7 +24,10 @@
 
       fanControl = {
         enable = true;
-        pwmPath = "/sys/class/hwmon/hwmon0/pwm1";
+        pwm = {
+          platformDevice = "braid-test.0";
+          number = 2;
+        };
         minStart = 65;
         maxStop = 60;
         minTemp = 25;

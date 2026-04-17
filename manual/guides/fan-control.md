@@ -12,7 +12,7 @@ On a NAS the dominant thermal load is the HDDs, not the CPU. A pool of spinning 
 
 The fix is to move fan control into Linux userspace using drive temps as the signal. The kernel's `drivetemp` module exposes each SATA drive's SMART temperature as a standard hwmon input, and `hddfancontrol` reads those inputs and drives the chassis fan's PWM proportionally to the hottest drive.
 
-`braid.fanControl` wraps `hddfancontrol` so you only provide one hardware-specific value (the PWM path from `pwmconfig`) plus two calibration values (`minStart`/`maxStop` from `hddfancontrol pwm-test`). The module handles the systemd service, `drivetemp` loading, SATA hotswap udev rules, and crash recovery.
+`braid.fanControl` wraps `hddfancontrol` so you only provide two hardware-specific values (the Super I/O platform device name and PWM channel number from `pwmconfig`) plus two calibration values (`minStart`/`maxStop` from `hddfancontrol pwm-test`). The module handles the systemd service, `drivetemp` loading, SATA hotswap udev rules, and crash recovery.
 
 **Scope:** `braid.fanControl` monitors **all visible SATA devices**, not only braid pool members. Drives generate heat regardless of LUKS state, pool membership, or mount status -- binding fan control to pool state would leave warm disks uncooled when the pool is locked or before first unlock. SAS drives are out of scope.
 
@@ -35,9 +35,10 @@ Setup has two phases: interactive discovery on the running machine (one-time), t
 
 ## Discovery
 
-Discovery is a one-time interactive procedure. Its only output is three values you paste into Nix at the end:
+Discovery is a one-time interactive procedure. Its only output is four values you paste into Nix at the end:
 
-- `pwmPath` -- sysfs path to the chassis fan's PWM control file
+- `pwm.platformDevice` -- platform device name of the Super I/O chip (e.g. `f71882fg.656`)
+- `pwm.number` -- PWM channel number on that chip (e.g. `2` for `pwm2`)
 - `minStart` -- PWM value needed to start the fan from standstill
 - `maxStop` -- PWM value below which the spinning fan stalls
 
@@ -108,7 +109,25 @@ It walks each PWM, asks whether to switch it to manual (say yes so the spin-down
 
 After identification, it asks which fans to configure. Pick only the chassis fans. **Skip the CPU PWM** -- leave it BIOS-controlled. Also skip any PWM whose fan did not respond (unpopulated header, or fan/header mode mismatch in BIOS).
 
-`pwmconfig` writes an `/etc/fancontrol` file at the end. You won't use that file (braid uses `hddfancontrol`, not vanilla `fancontrol`), but the tool's spin-down output is still how you identify the PWM path and measure stall behavior. Record the PWM sysfs path for the chassis fan -- something like `/sys/devices/platform/<super-io>/hwmon/hwmonN/device/pwmN`. Use the `hwmon[[:print:]]` glob trick in Nix to handle hwmonN renumbering across reboots (see "Committing to Nix" below).
+`pwmconfig` writes an `/etc/fancontrol` file at the end. You won't use that file (braid uses `hddfancontrol`, not vanilla `fancontrol`), but the tool's spin-down output is still how you identify the PWM path and measure stall behavior. Record the PWM sysfs path for the chassis fan -- something like `/sys/devices/platform/<super-io>/hwmon/hwmonN/device/pwmN`.
+
+### Translate the PWM path to a platform device
+
+`braid.fanControl` takes the stable platform device name plus the PWM channel number, and resolves the (unstable) `hwmonN` segment at service start. Translate the pwmconfig-surfaced sysfs path with:
+
+```sh
+pwm=/sys/class/hwmon/hwmon4/device/pwm2  # from pwmconfig output
+pwm_dir=$(dirname "$pwm")
+if [ "$(basename "$pwm_dir")" != device ]; then
+  pwm_dir="$pwm_dir/device"
+fi
+basename "$(readlink -f "$pwm_dir")"
+# -> f71882fg.656
+```
+
+The `if` branch handles both sysfs layouts: `hwmon*/device/pwmN` (common on f71882fg, nct6775) and `hwmon*/pwmN` (fallback). Without it, the fallback layout resolves to `hwmon4` instead of the platform device.
+
+The PWM number is the numeric suffix on the `pwmN` filename (`2` in the example above).
 
 After `pwmconfig` exits, restore each skipped PWM to the value you recorded:
 
@@ -137,7 +156,7 @@ It takes a couple of minutes (ramps slowly to avoid bouncing the fan). Record th
 
 ### Minimal recipe
 
-Paste the three discovery values into `braid.fanControl`:
+Paste the four discovery values into `braid.fanControl`:
 
 ```nix
 { pkgs, ... }:
@@ -148,14 +167,17 @@ Paste the three discovery values into `braid.fanControl`:
 
   braid.fanControl = {
     enable = true;
-    pwmPath = "`echo /sys/devices/platform/nct6775.656/hwmon/hwmon[[:print:]]`/device/pwm2";
+    pwm = {
+      platformDevice = "nct6775.656";
+      number = 2;
+    };
     minStart = 65;   # from hddfancontrol pwm-test
     maxStop  = 60;   # from hddfancontrol pwm-test
   };
 }
 ```
 
-The `hwmon[[:print:]]` glob trick with backtick substitution lets `hddfancontrol` resolve the PWM path at service start, which matters because `hwmonN` numbering can shift across reboots. The platform device name (`nct6775.656`, `f71882fg.656`, etc.) is stable.
+The module resolves the PWM sysfs path at service start by globbing `/sys/devices/platform/<platformDevice>/hwmon/hwmon*/{device/,}pwm<number>`, which handles `hwmonN` renumbering across reboots. The platform device name (`nct6775.656`, `f71882fg.656`, etc.) is stable.
 
 Sane defaults for the rest:
 
@@ -204,7 +226,7 @@ Cancel anytime with:
 sudo btrfs scrub cancel /mnt/storage
 ```
 
-If drive temps climb but PWM doesn't move, double-check `pwmPath` resolves to a writable file (`ls -l <pwmPath>`) and that `hddfancontrol-braid` is running (`systemctl status hddfancontrol-braid`).
+If drive temps climb but PWM doesn't move, double-check the resolved PWM file is writable (`ls -l /sys/devices/platform/<platformDevice>/hwmon/hwmon*/{device/,}pwm<number>`) and that `hddfancontrol-braid` is running (`systemctl status hddfancontrol-braid`).
 
 ## Monitoring commands
 
@@ -328,7 +350,10 @@ boot.kernelParams  = [ "acpi_enforce_resources=lax" ];
 
 braid.fanControl = {
   enable = true;
-  pwmPath = "`echo /sys/devices/platform/f71882fg.656/hwmon/hwmon[[:print:]]`/device/pwm2";
+  pwm = {
+    platformDevice = "f71882fg.656";
+    number = 2;
+  };
   minStart = 65;
   maxStop  = 60;
 };

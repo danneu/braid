@@ -143,7 +143,8 @@ See [Power management](power-management.md) for the full workflow.
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
 | `braid.fanControl.enable` | bool | `false` | Drive chassis fans from HDD temps |
-| `braid.fanControl.pwmPath` | string | (required) | Sysfs path to chassis fan PWM file |
+| `braid.fanControl.pwm.platformDevice` | string | (required) | Platform device name under `/sys/devices/platform/` |
+| `braid.fanControl.pwm.number` | int | (required) | PWM channel number (1-based) |
 | `braid.fanControl.minStart` | int | (required) | Minimum PWM to start fan from standstill |
 | `braid.fanControl.maxStop` | int | (required) | PWM below which a spinning fan stalls |
 | `braid.fanControl.minTemp` | int | `30` | Temperature (C) at which fan runs at minimum speed |
@@ -151,7 +152,7 @@ See [Power management](power-management.md) for the full workflow.
 | `braid.fanControl.minFanSpeedPercent` | int | `20` | Minimum fan speed % (0 = fan may stop) |
 | `braid.fanControl.interval` | string | `"30s"` | Temperature polling interval |
 
-`pwmPath` is found via `pwmconfig`. `minStart` and `maxStop` are measured with `hddfancontrol pwm-test -p <pwm-path>`. All three are hardware-specific.
+`pwm.platformDevice` and `pwm.number` are found via `pwmconfig`. `minStart` and `maxStop` are measured with `hddfancontrol pwm-test -p <pwm-path>`. All four are hardware-specific.
 
 Monitors all visible SATA devices (not only braid pool members). Requires a board-specific Super I/O driver in `boot.kernelModules` -- see [Fan control](fan-control.md) for the hardware discovery workflow.
 
@@ -198,7 +199,10 @@ braid = {
 
   fanControl = {
     enable = false;    # default; opt-in
-    pwmPath = "`echo /sys/devices/platform/.../hwmon/hwmon[[:print:]]`/device/pwmN";
+    pwm = {
+      platformDevice = "f71882fg.656";  # from pwmconfig (required)
+      number = 2;                        # from pwmconfig (required)
+    };
     minStart = 65;     # from hddfancontrol pwm-test (required)
     maxStop = 60;      # from hddfancontrol pwm-test (required)
     minTemp = 30;      # default

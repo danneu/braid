@@ -9,25 +9,46 @@
 let
   cfg = config.braid;
   fc = cfg.fanControl;
-  pwmSpec = "${fc.pwmPath}:${toString fc.minStart}:${toString fc.maxStop}";
 in
 {
   options.braid.fanControl = {
     enable = lib.mkEnableOption "HDD temperature-driven fan control";
 
-    pwmPath = lib.mkOption {
-      type = lib.types.str;
-      default = "";
-      example = "`echo /sys/devices/platform/f71882fg.656/hwmon/hwmon[[:print:]]`/device/pwm2";
-      description = ''
-        Sysfs path to the chassis fan PWM control file. Shell globs and
-        backtick substitution are supported for hwmon numbering (e.g.
-        `echo .../hwmon[[:print:]]`). Run `pwmconfig` to find this path.
+    pwm = {
+      platformDevice = lib.mkOption {
+        type = lib.types.str;
+        default = "";
+        example = "f71882fg.656";
+        description = ''
+          Platform device name of the Super I/O chip driving the chassis fan,
+          as shown in /sys/devices/platform/ (e.g. "nct6775", "f71882fg.656",
+          "it87.2608"). Identified from the pwmconfig-surfaced sysfs path:
 
-        Requires a board-specific Super I/O kernel driver (e.g. nct6775,
-        f71882fg, it87) loaded in boot.kernelModules. See the fan control
-        guide for the full discovery workflow.
-      '';
+            pwm=/sys/class/hwmon/hwmonN/device/pwmN  # from pwmconfig
+            pwm_dir=$(dirname "$pwm")
+            if [ "$(basename "$pwm_dir")" != device ]; then
+              pwm_dir="$pwm_dir/device"
+            fi
+            basename "$(readlink -f "$pwm_dir")"
+
+          The `if` branch handles both sysfs layouts: hwmon*/device/pwmN
+          (common on f71882fg, nct6775) and hwmon*/pwmN (fallback). Without
+          it, the fallback layout resolves to hwmonN instead of the platform
+          device.
+
+          This name is stable across reboots; the hwmonN number is not.
+        '';
+      };
+
+      number = lib.mkOption {
+        type = lib.types.ints.positive;
+        example = 2;
+        description = ''
+          PWM channel number within the platform device (1-based; matches
+          pwmN in sysfs). Identified via `pwmconfig`. No default --
+          pwm1 is frequently the CPU fan or an unpopulated header.
+        '';
+      };
     };
 
     minStart = lib.mkOption {
@@ -78,13 +99,16 @@ in
   config = lib.mkIf (cfg.enable && fc.enable) {
     assertions = [
       {
-        assertion = fc.pwmPath != "";
-        message = ''
-          braid.fanControl.pwmPath is required. This is the sysfs path to the
-          chassis fan's PWM control file (e.g. /sys/devices/platform/.../pwmN).
-          Run `pwmconfig` to discover this path. See the fan control guide for
-          the full hardware discovery workflow.
-        '';
+        assertion = fc.pwm.platformDevice != "";
+        message = "braid.fanControl.pwm.platformDevice is required. "
+          + "See the fan control guide for the discovery workflow.";
+      }
+      {
+        assertion = builtins.match "[A-Za-z0-9_.-]+" fc.pwm.platformDevice != null;
+        message = "braid.fanControl.pwm.platformDevice (${fc.pwm.platformDevice}) "
+          + "must be a platform device identifier (e.g. \"f71882fg.656\"), "
+          + "not a full path or shell expression. "
+          + "Expected characters: A-Z a-z 0-9 _ . -";
       }
       {
         assertion = fc.maxStop <= fc.minStart;
@@ -99,6 +123,12 @@ in
           + "must be less than maxTemp (${toString fc.maxTemp}).";
       }
     ];
+
+    warnings = lib.optional (fc.minFanSpeedPercent == 0) ''
+      braid.fanControl.minFanSpeedPercent is 0, so hddfancontrol may stop the
+      fan entirely below minTemp. Only use this if the chassis has other
+      cooling or is designed for passive airflow.
+    '';
 
     # Expose SATA drive SMART temperatures as hwmon inputs. drivetemp reads
     # via the ATA SCT command, which does not wake sleeping drives (unlike
@@ -134,12 +164,33 @@ in
         RestartSec = 5;
       };
       script = ''
+        matches=( \
+          /sys/devices/platform/${fc.pwm.platformDevice}/hwmon/hwmon*/device/pwm${toString fc.pwm.number} \
+          /sys/devices/platform/${fc.pwm.platformDevice}/hwmon/hwmon*/pwm${toString fc.pwm.number} \
+        )
+        existing=()
+        for path in "''${matches[@]}"; do
+          [ -e "$path" ] && existing+=("$path")
+        done
+        if [ "''${#existing[@]}" -ne 1 ]; then
+          echo "braid.fanControl: expected exactly one PWM path matching" >&2
+          echo "  /sys/devices/platform/${fc.pwm.platformDevice}/hwmon/hwmon*/{device/,}pwm${toString fc.pwm.number}," >&2
+          echo "  found ''${#existing[@]}." >&2
+          if [ "''${#existing[@]}" -eq 0 ]; then
+            echo "Is the kernel module for ${fc.pwm.platformDevice} loaded and bound?" >&2
+            echo "Check: ls /sys/devices/platform/ | grep -i ${fc.pwm.platformDevice}" >&2
+          else
+            echo "Multiple PWM paths resolved; narrow platformDevice or verify board driver binding." >&2
+          fi
+          exit 1
+        fi
+        pwm_path="''${existing[0]}"
         exec ${lib.getExe pkgs.hddfancontrol} -v INFO daemon \
           -d ata \
-          -p ${pwmSpec} \
+          -p "$pwm_path:${toString fc.minStart}:${toString fc.maxStop}" \
           --drive-temp-range ${toString fc.minTemp} ${toString fc.maxTemp} \
           --min-fan-speed-prct ${toString fc.minFanSpeedPercent} \
-          --interval ${fc.interval} \
+          --interval ${lib.escapeShellArg fc.interval} \
           --restore-fan-settings
       '';
     };
