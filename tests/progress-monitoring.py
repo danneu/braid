@@ -125,13 +125,17 @@ with subtest("scrub per-device progress observed"):
 
     # Start scrub in background and poll in the same shell command
     # to eliminate host round-trip latency.
+    # Capture both per-device (-d -R) and aggregate (--raw) running fixtures.
     machine.succeed(
         f"btrfs scrub start {MOUNT} "
         f"> /dev/null 2>&1 < /dev/null & "
         f"for i in $(seq 1 600); do "
-        f"out=\"$(btrfs scrub status -d -R {MOUNT} 2>&1 || true)\"; "
-        f"if printf '%s\\n' \"$out\" | grep -q 'Status:.*running'; then "
-        f"printf '%s\\n' \"$out\" > {FIXTURE_DIR}/btrfs-scrub-per-device-running.txt; "
+        f"per_dev_out=\"$(btrfs scrub status -d -R {MOUNT} 2>&1 || true)\"; "
+        f"agg_out=\"$(btrfs scrub status --raw {MOUNT} 2>&1 || true)\"; "
+        f"if printf '%s\\n' \"$per_dev_out\" | grep -q 'Status:.*running' "
+        f"&& printf '%s\\n' \"$agg_out\" | grep -q 'Status:.*running'; then "
+        f"printf '%s\\n' \"$per_dev_out\" > {FIXTURE_DIR}/btrfs-scrub-per-device-running.txt; "
+        f"printf '%s\\n' \"$agg_out\" > {FIXTURE_DIR}/btrfs-scrub-running.txt; "
         f"exit 0; fi; sleep 0.05; done; exit 1"
     )
 

@@ -6,7 +6,7 @@ use nom::{
 
 use crate::cmd::RawCommandOutput;
 
-use super::btrfs_scrub_status::parse_ctime;
+use super::helpers::{parse_ctime, parse_duration_hms};
 use super::types::{
     BtrfsScrubStatusPerDeviceOutput, DeviceScrubEntry, DeviceScrubState, ScrubTimestamp,
 };
@@ -49,18 +49,6 @@ fn parse_kv_u64(input: &str) -> IResult<&str, (&str, u64)> {
     let (input, _) = space1(input)?;
     let (input, value) = parse_u64(input)?;
     Ok((input, (key.trim(), value)))
-}
-
-/// Parses "0:03:15" → 195
-fn parse_duration_hms(s: &str) -> Option<u64> {
-    let parts: Vec<&str> = s.split(':').collect();
-    if parts.len() != 3 {
-        return None;
-    }
-    let h: u64 = parts[0].parse().ok()?;
-    let m: u64 = parts[1].parse().ok()?;
-    let s: u64 = parts[2].parse().ok()?;
-    Some(h * 3600 + m * 60 + s)
 }
 
 fn map_status(s: &str) -> DeviceScrubState {

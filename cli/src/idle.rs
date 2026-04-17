@@ -3,6 +3,7 @@ use crate::parse::{
     parse_btrfs_balance_status, parse_btrfs_replace_status, parse_btrfs_scrub_status,
     parse_findmnt_json, BalanceState, ParseError, ReplaceState, ScrubState,
 };
+use crate::progress::pct_from_bytes;
 use crate::types::MountPoint;
 
 #[derive(Debug, PartialEq)]
@@ -60,7 +61,16 @@ pub fn cmd_idle<R: CommandRunner>(
         mount_point: mount_point.clone(),
     })?;
     let scrub = parse_btrfs_scrub_status(&scrub_raw)?;
-    if let ScrubState::Running { pct, .. } = scrub.state {
+    if let ScrubState::Running {
+        bytes_scrubbed,
+        total_bytes,
+        ..
+    } = scrub.state
+    {
+        let pct = match (bytes_scrubbed, total_bytes) {
+            (Some(scrubbed), Some(total)) => pct_from_bytes(scrubbed, total),
+            _ => None,
+        };
         return Ok(IdleResult::Busy(BusyReason::ScrubRunning { pct }));
     }
 
@@ -169,6 +179,8 @@ mod tests {
     }
 
     fn scrub_running(pct: u8) -> (CmdRequest, RawCommandOutput) {
+        let total: u64 = 30408704000;
+        let scrubbed = total * u64::from(pct) / 100;
         (
             CmdRequest::BtrfsScrubStatus { mount_point: mp() },
             RawCommandOutput {
@@ -178,9 +190,9 @@ mod tests {
                      Scrub started:    Mon Jan  1 00:00:00 2024\n\
                      Status:           running\n\
                      Duration:         0:00:05\n\
-                     Total to scrub:   30408704000\n\
+                     Total to scrub:   {total}\n\
+                     Bytes scrubbed:   {scrubbed}  ({pct}.00%)\n\
                      Rate:             2952790016/s\n\
-                     {pct}.00% done\n\
                      Error summary:    no errors found\n"
                 ),
                 stderr: String::new(),

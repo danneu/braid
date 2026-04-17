@@ -80,6 +80,14 @@ pub fn format_replace_progress_json(pct: f64) -> String {
     format!(r#"{{"event":"progress","operation":"replace","pct_done":{pct:.1}}}"#)
 }
 
+pub fn pct_from_bytes(done: u64, total: u64) -> Option<u8> {
+    if total == 0 {
+        return None;
+    }
+    let pct = (u128::from(done) * 100) / u128::from(total);
+    Some(pct.min(100) as u8)
+}
+
 pub fn format_bytes(bytes: u64) -> String {
     const GIB: u64 = 1024 * 1024 * 1024;
     const MIB: u64 = 1024 * 1024;
@@ -312,6 +320,47 @@ mod tests {
     fn format_bytes_below_gib_threshold() {
         // Just under 1 GiB should show MiB
         assert_eq!(format_bytes(1024 * 1024 * 1024 - 1), "1024.0 MiB");
+    }
+
+    /*
+     * Intent: byte progress percentage uses integer truncation.
+     * Why: status JSON and idle output expose whole-number scrub progress.
+     * Scenario: btrfs reports 45 scrubbed bytes out of 100 total bytes.
+     */
+    #[test]
+    fn pct_from_bytes_truncates() {
+        assert_eq!(pct_from_bytes(45, 100), Some(45));
+    }
+
+    /*
+     * Intent: byte progress percentage is absent when total bytes is zero.
+     * Why: division by zero should degrade to unavailable progress.
+     * Scenario: btrfs reports a running scrub before total work is known.
+     */
+    #[test]
+    fn pct_from_bytes_zero_total_is_none() {
+        assert_eq!(pct_from_bytes(1, 0), None);
+    }
+
+    /*
+     * Intent: byte progress percentage does not overflow on huge counters.
+     * Why: multiplying u64 byte counters by 100 directly can panic in debug
+     * builds before division.
+     * Scenario: btrfs reports very large scrubbed and total byte counters.
+     */
+    #[test]
+    fn pct_from_bytes_handles_large_values() {
+        assert_eq!(pct_from_bytes(u64::MAX, u64::MAX), Some(100));
+    }
+
+    /*
+     * Intent: byte progress percentage clamps impossible over-complete values.
+     * Why: callers expose the value as u8 progress and must not wrap.
+     * Scenario: btrfs reports scrubbed bytes greater than total bytes.
+     */
+    #[test]
+    fn pct_from_bytes_clamps_above_100() {
+        assert_eq!(pct_from_bytes(300, 100), Some(100));
     }
 
     // --- resolve_progress_output tests ---

@@ -15,6 +15,7 @@ use crate::parse::{
     BtrfsDeviceStatsOutput, ParseError, ScrubState,
 };
 use crate::probe::{probe_config_disk, probe_pool, Filesystem, ProbeError};
+use crate::progress::pct_from_bytes;
 use crate::state_paths::StatePaths;
 use crate::types::*;
 
@@ -655,7 +656,17 @@ fn get_scrub_report<R: CommandRunner>(runner: &R, mount_point: &MountPoint) -> S
     match parse_btrfs_scrub_status(&raw) {
         Ok(out) => match out.state {
             ScrubState::Never => ScrubReport::Never,
-            ScrubState::Running { pct, .. } => ScrubReport::Running { pct },
+            ScrubState::Running {
+                bytes_scrubbed,
+                total_bytes,
+                ..
+            } => {
+                let pct = match (bytes_scrubbed, total_bytes) {
+                    (Some(scrubbed), Some(total)) => pct_from_bytes(scrubbed, total),
+                    _ => None,
+                };
+                ScrubReport::Running { pct }
+            }
             ScrubState::Completed {
                 started_at,
                 error_count,

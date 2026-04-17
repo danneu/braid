@@ -213,7 +213,7 @@ pub fn run_demo() -> io::Result<()> {
         scrub: ScrubState::Completed {
             started_at: ScrubTimestamp(time::macros::datetime!(2026-02-24 02:00:07)),
             error_count: 0,
-            duration: Some("0:00:00".to_owned()),
+            duration_secs: Some(0),
             total_bytes: Some(33_931_264),
             rate_bytes_per_sec: Some(33_910_682),
         },

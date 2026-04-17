@@ -212,14 +212,19 @@ pub struct ScrubTimestamp(pub time::PrimitiveDateTime);
 pub enum ScrubState {
     Never,
     Running {
-        pct: Option<u8>,
+        started_at: Option<ScrubTimestamp>,
+        duration_secs: Option<u64>,
+        time_left_secs: Option<u64>,
+        eta: Option<ScrubTimestamp>,
         total_bytes: Option<u64>,
+        bytes_scrubbed: Option<u64>,
         rate_bytes_per_sec: Option<u64>,
+        error_count: u64,
     },
     Completed {
         started_at: ScrubTimestamp,
         error_count: u64,
-        duration: Option<String>,
+        duration_secs: Option<u64>,
         total_bytes: Option<u64>,
         rate_bytes_per_sec: Option<u64>,
     },

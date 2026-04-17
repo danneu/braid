@@ -213,6 +213,19 @@ fn pool_balance_rows(pool: &PoolState) -> u16 {
     }
 }
 
+fn format_duration_secs(secs: u64) -> String {
+    let h = secs / 3600;
+    let m = (secs % 3600) / 60;
+    let s = secs % 60;
+    if h > 0 {
+        format!("{}h {}m {}s", h, m, s)
+    } else if m > 0 {
+        format!("{}m {}s", m, s)
+    } else {
+        format!("{}s", s)
+    }
+}
+
 fn scrub_table(scrub: &ScrubState, now: PrimitiveDateTime) -> Table<'_> {
     let (rows, style) = match scrub {
         ScrubState::Never => (
@@ -220,22 +233,43 @@ fn scrub_table(scrub: &ScrubState, now: PrimitiveDateTime) -> Table<'_> {
             None,
         ),
         ScrubState::Running {
-            pct,
+            bytes_scrubbed,
             total_bytes,
             rate_bytes_per_sec,
+            time_left_secs,
+            eta,
+            error_count,
+            ..
         } => {
-            let detail = match pct {
-                Some(p) => format!("now ({}% completed)", p),
-                None => "now".to_owned(),
+            // Status row: "running" or "running (14.78%)"
+            let status_detail = match (*bytes_scrubbed, *total_bytes) {
+                (Some(scrubbed), Some(total)) if total > 0 => {
+                    let pct = scrubbed as f64 / total as f64 * 100.0;
+                    format!("running ({:.2}%)", pct)
+                }
+                _ => "running".to_owned(),
             };
-            let mut rows = vec![Row::new(["Last run".to_owned(), detail])];
-            if let Some(t) = total_bytes {
-                let u = ByteUnit::friendliest(*t);
-                rows.push(Row::new([
-                    "Total".to_owned(),
-                    format!("{} {}", u.format(*t), u.suffix()),
-                ]));
+            let mut rows = vec![Row::new(["Status".to_owned(), status_detail])];
+
+            // Progress row: "82.1 GiB / 555.4 GiB"
+            if let Some(scrubbed) = bytes_scrubbed {
+                let su = ByteUnit::friendliest(*scrubbed);
+                let progress = match total_bytes {
+                    Some(total) => {
+                        let tu = ByteUnit::friendliest(*total);
+                        format!(
+                            "{} {} / {} {}",
+                            su.format(*scrubbed),
+                            su.suffix(),
+                            tu.format(*total),
+                            tu.suffix()
+                        )
+                    }
+                    None => format!("{} {}", su.format(*scrubbed), su.suffix()),
+                };
+                rows.push(Row::new(["Progress".to_owned(), progress]));
             }
+
             if let Some(r) = rate_bytes_per_sec {
                 let u = ByteUnit::friendliest(*r);
                 rows.push(Row::new([
@@ -243,12 +277,22 @@ fn scrub_table(scrub: &ScrubState, now: PrimitiveDateTime) -> Table<'_> {
                     format!("{} {}/s", u.format(*r), u.suffix()),
                 ]));
             }
+            if let Some(secs) = time_left_secs {
+                rows.push(Row::new([
+                    "Time left".to_owned(),
+                    format_duration_secs(*secs),
+                ]));
+            }
+            if let Some(eta_ts) = eta {
+                rows.push(Row::new(["ETA".to_owned(), format_timestamp(&eta_ts.0)]));
+            }
+            rows.push(Row::new(["Errors".to_owned(), error_count.to_string()]));
             (rows, None)
         }
         ScrubState::Completed {
             started_at,
             error_count,
-            duration,
+            duration_secs,
             total_bytes,
             rate_bytes_per_sec,
         } => {
@@ -274,8 +318,11 @@ fn scrub_table(scrub: &ScrubState, now: PrimitiveDateTime) -> Table<'_> {
                     format!("{} {}/s", u.format(*r), u.suffix()),
                 ]));
             }
-            if let Some(d) = duration {
-                rows.push(Row::new(["Duration".to_owned(), d.clone()]));
+            if let Some(secs) = duration_secs {
+                rows.push(Row::new([
+                    "Duration".to_owned(),
+                    format_duration_secs(*secs),
+                ]));
             }
             (rows, None)
         }
@@ -295,19 +342,27 @@ fn scrub_table(scrub: &ScrubState, now: PrimitiveDateTime) -> Table<'_> {
 fn scrub_lines(scrub: &ScrubState) -> u16 {
     match scrub {
         ScrubState::Running {
-            total_bytes,
+            bytes_scrubbed,
             rate_bytes_per_sec,
+            time_left_secs,
+            eta,
             ..
-        } => 1 + total_bytes.is_some() as u16 + rate_bytes_per_sec.is_some() as u16,
+        } => {
+            // Status + Errors are always shown
+            2 + bytes_scrubbed.is_some() as u16
+                + rate_bytes_per_sec.is_some() as u16
+                + time_left_secs.is_some() as u16
+                + eta.is_some() as u16
+        }
         ScrubState::Completed {
             total_bytes,
             rate_bytes_per_sec,
-            duration,
+            duration_secs,
             ..
         } => {
             2 + total_bytes.is_some() as u16
                 + rate_bytes_per_sec.is_some() as u16
-                + duration.is_some() as u16
+                + duration_secs.is_some() as u16
         }
         _ => 1,
     }
@@ -1243,7 +1298,7 @@ pub(crate) mod tests {
             scrub: ScrubState::Completed {
                 started_at: ScrubTimestamp(time::macros::datetime!(2026-02-24 02:00:07)),
                 error_count: 0,
-                duration: Some("0:00:00".to_owned()),
+                duration_secs: Some(0),
                 total_bytes: Some(33_931_264),
                 rate_bytes_per_sec: Some(33_910_682),
             },
@@ -1471,6 +1526,33 @@ pub(crate) mod tests {
     #[test]
     fn snapshot_scrub_tab() {
         let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(sample_pool()));
+        model.tab = Tab::Scrub;
+        let terminal = render(&model, 60, 22);
+        snap!(buffer_to_string(&terminal));
+    }
+
+    /*
+     * Intent: Scrub tab renders all Running fields when a scrub is in progress.
+     *
+     * Why it exists: The Running variant was expanded with progress, time left,
+     * ETA, and errors -- this verifies they all render in the scrub table.
+     *
+     * Scenario: User opens the Scrub tab mid-scrub on a healthy pool.
+     */
+    #[test]
+    fn snapshot_scrub_tab_running() {
+        let mut pool = sample_pool();
+        pool.scrub = ScrubState::Running {
+            started_at: Some(ScrubTimestamp(time::macros::datetime!(2026-04-16 18:28:44))),
+            duration_secs: Some(358),
+            time_left_secs: Some(2064),
+            eta: Some(ScrubTimestamp(time::macros::datetime!(2026-04-16 19:09:10))),
+            total_bytes: Some(596_353_253_376),
+            bytes_scrubbed: Some(88_143_626_240),
+            rate_bytes_per_sec: Some(246_211_246),
+            error_count: 0,
+        };
+        let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(pool));
         model.tab = Tab::Scrub;
         let terminal = render(&model, 60, 22);
         snap!(buffer_to_string(&terminal));

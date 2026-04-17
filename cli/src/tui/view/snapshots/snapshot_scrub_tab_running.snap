@@ -1,13 +1,14 @@
 ---
 source: cli/src/tui/view/mod.rs
-assertion_line: 1476
+assertion_line: 1558
 expression: buffer_to_string(&terminal)
 ---
 Data  Scrub  Sharing
  Scrub ─────────────────────────────────────────────────────
- Last run     Tue Feb 24 02:00:07 2026 (11 min ago)
+ Status       running (14.78%)
+ Progress     82.1 GiB / 555.4 GiB
+ Rate         234.8 MiB/s
+ Time left    34m 24s
+ ETA          Thu Apr 16 19:09:10 2026
  Errors       0
- Total        32.4 MiB
- Rate         32.3 MiB/s
- Duration     0s
 Quit: q │ Help: ? │ Reset temp hi/lo: R │ Reload: r
