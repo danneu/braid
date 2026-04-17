@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Fetch reference source and docs at the versions pinned in flake.lock.
 
-Includes: btrfs-progs, systemd, autosuspend, cryptsetup, util-linux, smartmontools, linux kernel.
+Includes: btrfs-progs, systemd, autosuspend, cryptsetup, util-linux, smartmontools, hddfancontrol, linux kernel.
 The linux kernel tarball is ~140MB and may take a few minutes to download and extract.
 
 Usage:
@@ -46,6 +46,7 @@ DEPS = [
         "https://github.com/smartmontools/smartmontools.git",
         lambda v: f"RELEASE_{v.replace('.', '_')}",
     ),
+    Dep("hddfancontrol", "git", "https://github.com/desbma/hddfancontrol.git", lambda v: v),
     Dep("linux", "tarball", "", lambda v: v),
 ]
 

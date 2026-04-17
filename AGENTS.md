@@ -86,6 +86,9 @@ Before searching the web for tool behavior, consult local resources first. `refe
 - **smartmontools** — [smartmontools/smartmontools](https://github.com/smartmontools/smartmontools)
   - **Source:** [`reference/smartmontools/smartmontools/`](reference/smartmontools/smartmontools/) — flat layout. `smartctl` output format, SMART attribute definitions, exit codes.
   - **Docs:** No separate docs dir. Man-page sources are inline alongside the code: `smartctl.8.in`, `smartd.8.in`, `smartd.conf.5.in`.
+- **hddfancontrol** — [desbma/hddfancontrol](https://github.com/desbma/hddfancontrol)
+  - **Source:** [`reference/hddfancontrol/src/`](reference/hddfancontrol/src/) — Rust daemon. `device/` (drivetemp, hddtemp, smartctl probing), `probe/` (pwm-test ramp logic), `fan.rs` (PWM control), `pwm.rs` (sysfs PWM I/O), `cl.rs` (CLI args).
+  - **Docs:** No separate docs dir. [`reference/hddfancontrol/README.md`](reference/hddfancontrol/README.md) and [`reference/hddfancontrol/systemd/hddfancontrol.service`](reference/hddfancontrol/systemd/hddfancontrol.service) — the upstream unit we intentionally don't use (see `modules/braid/fan-control.nix`).
 - **linux** — [torvalds/linux](https://github.com/torvalds/linux)
   - **Source:** [`reference/linux/`](reference/linux/) — kernel source at the exact version pinned in nixpkgs. Look in `fs/btrfs/` for btrfs-specific I/O scheduling, raid handling, and read balancing logic. `drivers/md/` for raid and block layer behavior.
   - **Use for:** Understanding kernel-level I/O behavior, raid1 read balancing, mount semantics, block device management.
