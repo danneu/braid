@@ -108,7 +108,7 @@ struct CommonArgs {
 #[derive(Debug, Args)]
 struct AddArgs {
     /// Disk spec(s): NAME=/dev/disk/by-id/... (e.g. toshiba=/dev/disk/by-id/ata-TOSHIBA_MN07)
-    #[arg(num_args(1..), add = ArgValueCandidates::new(disk_name_candidates))]
+    #[arg(required = true, num_args(1..), add = ArgValueCandidates::new(disk_name_candidates))]
     disks: Vec<String>,
     /// Directory containing braid.key to enroll in the new disk (LUKS slot 1)
     #[arg(long = "enroll")]

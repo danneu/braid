@@ -75,6 +75,29 @@ fn add_dry_run_flag_accepted() {
     );
 }
 
+// Intent: `braid add` with no disk arguments must be rejected by clap
+//   before any application logic runs.
+// Why: Without this, an empty disk list flows into cmd_add, hits the
+//   steps.is_empty() branch with an empty label, and exits 0 with a
+//   grammatically broken "Nothing to do" message instead of a usage error.
+// Scenario: User runs `sudo braid add` (forgetting the disk spec).
+//   Expected: clap prints a usage error and exits 2.
+//   Actual (before fix): exits 0 with misleading "already in pool" message.
+#[test]
+fn add_requires_at_least_one_disk() {
+    let output = braid()
+        .arg("add")
+        .output()
+        .expect("failed to execute braid");
+    // Clap exits 2 for usage errors; braid's own errors exit 1.
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("required"),
+        "expected clap usage error mentioning required args, got: {stderr}"
+    );
+}
+
 #[test]
 fn add_progress_values_accepted() {
     if is_root() {
