@@ -19,6 +19,7 @@ braid is a NixOS CLI tool for managing an encrypted btrfs RAID1 NAS. This manual
 | [Auto-unlock](guides/auto-unlock.md)                         | USB keyfile setup for unattended reboots               |
 | [Monitoring and alerts](guides/monitoring-and-alerts.md)     | Disk health alerts, beeper, alert commands             |
 | [Power management](guides/power-management.md)               | Auto-suspend, Wake-on-LAN, RTC wakeups                 |
+| [Fan control](guides/fan-control.md)                         | HDD-driven chassis fan control, SATA hotswap           |
 | [NixOS configuration](guides/nixos-configuration.md)         | Module options, scrub scheduling, pinned toolchain     |
 | [Sharing and permissions](guides/sharing-and-permissions.md) | Storage group, mount permissions, Samba                |
 | [Troubleshooting](guides/troubleshooting.md)                 | ENOSPC balance, paused balance, missing devices        |

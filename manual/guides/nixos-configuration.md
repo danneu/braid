@@ -48,6 +48,7 @@ When `braid.enable = true`, the module sets up:
 - **smartd integration** -- `services.smartd` enabled by default with a braid-owned alert script. SMART failures trigger the braid alert service.
 - **Storage group** -- a `storage` group is created; mount point is set to `root:storage 2770` after unlock. See [Sharing and permissions](sharing-and-permissions.md).
 - **Disk health monitoring** -- polls btrfs device stats every 5 minutes, audible beep on errors. Configurable via `braid.monitor`.
+- **Fan control** (opt-in) -- drive chassis fans from the hottest SATA drive temp. Handles hddfancontrol, SATA hotswap restart, crash recovery. Configurable via `braid.fanControl`.
 
 ## Module options
 
@@ -137,6 +138,23 @@ The scrub timer is registered as a wakeup source so the NAS wakes for scheduled 
 
 See [Power management](power-management.md) for the full workflow.
 
+### Fan control
+
+| Option | Type | Default | Description |
+| --- | --- | --- | --- |
+| `braid.fanControl.enable` | bool | `false` | Drive chassis fans from HDD temps |
+| `braid.fanControl.pwmPath` | string | (required) | Sysfs path to chassis fan PWM file |
+| `braid.fanControl.minStart` | int | (required) | Minimum PWM to start fan from standstill |
+| `braid.fanControl.maxStop` | int | (required) | PWM below which a spinning fan stalls |
+| `braid.fanControl.minTemp` | int | `30` | Temperature (C) at which fan runs at minimum speed |
+| `braid.fanControl.maxTemp` | int | `40` | Temperature (C) at which fan runs at full speed |
+| `braid.fanControl.minFanSpeedPercent` | int | `20` | Minimum fan speed % (0 = fan may stop) |
+| `braid.fanControl.interval` | string | `"30s"` | Temperature polling interval |
+
+`pwmPath` is found via `pwmconfig`. `minStart` and `maxStop` are measured with `hddfancontrol pwm-test -p <pwm-path>`. All three are hardware-specific.
+
+Monitors all visible SATA devices (not only braid pool members). Requires a board-specific Super I/O driver in `boot.kernelModules` -- see [Fan control](fan-control.md) for the hardware discovery workflow.
+
 ## Full config example
 
 Every option with its default (or a representative value for required/optional fields):
@@ -177,6 +195,17 @@ braid = {
     wolInterface = "eno1";
     idleTime = 900;   # default (15 minutes)
   };
+
+  fanControl = {
+    enable = false;    # default; opt-in
+    pwmPath = "`echo /sys/devices/platform/.../hwmon/hwmon[[:print:]]`/device/pwmN";
+    minStart = 65;     # from hddfancontrol pwm-test (required)
+    maxStop = 60;      # from hddfancontrol pwm-test (required)
+    minTemp = 30;      # default
+    maxTemp = 40;      # default
+    minFanSpeedPercent = 20;  # default
+    interval = "30s";  # default
+  };
 };
 ```
 
@@ -186,4 +215,5 @@ braid = {
 - [Auto-unlock](auto-unlock.md) -- USB keyfile enrollment
 - [Monitoring and alerts](monitoring-and-alerts.md) -- alert workflow and custom commands
 - [Power management](power-management.md) -- auto-suspend and WoL setup
+- [Fan control](fan-control.md) -- hardware discovery and fan control setup
 - [Sharing and permissions](sharing-and-permissions.md) -- storage group and Samba

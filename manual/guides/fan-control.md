@@ -2,7 +2,7 @@
 
 # Fan control
 
-This guide covers how to drive chassis fans from HDD temperatures on a NixOS NAS, using the kernel `drivetemp` module plus `lm_sensors` and `fancontrol`.
+This guide covers how to drive chassis fans from HDD temperatures on a NixOS NAS using the `braid.fanControl` module.
 
 Read this if you want quieter idle and predictable ramp under sustained disk load -- BIOS fan curves cannot see HDD temperatures, only CPU and motherboard temperatures.
 
@@ -10,21 +10,21 @@ Read this if you want quieter idle and predictable ramp under sustained disk loa
 
 On a NAS the dominant thermal load is the HDDs, not the CPU. A pool of spinning drives under scrub or heavy write load runs much hotter for much longer than a low-TDP NAS CPU ever does. BIOS fan curves only see CPU package temp and a motherboard sensor -- they cannot see drive temp. So chassis fans controlled by the BIOS ramp for the wrong reason at the wrong time.
 
-The fix is to move fan control into Linux userspace with `fancontrol`, using drive temps as the signal. The kernel's `drivetemp` module exposes each SATA drive's SMART temperature as a standard hwmon input, which `fancontrol` can read and use to drive a chassis fan's PWM.
+The fix is to move fan control into Linux userspace using drive temps as the signal. The kernel's `drivetemp` module exposes each SATA drive's SMART temperature as a standard hwmon input, and `hddfancontrol` reads those inputs and drives the chassis fan's PWM proportionally to the hottest drive.
 
-braid itself does not manage fans. This is pure NixOS hardware setup that happens alongside braid on a NAS.
+`braid.fanControl` wraps `hddfancontrol` so you only provide one hardware-specific value (the PWM path from `pwmconfig`) plus two calibration values (`minStart`/`maxStop` from `hddfancontrol pwm-test`). The module handles the systemd service, `drivetemp` loading, SATA hotswap udev rules, and crash recovery.
+
+**Scope:** `braid.fanControl` monitors **all visible SATA devices**, not only braid pool members. Drives generate heat regardless of LUKS state, pool membership, or mount status -- binding fan control to pool state would leave warm disks uncooled when the pool is locked or before first unlock. SAS drives are out of scope.
 
 ## The stack
-
-Five layers cooperate:
 
 | Layer | Role |
 | --- | --- |
 | `drivetemp` (kernel) | Exposes each SATA drive's SMART temp as an hwmon input |
 | Super I/O driver (kernel) | Board-specific (`nct6775`, `f71882fg`, `it87`, ...) -- drives the chassis fan PWM headers |
 | `lm_sensors` (userspace) | Provides `sensors`, `sensors-detect`, `pwmconfig` for discovery |
-| `fancontrol` (userspace) | Shell daemon that reads temps and writes PWM values per a curve |
-| `hardware.fancontrol` (NixOS) | Runs `fancontrol` as a systemd service, handles suspend/resume |
+| `hddfancontrol` (userspace) | Reads drivetemp hwmon inputs for all SATA drives, ramps PWM from the hottest |
+| `braid.fanControl` (NixOS) | Runs `hddfancontrol` as a systemd service, handles SATA hotswap and crash recovery |
 
 Setup has two phases: interactive discovery on the running machine (one-time), then committing the result to Nix.
 
@@ -35,17 +35,21 @@ Setup has two phases: interactive discovery on the running machine (one-time), t
 
 ## Discovery
 
-Discovery is a one-time interactive procedure. Its only output is values you paste into Nix at the end.
+Discovery is a one-time interactive procedure. Its only output is three values you paste into Nix at the end:
+
+- `pwmPath` -- sysfs path to the chassis fan's PWM control file
+- `minStart` -- PWM value needed to start the fan from standstill
+- `maxStop` -- PWM value below which the spinning fan stalls
 
 ### Install the tooling and load the sensor modules
 
-The NixOS `hardware.fancontrol` module ships the `fancontrol` daemon, but does **not** put the interactive operator tools (`sensors`, `sensors-detect`, `pwmconfig`) on PATH. Add them explicitly, and keep them in your committed config -- future re-runs after drive swaps or chassis changes need the same tools:
+`braid.fanControl` loads `drivetemp` automatically, but the interactive operator tools (`sensors`, `sensors-detect`, `pwmconfig`, `hddfancontrol`) are only needed on your PATH during discovery. Add them temporarily, plus your board's Super I/O driver -- these can stay in the committed config so future re-runs after drive swaps or chassis changes have the same tools available:
 
 ```nix
 { pkgs, ... }:
 {
-  environment.systemPackages = [ pkgs.lm_sensors ];
-  boot.kernelModules = [ "coretemp" "drivetemp" ];
+  environment.systemPackages = [ pkgs.lm_sensors pkgs.hddfancontrol ];
+  boot.kernelModules = [ "coretemp" ];  # drivetemp added by braid.fanControl
 }
 ```
 
@@ -61,7 +65,7 @@ You should see one `drivetemp-scsi-*-0` block per SATA drive, each showing a cur
 
 Run `sudo sensors-detect` and accept the defaults. When it asks whether to write `/etc/modules-load.d/lm_sensors.conf`, **answer no** -- on NixOS, kernel modules are declared in `boot.kernelModules`, not in `/etc`.
 
-At the end `sensors-detect` prints a summary. For most boards it names a driver (`nct6775`, `it87`, ...); add that driver to `boot.kernelModules` alongside `coretemp` and `drivetemp`, rebuild, and confirm a new block appears in `sensors` showing fan RPMs and PWMs.
+At the end `sensors-detect` prints a summary. For most boards it names a driver (`nct6775`, `it87`, ...); add that driver to `boot.kernelModules` alongside `coretemp`, rebuild, and confirm a new block appears in `sensors` showing fan RPMs and PWMs.
 
 If the summary says `Found unknown chip with ID 0xXXXX`, `sensors-detect`'s chip-ID table has fallen behind the kernel. The kernel driver may already support your chip even though the detect script doesn't recognize it. Grep the ID in the kernel source to find the driver:
 
@@ -104,7 +108,7 @@ It walks each PWM, asks whether to switch it to manual (say yes so the spin-down
 
 After identification, it asks which fans to configure. Pick only the chassis fans. **Skip the CPU PWM** -- leave it BIOS-controlled. Also skip any PWM whose fan did not respond (unpopulated header, or fan/header mode mismatch in BIOS).
 
-When it asks for a temperature input, pick any drivetemp node -- you'll finalize this in the Nix config. Enter your `MINTEMP` (fan at floor, e.g. 30) and `MAXTEMP` (fan at full, e.g. 40), accept the default `MAXPWM=255`. `pwmconfig` writes the result to `/etc/fancontrol`.
+`pwmconfig` writes an `/etc/fancontrol` file at the end. You won't use that file (braid uses `hddfancontrol`, not vanilla `fancontrol`), but the tool's spin-down output is still how you identify the PWM path and measure stall behavior. Record the PWM sysfs path for the chassis fan -- something like `/sys/devices/platform/<super-io>/hwmon/hwmonN/device/pwmN`. Use the `hwmon[[:print:]]` glob trick in Nix to handle hwmonN renumbering across reboots (see "Committing to Nix" below).
 
 After `pwmconfig` exits, restore each skipped PWM to the value you recorded:
 
@@ -112,78 +116,67 @@ After `pwmconfig` exits, restore each skipped PWM to the value you recorded:
 echo <original> | sudo tee /sys/class/hwmon/<N>/device/pwmK_enable
 ```
 
-### Identifying the pilot drive
+### Measure minStart and maxStop with hddfancontrol pwm-test
 
-Vanilla fancontrol supports **one temperature input per PWM** -- that's a config-format limitation. For a multi-drive pool, you have to pick one drive to be the pilot.
+`hddfancontrol pwm-test` ramps the PWM up and down while measuring fan RPM. It finds:
 
-Heuristic: pick the drive that runs hottest in sustained ops, typically a middle bay (worst airflow, highest steady-state temp). `FCTEMPS=` takes an hwmon path, not a block device, so record the mapping from hwmon path to serial to physical bay once, so it survives drive swaps and re-cabling:
+- `minStart` -- the PWM at which a stopped fan begins spinning again
+- `maxStop` -- the highest PWM at which a spinning fan stalls
+
+Run it against the chassis PWM path from the previous step:
 
 ```sh
-for h in /sys/class/hwmon/hwmon*; do
-  [ "$(cat "$h/name" 2>/dev/null)" = drivetemp ] || continue
-  blk=$(ls "$h/device/block" 2>/dev/null | head -1)
-  [ -n "$blk" ] || continue
-  serial=$(sudo smartctl -i "/dev/$blk" | awk -F: '/Serial Number/ {gsub(/ /,""); print $2}')
-  echo "$h -> /dev/$blk (serial $serial)"
-done
+sudo hddfancontrol pwm-test -p /sys/devices/platform/.../pwmN
 ```
 
-Write the result down somewhere persistent -- a comment in the Nix config, a README in the pool, a sticker on the chassis. Drive serials don't change; `/dev/sdX` names do.
+It takes a couple of minutes (ramps slowly to avoid bouncing the fan). Record the final `minStart` and `maxStop` values it prints.
+
+**If the fan has a hardware RPM floor** (common on voltage-controlled 3-pin fans, and some boards' chassis headers even in PWM mode), `maxStop` will be 0 and `minStart` will be some low value -- the fan never actually stops. That's fine; `hddfancontrol` still handles the ramp correctly. The `--min-fan-speed-prct` floor in `braid.fanControl` prevents the daemon from commanding the fan off in any case.
 
 ## Committing to Nix
 
 ### Minimal recipe
 
-Once `/etc/fancontrol` exists and looks right, paste its contents into `hardware.fancontrol.config`. Paste **verbatim**, including the `DEVPATH=` and `DEVNAME=` lines -- they pin to stable bus paths and survive `hwmonN` renumbering across reboots. Don't be tempted to "clean them up".
+Paste the three discovery values into `braid.fanControl`:
 
 ```nix
 { pkgs, ... }:
 {
-  environment.systemPackages = [ pkgs.lm_sensors ];
-  boot.kernelModules = [ "coretemp" "drivetemp" "nct6775" ];  # your SIO driver here
-  # boot.kernelParams = [ "acpi_enforce_resources=lax" ];     # only if needed
+  environment.systemPackages = [ pkgs.lm_sensors ];   # optional: tools for re-running discovery
+  boot.kernelModules = [ "coretemp" "nct6775" ];      # your Super I/O driver here
+  # boot.kernelParams = [ "acpi_enforce_resources=lax" ];  # only if needed
 
-  hardware.fancontrol = {
+  braid.fanControl = {
     enable = true;
-    config = ''
-      INTERVAL=10
-      DEVPATH=hwmon2=devices/pci0000:00/.../ata5/... hwmon5=devices/platform/nct6775.656
-      DEVNAME=hwmon2=drivetemp hwmon5=nct6775
-      FCTEMPS=hwmon5/device/pwm1=hwmon2/temp1_input
-      FCFANS= hwmon5/device/pwm1=hwmon5/device/fan1_input
-      MINTEMP=hwmon5/device/pwm1=30
-      MAXTEMP=hwmon5/device/pwm1=40
-      MINSTART=hwmon5/device/pwm1=150
-      MINSTOP=hwmon5/device/pwm1=0
-    '';
+    pwmPath = "`echo /sys/devices/platform/nct6775.656/hwmon/hwmon[[:print:]]`/device/pwm2";
+    minStart = 65;   # from hddfancontrol pwm-test
+    maxStop  = 60;   # from hddfancontrol pwm-test
   };
 }
 ```
 
-The `DEVPATH=`, `DEVNAME=`, and `FCTEMPS=` values above are illustrative -- use the ones `pwmconfig` wrote for your hardware.
+The `hwmon[[:print:]]` glob trick with backtick substitution lets `hddfancontrol` resolve the PWM path at service start, which matters because `hwmonN` numbering can shift across reboots. The platform device name (`nct6775.656`, `f71882fg.656`, etc.) is stable.
 
-### Tuning MINSTART and MINSTOP
+Sane defaults for the rest:
 
-Some chassis fans -- voltage-controlled 3-pin fans, and certain boards' chassis headers even in PWM mode -- have a hardware RPM floor. Writing `PWM=0` doesn't stop the fan; it holds at the floor (often 300-500 RPM).
+- `minTemp = 30` / `maxTemp = 40` -- fan floors below 30 C, ramps to full at 40 C
+- `minFanSpeedPercent = 20` -- fan never drops below 20% of range (conservative; upstream hddfancontrol default)
+- `interval = "30s"` -- 30-second polling interval
 
-Read the correlation table that `pwmconfig` printed during its spin-down test. Find the PWM below which RPM stops decreasing:
+Override any of these in the `braid.fanControl` block if you want a different curve. See [NixOS configuration](nixos-configuration.md) for the full option table.
 
-```
-PWM 30 FAN 452
-PWM 28 FAN 409
-PWM 26 FAN 399      <-- below here, RPM is the floor
-PWM 24 FAN 396
-PWM 22 FAN 397
-```
+### Tuning the curve
 
-Set `MINSTOP` to the floor PWM (26 in this example). `MINSTART` is the PWM needed to start a fully-stopped fan; on a fan with a hardware floor it never fully stops, so `MINSTART` is effectively dormant -- accept whatever `pwmconfig` chose.
+- **Ramp starts too soon / fan audibly spools early on idle:** raise `minTemp` (try 32-34).
+- **Drives climbing past 42-44 C under sustained load:** lower `maxTemp` (try 38) or raise `minFanSpeedPercent` (try 30).
+- **Fan noticeably oscillating:** raise `interval` (e.g. `"60s"`). HDDs heat slowly, so aggressive polling only adds jitter.
 
 ### Additional sensor modules
 
-For ECC DIMM temp monitoring (useful on ECC builds; not used by `fancontrol` directly but visible in `sensors`):
+For ECC DIMM temp monitoring (visible in `sensors`; not used by `hddfancontrol` directly):
 
 ```nix
-boot.kernelModules = [ "coretemp" "drivetemp" "nct6775" "jc42" ];
+boot.kernelModules = [ "coretemp" "nct6775" "jc42" ];
 ```
 
 ## Verification
@@ -198,35 +191,22 @@ sudo btrfs scrub start /mnt/storage
 
 # pane 2: watch the thermal signals
 watch -n2 sensors
+
+# pane 3: follow the hddfancontrol daemon log
+journalctl -u hddfancontrol-braid -f
 ```
 
-Expected: the chosen drivetemp climbs 3-8 C over 10+ minutes (HDDs heat slowly), and the PWM tracks in step per your `MINTEMP`/`MAXTEMP` curve. Cancel anytime with:
+Expected: drive temps climb 3-8 C over 10+ minutes (HDDs heat slowly), and the PWM tracks in step per your `minTemp`/`maxTemp` curve. The daemon log prints temperature readings and speed changes as it polls.
+
+Cancel anytime with:
 
 ```sh
 sudo btrfs scrub cancel /mnt/storage
 ```
 
-If drive temp climbs but PWM doesn't move, `FCTEMPS=` points at the wrong hwmon. Cross-check with `cat /sys/class/hwmon/*/name` on the running system.
+If drive temps climb but PWM doesn't move, double-check `pwmPath` resolves to a writable file (`ls -l <pwmPath>`) and that `hddfancontrol-braid` is running (`systemctl status hddfancontrol-braid`).
 
-## After a drive swap or re-cable
-
-`DEVPATH=hwmonN=devices/pci.../ataM/...` pins the temperature source to a **SATA port**, not a drive. It survives reboots and hwmonN renumbering, but is wrong after any physical reshuffle -- the fan will track whatever drive now sits in that port, which may no longer be your hottest or most-loaded drive.
-
-After a drive swap or re-cable:
-
-1. Re-run the hwmon-to-serial mapping from the "Identifying the pilot drive" section above.
-2. Re-verify that `FCTEMPS=` points at the hwmon for the drive you want to pilot from. If it doesn't, re-run `pwmconfig` or edit the path in place.
-3. Rebuild, then re-run the verification loop to confirm the signal path is live end-to-end.
-
-## Suspend, resume, and failure behavior
-
-A few things `hardware.fancontrol` handles for you, plus one it doesn't:
-
-- **Suspend/resume**: the NixOS module's `powerManagement.resumeCommands` restarts `fancontrol.service` after resume. Suspend works out of the box.
-- **Crash**: the service has `Restart=on-failure`, so a crashed `fancontrol` restarts itself.
-- **Manual stop**: if you stop the service (not a crash), PWMs stay at whatever value was last written. The fan will **not** ramp under new thermal load. Always `systemctl restart fancontrol` after any manual intervention with the service or with `/sys/class/hwmon/...` paths.
-
-## hddfancontrol monitoring commands
+## Monitoring commands
 
 Quick reference for monitoring the fan control loop on a running system. These paths assume an `f71882fg`-family Super I/O; substitute your platform device if different.
 
@@ -235,7 +215,7 @@ Quick reference for monitoring the fan control loop on a running system. These p
 watch -n2 'cat /sys/devices/platform/f71882fg.656/fan2_input; sensors drivetemp-*'
 
 # Follow daemon log (temp readings, speed changes)
-journalctl -u hddfancontrol-pool -f
+journalctl -u hddfancontrol-braid -f
 
 # Current PWM value (0-255)
 cat /sys/devices/platform/f71882fg.656/pwm2
@@ -244,7 +224,7 @@ cat /sys/devices/platform/f71882fg.656/pwm2
 for i in 1 2 3; do echo "fan${i}: $(cat /sys/devices/platform/f71882fg.656/fan${i}_input) RPM, pwm${i}: $(cat /sys/devices/platform/f71882fg.656/pwm${i}), enable: $(cat /sys/devices/platform/f71882fg.656/pwm${i}_enable)"; done
 
 # Service status
-systemctl status hddfancontrol-pool
+systemctl status hddfancontrol-braid
 
 # All hwmon sensors (CPU, board, DIMM, drives)
 sensors
@@ -253,17 +233,17 @@ sensors
 sudo smartctl -a /dev/sda
 ```
 
-The `pwmN_enable` values: 0=off, 1=manual (hddfancontrol sets this), 2=BIOS auto. If you stop hddfancontrol with `--restore-fan-settings`, it restores the original enable mode.
+The `pwmN_enable` values: 0=off, 1=manual (hddfancontrol sets this), 2=BIOS auto. hddfancontrol is configured with `--restore-fan-settings`, so a clean service stop restores the original enable mode.
 
-## When vanilla fancontrol isn't enough
+## When braid.fanControl isn't enough
 
-Vanilla fancontrol's one-input-per-PWM limit is fine for most small NAS builds. If you outgrow it -- many drives, PID-based curves, per-drive responsiveness -- the common escape hatches are:
+`braid.fanControl` drives a single chassis PWM from the hottest SATA drive. That covers the common NAS case. If you need more control -- multiple PWMs with different curves, PID-based responsiveness, non-SATA drive temperature sources -- the usual escape hatches:
 
-- [`hddfancontrol`](https://github.com/desbma/hddfancontrol) -- purpose-built for HDD-driven fan control; reads SMART temp from N drives, aware of spin-down states.
+- Configure `services.hddfancontrol` directly (nixpkgs's module supports multiple daemons, per-fan config).
 - [`fan2go`](https://github.com/markusressel/fan2go) -- Go daemon; supports multiple sensors and PID curves.
 - [CoolerControl](https://docs.coolercontrol.org/) -- more featureful, GUI-oriented.
 
-Adopt one of these and replace `hardware.fancontrol.enable` if you need that level of control. Not covered further here.
+Disable `braid.fanControl.enable` and bring your own solution. The `drivetemp` kernel module that braid loads is the only piece you'd need to keep.
 
 ## Worked example: ASRock Industrial IMB-X1231
 
@@ -327,20 +307,36 @@ f81866a-isa-0290
 
 The spin-down test confirmed:
 
-- `pwm1 -> fan1` (chassis fan; voltage-controlled -- RPM floors at ~395 and never fully stops regardless of PWM). Configured under fancontrol, driven by the hottest-bay `drivetemp` input.
-- `pwm2 -> fan2` (4-pin PWM CPU fan; stopped cleanly at PWM=60). Skipped in fancontrol, left on BIOS auto.
+- `pwm2 -> fan2` (chassis fan; voltage-controlled -- RPM floors at ~395 and never fully stops regardless of PWM). Selected for braid.fanControl.
+- `pwm1 -> fan1` (4-pin PWM CPU fan; stopped cleanly at PWM=60). Skipped -- left on BIOS auto.
 - `pwm3 -> no fan` (unpopulated header). Also left on auto.
 
-### Final modules and kernel params
+### hddfancontrol pwm-test
+
+```
+sudo hddfancontrol pwm-test -p /sys/devices/platform/f71882fg.656/hwmon/hwmon4/device/pwm2
+...
+minStart: 65
+maxStop:  60
+```
+
+### Final Nix config
 
 ```nix
-boot.kernelModules = [ "coretemp" "f71882fg" "jc42" "drivetemp" ];
+boot.kernelModules = [ "coretemp" "f71882fg" "jc42" ];
 boot.kernelParams  = [ "acpi_enforce_resources=lax" ];
+
+braid.fanControl = {
+  enable = true;
+  pwmPath = "`echo /sys/devices/platform/f71882fg.656/hwmon/hwmon[[:print:]]`/device/pwm2";
+  minStart = 65;
+  maxStop  = 60;
+};
 ```
 
 ### End-to-end check
 
-With drive temp at 32 C and the curve set to MINTEMP=30, MAXTEMP=40, MAXPWM=255: expected `pwm1` = `(32 - 30) / (40 - 30) * 255` = 51. Observed `pwm1` = 51, observed fan RPM = 656 -- matching the pwmconfig correlation table (PWM 45 -> 636, PWM 60 -> 843). Control loop arithmetically correct.
+With drive temp at 32 C and the default curve (`minTemp=30`, `maxTemp=40`, `minFanSpeedPercent=20`): expected `pwm2` = `20% + (32 - 30) / (40 - 30) * 80%` of PWM range above `maxStop`. Observed `pwm2` climbed smoothly with drive temp under a scrub, RPM tracked the `pwmconfig` correlation table. Control loop arithmetically correct.
 
 ## What's next
 
@@ -349,6 +345,6 @@ With drive temp at 32 C and the curve set to MINTEMP=30, MAXTEMP=40, MAXPWM=255:
 
 ## Related
 
-- [Arch Wiki: Fan speed control](https://wiki.archlinux.org/title/Fan_speed_control) -- distro-neutral reference for lm_sensors and fancontrol
+- [Arch Wiki: Fan speed control](https://wiki.archlinux.org/title/Fan_speed_control) -- distro-neutral reference for lm_sensors and fan control
 - [Kernel `drivetemp` driver](https://docs.kernel.org/hwmon/drivetemp.html) -- what the module exposes
-- [fancontrol(8)](https://man.archlinux.org/man/extra/lm_sensors/fancontrol.8.en) -- config file format reference
+- [`hddfancontrol`](https://github.com/desbma/hddfancontrol) -- upstream project
