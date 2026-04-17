@@ -226,6 +226,35 @@ A few things `hardware.fancontrol` handles for you, plus one it doesn't:
 - **Crash**: the service has `Restart=on-failure`, so a crashed `fancontrol` restarts itself.
 - **Manual stop**: if you stop the service (not a crash), PWMs stay at whatever value was last written. The fan will **not** ramp under new thermal load. Always `systemctl restart fancontrol` after any manual intervention with the service or with `/sys/class/hwmon/...` paths.
 
+## hddfancontrol monitoring commands
+
+Quick reference for monitoring the fan control loop on a running system. These paths assume an `f71882fg`-family Super I/O; substitute your platform device if different.
+
+```sh
+# Live chassis fan RPM + drive temps
+watch -n2 'cat /sys/devices/platform/f71882fg.656/fan2_input; sensors drivetemp-*'
+
+# Follow daemon log (temp readings, speed changes)
+journalctl -u hddfancontrol-pool -f
+
+# Current PWM value (0-255)
+cat /sys/devices/platform/f71882fg.656/pwm2
+
+# All fan channels at a glance (RPM, PWM, control mode)
+for i in 1 2 3; do echo "fan${i}: $(cat /sys/devices/platform/f71882fg.656/fan${i}_input) RPM, pwm${i}: $(cat /sys/devices/platform/f71882fg.656/pwm${i}), enable: $(cat /sys/devices/platform/f71882fg.656/pwm${i}_enable)"; done
+
+# Service status
+systemctl status hddfancontrol-pool
+
+# All hwmon sensors (CPU, board, DIMM, drives)
+sensors
+
+# SMART details for a specific drive
+sudo smartctl -a /dev/sda
+```
+
+The `pwmN_enable` values: 0=off, 1=manual (hddfancontrol sets this), 2=BIOS auto. If you stop hddfancontrol with `--restore-fan-settings`, it restores the original enable mode.
+
 ## When vanilla fancontrol isn't enough
 
 Vanilla fancontrol's one-input-per-PWM limit is fine for most small NAS builds. If you outgrow it -- many drives, PID-based curves, per-drive responsiveness -- the common escape hatches are:
