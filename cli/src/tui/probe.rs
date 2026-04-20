@@ -356,23 +356,59 @@ fn resolve_pwm_dir(sysfs_root: &Path, fc: &FanControl) -> Option<PathBuf> {
     }
 }
 
-/// Read `pwmN` (0-255) and sibling `fanN_input` (RPM). Either file failing
-/// to open/parse collapses both to `None` — they live in the same sysfs
+/// Read `pwmN` (0-255) and a sibling `fan*_input` (RPM). Either file failing
+/// to open/parse collapses both to `None` -- they live in the same sysfs
 /// directory, so their failure modes are correlated.
 fn read_fan_hardware(pwm_dir: &Path, n: u8) -> Option<FanReading> {
     let pwm_path = pwm_dir.join(format!("pwm{n}"));
-    let fan_path = pwm_dir.join(format!("fan{n}_input"));
     let pwm_raw = std::fs::read_to_string(&pwm_path)
         .ok()?
         .trim()
         .parse::<u8>()
         .ok()?;
+    let fan_path = resolve_rpm_path(pwm_dir, n)?;
     let rpm = std::fs::read_to_string(&fan_path)
         .ok()?
         .trim()
         .parse::<u32>()
         .ok()?;
     Some(FanReading { pwm_raw, rpm })
+}
+
+/// Find the RPM tach file for the given PWM channel.
+///
+/// Mirrors hddfancontrol's `resolve_rpm_path`
+/// (`reference/hddfancontrol/src/fan.rs:118-143`) in its sole-candidate
+/// branch: if the PWM sysfs dir contains exactly one `fan*_input`, use it
+/// regardless of numeric suffix. On boards where the user's PWM channel
+/// does not correspond to the tach file's numeric suffix (e.g. pwm2 paired
+/// with only fan1_input), this is what makes the TUI agree with the
+/// daemon instead of falsely showing "-/- -".
+///
+/// We do NOT run hddfancontrol's multi-candidate correlation test here
+/// (cycling PWM min/max with 3s sleeps). Running that every probe would
+/// bounce fans every 5s. Instead, the multi-candidate case prefers the
+/// numerically matching `fan<n>_input` if present; otherwise returns
+/// `None` and the UI honestly shows placeholders.
+fn resolve_rpm_path(pwm_dir: &Path, n: u8) -> Option<PathBuf> {
+    let mut candidates: Vec<PathBuf> = std::fs::read_dir(pwm_dir)
+        .ok()?
+        .flatten()
+        .filter(|e| {
+            e.file_name()
+                .to_str()
+                .is_some_and(|f| f.starts_with("fan") && f.ends_with("_input"))
+        })
+        .map(|e| e.path())
+        .collect();
+    match candidates.len() {
+        0 => None,
+        1 => candidates.pop(),
+        _ => {
+            let preferred = pwm_dir.join(format!("fan{n}_input"));
+            candidates.into_iter().find(|p| *p == preferred)
+        }
+    }
 }
 
 /// Mirror of hddfancontrol's `-d ata` selector
@@ -1300,6 +1336,69 @@ mod tests {
         // Non-numeric pwm -> None.
         std::fs::write(dir.join("pwm2"), "garbage\n").unwrap();
         std::fs::write(dir.join("fan2_input"), "1240\n").unwrap();
+        assert!(read_fan_hardware(dir, 2).is_none());
+
+        // Non-numeric fan tach -> None. Pins the contract from the edge-case
+        // table: a malformed RPM must not silently render as 0 or stale data.
+        std::fs::write(dir.join("pwm2"), "215\n").unwrap();
+        std::fs::write(dir.join("fan2_input"), "garbage\n").unwrap();
+        assert!(read_fan_hardware(dir, 2).is_none());
+    }
+
+    // Intent: when the PWM sysfs dir contains exactly one `fan*_input`,
+    // read_fan_hardware uses it regardless of numeric suffix -- mirroring
+    // hddfancontrol's sole-candidate branch.
+    // Why: this is the regression test for the bug where pwm2 paired with
+    // only fan1_input rendered "-/- -" in the TUI while the daemon ran
+    // fine. A sensor-row false negative undercuts the daemon-health row it
+    // was supposed to reinforce.
+    // Scenario: pwm2 exists, fan1_input is the sole tach -- single-fan
+    // board whose chosen PWM number doesn't match the lone tach.
+    #[test]
+    fn read_fan_hardware_sole_tach_regardless_of_number() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        std::fs::write(dir.join("pwm2"), "180\n").unwrap();
+        std::fs::write(dir.join("fan1_input"), "900\n").unwrap();
+        let r = read_fan_hardware(dir, 2).unwrap();
+        assert_eq!(r.pwm_raw, 180);
+        assert_eq!(r.rpm, 900);
+    }
+
+    // Intent: with multiple `fan*_input` files present, prefer the
+    // numerically matching `fan<n>_input` rather than picking arbitrarily.
+    // Why: on standard multi-fan Super-I/O chips (f71882fg, nct6775) the
+    // numbering matches, so preferring fan<n>_input preserves the existing
+    // behavior on common hardware without running the correlation test.
+    // Scenario: pwm2 plus fan1_input, fan2_input, fan3_input with distinct
+    // RPMs -- the fan2_input value must win.
+    #[test]
+    fn read_fan_hardware_multi_tach_prefers_matching_number() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        std::fs::write(dir.join("pwm2"), "128\n").unwrap();
+        std::fs::write(dir.join("fan1_input"), "800\n").unwrap();
+        std::fs::write(dir.join("fan2_input"), "1500\n").unwrap();
+        std::fs::write(dir.join("fan3_input"), "2200\n").unwrap();
+        let r = read_fan_hardware(dir, 2).unwrap();
+        assert_eq!(r.rpm, 1500);
+    }
+
+    // Intent: when multiple `fan*_input` files are present but none match
+    // `fan<n>_input`, return None rather than guessing.
+    // Why: the daemon would run a correlation test (cycle PWM, observe
+    // which tach responds) to pick the right one. We can't do that on a
+    // 5s probe, and picking arbitrarily would mislabel the sensor row.
+    // None surfaces as "-/- -" and leaves daemon health as the authoritative
+    // liveness signal.
+    // Scenario: pwm2 with fan1_input and fan3_input but no fan2_input.
+    #[test]
+    fn read_fan_hardware_multi_tach_no_match_returns_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        std::fs::write(dir.join("pwm2"), "128\n").unwrap();
+        std::fs::write(dir.join("fan1_input"), "800\n").unwrap();
+        std::fs::write(dir.join("fan3_input"), "2200\n").unwrap();
         assert!(read_fan_hardware(dir, 2).is_none());
     }
 
