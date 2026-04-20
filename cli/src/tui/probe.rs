@@ -7,8 +7,8 @@ use crate::config::FanControl;
 use crate::luks;
 use crate::parse::types::{ScrubState, SmartHealth, SmartProbe};
 use crate::parse::{
-    parse_btrfs_device_stats, parse_btrfs_device_usage, parse_btrfs_filesystem_usage,
-    parse_btrfs_scrub_status, parse_cryptsetup_luks_dump, parse_lsblk_json, parse_smartctl,
+    parse_btrfs_device_stats, parse_btrfs_device_usage, parse_btrfs_scrub_status,
+    parse_cryptsetup_luks_dump, parse_lsblk_json, parse_smartctl,
 };
 use crate::probe::{probe_config_disk, probe_pool, Filesystem, ProbeError};
 use crate::state_paths::StatePaths;
@@ -150,13 +150,6 @@ pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
             }
         }
 
-    let fs_usage_raw = runner
-        .run(&CmdRequest::BtrfsFilesystemUsageRaw {
-            mount_point: mount_point.clone(),
-        })
-        .map_err(|e| e.to_string())?;
-    let fs_usage = parse_btrfs_filesystem_usage(&fs_usage_raw).map_err(|e| e.to_string())?;
-
     // Device error stats
     let mut device_errors = HashMap::new();
     let device_stats_raw = runner
@@ -254,6 +247,8 @@ pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
         unpooled_disks.insert(disk_name.clone(), render);
     }
 
+    let capacity_used_bytes = df.logical_used_bytes();
+
     Ok(Some(PoolState {
         mount_point: mount_point.clone(),
         df_entries: df.entries,
@@ -268,7 +263,7 @@ pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
         scrub,
         balance,
         capacity_total_bytes,
-        capacity_used_bytes: fs_usage.used_bytes,
+        capacity_used_bytes,
         probed_at: Instant::now(),
     }))
 }
@@ -814,7 +809,155 @@ mod tests {
 
         // Verify capacity: 2 equal disks of 536870912 → estimated total = 536870912
         assert_eq!(pool.capacity_total_bytes, Some(536870912));
-        assert_eq!(pool.capacity_used_bytes, 33914880);
+        // Logical used = sum of non-GlobalReserve bg_used from the df
+        // mock: 16777216 (Data) + 16384 (System) + 65536 (Metadata).
+        assert_eq!(pool.capacity_used_bytes, 16777216 + 16384 + 65536);
+    }
+
+    /// Intent: capacity_used_bytes and capacity_total_bytes must be
+    /// in the same unit (logical bytes), so used <= total is an
+    /// invariant and the TUI's rendered percent stays in range.
+    ///
+    /// Why it exists: regression guard for the 112% pool usage bug,
+    /// where capacity_used_bytes came from `btrfs filesystem usage
+    /// --raw` (aggregate raw, including every mirror copy) while
+    /// capacity_total_bytes came from estimate_pool_capacity
+    /// (logical). The percent rendered as ~2x reality.
+    ///
+    /// Scenario: a nearly-full 2-disk RAID1 pool. btrfs reports
+    /// aggregate raw Used = 570458112 bytes, which exceeds the
+    /// estimated logical total of 536870912 (the 2x-equal-disk
+    /// RAID1 capacity). `btrfs filesystem df` reports logical
+    /// used per block group; summing Data + Metadata + System
+    /// (excluding GlobalReserve) yields 285229056, which is a
+    /// sensible ~53% of logical capacity.
+    #[test]
+    fn capacity_used_and_total_in_same_unit() {
+        let mp = MountPoint("/mnt/storage".to_owned());
+
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::FindmntJson { mount_point: mp.clone() },
+                ok_raw(
+                    "findmnt",
+                    r#"{"filesystems": [{"target":"/mnt/storage","source":"/dev/mapper/braid-toshiba","fstype":"btrfs"}]}"#,
+                ),
+            )
+            .with_output(
+                CmdRequest::BtrfsFilesystemShow { mount_point: mp.clone() },
+                ok_raw(
+                    "btrfs filesystem show",
+                    "Label: none  uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
+                     \tTotal devices 2 FS bytes used 256.00MiB\n\
+                     \tdevid    1 size 512.00MiB used 300.00MiB path /dev/mapper/braid-toshiba\n\
+                     \tdevid    2 size 512.00MiB used 300.00MiB path /dev/mapper/braid-ironwolf\n",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus { mapper: "braid-toshiba".into() },
+                ok_raw(
+                    "cryptsetup status",
+                    "/dev/mapper/braid-toshiba is active.\n\tdevice:  /dev/vda\n",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid { device: "/dev/vda".into() },
+                ok_raw("cryptsetup luksUUID", "11111111-1111-1111-1111-111111111111\n"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus { mapper: "braid-ironwolf".into() },
+                ok_raw(
+                    "cryptsetup status",
+                    "/dev/mapper/braid-ironwolf is active.\n\tdevice:  /dev/vdb\n",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid { device: "/dev/vdb".into() },
+                ok_raw("cryptsetup luksUUID", "22222222-2222-2222-2222-222222222222\n"),
+            )
+            // btrfs filesystem df --json: logical used/total per bg.
+            // Non-GlobalReserve sum: 268435456 + 16777216 + 16384 = 285229056.
+            .with_output(
+                CmdRequest::BtrfsFilesystemDfJson { mount_point: mp.clone() },
+                ok_raw(
+                    "btrfs filesystem df",
+                    r#"{"filesystem-df": [
+                        {"bg-type": "Data", "bg-profile": "RAID1", "total": 268435456, "used": 268435456},
+                        {"bg-type": "Metadata", "bg-profile": "DUP", "total": 33554432, "used": 16777216},
+                        {"bg-type": "System", "bg-profile": "DUP", "total": 8388608, "used": 16384},
+                        {"bg-type": "GlobalReserve", "bg-profile": "single", "total": 3670016, "used": 3670016}
+                    ]}"#,
+                ),
+            )
+            .with_output(
+                CmdRequest::BtrfsDeviceUsageRaw { mount_point: mp.clone() },
+                ok_raw(
+                    "btrfs device usage",
+                    "/dev/dm-0, ID: 1\n\
+                     \x20  Device size:          536870912\n\
+                     \x20  Device slack:              0\n\
+                     \x20  Data,RAID1:           268435456\n\
+                     \x20  Metadata,DUP:          33554432\n\
+                     \x20  System,DUP:             8388608\n\
+                     \x20  Unallocated:          226492416\n\
+                     \n\
+                     /dev/dm-1, ID: 2\n\
+                     \x20  Device size:          536870912\n\
+                     \x20  Device slack:              0\n\
+                     \x20  Data,RAID1:           268435456\n\
+                     \x20  Metadata,DUP:          33554432\n\
+                     \x20  System,DUP:             8388608\n\
+                     \x20  Unallocated:          226492416\n",
+                ),
+            )
+            .with_output(
+                CmdRequest::BtrfsBalanceStatus { mount_point: mp.clone() },
+                ok_raw("btrfs balance status", "No balance found on '/mnt/storage'\n"),
+            )
+            // btrfs filesystem usage --raw: aggregate Used is raw-mirrored.
+            // 268435456*2 + 16777216*2 + 16384*2 = 570458112. On master,
+            // this raw value is assigned directly to capacity_used_bytes
+            // and exceeds the logical capacity_total_bytes of 536870912,
+            // tripping the cross-field invariant.
+            .with_output(
+                CmdRequest::BtrfsFilesystemUsageRaw { mount_point: mp.clone() },
+                ok_raw(
+                    "btrfs filesystem usage",
+                    "Overall:\n\
+                     \tDevice size:\t\t\t1073741824\n\
+                     \tDevice allocated:\t\t620756992\n\
+                     \tDevice unallocated:\t\t452984832\n\
+                     \tUsed:\t\t\t\t570458112\n\
+                     \tFree (estimated):\t\t251641856\t(min: 251641856)\n\
+                     \tData ratio:\t\t\t2.00\n",
+                ),
+            );
+
+        let result = probe_pool_for_tui(
+            &runner,
+            &StubFs::empty(),
+            &MountPoint("/mnt/storage".into()),
+            &HashMap::new(),
+            &test_paths().1,
+        )
+        .unwrap();
+        let pool = result.expect("pool should be Some");
+
+        // 2 equal 536 MB disks → min(sum/2, sum-max) = 536870912.
+        assert_eq!(pool.capacity_total_bytes, Some(536_870_912));
+
+        // Cross-field unit invariant -- durable guard for this class
+        // of bug. On master, used (570458112 raw) exceeds total.
+        assert!(
+            pool.capacity_used_bytes <= pool.capacity_total_bytes.unwrap(),
+            "used ({}) must not exceed total ({}) -- unit mismatch?",
+            pool.capacity_used_bytes,
+            pool.capacity_total_bytes.unwrap(),
+        );
+
+        // Exact value pins the semantic: Data + Metadata + System
+        // logical used from df, GlobalReserve excluded.
+        assert_eq!(pool.capacity_used_bytes, 285_229_056);
     }
 
     /// Helper: build the minimum mock-runner mocks for a single-disk

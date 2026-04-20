@@ -248,6 +248,52 @@ mod tests {
         assert!(profiles.contains(&BtrfsProfile::Dup));
     }
 
+    /// Intent: logical_used_bytes sums Data + Metadata + System and
+    /// excludes GlobalReserve, matching the "how full is this
+    /// filesystem" contract.
+    ///
+    /// Why it exists: prevents regression to the "aggregate raw Used /
+    /// Data ratio" approach that conflates block group profiles and
+    /// produces >100% usage in the TUI (the 112% pool usage bug).
+    ///
+    /// Scenario: a filled pool where btrfs has reserved a nonzero
+    /// GlobalReserve. A forgotten filter would silently add the
+    /// reserve into used, overcounting by the reserve size.
+    #[test]
+    fn logical_used_bytes_excludes_global_reserve() {
+        let df = BtrfsDfOutput {
+            entries: vec![
+                BtrfsDfEntry {
+                    bg_type: BtrfsBgType::Data,
+                    bg_profile: BtrfsProfile::Raid1,
+                    bg_used: 100,
+                    bg_total: 200,
+                },
+                BtrfsDfEntry {
+                    bg_type: BtrfsBgType::Metadata,
+                    bg_profile: BtrfsProfile::Dup,
+                    bg_used: 20,
+                    bg_total: 40,
+                },
+                BtrfsDfEntry {
+                    bg_type: BtrfsBgType::System,
+                    bg_profile: BtrfsProfile::Dup,
+                    bg_used: 3,
+                    bg_total: 10,
+                },
+                BtrfsDfEntry {
+                    bg_type: BtrfsBgType::GlobalReserve,
+                    bg_profile: BtrfsProfile::Single,
+                    bg_used: 999,
+                    bg_total: 999,
+                },
+            ],
+        };
+        // 100 + 20 + 3 = 123; GlobalReserve's 999 must be excluded.
+        // A forgotten filter would produce 1122.
+        assert_eq!(df.logical_used_bytes(), 123);
+    }
+
     #[test]
     fn profiles_for_deduplicates() {
         let df = BtrfsDfOutput {

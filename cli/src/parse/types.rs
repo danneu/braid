@@ -109,6 +109,18 @@ impl BtrfsDfOutput {
             .map(|e| e.bg_profile.clone())
             .collect()
     }
+
+    /// Logical filesystem-used bytes: Data.used + Metadata.used +
+    /// System.used, excluding GlobalReserve. GlobalReserve is an
+    /// internal emergency reservation carved out of Metadata, not
+    /// additional on-disk data.
+    pub fn logical_used_bytes(&self) -> u64 {
+        self.entries
+            .iter()
+            .filter(|e| e.bg_type != BtrfsBgType::GlobalReserve)
+            .map(|e| e.bg_used)
+            .sum()
+    }
 }
 
 // --- Text command output structs ---

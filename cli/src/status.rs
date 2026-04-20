@@ -9,6 +9,7 @@ use crate::config::{self, mapper_name, Config};
 use crate::luks;
 use crate::membership::{self, PoolMembership};
 use crate::parse::types::BalanceState;
+use crate::parse::types::BtrfsDfOutput;
 use crate::parse::{
     parse_btrfs_balance_status, parse_btrfs_device_stats, parse_btrfs_device_usage,
     parse_btrfs_df_json, parse_btrfs_filesystem_usage, parse_btrfs_scrub_status,
@@ -346,8 +347,9 @@ pub fn build_status_report<R: CommandRunner, F: Filesystem>(
         });
     }
 
-    let df_summary = summarize_df(runner, config.mount_point())?;
-    let capacity = get_capacity(runner, config.mount_point(), pool.missing_count)?;
+    let df = fetch_df(runner, config.mount_point())?;
+    let df_summary = summarize_df(&df);
+    let capacity = get_capacity(runner, config.mount_point(), pool.missing_count, &df)?;
     let last_scrub = get_scrub_report(runner, config.mount_point());
     let balance = get_balance_report(runner, config.mount_point());
 
@@ -448,8 +450,9 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
     };
 
     // 4. Strict data gathering
-    let df_summary = summarize_df(runner, config.mount_point())?;
-    let capacity = get_capacity(runner, config.mount_point(), pool.missing_count)?;
+    let df = fetch_df(runner, config.mount_point())?;
+    let df_summary = summarize_df(&df);
+    let capacity = get_capacity(runner, config.mount_point(), pool.missing_count, &df)?;
     let last_scrub = get_scrub_report(runner, config.mount_point());
     let balance = get_balance_report(runner, config.mount_point());
 
@@ -559,15 +562,17 @@ struct DfSummary {
     allocation: Vec<AllocationEntry>,
 }
 
-fn summarize_df<R: CommandRunner>(
+fn fetch_df<R: CommandRunner>(
     runner: &R,
     mount_point: &MountPoint,
-) -> Result<DfSummary, StatusError> {
+) -> Result<BtrfsDfOutput, StatusError> {
     let raw = runner.run(&CmdRequest::BtrfsFilesystemDfJson {
         mount_point: mount_point.clone(),
     })?;
-    let df = parse_btrfs_df_json(&raw)?;
+    Ok(parse_btrfs_df_json(&raw)?)
+}
 
+fn summarize_df(df: &BtrfsDfOutput) -> DfSummary {
     let profiles = df.profiles_for(crate::parse::types::BtrfsBgType::Data);
     let profile = if profiles.is_empty() {
         "unknown".to_owned()
@@ -596,16 +601,17 @@ fn summarize_df<R: CommandRunner>(
         })
         .collect();
 
-    Ok(DfSummary {
+    DfSummary {
         profile,
         allocation,
-    })
+    }
 }
 
 fn get_capacity<R: CommandRunner>(
     runner: &R,
     mount_point: &MountPoint,
     missing_count: u64,
+    df: &BtrfsDfOutput,
 ) -> Result<CapacityReport, StatusError> {
     let raw = runner.run(&CmdRequest::BtrfsFilesystemUsageRaw {
         mount_point: mount_point.clone(),
@@ -625,7 +631,7 @@ fn get_capacity<R: CommandRunner>(
 
     Ok(CapacityReport {
         total_bytes,
-        used_bytes: usage.used_bytes,
+        used_bytes: df.logical_used_bytes(),
         free_bytes: usage.free_estimated_bytes,
     })
 }
@@ -1705,8 +1711,9 @@ mod tests {
         let runner = runner_healthy_3disk_base();
         let config = config_3disk();
 
-        let df_summary = summarize_df(&runner, &mp()).unwrap();
-        let capacity = get_capacity(&runner, &mp(), 0).unwrap();
+        let df = fetch_df(&runner, &mp()).unwrap();
+        let df_summary = summarize_df(&df);
+        let capacity = get_capacity(&runner, &mp(), 0, &df).unwrap();
         let last_scrub = get_scrub_report(&runner, &mp());
 
         let code = StatusCode::Intact;
@@ -2970,7 +2977,7 @@ mod tests {
             },
             err_raw("btrfs filesystem df", 1, "not a btrfs filesystem"),
         );
-        let result = summarize_df(&runner, &mp());
+        let result = fetch_df(&runner, &mp());
         assert!(result.is_err());
     }
 
@@ -2982,8 +2989,102 @@ mod tests {
             },
             err_raw("btrfs filesystem usage", 1, "error"),
         );
-        let result = get_capacity(&runner, &mp(), 0);
+        let df = BtrfsDfOutput { entries: vec![] };
+        let result = get_capacity(&runner, &mp(), 0, &df);
         assert!(result.is_err());
+    }
+
+    /// Intent: CapacityReport.used_bytes must be logical (df-derived)
+    /// and never exceed total_bytes.
+    ///
+    /// Why it exists: regression guard for the same unit mismatch as
+    /// the TUI "112% pool usage" bug. `braid status` prints Used and
+    /// Total on separate lines (no percent), so a raw vs logical
+    /// mismatch would show Used > Total -- nonsense data, but harder
+    /// to notice than a >100% percent.
+    ///
+    /// Scenario: 2-disk RAID1 pool. btrfs filesystem usage --raw
+    /// reports aggregate raw Used = 570458112 that exceeds the
+    /// estimated logical capacity. btrfs filesystem df --json reports
+    /// logical used per block group; the df-sum (GlobalReserve
+    /// excluded) is 285229056.
+    #[test]
+    fn get_capacity_raid1_used_is_logical() {
+        use crate::parse::types::{BtrfsBgType, BtrfsDfEntry, BtrfsProfile};
+
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::BtrfsFilesystemUsageRaw {
+                    mount_point: mp(),
+                },
+                ok_raw(
+                    "btrfs filesystem usage",
+                    "Overall:\n\
+                     \tDevice size:\t\t\t1073741824\n\
+                     \tDevice allocated:\t\t620756992\n\
+                     \tDevice unallocated:\t\t452984832\n\
+                     \tUsed:\t\t\t\t570458112\n\
+                     \tFree (estimated):\t\t251641856\t(min: 251641856)\n\
+                     \tData ratio:\t\t\t2.00\n",
+                ),
+            )
+            .with_output(
+                CmdRequest::BtrfsDeviceUsageRaw {
+                    mount_point: mp(),
+                },
+                ok_raw(
+                    "btrfs device usage",
+                    "/dev/dm-0, ID: 1\n\
+                     \x20  Device size:          536870912\n\
+                     \x20  Device slack:              0\n\
+                     \x20  Unallocated:          226492416\n\
+                     \n\
+                     /dev/dm-1, ID: 2\n\
+                     \x20  Device size:          536870912\n\
+                     \x20  Device slack:              0\n\
+                     \x20  Unallocated:          226492416\n",
+                ),
+            );
+
+        let df = BtrfsDfOutput {
+            entries: vec![
+                BtrfsDfEntry {
+                    bg_type: BtrfsBgType::Data,
+                    bg_profile: BtrfsProfile::Raid1,
+                    bg_used: 268_435_456,
+                    bg_total: 268_435_456,
+                },
+                BtrfsDfEntry {
+                    bg_type: BtrfsBgType::Metadata,
+                    bg_profile: BtrfsProfile::Dup,
+                    bg_used: 16_777_216,
+                    bg_total: 33_554_432,
+                },
+                BtrfsDfEntry {
+                    bg_type: BtrfsBgType::System,
+                    bg_profile: BtrfsProfile::Dup,
+                    bg_used: 16_384,
+                    bg_total: 8_388_608,
+                },
+                BtrfsDfEntry {
+                    bg_type: BtrfsBgType::GlobalReserve,
+                    bg_profile: BtrfsProfile::Single,
+                    bg_used: 3_670_016,
+                    bg_total: 3_670_016,
+                },
+            ],
+        };
+
+        let report = get_capacity(&runner, &mp(), 0, &df).unwrap();
+
+        assert_eq!(report.total_bytes, Some(536_870_912));
+        assert!(
+            report.used_bytes <= report.total_bytes.unwrap(),
+            "used ({}) must not exceed total ({}) -- unit mismatch?",
+            report.used_bytes,
+            report.total_bytes.unwrap(),
+        );
+        assert_eq!(report.used_bytes, 285_229_056);
     }
 
     #[test]
