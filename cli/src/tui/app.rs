@@ -2,8 +2,8 @@ use std::collections::VecDeque;
 use std::process::ExitStatus;
 use std::time::{Duration, Instant};
 
-use crate::tui::effect::Effect;
-use crate::tui::model::{Model, PoolState, PoolStatus, TemperatureWatermark};
+use crate::tui::effect::{Effect, FAN_PROBE_INTERVAL};
+use crate::tui::model::{FanSnapshot, Model, PoolState, PoolStatus, TemperatureWatermark};
 use crate::tui::state::{CmdId, CmdStatus, CommandState, Stream, MAX_LINES};
 
 pub enum Message {
@@ -32,6 +32,22 @@ pub enum Message {
         status: ExitStatus,
     },
     PoolProbeFinished(Box<Result<Option<PoolState>, String>>, Duration),
+    /// A fan probe finished. Install the snapshot and re-arm the loop.
+    FanProbeFinished(FanSnapshot),
+    /// Scheduler tick from `Effect::ScheduleFanProbe`. The handler reads
+    /// fresh fan_control + inflight state off Model before emitting the
+    /// next `Effect::ProbeFan`.
+    RefreshFan,
+}
+
+fn fan_probe_effect(model: &Model) -> Option<Effect> {
+    let fc = model.fan_control.as_ref()?;
+    Some(Effect::ProbeFan {
+        sysfs_root: std::path::PathBuf::from("/sys"),
+        dev_root: std::path::PathBuf::from("/dev"),
+        disk_by_id: model.disk_by_id.clone(),
+        fan_control: fc.clone(),
+    })
 }
 
 pub fn update(model: &mut Model, msg: Message) -> Vec<Effect> {
@@ -53,20 +69,28 @@ pub fn update(model: &mut Model, msg: Message) -> Vec<Effect> {
             vec![]
         }
         Message::RefreshPool => {
-            if model.pool.is_inflight() {
-                return vec![];
+            let mut effects: Vec<Effect> = vec![];
+            if !model.pool.is_inflight() {
+                model.spinner_deadline = Some(Instant::now() + Duration::from_millis(500));
+                if let Some(stale) = model.pool.current().cloned() {
+                    model.pool = PoolStatus::Refreshing(stale);
+                } else {
+                    model.pool = PoolStatus::Loading;
+                }
+                effects.push(Effect::ProbePool {
+                    mount_point: model.mount_point.clone(),
+                    disk_by_id: model.disk_by_id.clone(),
+                    paths: model.paths.clone(),
+                });
             }
-            model.spinner_deadline = Some(Instant::now() + Duration::from_millis(500));
-            if let Some(stale) = model.pool.current().cloned() {
-                model.pool = PoolStatus::Refreshing(stale);
-            } else {
-                model.pool = PoolStatus::Loading;
-            }
-            vec![Effect::ProbePool {
-                mount_point: model.mount_point.clone(),
-                disk_by_id: model.disk_by_id.clone(),
-                paths: model.paths.clone(),
-            }]
+            // Manual `r` refreshes the fan too, but only if one isn't
+            // already in flight — the auto-poll will catch up otherwise.
+            if model.fan_control.is_some() && !model.fan_probe_inflight
+                && let Some(fan_effect) = fan_probe_effect(model) {
+                    model.fan_probe_inflight = true;
+                    effects.push(fan_effect);
+                }
+            effects
         }
         Message::SelectNextDisk => {
             let len = model.disk_names.len();
@@ -164,13 +188,74 @@ pub fn update(model: &mut Model, msg: Message) -> Vec<Effect> {
             // }]
             vec![]
         }
+        Message::FanProbeFinished(snapshot) => {
+            model.fan = Some(snapshot);
+            model.fan_probe_inflight = false;
+            vec![Effect::ScheduleFanProbe {
+                delay: FAN_PROBE_INTERVAL,
+            }]
+        }
+        Message::RefreshFan => {
+            if model.fan_control.is_none() {
+                return vec![];
+            }
+            if model.fan_probe_inflight {
+                return vec![Effect::ScheduleFanProbe {
+                    delay: FAN_PROBE_INTERVAL,
+                }];
+            }
+            let effect = match fan_probe_effect(model) {
+                Some(e) => e,
+                None => return vec![],
+            };
+            model.fan_probe_inflight = true;
+            vec![effect]
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{FanControl as FanControlCfg, Pwm};
+    use crate::tui::model::{DaemonStatus, FanSnapshot};
     use crate::tui::view::tests::{sample_disk_names, sample_pool};
+
+    fn is_probe_fan(e: &Effect) -> bool {
+        matches!(e, Effect::ProbeFan { .. })
+    }
+    fn is_probe_pool(e: &Effect) -> bool {
+        matches!(e, Effect::ProbePool { .. })
+    }
+    fn is_schedule_fan(e: &Effect) -> bool {
+        matches!(e, Effect::ScheduleFanProbe { .. })
+    }
+    fn is_schedule_pool(e: &Effect) -> bool {
+        matches!(e, Effect::ScheduleProbe { .. })
+    }
+
+    fn sample_fan_control() -> FanControlCfg {
+        FanControlCfg {
+            pwm: Pwm {
+                platform_device: "f71882fg.656".to_owned(),
+                number: 2,
+                min_start: 70,
+                max_stop: 60,
+            },
+            min_temp: 30,
+            max_temp: 40,
+            min_fan_speed_percent: 20,
+        }
+    }
+
+    fn sample_fan_snapshot() -> FanSnapshot {
+        FanSnapshot {
+            fan: None,
+            driving: None,
+            daemon: DaemonStatus::Active,
+            probed_at: Instant::now(),
+        }
+    }
 
     /*
      * Intent: RefreshPool must set a spinner_deadline so the footer spinner
@@ -346,6 +431,157 @@ mod tests {
         assert_eq!(w.min_celsius, 38);
         assert_eq!(w.max_celsius, 38);
         assert_eq!(w.sample_count, 1);
+    }
+
+    // Intent: FanProbeFinished must install the snapshot, clear the
+    //         in-flight flag, and emit exactly one ScheduleFanProbe --
+    //         no pool-probe side-effects.
+    // Why: the two loops are independent. If FanProbeFinished accidentally
+    //      pushed a pool effect, every fan tick would also run a heavy
+    //      smartctl probe -- defeating the whole "cheap fan cadence"
+    //      design decision (revision 7 in the plan).
+    // Scenario: an in-flight fan probe returns; model is refreshed and
+    //         the next scheduler tick is armed.
+    #[test]
+    fn fan_probe_finished_schedules_only_fan_refresh() {
+        let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(sample_pool()));
+        model.fan_control = Some(sample_fan_control());
+        model.fan_probe_inflight = true;
+        let effects = update(&mut model, Message::FanProbeFinished(sample_fan_snapshot()));
+        assert!(model.fan.is_some());
+        assert!(!model.fan_probe_inflight);
+        assert_eq!(effects.len(), 1);
+        assert!(is_schedule_fan(&effects[0]));
+        assert!(!effects.iter().any(is_probe_pool));
+        assert!(!effects.iter().any(is_schedule_pool));
+    }
+
+    // Intent: PoolProbeFinished must NOT auto-reschedule pool probes.
+    // Why: the pool probe is heavy (smartctl -H -A per disk, btrfs
+    //      commands). Auto-rescheduling would wake sleeping drives and
+    //      interfere with HDD spindown. This test locks in the
+    //      manual-only contract so a future contributor doesn't
+    //      uncomment the TODO without understanding the trade-off.
+    // Scenario: any pool probe completion.
+    #[test]
+    fn pool_probe_finished_returns_no_effects() {
+        let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Loading);
+        let effects = update(
+            &mut model,
+            Message::PoolProbeFinished(Box::new(Ok(Some(sample_pool()))), Duration::from_millis(10)),
+        );
+        assert!(effects.is_empty(), "got {} effects", effects.len());
+    }
+
+    // Intent: RefreshFan with a fan probe already in flight re-arms the
+    //         scheduler but does NOT spawn a duplicate ProbeFan.
+    // Why: a duplicate probe would race with the inflight one --
+    //      FanProbeFinished clears inflight, so a second finish could
+    //      land while the loop thinks nothing is running. Silently
+    //      dropping the loop (returning []) is also wrong because the
+    //      single scheduler thread would die. Re-arming preserves the
+    //      loop without adding work.
+    // Scenario: user presses `r` during a slow fan probe, then the
+    //         auto-tick fires before the probe returns.
+    #[test]
+    fn refresh_fan_skips_when_inflight() {
+        let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Loading);
+        model.fan_control = Some(sample_fan_control());
+        model.fan_probe_inflight = true;
+        let effects = update(&mut model, Message::RefreshFan);
+        assert_eq!(effects.len(), 1);
+        assert!(is_schedule_fan(&effects[0]));
+        assert!(!effects.iter().any(is_probe_fan));
+    }
+
+    // Intent: RefreshFan with no fan_control tears the loop down
+    //         cleanly (returns no effects).
+    // Why: if the daemon is disabled mid-session (unlikely but possible
+    //      via a reload path), the loop must stop on its own rather
+    //      than spin forever firing empty probes.
+    // Scenario: fan_control is None when a scheduler tick lands.
+    #[test]
+    fn refresh_fan_skips_when_disabled() {
+        let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Loading);
+        model.fan_control = None;
+        let effects = update(&mut model, Message::RefreshFan);
+        assert!(effects.is_empty());
+    }
+
+    // Intent: RefreshFan with fan_control set and no probe in flight
+    //         emits exactly one Effect::ProbeFan AND flips
+    //         model.fan_probe_inflight to true.
+    // Why: the inflight flag is the guard that prevents duplicate
+    //      probes across the manual-refresh and auto-poll paths.
+    //      Setting it here, at the point of decision, is the single
+    //      source of truth -- downstream FanProbeFinished is what
+    //      clears it.
+    // Scenario: auto-poll tick on an idle model with fan enabled.
+    #[test]
+    fn refresh_fan_emits_probe_when_idle() {
+        let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Loading);
+        model.fan_control = Some(sample_fan_control());
+        model.fan_probe_inflight = false;
+        let effects = update(&mut model, Message::RefreshFan);
+        assert!(effects.iter().any(is_probe_fan));
+        assert!(model.fan_probe_inflight);
+        // Match on ProbeFan and verify the fan_control carried through.
+        let probe = effects
+            .iter()
+            .find(|e| matches!(e, Effect::ProbeFan { .. }))
+            .unwrap();
+        if let Effect::ProbeFan { fan_control, .. } = probe {
+            assert_eq!(fan_control.pwm.number, 2);
+            assert_eq!(fan_control.pwm.platform_device, "f71882fg.656");
+        }
+    }
+
+    // Intent: manual `r` with fan enabled and idle fires BOTH pool and
+    //         fan probes.
+    // Why: the user's mental model of `r` is "refresh everything". The
+    //      plan pins manual refresh as a both-probe trigger so the user
+    //      doesn't need to learn separate keystrokes for each subsystem.
+    // Scenario: user presses `r` on a fan-enabled system.
+    #[test]
+    fn refresh_pool_with_fan_idle_emits_both() {
+        let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(sample_pool()));
+        model.fan_control = Some(sample_fan_control());
+        model.fan_probe_inflight = false;
+        let effects = update(&mut model, Message::RefreshPool);
+        assert!(effects.iter().any(is_probe_pool), "missing ProbePool");
+        assert!(effects.iter().any(is_probe_fan), "missing ProbeFan");
+        assert!(model.fan_probe_inflight);
+    }
+
+    // Intent: manual `r` while a fan probe is already in flight emits
+    //         only the pool effect, not a duplicate ProbeFan.
+    // Why: mirror of the RefreshFan guard -- the two entry points must
+    //      use the same inflight logic or duplicate probes leak in.
+    // Scenario: user presses `r` repeatedly during a slow fan probe.
+    #[test]
+    fn refresh_pool_with_fan_inflight_emits_only_pool() {
+        let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(sample_pool()));
+        model.fan_control = Some(sample_fan_control());
+        model.fan_probe_inflight = true;
+        let effects = update(&mut model, Message::RefreshPool);
+        assert!(effects.iter().any(is_probe_pool));
+        assert!(!effects.iter().any(is_probe_fan));
+    }
+
+    // Intent: manual `r` on a fan-disabled system emits only the pool
+    //         effect.
+    // Why: no fan_control = no fan work. This is the common case for
+    //      users who haven't enabled fanControl; breaking it would
+    //      cause spurious probes for every NAS in the field.
+    // Scenario: standard `r` press on a default-config system.
+    #[test]
+    fn refresh_pool_with_fan_disabled_emits_only_pool() {
+        let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(sample_pool()));
+        model.fan_control = None;
+        let effects = update(&mut model, Message::RefreshPool);
+        assert!(effects.iter().any(is_probe_pool));
+        assert!(!effects.iter().any(is_probe_fan));
+        assert!(!effects.iter().any(is_schedule_fan));
     }
 
     // Intent: Message::ResetTemperatureStats must empty the watermark map.

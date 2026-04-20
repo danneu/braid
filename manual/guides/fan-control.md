@@ -12,7 +12,7 @@ On a NAS the dominant thermal load is the HDDs, not the CPU. A pool of spinning 
 
 The fix is to move fan control into Linux userspace using drive temps as the signal. The kernel's `drivetemp` module exposes each SATA drive's SMART temperature as a standard hwmon input, and `hddfancontrol` reads those inputs and drives the chassis fan's PWM proportionally to the hottest drive.
 
-`braid.fanControl` wraps `hddfancontrol` so you only provide two hardware-specific values (the Super I/O platform device name and PWM channel number from `pwmconfig`) plus two calibration values (`minStart`/`maxStop` from `hddfancontrol pwm-test`). The module handles the systemd service, `drivetemp` loading, SATA hotswap udev rules, and crash recovery.
+`braid.fanControl` wraps `hddfancontrol` so you only provide two hardware-specific values (the Super I/O platform device name and PWM channel number from `pwmconfig`) plus two calibration values (`pwm.minStart`/`pwm.maxStop` from `hddfancontrol pwm-test`). The module handles the systemd service, `drivetemp` loading, SATA hotswap udev rules, and crash recovery.
 
 **Scope:** `braid.fanControl` monitors **all visible SATA devices**, not only braid pool members. Drives generate heat regardless of LUKS state, pool membership, or mount status -- binding fan control to pool state would leave warm disks uncooled when the pool is locked or before first unlock. SAS drives are out of scope.
 
@@ -39,8 +39,8 @@ Discovery is a one-time interactive procedure. Its only output is four values yo
 
 - `pwm.platformDevice` -- platform device name of the Super I/O chip (e.g. `f71882fg.656`)
 - `pwm.number` -- PWM channel number on that chip (e.g. `2` for `pwm2`)
-- `minStart` -- PWM value needed to start the fan from standstill
-- `maxStop` -- PWM value below which the spinning fan stalls
+- `pwm.minStart` -- PWM value needed to start the fan from standstill
+- `pwm.maxStop` -- PWM value below which the spinning fan stalls
 
 ### Install the tooling and load the sensor modules
 
@@ -139,8 +139,8 @@ echo <original> | sudo tee /sys/class/hwmon/<N>/device/pwmK_enable
 
 `hddfancontrol pwm-test` ramps the PWM up and down while measuring fan RPM. It finds:
 
-- `minStart` -- the PWM at which a stopped fan begins spinning again
-- `maxStop` -- the highest PWM at which a spinning fan stalls
+- `pwm.minStart` -- the PWM at which a stopped fan begins spinning again
+- `pwm.maxStop` -- the highest PWM at which a spinning fan stalls
 
 Run it against the chassis PWM path from the previous step:
 
@@ -150,7 +150,7 @@ sudo hddfancontrol pwm-test -p /sys/devices/platform/.../pwmN
 
 It takes a couple of minutes (ramps slowly to avoid bouncing the fan). Record the final `minStart` and `maxStop` values it prints.
 
-**If the fan has a hardware RPM floor** (common on voltage-controlled 3-pin fans, and some boards' chassis headers even in PWM mode), `maxStop` will be 0 and `minStart` will be some low value -- the fan never actually stops. That's fine; `hddfancontrol` still handles the ramp correctly. The `--min-fan-speed-prct` floor in `braid.fanControl` prevents the daemon from commanding the fan off in any case.
+**If the fan has a hardware RPM floor** (common on voltage-controlled 3-pin fans, and some boards' chassis headers even in PWM mode), `pwm.maxStop` will be 0 and `pwm.minStart` will be some low value -- the fan never actually stops. That's fine; `hddfancontrol` still handles the ramp correctly. The `--min-fan-speed-prct` floor in `braid.fanControl` prevents the daemon from commanding the fan off in any case.
 
 ## Committing to Nix
 
@@ -170,9 +170,9 @@ Paste the four discovery values into `braid.fanControl`:
     pwm = {
       platformDevice = "nct6775.656";
       number = 2;
+      minStart = 65;   # from hddfancontrol pwm-test
+      maxStop  = 60;   # from hddfancontrol pwm-test
     };
-    minStart = 65;   # from hddfancontrol pwm-test
-    maxStop  = 60;   # from hddfancontrol pwm-test
   };
 }
 ```
@@ -353,9 +353,9 @@ braid.fanControl = {
   pwm = {
     platformDevice = "f71882fg.656";
     number = 2;
+    minStart = 65;
+    maxStop  = 60;
   };
-  minStart = 65;
-  maxStop  = 60;
 };
 ```
 

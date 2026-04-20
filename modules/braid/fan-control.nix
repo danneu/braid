@@ -49,22 +49,22 @@ in
           pwm1 is frequently the CPU fan or an unpopulated header.
         '';
       };
-    };
 
-    minStart = lib.mkOption {
-      type = lib.types.ints.between 0 255;
-      description = ''
-        Minimum PWM value to start the fan from standstill. Run
-        `hddfancontrol pwm-test -p <pwm-path>` to measure this for your fan.
-      '';
-    };
+      minStart = lib.mkOption {
+        type = lib.types.ints.between 0 255;
+        description = ''
+          Minimum PWM value to start the fan from standstill. Run
+          `hddfancontrol pwm-test -p <pwm-path>` to measure this for your fan.
+        '';
+      };
 
-    maxStop = lib.mkOption {
-      type = lib.types.ints.between 0 255;
-      description = ''
-        PWM value below which a spinning fan stalls. Run
-        `hddfancontrol pwm-test -p <pwm-path>` to measure this for your fan.
-      '';
+      maxStop = lib.mkOption {
+        type = lib.types.ints.between 0 255;
+        description = ''
+          PWM value below which a spinning fan stalls. Run
+          `hddfancontrol pwm-test -p <pwm-path>` to measure this for your fan.
+        '';
+      };
     };
 
     minTemp = lib.mkOption {
@@ -111,9 +111,9 @@ in
           + "Expected characters: A-Z a-z 0-9 _ . -";
       }
       {
-        assertion = fc.maxStop <= fc.minStart;
-        message = "braid.fanControl.maxStop (${toString fc.maxStop}) must be <= "
-          + "minStart (${toString fc.minStart}). maxStop is the PWM below which a "
+        assertion = fc.pwm.maxStop <= fc.pwm.minStart;
+        message = "braid.fanControl.pwm.maxStop (${toString fc.pwm.maxStop}) must be <= "
+          + "pwm.minStart (${toString fc.pwm.minStart}). maxStop is the PWM below which a "
           + "spinning fan stalls; minStart is the PWM needed to start from standstill. "
           + "Run `hddfancontrol pwm-test -p <pwm-path>` to measure these values.";
       }
@@ -187,7 +187,7 @@ in
         pwm_path="''${existing[0]}"
         exec ${lib.getExe pkgs.hddfancontrol} -v INFO daemon \
           -d ata \
-          -p "$pwm_path:${toString fc.minStart}:${toString fc.maxStop}" \
+          -p "$pwm_path:${toString fc.pwm.minStart}:${toString fc.pwm.maxStop}" \
           --drive-temp-range ${toString fc.minTemp} ${toString fc.maxTemp} \
           --min-fan-speed-prct ${toString fc.minFanSpeedPercent} \
           --interval ${lib.escapeShellArg fc.interval} \

@@ -51,6 +51,48 @@ pub struct DiskLuksInfo {
     pub keyslot_count: u32,
 }
 
+/// Raw chassis fan telemetry from sysfs. `pwm_raw` is the PWM register value
+/// (0-255); `rpm` is the latest `fanN_input` tachometer reading.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FanReading {
+    pub pwm_raw: u8,
+    pub rpm: u32,
+}
+
+/// Hottest drivetemp-reporting SATA drive on the system, as the TUI's
+/// best-effort approximation of hddfancontrol's `-d ata` selector. The
+/// daemon's actual selected set is authoritative; `DaemonStatus` is the
+/// source of truth for whether the control loop is live.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DrivingDrive {
+    pub label: String,
+    pub celsius: i16,
+}
+
+/// Live state of `hddfancontrol-braid.service` as reported by
+/// `systemctl is-active`. Sensor readings are still meaningful when the
+/// daemon is not `Active`, but the control loop isn't acting on them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DaemonStatus {
+    Active,
+    /// `activating`, `reloading`, or `deactivating`.
+    Transitioning,
+    Inactive,
+    Failed,
+    /// Output from `systemctl is-active` didn't match any known state, or
+    /// the command itself failed to spawn.
+    Unknown,
+}
+
+/// Snapshot of the fan control subsystem — produced on every fan probe.
+#[derive(Debug, Clone)]
+pub struct FanSnapshot {
+    pub fan: Option<FanReading>,
+    pub driving: Option<DrivingDrive>,
+    pub daemon: DaemonStatus,
+    pub probed_at: Instant,
+}
+
 /// Physical identity of a disk for session-scoped temperature tracking.
 /// LUKS UUID is preferred so watermarks survive device-path changes on
 /// unplug/replug; by-id path is a fallback for disks whose UUID isn't
@@ -186,6 +228,9 @@ pub struct Model {
     pub advisories: Vec<String>,
     pub paths: StatePaths,
     pub session_temperature_stats: HashMap<TemperatureDiskId, TemperatureWatermark>,
+    pub fan_control: Option<crate::config::FanControl>,
+    pub fan: Option<FanSnapshot>,
+    pub fan_probe_inflight: bool,
     next_cmd_id: u64,
 }
 
@@ -194,15 +239,25 @@ impl Model {
         disk_names: Vec<String>,
         disk_by_id: HashMap<String, String>,
         mount_point: String,
+        fan_control: Option<crate::config::FanControl>,
         advisories: Vec<String>,
         paths: StatePaths,
     ) -> (Self, Vec<Effect>) {
         let mount_point = MountPoint(mount_point);
-        let effects = vec![Effect::ProbePool {
+        let mut effects: Vec<Effect> = vec![Effect::ProbePool {
             mount_point: mount_point.clone(),
             disk_by_id: disk_by_id.clone(),
             paths: paths.clone(),
         }];
+        let fan_probe_inflight = fan_control.is_some();
+        if let Some(fc) = fan_control.as_ref() {
+            effects.push(Effect::ProbeFan {
+                sysfs_root: std::path::PathBuf::from("/sys"),
+                dev_root: std::path::PathBuf::from("/dev"),
+                disk_by_id: disk_by_id.clone(),
+                fan_control: fc.clone(),
+            });
+        }
         let model = Self {
             running: true,
             show_help: false,
@@ -220,6 +275,9 @@ impl Model {
             advisories,
             paths,
             session_temperature_stats: HashMap::new(),
+            fan_control,
+            fan: None,
+            fan_probe_inflight,
             next_cmd_id: 0,
         };
         (model, effects)
@@ -243,6 +301,9 @@ impl Model {
             advisories: vec![],
             paths: StatePaths::production(),
             session_temperature_stats: HashMap::new(),
+            fan_control: None,
+            fan: None,
+            fan_probe_inflight: false,
             next_cmd_id: 0,
         }
     }

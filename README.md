@@ -38,7 +38,7 @@ sudo braid lock
 - **Dynamic pool** -- add or remove drives with a command, no `nixos-rebuild`
 - **Self-healing** -- btrfs checksums every block and silently repairs corruption from the redundant copy
 - **CLI-owned membership** -- `braid add`/`remove`/`replace` manage the pool; state lives in `/var/lib/braid/pool.json`
-- **Dashboard** -- `braid tui` shows pool health, disk status, balance progress, SMART data
+- **Dashboard** -- `braid tui` shows pool health, disk status, balance progress, SMART data, and (when `braid.fanControl` is enabled) chassis fan telemetry with hddfancontrol daemon health
 
 ## Downsides
 
@@ -138,6 +138,7 @@ See the [command reference](manual/commands/) for full usage of each command.
 | [Auto-unlock](manual/guides/auto-unlock.md) | USB keyfile setup for unattended reboots |
 | [Monitoring and alerts](manual/guides/monitoring-and-alerts.md) | Disk health alerts, beeper, alert commands |
 | [Power management](manual/guides/power-management.md) | Auto-suspend, Wake-on-LAN, RTC wakeups |
+| [Fan control](manual/guides/fan-control.md) | HDD-driven chassis fan control via hddfancontrol |
 | [NixOS configuration](manual/guides/nixos-configuration.md) | Module options, scrub scheduling, pinned toolchain |
 | [Sharing and permissions](manual/guides/sharing-and-permissions.md) | Storage group, mount permissions, Samba |
 | [Troubleshooting](manual/guides/troubleshooting.md) | ENOSPC balance, paused balance, missing devices |

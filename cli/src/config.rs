@@ -11,9 +11,26 @@ pub enum ConfigBuildError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Pwm {
+    pub platform_device: String,
+    pub number: u8,
+    pub min_start: u8,
+    pub max_stop: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct FanControl {
+    pub pwm: Pwm,
+    pub min_temp: u8,
+    pub max_temp: u8,
+    pub min_fan_speed_percent: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(try_from = "RawConfig")]
 pub struct Config {
     mount_point: MountPoint,
+    fan_control: Option<FanControl>,
 }
 
 impl Config {
@@ -21,11 +38,18 @@ impl Config {
         if mount_point.0.is_empty() {
             return Err(ConfigBuildError::EmptyMountPoint);
         }
-        Ok(Config { mount_point })
+        Ok(Config {
+            mount_point,
+            fan_control: None,
+        })
     }
 
     pub fn mount_point(&self) -> &MountPoint {
         &self.mount_point
+    }
+
+    pub fn fan_control(&self) -> Option<&FanControl> {
+        self.fan_control.as_ref()
     }
 }
 
@@ -42,13 +66,17 @@ pub fn name_from_mapper(mapper: &str) -> Option<&str> {
 #[derive(Deserialize)]
 struct RawConfig {
     mount_point: MountPoint,
+    #[serde(default)]
+    fan_control: Option<FanControl>,
 }
 
 impl TryFrom<RawConfig> for Config {
     type Error = ConfigBuildError;
 
     fn try_from(raw: RawConfig) -> Result<Self, Self::Error> {
-        Config::new(raw.mount_point)
+        let mut cfg = Config::new(raw.mount_point)?;
+        cfg.fan_control = raw.fan_control;
+        Ok(cfg)
     }
 }
 
@@ -114,5 +142,76 @@ mod tests {
     fn name_from_mapper_returns_none_for_non_braid() {
         assert_eq!(name_from_mapper("luks-something"), None);
         assert_eq!(name_from_mapper(""), None);
+    }
+
+    // Intent: Config deserializes when fan_control is absent from JSON.
+    // Why: fan_control is opt-in on the Nix side; absent JSON key means
+    // braid.fanControl.enable = false. Config::fan_control must return None.
+    // Scenario: Config.json written by a NixOS generation without the
+    // fanControl module enabled.
+    #[test]
+    fn parses_config_without_fan_control() {
+        let raw = r#"{"mount_point":"/mnt/storage"}"#;
+        let cfg: Config = serde_json::from_str(raw).expect("config should parse");
+        assert_eq!(cfg.mount_point().as_str(), "/mnt/storage");
+        assert!(cfg.fan_control().is_none());
+    }
+
+    // Intent: Config deserializes the full fan_control shape from JSON.
+    // Why: modules/braid/cli.nix emits the exact key names (snake_case) below;
+    // a mismatch silently leaves Config::fan_control as None and the TUI
+    // degrades to "disabled" without a visible error.
+    // Scenario: NixOS generated /etc/braid/config.json with fanControl enabled
+    // and calibration values from hddfancontrol pwm-test.
+    #[test]
+    fn parses_config_with_fan_control() {
+        let raw = r#"{
+            "mount_point": "/mnt/storage",
+            "fan_control": {
+                "pwm": {
+                    "platform_device": "f71882fg.656",
+                    "number": 2,
+                    "min_start": 70,
+                    "max_stop": 60
+                },
+                "min_temp": 30,
+                "max_temp": 40,
+                "min_fan_speed_percent": 20
+            }
+        }"#;
+        let cfg: Config = serde_json::from_str(raw).expect("config should parse");
+        let fc = cfg.fan_control().expect("fan_control should be Some");
+        assert_eq!(fc.pwm.platform_device, "f71882fg.656");
+        assert_eq!(fc.pwm.number, 2);
+        assert_eq!(fc.pwm.min_start, 70);
+        assert_eq!(fc.pwm.max_stop, 60);
+        assert_eq!(fc.min_temp, 30);
+        assert_eq!(fc.max_temp, 40);
+        assert_eq!(fc.min_fan_speed_percent, 20);
+    }
+
+    // Intent: malformed pwm (missing required fields) fails to deserialize.
+    // Why: catching a missing pwm field at parse time surfaces the config bug
+    // at CLI startup rather than as a mysterious None later in the TUI.
+    // Scenario: hand-edited config.json or a future cli.nix refactor drops
+    // a required pwm key.
+    #[test]
+    fn rejects_malformed_pwm() {
+        let raw = r#"{
+            "mount_point": "/mnt/storage",
+            "fan_control": {
+                "pwm": {"platform_device": "f71882fg.656"},
+                "min_temp": 30,
+                "max_temp": 40,
+                "min_fan_speed_percent": 20
+            }
+        }"#;
+        let err = serde_json::from_str::<Config>(raw).expect_err("malformed pwm must fail");
+        assert!(
+            err.to_string().contains("number")
+                || err.to_string().contains("min_start")
+                || err.to_string().contains("max_stop"),
+            "expected missing-field error, got: {err}"
+        );
     }
 }

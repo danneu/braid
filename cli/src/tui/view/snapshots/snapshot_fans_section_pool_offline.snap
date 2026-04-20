@@ -1,0 +1,16 @@
+---
+source: cli/src/tui/view/mod.rs
+expression: buffer_to_string(&terminal)
+---
+Data  Scrub  Sharing
+ Pool ──────────────────────────────────────────────────────────────────
+ not mounted
+ Disks ─────────────────────────────────────────────────────────────────
+     Name     Bus SMART Temp btrfs Allocated
+ ▶ 1 toshiba  --
+   2 ironwolf --
+   3 wdc      --
+ Fans -- daemon: active ────────────────────────────────────────────────
+    PWM           RPM    Driving          Curve
+ 1  215/255 84%   1240   ironwolf 38°     30-40° -> 20-100%
+Quit: q │ Help: ? │ Reset temp hi/lo: R │ Reload: r

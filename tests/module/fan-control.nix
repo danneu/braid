@@ -27,9 +27,9 @@
         pwm = {
           platformDevice = "braid-test.0";
           number = 2;
+          minStart = 65;
+          maxStop = 60;
         };
-        minStart = 65;
-        maxStop = 60;
         minTemp = 25;
         maxTemp = 45;
         minFanSpeedPercent = 10;

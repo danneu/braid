@@ -44,8 +44,14 @@ pub fn run(config_path: &Path, paths: &StatePaths) -> io::Result<()> {
         .iter()
         .map(|(k, m)| (k.clone(), m.by_id.to_string()))
         .collect();
-    let (mut model, init_effects) =
-        Model::new(disk_names, disk_by_id, config.mount_point().0.clone(), advisories, paths.clone());
+    let (mut model, init_effects) = Model::new(
+        disk_names,
+        disk_by_id,
+        config.mount_point().0.clone(),
+        config.fan_control().cloned(),
+        advisories,
+        paths.clone(),
+    );
     for effect in init_effects {
         execute_effect(effect, &cmd_tx);
     }

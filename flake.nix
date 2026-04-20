@@ -548,6 +548,11 @@
               braid = linuxCrane.braid-cli-unwrapped;
             }
           );
+          fan-control-disabled = pkgs.testers.nixosTest (
+            import ./tests/module/fan-control-disabled.nix {
+              braid = linuxCrane.braid-cli-unwrapped;
+            }
+          );
           braid-auto-scrub = pkgs.testers.nixosTest (
             import ./tests/module/auto-scrub.nix {
               braid = linuxCrane.braid-cli-unwrapped;

@@ -1,8 +1,10 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::mpsc;
 use std::thread;
 
 use crate::cmd::RealRunner;
+use crate::config::FanControl;
 use crate::state_paths::StatePaths;
 use crate::tui::command;
 use crate::tui::event::Event;
@@ -12,6 +14,7 @@ use crate::types::MountPoint;
 use std::time::Duration;
 
 pub const PROBE_INTERVAL: Duration = Duration::from_secs(5);
+pub const FAN_PROBE_INTERVAL: Duration = Duration::from_secs(5);
 
 pub enum Effect {
     SpawnCommand {
@@ -25,6 +28,15 @@ pub enum Effect {
     },
     ScheduleProbe {
         mount_point: MountPoint,
+        delay: Duration,
+    },
+    ProbeFan {
+        sysfs_root: PathBuf,
+        dev_root: PathBuf,
+        disk_by_id: HashMap<String, String>,
+        fan_control: FanControl,
+    },
+    ScheduleFanProbe {
         delay: Duration,
     },
 }
@@ -60,6 +72,32 @@ pub fn execute_effect(effect: Effect, cmd_tx: &mpsc::Sender<Event>) {
             thread::spawn(move || {
                 thread::sleep(delay);
                 let _ = tx.send(Event::PollRefresh { mount_point });
+            });
+        }
+        Effect::ProbeFan {
+            sysfs_root,
+            dev_root,
+            disk_by_id,
+            fan_control,
+        } => {
+            let tx = cmd_tx.clone();
+            thread::spawn(move || {
+                let runner = RealRunner;
+                let snapshot = crate::tui::probe::probe_fan_for_tui(
+                    &runner,
+                    &sysfs_root,
+                    &dev_root,
+                    &disk_by_id,
+                    &fan_control,
+                );
+                let _ = tx.send(Event::FanProbeFinished(snapshot));
+            });
+        }
+        Effect::ScheduleFanProbe { delay } => {
+            let tx = cmd_tx.clone();
+            thread::spawn(move || {
+                thread::sleep(delay);
+                let _ = tx.send(Event::PollFanRefresh);
             });
         }
     }

@@ -12,6 +12,8 @@
 # and PWM number. No real hwmon devices -- inspects generated unit files and
 # udev rules, not runtime behavior.
 
+import json
+
 start_all()
 machine.wait_for_unit("multi-user.target")
 
@@ -74,5 +76,22 @@ with subtest("udev rules have correct add and remove SATA hotswap rules"):
     assert "systemctl start --no-block braid-fan-reload.service" in rules
     assert rules.count('ENV{ID_BUS}=="ata"') >= 2, \
         "Expected ID_BUS filter on both add and remove rules"
+
+with subtest("braid CLI config.json includes fan_control with correct shape"):
+    # The TUI reads /etc/braid/config.json at startup. Any drift between
+    # the Nix option paths and the JSON keys would leave the fan section
+    # silently disabled rather than producing a visible error.
+    cfg = json.loads(machine.succeed("cat /etc/braid/config.json"))
+    assert cfg["mount_point"] == "/mnt/storage"
+    fc = cfg["fan_control"]
+    assert fc["pwm"]["platform_device"] == "braid-test.0"
+    assert fc["pwm"]["number"] == 2
+    assert fc["pwm"]["min_start"] == 65
+    assert fc["pwm"]["max_stop"] == 60
+    assert fc["min_temp"] == 25
+    assert fc["max_temp"] == 45
+    assert fc["min_fan_speed_percent"] == 10
+    # interval is daemon-only -- must not appear in CLI config
+    assert "interval" not in fc, f"unexpected daemon-only key: {fc}"
 
 machine.shutdown()

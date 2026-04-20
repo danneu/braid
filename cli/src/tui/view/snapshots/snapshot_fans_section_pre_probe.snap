@@ -1,0 +1,21 @@
+---
+source: cli/src/tui/view/mod.rs
+expression: buffer_to_string(&terminal)
+---
+Data  Scrub  Sharing
+ Pool ──────────────────────────────────────────────────────────────────
+ Path       /mnt/storage
+ Usage      29% 2.1 TiB / 7.3 TiB (Estimated)
+ Type       Profile  Used       Allocated
+ Data       RAID1    2.1 TiB    5.4 TiB
+ Metadata   RAID1    1.5 GiB    2.0 GiB
+ System     RAID1    0.0 MiB    16.0 MiB
+ Disks ─────────────────────────────────────────────────────────────────
+     Name     Bus  SMART   Temp btrfs Allocated
+ ▶ 1 toshiba  sata ok      -    0 err 25%  1.4 / 5.5 TiB
+   2 ironwolf sata warning -    3 err 25%  1.4 / 5.5 TiB
+   3 wdc      usb  -       -    0 err 21%  0.8 / 3.6 TiB
+ Fans -- daemon: unknown ───────────────────────────────────────────────
+    PWM           RPM    Driving          Curve
+ 1  -/-           -      -                30-40° -> 20-100%
+Quit: q │ Help: ? │ Reset temp hi/lo: R │ Reload: r

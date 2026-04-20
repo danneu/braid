@@ -6,16 +6,17 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 mod help;
 
-use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph, Row, Table, TableState};
+use ratatui::widgets::{Block, Borders, Cell, Clear, Padding, Paragraph, Row, Table, TableState};
 use ratatui::Frame;
 use time::macros::format_description;
 use time::PrimitiveDateTime;
 
+use crate::config::FanControl;
 use crate::parse::types::{BtrfsBgType, ScrubState, SmartHealth};
 use crate::status::{BalanceReport, DiskErrors};
 use crate::tui::model::{
-    Model, PoolState, PoolStatus, Tab, TemperatureDiskId, TemperatureReading, TemperatureWatermark,
-    UnpooledDiskRender,
+    DaemonStatus, DrivingDrive, FanReading, Model, PoolState, PoolStatus, Tab, TemperatureDiskId,
+    TemperatureReading, TemperatureWatermark, UnpooledDiskRender,
 };
 
 fn format_timestamp(dt: &PrimitiveDateTime) -> String {
@@ -95,6 +96,113 @@ fn section_block(title: &str) -> Block<'_> {
         .title(format!(" {title} "))
         .border_style(Style::default().fg(Color::Cyan))
         .padding(ratatui::widgets::Padding::left(1))
+}
+
+fn section_block_with_status<'a>(
+    title: &'a str,
+    status_text: &'a str,
+    status_color: Color,
+) -> Block<'a> {
+    let title_line = Line::from(vec![
+        Span::raw(format!(" {title} -- daemon: ")),
+        Span::styled(status_text, Style::default().fg(status_color)),
+        Span::raw(" "),
+    ]);
+    Block::new()
+        .borders(Borders::TOP)
+        .title(title_line)
+        .border_style(Style::default().fg(Color::Cyan))
+        .padding(Padding::left(1))
+}
+
+fn format_pwm(reading: &Option<FanReading>) -> String {
+    match reading {
+        Some(r) => {
+            let pct = (r.pwm_raw as u32 * 100) / 255;
+            format!("{}/255 {}%", r.pwm_raw, pct)
+        }
+        None => "-/-".to_owned(),
+    }
+}
+
+fn format_rpm(reading: &Option<FanReading>) -> String {
+    match reading {
+        Some(r) => r.rpm.to_string(),
+        None => "-".to_owned(),
+    }
+}
+
+fn format_driving(d: &Option<DrivingDrive>) -> String {
+    match d {
+        Some(d) => format!("{} {}°", d.label, d.celsius),
+        None => "-".to_owned(),
+    }
+}
+
+fn format_curve(fc: &FanControl) -> String {
+    format!(
+        "{}-{}° -> {}-100%",
+        fc.min_temp, fc.max_temp, fc.min_fan_speed_percent
+    )
+}
+
+fn daemon_status_display(status: DaemonStatus) -> (&'static str, Color) {
+    match status {
+        DaemonStatus::Active => ("active", Color::Green),
+        DaemonStatus::Transitioning => ("activating", Color::Yellow),
+        DaemonStatus::Inactive => ("inactive", Color::Yellow),
+        DaemonStatus::Failed => ("failed", Color::Red),
+        DaemonStatus::Unknown => ("unknown", Color::DarkGray),
+    }
+}
+
+/// Render the single-row Fans table. Sensor cells render dim when the
+/// daemon is `Failed` or `Inactive` to signal "values are real but the
+/// control loop isn't acting on them". Caller is responsible for wrapping
+/// in `section_block_with_status`.
+///
+/// Precondition: `model.fan_control.is_some()` — the view_data layout
+/// branch only reaches here when fan control is configured.
+fn fan_section(model: &Model) -> Table<'_> {
+    let header = Row::new(["  ", "PWM", "RPM", "Driving", "Curve"])
+        .style(Style::default().fg(Color::DarkGray));
+
+    let (fan, driving, daemon) = match &model.fan {
+        Some(s) => (s.fan.clone(), s.driving.clone(), s.daemon),
+        // Before first probe completes: render placeholders and leave
+        // daemon as Unknown. The section still appears so its footprint
+        // doesn't pop in/out as probes fire.
+        None => (None, None, DaemonStatus::Unknown),
+    };
+
+    let fc = model
+        .fan_control
+        .as_ref()
+        .expect("fan_section called without fan_control");
+
+    let dim = matches!(daemon, DaemonStatus::Failed | DaemonStatus::Inactive);
+    let sensor_style = if dim {
+        Style::default().fg(Color::DarkGray)
+    } else {
+        Style::default()
+    };
+
+    let row = Row::new(vec![
+        Cell::from("1"),
+        Cell::from(format_pwm(&fan)).style(sensor_style),
+        Cell::from(format_rpm(&fan)).style(sensor_style),
+        Cell::from(format_driving(&driving)).style(sensor_style),
+        Cell::from(format_curve(fc)),
+    ]);
+
+    let widths = [
+        Constraint::Length(2),
+        Constraint::Length(13),
+        Constraint::Length(6),
+        Constraint::Length(16),
+        Constraint::Min(20),
+    ];
+    Table::new(vec![row], widths).header(header)
 }
 
 fn pool_info(pool: &PoolState) -> Paragraph<'_> {
@@ -644,13 +752,28 @@ fn view_data(model: &Model, frame: &mut Frame, area: Rect, _now: PrimitiveDateTi
         None => 1 + 1,
     };
     let disk_height: u16 = model.disk_names.len() as u16 + 2; // +1 border, +1 header
-    let chunks = Layout::vertical([
-        Constraint::Length(pool_height), // [0] pool
-        Constraint::Length(disk_height), // [1] disks
-        Constraint::Min(0),              // [2] spacer
-    ])
-    .spacing(1)
-    .split(area);
+    let fan_enabled = model.fan_control.is_some();
+    // border + header + single data row
+    let fan_height: u16 = 3;
+
+    let chunks = if fan_enabled {
+        Layout::vertical([
+            Constraint::Length(pool_height), // [0] pool
+            Constraint::Length(disk_height), // [1] disks
+            Constraint::Length(fan_height),  // [2] fans
+            Constraint::Min(0),              // [3] spacer
+        ])
+        .spacing(1)
+        .split(area)
+    } else {
+        Layout::vertical([
+            Constraint::Length(pool_height), // [0] pool
+            Constraint::Length(disk_height), // [1] disks
+            Constraint::Min(0),              // [2] spacer
+        ])
+        .spacing(1)
+        .split(area)
+    };
 
     match &model.pool {
         PoolStatus::Loading => {
@@ -704,6 +827,20 @@ fn view_data(model: &Model, frame: &mut Frame, area: Rect, _now: PrimitiveDateTi
 
     let mut table_state = TableState::default().with_selected(Some(model.selected_disk));
     frame.render_stateful_widget(disk_table(model, page_unit), chunks[1], &mut table_state);
+
+    if fan_enabled {
+        let daemon = model
+            .fan
+            .as_ref()
+            .map(|s| s.daemon)
+            .unwrap_or(DaemonStatus::Unknown);
+        let (status_text, status_color) = daemon_status_display(daemon);
+        frame.render_widget(
+            fan_section(model)
+                .block(section_block_with_status("Fans", status_text, status_color)),
+            chunks[2],
+        );
+    }
 }
 
 fn view_placeholder(frame: &mut Frame, area: Rect, name: &str) {
@@ -1572,6 +1709,186 @@ pub(crate) mod tests {
         model.tab = Tab::Scrub;
         let terminal = render(&model, 60, 22);
         snap!(buffer_to_string(&terminal));
+    }
+
+    // ----- Fan section snapshots -----
+
+    use crate::config::{FanControl as FanControlCfg, Pwm};
+    use crate::tui::model::{DaemonStatus, DrivingDrive, FanReading, FanSnapshot};
+
+    fn sample_fan_control() -> FanControlCfg {
+        FanControlCfg {
+            pwm: Pwm {
+                platform_device: "f71882fg.656".to_owned(),
+                number: 2,
+                min_start: 70,
+                max_stop: 60,
+            },
+            min_temp: 30,
+            max_temp: 40,
+            min_fan_speed_percent: 20,
+        }
+    }
+
+    fn sample_fan_snapshot_active() -> FanSnapshot {
+        FanSnapshot {
+            fan: Some(FanReading {
+                pwm_raw: 215,
+                rpm: 1240,
+            }),
+            driving: Some(DrivingDrive {
+                label: "ironwolf".to_owned(),
+                celsius: 38,
+            }),
+            daemon: DaemonStatus::Active,
+            probed_at: Instant::now(),
+        }
+    }
+
+    fn sample_fan_snapshot_no_hardware() -> FanSnapshot {
+        FanSnapshot {
+            fan: None,
+            driving: Some(DrivingDrive {
+                label: "ironwolf".to_owned(),
+                celsius: 38,
+            }),
+            daemon: DaemonStatus::Active,
+            probed_at: Instant::now(),
+        }
+    }
+
+    fn sample_fan_snapshot_no_drives() -> FanSnapshot {
+        FanSnapshot {
+            fan: Some(FanReading {
+                pwm_raw: 215,
+                rpm: 1240,
+            }),
+            driving: None,
+            daemon: DaemonStatus::Active,
+            probed_at: Instant::now(),
+        }
+    }
+
+    fn sample_fan_snapshot_daemon_failed() -> FanSnapshot {
+        FanSnapshot {
+            fan: Some(FanReading {
+                pwm_raw: 215,
+                rpm: 1240,
+            }),
+            driving: Some(DrivingDrive {
+                label: "ironwolf".to_owned(),
+                celsius: 38,
+            }),
+            daemon: DaemonStatus::Failed,
+            probed_at: Instant::now(),
+        }
+    }
+
+    // Intent: happy path -- pool mounted, fan_control set, snapshot
+    //         populated, daemon active. Header shows "daemon: active",
+    //         PWM/RPM/Driving/Curve cells render.
+    // Why: this is the common-case render. Locking it in with a
+    //      snapshot protects the layout against accidental breakage
+    //      during unrelated refactors.
+    // Scenario: running NAS with healthy fan control loop.
+    #[test]
+    fn snapshot_fans_section_active() {
+        let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(sample_pool()));
+        model.fan_control = Some(sample_fan_control());
+        model.fan = Some(sample_fan_snapshot_active());
+        let terminal = render(&model, 72, 28);
+        snap!(buffer_to_string(&terminal));
+    }
+
+    // Intent: fan section still renders when the pool is NotMounted.
+    // Why: fan control is a chassis safety loop, independent of LUKS
+    //      or btrfs state (revision 1 of the plan). Hiding fan info
+    //      when the pool is offline defeats the goal -- drives still
+    //      generate heat while the pool is locked.
+    // Scenario: user has booted but not yet run `braid unlock`.
+    #[test]
+    fn snapshot_fans_section_pool_offline() {
+        let mut model = Model::new_demo(sample_disk_names(), PoolStatus::NotMounted);
+        model.fan_control = Some(sample_fan_control());
+        model.fan = Some(sample_fan_snapshot_active());
+        let terminal = render(&model, 72, 28);
+        snap!(buffer_to_string(&terminal));
+    }
+
+    // Intent: fan hardware read failed but driving + daemon are fine.
+    //         PWM and RPM render as "-/-" and "-"; Driving still shows
+    //         the hottest drive.
+    // Why: correlated failure (missing hwmon, fan disconnected) should
+    //      degrade just the fan cells, not the whole section.
+    // Scenario: kernel module for the Super I/O didn't load yet (or
+    //           PWM glob matched zero paths).
+    #[test]
+    fn snapshot_fans_section_no_hardware() {
+        let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(sample_pool()));
+        model.fan_control = Some(sample_fan_control());
+        model.fan = Some(sample_fan_snapshot_no_hardware());
+        let terminal = render(&model, 72, 28);
+        snap!(buffer_to_string(&terminal));
+    }
+
+    // Intent: fan hardware fine but no drivetemp sensors -- Driving
+    //         renders as "-"; PWM/RPM still render.
+    // Why: drivetemp may be unavailable (kernel module not loaded, no
+    //      SATA disks) even when the fan itself is readable. Row should
+    //      still show actual PWM/RPM from the chassis fan.
+    // Scenario: all-NVMe host that still runs a chassis fan.
+    #[test]
+    fn snapshot_fans_section_no_drives() {
+        let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(sample_pool()));
+        model.fan_control = Some(sample_fan_control());
+        model.fan = Some(sample_fan_snapshot_no_drives());
+        let terminal = render(&model, 72, 28);
+        snap!(buffer_to_string(&terminal));
+    }
+
+    // Intent: daemon failed -- status renders in red, sensor cells dim.
+    // Why: daemon health is the source of truth for whether the control
+    //      loop is actually running (revision 6). Without this signal a
+    //      user looking at healthy-looking sensor values would miss that
+    //      hddfancontrol crashed.
+    // Scenario: `sudo systemctl stop hddfancontrol-braid.service` mid-session.
+    #[test]
+    fn snapshot_fans_section_daemon_failed() {
+        let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(sample_pool()));
+        model.fan_control = Some(sample_fan_control());
+        model.fan = Some(sample_fan_snapshot_daemon_failed());
+        let terminal = render(&model, 72, 28);
+        snap!(buffer_to_string(&terminal));
+    }
+
+    // Intent: pre-probe state (fan_control set, fan = None). Section
+    //         renders with all-"-" placeholders and "daemon: unknown"
+    //         in the header.
+    // Why: avoids pop-in/pop-out of the whole section footprint on the
+    //      first probe landing; the layout stabilizes at startup.
+    // Scenario: TUI has just launched and the initial fan probe is
+    //           still in flight.
+    #[test]
+    fn snapshot_fans_section_pre_probe() {
+        let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(sample_pool()));
+        model.fan_control = Some(sample_fan_control());
+        model.fan = None;
+        let terminal = render(&model, 72, 28);
+        snap!(buffer_to_string(&terminal));
+    }
+
+    // Intent: no fan_control in config -> no Fans header anywhere in
+    //         the buffer, layout unchanged from pre-feature.
+    // Why: users who haven't opted in must not have a surprise new
+    //      section take up screen space. "no fan_control in config"
+    //      is the feature flag.
+    // Scenario: default install without braid.fanControl.enable.
+    #[test]
+    fn snapshot_fans_section_disabled() {
+        let model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(sample_pool()));
+        let terminal = render(&model, 72, 28);
+        let buf = buffer_to_string(&terminal);
+        assert!(!buf.contains("Fans"), "Fans header should be absent:\n{buf}");
     }
 
     /// Intent: unpooled_disk_status_cell must surface a distinct label per

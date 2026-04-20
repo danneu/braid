@@ -199,6 +199,12 @@ pub enum CmdRequest {
     BraidBeepProbe {
         path: String,
     },
+    /// `systemctl is-active <unit>` — exits non-zero (3) when the unit is
+    /// inactive/failed but still prints the status word to stdout. The TUI
+    /// fan probe parses stdout regardless of exit code.
+    SystemctlIsActive {
+        unit: String,
+    },
 }
 
 #[derive(Debug)]
@@ -742,6 +748,10 @@ impl CmdRequest {
             CmdRequest::BraidBeepProbe { path } => CmdArgs {
                 program: path.clone(),
                 args: vec![],
+            },
+            CmdRequest::SystemctlIsActive { unit } => CmdArgs {
+                program: "systemctl".to_owned(),
+                args: vec!["is-active".into(), unit.clone()],
             },
         }
     }
