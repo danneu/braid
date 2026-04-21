@@ -118,14 +118,15 @@ not through braid).
 
 ## Mutation refusal on battery
 
-With UPS enabled, pool mutations refuse to start if the UPS is on
-battery or reporting low battery. Example:
+With UPS enabled, pool mutations refuse to start if the UPS reports
+any state that the TUI paints red (`LB` / `TESTFAIL` / `COMMBAD` /
+`FSD`) or yellow (`OB`). Example:
 
 ```
 $ sudo braid add newdisk=/dev/disk/by-id/ata-TOSHIBA_NEW
-error: cannot verify UPS is on utility power (UPS reports on-battery or
-low-battery) -- refusing to start add. Check 'braid ups status',
-restore utility power, then retry.
+error: cannot verify UPS is on utility power (UPS reports on-battery)
+-- refusing to start add. Check 'braid ups status', restore utility
+power, then retry.
 ```
 
 Recovery: run `braid ups status` to confirm, restore utility power,
@@ -133,7 +134,10 @@ wait for the status to return to `OL`, and retry the command.
 
 If `upsc` cannot reach the daemon (`daemon_down`), mutations also
 refuse with the same "cannot verify" wording -- fail-closed so a dead
-NUT daemon does not silently bypass the preflight.
+NUT daemon does not silently bypass the preflight. `TESTFAIL` and
+`COMMBAD` are treated the same way: braid does not start mutations on
+a UPS that is reporting a known-bad state, even when `OL` is also
+lit.
 
 ## doctor checks
 

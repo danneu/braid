@@ -206,15 +206,15 @@ fn fan_section(model: &Model) -> Table<'_> {
 }
 
 /// Render severity color for the UPS status set. Ordering matters:
-/// LB / TESTFAIL / COMMBAD / FSD are red (critical), OB is yellow
-/// (on battery), OL is green (utility power), everything else
-/// (including empty-set) is DarkGray.
+/// a critical flag (see `UpsStatusFlag::is_critical`) is red, OB alone
+/// is yellow (on battery, not yet critical), OL is green (utility
+/// power), everything else (including empty-set) is DarkGray.
+///
+/// Shares `UpsStatusFlag::is_critical` with
+/// `preflight::check_ups_not_on_battery` so the two surfaces never
+/// disagree about which tokens count as critical.
 fn ups_severity_color(flags: &std::collections::HashSet<UpsStatusFlag>) -> Color {
-    let is_critical = flags.contains(&UpsStatusFlag::Lb)
-        || flags.contains(&UpsStatusFlag::TestFail)
-        || flags.contains(&UpsStatusFlag::CommBad)
-        || flags.contains(&UpsStatusFlag::Fsd);
-    if is_critical {
+    if flags.iter().any(UpsStatusFlag::is_critical) {
         return Color::Red;
     }
     if flags.contains(&UpsStatusFlag::Ob) {

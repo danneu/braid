@@ -22,6 +22,8 @@ STATES = ["online", "onbattery", "lowbattery", "replace-battery"]
 start_all()
 machine.wait_for_unit("multi-user.target")
 machine.wait_for_unit("upsd.service")
+# upsmon is intentionally disabled for this capture VM (see .nix
+# header); don't wait on the unit.
 
 # The dummy-ups driver publishes ups.status to upsd once its first poll
 # cycle completes. Wait for each UPS's status to be queryable before

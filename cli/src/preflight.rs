@@ -3,7 +3,7 @@ use std::fmt;
 use crate::cmd::{CmdRequest, CommandRunner};
 use crate::journal;
 use crate::parse::parse_upsc;
-use crate::parse::types::{BtrfsDeviceUsageEntry, UpsStatusFlag};
+use crate::parse::types::BtrfsDeviceUsageEntry;
 use crate::parse::{parse_btrfs_device_usage, parse_findmnt_json};
 use crate::probe::Filesystem;
 use crate::state_paths::StatePaths;
@@ -302,13 +302,21 @@ pub fn check_raid1_relocation_space(
     Ok(())
 }
 
-/// Refuse if the configured UPS is on battery, reporting LB, or unreachable.
+/// Refuse if the configured UPS is on battery, in any critical state,
+/// or unreachable.
 ///
 /// Fail-closed: daemon-down, malformed output, and an empty `ups.status`
 /// all produce the same refusal. One wording covers all three so the
 /// message stays honest when the real cause is comms-failure rather than
 /// an on-battery condition. Caller passes `None` when no UPS is
 /// configured, which makes this a no-op.
+///
+/// Critical-state classification is shared with the TUI via
+/// `UpsStatusFlag::is_critical` so the two surfaces stay in sync: any
+/// token the UI paints red (LB, TESTFAIL, COMMBAD, FSD) also blocks
+/// mutations here. `OB` alone is yellow in the UI but still refused
+/// here -- starting a long mutation while the pool is on battery
+/// widens the mid-mutation recovery surface.
 ///
 /// Wire into `add`, `remove`, `remove-missing`, `replace` before journal
 /// write. See docs/decisions/020-ups-integration.md for the safety
@@ -340,10 +348,11 @@ pub fn check_ups_not_on_battery<R: CommandRunner>(
     if parsed.status_flags.is_empty() {
         return refuse("ups.status is empty or missing");
     }
-    if parsed.status_flags.contains(&UpsStatusFlag::Ob)
-        || parsed.status_flags.contains(&UpsStatusFlag::Lb)
-    {
-        return refuse("UPS reports on-battery or low-battery");
+    if parsed.is_critical() {
+        return refuse("UPS reports a critical state (LB / TESTFAIL / COMMBAD / FSD)");
+    }
+    if parsed.is_on_battery() {
+        return refuse("UPS reports on-battery");
     }
     Ok(())
 }
@@ -1026,7 +1035,46 @@ mod tests {
     fn ups_low_battery_refuses() {
         let runner = upsc_mock("ups", "ups.status: OL LB\n", 0);
         let err = check_ups_not_on_battery(&runner, Some("ups"), "add").unwrap_err();
-        assert!(err.contains("low-battery") || err.contains("on-battery"), "got: {err}");
+        assert!(err.contains("critical") || err.contains("on-battery"), "got: {err}");
+    }
+
+    #[test]
+    // Intent: TESTFAIL in ups.status triggers refusal, even when OL is
+    // also present.
+    // Why: the TUI shows TESTFAIL in red as a critical state; preflight
+    // must agree. A driver that surfaces TESTFAIL while OL is lit must
+    // not be a "green light" for mutation starts. Shares the predicate
+    // with the UI so the two surfaces cannot drift.
+    // Scenario: some drivers append TESTFAIL to ups.status on a
+    // failed self-test.
+    fn ups_test_fail_refuses() {
+        let runner = upsc_mock("ups", "ups.status: OL TESTFAIL\n", 0);
+        let err = check_ups_not_on_battery(&runner, Some("ups"), "add").unwrap_err();
+        assert!(err.contains("critical"), "got: {err}");
+    }
+
+    #[test]
+    // Intent: COMMBAD triggers refusal.
+    // Why: comms loss is fail-closed by definition -- we cannot trust
+    // what the UPS reports next. The TUI paints this red; preflight
+    // refuses.
+    // Scenario: USB cable unplugged mid-session; driver reports
+    // COMMBAD in ups.status before declaring the UPS lost.
+    fn ups_comm_bad_refuses() {
+        let runner = upsc_mock("ups", "ups.status: OL COMMBAD\n", 0);
+        let err = check_ups_not_on_battery(&runner, Some("ups"), "add").unwrap_err();
+        assert!(err.contains("critical"), "got: {err}");
+    }
+
+    #[test]
+    // Intent: FSD triggers refusal.
+    // Why: Forced-Shutdown-Delay means the UPS has decided shutdown is
+    // imminent. Starting a mutation here is always wrong.
+    // Scenario: network UPS has been issued a scheduled shutdown.
+    fn ups_fsd_refuses() {
+        let runner = upsc_mock("ups", "ups.status: OL FSD\n", 0);
+        let err = check_ups_not_on_battery(&runner, Some("ups"), "add").unwrap_err();
+        assert!(err.contains("critical"), "got: {err}");
     }
 
     #[test]

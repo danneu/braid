@@ -29,6 +29,16 @@
 # flip state at runtime (mid-mutation LB injection). That path is
 # deliberately kept on the 2.8.3 contract; if the matrix tests grow a
 # 2.8.4 failure mode, that's a separate problem.
+#
+# Design note -- why we do NOT run upsmon:
+#
+# Fixture capture only needs `upsd` + the `dummy-ups` drivers so that
+# `upsc` can connect. Running upsmon as well means a primary monitor
+# would watch the `lowbattery` dummy UPS, declare it critical
+# (OB+LB), and race its own SHUTDOWNCMD against our capture loop on
+# slower builders. Disabling upsmon via
+# `power.ups.upsmon.enable = false` keeps the capture deterministic
+# and limits the unit surface the test depends on.
 {
   name = "capture-ups-fixtures";
 
@@ -104,14 +114,6 @@
         port = "${_state}.dev";
         description = "braid fixture UPS (${spec.status})";
       };
-
-      mkMonitorEntry = _state: _spec: {
-        system = "${_state}@localhost";
-        powerValue = 1;
-        user = "ups";
-        type = "primary";
-        passwordFile = toString (pkgs.writeText "ups.pass" "fixturepass");
-      };
     in
     {
       environment.systemPackages = with pkgs; [
@@ -133,14 +135,11 @@
 
         ups = builtins.mapAttrs mkUpsEntry states;
 
-        # Single shared user for all UPSes. We don't need SET here
-        # (this capture is file-driven, not upsrw-driven).
-        users.ups = {
-          upsmon = "primary";
-          passwordFile = toString (pkgs.writeText "ups.pass" "fixturepass");
-        };
-
-        upsmon.monitor = builtins.mapAttrs mkMonitorEntry states;
+        # upsmon is intentionally NOT started -- see the header
+        # "why we do NOT run upsmon" note. upsd + drivers alone are
+        # enough for `upsc` to connect; adding upsmon would let it
+        # fire SHUTDOWNCMD on the `lowbattery` UPS mid-capture.
+        upsmon.enable = false;
       };
     };
 

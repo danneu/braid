@@ -527,6 +527,45 @@ impl UpsStatusFlag {
             Self::Unknown(s) => s.clone(),
         }
     }
+
+    /// Is this flag by itself a critical UPS state?
+    ///
+    /// "Critical" means: braid refuses to start pool-mutating commands
+    /// when this flag is present, and the TUI colors it red. Used by
+    /// both `preflight::check_ups_not_on_battery` and
+    /// `tui::view::ups_severity_color` so the two surfaces stay in
+    /// sync -- if a new driver-reported token lands, classification
+    /// lives in exactly one place.
+    ///
+    /// - `Lb` -- low battery, shutdown imminent.
+    /// - `TestFail` -- battery self-test failed.
+    /// - `CommBad` -- comms with UPS lost.
+    /// - `Fsd` -- forced shutdown in progress.
+    ///
+    /// `Ob` alone is NOT critical (yellow in the TUI); preflight
+    /// refuses on `Ob` separately.
+    pub fn is_critical(&self) -> bool {
+        matches!(
+            self,
+            Self::Lb | Self::TestFail | Self::CommBad | Self::Fsd
+        )
+    }
+}
+
+impl UpscOutput {
+    /// True when the UPS is reporting any critical state. See
+    /// `UpsStatusFlag::is_critical` for the token list.
+    pub fn is_critical(&self) -> bool {
+        self.status_flags.iter().any(UpsStatusFlag::is_critical)
+    }
+
+    /// True when the UPS reports it is running on battery (without
+    /// necessarily having crossed the low-battery threshold yet). Used
+    /// by preflight to refuse mutations that would start during an
+    /// outage, narrowing the recovery surface.
+    pub fn is_on_battery(&self) -> bool {
+        self.status_flags.contains(&UpsStatusFlag::Ob)
+    }
 }
 
 impl From<UpsStatusFlag> for String {
@@ -668,5 +707,43 @@ mod tests {
     #[test]
     fn data_ratio_logical_bytes_intermediate() {
         assert_eq!(DataRatio(101).logical_bytes(1_000_000), 990_099);
+    }
+
+    // Intent: UpsStatusFlag::is_critical names the exact set used by
+    // both preflight and the TUI severity color mapping.
+    // Why: this is the single classifier shared between surfaces. A
+    // regression that silently drops a token from the critical set
+    // would make preflight pass while the UI still paints red, or
+    // vice versa. Pinning the set here makes any shift visible at
+    // the source.
+    // Scenario: future edits to the UpsStatusFlag enum or severity
+    // rules.
+    #[test]
+    fn ups_status_flag_critical_set() {
+        for flag in [
+            UpsStatusFlag::Lb,
+            UpsStatusFlag::TestFail,
+            UpsStatusFlag::CommBad,
+            UpsStatusFlag::Fsd,
+        ] {
+            assert!(flag.is_critical(), "{flag:?} should be critical");
+        }
+        for flag in [
+            UpsStatusFlag::Ol,
+            UpsStatusFlag::Ob,
+            UpsStatusFlag::Rb,
+            UpsStatusFlag::Hb,
+            UpsStatusFlag::Chrg,
+            UpsStatusFlag::Dischrg,
+            UpsStatusFlag::Cal,
+            UpsStatusFlag::Bypass,
+            UpsStatusFlag::Off,
+            UpsStatusFlag::Over,
+            UpsStatusFlag::Trim,
+            UpsStatusFlag::Boost,
+            UpsStatusFlag::Unknown("WHATEVER".into()),
+        ] {
+            assert!(!flag.is_critical(), "{flag:?} must not be critical");
+        }
     }
 }
