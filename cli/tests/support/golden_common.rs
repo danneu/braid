@@ -420,3 +420,149 @@ fn golden_cryptsetup_status_inactive() {
     assert!(!out.is_active);
     assert_eq!(out.device, None);
 }
+
+// --- NUT (upsc) parsers ---
+//
+// Fixtures live under `upsc/` because they were captured by the dedicated
+// `capture-ups-fixtures` VM test; the stable (nixos-25.11) fixtures are
+// authoritative and the unstable sibling tracks upstream drift. See
+// docs/decisions/010-toolchain-pinning.md for the pinning contract.
+
+fn upsc_fixture(name: &str) -> Option<String> {
+    fixture(&format!("upsc/{name}"))
+}
+
+fn upsc_ok(name: &str) -> Option<braid_cli::parse::types::UpscOutput> {
+    let stdout = upsc_fixture(name)?;
+    let raw = RawCommandOutput {
+        cmd: "upsc".into(),
+        stdout,
+        stderr: String::new(),
+        exit_status: 0,
+    };
+    Some(
+        parse::upsc::parse_upsc(&raw)
+            .unwrap_or_else(|e| panic!("parse_upsc failed on {name}: {e}")),
+    )
+}
+
+// Intent: the online fixture parses with exactly `{OL}` and surfaces the
+// full typed model (battery, load, realpower, input, device).
+// Why: this is the normal steady state; every field the TUI and `braid ups
+// status` curate must round-trip. A regression here silently blanks
+// sections of the UI.
+// Scenario: UPS on utility power, full charge, no active alerts.
+#[test]
+fn golden_upsc_online() {
+    let Some(out) = upsc_ok("upsc-online.txt") else {
+        eprintln!("SKIP: upsc/upsc-online.txt not captured yet");
+        return;
+    };
+    use parse::types::UpsStatusFlag;
+    assert!(out.status_flags.contains(&UpsStatusFlag::Ol));
+    assert_eq!(out.status_flags.len(), 1, "online state is exactly {{OL}}");
+    assert_eq!(out.battery.charge_pct, Some(100));
+    assert_eq!(out.battery.runtime_secs, Some(1800));
+    assert_eq!(out.load_pct, Some(17));
+    assert_eq!(out.realpower_nominal_watts, Some(330));
+    assert_eq!(out.input.voltage.as_deref(), Some("120.0"));
+    assert_eq!(out.input.transfer_low.as_deref(), Some("88"));
+    assert_eq!(out.input.transfer_high.as_deref(), Some("142"));
+    assert_eq!(out.device.model.as_deref(), Some("Back-UPS ES 550G"));
+    assert_eq!(out.device.mfr.as_deref(), Some("APC"));
+    assert!(out.test_result.is_some(), "ups.test.result expected");
+}
+
+// Intent: the on-battery fixture produces {OB} (no LB) and a reduced
+// charge + runtime.
+// Why: the TUI colors OB yellow, LB red. If the parser folded both into
+// one state, the user could not tell whether LB had actually fired.
+// Scenario: sustained utility outage; battery is discharging but has not
+// yet dropped below battery.charge.low.
+#[test]
+fn golden_upsc_onbattery() {
+    let Some(out) = upsc_ok("upsc-onbattery.txt") else {
+        eprintln!("SKIP: upsc/upsc-onbattery.txt not captured yet");
+        return;
+    };
+    use parse::types::UpsStatusFlag;
+    assert!(out.status_flags.contains(&UpsStatusFlag::Ob));
+    assert!(
+        !out.status_flags.contains(&UpsStatusFlag::Lb),
+        "OB alone must not carry LB"
+    );
+    assert!(
+        matches!(out.battery.charge_pct, Some(pct) if pct < 100),
+        "on-battery fixture seeds a partial charge"
+    );
+}
+
+// Intent: the low-battery fixture produces the full critical pair {OB,LB}.
+// Why: upsmon's critical-state check (reference/nut/clients/upsmon.c:1404)
+// requires both flags. Every safety contract that depends on the critical
+// state (the SHUTDOWNCMD path, preflight refusal, TUI red coloring) reads
+// this combination; a parser regression here breaks all three.
+// Scenario: outage long enough to cross battery.charge.low -- upsmon will
+// fire SHUTDOWNCMD at this point.
+#[test]
+fn golden_upsc_lowbattery() {
+    let Some(out) = upsc_ok("upsc-lowbattery.txt") else {
+        eprintln!("SKIP: upsc/upsc-lowbattery.txt not captured yet");
+        return;
+    };
+    use parse::types::UpsStatusFlag;
+    assert!(out.status_flags.contains(&UpsStatusFlag::Ob));
+    assert!(out.status_flags.contains(&UpsStatusFlag::Lb));
+    // Sanity: the fixture seeds battery.charge below the low threshold.
+    match out.battery.charge_pct {
+        Some(pct) => assert!(pct <= 10, "lowbattery fixture should seed charge <=10, got {pct}"),
+        None => panic!("battery.charge must parse on the lowbattery fixture"),
+    }
+}
+
+// Intent: the replace-battery fixture produces {OL, RB} and does NOT
+// trigger preflight refusal logic.
+// Why: RB is advisory -- the battery is aging, but the UPS is still on
+// utility power. A parser that misclassified RB as critical would cause
+// mutation commands to refuse for a cosmetic condition.
+// Scenario: old UPS battery; operator is being reminded to replace, but
+// nothing is actually wrong right now.
+#[test]
+fn golden_upsc_replace_battery() {
+    let Some(out) = upsc_ok("upsc-replace-battery.txt") else {
+        eprintln!("SKIP: upsc/upsc-replace-battery.txt not captured yet");
+        return;
+    };
+    use parse::types::UpsStatusFlag;
+    assert!(out.status_flags.contains(&UpsStatusFlag::Ol));
+    assert!(out.status_flags.contains(&UpsStatusFlag::Rb));
+    assert!(!out.status_flags.contains(&UpsStatusFlag::Ob));
+    assert!(!out.status_flags.contains(&UpsStatusFlag::Lb));
+}
+
+// Intent: the daemon-down stderr fixture routes through CommandFailed.
+// Why: preflight distinguishes daemon-down from on-battery; both refuse
+// the mutation but the message + reason differ. Golden-fixture coverage
+// here locks in the non-zero-exit contract even if upstream upsc changes
+// its stderr wording.
+// Scenario: operator ran `braid ups status` while upsd.service was
+// stopped.
+#[test]
+fn golden_upsc_daemon_down() {
+    let Some(stderr) = upsc_fixture("upsc-daemon-down.stderr") else {
+        eprintln!("SKIP: upsc/upsc-daemon-down.stderr not captured yet");
+        return;
+    };
+    let raw = RawCommandOutput {
+        cmd: "upsc ups".into(),
+        stdout: String::new(),
+        stderr,
+        exit_status: 1,
+    };
+    let err = parse::upsc::parse_upsc(&raw)
+        .expect_err("daemon-down fixture must route through CommandFailed");
+    assert!(
+        matches!(err, parse::ParseError::CommandFailed { .. }),
+        "expected CommandFailed, got {err:?}"
+    );
+}

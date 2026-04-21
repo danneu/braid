@@ -2,8 +2,8 @@ use std::collections::VecDeque;
 use std::process::ExitStatus;
 use std::time::{Duration, Instant};
 
-use crate::tui::effect::{Effect, FAN_PROBE_INTERVAL};
-use crate::tui::model::{FanSnapshot, Model, PoolState, PoolStatus, TemperatureWatermark};
+use crate::tui::effect::{Effect, FAN_PROBE_INTERVAL, UPS_PROBE_INTERVAL};
+use crate::tui::model::{FanSnapshot, Model, PoolState, PoolStatus, TemperatureWatermark, UpsSnapshot};
 use crate::tui::state::{CmdId, CmdStatus, CommandState, Stream, MAX_LINES};
 
 pub enum Message {
@@ -38,6 +38,12 @@ pub enum Message {
     /// fresh fan_control + inflight state off Model before emitting the
     /// next `Effect::ProbeFan`.
     RefreshFan,
+    /// A UPS probe finished. Install the snapshot and re-arm the loop.
+    UpsProbeFinished(UpsSnapshot),
+    /// Scheduler tick from `Effect::ScheduleUpsProbe`. The handler reads
+    /// fresh ups_config + inflight state off Model before emitting the
+    /// next `Effect::ProbeUps`.
+    RefreshUps,
 }
 
 fn fan_probe_effect(model: &Model) -> Option<Effect> {
@@ -47,6 +53,18 @@ fn fan_probe_effect(model: &Model) -> Option<Effect> {
         dev_root: std::path::PathBuf::from("/dev"),
         disk_by_id: model.disk_by_id.clone(),
         fan_control: fc.clone(),
+    })
+}
+
+/// Emit an `Effect::ProbeUps` when the UPS block is present AND enabled.
+/// Mirrors `fan_probe_effect` for the fan subsystem.
+fn ups_probe_effect(model: &Model) -> Option<Effect> {
+    let u = model.ups_config.as_ref()?;
+    if !u.enable {
+        return None;
+    }
+    Some(Effect::ProbeUps {
+        name: u.name.clone(),
     })
 }
 
@@ -90,6 +108,16 @@ pub fn update(model: &mut Model, msg: Message) -> Vec<Effect> {
                     model.fan_probe_inflight = true;
                     effects.push(fan_effect);
                 }
+            // Manual `r` refreshes the UPS too. Same inflight-guard
+            // pattern as the fan section -- a duplicate probe would
+            // race with the pending one and the scheduler could lose
+            // an inflight flip.
+            if !model.ups_probe_inflight
+                && let Some(ups_effect) = ups_probe_effect(model)
+            {
+                model.ups_probe_inflight = true;
+                effects.push(ups_effect);
+            }
             effects
         }
         Message::SelectNextDisk => {
@@ -211,6 +239,35 @@ pub fn update(model: &mut Model, msg: Message) -> Vec<Effect> {
             model.fan_probe_inflight = true;
             vec![effect]
         }
+        Message::UpsProbeFinished(snapshot) => {
+            model.ups = Some(snapshot);
+            model.ups_probe_inflight = false;
+            vec![Effect::ScheduleUpsProbe {
+                delay: UPS_PROBE_INTERVAL,
+            }]
+        }
+        Message::RefreshUps => {
+            // Disabled / absent UPS config -> tear the loop down, no
+            // further effects. Mirror of the fan loop.
+            let enabled = model
+                .ups_config
+                .as_ref()
+                .is_some_and(|u| u.enable);
+            if !enabled {
+                return vec![];
+            }
+            if model.ups_probe_inflight {
+                return vec![Effect::ScheduleUpsProbe {
+                    delay: UPS_PROBE_INTERVAL,
+                }];
+            }
+            let effect = match ups_probe_effect(model) {
+                Some(e) => e,
+                None => return vec![],
+            };
+            model.ups_probe_inflight = true;
+            vec![effect]
+        }
     }
 }
 
@@ -232,6 +289,31 @@ mod tests {
     }
     fn is_schedule_pool(e: &Effect) -> bool {
         matches!(e, Effect::ScheduleProbe { .. })
+    }
+    fn is_probe_ups(e: &Effect) -> bool {
+        matches!(e, Effect::ProbeUps { .. })
+    }
+    fn is_schedule_ups(e: &Effect) -> bool {
+        matches!(e, Effect::ScheduleUpsProbe { .. })
+    }
+
+    fn sample_ups_config(enable: bool) -> crate::config::Ups {
+        crate::config::Ups {
+            enable,
+            name: "ups".into(),
+        }
+    }
+
+    fn sample_ups_snapshot() -> UpsSnapshot {
+        UpsSnapshot {
+            flags: std::collections::HashSet::new(),
+            battery_charge_pct: None,
+            runtime_secs: None,
+            load_pct: None,
+            watts_estimated: None,
+            daemon: DaemonStatus::Active,
+            probed_at: Instant::now(),
+        }
     }
 
     fn sample_fan_control() -> FanControlCfg {
@@ -603,5 +685,119 @@ mod tests {
         assert!(!model.session_temperature_stats.is_empty());
         update(&mut model, Message::ResetTemperatureStats);
         assert!(model.session_temperature_stats.is_empty());
+    }
+
+    // --- UPS probe scheduling tests (mirror the Fan pattern) ---
+
+    // Intent: UpsProbeFinished installs the snapshot, clears inflight,
+    // and emits exactly one ScheduleUpsProbe -- no pool side-effects.
+    // Why: pool and UPS probes are independent; a stray pool-schedule
+    // here would wake drives on every 5s UPS tick, defeating the
+    // cheap-cadence design.
+    // Scenario: in-flight UPS probe returns.
+    #[test]
+    fn ups_probe_finished_schedules_only_ups_refresh() {
+        let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(sample_pool()));
+        model.ups_config = Some(sample_ups_config(true));
+        model.ups_probe_inflight = true;
+        let effects = update(&mut model, Message::UpsProbeFinished(sample_ups_snapshot()));
+        assert!(model.ups.is_some());
+        assert!(!model.ups_probe_inflight);
+        assert_eq!(effects.len(), 1);
+        assert!(is_schedule_ups(&effects[0]));
+        assert!(!effects.iter().any(is_probe_pool));
+        assert!(!effects.iter().any(is_schedule_pool));
+    }
+
+    // Intent: RefreshUps with a probe in flight re-arms the scheduler
+    // but does NOT spawn a duplicate ProbeUps.
+    // Why: a duplicate probe would race with the inflight one;
+    // UpsProbeFinished clears inflight, so a second finish could land
+    // while the loop thinks nothing is running.
+    // Scenario: auto-poll tick fires while a slow UPS probe is still
+    // running (NUT is unusually laggy under VM load).
+    #[test]
+    fn refresh_ups_skips_when_inflight() {
+        let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Loading);
+        model.ups_config = Some(sample_ups_config(true));
+        model.ups_probe_inflight = true;
+        let effects = update(&mut model, Message::RefreshUps);
+        assert_eq!(effects.len(), 1);
+        assert!(is_schedule_ups(&effects[0]));
+        assert!(!effects.iter().any(is_probe_ups));
+    }
+
+    // Intent: RefreshUps with no UPS config tears the loop down
+    // cleanly (no effects).
+    // Why: the scheduler should not spin empty probes after the user
+    // disables UPS support between reloads.
+    // Scenario: scheduler tick fires after ups_config became None.
+    #[test]
+    fn refresh_ups_skips_when_disabled() {
+        let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Loading);
+        model.ups_config = None;
+        let effects = update(&mut model, Message::RefreshUps);
+        assert!(effects.is_empty());
+    }
+
+    // Intent: RefreshUps with config present but enable=false also
+    // tears the loop down.
+    // Why: the Nix-emitted config can carry an ups block whose
+    // `enable = false` (e.g. during a partial rollout); the loop
+    // must honour that.
+    // Scenario: operator sets braid.ups.enable = false temporarily.
+    #[test]
+    fn refresh_ups_skips_when_not_enabled() {
+        let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Loading);
+        model.ups_config = Some(sample_ups_config(false));
+        let effects = update(&mut model, Message::RefreshUps);
+        assert!(effects.is_empty());
+    }
+
+    // Intent: RefreshUps with config enabled and no probe in flight
+    // emits exactly one ProbeUps AND flips inflight to true.
+    // Why: the inflight flag is the guard for the manual-refresh +
+    // auto-poll duplicate-probe case; flipping it here, at the point
+    // of decision, is the single source of truth.
+    // Scenario: first scheduler tick on a UPS-enabled system.
+    #[test]
+    fn refresh_ups_emits_probe_when_idle() {
+        let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Loading);
+        model.ups_config = Some(sample_ups_config(true));
+        model.ups_probe_inflight = false;
+        let effects = update(&mut model, Message::RefreshUps);
+        assert!(effects.iter().any(is_probe_ups));
+        assert!(model.ups_probe_inflight);
+    }
+
+    // Intent: manual `r` with UPS enabled + idle fires BOTH pool and
+    // UPS probes.
+    // Why: the user's mental model of `r` is "refresh everything";
+    // stopping short of the UPS would create asymmetry with the fan
+    // path.
+    // Scenario: user presses `r` on a UPS-enabled system.
+    #[test]
+    fn refresh_pool_with_ups_idle_emits_both() {
+        let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(sample_pool()));
+        model.ups_config = Some(sample_ups_config(true));
+        model.ups_probe_inflight = false;
+        let effects = update(&mut model, Message::RefreshPool);
+        assert!(effects.iter().any(is_probe_pool), "missing ProbePool");
+        assert!(effects.iter().any(is_probe_ups), "missing ProbeUps");
+        assert!(model.ups_probe_inflight);
+    }
+
+    // Intent: manual `r` with a UPS probe already in flight emits
+    // only the pool effect, not a duplicate ProbeUps.
+    // Why: same inflight-guard rationale as the fan mirror.
+    // Scenario: user presses `r` while a slow UPS probe is pending.
+    #[test]
+    fn refresh_pool_with_ups_inflight_emits_only_pool() {
+        let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(sample_pool()));
+        model.ups_config = Some(sample_ups_config(true));
+        model.ups_probe_inflight = true;
+        let effects = update(&mut model, Message::RefreshPool);
+        assert!(effects.iter().any(is_probe_pool));
+        assert!(!effects.iter().any(is_probe_ups));
     }
 }

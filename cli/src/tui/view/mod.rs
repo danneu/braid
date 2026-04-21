@@ -12,11 +12,11 @@ use time::macros::format_description;
 use time::PrimitiveDateTime;
 
 use crate::config::FanControl;
-use crate::parse::types::{BtrfsBgType, ScrubState, SmartHealth};
+use crate::parse::types::{BtrfsBgType, ScrubState, SmartHealth, UpsStatusFlag};
 use crate::status::{BalanceReport, DiskErrors};
 use crate::tui::model::{
     DaemonStatus, DrivingDrive, FanReading, Model, PoolState, PoolStatus, Tab, TemperatureDiskId,
-    TemperatureReading, TemperatureWatermark, UnpooledDiskRender,
+    TemperatureReading, TemperatureWatermark, UnpooledDiskRender, UpsSnapshot,
 };
 
 fn format_timestamp(dt: &PrimitiveDateTime) -> String {
@@ -201,6 +201,104 @@ fn fan_section(model: &Model) -> Table<'_> {
         Constraint::Length(6),
         Constraint::Length(16),
         Constraint::Min(20),
+    ];
+    Table::new(vec![row], widths).header(header)
+}
+
+/// Render severity color for the UPS status set. Ordering matters:
+/// LB / TESTFAIL / COMMBAD / FSD are red (critical), OB is yellow
+/// (on battery), OL is green (utility power), everything else
+/// (including empty-set) is DarkGray.
+fn ups_severity_color(flags: &std::collections::HashSet<UpsStatusFlag>) -> Color {
+    let is_critical = flags.contains(&UpsStatusFlag::Lb)
+        || flags.contains(&UpsStatusFlag::TestFail)
+        || flags.contains(&UpsStatusFlag::CommBad)
+        || flags.contains(&UpsStatusFlag::Fsd);
+    if is_critical {
+        return Color::Red;
+    }
+    if flags.contains(&UpsStatusFlag::Ob) {
+        return Color::Yellow;
+    }
+    if flags.contains(&UpsStatusFlag::Ol) {
+        return Color::Green;
+    }
+    Color::DarkGray
+}
+
+/// Stable sort of ups.status tokens for display.
+fn format_ups_flags(flags: &std::collections::HashSet<UpsStatusFlag>) -> String {
+    if flags.is_empty() {
+        return "--".into();
+    }
+    let mut tokens: Vec<String> = flags.iter().map(UpsStatusFlag::as_token).collect();
+    tokens.sort();
+    tokens.join(" ")
+}
+
+fn format_ups_charge(snapshot: &UpsSnapshot) -> String {
+    match snapshot.battery_charge_pct {
+        Some(pct) => format!("{}%", pct),
+        None => "--".into(),
+    }
+}
+
+fn format_ups_runtime(snapshot: &UpsSnapshot) -> String {
+    match snapshot.runtime_secs {
+        Some(secs) => crate::ups::format_runtime(secs),
+        None => "--".into(),
+    }
+}
+
+fn format_ups_load(snapshot: &UpsSnapshot) -> String {
+    match (snapshot.load_pct, snapshot.watts_estimated) {
+        (Some(pct), Some(w)) => format!("{}% ({} W est.)", pct, w),
+        (Some(pct), None) => format!("{}%", pct),
+        _ => "--".into(),
+    }
+}
+
+/// Render the single-row UPS table. Sensor cells render dim when the
+/// UPS daemon is Failed or Inactive (mirror of the Fans section).
+///
+/// Precondition: `model.ups_config` is Some AND enable=true.
+fn ups_section(model: &Model) -> Table<'_> {
+    let header = Row::new(["Status", "Battery", "Runtime", "Load"])
+        .style(Style::default().fg(Color::DarkGray));
+
+    let snapshot = model.ups.as_ref();
+    let daemon = snapshot
+        .map(|s| s.daemon)
+        .unwrap_or(DaemonStatus::Unknown);
+    let dim = matches!(daemon, DaemonStatus::Failed | DaemonStatus::Inactive);
+    let sensor_style = if dim {
+        Style::default().fg(Color::DarkGray)
+    } else {
+        Style::default()
+    };
+
+    let status_text = snapshot
+        .map(|s| format_ups_flags(&s.flags))
+        .unwrap_or_else(|| "--".into());
+    let status_color = snapshot
+        .map(|s| ups_severity_color(&s.flags))
+        .unwrap_or(Color::DarkGray);
+
+    let row = Row::new(vec![
+        Cell::from(status_text).style(Style::default().fg(status_color)),
+        Cell::from(snapshot.map(format_ups_charge).unwrap_or_else(|| "--".into()))
+            .style(sensor_style),
+        Cell::from(snapshot.map(format_ups_runtime).unwrap_or_else(|| "--".into()))
+            .style(sensor_style),
+        Cell::from(snapshot.map(format_ups_load).unwrap_or_else(|| "--".into()))
+            .style(sensor_style),
+    ]);
+
+    let widths = [
+        Constraint::Length(10),
+        Constraint::Length(9),
+        Constraint::Length(9),
+        Constraint::Min(18),
     ];
     Table::new(vec![row], widths).header(header)
 }
@@ -753,27 +851,32 @@ fn view_data(model: &Model, frame: &mut Frame, area: Rect, _now: PrimitiveDateTi
     };
     let disk_height: u16 = model.disk_names.len() as u16 + 2; // +1 border, +1 header
     let fan_enabled = model.fan_control.is_some();
+    let ups_enabled = model
+        .ups_config
+        .as_ref()
+        .is_some_and(|u| u.enable);
     // border + header + single data row
     let fan_height: u16 = 3;
+    let ups_height: u16 = 3;
 
-    let chunks = if fan_enabled {
-        Layout::vertical([
-            Constraint::Length(pool_height), // [0] pool
-            Constraint::Length(disk_height), // [1] disks
-            Constraint::Length(fan_height),  // [2] fans
-            Constraint::Min(0),              // [3] spacer
-        ])
-        .spacing(1)
-        .split(area)
+    let mut constraints: Vec<Constraint> = vec![
+        Constraint::Length(pool_height),
+        Constraint::Length(disk_height),
+    ];
+    let fan_idx = if fan_enabled {
+        constraints.push(Constraint::Length(fan_height));
+        Some(constraints.len() - 1)
     } else {
-        Layout::vertical([
-            Constraint::Length(pool_height), // [0] pool
-            Constraint::Length(disk_height), // [1] disks
-            Constraint::Min(0),              // [2] spacer
-        ])
-        .spacing(1)
-        .split(area)
+        None
     };
+    let ups_idx = if ups_enabled {
+        constraints.push(Constraint::Length(ups_height));
+        Some(constraints.len() - 1)
+    } else {
+        None
+    };
+    constraints.push(Constraint::Min(0));
+    let chunks = Layout::vertical(constraints).spacing(1).split(area);
 
     match &model.pool {
         PoolStatus::Loading => {
@@ -828,7 +931,7 @@ fn view_data(model: &Model, frame: &mut Frame, area: Rect, _now: PrimitiveDateTi
     let mut table_state = TableState::default().with_selected(Some(model.selected_disk));
     frame.render_stateful_widget(disk_table(model, page_unit), chunks[1], &mut table_state);
 
-    if fan_enabled {
+    if let Some(idx) = fan_idx {
         let daemon = model
             .fan
             .as_ref()
@@ -838,7 +941,21 @@ fn view_data(model: &Model, frame: &mut Frame, area: Rect, _now: PrimitiveDateTi
         frame.render_widget(
             fan_section(model)
                 .block(section_block_with_status("Fans", status_text, status_color)),
-            chunks[2],
+            chunks[idx],
+        );
+    }
+
+    if let Some(idx) = ups_idx {
+        let daemon = model
+            .ups
+            .as_ref()
+            .map(|s| s.daemon)
+            .unwrap_or(DaemonStatus::Unknown);
+        let (status_text, status_color) = daemon_status_display(daemon);
+        frame.render_widget(
+            ups_section(model)
+                .block(section_block_with_status("UPS", status_text, status_color)),
+            chunks[idx],
         );
     }
 }
@@ -1935,5 +2052,102 @@ pub(crate) mod tests {
             unpooled_disk_status_cell(&pool, "foxtrot").is_none(),
             "names not in unpooled_disks must return None so callers can fall back"
         );
+    }
+
+    // --- UPS rendering tests ---
+
+    fn flags_set(tokens: &[UpsStatusFlag]) -> std::collections::HashSet<UpsStatusFlag> {
+        tokens.iter().cloned().collect()
+    }
+
+    // Intent: ups_severity_color routes LB/TESTFAIL/COMMBAD/FSD to Red
+    // even when OL is simultaneously present.
+    // Why: a driver reporting "OL LB" during a brief battery self-test
+    // must not render green; the whole point of severity coloring is
+    // that the worst flag wins. Regression here would give operators
+    // false confidence.
+    // Scenario: Covers each of the four critical flags alongside OL.
+    #[test]
+    fn ups_severity_critical_wins_over_ol() {
+        for bad in [
+            UpsStatusFlag::Lb,
+            UpsStatusFlag::TestFail,
+            UpsStatusFlag::CommBad,
+            UpsStatusFlag::Fsd,
+        ] {
+            let flags = flags_set(&[UpsStatusFlag::Ol, bad.clone()]);
+            assert_eq!(
+                ups_severity_color(&flags),
+                Color::Red,
+                "OL + {bad:?} must render Red"
+            );
+        }
+    }
+
+    // Intent: OB alone (without LB) renders Yellow.
+    // Why: the "on battery, not yet critical" state is a meaningful
+    // yellow-severity observation. A color regression here would
+    // collapse the OB/LB distinction from the operator's point of
+    // view.
+    // Scenario: sustained utility outage before battery.charge.low
+    // threshold is crossed.
+    #[test]
+    fn ups_severity_ob_alone_is_yellow() {
+        let flags = flags_set(&[UpsStatusFlag::Ob]);
+        assert_eq!(ups_severity_color(&flags), Color::Yellow);
+    }
+
+    // Intent: OL alone renders Green.
+    // Why: baseline health indicator must be green; anything else
+    // would be a silent visual regression.
+    // Scenario: UPS on utility power, healthy battery.
+    #[test]
+    fn ups_severity_ol_alone_is_green() {
+        let flags = flags_set(&[UpsStatusFlag::Ol]);
+        assert_eq!(ups_severity_color(&flags), Color::Green);
+    }
+
+    // Intent: empty flag set renders DarkGray (unknown).
+    // Why: the first-probe placeholder and the daemon-down fail-closed
+    // path both land here; both deserve the dim "nothing known yet"
+    // color, not green or yellow.
+    // Scenario: pre-first-probe Model::ups == None path, or UpsSnapshot
+    // built from a daemon-down fallback.
+    #[test]
+    fn ups_severity_empty_is_dark_gray() {
+        let flags = std::collections::HashSet::new();
+        assert_eq!(ups_severity_color(&flags), Color::DarkGray);
+    }
+
+    // Intent: OL + RB renders Green (RB is advisory, not critical).
+    // Why: a battery-replace advisory is important for operator
+    // awareness but does not imply imminent shutdown. Coloring it red
+    // would cry wolf.
+    // Scenario: old UPS with aging battery; utility power is fine.
+    #[test]
+    fn ups_severity_ol_plus_rb_is_green() {
+        let flags = flags_set(&[UpsStatusFlag::Ol, UpsStatusFlag::Rb]);
+        assert_eq!(ups_severity_color(&flags), Color::Green);
+    }
+
+    // Intent: format_ups_load only annotates watts when both load% and
+    // watts_estimated are available.
+    // Why: partial data must not invent a watts figure (see plan --
+    // "labeled 'estimated' when both ingredients are present").
+    // Scenario: load present but no realpower.nominal -> no annotation.
+    #[test]
+    fn ups_format_load_skips_watts_when_unknown() {
+        let mut s = UpsSnapshot {
+            flags: std::collections::HashSet::new(),
+            battery_charge_pct: None,
+            runtime_secs: None,
+            load_pct: Some(40),
+            watts_estimated: None,
+            daemon: DaemonStatus::Active,
+            probed_at: Instant::now(),
+        };
+        assert_eq!(format_ups_load(&s), "40%");
+        s.watts_estimated = Some(132);
+        assert_eq!(format_ups_load(&s), "40% (132 W est.)");
     }
 }

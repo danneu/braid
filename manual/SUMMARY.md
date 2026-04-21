@@ -11,6 +11,7 @@
 - [Monitoring and alerts](guides/monitoring-and-alerts.md)
 - [Power management](guides/power-management.md)
 - [Fan control](guides/fan-control.md)
+- [UPS](guides/ups.md)
 - [NixOS configuration](guides/nixos-configuration.md)
 - [Sharing and permissions](guides/sharing-and-permissions.md)
 - [Troubleshooting](guides/troubleshooting.md)
@@ -34,6 +35,7 @@
 - [recover](commands/recover.md)
 - [tui](commands/tui.md)
 - [browse](commands/browse.md)
+- [ups status](commands/ups-status.md)
 
 # Development
 

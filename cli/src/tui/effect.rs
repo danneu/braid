@@ -15,6 +15,7 @@ use std::time::Duration;
 
 pub const PROBE_INTERVAL: Duration = Duration::from_secs(5);
 pub const FAN_PROBE_INTERVAL: Duration = Duration::from_secs(5);
+pub const UPS_PROBE_INTERVAL: Duration = Duration::from_secs(5);
 
 pub enum Effect {
     SpawnCommand {
@@ -37,6 +38,14 @@ pub enum Effect {
         fan_control: FanControl,
     },
     ScheduleFanProbe {
+        delay: Duration,
+    },
+    /// Run `upsc <name>` + `parse_upsc` on a worker thread; the result
+    /// becomes `Event::UpsProbeFinished`.
+    ProbeUps {
+        name: String,
+    },
+    ScheduleUpsProbe {
         delay: Duration,
     },
 }
@@ -98,6 +107,21 @@ pub fn execute_effect(effect: Effect, cmd_tx: &mpsc::Sender<Event>) {
             thread::spawn(move || {
                 thread::sleep(delay);
                 let _ = tx.send(Event::PollFanRefresh);
+            });
+        }
+        Effect::ProbeUps { name } => {
+            let tx = cmd_tx.clone();
+            thread::spawn(move || {
+                let runner = RealRunner;
+                let snapshot = crate::tui::probe::probe_ups_for_tui(&runner, &name);
+                let _ = tx.send(Event::UpsProbeFinished(snapshot));
+            });
+        }
+        Effect::ScheduleUpsProbe { delay } => {
+            let tx = cmd_tx.clone();
+            thread::spawn(move || {
+                thread::sleep(delay);
+                let _ = tx.send(Event::PollUpsRefresh);
             });
         }
     }

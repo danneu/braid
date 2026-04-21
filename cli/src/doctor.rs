@@ -583,6 +583,147 @@ fn check_beep_path<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>, json: bool)
     check_beep_path_inner(ctx, Path::new(NOTIFIER_CONFIG_PATH), is_root, json)
 }
 
+/// UPS doctor check: warn when `braid.ups.enable = true` but the
+/// `upsc` probe fails.
+///
+/// Severity is `Warn`, not `Fail`: the operator can fix daemon state
+/// directly (e.g. `systemctl start upsd`); braid does not intervene in
+/// NUT lifecycle. Skips when UPS is not configured or disabled.
+fn check_ups_daemon_up<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> CheckResult {
+    let name = "ups_daemon".to_string();
+    let ups_cfg = match ctx.config.as_ref().and_then(|c| c.ups()) {
+        Some(u) if u.enable => u,
+        _ => {
+            return CheckResult {
+                name,
+                status: CheckStatus::Skip,
+                message: "skipped (braid.ups not enabled)".into(),
+            };
+        }
+    };
+    let raw = match ctx.runner.run(&CmdRequest::UpscQuery {
+        name: ups_cfg.name.clone(),
+    }) {
+        Ok(r) => r,
+        Err(e) => {
+            return CheckResult {
+                name,
+                status: CheckStatus::Warn,
+                message: format!(
+                    "upsc failed to spawn: {e} -- is pkgs.nut on PATH?"
+                ),
+            };
+        }
+    };
+    match crate::parse::parse_upsc(&raw) {
+        Ok(out) => {
+            if out.status_flags.is_empty() {
+                CheckResult {
+                    name,
+                    status: CheckStatus::Warn,
+                    message: format!(
+                        "upsc {} responded but ups.status is empty -- driver may still be starting",
+                        ups_cfg.name
+                    ),
+                }
+            } else {
+                CheckResult {
+                    name,
+                    status: CheckStatus::Ok,
+                    message: format!("upsc {} reachable", ups_cfg.name),
+                }
+            }
+        }
+        Err(_) => CheckResult {
+            name,
+            status: CheckStatus::Warn,
+            message: format!(
+                "upsc {} unreachable -- check 'systemctl status upsd.service'",
+                ups_cfg.name
+            ),
+        },
+    }
+}
+
+/// UPS doctor check: fail when the pool is mounted under UPS but
+/// `braid-online.service` is not `active`.
+///
+/// This is the critical configuration fault in `docs/decisions/020-
+/// ups-integration.md`'s "braid-online becomes safety-critical"
+/// section: without `braid-online.service` active, the `SHUTDOWNCMD =
+/// systemctl poweroff` path does NOT unwind `braid lock`'s ExecStop,
+/// and the Plan 1 safety guarantee silently breaks on LB. Operators
+/// need loud, high-severity feedback here.
+///
+/// Skips when UPS is disabled OR when the pool is not mounted (no
+/// safety implication then).
+fn check_braid_online_active_when_mounted<R: CommandRunner>(
+    ctx: &mut DoctorContext<'_, R>,
+) -> CheckResult {
+    let name = "braid_online_active".to_string();
+    let enabled = ctx
+        .config
+        .as_ref()
+        .and_then(|c| c.ups())
+        .is_some_and(|u| u.enable);
+    if !enabled {
+        return CheckResult {
+            name,
+            status: CheckStatus::Skip,
+            message: "skipped (braid.ups not enabled)".into(),
+        };
+    }
+    let mount_point = match ctx.config.as_ref() {
+        Some(c) => c.mount_point().clone(),
+        None => {
+            return CheckResult {
+                name,
+                status: CheckStatus::Skip,
+                message: "skipped (config not available)".into(),
+            };
+        }
+    };
+    match ctx.runner.run(&CmdRequest::MountpointCheck {
+        path: mount_point.clone(),
+    }) {
+        Ok(out) if out.exit_status == 0 => {}
+        _ => {
+            return CheckResult {
+                name,
+                status: CheckStatus::Skip,
+                message: "skipped (pool not mounted -- braid-online only matters while online)".into(),
+            };
+        }
+    }
+    let raw = match ctx.runner.run(&CmdRequest::SystemctlIsActive {
+        unit: "braid-online.service".into(),
+    }) {
+        Ok(r) => r,
+        Err(e) => {
+            return CheckResult {
+                name,
+                status: CheckStatus::Fail,
+                message: format!("systemctl spawn failed: {e}"),
+            };
+        }
+    };
+    match raw.stdout.trim() {
+        "active" => CheckResult {
+            name,
+            status: CheckStatus::Ok,
+            message: "braid-online.service is active".into(),
+        },
+        other => CheckResult {
+            name,
+            status: CheckStatus::Fail,
+            message: format!(
+                "braid-online.service is {other} -- UPS shutdown will not unmount the pool. \
+                 Run `systemctl start braid-online.service` or re-run `braid unlock`."
+            ),
+        },
+    }
+}
+
 fn check_beep_path_inner<R: CommandRunner>(
     ctx: &mut DoctorContext<'_, R>,
     notifier_path: &Path,
@@ -737,6 +878,8 @@ pub fn run_doctor<R: CommandRunner>(
         check_data_profile_mismatch(&mut ctx),
         check_metadata_profile_mismatch(&mut ctx),
         check_beep_path(&mut ctx, json),
+        check_ups_daemon_up(&mut ctx),
+        check_braid_online_active_when_mounted(&mut ctx),
     ];
 
     let status = overall_status(&checks);
@@ -769,6 +912,8 @@ pub fn format_doctor_human(report: &DoctorReport) -> String {
             // schema; the human label reflects the product framing — what
             // the operator hears, not what the code does.
             "beep_path" => "alert beep",
+            "ups_daemon" => "ups daemon",
+            "braid_online_active" => "braid-online",
             other => other,
         };
         out.push_str(&format!("[{tag:<4}]  {label:<14}  {}\n", c.message));
@@ -855,7 +1000,7 @@ mod tests {
         let f = write_temp(valid_config_json());
         let (_dir, paths) = isolated_paths();
         let report = run_doctor(f.path(), &mock(), &paths, false);
-        assert_eq!(report.checks.len(), 8);
+        assert_eq!(report.checks.len(), 10);
         assert_eq!(find_check(&report, "config_file").status, CheckStatus::Ok);
         assert_eq!(find_check(&report, "config_schema").status, CheckStatus::Ok);
         // declared_disks skips since no pool membership file exists in test env
@@ -2036,5 +2181,235 @@ mod tests {
             "Fail message must include wrapper stderr: {}",
             result.message
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // UPS doctor checks
+    // ---------------------------------------------------------------------
+
+    fn ups_ctx<'a, R: CommandRunner>(
+        runner: &'a R,
+        paths: &'a StatePaths,
+        config_json: &str,
+    ) -> DoctorContext<'a, R> {
+        let config: Option<Config> = serde_json::from_str(config_json).ok();
+        DoctorContext {
+            config_path: PathBuf::new(),
+            config_value: Some(
+                serde_json::from_str(config_json).expect("test config parses"),
+            ),
+            config,
+            runner,
+            paths,
+            df_snapshot: None,
+        }
+    }
+
+    fn config_with_ups_enabled() -> &'static str {
+        r#"{"mount_point":"/mnt/storage","ups":{"enable":true,"name":"ups"}}"#
+    }
+
+    fn config_without_ups() -> &'static str {
+        r#"{"mount_point":"/mnt/storage"}"#
+    }
+
+    fn config_with_ups_disabled() -> &'static str {
+        r#"{"mount_point":"/mnt/storage","ups":{"enable":false,"name":"ups"}}"#
+    }
+
+    // Intent: check_ups_daemon_up reports Ok when upsc returns a healthy
+    // OL status.
+    // Why: baseline happy path; confirms a live upsd does not trigger a
+    // spurious Warn.
+    // Scenario: operator runs `braid doctor` with UPS enabled and
+    // upsd.service healthy.
+    #[test]
+    fn ups_daemon_check_ok_when_upsc_returns_ol() {
+        let runner = MockRunner::default().with_output(
+            CmdRequest::UpscQuery {
+                name: "ups".into(),
+            },
+            RawCommandOutput {
+                cmd: "upsc ups".into(),
+                stdout: "ups.status: OL\n".into(),
+                stderr: String::new(),
+                exit_status: 0,
+            },
+        );
+        let (_dir, paths) = isolated_paths();
+        let mut ctx = ups_ctx(&runner, &paths, config_with_ups_enabled());
+        let r = check_ups_daemon_up(&mut ctx);
+        assert_eq!(r.status, CheckStatus::Ok, "got: {r:?}");
+        assert!(r.message.contains("reachable"));
+    }
+
+    // Intent: check_ups_daemon_up warns when `upsc` exits non-zero.
+    // Why: the daemon-down state deserves a visible but non-fatal nudge
+    // -- the plan says this is a Warn (operator fixes it, braid does
+    // not intervene). Regression here would turn every rebooting
+    // upsd.service into a false Fail that masks real problems.
+    // Scenario: `systemctl stop upsd.service` while doctor runs.
+    #[test]
+    fn ups_daemon_check_warns_when_daemon_down() {
+        let runner = MockRunner::default().with_output(
+            CmdRequest::UpscQuery {
+                name: "ups".into(),
+            },
+            RawCommandOutput {
+                cmd: "upsc ups".into(),
+                stdout: String::new(),
+                stderr: "Error: Connection refused".into(),
+                exit_status: 1,
+            },
+        );
+        let (_dir, paths) = isolated_paths();
+        let mut ctx = ups_ctx(&runner, &paths, config_with_ups_enabled());
+        let r = check_ups_daemon_up(&mut ctx);
+        assert_eq!(r.status, CheckStatus::Warn, "got: {r:?}");
+        assert!(r.message.contains("unreachable"));
+    }
+
+    // Intent: check_ups_daemon_up skips when braid.ups block is absent.
+    // Why: host without UPS support must not see UPS-colored warnings
+    // (both noise and misleading). Skipping also keeps the doctor
+    // count stable for pre-UPS deployments.
+    // Scenario: non-UPS deployment runs `braid doctor`.
+    #[test]
+    fn ups_daemon_check_skips_when_config_absent() {
+        let runner = MockRunner::default();
+        let (_dir, paths) = isolated_paths();
+        let mut ctx = ups_ctx(&runner, &paths, config_without_ups());
+        let r = check_ups_daemon_up(&mut ctx);
+        assert_eq!(r.status, CheckStatus::Skip);
+    }
+
+    // Intent: check_ups_daemon_up skips when braid.ups.enable = false.
+    // Why: the user explicitly opted out; doctor should respect that
+    // without complaining about a daemon they intentionally disabled.
+    // Scenario: operator temporarily disabled UPS for maintenance.
+    #[test]
+    fn ups_daemon_check_skips_when_enable_false() {
+        let runner = MockRunner::default();
+        let (_dir, paths) = isolated_paths();
+        let mut ctx = ups_ctx(&runner, &paths, config_with_ups_disabled());
+        let r = check_ups_daemon_up(&mut ctx);
+        assert_eq!(r.status, CheckStatus::Skip);
+    }
+
+    // Intent: check_braid_online_active_when_mounted fails (high
+    // severity) when the pool is mounted under UPS but
+    // braid-online.service is not active.
+    // Why: THIS IS THE CRITICAL FAULT. Without braid-online, the
+    // SHUTDOWNCMD path does not unmount the pool on LB, and the Plan
+    // 1 safety guarantee silently breaks. Fail (not Warn) so the
+    // operator sees the escalation.
+    // Scenario: operator disabled braid-online.service temporarily and
+    // forgot to re-enable it before an outage.
+    #[test]
+    fn braid_online_check_fails_when_inactive_and_mounted() {
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::MountpointCheck {
+                    path: MountPoint("/mnt/storage".into()),
+                },
+                RawCommandOutput {
+                    cmd: "mountpoint".into(),
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                },
+            )
+            .with_output(
+                CmdRequest::SystemctlIsActive {
+                    unit: "braid-online.service".into(),
+                },
+                RawCommandOutput {
+                    cmd: "systemctl is-active braid-online.service".into(),
+                    stdout: "inactive\n".into(),
+                    stderr: String::new(),
+                    exit_status: 3,
+                },
+            );
+        let (_dir, paths) = isolated_paths();
+        let mut ctx = ups_ctx(&runner, &paths, config_with_ups_enabled());
+        let r = check_braid_online_active_when_mounted(&mut ctx);
+        assert_eq!(r.status, CheckStatus::Fail);
+        assert!(r.message.contains("inactive"));
+        assert!(r.message.contains("UPS shutdown"));
+    }
+
+    // Intent: check_braid_online_active_when_mounted returns Ok when
+    // braid-online.service is active.
+    // Why: the happy path must be silent; any noise here and operators
+    // learn to ignore the check.
+    // Scenario: normal UPS-enabled deployment running smoothly.
+    #[test]
+    fn braid_online_check_ok_when_active() {
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::MountpointCheck {
+                    path: MountPoint("/mnt/storage".into()),
+                },
+                RawCommandOutput {
+                    cmd: "mountpoint".into(),
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                },
+            )
+            .with_output(
+                CmdRequest::SystemctlIsActive {
+                    unit: "braid-online.service".into(),
+                },
+                RawCommandOutput {
+                    cmd: "systemctl is-active braid-online.service".into(),
+                    stdout: "active\n".into(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                },
+            );
+        let (_dir, paths) = isolated_paths();
+        let mut ctx = ups_ctx(&runner, &paths, config_with_ups_enabled());
+        let r = check_braid_online_active_when_mounted(&mut ctx);
+        assert_eq!(r.status, CheckStatus::Ok);
+    }
+
+    // Intent: check_braid_online_active_when_mounted skips when pool
+    // is not mounted.
+    // Why: braid-online only matters while the pool is online; a
+    // locked pool has nothing to unmount. A Fail here would fire at
+    // every boot while the user is still typing their passphrase.
+    // Scenario: pre-unlock `braid doctor`.
+    #[test]
+    fn braid_online_check_skips_when_not_mounted() {
+        let runner = MockRunner::default().with_output(
+            CmdRequest::MountpointCheck {
+                path: MountPoint("/mnt/storage".into()),
+            },
+            RawCommandOutput {
+                cmd: "mountpoint".into(),
+                stdout: String::new(),
+                stderr: "not a mountpoint".into(),
+                exit_status: 1,
+            },
+        );
+        let (_dir, paths) = isolated_paths();
+        let mut ctx = ups_ctx(&runner, &paths, config_with_ups_enabled());
+        let r = check_braid_online_active_when_mounted(&mut ctx);
+        assert_eq!(r.status, CheckStatus::Skip);
+    }
+
+    // Intent: check_braid_online_active_when_mounted skips when UPS
+    // is disabled.
+    // Why: without UPS, braid-online is not the same safety
+    // bottleneck; a Fail on a non-UPS host is just noise.
+    // Scenario: host without UPS runs doctor.
+    #[test]
+    fn braid_online_check_skips_when_ups_disabled() {
+        let runner = MockRunner::default();
+        let (_dir, paths) = isolated_paths();
+        let mut ctx = ups_ctx(&runner, &paths, config_with_ups_disabled());
+        let r = check_braid_online_active_when_mounted(&mut ctx);
+        assert_eq!(r.status, CheckStatus::Skip);
     }
 }

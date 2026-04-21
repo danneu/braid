@@ -159,16 +159,16 @@ Write failing tests first, confirm they fail for the expected reasons, then impl
 
 ## Parser Compatibility
 
-braid parses output from btrfs-progs, cryptsetup, util-linux, and smartmontools. These parsers can break when tool versions change. Two validation lanes exist:
+braid parses output from btrfs-progs, cryptsetup, util-linux, smartmontools, and NUT. These parsers can break when tool versions change. Two validation lanes exist:
 
 ### Stable lane (pinned contract)
 
-- `just test-parsers` — CLI parser canary. Exercises 15 of 18 parsers against live tool output in VMs. Covers only CLI-reachable parsers.
-- `just test-rust` — validates golden fixtures for all 18 parsers. Fixture-backed coverage stays current only after running `just capture-fixtures` and `just capture-progress-fixtures` when parser-critical tool versions change (e.g. nixpkgs bump).
+- `just test-parsers` — CLI parser canary. Exercises CLI-reachable parsers against live tool output in VMs (including `braid-status-ups`, the NUT canary).
+- `just test-rust` — validates golden fixtures for the full parser set, including `parse_upsc`. Fixture-backed coverage stays current only after running `just capture-all-fixtures` when parser-critical tool versions change (e.g. nixpkgs bump).
 - Fixture refresh is a separate obligation: `just test-parsers` passing does not guarantee TUI-only parsers (`parse_lsblk_json`, `parse_cryptsetup_luks_dump`, `parse_smartctl_health`) or unused parsers (`parse_btrfs_scrub_status_per_device`) are compatible with the current toolchain.
-- Fixtures in `cli/tests/fixtures/nixos-25.11/` are committed and authoritative.
+- Fixtures in `cli/tests/fixtures/nixos-25.11/` are committed and authoritative. NUT fixtures live in `cli/tests/fixtures/nixos-25.11/upsc/` (and the unstable mirror); they are produced by `just capture-ups-fixtures`, which boots a dedicated NUT VM with per-state `dummy-ups` drivers (see `tests/capture-ups-fixtures.nix`).
 
-Parser-critical tool versions are the pinned `nixpkgs` versions of `btrfs-progs`, `cryptsetup`, and `util-linux`. Treat any change to the `nixpkgs` node in `flake.lock`, any `flake.nix` change that alters the `nixpkgs` input, or any change to `braid.packages.{btrfsProgs,cryptsetup,utilLinux}` as a required fixture-refresh event.
+Parser-critical tool versions are the pinned `nixpkgs` versions of `btrfs-progs`, `cryptsetup`, `util-linux`, and `nut`. Treat any change to the `nixpkgs` node in `flake.lock`, any `flake.nix` change that alters the `nixpkgs` input, or any change to `braid.packages.{btrfsProgs,cryptsetup,utilLinux,nut}` as a required fixture-refresh event.
 
 When parser-critical tool versions change, run:
 
@@ -181,7 +181,7 @@ When parser-critical tool versions change, run:
 Early-warning lane for upstream parser/output drift. Unstable failures signal upcoming changes, not a contract violation. Fixtures in `cli/tests/fixtures/nixos-unstable/` are committed so upstream output changes are visible in git history, but they are non-authoritative.
 
 - `just test-all-unstable` — VM tests against nixos-unstable. Covers CLI-reachable parsers against live tool output but does not cover the full parser surface (TUI-only parsers, unused parsers).
-- `just capture-all-fixtures-unstable` + `just test-rust-unstable` — covers all 18 parsers against unstable tool output via golden fixtures. Missing fixtures fail (not skip).
+- `just capture-all-fixtures-unstable` + `just test-rust-unstable` — covers the full parser surface (btrfs/cryptsetup/util-linux/smartctl/NUT) against unstable tool output via golden fixtures. Missing fixtures fail (not skip).
 
 Full unstable canary workflow:
 

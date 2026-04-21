@@ -1,0 +1,13 @@
+---
+source: cli/src/ups.rs
+expression: "format_human(\"ups\", &parsed)"
+---
+UPS: ups
+Status: LB OB
+Battery: 8%
+Runtime: 0:45
+Load: 25% (83 W estimated)
+Input: 0.0 V (transfer 88-142 V)
+Device: APC Back-UPS ES 550G
+Battery manufactured: 2023/04/12
+Last test: Done and passed

@@ -73,8 +73,17 @@ struct UpsArgs {
 
 #[derive(Debug, Subcommand)]
 enum UpsCommand {
-    /// Show current UPS status flags plus the raw upsc key/value tail
-    Status,
+    /// Show current UPS status, battery charge, runtime, load, and device info
+    Status(UpsStatusArgs),
+}
+
+#[derive(Debug, Args)]
+struct UpsStatusArgs {
+    /// Emit the parsed `upsc` model as JSON instead of a human summary.
+    /// Stable shape; distinct error sentinels for the not-enabled and
+    /// daemon-down branches.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -697,9 +706,13 @@ fn main() {
             }
         }
         Commands::Ups(args) => match args.command {
-            UpsCommand::Status => {
+            UpsCommand::Status(status_args) => {
                 let runner = RealRunner;
-                if let Err(e) = braid_cli::ups::cmd_ups_status(&runner, Path::new(&config_path)) {
+                if let Err(e) = braid_cli::ups::cmd_ups_status(
+                    &runner,
+                    Path::new(&config_path),
+                    status_args.json,
+                ) {
                     print_cli_error(&e.to_string());
                     std::process::exit(1);
                 }

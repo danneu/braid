@@ -1,0 +1,7 @@
+---
+source: cli/src/ups.rs
+expression: "&payload"
+---
+{
+  "error": "ups_not_enabled"
+}

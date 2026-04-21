@@ -38,7 +38,8 @@ sudo braid lock
 - **Dynamic pool** -- add or remove drives with a command, no `nixos-rebuild`
 - **Self-healing** -- btrfs checksums every block and silently repairs corruption from the redundant copy
 - **CLI-owned membership** -- `braid add`/`remove`/`replace` manage the pool; state lives in `/var/lib/braid/pool.json`
-- **Dashboard** -- `braid tui` shows pool health, disk status, balance progress, SMART data, and (when `braid.fanControl` is enabled) chassis fan telemetry with hddfancontrol daemon health
+- **UPS safety** -- with `braid.ups.enable = true`, NUT drives orderly poweroff on low battery, mutating commands refuse to start while on battery, and `braid ups status` / the TUI show live UPS state
+- **Dashboard** -- `braid tui` shows pool health, disk status, balance progress, SMART data, and (when enabled) chassis fan telemetry plus UPS state
 
 ## Downsides
 
@@ -128,6 +129,7 @@ See the [command reference](manual/commands/) for full usage of each command.
 | [idle](manual/commands/idle.md) | Check if the pool is idle (for auto-suspend) |
 | [tui](manual/commands/tui.md) | Interactive dashboard |
 | [browse](manual/commands/browse.md) | Read-only browser for raw btrfs output |
+| [ups status](manual/commands/ups-status.md) | Live UPS state (NUT); `--json` for scripts |
 
 ### Guides
 
@@ -139,6 +141,7 @@ See the [command reference](manual/commands/) for full usage of each command.
 | [Monitoring and alerts](manual/guides/monitoring-and-alerts.md) | Disk health alerts, beeper, alert commands |
 | [Power management](manual/guides/power-management.md) | Auto-suspend, Wake-on-LAN, RTC wakeups |
 | [Fan control](manual/guides/fan-control.md) | HDD-driven chassis fan control via hddfancontrol |
+| [UPS](manual/guides/ups.md) | NUT-backed orderly poweroff, preflight safety, live status |
 | [NixOS configuration](manual/guides/nixos-configuration.md) | Module options, scrub scheduling, pinned toolchain |
 | [Sharing and permissions](manual/guides/sharing-and-permissions.md) | Storage group, mount permissions, Samba |
 | [Troubleshooting](manual/guides/troubleshooting.md) | ENOSPC balance, paused balance, missing devices |

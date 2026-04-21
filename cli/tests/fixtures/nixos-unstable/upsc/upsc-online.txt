@@ -1,0 +1,32 @@
+battery.charge: 100
+battery.charge.low: 10
+battery.mfr.date: 2023/04/12
+battery.runtime: 1800
+battery.runtime.low: 120
+battery.type: PbAc
+battery.voltage: 27.0
+device.mfr: APC
+device.model: Back-UPS ES 550G
+device.serial: 3B1234X56789
+device.type: ups
+driver.debug: 0
+driver.flag.allow_killpower: 0
+driver.name: dummy-ups
+driver.parameter.mode: dummy-once
+driver.parameter.pollinterval: 2
+driver.parameter.port: online.dev
+driver.parameter.synchronous: auto
+driver.state: updateinfo
+driver.version: 2.8.4
+driver.version.internal: 0.22
+input.sensitivity: medium
+input.transfer.high: 142
+input.transfer.low: 88
+input.voltage: 120.0
+input.voltage.nominal: 120
+ups.load: 17
+ups.mfr: APC
+ups.model: Back-UPS ES 550G
+ups.realpower.nominal: 330
+ups.status: OL
+ups.test.result: Done and passed

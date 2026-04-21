@@ -8,7 +8,7 @@ use crate::luks;
 use crate::parse::types::{ScrubState, SmartHealth, SmartProbe};
 use crate::parse::{
     parse_btrfs_device_stats, parse_btrfs_device_usage, parse_btrfs_scrub_status,
-    parse_cryptsetup_luks_dump, parse_lsblk_json, parse_smartctl,
+    parse_cryptsetup_luks_dump, parse_lsblk_json, parse_smartctl, parse_upsc,
 };
 use crate::probe::{probe_config_disk, probe_pool, Filesystem, ProbeError};
 use crate::state_paths::StatePaths;
@@ -16,7 +16,7 @@ use crate::status::resolve_alert_state;
 use crate::status::{estimate_pool_capacity, get_balance_report, DiskErrors};
 use crate::tui::model::{
     DaemonStatus, DiskLuksInfo, DiskUsage, DrivingDrive, FanReading, FanSnapshot, PoolState,
-    TemperatureDiskId, TemperatureReading, UnpooledDiskRender,
+    TemperatureDiskId, TemperatureReading, UnpooledDiskRender, UpsSnapshot,
 };
 use crate::types::{ByIdPath, ConfigDiskState, LuksUuid, MountPoint};
 
@@ -555,6 +555,60 @@ fn pick_driving(
         label,
         celsius: *celsius,
     })
+}
+
+/// Unit name for the NUT server that the UPS probe watches when
+/// `upsc` fails. `systemctl is-active upsd.service` distinguishes
+/// "daemon stopped" (Inactive / Failed) from "daemon running but UPS
+/// unreachable" (Active but `upsc` non-zero -- we surface that as
+/// `DaemonStatus::Inactive` as a conservative fail-closed default).
+const UPS_DAEMON_UNIT: &str = "upsd.service";
+
+/// Probe UPS state for the TUI: invoke `upsc <name>`, parse, and
+/// convert to the TUI-facing `UpsSnapshot`. Failures from the runner
+/// or the parser become `DaemonStatus::Inactive` with an empty
+/// snapshot -- that's the DarkGray state the view renders.
+///
+/// This is the single bridge from `UpscOutput` -> `UpsSnapshot`, per
+/// the plan's risk 3 ("TUI snapshot drifts from UpscOutput"): all
+/// conversion happens here, tests snapshot the converter output.
+pub fn probe_ups_for_tui<R: CommandRunner>(runner: &R, name: &str) -> UpsSnapshot {
+    let raw = match runner.run(&CmdRequest::UpscQuery {
+        name: name.to_owned(),
+    }) {
+        Ok(r) => r,
+        Err(_) => return ups_snapshot_daemon_down(runner),
+    };
+    let parsed = match parse_upsc(&raw) {
+        Ok(p) => p,
+        Err(_) => return ups_snapshot_daemon_down(runner),
+    };
+    UpsSnapshot {
+        flags: parsed.status_flags.clone(),
+        battery_charge_pct: parsed.battery.charge_pct,
+        runtime_secs: parsed.battery.runtime_secs,
+        load_pct: parsed.load_pct,
+        watts_estimated: parsed.watts_estimated(),
+        // A successful `upsc` implies the daemon is reachable -- call
+        // the unit status just in case the upstream check captures a
+        // transitional state worth rendering (active / failed).
+        daemon: probe_daemon_status(runner, UPS_DAEMON_UNIT),
+        probed_at: Instant::now(),
+    }
+}
+
+fn ups_snapshot_daemon_down<R: CommandRunner>(runner: &R) -> UpsSnapshot {
+    UpsSnapshot {
+        flags: std::collections::HashSet::new(),
+        battery_charge_pct: None,
+        runtime_secs: None,
+        load_pct: None,
+        watts_estimated: None,
+        // Fall back to the unit probe so we can still distinguish
+        // "daemon has crashed" vs. "nothing running" vs. "transitional".
+        daemon: probe_daemon_status(runner, UPS_DAEMON_UNIT),
+        probed_at: Instant::now(),
+    }
 }
 
 /// Parse `systemctl is-active <unit>`. Exits non-zero (3) for
@@ -1762,5 +1816,104 @@ mod tests {
             probe_daemon_status(&empty_mock, "hddfancontrol-braid.service"),
             DaemonStatus::Unknown
         );
+    }
+
+    // --- probe_ups_for_tui tests ---
+    //
+    // This is the single UpscOutput -> UpsSnapshot bridge (plan risk
+    // 3). Test coverage locks in: typed-field passthrough, the
+    // watts_estimated derivation guard, and the two fail-closed
+    // branches (runner error, parse error).
+
+    fn upsc_ok(stdout: &str) -> RawCommandOutput {
+        RawCommandOutput {
+            cmd: "upsc ups".into(),
+            stdout: stdout.to_owned(),
+            stderr: String::new(),
+            exit_status: 0,
+        }
+    }
+
+    fn mock_with_upsc_and_unit(stdout: &str, exit: i32, unit_stdout: &str) -> MockRunner {
+        MockRunner::default()
+            .with_output(
+                CmdRequest::UpscQuery {
+                    name: "ups".into(),
+                },
+                RawCommandOutput {
+                    cmd: "upsc ups".into(),
+                    stdout: stdout.to_owned(),
+                    stderr: if exit == 0 { "" } else { "boom" }.to_owned(),
+                    exit_status: exit,
+                },
+            )
+            .with_output(
+                CmdRequest::SystemctlIsActive {
+                    unit: "upsd.service".into(),
+                },
+                RawCommandOutput {
+                    cmd: "systemctl is-active upsd.service".into(),
+                    stdout: unit_stdout.to_owned(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                },
+            )
+    }
+
+    // Intent: probe_ups_for_tui converts a healthy UpscOutput to an
+    // UpsSnapshot with the expected typed fields populated and
+    // daemon=Active.
+    // Why: this is the cell the TUI renders; its values must mirror
+    // the parser output for every key the view actually displays.
+    // Scenario: upsc returns OL + full battery + load; upsd is active.
+    #[test]
+    fn probe_ups_populates_typed_fields_on_success() {
+        let mock = mock_with_upsc_and_unit(
+            "ups.status: OL\nbattery.charge: 100\nbattery.runtime: 1800\n\
+             ups.load: 20\nups.realpower.nominal: 500\n",
+            0,
+            "active\n",
+        );
+        let snap = probe_ups_for_tui(&mock, "ups");
+        assert!(snap.flags.contains(&crate::parse::types::UpsStatusFlag::Ol));
+        assert_eq!(snap.battery_charge_pct, Some(100));
+        assert_eq!(snap.runtime_secs, Some(1800));
+        assert_eq!(snap.load_pct, Some(20));
+        // 20% * 500 W = 100 W
+        assert_eq!(snap.watts_estimated, Some(100));
+        assert_eq!(snap.daemon, DaemonStatus::Active);
+    }
+
+    // Intent: probe_ups_for_tui leaves watts_estimated as None when
+    // ups.realpower.nominal is missing from the upsc output.
+    // Why: mirrors the watts_estimated() invariant on UpscOutput; the
+    // TUI's "W estimated" annotation is omitted when either ingredient
+    // is absent.
+    // Scenario: UPS driver reports load but not realpower.nominal.
+    #[test]
+    fn probe_ups_watts_requires_both_ingredients() {
+        let mock = mock_with_upsc_and_unit(
+            "ups.status: OL\nups.load: 40\n",
+            0,
+            "active\n",
+        );
+        let snap = probe_ups_for_tui(&mock, "ups");
+        assert_eq!(snap.load_pct, Some(40));
+        assert_eq!(snap.watts_estimated, None);
+    }
+
+    // Intent: probe_ups_for_tui returns an empty snapshot with daemon
+    // falling back to the unit probe on a non-zero upsc exit.
+    // Why: fail-closed fallback -- a parse error cannot silently
+    // render as OL.
+    // Scenario: upsd.service is stopped; upsc exits 1.
+    #[test]
+    fn probe_ups_falls_back_on_upsc_failure() {
+        let mock = mock_with_upsc_and_unit("", 1, "inactive\n");
+        let snap = probe_ups_for_tui(&mock, "ups");
+        assert!(snap.flags.is_empty());
+        assert_eq!(snap.battery_charge_pct, None);
+        assert_eq!(snap.load_pct, None);
+        assert_eq!(snap.daemon, DaemonStatus::Inactive);
     }
 }

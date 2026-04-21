@@ -1,19 +1,22 @@
 //! `upsc <name>` output parser.
 //!
-//! NUT's upsc client emits one `key: value` pair per line (see
-//! `reference/nut/clients/upsc.c:141`). Plan 1 only consumes
-//! `ups.status` (a space-separated list of flags, per
-//! `reference/nut/clients/upsmon.c:1404`) plus a verbatim passthrough
-//! of every other line for `braid ups status`. The richer data model
-//! (battery, input voltage, test result, load/watts) is plan 2's
-//! responsibility.
+//! NUT's `upsc` client emits one `key: value` pair per line (see
+//! `reference/nut/clients/upsc.c:141`). This parser splits the familiar
+//! keys (`ups.status`, `battery.*`, `input.*`, `ups.load`,
+//! `ups.realpower.nominal`, `ups.test.result`, `device.*` / `ups.mfr` /
+//! `ups.model` / `ups.serial`) into the typed `UpscOutput` shape, and
+//! keeps every other line verbatim in `extra` so unfamiliar driver keys
+//! are still observable via `braid ups status --json`.
 //!
-//! Daemon-down handling: we treat a non-zero `upsc` exit with an empty
-//! or status-less stdout as an error. Callers (`cmd_ups_status`,
-//! `check_ups_not_on_battery`) fail-closed on that condition.
+//! Daemon-down handling: a non-zero `upsc` exit becomes
+//! `ParseError::CommandFailed`. Callers (`cmd_ups_status`,
+//! `check_ups_not_on_battery`, `probe_ups_for_tui`) fail-closed on that
+//! condition rather than silently treating it as an empty status set.
 
 use crate::cmd::RawCommandOutput;
-use crate::parse::types::{UpscOutput, UpsStatusFlag};
+use crate::parse::types::{
+    BatteryFields, DeviceFields, InputFields, UpsStatusFlag, UpscOutput,
+};
 use crate::parse::ParseError;
 
 impl UpsStatusFlag {
@@ -33,6 +36,8 @@ impl UpsStatusFlag {
             "TRIM" => Self::Trim,
             "BOOST" => Self::Boost,
             "FSD" => Self::Fsd,
+            "TESTFAIL" => Self::TestFail,
+            "COMMBAD" => Self::CommBad,
             other => Self::Unknown(other.to_owned()),
         }
     }
@@ -41,9 +46,8 @@ impl UpsStatusFlag {
 /// Parse `upsc <name>` output.
 ///
 /// Fails (`ParseError::CommandFailed`) if the subprocess reported a
-/// non-zero exit status. On success, splits `ups.status` into
-/// `status_flags` and copies every other `key: value` line verbatim
-/// into `extra`.
+/// non-zero exit status. On success, walks `key: value` lines and routes
+/// each known key to a typed field; unrecognised keys land in `extra`.
 pub fn parse_upsc(raw: &RawCommandOutput) -> Result<UpscOutput, ParseError> {
     if raw.exit_status != 0 {
         return Err(ParseError::CommandFailed {
@@ -54,6 +58,17 @@ pub fn parse_upsc(raw: &RawCommandOutput) -> Result<UpscOutput, ParseError> {
     }
 
     let mut status_flags = std::collections::HashSet::new();
+    let mut battery = BatteryFields::default();
+    let mut load_pct: Option<u8> = None;
+    let mut realpower_nominal_watts: Option<u32> = None;
+    let mut input = InputFields::default();
+    let mut test_result: Option<String> = None;
+    let mut device = DeviceFields::default();
+    // Fallbacks from `ups.mfr` / `ups.model` / `ups.serial` -- only used
+    // when no corresponding `device.*` key is present.
+    let mut ups_mfr: Option<String> = None;
+    let mut ups_model: Option<String> = None;
+    let mut ups_serial: Option<String> = None;
     let mut extra = std::collections::BTreeMap::new();
 
     for line in raw.stdout.lines() {
@@ -66,19 +81,79 @@ pub fn parse_upsc(raw: &RawCommandOutput) -> Result<UpscOutput, ParseError> {
         };
         let key = key.trim();
         let value = value.trim();
-        if key == "ups.status" {
-            for tok in value.split_ascii_whitespace() {
-                status_flags.insert(UpsStatusFlag::from_token(tok));
+        match key {
+            "ups.status" => {
+                for tok in value.split_ascii_whitespace() {
+                    status_flags.insert(UpsStatusFlag::from_token(tok));
+                }
             }
-        } else {
-            extra.insert(key.to_owned(), value.to_owned());
+            "battery.charge" => battery.charge_pct = parse_pct(value),
+            "battery.runtime" => battery.runtime_secs = value.parse().ok(),
+            "battery.runtime.low" => battery.runtime_low_secs = value.parse().ok(),
+            "battery.voltage" => battery.voltage = some_non_empty(value),
+            "battery.type" => battery.type_ = some_non_empty(value),
+            "battery.mfr.date" => battery.mfr_date = some_non_empty(value),
+            "ups.load" => load_pct = parse_pct(value),
+            "ups.realpower.nominal" => realpower_nominal_watts = value.parse().ok(),
+            "input.voltage" => input.voltage = some_non_empty(value),
+            "input.transfer.low" => input.transfer_low = some_non_empty(value),
+            "input.transfer.high" => input.transfer_high = some_non_empty(value),
+            "input.sensitivity" => input.sensitivity = some_non_empty(value),
+            "ups.test.result" => test_result = some_non_empty(value),
+            "device.model" => device.model = some_non_empty(value),
+            "device.mfr" => device.mfr = some_non_empty(value),
+            "device.serial" => device.serial = some_non_empty(value),
+            "device.type" => device.type_ = some_non_empty(value),
+            "ups.model" => ups_model = some_non_empty(value),
+            "ups.mfr" => ups_mfr = some_non_empty(value),
+            "ups.serial" => ups_serial = some_non_empty(value),
+            _ => {
+                extra.insert(key.to_owned(), value.to_owned());
+            }
         }
+    }
+
+    // Fold `ups.mfr/model/serial` into `device` only when the `device.*`
+    // variant was absent. Drivers that emit both prefer the `device.*`
+    // spelling; we preserve that preference.
+    if device.model.is_none() {
+        device.model = ups_model;
+    }
+    if device.mfr.is_none() {
+        device.mfr = ups_mfr;
+    }
+    if device.serial.is_none() {
+        device.serial = ups_serial;
     }
 
     Ok(UpscOutput {
         status_flags,
+        battery,
+        load_pct,
+        realpower_nominal_watts,
+        input,
+        test_result,
+        device,
         extra,
     })
+}
+
+fn some_non_empty(s: &str) -> Option<String> {
+    if s.is_empty() {
+        None
+    } else {
+        Some(s.to_owned())
+    }
+}
+
+/// Parse a percent value like `"100"` or `"47.5"` into `0..=100`. The
+/// rounding (`floor` after the split) is deliberately conservative --
+/// `99.9` becomes `99`, never `100`, so a UPS that is approximately but
+/// not actually full does not misrepresent.
+fn parse_pct(s: &str) -> Option<u8> {
+    let intpart = s.split_once('.').map(|(a, _)| a).unwrap_or(s);
+    let n: u16 = intpart.parse().ok()?;
+    if n > 100 { None } else { Some(n as u8) }
 }
 
 #[cfg(test)]
@@ -103,7 +178,7 @@ mod tests {
         let out = parse_upsc(&ok("ups.status: OL\nbattery.charge: 100\n")).unwrap();
         assert!(out.status_flags.contains(&UpsStatusFlag::Ol));
         assert_eq!(out.status_flags.len(), 1);
-        assert_eq!(out.extra.get("battery.charge"), Some(&"100".to_owned()));
+        assert_eq!(out.battery.charge_pct, Some(100));
     }
 
     // Intent: parse_upsc splits multi-token ups.status into separate flags.
@@ -132,6 +207,19 @@ mod tests {
             .contains(&UpsStatusFlag::Unknown("NEWFLAG".to_owned())));
     }
 
+    // Intent: parse_upsc recognises TESTFAIL and COMMBAD as typed variants.
+    // Why: the TUI's severity mapping wants these to render red, which is
+    // only reliable if the parser classifies them instead of dumping them
+    // into Unknown(String) (where string-matching becomes load-bearing).
+    // Scenario: driver surfaces TESTFAIL in ups.status alongside OL.
+    #[test]
+    fn recognises_testfail_and_commbad_as_typed() {
+        let out = parse_upsc(&ok("ups.status: OL TESTFAIL COMMBAD\n")).unwrap();
+        assert!(out.status_flags.contains(&UpsStatusFlag::Ol));
+        assert!(out.status_flags.contains(&UpsStatusFlag::TestFail));
+        assert!(out.status_flags.contains(&UpsStatusFlag::CommBad));
+    }
+
     // Intent: parse_upsc returns empty status_flags for absent or empty
     // ups.status. Preflight treats empty-set as fail-closed, so the parser
     // does not need to invent a sentinel.
@@ -142,9 +230,11 @@ mod tests {
     // first status write arrived.
     #[test]
     fn empty_status_produces_no_flags() {
-        let out = parse_upsc(&ok("battery.charge: 100\ndriver.name: usbhid-ups\n")).unwrap();
+        let out = parse_upsc(&ok("battery.charge: 50\ndriver.name: usbhid-ups\n")).unwrap();
         assert!(out.status_flags.is_empty());
-        assert_eq!(out.extra.len(), 2);
+        assert_eq!(out.battery.charge_pct, Some(50));
+        // driver.name is not a typed key yet -> lands in `extra`.
+        assert_eq!(out.extra.get("driver.name"), Some(&"usbhid-ups".to_owned()));
     }
 
     // Intent: parse_upsc returns CommandFailed when the subprocess exited
@@ -167,8 +257,114 @@ mod tests {
         );
     }
 
+    // Intent: parse_upsc populates the full typed model when all expected
+    // keys are present -- battery, load, realpower, input, test result,
+    // device.
+    // Why: this is the shape `braid ups status` and the TUI consume;
+    // regression here would silently empty the curated summary.
+    // Scenario: APC Back-UPS-style output with the full key set.
+    #[test]
+    fn parses_rich_model_fields() {
+        let stdout = "\
+battery.charge: 95\n\
+battery.charge.low: 10\n\
+battery.runtime: 1800\n\
+battery.runtime.low: 120\n\
+battery.type: PbAc\n\
+battery.voltage: 27.0\n\
+battery.mfr.date: 2023/04/12\n\
+device.mfr: APC\n\
+device.model: Back-UPS ES 550G\n\
+device.serial: 3B1234X56789\n\
+device.type: ups\n\
+input.voltage: 120.0\n\
+input.transfer.low: 88\n\
+input.transfer.high: 142\n\
+input.sensitivity: medium\n\
+ups.load: 17\n\
+ups.realpower.nominal: 330\n\
+ups.status: OL\n\
+ups.test.result: Done and passed\n\
+";
+        let out = parse_upsc(&ok(stdout)).unwrap();
+        assert!(out.status_flags.contains(&UpsStatusFlag::Ol));
+        assert_eq!(out.battery.charge_pct, Some(95));
+        assert_eq!(out.battery.runtime_secs, Some(1800));
+        assert_eq!(out.battery.runtime_low_secs, Some(120));
+        assert_eq!(out.battery.type_.as_deref(), Some("PbAc"));
+        assert_eq!(out.battery.voltage.as_deref(), Some("27.0"));
+        assert_eq!(out.battery.mfr_date.as_deref(), Some("2023/04/12"));
+        assert_eq!(out.load_pct, Some(17));
+        assert_eq!(out.realpower_nominal_watts, Some(330));
+        assert_eq!(out.input.voltage.as_deref(), Some("120.0"));
+        assert_eq!(out.input.transfer_low.as_deref(), Some("88"));
+        assert_eq!(out.input.transfer_high.as_deref(), Some("142"));
+        assert_eq!(out.input.sensitivity.as_deref(), Some("medium"));
+        assert_eq!(out.test_result.as_deref(), Some("Done and passed"));
+        assert_eq!(out.device.mfr.as_deref(), Some("APC"));
+        assert_eq!(out.device.model.as_deref(), Some("Back-UPS ES 550G"));
+        assert_eq!(out.device.serial.as_deref(), Some("3B1234X56789"));
+        assert_eq!(out.device.type_.as_deref(), Some("ups"));
+        // No stray extras: every documented key routed to a typed field.
+        assert_eq!(
+            out.extra.get("battery.charge.low"),
+            Some(&"10".to_owned()),
+            "battery.charge.low stays in extras -- no typed home yet"
+        );
+    }
+
+    // Intent: `ups.mfr` / `ups.model` / `ups.serial` populate device fields
+    // only when the `device.*` form is absent.
+    // Why: different drivers prefer different keys, and some emit both. If
+    // both spellings are present, the `device.*` value wins; if only
+    // `ups.*` is present, the parser still surfaces it.
+    // Scenario: old APC firmwares emit only `ups.model`; newer firmwares
+    // emit both.
+    #[test]
+    fn ups_keys_are_fallback_for_device_fields() {
+        // ups.* only -- populated.
+        let only_ups = parse_upsc(&ok("ups.mfr: APC\nups.model: Back-UPS\n")).unwrap();
+        assert_eq!(only_ups.device.mfr.as_deref(), Some("APC"));
+        assert_eq!(only_ups.device.model.as_deref(), Some("Back-UPS"));
+        // Both present -- device.* wins.
+        let both = parse_upsc(&ok(
+            "device.mfr: DeviceMfr\nups.mfr: UpsMfr\n",
+        ))
+        .unwrap();
+        assert_eq!(both.device.mfr.as_deref(), Some("DeviceMfr"));
+    }
+
+    // Intent: watts_estimated returns None unless both ingredients are set.
+    // Why: the plan says the "estimated watts" line is omitted entirely
+    // when either load% or realpower.nominal is missing. Centralising that
+    // rule on UpscOutput prevents inconsistent render decisions.
+    // Scenario: load present but nominal missing; nominal present but load
+    // missing; both present.
+    #[test]
+    fn watts_estimated_requires_both_ingredients() {
+        let only_load = parse_upsc(&ok("ups.load: 50\n")).unwrap();
+        assert_eq!(only_load.watts_estimated(), None);
+        let only_nominal = parse_upsc(&ok("ups.realpower.nominal: 330\n")).unwrap();
+        assert_eq!(only_nominal.watts_estimated(), None);
+        let both = parse_upsc(&ok("ups.load: 50\nups.realpower.nominal: 330\n")).unwrap();
+        // 50 * 330 = 16500, / 100 = 165 (with rounding: +50 before div).
+        assert_eq!(both.watts_estimated(), Some(165));
+    }
+
+    // Intent: percent values out of range round-trip to None.
+    // Why: a driver bug that emits `battery.charge: 200` should not be
+    // quietly clipped; callers render "--" and the typed field reflects
+    // that the source was unreliable.
+    // Scenario: malformed driver output.
+    #[test]
+    fn pct_out_of_range_is_none() {
+        let out = parse_upsc(&ok("battery.charge: 200\nups.load: 999\n")).unwrap();
+        assert_eq!(out.battery.charge_pct, None);
+        assert_eq!(out.load_pct, None);
+    }
+
     // Intent: parse_upsc accepts the minimal hand-written fixture for the
-    // on-utility-power state and produces {OL} plus the extra tail.
+    // on-utility-power state and produces {OL} plus the typed tail.
     // Why: freezing the fixture contract here guards against later refactors
     // that would silently change what preflight and `braid ups status` see.
     // Scenario: smoke test of the `upsc-online.txt` committed fixture.
@@ -178,7 +374,8 @@ mod tests {
         let out = parse_upsc(&ok(fixture)).unwrap();
         assert!(out.status_flags.contains(&UpsStatusFlag::Ol));
         assert!(!out.status_flags.contains(&UpsStatusFlag::Ob));
-        assert!(out.extra.contains_key("battery.charge"));
+        assert_eq!(out.battery.charge_pct, Some(100));
+        assert_eq!(out.device.model.as_deref(), Some("Back-UPS ES 550G"));
     }
 
     // Intent: the `upsc-onbattery-low.txt` fixture produces {OB, LB}.
@@ -191,6 +388,7 @@ mod tests {
         let out = parse_upsc(&ok(fixture)).unwrap();
         assert!(out.status_flags.contains(&UpsStatusFlag::Ob));
         assert!(out.status_flags.contains(&UpsStatusFlag::Lb));
+        assert_eq!(out.battery.charge_pct, Some(8));
     }
 
     // Intent: the `upsc-daemon-down.stderr` fixture surfaces as an error.

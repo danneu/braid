@@ -49,6 +49,7 @@ pub fn run(config_path: &Path, paths: &StatePaths) -> io::Result<()> {
         disk_by_id,
         config.mount_point().0.clone(),
         config.fan_control().cloned(),
+        config.ups().cloned(),
         advisories,
         paths.clone(),
     );

@@ -24,6 +24,6 @@ uuid = { version = "1", features = ["serde", "v7"] }
 zeroize = "1"
 
 [dev-dependencies]
-insta = { version = "1", features = ["redactions"] }
+insta = { version = "1", features = ["json", "redactions"] }
 pretty_assertions = "1"
 tempfile = "3"

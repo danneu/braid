@@ -4,7 +4,7 @@ Status: Active
 
 ## Context
 
-Braid's parser-critical runtime tools (btrfs-progs, cryptsetup, util-linux) are parsed by the Rust CLI. Output formats change between tool versions — a flake update to nixpkgs-unstable could silently break parsers. Generic helpers (coreutils, systemd) are used for basic system operations but their output is never parsed by braid.
+Braid's parser-critical runtime tools (btrfs-progs, cryptsetup, util-linux, NUT) are parsed by the Rust CLI. Output formats change between tool versions — a flake update to nixpkgs-unstable could silently break parsers. Generic helpers (coreutils, systemd) are used for basic system operations but their output is never parsed by braid.
 
 ## Decision
 
@@ -13,7 +13,7 @@ Pin `flake.nix` to a specific NixOS stable release (nixos-25.11). Pin only parse
 ### How it works
 
 - **Flake input**: `nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11"` — parser-critical tool packages come from this channel.
-- **Module options**: `braid.packages.*` (cryptsetup, btrfsProgs, utilLinux) default to the flake's nixpkgs but can be overridden per-system.
+- **Module options**: `braid.packages.*` (cryptsetup, btrfsProgs, utilLinux, nut) default to the flake's nixpkgs but can be overridden per-system.
 - **PATH wrapping**: The wrapper injects `cfg.packages.*` into PATH. Generic helpers (coreutils, systemd) are resolved from the consumer's `pkgs`, not pinned.
 - **Two wrapping sites**: flake.nix wraps with `pkgs.*` defaults (for `nix run` and tests); the module wraps `cfg.package` with `cfg.packages.*` (for deployed NixOS systems where package options may be overridden).
 
@@ -34,6 +34,7 @@ New runtime dependencies must be classified into one of these two groups when ad
 | btrfs-progs | Yes | Yes (`braid.packages.btrfsProgs`) | Output parsed by nom combinators and serde JSON |
 | cryptsetup | Yes | Yes (`braid.packages.cryptsetup`) | Output parsed by nom combinators |
 | util-linux (findmnt, lsblk) | Yes | Yes (`braid.packages.utilLinux`) | JSON output parsed by serde |
+| NUT (`upsc`) | Yes | Yes (`braid.packages.nut`) | `upsc` key: value output parsed by `parse_upsc` for preflight safety and operator visibility |
 | coreutils | No — system `pkgs` | No option | chown/chmod/realpath/stat — output not parsed |
 | systemd | No — system `pkgs` | No option | systemctl/ask-password — commodity behavior |
 
@@ -42,8 +43,10 @@ New runtime dependencies must be classified into one of these two groups when ad
 1. Bump the nixpkgs input to the next stable release.
 2. Run `nix flake update nixpkgs`.
 3. Run `make test` — the version-assertion test (`tool-versions`) catches drift.
-4. Capture new golden-file fixtures from a VM (`cli/tests/fixtures/<release>/`).
+4. Capture new golden-file fixtures from a VM -- `just capture-all-fixtures` writes under `cli/tests/fixtures/nixos-<release>/` (with `upsc/` holding the `capture-ups-fixtures` outputs). `just capture-all-fixtures-unstable` is the unstable-lane mirror.
 5. Update parser tests if output format changed.
+
+NUT specifically: `parse_upsc` depends on the `key: value` shape emitted by `pkgs.nut`'s `upsc` client (see `reference/nut/clients/upsc.c`). A nixpkgs bump that touches `networkupstools` triggers the same fixture-refresh obligation as the other pinned tools -- run `just capture-ups-fixtures` and `just test-rust` before merging. The `braid-status-ups` check under `just test-parsers` is the live-tool mirror of the golden fixtures.
 
 ## Alternatives considered
 

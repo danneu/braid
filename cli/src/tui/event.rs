@@ -8,7 +8,7 @@ use std::time::Duration;
 use ratatui::crossterm::event::{self, KeyEvent};
 
 use crate::tui::app::Message;
-use crate::tui::model::{FanSnapshot, PoolState};
+use crate::tui::model::{FanSnapshot, PoolState, UpsSnapshot};
 use crate::tui::keymap;
 use crate::tui::state::{CmdId, Stream};
 use crate::types::MountPoint;
@@ -32,6 +32,8 @@ pub enum Event {
     PollRefresh { mount_point: MountPoint },
     FanProbeFinished(FanSnapshot),
     PollFanRefresh,
+    UpsProbeFinished(UpsSnapshot),
+    PollUpsRefresh,
     Tick,
 }
 
@@ -50,6 +52,8 @@ impl Event {
             Event::PollRefresh { .. } => Some(Message::RefreshPool),
             Event::FanProbeFinished(snapshot) => Some(Message::FanProbeFinished(snapshot)),
             Event::PollFanRefresh => Some(Message::RefreshFan),
+            Event::UpsProbeFinished(snapshot) => Some(Message::UpsProbeFinished(snapshot)),
+            Event::PollUpsRefresh => Some(Message::RefreshUps),
             Event::Tick => Some(Message::Tick),
         }
     }

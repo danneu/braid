@@ -169,6 +169,11 @@
               braid = linuxCrane.braid;
             }
           );
+          braid-status-ups = pkgs.testers.nixosTest (
+            import ./tests/cli/braid-status-ups.nix {
+              braid = linuxCrane.braid;
+            }
+          );
           braid-add-during-balance = pkgs.testers.nixosTest (
             import ./tests/cli/braid-add-during-balance.nix {
               braid = linuxCrane.braid;
@@ -191,6 +196,11 @@
           );
           braid-doctor-beep = pkgs.testers.nixosTest (
             import ./tests/cli/braid-doctor-beep.nix {
+              braid = linuxCrane.braid;
+            }
+          );
+          braid-doctor-ups = pkgs.testers.nixosTest (
+            import ./tests/module/braid-doctor-ups.nix {
               braid = linuxCrane.braid;
             }
           );
@@ -275,6 +285,7 @@
             }
           );
           capture-tool-fixtures = pkgs.testers.nixosTest (import ./tests/capture-tool-fixtures.nix);
+          capture-ups-fixtures = pkgs.testers.nixosTest (import ./tests/capture-ups-fixtures.nix);
           progress-monitoring = pkgs.testers.nixosTest (import ./tests/progress-monitoring.nix);
           braid-module-disabled = pkgs.testers.nixosTest (import ./tests/module/disabled.nix);
           braid-module-add-bootstrap = pkgs.testers.nixosTest (

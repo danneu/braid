@@ -98,7 +98,7 @@ test-fast:
 
 # Run parser compatibility canary tests (CLI parsers against live tool output)
 test-parsers *args:
-    just test-vm braid-status-rust braid-status-during-balance braid-idle braid-discover braid-browse {{args}}
+    just test-vm braid-status-rust braid-status-during-balance braid-status-ups braid-idle braid-discover braid-browse {{args}}
 
 # Run Rust unit tests (excludes unstable golden tests)
 test-rust:
@@ -126,10 +126,19 @@ capture-progress-fixtures:
     cp -f result/fixtures/* cli/tests/fixtures/nixos-25.11/
     @echo "Progress fixtures written to cli/tests/fixtures/nixos-25.11/"
 
-# Capture all stable fixtures (base + progress)
+# Capture upsc fixtures for the NUT parser into cli/tests/fixtures/nixos-25.11/upsc/
+capture-ups-fixtures:
+    nix build .#checks.{{system}}.capture-ups-fixtures -L
+    mkdir -p cli/tests/fixtures/nixos-25.11/upsc
+    chmod u+w cli/tests/fixtures/nixos-25.11/upsc/* 2>/dev/null || true
+    cp -f result/fixtures/* cli/tests/fixtures/nixos-25.11/upsc/
+    @echo "UPS fixtures written to cli/tests/fixtures/nixos-25.11/upsc/"
+
+# Capture all stable fixtures (base + progress + ups)
 capture-all-fixtures:
     just capture-fixtures
     just capture-progress-fixtures
+    just capture-ups-fixtures
 
 # Run all tests (including repro) against nixos-unstable to foresee tool changes
 test-all-unstable:
@@ -150,10 +159,19 @@ capture-progress-fixtures-unstable:
     cp -f result/fixtures/* cli/tests/fixtures/nixos-unstable/
     @echo "Unstable progress fixtures written to cli/tests/fixtures/nixos-unstable/"
 
-# Capture all unstable fixtures (base + progress)
+# Capture upsc fixtures from nixos-unstable into cli/tests/fixtures/nixos-unstable/upsc/
+capture-ups-fixtures-unstable:
+    nix build .#checks.{{system}}.capture-ups-fixtures --override-input nixpkgs github:NixOS/nixpkgs/nixos-unstable -L
+    mkdir -p cli/tests/fixtures/nixos-unstable/upsc
+    chmod u+w cli/tests/fixtures/nixos-unstable/upsc/* 2>/dev/null || true
+    cp -f result/fixtures/* cli/tests/fixtures/nixos-unstable/upsc/
+    @echo "Unstable UPS fixtures written to cli/tests/fixtures/nixos-unstable/upsc/"
+
+# Capture all unstable fixtures (base + progress + ups)
 capture-all-fixtures-unstable:
     just capture-fixtures-unstable
     just capture-progress-fixtures-unstable
+    just capture-ups-fixtures-unstable
 
 # Run golden parser tests against unstable fixtures (requires capture-all-fixtures-unstable first)
 test-rust-unstable:

@@ -1,5 +1,7 @@
 use std::collections::BTreeSet;
 
+use serde::Serialize;
+
 use crate::types::LuksUuid;
 
 // --- JSON command output structs ---
@@ -456,11 +458,12 @@ pub struct BtrfsSubvolumeListOutput {
 
 /// NUT `ups.status` flag. The full variant list lives here even though v1
 /// preflight only consults `Ob` / `Lb` -- keeping the enum complete means
-/// plan 2's richer parser does not need to re-land the list.
+/// the richer parser does not need to re-land the list.
 ///
 /// `Unknown(String)` preserves any token we don't yet recognize so future
 /// NUT statuses are surfaced rather than silently dropped.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[serde(into = "String")]
 pub enum UpsStatusFlag {
     /// On utility power.
     Ol,
@@ -490,18 +493,127 @@ pub enum UpsStatusFlag {
     Boost,
     /// Forced shutdown in progress.
     Fsd,
+    /// Battery self-test failed (some drivers fold this into `ups.status`).
+    TestFail,
+    /// Communications with UPS lost. Not standard in `ups.status`, but
+    /// some drivers surface it there; `upsmon` also emits COMMBAD as a
+    /// notification name. Recognised here so severity rendering picks
+    /// it up instead of falling through to `Unknown`.
+    CommBad,
     Unknown(String),
 }
 
-/// Minimal `upsc <name>` parse. Plan 1 only needs `status_flags` for
-/// preflight + `braid ups status`; plan 2 extends this shape with the
-/// rich model (battery, input, load, test.result, ...). `extra` keeps
-/// every unparsed `key: value` line so `braid ups status` can render
-/// the raw tail verbatim without an upstream change.
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl UpsStatusFlag {
+    /// Rendered token, matching NUT's own `ups.status` vocabulary
+    /// (`reference/nut/clients/upsc.c:141` emits these verbatim).
+    pub fn as_token(&self) -> String {
+        match self {
+            Self::Ol => "OL".into(),
+            Self::Ob => "OB".into(),
+            Self::Lb => "LB".into(),
+            Self::Rb => "RB".into(),
+            Self::Hb => "HB".into(),
+            Self::Chrg => "CHRG".into(),
+            Self::Dischrg => "DISCHRG".into(),
+            Self::Cal => "CAL".into(),
+            Self::Bypass => "BYPASS".into(),
+            Self::Off => "OFF".into(),
+            Self::Over => "OVER".into(),
+            Self::Trim => "TRIM".into(),
+            Self::Boost => "BOOST".into(),
+            Self::Fsd => "FSD".into(),
+            Self::TestFail => "TESTFAIL".into(),
+            Self::CommBad => "COMMBAD".into(),
+            Self::Unknown(s) => s.clone(),
+        }
+    }
+}
+
+impl From<UpsStatusFlag> for String {
+    fn from(flag: UpsStatusFlag) -> Self {
+        flag.as_token()
+    }
+}
+
+/// Battery-scoped fields from `upsc`.
+///
+/// Every field is `Option` because NUT drivers vary widely in which keys
+/// they publish. A UPS that reports `ups.status` but no `battery.charge`
+/// is not malformed; we render missing fields as `-` instead of failing.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct BatteryFields {
+    /// `battery.charge` -- percent (0-100).
+    pub charge_pct: Option<u8>,
+    /// `battery.runtime` -- seconds of runtime remaining.
+    pub runtime_secs: Option<u32>,
+    /// `battery.voltage` -- raw textual value (formats vary across drivers).
+    pub voltage: Option<String>,
+    /// `battery.type` -- e.g. "PbAc".
+    pub type_: Option<String>,
+    /// `battery.mfr.date` -- raw textual date.
+    pub mfr_date: Option<String>,
+    /// `battery.runtime.low` -- low-battery runtime threshold in seconds.
+    pub runtime_low_secs: Option<u32>,
+}
+
+/// Input (mains) fields from `upsc`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct InputFields {
+    /// `input.voltage` -- raw textual value (volts).
+    pub voltage: Option<String>,
+    /// `input.transfer.low` -- transfer-to-battery low threshold.
+    pub transfer_low: Option<String>,
+    /// `input.transfer.high` -- transfer-to-battery high threshold.
+    pub transfer_high: Option<String>,
+    /// `input.sensitivity` -- driver-reported sensitivity setting.
+    pub sensitivity: Option<String>,
+}
+
+/// Device-scoped fields from `upsc`. Accepts either `device.*` or
+/// `ups.*` for model / mfr / serial because different drivers prefer
+/// different keys; `device.*` generally wins when both are present.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct DeviceFields {
+    pub model: Option<String>,
+    pub mfr: Option<String>,
+    pub serial: Option<String>,
+    pub type_: Option<String>,
+}
+
+/// Typed `upsc <name>` output. `extra` keeps every `key: value` line that
+/// did not land in a typed field, so operators can still see unfamiliar
+/// entries (e.g. driver-specific debug keys) if they inspect the full
+/// structure via `--json`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct UpscOutput {
     pub status_flags: std::collections::HashSet<UpsStatusFlag>,
+    pub battery: BatteryFields,
+    /// `ups.load` -- percent (0-100).
+    pub load_pct: Option<u8>,
+    /// `ups.realpower.nominal` -- nameplate watts. Combined with `load_pct`
+    /// to produce an estimated-watts figure in `braid ups status`.
+    pub realpower_nominal_watts: Option<u32>,
+    pub input: InputFields,
+    /// `ups.test.result` -- last self-test result, verbatim.
+    pub test_result: Option<String>,
+    pub device: DeviceFields,
+    /// Every `key: value` line not captured by a typed field above.
     pub extra: std::collections::BTreeMap<String, String>,
+}
+
+impl UpscOutput {
+    /// Estimated load in watts when both `load_pct` and
+    /// `realpower_nominal_watts` are available. Returns `None` otherwise
+    /// (we do not synthesize a figure from a single input -- callers
+    /// must render the missing case explicitly).
+    pub fn watts_estimated(&self) -> Option<u32> {
+        match (self.load_pct, self.realpower_nominal_watts) {
+            (Some(pct), Some(nominal)) => {
+                Some((u32::from(pct) * nominal + 50) / 100)
+            }
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]

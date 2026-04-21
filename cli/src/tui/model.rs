@@ -1,8 +1,8 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use crate::alert::AlertState;
-use crate::parse::types::{BtrfsDfEntry, DeviceAllocation, ScrubState, SmartHealth};
+use crate::parse::types::{BtrfsDfEntry, DeviceAllocation, ScrubState, SmartHealth, UpsStatusFlag};
 use crate::state_paths::StatePaths;
 use crate::status::{BalanceReport, DiskErrors};
 use crate::tui::effect::Effect;
@@ -89,6 +89,27 @@ pub enum DaemonStatus {
 pub struct FanSnapshot {
     pub fan: Option<FanReading>,
     pub driving: Option<DrivingDrive>,
+    pub daemon: DaemonStatus,
+    pub probed_at: Instant,
+}
+
+/// Snapshot of UPS state for the TUI -- produced on every UPS probe.
+///
+/// Distinct from `UpscOutput`: the TUI only needs the fields the
+/// section actually renders (status flags, charge, runtime, load,
+/// watts estimate, daemon state), so we keep the Model light. The
+/// conversion from `UpscOutput` -> `UpsSnapshot` lives in
+/// `tui::probe::probe_ups_for_tui`, the single authoritative bridge.
+#[derive(Debug, Clone)]
+pub struct UpsSnapshot {
+    pub flags: HashSet<UpsStatusFlag>,
+    pub battery_charge_pct: Option<u8>,
+    pub runtime_secs: Option<u32>,
+    pub load_pct: Option<u8>,
+    /// Only set when both `ups.load` and `ups.realpower.nominal` are
+    /// available. When `None`, the view omits the watts annotation
+    /// entirely rather than guessing.
+    pub watts_estimated: Option<u32>,
     pub daemon: DaemonStatus,
     pub probed_at: Instant,
 }
@@ -231,6 +252,9 @@ pub struct Model {
     pub fan_control: Option<crate::config::FanControl>,
     pub fan: Option<FanSnapshot>,
     pub fan_probe_inflight: bool,
+    pub ups_config: Option<crate::config::Ups>,
+    pub ups: Option<UpsSnapshot>,
+    pub ups_probe_inflight: bool,
     next_cmd_id: u64,
 }
 
@@ -240,6 +264,7 @@ impl Model {
         disk_by_id: HashMap<String, String>,
         mount_point: String,
         fan_control: Option<crate::config::FanControl>,
+        ups_config: Option<crate::config::Ups>,
         advisories: Vec<String>,
         paths: StatePaths,
     ) -> (Self, Vec<Effect>) {
@@ -256,6 +281,17 @@ impl Model {
                 dev_root: std::path::PathBuf::from("/dev"),
                 disk_by_id: disk_by_id.clone(),
                 fan_control: fc.clone(),
+            });
+        }
+        // Kick off the UPS probe immediately so the first render shows
+        // live state rather than a placeholder that disappears on the
+        // next poll tick.
+        let ups_probe_inflight = ups_config.as_ref().is_some_and(|u| u.enable);
+        if let Some(u) = ups_config.as_ref()
+            && u.enable
+        {
+            effects.push(Effect::ProbeUps {
+                name: u.name.clone(),
             });
         }
         let model = Self {
@@ -278,6 +314,9 @@ impl Model {
             fan_control,
             fan: None,
             fan_probe_inflight,
+            ups_config,
+            ups: None,
+            ups_probe_inflight,
             next_cmd_id: 0,
         };
         (model, effects)
@@ -304,6 +343,9 @@ impl Model {
             fan_control: None,
             fan: None,
             fan_probe_inflight: false,
+            ups_config: None,
+            ups: None,
+            ups_probe_inflight: false,
             next_cmd_id: 0,
         }
     }
