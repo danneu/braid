@@ -1,11 +1,6 @@
 {
   description = "braid — NixOS NAS with LUKS + btrfs RAID1";
 
-  nixConfig = {
-    extra-substituters = [ "https://braid.cachix.org" ];
-    extra-trusted-public-keys = [ "braid.cachix.org-1:I/p7fx1z5n0+O80KzMuT7aXRdkVyHr/buZKaBu7HvJs=" ];
-  };
-
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
     crane.url = "github:ipetkov/crane";
