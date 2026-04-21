@@ -4,6 +4,16 @@
 
 braid is developed test-first with NixOS VM tests. Tests run on macOS via `nix.linux-builder.enable = true` in nix-darwin (checks are `checks.aarch64-darwin`).
 
+## Dev shell
+
+Enter the pinned braid dev shell before running local commands:
+
+```bash
+nix develop
+```
+
+The shell includes the Rust toolchain (`cargo`, `rustc`, `rustfmt`, `clippy`, `rust-analyzer`), `just`, and braid's parser-critical/runtime tools (`btrfs-progs`, `cryptsetup`, `util-linux`, `nut`).
+
 ## Test workflow
 
 ```bash

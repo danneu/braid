@@ -80,6 +80,25 @@
             { }
         );
 
+      devShellFor =
+        system:
+        let
+          pkgs = nixpkgs.legacyPackages.${system};
+          craneLib = crane.mkLib pkgs;
+        in
+        craneLib.devShell {
+          packages = [
+            pkgs.btrfs-progs
+            pkgs.cryptsetup
+            pkgs.just
+            pkgs.nut
+            pkgs.rustfmt
+            pkgs.clippy
+            pkgs.rust-analyzer
+            pkgs.util-linux
+          ];
+        };
+
       checksFor =
         system:
         let
@@ -643,6 +662,8 @@
         };
 
       packages = forAllSystems packagesFor;
+
+      devShells = forAllSystems (system: { default = devShellFor system; });
 
       checks = forAllSystems (
         system: nixpkgs.lib.filterAttrs (n: _: !(nixpkgs.lib.hasPrefix "repro-" n)) (checksFor system)
