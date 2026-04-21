@@ -1008,15 +1008,9 @@ mod tests {
             find_check(&report, "declared_disks").status,
             CheckStatus::Skip
         );
-        // beep_path skips because /etc/braid/notifier-config.json does not
-        // exist in the cargo-test environment.
-        let beep = find_check(&report, "beep_path");
-        assert_eq!(beep.status, CheckStatus::Skip);
-        assert!(
-            beep.message.contains("braid monitor not configured"),
-            "expected 'braid monitor not configured' in: {}",
-            beep.message
-        );
+        // beep_path is intentionally not asserted here: it depends on real
+        // host state (/etc/braid/notifier-config.json and geteuid()).
+        // Deterministic coverage lives in the check_beep_path_inner tests.
     }
 
     #[test]
