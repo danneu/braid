@@ -47,7 +47,7 @@ Architecture decision records. Each has a status: `Draft`, `Active`, `Superseded
 - [decisions/017-runtime-disk-membership.md](decisions/017-runtime-disk-membership.md) — Disk membership moved from NixOS config to CLI-owned runtime state file.
 - [decisions/018-systemd-lifecycle.md](decisions/018-systemd-lifecycle.md) — Thin systemd layer for unlock/mount entry points; CLI owns LUKS and btrfs operations.
 - [decisions/019-inhibit-sleep.md](decisions/019-inhibit-sleep.md) — When braid should hold a systemd sleep inhibitor: only for the non-interruptible mutation window, not during prompts or reversible preflight.
-- [decisions/020-ups-integration.md](decisions/020-ups-integration.md) — **Draft.** Opinionated `braid.ups.*` wrapper over nixpkgs' `power.ups`: standalone USB single-host; guarantees orderly shutdown for ordinary operation + preflight reject on battery + live UPS state in `braid ups status`/TUI; mid-mutation power loss falls to journal + `braid recover`; alert-model integration deferred to a future ADR.
+- [decisions/020-ups-integration.md](decisions/020-ups-integration.md) — **Active.** Opinionated `braid.ups.*` wrapper over nixpkgs' `power.ups`: standalone USB single-host; guarantees orderly shutdown for ordinary operation + preflight reject on battery + live UPS state in `braid ups status`/TUI; mid-mutation power loss is a supported recovery case proven by the per-mutation `ups-lb-during-*` VM matrix; alert-model integration deferred to a future ADR.
 
 ## tool-behavior/
 

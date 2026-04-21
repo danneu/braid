@@ -4,7 +4,7 @@ intent: Capture the scope, safety contract, and config shape of `braid.ups.*` be
 
 # UPS Integration
 
-Status: Draft
+Status: Active
 
 > Principles:
 > - [Resilient by default](../principles.md#1-resilient-by-default)
@@ -122,13 +122,13 @@ The configured `name` is also written to `/etc/braid/config.json` so that `braid
 - multi-UPS per host
 - UPS-triggered automatic pause of running scrub/balance (they resume on remount; acceptable as v1 behavior)
 
-## Open questions
+## Resolved questions
 
-Must resolve before Status flips to Active:
+Each of these blocked the flip from `Draft` to `Active`. All three are now closed by VM tests committed in `tests/module/`.
 
-1. **Recovery-proof for mid-mutation power loss (primary blocker).** For each journaled mutation class -- `braid replace`, `braid remove`, `braid remove-missing`, and the conditional balance in `braid add` / `braid remove-missing` -- a NixOS VM test using NUT's `dummy-ups` driver must simulate LB firing during the active mutation window, allow `systemctl poweroff` to run, boot the VM back up, and assert that `braid recover` restores the pool to a consistent state without manual intervention. The test asserts both that recovery succeeds and that no data-integrity diagnostics (btrfs errors, orphaned LUKS mappers, journal stuck in an intermediate state) remain. If any mutation class cannot be cleanly recovered, either this decision narrows further or that mutation class grows additional protection (e.g. refusing to start while `braid.ups.enable = true` unless AC is also confirmed stable).
-2. **Shutdown ordering for ordinary mounted operation.** Does `SHUTDOWNCMD = systemctl poweroff` sequence cleanly against `braid-online.service` `TimeoutStopSec = 5min` when LB fires against a mounted but idle pool? A companion VM test exercises the "ordinary operation" guarantee: mount, idle, LB, assert clean unmount + LUKS close before poweroff.
-3. **Battery-low threshold.** NUT's default LB event fires at a driver-dependent threshold (often "remaining runtime below `battery.runtime.low`", i.e. 120 seconds for the tested APC unit). Is that enough for `braid-online.service` `TimeoutStopSec = 5min` to complete on a loaded pool? If not, braid must configure a larger threshold via `ups.conf` overrides; the VM tests above define what "enough" means.
+1. **Recovery-proof for mid-mutation power loss (primary blocker).** Resolved by the four VM tests in `plans/wip/forced-shutdown-recovery-proof.md`'s matrix: `ups-lb-during-replace`, `ups-lb-during-remove`, `ups-lb-during-remove-missing`, and `ups-lb-during-balanced-add`. Each fires `OB LB` via `upsrw` while a different mutation class is in flight, lets `systemctl poweroff` run, reboots the VM, runs `braid recover`, and asserts the post-recover state matches what the original mutation would have produced -- including no orphaned LUKS mappers, no `MISSING` btrfs entries, no remaining single-profile chunks where RAID1 was intended, and a cleared `pending-op.json`. The Pre-M11 audit also surfaced two `cli/src/recover.rs` gaps that the same plan landed before the matrix ran: `pool_resize_device` is now replayed for `OpKind::Replace`, and a soft RAID1 balance is replayed for `OpKind::Add`, `OpKind::RemoveMissing`, and `OpKind::Replace` so single-profile chunks left by a cancelled mid-flight balance get drained before the journal is cleared.
+2. **Shutdown ordering for ordinary mounted operation.** Resolved by `tests/module/ups-lb-clean-shutdown.{nix,py}` (Plan 1's M7). The VM test mounts an idle pool, fires `OB LB` via `upsrw`, and asserts `braid-online.service`'s ExecStop completes (and is not killed by `TimeoutStopSec`) before poweroff. The default `TimeoutStopSec = 5min` is sufficient for a single-disk pool; larger pools should retain that headroom.
+3. **Battery-low threshold.** Resolved with the upstream NUT default. Plan 1's M7 (`ups-lb-clean-shutdown`) passed without raising `battery.runtime.low` from its driver-dependent default (often 120s). The matrix tests in Plan 3 use the upstream default through `tests/module/lib/ups-fixture.nix`. Larger real-world pools that risk exceeding the default budget can override `power.ups.upsmon.settings` (or the driver's `battery.runtime.low`) at the deployment level; braid does not need a dedicated option for v1.
 
 ## Consequences
 

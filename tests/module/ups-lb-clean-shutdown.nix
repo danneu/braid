@@ -14,12 +14,10 @@
 # shutdown sequence) could be right in isolation while still failing
 # under the real upsmon critical trigger.
 #
-# Note: an inline test-only upsmon credential with `actions = [ "SET" ]`
-# is provisioned here so upsrw can flip ups.status from the VM. The
-# production upsmon user intentionally does not carry SET
-# (reference/nut/docs/man/upsd.users.txt:78). A shared fixture for this
-# pattern lives in plans/wip/forced-shutdown-recovery-proof.md --
-# refactoring onto it is that plan's concern, not this plan's.
+# Imports the shared `lib/ups-fixture.nix` so the dummy-ups driver mode,
+# .dev contents, and the test-only `testops` SET credential stay
+# consistent across this Plan 1 test and the Plan 3 forced-shutdown
+# matrix (`ups-lb-during-{replace,remove,remove-missing,balanced-add}`).
 { braid }:
 { pkgs, lib, ... }:
 let
@@ -38,17 +36,12 @@ in
           diskNames = [ "disk1" ];
           description = "Prepare LUKS + btrfs fixture for UPS LB shutdown test";
         })
+        (import ./lib/ups-fixture.nix { })
       ];
 
       braid = {
         enable = true;
         package = braid;
-        ups = {
-          enable = true;
-          name = "ups";
-          driver = "dummy-ups";
-          port = "ups.dev";
-        };
       };
 
       # Seed pool.json -- initrd fixture bypasses `braid add` so there is
@@ -57,26 +50,6 @@ in
         "d /var/lib/braid 0755 root root -"
         ''f /var/lib/braid/pool.json 0644 root root - {"disks":{"disk1":{"by_id":"/dev/disk/by-id/virtio-disk1"}}}''
       ];
-
-      # dummy-ups .dev fixture, on-utility-power at boot so the unlock
-      # sequence completes cleanly; later flipped to OB+LB via upsrw.
-      environment.etc."nut/ups.dev".text = ''
-        device.mfr: Dummy
-        device.model: UPS-v1-test
-        ups.status: OL
-        battery.charge: 100
-        battery.charge.low: 10
-      '';
-
-      # Test-only upsmon user carrying actions = [ "SET" ] so upsrw can
-      # drive ups.status from the test script. Separate from the
-      # production upsmon credential provisioned by modules/braid/ups.nix:
-      # per reference/nut/docs/man/upsd.users.txt:78 SET is only needed by
-      # upsrw clients, and production upsmon does not need it.
-      power.ups.users.testops = {
-        passwordFile = toString (pkgs.writeText "testops.pass" "testpass");
-        actions = [ "SET" ];
-      };
 
       # Persist journal across reboots so the post-reboot subtest can
       # read the previous boot's ExecStop log via `journalctl -b -1`.
@@ -92,8 +65,6 @@ in
         { size = 512; driveConfig.deviceExtraOpts.serial = "disk1"; }
       ];
       virtualisation.memorySize = 2048;
-
-      environment.systemPackages = [ pkgs.btrfs-progs pkgs.cryptsetup pkgs.nut ];
     };
 
   testScript = builtins.readFile ./ups-lb-clean-shutdown.py;

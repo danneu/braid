@@ -91,6 +91,13 @@ struct RecoverArgs {
     /// Show what would be done without making changes
     #[arg(long)]
     dry_run: bool,
+    /// Progress output for the post-mount remediation phase (replace resize
+    /// replay and paused-balance resume). Defaults to auto, like the
+    /// mutation commands. The resume itself can be many minutes on a loaded
+    /// pool, so progress matters here even though `recover` is otherwise
+    /// quiet.
+    #[arg(long, value_enum, default_value_t = braid_cli::progress::ProgressMode::Auto)]
+    progress: braid_cli::progress::ProgressMode,
 }
 
 #[derive(Debug, Args)]
@@ -654,6 +661,11 @@ fn main() {
                     std::process::exit(1);
                 }
             };
+            let progress = resolve_progress_output(
+                args.progress,
+                std::io::IsTerminal::is_terminal(&std::io::stderr()),
+                false,
+            );
             let runner = RealRunner;
             let fs = RealFilesystem;
             let by_id_resolver = braid_cli::recover::RealByIdResolver;
@@ -668,6 +680,7 @@ fn main() {
                     passphrase_file: args.passphrase_file.as_deref(),
                     allow_degraded: args.allow_degraded,
                     dry_run: args.dry_run,
+                    progress,
                 },
             ) {
                 Ok(()) => {}

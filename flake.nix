@@ -488,6 +488,26 @@
               braid = linuxCrane.braid-cli-unwrapped;
             }
           );
+          ups-lb-during-replace = pkgs.testers.nixosTest (
+            import ./tests/module/ups-lb-during-replace.nix {
+              braid = linuxCrane.braid-cli-unwrapped;
+            }
+          );
+          ups-lb-during-remove = pkgs.testers.nixosTest (
+            import ./tests/module/ups-lb-during-remove.nix {
+              braid = linuxCrane.braid-cli-unwrapped;
+            }
+          );
+          ups-lb-during-remove-missing = pkgs.testers.nixosTest (
+            import ./tests/module/ups-lb-during-remove-missing.nix {
+              braid = linuxCrane.braid-cli-unwrapped;
+            }
+          );
+          ups-lb-during-balanced-add = pkgs.testers.nixosTest (
+            import ./tests/module/ups-lb-during-balanced-add.nix {
+              braid = linuxCrane.braid-cli-unwrapped;
+            }
+          );
           auto-unlock-key-missing = pkgs.testers.nixosTest (
             import ./tests/module/auto-unlock-key-missing.nix {
               braid = linuxCrane.braid-cli-unwrapped;
