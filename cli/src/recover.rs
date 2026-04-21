@@ -444,27 +444,37 @@ pub fn cmd_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
 ///    resize, the new disk reports the source disk's old size instead of
 ///    its full capacity. Resize-to-max is idempotent at the btrfs layer.
 ///
-/// 2. **Universal**: resume any paused balance the interruption left
-///    behind. Some kernel versions pause the BALANCE_ITEM on umount; this
-///    drains it. No-op if there is no paused balance.
+/// 2. **Per-op resume + balance replay** (Add / RemoveMissing / Replace
+///    only): if the kernel left a paused BALANCE_ITEM on umount, drain
+///    it; then re-run the post-mutation balance with `,soft` semantics so
+///    any non-target-profile chunks left behind by a cancelled-mid-flight
+///    balance get converted. The kernel may CANCEL rather than PAUSE the
+///    balance during the umount triggered by `systemctl poweroff`, in
+///    which case the resume is a no-op and the chunks that had not yet
+///    been converted stay single-profile. The `,soft` filter skips chunks
+///    already in the target profile, so this is idempotent if the
+///    original balance completed naturally.
 ///
-/// 3. **Per-op balance replay**: re-run the post-mutation balance with
-///    `,soft` semantics so any non-target-profile chunks left behind by a
-///    cancelled-mid-flight balance get converted. The kernel may CANCEL
-///    rather than PAUSE the balance during the umount triggered by
-///    `systemctl poweroff`, in which case step 2 is a no-op and the chunks
-///    that had not yet been converted stay single-profile. The `,soft`
-///    filter skips chunks already in the target profile, so this is
-///    idempotent if the original balance completed naturally.
+///    `OpKind::Remove` is intentionally skipped for BOTH the resume and
+///    the soft replay: the operator's recovery path is to re-run
+///    `braid remove`, which itself runs the appropriate
+///    `pool_balance_single`. Resuming a paused balance here would be
+///    actively wrong for the 2->1 case -- `braid remove` runs
+///    `pool_balance_single` BEFORE the device is dropped, so a shutdown
+///    that lands during that pre-balance leaves the kernel with a paused
+///    convert-to-single balance against a still-2-disk pool. Resuming it
+///    would convert RAID1 -> single without ever removing the device,
+///    then this function returns Ok and the journal gets cleared,
+///    silently halving redundancy. Letting `braid remove` rerun handles
+///    every shape (2->1 pre-balance, 3->2 / 4->3 with no pre-balance)
+///    correctly.
 ///
-///    `OpKind::Remove` is intentionally skipped: the operator's recovery
-///    path is to re-run `braid remove`, which itself runs the appropriate
-///    `pool_balance_single`. For `OpKind::Add` the new disk is already in
-///    the pool (so `braid add` would refuse on rerun) and for
-///    `OpKind::RemoveMissing` the missing device is already gone (so
-///    `braid remove-missing` would refuse), so those need the recover-side
-///    replay to avoid stranding the operator with single-profile chunks
-///    they have to fix manually with `btrfs balance start`.
+///    For `OpKind::Add` the new disk is already in the pool (so
+///    `braid add` would refuse on rerun) and for `OpKind::RemoveMissing`
+///    the missing device is already gone (so `braid remove-missing`
+///    would refuse), so those need the recover-side replay to avoid
+///    stranding the operator with single-profile chunks they have to fix
+///    manually with `btrfs balance start`.
 fn replay_post_mutation<R: CommandRunner + Sync>(
     runner: &R,
     mount_point: &MountPoint,
@@ -484,20 +494,20 @@ fn replay_post_mutation<R: CommandRunner + Sync>(
         }
     }
 
-    if let BalanceReport::Paused { .. } = get_balance_report(runner, mount_point) {
-        eprintln!(
-            "Resuming paused balance left by interrupted {}...",
-            journal_op_label_for_op(op)
-        );
-        crate::pool::pool_balance_resume(runner, mount_point, progress)
-            .map_err(|e| RecoverError::Failed(format!("recover balance resume: {e}")))?;
-        eprintln!("Balance resume complete.");
-    }
-
     match op {
         journal::OpKind::Add { .. }
         | journal::OpKind::RemoveMissing { .. }
         | journal::OpKind::Replace { .. } => {
+            if let BalanceReport::Paused { .. } = get_balance_report(runner, mount_point) {
+                eprintln!(
+                    "Resuming paused balance left by interrupted {}...",
+                    journal_op_label_for_op(op)
+                );
+                crate::pool::pool_balance_resume(runner, mount_point, progress)
+                    .map_err(|e| RecoverError::Failed(format!("recover balance resume: {e}")))?;
+                eprintln!("Balance resume complete.");
+            }
+
             if pool.devices.len() >= 2 {
                 eprintln!(
                     "Replaying post-{} RAID1 soft balance (skip already-RAID1 chunks)...",
@@ -509,11 +519,17 @@ fn replay_post_mutation<R: CommandRunner + Sync>(
             }
         }
         journal::OpKind::Remove { .. } => {
-            // No replay -- the recovery_guidance message already directs
-            // the operator to re-run `braid remove`, which will run its
-            // own `pool_balance_single` if 2->1. Trying to replay the
-            // single-conversion balance from recover would be wrong for
-            // 3->2 and 4->3 cases (no balance was ever started).
+            // No resume, no replay. `braid remove` is the only mutation
+            // whose pre-mutation phase issues a balance (the RAID1 ->
+            // single conversion in the 2->1 case), so a paused balance
+            // observed here may belong to an unfinished pre-remove rather
+            // than to a post-mutation rebalance. Resuming it would
+            // complete the conversion-to-single without removing the
+            // device, then we'd clear the journal and silently lose
+            // redundancy. The recovery_guidance message directs the
+            // operator to re-run `braid remove` instead, which handles
+            // every shape (2->1 pre-balance, 3->2 / 4->3 with no
+            // pre-balance) correctly.
         }
     }
 
@@ -3187,6 +3203,159 @@ mod tests {
         assert!(
             !paths.pending_op_json().exists(),
             "journal must be cleared after the paused balance is resumed"
+        );
+    }
+
+    /// Two-disk Remove journal modeling an interrupted 2->1 remove: pre =
+    /// {disk1, disk2}, target = {disk1}. Shutdown landed during the
+    /// pre-remove `pool_balance_single`, so the live pool still has both
+    /// disks but the kernel has a paused convert-to-single balance.
+    fn remove_2to1_journal() -> journal::Journal {
+        let mut pre_disks = BTreeMap::new();
+        pre_disks.insert(
+            "disk1".to_owned(),
+            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
+        );
+        pre_disks.insert(
+            "disk2".to_owned(),
+            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk2".into())),
+        );
+        let pre = PoolMembership { disks: pre_disks };
+
+        let mut target_disks = BTreeMap::new();
+        target_disks.insert(
+            "disk1".to_owned(),
+            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
+        );
+        let target = PoolMembership {
+            disks: target_disks,
+        };
+
+        journal::Journal {
+            started_at: "2026-01-01T00:00:00Z".into(),
+            op: OpKind::Remove {
+                name: "disk2".to_owned(),
+            },
+            pre_membership: pre,
+            target_membership: target,
+        }
+    }
+
+    /// Intent: When `cmd_recover` finds a paused balance after rebuilding
+    /// pool.json from an interrupted `OpKind::Remove`, it MUST NOT auto-resume
+    /// it. The operator's recovery path is to re-run `braid remove`, which
+    /// re-issues the appropriate `pool_balance_single` itself.
+    ///
+    /// Why it exists: `braid remove` is the only mutation whose pre-mutation
+    /// phase issues a balance (the RAID1 -> single conversion in the 2->1
+    /// case in `cli/src/pool.rs:310`). A shutdown landing during that
+    /// pre-balance leaves the kernel with a paused convert-to-single balance
+    /// against a still-2-disk pool. If `replay_post_mutation` resumed it
+    /// unconditionally, recover would finish the conversion to single
+    /// without ever removing the device, then clear the journal, silently
+    /// halving redundancy. The matrix test `ups-lb-during-remove` only
+    /// exercises a 3->2 remove, so this unit test is the regression guard
+    /// for the 2->1 pre-balance path.
+    ///
+    /// Scenario: Operator started `braid remove disk2` against a 2-disk
+    /// RAID1 pool; UPS LB fired during the pre-remove `pool_balance_single`.
+    /// Pool comes up with both disks still present and a paused balance.
+    /// Recover writes the recovered membership ({disk1, disk2} = pre), skips
+    /// the resume + the soft RAID1 replay, clears the journal, and prints
+    /// guidance to re-run `braid remove`.
+    #[test]
+    fn recover_skips_paused_balance_resume_for_remove() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let fs = MockFs::new(&[]);
+
+        let journal = remove_2to1_journal();
+        journal::write_journal(&paths, &journal).unwrap();
+
+        let (mp_req, mp_out) = mountpoint_ok();
+        let runner = MockRunner::default()
+            // mountpoint check -> already mounted (skips the mount cycle)
+            .with_output(mp_req, mp_out)
+            // probe_pool path -- live pool still has both disks because the
+            // pre-remove balance was in flight when shutdown hit; the device
+            // was never removed.
+            .with_output(
+                CmdRequest::FindmntJson {
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                ok_raw(
+                    "findmnt",
+                    r#"{"filesystems": [{"target":"/mnt/storage","source":"/dev/mapper/braid-disk1","fstype":"btrfs"}]}"#,
+                ),
+            )
+            .with_output(
+                CmdRequest::BtrfsFilesystemShow {
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                btrfs_show_two_disks(),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-disk1".into(),
+                },
+                cryptsetup_status_active("braid-disk1", "/dev/vda"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vda".into(),
+                },
+                cryptsetup_uuid_ok("/dev/vda", "11111111-1111-1111-1111-111111111111"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-disk2".into(),
+                },
+                cryptsetup_status_active("braid-disk2", "/dev/vdb"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vdb".into(),
+                },
+                cryptsetup_uuid_ok("/dev/vdb", "22222222-2222-2222-2222-222222222222"),
+            );
+        // Note: BtrfsBalanceStatus, BtrfsBalanceResume, and BtrfsBalanceRaid1Soft
+        // are NOT mocked. If replay_post_mutation regresses and either probes
+        // balance status, issues `btrfs balance resume`, or replays the soft
+        // RAID1 balance for OpKind::Remove, the test fails with MissingMock --
+        // proving recover correctly leaves the paused balance alone for the
+        // remove path.
+
+        let resolver = resolver_for(&[
+            ("/dev/vda", "virtio-disk1"),
+            ("/dev/vdb", "virtio-disk2"),
+        ]);
+        let result = cmd_recover(
+            &runner,
+            &fs,
+            &resolver,
+            &RecoverParams {
+                config: &config,
+                paths: &paths,
+                passphrase_stdin: false,
+                passphrase_file: None,
+                allow_degraded: false,
+                dry_run: false,
+                progress: ProgressOutput::Off,
+            },
+        );
+
+        result.expect("recover should succeed without resuming the paused remove balance");
+
+        let recovered = membership::load_membership(&paths).unwrap();
+        assert!(
+            recovered.disks.contains_key("disk1") && recovered.disks.contains_key("disk2"),
+            "recovered membership must reflect the live pool (both disks still present)"
+        );
+
+        assert!(
+            !paths.pending_op_json().exists(),
+            "journal must be cleared so the operator can re-run braid remove cleanly"
         );
     }
 }

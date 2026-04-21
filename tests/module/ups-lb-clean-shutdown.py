@@ -83,11 +83,15 @@ with subtest("Drive UPS critical: upsrw ups.status = OB LB"):
     )
 
 with subtest("Host shuts down in response to upsmon SHUTDOWNCMD"):
-    # FINALDELAY default is 5s before upsmon invokes SHUTDOWNCMD
-    # (reference/nut/clients/upsmon.c:114,935). Plus systemd stop
-    # sequence + braid-online ExecStop bounded by TimeoutStopSec=5min
-    # (decision 018). Single-disk minimal pool should complete well
-    # within the 180s wait budget below.
+    # This test deliberately runs upsmon at upstream defaults (POLLFREQ /
+    # POLLFREQALERT / FINALDELAY = 5/5/5; see ups-lb-clean-shutdown.nix)
+    # so the wait budget below has to absorb a real production-shape
+    # detection + delay window before SHUTDOWNCMD fires
+    # (reference/nut/clients/upsmon.c:114,935), plus the systemd stop
+    # sequence and braid-online ExecStop bounded by TimeoutStopSec=5min
+    # (decision 018). The 180s budget is comfortably wider than that.
+    # ADR 020 Open Question 3 leans on this test passing without the
+    # matrix-style 1/1/0 squeeze.
     try:
         machine.wait_for_shutdown()
     except Exception as e:

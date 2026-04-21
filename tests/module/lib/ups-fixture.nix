@@ -80,6 +80,30 @@
     battery.runtime: 1800
     battery.runtime.low: 120
   '',
+  # Upsmon poll/notify cadence overrides. The default squeezes POLLFREQ /
+  # POLLFREQALERT / FINALDELAY (upstream 5/5/5) down to 1/1/0 so the
+  # forced-shutdown matrix tests can land OB+LB while a slow mutation
+  # (replace / balance / remove) is still in flight; if POLLFREQ +
+  # FINALDELAY adds up to ~10s the mutation finishes first and the test
+  # silently degrades to "no journal to recover from."
+  #
+  # Pass `upsmonTimings = null` to leave upsmon at upstream defaults --
+  # required for `ups-lb-clean-shutdown`, which is the proof referenced
+  # by ADR 020 Open Question 3 ("default runtime budget is sufficient").
+  # That test must exercise production timings to be representative; it
+  # is not racing an in-flight mutation, so the wider LB-detection window
+  # is fine.
+  upsmonTimings ? {
+    POLLFREQ = 1;
+    POLLFREQALERT = 1;
+    # FINALDELAY=0 = SHUTDOWNCMD fires the moment upsmon detects critical.
+    # Matrix tests need every millisecond of margin between the LB trigger
+    # and the actual umount; the shutdown sequence (systemd unwind ->
+    # braid-online ExecStop -> braid lock -> umount) already takes ~1s on
+    # the test VMs, so even a 1-second FINALDELAY can let an in-memory
+    # tmpfs-backed `btrfs replace` finish before the umount cancels it.
+    FINALDELAY = 0;
+  },
 }:
 { pkgs, lib, ... }:
 {
@@ -97,29 +121,15 @@
   # later upsrw writes are kept in memory until the driver restarts.
   environment.etc."nut/ups.dev".text = devContent;
 
-  # Squeeze the upsmon poll/notify cadence so tests do not eat 10+
-  # real-world seconds between the upsrw write and SHUTDOWNCMD firing.
-  # The forced-shutdown matrix tests have to land the LB trigger while
-  # a slow mutation (replace / balance / remove) is still in flight; if
-  # POLLFREQ + FINALDELAY adds up to ~10s the mutation can finish first
-  # and the test silently degrades to "no journal to recover from."
+  # Apply the caller-controlled upsmon timing overrides (see the
+  # `upsmonTimings` parameter docstring above). Production
+  # `braid.ups.enable = true` ships upstream defaults via
+  # `modules/braid/ups.nix`; these overrides apply only to test VMs that
+  # import this fixture.
   #
   # Defaults from `reference/nut/conf/upsmon.conf.sample.in:236,249,542`
-  # are 5/5/5 (POLLFREQ / POLLFREQALERT / FINALDELAY). We drop each to
-  # 1s here. These overrides apply only to test VMs that import this
-  # fixture; production `braid.ups.enable = true` keeps upstream
-  # defaults via `modules/braid/ups.nix`.
-  power.ups.upsmon.settings = {
-    POLLFREQ = 1;
-    POLLFREQALERT = 1;
-    # FINALDELAY=0 = SHUTDOWNCMD fires the moment upsmon detects critical.
-    # Matrix tests need every millisecond of margin between the LB trigger
-    # and the actual umount; the shutdown sequence (systemd unwind ->
-    # braid-online ExecStop -> braid lock -> umount) already takes ~1s on
-    # the test VMs, so even a 1-second FINALDELAY can let an in-memory
-    # tmpfs-backed `btrfs replace` finish before the umount cancels it.
-    FINALDELAY = 0;
-  };
+  # are 5/5/5 (POLLFREQ / POLLFREQALERT / FINALDELAY).
+  power.ups.upsmon.settings = lib.mkIf (upsmonTimings != null) upsmonTimings;
 
   # Test-only user. Distinct from the production `users.${upsName}` user
   # provisioned by modules/braid/ups.nix. Keeping them separate is a

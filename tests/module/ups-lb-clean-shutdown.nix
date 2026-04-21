@@ -18,6 +18,15 @@
 # .dev contents, and the test-only `testops` SET credential stay
 # consistent across this Plan 1 test and the Plan 3 forced-shutdown
 # matrix (`ups-lb-during-{replace,remove,remove-missing,balanced-add}`).
+#
+# Critically, this test imports the fixture with `upsmonTimings = null`
+# so upsmon runs at upstream defaults (POLLFREQ/POLLFREQALERT/FINALDELAY
+# = 5/5/5). ADR 020 Open Question 3 cites this test as evidence that the
+# default upsmon runtime budget is sufficient for a clean shutdown of an
+# idle pool; the matrix tests squeeze those timings to 1/1/0 to keep the
+# LB-detection window narrower than the in-flight mutation, but that
+# squeeze would invalidate the runtime-budget claim if it leaked here.
+# See `lib/ups-fixture.nix` for the full rationale.
 { braid }:
 { pkgs, lib, ... }:
 let
@@ -36,7 +45,7 @@ in
           diskNames = [ "disk1" ];
           description = "Prepare LUKS + btrfs fixture for UPS LB shutdown test";
         })
-        (import ./lib/ups-fixture.nix { })
+        (import ./lib/ups-fixture.nix { upsmonTimings = null; })
       ];
 
       braid = {
