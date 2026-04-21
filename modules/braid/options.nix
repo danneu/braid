@@ -16,6 +16,7 @@ in
       cryptsetup = lib.mkPackageOption pkgs "cryptsetup" {};
       btrfsProgs = lib.mkPackageOption pkgs "btrfs-progs" {};
       utilLinux = lib.mkPackageOption pkgs "util-linux" {};
+      nut = lib.mkPackageOption pkgs "nut" {};
     };
 
     package = lib.mkOption {

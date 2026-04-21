@@ -36,6 +36,7 @@ mod helpers;
 pub mod lsblk;
 pub mod smartctl;
 pub mod types;
+pub mod upsc;
 
 use thiserror::Error;
 
@@ -87,3 +88,4 @@ pub use findmnt::parse_findmnt_json;
 pub use lsblk::{parse_lsblk_field, parse_lsblk_json};
 pub use btrfs_subvolume_list::parse_btrfs_subvolume_list;
 pub use smartctl::parse_smartctl;
+pub use upsc::parse_upsc;

@@ -87,6 +87,8 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     let fsid = pool.fsid.as_deref().expect("mounted pool must have FSID");
     preflight::require_mutation_preflight(runner, fs, fsid, config.mount_point())
         .map_err(ReplaceError::Validation)?;
+    preflight::check_ups_not_on_battery(runner, config.ups().map(|u| u.name.as_str()), "replace")
+        .map_err(ReplaceError::Validation)?;
 
     // --old == --new: reject early.
     if params.old_name == new_name {

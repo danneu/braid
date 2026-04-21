@@ -478,6 +478,16 @@
               braid = linuxCrane.braid-cli-unwrapped;
             }
           );
+          ups-preflight-on-battery = pkgs.testers.nixosTest (
+            import ./tests/module/ups-preflight-on-battery.nix {
+              braid = linuxCrane.braid-cli-unwrapped;
+            }
+          );
+          ups-lb-clean-shutdown = pkgs.testers.nixosTest (
+            import ./tests/module/ups-lb-clean-shutdown.nix {
+              braid = linuxCrane.braid-cli-unwrapped;
+            }
+          );
           auto-unlock-key-missing = pkgs.testers.nixosTest (
             import ./tests/module/auto-unlock-key-missing.nix {
               braid = linuxCrane.braid-cli-unwrapped;

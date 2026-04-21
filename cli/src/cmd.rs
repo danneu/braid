@@ -205,6 +205,13 @@ pub enum CmdRequest {
     SystemctlIsActive {
         unit: String,
     },
+    /// `upsc <name>` — NUT status query. Emits `key: value` lines (see
+    /// `reference/nut/clients/upsc.c:141`) on stdout; non-zero exit when the
+    /// upsd daemon is unreachable or the UPS name is unknown. braid uses
+    /// this for preflight-on-battery and `braid ups status`.
+    UpscQuery {
+        name: String,
+    },
 }
 
 #[derive(Debug)]
@@ -752,6 +759,10 @@ impl CmdRequest {
             CmdRequest::SystemctlIsActive { unit } => CmdArgs {
                 program: "systemctl".to_owned(),
                 args: vec!["is-active".into(), unit.clone()],
+            },
+            CmdRequest::UpscQuery { name } => CmdArgs {
+                program: "upsc".to_owned(),
+                args: vec![name.clone()],
             },
         }
     }

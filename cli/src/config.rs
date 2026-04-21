@@ -27,10 +27,17 @@ pub struct FanControl {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Ups {
+    pub enable: bool,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(try_from = "RawConfig")]
 pub struct Config {
     mount_point: MountPoint,
     fan_control: Option<FanControl>,
+    ups: Option<Ups>,
 }
 
 impl Config {
@@ -41,6 +48,7 @@ impl Config {
         Ok(Config {
             mount_point,
             fan_control: None,
+            ups: None,
         })
     }
 
@@ -50,6 +58,10 @@ impl Config {
 
     pub fn fan_control(&self) -> Option<&FanControl> {
         self.fan_control.as_ref()
+    }
+
+    pub fn ups(&self) -> Option<&Ups> {
+        self.ups.as_ref()
     }
 }
 
@@ -68,6 +80,8 @@ struct RawConfig {
     mount_point: MountPoint,
     #[serde(default)]
     fan_control: Option<FanControl>,
+    #[serde(default)]
+    ups: Option<Ups>,
 }
 
 impl TryFrom<RawConfig> for Config {
@@ -76,6 +90,7 @@ impl TryFrom<RawConfig> for Config {
     fn try_from(raw: RawConfig) -> Result<Self, Self::Error> {
         let mut cfg = Config::new(raw.mount_point)?;
         cfg.fan_control = raw.fan_control;
+        cfg.ups = raw.ups;
         Ok(cfg)
     }
 }
@@ -188,6 +203,34 @@ mod tests {
         assert_eq!(fc.min_temp, 30);
         assert_eq!(fc.max_temp, 40);
         assert_eq!(fc.min_fan_speed_percent, 20);
+    }
+
+    // Intent: Config deserializes the ups block emitted by modules/braid/cli.nix.
+    // Why: cli.nix writes `ups = { enable, name }` when braid.ups.enable = true;
+    // a schema mismatch silently leaves Config::ups as None, which would turn
+    // the preflight on-battery refusal into a no-op (the check is a no-op when
+    // `ups_name` is None).
+    // Scenario: NixOS generation with braid.ups.enable = true and name = "ups".
+    #[test]
+    fn parses_config_with_ups() {
+        let raw = r#"{
+            "mount_point": "/mnt/storage",
+            "ups": { "enable": true, "name": "ups" }
+        }"#;
+        let cfg: Config = serde_json::from_str(raw).expect("config should parse");
+        let u = cfg.ups().expect("ups should be Some");
+        assert!(u.enable);
+        assert_eq!(u.name, "ups");
+    }
+
+    // Intent: Config parses when ups key is absent (braid.ups.enable = false).
+    // Why: absent JSON key means no UPS configured; preflight must treat that
+    // as "no UPS check needed" rather than erroring at config-read time.
+    #[test]
+    fn parses_config_without_ups() {
+        let raw = r#"{"mount_point":"/mnt/storage"}"#;
+        let cfg: Config = serde_json::from_str(raw).expect("config should parse");
+        assert!(cfg.ups().is_none());
     }
 
     // Intent: malformed pwm (missing required fields) fails to deserialize.

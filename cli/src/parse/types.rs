@@ -454,6 +454,56 @@ pub struct BtrfsSubvolumeListOutput {
     pub subvolumes: Vec<BtrfsSubvolume>,
 }
 
+/// NUT `ups.status` flag. The full variant list lives here even though v1
+/// preflight only consults `Ob` / `Lb` -- keeping the enum complete means
+/// plan 2's richer parser does not need to re-land the list.
+///
+/// `Unknown(String)` preserves any token we don't yet recognize so future
+/// NUT statuses are surfaced rather than silently dropped.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum UpsStatusFlag {
+    /// On utility power.
+    Ol,
+    /// On battery.
+    Ob,
+    /// Low battery.
+    Lb,
+    /// Replace battery.
+    Rb,
+    /// High battery.
+    Hb,
+    /// Charging.
+    Chrg,
+    /// Discharging.
+    Dischrg,
+    /// Calibrating.
+    Cal,
+    /// Bypass active.
+    Bypass,
+    /// Administratively off.
+    Off,
+    /// Overload.
+    Over,
+    /// Trim / SmartTrim (stepping voltage down).
+    Trim,
+    /// Boost / SmartBoost (stepping voltage up).
+    Boost,
+    /// Forced shutdown in progress.
+    Fsd,
+    Unknown(String),
+}
+
+/// Minimal `upsc <name>` parse. Plan 1 only needs `status_flags` for
+/// preflight + `braid ups status`; plan 2 extends this shape with the
+/// rich model (battery, input, load, test.result, ...). `extra` keeps
+/// every unparsed `key: value` line so `braid ups status` can render
+/// the raw tail verbatim without an upstream change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpscOutput {
+    pub status_flags: std::collections::HashSet<UpsStatusFlag>,
+    pub extra: std::collections::BTreeMap<String, String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -61,6 +61,20 @@ enum Commands {
     Discover(DiscoverArgs),
     /// Recover from an interrupted operation by rebuilding pool.json from live pool state
     Recover(RecoverArgs),
+    /// UPS (NUT) inspection commands
+    Ups(UpsArgs),
+}
+
+#[derive(Debug, Args)]
+struct UpsArgs {
+    #[command(subcommand)]
+    command: UpsCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum UpsCommand {
+    /// Show current UPS status flags plus the raw upsc key/value tail
+    Status,
 }
 
 #[derive(Debug, Args)]
@@ -669,6 +683,15 @@ fn main() {
                 }
             }
         }
+        Commands::Ups(args) => match args.command {
+            UpsCommand::Status => {
+                let runner = RealRunner;
+                if let Err(e) = braid_cli::ups::cmd_ups_status(&runner, Path::new(&config_path)) {
+                    print_cli_error(&e.to_string());
+                    std::process::exit(1);
+                }
+            }
+        },
         Commands::Browse(args) => {
             let mount_point = match args.mount_point {
                 Some(mp) => mp,

@@ -320,6 +320,8 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         preflight::require_mutation_preflight(runner, fs, fsid, config.mount_point())
             .map_err(AddError::Validation)?;
     }
+    preflight::check_ups_not_on_battery(runner, config.ups().map(|u| u.name.as_str()), "add")
+        .map_err(AddError::Validation)?;
     if pool.missing_count > 0 {
         eprintln!(
             "warning: pool has {} missing device{}. \

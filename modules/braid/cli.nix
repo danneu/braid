@@ -24,6 +24,11 @@ let
       max_temp = cfg.fanControl.maxTemp;
       min_fan_speed_percent = cfg.fanControl.minFanSpeedPercent;
     };
+  } // lib.optionalAttrs cfg.ups.enable {
+    ups = {
+      enable = cfg.ups.enable;
+      name = cfg.ups.name;
+    };
   });
 in
 {

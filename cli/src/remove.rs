@@ -69,6 +69,8 @@ pub fn cmd_remove<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     let fsid = pool.fsid.as_deref().expect("mounted pool must have FSID");
     preflight::require_mutation_preflight(runner, fs, fsid, config.mount_point())
         .map_err(RemoveError::Validation)?;
+    preflight::check_ups_not_on_battery(runner, config.ups().map(|u| u.name.as_str()), "remove")
+        .map_err(RemoveError::Validation)?;
 
     let mn = mapper_name(params.name);
 

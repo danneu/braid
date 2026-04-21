@@ -99,6 +99,12 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     let fsid = pool.fsid.as_deref().expect("mounted pool must have FSID");
     preflight::require_mutation_preflight(runner, fs, fsid, config.mount_point())
         .map_err(RemoveMissingError::Validation)?;
+    preflight::check_ups_not_on_battery(
+        runner,
+        config.ups().map(|u| u.name.as_str()),
+        "remove-missing",
+    )
+    .map_err(RemoveMissingError::Validation)?;
 
     if pool.missing_count == 0 {
         return Err(RemoveMissingError::Validation(

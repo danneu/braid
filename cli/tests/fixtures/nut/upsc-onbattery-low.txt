@@ -1,0 +1,18 @@
+battery.charge: 8
+battery.charge.low: 10
+battery.runtime: 45
+battery.type: PbAc
+device.mfr: APC
+device.model: Back-UPS ES 550G
+device.type: ups
+driver.name: usbhid-ups
+driver.parameter.pollfreq: 30
+driver.parameter.port: auto
+input.voltage: 0.0
+input.voltage.nominal: 120
+ups.load: 20
+ups.mfr: APC
+ups.model: Back-UPS ES 550G
+ups.realpower.nominal: 330
+ups.status: OB LB
+ups.test.result: No test initiated

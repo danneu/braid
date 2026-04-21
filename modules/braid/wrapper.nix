@@ -8,7 +8,10 @@
 # 4. On success of lock, deactivates braid-online
 { cfg, pkgs, lib }:
 let
-  toolPackages = with cfg.packages; [ cryptsetup btrfsProgs utilLinux ] ++ [ pkgs.systemd ];
+  toolPackages =
+    (with cfg.packages; [ cryptsetup btrfsProgs utilLinux ])
+    ++ [ pkgs.systemd ]
+    ++ lib.optional cfg.ups.enable cfg.packages.nut;
 in
 pkgs.runCommand "braid" {} ''
   mkdir -p $out/bin

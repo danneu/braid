@@ -2,7 +2,8 @@ use std::fmt;
 
 use crate::cmd::{CmdRequest, CommandRunner};
 use crate::journal;
-use crate::parse::types::BtrfsDeviceUsageEntry;
+use crate::parse::parse_upsc;
+use crate::parse::types::{BtrfsDeviceUsageEntry, UpsStatusFlag};
 use crate::parse::{parse_btrfs_device_usage, parse_findmnt_json};
 use crate::probe::Filesystem;
 use crate::state_paths::StatePaths;
@@ -297,6 +298,52 @@ pub fn check_raid1_relocation_space(
                 format_bytes(raid1_capacity),
             ));
         }
+    }
+    Ok(())
+}
+
+/// Refuse if the configured UPS is on battery, reporting LB, or unreachable.
+///
+/// Fail-closed: daemon-down, malformed output, and an empty `ups.status`
+/// all produce the same refusal. One wording covers all three so the
+/// message stays honest when the real cause is comms-failure rather than
+/// an on-battery condition. Caller passes `None` when no UPS is
+/// configured, which makes this a no-op.
+///
+/// Wire into `add`, `remove`, `remove-missing`, `replace` before journal
+/// write. See docs/decisions/020-ups-integration.md for the safety
+/// rationale.
+pub fn check_ups_not_on_battery<R: CommandRunner>(
+    runner: &R,
+    ups_name: Option<&str>,
+    op: &str,
+) -> Result<(), String> {
+    let Some(name) = ups_name else {
+        return Ok(());
+    };
+    let refuse = |context: &str| {
+        Err(format!(
+            "cannot verify UPS is on utility power ({context}) -- refusing to start {op}. \
+             Check 'braid ups status', restore utility power, then retry."
+        ))
+    };
+    let raw = match runner.run(&CmdRequest::UpscQuery {
+        name: name.to_owned(),
+    }) {
+        Ok(r) => r,
+        Err(_) => return refuse("upsc command failed"),
+    };
+    let parsed = match parse_upsc(&raw) {
+        Ok(p) => p,
+        Err(_) => return refuse("upsc output unparseable or upsd unreachable"),
+    };
+    if parsed.status_flags.is_empty() {
+        return refuse("ups.status is empty or missing");
+    }
+    if parsed.status_flags.contains(&UpsStatusFlag::Ob)
+        || parsed.status_flags.contains(&UpsStatusFlag::Lb)
+    {
+        return refuse("UPS reports on-battery or low-battery");
     }
     Ok(())
 }
@@ -920,6 +967,99 @@ mod tests {
         let fs = MockFs::with_sysfs(FSID, "device add\n");
         let runner = MockRunner::default();
         assert!(require_mutation_preflight(&runner, &fs, FSID, &mp()).is_ok());
+    }
+
+    // --- check_ups_not_on_battery tests ---
+
+    fn upsc_mock(name: &str, stdout: &str, exit: i32) -> MockRunner {
+        MockRunner::default().with_output(
+            CmdRequest::UpscQuery {
+                name: name.to_owned(),
+            },
+            RawCommandOutput {
+                cmd: format!("upsc {name}"),
+                stdout: stdout.to_owned(),
+                stderr: if exit == 0 { "" } else { "daemon unreachable" }.to_owned(),
+                exit_status: exit,
+            },
+        )
+    }
+
+    #[test]
+    // Intent: check_ups_not_on_battery passes when ups_name is None.
+    // Why: users who have not enabled braid.ups should not see a preflight
+    // change at all. The no-op guard is load-bearing for config compat.
+    // Scenario: braid.ups.enable = false (default), operator runs `braid add`.
+    fn ups_no_config_is_noop() {
+        let runner = MockRunner::default();
+        assert!(check_ups_not_on_battery(&runner, None, "add").is_ok());
+    }
+
+    #[test]
+    // Intent: check_ups_not_on_battery passes when ups.status = OL.
+    // Why: preflight must not refuse the healthy case; doing so would make
+    // `braid.ups.enable = true` refuse every mutation and silently regress.
+    // Scenario: operator runs `braid add` against a UPS on utility power.
+    fn ups_online_passes() {
+        let runner = upsc_mock("ups", "ups.status: OL\n", 0);
+        assert!(check_ups_not_on_battery(&runner, Some("ups"), "add").is_ok());
+    }
+
+    #[test]
+    // Intent: OB in the status set triggers refusal.
+    // Why: primary safety feature -- narrow the mid-mutation recovery surface
+    // by rejecting avoidable starts on battery.
+    // Scenario: operator runs `braid remove` while the UPS is on battery.
+    fn ups_on_battery_refuses() {
+        let runner = upsc_mock("ups", "ups.status: OB\n", 0);
+        let err = check_ups_not_on_battery(&runner, Some("ups"), "remove").unwrap_err();
+        assert!(err.contains("utility power"), "got: {err}");
+        assert!(err.contains("remove"), "op name should appear in: {err}");
+    }
+
+    #[test]
+    // Intent: LB alone (without OB) still triggers refusal.
+    // Why: upsmon's critical-state check requires OB+LB together, but a
+    // battery self-test can transiently show LB+OL. braid refuses either
+    // way because starting a long mutation while LB is reported is risky.
+    // Scenario: UPS reports LB during a self-test or flaky USB HID state.
+    fn ups_low_battery_refuses() {
+        let runner = upsc_mock("ups", "ups.status: OL LB\n", 0);
+        let err = check_ups_not_on_battery(&runner, Some("ups"), "add").unwrap_err();
+        assert!(err.contains("low-battery") || err.contains("on-battery"), "got: {err}");
+    }
+
+    #[test]
+    // Intent: daemon-down (non-zero upsc exit) refuses the mutation.
+    // Why: fail-closed -- if braid cannot determine UPS state, it must not
+    // start work it can't guarantee a clean shutdown from.
+    // Scenario: upsd.service has crashed or hasn't started yet.
+    fn ups_daemon_down_refuses() {
+        let runner = upsc_mock("ups", "", 1);
+        let err = check_ups_not_on_battery(&runner, Some("ups"), "replace").unwrap_err();
+        assert!(err.contains("utility power"), "got: {err}");
+    }
+
+    #[test]
+    // Intent: empty status set (no ups.status line) refuses.
+    // Why: an absent ups.status is indistinguishable from a stuck driver;
+    // treating empty as OL would undermine the whole preflight contract.
+    // Scenario: dummy-ups driver hasn't filled in ups.status yet.
+    fn ups_empty_status_refuses() {
+        let runner = upsc_mock("ups", "battery.charge: 100\n", 0);
+        let err = check_ups_not_on_battery(&runner, Some("ups"), "remove-missing").unwrap_err();
+        assert!(err.contains("utility power"), "got: {err}");
+    }
+
+    #[test]
+    // Intent: missing mock output is treated as daemon-down (fail-closed).
+    // Why: MockRunner::default() produces MissingMock, which mirrors a
+    // subprocess spawn failure at runtime; both must refuse.
+    // Scenario: a future refactor forgets to wire the upsc mock in a test.
+    fn ups_missing_mock_refuses() {
+        let runner = MockRunner::default();
+        let err = check_ups_not_on_battery(&runner, Some("ups"), "add").unwrap_err();
+        assert!(err.contains("utility power"), "got: {err}");
     }
 
     #[test]
