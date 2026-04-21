@@ -471,6 +471,11 @@ fn is_sd_shaped(name: &str) -> bool {
 /// (millidegrees). The traversal via `../../` resolves through the
 /// `/sys/block/sdX` symlink into the drive-specific device subtree,
 /// so each drive lands in its own hwmon dir.
+///
+/// Used for the Fans section only. drivetemp reads SCT, which on observed
+/// drives latches high and bleeds down slowly after a thermal spike. The
+/// Disks section uses smartctl `temperature.current` instead because it
+/// tracks falling temperatures in near-real-time.
 fn read_drivetemp(sysfs_root: &Path, sd_name: &str) -> Option<i16> {
     let hwmon_dir = sysfs_root.join("block").join(sd_name).join("../../hwmon");
     if !hwmon_dir.is_dir() {
