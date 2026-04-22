@@ -20,7 +20,7 @@ If any check triggers, braid activates an alert.
 
 When `braid monitor` detects an issue (exit code 1), the systemd wrapper starts `braid-alert.service`, which:
 
-- **Beeps the PC speaker** every 15 seconds (if enabled) until acknowledged.
+- **Beeps the PC speaker** (if enabled) until acknowledged. The cadence starts at 5 seconds and backs off exponentially (5s, 10s, 20s, 40s, ...) up to once every 15 minutes, so the early beeps are urgent but an ignored alert doesn't stay obnoxious.
 - **Runs your custom alert command** (if configured).
 
 The beeping is intentionally persistent and annoying -- you should not be able to ignore a disk problem on a NAS that holds your data.
@@ -153,7 +153,7 @@ braid-monitor.timer (every 5 min)
   -> braid-monitor.service
     -> braid monitor (exit 0 = ok, 1 = alert, 2 = error)
       -> on exit 1: start braid-alert.service
-        -> beep (PC speaker, every 15s)
+        -> beep (PC speaker, 5s -> 10s -> ... -> 15min)
         -> alertCommand (if configured)
 
 smartd (always running)

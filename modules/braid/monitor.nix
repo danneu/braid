@@ -96,9 +96,16 @@ in
           ${cfg.monitor.alertCommand} || true
         ''}
         ${lib.optionalString beepEnabled ''
+          # Exponential backoff resets via service stop on `braid ack`.
+          delay=5
+          max_delay=900
           while true; do
             ${braidBeepProbe}/bin/braid-beep-probe 2>/dev/null || true
-            sleep 15
+            sleep "$delay"
+            delay=$((delay * 2))
+            if [ "$delay" -gt "$max_delay" ]; then
+              delay=$max_delay
+            fi
           done
         ''}
       '';

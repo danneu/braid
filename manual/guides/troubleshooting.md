@@ -114,7 +114,7 @@ See [Auto-unlock](auto-unlock.md) for the setup guide.
 
 ## Beeper won't stop
 
-**Symptom:** The PC speaker is beeping every 15 seconds due to a disk health alert.
+**Symptom:** The PC speaker is beeping (initially every few seconds, then less often) due to a disk health alert.
 
 **Fix:** Acknowledge the alert:
 

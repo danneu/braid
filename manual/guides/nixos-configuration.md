@@ -91,7 +91,7 @@ braid's scrub conflicts with the NixOS built-in `services.btrfs.autoScrub`. If b
 | `braid.monitor.beep` | bool | `true` | Audible PC speaker beep on alert |
 | `braid.monitor.alertCommand` | string or null | `null` | Custom command to run on alert |
 
-When `beep = true`, the module unblacklists the `pcspkr` kernel module, creates a `beep` group, and sets up a udev rule for PC speaker access. The beep loops every 15 seconds until acknowledged with `braid ack`.
+When `beep = true`, the module unblacklists the `pcspkr` kernel module, creates a `beep` group, and sets up a udev rule for PC speaker access. The beep loops with exponential backoff (5s, 10s, 20s, 40s, ...) capped at once every 15 minutes, until acknowledged with `braid ack`.
 
 `alertCommand` runs in addition to the beep (not instead of). Use it for push notifications, email, etc.:
 

@@ -44,6 +44,13 @@ with subtest("Service script has modprobe fallback and references the canonical 
         f"alert script must reference the canonical braid-beep-probe wrapper:\n{script}"
     )
 
+    # Beep loop must implement exponential backoff capping at 900s (15min).
+    # Catches a future refactor that silently reverts to fixed-cadence beeping.
+    assert "delay=5" in script, f"alert script must initialize delay=5:\n{script}"
+    assert "max_delay=900" in script, f"alert script must cap delay at 900s:\n{script}"
+    assert "delay * 2" in script, f"alert script must double the delay each iter:\n{script}"
+    assert "$max_delay" in script, f"alert script must clamp to max_delay:\n{script}"
+
     # The rendered script line looks like:
     #   /nix/store/xxxx-braid-beep-probe/bin/braid-beep-probe 2>/dev/null || true
     # Extract that absolute store path so we can read the wrapper body.
