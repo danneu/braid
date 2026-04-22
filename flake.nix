@@ -451,6 +451,11 @@
           repro-remove-without-balance = pkgs.testers.nixosTest (
             import ./tests/repro/remove-without-balance.nix
           );
+          repro-remove-2to1-undersized-survivor = pkgs.testers.nixosTest (
+            import ./tests/repro/remove-2to1-undersized-survivor.nix {
+              braid = linuxCrane.braid;
+            }
+          );
           repro-cryptsetup-close-mounted = pkgs.testers.nixosTest (
             import ./tests/repro/cryptsetup-close-mounted.nix
           );

@@ -4,7 +4,7 @@ use crate::confirm;
 use crate::inhibit::AcquireSleepInhibitor;
 use crate::journal;
 use crate::membership;
-use crate::parse::{parse_btrfs_device_usage, ParseError};
+use crate::parse::{parse_btrfs_device_usage, parse_btrfs_df_json, ParseError};
 use crate::pool::evict_present_device;
 use crate::preflight;
 use crate::probe::{probe_pool, Filesystem, ProbeError};
@@ -122,20 +122,20 @@ pub fn cmd_remove<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     preflight::check_no_missing_devices(pool.missing_count, "remove a live disk from the pool")
         .map_err(RemoveError::Validation)?;
 
-    let remaining = pool.devices.len() - 1;
-    // Pre-flight: reject if other devices lack space to absorb data from
-    // the device being removed. Without this, btrfs will either ENOSPC
-    // instantly or crash the filesystem to read-only mid-relocation
-    // (see tests/repro/).
-    //
-    // Skip for single-survivor removals (remaining == 1): the eviction
-    // path balances RAID1->single first, which handles data redistribution.
-    // This does not match the reproduced relocation-failure mode.
-    if remaining > 1 {
-        check_eviction_space(runner, config.mount_point(), target.devid)?;
-    }
-
+    // compile_remove_present_steps owns the remaining == 0 rejection
+    // (last-disk gate). Run it first so that `check_eviction_space` is
+    // always reached with `remaining >= 1`; the capacity helper does not
+    // need to handle the 0-case.
     let steps = compile_remove_present_steps(&mn, &pool, config.mount_point())?;
+
+    let remaining = pool.devices.len() - 1;
+    // Pre-flight: reject if the surviving devices lack space to absorb
+    // data from the device being removed. Without this, btrfs will
+    // either ENOSPC instantly or crash the filesystem to read-only
+    // mid-relocation (see tests/repro/). The helper dispatches on
+    // `remaining` -- the >=2-survivor path and the 1-survivor path use
+    // different models and different error policies.
+    check_eviction_space(runner, config.mount_point(), target, remaining)?;
 
     if params.dry_run {
         Step::print_dry_run(&steps);
@@ -212,21 +212,41 @@ pub fn cmd_remove<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     Ok(())
 }
 
-/// Check that the remaining devices have enough RAID1-aware, per-type space to
-/// absorb data from the device being removed. If they don't, btrfs device remove
-/// will either ENOSPC instantly or crash the filesystem to read-only mid-relocation.
+/// Check that the surviving device(s) have enough space to absorb data from
+/// the device being removed. If they don't, `btrfs device remove` will either
+/// ENOSPC instantly or crash the filesystem to read-only mid-relocation.
 ///
-/// Failure handling splits by source: spawn errors (runner could not invoke
-/// btrfs) and parser-shape errors (malformed output) warn and proceed -- a bug
-/// in the safety net shouldn't block a valid operation. A non-zero exit from
-/// btrfs itself (`ParseError::CommandFailed`) is surfaced as a validation error,
-/// because that means btrfs could not read the filesystem and the irreversible
-/// `btrfs device remove` step must not run.
+/// Two branches with **different error policies**:
+///
+/// - `remaining >= 2`: RAID1-aware per-type check via
+///   `check_raid1_relocation_space`. Input uncertainty (spawn errors,
+///   non-`CommandFailed` parse errors) is *warn-and-proceed* -- a best-effort
+///   preflight miss here falls through to `btrfs device remove`, which ENOSPCs
+///   cleanly without corrupting the filesystem. Only a `CommandFailed` parse
+///   error (btrfs itself refused) is surfaced as a validation error.
+///
+/// - `remaining == 1`: single-survivor capacity check. Every input uncertainty
+///   -- spawn error, parser-shape error, `CommandFailed`, or "survivor entry
+///   missing from `btrfs device usage`" -- is a hard `RemoveError::Validation`.
+///   The post-balance + post-remove state for a lone survivor has no safety
+///   net: a missed capacity refusal lets `btrfs device remove` crash the fs
+///   read-only mid-migration with `pending-op.json` already on disk. Any
+///   uncertainty is fail-closed here by design. Do **not** unify the two
+///   error policies -- the asymmetry is the point.
+///
+/// `remaining == 0` is not a valid input; `compile_remove_present_steps` has
+/// already rejected the last-disk case upstream.
 fn check_eviction_space<R: CommandRunner>(
     runner: &R,
     mount_point: &MountPoint,
-    target_devid: u64,
+    target: &PoolDevice,
+    remaining: usize,
 ) -> Result<(), RemoveError> {
+    if remaining == 1 {
+        return check_single_survivor(runner, mount_point, target);
+    }
+
+    // remaining >= 2: existing warn-and-proceed policy.
     let raw = match runner.run(&CmdRequest::BtrfsDeviceUsageRaw {
         mount_point: mount_point.clone(),
     }) {
@@ -252,22 +272,89 @@ fn check_eviction_space<R: CommandRunner>(
         }
     };
 
-    let target: Vec<_> = usage
+    let target_devs: Vec<_> = usage
         .devices
         .iter()
-        .filter(|d| d.devid == target_devid)
+        .filter(|d| d.devid == target.devid)
         .collect();
-    let remaining: Vec<_> = usage
+    let remaining_devs: Vec<_> = usage
         .devices
         .iter()
-        .filter(|d| d.devid != target_devid)
+        .filter(|d| d.devid != target.devid)
         .collect();
 
-    preflight::check_raid1_relocation_space(&target, &remaining).map_err(|e| {
+    preflight::check_raid1_relocation_space(&target_devs, &remaining_devs).map_err(|e| {
         RemoveError::Validation(format!(
             "{e}\n\nFree up space by deleting files, or add a new device first with `braid add`."
         ))
     })
+}
+
+/// 2->1 branch of `check_eviction_space`. Fail-closed on every input
+/// uncertainty -- see `check_eviction_space` docstring for the rationale.
+fn check_single_survivor<R: CommandRunner>(
+    runner: &R,
+    mount_point: &MountPoint,
+    target: &PoolDevice,
+) -> Result<(), RemoveError> {
+    let usage_raw = runner
+        .run(&CmdRequest::BtrfsDeviceUsageRaw {
+            mount_point: mount_point.clone(),
+        })
+        .map_err(|e| {
+            RemoveError::Validation(format!(
+                "ENOSPC pre-flight (2->1): btrfs device usage spawn failed: {e}. \
+                 Refusing to start remove without a validated survivor capacity."
+            ))
+        })?;
+    let usage = parse_btrfs_device_usage(&usage_raw).map_err(|e| match e {
+        ParseError::CommandFailed {
+            exit_code, stderr, ..
+        } => RemoveError::Validation(format!(
+            "btrfs device usage failed (exit {exit_code}): {stderr}"
+        )),
+        other => RemoveError::Validation(format!(
+            "ENOSPC pre-flight (2->1): btrfs device usage output unparseable: {other}. \
+             Refusing to start remove without a validated survivor capacity."
+        )),
+    })?;
+
+    let df_raw = runner
+        .run(&CmdRequest::BtrfsFilesystemDfJson {
+            mount_point: mount_point.clone(),
+        })
+        .map_err(|e| {
+            RemoveError::Validation(format!(
+                "ENOSPC pre-flight (2->1): btrfs filesystem df spawn failed: {e}. \
+                 Refusing to start remove without a validated survivor capacity."
+            ))
+        })?;
+    let df = parse_btrfs_df_json(&df_raw).map_err(|e| match e {
+        ParseError::CommandFailed {
+            exit_code, stderr, ..
+        } => RemoveError::Validation(format!(
+            "btrfs filesystem df failed (exit {exit_code}): {stderr}"
+        )),
+        other => RemoveError::Validation(format!(
+            "ENOSPC pre-flight (2->1): btrfs filesystem df output unparseable: {other}. \
+             Refusing to start remove without a validated survivor capacity."
+        )),
+    })?;
+
+    let survivor = usage
+        .devices
+        .iter()
+        .find(|d| d.devid != target.devid)
+        .ok_or_else(|| {
+            RemoveError::Validation(format!(
+                "ENOSPC pre-flight (2->1): btrfs device usage did not list the \
+                 surviving device (target devid {}). Refusing to start remove \
+                 without a validated survivor capacity.",
+                target.devid,
+            ))
+        })?;
+
+    preflight::check_single_survivor_capacity(&df, survivor).map_err(RemoveError::Validation)
 }
 
 fn compile_remove_present_steps(
@@ -495,6 +582,42 @@ mod tests {
                     "No balance found on '/mnt/storage'\n",
                     0,
                 )),
+                CmdRequest::BtrfsDeviceUsageRaw { .. } => Ok(mock_out(
+                    "btrfs device usage --raw /mnt/storage",
+                    // 2-disk RAID1, each device 1 GiB physical, small
+                    // allocations. Used by the 2->1 preflight to resolve
+                    // the survivor entry (device_size - device_slack is
+                    // the usable capacity).
+                    "/dev/mapper/braid-disk1, ID: 1\n\
+                     \x20  Device size:         1073741824\n\
+                     \x20  Device slack:                 0\n\
+                     \x20  Data,RAID1:            52428800\n\
+                     \x20  Metadata,RAID1:        10485760\n\
+                     \x20  System,RAID1:             32768\n\
+                     \x20  Unallocated:         1010794496\n\n\
+                     /dev/mapper/braid-disk2, ID: 2\n\
+                     \x20  Device size:         1073741824\n\
+                     \x20  Device slack:                 0\n\
+                     \x20  Data,RAID1:            52428800\n\
+                     \x20  Metadata,RAID1:        10485760\n\
+                     \x20  System,RAID1:             32768\n\
+                     \x20  Unallocated:         1010794496\n",
+                    0,
+                )),
+                CmdRequest::BtrfsFilesystemDfJson { .. } => Ok(mock_out(
+                    "btrfs --format json filesystem df /mnt/storage",
+                    // Logical usage: Data=50 MiB, Metadata=10 MiB,
+                    // System=32 KiB. needed_post_single = 50 + 20 +
+                    // 0.06 = ~70 MiB, well under 1 GiB usable.
+                    r#"{
+  "filesystem-df": [
+    { "bg-type": "Data", "bg-profile": "RAID1", "total": 52428800, "used": 52428800 },
+    { "bg-type": "Metadata", "bg-profile": "RAID1", "total": 10485760, "used": 10485760 },
+    { "bg-type": "System", "bg-profile": "RAID1", "total": 32768, "used": 32768 }
+  ]
+}"#,
+                    0,
+                )),
                 CmdRequest::BtrfsBalanceSingle { .. } => Ok(mock_out("btrfs balance start", "", 0)),
                 CmdRequest::BtrfsDeviceRemove { .. } => {
                     if self.fail_device_remove {
@@ -523,17 +646,23 @@ mod tests {
     }
 
     #[test]
-    // Intent: cmd_remove succeeds on a 2->1 removal without invoking the ENOSPC
-    //   pre-flight check.
+    // Intent: cmd_remove invokes the 2->1 survivor-capacity preflight before
+    //   committing any mutation, and proceeds when the survivor has room.
     //
-    // Why: The 2->1 eviction path balances RAID1->single before device remove,
-    //   which does not match the reproduced relocation-failure mode. The pre-
-    //   flight check compares pre-balance allocations and would false-positive.
+    // Why: A 2-disk RAID1 with a smaller survivor can fit the data in RAID1
+    //   (min of the two) yet fail post-balance once metadata is doubled to
+    //   DUP on one device. The fix calls check_single_survivor_capacity on
+    //   every 2->1 remove so btrfs device remove cannot crash the fs to RO
+    //   mid-migration. This test locks in both preflight calls
+    //   (BtrfsDeviceUsageRaw + BtrfsFilesystemDfJson) run BEFORE the
+    //   balance/device-remove steps, so a regression that reintroduces the
+    //   old remaining == 1 skip fails here.
     //
-    // Scenario: User removes one disk from a healthy 2-disk pool. The disks are
-    //   small and mostly allocated. The operation succeeds because the balance
-    //   step handles redistribution, making the space check irrelevant.
-    fn enospc_check_skipped_for_two_to_one_removal() {
+    // Scenario: User removes one disk from a healthy 2-disk pool whose live
+    //   data (50 MiB data + 10 MiB metadata) fits comfortably on the survivor.
+    //   Preflight runs, reports pass, and the operation proceeds to balance
+    //   + device remove. Pre-fix, the preflight calls would be absent.
+    fn two_to_one_remove_invokes_survivor_capacity_preflight() {
         let (_state_dir, paths) = setup_membership(&[
             ("disk1", "/dev/disk/by-id/virtio-disk1"),
             ("disk2", "/dev/disk/by-id/virtio-disk2"),
@@ -575,11 +704,21 @@ mod tests {
         .expect("remove should succeed");
 
         let calls = log.lock().unwrap();
+        let usage_idx = calls
+            .iter()
+            .position(|c| matches!(c, CmdRequest::BtrfsDeviceUsageRaw { .. }))
+            .expect("2->1 preflight must call btrfs device usage; calls: {calls:?}");
+        let df_idx = calls
+            .iter()
+            .position(|c| matches!(c, CmdRequest::BtrfsFilesystemDfJson { .. }))
+            .expect("2->1 preflight must call btrfs filesystem df; calls: {calls:?}");
+        let balance_idx = calls
+            .iter()
+            .position(|c| matches!(c, CmdRequest::BtrfsBalanceSingle { .. }))
+            .expect("2->1 remove must balance; calls: {calls:?}");
         assert!(
-            !calls
-                .iter()
-                .any(|c| matches!(c, CmdRequest::BtrfsDeviceUsageRaw { .. })),
-            "ENOSPC pre-flight should not be invoked for 2->1 removal; calls: {calls:?}"
+            usage_idx < balance_idx && df_idx < balance_idx,
+            "preflight calls must precede the RAID1->single balance; calls: {calls:?}"
         );
         // Locks in the seam placement: a successful 2->1 remove must take the
         // inhibitor exactly once before journal::write_journal.
@@ -1117,7 +1256,15 @@ mod tests {
         }
 
         let mount = MountPoint("/mnt/storage".to_owned());
-        let err = check_eviction_space(&FailingUsageRunner, &mount, 1)
+        let target = PoolDevice {
+            devid: 1,
+            mapper: MapperName("braid-disk1".into()),
+            luks_uuid: LuksUuid("11111111-1111-1111-1111-111111111111".into()),
+            underlying: "/dev/vda".into(),
+        };
+        // remaining: 2 exercises the >= 2 branch (3->2 remove), which is the
+        // scenario the CommandFailed surfacing was written for.
+        let err = check_eviction_space(&FailingUsageRunner, &mount, &target, 2)
             .expect_err("non-zero btrfs exit must surface as validation error");
         match err {
             RemoveError::Validation(msg) => {

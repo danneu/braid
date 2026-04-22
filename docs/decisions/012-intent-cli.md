@@ -67,12 +67,17 @@ unallocated space to absorb the target device's allocations before invoking
 crash the filesystem to read-only mid-relocation (reproduced in
 `tests/repro/`).
 
-The check is skipped when only one device survives the removal:
+Single-survivor cases use a path-specific check:
 
-- **`remove` (2→1):** the eviction path balances RAID1→single before device
-  remove, which does not match the reproduced relocation-failure mode.
-- **`remove-missing` (1 present + 1 missing):** in 2-device RAID1, the
-  survivor already mirrors all data. No relocation is needed.
+- **`remove` (2→1):** the RAID1-aware relocation check does not apply
+  (there is only one remaining device, not two). Instead, a single-
+  survivor capacity check derives demand from `btrfs filesystem df`
+  logical usage -- `data + 2 * metadata + 2 * system`, reflecting the
+  post-balance single + DUP profile on one device -- and compares it
+  to the survivor's `device_size - device_slack`.
+- **`remove-missing` (1 present + 1 missing):** the check is skipped.
+  In 2-device RAID1, the surviving device already mirrors all data,
+  so no relocation is needed.
 
 ### NixOS-native automation
 

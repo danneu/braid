@@ -3,7 +3,7 @@ use std::fmt;
 use crate::cmd::{CmdRequest, CommandRunner};
 use crate::journal;
 use crate::parse::parse_upsc;
-use crate::parse::types::BtrfsDeviceUsageEntry;
+use crate::parse::types::{BtrfsBgType, BtrfsDeviceUsageEntry, BtrfsDfOutput};
 use crate::parse::{parse_btrfs_device_usage, parse_findmnt_json};
 use crate::probe::Filesystem;
 use crate::state_paths::StatePaths;
@@ -298,6 +298,50 @@ pub fn check_raid1_relocation_space(
                 format_bytes(raid1_capacity),
             ));
         }
+    }
+    Ok(())
+}
+
+/// Check that the surviving device can hold all live data after a 2->1
+/// eviction (RAID1 data -> single, RAID1 metadata/system -> DUP).
+///
+/// Uses logical usage from `btrfs filesystem df` rather than per-device
+/// allocations, so it is correct regardless of current profile mix
+/// (RAID1, single, DUP, or leftover chunks from an interrupted balance).
+///
+/// Post-balance + post-remove demand on the survivor:
+///   Data (single):     Data.used
+///   Metadata (DUP):    2 * Metadata.used
+///   System (DUP):      2 * System.used
+/// Usable survivor capacity = device_size - device_slack.
+///
+/// GlobalReserve is excluded -- it is an internal emergency reservation
+/// carved out of Metadata, not additional on-disk data.
+pub fn check_single_survivor_capacity(
+    df: &BtrfsDfOutput,
+    survivor: &BtrfsDeviceUsageEntry,
+) -> Result<(), String> {
+    let sum_bg = |t: BtrfsBgType| -> u64 {
+        df.entries
+            .iter()
+            .filter(|e| e.bg_type == t)
+            .map(|e| e.bg_used)
+            .sum()
+    };
+    let data = sum_bg(BtrfsBgType::Data);
+    let metadata = sum_bg(BtrfsBgType::Metadata);
+    let system = sum_bg(BtrfsBgType::System);
+    let needed = data + 2 * metadata + 2 * system;
+    let usable = survivor.device_size.saturating_sub(survivor.device_slack);
+    if needed > usable {
+        return Err(format!(
+            "not enough space on surviving device after RAID1 -> single conversion.\n  \
+             data + 2 * metadata + 2 * system: {}\n  \
+             surviving device usable capacity:  {}\n\n\
+             Free up space by deleting files first, or `braid add` a larger disk.",
+            format_bytes(needed),
+            format_bytes(usable),
+        ));
     }
     Ok(())
 }
@@ -847,6 +891,150 @@ mod tests {
         let result = check_raid1_relocation_space(&[&target], &[&rem1, &rem2, &rem3]);
         let err = result.expect_err("should fail: total/2 < bytes_on_target");
         assert!(err.contains("Data"), "expected 'Data' in error: {err}");
+    }
+
+    // --- check_single_survivor_capacity tests ---
+
+    use crate::parse::types::{BtrfsDfEntry, BtrfsProfile};
+
+    fn make_df(entries: &[(BtrfsBgType, u64)]) -> BtrfsDfOutput {
+        BtrfsDfOutput {
+            entries: entries
+                .iter()
+                .map(|(t, used)| BtrfsDfEntry {
+                    bg_type: *t,
+                    bg_profile: BtrfsProfile::Raid1,
+                    bg_used: *used,
+                    bg_total: *used,
+                })
+                .collect(),
+        }
+    }
+
+    fn make_survivor(device_size: u64, device_slack: u64) -> BtrfsDeviceUsageEntry {
+        BtrfsDeviceUsageEntry {
+            path: "/dev/mapper/braid-disk2".to_string(),
+            devid: 2,
+            device_size,
+            device_slack,
+            allocations: vec![],
+            unallocated: 0,
+        }
+    }
+
+    #[test]
+    // Intent: check_single_survivor_capacity passes when data + 2*meta + 2*sys
+    //   fits comfortably within the survivor's device_size - device_slack.
+    // Why: Common healthy pool: a 1 GiB survivor can absorb a lightly-used pool.
+    // Scenario: 1 GiB survivor (no slack); 200 MiB Data, 10 MiB Metadata,
+    //   4 KiB System. needed = 200 + 20 + ~0 = 220 MiB << 1024 MiB.
+    fn survivor_fits_passes() {
+        let df = make_df(&[
+            (BtrfsBgType::Data, 200 * 1024 * 1024),
+            (BtrfsBgType::Metadata, 10 * 1024 * 1024),
+            (BtrfsBgType::System, 4 * 1024),
+        ]);
+        let survivor = make_survivor(1024 * 1024 * 1024, 0);
+        assert!(check_single_survivor_capacity(&df, &survivor).is_ok());
+    }
+
+    #[test]
+    // Intent: check_single_survivor_capacity fails when the data alone already
+    //   exceeds the survivor's usable capacity.
+    // Why: This is the obvious sad path — the balance would ENOSPC on Data.
+    // Scenario: 512 MiB survivor; Data.used = 600 MiB.
+    fn survivor_undersized_fails() {
+        let df = make_df(&[(BtrfsBgType::Data, 600 * 1024 * 1024)]);
+        let survivor = make_survivor(512 * 1024 * 1024, 0);
+        let err = check_single_survivor_capacity(&df, &survivor)
+            .expect_err("should fail: data > survivor");
+        assert!(
+            err.contains("not enough space on surviving device"),
+            "wrong error: {err}"
+        );
+    }
+
+    #[test]
+    // Intent: check_single_survivor_capacity fails when Data alone fits but
+    //   2 * Metadata tips the demand past usable.
+    // Why: This is the exact bug the 2->1 preflight exists to catch —
+    //   post-balance metadata is DUP (2x physical) even when pre-balance
+    //   RAID1 hid the overhead.
+    // Scenario: 1000 MiB survivor; Data = 700 MiB, Metadata = 200 MiB.
+    //   Data alone fits. needed = 700 + 400 = 1100 MiB > 1000 MiB.
+    fn metadata_doubling_tips_over() {
+        let df = make_df(&[
+            (BtrfsBgType::Data, 700 * 1024 * 1024),
+            (BtrfsBgType::Metadata, 200 * 1024 * 1024),
+        ]);
+        let survivor = make_survivor(1000 * 1024 * 1024, 0);
+        let err = check_single_survivor_capacity(&df, &survivor)
+            .expect_err("should fail: 2 * meta tips over");
+        assert!(
+            err.contains("data + 2 * metadata"),
+            "wrong error: {err}"
+        );
+    }
+
+    #[test]
+    // Intent: check_single_survivor_capacity passes on an empty pool.
+    // Why: No entries must not crash or false-fail; the helper is called on
+    //   every 2->1 remove including against a pool mounted for the first time.
+    // Scenario: Empty df, 1 GiB survivor. needed = 0.
+    fn empty_pool_passes() {
+        let df = make_df(&[]);
+        let survivor = make_survivor(1024 * 1024 * 1024, 0);
+        assert!(check_single_survivor_capacity(&df, &survivor).is_ok());
+    }
+
+    #[test]
+    // Intent: check_single_survivor_capacity passes when only metadata/system
+    //   is present and 2x fits.
+    // Why: Exercises the boundary where Data.used == 0 but Metadata/System
+    //   still incur the 2x multiplier -- confirms metadata/system are
+    //   counted correctly when data is absent.
+    // Scenario: 1 GiB survivor; 200 MiB Metadata, 16 MiB System, 0 Data.
+    //   needed = 2 * 200 + 2 * 16 = 432 MiB << 1024 MiB.
+    fn metadata_only_passes() {
+        let df = make_df(&[
+            (BtrfsBgType::Metadata, 200 * 1024 * 1024),
+            (BtrfsBgType::System, 16 * 1024 * 1024),
+        ]);
+        let survivor = make_survivor(1024 * 1024 * 1024, 0);
+        assert!(check_single_survivor_capacity(&df, &survivor).is_ok());
+    }
+
+    #[test]
+    // Intent: check_single_survivor_capacity excludes GlobalReserve from the
+    //   demand calculation.
+    // Why: GlobalReserve is an internal emergency reservation carved out of
+    //   Metadata, not on-disk data that needs to migrate; counting it would
+    //   false-fail healthy pools.
+    // Scenario: 100 MiB survivor; real Data = 30 MiB, real Metadata = 5 MiB,
+    //   GlobalReserve.used = 999 MiB (impossibly big, a forgotten filter
+    //   would double it into needed and refuse). Expected: pass.
+    fn global_reserve_excluded() {
+        let df = make_df(&[
+            (BtrfsBgType::Data, 30 * 1024 * 1024),
+            (BtrfsBgType::Metadata, 5 * 1024 * 1024),
+            (BtrfsBgType::GlobalReserve, 999 * 1024 * 1024),
+        ]);
+        let survivor = make_survivor(100 * 1024 * 1024, 0);
+        assert!(check_single_survivor_capacity(&df, &survivor).is_ok());
+    }
+
+    #[test]
+    // Intent: check_single_survivor_capacity subtracts device_slack from
+    //   device_size when computing usable capacity.
+    // Why: device_slack is space the kernel cannot address (alignment
+    //   gaps, reserved boundary regions); ignoring it would false-pass on
+    //   a pool whose real usable capacity is smaller than device_size.
+    // Scenario: 1 GiB device_size + 100 MiB device_slack = 924 MiB usable;
+    //   demand = 950 MiB. Expected: fail (950 > 924).
+    fn device_slack_reduces_usable() {
+        let df = make_df(&[(BtrfsBgType::Data, 950 * 1024 * 1024)]);
+        let survivor = make_survivor(1024 * 1024 * 1024, 100 * 1024 * 1024);
+        assert!(check_single_survivor_capacity(&df, &survivor).is_err());
     }
 
     #[test]
