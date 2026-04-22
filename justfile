@@ -104,6 +104,11 @@ test-parsers *args:
 test-rust:
     cargo test --lib --test golden_nixos_25_11
 
+# Format nix source + tests with nixfmt
+fmt-nix:
+    find flake.nix modules tests vm -name '*.nix' -print0 \
+        | xargs -0 nix run nixpkgs#nixfmt --
+
 # Run clippy lints
 clippy:
     cargo clippy --manifest-path cli/Cargo.toml --tests
