@@ -236,26 +236,49 @@ def main() -> None:
 
     nixpkgs = locked_nixpkgs_flakeref()
     dest = ROOT / "reference"
+    subset = args.resource is not None
 
     with tempfile.TemporaryDirectory(dir=ROOT, prefix=".reference-staging-") as tmp:
         staging = Path(tmp)
         fetch_source_repos(staging, nixpkgs, deps)
         inline_btrfs_docs(staging, deps)
 
-        # All fetches succeeded — swap via backup so dest is never absent.
-        backup = ROOT / ".reference-backup"
-        if backup.exists():
-            shutil.rmtree(backup)
-        if dest.exists():
-            dest.rename(backup)
-        try:
-            staging.rename(dest)
-        except BaseException:
-            if not dest.exists() and backup.exists():
-                backup.rename(dest)
-            raise
-        if backup.exists():
-            shutil.rmtree(backup)
+        if not subset:
+            # All fetches succeeded -- swap via backup so dest is never absent.
+            backup = ROOT / ".reference-backup"
+            if backup.exists():
+                shutil.rmtree(backup)
+            if dest.exists():
+                dest.rename(backup)
+            try:
+                staging.rename(dest)
+            except BaseException:
+                if not dest.exists() and backup.exists():
+                    backup.rename(dest)
+                raise
+            if backup.exists():
+                shutil.rmtree(backup)
+        else:
+            # Subset fetch -- per-dep swap so unfetched deps in reference/
+            # are preserved.
+            dest.mkdir(exist_ok=True)
+            for dep in deps:
+                staged_dir = staging / dep.nix_attr
+                target_dir = dest / dep.nix_attr
+                backup_dir = dest / f".{dep.nix_attr}.backup"
+
+                if backup_dir.exists():
+                    shutil.rmtree(backup_dir)
+                if target_dir.exists():
+                    target_dir.rename(backup_dir)
+                try:
+                    staged_dir.rename(target_dir)
+                except BaseException:
+                    if not target_dir.exists() and backup_dir.exists():
+                        backup_dir.rename(target_dir)
+                    raise
+                if backup_dir.exists():
+                    shutil.rmtree(backup_dir)
 
     print("\nDone.")
 
