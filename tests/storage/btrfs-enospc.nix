@@ -16,17 +16,25 @@
 {
   name = "btrfs-enospc";
 
-  nodes.machine = { pkgs, ... }: {
-    virtualisation.emptyDiskImages = [
-      { size = 256; driveConfig.deviceExtraOpts.serial = "disk1"; }
-      { size = 256; driveConfig.deviceExtraOpts.serial = "disk2"; }
-    ];
+  nodes.machine =
+    { pkgs, ... }:
+    {
+      virtualisation.emptyDiskImages = [
+        {
+          size = 256;
+          driveConfig.deviceExtraOpts.serial = "disk1";
+        }
+        {
+          size = 256;
+          driveConfig.deviceExtraOpts.serial = "disk2";
+        }
+      ];
 
-    environment.systemPackages = [
-      pkgs.cryptsetup
-      pkgs.btrfs-progs
-    ];
-  };
+      environment.systemPackages = [
+        pkgs.cryptsetup
+        pkgs.btrfs-progs
+      ];
+    };
 
   testScript = builtins.readFile ./btrfs-enospc.py;
 }

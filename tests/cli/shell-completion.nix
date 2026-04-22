@@ -13,17 +13,19 @@
 {
   name = "shell-completion";
 
-  nodes.machine = { pkgs, ... }: {
-    environment.systemPackages = [
-      braid
-      pkgs.bash
-      pkgs.fish
-    ];
+  nodes.machine =
+    { pkgs, ... }:
+    {
+      environment.systemPackages = [
+        braid
+        pkgs.bash
+        pkgs.fish
+      ];
 
-    environment.etc."braid/config.json".text = builtins.toJSON {
-      mount_point = "/mnt/storage";
+      environment.etc."braid/config.json".text = builtins.toJSON {
+        mount_point = "/mnt/storage";
+      };
     };
-  };
 
   testScript = builtins.readFile ./shell-completion.py;
 }

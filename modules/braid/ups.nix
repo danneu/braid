@@ -11,7 +11,12 @@
 # oneshot `braid-ups-secrets.service`; the token lives at
 # /var/lib/braid/upsmon.pass outside the Nix store. See
 # decisions/020-ups-integration.md for the scope and safety contract.
-{ config, lib, pkgs, ... }:
+{
+  config,
+  lib,
+  pkgs,
+  ...
+}:
 let
   cfg = config.braid;
   ups = cfg.ups;
@@ -65,8 +70,14 @@ in
     # fail if secret creation fails, rather than racing it.
     systemd.services.braid-ups-secrets = {
       description = "Generate upsmon password file for braid-managed NUT";
-      before = [ "upsd.service" "upsmon.service" ];
-      requiredBy = [ "upsd.service" "upsmon.service" ];
+      before = [
+        "upsd.service"
+        "upsmon.service"
+      ];
+      requiredBy = [
+        "upsd.service"
+        "upsmon.service"
+      ];
       path = [ pkgs.coreutils ];
       serviceConfig = {
         Type = "oneshot";

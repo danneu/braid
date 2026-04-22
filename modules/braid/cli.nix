@@ -10,26 +10,30 @@ let
   braid = import ./wrapper.nix { inherit cfg pkgs lib; };
 
   # Config JSON uses snake_case to match Rust serde field names.
-  configFile = (pkgs.formats.json { }).generate "braid-config.json" ({
-    mount_point = cfg.mountPoint;
-  } // lib.optionalAttrs cfg.fanControl.enable {
-    fan_control = {
-      pwm = {
-        platform_device = cfg.fanControl.pwm.platformDevice;
-        number = cfg.fanControl.pwm.number;
-        min_start = cfg.fanControl.pwm.minStart;
-        max_stop = cfg.fanControl.pwm.maxStop;
+  configFile = (pkgs.formats.json { }).generate "braid-config.json" (
+    {
+      mount_point = cfg.mountPoint;
+    }
+    // lib.optionalAttrs cfg.fanControl.enable {
+      fan_control = {
+        pwm = {
+          platform_device = cfg.fanControl.pwm.platformDevice;
+          number = cfg.fanControl.pwm.number;
+          min_start = cfg.fanControl.pwm.minStart;
+          max_stop = cfg.fanControl.pwm.maxStop;
+        };
+        min_temp = cfg.fanControl.minTemp;
+        max_temp = cfg.fanControl.maxTemp;
+        min_fan_speed_percent = cfg.fanControl.minFanSpeedPercent;
       };
-      min_temp = cfg.fanControl.minTemp;
-      max_temp = cfg.fanControl.maxTemp;
-      min_fan_speed_percent = cfg.fanControl.minFanSpeedPercent;
-    };
-  } // lib.optionalAttrs cfg.ups.enable {
-    ups = {
-      enable = cfg.ups.enable;
-      name = cfg.ups.name;
-    };
-  });
+    }
+    // lib.optionalAttrs cfg.ups.enable {
+      ups = {
+        enable = cfg.ups.enable;
+        name = cfg.ups.name;
+      };
+    }
+  );
 in
 {
   config = lib.mkIf cfg.enable {

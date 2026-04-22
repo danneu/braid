@@ -36,22 +36,30 @@
 {
   name = "remove-inhibits-suspend";
 
-  nodes.machine = { pkgs, ... }: {
-    virtualisation.emptyDiskImages = [
-      { size = 2048; driveConfig.deviceExtraOpts.serial = "disk1"; }
-      { size = 2048; driveConfig.deviceExtraOpts.serial = "disk2"; }
-    ];
+  nodes.machine =
+    { pkgs, ... }:
+    {
+      virtualisation.emptyDiskImages = [
+        {
+          size = 2048;
+          driveConfig.deviceExtraOpts.serial = "disk1";
+        }
+        {
+          size = 2048;
+          driveConfig.deviceExtraOpts.serial = "disk2";
+        }
+      ];
 
-    environment.systemPackages = [
-      braid
-      pkgs.cryptsetup
-      pkgs.btrfs-progs
-    ];
+      environment.systemPackages = [
+        braid
+        pkgs.cryptsetup
+        pkgs.btrfs-progs
+      ];
 
-    environment.etc."braid/config.json".text = builtins.toJSON {
-      mount_point = "/mnt/storage";
+      environment.etc."braid/config.json".text = builtins.toJSON {
+        mount_point = "/mnt/storage";
+      };
     };
-  };
 
   # Inhibitor query helpers (list_inhibitors / find_braid_sleep_inhibitor)
   # are concatenated into the test script's global namespace at Nix-eval
@@ -59,7 +67,5 @@
   # module path, so a normal `import` would not work — see
   # tests/cli/inhibitor_helpers.py for details.
   testScript =
-    builtins.readFile ./inhibitor_helpers.py
-    + "\n\n"
-    + builtins.readFile ./remove-inhibits-suspend.py;
+    builtins.readFile ./inhibitor_helpers.py + "\n\n" + builtins.readFile ./remove-inhibits-suspend.py;
 }

@@ -14,39 +14,47 @@
 {
   name = "braid-doctor-beep";
 
-  nodes.machine = { pkgs, ... }: {
-    imports = [ ../../modules/braid ];
+  nodes.machine =
+    { pkgs, ... }:
+    {
+      imports = [ ../../modules/braid ];
 
-    # Flag-file-controlled mock so one VM can exercise both healthy and broken
-    # branches by touching/removing the flag, instead of needing two VMs with
-    # two different overlay-pinned beep packages.
-    nixpkgs.overlays = [
-      (final: prev: {
-        beep = prev.writeShellScriptBin "beep" ''
-          if [ -f /tmp/beep-broken ]; then
-            echo "mock beep: failing per /tmp/beep-broken" >&2
-            exit 1
-          fi
-          exit 0
-        '';
-      })
-    ];
+      # Flag-file-controlled mock so one VM can exercise both healthy and broken
+      # branches by touching/removing the flag, instead of needing two VMs with
+      # two different overlay-pinned beep packages.
+      nixpkgs.overlays = [
+        (final: prev: {
+          beep = prev.writeShellScriptBin "beep" ''
+            if [ -f /tmp/beep-broken ]; then
+              echo "mock beep: failing per /tmp/beep-broken" >&2
+              exit 1
+            fi
+            exit 0
+          '';
+        })
+      ];
 
-    braid = {
-      enable = true;
-      package = braid;
-      monitor.enable = true;
-      monitor.beep = true;
+      braid = {
+        enable = true;
+        package = braid;
+        monitor.enable = true;
+        monitor.beep = true;
+      };
+
+      virtualisation.emptyDiskImages = [
+        {
+          size = 512;
+          driveConfig.deviceExtraOpts.serial = "disk1";
+        }
+        {
+          size = 512;
+          driveConfig.deviceExtraOpts.serial = "disk2";
+        }
+      ];
+
+      # /etc/braid/config.json is written by the braid NixOS module from the
+      # default `braid.mountPoint` (/mnt/storage). No explicit override needed.
     };
-
-    virtualisation.emptyDiskImages = [
-      { size = 512; driveConfig.deviceExtraOpts.serial = "disk1"; }
-      { size = 512; driveConfig.deviceExtraOpts.serial = "disk2"; }
-    ];
-
-    # /etc/braid/config.json is written by the braid NixOS module from the
-    # default `braid.mountPoint` (/mnt/storage). No explicit override needed.
-  };
 
   testScript = builtins.readFile ./braid-doctor-beep.py;
 }

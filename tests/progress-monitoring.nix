@@ -13,21 +13,32 @@
 {
   name = "progress-monitoring";
 
-  nodes.machine = { pkgs, ... }: {
-    virtualisation.emptyDiskImages = [
-      { size = 4096; driveConfig.deviceExtraOpts.serial = "disk1"; }
-      { size = 4096; driveConfig.deviceExtraOpts.serial = "disk2"; }
-      { size = 4096; driveConfig.deviceExtraOpts.serial = "disk3"; }
-    ];
+  nodes.machine =
+    { pkgs, ... }:
+    {
+      virtualisation.emptyDiskImages = [
+        {
+          size = 4096;
+          driveConfig.deviceExtraOpts.serial = "disk1";
+        }
+        {
+          size = 4096;
+          driveConfig.deviceExtraOpts.serial = "disk2";
+        }
+        {
+          size = 4096;
+          driveConfig.deviceExtraOpts.serial = "disk3";
+        }
+      ];
 
-    virtualisation.memorySize = 2048;
+      virtualisation.memorySize = 2048;
 
-    environment.systemPackages = [
-      pkgs.cryptsetup
-      pkgs.btrfs-progs
-      pkgs.lvm2
-    ];
-  };
+      environment.systemPackages = [
+        pkgs.cryptsetup
+        pkgs.btrfs-progs
+        pkgs.lvm2
+      ];
+    };
 
   testScript = builtins.readFile ./progress-monitoring.py;
 }

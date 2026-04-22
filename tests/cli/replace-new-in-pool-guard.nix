@@ -14,22 +14,30 @@
 {
   name = "replace-new-in-pool-guard";
 
-  nodes.machine = { pkgs, ... }: {
-    virtualisation.emptyDiskImages = [
-      { size = 1024; driveConfig.deviceExtraOpts.serial = "disk1"; }
-      { size = 1024; driveConfig.deviceExtraOpts.serial = "disk2"; }
-    ];
+  nodes.machine =
+    { pkgs, ... }:
+    {
+      virtualisation.emptyDiskImages = [
+        {
+          size = 1024;
+          driveConfig.deviceExtraOpts.serial = "disk1";
+        }
+        {
+          size = 1024;
+          driveConfig.deviceExtraOpts.serial = "disk2";
+        }
+      ];
 
-    environment.systemPackages = [
-      braid
-      pkgs.cryptsetup
-      pkgs.btrfs-progs
-    ];
+      environment.systemPackages = [
+        braid
+        pkgs.cryptsetup
+        pkgs.btrfs-progs
+      ];
 
-    environment.etc."braid/config.json".text = builtins.toJSON {
-      mount_point = "/mnt/storage";
+      environment.etc."braid/config.json".text = builtins.toJSON {
+        mount_point = "/mnt/storage";
+      };
     };
-  };
 
   testScript = builtins.readFile ./replace-new-in-pool-guard.py;
 }

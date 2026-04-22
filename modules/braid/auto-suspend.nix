@@ -38,14 +38,16 @@ in
     assertions = [
       {
         assertion = cfg.autoSuspend.wolInterface != null;
-        message = "braid.autoSuspend requires Wake-on-LAN to wake the NAS after suspend. "
+        message =
+          "braid.autoSuspend requires Wake-on-LAN to wake the NAS after suspend. "
           + "Set braid.autoSuspend.wolInterface to your primary network interface (e.g. \"eno1\"). "
           + "Find it with: ip link";
       }
       {
-        assertion = cfg.autoSuspend.wolInterface == null
-          || !(lib.hasPrefix "wl" cfg.autoSuspend.wolInterface);
-        message = "braid.autoSuspend.wolInterface is set to \"${cfg.autoSuspend.wolInterface}\" which looks like a WiFi interface. "
+        assertion =
+          cfg.autoSuspend.wolInterface == null || !(lib.hasPrefix "wl" cfg.autoSuspend.wolInterface);
+        message =
+          "braid.autoSuspend.wolInterface is set to \"${cfg.autoSuspend.wolInterface}\" which looks like a WiFi interface. "
           + "Wake-on-LAN requires a wired ethernet interface -- the NixOS wakeOnLan option uses ethtool, "
           + "which does not work for WiFi (silently fails). WiFi wake (WoWLAN) is a separate mechanism "
           + "and is unreliable in practice.";

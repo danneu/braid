@@ -8,20 +8,25 @@
 {
   name = "repro-kernel-journal-bad-sector";
 
-  nodes.machine = { pkgs, ... }: {
-    virtualisation.emptyDiskImages = [
-      { size = 512; driveConfig.deviceExtraOpts.serial = "disk1"; }
-    ];
+  nodes.machine =
+    { pkgs, ... }:
+    {
+      virtualisation.emptyDiskImages = [
+        {
+          size = 512;
+          driveConfig.deviceExtraOpts.serial = "disk1";
+        }
+      ];
 
-    environment.systemPackages = [
-      pkgs.btrfs-progs
-      pkgs.cryptsetup
-      pkgs.e2fsprogs
-      pkgs.kmod
-      pkgs.lvm2
-      pkgs.util-linux
-    ];
-  };
+      environment.systemPackages = [
+        pkgs.btrfs-progs
+        pkgs.cryptsetup
+        pkgs.e2fsprogs
+        pkgs.kmod
+        pkgs.lvm2
+        pkgs.util-linux
+      ];
+    };
 
   testScript = builtins.readFile ./kernel-journal-bad-sector.py;
 }

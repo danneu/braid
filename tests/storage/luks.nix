@@ -10,15 +10,26 @@
 {
   name = "luks";
 
-  nodes.machine = { pkgs, ... }: {
-    virtualisation.emptyDiskImages = [
-      { size = 256; driveConfig.deviceExtraOpts.serial = "disk1"; }
-      { size = 256; driveConfig.deviceExtraOpts.serial = "disk2"; }
-      { size = 256; driveConfig.deviceExtraOpts.serial = "disk3"; }
-    ];
+  nodes.machine =
+    { pkgs, ... }:
+    {
+      virtualisation.emptyDiskImages = [
+        {
+          size = 256;
+          driveConfig.deviceExtraOpts.serial = "disk1";
+        }
+        {
+          size = 256;
+          driveConfig.deviceExtraOpts.serial = "disk2";
+        }
+        {
+          size = 256;
+          driveConfig.deviceExtraOpts.serial = "disk3";
+        }
+      ];
 
-    environment.systemPackages = [ pkgs.cryptsetup ];
-  };
+      environment.systemPackages = [ pkgs.cryptsetup ];
+    };
 
   testScript = builtins.readFile ./luks.py;
 }

@@ -632,9 +632,7 @@
           repro-udev-missing-disk-idle = pkgs.testers.nixosTest (
             import ./tests/repro/udev-missing-disk-idle.nix
           );
-          repro-udev-missing-disk-io = pkgs.testers.nixosTest (
-            import ./tests/repro/udev-missing-disk-io.nix
-          );
+          repro-udev-missing-disk-io = pkgs.testers.nixosTest (import ./tests/repro/udev-missing-disk-io.nix);
         };
     in
     {

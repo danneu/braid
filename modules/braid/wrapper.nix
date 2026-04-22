@@ -6,14 +6,22 @@
 # 3. On success of mount-producing commands (unlock, add), sets
 #    root:<storageGroup> 2770 on the mount point and activates braid-online
 # 4. On success of lock, deactivates braid-online
-{ cfg, pkgs, lib }:
+{
+  cfg,
+  pkgs,
+  lib,
+}:
 let
   toolPackages =
-    (with cfg.packages; [ cryptsetup btrfsProgs utilLinux ])
+    (with cfg.packages; [
+      cryptsetup
+      btrfsProgs
+      utilLinux
+    ])
     ++ [ pkgs.systemd ]
     ++ lib.optional cfg.ups.enable cfg.packages.nut;
 in
-pkgs.runCommand "braid" {} ''
+pkgs.runCommand "braid" { } ''
   mkdir -p $out/bin
   substitute ${./braid-wrapper.sh} $out/bin/braid \
     --subst-var-by shell '${pkgs.runtimeShell}' \

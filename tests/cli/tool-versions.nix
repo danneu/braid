@@ -12,26 +12,28 @@
 {
   name = "tool-versions";
 
-  nodes.machine = { pkgs, ... }: {
-    imports = [ ../../modules/braid ];
-    braid.enable = true;
-    braid.package = braid-cli-unwrapped;
+  nodes.machine =
+    { pkgs, ... }:
+    {
+      imports = [ ../../modules/braid ];
+      braid.enable = true;
+      braid.package = braid-cli-unwrapped;
 
-    environment.systemPackages = [
-      pkgs.btrfs-progs
-      pkgs.cryptsetup
-      pkgs.util-linux
-      pkgs.jq
-      pkgs.coreutils
-    ];
+      environment.systemPackages = [
+        pkgs.btrfs-progs
+        pkgs.cryptsetup
+        pkgs.util-linux
+        pkgs.jq
+        pkgs.coreutils
+      ];
 
-    # Nix-evaluated expected versions — single source of truth
-    environment.etc."braid/expected-versions.json".text = builtins.toJSON {
-      btrfsProgs = pkgs.btrfs-progs.version;
-      cryptsetup = pkgs.cryptsetup.version;
-      utilLinux = pkgs.util-linux.version;
+      # Nix-evaluated expected versions — single source of truth
+      environment.etc."braid/expected-versions.json".text = builtins.toJSON {
+        btrfsProgs = pkgs.btrfs-progs.version;
+        cryptsetup = pkgs.cryptsetup.version;
+        utilLinux = pkgs.util-linux.version;
+      };
     };
-  };
 
   testScript = builtins.readFile ./tool-versions.py;
 }

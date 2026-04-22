@@ -11,9 +11,11 @@
 {
   name = "braid-module-disabled";
 
-  nodes.machine = { ... }: {
-    imports = [ ../../modules/braid ];
-  };
+  nodes.machine =
+    { ... }:
+    {
+      imports = [ ../../modules/braid ];
+    };
 
   testScript = builtins.readFile ./disabled.py;
 }

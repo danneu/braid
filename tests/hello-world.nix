@@ -11,13 +11,24 @@
 {
   name = "hello-world";
 
-  nodes.machine = { ... }: {
-    virtualisation.emptyDiskImages = [
-      { size = 256; driveConfig.deviceExtraOpts.serial = "disk1"; }
-      { size = 256; driveConfig.deviceExtraOpts.serial = "disk2"; }
-      { size = 256; driveConfig.deviceExtraOpts.serial = "disk3"; }
-    ];
-  };
+  nodes.machine =
+    { ... }:
+    {
+      virtualisation.emptyDiskImages = [
+        {
+          size = 256;
+          driveConfig.deviceExtraOpts.serial = "disk1";
+        }
+        {
+          size = 256;
+          driveConfig.deviceExtraOpts.serial = "disk2";
+        }
+        {
+          size = 256;
+          driveConfig.deviceExtraOpts.serial = "disk3";
+        }
+      ];
+    };
 
   testScript = builtins.readFile ./hello-world.py;
 }

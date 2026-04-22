@@ -14,30 +14,41 @@
 { ... }:
 let
   passphrase = "testpassphrase";
-  diskNames = ["disk1" "disk2"];
+  diskNames = [
+    "disk1"
+    "disk2"
+  ];
 in
 {
   name = "braid-alert-no-beep";
 
-  nodes.machine = { pkgs, ... }: {
-    imports = [
-      ../../modules/braid
-      (import ./lib/initrd-fixture.nix { inherit passphrase diskNames; })
-    ];
+  nodes.machine =
+    { pkgs, ... }:
+    {
+      imports = [
+        ../../modules/braid
+        (import ./lib/initrd-fixture.nix { inherit passphrase diskNames; })
+      ];
 
-    braid = {
-      enable = true;
-      package = braid;
-      monitor.enable = true;
-      monitor.beep = false;
-      monitor.alertCommand = "touch /root/alert-fired";
+      braid = {
+        enable = true;
+        package = braid;
+        monitor.enable = true;
+        monitor.beep = false;
+        monitor.alertCommand = "touch /root/alert-fired";
+      };
+
+      virtualisation.emptyDiskImages = [
+        {
+          size = 512;
+          driveConfig.deviceExtraOpts.serial = "disk1";
+        }
+        {
+          size = 512;
+          driveConfig.deviceExtraOpts.serial = "disk2";
+        }
+      ];
     };
-
-    virtualisation.emptyDiskImages = [
-      { size = 512; driveConfig.deviceExtraOpts.serial = "disk1"; }
-      { size = 512; driveConfig.deviceExtraOpts.serial = "disk2"; }
-    ];
-  };
 
   testScript = builtins.readFile ./braid-alert-no-beep.py;
 }

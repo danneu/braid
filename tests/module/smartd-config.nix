@@ -18,30 +18,38 @@
 {
   name = "braid-smartd-config";
 
-  nodes.machine = { pkgs, ... }: {
-    imports = [ ../../modules/braid ];
+  nodes.machine =
+    { pkgs, ... }:
+    {
+      imports = [ ../../modules/braid ];
 
-    braid = {
-      enable = true;
-      package = braid;
-      monitor.enable = true;
+      braid = {
+        enable = true;
+        package = braid;
+        monitor.enable = true;
+      };
+
+      # Simulate having a mail stack installed (e.g. postfix).
+      # This makes smartd's notifications.mail.enable default to true,
+      # which is the scenario braid must suppress.
+      services.mail.sendmailSetuidWrapper = {
+        program = "sendmail";
+        source = "${pkgs.coreutils}/bin/true";
+        owner = "root";
+        group = "root";
+      };
+
+      virtualisation.emptyDiskImages = [
+        {
+          size = 256;
+          driveConfig.deviceExtraOpts.serial = "disk1";
+        }
+        {
+          size = 256;
+          driveConfig.deviceExtraOpts.serial = "disk2";
+        }
+      ];
     };
-
-    # Simulate having a mail stack installed (e.g. postfix).
-    # This makes smartd's notifications.mail.enable default to true,
-    # which is the scenario braid must suppress.
-    services.mail.sendmailSetuidWrapper = {
-      program = "sendmail";
-      source = "${pkgs.coreutils}/bin/true";
-      owner = "root";
-      group = "root";
-    };
-
-    virtualisation.emptyDiskImages = [
-      { size = 256; driveConfig.deviceExtraOpts.serial = "disk1"; }
-      { size = 256; driveConfig.deviceExtraOpts.serial = "disk2"; }
-    ];
-  };
 
   testScript = builtins.readFile ./smartd-config.py;
 }

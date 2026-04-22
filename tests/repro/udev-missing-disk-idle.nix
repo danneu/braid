@@ -8,39 +8,41 @@
 {
   name = "repro-udev-missing-disk-idle";
 
-  nodes.machine = { pkgs, ... }: {
-    virtualisation.emptyDiskImages = [
-      {
-        size = 512;
-        driveConfig.deviceExtraOpts = {
-          serial = "disk1";
-          id = "disk1dev";
-        };
-      }
-      {
-        size = 512;
-        driveConfig.deviceExtraOpts = {
-          serial = "disk2";
-          id = "disk2dev";
-        };
-      }
-      {
-        size = 512;
-        driveConfig.deviceExtraOpts = {
-          serial = "disk3";
-          id = "disk3dev";
-        };
-      }
-    ];
+  nodes.machine =
+    { pkgs, ... }:
+    {
+      virtualisation.emptyDiskImages = [
+        {
+          size = 512;
+          driveConfig.deviceExtraOpts = {
+            serial = "disk1";
+            id = "disk1dev";
+          };
+        }
+        {
+          size = 512;
+          driveConfig.deviceExtraOpts = {
+            serial = "disk2";
+            id = "disk2dev";
+          };
+        }
+        {
+          size = 512;
+          driveConfig.deviceExtraOpts = {
+            serial = "disk3";
+            id = "disk3dev";
+          };
+        }
+      ];
 
-    environment.systemPackages = [
-      pkgs.btrfs-progs
-      pkgs.coreutils
-      pkgs.cryptsetup
-      pkgs.kmod
-      pkgs.util-linux
-    ];
-  };
+      environment.systemPackages = [
+        pkgs.btrfs-progs
+        pkgs.coreutils
+        pkgs.cryptsetup
+        pkgs.kmod
+        pkgs.util-linux
+      ];
+    };
 
   testScript = builtins.readFile ./udev-missing-disk-idle.py;
 }

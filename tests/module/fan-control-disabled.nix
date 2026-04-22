@@ -17,16 +17,18 @@
 {
   name = "fan-control-disabled";
 
-  nodes.machine = { ... }: {
-    imports = [ ../../modules/braid ];
+  nodes.machine =
+    { ... }:
+    {
+      imports = [ ../../modules/braid ];
 
-    braid = {
-      enable = true;
-      package = braid;
-      # fanControl.enable default is false; leaving it out makes the
-      # intent explicit.
+      braid = {
+        enable = true;
+        package = braid;
+        # fanControl.enable default is false; leaving it out makes the
+        # intent explicit.
+      };
     };
-  };
 
   testScript = builtins.readFile ./fan-control-disabled.py;
 }

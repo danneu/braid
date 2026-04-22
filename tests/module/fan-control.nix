@@ -15,28 +15,30 @@
 {
   name = "fan-control";
 
-  nodes.machine = { ... }: {
-    imports = [ ../../modules/braid ];
+  nodes.machine =
+    { ... }:
+    {
+      imports = [ ../../modules/braid ];
 
-    braid = {
-      enable = true;
-      package = braid;
-
-      fanControl = {
+      braid = {
         enable = true;
-        pwm = {
-          platformDevice = "braid-test.0";
-          number = 2;
-          minStart = 65;
-          maxStop = 60;
+        package = braid;
+
+        fanControl = {
+          enable = true;
+          pwm = {
+            platformDevice = "braid-test.0";
+            number = 2;
+            minStart = 65;
+            maxStop = 60;
+          };
+          minTemp = 25;
+          maxTemp = 45;
+          minFanSpeedPercent = 10;
+          interval = "20s";
         };
-        minTemp = 25;
-        maxTemp = 45;
-        minFanSpeedPercent = 10;
-        interval = "20s";
       };
     };
-  };
 
   testScript = builtins.readFile ./fan-control.py;
 }

@@ -7,17 +7,25 @@
 {
   name = "repro-remove-without-balance";
 
-  nodes.machine = { pkgs, ... }: {
-    virtualisation.emptyDiskImages = [
-      { size = 512; driveConfig.deviceExtraOpts.serial = "disk1"; }
-      { size = 512; driveConfig.deviceExtraOpts.serial = "disk2"; }
-    ];
+  nodes.machine =
+    { pkgs, ... }:
+    {
+      virtualisation.emptyDiskImages = [
+        {
+          size = 512;
+          driveConfig.deviceExtraOpts.serial = "disk1";
+        }
+        {
+          size = 512;
+          driveConfig.deviceExtraOpts.serial = "disk2";
+        }
+      ];
 
-    environment.systemPackages = [
-      pkgs.cryptsetup
-      pkgs.btrfs-progs
-    ];
-  };
+      environment.systemPackages = [
+        pkgs.cryptsetup
+        pkgs.btrfs-progs
+      ];
+    };
 
   testScript = builtins.readFile ./remove-without-balance.py;
 }

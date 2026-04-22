@@ -39,10 +39,22 @@
       # payload give ~3s of replace work, comfortably wider than the
       # shutdown window.
       virtualisation.emptyDiskImages = [
-        { size = 4096; driveConfig.deviceExtraOpts.serial = "disk1"; }
-        { size = 4096; driveConfig.deviceExtraOpts.serial = "disk2"; }
-        { size = 4096; driveConfig.deviceExtraOpts.serial = "disk3"; }
-        { size = 4096; driveConfig.deviceExtraOpts.serial = "disk4"; }
+        {
+          size = 4096;
+          driveConfig.deviceExtraOpts.serial = "disk1";
+        }
+        {
+          size = 4096;
+          driveConfig.deviceExtraOpts.serial = "disk2";
+        }
+        {
+          size = 4096;
+          driveConfig.deviceExtraOpts.serial = "disk3";
+        }
+        {
+          size = 4096;
+          driveConfig.deviceExtraOpts.serial = "disk4";
+        }
       ];
       virtualisation.memorySize = 2048;
 

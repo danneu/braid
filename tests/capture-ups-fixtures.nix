@@ -48,32 +48,40 @@
       # Each state's full UPS dump. The seed is an APC Back-UPS-style
       # dump -- enough keys that every typed field the parser cares
       # about (battery, input, load, device, test result) has content.
-      mkDev = { status, batteryCharge, batteryRuntime, inputVoltage, upsLoad }: ''
-        battery.charge: ${toString batteryCharge}
-        battery.charge.low: 10
-        battery.runtime: ${toString batteryRuntime}
-        battery.runtime.low: 120
-        battery.type: PbAc
-        battery.voltage: 27.0
-        battery.mfr.date: 2023/04/12
-        device.mfr: APC
-        device.model: Back-UPS ES 550G
-        device.serial: 3B1234X56789
-        device.type: ups
-        driver.name: dummy-ups
-        driver.parameter.pollfreq: 30
-        input.voltage: ${toString inputVoltage}
-        input.voltage.nominal: 120
-        input.transfer.low: 88
-        input.transfer.high: 142
-        input.sensitivity: medium
-        ups.load: ${toString upsLoad}
-        ups.mfr: APC
-        ups.model: Back-UPS ES 550G
-        ups.realpower.nominal: 330
-        ups.status: ${status}
-        ups.test.result: Done and passed
-      '';
+      mkDev =
+        {
+          status,
+          batteryCharge,
+          batteryRuntime,
+          inputVoltage,
+          upsLoad,
+        }:
+        ''
+          battery.charge: ${toString batteryCharge}
+          battery.charge.low: 10
+          battery.runtime: ${toString batteryRuntime}
+          battery.runtime.low: 120
+          battery.type: PbAc
+          battery.voltage: 27.0
+          battery.mfr.date: 2023/04/12
+          device.mfr: APC
+          device.model: Back-UPS ES 550G
+          device.serial: 3B1234X56789
+          device.type: ups
+          driver.name: dummy-ups
+          driver.parameter.pollfreq: 30
+          input.voltage: ${toString inputVoltage}
+          input.voltage.nominal: 120
+          input.transfer.low: 88
+          input.transfer.high: 142
+          input.sensitivity: medium
+          ups.load: ${toString upsLoad}
+          ups.mfr: APC
+          ups.model: Back-UPS ES 550G
+          ups.realpower.nominal: 330
+          ups.status: ${status}
+          ups.test.result: Done and passed
+        '';
 
       states = {
         online = {
@@ -125,7 +133,9 @@
       environment.etc = builtins.listToAttrs (
         map (name: {
           name = "nut/${name}.dev";
-          value = { text = mkDev states.${name}; };
+          value = {
+            text = mkDev states.${name};
+          };
         }) (builtins.attrNames states)
       );
 

@@ -13,21 +13,26 @@
 {
   name = "luks-label";
 
-  nodes.machine = { pkgs, ... }: {
-    virtualisation.emptyDiskImages = [
-      { size = 256; driveConfig.deviceExtraOpts.serial = "disk1"; }
-    ];
+  nodes.machine =
+    { pkgs, ... }:
+    {
+      virtualisation.emptyDiskImages = [
+        {
+          size = 256;
+          driveConfig.deviceExtraOpts.serial = "disk1";
+        }
+      ];
 
-    environment.systemPackages = [
-      braid
-      pkgs.cryptsetup
-      pkgs.btrfs-progs
-    ];
+      environment.systemPackages = [
+        braid
+        pkgs.cryptsetup
+        pkgs.btrfs-progs
+      ];
 
-    environment.etc."braid/config.json".text = builtins.toJSON {
-      mount_point = "/mnt/storage";
+      environment.etc."braid/config.json".text = builtins.toJSON {
+        mount_point = "/mnt/storage";
+      };
     };
-  };
 
   testScript = builtins.readFile ./luks-label.py;
 }

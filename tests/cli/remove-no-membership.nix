@@ -12,22 +12,30 @@
 {
   name = "remove-no-membership";
 
-  nodes.machine = { pkgs, ... }: {
-    virtualisation.emptyDiskImages = [
-      { size = 1024; driveConfig.deviceExtraOpts.serial = "disk1"; }
-      { size = 1024; driveConfig.deviceExtraOpts.serial = "disk2"; }
-    ];
+  nodes.machine =
+    { pkgs, ... }:
+    {
+      virtualisation.emptyDiskImages = [
+        {
+          size = 1024;
+          driveConfig.deviceExtraOpts.serial = "disk1";
+        }
+        {
+          size = 1024;
+          driveConfig.deviceExtraOpts.serial = "disk2";
+        }
+      ];
 
-    environment.systemPackages = [
-      braid
-      pkgs.cryptsetup
-      pkgs.btrfs-progs
-    ];
+      environment.systemPackages = [
+        braid
+        pkgs.cryptsetup
+        pkgs.btrfs-progs
+      ];
 
-    environment.etc."braid/config.json".text = builtins.toJSON {
-      mount_point = "/mnt/storage";
+      environment.etc."braid/config.json".text = builtins.toJSON {
+        mount_point = "/mnt/storage";
+      };
     };
-  };
 
   testScript = builtins.readFile ./remove-no-membership.py;
 }

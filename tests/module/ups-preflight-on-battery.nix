@@ -49,11 +49,17 @@
       '';
 
       virtualisation.emptyDiskImages = [
-        { size = 256; driveConfig.deviceExtraOpts.serial = "disk1"; }
+        {
+          size = 256;
+          driveConfig.deviceExtraOpts.serial = "disk1";
+        }
       ];
       virtualisation.memorySize = 2048;
 
-      environment.systemPackages = [ pkgs.btrfs-progs pkgs.nut ];
+      environment.systemPackages = [
+        pkgs.btrfs-progs
+        pkgs.nut
+      ];
     };
 
   testScript = builtins.readFile ./ups-preflight-on-battery.py;

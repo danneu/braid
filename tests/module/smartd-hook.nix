@@ -28,8 +28,14 @@
       # Minimal disks — smartd config generation needs the module to evaluate,
       # but the test does not exercise storage.
       virtualisation.emptyDiskImages = [
-        { size = 256; driveConfig.deviceExtraOpts.serial = "disk1"; }
-        { size = 256; driveConfig.deviceExtraOpts.serial = "disk2"; }
+        {
+          size = 256;
+          driveConfig.deviceExtraOpts.serial = "disk1";
+        }
+        {
+          size = 256;
+          driveConfig.deviceExtraOpts.serial = "disk2";
+        }
       ];
     };
 

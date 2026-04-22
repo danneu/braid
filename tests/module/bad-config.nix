@@ -14,17 +14,19 @@
 {
   name = "braid-module-bad-config";
 
-  nodes.machine = { pkgs, ... }: {
-    imports = [ ../../modules/braid ];
+  nodes.machine =
+    { pkgs, ... }:
+    {
+      imports = [ ../../modules/braid ];
 
-    braid = {
-      enable = true;
-      package = braid;
+      braid = {
+        enable = true;
+        package = braid;
+      };
+
+      # No virtualisation.emptyDiskImages — the block devices never appear.
+      virtualisation.memorySize = 2048;
     };
-
-    # No virtualisation.emptyDiskImages — the block devices never appear.
-    virtualisation.memorySize = 2048;
-  };
 
   testScript = builtins.readFile ./bad-config.py;
 }

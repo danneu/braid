@@ -16,22 +16,27 @@
 {
   name = "braid-module-add-bootstrap";
 
-  nodes.machine = { pkgs, ... }: {
-    imports = [ ../../modules/braid ];
+  nodes.machine =
+    { pkgs, ... }:
+    {
+      imports = [ ../../modules/braid ];
 
-    braid = {
-      enable = true;
-      package = braid;
+      braid = {
+        enable = true;
+        package = braid;
+      };
+
+      virtualisation.emptyDiskImages = [
+        {
+          size = 256;
+          driveConfig.deviceExtraOpts.serial = "disk1";
+        }
+      ];
+      virtualisation.memorySize = 2048;
+
+      environment.systemPackages = [ pkgs.btrfs-progs ];
+
     };
-
-    virtualisation.emptyDiskImages = [
-      { size = 256; driveConfig.deviceExtraOpts.serial = "disk1"; }
-    ];
-    virtualisation.memorySize = 2048;
-
-    environment.systemPackages = [ pkgs.btrfs-progs ];
-
-  };
 
   testScript = builtins.readFile ./add-bootstrap.py;
 }

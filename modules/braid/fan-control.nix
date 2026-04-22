@@ -5,7 +5,12 @@
 # hddtemp (unnecessary with drivetemp) and injects hddtemp.service
 # dependencies that must then be force-overridden. Owning the service avoids
 # that brittleness and gives braid full control over the unit lifecycle.
-{ config, lib, pkgs, ... }:
+{
+  config,
+  lib,
+  pkgs,
+  ...
+}:
 let
   cfg = config.braid;
   fc = cfg.fanControl;
@@ -100,26 +105,30 @@ in
     assertions = [
       {
         assertion = fc.pwm.platformDevice != "";
-        message = "braid.fanControl.pwm.platformDevice is required. "
+        message =
+          "braid.fanControl.pwm.platformDevice is required. "
           + "See the fan control guide for the discovery workflow.";
       }
       {
         assertion = builtins.match "[A-Za-z0-9_.-]+" fc.pwm.platformDevice != null;
-        message = "braid.fanControl.pwm.platformDevice (${fc.pwm.platformDevice}) "
+        message =
+          "braid.fanControl.pwm.platformDevice (${fc.pwm.platformDevice}) "
           + "must be a platform device identifier (e.g. \"f71882fg.656\"), "
           + "not a full path or shell expression. "
           + "Expected characters: A-Z a-z 0-9 _ . -";
       }
       {
         assertion = fc.pwm.maxStop <= fc.pwm.minStart;
-        message = "braid.fanControl.pwm.maxStop (${toString fc.pwm.maxStop}) must be <= "
+        message =
+          "braid.fanControl.pwm.maxStop (${toString fc.pwm.maxStop}) must be <= "
           + "pwm.minStart (${toString fc.pwm.minStart}). maxStop is the PWM below which a "
           + "spinning fan stalls; minStart is the PWM needed to start from standstill. "
           + "Run `hddfancontrol pwm-test -p <pwm-path>` to measure these values.";
       }
       {
         assertion = fc.minTemp < fc.maxTemp;
-        message = "braid.fanControl.minTemp (${toString fc.minTemp}) "
+        message =
+          "braid.fanControl.minTemp (${toString fc.minTemp}) "
           + "must be less than maxTemp (${toString fc.maxTemp}).";
       }
     ];

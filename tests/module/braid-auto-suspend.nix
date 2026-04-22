@@ -16,31 +16,39 @@
 {
   name = "braid-auto-suspend";
 
-  nodes.machine = { pkgs, ... }: {
-    imports = [ ../../modules/braid ];
+  nodes.machine =
+    { pkgs, ... }:
+    {
+      imports = [ ../../modules/braid ];
 
-    braid = {
-      enable = true;
-      package = braid;
-      autoSuspend.enable = true;
-      autoSuspend.wolInterface = "eth0";
-    };
-
-    services.samba = {
-      enable = true;
-      settings.storage = {
-        path = "/mnt/storage";
-        browseable = "yes";
-        "read only" = "no";
-        "guest ok" = "yes";
+      braid = {
+        enable = true;
+        package = braid;
+        autoSuspend.enable = true;
+        autoSuspend.wolInterface = "eth0";
       };
-    };
 
-    virtualisation.emptyDiskImages = [
-      { size = 256; driveConfig.deviceExtraOpts.serial = "disk1"; }
-      { size = 256; driveConfig.deviceExtraOpts.serial = "disk2"; }
-    ];
-  };
+      services.samba = {
+        enable = true;
+        settings.storage = {
+          path = "/mnt/storage";
+          browseable = "yes";
+          "read only" = "no";
+          "guest ok" = "yes";
+        };
+      };
+
+      virtualisation.emptyDiskImages = [
+        {
+          size = 256;
+          driveConfig.deviceExtraOpts.serial = "disk1";
+        }
+        {
+          size = 256;
+          driveConfig.deviceExtraOpts.serial = "disk2";
+        }
+      ];
+    };
 
   testScript = builtins.readFile ./braid-auto-suspend.py;
 }

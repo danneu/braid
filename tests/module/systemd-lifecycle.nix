@@ -49,16 +49,31 @@ in
       '';
 
       virtualisation.emptyDiskImages = [
-        { size = 512; driveConfig.deviceExtraOpts.serial = "disk1"; }
-        { size = 512; driveConfig.deviceExtraOpts.serial = "disk2"; }
+        {
+          size = 512;
+          driveConfig.deviceExtraOpts.serial = "disk1";
+        }
+        {
+          size = 512;
+          driveConfig.deviceExtraOpts.serial = "disk2";
+        }
         # Extra disk for the braid-add activation path test (subtest 7).
         # Not in pool.json — added via `braid add` during the test.
-        { size = 512; driveConfig.deviceExtraOpts.serial = "disk3"; }
+        {
+          size = 512;
+          driveConfig.deviceExtraOpts.serial = "disk3";
+        }
         # Extra disks for the concurrent-add contention test (subtest 9).
         # Two are required: both `braid add` invocations target a real
         # disk, but only the flock winner actually enrolls and adds it.
-        { size = 512; driveConfig.deviceExtraOpts.serial = "disk4"; }
-        { size = 512; driveConfig.deviceExtraOpts.serial = "disk5"; }
+        {
+          size = 512;
+          driveConfig.deviceExtraOpts.serial = "disk4";
+        }
+        {
+          size = 512;
+          driveConfig.deviceExtraOpts.serial = "disk5";
+        }
       ];
       virtualisation.memorySize = 2048;
 

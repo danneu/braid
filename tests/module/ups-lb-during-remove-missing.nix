@@ -40,9 +40,18 @@
       # balance's input. Disk3 (the replacement) is sized the same so
       # the pool is balanced after recovery.
       virtualisation.emptyDiskImages = [
-        { size = 6144; driveConfig.deviceExtraOpts.serial = "disk1"; }
-        { size = 6144; driveConfig.deviceExtraOpts.serial = "disk2"; }
-        { size = 6144; driveConfig.deviceExtraOpts.serial = "disk3"; }
+        {
+          size = 6144;
+          driveConfig.deviceExtraOpts.serial = "disk1";
+        }
+        {
+          size = 6144;
+          driveConfig.deviceExtraOpts.serial = "disk2";
+        }
+        {
+          size = 6144;
+          driveConfig.deviceExtraOpts.serial = "disk3";
+        }
       ];
       virtualisation.memorySize = 2048;
 

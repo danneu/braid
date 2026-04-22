@@ -36,8 +36,14 @@
       };
 
       virtualisation.emptyDiskImages = [
-        { size = 6144; driveConfig.deviceExtraOpts.serial = "disk1"; }
-        { size = 6144; driveConfig.deviceExtraOpts.serial = "disk2"; }
+        {
+          size = 6144;
+          driveConfig.deviceExtraOpts.serial = "disk1";
+        }
+        {
+          size = 6144;
+          driveConfig.deviceExtraOpts.serial = "disk2";
+        }
       ];
       virtualisation.memorySize = 2048;
 

@@ -14,23 +14,34 @@
 {
   name = "braid-remove-missing-enospc-crash";
 
-  nodes.machine = { pkgs, ... }: {
-    virtualisation.emptyDiskImages = [
-      { size = 4096; driveConfig.deviceExtraOpts.serial = "disk1"; }
-      { size = 4096; driveConfig.deviceExtraOpts.serial = "disk2"; }
-      { size = 4096; driveConfig.deviceExtraOpts.serial = "disk3"; }
-    ];
+  nodes.machine =
+    { pkgs, ... }:
+    {
+      virtualisation.emptyDiskImages = [
+        {
+          size = 4096;
+          driveConfig.deviceExtraOpts.serial = "disk1";
+        }
+        {
+          size = 4096;
+          driveConfig.deviceExtraOpts.serial = "disk2";
+        }
+        {
+          size = 4096;
+          driveConfig.deviceExtraOpts.serial = "disk3";
+        }
+      ];
 
-    environment.systemPackages = [
-      braid
-      pkgs.cryptsetup
-      pkgs.btrfs-progs
-    ];
+      environment.systemPackages = [
+        braid
+        pkgs.cryptsetup
+        pkgs.btrfs-progs
+      ];
 
-    environment.etc."braid/config.json".text = builtins.toJSON {
-      mount_point = "/mnt/storage";
+      environment.etc."braid/config.json".text = builtins.toJSON {
+        mount_point = "/mnt/storage";
+      };
     };
-  };
 
   testScript = builtins.readFile ./braid-remove-missing-enospc-crash.py;
 }

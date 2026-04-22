@@ -8,16 +8,21 @@
 {
   name = "repro-cryptsetup-close-mounted";
 
-  nodes.machine = { pkgs, ... }: {
-    virtualisation.emptyDiskImages = [
-      { size = 512; driveConfig.deviceExtraOpts.serial = "disk1"; }
-    ];
+  nodes.machine =
+    { pkgs, ... }:
+    {
+      virtualisation.emptyDiskImages = [
+        {
+          size = 512;
+          driveConfig.deviceExtraOpts.serial = "disk1";
+        }
+      ];
 
-    environment.systemPackages = [
-      pkgs.cryptsetup
-      pkgs.btrfs-progs
-    ];
-  };
+      environment.systemPackages = [
+        pkgs.cryptsetup
+        pkgs.btrfs-progs
+      ];
+    };
 
   testScript = builtins.readFile ./cryptsetup-close-mounted.py;
 }

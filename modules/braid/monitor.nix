@@ -1,4 +1,9 @@
-{ config, lib, pkgs, ... }:
+{
+  config,
+  lib,
+  pkgs,
+  ...
+}:
 let
   cfg = config.braid;
   beepEnabled = cfg.monitor.beep;
@@ -22,7 +27,9 @@ let
 in
 {
   options.braid.monitor = {
-    enable = lib.mkEnableOption "disk health monitoring and alerting" // { default = true; };
+    enable = lib.mkEnableOption "disk health monitoring and alerting" // {
+      default = true;
+    };
 
     interval = lib.mkOption {
       type = lib.types.str;
@@ -61,7 +68,7 @@ in
 
     # beep refuses to run as root — grant the beep group write access to
     # the PC Speaker evdev device so the alert service can beep unprivileged.
-    users.groups.beep = lib.mkIf beepEnabled {};
+    users.groups.beep = lib.mkIf beepEnabled { };
 
     services.udev.extraRules = lib.mkIf beepEnabled ''
       ACTION=="add", SUBSYSTEM=="input", ATTRS{name}=="PC Speaker", ENV{DEVNAME}!="", GROUP="beep", MODE="0620"
@@ -73,21 +80,22 @@ in
     # systemd unit text, so a refactor of the alert service script cannot
     # silently break the speaker probe.
     environment.etc."braid/notifier-config.json".text = builtins.toJSON {
-      beep_probe_path =
-        if beepEnabled
-        then "${braidBeepProbe}/bin/braid-beep-probe"
-        else null;
+      beep_probe_path = if beepEnabled then "${braidBeepProbe}/bin/braid-beep-probe" else null;
     };
 
     # --- Alert service ---
     systemd.services.braid-alert = {
       description = "Braid disk health alert (audible beep if enabled)";
-      serviceConfig = if beepEnabled then {
-        Type = "simple";
-      } else {
-        Type = "oneshot";
-        RemainAfterExit = true;
-      };
+      serviceConfig =
+        if beepEnabled then
+          {
+            Type = "simple";
+          }
+        else
+          {
+            Type = "oneshot";
+            RemainAfterExit = true;
+          };
       script = ''
         ${lib.optionalString beepEnabled ''
           ${pkgs.kmod}/bin/modprobe pcspkr 2>/dev/null || true
@@ -116,7 +124,10 @@ in
       description = "Poll btrfs device stats for disk errors";
       unitConfig.ConditionPathIsMountPoint = cfg.mountPoint;
       serviceConfig.Type = "oneshot";
-      path = [ braidWrapped cfg.packages.btrfsProgs ];
+      path = [
+        braidWrapped
+        cfg.packages.btrfsProgs
+      ];
       script = ''
         rc=0
         braid monitor || rc=$?
@@ -142,8 +153,7 @@ in
     # --- smartd integration ---
     services.smartd = {
       enable = lib.mkDefault true;
-      defaults.monitored = lib.mkDefault
-        "-a -o on -S on -m <nomailer> -M exec ${smartdAlertScript}";
+      defaults.monitored = lib.mkDefault "-a -o on -S on -m <nomailer> -M exec ${smartdAlertScript}";
       # Suppress the NixOS smartd module's own notification handlers.
       # Without these, installing an MTA (e.g. postfix) would cause the
       # module to prepend a second -m/-M exec pair to every config line.

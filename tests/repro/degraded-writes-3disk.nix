@@ -8,18 +8,29 @@
 {
   name = "repro-degraded-writes-3disk";
 
-  nodes.machine = { pkgs, ... }: {
-    virtualisation.emptyDiskImages = [
-      { size = 512; driveConfig.deviceExtraOpts.serial = "disk1"; }
-      { size = 512; driveConfig.deviceExtraOpts.serial = "disk2"; }
-      { size = 512; driveConfig.deviceExtraOpts.serial = "disk3"; }
-    ];
+  nodes.machine =
+    { pkgs, ... }:
+    {
+      virtualisation.emptyDiskImages = [
+        {
+          size = 512;
+          driveConfig.deviceExtraOpts.serial = "disk1";
+        }
+        {
+          size = 512;
+          driveConfig.deviceExtraOpts.serial = "disk2";
+        }
+        {
+          size = 512;
+          driveConfig.deviceExtraOpts.serial = "disk3";
+        }
+      ];
 
-    environment.systemPackages = [
-      pkgs.cryptsetup
-      pkgs.btrfs-progs
-    ];
-  };
+      environment.systemPackages = [
+        pkgs.cryptsetup
+        pkgs.btrfs-progs
+      ];
+    };
 
   testScript = builtins.readFile ./degraded-writes-3disk.py;
 }

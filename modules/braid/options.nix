@@ -1,4 +1,9 @@
-{ lib, pkgs, config, ... }:
+{
+  lib,
+  pkgs,
+  config,
+  ...
+}:
 let
   cfg = config.braid;
 in
@@ -13,10 +18,10 @@ in
     };
 
     packages = {
-      cryptsetup = lib.mkPackageOption pkgs "cryptsetup" {};
-      btrfsProgs = lib.mkPackageOption pkgs "btrfs-progs" {};
-      utilLinux = lib.mkPackageOption pkgs "util-linux" {};
-      nut = lib.mkPackageOption pkgs "nut" {};
+      cryptsetup = lib.mkPackageOption pkgs "cryptsetup" { };
+      btrfsProgs = lib.mkPackageOption pkgs "btrfs-progs" { };
+      utilLinux = lib.mkPackageOption pkgs "util-linux" { };
+      nut = lib.mkPackageOption pkgs "nut" { };
     };
 
     package = lib.mkOption {
@@ -58,7 +63,9 @@ in
     };
 
     autoScrub = {
-      enable = lib.mkEnableOption "periodic btrfs scrub" // { default = true; };
+      enable = lib.mkEnableOption "periodic btrfs scrub" // {
+        default = true;
+      };
 
       interval = lib.mkOption {
         type = lib.types.str;
@@ -93,7 +100,7 @@ in
     ];
 
     users.groups = lib.mkIf (cfg.storageGroup != null) {
-      ${cfg.storageGroup} = {};
+      ${cfg.storageGroup} = { };
     };
   };
 }

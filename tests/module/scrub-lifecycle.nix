@@ -55,8 +55,14 @@ let
       '';
 
       virtualisation.emptyDiskImages = [
-        { size = 512; driveConfig.deviceExtraOpts.serial = "disk1"; }
-        { size = 512; driveConfig.deviceExtraOpts.serial = "disk2"; }
+        {
+          size = 512;
+          driveConfig.deviceExtraOpts.serial = "disk1";
+        }
+        {
+          size = 512;
+          driveConfig.deviceExtraOpts.serial = "disk2";
+        }
       ];
       virtualisation.memorySize = 2048;
 
@@ -80,11 +86,14 @@ in
       # mount busy. Opens an FD on the pool mount, then sleeps. This makes
       # the cancellation test deterministic — no timing race with a real
       # scrub that completes in milliseconds on tiny test disks.
-      systemd.services.braid-scrub.serviceConfig.ExecStart = lib.mkForce
-        (toString (pkgs.writeShellScript "fake-scrub" ''
-          exec 3>/mnt/storage/.scrub-lock
-          sleep 300
-        ''));
+      systemd.services.braid-scrub.serviceConfig.ExecStart = lib.mkForce (
+        toString (
+          pkgs.writeShellScript "fake-scrub" ''
+            exec 3>/mnt/storage/.scrub-lock
+            sleep 300
+          ''
+        )
+      );
     };
 
   testScript = builtins.readFile ./scrub-lifecycle.py;

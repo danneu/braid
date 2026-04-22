@@ -15,43 +15,58 @@
 {
   name = "playground";
 
-  nodes.nas = { pkgs, ... }: {
-    virtualisation.emptyDiskImages = [
-      { size = 256; driveConfig.deviceExtraOpts.serial = "disk1"; }
-      { size = 256; driveConfig.deviceExtraOpts.serial = "disk2"; }
-      { size = 256; driveConfig.deviceExtraOpts.serial = "disk3"; }
-    ];
+  nodes.nas =
+    { pkgs, ... }:
+    {
+      virtualisation.emptyDiskImages = [
+        {
+          size = 256;
+          driveConfig.deviceExtraOpts.serial = "disk1";
+        }
+        {
+          size = 256;
+          driveConfig.deviceExtraOpts.serial = "disk2";
+        }
+        {
+          size = 256;
+          driveConfig.deviceExtraOpts.serial = "disk3";
+        }
+      ];
 
-    virtualisation.memorySize = 2048;
+      virtualisation.memorySize = 2048;
 
-    virtualisation.forwardPorts = [
-      { from = "host"; host.port = 4450; guest.port = 445; }
-    ];
+      virtualisation.forwardPorts = [
+        {
+          from = "host";
+          host.port = 4450;
+          guest.port = 445;
+        }
+      ];
 
-    environment.systemPackages = [
-      pkgs.btrfs-progs
-    ];
+      environment.systemPackages = [
+        pkgs.btrfs-progs
+      ];
 
-    services.samba = {
-      enable = true;
-      settings = {
-        storage = {
-          path = "/mnt/storage";
-          browseable = "yes";
-          "read only" = "no";
-          "guest ok" = "no";
-          "force user" = "nas";
+      services.samba = {
+        enable = true;
+        settings = {
+          storage = {
+            path = "/mnt/storage";
+            browseable = "yes";
+            "read only" = "no";
+            "guest ok" = "no";
+            "force user" = "nas";
+          };
         };
       };
-    };
 
-    users.users.nas = {
-      isNormalUser = true;
-      description = "Samba share user";
-    };
+      users.users.nas = {
+        isNormalUser = true;
+        description = "Samba share user";
+      };
 
-    networking.firewall.allowedTCPPorts = [ 445 ];
-  };
+      networking.firewall.allowedTCPPorts = [ 445 ];
+    };
 
   testScript = ''
     start_all()

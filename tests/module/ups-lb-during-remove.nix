@@ -51,9 +51,18 @@
       #     when removing one of three disks) keeps the remove in flight
       #     for ~2s.
       virtualisation.emptyDiskImages = [
-        { size = 10240; driveConfig.deviceExtraOpts.serial = "disk1"; }
-        { size = 10240; driveConfig.deviceExtraOpts.serial = "disk2"; }
-        { size = 10240; driveConfig.deviceExtraOpts.serial = "disk3"; }
+        {
+          size = 10240;
+          driveConfig.deviceExtraOpts.serial = "disk1";
+        }
+        {
+          size = 10240;
+          driveConfig.deviceExtraOpts.serial = "disk2";
+        }
+        {
+          size = 10240;
+          driveConfig.deviceExtraOpts.serial = "disk3";
+        }
       ];
       virtualisation.memorySize = 2048;
 

@@ -16,43 +16,67 @@
 {
   name = "braid-auto-scrub";
 
-  nodes.defaults = { ... }: {
-    imports = [ ../../modules/braid ];
-    braid = {
-      enable = true;
-      package = braid;
+  nodes.defaults =
+    { ... }:
+    {
+      imports = [ ../../modules/braid ];
+      braid = {
+        enable = true;
+        package = braid;
+      };
+      virtualisation.emptyDiskImages = [
+        {
+          size = 256;
+          driveConfig.deviceExtraOpts.serial = "disk1";
+        }
+        {
+          size = 256;
+          driveConfig.deviceExtraOpts.serial = "disk2";
+        }
+      ];
     };
-    virtualisation.emptyDiskImages = [
-      { size = 256; driveConfig.deviceExtraOpts.serial = "disk1"; }
-      { size = 256; driveConfig.deviceExtraOpts.serial = "disk2"; }
-    ];
-  };
 
-  nodes.disabled = { ... }: {
-    imports = [ ../../modules/braid ];
-    braid = {
-      enable = true;
-      package = braid;
-      autoScrub.enable = false;
+  nodes.disabled =
+    { ... }:
+    {
+      imports = [ ../../modules/braid ];
+      braid = {
+        enable = true;
+        package = braid;
+        autoScrub.enable = false;
+      };
+      virtualisation.emptyDiskImages = [
+        {
+          size = 256;
+          driveConfig.deviceExtraOpts.serial = "disk1";
+        }
+        {
+          size = 256;
+          driveConfig.deviceExtraOpts.serial = "disk2";
+        }
+      ];
     };
-    virtualisation.emptyDiskImages = [
-      { size = 256; driveConfig.deviceExtraOpts.serial = "disk1"; }
-      { size = 256; driveConfig.deviceExtraOpts.serial = "disk2"; }
-    ];
-  };
 
-  nodes.weekly = { ... }: {
-    imports = [ ../../modules/braid ];
-    braid = {
-      enable = true;
-      package = braid;
-      autoScrub.interval = "weekly";
+  nodes.weekly =
+    { ... }:
+    {
+      imports = [ ../../modules/braid ];
+      braid = {
+        enable = true;
+        package = braid;
+        autoScrub.interval = "weekly";
+      };
+      virtualisation.emptyDiskImages = [
+        {
+          size = 256;
+          driveConfig.deviceExtraOpts.serial = "disk1";
+        }
+        {
+          size = 256;
+          driveConfig.deviceExtraOpts.serial = "disk2";
+        }
+      ];
     };
-    virtualisation.emptyDiskImages = [
-      { size = 256; driveConfig.deviceExtraOpts.serial = "disk1"; }
-      { size = 256; driveConfig.deviceExtraOpts.serial = "disk2"; }
-    ];
-  };
 
   testScript = builtins.readFile ./auto-scrub.py;
 }
