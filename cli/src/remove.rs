@@ -514,6 +514,15 @@ mod tests {
         }
     }
 
+    fn test_target_device() -> PoolDevice {
+        PoolDevice {
+            devid: 1,
+            mapper: MapperName("braid-disk1".into()),
+            luks_uuid: LuksUuid("11111111-1111-1111-1111-111111111111".into()),
+            underlying: "/dev/vda".into(),
+        }
+    }
+
     #[derive(Clone)]
     struct RecordingRunner {
         log: Arc<Mutex<Vec<CmdRequest>>>,
@@ -1256,12 +1265,7 @@ mod tests {
         }
 
         let mount = MountPoint("/mnt/storage".to_owned());
-        let target = PoolDevice {
-            devid: 1,
-            mapper: MapperName("braid-disk1".into()),
-            luks_uuid: LuksUuid("11111111-1111-1111-1111-111111111111".into()),
-            underlying: "/dev/vda".into(),
-        };
+        let target = test_target_device();
         // remaining: 2 exercises the >= 2 branch (3->2 remove), which is the
         // scenario the CommandFailed surfacing was written for.
         let err = check_eviction_space(&FailingUsageRunner, &mount, &target, 2)
@@ -1271,6 +1275,332 @@ mod tests {
                 assert!(msg.contains("btrfs device usage failed"), "got: {msg}");
                 assert!(msg.contains("exit 1"), "got: {msg}");
                 assert!(msg.contains("not a btrfs filesystem"), "got: {msg}");
+            }
+            other => panic!("expected RemoveError::Validation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    // Intent: the 2->1 branch fails closed when `btrfs device usage --raw`
+    //   cannot be spawned.
+    // Why: a runner/spawn failure means survivor capacity is unknown. The
+    //   single-survivor path must not fall through to the irreversible remove.
+    // Scenario: 2->1 remove where the preflight cannot invoke `btrfs device
+    //   usage --raw` at all.
+    fn check_eviction_space_2to1_fails_closed_on_device_usage_spawn_error() {
+        struct UsageSpawnFailRunner;
+
+        impl CommandRunner for UsageSpawnFailRunner {
+            fn run(&self, _request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
+                Err(CmdError::MissingMock)
+            }
+
+            fn run_with_stdin(
+                &self,
+                request: &CmdRequest,
+                _stdin: &[u8],
+            ) -> Result<RawCommandOutput, CmdError> {
+                self.run(request)
+            }
+        }
+
+        let mount = MountPoint("/mnt/storage".to_owned());
+        let target = test_target_device();
+        let err = check_eviction_space(&UsageSpawnFailRunner, &mount, &target, 1)
+            .expect_err("2->1 preflight must fail closed on usage spawn error");
+        match err {
+            RemoveError::Validation(msg) => {
+                assert!(msg.contains("ENOSPC pre-flight (2->1)"), "got: {msg}");
+                assert!(msg.contains("btrfs device usage spawn failed"), "got: {msg}");
+                assert!(msg.contains("validated survivor capacity"), "got: {msg}");
+            }
+            other => panic!("expected RemoveError::Validation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    // Intent: the 2->1 branch fails closed when `btrfs device usage --raw`
+    //   returns malformed output.
+    // Why: parser-shape uncertainty on the single-survivor path must not
+    //   degrade into warn-and-proceed.
+    // Scenario: 2->1 remove where `btrfs device usage --raw` exits 0 but the
+    //   output cannot be parsed.
+    fn check_eviction_space_2to1_fails_closed_on_device_usage_parse_error() {
+        struct UsageParseFailRunner;
+
+        impl CommandRunner for UsageParseFailRunner {
+            fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
+                match request {
+                    CmdRequest::BtrfsDeviceUsageRaw { .. } => Ok(mock_out(
+                        "btrfs device usage --raw /mnt/storage",
+                        "/dev/mapper/braid-disk1, ID: 1\n\
+                         \x20  Device size:         1073741824\n",
+                        0,
+                    )),
+                    _ => Err(CmdError::MissingMock),
+                }
+            }
+
+            fn run_with_stdin(
+                &self,
+                request: &CmdRequest,
+                _stdin: &[u8],
+            ) -> Result<RawCommandOutput, CmdError> {
+                self.run(request)
+            }
+        }
+
+        let mount = MountPoint("/mnt/storage".to_owned());
+        let target = test_target_device();
+        let err = check_eviction_space(&UsageParseFailRunner, &mount, &target, 1)
+            .expect_err("2->1 preflight must fail closed on usage parse error");
+        match err {
+            RemoveError::Validation(msg) => {
+                assert!(msg.contains("ENOSPC pre-flight (2->1)"), "got: {msg}");
+                assert!(msg.contains("btrfs device usage output unparseable"), "got: {msg}");
+            }
+            other => panic!("expected RemoveError::Validation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    // Intent: the 2->1 branch fails closed when `btrfs filesystem df` cannot
+    //   be spawned.
+    // Why: without logical used bytes, the single-survivor capacity model
+    //   cannot run, so remove must stop.
+    // Scenario: valid device-usage output is available, but the df command
+    //   itself cannot be invoked.
+    fn check_eviction_space_2to1_fails_closed_on_df_spawn_error() {
+        struct DfSpawnFailRunner;
+
+        impl CommandRunner for DfSpawnFailRunner {
+            fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
+                match request {
+                    CmdRequest::BtrfsDeviceUsageRaw { .. } => Ok(mock_out(
+                        "btrfs device usage --raw /mnt/storage",
+                        "/dev/mapper/braid-disk1, ID: 1\n\
+                         \x20  Device size:         1073741824\n\
+                         \x20  Device slack:                 0\n\
+                         \x20  Data,RAID1:            52428800\n\
+                         \x20  Metadata,RAID1:        10485760\n\
+                         \x20  System,RAID1:             32768\n\
+                         \x20  Unallocated:         1010794496\n\n\
+                         /dev/mapper/braid-disk2, ID: 2\n\
+                         \x20  Device size:         1073741824\n\
+                         \x20  Device slack:                 0\n\
+                         \x20  Data,RAID1:            52428800\n\
+                         \x20  Metadata,RAID1:        10485760\n\
+                         \x20  System,RAID1:             32768\n\
+                         \x20  Unallocated:         1010794496\n",
+                        0,
+                    )),
+                    CmdRequest::BtrfsFilesystemDfJson { .. } => Err(CmdError::MissingMock),
+                    _ => Err(CmdError::MissingMock),
+                }
+            }
+
+            fn run_with_stdin(
+                &self,
+                request: &CmdRequest,
+                _stdin: &[u8],
+            ) -> Result<RawCommandOutput, CmdError> {
+                self.run(request)
+            }
+        }
+
+        let mount = MountPoint("/mnt/storage".to_owned());
+        let target = test_target_device();
+        let err = check_eviction_space(&DfSpawnFailRunner, &mount, &target, 1)
+            .expect_err("2->1 preflight must fail closed on df spawn error");
+        match err {
+            RemoveError::Validation(msg) => {
+                assert!(msg.contains("ENOSPC pre-flight (2->1)"), "got: {msg}");
+                assert!(msg.contains("btrfs filesystem df spawn failed"), "got: {msg}");
+                assert!(msg.contains("validated survivor capacity"), "got: {msg}");
+            }
+            other => panic!("expected RemoveError::Validation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    // Intent: the 2->1 branch fails closed when `btrfs filesystem df`
+    //   returns malformed JSON.
+    // Why: parser-shape uncertainty on df output is part of the
+    //   single-survivor risk surface and must be rejected.
+    // Scenario: valid device-usage output, but df exits 0 with malformed JSON.
+    fn check_eviction_space_2to1_fails_closed_on_df_parse_error() {
+        struct DfParseFailRunner;
+
+        impl CommandRunner for DfParseFailRunner {
+            fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
+                match request {
+                    CmdRequest::BtrfsDeviceUsageRaw { .. } => Ok(mock_out(
+                        "btrfs device usage --raw /mnt/storage",
+                        "/dev/mapper/braid-disk1, ID: 1\n\
+                         \x20  Device size:         1073741824\n\
+                         \x20  Device slack:                 0\n\
+                         \x20  Data,RAID1:            52428800\n\
+                         \x20  Metadata,RAID1:        10485760\n\
+                         \x20  System,RAID1:             32768\n\
+                         \x20  Unallocated:         1010794496\n\n\
+                         /dev/mapper/braid-disk2, ID: 2\n\
+                         \x20  Device size:         1073741824\n\
+                         \x20  Device slack:                 0\n\
+                         \x20  Data,RAID1:            52428800\n\
+                         \x20  Metadata,RAID1:        10485760\n\
+                         \x20  System,RAID1:             32768\n\
+                         \x20  Unallocated:         1010794496\n",
+                        0,
+                    )),
+                    CmdRequest::BtrfsFilesystemDfJson { .. } => Ok(mock_out(
+                        "btrfs --format json filesystem df /mnt/storage",
+                        "{\"filesystem-df\":",
+                        0,
+                    )),
+                    _ => Err(CmdError::MissingMock),
+                }
+            }
+
+            fn run_with_stdin(
+                &self,
+                request: &CmdRequest,
+                _stdin: &[u8],
+            ) -> Result<RawCommandOutput, CmdError> {
+                self.run(request)
+            }
+        }
+
+        let mount = MountPoint("/mnt/storage".to_owned());
+        let target = test_target_device();
+        let err = check_eviction_space(&DfParseFailRunner, &mount, &target, 1)
+            .expect_err("2->1 preflight must fail closed on df parse error");
+        match err {
+            RemoveError::Validation(msg) => {
+                assert!(msg.contains("ENOSPC pre-flight (2->1)"), "got: {msg}");
+                assert!(msg.contains("btrfs filesystem df output unparseable"), "got: {msg}");
+            }
+            other => panic!("expected RemoveError::Validation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    // Intent: the 2->1 branch fails closed when `btrfs device usage` does not
+    //   include a surviving device entry.
+    // Why: survivor resolution is load-bearing for the capacity check. Missing
+    //   survivor data must refuse, not proceed.
+    // Scenario: valid df output is available, but usage output only lists the
+    //   target device.
+    fn check_eviction_space_2to1_fails_closed_when_survivor_missing() {
+        struct SurvivorMissingRunner;
+
+        impl CommandRunner for SurvivorMissingRunner {
+            fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
+                match request {
+                    CmdRequest::BtrfsDeviceUsageRaw { .. } => Ok(mock_out(
+                        "btrfs device usage --raw /mnt/storage",
+                        "/dev/mapper/braid-disk1, ID: 1\n\
+                         \x20  Device size:         1073741824\n\
+                         \x20  Device slack:                 0\n\
+                         \x20  Data,RAID1:            52428800\n\
+                         \x20  Metadata,RAID1:        10485760\n\
+                         \x20  System,RAID1:             32768\n\
+                         \x20  Unallocated:         1010794496\n",
+                        0,
+                    )),
+                    CmdRequest::BtrfsFilesystemDfJson { .. } => Ok(mock_out(
+                        "btrfs --format json filesystem df /mnt/storage",
+                        r#"{
+  "filesystem-df": [
+    { "bg-type": "Data", "bg-profile": "RAID1", "total": 52428800, "used": 52428800 }
+  ]
+}"#,
+                        0,
+                    )),
+                    _ => Err(CmdError::MissingMock),
+                }
+            }
+
+            fn run_with_stdin(
+                &self,
+                request: &CmdRequest,
+                _stdin: &[u8],
+            ) -> Result<RawCommandOutput, CmdError> {
+                self.run(request)
+            }
+        }
+
+        let mount = MountPoint("/mnt/storage".to_owned());
+        let target = test_target_device();
+        let err = check_eviction_space(&SurvivorMissingRunner, &mount, &target, 1)
+            .expect_err("2->1 preflight must fail closed when survivor is missing");
+        match err {
+            RemoveError::Validation(msg) => {
+                assert!(msg.contains("did not list the surviving device"), "got: {msg}");
+                assert!(msg.contains("target devid"), "got: {msg}");
+            }
+            other => panic!("expected RemoveError::Validation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    // Intent: the 2->1 branch surfaces a non-zero `btrfs filesystem df`
+    //   exit as a validation error.
+    // Why: this is the df-side equivalent of the existing CommandFailed test;
+    //   if btrfs itself refuses, the remove must stop.
+    // Scenario: valid usage output is available, but `btrfs filesystem df`
+    //   exits non-zero.
+    fn check_eviction_space_2to1_surfaces_df_command_failed_as_validation() {
+        struct DfCommandFailedRunner;
+
+        impl CommandRunner for DfCommandFailedRunner {
+            fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
+                match request {
+                    CmdRequest::BtrfsDeviceUsageRaw { .. } => Ok(mock_out(
+                        "btrfs device usage --raw /mnt/storage",
+                        "/dev/mapper/braid-disk1, ID: 1\n\
+                         \x20  Device size:         1073741824\n\
+                         \x20  Device slack:                 0\n\
+                         \x20  Data,RAID1:            52428800\n\
+                         \x20  Metadata,RAID1:        10485760\n\
+                         \x20  System,RAID1:             32768\n\
+                         \x20  Unallocated:         1010794496\n\n\
+                         /dev/mapper/braid-disk2, ID: 2\n\
+                         \x20  Device size:         1073741824\n\
+                         \x20  Device slack:                 0\n\
+                         \x20  Data,RAID1:            52428800\n\
+                         \x20  Metadata,RAID1:        10485760\n\
+                         \x20  System,RAID1:             32768\n\
+                         \x20  Unallocated:         1010794496\n",
+                        0,
+                    )),
+                    CmdRequest::BtrfsFilesystemDfJson { .. } => Ok(RawCommandOutput {
+                        cmd: "btrfs --format json filesystem df /mnt/storage".into(),
+                        stdout: String::new(),
+                        stderr: "ERROR: filesystem is read-only".into(),
+                        exit_status: 1,
+                    }),
+                    _ => Err(CmdError::MissingMock),
+                }
+            }
+
+            fn run_with_stdin(
+                &self,
+                request: &CmdRequest,
+                _stdin: &[u8],
+            ) -> Result<RawCommandOutput, CmdError> {
+                self.run(request)
+            }
+        }
+
+        let mount = MountPoint("/mnt/storage".to_owned());
+        let target = test_target_device();
+        let err = check_eviction_space(&DfCommandFailedRunner, &mount, &target, 1)
+            .expect_err("2->1 preflight must surface df command failure");
+        match err {
+            RemoveError::Validation(msg) => {
+                assert!(msg.contains("btrfs filesystem df failed"), "got: {msg}");
+                assert!(msg.contains("exit 1"), "got: {msg}");
+                assert!(msg.contains("filesystem is read-only"), "got: {msg}");
             }
             other => panic!("expected RemoveError::Validation, got {other:?}"),
         }
