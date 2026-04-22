@@ -102,7 +102,7 @@ pub fn cmd_remove<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     // (see tests/repro/).
     //
     // Skip for single-survivor removals (remaining == 1): the eviction
-    // path balances RAID1→single first, which handles data redistribution.
+    // path balances RAID1->single first, which handles data redistribution.
     // This does not match the reproduced relocation-failure mode.
     if remaining > 1 {
         check_eviction_space(runner, config.mount_point(), target.devid)?;
@@ -132,13 +132,13 @@ pub fn cmd_remove<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             )
         );
         if remaining == 1 {
-            eprintln!("WARNING: Pool will have 1 disk \u{2014} no RAID1 redundancy.\n");
+            eprintln!("WARNING: Pool will have 1 disk -- no RAID1 redundancy.\n");
         }
         confirm::confirm_yes().map_err(RemoveError::Validation)?;
     }
 
-    // Hold a logind sleep inhibitor for the rest of the remove operation —
-    // covers the optional pre-remove RAID1→single balance, the long-running
+    // Hold a logind sleep inhibitor for the rest of the remove operation --
+    // covers the optional pre-remove RAID1->single balance, the long-running
     // btrfs device remove (data migration), and the post-op LUKS close +
     // membership persist. Suspending mid-remove can leave the kernel-side
     // device-remove state machine in a partially-relocated state requiring
@@ -190,7 +190,7 @@ pub fn cmd_remove<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
 /// will either ENOSPC instantly or crash the filesystem to read-only mid-relocation.
 ///
 /// If the check itself fails (parse error, command error), we log a warning and
-/// proceed — a bug in the safety net shouldn't block a valid operation.
+/// proceed -- a bug in the safety net shouldn't block a valid operation.
 fn check_eviction_space<R: CommandRunner>(
     runner: &R,
     mount_point: &MountPoint,
@@ -249,7 +249,7 @@ fn compile_remove_present_steps(
     if remaining == 1 {
         steps.push(Step {
             risk: "long",
-            description: "btrfs balance -dconvert=single -mconvert=dup -f (RAID1 → single)".into(),
+            description: "btrfs balance -dconvert=single -mconvert=dup -f (RAID1 -> single)".into(),
             commands: vec![CmdRequest::BtrfsBalanceSingle {
                 mount_point: mount_point.clone(),
             }],
@@ -296,14 +296,14 @@ fn format_remove_confirm(disk: &RemoveConfirmDisk, remaining: usize, total: usiz
     }
     let migrate_word = if remaining == 1 { "disk" } else { "disks" };
     msg.push_str(&format!(
-        "  {:width$}devid {} \u{00b7} data will migrate to remaining {}\n",
+        "  {:width$}devid {} | data will migrate to remaining {}\n",
         "",
         disk.devid,
         migrate_word,
         width = disk.name.len() + 2,
     ));
     msg.push_str(&format!(
-        "\nPool: {} {} \u{2192} {} {}\n",
+        "\nPool: {} {} -> {} {}\n",
         total,
         if total == 1 { "disk" } else { "disks" },
         remaining,
@@ -485,10 +485,10 @@ mod tests {
     }
 
     #[test]
-    // Intent: cmd_remove succeeds on a 2→1 removal without invoking the ENOSPC
+    // Intent: cmd_remove succeeds on a 2->1 removal without invoking the ENOSPC
     //   pre-flight check.
     //
-    // Why: The 2→1 eviction path balances RAID1→single before device remove,
+    // Why: The 2->1 eviction path balances RAID1->single before device remove,
     //   which does not match the reproduced relocation-failure mode. The pre-
     //   flight check compares pre-balance allocations and would false-positive.
     //
@@ -541,9 +541,9 @@ mod tests {
             !calls
                 .iter()
                 .any(|c| matches!(c, CmdRequest::BtrfsDeviceUsageRaw { .. })),
-            "ENOSPC pre-flight should not be invoked for 2→1 removal; calls: {calls:?}"
+            "ENOSPC pre-flight should not be invoked for 2->1 removal; calls: {calls:?}"
         );
-        // Locks in the seam placement: a successful 2→1 remove must take the
+        // Locks in the seam placement: a successful 2->1 remove must take the
         // inhibitor exactly once before journal::write_journal.
         assert_eq!(
             inhibitor.acquire_count(),
@@ -688,7 +688,7 @@ mod tests {
     }
 
     #[test]
-    // Intent: dry-run output shows exact commands for a 3→2 removal.
+    // Intent: dry-run output shows exact commands for a 3->2 removal.
     // Why: verifies the Step/CmdRequest integration produces correct shell strings.
     // Scenario: 3-disk pool, removing one disk (remaining=2, no balance to single).
     fn dry_run_render_3disk_removal() {
@@ -740,7 +740,7 @@ mod tests {
     }
 
     #[test]
-    // Intent: dry-run output includes balance-to-single when 2→1 removal.
+    // Intent: dry-run output includes balance-to-single when 2->1 removal.
     // Why: verifies the conditional balance step renders with its command.
     // Scenario: 2-disk pool, removing one disk leaves no redundancy.
     fn dry_run_render_2disk_removal_includes_balance() {
@@ -774,7 +774,7 @@ mod tests {
 
         // 3 steps (balance + device remove + close), each with 1 command = 6 lines
         assert_eq!(lines.len(), 6, "expected 6 lines, got:\n{output}");
-        assert!(lines[0].contains("RAID1 → single"));
+        assert!(lines[0].contains("RAID1 -> single"));
         assert_eq!(
             lines[1],
             "               $ btrfs balance start --enqueue '-dconvert=single' '-mconvert=dup' -f /mnt/storage"
@@ -817,10 +817,10 @@ mod tests {
                 sleep_inhibitor: &inhibitor,
             },
         )
-        .expect_err("should fail — balance is paused");
+        .expect_err("should fail -- balance is paused");
         let msg = err.to_string();
         assert!(msg.contains("paused"), "expected 'paused' in error: {msg}");
-        // Preflight failure must NOT acquire the inhibitor — the failure is
+        // Preflight failure must NOT acquire the inhibitor -- the failure is
         // reversible and the user should not be stranded in a state where
         // logind unavailability and a paused balance both have to clear before
         // the same braid command can run.
@@ -867,7 +867,7 @@ mod tests {
         let log = Arc::new(Mutex::new(Vec::new()));
         let runner = RecordingRunner::new(log.clone());
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
-        // With an active balance, cmd_remove should NOT error on the preflight —
+        // With an active balance, cmd_remove should NOT error on the preflight --
         // it prints a warning and proceeds. The command itself will eventually
         // fail because our mock doesn't seed all the downstream commands,
         // but the important thing is it does NOT return a Validation error
@@ -890,7 +890,7 @@ mod tests {
             result.is_ok(),
             "expected dry_run to proceed past active-op preflight, got: {result:?}"
         );
-        // dry-run must NOT acquire the inhibitor — it has no irreversible work
+        // dry-run must NOT acquire the inhibitor -- it has no irreversible work
         // to protect.
         assert_eq!(
             inhibitor.acquire_count(),
@@ -923,7 +923,7 @@ mod tests {
         assert!(msg.contains("serial 1234ABCD"));
         assert!(msg.contains("devid 2"));
         assert!(msg.contains("remaining disks"));
-        assert!(msg.contains("3 disks \u{2192} 2 disks"));
+        assert!(msg.contains("3 disks -> 2 disks"));
     }
 
     #[test]
@@ -946,7 +946,7 @@ mod tests {
             msg.contains("remaining disk"),
             "singular 'disk' when 1 remaining"
         );
-        assert!(msg.contains("2 disks \u{2192} 1 disk"));
+        assert!(msg.contains("2 disks -> 1 disk"));
     }
 
     #[test]
@@ -962,9 +962,6 @@ mod tests {
         );
         assert!(msg.contains("toshiba"));
         assert!(msg.contains("devid 2"));
-        assert!(
-            !msg.contains("\u{00b7} \u{00b7}"),
-            "no double dots when hw missing"
-        );
+        assert!(!msg.contains("| |"), "no double separators when hw missing");
     }
 }
