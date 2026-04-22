@@ -8,3 +8,4 @@ target/
 /reference/
 __pycache__/
 manual/book/
+.envrc

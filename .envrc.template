@@ -1,0 +1,3 @@
+# Rename this file to ".envrc" on machines that want braid's linux
+# deps like btrfs installed via nix
+use flake
