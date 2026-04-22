@@ -17,6 +17,17 @@ use std::path::Path;
 pub enum RemoveError {
     #[error("{0}")]
     Validation(String),
+    #[error(
+        "pool was modified but membership persist failed: {0}\n\
+         pool.json may be stale -- run `braid recover` to reconcile from live state."
+    )]
+    MembershipPersistFailure(String),
+    #[error(
+        "pool was modified and membership persisted, but journal clear failed: {0}\n\
+         Recovery mode remains active until pending-op.json is cleared -- \
+         run `braid recover`."
+    )]
+    JournalClearFailure(String),
     #[error("probe error: {0}")]
     Probe(#[from] ProbeError),
     #[error("pool error: {0}")]
@@ -25,6 +36,22 @@ pub enum RemoveError {
     Config(#[from] crate::config::ConfigError),
     #[error("command error: {0}")]
     Cmd(#[from] crate::cmd::CmdError),
+}
+
+/// Classify a `save_membership` failure that occurs *after* the irreversible
+/// btrfs device-remove has returned. Callers pass this to `.map_err` on the
+/// post-commit `save_membership` call; tests call it directly on a real
+/// `MembershipError` so a classification regression inside the helper fails
+/// the test.
+fn map_membership_persist_failure(e: membership::MembershipError) -> RemoveError {
+    RemoveError::MembershipPersistFailure(format!("failed to persist pool membership: {e}"))
+}
+
+/// Classify a `clear_journal` failure that occurs after the pool has been
+/// modified and pool.json has already been rewritten. Same testing seam as
+/// `map_membership_persist_failure` above.
+fn map_journal_clear_failure(e: journal::JournalError) -> RemoveError {
+    RemoveError::JournalClearFailure(e.to_string())
 }
 
 pub struct RemoveParams<'a> {
@@ -178,8 +205,8 @@ pub fn cmd_remove<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
 
     // Post-commit: write pool.json and clear journal.
     membership::save_membership(&target_membership, params.paths)
-        .map_err(|e| RemoveError::Validation(format!("failed to persist pool membership: {e}")))?;
-    journal::clear_journal(params.paths).map_err(|e| RemoveError::Validation(e.to_string()))?;
+        .map_err(map_membership_persist_failure)?;
+    journal::clear_journal(params.paths).map_err(map_journal_clear_failure)?;
 
     eprintln!("Done. Disk '{}' removed from pool.", params.name);
     Ok(())
@@ -963,5 +990,83 @@ mod tests {
         assert!(msg.contains("toshiba"));
         assert!(msg.contains("devid 2"));
         assert!(!msg.contains("| |"), "no double separators when hw missing");
+    }
+
+    #[test]
+    // Intent: the real post-commit mapping function classifies a
+    //   save_membership failure as MembershipPersistFailure with remediation
+    //   text that names pool.json as the stale artifact.
+    //
+    // Why: previously wrapped as RemoveError::Validation, which reads like a
+    //   pre-flight rejection. A regression inside map_membership_persist_failure
+    //   that returns the wrong variant or wrong remediation text fails this
+    //   test -- the production callsite at remove.rs:208 passes this same
+    //   helper to .map_err, so the test binds to the real mapping.
+    //
+    // Scenario: `braid remove` succeeds at the btrfs layer, but the atomic
+    //   write of pool.json fails (disk full in /var/lib/braid, stale NFS
+    //   mount, etc.). Forced here by writing to a path whose parent
+    //   directory does not exist.
+    fn save_membership_failure_classified_as_membership_persist() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Force the atomic write to fail: place a regular file where
+        // `save_membership_to` expects a directory component. `create_dir_all`
+        // in atomic_write will then error with NotADirectory.
+        let blocker = tmp.path().join("not-a-dir");
+        std::fs::write(&blocker, b"").unwrap();
+        let bad_path = blocker.join("pool.json");
+        let m = PoolMembership::empty();
+        let underlying = membership::save_membership_to(&m, &bad_path)
+            .expect_err("write under a non-directory path component must fail");
+        let classified = map_membership_persist_failure(underlying);
+        assert!(
+            matches!(classified, RemoveError::MembershipPersistFailure(_)),
+            "variant mismatch: {classified:?}"
+        );
+        let display = classified.to_string();
+        assert!(display.contains("pool was modified"), "got: {display}");
+        assert!(display.contains("pool.json may be stale"), "got: {display}");
+        assert!(display.contains("braid recover"), "got: {display}");
+    }
+
+    #[test]
+    // Intent: the real post-commit mapping function classifies a
+    //   clear_journal failure as JournalClearFailure with remediation text
+    //   that names recovery mode / pending-op.json as the latched artifact.
+    //
+    // Why: this is the only post-commit mode where pool.json is already
+    //   correct and the *journal* is keeping the system in recovery mode. A
+    //   regression that reused the membership message would tell the user to
+    //   reconcile pool.json when pool.json is fine.
+    //
+    // Scenario: `braid remove` succeeds, pool.json is rewritten, but
+    //   clear_journal fails (forced here by making pending-op.json a
+    //   non-empty directory so fs::remove_file errors).
+    fn clear_journal_failure_classified_as_journal_clear() {
+        use crate::journal;
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let pending = paths.pending_op_json();
+        std::fs::create_dir_all(&pending).unwrap();
+        std::fs::write(pending.join("child"), b"x").unwrap();
+        let underlying = journal::clear_journal(&paths)
+            .expect_err("remove_file on a non-empty directory must fail");
+        let classified = map_journal_clear_failure(underlying);
+        assert!(
+            matches!(classified, RemoveError::JournalClearFailure(_)),
+            "variant mismatch: {classified:?}"
+        );
+        let display = classified.to_string();
+        assert!(
+            display.contains("pool was modified and membership persisted"),
+            "got: {display}"
+        );
+        assert!(display.contains("journal clear failed"), "got: {display}");
+        assert!(
+            display.contains("Recovery mode remains active"),
+            "got: {display}"
+        );
+        assert!(display.contains("pending-op.json"), "got: {display}");
+        assert!(display.contains("braid recover"), "got: {display}");
     }
 }
