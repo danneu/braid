@@ -143,11 +143,7 @@ pub fn pool_balance_resume<R: CommandRunner + Sync>(
         progress,
     )?;
     if result.exit_status != 0 {
-        return Err(balance_error(
-            "btrfs balance resume",
-            mount_point,
-            &result,
-        ));
+        return Err(balance_error("btrfs balance resume", mount_point, &result));
     }
     Ok(())
 }
@@ -271,15 +267,6 @@ pub fn pool_resize_device<R: CommandRunner + Sync>(
     Ok(())
 }
 
-/// Result of evicting a live device from the pool.
-#[derive(Debug, PartialEq, Eq)]
-pub enum EvictResult {
-    /// Device was removed from pool and LUKS mapper closed.
-    Removed,
-    /// Device mapper was already absent — nothing to do.
-    AlreadyAbsent,
-}
-
 /// Shared helper: evict a live (present) device from the pool.
 ///
 /// 1. Probes the current pool to decide if RAID1→single conversion is needed.
@@ -289,22 +276,21 @@ pub enum EvictResult {
 /// 3. Removes the target device from the pool.
 /// 4. Closes the LUKS mapper (best-effort; warns on failure).
 ///
-/// Idempotent: if target mapper is already absent from the pool, returns
-/// `EvictResult::AlreadyAbsent`.
+/// Returns `Ok(())` as a no-op if the target mapper is not present in the pool.
 #[allow(clippy::doc_overindented_list_items)]
 pub fn evict_present_device<R: CommandRunner + Sync>(
     runner: &R,
     mapper: &str,
     mount_point: &MountPoint,
     progress: ProgressOutput,
-) -> Result<EvictResult, PoolError> {
+) -> Result<(), PoolError> {
     let pool = probe_pool(runner, mount_point).map_err(|e| PoolError::Failed(e.to_string()))?;
 
     let device_path = format!("/dev/mapper/{mapper}");
     let in_pool = pool.devices.iter().any(|d| d.mapper.0 == mapper);
 
     if !in_pool {
-        return Ok(EvictResult::AlreadyAbsent);
+        return Ok(());
     }
 
     let remaining = pool.devices.len() - 1;
@@ -333,7 +319,7 @@ pub fn evict_present_device<R: CommandRunner + Sync>(
         _ => {}
     }
 
-    Ok(EvictResult::Removed)
+    Ok(())
 }
 
 /// Bootstrap the pool: mkfs.btrfs (only if no superblock) then mount.
