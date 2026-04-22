@@ -2,8 +2,8 @@
 
 You can follow NixOS' own guide here:
 
-- https://nixos158org/manual/nixos/stable/
-- https://wiki.nixos.org/wiki/NixOS_Installation_Guide
+- <https://nixos.org/manual/nixos/stable/>
+- <https://wiki.nixos.org/wiki/NixOS_Installation_Guide>
 
 I'll document the process and the post-install setup, mostly for my own notes.
 
@@ -11,87 +11,49 @@ I'll document the process and the post-install setup, mostly for my own notes.
 
 - Go to <https://nixos.org/download/#nix-install-linux>
 - Scroll down to ISO image section
-- Download Graphical or Minimal 64-bit Intel/AMD image
+- Download the **Graphical** 64-bit Intel/AMD image
 
-The graphical one is much nicer since it gives you an installation wizard GUI, lets you pick your target SSD from a dropdown, set up swap via checkbox.
+This guide uses the graphical installer's wizard for partitioning, swap, and user creation. The Minimal ISO is out of scope here -- if you prefer it, follow [NixOS' install guide](https://nixos.org/manual/nixos/stable/) instead.
 
 ## Format USB stick with NixOS image
 
-- Download Etcher (https://etcher.balena.io/)
+- Download [Etcher](https://etcher.balena.io/)
 - Plug in USB stick
 - Use Etcher to write your downloaded ISO image to your USB stick
 
 ## Install NixOS on NAS computer
 
-- Plug in USB stick and boot from it.
-- Choose "Install NixOS (Linux LTS)"
-- You'll get dropped into a terminal
-
-If you used the "Graphical" NixOS installer, you can skip the commands below until the "5. Edit config" part to set up your user.
-
-If you used the "Minimal" NixOS ISO image, you'll need to do ran all the commands that the graphical installer would have done for you:
-
-```sh
-# 0. Find your SSD (probably nvme0n1, but verify)
-lsblk
-
-# 1. Partition (GPT)
-sudo parted /dev/nvme0n1 -- mklabel gpt
-## I'm setting up 8GB swap since that's how much RAM I have
-sudo parted /dev/nvme0n1 -- mkpart root ext4 512MB -8GB
-sudo parted /dev/nvme0n1 -- mkpart swap linux-swap -8GB 100%
-
-sudo parted /dev/nvme0n1 -- mkpart ESP fat32 1MB 512MB
-sudo parted /dev/nvme0n1 -- set 3 esp on
-
-# 2. Format
-sudo mkfs.ext4 -L nixos /dev/nvme0n1p1
-sudo mkswap -L swap /dev/nvme0n1p2
-sudo mkfs.fat -F 32 -n boot /dev/nvme0n1p3
-
-# 3. Mount
-sudo mount /dev/disk/by-label/nixos /mnt
-sudo mkdir -p /mnt/boot
-sudo mount -o umask=077 /dev/disk/by-label/boot /mnt/boot
-sudo swapon /dev/nvme0n1p2
-
-# 4. Generate config
-sudo nixos-generate-config --root /mnt
-
-# 5. Edit config (make sure systemd-boot is enabled)
-sudo nano /mnt/etc/nixos/configuration.nix
-
-# Add your user. Example:
-#
-# users.users.dan = {
-#   isNormalUser = true;
-#   extraGroups = [ "wheel" ];
-#   initialPassword = "changeme"; # Something temporary just for first log-in
-# };
-#
-# services.openssh.enable = true;
-
-# 6. Install
-sudo nixos-install
-
-# 7. Reboot and unplug USB stick so it doesn't boot from it
-sudo reboot
-```
+- Plug in USB stick and boot from it
+- Choose "Install NixOS (Linux LTS)" -- this launches the graphical installer
+- Click through the wizard. It handles partitioning, swap, and user creation for you.
+- Reboot when done; unplug the USB stick so it doesn't boot from it again
 
 ## Post-install
 
-Since you set up a user and enabled sshd, you should be able to ssh into the NAS machine which is more comfortable.
+### Enable SSH
+
+The graphical installer doesn't enable SSH by default. Log in physically on the NAS console with your user, then add openssh:
 
 ```sh
-# On NAS machine
-ip a # look for LAN ip address
+sudo nano /etc/nixos/configuration.nix
+# add: services.openssh.enable = true;
+sudo nixos-rebuild switch
+```
 
-# e.g. On your laptop
+Find the NAS's LAN IP and SSH in from your laptop:
+
+```sh
+# On NAS
+ip a            # look for LAN ip address
+
+# On your laptop
 ssh dan@192.168.1.158
 
-# Once logged in on NAS, remember to change your password
+# Once logged in on NAS, change your password
 passwd
 ```
+
+The rest of this guide takes place over SSH from your laptop.
 
 ### Install vim
 
@@ -105,32 +67,28 @@ environment.systemPackages = with pkgs; [ vim ];
 sudo nixos-rebuild switch
 ```
 
-The rest of this guide takes place on the NAS machine.
-
 ### Make git repo for NixOS config
 
 The beauty of nix is that your OS is configured by git-diffable config files.
 
-Instead of editing /etc/nixos/\*.nix files, I like to have a `~/world` git repo that contains the nix config for all my machines (this NAS machine, my MacBook), and I'll push it to https://github.com/danneu/world.
+Instead of editing /etc/nixos/\*.nix files, I like to have a `~/world` git repo that tracks the NAS's nix config and push it to [danneu/world](https://github.com/danneu/world).
 
-I'll name my NAS "caja" here.
+I'll name my NAS "nasbox" here.
 
 ```
 ~/world/
 ├── flake.nix
 └── hosts/
-    ├── caja/                        # NAS (NixOS)
-    │   ├── configuration.nix        # System config (boot, networking, services)
-    │   ├── hardware-configuration.nix
-    │   └── home.nix                 # User config (packages, shell, git, etc.)
-    └── mac/                         # MacBook (nix-darwin)
-        └── ...
+    └── nasbox/                        # NAS (NixOS)
+        ├── configuration.nix        # System config (boot, networking, services)
+        ├── hardware-configuration.nix
+        └── home.nix                 # User config (packages, shell, git, etc.)
 ```
 
 Let's stub out that folder tree:
 
 ```sh
-mkdir -p ~/world/hosts/{caja,mac}
+mkdir -p ~/world/hosts/nasbox
 ```
 
 We use [home-manager](https://github.com/nix-community/home-manager) to manage user-level config (packages, git, shell, etc.) separately from the system config. This keeps `configuration.nix` lean — just boot, networking, and services — while `home.nix` handles everything specific to your user.
@@ -141,35 +99,20 @@ In `~/world/flake.nix`:
 {
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
-    nix-darwin.url = "github:nix-darwin/nix-darwin";
-    nix-darwin.inputs.nixpkgs.follows = "nixpkgs";
     home-manager.url = "github:nix-community/home-manager/release-25.11";
     home-manager.inputs.nixpkgs.follows = "nixpkgs";
   };
 
-  outputs = { nixpkgs, nix-darwin, home-manager, ... }: {
-    nixosConfigurations.caja = nixpkgs.lib.nixosSystem {
+  outputs = { nixpkgs, home-manager, ... }: {
+    nixosConfigurations.nasbox = nixpkgs.lib.nixosSystem {
       system = "x86_64-linux";
       modules = [
-        ./hosts/caja/configuration.nix
+        ./hosts/nasbox/configuration.nix
         home-manager.nixosModules.home-manager
         {
           home-manager.useGlobalPkgs = true;
           home-manager.useUserPackages = true;
-          home-manager.users.dan = import ./hosts/caja/home.nix;
-        }
-      ];
-    };
-
-    darwinConfigurations.mac = nix-darwin.lib.darwinSystem {
-      system = "aarch64-darwin";
-      modules = [
-        ./hosts/mac/configuration.nix
-        home-manager.darwinModules.home-manager
-        {
-          home-manager.useGlobalPkgs = true;
-          home-manager.useUserPackages = true;
-          home-manager.users.dan = import ./hosts/mac/home.nix;
+          home-manager.users.dan = import ./hosts/nasbox/home.nix;
         }
       ];
     };
@@ -180,17 +123,17 @@ In `~/world/flake.nix`:
 Copy the generated NixOS config into your world repo:
 
 ```sh
-cp /etc/nixos/configuration.nix ~/world/hosts/caja/
-cp /etc/nixos/hardware-configuration.nix ~/world/hosts/caja/
+cp /etc/nixos/configuration.nix ~/world/hosts/nasbox/
+cp /etc/nixos/hardware-configuration.nix ~/world/hosts/nasbox/
 ```
 
-Make sure `hosts/caja/configuration.nix` imports the hardware config with a relative path:
+Make sure `hosts/nasbox/configuration.nix` imports the hardware config with a relative path:
 
 ```nix
 imports = [ ./hardware-configuration.nix ];
 ```
 
-Create `hosts/caja/home.nix` for your user-level config:
+Create `hosts/nasbox/home.nix` for your user-level config:
 
 ```nix
 { pkgs, ... }:
@@ -208,9 +151,9 @@ Create `hosts/caja/home.nix` for your user-level config:
 
   programs.git = {
     enable = true;
-    settings = {
-      user.name = "Your Name";
-      user.email = "your@email.com";
+    userName = "Your Name";
+    userEmail = "your@email.com";
+    extraConfig = {
       init.defaultBranch = "master";
       pull.rebase = true;
       push.autoSetupRemote = true;
@@ -230,7 +173,7 @@ Create `hosts/caja/home.nix` for your user-level config:
 Now rebuild from the flake instead of /etc/nixos:
 
 ```sh
-sudo nixos-rebuild switch --flake ~/world#caja
+sudo nixos-rebuild switch --flake ~/world#nasbox
 ```
 
 From now on, you edit `~/world/` as your normal user and only `sudo` for the rebuild. System-level config goes in `configuration.nix`, user-level config goes in `home.nix`.
@@ -240,11 +183,11 @@ From now on, you edit `~/world/` as your normal user and only `sudo` for the reb
 Generate an SSH key on the NAS and add it to GitHub so you can push/pull:
 
 ```sh
-ssh-keygen -t ed25519 -C "caja"
+ssh-keygen -t ed25519 -C "nasbox"
 cat ~/.ssh/id_ed25519.pub
 ```
 
-Copy the public key and add it at GitHub > Settings > SSH and GPG keys > New SSH key (https://github.com/settings/ssh/new).
+Copy the public key and add it at GitHub > Settings > SSH and GPG keys > [New SSH key](https://github.com/settings/ssh/new).
 
 Then init and push:
 
@@ -257,14 +200,23 @@ git remote add origin git@github.com:danneu/world.git
 git push -u origin master
 ```
 
-### Set hostname and static IP
+### Set hostname and pin the IP
 
-Edit `~/world/hosts/caja/configuration.nix`:
+Edit `~/world/hosts/nasbox/configuration.nix`:
 
 ```nix
-networking.hostName = "caja";
+networking.hostName = "nasbox";
+```
 
-# Static IP (check your interface name with `ip link`)
+```sh
+sudo nixos-rebuild switch --flake ~/world#nasbox
+```
+
+For a stable IP, the simplest approach is a DHCP reservation on your router: look up the NAS's MAC address (`ip link show <iface>`) and tell the router to always hand it the same address. The reservation lives on the router, not the host -- no nix changes and no `nixos-rebuild` needed. Bonus: it survives interface renames.
+
+If you'd rather pin it on the host, add to `configuration.nix`:
+
+```nix
 networking.interfaces.eno1.ipv4.addresses = [{
   address = "192.168.1.158";
   prefixLength = 24;
@@ -273,8 +225,10 @@ networking.defaultGateway = "192.168.1.1";
 networking.nameservers = [ "1.1.1.1" "8.8.8.8" ];
 ```
 
+Then rebuild:
+
 ```sh
-sudo nixos-rebuild switch --flake ~/world#caja
+sudo nixos-rebuild switch --flake ~/world#nasbox
 ```
 
 ### Set up SSH key auth
@@ -294,54 +248,34 @@ services.openssh = {
 };
 ```
 
-### Set up Claude Code
+### Set up Claude Code and Codex
 
-[danneu/claude-code-nix](https://github.com/danneu/claude-code-nix) is an autoupdating nix flake for Claude Code. It provides a home-manager module.
+[numtide/llm-agents.nix](https://github.com/numtide/llm-agents.nix) is a daily-updated nix flake that packages 40+ AI coding agents, including Claude Code and OpenAI's Codex CLI. It exposes them via an overlay under `pkgs.llm-agents.*`.
 
-Add it as a flake input in `~/world/flake.nix` and wire up its home-manager module via `sharedModules`:
+Add it as a flake input in `~/world/flake.nix` and apply its overlay:
 
 ```nix
 {
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
-    nix-darwin.url = "github:nix-darwin/nix-darwin";
-    nix-darwin.inputs.nixpkgs.follows = "nixpkgs";
     home-manager.url = "github:nix-community/home-manager/release-25.11";
     home-manager.inputs.nixpkgs.follows = "nixpkgs";
-    claude-code.url = "github:danneu/claude-code-nix";
+
+    # No `follows = "nixpkgs"` -- llm-agents is built against nixpkgs-unstable.
+    llm-agents.url = "github:numtide/llm-agents.nix";
   };
 
-  outputs = { nixpkgs, nix-darwin, home-manager, claude-code, ... }: {
-    nixosConfigurations.caja = nixpkgs.lib.nixosSystem {
+  outputs = { nixpkgs, home-manager, llm-agents, ... }: {
+    nixosConfigurations.nasbox = nixpkgs.lib.nixosSystem {
       system = "x86_64-linux";
       modules = [
-        ./hosts/caja/configuration.nix
-        { nixpkgs.overlays = [ claude-code.overlays.default ]; }
+        ./hosts/nasbox/configuration.nix
+        { nixpkgs.overlays = [ llm-agents.overlays.default ]; }
         home-manager.nixosModules.home-manager
         {
           home-manager.useGlobalPkgs = true;
           home-manager.useUserPackages = true;
-          home-manager.sharedModules = [
-            claude-code.homeManagerModules.default
-          ];
-          home-manager.users.dan = import ./hosts/caja/home.nix;
-        }
-      ];
-    };
-
-    darwinConfigurations.mac = nix-darwin.lib.darwinSystem {
-      system = "aarch64-darwin";
-      modules = [
-        ./hosts/mac/configuration.nix
-        { nixpkgs.overlays = [ claude-code.overlays.default ]; }
-        home-manager.darwinModules.home-manager
-        {
-          home-manager.useGlobalPkgs = true;
-          home-manager.useUserPackages = true;
-          home-manager.sharedModules = [
-            claude-code.homeManagerModules.default
-          ];
-          home-manager.users.dan = import ./hosts/mac/home.nix;
+          home-manager.users.dan = import ./hosts/nasbox/home.nix;
         }
       ];
     };
@@ -349,22 +283,47 @@ Add it as a flake input in `~/world/flake.nix` and wire up its home-manager modu
 }
 ```
 
-Then in `hosts/caja/home.nix`, enable Claude Code:
+Then in `hosts/nasbox/home.nix`, allow the unfree Claude Code package and add both binaries to your packages:
 
 ```nix
-programs.claude-code = {
-  enable = true;
-};
+{ pkgs, ... }:
+
+{
+  # Allow the unfree `claude-code` package. Codex is Apache-2.0 and does not
+  # require this.
+  nixpkgs.config.allowUnfreePredicate = pkg:
+    builtins.elem (pkgs.lib.getName pkg) [ "claude-code" ];
+
+  home.packages = with pkgs.llm-agents; [
+    claude-code
+    codex
+  ];
+}
 ```
 
 Rebuild:
 
 ```sh
-sudo nixos-rebuild switch --flake ~/world#caja
+sudo nixos-rebuild switch --flake ~/world#nasbox
 ```
 
-Now you can run `claude` from anywhere on the NAS.
+Now you can run `claude` and `codex` from anywhere on the NAS.
+
+#### Optional: use the numtide binary cache
+
+By default, source-built agents like `codex` will compile locally on first install. To pull prebuilt binaries instead, add the numtide cache to your system config (in `hosts/nasbox/configuration.nix`):
+
+```nix
+nix.settings = {
+  extra-substituters = [ "https://cache.numtide.com" ];
+  extra-trusted-public-keys = [
+    "niks3.numtide.com-1:DTx8wZduET09hRmMtKdQDxNNthLQETkc/yaX7M4qK0g="
+  ];
+};
+```
+
+Then rebuild. Subsequent installs will fetch from the cache.
 
 ### Next steps
 
-At this point you have a working NixOS machine with SSH access, a static IP, Claude Code, and a git-tracked config. See [Getting Started](getting-started.md) to set up braid.
+At this point you have a working NixOS machine with SSH access, a static IP, Claude Code + Codex, and a git-tracked config. Next: [add braid to your NixOS config](getting-started.md#install-the-nixos-module).
