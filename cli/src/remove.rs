@@ -75,27 +75,27 @@ pub fn cmd_remove<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     let mn = mapper_name(params.name);
 
     // Is the disk present in the pool?
-    let in_pool = pool.devices.iter().any(|d| d.mapper == mn);
-
-    if !in_pool {
-        let mut msg = format!("disk '{}' not found in pool.", params.name);
-        if pool.missing_count > 0 {
-            msg.push_str(&format!(
-                " ({} missing device{} detected. \
-                 To repair onto a new disk, use `braid replace`. \
-                 To forget the entry, use `braid remove-missing`.)",
-                pool.missing_count,
-                if pool.missing_count == 1 { "" } else { "s" }
-            ));
+    let target = match pool.devices.iter().find(|d| d.mapper == mn) {
+        Some(d) => d,
+        None => {
+            let mut msg = format!("disk '{}' not found in pool.", params.name);
+            if pool.missing_count > 0 {
+                msg.push_str(&format!(
+                    " ({} missing device{} detected. \
+                     To repair onto a new disk, use `braid replace`. \
+                     To forget the entry, use `braid remove-missing`.)",
+                    pool.missing_count,
+                    if pool.missing_count == 1 { "" } else { "s" }
+                ));
+            }
+            return Err(RemoveError::Validation(msg));
         }
-        return Err(RemoveError::Validation(msg));
-    }
+    };
 
     preflight::check_no_missing_devices(pool.missing_count, "remove a live disk from the pool")
         .map_err(RemoveError::Validation)?;
 
     let remaining = pool.devices.len() - 1;
-    let target_device = pool.devices.iter().find(|d| d.mapper == mn);
     // Pre-flight: reject if other devices lack space to absorb data from
     // the device being removed. Without this, btrfs will either ENOSPC
     // instantly or crash the filesystem to read-only mid-relocation
@@ -104,10 +104,9 @@ pub fn cmd_remove<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     // Skip for single-survivor removals (remaining == 1): the eviction
     // path balances RAID1→single first, which handles data redistribution.
     // This does not match the reproduced relocation-failure mode.
-    if remaining > 1
-        && let Some(devid) = target_device.map(|d| d.devid) {
-            check_eviction_space(runner, config.mount_point(), devid)?;
-        }
+    if remaining > 1 {
+        check_eviction_space(runner, config.mount_point(), target.devid)?;
+    }
 
     let steps = compile_remove_present_steps(&mn, &pool, config.mount_point())?;
 
@@ -116,29 +115,17 @@ pub fn cmd_remove<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         return Ok(());
     }
 
-    if steps.is_empty() {
-        eprintln!("Nothing to do.");
-        return Ok(());
-    }
-
     // Confirm
     if !params.yes {
-        if remaining == 0 {
-            return Err(RemoveError::Validation(
-                "cannot remove the last disk from the pool".into(),
-            ));
-        }
-        let hw = target_device
-            .map(|d| confirm::query_disk_hw_info(runner, &d.underlying));
-        let devid = target_device.expect("in_pool check guarantees device exists").devid;
+        let hw = confirm::query_disk_hw_info(runner, &target.underlying);
         let total = pool.devices.len();
         eprintln!(
             "{}",
             format_remove_confirm(
                 &RemoveConfirmDisk {
                     name: params.name,
-                    hw: hw.as_ref(),
-                    devid,
+                    hw: Some(&hw),
+                    devid: target.devid,
                 },
                 remaining,
                 total,
@@ -301,9 +288,7 @@ struct RemoveConfirmDisk<'a> {
 
 fn format_remove_confirm(disk: &RemoveConfirmDisk, remaining: usize, total: usize) -> String {
     let mut msg = "Remove from pool:\n".to_string();
-    let hw_line = disk
-        .hw
-        .and_then(confirm::format_hw_info_line);
+    let hw_line = disk.hw.and_then(confirm::format_hw_info_line);
     if let Some(hw) = &hw_line {
         msg.push_str(&format!("  {}  {}\n", disk.name, hw));
     } else {
@@ -992,7 +977,10 @@ mod tests {
             1,
             2,
         );
-        assert!(msg.contains("remaining disk"), "singular 'disk' when 1 remaining");
+        assert!(
+            msg.contains("remaining disk"),
+            "singular 'disk' when 1 remaining"
+        );
         assert!(msg.contains("2 disks \u{2192} 1 disk"));
     }
 
@@ -1009,6 +997,9 @@ mod tests {
         );
         assert!(msg.contains("toshiba"));
         assert!(msg.contains("devid 2"));
-        assert!(!msg.contains("\u{00b7} \u{00b7}"), "no double dots when hw missing");
+        assert!(
+            !msg.contains("\u{00b7} \u{00b7}"),
+            "no double dots when hw missing"
+        );
     }
 }
