@@ -283,22 +283,25 @@ Add it as a flake input in `~/world/flake.nix` and apply its overlay:
 }
 ```
 
-Then in `hosts/nasbox/home.nix`, allow the unfree Claude Code package and add both binaries to your packages:
+First, allow unfree packages in `hosts/nasbox/configuration.nix`:
 
 ```nix
-{ pkgs, ... }:
+nixpkgs.config.allowUnfree = true;
+```
 
-{
-  # Allow the unfree `claude-code` package. Codex is Apache-2.0 and does not
-  # require this.
-  nixpkgs.config.allowUnfreePredicate = pkg:
-    builtins.elem (pkgs.lib.getName pkg) [ "claude-code" ];
+Then add both binaries to the existing `home.packages` list in `hosts/nasbox/home.nix`:
 
-  home.packages = with pkgs.llm-agents; [
+```nix
+home.packages = with pkgs; [
+  lazygit
+  ripgrep
+  fd
+  jq
+  htop
+] ++ (with pkgs.llm-agents; [
     claude-code
     codex
-  ];
-}
+  ]);
 ```
 
 Rebuild:
@@ -326,4 +329,4 @@ Then rebuild. Subsequent installs will fetch from the cache.
 
 ### Next steps
 
-At this point you have a working NixOS machine with SSH access, a static IP, Claude Code + Codex, and a git-tracked config. Next: [add braid to your NixOS config](getting-started.md#install-the-nixos-module).
+At this point you have a working NixOS machine with SSH access, a stable IP, Claude Code + Codex, and a git-tracked config. Next: [add braid to your NixOS config](getting-started.md#install-the-nixos-module).
