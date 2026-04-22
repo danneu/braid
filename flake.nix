@@ -658,7 +658,11 @@
 
       packages = forAllSystems packagesFor;
 
-      devShells = forAllSystems (system: { default = devShellFor system; });
+      # Linux-only: the devShell pulls in btrfs-progs/cryptsetup/nut/util-linux,
+      # none of which evaluate on darwin. Use linux-builder or a Linux host.
+      devShells = forAllSystems (
+        system: if builtins.match ".*-linux" system != null then { default = devShellFor system; } else { }
+      );
 
       checks = forAllSystems (
         system: nixpkgs.lib.filterAttrs (n: _: !(nixpkgs.lib.hasPrefix "repro-" n)) (checksFor system)
