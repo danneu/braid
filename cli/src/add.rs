@@ -275,6 +275,23 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         }
     }
 
+    // Reject duplicate by_id values within the same invocation. Runs before
+    // any probing, confirmation, passphrase read, inhibitor acquisition, or
+    // journal write so a typo like `d1=/dev/disk/by-id/X d2=/dev/disk/by-id/X`
+    // fails fast with no side effects. Compares raw strings only -- symlink
+    // alias resolution is out of scope.
+    {
+        let mut seen = std::collections::HashSet::new();
+        for by_id in &by_ids {
+            if !seen.insert(by_id.0.as_str()) {
+                return Err(AddError::Validation(format!(
+                    "duplicate by_id: '{}'",
+                    by_id.0
+                )));
+            }
+        }
+    }
+
     // Load existing membership (or empty if first add)
     let pool_membership = match membership::load_membership(params.paths) {
         Ok(m) => m,
@@ -2003,6 +2020,75 @@ mod tests {
             inhibitor.acquire_count(),
             0,
             "pre-mutation identity failure must NOT acquire the sleep inhibitor"
+        );
+    }
+
+    #[test]
+    // Intent: two disk specs with different names pointing at the same
+    //   /dev/disk/by-id/... are rejected before any probing, confirmation,
+    //   passphrase read, inhibitor acquisition, or journal write.
+    //
+    // Why it exists: cmd_add already dedups disk names (see
+    //   duplicate_name_rejected), but a typo of the form
+    //   `d1=/dev/disk/by-id/X d2=/dev/disk/by-id/X` slipped past validation
+    //   and failed at execution time -- after the journal was written and
+    //   the inhibitor was held. Fast-fail at the validation phase keeps the
+    //   state dir clean on operator typo.
+    //
+    // Scenario: operator pastes the same by_id twice with two different
+    //   logical names and runs a non-dry-run `braid add`. cmd_add must
+    //   reject before any runner.run() call (empty MockRunner would fail
+    //   with MissingMock if anything tried to execute).
+    fn duplicate_by_id_rejected() {
+        let (_state_tmp, paths, _tmp, config_path, pass_path) = add_test_setup();
+        // fs lookups never happen — dedup fires before any filesystem probe.
+        let fs = AddMockFs(vec![]);
+        // Empty MockRunner: any runner.run() would return MissingMock, which
+        // would surface in the returned error rather than a "duplicate by_id"
+        // message. Asserting the duplicate error text indirectly pins
+        // "nothing executed".
+        let runner = MockRunner::default();
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+
+        let result = cmd_add(
+            &runner,
+            &fs,
+            &AddParams {
+                config_path: &config_path,
+                disk_specs: &[
+                    "d1=/dev/disk/by-id/virtio-disk2".into(),
+                    "d2=/dev/disk/by-id/virtio-disk2".into(),
+                ],
+                dry_run: false,
+                yes: true,
+                passphrase_stdin: false,
+                // Only here for robustness against future code reordering.
+                // Dedup runs before read_passphrase, so this is never consulted.
+                passphrase_file: Some(pass_path.as_path()),
+                enroll_key_file: None,
+                progress: ProgressOutput::Off,
+                paths: &paths,
+                sleep_inhibitor: &inhibitor,
+            },
+        );
+
+        let err = result.expect_err("duplicate by_id must be rejected").to_string();
+        assert!(
+            err.contains("duplicate by_id"),
+            "expected duplicate by_id error, got: {err}"
+        );
+        assert!(
+            err.contains("/dev/disk/by-id/virtio-disk2"),
+            "error must name the offending by_id, got: {err}"
+        );
+        assert!(
+            journal::load_journal(&paths).unwrap().is_none(),
+            "no journal should exist after pre-probe validation failure"
+        );
+        assert_eq!(
+            inhibitor.acquire_count(),
+            0,
+            "validation failure must NOT acquire the sleep inhibitor"
         );
     }
 
