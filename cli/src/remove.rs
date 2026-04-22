@@ -4,7 +4,7 @@ use crate::confirm;
 use crate::inhibit::AcquireSleepInhibitor;
 use crate::journal;
 use crate::membership;
-use crate::parse::parse_btrfs_device_usage;
+use crate::parse::{parse_btrfs_device_usage, ParseError};
 use crate::pool::evict_present_device;
 use crate::preflight;
 use crate::probe::{probe_pool, Filesystem, ProbeError};
@@ -216,8 +216,12 @@ pub fn cmd_remove<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
 /// absorb data from the device being removed. If they don't, btrfs device remove
 /// will either ENOSPC instantly or crash the filesystem to read-only mid-relocation.
 ///
-/// If the check itself fails (parse error, command error), we log a warning and
-/// proceed -- a bug in the safety net shouldn't block a valid operation.
+/// Failure handling splits by source: spawn errors (runner could not invoke
+/// btrfs) and parser-shape errors (malformed output) warn and proceed -- a bug
+/// in the safety net shouldn't block a valid operation. A non-zero exit from
+/// btrfs itself (`ParseError::CommandFailed`) is surfaced as a validation error,
+/// because that means btrfs could not read the filesystem and the irreversible
+/// `btrfs device remove` step must not run.
 fn check_eviction_space<R: CommandRunner>(
     runner: &R,
     mount_point: &MountPoint,
@@ -235,6 +239,13 @@ fn check_eviction_space<R: CommandRunner>(
 
     let usage = match parse_btrfs_device_usage(&raw) {
         Ok(u) => u,
+        Err(ParseError::CommandFailed {
+            exit_code, stderr, ..
+        }) => {
+            return Err(RemoveError::Validation(format!(
+                "btrfs device usage failed (exit {exit_code}): {stderr}"
+            )));
+        }
         Err(e) => {
             eprintln!("warning: ENOSPC pre-flight check failed: {e}; proceeding anyway");
             return Ok(());
@@ -1068,5 +1079,53 @@ mod tests {
         );
         assert!(display.contains("pending-op.json"), "got: {display}");
         assert!(display.contains("braid recover"), "got: {display}");
+    }
+
+    #[test]
+    // Intent: check_eviction_space surfaces a non-zero btrfs exit as a hard
+    //   validation error instead of swallowing it into warn-and-proceed.
+    // Why: btrfs exiting non-zero during pre-flight is a real "cannot read the
+    //   filesystem" signal. If the preflight tool itself has failed, a 3->2
+    //   remove must not proceed into the irreversible btrfs device-remove
+    //   step.
+    // Scenario: 3->2 remove on a filesystem that returns EIO (or similar) to
+    //   `btrfs device usage --raw`. Before this fix the warning was printed
+    //   and remove proceeded; after the fix, remove stops at validation.
+    fn check_eviction_space_surfaces_command_failed_as_validation() {
+        struct FailingUsageRunner;
+
+        impl CommandRunner for FailingUsageRunner {
+            fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
+                match request {
+                    CmdRequest::BtrfsDeviceUsageRaw { .. } => Ok(RawCommandOutput {
+                        cmd: "btrfs device usage --raw /mnt/storage".into(),
+                        stdout: String::new(),
+                        stderr: "ERROR: not a btrfs filesystem: /mnt/storage".into(),
+                        exit_status: 1,
+                    }),
+                    _ => Err(CmdError::MissingMock),
+                }
+            }
+
+            fn run_with_stdin(
+                &self,
+                request: &CmdRequest,
+                _stdin: &[u8],
+            ) -> Result<RawCommandOutput, CmdError> {
+                self.run(request)
+            }
+        }
+
+        let mount = MountPoint("/mnt/storage".to_owned());
+        let err = check_eviction_space(&FailingUsageRunner, &mount, 1)
+            .expect_err("non-zero btrfs exit must surface as validation error");
+        match err {
+            RemoveError::Validation(msg) => {
+                assert!(msg.contains("btrfs device usage failed"), "got: {msg}");
+                assert!(msg.contains("exit 1"), "got: {msg}");
+                assert!(msg.contains("not a btrfs filesystem"), "got: {msg}");
+            }
+            other => panic!("expected RemoveError::Validation, got {other:?}"),
+        }
     }
 }
