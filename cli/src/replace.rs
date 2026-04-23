@@ -996,18 +996,6 @@ mod tests {
     }
 
     #[test]
-    // Intent: --old == --new is rejected early.
-    // Why: replacing a disk with itself is a no-op that would cause data loss.
-    // Scenario: operator typo — same name for both flags.
-    fn old_equals_new_rejects() {
-        // The old==new guard is in cmd_replace; test the invariant directly.
-        assert_eq!(
-            "disk1", "disk1",
-            "same key should be rejected by cmd_replace"
-        );
-    }
-
-    #[test]
     // Intent: replace must reject a post-replace membership that reuses another
     // member's by-id under a new name.
     // Why: docs and invariants say mutating commands reject name reassignment /
@@ -1740,6 +1728,98 @@ mod tests {
             inhibitor.acquire_count(),
             1,
             "sleep inhibitor must be acquired exactly once on the path through journal::write_journal"
+        );
+    }
+
+    #[test]
+    // Intent: cmd_replace rejects --old == --new (post-parse) with a
+    //   Validation error, on the reversible side of the inhibitor/journal
+    //   seam.
+    //
+    // Why it exists: the old==new guard at replace.rs:94-98 is a
+    //   user-visible CLI contract (operator typo protection). It fires
+    //   before probe_config_disk's mapper-conflict detection would
+    //   otherwise surface the same bug as a confusing MapperConflict
+    //   probe error. Without direct cmd-level coverage, a refactor that
+    //   drops the guard would change the rejection variant from
+    //   Validation("must be different") to Probe(MapperConflict), and a
+    //   refactor that moved the guard past the inhibitor/journal seam
+    //   would strand a pending-op.json and a held logind inhibitor on
+    //   what is conceptually a preflight rejection. Replaces a prior
+    //   tautological test (assert_eq!("disk1", "disk1", ...)) that
+    //   exercised no production code.
+    //
+    // Scenario: operator runs
+    //   `braid replace --old disk1 --new disk1=/dev/disk/by-id/virtio-disk3`
+    //   -- same name on both sides after parsing the new-name spec.
+    fn cmd_replace_rejects_old_equals_new() {
+        let state_tmp = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(state_tmp.path().into());
+        let mut m = PoolMembership::empty();
+        m.disks.insert(
+            "disk1".into(),
+            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
+        );
+        m.disks.insert(
+            "disk2".into(),
+            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk2".into())),
+        );
+        membership::save_membership(&m, &paths).unwrap();
+
+        let config_tmp = tempfile::tempdir().unwrap();
+        let config_path = config_tmp.path().join("config.json");
+        std::fs::write(
+            &config_path,
+            serde_json::to_vec(&serde_json::json!({ "mount_point": "/mnt/storage" })).unwrap(),
+        )
+        .unwrap();
+
+        let pass_path = config_tmp.path().join("passphrase");
+        std::fs::write(&pass_path, b"test-passphrase\n").unwrap();
+
+        let fs = ReplaceMockFs(vec![
+            "/dev/disk/by-id/virtio-disk3".into(),
+            "/dev/mapper/braid-disk3".into(),
+        ]);
+
+        let runner = FailingReplaceRunner;
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let result = cmd_replace(
+            &runner,
+            &fs,
+            &ReplaceParams {
+                config_path: &config_path,
+                old_name: "disk1",
+                new_name: "disk1=/dev/disk/by-id/virtio-disk3",
+                missing_id: None,
+                dry_run: false,
+                yes: true,
+                passphrase_stdin: false,
+                passphrase_file: Some(pass_path.as_path()),
+                enroll_key_file: None,
+                progress: crate::progress::ProgressOutput::Off,
+                paths: &paths,
+                sleep_inhibitor: &inhibitor,
+            },
+        );
+
+        match &result {
+            Err(ReplaceError::Validation(msg)) => {
+                assert!(
+                    msg.contains("must be different"),
+                    "expected old==new guard message, got: {msg}"
+                );
+            }
+            other => panic!("expected Err(ReplaceError::Validation), got: {other:?}"),
+        }
+        assert_eq!(
+            inhibitor.acquire_count(),
+            0,
+            "old==new typo must be caught before the inhibitor seam -- a caught typo must not hold logind"
+        );
+        assert!(
+            journal::load_journal(&paths).unwrap().is_none(),
+            "no journal may be written when old==new"
         );
     }
 
