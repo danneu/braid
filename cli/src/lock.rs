@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, Step};
 use crate::config::{mapper_name, name_from_mapper, Config};
-use crate::membership::{self, PoolMembership};
+use crate::membership::PoolMembership;
 use crate::preflight;
 use crate::probe::{probe_pool, Filesystem};
 
@@ -11,8 +11,6 @@ use crate::probe::{probe_pool, Filesystem};
 pub enum LockError {
     #[error("command failed: {0}")]
     Cmd(#[from] CmdError),
-    #[error("{0}")]
-    Membership(#[from] membership::MembershipError),
     #[error("{0}")]
     Failed(String),
     #[error("device busy: {0}")]
