@@ -149,11 +149,12 @@ pub fn pool_balance_resume<R: CommandRunner + Sync>(
 }
 
 /// Run a soft RAID1 rebalance if the operation just transitioned the pool from
-/// degraded to non-degraded with ≥2 present devices. This restores redundancy
+/// degraded to non-degraded with >=2 present devices. This restores redundancy
 /// for single-profile chunks created during degraded operation (known btrfs bug).
 ///
-/// Callers: `remove-missing` and `replace` (missing path), after their primary
-/// operation and pool.json update have completed.
+/// Callers: `remove-missing` and `replace` (missing path), after the primary
+/// btrfs op completes and before the pool.json membership write + journal clear.
+/// `pre_op_missing_count` must be the missing count from the pre-op pool probe.
 pub fn maybe_restore_raid1<R: CommandRunner + Sync>(
     runner: &R,
     mount_point: &MountPoint,

@@ -393,15 +393,12 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
 
     pool_resize_device(runner, devid, config.mount_point())?;
 
-    // Capture pre-op missing count for soft balance decision
-    let pre_op_missing_count = pool.missing_count;
-
     // Restore RAID1 redundancy for missing-path replacements that clear the last missing device
     if matches!(&replace_source, ReplaceSource::Missing { .. }) {
         crate::pool::maybe_restore_raid1(
             runner,
             config.mount_point(),
-            pre_op_missing_count,
+            pool.missing_count,
             params.progress,
         )
         .map_err(ReplaceError::Pool)?;
