@@ -278,6 +278,11 @@
               braid = linuxCrane.braid;
             }
           );
+          replace-preformatted-luks-passphrase-mismatch = pkgs.testers.nixosTest (
+            import ./tests/cli/replace-preformatted-luks-passphrase-mismatch.nix {
+              braid = linuxCrane.braid;
+            }
+          );
           replace-new-already-in-pool = pkgs.testers.nixosTest (
             import ./tests/cli/replace-new-already-in-pool.nix {
               braid = linuxCrane.braid;

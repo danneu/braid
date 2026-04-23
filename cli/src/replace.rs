@@ -221,6 +221,23 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             }
         }
 
+    // Reversible check: for an already-formatted but closed LUKS disk,
+    // verify the passphrase against the new disk's own LUKS header before
+    // committing the journal. Without this, ensure_luks_open below would be
+    // the first thing to notice a wrong passphrase -- and by then the
+    // journal is already written and the user is forced into braid recover
+    // mode for what is conceptually a preflight failure (see decision 019).
+    if let ConfigDiskState::PresentLuks { mapper_open: false, .. } = new_probed.state {
+        match verify_passphrase(runner, &new_by_id.0, &passphrase)? {
+            VerifyOutcome::Authenticated => {}
+            VerifyOutcome::Rejected => {
+                return Err(ReplaceError::Validation(format!(
+                    "passphrase rejected by new disk '{new_name}' ({new_by_id})"
+                )));
+            }
+        }
+    }
+
     // Guard: new disk must not already be in the pool.
     check_new_not_in_pool(new_name, &new_mn, &pool)?;
 
@@ -2036,5 +2053,318 @@ mod tests {
         // Close old mapper
         assert!(lines[12].contains("cryptsetup close"));
         assert_eq!(lines[13], "               $ cryptsetup close braid-disk2");
+    }
+
+    /// Runner for a replace where the new disk is already LUKS-formatted but
+    /// the mapper is closed (PresentLuks { mapper_open: false }) and the
+    /// supplied passphrase is wrong: CryptsetupTestPassphrase on the new
+    /// disk's by_id returns exit 2 (EPERM). Everything else mirrors
+    /// FailingReplaceRunner except that braid-disk3's mapper is inactive,
+    /// so probe_config_disk reports mapper_open: false.
+    struct ClosedLuksWrongPassRunner;
+
+    impl CmdRunner2 for ClosedLuksWrongPassRunner {
+        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
+            match request {
+                CmdRequest::FindmntJson { mount_point } => Ok(mock_ok(
+                    &format!("findmnt --json --mountpoint {mount_point}"),
+                    r#"{"filesystems":[{"target":"/mnt/storage","source":"/dev/mapper/braid-disk1","fstype":"btrfs"}]}"#,
+                )),
+                CmdRequest::BtrfsFilesystemShow { mount_point } => Ok(mock_ok(
+                    &format!("btrfs filesystem show {mount_point}"),
+                    "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\tTotal devices 2 FS bytes used 16.17MiB\n\tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk2\n",
+                )),
+                CmdRequest::CryptsetupStatus { mapper } => match mapper.as_str() {
+                    "braid-disk1" => Ok(mock_ok(
+                        &format!("cryptsetup status {mapper}"),
+                        &format!("{mapper} is active and is in use.\n  type:    LUKS2\n  device:  /dev/vdb\n  mode:    read/write\n"),
+                    )),
+                    "braid-disk2" => Ok(mock_ok(
+                        &format!("cryptsetup status {mapper}"),
+                        &format!("{mapper} is active and is in use.\n  type:    LUKS2\n  device:  /dev/vdc\n  mode:    read/write\n"),
+                    )),
+                    // new disk's mapper is closed -- this is the key
+                    // difference vs FailingReplaceRunner.
+                    "braid-disk3" => Ok(RawCommandOutput {
+                        cmd: format!("cryptsetup status {mapper}"),
+                        stdout: String::new(),
+                        stderr: format!("/dev/mapper/{mapper} is inactive.\n"),
+                        exit_status: 4,
+                    }),
+                    _ => Err(CmdError::MissingMock),
+                },
+                CmdRequest::CryptsetupLuksUuid { device } => {
+                    let uuid = match device.as_str() {
+                        "/dev/vdb" | "/dev/disk/by-id/virtio-disk1" => {
+                            "11111111-1111-1111-1111-111111111111"
+                        }
+                        "/dev/vdc" | "/dev/disk/by-id/virtio-disk2" => {
+                            "22222222-2222-2222-2222-222222222222"
+                        }
+                        "/dev/disk/by-id/virtio-disk3" => {
+                            "33333333-3333-3333-3333-333333333333"
+                        }
+                        _ => "99999999-9999-9999-9999-999999999999",
+                    };
+                    Ok(mock_ok(&format!("cryptsetup luksUUID {device}"), &format!("{uuid}\n")))
+                }
+                CmdRequest::CryptsetupLuksDumpText { device } => Ok(mock_ok(
+                    &format!("cryptsetup luksDump {device}"),
+                    "LUKS header information\nVersion:       \t2\n",
+                )),
+                CmdRequest::CryptsetupTestPassphrase { device } => {
+                    if device == "/dev/disk/by-id/virtio-disk3" {
+                        Ok(RawCommandOutput {
+                            cmd: format!("cryptsetup luksOpen --test-passphrase {device}"),
+                            stdout: String::new(),
+                            stderr: "No key available with this passphrase.\n".into(),
+                            exit_status: 2,
+                        })
+                    } else {
+                        Err(CmdError::MissingMock)
+                    }
+                }
+                CmdRequest::BtrfsBalanceStatus { .. } => Ok(mock_ok(
+                    "btrfs balance status",
+                    "No balance found on '/mnt/storage'\n",
+                )),
+                _ => Err(CmdError::MissingMock),
+            }
+        }
+
+        fn run_with_stdin(
+            &self,
+            request: &CmdRequest,
+            _stdin: &[u8],
+        ) -> Result<RawCommandOutput, CmdError> {
+            self.run(request)
+        }
+    }
+
+    #[test]
+    // Intent: wrong passphrase on a PresentLuks { mapper_open: false } new
+    //   disk must fail before the journal is written.
+    //
+    // Why it exists: the closed-LUKS replacement path previously deferred
+    //   passphrase verification to the post-journal ensure_luks_open call,
+    //   so a wrong passphrase stranded pending-op.json and forced the user
+    //   into braid recover for a pure preflight failure -- contradicting
+    //   decision 019's "logind failure aborts cleanly without stranding
+    //   pending-op.json...for a preflight failure" guidance. Re-introducing
+    //   that ordering must flip this assertion.
+    //
+    // Scenario: operator runs `braid replace --old disk2 --new disk3=...`
+    //   where disk3 is already LUKS-formatted (mapper closed) and types the
+    //   wrong passphrase. The command must abort cleanly: no journal, no
+    //   inhibitor acquired, Err(Validation).
+    fn wrong_passphrase_on_closed_luks_new_disk_does_not_write_journal() {
+        let state_tmp = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(state_tmp.path().into());
+        let mut m = PoolMembership::empty();
+        m.disks.insert(
+            "disk1".into(),
+            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
+        );
+        m.disks.insert(
+            "disk2".into(),
+            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk2".into())),
+        );
+        membership::save_membership(&m, &paths).unwrap();
+
+        let config_tmp = tempfile::tempdir().unwrap();
+        let config_path = config_tmp.path().join("config.json");
+        std::fs::write(
+            &config_path,
+            serde_json::to_vec(&serde_json::json!({ "mount_point": "/mnt/storage" })).unwrap(),
+        )
+        .unwrap();
+
+        let pass_path = config_tmp.path().join("passphrase");
+        std::fs::write(&pass_path, b"wrong-passphrase\n").unwrap();
+
+        // Only the new disk's by_id exists. /dev/mapper/braid-disk3 is
+        // absent because the mapper is closed.
+        let fs = ReplaceMockFs(vec!["/dev/disk/by-id/virtio-disk3".into()]);
+
+        let runner = ClosedLuksWrongPassRunner;
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let result = cmd_replace(
+            &runner,
+            &fs,
+            &ReplaceParams {
+                config_path: &config_path,
+                old_name: "disk2",
+                new_name: "disk3=/dev/disk/by-id/virtio-disk3",
+                missing_id: None,
+                dry_run: false,
+                yes: true,
+                passphrase_stdin: false,
+                passphrase_file: Some(pass_path.as_path()),
+                enroll_key_file: None,
+                progress: crate::progress::ProgressOutput::Off,
+                paths: &paths,
+                sleep_inhibitor: &inhibitor,
+            },
+        );
+
+        assert!(
+            matches!(result, Err(ReplaceError::Validation(_))),
+            "expected Err(ReplaceError::Validation(_)) for wrong passphrase on a closed-LUKS new disk, got: {result:?}"
+        );
+        assert!(
+            journal::load_journal(&paths).unwrap().is_none(),
+            "pending-op.json must not be written -- wrong passphrase is a reversible preflight failure"
+        );
+        assert_eq!(
+            inhibitor.acquire_count(),
+            0,
+            "sleep inhibitor must not be acquired before passphrase verification"
+        );
+    }
+
+    /// Recording wrapper around FailingReplaceRunner that logs every
+    /// CmdRequest before dispatching. Used by the mapper_open: true
+    /// negative-coverage test to assert CryptsetupTestPassphrase and
+    /// CryptsetupLuksOpen against the new disk are never issued.
+    struct RecordingReplaceRunner {
+        inner: FailingReplaceRunner,
+        log: std::sync::Arc<std::sync::Mutex<Vec<CmdRequest>>>,
+    }
+
+    impl RecordingReplaceRunner {
+        fn new() -> Self {
+            Self {
+                inner: FailingReplaceRunner,
+                log: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            }
+        }
+    }
+
+    impl CmdRunner2 for RecordingReplaceRunner {
+        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
+            self.log.lock().unwrap().push(request.clone());
+            self.inner.run(request)
+        }
+
+        fn run_with_stdin(
+            &self,
+            request: &CmdRequest,
+            stdin: &[u8],
+        ) -> Result<RawCommandOutput, CmdError> {
+            self.log.lock().unwrap().push(request.clone());
+            self.inner.run_with_stdin(request, stdin)
+        }
+    }
+
+    #[test]
+    // Intent: when the new disk is PresentLuks { mapper_open: true },
+    //   cmd_replace must not issue CryptsetupTestPassphrase or
+    //   CryptsetupLuksOpen against that disk's by_id.
+    //
+    // Why it exists: the pre-journal passphrase check added for the
+    //   closed-LUKS branch targets only mapper_open: false. A future
+    //   refactor that accidentally broadens it to all PresentLuks -- or
+    //   re-adds a post-journal ensure_luks_open on the already-open path --
+    //   would surface an unnecessary credential demand or second open.
+    //   This test pins the no-op shape of the open-mapper branch by
+    //   inspecting a recorded call log directly, so the assertion is
+    //   insensitive to error-plumbing refactors.
+    //
+    // Scenario: a previous replace/add opened /dev/mapper/braid-disk3 but
+    //   never added it to the pool (e.g. crash). Operator retries
+    //   `braid replace --old disk2 --new disk3=...`; the command picks up
+    //   the already-open mapper and proceeds to btrfs replace start without
+    //   a second LUKS interaction on the new disk.
+    fn mapper_open_true_does_not_verify_or_open_new_disk_luks() {
+        let state_tmp = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(state_tmp.path().into());
+        let mut m = PoolMembership::empty();
+        m.disks.insert(
+            "disk1".into(),
+            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
+        );
+        m.disks.insert(
+            "disk2".into(),
+            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk2".into())),
+        );
+        membership::save_membership(&m, &paths).unwrap();
+
+        let config_tmp = tempfile::tempdir().unwrap();
+        let config_path = config_tmp.path().join("config.json");
+        std::fs::write(
+            &config_path,
+            serde_json::to_vec(&serde_json::json!({ "mount_point": "/mnt/storage" })).unwrap(),
+        )
+        .unwrap();
+
+        let pass_path = config_tmp.path().join("passphrase");
+        std::fs::write(&pass_path, b"test-passphrase\n").unwrap();
+
+        let fs = ReplaceMockFs(vec![
+            "/dev/disk/by-id/virtio-disk3".into(),
+            "/dev/mapper/braid-disk3".into(),
+        ]);
+
+        let runner = RecordingReplaceRunner::new();
+        let log = runner.log.clone();
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let result = cmd_replace(
+            &runner,
+            &fs,
+            &ReplaceParams {
+                config_path: &config_path,
+                old_name: "disk2",
+                new_name: "disk3=/dev/disk/by-id/virtio-disk3",
+                missing_id: None,
+                dry_run: false,
+                yes: true,
+                passphrase_stdin: false,
+                passphrase_file: Some(pass_path.as_path()),
+                enroll_key_file: None,
+                progress: crate::progress::ProgressOutput::Off,
+                paths: &paths,
+                sleep_inhibitor: &inhibitor,
+            },
+        );
+
+        // The inner runner forces BtrfsReplaceStart to fail (exit 1), so
+        // cmd_replace must return a Pool error -- this confirms the flow
+        // reached the btrfs phase rather than stopping short, which is a
+        // prerequisite for the zero-counts below to mean "not called"
+        // instead of "test aborted early".
+        assert!(
+            matches!(result, Err(ReplaceError::Pool(_))),
+            "expected Err(ReplaceError::Pool(_)) from btrfs replace start failure, got: {result:?}"
+        );
+        assert!(
+            journal::load_journal(&paths).unwrap().is_some(),
+            "journal must be written -- the failure is post-journal"
+        );
+        assert_eq!(
+            inhibitor.acquire_count(),
+            1,
+            "sleep inhibitor must be acquired exactly once on the way in"
+        );
+
+        let log = log.lock().unwrap();
+        let new_by_id = "/dev/disk/by-id/virtio-disk3";
+
+        let test_passphrase_calls = log
+            .iter()
+            .filter(|r| matches!(r, CmdRequest::CryptsetupTestPassphrase { device } if device == new_by_id))
+            .count();
+        assert_eq!(
+            test_passphrase_calls, 0,
+            "mapper_open: true must not trigger CryptsetupTestPassphrase on the new disk"
+        );
+
+        let open_calls = log
+            .iter()
+            .filter(|r| matches!(r, CmdRequest::CryptsetupLuksOpen { device, .. } if device == new_by_id))
+            .count();
+        assert_eq!(
+            open_calls, 0,
+            "mapper_open: true must not trigger CryptsetupLuksOpen on the new disk"
+        );
     }
 }
