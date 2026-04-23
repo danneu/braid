@@ -21,3 +21,5 @@ match result {
 ```
 
 If the test's goal is specifically to lock user-facing wording (e.g. a remediation hint), put that in a separate `Display`-targeted unit test against the source error type -- don't conflate propagation coverage with string-wording coverage.
+
+**Companion rule for Display-locking tests:** when the test IS the Display-targeted one (protecting a message-construction helper from refactor drift), use `assert_eq!(err.to_string(), "...full expected bytes...")`, not `err.to_string().contains("braid-aaa") && .contains("exit 5")`. Substring checks leave gaps: a refactor that drops `.trim()`, swaps two locals, changes punctuation, or reflows the shape can still pass every substring assertion while changing what the user sees. Full-string equality catches all of those in one line. Reviewer pushback from 2026-04-23: "The proposed assertions only check substrings plus trim/casing, not the complete rendered message ... make the new test assert the exact `err.to_string()`."

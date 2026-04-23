@@ -53,3 +53,4 @@
 - [feedback_preview_boundary_tests_every_branch.md](feedback_preview_boundary_tests_every_branch.md) — When a helper is promoted to "the preview boundary" for a CLI contract, every branch (including no-op) needs an exact-output test, not just substrings
 - [feedback_stream_routing_needs_cli_test.md](feedback_stream_routing_needs_cli_test.md) — Stdout-vs-stderr contracts aren't observable from unit tests on a render helper; a CLI subtest capturing `>stdout 2>stderr` is mandatory
 - [feedback_dont_overclaim_cross_site_parity.md](feedback_dont_overclaim_cross_site_parity.md) — "Byte-for-byte parity" between two duplicated call sites requires tests on both sides; a one-sided test can't catch drift on the other
+- [feedback_no_autonomous_cargo_fmt.md](feedback_no_autonomous_cargo_fmt.md) — Never run `cargo fmt` / `rustfmt` autonomously; only when the user explicitly asks in the current turn
