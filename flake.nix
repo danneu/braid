@@ -288,11 +288,6 @@
               braid = linuxCrane.braid;
             }
           );
-          replace-new-already-in-pool = pkgs.testers.nixosTest (
-            import ./tests/cli/replace-new-already-in-pool.nix {
-              braid = linuxCrane.braid;
-            }
-          );
           replace-new-in-pool-guard = pkgs.testers.nixosTest (
             import ./tests/cli/replace-new-in-pool-guard.nix {
               braid = linuxCrane.braid;

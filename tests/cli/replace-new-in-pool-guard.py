@@ -2,18 +2,26 @@
 #
 # Intent:
 #   `braid replace --old disk1 --new disk2` is rejected with an
-#   "already a member" error when disk2 is already a pool member.
-#   The rejection must come from braid's own guard, not from btrfs.
+#   "already a member" error when disk2 is already a pool member, AND
+#   the rejection leaves no observable side effects:
+#     - pool membership and metadata on disk (pool.json) bit-identical
+#     - btrfs fi show output unchanged (same devids, no "missing")
+#     - user data intact
+#     - no stranded pending-op.json (no recovery state left behind)
 #
 # Why it exists:
 #   The live `btrfs replace start` path has no natural duplicate-device
 #   guard. Without check_new_not_in_pool, the command would reach btrfs
 #   and either corrupt the pool or produce a confusing btrfs-level error.
-#   This test fails when the guard is commented out.
+#   Additionally, a preflight failure must not mutate on-disk membership
+#   metadata or strand recovery state -- if it did, the user would be
+#   forced into `braid recover` for what is conceptually a rejected
+#   precondition check.
 #
 # Scenario:
-#   Operator typo — specifies an existing pool member as --new.
+#   Operator typo -- specifies an existing pool member as --new.
 
+import json
 import shlex
 
 start_all()
@@ -41,9 +49,19 @@ def replace_cmd(old, new):
     )
 
 
-with subtest("Setup: build 2-drive pool"):
+def read_pool():
+    raw = machine.succeed("cat /var/lib/braid/pool.json")
+    return json.loads(raw)
+
+
+with subtest("Setup: build 2-drive pool with data"):
     machine.succeed(add_cmd("disk1"))
     machine.succeed(add_cmd("disk2"))
+    machine.succeed("echo 'important data' > /mnt/storage/precious.txt")
+    machine.succeed("sync")
+
+# Capture baseline state for post-rejection equality checks.
+baseline_pool = read_pool()
 
 with subtest("Replace with existing member rejected by braid guard"):
     (status, output) = machine.execute(replace_cmd("disk1", "disk2") + " 2>&1")
@@ -52,5 +70,29 @@ with subtest("Replace with existing member rejected by braid guard"):
     assert "already a member" in output, (
         f"Expected braid guard message 'already a member' in output, got:\n{output}"
     )
+
+with subtest("Pool unchanged after failed replace"):
+    fi_show = machine.succeed("btrfs fi show /mnt/storage")
+    for name in ["braid-disk1", "braid-disk2"]:
+        assert f"/dev/mapper/{name}" in fi_show, f"{name} missing:\n{fi_show}"
+    assert "missing" not in fi_show.lower(), (
+        f"No missing devices expected:\n{fi_show}"
+    )
+    devid_count = fi_show.count("devid")
+    assert devid_count == 2, f"Expected 2 devices, got {devid_count}:\n{fi_show}"
+
+with subtest("Data intact after failed replace"):
+    content = machine.succeed("cat /mnt/storage/precious.txt").strip()
+    assert content == "important data", f"Got '{content}'"
+
+with subtest("pool.json bit-identical after failed replace"):
+    after_pool = read_pool()
+    assert baseline_pool == after_pool, (
+        f"pool.json changed after rejected replace.\n"
+        f"baseline={baseline_pool}\nafter={after_pool}"
+    )
+
+with subtest("No journal stranded after failed replace"):
+    machine.fail("test -e /var/lib/braid/pending-op.json")
 
 machine.shutdown()
