@@ -350,9 +350,9 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             )?;
             eprintln!("Replace complete.");
 
-            pool_resize_device(runner, *devid, config.mount_point())?;
-
-            // Best-effort LUKS close of old mapper.
+            // Best-effort LUKS close of old mapper. Runs BEFORE the resize
+            // so a resize failure does not `?` out and strand the old dm
+            // slot bound to the backing disk until `braid lock` or reboot.
             let close_result = runner.run(&CmdRequest::CryptsetupClose {
                 mapper: mapper.0.clone(),
             });
@@ -370,6 +370,8 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
                     );
                 }
             }
+
+            pool_resize_device(runner, *devid, config.mount_point())?;
         }
         ReplaceSource::Missing { devid } => {
             eprintln!(
@@ -626,6 +628,13 @@ fn compile_replace_steps(input: &ReplaceStepsInput<'_>) -> Result<Vec<Step>, Rep
             });
             steps.push(Step {
                 risk: "safe",
+                description: format!("cryptsetup close {}", mapper),
+                commands: vec![CmdRequest::CryptsetupClose {
+                    mapper: mapper.0.clone(),
+                }],
+            });
+            steps.push(Step {
+                risk: "safe",
                 description: format!(
                     "btrfs filesystem resize {}:max {}",
                     devid, input.mount_point
@@ -633,13 +642,6 @@ fn compile_replace_steps(input: &ReplaceStepsInput<'_>) -> Result<Vec<Step>, Rep
                 commands: vec![CmdRequest::BtrfsFilesystemResize {
                     devid: *devid,
                     mount_point: input.mount_point.clone(),
-                }],
-            });
-            steps.push(Step {
-                risk: "safe",
-                description: format!("cryptsetup close {}", mapper),
-                commands: vec![CmdRequest::CryptsetupClose {
-                    mapper: mapper.0.clone(),
                 }],
             });
         }
@@ -1827,6 +1829,195 @@ mod tests {
         );
     }
 
+    /// Runner for a live replace where btrfs replace + cryptsetup close
+    /// succeed but the post-replace `btrfs filesystem resize` fails.
+    /// Records every request so the test can assert that the close ran
+    /// BEFORE the failing resize (regression for the Live arm ordering
+    /// bug where a resize `?` would skip the close).
+    struct ResizeFailingLoggingRunner {
+        log: std::sync::Arc<std::sync::Mutex<Vec<CmdRequest>>>,
+    }
+
+    impl CmdRunner2 for ResizeFailingLoggingRunner {
+        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
+            self.log.lock().unwrap().push(request.clone());
+            match request {
+                CmdRequest::FindmntJson { mount_point } => Ok(mock_ok(
+                    &format!("findmnt --json --mountpoint {mount_point}"),
+                    r#"{"filesystems":[{"target":"/mnt/storage","source":"/dev/mapper/braid-disk1","fstype":"btrfs"}]}"#,
+                )),
+                CmdRequest::BtrfsFilesystemShow { mount_point } => Ok(mock_ok(
+                    &format!("btrfs filesystem show {mount_point}"),
+                    "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\tTotal devices 2 FS bytes used 16.17MiB\n\tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk2\n",
+                )),
+                CmdRequest::CryptsetupStatus { mapper } => {
+                    let dev = match mapper.as_str() {
+                        "braid-disk1" => "/dev/vdb",
+                        "braid-disk2" => "/dev/vdc",
+                        "braid-disk3" => "/dev/vdd",
+                        _ => "/dev/vdz",
+                    };
+                    Ok(mock_ok(
+                        &format!("cryptsetup status {mapper}"),
+                        &format!("{mapper} is active and is in use.\n  type:    LUKS2\n  device:  {dev}\n  mode:    read/write\n"),
+                    ))
+                }
+                CmdRequest::CryptsetupLuksUuid { device } => {
+                    let uuid = match device.as_str() {
+                        "/dev/vdb" | "/dev/disk/by-id/virtio-disk1" => {
+                            "11111111-1111-1111-1111-111111111111"
+                        }
+                        "/dev/vdc" | "/dev/disk/by-id/virtio-disk2" => {
+                            "22222222-2222-2222-2222-222222222222"
+                        }
+                        "/dev/vdd" | "/dev/disk/by-id/virtio-disk3" => {
+                            "33333333-3333-3333-3333-333333333333"
+                        }
+                        _ => "99999999-9999-9999-9999-999999999999",
+                    };
+                    Ok(mock_ok(&format!("cryptsetup luksUUID {device}"), &format!("{uuid}\n")))
+                }
+                CmdRequest::CryptsetupLuksDumpText { device } => Ok(mock_ok(
+                    &format!("cryptsetup luksDump {device}"),
+                    "LUKS header information\nVersion:       \t2\n",
+                )),
+                CmdRequest::BtrfsBalanceStatus { .. } => Ok(mock_ok(
+                    "btrfs balance status",
+                    "No balance found on '/mnt/storage'\n",
+                )),
+                CmdRequest::BtrfsDeviceStatsJson { .. } => {
+                    Ok(mock_ok("btrfs device stats", r#"{"device-stats": []}"#))
+                }
+                CmdRequest::BtrfsReplaceStart { .. } => {
+                    Ok(mock_ok("btrfs replace start", ""))
+                }
+                CmdRequest::CryptsetupClose { .. } => Ok(mock_ok("cryptsetup close", "")),
+                CmdRequest::BtrfsFilesystemResize { .. } => Ok(RawCommandOutput {
+                    cmd: "btrfs filesystem resize".into(),
+                    stdout: String::new(),
+                    stderr: "ERROR: unable to resize".into(),
+                    exit_status: 1,
+                }),
+                _ => Err(CmdError::MissingMock),
+            }
+        }
+
+        fn run_with_stdin(
+            &self,
+            request: &CmdRequest,
+            _stdin: &[u8],
+        ) -> Result<RawCommandOutput, CmdError> {
+            self.run(request)
+        }
+    }
+
+    #[test]
+    // Intent: close of old mapper must run even when the post-replace
+    //   `btrfs filesystem resize` fails.
+    //
+    // Why it exists: a resize failure returning `?` previously skipped the
+    //   best-effort cryptsetup close of the old mapper, leaving the old
+    //   dm slot bound to its backing disk until the next `braid lock` or
+    //   reboot. The ordering in the Live arm of cmd_replace must be
+    //   close-then-resize so the close always runs.
+    //
+    // Scenario: live replace of disk2 -> disk3. `btrfs replace start`
+    //   succeeds; `btrfs filesystem resize devid=2:max` fails (exit 1);
+    //   cmd_replace must still have issued `cryptsetup close braid-disk2`
+    //   before the resize error propagated out.
+    fn close_runs_before_resize_on_live_replace() {
+        let state_tmp = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(state_tmp.path().into());
+        let mut m = PoolMembership::empty();
+        m.disks.insert(
+            "disk1".into(),
+            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
+        );
+        m.disks.insert(
+            "disk2".into(),
+            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk2".into())),
+        );
+        membership::save_membership(&m, &paths).unwrap();
+
+        let config_tmp = tempfile::tempdir().unwrap();
+        let config_path = config_tmp.path().join("config.json");
+        std::fs::write(
+            &config_path,
+            serde_json::to_vec(&serde_json::json!({ "mount_point": "/mnt/storage" })).unwrap(),
+        )
+        .unwrap();
+
+        let pass_path = config_tmp.path().join("passphrase");
+        std::fs::write(&pass_path, b"test-passphrase\n").unwrap();
+
+        let fs = ReplaceMockFs(vec![
+            "/dev/disk/by-id/virtio-disk3".into(),
+            "/dev/mapper/braid-disk3".into(),
+        ]);
+
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let runner = ResizeFailingLoggingRunner { log: log.clone() };
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let result = cmd_replace(
+            &runner,
+            &fs,
+            &ReplaceParams {
+                config_path: &config_path,
+                old_name: "disk2",
+                new_name: "disk3=/dev/disk/by-id/virtio-disk3",
+                missing_id: None,
+                dry_run: false,
+                yes: true,
+                passphrase_stdin: false,
+                passphrase_file: Some(pass_path.as_path()),
+                enroll_key_file: None,
+                progress: crate::progress::ProgressOutput::Off,
+                paths: &paths,
+                sleep_inhibitor: &inhibitor,
+            },
+        );
+
+        match &result {
+            Err(ReplaceError::Pool(crate::pool::PoolError::Failed(msg))) => {
+                assert!(
+                    msg.contains("btrfs filesystem resize failed"),
+                    "expected typed PoolError::Failed carrying resize message, got: {msg}"
+                );
+            }
+            other => panic!(
+                "expected Err(ReplaceError::Pool(PoolError::Failed(..))), got: {other:?}"
+            ),
+        }
+
+        let log = log.lock().unwrap();
+        let close_idx = log
+            .iter()
+            .position(|r| matches!(
+                r,
+                CmdRequest::CryptsetupClose { mapper } if mapper == "braid-disk2"
+            ))
+            .expect(
+                "cryptsetup close on braid-disk2 must be issued even when resize fails",
+            );
+        let resize_idx = log
+            .iter()
+            .position(|r| matches!(
+                r,
+                CmdRequest::BtrfsFilesystemResize { devid: 2, .. }
+            ))
+            .expect("btrfs filesystem resize on devid 2 must be issued");
+        assert!(
+            close_idx < resize_idx,
+            "close (index {close_idx}) must run BEFORE resize (index {resize_idx}) \
+             so a resize failure does not strand the old dm slot"
+        );
+
+        assert!(
+            journal::load_journal(&paths).unwrap().is_some(),
+            "pending-op.json must survive error exit so braid recover can reconcile"
+        );
+    }
+
     /// Runner for a missing-path replace where --old is a typo'd name absent
     /// from pool.json. probe_pool sees 1 live disk + 1 missing devid (devid 2);
     /// probe_missing_devids reports [2]. The runner is scoped narrowly so
@@ -2025,7 +2216,7 @@ mod tests {
         let lines: Vec<&str> = output.lines().collect();
 
         // Steps: LUKS format, header backup, LUKS open, keyfile enroll,
-        //        replace start, resize, close old = 7 steps × 2 lines each = 14
+        //        replace start, close old, resize = 7 steps x 2 lines each = 14
         assert_eq!(lines.len(), 14, "expected 14 lines, got:\n{output}");
 
         // LUKS format
@@ -2050,12 +2241,13 @@ mod tests {
         assert!(lines[8].contains("[long       ]"));
         assert!(lines[9].contains("$ btrfs replace start"));
 
-        // Resize
-        assert!(lines[10].contains("btrfs filesystem resize"));
+        // Close old mapper (before resize: a resize failure must not strand
+        // the old dm slot)
+        assert!(lines[10].contains("cryptsetup close"));
+        assert_eq!(lines[11], "               $ cryptsetup close braid-disk2");
 
-        // Close old mapper
-        assert!(lines[12].contains("cryptsetup close"));
-        assert_eq!(lines[13], "               $ cryptsetup close braid-disk2");
+        // Resize
+        assert!(lines[12].contains("btrfs filesystem resize"));
     }
 
     /// Runner for a replace where the new disk is already LUKS-formatted but

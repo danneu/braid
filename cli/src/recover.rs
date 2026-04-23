@@ -443,11 +443,11 @@ pub fn cmd_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
 /// Steps, in order:
 ///
 /// 1. **Replace-only**: replay `pool_resize_device` on the new disk's devid.
-///    The original command issues the resize at `cli/src/replace.rs:327`
-///    (Live) and `:359` (Missing) immediately after `pool_replace_device`.
-///    If shutdown lands between the kernel-resumed dev_replace and the
-///    resize, the new disk reports the source disk's old size instead of
-///    its full capacity. Resize-to-max is idempotent at the btrfs layer.
+///    The original command issues the resize in both the Live and Missing
+///    arms after `pool_replace_device` succeeds. If shutdown lands between
+///    the kernel-resumed dev_replace and the resize, the new disk reports
+///    the source disk's old size instead of its full capacity. Resize-to-max
+///    is idempotent at the btrfs layer.
 ///
 /// 2. **Per-op resume + balance replay** (Add / RemoveMissing / Replace
 ///    only): if the kernel left a paused BALANCE_ITEM on umount, drain
