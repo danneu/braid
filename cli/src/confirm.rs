@@ -88,7 +88,7 @@ pub fn format_hw_info_line(info: &DiskHwInfo) -> Option<String> {
     if parts.is_empty() {
         None
     } else {
-        Some(parts.join(" \u{00b7} ")) // middle dot separator
+        Some(parts.join(" .. ")) // double-dot separator
     }
 }
 
@@ -151,7 +151,7 @@ mod tests {
         assert!(line.contains("Toshiba MN07ACA12T"));
         assert!(line.contains("TiB"));
         assert!(line.contains("serial 1234ABCD"));
-        assert!(line.contains("\u{00b7}")); // middle dot separator
+        assert!(line.contains("..")); // double-dot separator
     }
 
     #[test]

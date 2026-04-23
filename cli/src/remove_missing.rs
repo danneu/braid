@@ -329,7 +329,7 @@ fn format_remove_missing_confirm(
 ) -> String {
     let mut msg = "Remove missing device from pool:\n".to_string();
     msg.push_str(&format!(
-        "  {} (devid {})  missing \u{2014} no hardware info available\n",
+        "  {} (devid {})  missing -- no hardware info available\n",
         name, devid
     ));
     if remaining_present >= 2 {
@@ -338,7 +338,7 @@ fn format_remove_missing_confirm(
         msg.push_str("  Surviving disk already has all data.\n");
     }
     msg.push_str(&format!(
-        "\nPool: {} present + {} missing \u{2192} {} {}\n",
+        "\nPool: {} present + {} missing -> {} {}\n",
         remaining_present,
         missing_count,
         remaining_present,
@@ -1241,13 +1241,13 @@ mod tests {
         assert!(msg.contains("missing"));
         assert!(msg.contains("no hardware info available"));
         assert!(msg.contains("rebalanced"));
-        assert!(msg.contains("2 present + 1 missing \u{2192} 2 disks"));
+        assert!(msg.contains("2 present + 1 missing -> 2 disks"));
     }
 
     #[test]
     fn remove_missing_confirm_single_survivor() {
         let msg = format_remove_missing_confirm("toshiba", 2, 1, 1);
         assert!(msg.contains("Surviving disk already has all data"));
-        assert!(msg.contains("1 present + 1 missing \u{2192} 1 disk"));
+        assert!(msg.contains("1 present + 1 missing -> 1 disk"));
     }
 }

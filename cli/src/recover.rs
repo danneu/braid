@@ -717,20 +717,20 @@ fn recovery_guidance(
             journal::OpKind::Add { disks } => {
                 let names: Vec<_> = disks.keys().map(|n| format!("'{n}'")).collect();
                 format!(
-                    "add completed \u{2014} {} now in the pool.",
+                    "add completed -- {} now in the pool.",
                     names.join(", ")
                 )
             }
             journal::OpKind::Remove { name } => {
-                format!("remove completed \u{2014} '{name}' is no longer in the pool.")
+                format!("remove completed -- '{name}' is no longer in the pool.")
             }
             journal::OpKind::RemoveMissing { .. } => {
-                "remove-missing completed \u{2014} missing device removed from the pool.".to_owned()
+                "remove-missing completed -- missing device removed from the pool.".to_owned()
             }
             journal::OpKind::Replace {
                 old_name, new_name, ..
             } => {
-                format!("replace completed \u{2014} '{old_name}' replaced by '{new_name}'.")
+                format!("replace completed -- '{old_name}' replaced by '{new_name}'.")
             }
         }
     } else if recovered_names == pre_names {
@@ -738,24 +738,24 @@ fn recovery_guidance(
             journal::OpKind::Add { disks } => {
                 let names: Vec<_> = disks.keys().map(|n| format!("'{n}'")).collect();
                 format!(
-                    "add did not complete \u{2014} {} not in the pool. Re-run braid add to retry.",
+                    "add did not complete -- {} not in the pool. Re-run braid add to retry.",
                     names.join(", ")
                 )
             }
             journal::OpKind::Remove { name } => {
                 format!(
-                    "remove did not complete \u{2014} '{name}' is still in the pool. \
+                    "remove did not complete -- '{name}' is still in the pool. \
                      Re-run braid remove to retry."
                 )
             }
             journal::OpKind::RemoveMissing { .. } => {
-                "remove-missing did not complete \u{2014} device still in the pool. \
+                "remove-missing did not complete -- device still in the pool. \
                  Re-run braid remove-missing to retry."
                     .to_owned()
             }
             journal::OpKind::Replace { old_name, .. } => {
                 format!(
-                    "replace did not complete \u{2014} pool still has '{old_name}'. \
+                    "replace did not complete -- pool still has '{old_name}'. \
                      Re-run braid replace to retry."
                 )
             }
@@ -2835,7 +2835,7 @@ mod tests {
 
         assert_eq!(
             recovery_guidance(&op, &ref_set(&pre), &ref_set(&target), &ref_set(&recovered)),
-            "add completed \u{2014} 'disk3' now in the pool."
+            "add completed -- 'disk3' now in the pool."
         );
     }
 
@@ -2850,7 +2850,7 @@ mod tests {
 
         assert_eq!(
             recovery_guidance(&op, &ref_set(&pre), &ref_set(&target), &ref_set(&recovered)),
-            "add did not complete \u{2014} 'disk3' not in the pool. Re-run braid add to retry."
+            "add did not complete -- 'disk3' not in the pool. Re-run braid add to retry."
         );
     }
 
@@ -2865,7 +2865,7 @@ mod tests {
 
         assert_eq!(
             recovery_guidance(&op, &ref_set(&pre), &ref_set(&target), &ref_set(&recovered)),
-            "remove completed \u{2014} 'toshiba' is no longer in the pool."
+            "remove completed -- 'toshiba' is no longer in the pool."
         );
     }
 
@@ -2880,7 +2880,7 @@ mod tests {
 
         assert_eq!(
             recovery_guidance(&op, &ref_set(&pre), &ref_set(&target), &ref_set(&recovered)),
-            "remove did not complete \u{2014} 'toshiba' is still in the pool. Re-run braid remove to retry."
+            "remove did not complete -- 'toshiba' is still in the pool. Re-run braid remove to retry."
         );
     }
 
@@ -2893,7 +2893,7 @@ mod tests {
 
         assert_eq!(
             recovery_guidance(&op, &ref_set(&pre), &ref_set(&target), &ref_set(&recovered)),
-            "remove-missing completed \u{2014} missing device removed from the pool."
+            "remove-missing completed -- missing device removed from the pool."
         );
     }
 
@@ -2906,7 +2906,7 @@ mod tests {
 
         assert_eq!(
             recovery_guidance(&op, &ref_set(&pre), &ref_set(&target), &ref_set(&recovered)),
-            "remove-missing did not complete \u{2014} device still in the pool. Re-run braid remove-missing to retry."
+            "remove-missing did not complete -- device still in the pool. Re-run braid remove-missing to retry."
         );
     }
 
@@ -2923,7 +2923,7 @@ mod tests {
 
         assert_eq!(
             recovery_guidance(&op, &ref_set(&pre), &ref_set(&target), &ref_set(&recovered)),
-            "replace completed \u{2014} 'old' replaced by 'new'."
+            "replace completed -- 'old' replaced by 'new'."
         );
     }
 
@@ -2940,7 +2940,7 @@ mod tests {
 
         assert_eq!(
             recovery_guidance(&op, &ref_set(&pre), &ref_set(&target), &ref_set(&recovered)),
-            "replace did not complete \u{2014} pool still has 'old'. Re-run braid replace to retry."
+            "replace did not complete -- pool still has 'old'. Re-run braid replace to retry."
         );
     }
 

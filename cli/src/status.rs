@@ -745,7 +745,7 @@ pub fn paused_balance_warning<R: CommandRunner>(
 ) -> Option<String> {
     match get_balance_report(runner, mount_point) {
         BalanceReport::Paused { .. } => Some(format!(
-            "paused balance detected \u{2014} will not auto-resume\n  \
+            "paused balance detected -- will not auto-resume\n  \
              resume:  btrfs balance resume {mount_point}\n  \
              cancel:  btrfs balance cancel {mount_point}"
         )),

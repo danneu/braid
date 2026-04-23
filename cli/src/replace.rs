@@ -174,7 +174,7 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             )
         );
         if pool.total_devices == 1 {
-            eprintln!("WARNING: This replace leaves only 1 disk \u{2014} no redundancy.\n");
+            eprintln!("WARNING: This replace leaves only 1 disk -- no redundancy.\n");
         }
         if matches!(new_probed.state, ConfigDiskState::PresentNotLuks)
             && params.enroll_key_file.is_none()
@@ -716,21 +716,21 @@ fn format_replace_confirm(
             if let Some(hw) = &old_hw_line {
                 msg.push_str(&format!("  old: {}   {}\n", old.name, hw));
                 msg.push_str(&format!(
-                    "  {:width$}devid {} \u{00b7} will be replaced in-place\n",
+                    "  {:width$}devid {} .. will be replaced in-place\n",
                     "",
                     devid,
                     width = old.name.len() + 7,
                 ));
             } else {
                 msg.push_str(&format!(
-                    "  old: {}   devid {} \u{00b7} will be replaced in-place\n",
+                    "  old: {}   devid {} .. will be replaced in-place\n",
                     old.name, devid
                 ));
             }
         }
         ReplaceSource::Missing { devid } => {
             msg.push_str(&format!(
-                "  old: {} (devid {})  missing \u{2014} no hardware info available\n",
+                "  old: {} (devid {})  missing -- no hardware info available\n",
                 old.name, devid
             ));
         }
@@ -760,7 +760,7 @@ fn format_replace_confirm(
 
     // Pool summary
     msg.push_str(&format!(
-        "\nPool: {} {} \u{2192} {} {}\n",
+        "\nPool: {} {} -> {} {}\n",
         total_devices,
         if total_devices == 1 { "disk" } else { "disks" },
         total_devices,
