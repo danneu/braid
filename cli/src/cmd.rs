@@ -1666,4 +1666,220 @@ mod tests {
         assert_eq!(signal_name(libc::SIGPIPE), "SIGPIPE");
         assert_eq!(signal_name(999), "unknown");
     }
+
+    // --- cryptsetup keyfile-size asymmetry pins -------------------------------
+    //
+    // The stdin-fed passphrase variants (LuksOpen / TestPassphrase / LuksFormat)
+    // and the file-fed keyfile variants (LuksOpenKeyFile / TestKeyFile /
+    // LuksAddKeyFile) intentionally disagree on --keyfile-size. The passphrase
+    // variants must NOT pass it; the keyfile variants must pass 4096. Tests
+    // below pin the full argv for each variant so a future "normalize the
+    // asymmetry" patch fails immediately with a pointer to this comment.
+    //
+    // Why the asymmetry: --keyfile-size N, combined with --key-file=- on piped
+    // stdin, makes cryptsetup's non-interactive branch (see
+    // reference/cryptsetup/src/utils_password.c:296-302 and
+    // reference/cryptsetup/lib/utils.c:314-317) demand exactly N bytes and fail
+    // with "Cannot read requested amount of data" otherwise. User passphrases
+    // are variable-length strings (braid feeds passphrase.as_bytes() unpadded
+    // from cli/src/luks.rs), so pinning any N breaks unlock. The keyfile side
+    // feeds a fixed 4096-byte binary blob written by LuksAddKeyFile
+    // (--new-keyfile-size 4096), so pinning matches the enrollment contract
+    // and makes a truncated or grown key file fail fast.
+
+    #[test]
+    // Intent: CryptsetupLuksOpen (passphrase-via-stdin) must NOT carry
+    // --keyfile-size. Pin full argv.
+    // Why: see the block comment above -- --keyfile-size on piped stdin would
+    // break every passphrase unlock. The keyfile companion test
+    // (cryptsetup_luks_open_key_file_sets_keyfile_size_4096) pins the inverse
+    // for the file-fed variant.
+    // Scenario: a future cleanup PR copies --keyfile-size 4096 from the
+    // keyfile variant into this argv "for consistency". This test fails and
+    // points at the block comment.
+    fn cryptsetup_luks_open_omits_keyfile_size() {
+        let cmd = CmdRequest::CryptsetupLuksOpen {
+            device: "/dev/disk/by-id/disk1".to_owned(),
+            mapper: "braid-disk1".to_owned(),
+        }
+        .to_argv();
+        assert_eq!(cmd.program, "cryptsetup");
+        assert_eq!(
+            cmd.args,
+            vec![
+                "open",
+                "--type",
+                "luks",
+                "--key-file=-",
+                "--perf-no_read_workqueue",
+                "--perf-no_write_workqueue",
+                "/dev/disk/by-id/disk1",
+                "braid-disk1",
+            ]
+        );
+        assert!(
+            !cmd.args.iter().any(|a| a == "--keyfile-size"),
+            "CryptsetupLuksOpen reads a variable-length passphrase from stdin \
+             and must NOT set --keyfile-size -- see block comment in cmd.rs \
+             tests module above cryptsetup_luks_open_omits_keyfile_size"
+        );
+    }
+
+    #[test]
+    // Intent: CryptsetupTestPassphrase (passphrase-via-stdin) must NOT carry
+    // --keyfile-size. Pin full argv.
+    // Why: same as cryptsetup_luks_open_omits_keyfile_size -- stdin variants
+    // break under --keyfile-size.
+    // Scenario: a cleanup PR copies --keyfile-size 4096 from TestKeyFile. This
+    // test fails immediately.
+    fn cryptsetup_test_passphrase_omits_keyfile_size() {
+        let cmd = CmdRequest::CryptsetupTestPassphrase {
+            device: "/dev/disk/by-id/disk1".to_owned(),
+        }
+        .to_argv();
+        assert_eq!(cmd.program, "cryptsetup");
+        assert_eq!(
+            cmd.args,
+            vec![
+                "open",
+                "--test-passphrase",
+                "--key-file=-",
+                "/dev/disk/by-id/disk1",
+            ]
+        );
+        assert!(
+            !cmd.args.iter().any(|a| a == "--keyfile-size"),
+            "CryptsetupTestPassphrase reads a variable-length passphrase from \
+             stdin and must NOT set --keyfile-size"
+        );
+    }
+
+    #[test]
+    // Intent: CryptsetupLuksFormat (passphrase-via-stdin) must NOT carry
+    // --keyfile-size. Pin full argv for the empty-extra-opts shape.
+    // Why: luksFormat consumes the initial passphrase from stdin; forcing a
+    // fixed read size would break first-time format the same way it would
+    // break unlock.
+    // Scenario: a cleanup PR normalizes all cryptsetup variants. Fails here.
+    fn cryptsetup_luks_format_omits_keyfile_size() {
+        let cmd = CmdRequest::CryptsetupLuksFormat {
+            device: "/dev/disk/by-id/disk1".to_owned(),
+            extra_opts: vec![],
+        }
+        .to_argv();
+        assert_eq!(cmd.program, "cryptsetup");
+        assert_eq!(
+            cmd.args,
+            vec![
+                "luksFormat",
+                "--type",
+                "luks2",
+                "--batch-mode",
+                "--key-file=-",
+                "/dev/disk/by-id/disk1",
+            ]
+        );
+        assert!(
+            !cmd.args.iter().any(|a| a == "--keyfile-size"),
+            "CryptsetupLuksFormat reads the initial passphrase from stdin and \
+             must NOT set --keyfile-size"
+        );
+    }
+
+    #[test]
+    // Intent: CryptsetupLuksOpenKeyFile (file-fed) MUST carry
+    // --keyfile-size 4096. Pin full argv.
+    // Why: the keyfile is a fixed 4096-byte binary blob written by
+    // CryptsetupLuksAddKeyFile (--new-keyfile-size 4096). Pinning the read
+    // length to the enrollment size means a truncated or grown keyfile fails
+    // fast instead of silently deriving a different key. Dropping this flag
+    // would let a tampered keyfile unlock (or silently change the effective
+    // key bytes). See the block comment above for the asymmetry rationale.
+    // Scenario: a refactor strips --keyfile-size "for symmetry" with the
+    // passphrase variants. This test fails and names the enrollment contract.
+    fn cryptsetup_luks_open_key_file_sets_keyfile_size_4096() {
+        let cmd = CmdRequest::CryptsetupLuksOpenKeyFile {
+            device: "/dev/disk/by-id/disk1".to_owned(),
+            mapper: "braid-disk1".to_owned(),
+            key_file_path: "/var/lib/braid/keyfiles/braid-disk1.key".to_owned(),
+        }
+        .to_argv();
+        assert_eq!(cmd.program, "cryptsetup");
+        assert_eq!(
+            cmd.args,
+            vec![
+                "open",
+                "--type",
+                "luks",
+                "--key-file",
+                "/var/lib/braid/keyfiles/braid-disk1.key",
+                "--keyfile-size",
+                "4096",
+                "--perf-no_read_workqueue",
+                "--perf-no_write_workqueue",
+                "/dev/disk/by-id/disk1",
+                "braid-disk1",
+            ]
+        );
+    }
+
+    #[test]
+    // Intent: CryptsetupTestKeyFile (file-fed) MUST carry --keyfile-size 4096.
+    // Pin full argv.
+    // Why: same reasoning as cryptsetup_luks_open_key_file_sets_keyfile_size_4096
+    // -- the test-passphrase probe must read exactly the enrolled byte count.
+    // Scenario: a refactor drops --keyfile-size here while leaving the real
+    // open variant alone, causing a confirmation/actual mismatch where Test
+    // would succeed on a truncated file but Open would refuse.
+    fn cryptsetup_test_key_file_sets_keyfile_size_4096() {
+        let cmd = CmdRequest::CryptsetupTestKeyFile {
+            device: "/dev/disk/by-id/disk1".to_owned(),
+            key_file_path: "/var/lib/braid/keyfiles/braid-disk1.key".to_owned(),
+        }
+        .to_argv();
+        assert_eq!(cmd.program, "cryptsetup");
+        assert_eq!(
+            cmd.args,
+            vec![
+                "open",
+                "--test-passphrase",
+                "--key-file",
+                "/var/lib/braid/keyfiles/braid-disk1.key",
+                "--keyfile-size",
+                "4096",
+                "/dev/disk/by-id/disk1",
+            ]
+        );
+    }
+
+    #[test]
+    // Intent: CryptsetupLuksAddKeyFile MUST carry --new-keyfile-size 4096.
+    // Pin full argv.
+    // Why: this call is the source-of-truth for the 4096 byte count that the
+    // Open/Test keyfile variants then rely on. Changing it here without also
+    // changing the reader flags would silently desynchronize enrollment vs
+    // unlock. The key-slot 1 is also load-bearing -- slot 0 holds the user
+    // passphrase and must not be overwritten by keyfile enrollment.
+    // Scenario: someone bumps the enrollment size or drops the slot. Both
+    // directions fail here.
+    fn cryptsetup_luks_add_key_file_sets_new_keyfile_size_4096() {
+        let cmd = CmdRequest::CryptsetupLuksAddKeyFile {
+            device: "/dev/disk/by-id/disk1".to_owned(),
+            key_file_path: "/var/lib/braid/keyfiles/braid-disk1.key".to_owned(),
+        }
+        .to_argv();
+        assert_eq!(cmd.program, "cryptsetup");
+        assert_eq!(
+            cmd.args,
+            vec![
+                "luksAddKey",
+                "--key-slot",
+                "1",
+                "--new-keyfile-size",
+                "4096",
+                "/dev/disk/by-id/disk1",
+                "/var/lib/braid/keyfiles/braid-disk1.key",
+            ]
+        );
+    }
 }
