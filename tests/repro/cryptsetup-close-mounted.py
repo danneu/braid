@@ -32,7 +32,13 @@ with subtest("cryptsetup close fails while mounted"):
     exit_code, stderr = machine.execute("cryptsetup close disk1 2>&1")
     print(f"Exit code: {exit_code}")
     print(f"Stderr: {stderr}")
-    assert exit_code != 0, f"Expected cryptsetup close to fail while mounted, but exit was {exit_code}"
+    # EBUSY -> translate_errno -> exit 5. Busy classification in
+    # cli/src/lock.rs close_mapper_with_retry relies on this exact code
+    # (wording-independent). Do not relax this assertion to != 0.
+    assert exit_code == 5, \
+        f"Expected exit 5 (EBUSY) while mounted, got {exit_code}. stderr: {stderr}"
+    # Descriptive wording check -- not load-bearing for braid's classifier
+    # anymore, but a wording shift is still worth surfacing in the log.
     stderr_lower = stderr.lower()
     assert "busy" in stderr_lower or "in use" in stderr_lower, \
         f"Expected 'busy' or 'in use' in error output, got: {stderr}"
@@ -41,5 +47,17 @@ with subtest("After umount, cryptsetup close succeeds"):
     machine.succeed("umount /mnt/storage")
     machine.succeed("cryptsetup close disk1")
     machine.fail("test -e /dev/mapper/disk1")
+
+with subtest("cryptsetup close on already-closed mapper returns ENODEV (exit 4)"):
+    # Pins the non-busy distractor exit code that lock.rs unit tests
+    # model (see `lock_mapper_close_fatal_when_umount_succeeded` and
+    # siblings). If cryptsetup ever started returning exit 5 here,
+    # close_mapper_with_retry would misclassify a fatal error as busy
+    # and spin three retries before surfacing it.
+    exit_code, stderr = machine.execute("cryptsetup close disk1 2>&1")
+    print(f"Exit code: {exit_code}")
+    print(f"Stderr: {stderr}")
+    assert exit_code == 4, \
+        f"Expected exit 4 (ENODEV) for already-closed mapper, got {exit_code}. stderr: {stderr}"
 
 machine.shutdown()

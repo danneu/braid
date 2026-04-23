@@ -35,8 +35,12 @@ fn close_mapper_with_retry<R: CommandRunner>(runner: &R, mapper: &str) -> Result
         if result.exit_status == 0 {
             return Ok(());
         }
-        let stderr = result.stderr.to_lowercase();
-        let is_busy = stderr.contains("busy") || stderr.contains("in use");
+        // cryptsetup close (lib/setup.c:5763-5811) returns -EBUSY for a held
+        // mapper, translated to exit 5 by src/utils_tools.c translate_errno.
+        // On the close path exit 5 is EBUSY-exclusive (no -EEXIST branch),
+        // so matching exit status is wording- and locale-agnostic and
+        // survives upstream phrasing drift.
+        let is_busy = result.exit_status == 5;
         if !is_busy {
             return Err(LockError::Failed(format!(
                 "cryptsetup close {} failed (exit {}): {}",
@@ -1043,7 +1047,7 @@ mod tests {
                 CmdRequest::CryptsetupClose {
                     mapper: "braid-aaa".into(),
                 },
-                err_raw("cryptsetup close braid-aaa", 5, "Device is not active."),
+                err_raw("cryptsetup close braid-aaa", 4, "Device is not active."),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
@@ -1076,7 +1080,7 @@ mod tests {
                 CmdRequest::CryptsetupClose {
                     mapper: "braid-aaa".into(),
                 },
-                err_raw("cryptsetup close braid-aaa", 5, "Device is not active."),
+                err_raw("cryptsetup close braid-aaa", 4, "Device is not active."),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
@@ -1174,7 +1178,7 @@ mod tests {
                 CmdRequest::CryptsetupClose {
                     mapper: "braid-ccc".into(),
                 },
-                err_raw("cryptsetup close braid-ccc", 5, "Device is not active."),
+                err_raw("cryptsetup close braid-ccc", 4, "Device is not active."),
             );
         let fs = MockFs::new(&[
             "/dev/mapper/braid-aaa",
@@ -1218,7 +1222,7 @@ mod tests {
                 CmdRequest::CryptsetupClose {
                     mapper: "braid-orphan".into(),
                 },
-                err_raw("cryptsetup close braid-orphan", 5, "Device is not active."),
+                err_raw("cryptsetup close braid-orphan", 4, "Device is not active."),
             );
         let fs = MockFs::new(&[
             "/dev/mapper/braid-aaa",
@@ -1250,7 +1254,7 @@ mod tests {
                 CmdRequest::CryptsetupClose {
                     mapper: "braid-aaa".into(),
                 },
-                err_raw("cryptsetup close braid-aaa", 5, "Device is not active."),
+                err_raw("cryptsetup close braid-aaa", 4, "Device is not active."),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
@@ -1289,7 +1293,7 @@ mod tests {
                 CmdRequest::CryptsetupClose {
                     mapper: "braid-aaa".into(),
                 },
-                err_raw("cryptsetup close braid-aaa", 5, "Device is not active."),
+                err_raw("cryptsetup close braid-aaa", 4, "Device is not active."),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
@@ -1371,6 +1375,62 @@ mod tests {
         assert_eq!(
             bbb_calls, 1,
             "expected exactly 1 close for braid-bbb, got: {calls:?}"
+        );
+    }
+
+    // Intent: cryptsetup close with exit status 5 goes through the retry
+    //   loop and surfaces as LockError::DeviceBusy, regardless of the
+    //   specific English phrase in stderr.
+    // Why it exists: the classifier at lock.rs:38-42 is what distinguishes
+    //   "kernel-async release race, retry wins" from "every close
+    //   hard-fails on first attempt". An earlier stderr-substring
+    //   classifier ("busy" || "in use") would hard-fail on wording drift
+    //   like "still active and cannot be removed". This test uses that
+    //   non-canonical wording at exit 5 so a regression back to
+    //   stderr-based matching fails here.
+    // Scenario: umount succeeds; braid-aaa close returns exit 5 on every
+    //   attempt with non-canonical busy wording; braid-bbb closes cleanly.
+    //   Lock must retry braid-aaa CLOSE_RETRY_ATTEMPTS times, then return
+    //   LockError::DeviceBusy.
+    #[test]
+    fn lock_mapper_close_exit5_is_busy_regardless_of_wording() {
+        let inner = mounted_runner()
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: "braid-aaa".into(),
+                },
+                err_raw(
+                    "cryptsetup close braid-aaa",
+                    5,
+                    "Target braid-aaa is still active and cannot be removed.",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: "braid-bbb".into(),
+                },
+                ok_raw("cryptsetup close braid-bbb"),
+            );
+        let runner = RecordingRunner::new(inner);
+        let fs = MockFs::new(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]);
+        let config = test_config();
+        let membership = test_membership();
+
+        let err = cmd_lock(&runner, &fs, &config, &membership, false)
+            .expect_err("busy close should bubble up after retries exhaust");
+        assert!(
+            matches!(err, LockError::DeviceBusy(_)),
+            "expected LockError::DeviceBusy, got: {err:?}"
+        );
+        let aaa_attempts = runner
+            .close_calls()
+            .iter()
+            .filter(|m| m.as_str() == "braid-aaa")
+            .count();
+        assert_eq!(
+            aaa_attempts, CLOSE_RETRY_ATTEMPTS as usize,
+            "expected {} retry attempts, got {}",
+            CLOSE_RETRY_ATTEMPTS, aaa_attempts
         );
     }
 
