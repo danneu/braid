@@ -90,7 +90,12 @@ pub fn cmd_unlock<R: CommandRunner, F: Filesystem + ?Sized>(
 
     let mount_point = params.config.mount_point();
 
-    // Enrich pool.json with live metadata (luks_uuid, devid) — best-effort.
+    // Enrich pool.json with live metadata (luks_uuid, devid) -- best-effort.
+    // A rare race where probe_pool sees mounted=false after a successful
+    // mount leaves `pool_after.devices` empty, so refresh_pool_metadata
+    // no-ops. That is acceptable: correctness never depends on this write
+    // (see contract above). Pinned by
+    // unlock_tolerates_post_mount_probe_mounted_false.
     if let Ok(pool_after) = probe::probe_pool(runner, mount_point) {
         membership::refresh_pool_metadata(&pool_after, params.paths);
     }
@@ -913,5 +918,195 @@ mod tests {
             matches!(&err, UnlockError::Mount(MountError::DegradedRefused(_))),
             "expected DegradedRefused, got: {err:?}"
         );
+    }
+
+    /// Intent: `cmd_unlock` must tolerate a post-mount `probe_pool` that
+    /// returns `Ok(PoolState { mounted: false, devices: vec![], ... })`
+    /// without enriching pool.json and without failing.
+    ///
+    /// Why it exists: the post-mount enrichment at `cli/src/unlock.rs:94`
+    /// is best-effort. If `findmnt` races the mount (exit 1, empty stderr)
+    /// `probe_pool` returns `Ok(mounted=false)` instead of an error, which
+    /// still enters the `if let Ok(...)` arm. Without a pinning test,
+    /// nothing prevents a future refactor from propagating that `Ok` as a
+    /// hard failure or from silently enriching with stale data.
+    ///
+    /// Scenario: 3-disk pool, clean mount. The post-mount `findmnt` call
+    /// happens to exit 1 with empty stderr (benign miss). pool.json was
+    /// seeded with `luks_uuid=None`/`devid=None`; those fields must remain
+    /// `None` after `cmd_unlock` returns `Ok(())`, proving no enrichment
+    /// occurred.
+    #[test]
+    fn unlock_tolerates_post_mount_probe_mounted_false() {
+        let (_state_dir, sp) = test_paths();
+        let config = three_disk_config();
+        let membership = three_disk_membership();
+        // Seed pool.json with None metadata so we can assert non-enrichment.
+        membership::save_membership(&membership, &sp)
+            .expect("seed pool.json for assertion baseline");
+
+        let fs = MockFs::new(&[
+            "/dev/disk/by-id/virtio-disk1",
+            "/dev/disk/by-id/virtio-disk2",
+            "/dev/disk/by-id/virtio-disk3",
+        ]);
+
+        let runner = MockRunner::default()
+            // mountpoint check -> not mounted
+            .with_output(
+                CmdRequest::MountpointCheck {
+                    path: MountPoint("/mnt/storage".to_owned()),
+                },
+                err_raw("mountpoint", 1, ""),
+            )
+            // probe: all 3 disks are LUKS
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                RawCommandOutput {
+                    cmd: "cryptsetup luksUUID".into(),
+                    stdout: "aaaaaaaa-1111-2222-3333-444444444444\n".into(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                },
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                },
+                RawCommandOutput {
+                    cmd: "cryptsetup luksUUID".into(),
+                    stdout: "bbbbbbbb-1111-2222-3333-444444444444\n".into(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                },
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk3".into(),
+                },
+                RawCommandOutput {
+                    cmd: "cryptsetup luksUUID".into(),
+                    stdout: "cccccccc-1111-2222-3333-444444444444\n".into(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                },
+            )
+            // verify passphrase
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw("cryptsetup open --test-passphrase"),
+            )
+            // open all 3 disks
+            .with_output_stdin(
+                CmdRequest::CryptsetupLuksOpen {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                    mapper: "braid-disk1".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw("cryptsetup open"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupLuksOpen {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                    mapper: "braid-disk2".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw("cryptsetup open"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupLuksOpen {
+                    device: "/dev/disk/by-id/virtio-disk3".into(),
+                    mapper: "braid-disk3".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw("cryptsetup open"),
+            )
+            // btrfs device scan
+            .with_output(CmdRequest::BtrfsDeviceScanAll, ok_raw("btrfs device scan"))
+            // normal mount (all present)
+            .with_output(
+                CmdRequest::Mount {
+                    device: "/dev/mapper/braid-disk1".into(),
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                },
+                ok_raw("mount -o noatime,skip_balance"),
+            )
+            // post-mount probe_pool: findmnt returns exit 1 + empty stderr.
+            // Per parse_findmnt_json, that yields FindmntOutput with no
+            // filesystems, which probe_pool converts to
+            // Ok(PoolState { mounted: false, devices: vec![], ... }).
+            .with_output(
+                CmdRequest::FindmntJson {
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                },
+                err_raw("findmnt", 1, ""),
+            )
+            // balance status -> no balance (post-enrichment warn step)
+            .with_output(
+                CmdRequest::BtrfsBalanceStatus {
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                },
+                RawCommandOutput {
+                    cmd: "btrfs balance status".into(),
+                    stdout: "No balance found on '/mnt/storage'\n".into(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                },
+            )
+            .with_luks_dump_text_luks2_for(&[
+                "/dev/disk/by-id/virtio-disk1",
+                "/dev/disk/by-id/virtio-disk2",
+                "/dev/disk/by-id/virtio-disk3",
+            ])
+            .with_mappers_closed(&["braid-disk1", "braid-disk2", "braid-disk3"]);
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        {
+            use std::io::Write;
+            tmp.as_file().write_all(b"testpass").unwrap();
+        }
+
+        let result = cmd_unlock(
+            &runner,
+            &fs,
+            &UnlockParams {
+                config: &config,
+                membership: &membership,
+                paths: &sp,
+                passphrase_stdin: false,
+                passphrase_file: Some(tmp.path()),
+                key_file: None,
+                allow_degraded: false,
+                dry_run: false,
+            },
+        );
+
+        result.expect("unlock should tolerate probe_pool returning mounted=false");
+
+        let loaded = membership::load_membership(&sp)
+            .expect("pool.json should still be loadable after unlock");
+        for name in ["disk1", "disk2", "disk3"] {
+            let member = loaded
+                .disks
+                .get(name)
+                .unwrap_or_else(|| panic!("missing disk {name} in pool.json"));
+            assert!(
+                member.luks_uuid.is_none(),
+                "{name}.luks_uuid must remain None when probe_pool returns \
+                 mounted=false, got: {:?}",
+                member.luks_uuid
+            );
+            assert!(
+                member.devid.is_none(),
+                "{name}.devid must remain None when probe_pool returns \
+                 mounted=false, got: {:?}",
+                member.devid
+            );
+        }
     }
 }
