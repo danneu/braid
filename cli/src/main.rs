@@ -315,6 +315,7 @@ fn main() {
                     progress,
                     paths: &paths,
                     sleep_inhibitor: &sleep_inhibitor,
+                    passphrase_reader: &braid_cli::luks::RpasswordTty,
                 },
             ) {
                 print_cli_error(&e.to_string());

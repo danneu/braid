@@ -5,7 +5,8 @@ use crate::inhibit::AcquireSleepInhibitor;
 use crate::journal;
 use crate::luks::{
     backup_luks_header, ensure_luks_open, luks_format, luks_opts_from_env,
-    pool_has_keyfile_enrollment, read_passphrase, verify_passphrase, VerifyOutcome,
+    pool_has_keyfile_enrollment, read_passphrase_with, verify_passphrase, PassphraseReader,
+    VerifyOutcome,
 };
 use crate::membership::{self, PoolMembership};
 use crate::parse::btrfs_filesystem_show::{classify_btrfs_probe, DeviceBtrfsProbe};
@@ -242,6 +243,10 @@ pub struct AddParams<'a> {
     /// portion of the add. Production passes `&RealSleepInhibitor`;
     /// unit tests pass `&RecordingInhibitor` to avoid spawning subprocesses.
     pub sleep_inhibitor: &'a dyn AcquireSleepInhibitor,
+    /// Seam for reading a LUKS passphrase from the TTY. Production
+    /// passes `&RpasswordTty`; tests pass a scripted reader so the
+    /// bootstrap-confirm path is observable at the `cmd_add` layer.
+    pub passphrase_reader: &'a dyn PassphraseReader,
 }
 
 pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
@@ -415,8 +420,20 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         confirm::confirm_yes().map_err(AddError::Validation)?;
     }
 
-    // Read passphrase (once)
-    let passphrase = read_passphrase(params.passphrase_file, params.passphrase_stdin)?;
+    // Confirm the new passphrase iff this add will `luks_format` without
+    // a live keyslot to verify against. Otherwise a typo either (a) gets
+    // caught by the `verify_passphrase` block below against the live pool
+    // member, or (b) lands on a no-format path where subsequent open/
+    // identity validation aborts -- both recoverable. Bootstrap and
+    // fresh-disk-into-unassembled-pool have no such safety net, so a typo
+    // becomes the canonical pool passphrase; see plans/wip for details.
+    let confirm_new = any_needs_format && pool.devices.is_empty();
+    let passphrase = read_passphrase_with(
+        params.passphrase_file,
+        params.passphrase_stdin,
+        confirm_new,
+        params.passphrase_reader,
+    )?;
 
     // Verify passphrase against existing pool member (once)
     if any_needs_format
@@ -872,6 +889,7 @@ fn format_add_confirm(disks: &[AddConfirmDisk]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::luks::{RpasswordTty, ScriptedPassphraseReader};
 
     fn test_paths() -> (tempfile::TempDir, StatePaths) {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1005,6 +1023,7 @@ mod tests {
                 progress: ProgressOutput::Off,
                 paths: &sp,
                 sleep_inhibitor: &inhibitor,
+                passphrase_reader: &RpasswordTty,
             },
         );
         let err = result.unwrap_err().to_string();
@@ -1903,6 +1922,7 @@ mod tests {
                 progress: ProgressOutput::Off,
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
+                passphrase_reader: &RpasswordTty,
             },
         )
         .expect("no-op add should succeed");
@@ -1957,6 +1977,7 @@ mod tests {
                 progress: ProgressOutput::Off,
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
+                passphrase_reader: &RpasswordTty,
             },
         );
 
@@ -2016,6 +2037,7 @@ mod tests {
                 progress: ProgressOutput::Off,
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
+                passphrase_reader: &RpasswordTty,
             },
         );
 
@@ -2080,6 +2102,7 @@ mod tests {
                 progress: ProgressOutput::Off,
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
+                passphrase_reader: &RpasswordTty,
             },
         );
 
@@ -2168,6 +2191,7 @@ mod tests {
                 progress: ProgressOutput::Off,
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
+                passphrase_reader: &RpasswordTty,
             },
         );
 
@@ -2287,6 +2311,448 @@ mod tests {
         assert!(
             output.contains("$ btrfs balance start"),
             "missing balance command"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Bootstrap-confirm regression tests (cmd_add gate matrix)
+    // -----------------------------------------------------------------------
+    //
+    // These tests pin the `confirm_new = any_needs_format &&
+    // pool.devices.first().is_none()` gate by driving `cmd_add` directly
+    // through its passphrase read. The gate has two axes:
+    //
+    //   any_needs_format  | live_target | confirm_new
+    //   ------------------+-------------+------------
+    //   true              | false       | TRUE  (bootstrap, locked-pool-fresh-add)
+    //   true              | true        | false (live pool: verify_passphrase catches typos)
+    //   false             | *           | false (no format: gate short-circuits)
+    //
+    // Each cmd-level cell where any_needs_format=true has a test below.
+    // The no-format cell is covered at helper level
+    // (`read_passphrase_with_readers_tty_no_confirm_single_read`).
+
+    use std::sync::Arc;
+
+    /// Recording runner for cmd_add regression tests. Stubs just enough to
+    /// reach the passphrase read and the first few format/backup commands,
+    /// and logs every call so tests can assert on what ran.
+    ///
+    /// `CryptsetupLuksHeaderBackup` is hard-coded to fail (exit 1) so that
+    /// `cmd_add` aborts deterministically after `luks_format` runs, without
+    /// having to mock every downstream command (mkfs, mount, pool probe).
+    type CmdLog = Arc<Mutex<Vec<CmdRequest>>>;
+    type StdinLog = Arc<Mutex<Vec<(CmdRequest, Vec<u8>)>>>;
+
+    #[derive(Clone)]
+    struct AddRecordingRunner {
+        log: CmdLog,
+        stdin_log: StdinLog,
+        pool_mounted: bool,
+    }
+
+    impl AddRecordingRunner {
+        fn new(pool_mounted: bool) -> Self {
+            Self {
+                log: Arc::new(Mutex::new(Vec::new())),
+                stdin_log: Arc::new(Mutex::new(Vec::new())),
+                pool_mounted,
+            }
+        }
+        fn log(&self) -> std::sync::MutexGuard<'_, Vec<CmdRequest>> {
+            self.log.lock().unwrap()
+        }
+        fn stdin_log(&self) -> std::sync::MutexGuard<'_, Vec<(CmdRequest, Vec<u8>)>> {
+            self.stdin_log.lock().unwrap()
+        }
+        fn saw_format(&self) -> bool {
+            self.log()
+                .iter()
+                .any(|r| matches!(r, CmdRequest::CryptsetupLuksFormat { .. }))
+        }
+        fn saw_verify(&self) -> bool {
+            self.log()
+                .iter()
+                .any(|r| matches!(r, CmdRequest::CryptsetupTestPassphrase { .. }))
+        }
+        fn format_stdin(&self) -> Option<Vec<u8>> {
+            self.stdin_log()
+                .iter()
+                .find(|(r, _)| matches!(r, CmdRequest::CryptsetupLuksFormat { .. }))
+                .map(|(_, s)| s.clone())
+        }
+    }
+
+    const LIVE_POOL_FSID: &str = "cc86845b-aec3-408e-bef5-553affc1f2b1";
+    const DISK1_UUID: &str = "11111111-1111-1111-1111-111111111111";
+
+    impl CommandRunner for AddRecordingRunner {
+        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
+            self.log.lock().unwrap().push(request.clone());
+            match request {
+                CmdRequest::FindmntJson { mount_point } => {
+                    if self.pool_mounted {
+                        Ok(RawCommandOutput {
+                            cmd: format!("findmnt --json --mountpoint {mount_point}"),
+                            stdout: r#"{"filesystems":[{"target":"/mnt/storage","source":"/dev/mapper/braid-disk1","fstype":"btrfs","options":"rw,relatime"}]}"#.into(),
+                            stderr: String::new(),
+                            exit_status: 0,
+                        })
+                    } else {
+                        // Unmounted: findmnt exits 1 with empty stderr ->
+                        // parse_findmnt_json treats as empty filesystems list.
+                        Ok(RawCommandOutput {
+                            cmd: format!("findmnt --json --mountpoint {mount_point}"),
+                            stdout: String::new(),
+                            stderr: String::new(),
+                            exit_status: 1,
+                        })
+                    }
+                }
+                CmdRequest::BtrfsFilesystemShow { mount_point } => Ok(RawCommandOutput {
+                    cmd: format!("btrfs filesystem show {mount_point}"),
+                    stdout: format!(
+                        "Label: none  uuid: {LIVE_POOL_FSID}\n\
+                         \tTotal devices 1 FS bytes used 16.17MiB\n\
+                         \tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n"
+                    ),
+                    stderr: String::new(),
+                    exit_status: 0,
+                }),
+                CmdRequest::CryptsetupStatus { mapper } if mapper == "braid-disk1" => {
+                    Ok(RawCommandOutput {
+                        cmd: format!("cryptsetup status {mapper}"),
+                        stdout: format!(
+                            "{mapper} is active and is in use.\n  \
+                             type:    LUKS2\n  device:  /dev/vdb\n  mode:    read/write\n"
+                        ),
+                        stderr: String::new(),
+                        exit_status: 0,
+                    })
+                }
+                CmdRequest::CryptsetupLuksUuid { device } if device == "/dev/vdb" => {
+                    Ok(RawCommandOutput {
+                        cmd: format!("cryptsetup luksUUID {device}"),
+                        stdout: format!("{DISK1_UUID}\n"),
+                        stderr: String::new(),
+                        exit_status: 0,
+                    })
+                }
+                CmdRequest::CryptsetupLuksUuid { device } => {
+                    // Disk under test is PresentNotLuks -- luksUUID fails.
+                    Ok(RawCommandOutput {
+                        cmd: format!("cryptsetup luksUUID {device}"),
+                        stdout: String::new(),
+                        stderr: "Device is not a valid LUKS device.\n".into(),
+                        exit_status: 1,
+                    })
+                }
+                CmdRequest::CryptsetupLuksFormat { device, .. } => Ok(RawCommandOutput {
+                    cmd: format!("cryptsetup luksFormat {device}"),
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                }),
+                CmdRequest::CryptsetupLuksHeaderBackup { device, .. } => {
+                    // Forced failure so cmd_add aborts cleanly after
+                    // luks_format runs. Lets tests assert on what ran
+                    // without stubbing the full mkfs/mount chain.
+                    Ok(RawCommandOutput {
+                        cmd: format!("cryptsetup luksHeaderBackup {device}"),
+                        stdout: String::new(),
+                        stderr: "mock: header backup forced to fail".into(),
+                        exit_status: 1,
+                    })
+                }
+                CmdRequest::BtrfsBalanceStatus { .. } => Ok(RawCommandOutput {
+                    cmd: "btrfs balance status".into(),
+                    stdout: "No balance found on '/mnt/storage'\n".into(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                }),
+                _ => Err(CmdError::MissingMock),
+            }
+        }
+
+        fn run_with_stdin(
+            &self,
+            request: &CmdRequest,
+            stdin: &[u8],
+        ) -> Result<RawCommandOutput, CmdError> {
+            self.stdin_log
+                .lock()
+                .unwrap()
+                .push((request.clone(), stdin.to_vec()));
+            // For CryptsetupTestPassphrase in the live-pool case, return
+            // Authenticated (exit 0). All other stdin-carrying commands
+            // fall through to `run`.
+            if let CmdRequest::CryptsetupTestPassphrase { device } = request {
+                self.log.lock().unwrap().push(request.clone());
+                return Ok(RawCommandOutput {
+                    cmd: format!("cryptsetup open --test-passphrase {device}"),
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                });
+            }
+            self.run(request)
+        }
+    }
+
+    /// Shared test setup for the confirm-regression tests. Writes a minimal
+    /// config. Membership is NOT pre-seeded -- add_test_setup pre-seeds
+    /// disk1; this helper does not, so the tempdir is a true fresh state.
+    fn confirm_test_setup() -> (
+        tempfile::TempDir,
+        StatePaths,
+        tempfile::TempDir,
+        std::path::PathBuf,
+    ) {
+        let state_tmp = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(state_tmp.path().into());
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.json");
+        std::fs::write(
+            &config_path,
+            serde_json::to_vec(&serde_json::json!({ "mount_point": "/mnt/storage" })).unwrap(),
+        )
+        .unwrap();
+        (state_tmp, paths, tmp, config_path)
+    }
+
+    /*
+     * Intent: bootstrap `braid add` with a mismatched confirmation prompt
+     *   aborts BEFORE `cryptsetup luksFormat` runs.
+     *
+     * Why it exists: this is the primary regression for the fresh-format
+     *   typo trap. On bootstrap there is no live keyslot to verify
+     *   against, so a typoed passphrase would otherwise become the
+     *   canonical pool passphrase -- unrecoverable without an external
+     *   key backup. A test at the helper layer (check_passphrase_match)
+     *   would still pass if the cmd_add callsite forgot to enable
+     *   confirmation, so the assertion must be at the cmd_add layer.
+     *
+     * Scenario: user runs `braid add disk1=...` on a fresh system, types
+     *   the passphrase once, fat-fingers the confirmation, and the CLI
+     *   aborts without touching the LUKS header.
+     */
+    #[test]
+    fn cmd_add_bootstrap_aborts_on_passphrase_mismatch() {
+        let (_state_tmp, paths, _tmp, config_path) = confirm_test_setup();
+        let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk1".into()]);
+        let runner = AddRecordingRunner::new(false);
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let tty = ScriptedPassphraseReader::new(["typo-one", "typo-two"]);
+
+        let result = cmd_add(
+            &runner,
+            &fs,
+            &AddParams {
+                config_path: &config_path,
+                disk_specs: &["disk1=/dev/disk/by-id/virtio-disk1".into()],
+                dry_run: false,
+                yes: true,
+                passphrase_stdin: false,
+                passphrase_file: None,
+                enroll_key_file: None,
+                progress: ProgressOutput::Off,
+                paths: &paths,
+                sleep_inhibitor: &inhibitor,
+                passphrase_reader: &tty,
+            },
+        );
+
+        match result {
+            Err(AddError::Luks(crate::luks::LuksError::Validation(msg))) => assert!(
+                msg.contains("do not match"),
+                "expected 'do not match' in: {msg}"
+            ),
+            other => panic!(
+                "expected AddError::Luks(Validation), got {:?}",
+                other.map(|_| "Ok").unwrap_or("Err")
+            ),
+        }
+        assert!(
+            !runner.saw_format(),
+            "luks_format must NOT run when confirmation mismatches"
+        );
+        assert_eq!(tty.remaining(), 0, "both prompts must have been read");
+        // Pre-format failure: inhibitor never acquired, journal never written.
+        assert_eq!(
+            inhibitor.acquire_count(),
+            0,
+            "mismatch rejection must NOT acquire the sleep inhibitor"
+        );
+        assert!(
+            journal::load_journal(&paths).unwrap().is_none(),
+            "no journal should exist after pre-format mismatch rejection"
+        );
+    }
+
+    /*
+     * Intent: bootstrap `braid add` with matching confirmation reaches
+     *   `cryptsetup luksFormat` and passes the confirmed passphrase as
+     *   stdin to the format command.
+     *
+     * Why it exists: the happy path for the confirm flow. Pairs with the
+     *   mismatch test to pin both edges of the gate: mismatch blocks
+     *   format, match allows format to run with the exact bytes the user
+     *   confirmed.
+     *
+     * Scenario: user types the same passphrase twice; LUKS format runs
+     *   with that passphrase. The test deliberately fails at header
+     *   backup so we don't need to stub the full mkfs+mount chain.
+     */
+    #[test]
+    fn cmd_add_bootstrap_proceeds_on_passphrase_match() {
+        let (_state_tmp, paths, _tmp, config_path) = confirm_test_setup();
+        let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk1".into()]);
+        let runner = AddRecordingRunner::new(false);
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let tty = ScriptedPassphraseReader::new(["ok", "ok"]);
+
+        let result = cmd_add(
+            &runner,
+            &fs,
+            &AddParams {
+                config_path: &config_path,
+                disk_specs: &["disk1=/dev/disk/by-id/virtio-disk1".into()],
+                dry_run: false,
+                yes: true,
+                passphrase_stdin: false,
+                passphrase_file: None,
+                enroll_key_file: None,
+                progress: ProgressOutput::Off,
+                paths: &paths,
+                sleep_inhibitor: &inhibitor,
+                passphrase_reader: &tty,
+            },
+        );
+
+        assert!(
+            result.is_err(),
+            "cmd_add must abort at forced header-backup failure"
+        );
+        assert!(runner.saw_format(), "luks_format must have run");
+        assert_eq!(
+            runner.format_stdin().as_deref(),
+            Some(b"ok".as_ref()),
+            "luks_format must receive the confirmed passphrase as stdin"
+        );
+        assert_eq!(tty.remaining(), 0, "both prompts must have been read");
+    }
+
+    /*
+     * Intent: `braid add` for a fresh disk when `pool_membership.disks`
+     *   is non-empty but no live verify target exists (pool not
+     *   currently assembled) STILL confirms -- two reads, then format.
+     *
+     * Why it exists: guards against the rejected
+     *   `pool_membership.disks.is_empty()` gate that would have missed
+     *   this cell. The good gate reads
+     *   `any_needs_format && pool.devices.first().is_none()`; when
+     *   membership has a prior disk but the pool is locked/unmounted,
+     *   the verify block is skipped yet we are still about to
+     *   `luks_format` -- so confirmation is still required.
+     *
+     * Scenario: user has a pool with disk1 recorded in membership but
+     *   currently locked (post-boot, pre-unlock). They add a new fresh
+     *   disk2 without first unlocking. Typo protection still applies.
+     */
+    #[test]
+    fn cmd_add_existing_membership_no_live_target_confirms() {
+        let (_state_tmp, paths, _tmp, config_path, _pass_path) = add_test_setup();
+        let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
+        let runner = AddRecordingRunner::new(false);
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let tty = ScriptedPassphraseReader::new(["pw", "pw", "SENTINEL"]);
+
+        let _ = cmd_add(
+            &runner,
+            &fs,
+            &AddParams {
+                config_path: &config_path,
+                disk_specs: &["disk2=/dev/disk/by-id/virtio-disk2".into()],
+                dry_run: false,
+                yes: true,
+                passphrase_stdin: false,
+                passphrase_file: None,
+                enroll_key_file: None,
+                progress: ProgressOutput::Off,
+                paths: &paths,
+                sleep_inhibitor: &inhibitor,
+                passphrase_reader: &tty,
+            },
+        );
+
+        assert!(runner.saw_format(), "luks_format must have run");
+        assert_eq!(
+            runner.format_stdin().as_deref(),
+            Some(b"pw".as_ref()),
+            "luks_format must receive the confirmed passphrase"
+        );
+        assert_eq!(
+            tty.remaining(),
+            1,
+            "exactly two prompts must have been read (SENTINEL remains)"
+        );
+    }
+
+    /*
+     * Intent: `braid add` for a fresh disk into a LIVE mounted pool
+     *   reads the passphrase ONCE (no confirm), then `verify_passphrase`
+     *   catches any typo against the live keyslot before format.
+     *
+     * Why it exists: guards against a regression that over-triggers the
+     *   confirm gate (e.g., `confirm_new = any_needs_format`). The live
+     *   pool already has a safety net -- a typo is rejected by the
+     *   existing verify_passphrase block -- so doubling the prompt is
+     *   gratuitous and the test must fail if the gate forgets to check
+     *   `pool.devices.first().is_none()`.
+     *
+     * Scenario: user adds a new disk to an already-mounted 1-disk pool.
+     *   One prompt, then verify_passphrase authenticates, then format
+     *   runs.
+     */
+    #[test]
+    fn cmd_add_live_pool_fresh_add_single_prompt() {
+        let (_state_tmp, paths, _tmp, config_path, _pass_path) = add_test_setup();
+        let fs = AddMockFs(vec![
+            "/dev/disk/by-id/virtio-disk2".into(),
+            // /sys/fs/btrfs/<fsid>/exclusive_operation is served by
+            // AddMockFs::read_to_string, not exists(). No entry needed.
+        ]);
+        let runner = AddRecordingRunner::new(true);
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let tty = ScriptedPassphraseReader::new(["pw", "SENTINEL"]);
+
+        let _ = cmd_add(
+            &runner,
+            &fs,
+            &AddParams {
+                config_path: &config_path,
+                disk_specs: &["disk2=/dev/disk/by-id/virtio-disk2".into()],
+                dry_run: false,
+                yes: true,
+                passphrase_stdin: false,
+                passphrase_file: None,
+                enroll_key_file: None,
+                progress: ProgressOutput::Off,
+                paths: &paths,
+                sleep_inhibitor: &inhibitor,
+                passphrase_reader: &tty,
+            },
+        );
+
+        assert!(
+            runner.saw_verify(),
+            "verify_passphrase must run against live pool member"
+        );
+        assert!(runner.saw_format(), "luks_format must have run");
+        assert_eq!(
+            tty.remaining(),
+            1,
+            "exactly one prompt must have been read (SENTINEL remains)"
         );
     }
 }

@@ -3,6 +3,7 @@ use crate::config::mapper_name;
 use crate::probe::Filesystem;
 use crate::state_paths::StatePaths;
 use crate::types::{ByIdPath, PoolDevice};
+use std::io::BufRead;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
@@ -45,10 +46,107 @@ pub enum LuksError {
     Io(#[from] std::io::Error),
 }
 
-/// Read passphrase from --passphrase-file, --passphrase-stdin, or TTY prompt.
+/// Abstraction over the TTY passphrase read. Production uses
+/// [`RpasswordTty`] (rpassword-backed, echo-suppressed). Tests inject a
+/// scripted reader so `cmd_add` can be exercised without a PTY.
+pub trait PassphraseReader {
+    /// Read a passphrase from the terminal with the given prompt label,
+    /// suppressing echo. Returns the validated (non-empty, no embedded
+    /// line-break characters) passphrase.
+    fn read_tty(&self, label: &str) -> Result<String, LuksError>;
+}
+
+/// Production TTY reader backed by rpassword.
+pub struct RpasswordTty;
+
+impl PassphraseReader for RpasswordTty {
+    fn read_tty(&self, label: &str) -> Result<String, LuksError> {
+        eprint!("{label}");
+        let raw = rpassword::read_password().map_err(|e| {
+            LuksError::Validation(format!("failed to read passphrase from terminal: {e}"))
+        })?;
+        validate_passphrase(&raw, "terminal")
+    }
+}
+
+/// Test-only scripted passphrase reader. Pops from an internal queue
+/// so tests can observe read-count without a PTY. Shared between
+/// luks.rs unit tests and add.rs `cmd_add` regression tests.
+#[cfg(test)]
+pub(crate) struct ScriptedPassphraseReader {
+    queue: std::cell::RefCell<std::collections::VecDeque<String>>,
+}
+
+#[cfg(test)]
+impl ScriptedPassphraseReader {
+    pub(crate) fn new<I, S>(items: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Self {
+            queue: std::cell::RefCell::new(items.into_iter().map(Into::into).collect()),
+        }
+    }
+    pub(crate) fn remaining(&self) -> usize {
+        self.queue.borrow().len()
+    }
+}
+
+#[cfg(test)]
+impl PassphraseReader for ScriptedPassphraseReader {
+    fn read_tty(&self, _label: &str) -> Result<String, LuksError> {
+        match self.queue.borrow_mut().pop_front() {
+            Some(s) => Ok(s),
+            None => Err(LuksError::Validation(
+                "ScriptedPassphraseReader: queue exhausted".into(),
+            )),
+        }
+    }
+}
+
+/// Existing API -- read a passphrase without new-format confirmation.
+/// Used by `replace`, `enroll-key-file`, and `mount::resolve_credential`
+/// where a typo is caught by a live verification target.
 pub fn read_passphrase(
     passphrase_file: Option<&std::path::Path>,
     passphrase_stdin: bool,
+) -> Result<String, LuksError> {
+    read_passphrase_with(passphrase_file, passphrase_stdin, false, &RpasswordTty)
+}
+
+/// Read a passphrase, optionally confirming on the TTY when the caller
+/// is about to `luks_format` without a live keyslot to verify against.
+///
+/// - File / stdin inputs ignore `confirm_new` and `tty` (single read).
+/// - TTY input reads once; if `confirm_new`, prompts again and requires
+///   a byte-exact match.
+///
+/// Thin wrapper -- locks process stdin and delegates.
+pub fn read_passphrase_with(
+    passphrase_file: Option<&std::path::Path>,
+    passphrase_stdin: bool,
+    confirm_new: bool,
+    tty: &dyn PassphraseReader,
+) -> Result<String, LuksError> {
+    let mut stdin = std::io::stdin().lock();
+    read_passphrase_with_readers(
+        passphrase_file,
+        passphrase_stdin,
+        confirm_new,
+        &mut stdin,
+        tty,
+    )
+}
+
+/// Full form used by production (via `read_passphrase_with`) and by
+/// tests (with a `Cursor` for stdin and a scripted `PassphraseReader`).
+fn read_passphrase_with_readers(
+    passphrase_file: Option<&std::path::Path>,
+    passphrase_stdin: bool,
+    confirm_new: bool,
+    stdin: &mut dyn BufRead,
+    tty: &dyn PassphraseReader,
 ) -> Result<String, LuksError> {
     if let Some(path) = passphrase_file {
         let contents = std::fs::read_to_string(path).map_err(|e| {
@@ -60,11 +158,14 @@ pub fn read_passphrase(
         return validate_passphrase(&contents, &format!("file {}", path.display()));
     }
     if passphrase_stdin {
-        let mut buf = String::new();
-        std::io::stdin().read_line(&mut buf)?;
-        return validate_passphrase(&buf, "stdin");
+        return read_passphrase_stdin_from(stdin);
     }
-    prompt_passphrase_tty()
+    let first = tty.read_tty("LUKS passphrase: ")?;
+    if !confirm_new {
+        return Ok(first);
+    }
+    let second = tty.read_tty("Confirm LUKS passphrase: ")?;
+    check_passphrase_match(first, second)
 }
 
 /// Normalize and validate a raw passphrase string.
@@ -86,12 +187,27 @@ fn validate_passphrase(raw: &str, source: &str) -> Result<String, LuksError> {
     Ok(passphrase)
 }
 
-fn prompt_passphrase_tty() -> Result<String, LuksError> {
-    eprint!("LUKS passphrase: ");
-    let raw = rpassword::read_password().map_err(|e| {
-        LuksError::Validation(format!("failed to read passphrase from terminal: {e}"))
-    })?;
-    validate_passphrase(&raw, "terminal")
+/// Read a single line from the given reader and validate it as a
+/// passphrase. Parallels `confirm_yes_from` -- the production caller
+/// locks stdin and passes it in; tests pass `Cursor`.
+fn read_passphrase_stdin_from(r: &mut dyn BufRead) -> Result<String, LuksError> {
+    let mut buf = String::new();
+    r.read_line(&mut buf)?;
+    validate_passphrase(&buf, "stdin")
+}
+
+/// Require two passphrase reads to match byte-for-byte. Returns the
+/// passphrase on match, Validation error on mismatch. Used to catch
+/// typos on the fresh-format path where the typoed passphrase would
+/// otherwise become the canonical pool passphrase.
+fn check_passphrase_match(first: String, second: String) -> Result<String, LuksError> {
+    if first == second {
+        Ok(first)
+    } else {
+        Err(LuksError::Validation(
+            "passphrases do not match -- aborting".to_owned(),
+        ))
+    }
 }
 
 /// LUKS format a device with the given passphrase.
@@ -1213,6 +1329,213 @@ mod tests {
     fn read_passphrase_file_missing() {
         let result = read_passphrase(Some(std::path::Path::new("/no/such/file")), false);
         assert!(result.is_err());
+    }
+
+    // ── check_passphrase_match ───────────────────────────────────────
+    //
+    // The byte-equality comparator that gates fresh-format adds. These
+    // unit tests pin the pure function; the cmd-level regression lives
+    // in add.rs.
+
+    /*
+     * Intent: two identical passphrases return Ok with the passphrase.
+     * Why: happy path for the confirm-twice flow on bootstrap add.
+     * Scenario: user types the intended passphrase both times.
+     */
+    #[test]
+    fn check_passphrase_match_ok_on_equal() {
+        let got = check_passphrase_match("secret".into(), "secret".into()).unwrap();
+        assert_eq!(got, "secret");
+    }
+
+    /*
+     * Intent: differing passphrases return Validation with "do not match".
+     * Why: the primary regression -- a typo on fresh format must be
+     *   rejected before `luks_format` runs.
+     * Scenario: user typos the second prompt.
+     */
+    #[test]
+    fn check_passphrase_match_err_on_differ() {
+        let err = check_passphrase_match("abc".into(), "xyz".into()).unwrap_err();
+        match err {
+            LuksError::Validation(msg) => assert!(
+                msg.contains("do not match"),
+                "expected 'do not match' in: {msg}"
+            ),
+            other => panic!("expected Validation, got {other:?}"),
+        }
+    }
+
+    /*
+     * Intent: comparison is case-sensitive.
+     * Why: LUKS passphrases are opaque byte strings -- "ABC" and "abc"
+     *   are different keys and must not silently match.
+     * Scenario: user holds shift on the second prompt by accident.
+     */
+    #[test]
+    fn check_passphrase_match_case_sensitive() {
+        assert!(check_passphrase_match("ABC".into(), "abc".into()).is_err());
+    }
+
+    /*
+     * Intent: trailing whitespace is significant.
+     * Why: same reason as case-sensitivity -- the LUKS keyslot binds
+     *   to the exact byte string.
+     * Scenario: user hits space after the second prompt.
+     */
+    #[test]
+    fn check_passphrase_match_trailing_whitespace_sensitive() {
+        assert!(check_passphrase_match("abc".into(), "abc ".into()).is_err());
+    }
+
+    // ── read_passphrase_stdin_from ───────────────────────────────────
+    //
+    // Mirrors the `confirm_yes_from` pattern in cli/src/confirm.rs:101.
+    // Tests feed a Cursor so the production stdin path is unchanged but
+    // behavior is pinned at unit level.
+
+    /*
+     * Intent: a well-formed line returns the trimmed passphrase.
+     * Why: core happy path for `--passphrase-stdin`.
+     * Scenario: `echo "secret" | braid add --passphrase-stdin ...`.
+     */
+    #[test]
+    fn read_passphrase_stdin_from_ok() {
+        let mut cur = std::io::Cursor::new(b"secret\n");
+        let got = read_passphrase_stdin_from(&mut cur).unwrap();
+        assert_eq!(got, "secret");
+    }
+
+    /*
+     * Intent: a line containing only a newline is rejected as empty.
+     * Why: symmetry with file/TTY paths -- empty passphrases are
+     *   forbidden everywhere.
+     * Scenario: operator pipes an empty string by mistake.
+     */
+    #[test]
+    fn read_passphrase_stdin_from_empty_rejected() {
+        let mut cur = std::io::Cursor::new(b"\n");
+        let err = read_passphrase_stdin_from(&mut cur).unwrap_err();
+        match err {
+            LuksError::Validation(msg) => {
+                assert!(msg.contains("empty"), "expected 'empty' in: {msg}")
+            }
+            other => panic!("expected Validation, got {other:?}"),
+        }
+    }
+
+    /*
+     * Intent: CRLF line endings are stripped to the passphrase.
+     * Why: Windows-origin pipes may carry \r\n; symmetry with the file
+     *   path's `read_passphrase_file_crlf_trailing` coverage.
+     * Scenario: passphrase piped from a Windows-authored source.
+     */
+    #[test]
+    fn read_passphrase_stdin_from_strips_crlf() {
+        let mut cur = std::io::Cursor::new(b"secret\r\n");
+        let got = read_passphrase_stdin_from(&mut cur).unwrap();
+        assert_eq!(got, "secret");
+    }
+
+    // ── read_passphrase_with_readers (branch selection) ──────────────
+    //
+    // These tests pin the file/stdin/TTY branch selection inside the
+    // seam-aware helper. Using a scripted PassphraseReader + Cursor
+    // lets us observe which branch actually consumed input, without
+    // swapping process stdin. `ScriptedPassphraseReader` lives at
+    // module scope (above) so add.rs tests can reuse it.
+
+    /*
+     * Intent: TTY branch with confirm_new=false reads exactly once.
+     * Why: non-bootstrap add must not double-prompt; a regression that
+     *   always confirms would consume the SENTINEL entry.
+     * Scenario: subsequent `braid add` to a live pool -- one TTY read,
+     *   then verify_passphrase catches any typo.
+     */
+    #[test]
+    fn read_passphrase_with_readers_tty_no_confirm_single_read() {
+        let tty = ScriptedPassphraseReader::new(["pw", "SENTINEL"]);
+        let mut stdin = std::io::Cursor::new(&[][..]);
+        let got = read_passphrase_with_readers(None, false, false, &mut stdin, &tty).unwrap();
+        assert_eq!(got, "pw");
+        assert_eq!(tty.remaining(), 1, "SENTINEL must remain unconsumed");
+    }
+
+    /*
+     * Intent: TTY branch with confirm_new=true consumes both prompts on match.
+     * Why: the primary confirm flow on bootstrap add.
+     * Scenario: user correctly types the same passphrase twice.
+     */
+    #[test]
+    fn read_passphrase_with_readers_tty_confirm_consumes_two() {
+        let tty = ScriptedPassphraseReader::new(["pw", "pw"]);
+        let mut stdin = std::io::Cursor::new(&[][..]);
+        let got = read_passphrase_with_readers(None, false, true, &mut stdin, &tty).unwrap();
+        assert_eq!(got, "pw");
+        assert_eq!(tty.remaining(), 0);
+    }
+
+    /*
+     * Intent: TTY branch with confirm_new=true returns Validation on mismatch.
+     * Why: the load-bearing reject path for bootstrap typo protection.
+     * Scenario: user typos the second prompt.
+     */
+    #[test]
+    fn read_passphrase_with_readers_tty_confirm_mismatch_err() {
+        let tty = ScriptedPassphraseReader::new(["pw", "typo"]);
+        let mut stdin = std::io::Cursor::new(&[][..]);
+        let err = read_passphrase_with_readers(None, false, true, &mut stdin, &tty).unwrap_err();
+        match err {
+            LuksError::Validation(msg) => assert!(
+                msg.contains("do not match"),
+                "expected 'do not match' in: {msg}"
+            ),
+            other => panic!("expected Validation, got {other:?}"),
+        }
+        assert_eq!(tty.remaining(), 0, "both prompts must have been read");
+    }
+
+    /*
+     * Intent: file branch short-circuits both the stdin and TTY readers.
+     * Why: `--passphrase-file` is an automation path; it must not
+     *   trigger a confirmation prompt even when confirm_new is true.
+     * Scenario: automation pipeline passes `--passphrase-file` during a
+     *   fresh bootstrap add.
+     */
+    #[test]
+    fn read_passphrase_with_readers_file_short_circuits_stdin_and_tty() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("pw.txt");
+        std::fs::write(&file, b"from-file\n").unwrap();
+        let tty = ScriptedPassphraseReader::new(["SENTINEL"]);
+        let mut stdin = std::io::Cursor::new(b"STDIN_SHOULD_NOT_BE_READ\n".to_vec());
+        let got = read_passphrase_with_readers(Some(&file), false, true, &mut stdin, &tty).unwrap();
+        assert_eq!(got, "from-file");
+        assert_eq!(tty.remaining(), 1, "SENTINEL must remain unconsumed");
+        assert_eq!(
+            stdin.position(),
+            0,
+            "stdin cursor must not have advanced (branch must short-circuit)"
+        );
+    }
+
+    /*
+     * Intent: stdin branch short-circuits the TTY reader even when confirm_new=true.
+     * Why: pins the stdin-vs-TTY branch selection inside
+     *   `read_passphrase_with_readers`. A regression that routed
+     *   `--passphrase-stdin` through the TTY path (or accidentally
+     *   prompted twice over stdin) would still satisfy the other tests,
+     *   so this is the seam that catches that class of bug.
+     * Scenario: `echo "pw" | braid add --passphrase-stdin ...` on a
+     *   fresh bootstrap.
+     */
+    #[test]
+    fn read_passphrase_with_readers_stdin_short_circuits_tty() {
+        let tty = ScriptedPassphraseReader::new(["SENTINEL"]);
+        let mut stdin = std::io::Cursor::new(b"from-stdin\n".to_vec());
+        let got = read_passphrase_with_readers(None, true, true, &mut stdin, &tty).unwrap();
+        assert_eq!(got, "from-stdin");
+        assert_eq!(tty.remaining(), 1, "SENTINEL must remain unconsumed");
     }
 
     // -- pool_has_keyfile_enrollment tests --
