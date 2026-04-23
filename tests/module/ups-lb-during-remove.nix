@@ -10,10 +10,13 @@
 # This is M4 of plans/wip/forced-shutdown-recovery-proof.md and is one
 # of the four matrix tests gating the flip of ADR 020 to Active.
 #
-# 3 disks, 6 GiB each. The 5 GiB urandom payload makes the remove's
-# data relocation last several seconds on tmpfs-backed virtual disks --
-# wider than the ~1s shutdown window from LB detection to umount --
-# so the test reliably catches the interrupted-remove scenario.
+# 3 disks, 10 GiB each. The 3 GiB urandom payload makes the
+# remove's data relocation last several seconds on tmpfs-backed
+# virtual disks -- wider than the ~1s shutdown window from LB
+# detection to umount -- so the test reliably catches the
+# interrupted-remove scenario. See the sizing comment at
+# `virtualisation.emptyDiskImages` below for the preflight-capacity
+# math that forces 10 GiB rather than 6.
 { braid }:
 { pkgs, lib, ... }:
 {
