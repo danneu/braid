@@ -1,6 +1,6 @@
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, Step};
 use crate::config::{mapper_name, Config};
-use crate::luks::{self, LuksError};
+use crate::luks::{self, LuksError, VerifyOutcome};
 use crate::membership::PoolMembership;
 use crate::probe::{self, Filesystem, ProbeError};
 use crate::types::{ByIdPath, ConfigDiskState, MountPoint};
@@ -386,8 +386,26 @@ fn open_disks_with_passphrase<R: CommandRunner, F: Filesystem + ?Sized>(
     passphrase: &str,
 ) -> Result<(), MountError> {
     let (ref first_name, ref first_by_id) = to_unlock[0];
-    let ok = luks::verify_passphrase(runner, &first_by_id.0, passphrase)?;
-    if !ok {
+    let outcome = match luks::verify_passphrase(runner, &first_by_id.0, passphrase) {
+        Ok(o) => o,
+        Err(e @ LuksError::OpenFailed { .. }) => {
+            // A non-auth verify failure (e.g. EBUSY, ENODEV, generic EINVAL)
+            // must still route through header diagnosis so a wiped or damaged
+            // header surfaces the restore/repair guidance instead of the
+            // cryptsetup "generic failure" string.
+            let original_summary = format!("verify failed on '{first_name}': {e}");
+            let header_state = luks::probe_luks_header(runner, &first_by_id.0);
+            return Err(explain_open_failure(
+                first_name,
+                &first_by_id.0,
+                header_state,
+                &original_summary,
+                MountError::Luks(e),
+            ));
+        }
+        Err(e) => return Err(e.into()),
+    };
+    if outcome == VerifyOutcome::Rejected {
         let original_summary = format!("passphrase rejected on '{first_name}'");
         let ok_fallback = MountError::Failed(format!(
             "wrong passphrase (verified against {first_name})"
@@ -491,8 +509,26 @@ pub fn execute_open_plan<R: CommandRunner, F: Filesystem + ?Sized>(
             OpenCredential::KeyFile(kf) => {
                 let kf = kf.as_path();
                 let (ref first_name, ref first_by_id) = plan.to_unlock[0];
-                let ok = luks::verify_key_file(runner, &first_by_id.0, kf)?;
-                if !ok {
+                let outcome = match luks::verify_key_file(runner, &first_by_id.0, kf) {
+                    Ok(o) => o,
+                    Err(e @ LuksError::OpenFailed { .. }) => {
+                        // Same non-auth routing as the passphrase arm: a
+                        // wiped/damaged header on the first disk must
+                        // still surface restore/repair guidance rather
+                        // than a raw cryptsetup hint.
+                        let original_summary = format!("verify failed on '{first_name}': {e}");
+                        let header_state = luks::probe_luks_header(runner, &first_by_id.0);
+                        return Err(explain_open_failure(
+                            first_name,
+                            &first_by_id.0,
+                            header_state,
+                            &original_summary,
+                            MountError::Luks(e),
+                        ));
+                    }
+                    Err(e) => return Err(e.into()),
+                };
+                if outcome == VerifyOutcome::Rejected {
                     let original_summary = format!("keyfile rejected on '{first_name}'");
                     let ok_fallback = MountError::Failed(format!(
                         "wrong keyfile (verified against {first_name})"
@@ -2610,6 +2646,272 @@ mod tests {
         assert!(
             !msg.contains(".luksheader"),
             "must not reference local .luksheader files: {msg}"
+        );
+    }
+
+    // ---- VerifyOutcome non-auth routing tests ---------------------------
+    //
+    // Pin the behavior split added to both verify callsites: on a non-auth
+    // verify exit, the outcome branches on LuksHeaderState.
+    //   - LuksHeaderState::Ok -> MountError::Luks(OpenFailed) with the raw
+    //     exit code/hint (no "wrong passphrase" narrative).
+    //   - LuksHeaderState::Unreadable -> off-system-backup guidance.
+    // Both branches are covered for each credential type so a revert at
+    // either callsite fails at least one test.
+
+    /*
+     * Intent: a non-auth verify exit (EBUSY) with a healthy LUKS header
+     *   surfaces as MountError::Luks(OpenFailed { exit_code: 5, .. }) and
+     *   does NOT route into the "wrong passphrase" fallback.
+     * Why it exists: this is the central regression probe for the
+     *   misdiagnosis bug -- before the VerifyOutcome refactor, every
+     *   non-zero verify exit collapsed to Ok(false), reaching the
+     *   LuksHeaderState::Ok fallback and telling users their passphrase
+     *   was wrong when the real cause was a busy device.
+     * Scenario: a stale dm-crypt mapper from a prior unlock attempt is
+     *   still holding the backing device open; the user tries `braid
+     *   unlock` with a perfectly correct passphrase.
+     */
+    #[test]
+    fn unlock_passphrase_verify_exit_5_ok_header_surfaces_open_failed() {
+        let config = test_config();
+        let membership = two_disk_membership();
+        let fs = two_disk_fs();
+
+        let (tp_req, tp_out) = (
+            CmdRequest::CryptsetupTestPassphrase {
+                device: "/dev/disk/by-id/virtio-disk1".into(),
+            },
+            err_raw(
+                "cryptsetup open --test-passphrase",
+                5,
+                "Device /dev/dm-0 already exists.",
+            ),
+        );
+        // Healthy header: isLuks ok, luksDumpText ok (base runner seeds the dump).
+        let (is_req, is_out) = is_luks_ok("/dev/disk/by-id/virtio-disk1");
+
+        let runner = base_two_disk_runner()
+            .with_output_stdin(tp_req, b"testpass".to_vec(), tp_out)
+            .with_output(is_req, is_out);
+
+        let err = open_and_mount_for_test(
+            &runner,
+            &fs,
+            &config,
+            &membership,
+            Some(test_passphrase()),
+            false,
+            "unlock",
+        )
+        .expect_err("expected failure");
+
+        match err {
+            MountError::Luks(LuksError::OpenFailed {
+                exit_code, hint, ..
+            }) => {
+                assert_eq!(exit_code, 5);
+                assert_eq!(hint, "device is already open or busy");
+            }
+            other => panic!(
+                "expected MountError::Luks(LuksError::OpenFailed {{ exit_code: 5, .. }}), got: {other}"
+            ),
+        }
+    }
+
+    /*
+     * Intent: a non-auth verify exit (generic failure, exit 1) with an
+     *   unreadable LUKS header emits the off-system-backup guidance --
+     *   not a raw "generic failure" string.
+     * Why it exists: this pins the high-severity review concern. Header
+     *   diagnosis must remain reachable when verify hits a non-auth exit;
+     *   otherwise a wiped header path regresses to a bare cryptsetup
+     *   message that does not tell the user what to do.
+     * Scenario: a misdirected `dd` wiped disk1's LUKS header; cryptsetup
+     *   --test-passphrase on the raw device now returns a generic
+     *   failure because there is no LUKS structure to test against.
+     */
+    #[test]
+    fn unlock_passphrase_verify_exit_1_unreadable_header_emits_guidance() {
+        let config = test_config();
+        let membership = two_disk_membership();
+        let fs = two_disk_fs();
+
+        let (tp_req, tp_out) = (
+            CmdRequest::CryptsetupTestPassphrase {
+                device: "/dev/disk/by-id/virtio-disk1".into(),
+            },
+            err_raw("cryptsetup open --test-passphrase", 1, "generic failure"),
+        );
+        let (is_req, is_out) = is_luks_fail("/dev/disk/by-id/virtio-disk1");
+
+        let runner = base_two_disk_runner()
+            .with_output_stdin(tp_req, b"testpass".to_vec(), tp_out)
+            .with_output(is_req, is_out);
+
+        let msg = open_and_mount_for_test(
+            &runner,
+            &fs,
+            &config,
+            &membership,
+            Some(test_passphrase()),
+            false,
+            "unlock",
+        )
+        .expect_err("expected failure")
+        .to_string();
+
+        assert!(
+            msg.contains("header unreadable"),
+            "missing 'header unreadable': {msg}"
+        );
+        assert!(
+            msg.contains("luksHeaderRestore"),
+            "missing 'luksHeaderRestore': {msg}"
+        );
+        assert!(
+            !msg.contains("wrong passphrase"),
+            "unreadable header must not blame passphrase: {msg}"
+        );
+        assert!(
+            !msg.contains("generic failure"),
+            "unreadable header must not leak the raw cryptsetup hint: {msg}"
+        );
+    }
+
+    /*
+     * Intent: keyfile-path mirror of the passphrase exit-5 regression
+     *   probe. A busy backing device during keyfile verify surfaces as
+     *   MountError::Luks(OpenFailed { exit_code: 5, .. }), not as
+     *   "wrong keyfile".
+     * Why it exists: the keyfile callsite had the same silent-bool bug
+     *   as the passphrase callsite; both need independent regression
+     *   coverage so a revert at either one fails at least one test.
+     * Scenario: auto-unlock via keyfile, but a prior unlock attempt left
+     *   a stale mapper holding the backing device busy.
+     */
+    #[test]
+    fn unlock_keyfile_verify_exit_5_ok_header_surfaces_open_failed() {
+        let config = test_config();
+        let membership = two_disk_membership();
+        let fs = two_disk_fs();
+
+        let kf = tempfile::NamedTempFile::new().unwrap();
+        {
+            use std::io::Write;
+            kf.as_file().write_all(b"keydata").unwrap();
+        }
+        let kf_path = kf.path().display().to_string();
+
+        let (tk_req, tk_out) = (
+            CmdRequest::CryptsetupTestKeyFile {
+                device: "/dev/disk/by-id/virtio-disk1".into(),
+                key_file_path: kf_path,
+            },
+            err_raw(
+                "cryptsetup open --test-passphrase --key-file",
+                5,
+                "Device /dev/dm-0 already exists.",
+            ),
+        );
+        let (is_req, is_out) = is_luks_ok("/dev/disk/by-id/virtio-disk1");
+
+        let runner = base_two_disk_runner()
+            .with_output(tk_req, tk_out)
+            .with_output(is_req, is_out);
+
+        let err = open_and_mount_for_test(
+            &runner,
+            &fs,
+            &config,
+            &membership,
+            Some(OpenCredential::KeyFile(kf.path().to_path_buf())),
+            false,
+            "unlock",
+        )
+        .expect_err("expected failure");
+
+        match err {
+            MountError::Luks(LuksError::OpenFailed {
+                exit_code, hint, ..
+            }) => {
+                assert_eq!(exit_code, 5);
+                assert_eq!(hint, "device is already open or busy");
+            }
+            other => panic!(
+                "expected MountError::Luks(LuksError::OpenFailed {{ exit_code: 5, .. }}), got: {other}"
+            ),
+        }
+    }
+
+    /*
+     * Intent: keyfile-path mirror of the passphrase exit-1 +
+     *   unreadable-header test. A wiped header during keyfile verify
+     *   routes to off-system-backup guidance, not a raw hint.
+     * Why it exists: same as the passphrase variant -- the keyfile
+     *   callsite needs independent coverage for the header-diagnosis
+     *   routing on non-auth verify exits.
+     * Scenario: disk1's LUKS header was clobbered; an auto-unlock run
+     *   attempts to verify the keyfile against the raw device and gets
+     *   a generic failure because there is no header to test against.
+     */
+    #[test]
+    fn unlock_keyfile_verify_exit_1_unreadable_header_emits_guidance() {
+        let config = test_config();
+        let membership = two_disk_membership();
+        let fs = two_disk_fs();
+
+        let kf = tempfile::NamedTempFile::new().unwrap();
+        {
+            use std::io::Write;
+            kf.as_file().write_all(b"keydata").unwrap();
+        }
+        let kf_path = kf.path().display().to_string();
+
+        let (tk_req, tk_out) = (
+            CmdRequest::CryptsetupTestKeyFile {
+                device: "/dev/disk/by-id/virtio-disk1".into(),
+                key_file_path: kf_path,
+            },
+            err_raw(
+                "cryptsetup open --test-passphrase --key-file",
+                1,
+                "generic failure",
+            ),
+        );
+        let (is_req, is_out) = is_luks_fail("/dev/disk/by-id/virtio-disk1");
+
+        let runner = base_two_disk_runner()
+            .with_output(tk_req, tk_out)
+            .with_output(is_req, is_out);
+
+        let msg = open_and_mount_for_test(
+            &runner,
+            &fs,
+            &config,
+            &membership,
+            Some(OpenCredential::KeyFile(kf.path().to_path_buf())),
+            false,
+            "unlock",
+        )
+        .expect_err("expected failure")
+        .to_string();
+
+        assert!(
+            msg.contains("header unreadable"),
+            "missing 'header unreadable': {msg}"
+        );
+        assert!(
+            msg.contains("luksHeaderRestore"),
+            "missing 'luksHeaderRestore': {msg}"
+        );
+        assert!(
+            !msg.contains("wrong keyfile"),
+            "unreadable header must not blame keyfile: {msg}"
+        );
+        assert!(
+            !msg.contains("generic failure"),
+            "unreadable header must not leak the raw cryptsetup hint: {msg}"
         );
     }
 }

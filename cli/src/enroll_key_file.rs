@@ -1,6 +1,6 @@
 use crate::cmd::{CmdRequest, CommandRunner, Step};
 use crate::config::mapper_name;
-use crate::luks::{self, KeySlotState, LuksError, KEYFILE_SIZE, LUKS_SLOT_KEYFILE};
+use crate::luks::{self, KeySlotState, LuksError, VerifyOutcome, KEYFILE_SIZE, LUKS_SLOT_KEYFILE};
 use crate::membership::PoolMembership;
 use crate::preflight;
 use crate::probe::{self, Filesystem};
@@ -74,24 +74,35 @@ fn plan_enrollment<R: CommandRunner>(
 ) -> Result<Vec<DiskEnrollAction>, EnrollKeyFileError> {
     // Verify passphrase once against first candidate
     let (ref first_name, ref first_by_id) = candidates[0];
-    let ok = luks::verify_passphrase(runner, &first_by_id.0, passphrase)?;
-    if !ok {
-        return Err(EnrollKeyFileError::Validation(format!(
-            "wrong passphrase (verified against {})",
-            first_name
-        )));
+    match luks::verify_passphrase(runner, &first_by_id.0, passphrase)? {
+        VerifyOutcome::Authenticated => {}
+        VerifyOutcome::Rejected => {
+            return Err(EnrollKeyFileError::Validation(format!(
+                "wrong passphrase (verified against {})",
+                first_name
+            )));
+        }
     }
 
     let mut plan = Vec::new();
     for (name, by_id) in candidates {
-        // Check if keyfile already works (idempotent)
-        if luks::verify_key_file(runner, &by_id.0, key_file_path)? {
-            eprintln!("ok: {} -- keyfile already enrolled", name);
-            plan.push(DiskEnrollAction::AlreadyEnrolled {
-                name: name.clone(),
-                by_id: by_id.clone(),
-            });
-            continue;
+        // Check if keyfile already works (idempotent). Only `Authenticated`
+        // means the keyfile is already installed in a slot -- `Rejected` is
+        // the normal "not yet enrolled" signal. Any other non-zero exit
+        // (busy/missing/generic) propagates via the `?` on verify_key_file
+        // and must NOT be silently treated as "not enrolled" -- doing so
+        // would let the flow proceed to slot preflight on a device that
+        // may not even be readable.
+        match luks::verify_key_file(runner, &by_id.0, key_file_path)? {
+            VerifyOutcome::Authenticated => {
+                eprintln!("ok: {} -- keyfile already enrolled", name);
+                plan.push(DiskEnrollAction::AlreadyEnrolled {
+                    name: name.clone(),
+                    by_id: by_id.clone(),
+                });
+                continue;
+            }
+            VerifyOutcome::Rejected => {}
         }
 
         // Preflight: check slot 1 state
@@ -834,6 +845,68 @@ mod tests {
             err.to_string().contains("occupied by an unknown key"),
             "unexpected error: {err}"
         );
+    }
+
+    /*
+     * Intent: a non-auth exit from --test-passphrase --key-file (e.g.
+     *   EBUSY) must surface as EnrollKeyFileError::Luks(OpenFailed) with
+     *   exit_code 5, and MUST NOT silently fall through to the slot-1
+     *   preflight as if the keyfile were "not yet enrolled".
+     * Why it exists: this is the regression probe for the silent bug at
+     *   the verify_key_file callsite. Before the VerifyOutcome refactor,
+     *   `verify_key_file` returned `Ok(false)` for every non-zero exit,
+     *   so an EBUSY here collapsed to "keyfile not enrolled -> proceed
+     *   to luksDump and possibly enrollment" -- on a device that may not
+     *   even be readable. No slot preflight mock is seeded below, so if
+     *   the code regresses and reaches luksDump, MockRunner returns
+     *   MissingMock and the error shape no longer matches OpenFailed{5}.
+     * Scenario: a stale dm-crypt mapper holds the backing device busy,
+     *   or another concurrent cryptsetup attempt is in flight, during a
+     *   `braid enroll-key-file` run.
+     */
+    #[test]
+    fn plan_keyfile_verify_busy_surfaces_open_failed_not_proceeds() {
+        let d1 = "/dev/disk/by-id/d1";
+        let kf = "/tmp/braid.key";
+        let pass = "testpass";
+
+        let (tp_req, tp_stdin, tp_out) = test_passphrase_ok(d1, pass);
+
+        // test-keyfile exits 5 (EBUSY) -- this is the regression signal.
+        let tkf_req = CmdRequest::CryptsetupTestKeyFile {
+            device: d1.to_owned(),
+            key_file_path: kf.to_owned(),
+        };
+        let tkf_out = err_raw(
+            "cryptsetup open --test-passphrase --key-file",
+            5,
+            "Device /dev/dm-0 already exists.",
+        );
+
+        // Deliberately NOT seeding CryptsetupLuksDump on d1. If the code
+        // regresses and treats exit 5 as "not enrolled", it will proceed
+        // to check_key_slot -> luksDump, which returns MissingMock and
+        // changes the error shape -- the assertion below catches that.
+        let runner = MockRunner::default()
+            .with_output_stdin(tp_req, tp_stdin, tp_out)
+            .with_output(tkf_req, tkf_out);
+
+        let candidates = vec![("disk1".to_owned(), by_id(d1))];
+
+        let err = plan_enrollment(&runner, &candidates, Path::new(kf), pass)
+            .expect_err("expected non-auth verify exit to surface as error");
+
+        match err {
+            EnrollKeyFileError::Luks(LuksError::OpenFailed {
+                exit_code, hint, ..
+            }) => {
+                assert_eq!(exit_code, 5, "expected exit 5, got: {exit_code}");
+                assert_eq!(hint, "device is already open or busy");
+            }
+            other => panic!(
+                "expected EnrollKeyFileError::Luks(LuksError::OpenFailed {{ exit_code: 5, .. }}), got: {other:?}"
+            ),
+        }
     }
 
     // ---- apply_enrollment tests ----

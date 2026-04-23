@@ -5,7 +5,7 @@ use crate::inhibit::AcquireSleepInhibitor;
 use crate::journal;
 use crate::luks::{
     backup_luks_header, ensure_luks_open, luks_format, luks_opts_from_env,
-    pool_has_keyfile_enrollment, read_passphrase, verify_passphrase,
+    pool_has_keyfile_enrollment, read_passphrase, verify_passphrase, VerifyOutcome,
 };
 use crate::membership;
 use crate::parse::parse_btrfs_device_stats;
@@ -200,11 +200,13 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             })?;
             let status = crate::parse::parse_cryptsetup_status(&status_raw)?;
             if let Some(underlying) = status.device {
-                let ok = verify_passphrase(runner, &underlying, &passphrase)?;
-                if !ok {
-                    return Err(ReplaceError::Validation(
-                        "passphrase does not match existing pool member".into(),
-                    ));
+                match verify_passphrase(runner, &underlying, &passphrase)? {
+                    VerifyOutcome::Authenticated => {}
+                    VerifyOutcome::Rejected => {
+                        return Err(ReplaceError::Validation(
+                            "passphrase does not match existing pool member".into(),
+                        ));
+                    }
                 }
             }
         }

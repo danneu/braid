@@ -5,7 +5,7 @@ use crate::inhibit::AcquireSleepInhibitor;
 use crate::journal;
 use crate::luks::{
     backup_luks_header, ensure_luks_open, luks_format, luks_opts_from_env,
-    pool_has_keyfile_enrollment, read_passphrase, verify_passphrase,
+    pool_has_keyfile_enrollment, read_passphrase, verify_passphrase, VerifyOutcome,
 };
 use crate::membership::{self, PoolMembership};
 use crate::parse::btrfs_filesystem_show::{classify_btrfs_probe, DeviceBtrfsProbe};
@@ -426,12 +426,14 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             })?;
             let status = crate::parse::parse_cryptsetup_status(&status_raw)?;
             if let Some(underlying) = status.device {
-                let ok = verify_passphrase(runner, &underlying, &passphrase)?;
-                if !ok {
-                    return Err(AddError::Validation(
-                        "passphrase does not match existing pool member. All disks must use the same passphrase."
-                            .into(),
-                    ));
+                match verify_passphrase(runner, &underlying, &passphrase)? {
+                    VerifyOutcome::Authenticated => {}
+                    VerifyOutcome::Rejected => {
+                        return Err(AddError::Validation(
+                            "passphrase does not match existing pool member. All disks must use the same passphrase."
+                                .into(),
+                        ));
+                    }
                 }
             }
         }

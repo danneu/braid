@@ -1,4 +1,4 @@
-use crate::cmd::{CmdError, CmdRequest, CommandRunner};
+use crate::cmd::{CmdError, CmdRequest, CommandRunner, RawCommandOutput};
 use crate::config::mapper_name;
 use crate::probe::Filesystem;
 use crate::state_paths::StatePaths;
@@ -167,19 +167,52 @@ pub fn backup_luks_header<R: CommandRunner>(
     backup_luks_header_to(runner, device, mapper, &paths.luks_headers_dir())
 }
 
+/// Outcome of a keyslot verification attempt. Exit 2 (EPERM) is the only
+/// cryptsetup exit that semantically means "wrong credential" (see
+/// `translate_errno` in `reference/cryptsetup/src/utils_tools.c`). Every
+/// other non-zero exit is a real error -- busy, missing device, out of
+/// memory, generic EINVAL -- and must not be silently treated as rejection
+/// by callers, or the user gets a misleading "wrong passphrase" narrative
+/// for an unrelated failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerifyOutcome {
+    Authenticated,
+    Rejected,
+}
+
+/// Classify a cryptsetup `--test-passphrase` (or `--test-passphrase
+/// --key-file`) exit into `VerifyOutcome` or `LuksError::OpenFailed`.
+/// Single source of truth for the verify-exit mapping so tests bind to
+/// the real helper.
+fn classify_verify_exit(
+    device: &str,
+    result: &RawCommandOutput,
+) -> Result<VerifyOutcome, LuksError> {
+    match result.exit_status {
+        0 => Ok(VerifyOutcome::Authenticated),
+        2 => Ok(VerifyOutcome::Rejected),
+        code => Err(LuksError::OpenFailed {
+            device: device.to_owned(),
+            exit_code: code,
+            hint: cryptsetup_open_hint(code),
+            stderr: result.stderr.trim().to_owned(),
+        }),
+    }
+}
+
 /// Verify passphrase against an existing LUKS device (test-passphrase).
 pub fn verify_passphrase<R: CommandRunner>(
     runner: &R,
     device: &str,
     passphrase: &str,
-) -> Result<bool, LuksError> {
+) -> Result<VerifyOutcome, LuksError> {
     let result = runner.run_with_stdin(
         &CmdRequest::CryptsetupTestPassphrase {
             device: device.to_owned(),
         },
         passphrase.as_bytes(),
     )?;
-    Ok(result.exit_status == 0)
+    classify_verify_exit(device, &result)
 }
 
 /// Semantic classification of cryptsetup exit codes.
@@ -387,12 +420,12 @@ pub fn verify_key_file<R: CommandRunner>(
     runner: &R,
     device: &str,
     key_file_path: &std::path::Path,
-) -> Result<bool, LuksError> {
+) -> Result<VerifyOutcome, LuksError> {
     let result = runner.run(&CmdRequest::CryptsetupTestKeyFile {
         device: device.to_owned(),
         key_file_path: key_file_path.display().to_string(),
     })?;
-    Ok(result.exit_status == 0)
+    classify_verify_exit(device, &result)
 }
 
 /// Enroll a binary keyfile into LUKS slot 1, authorized by the existing passphrase.
@@ -593,6 +626,131 @@ mod tests {
     #[test]
     fn hint_format_unknown_code() {
         assert_eq!(cryptsetup_format_hint(42), "unknown error");
+    }
+
+    // ---- classify_verify_exit -------------------------------------------
+    //
+    // These tests pin the boundary between "cryptsetup said the credential
+    // was wrong" (exit 2, the only semantically auth-related exit per
+    // cryptsetup's translate_errno) and "cryptsetup could not complete the
+    // verify attempt for any other reason". Without this boundary,
+    // downstream narrates "wrong passphrase" for busy/missing/OOM/generic
+    // failures -- the original bug.
+
+    fn raw(exit_status: i32) -> RawCommandOutput {
+        RawCommandOutput {
+            cmd: "cryptsetup open --test-passphrase".into(),
+            stdout: String::new(),
+            stderr: "stderr text".into(),
+            exit_status,
+        }
+    }
+
+    /*
+     * Intent: exit 0 from --test-passphrase classifies as Authenticated.
+     * Why: the success case is the only thing callers should trust to
+     *   proceed with opening every disk with the verified credential.
+     * Scenario: user enters the correct passphrase on a healthy pool.
+     */
+    #[test]
+    fn classify_verify_exit_0_is_authenticated() {
+        let out = classify_verify_exit("/dev/sda", &raw(0)).unwrap();
+        assert_eq!(out, VerifyOutcome::Authenticated);
+    }
+
+    /*
+     * Intent: exit 2 (EPERM) from --test-passphrase classifies as Rejected.
+     * Why: EPERM is the one-and-only cryptsetup exit that means "wrong
+     *   credential"; all other exits are environmental errors.
+     * Scenario: user enters a wrong passphrase on a healthy pool.
+     */
+    #[test]
+    fn classify_verify_exit_2_is_rejected() {
+        let out = classify_verify_exit("/dev/sda", &raw(2)).unwrap();
+        assert_eq!(out, VerifyOutcome::Rejected);
+    }
+
+    /*
+     * Intent: exit 1 (generic/EINVAL) surfaces as OpenFailed, not Rejected.
+     * Why: pre-fix, every non-zero exit collapsed to "wrong passphrase"
+     *   through the downstream explain_open_failure path. Generic errors
+     *   have nothing to do with the credential.
+     * Scenario: cryptsetup hits a generic failure (e.g. bad invocation
+     *   or ENOENT on a dependency).
+     */
+    #[test]
+    fn classify_verify_exit_1_is_open_failed() {
+        let err = classify_verify_exit("/dev/sda", &raw(1)).unwrap_err();
+        match err {
+            LuksError::OpenFailed {
+                exit_code, hint, ..
+            } => {
+                assert_eq!(exit_code, 1);
+                assert_eq!(hint, "generic failure");
+            }
+            other => panic!("expected OpenFailed, got {other:?}"),
+        }
+    }
+
+    /*
+     * Intent: exit 3 (ENOMEM) surfaces as OpenFailed with the OOM hint.
+     * Why: a memory-exhaustion failure is not a credential rejection.
+     * Scenario: low-memory machine exhausts PBKDF argon2 memory budget.
+     */
+    #[test]
+    fn classify_verify_exit_3_is_open_failed() {
+        let err = classify_verify_exit("/dev/sda", &raw(3)).unwrap_err();
+        match err {
+            LuksError::OpenFailed {
+                exit_code, hint, ..
+            } => {
+                assert_eq!(exit_code, 3);
+                assert_eq!(hint, "out of memory");
+            }
+            other => panic!("expected OpenFailed, got {other:?}"),
+        }
+    }
+
+    /*
+     * Intent: exit 4 (ENODEV/ENOTBLK) surfaces as OpenFailed with the
+     *   device-not-found hint.
+     * Why: a vanished device is not a wrong passphrase.
+     * Scenario: hot-unplug or enclosure dropout between probe and verify.
+     */
+    #[test]
+    fn classify_verify_exit_4_is_open_failed() {
+        let err = classify_verify_exit("/dev/sda", &raw(4)).unwrap_err();
+        match err {
+            LuksError::OpenFailed {
+                exit_code, hint, ..
+            } => {
+                assert_eq!(exit_code, 4);
+                assert_eq!(hint, "device not found or not a block device");
+            }
+            other => panic!("expected OpenFailed, got {other:?}"),
+        }
+    }
+
+    /*
+     * Intent: exit 5 (EBUSY/EEXIST) surfaces as OpenFailed with the
+     *   busy/already-open hint. This is the canonical misdiagnosis
+     *   scenario: a stale mapper looked like a lockout pre-fix.
+     * Why: the bug that motivated this whole plan.
+     * Scenario: a previous open left a dm-crypt mapper on the same
+     *   backing device; the user's verify attempt now gets EBUSY.
+     */
+    #[test]
+    fn classify_verify_exit_5_is_open_failed() {
+        let err = classify_verify_exit("/dev/sda", &raw(5)).unwrap_err();
+        match err {
+            LuksError::OpenFailed {
+                exit_code, hint, ..
+            } => {
+                assert_eq!(exit_code, 5);
+                assert_eq!(hint, "device is already open or busy");
+            }
+            other => panic!("expected OpenFailed, got {other:?}"),
+        }
     }
 
     /*
