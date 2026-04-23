@@ -1768,13 +1768,22 @@ mod tests {
                         ),
                     ))
                 }
-                CmdRequest::CryptsetupStatus { mapper } => Ok(mock_ok(
-                    &format!("cryptsetup status {mapper}"),
-                    &format!("{mapper} is active and is in use.\n  type:    LUKS2\n  device:  /dev/vdb\n  mode:    read/write\n"),
-                )),
+                CmdRequest::CryptsetupStatus { mapper } => {
+                    let underlying = match mapper.as_str() {
+                        "braid-disk1" => "/dev/vdb",
+                        "braid-disk2" => "/dev/vdc",
+                        _ => "/dev/vdz",
+                    };
+                    Ok(mock_ok(
+                        &format!("cryptsetup status {mapper}"),
+                        &format!("{mapper} is active and is in use.\n  type:    LUKS2\n  device:  {underlying}\n  mode:    read/write\n"),
+                    ))
+                }
                 CmdRequest::CryptsetupLuksUuid { device } => {
                     let uuid = match device.as_str() {
-                        "/dev/vdb" => "11111111-1111-1111-1111-111111111111",
+                        "/dev/vdb" | "/dev/disk/by-id/virtio-disk1" => {
+                            "11111111-1111-1111-1111-111111111111"
+                        }
                         _ => "22222222-2222-2222-2222-222222222222",
                     };
                     Ok(mock_ok(&format!("cryptsetup luksUUID {device}"), &format!("{uuid}\n")))
@@ -2131,6 +2140,7 @@ mod tests {
                     exit_status: 0,
                 },
             )
+            .with_mapper_closed("braid-disk2")
             .with_output(
                 CmdRequest::FindmntJson {
                     mount_point: MountPoint("/mnt/storage".into()),

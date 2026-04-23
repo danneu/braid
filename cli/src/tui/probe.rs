@@ -1183,6 +1183,17 @@ mod tests {
                     "cryptsetup luksDump",
                     "LUKS header information\nVersion:       \t2\n",
                 ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-ironwolf".into(),
+                },
+                RawCommandOutput {
+                    cmd: "cryptsetup status braid-ironwolf".into(),
+                    stdout: String::new(),
+                    stderr: "/dev/mapper/braid-ironwolf is inactive.\n".into(),
+                    exit_status: 4,
+                },
             );
         let fs = StubFs::with_paths(&[
             "/dev/disk/by-id/braid-toshiba",

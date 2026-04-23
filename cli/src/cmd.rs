@@ -974,6 +974,68 @@ impl MockRunner {
             .iter()
             .fold(self, |acc, d| acc.with_luks_dump_text_luks2(d))
     }
+
+    /// Test helper: stub `cryptsetup status <mapper>` to report the mapper
+    /// as inactive (closed). Use for the common "mapper not yet opened"
+    /// scenario. `probe_config_disk` uses this to set `mapper_open=false`
+    /// without error.
+    pub fn with_mapper_closed(self, mapper: &str) -> Self {
+        self.with_output(
+            CmdRequest::CryptsetupStatus {
+                mapper: mapper.into(),
+            },
+            RawCommandOutput {
+                cmd: format!("cryptsetup status {mapper}"),
+                stdout: String::new(),
+                stderr: format!("/dev/mapper/{mapper} is inactive.\n"),
+                exit_status: 4,
+            },
+        )
+    }
+
+    /// Test helper: stub every mapper in the slice as inactive.
+    pub fn with_mappers_closed(self, mappers: &[&str]) -> Self {
+        mappers
+            .iter()
+            .fold(self, |acc, m| acc.with_mapper_closed(m))
+    }
+
+    /// Test helper: stub `cryptsetup status <mapper>` as active with
+    /// `underlying` as the backing device, AND stub
+    /// `cryptsetup luksUUID <underlying>` to return `uuid`. Together these
+    /// satisfy `probe_config_disk`'s mapper-backing verification for an
+    /// already-open mapper whose backing LUKS UUID matches the configured
+    /// disk.
+    pub fn with_mapper_open(self, mapper: &str, underlying: &str, uuid: &str) -> Self {
+        self.with_output(
+            CmdRequest::CryptsetupStatus {
+                mapper: mapper.into(),
+            },
+            RawCommandOutput {
+                cmd: format!("cryptsetup status {mapper}"),
+                stdout: format!(
+                    "/dev/mapper/{mapper} is active and is in use.\n\
+                     \ttype:    LUKS2\n\
+                     \tcipher:  aes-xts-plain64\n\
+                     \tdevice:  {underlying}\n\
+                     \tsector size:  512\n"
+                ),
+                stderr: String::new(),
+                exit_status: 0,
+            },
+        )
+        .with_output(
+            CmdRequest::CryptsetupLuksUuid {
+                device: underlying.into(),
+            },
+            RawCommandOutput {
+                cmd: format!("cryptsetup luksUUID {underlying}"),
+                stdout: format!("{uuid}\n"),
+                stderr: String::new(),
+                exit_status: 0,
+            },
+        )
+    }
 }
 
 impl CommandRunner for MockRunner {

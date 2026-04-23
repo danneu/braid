@@ -1415,7 +1415,12 @@ mod tests {
                     "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\tTotal devices 2 FS bytes used 16.17MiB\n\tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk2\n",
                 )),
                 CmdRequest::CryptsetupStatus { mapper } => {
-                    let dev = if mapper == "braid-disk1" { "/dev/vdb" } else { "/dev/vdc" };
+                    let dev = match mapper.as_str() {
+                        "braid-disk1" => "/dev/vdb",
+                        "braid-disk2" => "/dev/vdc",
+                        "braid-disk3" => "/dev/vdd",
+                        _ => "/dev/vdz",
+                    };
                     Ok(mock_ok(
                         &format!("cryptsetup status {mapper}"),
                         &format!("{mapper} is active and is in use.\n  type:    LUKS2\n  device:  {dev}\n  mode:    read/write\n"),
@@ -1423,10 +1428,17 @@ mod tests {
                 }
                 CmdRequest::CryptsetupLuksUuid { device } => {
                     let uuid = match device.as_str() {
-                        "/dev/vdb" => "11111111-1111-1111-1111-111111111111",
-                        "/dev/vdc" => "22222222-2222-2222-2222-222222222222",
-                        // new disk
-                        _ => "33333333-3333-3333-3333-333333333333",
+                        "/dev/vdb" | "/dev/disk/by-id/virtio-disk1" => {
+                            "11111111-1111-1111-1111-111111111111"
+                        }
+                        "/dev/vdc" | "/dev/disk/by-id/virtio-disk2" => {
+                            "22222222-2222-2222-2222-222222222222"
+                        }
+                        // new disk: its backing via the braid-disk3 mapper is /dev/vdd
+                        "/dev/vdd" | "/dev/disk/by-id/virtio-disk3" => {
+                            "33333333-3333-3333-3333-333333333333"
+                        }
+                        _ => "99999999-9999-9999-9999-999999999999",
                     };
                     Ok(mock_ok(&format!("cryptsetup luksUUID {device}"), &format!("{uuid}\n")))
                 }

@@ -70,6 +70,25 @@ pub enum ProbeError {
          (braid will reformat it as LUKS2)."
     )]
     UnsupportedLuksVersion { name: String, version: u32 },
+    #[error(
+        "disk '{name}' mapper '/dev/mapper/braid-{name}' is open but not \
+         backed by the configured disk. Expected LUKS UUID {expected}, \
+         found {}. Close the conflicting mapper with \
+         'sudo cryptsetup close braid-{name}' and re-run.",
+        found_display(found)
+    )]
+    MapperConflict {
+        name: String,
+        expected: LuksUuid,
+        found: Option<LuksUuid>,
+    },
+}
+
+fn found_display(found: &Option<LuksUuid>) -> String {
+    match found {
+        Some(uuid) => uuid.to_string(),
+        None => "no backing (stale mapper)".to_owned(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -129,13 +148,63 @@ pub fn probe_config_disk<R: CommandRunner, F: Filesystem + ?Sized>(
     }
 
     let mn = mapper_name(name);
-    let mapper_open = fs.exists(&format!("/dev/mapper/{}", mn.0));
+    let mapper_open = probe_mapper_open(runner, name, &mn, &uuid)?;
 
     Ok(ConfigDisk {
         name: name.to_owned(),
         by_id_path: by_id.clone(),
         state: ConfigDiskState::PresentLuks { uuid, mapper_open },
     })
+}
+
+/// Determine whether `/dev/mapper/<mapper>` is open AND backed by the
+/// configured disk's LUKS container. `cryptsetup status` is the sole
+/// source of truth: a closed mapper is reported inactive, and an active
+/// mapper carries the underlying device that we cross-check by LUKS UUID.
+///
+/// Returns `Ok(true)` when the mapper is open and its backing LUKS
+/// container's UUID matches `expected_uuid`. Returns `Ok(false)` when the
+/// mapper is inactive. Returns `ProbeError::MapperConflict` when the
+/// mapper is active but its backing is missing (stale dm-crypt) or
+/// holds a different LUKS UUID (external mapper aliasing over our name).
+fn probe_mapper_open<R: CommandRunner>(
+    runner: &R,
+    name: &str,
+    mapper: &MapperName,
+    expected_uuid: &LuksUuid,
+) -> Result<bool, ProbeError> {
+    let status_raw = runner.run(&CmdRequest::CryptsetupStatus {
+        mapper: mapper.0.clone(),
+    })?;
+    let status = parse_cryptsetup_status(&status_raw)?;
+
+    if !status.is_active {
+        return Ok(false);
+    }
+
+    let underlying = match status.device.as_deref() {
+        None | Some("") | Some("(null)") => {
+            return Err(ProbeError::MapperConflict {
+                name: name.to_owned(),
+                expected: expected_uuid.clone(),
+                found: None,
+            });
+        }
+        Some(dev) => dev.to_owned(),
+    };
+
+    let uuid_raw = runner.run(&CmdRequest::CryptsetupLuksUuid { device: underlying })?;
+    let backing_uuid = parse_cryptsetup_luks_uuid(&uuid_raw)?.uuid;
+
+    if &backing_uuid == expected_uuid {
+        Ok(true)
+    } else {
+        Err(ProbeError::MapperConflict {
+            name: name.to_owned(),
+            expected: expected_uuid.clone(),
+            found: Some(backing_uuid),
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -422,6 +491,26 @@ mod tests {
         )
     }
 
+    fn cryptsetup_status_inactive(mapper: &str) -> RawCommandOutput {
+        RawCommandOutput {
+            cmd: format!("cryptsetup status {mapper}"),
+            stdout: String::new(),
+            stderr: format!("/dev/mapper/{mapper} is inactive.\n"),
+            exit_status: 4,
+        }
+    }
+
+    fn cryptsetup_status_active_null(mapper: &str) -> RawCommandOutput {
+        ok_raw(
+            &format!("cryptsetup status {mapper}"),
+            &format!(
+                "/dev/mapper/{mapper} is active and is in use.\n\
+                 \ttype:    LUKS2\n\
+                 \tdevice:  (null)\n"
+            ),
+        )
+    }
+
     #[test]
     fn probe_config_disk_present_luks_closed() {
         let runner = MockRunner::default()
@@ -439,6 +528,12 @@ mod tests {
                     device: "/dev/disk/by-id/disk-1".into(),
                 },
                 luks_dump_text_luks2(),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-toshiba".into(),
+                },
+                cryptsetup_status_inactive("braid-toshiba"),
             );
         let fs = MockFs::new(&["/dev/disk/by-id/disk-1"]);
         let d = by_id("/dev/disk/by-id/disk-1");
@@ -454,6 +549,17 @@ mod tests {
         );
     }
 
+    /*
+     * Intent: when the mapper is open AND cryptsetup status reports a
+     *   backing device whose LUKS UUID matches the configured disk, the
+     *   probe must report mapper_open=true.
+     * Why it exists: regression guard that the source-of-truth shift from
+     *   fs.exists to cryptsetup status still admits the healthy
+     *   already-open case end-to-end (status active + backing UUID
+     *   match -> mapper_open=true, no error).
+     * Scenario: braid status / unlock run after a successful prior
+     *   unlock; the mapper is open and backed by the correct disk.
+     */
     #[test]
     fn probe_config_disk_present_luks_open() {
         let runner = MockRunner::default()
@@ -471,9 +577,23 @@ mod tests {
                     device: "/dev/disk/by-id/disk-1".into(),
                 },
                 luks_dump_text_luks2(),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-toshiba".into(),
+                },
+                cryptsetup_status_active("braid-toshiba", "/dev/vda"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vda".into(),
+                },
+                ok_raw(
+                    "cryptsetup luksUUID /dev/vda",
+                    "a1b2c3d4-e5f6-7890-abcd-ef1234567890\n",
+                ),
             );
-        // Named mapper: braid-toshiba
-        let fs = MockFs::new(&["/dev/disk/by-id/disk-1", "/dev/mapper/braid-toshiba"]);
+        let fs = MockFs::new(&["/dev/disk/by-id/disk-1"]);
         let d = by_id("/dev/disk/by-id/disk-1");
 
         let result = probe_config_disk(&runner, &fs, "toshiba", &d).unwrap();
@@ -484,6 +604,187 @@ mod tests {
                 mapper_open: true,
             }
         );
+    }
+
+    /*
+     * Intent: when /dev/mapper/braid-<name> is open but backed by a LUKS
+     *   container with a different UUID than the configured disk, the
+     *   probe must surface ProbeError::MapperConflict instead of
+     *   reporting mapper_open=true.
+     * Why it exists: this is the failure-layer test for the
+     *   path-existence regression (probe.rs:132 -> fs.exists only).
+     *   Reverting probe_mapper_open back to fs.exists makes this test
+     *   fail (mapper_open would become true), per
+     *   feedback_test_at_failure_layer.md. Parser canaries cannot catch
+     *   this wiring bug.
+     * Scenario: a user or systemd-cryptsetup has opened an unrelated
+     *   LUKS container under the name braid-toshiba before running
+     *   braid unlock.
+     */
+    #[test]
+    fn probe_config_disk_mapper_backing_mismatch_errors() {
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/disk-1".into(),
+                },
+                ok_raw(
+                    "cryptsetup luksUUID /dev/disk/by-id/disk-1",
+                    "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa\n",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksDumpText {
+                    device: "/dev/disk/by-id/disk-1".into(),
+                },
+                luks_dump_text_luks2(),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-toshiba".into(),
+                },
+                cryptsetup_status_active("braid-toshiba", "/dev/vdz"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vdz".into(),
+                },
+                ok_raw(
+                    "cryptsetup luksUUID /dev/vdz",
+                    "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb\n",
+                ),
+            );
+        let fs = MockFs::new(&["/dev/disk/by-id/disk-1"]);
+        let d = by_id("/dev/disk/by-id/disk-1");
+
+        let err = probe_config_disk(&runner, &fs, "toshiba", &d).unwrap_err();
+        match err {
+            ProbeError::MapperConflict {
+                name,
+                expected,
+                found,
+            } => {
+                assert_eq!(name, "toshiba");
+                assert_eq!(
+                    expected,
+                    LuksUuid("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa".into())
+                );
+                assert_eq!(
+                    found,
+                    Some(LuksUuid("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb".into()))
+                );
+            }
+            other => panic!("expected ProbeError::MapperConflict, got: {other:?}"),
+        }
+    }
+
+    /*
+     * Intent: when cryptsetup status reports the mapper as inactive, the
+     *   probe must report mapper_open=false without error so the normal
+     *   unlock flow opens the LUKS container fresh.
+     * Why it exists: cryptsetup status is the sole source of truth for
+     *   mapper state; the probe must handle the inactive case as "not
+     *   open", not as an error. Guards against a future refactor that
+     *   might treat any cryptsetup-status non-zero exit as a hard
+     *   failure.
+     * Scenario: a fresh boot where no mapper has been opened yet; also
+     *   the TOCTOU race where the mapper was torn down between any
+     *   prior observation and the status query.
+     */
+    #[test]
+    fn probe_config_disk_mapper_status_inactive_is_closed() {
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/disk-1".into(),
+                },
+                ok_raw(
+                    "cryptsetup luksUUID /dev/disk/by-id/disk-1",
+                    "a1b2c3d4-e5f6-7890-abcd-ef1234567890\n",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksDumpText {
+                    device: "/dev/disk/by-id/disk-1".into(),
+                },
+                luks_dump_text_luks2(),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-toshiba".into(),
+                },
+                cryptsetup_status_inactive("braid-toshiba"),
+            );
+        let fs = MockFs::new(&["/dev/disk/by-id/disk-1"]);
+        let d = by_id("/dev/disk/by-id/disk-1");
+
+        let result = probe_config_disk(&runner, &fs, "toshiba", &d).unwrap();
+        assert_eq!(
+            result.state,
+            ConfigDiskState::PresentLuks {
+                uuid: LuksUuid("a1b2c3d4-e5f6-7890-abcd-ef1234567890".into()),
+                mapper_open: false,
+            }
+        );
+    }
+
+    /*
+     * Intent: when cryptsetup status reports the mapper as active but
+     *   with device = (null), the probe must surface
+     *   ProbeError::MapperConflict with found=None so downstream
+     *   mutations do not operate on a stale mapper whose backing disk
+     *   is gone.
+     * Why it exists: hot-unplug leaves the mapper structure present but
+     *   unusable; mount/add/replace reading from this mapper would see
+     *   a detached block device. Fail-closed per
+     *   feedback_fail_closed_by_downstream_blast_radius.md.
+     * Scenario: user hot-unplugs the backing disk during active use;
+     *   the kernel detaches the block device but dm-crypt has not yet
+     *   torn down the mapper.
+     */
+    #[test]
+    fn probe_config_disk_mapper_backing_null_errors() {
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/disk-1".into(),
+                },
+                ok_raw(
+                    "cryptsetup luksUUID /dev/disk/by-id/disk-1",
+                    "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa\n",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksDumpText {
+                    device: "/dev/disk/by-id/disk-1".into(),
+                },
+                luks_dump_text_luks2(),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-toshiba".into(),
+                },
+                cryptsetup_status_active_null("braid-toshiba"),
+            );
+        let fs = MockFs::new(&["/dev/disk/by-id/disk-1"]);
+        let d = by_id("/dev/disk/by-id/disk-1");
+
+        let err = probe_config_disk(&runner, &fs, "toshiba", &d).unwrap_err();
+        match err {
+            ProbeError::MapperConflict {
+                name,
+                expected,
+                found,
+            } => {
+                assert_eq!(name, "toshiba");
+                assert_eq!(
+                    expected,
+                    LuksUuid("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa".into())
+                );
+                assert_eq!(found, None);
+            }
+            other => panic!("expected ProbeError::MapperConflict, got: {other:?}"),
+        }
     }
 
     /*

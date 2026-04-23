@@ -856,24 +856,54 @@ mod tests {
     }
 
     /// Wraps a `MockRunner` and removes `/dev/mapper/<mapper>` from a shared
-    /// `StatefulMockFs` whenever a `CryptsetupClose` request succeeds. This
-    /// makes the post-close world visible to subsequent `plan_open_pool`
-    /// calls in the recover relock cycle, mirroring real-kernel behavior.
+    /// `StatefulMockFs` whenever a `CryptsetupClose` request succeeds. Also
+    /// tracks which mappers have been closed so subsequent `CryptsetupStatus`
+    /// queries on those mappers report inactive, mirroring real-kernel
+    /// behavior across the recover relock cycle.
     struct MapperClosingRunner {
         inner: MockRunner,
         fs_paths: SharedPaths,
+        closed: std::sync::Mutex<std::collections::HashSet<String>>,
+    }
+
+    impl MapperClosingRunner {
+        fn inactive_status(mapper: &str) -> RawCommandOutput {
+            RawCommandOutput {
+                cmd: format!("cryptsetup status {mapper}"),
+                stdout: String::new(),
+                stderr: format!("/dev/mapper/{mapper} is inactive.\n"),
+                exit_status: 4,
+            }
+        }
     }
 
     impl CommandRunner for MapperClosingRunner {
         fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, crate::cmd::CmdError> {
-            let result = self.inner.run(request)?;
-            if let CmdRequest::CryptsetupClose { mapper } = request
-                && result.exit_status == 0
+            if let CmdRequest::CryptsetupStatus { mapper } = request
+                && self.closed.lock().unwrap().contains(mapper)
             {
-                self.fs_paths
-                    .lock()
-                    .unwrap()
-                    .remove(&format!("/dev/mapper/{}", mapper));
+                return Ok(Self::inactive_status(mapper));
+            }
+            let result = self.inner.run(request)?;
+            match request {
+                CmdRequest::CryptsetupClose { mapper } if result.exit_status == 0 => {
+                    self.fs_paths
+                        .lock()
+                        .unwrap()
+                        .remove(&format!("/dev/mapper/{}", mapper));
+                    self.closed.lock().unwrap().insert(mapper.clone());
+                }
+                CmdRequest::CryptsetupLuksOpen { mapper, .. }
+                | CmdRequest::CryptsetupLuksOpenKeyFile { mapper, .. }
+                    if result.exit_status == 0 =>
+                {
+                    self.fs_paths
+                        .lock()
+                        .unwrap()
+                        .insert(format!("/dev/mapper/{}", mapper));
+                    self.closed.lock().unwrap().remove(mapper);
+                }
+                _ => {}
             }
             Ok(result)
         }
@@ -883,7 +913,21 @@ mod tests {
             request: &CmdRequest,
             stdin: &[u8],
         ) -> Result<RawCommandOutput, crate::cmd::CmdError> {
-            self.inner.run_with_stdin(request, stdin)
+            let result = self.inner.run_with_stdin(request, stdin)?;
+            match request {
+                CmdRequest::CryptsetupLuksOpen { mapper, .. }
+                | CmdRequest::CryptsetupLuksOpenKeyFile { mapper, .. }
+                    if result.exit_status == 0 =>
+                {
+                    self.fs_paths
+                        .lock()
+                        .unwrap()
+                        .insert(format!("/dev/mapper/{}", mapper));
+                    self.closed.lock().unwrap().remove(mapper);
+                }
+                _ => {}
+            }
+            Ok(result)
         }
     }
 
@@ -1197,16 +1241,17 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let paths = StatePaths::custom(tmp.path().into());
         let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
-        let fs = MockFs::new(&[
+        let fs = StatefulMockFs::new(&[
             "/dev/disk/by-id/virtio-disk1",
             "/dev/disk/by-id/virtio-disk2",
         ]);
+        let fs_handle = fs.handle();
 
         let journal = two_disk_journal();
         journal::write_journal(&paths, &journal).unwrap();
 
         let (mp_req, mp_out) = mountpoint_fail();
-        let runner = MockRunner::default()
+        let inner = MockRunner::default()
             // mount helper: mountpoint check → not mounted
             .with_output(mp_req, mp_out)
             // mount helper: probe disk1 → LUKS
@@ -1281,6 +1326,21 @@ mod tests {
                 CmdRequest::BtrfsDeviceScanForget,
                 ok_raw_empty("btrfs device scan --forget"),
             )
+            // remount cycle: close both mappers (the wrapper runner removes
+            // mapper paths from the StatefulMockFs after each success and
+            // flips status queries to inactive so the re-probe opens them).
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: "braid-disk1".into(),
+                },
+                ok_raw_empty("cryptsetup close braid-disk1"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: "braid-disk2".into(),
+                },
+                ok_raw_empty("cryptsetup close braid-disk2"),
+            )
             // remount cycle: re-mount via the same MountWithOptions mock above
             // (MockRunner serves the same response for repeated requests)
             // probe_pool: findmnt
@@ -1337,6 +1397,19 @@ mod tests {
                 "/dev/disk/by-id/virtio-disk1",
                 "/dev/disk/by-id/virtio-disk2",
             ]);
+
+        // Initial closed set: both mappers start closed (not yet unlocked).
+        // After LuksOpen the wrapper removes them from the closed set so the
+        // post-mount probe_pool (which needs active) falls through to the
+        // seeded `cryptsetup_status_active` stubs.
+        let mut closed0 = std::collections::HashSet::new();
+        closed0.insert("braid-disk1".to_owned());
+        closed0.insert("braid-disk2".to_owned());
+        let runner = MapperClosingRunner {
+            inner,
+            fs_paths: fs_handle,
+            closed: std::sync::Mutex::new(closed0),
+        };
 
         let passphrase_file = tempfile::NamedTempFile::new().unwrap();
         {
@@ -1584,6 +1657,7 @@ mod tests {
         let runner = MapperClosingRunner {
             inner,
             fs_paths: fs_handle,
+            closed: std::sync::Mutex::new(std::collections::HashSet::new()),
         };
 
         // Passphrase file with the canonical "testpass" — the cycle's
@@ -1733,7 +1807,8 @@ mod tests {
             .with_luks_dump_text_luks2_for(&[
                 "/dev/disk/by-id/virtio-disk1",
                 "/dev/disk/by-id/virtio-disk2",
-            ]);
+            ])
+            .with_mappers_closed(&["braid-disk1", "braid-disk2"]);
         // No probe_pool / save_membership / clear_journal mocks — those must
         // not be reached.
 
@@ -1853,7 +1928,8 @@ mod tests {
             .with_luks_dump_text_luks2_for(&[
                 "/dev/disk/by-id/virtio-disk1",
                 "/dev/disk/by-id/virtio-disk2",
-            ]);
+            ])
+            .with_mappers_closed(&["braid-disk1", "braid-disk2"]);
         // No mount mock — should not reach mount
 
         let passphrase_file = tempfile::NamedTempFile::new().unwrap();
@@ -2104,7 +2180,8 @@ mod tests {
                     "not a valid btrfs filesystem on /dev/mapper/braid-disk1",
                 ),
             )
-            .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk1");
+            .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk1")
+            .with_mapper_closed("braid-disk1");
 
         let passphrase_file = tempfile::NamedTempFile::new().unwrap();
         {
@@ -2214,7 +2291,8 @@ mod tests {
                     stderr: String::new(),
                     exit_status: 0,
                 },
-            );
+            )
+            .with_mapper_closed("braid-disk1");
 
         let passphrase_file = tempfile::NamedTempFile::new().unwrap();
         {
@@ -2402,7 +2480,8 @@ mod tests {
                      \tdevid    1 size 10.00GiB used 536.00MiB path /dev/mapper/braid-disk1\n",
                 ),
             )
-            .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk1");
+            .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk1")
+            .with_mapper_closed("braid-disk1");
 
         let passphrase_file = tempfile::NamedTempFile::new().unwrap();
         {

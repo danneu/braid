@@ -304,7 +304,8 @@ mod tests {
             .with_luks_dump_text_luks2_for(&[
                 "/dev/disk/by-id/virtio-disk1",
                 "/dev/disk/by-id/virtio-disk2",
-            ]);
+            ])
+            .with_mappers_closed(&["braid-disk1", "braid-disk2"]);
 
         // Write passphrase to a temp file for the test (avoid stdin TTY)
         let tmp = tempfile::NamedTempFile::new().unwrap();
@@ -421,7 +422,8 @@ mod tests {
             .with_luks_dump_text_luks2_for(&[
                 "/dev/disk/by-id/virtio-disk1",
                 "/dev/disk/by-id/virtio-disk2",
-            ]);
+            ])
+            .with_mappers_closed(&["braid-disk1", "braid-disk2"]);
         // No mount mock — should never reach mount
 
         let tmp = tempfile::NamedTempFile::new().unwrap();
@@ -563,7 +565,8 @@ mod tests {
             .with_luks_dump_text_luks2_for(&[
                 "/dev/disk/by-id/virtio-disk1",
                 "/dev/disk/by-id/virtio-disk2",
-            ]);
+            ])
+            .with_mappers_closed(&["braid-disk1", "braid-disk2"]);
 
         let tmp = tempfile::NamedTempFile::new().unwrap();
         {
@@ -728,7 +731,8 @@ mod tests {
                 "/dev/disk/by-id/virtio-disk1",
                 "/dev/disk/by-id/virtio-disk2",
                 "/dev/disk/by-id/virtio-disk3",
-            ]);
+            ])
+            .with_mappers_closed(&["braid-disk1", "braid-disk2", "braid-disk3"]);
 
         let tmp = tempfile::NamedTempFile::new().unwrap();
         {
@@ -810,7 +814,8 @@ mod tests {
             .with_luks_dump_text_luks2_for(&[
                 "/dev/disk/by-id/virtio-disk1",
                 "/dev/disk/by-id/virtio-disk2",
-            ]);
+            ])
+            .with_mappers_closed(&["braid-disk1", "braid-disk2"]);
 
         // dry_run = true, no passphrase needed
         let result = cmd_unlock(
@@ -885,7 +890,8 @@ mod tests {
             .with_luks_dump_text_luks2_for(&[
                 "/dev/disk/by-id/virtio-disk1",
                 "/dev/disk/by-id/virtio-disk2",
-            ]);
+            ])
+            .with_mappers_closed(&["braid-disk1", "braid-disk2"]);
 
         let result = cmd_unlock(
             &runner,

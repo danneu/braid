@@ -838,6 +838,7 @@ mod tests {
             .with_output(uuid2_req, uuid2_out)
             .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk1")
             .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk2")
+            .with_mappers_closed(&["braid-disk1", "braid-disk2"])
             .with_output_stdin(
                 CmdRequest::CryptsetupTestPassphrase {
                     device: "/dev/disk/by-id/virtio-disk1".into(),
@@ -921,6 +922,7 @@ mod tests {
             .with_output(uuid2_req, uuid2_out)
             .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk1")
             .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk2")
+            .with_mappers_closed(&["braid-disk1", "braid-disk2"])
             .with_output_stdin(
                 CmdRequest::CryptsetupTestPassphrase {
                     device: "/dev/disk/by-id/virtio-disk1".into(),
@@ -1003,6 +1005,7 @@ mod tests {
             .with_output(uuid2_req, uuid2_out)
             .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk1")
             .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk2")
+            .with_mappers_closed(&["braid-disk1", "braid-disk2"])
             .with_output_stdin(
                 CmdRequest::CryptsetupTestPassphrase {
                     device: "/dev/disk/by-id/virtio-disk1".into(),
@@ -1377,6 +1380,7 @@ mod tests {
             .with_output(uuid2_req, uuid2_out)
             .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk1")
             .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk2")
+            .with_mappers_closed(&["braid-disk1", "braid-disk2"])
             .with_output_stdin(
                 CmdRequest::CryptsetupTestPassphrase {
                     device: "/dev/disk/by-id/virtio-disk1".into(),
@@ -1503,6 +1507,16 @@ mod tests {
             .with_output(uuid2_req, uuid2_out)
             .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk1")
             .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk2")
+            .with_mapper_open(
+                "braid-disk1",
+                "/dev/vda",
+                "aaaaaaaa-1111-2222-3333-444444444444",
+            )
+            .with_mapper_open(
+                "braid-disk2",
+                "/dev/vdb",
+                "bbbbbbbb-1111-2222-3333-444444444444",
+            )
             // No passphrase or LUKS open mocks — should not be called
             .with_output(CmdRequest::BtrfsDeviceScanAll, ok_raw("btrfs device scan"))
             .with_output(
@@ -1575,7 +1589,17 @@ mod tests {
             .with_output(uuid2_req, uuid2_out)
             .with_output(uuid3_req, uuid3_out)
             .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk2")
-            .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk3");
+            .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk3")
+            .with_mapper_open(
+                "braid-disk2",
+                "/dev/vdb",
+                "bbbbbbbb-1111-2222-3333-444444444444",
+            )
+            .with_mapper_open(
+                "braid-disk3",
+                "/dev/vdc",
+                "cccccccc-1111-2222-3333-444444444444",
+            );
 
         let plan = plan_open_pool(&runner, &fs, &config, &membership, true, "unlock")
             .expect("plan should succeed with --allow-degraded")
@@ -1641,6 +1665,16 @@ mod tests {
             .with_output(uuid3_req, uuid3_out)
             .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk2")
             .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk3")
+            .with_mapper_open(
+                "braid-disk2",
+                "/dev/vdb",
+                "bbbbbbbb-1111-2222-3333-444444444444",
+            )
+            .with_mapper_open(
+                "braid-disk3",
+                "/dev/vdc",
+                "cccccccc-1111-2222-3333-444444444444",
+            )
             .with_output(CmdRequest::BtrfsDeviceScanAll, ok_raw("btrfs device scan"))
             .with_output(
                 CmdRequest::MountWithOptions {
@@ -1707,7 +1741,8 @@ mod tests {
             .with_output(uuid1_req, uuid1_out)
             .with_output(uuid2_req, uuid2_out)
             .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk1")
-            .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk2");
+            .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk2")
+            .with_mappers_closed(&["braid-disk1", "braid-disk2"]);
 
         let result = open_and_mount_for_test(
             &runner,
@@ -1775,7 +1810,13 @@ mod tests {
             .with_output(uuid1_req, uuid1_out)
             .with_output(uuid2_req, uuid2_out)
             .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk1")
-            .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk2");
+            .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk2")
+            .with_mapper_open(
+                "braid-disk1",
+                "/dev/vda",
+                "ffffffff-ffff-ffff-ffff-ffffffffffff",
+            )
+            .with_mapper_closed("braid-disk2");
 
         let result = open_and_mount_for_test(
             &runner,
@@ -1841,6 +1882,7 @@ mod tests {
             .with_output(uuid2_req, uuid2_out)
             .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk1")
             .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk2")
+            .with_mappers_closed(&["braid-disk1", "braid-disk2"])
             .with_output_stdin(
                 CmdRequest::CryptsetupTestPassphrase {
                     device: "/dev/disk/by-id/virtio-disk1".into(),
@@ -1934,6 +1976,7 @@ mod tests {
             .with_output(uuid2_req, uuid2_out)
             .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk1")
             .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk2")
+            .with_mappers_closed(&["braid-disk1", "braid-disk2"])
             // verify keyfile against disk1 → success
             .with_output(
                 CmdRequest::CryptsetupTestKeyFile {
@@ -2226,6 +2269,7 @@ mod tests {
             .with_output(uuid2_req, uuid2_out)
             .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk1")
             .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk2")
+            .with_mappers_closed(&["braid-disk1", "braid-disk2"])
     }
 
     fn two_disk_fs() -> MockFs {

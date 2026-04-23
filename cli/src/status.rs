@@ -3860,4 +3860,156 @@ mod tests {
             "expected StatusError::Membership(Corrupt(..))"
         );
     }
+
+    /*
+     * Intent: a ProbeError::MapperConflict raised by probe_config_disk while
+     *   building the per-disk status report must surface through
+     *   build_status_report as a StatusError::Probe(MapperConflict), not be
+     *   swallowed or remapped.
+     * Why it exists: a future regression in the status-path error handling
+     *   could narrow or drop the MapperConflict variant (e.g. a .or_else that
+     *   filters probe errors), hiding the probe-layer safety fix from the
+     *   non-mutating command boundary. The probe-level tests in probe.rs lock
+     *   the gateway behavior; this test locks the propagation contract so
+     *   both halves stay honest.
+     * Scenario: braid status run on a host where the LUKS mapper
+     *   /dev/mapper/braid-disk1 was externally aliased to a different LUKS
+     *   container (a distinct UUID) before braid was invoked.
+     */
+    #[test]
+    fn status_surfaces_mapper_conflict() {
+        use crate::probe::ProbeError;
+        use crate::types::LuksUuid;
+
+        let tmpdir = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(tmpdir.path().to_path_buf());
+
+        let mut disks = BTreeMap::new();
+        disks.insert(
+            "disk1".to_owned(),
+            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/disk1".to_owned())),
+        );
+        let membership = PoolMembership { disks };
+
+        // Healthy 1-disk mounted pool for probe_pool + data-gathering; the
+        // pool-side mapper "disk1" is distinct from the config-side mapper
+        // "braid-disk1" and does not collide.
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::FindmntJson {
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                },
+                findmnt_btrfs(),
+            )
+            .with_output(
+                CmdRequest::BtrfsFilesystemShow {
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                },
+                btrfs_show_1disk(),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "disk1".into(),
+                },
+                cryptsetup_status_active("disk1", "/dev/vda"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vda".into(),
+                },
+                cryptsetup_uuid_ok("/dev/vda", "11111111-1111-1111-1111-111111111111"),
+            )
+            .with_output(
+                CmdRequest::BtrfsFilesystemDfJson {
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                },
+                btrfs_df_single(),
+            )
+            .with_output(
+                CmdRequest::BtrfsFilesystemUsageRaw {
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                },
+                btrfs_usage_raw(),
+            )
+            .with_output(
+                CmdRequest::BtrfsDeviceUsageRaw {
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                },
+                btrfs_device_usage_raw_1disk(),
+            )
+            .with_output(
+                CmdRequest::BtrfsScrubStatus {
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                },
+                btrfs_scrub_never(),
+            )
+            .with_output(
+                CmdRequest::BtrfsDeviceStatsJson {
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                },
+                ok_raw(
+                    "btrfs device stats",
+                    r#"{"device-stats": [
+                        {"device": "/dev/mapper/disk1", "devid": 1, "write_io_errs": 0, "read_io_errs": 0, "flush_io_errs": 0, "corruption_errs": 0, "generation_errs": 0}
+                    ]}"#,
+                ),
+            )
+            // probe_config_disk for "disk1": by-id UUID = 11111111, mapper
+            // backing reports 99999999 → MapperConflict.
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/disk1".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/disk1",
+                    "11111111-1111-1111-1111-111111111111",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksDumpText {
+                    device: "/dev/disk/by-id/disk1".into(),
+                },
+                ok_raw(
+                    "cryptsetup luksDump",
+                    "LUKS header information\nVersion:       \t2\n",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-disk1".into(),
+                },
+                cryptsetup_status_active("braid-disk1", "/dev/vdz"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vdz".into(),
+                },
+                cryptsetup_uuid_ok("/dev/vdz", "99999999-9999-9999-9999-999999999999"),
+            );
+
+        let fs = fs_1disk();
+        let config = config_1disk();
+
+        let result = build_status_report(&runner, &fs, &config, &membership, &paths);
+        match result {
+            Err(StatusError::Probe(ProbeError::MapperConflict {
+                name,
+                expected,
+                found,
+            })) => {
+                assert_eq!(name, "disk1");
+                assert_eq!(
+                    expected,
+                    LuksUuid("11111111-1111-1111-1111-111111111111".into())
+                );
+                assert_eq!(
+                    found,
+                    Some(LuksUuid("99999999-9999-9999-9999-999999999999".into()))
+                );
+            }
+            other => panic!(
+                "expected StatusError::Probe(MapperConflict), got: {other:?}"
+            ),
+        }
+    }
 }
