@@ -405,13 +405,13 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     }
 
     // Post-commit: write pool.json with enriched metadata and clear journal.
-    let mut final_membership = target_membership;
+    let mut target_membership = target_membership;
     if let Ok(pool_after) = probe_pool(runner, config.mount_point()) {
         for dev in &pool_after.devices {
             let Some(name) = crate::config::name_from_mapper(&dev.mapper.0) else {
                 continue;
             };
-            if let Some(member) = final_membership.disks.get_mut(name) {
+            if let Some(member) = target_membership.disks.get_mut(name) {
                 member.luks_uuid = Some(dev.luks_uuid.clone());
                 member.devid = Some(dev.devid);
                 if member.added_at.is_none() {
@@ -420,7 +420,7 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             }
         }
     }
-    membership::save_membership(&final_membership, params.paths)
+    membership::save_membership(&target_membership, params.paths)
         .map_err(|e| ReplaceError::Validation(format!("failed to persist pool membership: {e}")))?;
     journal::clear_journal(params.paths).map_err(|e| ReplaceError::Validation(e.to_string()))?;
 
