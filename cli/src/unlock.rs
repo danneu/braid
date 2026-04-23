@@ -81,12 +81,7 @@ pub fn cmd_unlock<R: CommandRunner, F: Filesystem + ?Sized>(
         Some(mount::resolve_credential(&source)?)
     };
 
-    let mounted = mount::execute_open_plan(runner, fs, params.config, &plan, credential.as_ref())?;
-
-    if !mounted {
-        // Pool was already mounted (defensive — plan should have caught this)
-        return Ok(());
-    }
+    mount::execute_open_plan(runner, fs, params.config, &plan, credential.as_ref())?;
 
     let mount_point = params.config.mount_point();
 
