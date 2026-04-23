@@ -120,4 +120,30 @@ with subtest("Test 4: round-trip — lock then unlock, data intact"):
     content = machine.succeed("cat /mnt/storage/test.txt").strip()
     assert content == "persistent data", f"Expected 'persistent data', got '{content}'"
 
+# --- Test 5: Dry-run preview stream routing ---
+# Intent: `braid lock --dry-run` writes its entire preview to stdout with
+# nothing on stderr when /dev/mapper is readable and there is nothing to do.
+# Why it exists: the dry-run preview is the single-stream contract the
+# render_lock_dry_run helper establishes; if the CLI reverts to mixing
+# streams (e.g. swapping print! for eprintln!), users piping
+# `braid lock --dry-run > preview.txt` would silently lose output.
+# Scenario: operator scripts a shutdown rehearsal by redirecting the
+# preview to a file; capturing stdout alone must contain the full preview.
+
+with subtest("Test 5: dry-run preview goes to stdout"):
+    # Lock the pool so dry-run has no work to do -- shortest deterministic preview.
+    machine.succeed("braid lock")
+    machine.fail("mountpoint -q /mnt/storage")
+    for k in ["disk1", "disk2", "disk3"]:
+        machine.fail(f"test -e /dev/mapper/braid-{k}")
+
+    machine.succeed(
+        "braid lock --dry-run >/tmp/lock-stdout 2>/tmp/lock-stderr"
+    )
+    stdout = machine.succeed("cat /tmp/lock-stdout")
+    stderr = machine.succeed("cat /tmp/lock-stderr")
+
+    assert stdout == "nothing to do.\n", f"unexpected stdout: {stdout!r}"
+    assert stderr == "", f"expected empty stderr, got: {stderr!r}"
+
 machine.shutdown()

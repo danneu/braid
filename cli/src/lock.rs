@@ -67,16 +67,14 @@ fn close_mapper_with_retry<R: CommandRunner>(runner: &R, mapper: &str) -> Result
 
 /// Enumerate braid-* mappers under /dev/mapper that are NOT in the pool
 /// membership. These are orphans from interrupted add/replace flows --
-/// see docs/principles.md:18. Missing/unreadable /dev/mapper is
-/// non-fatal: returns an empty list so the primary lock path still
-/// runs.
+/// see docs/principles.md:18. An unreadable /dev/mapper is surfaced as
+/// Err so callers can warn the user and proceed with an empty orphan
+/// set.
 fn scan_orphan_mappers<F: Filesystem + ?Sized>(
     fs: &F,
     membership: &PoolMembership,
-) -> Vec<String> {
-    let Ok(entries) = fs.list_dir("/dev/mapper") else {
-        return Vec::new();
-    };
+) -> Result<Vec<String>, std::io::Error> {
+    let entries = fs.list_dir("/dev/mapper")?;
     let mut orphans = Vec::new();
     for entry in entries {
         let Some(disk_name) = name_from_mapper(&entry) else {
@@ -89,7 +87,14 @@ fn scan_orphan_mappers<F: Filesystem + ?Sized>(
             orphans.push(entry);
         }
     }
-    orphans
+    Ok(orphans)
+}
+
+/// Message body (no `[warn]` prefix) for a failed /dev/mapper scan.
+/// Shared between the dry-run preview and the real-run stderr warn so
+/// both branches use identical wording.
+fn orphan_scan_warn_body(e: &std::io::Error) -> String {
+    format!("could not scan /dev/mapper for orphans: {e} (skipping)")
 }
 
 /// Build the scoped `btrfs device scan --forget` argument list: every
@@ -175,6 +180,46 @@ pub fn compile_lock_steps(
     steps
 }
 
+/// Render the full `braid lock --dry-run` preview as a single String.
+/// The preview includes a `[warn]` line when /dev/mapper cannot be
+/// scanned for orphans, followed by either the rendered step block or
+/// the literal `nothing to do.` sentinel. This is the user-visible
+/// contract boundary for the dry-run output; the caller is a thin
+/// printer.
+pub fn render_lock_dry_run<F: Filesystem + ?Sized>(
+    pool_was_mounted: bool,
+    fs: &F,
+    membership: &PoolMembership,
+    mount_point: &crate::types::MountPoint,
+) -> String {
+    use std::fmt::Write;
+
+    let mut out = String::new();
+
+    let open_mappers: Vec<String> = membership
+        .disks
+        .keys()
+        .map(|name| mapper_name(name).0)
+        .filter(|m| fs.exists(&format!("/dev/mapper/{m}")))
+        .collect();
+
+    let orphan_mappers = match scan_orphan_mappers(fs, membership) {
+        Ok(v) => v,
+        Err(e) => {
+            writeln!(out, "[warn]  {}", orphan_scan_warn_body(&e)).unwrap();
+            Vec::new()
+        }
+    };
+
+    let steps = compile_lock_steps(pool_was_mounted, &open_mappers, &orphan_mappers, mount_point);
+    if steps.is_empty() {
+        out.push_str("nothing to do.\n");
+    } else {
+        out.push_str(&Step::render_dry_run(&steps));
+    }
+    out
+}
+
 pub fn cmd_lock<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
@@ -202,32 +247,30 @@ pub fn cmd_lock<R: CommandRunner, F: Filesystem + ?Sized>(
         preflight::require_lock_preflight(fs, fsid).map_err(LockError::Failed)?;
     }
 
-    // Probe mapper state. Shared between dry-run and runtime so the
-    // forget call's device list matches the set the same function is
-    // about to close (the close set).
-    let open_mappers: Vec<String> = membership
-        .disks
-        .keys()
-        .map(|name| mapper_name(name).0)
-        .filter(|m| fs.exists(&format!("/dev/mapper/{m}")))
-        .collect();
-    let orphan_mappers = scan_orphan_mappers(fs, membership);
-
-    // Dry-run: compile steps, print
+    // Dry-run: render the full preview via render_lock_dry_run and
+    // print it to stdout as one stream. The helper owns the orphan scan
+    // so a /dev/mapper read failure surfaces as a `[warn]` line inside
+    // the preview, mirroring the real-run warn below.
     if dry_run {
-        let steps = compile_lock_steps(
-            pool_was_mounted,
-            &open_mappers,
-            &orphan_mappers,
-            mount_point,
+        print!(
+            "{}",
+            render_lock_dry_run(pool_was_mounted, fs, membership, mount_point)
         );
-        if steps.is_empty() {
-            eprintln!("nothing to do.");
-        } else {
-            Step::print_dry_run(&steps);
-        }
         return Ok(());
     }
+
+    // Runtime orphan probe. Computed once here (after the dry-run
+    // early return) so the close loop and the forget device list see
+    // the same set. An unreadable /dev/mapper is surfaced as a `[warn]`
+    // line (mirroring the dry-run preview) and treated as an empty
+    // orphan set -- the primary close loop still runs.
+    let orphan_mappers = match scan_orphan_mappers(fs, membership) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("[warn]  {}", orphan_scan_warn_body(&e));
+            Vec::new()
+        }
+    };
 
     // 2. If mounted → unmount
     let mut umount_error: Option<LockError> = None;
@@ -1016,6 +1059,122 @@ mod tests {
 
         cmd_lock(&runner, &FailListDirFs, &config, &membership, false)
             .expect("lock should succeed despite list_dir failure");
+    }
+
+    /*
+     * Intent: `braid lock --dry-run` preview surfaces a `[warn]` line when
+     *   /dev/mapper cannot be scanned for orphans.
+     * Why it exists: the dry-run branch previously used
+     *   `if let Ok(entries) = fs.list_dir(...)`, silently swallowing the
+     *   error while the real run warned -- violating the dry-run contract
+     *   of "preview what the real command will do."
+     * Scenario: containerized environment where /dev/mapper is unreadable;
+     *   the user runs `braid lock --dry-run` to preview the shutdown and
+     *   must see the scan failure, not a falsely-clean preview.
+     */
+    #[test]
+    fn dry_run_preview_warns_when_list_dir_fails() {
+        struct FailListDirFs;
+        impl Filesystem for FailListDirFs {
+            fn exists(&self, path: &str) -> bool {
+                path == "/dev/mapper/braid-aaa" || path == "/dev/mapper/braid-bbb"
+            }
+            fn is_block_device(&self, _path: &str) -> bool {
+                false
+            }
+            fn read_to_string(&self, _path: &str) -> Result<String, std::io::Error> {
+                Err(std::io::Error::new(std::io::ErrorKind::NotFound, "mock"))
+            }
+            fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "permission denied",
+                ))
+            }
+        }
+
+        let mount_point = MountPoint("/mnt/storage".to_owned());
+        let output = render_lock_dry_run(false, &FailListDirFs, &test_membership(), &mount_point);
+
+        assert!(
+            output.starts_with(
+                "[warn]  could not scan /dev/mapper for orphans: permission denied (skipping)\n"
+            ),
+            "preview must start with the exact [warn] line, got:\n{output}"
+        );
+        assert!(
+            output.contains("close LUKS mapper braid-aaa"),
+            "preview must still render membership close steps, got:\n{output}"
+        );
+        assert!(
+            output.contains("close LUKS mapper braid-bbb"),
+            "preview must still render membership close steps, got:\n{output}"
+        );
+    }
+
+    /*
+     * Intent: `render_lock_dry_run` renders the full happy-path preview --
+     *   umount + scoped forget + per-mapper closes (membership and orphan).
+     * Why it exists: the preview helper is the sole boundary between
+     *   `cmd_lock` dry-run and the user; a refactor that drops any of
+     *   these steps must fail a test, not only `compile_lock_steps`'
+     *   isolated tests.
+     * Scenario: pool mounted, both membership mappers open, one orphan
+     *   (braid-ccc) left by a prior crash; user previews `braid lock
+     *   --dry-run` to confirm the shutdown plan before running it.
+     */
+    #[test]
+    fn dry_run_preview_mounted_happy_path() {
+        let fs = MockFs::new(&[
+            "/dev/mapper/braid-aaa",
+            "/dev/mapper/braid-bbb",
+            "/dev/mapper/braid-ccc",
+        ]);
+        let mount_point = MountPoint("/mnt/storage".to_owned());
+        let output = render_lock_dry_run(true, &fs, &test_membership(), &mount_point);
+
+        assert!(
+            !output.contains("[warn]"),
+            "happy path must not emit a scan warning, got:\n{output}"
+        );
+        assert!(
+            output.contains("unmount /mnt/storage"),
+            "preview must include unmount step, got:\n{output}"
+        );
+        assert!(
+            output.contains("btrfs device scan --forget"),
+            "preview must include scoped forget step, got:\n{output}"
+        );
+        assert!(
+            output.contains("close LUKS mapper braid-aaa"),
+            "preview must include membership close for braid-aaa, got:\n{output}"
+        );
+        assert!(
+            output.contains("close LUKS mapper braid-bbb"),
+            "preview must include membership close for braid-bbb, got:\n{output}"
+        );
+        assert!(
+            output.contains("close LUKS mapper braid-ccc (orphan)"),
+            "preview must include orphan close for braid-ccc, got:\n{output}"
+        );
+    }
+
+    /*
+     * Intent: `render_lock_dry_run` emits exactly `nothing to do.\n` when
+     *   the pool is unmounted with no open membership or orphan mappers.
+     * Why it exists: the no-op branch is easy to regress silently -- a
+     *   helper refactor could drop or alter the line and all other tests
+     *   would stay green.
+     * Scenario: user re-runs `braid lock --dry-run` on an already-locked
+     *   pool and expects a short, deterministic confirmation.
+     */
+    #[test]
+    fn dry_run_preview_nothing_to_do() {
+        let fs = MockFs::new(&[]);
+        let mount_point = MountPoint("/mnt/storage".to_owned());
+        let output = render_lock_dry_run(false, &fs, &test_membership(), &mount_point);
+
+        assert_eq!(output, "nothing to do.\n", "unexpected preview: {output:?}");
     }
 
     /// Build a MockRunner pre-loaded with a failed-umount scenario
