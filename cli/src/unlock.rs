@@ -73,12 +73,11 @@ pub fn cmd_unlock<R: CommandRunner, F: Filesystem + ?Sized>(
     if plan.to_unlock.is_empty() {
         mount::execute_mount_only(runner, fs, params.config, &plan)?;
     } else {
-        let source = mount::CredentialSource {
-            passphrase_stdin: params.passphrase_stdin,
-            passphrase_file: params.passphrase_file,
-            key_file: params.key_file,
-        };
-        let credential = mount::resolve_credential(&source)?;
+        let credential = mount::resolve_credential(
+            params.passphrase_stdin,
+            params.passphrase_file,
+            params.key_file,
+        )?;
         mount::execute_unlock_and_mount(runner, fs, params.config, &plan, &credential)?;
     }
 

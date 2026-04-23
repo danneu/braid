@@ -26,27 +26,16 @@ pub enum MountError {
 /// A fully-resolved credential ready to drive `cryptsetup open`. Owned (no
 /// lifetime parameter); plaintext is scrubbed on drop via `Zeroizing`.
 ///
-/// Constructed by `resolve_credential` from a `CredentialSource`. Callers
-/// hold the resolved value and pass it by reference to
-/// `execute_unlock_and_mount`. The mount-only entry point
-/// (`execute_mount_only`) takes no credential.
+/// Produced by `resolve_credential`. Callers hold the resolved value and
+/// pass it by reference to `execute_unlock_and_mount`. The mount-only
+/// entry point (`execute_mount_only`) takes no credential.
 pub enum OpenCredential {
     Passphrase(Zeroizing<String>),
     KeyFile(PathBuf),
 }
 
-/// Where to read a credential from. Mirrors the existing
-/// `passphrase_stdin`/`passphrase_file`/`key_file` fields on `UnlockParams`
-/// and `RecoverParams`. Constructed at the callsite, consumed by
-/// `resolve_credential`.
-pub struct CredentialSource<'a> {
-    pub passphrase_stdin: bool,
-    pub passphrase_file: Option<&'a Path>,
-    pub key_file: Option<&'a Path>,
-}
-
-/// Resolve a credential source into an owned, fully-resolved
-/// `OpenCredential`. ALWAYS reads — callers decide whether to invoke this,
+/// Resolve credential flag inputs into an owned, fully-resolved
+/// `OpenCredential`. ALWAYS reads -- callers decide whether to invoke this,
 /// because the "should we prompt now?" rule differs by command:
 ///
 /// - `cmd_unlock` skips this call entirely when `plan.to_unlock` is empty
@@ -55,15 +44,17 @@ pub struct CredentialSource<'a> {
 ///   if the initial plan's `to_unlock` is empty, because the post-mount
 ///   relock cycle will close every mapper and need to reopen them.
 ///
-/// Resolution order: `key_file` (if provided) → passphrase
+/// Resolution order: `key_file` (if provided) -> passphrase
 /// (file/stdin/TTY).
 pub fn resolve_credential(
-    source: &CredentialSource<'_>,
+    passphrase_stdin: bool,
+    passphrase_file: Option<&Path>,
+    key_file: Option<&Path>,
 ) -> Result<OpenCredential, MountError> {
-    if let Some(kf) = source.key_file {
+    if let Some(kf) = key_file {
         return Ok(OpenCredential::KeyFile(kf.to_path_buf()));
     }
-    let pp = luks::read_passphrase(source.passphrase_file, source.passphrase_stdin)?;
+    let pp = luks::read_passphrase(passphrase_file, passphrase_stdin)?;
     Ok(OpenCredential::Passphrase(Zeroizing::new(pp)))
 }
 

@@ -244,17 +244,14 @@ pub fn cmd_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     // credential lives in this local across both execute calls (initial
     // mount and the cycle remount).
     let credential = match plan.as_ref() {
-        Some(_) => {
-            let source = mount::CredentialSource {
-                passphrase_stdin: params.passphrase_stdin,
-                passphrase_file: params.passphrase_file,
-                key_file: None, // recover does not expose --key-file today
-            };
-            Some(
-                mount::resolve_credential(&source)
-                    .map_err(|e| RecoverError::Failed(format!("recover: {e}")))?,
+        Some(_) => Some(
+            mount::resolve_credential(
+                params.passphrase_stdin,
+                params.passphrase_file,
+                None, // recover does not expose --key-file today
             )
-        }
+            .map_err(|e| RecoverError::Failed(format!("recover: {e}")))?,
+        ),
         None => None, // already mounted, no cycle, no credential needed
     };
 
