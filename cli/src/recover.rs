@@ -166,14 +166,16 @@ pub fn cmd_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
 
     // Dry-run: probe + validate (same errors as execution), then print plan
     if params.dry_run {
-        let plan = mount::plan_open_pool(
+        let report = mount::plan_open_pool(
             runner,
             fs,
             params.config,
             &union,
             params.allow_degraded,
             "recover",
-        )?;
+        );
+        mount::print_probe_events(&report.events);
+        let plan = report.result?;
         let mut steps = Vec::new();
         if let Some(plan) = &plan {
             steps.extend(mount::compile_open_steps(
@@ -227,14 +229,16 @@ pub fn cmd_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     // Plan once. plan_open_pool returns None when the pool is already
     // mounted (this replaces the manual MountpointCheck the previous
     // implementation hoisted here for the same purpose).
-    let plan = mount::plan_open_pool(
+    let report = mount::plan_open_pool(
         runner,
         fs,
         params.config,
         &union,
         params.allow_degraded,
         "recover",
-    )?;
+    );
+    mount::print_probe_events(&report.events);
+    let plan = report.result?;
 
     // Recover-specific gate: resolve a credential whenever we have a plan
     // (i.e. the pool is not already mounted). This is EAGER on purpose —
@@ -675,7 +679,11 @@ fn relock_and_remount<R: CommandRunner, F: Filesystem + ?Sized>(
     // The cycle just closed every mapper, so the cycle's plan ALWAYS has
     // `to_unlock` non-empty — we always pass the credential. (If somehow
     // plan_open_pool returns None here it means another mounter raced us.)
-    let cycle_plan = mount::plan_open_pool(runner, fs, config, membership, allow_degraded, "recover")
+    let cycle_report =
+        mount::plan_open_pool(runner, fs, config, membership, allow_degraded, "recover");
+    mount::print_probe_events(&cycle_report.events);
+    let cycle_plan = cycle_report
+        .result
         .map_err(|e| RecoverError::Failed(format!("recover remount cycle: plan: {e}")))?
         .ok_or_else(|| {
             RecoverError::Failed(

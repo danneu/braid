@@ -124,6 +124,7 @@ fn format_degraded_refused(
 }
 
 /// Result of the read-only probe + validate phase.
+#[derive(Debug)]
 pub struct OpenPlan {
     /// Disks that need LUKS open (name, by_id pairs).
     pub to_unlock: Vec<(String, ByIdPath)>,
@@ -135,12 +136,38 @@ pub struct OpenPlan {
     pub mount_device: String,
 }
 
+/// An observation produced during the read-only probe phase. Collected
+/// by `plan_open_pool` and rendered by callers via `print_probe_events`
+/// / `render_probe_events`. Kept separate from the plan so that error
+/// returns still carry the per-disk context that preceded them (e.g.
+/// `DegradedRefused`, UUID mismatch).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProbeEvent {
+    AlreadyMounted { mount_point: String },
+    DiskAbsent { name: String },
+    DiskLuksHeaderUnreadable { name: String },
+    DiskLuksHeaderDamaged { name: String },
+    DiskAlreadyOpen { name: String },
+    DiskAvailable { name: String },
+}
+
+/// Outcome of `plan_open_pool`. `events` are always populated, even on
+/// error, so callers can render them before propagating `result`.
+pub struct PlanReport {
+    pub events: Vec<ProbeEvent>,
+    pub result: Result<Option<OpenPlan>, MountError>,
+}
+
 /// Probe membership disks, validate UUIDs, check degraded policy.
 /// Returns the planning errors that `execute_mount_only` /
 /// `execute_unlock_and_mount` would otherwise surface (degraded refusal,
-/// UUID mismatch, no unlockable disks). No mutations — safe for dry-run.
+/// UUID mismatch, no unlockable disks). No mutations -- safe for dry-run.
 ///
-/// Returns `Ok(None)` when pool is already mounted.
+/// Events accumulate as probing proceeds and are returned on both
+/// success and error paths. Callers typically render them (via
+/// `print_probe_events`) before `?`-propagating `result`.
+///
+/// `result` is `Ok(None)` when the pool is already mounted.
 pub fn plan_open_pool<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
@@ -148,15 +175,39 @@ pub fn plan_open_pool<R: CommandRunner, F: Filesystem + ?Sized>(
     membership: &PoolMembership,
     allow_degraded: bool,
     command_hint: &str,
+) -> PlanReport {
+    let mut events = Vec::new();
+    let result = plan_open_pool_inner(
+        runner,
+        fs,
+        config,
+        membership,
+        allow_degraded,
+        command_hint,
+        &mut events,
+    );
+    PlanReport { events, result }
+}
+
+fn plan_open_pool_inner<R: CommandRunner, F: Filesystem + ?Sized>(
+    runner: &R,
+    fs: &F,
+    config: &Config,
+    membership: &PoolMembership,
+    allow_degraded: bool,
+    command_hint: &str,
+    events: &mut Vec<ProbeEvent>,
 ) -> Result<Option<OpenPlan>, MountError> {
     let mount_point = config.mount_point();
 
-    // 1. If pool already mounted → None
+    // 1. If pool already mounted -> None
     let mp_result = runner.run(&CmdRequest::MountpointCheck {
         path: mount_point.clone(),
     })?;
     if mp_result.exit_status == 0 {
-        eprintln!("pool already mounted at {mount_point}");
+        events.push(ProbeEvent::AlreadyMounted {
+            mount_point: mount_point.to_string(),
+        });
         return Ok(None);
     }
 
@@ -170,7 +221,7 @@ pub fn plan_open_pool<R: CommandRunner, F: Filesystem + ?Sized>(
         let probed = probe::probe_config_disk(runner, fs, name, &member.by_id)?;
         match &probed.state {
             ConfigDiskState::Absent => {
-                eprintln!("{}  disk: {:<10}not found (unplugged?)", tag("skip"), name);
+                events.push(ProbeEvent::DiskAbsent { name: name.clone() });
                 missing.push((name.clone(), MissingReason::Unplugged));
             }
             ConfigDiskState::PresentNotLuks => {
@@ -190,11 +241,12 @@ pub fn plan_open_pool<R: CommandRunner, F: Filesystem + ?Sized>(
                     // gets the conservative Unreadable label.
                     _ => MissingReason::LuksHeaderUnreadable,
                 };
-                let reason_text = match reason {
-                    MissingReason::LuksHeaderDamaged => "LUKS header metadata damaged",
-                    _ => "LUKS header unreadable",
-                };
-                eprintln!("{}  disk: {:<10}{reason_text}", tag("skip"), name);
+                events.push(match reason {
+                    MissingReason::LuksHeaderDamaged => {
+                        ProbeEvent::DiskLuksHeaderDamaged { name: name.clone() }
+                    }
+                    _ => ProbeEvent::DiskLuksHeaderUnreadable { name: name.clone() },
+                });
                 missing.push((name.clone(), reason));
             }
             ConfigDiskState::PresentLuks { uuid, mapper_open } => {
@@ -209,13 +261,13 @@ pub fn plan_open_pool<R: CommandRunner, F: Filesystem + ?Sized>(
                     }
 
                 if *mapper_open {
-                    eprintln!("{}  disk: {:<10}already open", tag("ok"), name);
+                    events.push(ProbeEvent::DiskAlreadyOpen { name: name.clone() });
                     any_open = true;
                     if first_open_mapper.is_none() {
                         first_open_mapper = Some(name.clone());
                     }
                 } else {
-                    eprintln!("{}  disk: {:<10}found", tag("ok"), name);
+                    events.push(ProbeEvent::DiskAvailable { name: name.clone() });
                     to_unlock.push((name.clone(), member.by_id.clone()));
                 }
             }
@@ -254,6 +306,62 @@ pub fn plan_open_pool<R: CommandRunner, F: Filesystem + ?Sized>(
         any_missing_member,
         mount_device,
     }))
+}
+
+/// Render a probe-event sequence to a multi-line string. Pure: no I/O,
+/// no global state. The exact byte output is a behavioral contract --
+/// see `render_probe_events_formats_mixed_probe_result`.
+pub fn render_probe_events(events: &[ProbeEvent]) -> String {
+    let mut out = String::new();
+    for ev in events {
+        match ev {
+            ProbeEvent::AlreadyMounted { mount_point } => {
+                out.push_str(&format!("pool already mounted at {mount_point}\n"));
+            }
+            ProbeEvent::DiskAbsent { name } => {
+                out.push_str(&format!(
+                    "{}  disk: {:<10}not found (unplugged?)\n",
+                    tag("skip"),
+                    name
+                ));
+            }
+            ProbeEvent::DiskLuksHeaderUnreadable { name } => {
+                out.push_str(&format!(
+                    "{}  disk: {:<10}LUKS header unreadable\n",
+                    tag("skip"),
+                    name
+                ));
+            }
+            ProbeEvent::DiskLuksHeaderDamaged { name } => {
+                out.push_str(&format!(
+                    "{}  disk: {:<10}LUKS header metadata damaged\n",
+                    tag("skip"),
+                    name
+                ));
+            }
+            ProbeEvent::DiskAlreadyOpen { name } => {
+                out.push_str(&format!(
+                    "{}  disk: {:<10}already open\n",
+                    tag("ok"),
+                    name
+                ));
+            }
+            ProbeEvent::DiskAvailable { name } => {
+                out.push_str(&format!("{}  disk: {:<10}found\n", tag("ok"), name));
+            }
+        }
+    }
+    out
+}
+
+/// Thin stderr wrapper around `render_probe_events`. Callers invoke
+/// this after `plan_open_pool` but before propagating any error, so
+/// per-disk context always precedes a failure message.
+pub fn print_probe_events(events: &[ProbeEvent]) {
+    let text = render_probe_events(events);
+    if !text.is_empty() {
+        eprint!("{text}");
+    }
 }
 
 /// Compile dry-run steps from a validated OpenPlan.
@@ -716,11 +824,12 @@ mod tests {
         allow_degraded: bool,
         command_hint: &str,
     ) -> Result<bool, MountError> {
-        let plan =
-            match plan_open_pool(runner, fs, config, membership, allow_degraded, command_hint)? {
-                Some(p) => p,
-                None => return Ok(false),
-            };
+        let report =
+            plan_open_pool(runner, fs, config, membership, allow_degraded, command_hint);
+        let plan = match report.result? {
+            Some(p) => p,
+            None => return Ok(false),
+        };
         if plan.to_unlock.is_empty() {
             execute_mount_only(runner, fs, config, &plan)
         } else {
@@ -1706,7 +1815,9 @@ mod tests {
                 "cccccccc-1111-2222-3333-444444444444",
             );
 
-        let plan = plan_open_pool(&runner, &fs, &config, &membership, true, "unlock")
+        let report = plan_open_pool(&runner, &fs, &config, &membership, true, "unlock");
+        let plan = report
+            .result
             .expect("plan should succeed with --allow-degraded")
             .expect("pool is not mounted -- plan should not be None");
 
@@ -1723,6 +1834,146 @@ mod tests {
         assert_eq!(
             plan.mount_device, "/dev/mapper/braid-disk2",
             "mount_device must name the first open mapper, not the absent first disk"
+        );
+        assert_eq!(
+            report.events,
+            vec![
+                ProbeEvent::DiskAbsent {
+                    name: "disk1".to_owned()
+                },
+                ProbeEvent::DiskAlreadyOpen {
+                    name: "disk2".to_owned()
+                },
+                ProbeEvent::DiskAlreadyOpen {
+                    name: "disk3".to_owned()
+                },
+            ],
+            "event sequence must match probe order"
+        );
+    }
+
+    /// Intent: `render_probe_events` must produce byte-for-byte stable
+    /// output for every `ProbeEvent` variant.
+    ///
+    /// Why: The pre-refactor behavior of `plan_open_pool` was to emit
+    /// these exact lines inline via `eprintln!`. After extracting a pure
+    /// renderer, the caller-side `print_probe_events` wraps it with
+    /// `eprint!`, so wording/padding/tag drift is only detectable via
+    /// this test. A failure here means user-visible stderr output from
+    /// unlock/recover has shifted.
+    ///
+    /// Scenario: a single fixture vector containing every variant,
+    /// including both disk states and the already-mounted header line.
+    #[test]
+    fn render_probe_events_formats_mixed_probe_result() {
+        let events = vec![
+            ProbeEvent::AlreadyMounted {
+                mount_point: "/mnt/storage".to_owned(),
+            },
+            ProbeEvent::DiskAbsent {
+                name: "disk1".to_owned(),
+            },
+            ProbeEvent::DiskLuksHeaderUnreadable {
+                name: "disk2".to_owned(),
+            },
+            ProbeEvent::DiskLuksHeaderDamaged {
+                name: "disk3".to_owned(),
+            },
+            ProbeEvent::DiskAlreadyOpen {
+                name: "disk4".to_owned(),
+            },
+            ProbeEvent::DiskAvailable {
+                name: "disk5".to_owned(),
+            },
+        ];
+
+        let rendered = render_probe_events(&events);
+
+        let expected = "\
+pool already mounted at /mnt/storage
+[skip]  disk: disk1     not found (unplugged?)
+[skip]  disk: disk2     LUKS header unreadable
+[skip]  disk: disk3     LUKS header metadata damaged
+[ok  ]  disk: disk4     already open
+[ok  ]  disk: disk5     found
+";
+
+        assert_eq!(
+            rendered, expected,
+            "render_probe_events output drifted from the pre-refactor stderr format"
+        );
+    }
+
+    /// Intent: `plan_open_pool` must return the events it accumulated
+    /// even when it returns an error. Users and tests rely on seeing
+    /// the per-disk probe context *before* a refusal error.
+    ///
+    /// Why: Before this refactor, `plan_open_pool` wrote probe lines to
+    /// stderr inline, so those lines appeared ahead of any subsequent
+    /// error (degraded-refused, UUID mismatch, no unlockable disks). A
+    /// naive `Result<Option<OpenPlan>, MountError>` shape would drop
+    /// those events on the `Err` path. This test pins the
+    /// events-always contract so that regression is caught.
+    ///
+    /// Scenario: 3-disk pool with disk3 absent and
+    /// `allow_degraded=false`. `plan_open_pool` must return
+    /// `DegradedRefused` AND a `report.events` vector containing the
+    /// two Available disks plus the one Absent disk.
+    #[test]
+    fn plan_open_pool_emits_events_before_degraded_refused() {
+        let config = test_config();
+        let membership = three_disk_membership();
+        let fs = MockFs::new(&[
+            "/dev/disk/by-id/virtio-disk1",
+            "/dev/disk/by-id/virtio-disk2",
+            // disk3 absent -- not in fs paths
+        ]);
+
+        let (uuid1_req, uuid1_out) = luks_uuid_ok(
+            "/dev/disk/by-id/virtio-disk1",
+            "aaaaaaaa-1111-2222-3333-444444444444",
+        );
+        let (uuid2_req, uuid2_out) = luks_uuid_ok(
+            "/dev/disk/by-id/virtio-disk2",
+            "bbbbbbbb-1111-2222-3333-444444444444",
+        );
+
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::MountpointCheck {
+                    path: MountPoint("/mnt/storage".to_owned()),
+                },
+                err_raw("mountpoint", 1, ""),
+            )
+            .with_output(uuid1_req, uuid1_out)
+            .with_output(uuid2_req, uuid2_out)
+            .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk1")
+            .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk2")
+            .with_mappers_closed(&["braid-disk1", "braid-disk2"]);
+
+        let report = plan_open_pool(&runner, &fs, &config, &membership, false, "unlock");
+
+        let err = report
+            .result
+            .expect_err("should refuse degraded mount without --allow-degraded");
+        assert!(
+            matches!(&err, MountError::DegradedRefused(_)),
+            "expected DegradedRefused, got: {err:?}"
+        );
+        assert_eq!(
+            report.events,
+            vec![
+                ProbeEvent::DiskAvailable {
+                    name: "disk1".to_owned()
+                },
+                ProbeEvent::DiskAvailable {
+                    name: "disk2".to_owned()
+                },
+                ProbeEvent::DiskAbsent {
+                    name: "disk3".to_owned()
+                },
+            ],
+            "events accumulated during probe must survive the Err return"
         );
     }
 

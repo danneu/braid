@@ -36,14 +36,16 @@ pub fn cmd_unlock<R: CommandRunner, F: Filesystem + ?Sized>(
     preflight::check_no_pending_operation(params.paths).map_err(UnlockError::Failed)?;
 
     // Plan once (read-only). Reused by dry-run and execution.
-    let plan = mount::plan_open_pool(
+    let report = mount::plan_open_pool(
         runner,
         fs,
         params.config,
         params.membership,
         params.allow_degraded,
         "unlock",
-    )?;
+    );
+    mount::print_probe_events(&report.events);
+    let plan = report.result?;
 
     // Dry-run: print steps and exit. plan_open_pool already validated.
     if params.dry_run {
