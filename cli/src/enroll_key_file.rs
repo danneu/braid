@@ -30,6 +30,25 @@ pub enum DiskEnrollAction {
     NeedsEnroll { name: String, by_id: ByIdPath },
 }
 
+/// Mode dispatch for `plan_enrollment`. The two modes share passphrase
+/// verification and slot-1 conflict detection but differ on whether the
+/// keyfile probe (`luks::verify_key_file`) runs.
+///
+/// `GenerateNew` must skip the keyfile probe -- the keyfile does not exist
+/// yet, so probing it would always fail with "Failed to open key file" and
+/// abort enrollment before the file is created.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EnrollmentPlanMode {
+    /// User-supplied keyfile already on disk. Probe it on each candidate
+    /// to support idempotent re-enroll, then check slot 1 on disks that
+    /// don't already have it.
+    ExistingKeyfile,
+    /// `--generate`: keyfile does not exist yet. Skip the keyfile probe
+    /// entirely and only check slot 1 on every candidate -- every disk
+    /// is by definition `NeedsEnroll`.
+    GenerateNew,
+}
+
 /// Discovery phase: iterate membership disks and collect present LUKS candidates.
 /// Absent and non-LUKS disks are silently skipped.
 /// Errors if zero candidates found.
@@ -63,57 +82,88 @@ fn discover_enrollment_candidates<R: CommandRunner, F: Filesystem + ?Sized>(
     Ok(candidates)
 }
 
+/// Verify the supplied passphrase against the first candidate disk.
+/// Single source of truth for the "fail fast on wrong passphrase" preflight
+/// shared by both planning modes. Wrong passphrase here would cause every
+/// downstream `luksAddKey` to fail, so we surface it once up front rather
+/// than partway through enrollment.
+fn verify_first_candidate_passphrase<R: CommandRunner>(
+    runner: &R,
+    candidates: &[(String, ByIdPath)],
+    passphrase: &str,
+) -> Result<(), EnrollKeyFileError> {
+    let (first_name, first_by_id) = &candidates[0];
+    match luks::verify_passphrase(runner, &first_by_id.0, passphrase)? {
+        VerifyOutcome::Authenticated => Ok(()),
+        VerifyOutcome::Rejected => Err(EnrollKeyFileError::Validation(format!(
+            "wrong passphrase (verified against {})",
+            first_name
+        ))),
+    }
+}
+
+/// Slot-1 preflight: refuse to enroll if slot 1 is already occupied by
+/// an unknown key. Same remediation regardless of mode.
+fn check_slot_one_available<R: CommandRunner>(
+    runner: &R,
+    name: &str,
+    by_id: &ByIdPath,
+) -> Result<(), EnrollKeyFileError> {
+    let slot_state = luks::check_key_slot(runner, &by_id.0, LUKS_SLOT_KEYFILE)?;
+    if slot_state == KeySlotState::Occupied {
+        return Err(EnrollKeyFileError::Validation(format!(
+            "slot 1 on {} ({}) is occupied by an unknown key. \
+             Remove it first with `cryptsetup luksKillSlot {} 1` then re-run enrollment.",
+            name, by_id, by_id
+        )));
+    }
+    Ok(())
+}
+
 /// Planning phase: verify passphrase, then classify each candidate disk.
-/// Returns an immutable plan — no mutations occur.
-/// Fails immediately on wrong passphrase or slot-1 conflict.
+/// Returns an immutable plan -- no mutations occur. Fails immediately on
+/// wrong passphrase or slot-1 conflict.
+///
+/// Mode dispatch:
+/// - `ExistingKeyfile`: probe the keyfile per-disk (idempotent re-enroll
+///   collapses to `AlreadyEnrolled`); slot 1 only checked when the probe
+///   was rejected.
+/// - `GenerateNew`: keyfile does not exist yet, so the probe is skipped
+///   entirely and every candidate gets a slot-1 check, producing only
+///   `NeedsEnroll` actions.
 fn plan_enrollment<R: CommandRunner>(
     runner: &R,
     candidates: &[(String, ByIdPath)],
     key_file_path: &Path,
     passphrase: &str,
+    mode: EnrollmentPlanMode,
 ) -> Result<Vec<DiskEnrollAction>, EnrollKeyFileError> {
-    // Verify passphrase once against first candidate
-    let (ref first_name, ref first_by_id) = candidates[0];
-    match luks::verify_passphrase(runner, &first_by_id.0, passphrase)? {
-        VerifyOutcome::Authenticated => {}
-        VerifyOutcome::Rejected => {
-            return Err(EnrollKeyFileError::Validation(format!(
-                "wrong passphrase (verified against {})",
-                first_name
-            )));
-        }
-    }
+    verify_first_candidate_passphrase(runner, candidates, passphrase)?;
 
     let mut plan = Vec::new();
     for (name, by_id) in candidates {
-        // Check if keyfile already works (idempotent). Only `Authenticated`
-        // means the keyfile is already installed in a slot -- `Rejected` is
-        // the normal "not yet enrolled" signal. Any other non-zero exit
-        // (busy/missing/generic) propagates via the `?` on verify_key_file
-        // and must NOT be silently treated as "not enrolled" -- doing so
-        // would let the flow proceed to slot preflight on a device that
-        // may not even be readable.
-        match luks::verify_key_file(runner, &by_id.0, key_file_path)? {
-            VerifyOutcome::Authenticated => {
-                eprintln!("ok: {} -- keyfile already enrolled", name);
-                plan.push(DiskEnrollAction::AlreadyEnrolled {
-                    name: name.clone(),
-                    by_id: by_id.clone(),
-                });
-                continue;
+        if let EnrollmentPlanMode::ExistingKeyfile = mode {
+            // Check if keyfile already works (idempotent). Only `Authenticated`
+            // means the keyfile is already installed in a slot -- `Rejected` is
+            // the normal "not yet enrolled" signal. Any other non-zero exit
+            // (busy/missing/generic) propagates via the `?` on verify_key_file
+            // and must NOT be silently treated as "not enrolled" -- doing so
+            // would let the flow proceed to slot preflight on a device that
+            // may not even be readable.
+            match luks::verify_key_file(runner, &by_id.0, key_file_path)? {
+                VerifyOutcome::Authenticated => {
+                    eprintln!("ok: {} -- keyfile already enrolled", name);
+                    plan.push(DiskEnrollAction::AlreadyEnrolled {
+                        name: name.clone(),
+                        by_id: by_id.clone(),
+                    });
+                    continue;
+                }
+                VerifyOutcome::Rejected => {}
             }
-            VerifyOutcome::Rejected => {}
         }
 
-        // Preflight: check slot 1 state
-        let slot_state = luks::check_key_slot(runner, &by_id.0, LUKS_SLOT_KEYFILE)?;
-        if slot_state == KeySlotState::Occupied {
-            return Err(EnrollKeyFileError::Validation(format!(
-                "slot 1 on {} ({}) is occupied by an unknown key. \
-                 Remove it first with `cryptsetup luksKillSlot {} 1` then re-run enrollment.",
-                name, by_id, by_id
-            )));
-        }
+        check_slot_one_available(runner, name, by_id)?;
 
         eprintln!("enroll: {} -- will add keyfile to slot 1", name);
         plan.push(DiskEnrollAction::NeedsEnroll {
@@ -283,8 +333,15 @@ pub fn cmd_enroll_key_file<R: CommandRunner, F: Filesystem + ?Sized>(
         // 2. Read passphrase
         let passphrase = luks::read_passphrase(params.passphrase_file, params.passphrase_stdin)?;
 
-        // 3. Plan enrollment (preflight: passphrase + slot conflict detection)
-        let plan = plan_enrollment(runner, &candidates, params.key_file_path, &passphrase)?;
+        // 3. Plan enrollment (preflight: passphrase + slot conflict detection).
+        //    GenerateNew skips the keyfile probe -- the file does not exist yet.
+        let plan = plan_enrollment(
+            runner,
+            &candidates,
+            params.key_file_path,
+            &passphrase,
+            EnrollmentPlanMode::GenerateNew,
+        )?;
 
         // 4. Only if preflight passes: generate keyfile
         generate_key_file(params.key_file_path)?;
@@ -334,7 +391,13 @@ pub fn cmd_enroll_key_file<R: CommandRunner, F: Filesystem + ?Sized>(
         }
 
         let passphrase = luks::read_passphrase(params.passphrase_file, params.passphrase_stdin)?;
-        let plan = plan_enrollment(runner, &candidates, params.key_file_path, &passphrase)?;
+        let plan = plan_enrollment(
+            runner,
+            &candidates,
+            params.key_file_path,
+            &passphrase,
+            EnrollmentPlanMode::ExistingKeyfile,
+        )?;
         apply_enrollment(
             runner,
             &plan,
@@ -688,7 +751,14 @@ mod tests {
             ("disk2".to_owned(), by_id(d2)),
         ];
 
-        let plan = plan_enrollment(&runner, &candidates, Path::new(kf), pass).unwrap();
+        let plan = plan_enrollment(
+            &runner,
+            &candidates,
+            Path::new(kf),
+            pass,
+            EnrollmentPlanMode::ExistingKeyfile,
+        )
+        .unwrap();
         assert_eq!(plan.len(), 2);
         assert_eq!(
             plan[0],
@@ -732,7 +802,14 @@ mod tests {
             ("disk2".to_owned(), by_id(d2)),
         ];
 
-        let plan = plan_enrollment(&runner, &candidates, Path::new(kf), pass).unwrap();
+        let plan = plan_enrollment(
+            &runner,
+            &candidates,
+            Path::new(kf),
+            pass,
+            EnrollmentPlanMode::ExistingKeyfile,
+        )
+        .unwrap();
         assert_eq!(plan.len(), 2);
         assert!(
             matches!(&plan[0], DiskEnrollAction::AlreadyEnrolled { name, .. } if name == "disk1")
@@ -770,7 +847,14 @@ mod tests {
             ("disk2".to_owned(), by_id(d2)),
         ];
 
-        let plan = plan_enrollment(&runner, &candidates, Path::new(kf), pass).unwrap();
+        let plan = plan_enrollment(
+            &runner,
+            &candidates,
+            Path::new(kf),
+            pass,
+            EnrollmentPlanMode::ExistingKeyfile,
+        )
+        .unwrap();
         assert_eq!(plan.len(), 2);
         assert!(
             matches!(&plan[0], DiskEnrollAction::AlreadyEnrolled { name, .. } if name == "disk1")
@@ -794,7 +878,13 @@ mod tests {
 
         let candidates = vec![("disk1".to_owned(), by_id(d1))];
 
-        let result = plan_enrollment(&runner, &candidates, Path::new(kf), pass);
+        let result = plan_enrollment(
+            &runner,
+            &candidates,
+            Path::new(kf),
+            pass,
+            EnrollmentPlanMode::ExistingKeyfile,
+        );
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
@@ -837,7 +927,13 @@ mod tests {
             ("disk2".to_owned(), by_id(d2)),
         ];
 
-        let result = plan_enrollment(&runner, &candidates, Path::new(kf), pass);
+        let result = plan_enrollment(
+            &runner,
+            &candidates,
+            Path::new(kf),
+            pass,
+            EnrollmentPlanMode::ExistingKeyfile,
+        );
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
@@ -896,8 +992,14 @@ mod tests {
 
         let candidates = vec![("disk1".to_owned(), by_id(d1))];
 
-        let err = plan_enrollment(&runner, &candidates, Path::new(kf), pass)
-            .expect_err("expected non-auth verify exit to surface as error");
+        let err = plan_enrollment(
+            &runner,
+            &candidates,
+            Path::new(kf),
+            pass,
+            EnrollmentPlanMode::ExistingKeyfile,
+        )
+        .expect_err("expected non-auth verify exit to surface as error");
 
         match err {
             EnrollKeyFileError::Luks(LuksError::OpenFailed {
@@ -910,6 +1012,118 @@ mod tests {
                 "expected EnrollKeyFileError::Luks(LuksError::OpenFailed {{ exit_code: 5, .. }}), got: {other:?}"
             ),
         }
+    }
+
+    /*
+     * Intent: planner in `GenerateNew` mode never probes the (nonexistent)
+     *   keyfile. Verify passphrase, then per-candidate slot-1 check only.
+     * Why it exists: regression probe for the original `--generate` bug --
+     *   the existing-keyfile planning path called `verify_key_file()` against
+     *   a path that does not exist yet, aborting enrollment with
+     *   "Failed to open key file" before the file could be created. This
+     *   test deliberately omits any `CryptsetupTestKeyFile` mock; if the
+     *   planner regresses and probes the keyfile, MockRunner returns
+     *   MissingMock and the test fails before reaching the assertion.
+     * Scenario: fresh USB stick, user runs `braid enroll /mnt/usb --generate`
+     *   on a 2-disk pool with empty slot 1.
+     */
+    #[test]
+    fn plan_generate_new_skips_keyfile_probe() {
+        let d1 = "/dev/disk/by-id/d1";
+        let d2 = "/dev/disk/by-id/d2";
+        let kf = "/mnt/usb/braid.key";
+        let pass = "testpass";
+
+        let (tp_req, tp_stdin, tp_out) = test_passphrase_ok(d1, pass);
+        let (ld1_req, ld1_out) = luks_dump_slot1_empty(d1);
+        let (ld2_req, ld2_out) = luks_dump_slot1_empty(d2);
+
+        // Deliberately NO CryptsetupTestKeyFile mocks. If `GenerateNew`
+        // mode regresses and calls `verify_key_file`, MockRunner returns
+        // MissingMock and this test fails.
+        let runner = MockRunner::default()
+            .with_output_stdin(tp_req, tp_stdin, tp_out)
+            .with_output(ld1_req, ld1_out)
+            .with_output(ld2_req, ld2_out);
+
+        let candidates = vec![
+            ("disk1".to_owned(), by_id(d1)),
+            ("disk2".to_owned(), by_id(d2)),
+        ];
+
+        let plan = plan_enrollment(
+            &runner,
+            &candidates,
+            Path::new(kf),
+            pass,
+            EnrollmentPlanMode::GenerateNew,
+        )
+        .unwrap();
+        assert_eq!(plan.len(), 2);
+        assert_eq!(
+            plan[0],
+            DiskEnrollAction::NeedsEnroll {
+                name: "disk1".to_owned(),
+                by_id: by_id(d1),
+            }
+        );
+        assert_eq!(
+            plan[1],
+            DiskEnrollAction::NeedsEnroll {
+                name: "disk2".to_owned(),
+                by_id: by_id(d2),
+            }
+        );
+    }
+
+    /*
+     * Intent: in `GenerateNew` mode, slot-1 conflict still aborts the plan
+     *   without producing any actions.
+     * Why it exists: skipping the keyfile probe must not weaken the slot-1
+     *   conflict check -- otherwise `--generate` would create a useless
+     *   keyfile, then fail mid-enrollment when `luksAddKey` collides with
+     *   the existing slot.
+     * Scenario: user runs `braid enroll DIR --generate` after a previous
+     *   manual `cryptsetup luksAddKey --key-slot 1` left an unknown key
+     *   in slot 1 on disk2.
+     */
+    #[test]
+    fn plan_generate_new_slot1_conflict_errors() {
+        let d1 = "/dev/disk/by-id/d1";
+        let d2 = "/dev/disk/by-id/d2";
+        let kf = "/mnt/usb/braid.key";
+        let pass = "testpass";
+
+        let (tp_req, tp_stdin, tp_out) = test_passphrase_ok(d1, pass);
+        let (ld1_req, ld1_out) = luks_dump_slot1_empty(d1);
+        let (ld2_req, ld2_out) = luks_dump_slot1_occupied(d2);
+
+        let runner = MockRunner::default()
+            .with_output_stdin(tp_req, tp_stdin, tp_out)
+            .with_output(ld1_req, ld1_out)
+            .with_output(ld2_req, ld2_out);
+
+        let candidates = vec![
+            ("disk1".to_owned(), by_id(d1)),
+            ("disk2".to_owned(), by_id(d2)),
+        ];
+
+        let err = plan_enrollment(
+            &runner,
+            &candidates,
+            Path::new(kf),
+            pass,
+            EnrollmentPlanMode::GenerateNew,
+        )
+        .expect_err("expected slot-1 conflict to surface");
+        assert!(
+            err.to_string().contains("slot 1 on disk2"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            err.to_string().contains("occupied by an unknown key"),
+            "unexpected error: {err}"
+        );
     }
 
     // ---- apply_enrollment tests ----
@@ -1139,6 +1353,119 @@ mod tests {
         assert!(
             err.to_string().contains("interrupted operation"),
             "expected 'interrupted operation' in: {err}"
+        );
+    }
+
+    /*
+     * Intent: `cmd_enroll_key_file` with `generate=true` and a wrong
+     *   passphrase fails with the standard wrong-passphrase validation,
+     *   AND no `braid.key` is created on disk.
+     * Why it exists: --generate must atomically validate first, generate
+     *   the keyfile only on success. A user who fat-fingers their
+     *   passphrase should not be left with a useless 4096-byte key file
+     *   sitting on their USB stick that they then have to identify and
+     *   remove manually before retrying.
+     * Scenario: user runs `braid enroll /mnt/usb --generate --passphrase-file FILE`
+     *   with the wrong passphrase in FILE.
+     */
+    #[test]
+    fn cmd_generate_wrong_passphrase_no_keyfile_created() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+
+        let kf = tmp.path().join("braid.key");
+        let pass_path = tmp.path().join("pass");
+        std::fs::write(&pass_path, "wrongpass\n").unwrap();
+
+        let d1 = "/dev/disk/by-id/d1";
+        let (uuid_req, uuid_out) = luks_uuid_ok(d1);
+        let (tp_req, tp_stdin, tp_out) = test_passphrase_fail(d1, "wrongpass");
+
+        let runner = MockRunner::default()
+            .with_output(uuid_req, uuid_out)
+            .with_luks_dump_text_luks2(d1)
+            .with_mappers_closed(&["braid-disk1"])
+            .with_output_stdin(tp_req, tp_stdin, tp_out);
+
+        let fs = MockFs::new(&[d1]);
+        let membership = make_membership(&[("disk1", d1)]);
+
+        let err = cmd_enroll_key_file(
+            &runner,
+            &fs,
+            &EnrollKeyFileParams {
+                membership: &membership,
+                key_file_path: &kf,
+                generate: true,
+                passphrase_stdin: false,
+                passphrase_file: Some(&pass_path),
+                dry_run: false,
+                paths: &paths,
+            },
+        )
+        .expect_err("expected wrong passphrase to abort enrollment");
+
+        assert!(
+            err.to_string().contains("wrong passphrase"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            !kf.exists(),
+            "braid.key must not be created when preflight fails"
+        );
+    }
+
+    /*
+     * Intent: `cmd_enroll_key_file` with `generate=true, dry_run=true`
+     *   succeeds without ever reading a passphrase, probing the keyfile,
+     *   or creating `braid.key` on disk.
+     * Why it exists: dry-run is the user's safe "what would this do?"
+     *   mode. It must short-circuit before any side effect (keyfile
+     *   generation, passphrase prompt, header backup), and before any
+     *   keyfile probe -- the keyfile does not exist yet by definition
+     *   in --generate mode. We assert the file is still absent afterward
+     *   to prove the short-circuit fires before `generate_key_file`.
+     * Scenario: user runs `braid enroll /mnt/usb --generate --dry-run`.
+     */
+    #[test]
+    fn cmd_generate_dry_run_short_circuits() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+
+        let kf = tmp.path().join("braid.key");
+
+        let d1 = "/dev/disk/by-id/d1";
+        let (uuid_req, uuid_out) = luks_uuid_ok(d1);
+
+        // No passphrase mock, no TestKeyFile mock, no slot dump. If
+        // dry-run regresses past the short-circuit, MockRunner returns
+        // MissingMock and the test fails.
+        let runner = MockRunner::default()
+            .with_output(uuid_req, uuid_out)
+            .with_luks_dump_text_luks2(d1)
+            .with_mappers_closed(&["braid-disk1"]);
+
+        let fs = MockFs::new(&[d1]);
+        let membership = make_membership(&[("disk1", d1)]);
+
+        cmd_enroll_key_file(
+            &runner,
+            &fs,
+            &EnrollKeyFileParams {
+                membership: &membership,
+                key_file_path: &kf,
+                generate: true,
+                passphrase_stdin: false,
+                passphrase_file: None,
+                dry_run: true,
+                paths: &paths,
+            },
+        )
+        .expect("dry-run must succeed without passphrase or mutations");
+
+        assert!(
+            !kf.exists(),
+            "braid.key must remain absent after --generate --dry-run"
         );
     }
 
