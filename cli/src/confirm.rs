@@ -72,7 +72,7 @@ pub fn query_disk_hw_info<R: CommandRunner>(runner: &R, device: &str) -> DiskHwI
     }
 }
 
-/// Format hardware info as a single line: "Model · 12.00 TiB · serial ABCD".
+/// Format hardware info as a single line: "Model | 12.00 TiB | serial ABCD".
 /// Returns None if no hardware info is available.
 pub fn format_hw_info_line(info: &DiskHwInfo) -> Option<String> {
     let mut parts = Vec::new();
@@ -88,7 +88,7 @@ pub fn format_hw_info_line(info: &DiskHwInfo) -> Option<String> {
     if parts.is_empty() {
         None
     } else {
-        Some(parts.join(" .. ")) // double-dot separator
+        Some(parts.join(" | "))
     }
 }
 
@@ -151,7 +151,7 @@ mod tests {
         assert!(line.contains("Toshiba MN07ACA12T"));
         assert!(line.contains("TiB"));
         assert!(line.contains("serial 1234ABCD"));
-        assert!(line.contains("..")); // double-dot separator
+        assert!(line.contains(" | "));
     }
 
     #[test]

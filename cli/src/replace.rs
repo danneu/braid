@@ -241,11 +241,11 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     // Guard: new disk must not already be in the pool.
     check_new_not_in_pool(new_name, &new_mn, &pool)?;
 
-    // Hold a logind sleep inhibitor for the rest of the replace operation —
+    // Hold a logind sleep inhibitor for the rest of the replace operation --
     // covers Step 1 LUKS init, the long-running btrfs replace start, and
     // the post-replace soft balance for missing-path replaces. Suspending
     // mid-replace produces kernel-level topology corruption on every kernel
-    // — see issues #45 and #48 and the upstream warning at
+    // -- see issues #45 and #48 and the upstream warning at
     // reference/btrfs-progs/Documentation/btrfs-replace.rst:49-50.
     //
     // Acquired here, AFTER all interactive/reversible work (confirmation,
@@ -277,7 +277,7 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     journal::write_journal(params.paths, &journal)
         .map_err(|e| ReplaceError::Validation(e.to_string()))?;
 
-    // Step 1: Init new disk (LUKS format/open) — irreversible from here.
+    // Step 1: Init new disk (LUKS format/open) -- irreversible from here.
     match new_probed.state {
         ConfigDiskState::Absent => unreachable!("already checked above"),
         ConfigDiskState::PresentNotLuks => {
@@ -292,7 +292,7 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             eprintln!("LUKS header backed up: {}", backup_path.display());
 
             ensure_luks_open(runner, fs, new_name, &new_by_id, &passphrase)?;
-            eprintln!("LUKS opened: {} → {}", new_by_id, new_mn);
+            eprintln!("LUKS opened: {} -> {}", new_by_id, new_mn);
 
             if let Some(kf) = params.enroll_key_file {
                 crate::luks::enroll_key_file(runner, &new_by_id.0, &passphrase, kf)?;
@@ -302,7 +302,7 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         ConfigDiskState::PresentLuks { mapper_open, .. } => {
             if !mapper_open {
                 ensure_luks_open(runner, fs, new_name, &new_by_id, &passphrase)?;
-                eprintln!("LUKS opened: {} → {}", new_by_id, new_mn);
+                eprintln!("LUKS opened: {} -> {}", new_by_id, new_mn);
             } else if !pool.devices.iter().any(|d| d.mapper == new_mn) {
                 eprintln!(
                     "note: LUKS mapper is already open but device is not yet in pool. Completing replace."
@@ -430,9 +430,9 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
 
 #[derive(Debug)]
 enum ReplaceSource {
-    /// Old disk is alive in the pool — replace via `btrfs replace start`.
+    /// Old disk is alive in the pool -- replace via `btrfs replace start`.
     Live { mapper: MapperName, devid: u64 },
-    /// Old disk is missing — replace via `btrfs replace start` by devid.
+    /// Old disk is missing -- replace via `btrfs replace start` by devid.
     Missing { devid: u64 },
 }
 
@@ -489,7 +489,7 @@ fn resolve_replace_source<R: CommandRunner>(
         });
     }
 
-    // Old disk not in pool — dead/missing path.
+    // Old disk not in pool -- dead/missing path.
     // Probe actual missing devids for validation and auto-resolution.
     let missing_devids =
         preflight::probe_missing_devids(runner, mount_point).map_err(ReplaceError::Validation)?;
@@ -570,7 +570,7 @@ fn compile_replace_steps(input: &ReplaceStepsInput<'_>) -> Result<Vec<Step>, Rep
                 .join(format!("{}.luksheader", new_mn.0));
             steps.push(Step {
                 risk: "safe",
-                description: format!("LUKS header backup → {}", backup_path.display()),
+                description: format!("LUKS header backup -> {}", backup_path.display()),
                 commands: vec![CmdRequest::CryptsetupLuksHeaderBackup {
                     device: input.new_by_id.0.clone(),
                     backup_path: backup_path.display().to_string(),
@@ -578,7 +578,7 @@ fn compile_replace_steps(input: &ReplaceStepsInput<'_>) -> Result<Vec<Step>, Rep
             });
             steps.push(Step {
                 risk: "safe",
-                description: format!("LUKS open → {}", new_mn),
+                description: format!("LUKS open -> {}", new_mn),
                 commands: vec![CmdRequest::CryptsetupLuksOpen {
                     device: input.new_by_id.0.clone(),
                     mapper: new_mn.0.clone(),
@@ -587,7 +587,7 @@ fn compile_replace_steps(input: &ReplaceStepsInput<'_>) -> Result<Vec<Step>, Rep
             if let Some(kf) = input.enroll_key_file {
                 steps.push(Step {
                     risk: "safe",
-                    description: format!("enroll keyfile → LUKS slot 1 on {}", input.new_by_id),
+                    description: format!("enroll keyfile -> LUKS slot 1 on {}", input.new_by_id),
                     commands: vec![CmdRequest::CryptsetupLuksAddKeyFile {
                         device: input.new_by_id.0.clone(),
                         key_file_path: kf.display().to_string(),
@@ -599,7 +599,7 @@ fn compile_replace_steps(input: &ReplaceStepsInput<'_>) -> Result<Vec<Step>, Rep
             if !mapper_open {
                 steps.push(Step {
                     risk: "safe",
-                    description: format!("LUKS open → {}", new_mn),
+                    description: format!("LUKS open -> {}", new_mn),
                     commands: vec![CmdRequest::CryptsetupLuksOpen {
                         device: input.new_by_id.0.clone(),
                         mapper: new_mn.0.clone(),
@@ -707,14 +707,14 @@ fn format_replace_confirm(
             if let Some(hw) = &old_hw_line {
                 msg.push_str(&format!("  old: {}   {}\n", old.name, hw));
                 msg.push_str(&format!(
-                    "  {:width$}devid {} .. will be replaced in-place\n",
+                    "  {:width$}devid {} | will be replaced in-place\n",
                     "",
                     devid,
                     width = old.name.len() + 7,
                 ));
             } else {
                 msg.push_str(&format!(
-                    "  old: {}   devid {} .. will be replaced in-place\n",
+                    "  old: {}   devid {} | will be replaced in-place\n",
                     old.name, devid
                 ));
             }
@@ -940,7 +940,7 @@ mod tests {
 
     #[test]
     // Intent: live old disk in healthy pool resolves to ReplaceSource::Live.
-    // Why: core behavior — replace must accept live disks when pool has no missing.
+    // Why: core behavior -- replace must accept live disks when pool has no missing.
     // Scenario: operator swaps a slow-but-alive drive for a faster one.
     fn live_old_resolution_succeeds_no_missing() {
         let pool = two_device_pool();
@@ -1316,10 +1316,10 @@ mod tests {
     // Why: without the guard, the Live path would pass an existing pool member
     //   to `btrfs replace start`. The btrfs replace path has no natural guard
     //   against this, so we need an explicit one.
-    // Scenario: operator typo — specifies an existing pool member as --new.
+    // Scenario: operator typo -- specifies an existing pool member as --new.
     fn new_disk_already_in_pool_rejected() {
         let pool = two_device_pool(); // has braid-disk1 and braid-disk2
-        let new_mn = mapper_name("disk2"); // → "braid-disk2"
+        let new_mn = mapper_name("disk2"); // -> "braid-disk2"
         let err = check_new_not_in_pool("disk2", &new_mn, &pool).unwrap_err();
         assert!(
             err.to_string().contains("already a member"),
@@ -1329,12 +1329,12 @@ mod tests {
 
     #[test]
     // Intent: a disk NOT in the pool passes the guard.
-    // Why: regression — the guard must not block valid replacements.
+    // Why: regression -- the guard must not block valid replacements.
     // Scenario: normal replace with a fresh disk.
     fn new_disk_not_in_pool_passes() {
         let pool = two_device_pool();
         let new_mn = mapper_name("disk3");
-        check_new_not_in_pool("disk3", &new_mn, &pool).expect("disk3 is not in pool — should pass");
+        check_new_not_in_pool("disk3", &new_mn, &pool).expect("disk3 is not in pool -- should pass");
     }
 
     #[test]
@@ -1490,7 +1490,7 @@ mod tests {
     #[test]
     // Intent: missing-path dry-run (not last missing) omits rebalance step.
     // Why: if other missing devices remain, a rebalance would be premature.
-    // Scenario: 3-disk pool, 2 missing, replacing 1 — still degraded after.
+    // Scenario: 3-disk pool, 2 missing, replacing 1 -- still degraded after.
     fn dry_run_missing_not_last_omits_rebalance() {
         let _config = make_replace_config();
         let new_probed = new_probed_not_luks();
@@ -1829,7 +1829,7 @@ mod tests {
     // Why it exists: dry-run takes no irreversible action and never reaches
     //   the irreversible section that the inhibitor is meant to protect. If
     //   acquisition leaks into the dry-run path it would spawn systemd-inhibit
-    //   for nothing — wasteful and a UX surprise (operators do not expect
+    //   for nothing -- wasteful and a UX surprise (operators do not expect
     //   --dry-run to require logind).
     //
     // Scenario: operator runs `braid replace --old disk2 --new disk3=... --dry-run`
@@ -1890,7 +1890,7 @@ mod tests {
         assert_eq!(
             inhibitor.acquire_count(),
             0,
-            "dry-run must NOT acquire the sleep inhibitor — it has no irreversible work to protect"
+            "dry-run must NOT acquire the sleep inhibitor -- it has no irreversible work to protect"
         );
         assert!(
             journal::load_journal(&paths).unwrap().is_none(),
@@ -2228,7 +2228,7 @@ mod tests {
 
     #[test]
     // Intent: live-path dry-run still shows NO soft balance step.
-    // Why: live replace doesn't create single-profile chunks — no degraded mode involved.
+    // Why: live replace doesn't create single-profile chunks -- no degraded mode involved.
     // Scenario: swapping a working drive for a bigger one.
     fn dry_run_live_path_no_soft_balance() {
         let _config = make_replace_config();

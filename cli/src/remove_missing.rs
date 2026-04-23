@@ -154,7 +154,7 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         return Ok(());
     }
 
-    // Resolve devid→name from enriched pool.json before confirmation and journal.
+    // Resolve devid->name from enriched pool.json before confirmation and journal.
     let pre_membership = membership::load_membership(params.paths).map_err(|e| {
         RemoveMissingError::Validation(format!("failed to load pool membership: {e}"))
     })?;
@@ -176,7 +176,7 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     }
 
     // Hold a logind sleep inhibitor for the rest of the remove-missing
-    // operation — covers the btrfs device remove (fast metadata-only) and
+    // operation -- covers the btrfs device remove (fast metadata-only) and
     // the post-op maybe_restore_raid1 soft balance, which converts
     // single-profile chunks created during degraded operation back to RAID1
     // and can be long-running. Suspending mid-soft-balance interrupts the
@@ -237,7 +237,7 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
 
 /// Check that surviving devices have enough RAID1-aware, per-type space to absorb
 /// the missing device's allocations. If they don't, btrfs device remove will
-/// either ENOSPC instantly or — worse — crash the filesystem to read-only
+/// either ENOSPC instantly or -- worse -- crash the filesystem to read-only
 /// mid-relocation.
 ///
 /// Missing devices are identified by `device_size == 0` in `btrfs device usage
@@ -246,7 +246,7 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
 /// System) are preserved and accurate.
 ///
 /// If the check itself fails (parse error, command error), we log a warning and
-/// proceed — a bug in the safety net shouldn't block a valid operation.
+/// proceed -- a bug in the safety net shouldn't block a valid operation.
 fn check_relocation_space<R: CommandRunner>(
     runner: &R,
     mount_point: &MountPoint,
@@ -694,11 +694,11 @@ mod tests {
             device_usage_stdout: fixture,
         };
 
-        // Targeting devid 2 (50 MB Data) — should pass: RAID1 capacity = 200 MB >= 50 MB
+        // Targeting devid 2 (50 MB Data) -- should pass: RAID1 capacity = 200 MB >= 50 MB
         let result = check_relocation_space(&runner, &mp(), Some(2));
         assert!(result.is_ok(), "targeting devid 2 should pass: {result:?}");
 
-        // Targeting devid 3 (5 GB Data) — should fail: RAID1 capacity = 200 MB < 5 GB
+        // Targeting devid 3 (5 GB Data) -- should fail: RAID1 capacity = 200 MB < 5 GB
         let result = check_relocation_space(&runner, &mp(), Some(3));
         assert!(result.is_err(), "targeting devid 3 should fail");
     }
@@ -748,7 +748,7 @@ mod tests {
     #[test]
     // Intent: dry-run with 1 survivor omits rebalance step.
     // Why: can't have RAID1 with only 1 device.
-    // Scenario: 2-disk pool, 1 died. Only 1 survivor — no balance.
+    // Scenario: 2-disk pool, 1 died. Only 1 survivor -- no balance.
     fn compile_steps_omits_rebalance_with_single_survivor() {
         let steps = compile_steps(3, true, 1, &MountPoint("/mnt/storage".into()));
         assert!(
@@ -890,11 +890,11 @@ mod tests {
     }
 
     #[test]
-    // Intent: 3-disk pool, 1 missing → soft rebalance runs after remove-missing.
+    // Intent: 3-disk pool, 1 missing -> soft rebalance runs after remove-missing.
     // Why: clearing the last missing device should restore RAID1 for chunks
     // written during degraded operation.
     // Scenario: 3-disk NAS, one drive dies. Operator runs remove-missing.
-    // After the removal, pool is healthy with 2 survivors → soft balance runs.
+    // After the removal, pool is healthy with 2 survivors -> soft balance runs.
     fn three_device_pool_soft_rebalance_runs() {
         let (_tmp, config_path, _state_tmp, state_paths) = three_device_config();
         let log = Arc::new(Mutex::new(Vec::new()));
@@ -945,10 +945,10 @@ mod tests {
     }
 
     #[test]
-    // Intent: 3-disk pool, 2 missing, targeting 1 → NO rebalance (still degraded).
+    // Intent: 3-disk pool, 2 missing, targeting 1 -> NO rebalance (still degraded).
     // Why: running a balance while still degraded is pointless.
     // Scenario: 3-disk NAS, 2 drives die. Operator removes 1 missing entry.
-    // Pool still has 1 missing device → no rebalance.
+    // Pool still has 1 missing device -> no rebalance.
     fn three_device_two_missing_no_rebalance() {
         let (_tmp, config_path, _state_tmp, state_paths) = three_device_config();
         let log = Arc::new(Mutex::new(Vec::new()));
@@ -977,7 +977,7 @@ mod tests {
             "should NOT call BtrfsBalanceRaid1Soft when still degraded; calls: {calls:?}"
         );
         // Even when no soft balance runs, the inhibitor must still be acquired
-        // unconditionally before journal::write_journal — the rule is "acquire
+        // unconditionally before journal::write_journal -- the rule is "acquire
         // before journal", not "acquire when slow phase will run".
         assert_eq!(
             inhibitor.acquire_count(),
@@ -1125,7 +1125,7 @@ mod tests {
     // Intent: when soft balance fails with ENOSPC, the surfaced error includes
     //   the recovery hint with a concrete `dusage=0` command.
     // Why: the hint is appended in pool::balance_error, but it must survive
-    //   PoolError → RemoveMissingError::Pool → Display without being lost.
+    //   PoolError -> RemoveMissingError::Pool -> Display without being lost.
     // Scenario: 3-disk NAS, one drive dies. Operator runs remove-missing. Device
     //   removal succeeds but the post-removal soft balance hits ENOSPC. The error
     //   message should guide the user to free empty block groups.
@@ -1210,7 +1210,7 @@ mod tests {
     #[test]
     // Intent: dry-run for targeted missing-device removal shows the devid command.
     // Why: verifies CmdRequest integration for the targeted removal path.
-    // Scenario: one missing device (devid 2), last missing, 2 present → includes balance.
+    // Scenario: one missing device (devid 2), last missing, 2 present -> includes balance.
     fn dry_run_render_targeted_removal_with_balance() {
         let mount_point = MountPoint("/mnt/storage".into());
         let steps = compile_steps(2, true, 2, &mount_point);
