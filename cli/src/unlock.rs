@@ -70,18 +70,17 @@ pub fn cmd_unlock<R: CommandRunner, F: Filesystem + ?Sized>(
     // Unlock-specific gate: only resolve a credential if there is something
     // to unlock. Preserves the "no prompt when every mapper is already open"
     // UX rule that used to live inside open_and_mount_pool.
-    let credential = if plan.to_unlock.is_empty() {
-        None
+    if plan.to_unlock.is_empty() {
+        mount::execute_mount_only(runner, fs, params.config, &plan)?;
     } else {
         let source = mount::CredentialSource {
             passphrase_stdin: params.passphrase_stdin,
             passphrase_file: params.passphrase_file,
             key_file: params.key_file,
         };
-        Some(mount::resolve_credential(&source)?)
-    };
-
-    mount::execute_open_plan(runner, fs, params.config, &plan, credential.as_ref())?;
+        let credential = mount::resolve_credential(&source)?;
+        mount::execute_unlock_and_mount(runner, fs, params.config, &plan, &credential)?;
+    }
 
     let mount_point = params.config.mount_point();
 
@@ -1103,5 +1102,164 @@ mod tests {
                 member.devid
             );
         }
+    }
+
+    /// Intent: When every membership disk's mapper is already open,
+    /// `cmd_unlock` must take the mount-only branch and NEVER call
+    /// `resolve_credential` -- preserving the UX rule that a redundant
+    /// unlock does not prompt for or read a passphrase.
+    ///
+    /// Why it exists: This is the cross-file counterpart to
+    /// `execute_mount_only_rejects_non_empty_plan`/`execute_unlock_and_mount_rejects_empty_plan`
+    /// in mount.rs. Those two tests pin the entry-point contracts; this
+    /// test pins the caller-side dispatch. A natural-looking refactor
+    /// (hoisting `resolve_credential` above the `plan.to_unlock.is_empty()`
+    /// branch) would break the no-prompt UX and also start erroring on
+    /// operators who don't supply credentials for an already-open pool.
+    /// Without this test, that regression passes `mount.rs`'s boundary
+    /// tests because they bypass `cmd_unlock`'s dispatch entirely.
+    ///
+    /// Scenario: 3-disk pool, all mappers already open at probe time. The
+    /// `UnlockParams` point `passphrase_file` at a path that does not
+    /// exist -- if `resolve_credential` is called, `read_passphrase` would
+    /// fail with a "failed to read passphrase file" error and surface
+    /// through `cmd_unlock`. A clean `Ok(())` proves the mount-only
+    /// branch was taken.
+    #[test]
+    fn cmd_unlock_skips_credential_resolution_when_nothing_to_unlock() {
+        let (_state_dir, sp) = test_paths();
+        let config = three_disk_config();
+        let membership = three_disk_membership();
+
+        // All three by-id devices AND all three mapper paths exist.
+        let fs = MockFs::new(&[
+            "/dev/disk/by-id/virtio-disk1",
+            "/dev/disk/by-id/virtio-disk2",
+            "/dev/disk/by-id/virtio-disk3",
+            "/dev/mapper/braid-disk1",
+            "/dev/mapper/braid-disk2",
+            "/dev/mapper/braid-disk3",
+        ]);
+
+        let runner = MockRunner::default()
+            // Pool not mounted yet.
+            .with_output(
+                CmdRequest::MountpointCheck {
+                    path: MountPoint("/mnt/storage".to_owned()),
+                },
+                err_raw("mountpoint", 1, ""),
+            )
+            // probe: each disk reports its LUKS UUID.
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                RawCommandOutput {
+                    cmd: "cryptsetup luksUUID".into(),
+                    stdout: "aaaaaaaa-1111-2222-3333-444444444444\n".into(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                },
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                },
+                RawCommandOutput {
+                    cmd: "cryptsetup luksUUID".into(),
+                    stdout: "bbbbbbbb-1111-2222-3333-444444444444\n".into(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                },
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk3".into(),
+                },
+                RawCommandOutput {
+                    cmd: "cryptsetup luksUUID".into(),
+                    stdout: "cccccccc-1111-2222-3333-444444444444\n".into(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                },
+            )
+            // All mappers already open with matching backing-device UUIDs.
+            .with_mapper_open(
+                "braid-disk1",
+                "/dev/vda",
+                "aaaaaaaa-1111-2222-3333-444444444444",
+            )
+            .with_mapper_open(
+                "braid-disk2",
+                "/dev/vdb",
+                "bbbbbbbb-1111-2222-3333-444444444444",
+            )
+            .with_mapper_open(
+                "braid-disk3",
+                "/dev/vdc",
+                "cccccccc-1111-2222-3333-444444444444",
+            )
+            .with_luks_dump_text_luks2_for(&[
+                "/dev/disk/by-id/virtio-disk1",
+                "/dev/disk/by-id/virtio-disk2",
+                "/dev/disk/by-id/virtio-disk3",
+            ])
+            // No CryptsetupTestPassphrase / CryptsetupLuksOpen mocks -- if
+            // the code takes the unlock-and-mount branch, these lookups
+            // miss and MockRunner fails the test.
+            .with_output(CmdRequest::BtrfsDeviceScanAll, ok_raw("btrfs device scan"))
+            .with_output(
+                CmdRequest::Mount {
+                    device: "/dev/mapper/braid-disk1".into(),
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                },
+                ok_raw("mount"),
+            )
+            // post-mount probe_pool: benign miss, keeps test focused.
+            .with_output(
+                CmdRequest::FindmntJson {
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                },
+                err_raw("findmnt", 1, ""),
+            )
+            // balance status post-mount
+            .with_output(
+                CmdRequest::BtrfsBalanceStatus {
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                },
+                RawCommandOutput {
+                    cmd: "btrfs balance status".into(),
+                    stdout: "No balance found on '/mnt/storage'\n".into(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                },
+            );
+
+        // passphrase_file points at a path that does not exist. If the
+        // dispatch regresses and hoists resolve_credential above the
+        // `plan.to_unlock.is_empty()` check, read_passphrase will fail
+        // with a "failed to read passphrase file" error and this test
+        // will no longer reach Ok(()).
+        let bogus = std::path::PathBuf::from("/definitely/not/a/real/path/passphrase");
+
+        let result = cmd_unlock(
+            &runner,
+            &fs,
+            &UnlockParams {
+                config: &config,
+                membership: &membership,
+                paths: &sp,
+                passphrase_stdin: false,
+                passphrase_file: Some(&bogus),
+                key_file: None,
+                allow_degraded: false,
+                dry_run: false,
+            },
+        );
+
+        result.expect(
+            "unlock with all mappers already open must take the mount-only \
+             branch and never attempt to read the (nonexistent) passphrase file",
+        );
     }
 }

@@ -241,7 +241,8 @@ pub fn cmd_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     // even if the initial plan's `to_unlock` is empty (every mapper already
     // open), the post-mount relock cycle below closes every mapper and must
     // reopen them, so a credential is required regardless. The resolved
-    // credential lives in this local across both execute_open_plan calls.
+    // credential lives in this local across both execute calls (initial
+    // mount and the cycle remount).
     let credential = match plan.as_ref() {
         Some(_) => {
             let source = mount::CredentialSource {
@@ -257,19 +258,22 @@ pub fn cmd_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         None => None, // already mounted, no cycle, no credential needed
     };
 
-    // Initial mount. Pass the credential to execute_open_plan ONLY if the
-    // initial plan needs it — execute_open_plan strict-validates both
-    // directions. The resolved credential stays alive in `credential` for
-    // the cycle below either way.
+    // Initial mount. Dispatch on `p.to_unlock.is_empty()` to the matching
+    // execute entry point. The `expect` in the else arm is load-bearing:
+    // the match above guarantees `credential` is `Some` whenever `plan`
+    // is `Some`.
     let just_mounted = match plan.as_ref() {
         None => false, // already mounted
         Some(p) => {
-            let cred_for_initial = if p.to_unlock.is_empty() {
-                None
+            let res = if p.to_unlock.is_empty() {
+                mount::execute_mount_only(runner, fs, params.config, p)
             } else {
-                credential.as_ref()
+                let cred = credential
+                    .as_ref()
+                    .expect("credential resolved above when plan is Some");
+                mount::execute_unlock_and_mount(runner, fs, params.config, p, cred)
             };
-            match mount::execute_open_plan(runner, fs, params.config, p, cred_for_initial) {
+            match res {
                 Ok(b) => b,
                 Err(e) => {
                     // Bootstrap mount failure: probe the target devices to confirm no btrfs
@@ -592,7 +596,7 @@ fn wait_for_kernel_replace_to_finish<R: CommandRunner>(runner: &R, mount_point: 
 /// This mirrors what `braid lock; braid unlock` does end-to-end: umount,
 /// `btrfs device scan --forget` (drop cached fs_devices), close every LUKS
 /// mapper for the membership union, then re-plan + re-open + remount via
-/// the standard `plan_open_pool` + `execute_open_plan` flow.
+/// the standard `plan_open_pool` + `execute_unlock_and_mount` flow.
 ///
 /// The LUKS close+reopen is load-bearing: empirically, an `umount + scan
 /// --forget + remount` cycle that leaves the dm devices alive does NOT clear
@@ -681,7 +685,7 @@ fn relock_and_remount<R: CommandRunner, F: Filesystem + ?Sized>(
                 "recover remount cycle: pool already mounted after umount?".into(),
             )
         })?;
-    mount::execute_open_plan(runner, fs, config, &cycle_plan, Some(credential))
+    mount::execute_unlock_and_mount(runner, fs, config, &cycle_plan, credential)
         .map_err(|e| RecoverError::Failed(format!("recover remount cycle: re-mount: {e}")))?;
 
     Ok(())
@@ -1527,7 +1531,7 @@ mod tests {
                     "22222222-2222-2222-2222-222222222222",
                 ),
             )
-            // ── Initial execute_open_plan: mount-only (no LUKS open) ────
+            // ── Initial execute_mount_only (no LUKS open) ───────────────
             // (no CryptsetupTestPassphrase / LuksOpen mocks here — should not be called)
             .with_output(
                 CmdRequest::BtrfsDeviceScanAll,

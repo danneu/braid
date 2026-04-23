@@ -27,9 +27,9 @@ pub enum MountError {
 /// lifetime parameter); plaintext is scrubbed on drop via `Zeroizing`.
 ///
 /// Constructed by `resolve_credential` from a `CredentialSource`. Callers
-/// hold the resolved value and pass it (by reference, optionally) to
-/// `execute_open_plan`, which strict-validates that the credential's
-/// presence matches the plan's `to_unlock` state.
+/// hold the resolved value and pass it by reference to
+/// `execute_unlock_and_mount`. The mount-only entry point
+/// (`execute_mount_only`) takes no credential.
 pub enum OpenCredential {
     Passphrase(Zeroizing<String>),
     KeyFile(PathBuf),
@@ -145,9 +145,9 @@ pub struct OpenPlan {
 }
 
 /// Probe membership disks, validate UUIDs, check degraded policy.
-/// Returns the planning errors that `execute_open_plan` would otherwise
-/// surface (degraded refusal, UUID mismatch, no unlockable disks).
-/// No mutations — safe for dry-run.
+/// Returns the planning errors that `execute_mount_only` /
+/// `execute_unlock_and_mount` would otherwise surface (degraded refusal,
+/// UUID mismatch, no unlockable disks). No mutations — safe for dry-run.
 ///
 /// Returns `Ok(None)` when pool is already mounted.
 pub fn plan_open_pool<R: CommandRunner, F: Filesystem + ?Sized>(
@@ -376,8 +376,8 @@ fn explain_open_failure(
 
 /// Verify a passphrase against the first to-unlock disk and then open every
 /// to-unlock disk with it. Called from the `OpenCredential::Passphrase`
-/// arm of `execute_open_plan`. Mirrors the structure of the `KeyFile` arm:
-/// `explain_open_failure` handles header-state classification for both
+/// arm of `execute_unlock_and_mount`. Mirrors the structure of the `KeyFile`
+/// arm: `explain_open_failure` handles header-state classification for both
 /// verification and per-disk open failures.
 fn open_disks_with_passphrase<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
@@ -460,135 +460,158 @@ fn open_disks_with_passphrase<R: CommandRunner, F: Filesystem + ?Sized>(
     Ok(())
 }
 
-/// Execute a pre-built `OpenPlan`: open LUKS devices (if any) and mount
-/// the btrfs pool.
+/// Execute a pre-built `OpenPlan` whose `to_unlock` is empty (all mappers
+/// already open or no disks need unlocking).
 ///
-/// Phases: validate credential/plan agreement → open LUKS (if needed) →
-/// btrfs device scan → mkdir + mount.
+/// Phases: reject non-empty `to_unlock` → btrfs device scan → mkdir + mount.
+///
+/// Non-empty `to_unlock` is a caller-contract violation and returns
+/// `MountError::Failed("internal: execute_mount_only called with non-empty
+/// plan.to_unlock")` in all builds. Callers that might hold a plan with
+/// locked disks must dispatch to `execute_unlock_and_mount` instead.
 ///
 /// Planning + probing + validation lives in `plan_open_pool`, which the
 /// caller invokes first. This function does NOT plan; it only executes.
 ///
-/// `credential` must be `Some` iff `plan.to_unlock` is non-empty:
-/// - `(false, false)` (need a credential, none provided) → `MountError::Failed`
-/// - `(true, true)` (provided a credential we don't need) → `MountError::Failed`
-/// - `(true, false)` and `(false, true)` are the normal cases.
-///
 /// Returns `Ok(true)` once the mount succeeds. (Callers detect the
 /// already-mounted case earlier, by `plan_open_pool` returning `None`.)
-pub fn execute_open_plan<R: CommandRunner, F: Filesystem + ?Sized>(
+pub fn execute_mount_only<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
     config: &Config,
     plan: &OpenPlan,
-    credential: Option<&OpenCredential>,
 ) -> Result<bool, MountError> {
-    let mount_point = config.mount_point();
+    if !plan.to_unlock.is_empty() {
+        return Err(MountError::Failed(
+            "internal: execute_mount_only called with non-empty plan.to_unlock".into(),
+        ));
+    }
+    scan_and_mount(runner, fs, config, plan)
+}
 
-    // 1. Validate credential/plan agreement, STRICTLY in both directions.
-    //    Each caller is expected to gate credential presence to match
-    //    `plan.to_unlock` itself; mismatches mean a caller bug.
-    match (credential.is_some(), plan.to_unlock.is_empty()) {
-        (false, false) => {
-            return Err(MountError::Failed(
-                "internal: credential required for unlock but none was provided".into(),
-            ));
-        }
-        (true, true) => {
-            return Err(MountError::Failed(
-                "internal: credential provided but plan has no disks to unlock".into(),
-            ));
-        }
-        // (false, true): mount-only path. (true, false): normal unlock.
-        _ => {}
+/// Execute a pre-built `OpenPlan` that has disks to unlock.
+///
+/// Phases: reject empty `to_unlock` → verify credential → open LUKS →
+/// btrfs device scan → mkdir + mount.
+///
+/// Empty `to_unlock` is a caller-contract violation and returns
+/// `MountError::Failed("internal: execute_unlock_and_mount called with empty
+/// plan.to_unlock")` in all builds. Callers that might hold an empty plan
+/// must dispatch to `execute_mount_only` instead.
+///
+/// Planning + probing + validation lives in `plan_open_pool`, which the
+/// caller invokes first. This function does NOT plan; it only executes.
+///
+/// Returns `Ok(true)` once the mount succeeds.
+pub fn execute_unlock_and_mount<R: CommandRunner, F: Filesystem + ?Sized>(
+    runner: &R,
+    fs: &F,
+    config: &Config,
+    plan: &OpenPlan,
+    credential: &OpenCredential,
+) -> Result<bool, MountError> {
+    if plan.to_unlock.is_empty() {
+        return Err(MountError::Failed(
+            "internal: execute_unlock_and_mount called with empty plan.to_unlock".into(),
+        ));
     }
 
-    // 2. If disks need opening → verify credential, then open each disk.
-    if !plan.to_unlock.is_empty() {
-        match credential.expect("checked above") {
-            OpenCredential::KeyFile(kf) => {
-                let kf = kf.as_path();
-                let (ref first_name, ref first_by_id) = plan.to_unlock[0];
-                let outcome = match luks::verify_key_file(runner, &first_by_id.0, kf) {
-                    Ok(o) => o,
-                    Err(e @ LuksError::OpenFailed { .. }) => {
-                        // Same non-auth routing as the passphrase arm: a
-                        // wiped/damaged header on the first disk must
-                        // still surface restore/repair guidance rather
-                        // than a raw cryptsetup hint.
-                        let original_summary = format!("verify failed on '{first_name}': {e}");
-                        let header_state = luks::probe_luks_header(runner, &first_by_id.0);
-                        return Err(explain_open_failure(
-                            first_name,
-                            &first_by_id.0,
-                            header_state,
-                            &original_summary,
-                            MountError::Luks(e),
-                        ));
-                    }
-                    Err(e) => return Err(e.into()),
-                };
-                if outcome == VerifyOutcome::Rejected {
-                    let original_summary = format!("keyfile rejected on '{first_name}'");
-                    let ok_fallback = MountError::Failed(format!(
-                        "wrong keyfile (verified against {first_name})"
-                    ));
+    match credential {
+        OpenCredential::KeyFile(kf) => {
+            let kf = kf.as_path();
+            let (ref first_name, ref first_by_id) = plan.to_unlock[0];
+            let outcome = match luks::verify_key_file(runner, &first_by_id.0, kf) {
+                Ok(o) => o,
+                Err(e @ LuksError::OpenFailed { .. }) => {
+                    // Same non-auth routing as the passphrase arm: a
+                    // wiped/damaged header on the first disk must
+                    // still surface restore/repair guidance rather
+                    // than a raw cryptsetup hint.
+                    let original_summary = format!("verify failed on '{first_name}': {e}");
                     let header_state = luks::probe_luks_header(runner, &first_by_id.0);
                     return Err(explain_open_failure(
                         first_name,
                         &first_by_id.0,
                         header_state,
                         &original_summary,
+                        MountError::Luks(e),
+                    ));
+                }
+                Err(e) => return Err(e.into()),
+            };
+            if outcome == VerifyOutcome::Rejected {
+                let original_summary = format!("keyfile rejected on '{first_name}'");
+                let ok_fallback = MountError::Failed(format!(
+                    "wrong keyfile (verified against {first_name})"
+                ));
+                let header_state = luks::probe_luks_header(runner, &first_by_id.0);
+                return Err(explain_open_failure(
+                    first_name,
+                    &first_by_id.0,
+                    header_state,
+                    &original_summary,
+                    ok_fallback,
+                ));
+            }
+
+            for (name, by_id) in &plan.to_unlock {
+                if let Err(e) =
+                    luks::ensure_luks_open_with_key_file(runner, fs, name, by_id, kf)
+                {
+                    let header_state = luks::probe_luks_header(runner, &by_id.0);
+                    let (original_summary, ok_fallback) = match &e {
+                        LuksError::OpenFailed {
+                            exit_code: 2,
+                            hint,
+                            stderr,
+                            ..
+                        } => (
+                            format!(
+                                "cryptsetup open rejected on '{name}' despite verified keyfile on '{first_name}' -- {hint} ({stderr})"
+                            ),
+                            MountError::Failed(format!(
+                                "failed to open disk '{}': keyfile was verified against \
+                                 '{}' but rejected here -- {} ({}). \
+                                 If the keyfile is correct, the single-passphrase \
+                                 invariant may be violated by external LUKS manipulation",
+                                name, first_name, hint, stderr
+                            )),
+                        ),
+                        _ => {
+                            let summary = format!("cryptsetup open failed on '{name}': {e}");
+                            (summary, MountError::Luks(e))
+                        }
+                    };
+                    return Err(explain_open_failure(
+                        name,
+                        &by_id.0,
+                        header_state,
+                        &original_summary,
                         ok_fallback,
                     ));
                 }
-
-                for (name, by_id) in &plan.to_unlock {
-                    if let Err(e) =
-                        luks::ensure_luks_open_with_key_file(runner, fs, name, by_id, kf)
-                    {
-                        let header_state = luks::probe_luks_header(runner, &by_id.0);
-                        let (original_summary, ok_fallback) = match &e {
-                            LuksError::OpenFailed {
-                                exit_code: 2,
-                                hint,
-                                stderr,
-                                ..
-                            } => (
-                                format!(
-                                    "cryptsetup open rejected on '{name}' despite verified keyfile on '{first_name}' -- {hint} ({stderr})"
-                                ),
-                                MountError::Failed(format!(
-                                    "failed to open disk '{}': keyfile was verified against \
-                                     '{}' but rejected here -- {} ({}). \
-                                     If the keyfile is correct, the single-passphrase \
-                                     invariant may be violated by external LUKS manipulation",
-                                    name, first_name, hint, stderr
-                                )),
-                            ),
-                            _ => {
-                                let summary = format!("cryptsetup open failed on '{name}': {e}");
-                                (summary, MountError::Luks(e))
-                            }
-                        };
-                        return Err(explain_open_failure(
-                            name,
-                            &by_id.0,
-                            header_state,
-                            &original_summary,
-                            ok_fallback,
-                        ));
-                    }
-                    eprintln!("{}  disk: {:<10}unlocked", tag("ok"), name);
-                }
+                eprintln!("{}  disk: {:<10}unlocked", tag("ok"), name);
             }
-            OpenCredential::Passphrase(pp) => {
-                open_disks_with_passphrase(runner, fs, &plan.to_unlock, pp.as_str())?;
-            }
+        }
+        OpenCredential::Passphrase(pp) => {
+            open_disks_with_passphrase(runner, fs, &plan.to_unlock, pp.as_str())?;
         }
     }
 
-    // 3. btrfs device scan
+    scan_and_mount(runner, fs, config, plan)
+}
+
+/// Shared tail for both execute entry points: btrfs device scan, ensure the
+/// mount point exists, then mount (with `degraded` when any membership disk
+/// is missing).
+fn scan_and_mount<R: CommandRunner, F: Filesystem + ?Sized>(
+    runner: &R,
+    _fs: &F,
+    config: &Config,
+    plan: &OpenPlan,
+) -> Result<bool, MountError> {
+    let mount_point = config.mount_point();
+
     let scan = runner.run(&CmdRequest::BtrfsDeviceScanAll)?;
     if scan.exit_status != 0 {
         return Err(MountError::Failed(format!(
@@ -598,7 +621,6 @@ pub fn execute_open_plan<R: CommandRunner, F: Filesystem + ?Sized>(
         )));
     }
 
-    // 4. mkdir + mount
     let _ = std::fs::create_dir_all(mount_point.as_str());
 
     let mount_result = if plan.any_missing_member {
@@ -690,10 +712,10 @@ mod tests {
     /// `cmd_recover`) compose the phases explicitly per the refactor's
     /// design — this helper exists ONLY for the test module.
     ///
-    /// Mirrors the unlock-style gating: if `plan.to_unlock` is empty, the
-    /// credential is dropped before reaching `execute_open_plan` (so the
-    /// strict `(true, true)` validation does not fire). Tests for the
-    /// recover-specific (true, true) path live in recover.rs.
+    /// Dispatches on `plan.to_unlock.is_empty()`: mount-only when empty,
+    /// unlock-and-mount otherwise. Tests that need to pin the per-entry-
+    /// point boundary checks must call the production functions directly
+    /// (not through this helper).
     fn open_and_mount_for_test<R: CommandRunner, F: Filesystem + ?Sized>(
         runner: &R,
         fs: &F,
@@ -708,12 +730,14 @@ mod tests {
                 Some(p) => p,
                 None => return Ok(false),
             };
-        let cred_for_plan = if plan.to_unlock.is_empty() {
-            None
+        if plan.to_unlock.is_empty() {
+            execute_mount_only(runner, fs, config, &plan)
         } else {
-            credential.as_ref()
-        };
-        execute_open_plan(runner, fs, config, &plan, cred_for_plan)
+            let credential = credential
+                .as_ref()
+                .expect("test passed empty credential with non-empty plan");
+            execute_unlock_and_mount(runner, fs, config, &plan, credential)
+        }
     }
 
     /// Convenience constructor used in tests.
@@ -766,6 +790,96 @@ mod tests {
                 exit_status: 0,
             },
         )
+    }
+
+    /// Intent: `execute_unlock_and_mount` must reject an empty `to_unlock`
+    /// plan with a typed internal error BEFORE running any LUKS or mount
+    /// commands.
+    ///
+    /// Why: The split of the legacy combined entry point into two
+    /// points encodes credential-presence via the signature, but a caller
+    /// could still route a plan whose `to_unlock` is empty into the
+    /// unlock-and-mount path. That is a caller-contract violation. The
+    /// residual check here replaces half of the original bidirectional
+    /// runtime validation; without it, a bad caller wiring would silently
+    /// attempt to mount via the unlock path and possibly hit downstream
+    /// commands in a confusing order. If this check regresses to
+    /// `debug_assert!` or is deleted, this test fails in release builds.
+    ///
+    /// Scenario: construct an `OpenPlan` directly with empty `to_unlock`,
+    /// pass it to `execute_unlock_and_mount` with any credential, and
+    /// confirm the typed `MountError::Failed(msg)` fires with a message
+    /// naming the function and the violated precondition.
+    #[test]
+    fn execute_unlock_and_mount_rejects_empty_plan() {
+        let config = test_config();
+        let fs = MockFs::new(&[]);
+        // Runner with no outputs wired — if the guard lets us through,
+        // the first real command (btrfs device scan or cryptsetup verify)
+        // will panic on lookup, which would also fail the test.
+        let runner = MockRunner::default();
+
+        let plan = OpenPlan {
+            to_unlock: Vec::new(),
+            any_open: true,
+            any_missing_member: false,
+            mount_device: "/dev/mapper/braid-disk1".to_owned(),
+        };
+
+        let cred = test_passphrase();
+        let res = execute_unlock_and_mount(&runner, &fs, &config, &plan, &cred);
+        match res {
+            Err(MountError::Failed(msg)) => {
+                assert!(
+                    msg.contains("execute_unlock_and_mount called with empty plan.to_unlock"),
+                    "unexpected message: {msg}"
+                );
+            }
+            other => panic!("expected MountError::Failed, got {other:?}"),
+        }
+    }
+
+    /// Intent: `execute_mount_only` must reject a non-empty `to_unlock`
+    /// plan with a typed internal error BEFORE running any mount commands.
+    ///
+    /// Why: Symmetric counterpart to
+    /// `execute_unlock_and_mount_rejects_empty_plan`. The type system
+    /// cannot express "plan.to_unlock is empty" via `&OpenPlan`, so this
+    /// runtime check is what catches a caller that routes a plan with
+    /// locked disks into the mount-only path. Without it, `scan_and_mount`
+    /// would attempt to mount the btrfs device while some LUKS members are
+    /// still locked, producing an obscure mount-layer error far from the
+    /// root cause. If this check regresses or is deleted, this test fails.
+    ///
+    /// Scenario: construct an `OpenPlan` directly with one disk still to
+    /// unlock, pass it to `execute_mount_only`, and confirm the typed
+    /// `MountError::Failed(msg)` fires.
+    #[test]
+    fn execute_mount_only_rejects_non_empty_plan() {
+        let config = test_config();
+        let fs = MockFs::new(&[]);
+        let runner = MockRunner::default();
+
+        let plan = OpenPlan {
+            to_unlock: vec![(
+                "disk1".to_owned(),
+                ByIdPath("/dev/disk/by-id/virtio-disk1".to_owned()),
+            )],
+            any_open: false,
+            any_missing_member: false,
+            mount_device: "/dev/mapper/braid-disk1".to_owned(),
+        };
+
+        let res = execute_mount_only(&runner, &fs, &config, &plan);
+        match res {
+            Err(MountError::Failed(msg)) => {
+                assert!(
+                    msg.contains("execute_mount_only called with non-empty plan.to_unlock"),
+                    "unexpected message: {msg}"
+                );
+            }
+            other => panic!("expected MountError::Failed, got {other:?}"),
+        }
     }
 
     /// Intent: When the pool is already mounted, open_and_mount_pool should
