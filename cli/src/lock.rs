@@ -65,6 +65,60 @@ fn close_mapper_with_retry<R: CommandRunner>(runner: &R, mapper: &str) -> Result
     unreachable!()
 }
 
+/// Enumerate braid-* mappers under /dev/mapper that are NOT in the pool
+/// membership. These are orphans from interrupted add/replace flows --
+/// see docs/principles.md:18. Missing/unreadable /dev/mapper is
+/// non-fatal: returns an empty list so the primary lock path still
+/// runs.
+fn scan_orphan_mappers<F: Filesystem + ?Sized>(
+    fs: &F,
+    membership: &PoolMembership,
+) -> Vec<String> {
+    let Ok(entries) = fs.list_dir("/dev/mapper") else {
+        return Vec::new();
+    };
+    let mut orphans = Vec::new();
+    for entry in entries {
+        let Some(disk_name) = name_from_mapper(&entry) else {
+            continue;
+        };
+        if membership.disks.contains_key(disk_name) {
+            continue;
+        }
+        if fs.exists(&format!("/dev/mapper/{entry}")) {
+            orphans.push(entry);
+        }
+    }
+    orphans
+}
+
+/// Build the scoped `btrfs device scan --forget` argument list: every
+/// LUKS mapper path `cmd_lock` is about to destroy (membership +
+/// orphan), filtered through fs.exists. The kernel forget path is
+/// per-device (reference/linux/fs/btrfs/volumes.c
+/// btrfs_free_stale_devices), and `btrfs device scan --forget <path>`
+/// rejects non-block-device arguments and aborts on the first failing
+/// path, so the list must only contain currently-present mappers.
+fn lock_forget_devices<F: Filesystem + ?Sized>(
+    fs: &F,
+    membership: &PoolMembership,
+    orphan_mappers: &[String],
+) -> Vec<String> {
+    let mut devs: Vec<String> = membership
+        .disks
+        .keys()
+        .map(|name| format!("/dev/mapper/{}", mapper_name(name).0))
+        .filter(|p| fs.exists(p))
+        .collect();
+    for entry in orphan_mappers {
+        let p = format!("/dev/mapper/{entry}");
+        if fs.exists(&p) {
+            devs.push(p);
+        }
+    }
+    devs
+}
+
 /// Compile dry-run steps for lock.
 pub fn compile_lock_steps(
     pool_was_mounted: bool,
@@ -82,11 +136,20 @@ pub fn compile_lock_steps(
                 mount_point: mount_point.clone(),
             }],
         });
-        steps.push(Step {
-            risk: "safe",
-            description: "btrfs device scan --forget".into(),
-            commands: vec![CmdRequest::BtrfsDeviceScanForget],
-        });
+        let forget_devs: Vec<String> = open_mappers
+            .iter()
+            .chain(orphan_mappers.iter())
+            .map(|m| format!("/dev/mapper/{m}"))
+            .collect();
+        if !forget_devs.is_empty() {
+            steps.push(Step {
+                risk: "safe",
+                description: "btrfs device scan --forget".into(),
+                commands: vec![CmdRequest::BtrfsDeviceScanForget {
+                    devices: forget_devs,
+                }],
+            });
+        }
     }
 
     for mapper in open_mappers {
@@ -139,29 +202,19 @@ pub fn cmd_lock<R: CommandRunner, F: Filesystem + ?Sized>(
         preflight::require_lock_preflight(fs, fsid).map_err(LockError::Failed)?;
     }
 
-    // Dry-run: probe mapper state, compile steps, print
+    // Probe mapper state. Shared between dry-run and runtime so the
+    // forget call's device list matches the set the same function is
+    // about to close (the close set).
+    let open_mappers: Vec<String> = membership
+        .disks
+        .keys()
+        .map(|name| mapper_name(name).0)
+        .filter(|m| fs.exists(&format!("/dev/mapper/{m}")))
+        .collect();
+    let orphan_mappers = scan_orphan_mappers(fs, membership);
+
+    // Dry-run: compile steps, print
     if dry_run {
-        let mut open_mappers = Vec::new();
-        for name in membership.disks.keys() {
-            let mn = mapper_name(name);
-            if fs.exists(&format!("/dev/mapper/{}", mn.0)) {
-                open_mappers.push(mn.0.clone());
-            }
-        }
-        let mut orphan_mappers = Vec::new();
-        if let Ok(entries) = fs.list_dir("/dev/mapper") {
-            for entry in entries {
-                let Some(disk_name) = name_from_mapper(&entry) else {
-                    continue;
-                };
-                if membership.disks.contains_key(disk_name) {
-                    continue;
-                }
-                if fs.exists(&format!("/dev/mapper/{entry}")) {
-                    orphan_mappers.push(entry);
-                }
-            }
-        }
         let steps = compile_lock_steps(
             pool_was_mounted,
             &open_mappers,
@@ -198,20 +251,28 @@ pub fn cmd_lock<R: CommandRunner, F: Filesystem + ?Sized>(
         } else {
             eprintln!("{}  {:<14}unmounted {}", tag("ok"), "pool", mount_point);
 
-            // Clear btrfs kernel scan registry so that cryptsetup close doesn't
-            // race against stale device references on multi-device pools.
-            let forget_result = runner.run(&CmdRequest::BtrfsDeviceScanForget);
-            match forget_result {
-                Ok(r) if r.exit_status == 0 => {}
-                Ok(r) => {
-                    eprintln!(
-                        "[warn]  btrfs device scan --forget failed (exit {}): {} (continuing)",
-                        r.exit_status,
-                        r.stderr.trim()
-                    );
-                }
-                Err(e) => {
-                    eprintln!("[warn]  btrfs device scan --forget failed: {e} (continuing)");
+            // Clear btrfs kernel scan registry so that cryptsetup close
+            // doesn't race against stale device references on multi-device
+            // pools. Scope to the close set (membership + orphan mappers)
+            // -- the no-arg form is kernel-global and would invalidate
+            // scan entries for unrelated btrfs filesystems on the host.
+            let forget_devs = lock_forget_devices(fs, membership, &orphan_mappers);
+            if !forget_devs.is_empty() {
+                let forget_result = runner.run(&CmdRequest::BtrfsDeviceScanForget {
+                    devices: forget_devs,
+                });
+                match forget_result {
+                    Ok(r) if r.exit_status == 0 => {}
+                    Ok(r) => {
+                        eprintln!(
+                            "[warn]  btrfs device scan --forget failed (exit {}): {} (continuing)",
+                            r.exit_status,
+                            r.stderr.trim()
+                        );
+                    }
+                    Err(e) => {
+                        eprintln!("[warn]  btrfs device scan --forget failed: {e} (continuing)");
+                    }
                 }
             }
         }
@@ -247,44 +308,36 @@ pub fn cmd_lock<R: CommandRunner, F: Filesystem + ?Sized>(
         }
     }
 
-    // 3b. Scan for orphaned braid-* mappers not in membership
-    match fs.list_dir("/dev/mapper") {
-        Ok(entries) => {
-            for entry in entries {
-                let Some(disk_name) = name_from_mapper(&entry) else {
-                    continue;
-                };
-                if membership.disks.contains_key(disk_name) {
-                    continue;
-                }
-                if fs.exists(&format!("/dev/mapper/{entry}")) {
-                    eprintln!(
-                        "[warn]  orphaned mapper {entry} (not in pool.json -- likely a prior crash)"
-                    );
-                    match close_mapper_with_retry(runner, &entry) {
-                        Ok(()) => {
-                            eprintln!("{}  disk: {:<7}locked (orphan)", tag("ok"), disk_name);
-                        }
-                        Err(LockError::DeviceBusy(msg)) if umount_error.is_some() => {
-                            eprintln!(
-                                "[warn]  disk: {:<7}orphan close failed (umount was stuck): {}",
-                                disk_name, msg
-                            );
-                        }
-                        Err(e) => {
-                            eprintln!("[FAIL]  disk: {:<7}orphan: {}", disk_name, e);
-                            if first_mapper_error.is_none() {
-                                first_mapper_error = Some(e);
-                            }
-                        }
-                    }
-                    all_already_closed = false;
+    // 3b. Close orphaned braid-* mappers (precomputed above so the
+    // forget call shared the same close-set). An orphan is detected
+    // iff fs.exists was true at probe time; re-check to cover the
+    // narrow window where it disappeared on its own.
+    for entry in &orphan_mappers {
+        let disk_name = name_from_mapper(entry).unwrap_or(entry);
+        if !fs.exists(&format!("/dev/mapper/{entry}")) {
+            continue;
+        }
+        eprintln!(
+            "[warn]  orphaned mapper {entry} (not in pool.json -- likely a prior crash)"
+        );
+        match close_mapper_with_retry(runner, entry) {
+            Ok(()) => {
+                eprintln!("{}  disk: {:<7}locked (orphan)", tag("ok"), disk_name);
+            }
+            Err(LockError::DeviceBusy(msg)) if umount_error.is_some() => {
+                eprintln!(
+                    "[warn]  disk: {:<7}orphan close failed (umount was stuck): {}",
+                    disk_name, msg
+                );
+            }
+            Err(e) => {
+                eprintln!("[FAIL]  disk: {:<7}orphan: {}", disk_name, e);
+                if first_mapper_error.is_none() {
+                    first_mapper_error = Some(e);
                 }
             }
         }
-        Err(e) => {
-            eprintln!("[warn]  could not scan /dev/mapper for orphans: {e} (skipping)");
-        }
+        all_already_closed = false;
     }
 
     // 4. Return first fatal mapper error if any, otherwise deferred umount error
@@ -322,6 +375,7 @@ mod tests {
         inner: MockRunner,
         close_calls: Mutex<Vec<String>>,
         close_sequences: Mutex<HashMap<String, VecDeque<RawCommandOutput>>>,
+        forget_calls: Mutex<Vec<Vec<String>>>,
     }
 
     impl RecordingRunner {
@@ -330,6 +384,7 @@ mod tests {
                 inner,
                 close_calls: Mutex::new(Vec::new()),
                 close_sequences: Mutex::new(HashMap::new()),
+                forget_calls: Mutex::new(Vec::new()),
             }
         }
 
@@ -344,6 +399,10 @@ mod tests {
         fn close_calls(&self) -> Vec<String> {
             self.close_calls.lock().unwrap().clone()
         }
+
+        fn forget_calls(&self) -> Vec<Vec<String>> {
+            self.forget_calls.lock().unwrap().clone()
+        }
     }
 
     impl CommandRunner for RecordingRunner {
@@ -356,6 +415,9 @@ mod tests {
                 {
                     return Ok(out);
                 }
+            }
+            if let CmdRequest::BtrfsDeviceScanForget { devices } = request {
+                self.forget_calls.lock().unwrap().push(devices.clone());
             }
             self.inner.run(request)
         }
@@ -613,7 +675,12 @@ mod tests {
                 ok_raw("umount /mnt/storage"),
             )
             .with_output(
-                CmdRequest::BtrfsDeviceScanForget,
+                CmdRequest::BtrfsDeviceScanForget {
+                    devices: vec![
+                        "/dev/mapper/braid-aaa".into(),
+                        "/dev/mapper/braid-bbb".into(),
+                    ],
+                },
                 ok_raw("btrfs device scan --forget"),
             )
     }
@@ -820,7 +887,12 @@ mod tests {
             ok_raw("umount /mnt/storage"),
         )
         .with_output(
-            CmdRequest::BtrfsDeviceScanForget,
+            CmdRequest::BtrfsDeviceScanForget {
+                devices: vec![
+                    "/dev/mapper/braid-aaa".into(),
+                    "/dev/mapper/braid-bbb".into(),
+                ],
+            },
             err_raw("btrfs device scan --forget", 1, "some error"),
         )
         .with_output(
@@ -853,6 +925,18 @@ mod tests {
     #[test]
     fn lock_closes_orphaned_mapper() {
         let runner = mounted_runner()
+            // Override forget mock: with an orphan present, the forget
+            // set must include it (close-set-scoped).
+            .with_output(
+                CmdRequest::BtrfsDeviceScanForget {
+                    devices: vec![
+                        "/dev/mapper/braid-aaa".into(),
+                        "/dev/mapper/braid-bbb".into(),
+                        "/dev/mapper/braid-ccc".into(),
+                    ],
+                },
+                ok_raw("btrfs device scan --forget"),
+            )
             .with_output(
                 CmdRequest::CryptsetupClose {
                     mapper: "braid-aaa".into(),
@@ -1207,6 +1291,16 @@ mod tests {
     fn lock_orphan_close_failure_is_fatal() {
         let runner = mounted_runner()
             .with_output(
+                CmdRequest::BtrfsDeviceScanForget {
+                    devices: vec![
+                        "/dev/mapper/braid-aaa".into(),
+                        "/dev/mapper/braid-bbb".into(),
+                        "/dev/mapper/braid-orphan".into(),
+                    ],
+                },
+                ok_raw("btrfs device scan --forget"),
+            )
+            .with_output(
                 CmdRequest::CryptsetupClose {
                     mapper: "braid-aaa".into(),
                 },
@@ -1486,7 +1580,9 @@ mod tests {
     }
 
     // Intent: dry-run for lock shows umount + scan forget + close per open mapper.
-    // Why: verifies compile_lock_steps produces correct output.
+    // Why: verifies compile_lock_steps produces correct output. The
+    // rendered forget command must include the explicit device paths,
+    // not the bare kernel-global form.
     // Scenario: pool mounted, 2 open mappers, no orphans.
     #[test]
     fn dry_run_render_lock_mounted_2_disks() {
@@ -1502,6 +1598,11 @@ mod tests {
         assert!(lines[0].contains("unmount"));
         assert!(lines[1].contains("$ umount"));
         assert!(lines[2].contains("btrfs device scan --forget"));
+        assert!(
+            lines[3].contains("--forget /dev/mapper/braid-disk1 /dev/mapper/braid-disk2"),
+            "rendered forget command must list pool mapper paths, got: {}",
+            lines[3]
+        );
         assert!(lines[4].contains("close LUKS mapper braid-disk1"));
         assert!(lines[6].contains("close LUKS mapper braid-disk2"));
     }
@@ -1533,5 +1634,206 @@ mod tests {
         let mount_point = MountPoint("/mnt/storage".into());
         let steps = compile_lock_steps(false, &[], &[], &mount_point);
         assert!(steps.is_empty());
+    }
+
+    /// Extract the `devices` list from the single forget step in a
+    /// compiled lock plan. Panics if there is not exactly one forget
+    /// step, so the caller's assertion is anchored to a present step.
+    fn forget_step_devices(steps: &[Step]) -> Vec<String> {
+        let mut found: Option<Vec<String>> = None;
+        for step in steps {
+            for cmd in &step.commands {
+                if let CmdRequest::BtrfsDeviceScanForget { devices } = cmd {
+                    assert!(
+                        found.is_none(),
+                        "multiple forget steps in plan: {steps:?}"
+                    );
+                    found = Some(devices.clone());
+                }
+            }
+        }
+        found.expect("no forget step in plan")
+    }
+
+    fn count_forget_steps(steps: &[Step]) -> usize {
+        steps
+            .iter()
+            .flat_map(|s| &s.commands)
+            .filter(|c| matches!(c, CmdRequest::BtrfsDeviceScanForget { .. }))
+            .count()
+    }
+
+    // Intent: the compiled dry-run plan's forget step lists the pool's
+    // own mapper paths, never the kernel-global no-arg form.
+    // Why: the no-arg form (btrfs_forget_devices(NULL) in
+    // reference/btrfs-progs/cmds/device.c) invalidates every btrfs scan
+    // entry on the host. Pool-scoping matters as soon as a second
+    // (non-braid) btrfs filesystem coexists.
+    // Scenario: 2-disk pool, no orphans; the forget step must carry
+    // exactly the pool's mapper paths in membership order.
+    #[test]
+    fn dry_run_lock_forget_step_lists_scoped_devices() {
+        use crate::types::MountPoint;
+        let mount_point = MountPoint("/mnt/storage".into());
+        let open_mappers = vec!["braid-aaa".into(), "braid-bbb".into()];
+        let steps = compile_lock_steps(true, &open_mappers, &[], &mount_point);
+        assert_eq!(
+            forget_step_devices(&steps),
+            vec![
+                "/dev/mapper/braid-aaa".to_string(),
+                "/dev/mapper/braid-bbb".to_string(),
+            ],
+        );
+    }
+
+    // Intent: dry-run's forget step unions membership + orphan mappers
+    // -- the exact set compile_lock_steps will also close below it.
+    // Why: the kernel forget path is per-device, not per-fsid
+    // (reference/linux/fs/btrfs/volumes.c btrfs_free_stale_devices).
+    // Forgetting only membership leaves an orphan mapper (from a prior
+    // crash between cryptsetup open and pool.json write, per
+    // docs/principles.md:18) with a stale scan entry, reviving the
+    // cryptsetup-close-btrfs-held race for the orphan.
+    // Scenario: 1 membership mapper, 1 orphan; forget devices = union.
+    #[test]
+    fn dry_run_lock_forget_step_includes_orphans() {
+        use crate::types::MountPoint;
+        let mount_point = MountPoint("/mnt/storage".into());
+        let open_mappers = vec!["braid-aaa".into()];
+        let orphan_mappers = vec!["braid-orphan".into()];
+        let steps = compile_lock_steps(true, &open_mappers, &orphan_mappers, &mount_point);
+        assert_eq!(
+            forget_step_devices(&steps),
+            vec![
+                "/dev/mapper/braid-aaa".to_string(),
+                "/dev/mapper/braid-orphan".to_string(),
+            ],
+        );
+    }
+
+    // Intent: the forget step is omitted entirely when there are no
+    // mappers to close, even if the pool was mounted.
+    // Why: a forget call with no arguments is kernel-global. The only
+    // safe way to express "forget nothing" is to not issue the command
+    // at all.
+    // Scenario: pool_was_mounted=true but membership and orphan lists
+    // are both empty -- only the umount step remains in the plan.
+    #[test]
+    fn dry_run_lock_forget_step_omitted_when_no_mappers() {
+        use crate::types::MountPoint;
+        let mount_point = MountPoint("/mnt/storage".into());
+        let steps = compile_lock_steps(true, &[], &[], &mount_point);
+        assert_eq!(count_forget_steps(&steps), 0, "no forget step expected");
+        assert!(
+            steps.iter().any(|s| s
+                .commands
+                .iter()
+                .any(|c| matches!(c, CmdRequest::Umount { .. }))),
+            "umount step should still be emitted",
+        );
+    }
+
+    // Intent: `braid lock` scopes the forget request to the pool's own
+    // mappers, never the kernel-global no-arg form.
+    // Why: the no-arg form invalidates every btrfs scan entry on the
+    // host (reference/btrfs-progs/cmds/device.c:btrfs_forget_devices
+    // with path=NULL). Pool-scoping prevents `braid lock` from
+    // clobbering scan state for an unrelated btrfs filesystem.
+    // Scenario: 2-disk pool, no orphans; the recorded forget call
+    // carries exactly the pool's mapper paths.
+    #[test]
+    fn lock_forget_is_pool_scoped() {
+        let inner = mounted_runner()
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: "braid-aaa".into(),
+                },
+                ok_raw("cryptsetup close braid-aaa"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: "braid-bbb".into(),
+                },
+                ok_raw("cryptsetup close braid-bbb"),
+            );
+        let runner = RecordingRunner::new(inner);
+        let fs = MockFs::new(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]);
+        let config = test_config();
+        let membership = test_membership();
+
+        cmd_lock(&runner, &fs, &config, &membership, false).expect("lock should succeed");
+
+        assert_eq!(
+            runner.forget_calls(),
+            vec![vec![
+                "/dev/mapper/braid-aaa".to_string(),
+                "/dev/mapper/braid-bbb".to_string(),
+            ]],
+            "forget must be pool-scoped (not kernel-global, not membership-only)"
+        );
+    }
+
+    // Intent: `braid lock` forgets the full close set -- membership AND
+    // orphan mappers.
+    // Why: the kernel forget path is per-device
+    // (reference/linux/fs/btrfs/volumes.c btrfs_free_stale_devices).
+    // Membership-only forget leaves crash-created orphan mappers with
+    // stale scan entries, reviving the cryptsetup-close-btrfs-held
+    // race that BtrfsDeviceScanForget exists to prevent (see
+    // tests/repro/cryptsetup-close-btrfs-held.py).
+    // Scenario: 2-disk pool + 1 orphan (braid-ccc); the recorded forget
+    // call carries all three mapper paths.
+    #[test]
+    fn lock_forget_includes_orphan_mappers() {
+        let inner = mounted_runner()
+            .with_output(
+                CmdRequest::BtrfsDeviceScanForget {
+                    devices: vec![
+                        "/dev/mapper/braid-aaa".into(),
+                        "/dev/mapper/braid-bbb".into(),
+                        "/dev/mapper/braid-ccc".into(),
+                    ],
+                },
+                ok_raw("btrfs device scan --forget"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: "braid-aaa".into(),
+                },
+                ok_raw("cryptsetup close braid-aaa"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: "braid-bbb".into(),
+                },
+                ok_raw("cryptsetup close braid-bbb"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: "braid-ccc".into(),
+                },
+                ok_raw("cryptsetup close braid-ccc"),
+            );
+        let runner = RecordingRunner::new(inner);
+        let fs = MockFs::new(&[
+            "/dev/mapper/braid-aaa",
+            "/dev/mapper/braid-bbb",
+            "/dev/mapper/braid-ccc",
+        ]);
+        let config = test_config();
+        let membership = test_membership();
+
+        cmd_lock(&runner, &fs, &config, &membership, false)
+            .expect("lock should succeed and close orphan");
+
+        assert_eq!(
+            runner.forget_calls(),
+            vec![vec![
+                "/dev/mapper/braid-aaa".to_string(),
+                "/dev/mapper/braid-bbb".to_string(),
+                "/dev/mapper/braid-ccc".to_string(),
+            ]],
+            "forget must include the orphan mapper in the close set"
+        );
     }
 }

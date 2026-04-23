@@ -86,7 +86,14 @@ pub enum CmdRequest {
         device: String,
     },
     BtrfsDeviceScanAll,
-    BtrfsDeviceScanForget,
+    /// `btrfs device scan --forget <dev>...` -- pool-scoped forget of the
+    /// kernel's btrfs scan registry. The no-arg form is kernel-global
+    /// (forgets every stale scan entry on the host); always pass the
+    /// explicit close-set of mapper paths the same code path is about
+    /// to destroy.
+    BtrfsDeviceScanForget {
+        devices: Vec<String>,
+    },
     BtrfsBalanceRaid1 {
         mount_point: MountPoint,
     },
@@ -482,10 +489,15 @@ impl CmdRequest {
                 program: "btrfs".to_owned(),
                 args: vec!["device".into(), "scan".into()],
             },
-            CmdRequest::BtrfsDeviceScanForget => CmdArgs {
-                program: "btrfs".to_owned(),
-                args: vec!["device".into(), "scan".into(), "--forget".into()],
-            },
+            CmdRequest::BtrfsDeviceScanForget { devices } => {
+                let mut args: Vec<String> =
+                    vec!["device".into(), "scan".into(), "--forget".into()];
+                args.extend(devices.iter().cloned());
+                CmdArgs {
+                    program: "btrfs".to_owned(),
+                    args,
+                }
+            }
             CmdRequest::BtrfsBalanceRaid1 { mount_point } => CmdArgs {
                 program: "btrfs".to_owned(),
                 args: vec![
@@ -1221,6 +1233,39 @@ mod tests {
         let result = mock.run_with_stdin(&req, b"existingpassphrase");
         assert!(result.is_ok());
         assert_eq!(result.unwrap().exit_status, 0);
+    }
+
+    #[test]
+    // Intent: BtrfsDeviceScanForget emits `btrfs device scan --forget
+    // <dev>...`, never the no-arg form that forgets every scanned btrfs
+    // device on the host.
+    // Why: the no-arg form is kernel-global (volumes.c
+    // btrfs_free_stale_devices with devt=0). Pool-scoped forget MUST pass
+    // explicit device paths. A regression to the bare form is not caught
+    // by typed-CmdRequest inspection in lock.rs (an accidental to_args
+    // that dropped `devices` would still typecheck), so pin it here at
+    // the argv layer.
+    // Scenario: lock builds [/dev/mapper/braid-aaa, /dev/mapper/braid-bbb];
+    // to_argv() appends both after --forget.
+    fn btrfs_device_scan_forget_generates_scoped_argv() {
+        let cmd = CmdRequest::BtrfsDeviceScanForget {
+            devices: vec![
+                "/dev/mapper/braid-aaa".into(),
+                "/dev/mapper/braid-bbb".into(),
+            ],
+        }
+        .to_argv();
+        assert_eq!(cmd.program, "btrfs");
+        assert_eq!(
+            cmd.args,
+            vec![
+                "device",
+                "scan",
+                "--forget",
+                "/dev/mapper/braid-aaa",
+                "/dev/mapper/braid-bbb",
+            ]
+        );
     }
 
     #[test]

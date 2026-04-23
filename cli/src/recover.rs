@@ -631,15 +631,33 @@ fn relock_and_remount<R: CommandRunner, F: Filesystem + ?Sized>(
     // 2. Drop cached btrfs_fs_devices. Without this, the kernel may
     //    re-attach the next mount to a still-cached structure that retains
     //    the stale post-resume topology, defeating the cycle.
-    let forget = runner
-        .run(&CmdRequest::BtrfsDeviceScanForget)
-        .map_err(|e| RecoverError::Failed(format!("recover remount cycle: scan --forget: {e}")))?;
-    if forget.exit_status != 0 {
-        return Err(RecoverError::Failed(format!(
-            "recover remount cycle: btrfs device scan --forget failed (exit {}): {}",
-            forget.exit_status,
-            forget.stderr.trim()
-        )));
+    //
+    //    Scope to the pool's own mapper paths (the close set for this
+    //    cycle). The no-arg form is kernel-global and would invalidate
+    //    unrelated btrfs scan entries; per-device forget is sufficient
+    //    here because the cycle only closes and re-opens membership
+    //    mappers.
+    let forget_devs: Vec<String> = membership
+        .disks
+        .keys()
+        .map(|name| format!("/dev/mapper/{}", config::mapper_name(name).0))
+        .filter(|p| fs.exists(p))
+        .collect();
+    if !forget_devs.is_empty() {
+        let forget = runner
+            .run(&CmdRequest::BtrfsDeviceScanForget {
+                devices: forget_devs,
+            })
+            .map_err(|e| {
+                RecoverError::Failed(format!("recover remount cycle: scan --forget: {e}"))
+            })?;
+        if forget.exit_status != 0 {
+            return Err(RecoverError::Failed(format!(
+                "recover remount cycle: btrfs device scan --forget failed (exit {}): {}",
+                forget.exit_status,
+                forget.stderr.trim()
+            )));
+        }
     }
 
     // 3. Close every LUKS mapper from the union. The dm devices must be
@@ -1330,9 +1348,16 @@ mod tests {
                 },
                 ok_raw_empty("umount"),
             )
-            // remount cycle: scan --forget (drop cached fs_devices)
+            // remount cycle: scan --forget (drop cached fs_devices) --
+            // pool-scoped to the membership mappers the cycle is about
+            // to close.
             .with_output(
-                CmdRequest::BtrfsDeviceScanForget,
+                CmdRequest::BtrfsDeviceScanForget {
+                    devices: vec![
+                        "/dev/mapper/braid-disk1".into(),
+                        "/dev/mapper/braid-disk2".into(),
+                    ],
+                },
                 ok_raw_empty("btrfs device scan --forget"),
             )
             // remount cycle: close both mappers (the wrapper runner removes
@@ -1558,9 +1583,14 @@ mod tests {
                 },
                 ok_raw_empty("umount"),
             )
-            // 2. scan --forget
+            // 2. scan --forget -- pool-scoped to the membership mappers.
             .with_output(
-                CmdRequest::BtrfsDeviceScanForget,
+                CmdRequest::BtrfsDeviceScanForget {
+                    devices: vec![
+                        "/dev/mapper/braid-disk1".into(),
+                        "/dev/mapper/braid-disk2".into(),
+                    ],
+                },
                 ok_raw_empty("btrfs device scan --forget"),
             )
             // 3. close each mapper. The wrapper runner removes the mapper
