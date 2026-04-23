@@ -132,7 +132,7 @@ The wrapper (`braid-wrapper.sh`) bridges CLI operations and systemd state. This 
 
 ## Unlock path mutual exclusion
 
-Pool-mutating commands (`unlock`, `add`, `recover`) acquire an exclusive **non-blocking** `flock` on `/run/braid-pool.lock` in the wrapper before invoking the CLI. **braid does not queue pool operations** — if the lock is already held by another braid process, the wrapper exits 1 immediately with `braid: another braid operation is already in progress` and the user must retry once the active operation completes. The lock is held through post-processing (permissions, `braid-online` activation). After acquiring the lock, `unlock` re-checks `mountpoint -q` and exits cleanly if a prior winner already mounted the pool sequentially — `add` and `recover` do not fast-exit because they operate on mounted pools. See [Principle 12](../principles.md#12-one-pool-operation-at-a-time).
+Pool-mutating commands (`unlock`, `add`, `recover`) acquire an exclusive **non-blocking** `flock` on `/run/braid-pool.lock` in the wrapper before invoking the CLI. **braid does not queue pool operations** — if the lock is already held by another braid process, the wrapper exits 1 immediately with `braid: another braid operation is already in progress` and the user must retry once the active operation completes. The lock is held through post-processing (permissions, `braid-online` activation). Under the held lock, `unlock` re-checks whether the pool is already mounted and exits cleanly if a prior winner mounted it sequentially — `add` and `recover` do not fast-exit because they operate on mounted pools. See [Principle 12](../principles.md#12-one-pool-operation-at-a-time).
 
 ## Consumer dependency contracts
 

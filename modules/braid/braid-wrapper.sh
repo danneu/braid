@@ -1,4 +1,5 @@
 #!@shell@
+# shellcheck shell=bash
 export PATH="@toolPath@:$PATH"
 
 # Parse subcommand before execution — needed to decide whether to acquire
@@ -45,21 +46,6 @@ case "$subcmd" in
     ;;
 esac
 
-# For unlock specifically: re-check after acquiring the lock — a prior
-# unlock that ran sequentially (and released the lock) may have already
-# mounted the pool. Does NOT apply to add/recover, which operate on a
-# mounted pool.
-case "$subcmd" in
-  unlock)
-    if ! $skip_fixup; then
-      if @mountpointBin@ -q "@mountPointPath@" 2>/dev/null; then
-        echo "pool already mounted at @mountPointPath@"
-        exit 0
-      fi
-    fi
-    ;;
-esac
-
 # Stop scrub timer and service before CLI lock attempts unmount.
 # Timer must stop first — otherwise it can re-trigger the service between
 # service stop and unmount. braid-scrub.service holds the mount busy while
@@ -82,6 +68,7 @@ if [ "$ret" -eq 0 ] && ! $skip_fixup; then
   case "$subcmd" in
     unlock|add|recover)
       if @mountpointBin@ -q "@mountPointPath@" 2>/dev/null; then
+        # shellcheck disable=SC2157  # @storageGroup@ is a Nix substitution, may be empty
         if [ -n "@storageGroup@" ]; then
           if ! @chownBin@ "root:@storageGroup@" "@mountPointPath@"; then
             echo "braid: WARNING: failed to set ownership on @mountPointPath@" >&2

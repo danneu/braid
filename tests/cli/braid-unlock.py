@@ -97,6 +97,61 @@ with subtest("Test 2: idempotent — unlock again is a no-op"):
     content = machine.succeed("cat /mnt/storage/test.txt").strip()
     assert content == "persistent data", f"Expected 'persistent data', got '{content}'"
 
+# --- Test 2c: already-mounted unlock: exit 0, stderr message, no remount ---
+#
+# Intent: Verify that `braid unlock` against an already-mounted pool exits 0,
+# emits "pool already mounted at /mnt/storage" to stderr (not stdout),
+# performs no cryptsetup/mount work, and leaves the pool unchanged.
+#
+# Why it exists: The wrapper's pre-CLI `mountpoint -q` short-circuit was
+# removed in favor of the CLI's own check inside `plan_open_pool`. Without
+# this test, a regression could silently re-route the message back to
+# stdout, drop it entirely, or drop the `Ok(None)` short-circuit and cause
+# redundant mount work — all exit-0 and all invisible to the existing
+# idempotent test (which asserts data integrity, not control flow).
+#
+# Scenario: Pool is already mounted from Tests 1 and 2. Run `braid unlock`
+# with stdout and stderr captured separately and assert the shape.
+with subtest("Test 2c: already-mounted unlock -> exit 0, stderr message, no remount"):
+    # Precondition: pool is mounted from Tests 1/2.
+    machine.succeed("mountpoint -q /mnt/storage")
+
+    # Snapshot mount source and mapper set to prove no remount/reopen work.
+    before_src = machine.succeed("findmnt -n -o SOURCE /mnt/storage").strip()
+    before_mappers = machine.succeed(
+        "ls /dev/mapper/ | grep '^braid-' | sort"
+    ).strip()
+
+    # Run with stdout/stderr split. machine.succeed asserts exit 0.
+    machine.succeed(
+        f"{unlock_cmd(passphrase)} >/tmp/amm-stdout 2>/tmp/amm-stderr"
+    )
+    out = machine.succeed("cat /tmp/amm-stdout")
+    err = machine.succeed("cat /tmp/amm-stderr")
+
+    # Message is on stderr, absent from stdout.
+    assert "pool already mounted" in err, (
+        "expected 'pool already mounted' on stderr; "
+        "stderr={!r} stdout={!r}".format(err, out)
+    )
+    assert "pool already mounted" not in out, (
+        "message leaked to stdout; stdout={!r}".format(out)
+    )
+
+    # No remount (same mount source) and same mapper set.
+    after_src = machine.succeed("findmnt -n -o SOURCE /mnt/storage").strip()
+    after_mappers = machine.succeed(
+        "ls /dev/mapper/ | grep '^braid-' | sort"
+    ).strip()
+    assert before_src == after_src, (
+        "mount source changed: before={} after={}".format(before_src, after_src)
+    )
+    assert before_mappers == after_mappers, (
+        "mapper set changed: before={!r} after={!r}".format(
+            before_mappers, after_mappers
+        )
+    )
+
 # --- Test 2b: Unlock enriches pool.json ---
 
 with subtest("Test 2b: unlock enriches pool.json with runtime metadata"):
