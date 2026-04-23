@@ -313,84 +313,85 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
 
     let new_mapper_path = format!("/dev/mapper/{}", new_mn.0);
 
-    // Step 2+: Execute replacement — both paths use btrfs replace start.
-    match &replace_source {
-        ReplaceSource::Live { mapper, devid } => {
-            // Pre-flight: warn if source device has I/O errors (informational only).
-            let stats_raw = runner.run(&CmdRequest::BtrfsDeviceStatsJson {
-                mount_point: config.mount_point().clone(),
+    // Step 2+: Execute replacement -- both paths use btrfs replace start.
+    // Live-only: warn if the source device has accumulated I/O errors.
+    if let ReplaceSource::Live { mapper, devid } = &replace_source {
+        let stats_raw = runner.run(&CmdRequest::BtrfsDeviceStatsJson {
+            mount_point: config.mount_point().clone(),
+        });
+        if let Ok(ref raw) = stats_raw
+            && let Ok(stats) = parse_btrfs_device_stats(raw)
+        {
+            let expected_path = format!("/dev/mapper/{}", mapper.0);
+            let has_errs = stats.devices.iter().any(|d| {
+                d.target.as_path() == Some(expected_path.as_str())
+                    && (d.read_io_errs > 0
+                        || d.write_io_errs > 0
+                        || d.flush_io_errs > 0
+                        || d.corruption_errs > 0
+                        || d.generation_errs > 0)
             });
-            if let Ok(ref raw) = stats_raw
-                && let Ok(stats) = parse_btrfs_device_stats(raw) {
-                    let expected_path = format!("/dev/mapper/{}", mapper.0);
-                    let has_errs = stats.devices.iter().any(|d| {
-                        d.target.as_path() == Some(expected_path.as_str())
-                            && (d.read_io_errs > 0
-                                || d.write_io_errs > 0
-                                || d.flush_io_errs > 0
-                                || d.corruption_errs > 0
-                                || d.generation_errs > 0)
-                    });
-                    if has_errs {
-                        eprintln!(
-                            "Warning: source device (devid {devid}) has I/O errors. \
-                             btrfs replace will read from mirrors where possible, \
-                             but may fail if any data lacks a healthy mirror copy."
-                        );
-                    }
-                }
-
-            eprintln!("Replacing device (devid {devid}) with {}...", new_mn);
-            pool_replace_device(
-                runner,
-                *devid,
-                &new_mapper_path,
-                config.mount_point(),
-                params.progress,
-            )?;
-            eprintln!("Replace complete.");
-
-            // Best-effort LUKS close of old mapper. Runs BEFORE the resize
-            // so a resize failure does not `?` out and strand the old dm
-            // slot bound to the backing disk until `braid lock` or reboot.
-            let close_result = runner.run(&CmdRequest::CryptsetupClose {
-                mapper: mapper.0.clone(),
-            });
-            match close_result {
-                Ok(r) if r.exit_status != 0 => {
-                    eprintln!(
-                        "Warning: failed to close LUKS mapper {} (exit {})",
-                        mapper, r.exit_status
-                    );
-                }
-                Err(e) => eprintln!("Warning: failed to close LUKS mapper {}: {}", mapper, e),
-                _ => {
-                    eprintln!(
-                        "Old device closed. If repurposing the physical disk, wipe it separately."
-                    );
-                }
+            if has_errs {
+                eprintln!(
+                    "Warning: source device (devid {devid}) has I/O errors. \
+                     btrfs replace will read from mirrors where possible, \
+                     but may fail if any data lacks a healthy mirror copy."
+                );
             }
+        }
+    }
 
-            pool_resize_device(runner, *devid, config.mount_point())?;
+    // Kickoff wording differs (replace-in-place vs rebuild-missing), but the
+    // underlying `btrfs replace start` + resize sequence is identical. Bind
+    // devid here so the shared spine below runs once.
+    let devid = match &replace_source {
+        ReplaceSource::Live { devid, .. } => {
+            eprintln!("Replacing device (devid {devid}) with {}...", new_mn);
+            *devid
         }
         ReplaceSource::Missing { devid } => {
             eprintln!(
                 "Rebuilding missing device (devid {devid}) onto {}...",
                 new_mn
             );
-            pool_replace_device(
-                runner,
-                *devid,
-                &new_mapper_path,
-                config.mount_point(),
-                params.progress,
-            )?;
-            eprintln!("Replace complete.");
+            *devid
+        }
+    };
 
-            pool_resize_device(runner, *devid, config.mount_point())?;
-            // No old mapper to close — device was already missing.
+    pool_replace_device(
+        runner,
+        devid,
+        &new_mapper_path,
+        config.mount_point(),
+        params.progress,
+    )?;
+    eprintln!("Replace complete.");
+
+    // Live-only: best-effort close of old mapper. Runs BEFORE the resize
+    // so a resize failure does not `?` out and strand the old dm slot
+    // bound to the backing disk until `braid lock` or reboot. Missing has
+    // no old mapper to close.
+    if let ReplaceSource::Live { mapper, .. } = &replace_source {
+        let close_result = runner.run(&CmdRequest::CryptsetupClose {
+            mapper: mapper.0.clone(),
+        });
+        match close_result {
+            Ok(r) if r.exit_status != 0 => {
+                eprintln!(
+                    "Warning: failed to close LUKS mapper {} (exit {})",
+                    mapper, r.exit_status
+                );
+            }
+            Err(e) => eprintln!("Warning: failed to close LUKS mapper {}: {}", mapper, e),
+            _ => {
+                eprintln!(
+                    "Old device closed. If repurposing the physical disk, wipe it separately."
+                );
+            }
         }
     }
+
+    pool_resize_device(runner, devid, config.mount_point())?;
 
     // Capture pre-op missing count for soft balance decision
     let pre_op_missing_count = pool.missing_count;
@@ -612,75 +613,66 @@ fn compile_replace_steps(input: &ReplaceStepsInput<'_>) -> Result<Vec<Step>, Rep
     }
 
     let new_mapper_path = format!("/dev/mapper/{}", new_mn.0);
-    match input.replace_source {
-        ReplaceSource::Live { mapper, devid } => {
-            steps.push(Step {
-                risk: "long",
-                description: format!(
-                    "btrfs replace start {} /dev/mapper/{} {}",
-                    devid, new_mn, input.mount_point
-                ),
-                commands: vec![CmdRequest::BtrfsReplaceStart {
-                    devid: *devid,
-                    target_device: new_mapper_path,
-                    mount_point: input.mount_point.clone(),
-                }],
-            });
-            steps.push(Step {
-                risk: "safe",
-                description: format!("cryptsetup close {}", mapper),
-                commands: vec![CmdRequest::CryptsetupClose {
-                    mapper: mapper.0.clone(),
-                }],
-            });
-            steps.push(Step {
-                risk: "safe",
-                description: format!(
-                    "btrfs filesystem resize {}:max {}",
-                    devid, input.mount_point
-                ),
-                commands: vec![CmdRequest::BtrfsFilesystemResize {
-                    devid: *devid,
-                    mount_point: input.mount_point.clone(),
-                }],
-            });
-        }
-        ReplaceSource::Missing { devid } => {
-            steps.push(Step {
-                risk: "long",
-                description: format!(
-                    "btrfs replace start {} /dev/mapper/{} {}",
-                    devid, new_mn, input.mount_point
-                ),
-                commands: vec![CmdRequest::BtrfsReplaceStart {
-                    devid: *devid,
-                    target_device: new_mapper_path,
-                    mount_point: input.mount_point.clone(),
-                }],
-            });
-            steps.push(Step {
-                risk: "safe",
-                description: format!(
-                    "btrfs filesystem resize {}:max {}",
-                    devid, input.mount_point
-                ),
-                commands: vec![CmdRequest::BtrfsFilesystemResize {
-                    devid: *devid,
-                    mount_point: input.mount_point.clone(),
-                }],
-            });
-            if input.will_clear_last_missing && input.total_devices >= 2 {
-                steps.push(Step {
-                    risk: "long",
-                    description:
-                        "btrfs balance -dconvert=raid1,soft -mconvert=raid1,soft (restore redundancy)"
-                            .into(),
-                    commands: vec![CmdRequest::BtrfsBalanceRaid1Soft {
-                        mount_point: input.mount_point.clone(),
-                    }],
-                });
-            }
-        }
+    let devid = match input.replace_source {
+        ReplaceSource::Live { devid, .. } | ReplaceSource::Missing { devid } => *devid,
+    };
+
+    // Shared: btrfs replace start.
+    steps.push(Step {
+        risk: "long",
+        description: format!(
+            "btrfs replace start {} /dev/mapper/{} {}",
+            devid, new_mn, input.mount_point
+        ),
+        commands: vec![CmdRequest::BtrfsReplaceStart {
+            devid,
+            target_device: new_mapper_path,
+            mount_point: input.mount_point.clone(),
+        }],
+    });
+
+    // Live-only: close old mapper before the resize -- mirrors the ordering
+    // in cmd_replace, which runs the close before resize so a resize error
+    // does not strand the old dm slot.
+    if let ReplaceSource::Live { mapper, .. } = input.replace_source {
+        steps.push(Step {
+            risk: "safe",
+            description: format!("cryptsetup close {}", mapper),
+            commands: vec![CmdRequest::CryptsetupClose {
+                mapper: mapper.0.clone(),
+            }],
+        });
+    }
+
+    // Shared: btrfs filesystem resize.
+    steps.push(Step {
+        risk: "safe",
+        description: format!(
+            "btrfs filesystem resize {}:max {}",
+            devid, input.mount_point
+        ),
+        commands: vec![CmdRequest::BtrfsFilesystemResize {
+            devid,
+            mount_point: input.mount_point.clone(),
+        }],
+    });
+
+    // Missing-only: restore RAID1 redundancy after the last missing device
+    // clears. Live replace never creates single-profile chunks, so this
+    // step is unconditionally absent on the Live path.
+    if let ReplaceSource::Missing { .. } = input.replace_source
+        && input.will_clear_last_missing
+        && input.total_devices >= 2
+    {
+        steps.push(Step {
+            risk: "long",
+            description:
+                "btrfs balance -dconvert=raid1,soft -mconvert=raid1,soft (restore redundancy)"
+                    .into(),
+            commands: vec![CmdRequest::BtrfsBalanceRaid1Soft {
+                mount_point: input.mount_point.clone(),
+            }],
+        });
     }
 
     Ok(steps)
@@ -2250,6 +2242,78 @@ mod tests {
         assert!(lines[12].contains("btrfs filesystem resize"));
     }
 
+    #[test]
+    // Intent: dry-run for a fresh-disk missing-path replace renders the
+    //   expected step ordering: LUKS init of the new disk, then
+    //   `btrfs replace start`, then `btrfs filesystem resize`, then the
+    //   post-replace soft balance. No `cryptsetup close` step -- the missing
+    //   path has no old mapper.
+    //
+    // Why it exists: the live-path render order is pinned by
+    //   `dry_run_render_fresh_disk_live_replace_with_keyfile`, but the
+    //   missing path only had presence/absence coverage. A regression that
+    //   moved the soft balance before `btrfs replace start`/`resize` would
+    //   ship broken dry-run output without tripping the existing test. This
+    //   test fails if the order breaks even when every substring is still
+    //   present.
+    //
+    // Scenario: operator replaces a missing disk with a fresh disk3. The
+    //   pool has 2 devices and this clears the last missing one, so the
+    //   soft-balance tail appears.
+    fn dry_run_render_missing_path_ordering() {
+        let new_probed = new_probed_not_luks();
+        let source = ReplaceSource::Missing { devid: 2 };
+        let steps = compile_replace_steps(&ReplaceStepsInput {
+            new_name: "disk3",
+            new_by_id: &ByIdPath("/dev/disk/by-id/virtio-disk3".into()),
+            new_probed: &new_probed,
+            replace_source: &source,
+            mount_point: &MountPoint("/mnt/storage".into()),
+            will_clear_last_missing: true,
+            total_devices: 2,
+            paths: &test_paths().1,
+            enroll_key_file: None,
+        })
+        .unwrap();
+        let output = Step::render_dry_run(&steps);
+        let lines: Vec<&str> = output.lines().collect();
+
+        // Substring order: LUKS format -> header backup -> LUKS open ->
+        // btrfs replace start -> btrfs filesystem resize -> soft balance.
+        // Pin the order by resolving each substring to an index and
+        // asserting strict monotonic increase.
+        let find = |needle: &str| -> usize {
+            lines
+                .iter()
+                .position(|l| l.contains(needle))
+                .unwrap_or_else(|| panic!("expected '{needle}' in dry-run output:\n{output}"))
+        };
+        let luks_format = find("$ cryptsetup luksFormat");
+        let header_backup = find("$ cryptsetup luksHeaderBackup");
+        let luks_open = find("$ cryptsetup open --type luks");
+        let replace_start = find("$ btrfs replace start");
+        let resize = find("btrfs filesystem resize");
+        let soft_balance = find("-dconvert=raid1,soft");
+
+        assert!(
+            luks_format < header_backup
+                && header_backup < luks_open
+                && luks_open < replace_start
+                && replace_start < resize
+                && resize < soft_balance,
+            "missing-path dry-run step ordering violated \
+             (format={luks_format}, header_backup={header_backup}, \
+             luks_open={luks_open}, replace_start={replace_start}, \
+             resize={resize}, soft_balance={soft_balance}):\n{output}"
+        );
+
+        // Missing path has no old mapper, so no cryptsetup close anywhere.
+        assert!(
+            !output.contains("cryptsetup close"),
+            "missing path must not render a cryptsetup close step:\n{output}"
+        );
+    }
+
     /// Runner for a replace where the new disk is already LUKS-formatted but
     /// the mapper is closed (PresentLuks { mapper_open: false }) and the
     /// supplied passphrase is wrong: CryptsetupTestPassphrase on the new
@@ -2560,6 +2624,256 @@ mod tests {
         assert_eq!(
             open_calls, 0,
             "mapper_open: true must not trigger CryptsetupLuksOpen on the new disk"
+        );
+    }
+
+    /// Runner for a successful missing-path replace. Drives cmd_replace all
+    /// the way through the replace -> resize -> soft-balance sequence.
+    ///
+    /// Stateful: `BtrfsFilesystemShow` returns a degraded layout (disk1 live,
+    /// devid 2 missing) until `BtrfsReplaceStart` is issued, then flips to a
+    /// healthy 2-device layout (disk1 + disk3) so the second `probe_pool`
+    /// inside `maybe_restore_raid1` sees `missing_count == 0` with
+    /// `devices.len() >= 2` -- the minimal condition set for the soft
+    /// balance to fire.
+    struct MissingPathSuccessRunner {
+        log: std::sync::Arc<std::sync::Mutex<Vec<CmdRequest>>>,
+        replace_done: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl CmdRunner2 for MissingPathSuccessRunner {
+        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
+            self.log.lock().unwrap().push(request.clone());
+            match request {
+                CmdRequest::FindmntJson { mount_point } => Ok(mock_ok(
+                    &format!("findmnt --json --mountpoint {mount_point}"),
+                    r#"{"filesystems":[{"target":"/mnt/storage","source":"/dev/mapper/braid-disk1","fstype":"btrfs","options":"rw,relatime"}]}"#,
+                )),
+                CmdRequest::BtrfsFilesystemShow { mount_point } => {
+                    let show = if self.replace_done.load(std::sync::atomic::Ordering::Relaxed) {
+                        // post-replace: disk1 + disk3, no missing
+                        "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\
+                         \tTotal devices 2 FS bytes used 16.17MiB\n\
+                         \tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\
+                         \tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk3\n"
+                    } else {
+                        // pre-replace: disk1 live, devid 2 missing
+                        "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\
+                         \tTotal devices 2 FS bytes used 16.17MiB\n\
+                         \tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\
+                         \t*** Some devices missing\n"
+                    };
+                    Ok(mock_ok(
+                        &format!("btrfs filesystem show {mount_point}"),
+                        show,
+                    ))
+                }
+                CmdRequest::CryptsetupStatus { mapper } => {
+                    // disk3's mapper is already open: skips the LUKS
+                    // format/open/enroll init steps so the test focuses on
+                    // the shared replace spine + missing-path tail.
+                    let dev = match mapper.as_str() {
+                        "braid-disk1" => "/dev/vdb",
+                        "braid-disk3" => "/dev/vdd",
+                        _ => return Err(CmdError::MissingMock),
+                    };
+                    Ok(mock_ok(
+                        &format!("cryptsetup status {mapper}"),
+                        &format!("{mapper} is active and is in use.\n  type:    LUKS2\n  device:  {dev}\n  mode:    read/write\n"),
+                    ))
+                }
+                CmdRequest::CryptsetupLuksUuid { device } => {
+                    let uuid = match device.as_str() {
+                        "/dev/vdb" | "/dev/disk/by-id/virtio-disk1" => {
+                            "11111111-1111-1111-1111-111111111111"
+                        }
+                        "/dev/vdd" | "/dev/disk/by-id/virtio-disk3" => {
+                            "33333333-3333-3333-3333-333333333333"
+                        }
+                        _ => return Err(CmdError::MissingMock),
+                    };
+                    Ok(mock_ok(
+                        &format!("cryptsetup luksUUID {device}"),
+                        &format!("{uuid}\n"),
+                    ))
+                }
+                CmdRequest::CryptsetupLuksDumpText { device } => Ok(mock_ok(
+                    &format!("cryptsetup luksDump {device}"),
+                    "LUKS header information\nVersion:       \t2\n",
+                )),
+                CmdRequest::BtrfsBalanceStatus { .. } => Ok(mock_ok(
+                    "btrfs balance status",
+                    "No balance found on '/mnt/storage'\n",
+                )),
+                CmdRequest::BtrfsDeviceUsageRaw { .. } => Ok(mock_ok(
+                    "btrfs device usage --raw",
+                    "/dev/mapper/braid-disk1, ID: 1\n\
+                     \tDevice size:           520093696\n\
+                     \tDevice slack:                  0\n\
+                     \tData,RAID1:            469762048\n\
+                     \tUnallocated:            50331648\n\n\
+                     <missing disk>, ID: 2\n\
+                     \tDevice size:                  0\n\
+                     \tDevice slack:                  0\n\
+                     \tData,RAID1:            469762048\n\
+                     \tUnallocated:                  0\n\n",
+                )),
+                CmdRequest::BtrfsReplaceStart { .. } => {
+                    self.replace_done
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                    Ok(mock_ok("btrfs replace start", ""))
+                }
+                CmdRequest::BtrfsFilesystemResize { .. } => {
+                    Ok(mock_ok("btrfs filesystem resize", ""))
+                }
+                CmdRequest::BtrfsBalanceRaid1Soft { .. } => {
+                    Ok(mock_ok("btrfs balance raid1 soft", ""))
+                }
+                _ => Err(CmdError::MissingMock),
+            }
+        }
+
+        fn run_with_stdin(
+            &self,
+            request: &CmdRequest,
+            _stdin: &[u8],
+        ) -> Result<RawCommandOutput, CmdError> {
+            self.run(request)
+        }
+    }
+
+    #[test]
+    // Intent: on the missing path, `cmd_replace` issues the soft-balance
+    //   follow-up after the replace-start + resize sequence, and does not
+    //   close any old LUKS mapper (there is none).
+    //
+    // Why it exists: the missing arm of `cmd_replace` delegates the
+    //   post-replace redundancy restoration to `crate::pool::maybe_restore_raid1`.
+    //   An end-to-end VM test of this is infeasible -- the only way to
+    //   create the single-profile chunks the soft balance is meant to
+    //   clean up is to write while degraded, and that same state prevents
+    //   `btrfs replace start` from succeeding (kernel returns ENOSPC from
+    //   `inc_block_group_ro` during staging; see
+    //   `reference/linux/fs/btrfs/block-group.c:1366`). Without a wiring
+    //   test at this layer, a refactor that dropped the
+    //   `maybe_restore_raid1` call on the missing path -- or reordered it
+    //   before the replace/resize -- would ship undetected.
+    //
+    // Scenario: pool has disk1 live + devid 2 missing. Operator runs
+    //   `braid replace --old disk2 --missing-id 2 --new disk3=...` with an
+    //   already-LUKS-open disk3 (PresentLuks { mapper_open: true }), which
+    //   skips the LUKS init steps and focuses the test on the shared
+    //   replace spine + missing-path tail. The runner reports degraded
+    //   btrfs state until `BtrfsReplaceStart` is issued, then flips to a
+    //   healthy 2-device layout so `maybe_restore_raid1`'s probe sees
+    //   `missing_count == 0` with `devices.len() >= 2` and fires the soft
+    //   balance.
+    fn cmd_replace_missing_path_runs_soft_balance_after_replace_and_resize() {
+        let state_tmp = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(state_tmp.path().into());
+        let mut m = PoolMembership::empty();
+        m.disks.insert(
+            "disk1".into(),
+            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
+        );
+        // disk2 is the missing entry being replaced. Record its devid so
+        // `build_replacement_membership` matches the --missing-id argument
+        // to the right pool.json row.
+        let mut disk2 = DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk2".into()));
+        disk2.devid = Some(2);
+        m.disks.insert("disk2".into(), disk2);
+        membership::save_membership(&m, &paths).unwrap();
+
+        let config_tmp = tempfile::tempdir().unwrap();
+        let config_path = config_tmp.path().join("config.json");
+        std::fs::write(
+            &config_path,
+            serde_json::to_vec(&serde_json::json!({ "mount_point": "/mnt/storage" })).unwrap(),
+        )
+        .unwrap();
+
+        let pass_path = config_tmp.path().join("passphrase");
+        std::fs::write(&pass_path, b"test-passphrase\n").unwrap();
+
+        // disk3 is already LUKS-open (PresentLuks { mapper_open: true }),
+        // so cmd_replace skips LUKS format/open/enroll. That keeps the test
+        // focused on the replace+resize+balance sequence.
+        let fs = ReplaceMockFs(vec![
+            "/dev/disk/by-id/virtio-disk3".into(),
+            "/dev/mapper/braid-disk3".into(),
+        ]);
+
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let replace_done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let runner = MissingPathSuccessRunner {
+            log: log.clone(),
+            replace_done: replace_done.clone(),
+        };
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let result = cmd_replace(
+            &runner,
+            &fs,
+            &ReplaceParams {
+                config_path: &config_path,
+                old_name: "disk2",
+                new_name: "disk3=/dev/disk/by-id/virtio-disk3",
+                missing_id: Some(2),
+                dry_run: false,
+                yes: true,
+                passphrase_stdin: false,
+                passphrase_file: Some(pass_path.as_path()),
+                enroll_key_file: None,
+                progress: crate::progress::ProgressOutput::Off,
+                paths: &paths,
+                sleep_inhibitor: &inhibitor,
+            },
+        );
+
+        assert!(
+            matches!(result, Ok(())),
+            "expected Ok(()) from successful missing-path replace, got: {result:?}"
+        );
+        assert!(
+            journal::load_journal(&paths).unwrap().is_none(),
+            "pending-op.json must be cleared on successful completion"
+        );
+        assert_eq!(
+            inhibitor.acquire_count(),
+            1,
+            "sleep inhibitor must be acquired exactly once on the way in"
+        );
+
+        let log = log.lock().unwrap();
+        let replace_idx = log
+            .iter()
+            .position(|r| matches!(r, CmdRequest::BtrfsReplaceStart { devid: 2, .. }))
+            .expect("btrfs replace start on devid 2 must be issued");
+        let resize_idx = log
+            .iter()
+            .position(|r| matches!(r, CmdRequest::BtrfsFilesystemResize { devid: 2, .. }))
+            .expect("btrfs filesystem resize on devid 2 must be issued");
+        let balance_idx = log
+            .iter()
+            .position(|r| matches!(r, CmdRequest::BtrfsBalanceRaid1Soft { .. }))
+            .expect(
+                "btrfs soft balance must be issued after replace+resize on missing path \
+                 -- maybe_restore_raid1 is part of the `replace` contract per \
+                 docs/principles.md",
+            );
+        assert!(
+            replace_idx < resize_idx && resize_idx < balance_idx,
+            "missing-path command order violated \
+             (replace={replace_idx}, resize={resize_idx}, balance={balance_idx}) -- \
+             soft balance must run AFTER the replace-start and resize"
+        );
+
+        let close_calls = log
+            .iter()
+            .filter(|r| matches!(r, CmdRequest::CryptsetupClose { .. }))
+            .count();
+        assert_eq!(
+            close_calls, 0,
+            "missing path has no old LUKS mapper to close -- CryptsetupClose must not be issued"
         );
     }
 }
