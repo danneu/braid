@@ -35,6 +35,12 @@ fn close_mapper_with_retry<R: CommandRunner>(runner: &R, mapper: &str) -> Result
         if result.exit_status == 0 {
             return Ok(());
         }
+        let msg = format!(
+            "cryptsetup close {} failed (exit {}): {}",
+            mapper,
+            result.exit_status,
+            result.stderr.trim()
+        );
         // cryptsetup close (lib/setup.c:5763-5811) returns -EBUSY for a held
         // mapper, translated to exit 5 by src/utils_tools.c translate_errno.
         // On the close path exit 5 is EBUSY-exclusive (no -EEXIST branch),
@@ -42,20 +48,10 @@ fn close_mapper_with_retry<R: CommandRunner>(runner: &R, mapper: &str) -> Result
         // survives upstream phrasing drift.
         let is_busy = result.exit_status == 5;
         if !is_busy {
-            return Err(LockError::Failed(format!(
-                "cryptsetup close {} failed (exit {}): {}",
-                mapper,
-                result.exit_status,
-                result.stderr.trim()
-            )));
+            return Err(LockError::Failed(msg));
         }
         if attempt == CLOSE_RETRY_ATTEMPTS {
-            return Err(LockError::DeviceBusy(format!(
-                "cryptsetup close {} failed (exit {}): {}",
-                mapper,
-                result.exit_status,
-                result.stderr.trim()
-            )));
+            return Err(LockError::DeviceBusy(msg));
         }
         eprintln!(
             "[warn]  cryptsetup close {mapper} busy, retrying ({attempt}/{CLOSE_RETRY_ATTEMPTS})..."
@@ -1684,6 +1680,60 @@ mod tests {
             aaa_attempts, CLOSE_RETRY_ATTEMPTS as usize,
             "expected {} retry attempts, got {}",
             CLOSE_RETRY_ATTEMPTS, aaa_attempts
+        );
+    }
+
+    // Intent: when `cryptsetup close` returns busy on every retry and umount
+    //   succeeded (no suppression), cmd_lock surfaces a LockError::DeviceBusy
+    //   whose rendered message preserves the mapper name, the raw exit code,
+    //   and the ORIGINAL-CASED, TRIMMED stderr from cryptsetup exactly.
+    // Why it exists: locks the full DeviceBusy message contract so refactors
+    //   in close_mapper_with_retry (dedup, formatting tweaks) can't silently
+    //   drop .trim(), change the shape, or drift the text. The sibling test
+    //   `lock_mapper_close_exit5_is_busy_regardless_of_wording` pins variant
+    //   + retry count but not message content; this test pins the exact
+    //   bytes the user sees.
+    // Scenario: pool mounted; umount/forget succeed; every close attempt
+    //   for braid-aaa returns exit 5 with a mixed-case stderr padded with
+    //   leading whitespace and a trailing newline; braid-bbb closes cleanly.
+    #[test]
+    fn lock_busy_close_exhausts_retries_preserves_stderr_contract() {
+        let busy_stderr = "  Device braid-aaa IS STILL IN USE.\n";
+        let runner = mounted_runner()
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: "braid-aaa".into(),
+                },
+                err_raw("cryptsetup close braid-aaa", 5, busy_stderr),
+            )
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: "braid-bbb".into(),
+                },
+                ok_raw("cryptsetup close braid-bbb"),
+            );
+        let fs = MockFs::new(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]);
+        let config = test_config();
+        let membership = test_membership();
+
+        let err = cmd_lock(&runner, &fs, &config, &membership, false)
+            .expect_err("should fail: busy retries exhausted");
+        // Variant check is orthogonal to text check: guards against a rename
+        // that also updates the #[error(...)] attribute and still renders
+        // the same bytes.
+        assert!(
+            matches!(err, LockError::DeviceBusy(_)),
+            "expected LockError::DeviceBusy, got: {err:?}"
+        );
+        // Full rendered-message lock: pins the thiserror prefix
+        // ("device busy: "), the cryptsetup phrasing, the raw exit code,
+        // and the ORIGINAL-CASED TRIMMED stderr all in one assertion. Any
+        // drift -- shape change, dropped .trim(), missing exit code --
+        // flips this.
+        assert_eq!(
+            err.to_string(),
+            "device busy: cryptsetup close braid-aaa failed (exit 5): \
+             Device braid-aaa IS STILL IN USE."
         );
     }
 
