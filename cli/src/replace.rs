@@ -364,9 +364,12 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
                     );
                 }
                 Err(e) => eprintln!("Warning: failed to close LUKS mapper {}: {}", mapper, e),
-                _ => {}
+                _ => {
+                    eprintln!(
+                        "Old device closed. If repurposing the physical disk, wipe it separately."
+                    );
+                }
             }
-            eprintln!("Old device closed. If repurposing the physical disk, wipe it separately.");
         }
         ReplaceSource::Missing { devid } => {
             eprintln!(

@@ -238,6 +238,11 @@
               braid = linuxCrane.braid;
             }
           );
+          replace-live-disk-busy = pkgs.testers.nixosTest (
+            import ./tests/cli/replace-live-disk-busy.nix {
+              braid = linuxCrane.braid;
+            }
+          );
           replace-dead-disk = pkgs.testers.nixosTest (
             import ./tests/cli/replace-dead-disk.nix {
               braid = linuxCrane.braid;
