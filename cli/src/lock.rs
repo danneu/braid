@@ -306,14 +306,18 @@ mod tests {
     use crate::config::Config;
     use crate::membership::{DiskMember, PoolMembership};
     use crate::types::{ByIdPath, MountPoint};
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, HashMap, VecDeque};
     use std::sync::Mutex;
 
     /// A runner that delegates to MockRunner but records which
-    /// CryptsetupClose requests were made.
+    /// CryptsetupClose requests were made. Optionally serves a per-mapper
+    /// queue of CryptsetupClose responses (drained in order) before
+    /// falling back to the inner mock -- used to model transient busy
+    /// errors that succeed on retry.
     struct RecordingRunner {
         inner: MockRunner,
         close_calls: Mutex<Vec<String>>,
+        close_sequences: Mutex<HashMap<String, VecDeque<RawCommandOutput>>>,
     }
 
     impl RecordingRunner {
@@ -321,7 +325,16 @@ mod tests {
             Self {
                 inner,
                 close_calls: Mutex::new(Vec::new()),
+                close_sequences: Mutex::new(HashMap::new()),
             }
+        }
+
+        fn with_close_sequence(self, mapper: &str, outputs: Vec<RawCommandOutput>) -> Self {
+            self.close_sequences
+                .lock()
+                .unwrap()
+                .insert(mapper.to_owned(), outputs.into());
+            self
         }
 
         fn close_calls(&self) -> Vec<String> {
@@ -333,6 +346,12 @@ mod tests {
         fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
             if let CmdRequest::CryptsetupClose { mapper } = request {
                 self.close_calls.lock().unwrap().push(mapper.clone());
+                let mut seqs = self.close_sequences.lock().unwrap();
+                if let Some(queue) = seqs.get_mut(mapper)
+                    && let Some(out) = queue.pop_front()
+                {
+                    return Ok(out);
+                }
             }
             self.inner.run(request)
         }
@@ -1294,6 +1313,64 @@ mod tests {
         assert!(
             calls.contains(&"braid-aaa".to_string()) && calls.contains(&"braid-bbb".to_string()),
             "expected both mappers attempted, got: {calls:?}"
+        );
+    }
+
+    /*
+     * Intent: `cryptsetup close` that returns "busy" once but succeeds on
+     * retry must let `braid lock` finish cleanly, closing the mapper on
+     * attempt 2.
+     *
+     * Why it exists: the btrfs scan registry can keep device references
+     * alive for a short window after umount (see commit 1484ff1 and
+     * tests/repro/cryptsetup-close-btrfs-held.py). The retry loop in
+     * `close_mapper_with_retry` exists to cover that window. Without
+     * this test, a regression that misclassifies the busy substring,
+     * flips CLOSE_RETRY_ATTEMPTS to 1, or mis-orders the early returns
+     * would pass every existing unit test -- only the race-dependent VM
+     * repro could surface it.
+     *
+     * Scenario: pool mounted; umount and btrfs forget succeed; first
+     * `cryptsetup close braid-aaa` returns "Device braid-aaa is still
+     * in use.", second returns ok; `braid-bbb` closes cleanly on the
+     * first try.
+     */
+    #[test]
+    fn lock_retries_busy_close_then_succeeds() {
+        let inner = mounted_runner().with_output(
+            CmdRequest::CryptsetupClose {
+                mapper: "braid-bbb".into(),
+            },
+            ok_raw("cryptsetup close braid-bbb"),
+        );
+        let runner = RecordingRunner::new(inner).with_close_sequence(
+            "braid-aaa",
+            vec![
+                err_raw(
+                    "cryptsetup close braid-aaa",
+                    5,
+                    "Device braid-aaa is still in use.",
+                ),
+                ok_raw("cryptsetup close braid-aaa"),
+            ],
+        );
+        let fs = MockFs::new(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]);
+        let config = test_config();
+        let membership = test_membership();
+
+        cmd_lock(&runner, &fs, &config, &membership, false)
+            .expect("lock should succeed after retry");
+
+        let calls = runner.close_calls();
+        let aaa_calls = calls.iter().filter(|m| m.as_str() == "braid-aaa").count();
+        let bbb_calls = calls.iter().filter(|m| m.as_str() == "braid-bbb").count();
+        assert_eq!(
+            aaa_calls, 2,
+            "expected exactly 2 close attempts for braid-aaa, got: {calls:?}"
+        );
+        assert_eq!(
+            bbb_calls, 1,
+            "expected exactly 1 close for braid-bbb, got: {calls:?}"
         );
     }
 
