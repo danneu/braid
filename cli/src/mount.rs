@@ -172,6 +172,7 @@ pub fn plan_open_pool<R: CommandRunner, F: Filesystem + ?Sized>(
     // 2. Probe each membership disk
     let mut to_unlock = Vec::new();
     let mut any_open = false;
+    let mut first_open_mapper: Option<String> = None;
     let mut missing: Vec<(String, MissingReason)> = Vec::new();
 
     for (name, member) in &membership.disks {
@@ -219,6 +220,9 @@ pub fn plan_open_pool<R: CommandRunner, F: Filesystem + ?Sized>(
                 if *mapper_open {
                     eprintln!("{}  disk: {:<10}already open", tag("ok"), name);
                     any_open = true;
+                    if first_open_mapper.is_none() {
+                        first_open_mapper = Some(name.clone());
+                    }
                 } else {
                     eprintln!("{}  disk: {:<10}found", tag("ok"), name);
                     to_unlock.push((name.clone(), member.by_id.clone()));
@@ -242,11 +246,14 @@ pub fn plan_open_pool<R: CommandRunner, F: Filesystem + ?Sized>(
         )));
     }
 
-    // 5. Compute mount device
+    // 5. Compute mount device. Fallback must name a mapper that actually
+    // exists -- using membership.disks.keys().next() would pick the
+    // alphabetically-first disk even when it is Absent/PresentNotLuks,
+    // producing a stale /dev/mapper/<first> path that mount would fail on.
     let mount_key = to_unlock
         .first()
         .map(|(k, _)| k.as_str())
-        .or_else(|| membership.disks.keys().next().map(|k| k.as_str()))
+        .or(first_open_mapper.as_deref())
         .unwrap_or("unknown");
     let mount_device = format!("/dev/mapper/{}", mapper_name(mount_key).0);
 
@@ -1481,6 +1488,147 @@ mod tests {
         );
 
         assert!(result.unwrap());
+    }
+
+    /// Intent: When the alphabetically-first membership disk is absent and
+    /// all surviving members already have their mappers open, `plan_open_pool`
+    /// must set `mount_device` to an open mapper -- never to the absent
+    /// first disk's mapper path.
+    ///
+    /// Why: This is the primary regression test for the
+    /// `membership.disks.keys().next()` fallback bug. With `to_unlock` empty
+    /// and `any_open == true`, the old code picked the BTreeMap's first key
+    /// (e.g. "disk1") with no state filter, producing
+    /// `/dev/mapper/braid-disk1` even when disk1 was `Absent`. The mount
+    /// then failed with a confusing "no such device" instead of mounting
+    /// degraded via a mapper that actually existed. If this fix is reverted
+    /// -- changing `or(first_open_mapper.as_deref())` back to
+    /// `or_else(|| membership.disks.keys().next()...)` -- this test fails.
+    ///
+    /// Scenario: 3-disk pool, disk1 unplugged, disk2 and disk3 present with
+    /// mappers already open (e.g. a second unlock attempt after the first
+    /// opened everything but never reached mount). --allow-degraded set.
+    #[test]
+    fn plan_open_pool_degraded_first_absent_picks_open_mapper() {
+        let config = test_config();
+        let membership = three_disk_membership();
+        let fs = MockFs::new(&[
+            // disk1 absent -- not in fs paths
+            "/dev/disk/by-id/virtio-disk2",
+            "/dev/disk/by-id/virtio-disk3",
+            "/dev/mapper/braid-disk2",
+            "/dev/mapper/braid-disk3",
+        ]);
+
+        let (uuid2_req, uuid2_out) = luks_uuid_ok(
+            "/dev/disk/by-id/virtio-disk2",
+            "bbbbbbbb-1111-2222-3333-444444444444",
+        );
+        let (uuid3_req, uuid3_out) = luks_uuid_ok(
+            "/dev/disk/by-id/virtio-disk3",
+            "cccccccc-1111-2222-3333-444444444444",
+        );
+
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::MountpointCheck {
+                    path: MountPoint("/mnt/storage".to_owned()),
+                },
+                err_raw("mountpoint", 1, ""),
+            )
+            .with_output(uuid2_req, uuid2_out)
+            .with_output(uuid3_req, uuid3_out)
+            .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk2")
+            .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk3");
+
+        let plan = plan_open_pool(&runner, &fs, &config, &membership, true, "unlock")
+            .expect("plan should succeed with --allow-degraded")
+            .expect("pool is not mounted -- plan should not be None");
+
+        assert!(
+            plan.to_unlock.is_empty(),
+            "to_unlock must be empty (all surviving mappers already open): {:?}",
+            plan.to_unlock
+        );
+        assert!(plan.any_open, "any_open must be true");
+        assert!(
+            plan.any_missing_member,
+            "any_missing_member must be true (disk1 absent)"
+        );
+        assert_eq!(
+            plan.mount_device, "/dev/mapper/braid-disk2",
+            "mount_device must name the first open mapper, not the absent first disk"
+        );
+    }
+
+    /// Intent: End-to-end, the degraded-mount path with an absent first disk
+    /// and all surviving mappers open must issue the MountWithOptions call
+    /// against the open mapper, not the stale first-disk mapper.
+    ///
+    /// Why: Proves that `plan.mount_device` flows through unchanged into the
+    /// actual `CmdRequest::MountWithOptions` -- catching any future refactor
+    /// that would recompute a mount device downstream. The MockRunner is
+    /// strict about seeded requests: if the code attempted to mount
+    /// `/dev/mapper/braid-disk1`, it would surface as a missing-mock error
+    /// and fail the test.
+    ///
+    /// Scenario: same setup as the plan-level regression above; additionally
+    /// seed `BtrfsDeviceScanAll` and the expected degraded-mount command.
+    #[test]
+    fn mount_degraded_first_absent_all_open_uses_open_mapper() {
+        let config = test_config();
+        let membership = three_disk_membership();
+        let fs = MockFs::new(&[
+            "/dev/disk/by-id/virtio-disk2",
+            "/dev/disk/by-id/virtio-disk3",
+            "/dev/mapper/braid-disk2",
+            "/dev/mapper/braid-disk3",
+        ]);
+
+        let (uuid2_req, uuid2_out) = luks_uuid_ok(
+            "/dev/disk/by-id/virtio-disk2",
+            "bbbbbbbb-1111-2222-3333-444444444444",
+        );
+        let (uuid3_req, uuid3_out) = luks_uuid_ok(
+            "/dev/disk/by-id/virtio-disk3",
+            "cccccccc-1111-2222-3333-444444444444",
+        );
+
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::MountpointCheck {
+                    path: MountPoint("/mnt/storage".to_owned()),
+                },
+                err_raw("mountpoint", 1, ""),
+            )
+            .with_output(uuid2_req, uuid2_out)
+            .with_output(uuid3_req, uuid3_out)
+            .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk2")
+            .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk3")
+            .with_output(CmdRequest::BtrfsDeviceScanAll, ok_raw("btrfs device scan"))
+            .with_output(
+                CmdRequest::MountWithOptions {
+                    device: "/dev/mapper/braid-disk2".into(),
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                    options: vec!["degraded".to_owned()],
+                },
+                ok_raw("mount -o degraded"),
+            );
+
+        let result = open_and_mount_for_test(
+            &runner,
+            &fs,
+            &config,
+            &membership,
+            None,
+            true,
+            "unlock",
+        );
+
+        assert!(
+            result.unwrap(),
+            "degraded mount must succeed using the first open mapper"
+        );
     }
 
     /// Intent: When a disk's probed LUKS UUID doesn't match pool.json's stored
