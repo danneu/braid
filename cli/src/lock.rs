@@ -6,6 +6,7 @@ use crate::config::{mapper_name, name_from_mapper, Config};
 use crate::membership::PoolMembership;
 use crate::preflight;
 use crate::probe::{probe_fsid, Filesystem};
+use crate::status_tag::StatusTag;
 
 #[derive(Debug, thiserror::Error)]
 pub enum LockError {
@@ -15,11 +16,6 @@ pub enum LockError {
     Failed(String),
     #[error("device busy: {0}")]
     DeviceBusy(String),
-}
-
-/// Status line tag for output.
-fn tag(label: &str) -> String {
-    format!("[{:<4}]", label)
 }
 
 const CLOSE_RETRY_ATTEMPTS: u32 = 3;
@@ -73,7 +69,8 @@ fn close_mapper_with_retry<R: CommandRunner, S: Sleeper>(
             return Err(LockError::DeviceBusy(msg));
         }
         eprintln!(
-            "[warn]  cryptsetup close {mapper} busy, retrying ({attempt}/{CLOSE_RETRY_ATTEMPTS})..."
+            "{}  cryptsetup close {mapper} busy, retrying ({attempt}/{CLOSE_RETRY_ATTEMPTS})...",
+            StatusTag::Warn
         );
         sleeper.sleep(CLOSE_RETRY_DELAY);
     }
@@ -221,7 +218,7 @@ pub fn render_lock_dry_run<F: Filesystem + ?Sized>(
     let orphan_mappers = match scan_orphan_mappers(fs, membership) {
         Ok(v) => v,
         Err(e) => {
-            writeln!(out, "[warn]  {}", orphan_scan_warn_body(&e)).unwrap();
+            writeln!(out, "{}  {}", StatusTag::Warn, orphan_scan_warn_body(&e)).unwrap();
             Vec::new()
         }
     };
@@ -293,7 +290,7 @@ where
     let orphan_mappers = match scan_orphan_mappers(fs, membership) {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("[warn]  {}", orphan_scan_warn_body(&e));
+            eprintln!("{}  {}", StatusTag::Warn, orphan_scan_warn_body(&e));
             Vec::new()
         }
     };
@@ -314,11 +311,14 @@ where
                 umount_result.stderr.trim(),
                 mount_point = mount_point,
             ));
-            eprintln!("[FAIL]  {err}");
-            eprintln!("[warn]  attempting to close LUKS mappers despite umount failure...");
+            eprintln!("{}  {err}", StatusTag::Fail);
+            eprintln!(
+                "{}  attempting to close LUKS mappers despite umount failure...",
+                StatusTag::Warn
+            );
             umount_error = Some(err);
         } else {
-            eprintln!("{}  {:<14}unmounted {}", tag("ok"), "pool", mount_point);
+            eprintln!("{}  {:<14}unmounted {}", StatusTag::Ok, "pool", mount_point);
 
             // Clear btrfs kernel scan registry so that cryptsetup close
             // doesn't race against stale device references on multi-device
@@ -334,13 +334,17 @@ where
                     Ok(r) if r.exit_status == 0 => {}
                     Ok(r) => {
                         eprintln!(
-                            "[warn]  btrfs device scan --forget failed (exit {}): {} (continuing)",
+                            "{}  btrfs device scan --forget failed (exit {}): {} (continuing)",
+                            StatusTag::Warn,
                             r.exit_status,
                             r.stderr.trim()
                         );
                     }
                     Err(e) => {
-                        eprintln!("[warn]  btrfs device scan --forget failed: {e} (continuing)");
+                        eprintln!(
+                            "{}  btrfs device scan --forget failed: {e} (continuing)",
+                            StatusTag::Warn
+                        );
                     }
                 }
             }
@@ -356,16 +360,16 @@ where
         if fs.exists(&mapper_path) {
             match close_mapper_with_retry(runner, sleeper, &mn.0) {
                 Ok(()) => {
-                    eprintln!("{}  disk: {:<7}locked", tag("ok"), name);
+                    eprintln!("{}  disk: {:<7}locked", StatusTag::Ok, name);
                 }
                 Err(LockError::DeviceBusy(msg)) if umount_error.is_some() => {
                     eprintln!(
-                        "[warn]  disk: {:<7}close failed (umount was stuck): {}",
-                        name, msg
+                        "{}  disk: {:<7}close failed (umount was stuck): {}",
+                        StatusTag::Warn, name, msg
                     );
                 }
                 Err(e) => {
-                    eprintln!("[FAIL]  disk: {:<7}{}", name, e);
+                    eprintln!("{}  disk: {:<7}{}", StatusTag::Fail, name, e);
                     if first_mapper_error.is_none() {
                         first_mapper_error = Some(e);
                     }
@@ -373,7 +377,7 @@ where
             }
             all_already_closed = false;
         } else {
-            eprintln!("{}  disk: {:<7}already closed", tag("ok"), name);
+            eprintln!("{}  disk: {:<7}already closed", StatusTag::Ok, name);
         }
     }
 
@@ -387,20 +391,21 @@ where
             continue;
         }
         eprintln!(
-            "[warn]  orphaned mapper {entry} (not in pool.json -- likely a prior crash)"
+            "{}  orphaned mapper {entry} (not in pool.json -- likely a prior crash)",
+            StatusTag::Warn
         );
         match close_mapper_with_retry(runner, sleeper, entry) {
             Ok(()) => {
-                eprintln!("{}  disk: {:<7}locked (orphan)", tag("ok"), disk_name);
+                eprintln!("{}  disk: {:<7}locked (orphan)", StatusTag::Ok, disk_name);
             }
             Err(LockError::DeviceBusy(msg)) if umount_error.is_some() => {
                 eprintln!(
-                    "[warn]  disk: {:<7}orphan close failed (umount was stuck): {}",
-                    disk_name, msg
+                    "{}  disk: {:<7}orphan close failed (umount was stuck): {}",
+                    StatusTag::Warn, disk_name, msg
                 );
             }
             Err(e) => {
-                eprintln!("[FAIL]  disk: {:<7}orphan: {}", disk_name, e);
+                eprintln!("{}  disk: {:<7}orphan: {}", StatusTag::Fail, disk_name, e);
                 if first_mapper_error.is_none() {
                     first_mapper_error = Some(e);
                 }

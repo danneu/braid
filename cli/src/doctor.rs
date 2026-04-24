@@ -26,6 +26,7 @@ use crate::parse::types::{BtrfsBgType, BtrfsDfOutput, BtrfsProfile};
 use crate::preflight;
 use crate::state_paths::StatePaths;
 use crate::status::format_bytes;
+use crate::status_tag::StatusTag;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -609,9 +610,7 @@ fn check_ups_daemon_up<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> Chec
             return CheckResult {
                 name,
                 status: CheckStatus::Warn,
-                message: format!(
-                    "upsc failed to spawn: {e} -- is pkgs.nut on PATH?"
-                ),
+                message: format!("upsc failed to spawn: {e} -- is pkgs.nut on PATH?"),
             };
         }
     };
@@ -691,7 +690,8 @@ fn check_braid_online_active_when_mounted<R: CommandRunner>(
             return CheckResult {
                 name,
                 status: CheckStatus::Skip,
-                message: "skipped (pool not mounted -- braid-online only matters while online)".into(),
+                message: "skipped (pool not mounted -- braid-online only matters while online)"
+                    .into(),
             };
         }
     }
@@ -895,10 +895,10 @@ pub fn format_doctor_human(report: &DoctorReport) -> String {
     let mut out = String::new();
     for c in &report.checks {
         let tag = match c.status {
-            CheckStatus::Ok => "ok",
-            CheckStatus::Warn => "warn",
-            CheckStatus::Fail => "FAIL",
-            CheckStatus::Skip => "skip",
+            CheckStatus::Ok => StatusTag::Ok,
+            CheckStatus::Warn => StatusTag::Warn,
+            CheckStatus::Fail => StatusTag::Fail,
+            CheckStatus::Skip => StatusTag::Skip,
         };
         let label = match c.name.as_str() {
             "config_file" => "config file",
@@ -916,7 +916,7 @@ pub fn format_doctor_human(report: &DoctorReport) -> String {
             "braid_online_active" => "braid-online",
             other => other,
         };
-        out.push_str(&format!("[{tag:<4}]  {label:<14}  {}\n", c.message));
+        out.push_str(&format!("{tag}  {label:<14}  {}\n", c.message));
     }
     out
 }
@@ -1162,7 +1162,7 @@ mod tests {
             false,
         );
         let human = format_doctor_human(&report);
-        assert!(human.contains("[FAIL]"), "expected [FAIL] tag:\n{human}");
+        assert!(human.contains("[fail]"), "expected [fail] tag:\n{human}");
         assert!(human.contains("[skip]"), "expected [skip] tag:\n{human}");
     }
 
@@ -2189,9 +2189,7 @@ mod tests {
         let config: Option<Config> = serde_json::from_str(config_json).ok();
         DoctorContext {
             config_path: PathBuf::new(),
-            config_value: Some(
-                serde_json::from_str(config_json).expect("test config parses"),
-            ),
+            config_value: Some(serde_json::from_str(config_json).expect("test config parses")),
             config,
             runner,
             paths,
@@ -2220,9 +2218,7 @@ mod tests {
     #[test]
     fn ups_daemon_check_ok_when_upsc_returns_ol() {
         let runner = MockRunner::default().with_output(
-            CmdRequest::UpscQuery {
-                name: "ups".into(),
-            },
+            CmdRequest::UpscQuery { name: "ups".into() },
             RawCommandOutput {
                 cmd: "upsc ups".into(),
                 stdout: "ups.status: OL\n".into(),
@@ -2246,9 +2242,7 @@ mod tests {
     #[test]
     fn ups_daemon_check_warns_when_daemon_down() {
         let runner = MockRunner::default().with_output(
-            CmdRequest::UpscQuery {
-                name: "ups".into(),
-            },
+            CmdRequest::UpscQuery { name: "ups".into() },
             RawCommandOutput {
                 cmd: "upsc ups".into(),
                 stdout: String::new(),

@@ -3,6 +3,7 @@ use crate::config::{mapper_name, Config};
 use crate::luks::{self, LuksError, VerifyOutcome};
 use crate::membership::PoolMembership;
 use crate::probe::{self, Filesystem, ProbeError};
+use crate::status_tag::StatusTag;
 use crate::types::{ByIdPath, ConfigDiskState, MountPoint};
 use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
@@ -56,11 +57,6 @@ pub fn resolve_credential(
     }
     let pp = luks::read_passphrase(passphrase_file, passphrase_stdin)?;
     Ok(OpenCredential::Passphrase(Zeroizing::new(pp)))
-}
-
-/// Status line tag for output.
-fn tag(label: &str) -> String {
-    format!("[{:<4}]", label)
 }
 
 /// Why a membership disk is missing from the pool at unlock time.
@@ -321,33 +317,33 @@ pub fn render_probe_events(events: &[ProbeEvent]) -> String {
             ProbeEvent::DiskAbsent { name } => {
                 out.push_str(&format!(
                     "{}  disk: {:<10}not found (unplugged?)\n",
-                    tag("skip"),
+                    StatusTag::Skip,
                     name
                 ));
             }
             ProbeEvent::DiskLuksHeaderUnreadable { name } => {
                 out.push_str(&format!(
                     "{}  disk: {:<10}LUKS header unreadable\n",
-                    tag("skip"),
+                    StatusTag::Skip,
                     name
                 ));
             }
             ProbeEvent::DiskLuksHeaderDamaged { name } => {
                 out.push_str(&format!(
                     "{}  disk: {:<10}LUKS header metadata damaged\n",
-                    tag("skip"),
+                    StatusTag::Skip,
                     name
                 ));
             }
             ProbeEvent::DiskAlreadyOpen { name } => {
                 out.push_str(&format!(
                     "{}  disk: {:<10}already open\n",
-                    tag("ok"),
+                    StatusTag::Ok,
                     name
                 ));
             }
             ProbeEvent::DiskAvailable { name } => {
-                out.push_str(&format!("{}  disk: {:<10}found\n", tag("ok"), name));
+                out.push_str(&format!("{}  disk: {:<10}found\n", StatusTag::Ok, name));
             }
         }
     }
@@ -553,7 +549,7 @@ fn open_disks_with_passphrase<R: CommandRunner, F: Filesystem + ?Sized>(
                 ok_fallback,
             ));
         }
-        eprintln!("{}  disk: {:<10}unlocked", tag("ok"), name);
+        eprintln!("{}  disk: {:<10}unlocked", StatusTag::Ok, name);
     }
 
     Ok(())
@@ -689,7 +685,7 @@ pub fn execute_unlock_and_mount<R: CommandRunner, F: Filesystem + ?Sized>(
                         ok_fallback,
                     ));
                 }
-                eprintln!("{}  disk: {:<10}unlocked", tag("ok"), name);
+                eprintln!("{}  disk: {:<10}unlocked", StatusTag::Ok, name);
             }
         }
         OpenCredential::Passphrase(pp) => {
@@ -743,7 +739,7 @@ fn scan_and_mount<R: CommandRunner, F: Filesystem + ?Sized>(
         )));
     }
 
-    eprintln!("{}  {:<10}mounted {}", tag("ok"), "pool", mount_point);
+    eprintln!("{}  {:<10}mounted {}", StatusTag::Ok, "pool", mount_point);
 
     Ok(true)
 }
