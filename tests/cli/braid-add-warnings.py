@@ -102,4 +102,89 @@ with subtest("Real-run missing-device warning stays on stderr with legacy prefix
         " exit={} stderr={!r}".format(ec, err)
     )
 
+# --- Phase 4: preserved-context failure keeps legacy `warning:` prefix ---
+#
+# Intent: when `plan_add` accumulates the missing-devices warn and then
+# fails later inside `compile_add_steps_multi` (BraidLabeledNoBtrfs
+# identity), stderr must show the legacy `warning: pool has ...` line
+# BEFORE the refusal error -- byte-identical to the Ok-path replay.
+#
+# Why it exists: the Err-branch in `cmd_add` used to pipe `report.notes`
+# through the generic `preview::render_notes_for_stderr`, which
+# normalizes `PreviewNote::Warn` to `[warn]  ...`. That silently
+# changed user-visible stderr wording on the refusal path (pre-PR-7
+# users saw `warning: ...`). This subtest pins the Err-path legacy
+# replay so a regression that re-routes through the bracketed formatter
+# fails visibly.
+#
+# Scenario: pool still has disk2 MISSING (from Phase 1). Craft disk4
+# as a braid-labeled LUKS with zeroed btrfs signature so identity
+# classification returns BraidLabeledNoBtrfs. Run `braid add disk4`
+# (no --dry-run).
+
+with subtest("Phase 4: preserved-context failure keeps legacy warning: prefix"):
+    dev4 = "/dev/disk/by-id/virtio-disk4"
+    # LUKS-format disk4 with the braid-<name> label, then open the
+    # mapper so plan_add's probe_config_disk sees PresentLuks with
+    # mapper_open. No btrfs superblock inside -- that is the ambiguous
+    # identity that compile_add_steps_multi rejects via
+    # BraidLabeledNoBtrfs.
+    machine.succeed(
+        f"echo -n '{passphrase}' | cryptsetup luksFormat --batch-mode --key-file=- "
+        f"--label braid-disk4 {luks_opts} {dev4}"
+    )
+    machine.succeed(
+        f"echo -n '{passphrase}' | cryptsetup open --key-file=- {dev4} braid-disk4"
+    )
+    # Sanity: btrfs filesystem show on the mapper should NOT find a fs.
+    ec_sanity = machine.execute(
+        "btrfs filesystem show /dev/mapper/braid-disk4 2>&1"
+    )[0]
+    assert ec_sanity != 0, (
+        "braid-disk4 must have no btrfs superblock for the "
+        "BraidLabeledNoBtrfs branch to fire"
+    )
+
+    ec, _ = machine.execute(
+        f"{add_cmd('disk4')} >/tmp/pc-stdout 2>/tmp/pc-stderr"
+    )
+    out = machine.succeed("cat /tmp/pc-stdout")
+    err = machine.succeed("cat /tmp/pc-stderr")
+
+    assert ec != 0, (
+        "preserved-context add must fail (BraidLabeledNoBtrfs); "
+        "exit={} stdout={!r} stderr={!r}".format(ec, out, err)
+    )
+    assert out == "", (
+        "stdout must be empty on failure; got: {!r}".format(out)
+    )
+    warn_line = (
+        "warning: pool has 1 missing device. Consider repairing with"
+        " `braid replace --missing-id <devid>` first. Use `braid status`"
+        " to see device IDs."
+    )
+    warn_pos = err.find(warn_line)
+    assert warn_pos != -1, (
+        "stderr must carry the legacy `warning:` prefix on the refusal "
+        "path (NOT `[warn]  ...`); got: {!r}".format(err)
+    )
+    # Identity-error wording comes from identity_to_error's
+    # BraidLabeledNoBtrfs branch in cli/src/add.rs.
+    err_pos = err.find("contains no btrfs superblock")
+    assert err_pos != -1, (
+        "stderr must carry the BraidLabeledNoBtrfs identity error; "
+        "got: {!r}".format(err)
+    )
+    assert warn_pos < err_pos, (
+        "warning must render BEFORE the error on the preserved-context "
+        "stderr path; got: {!r}".format(err)
+    )
+    # Regression guard: the generic bracketed form must NOT appear --
+    # that would mean the Err path still routes through
+    # preview::render_notes_for_stderr.
+    assert "[warn]  pool has" not in err, (
+        "Err-path must NOT emit the generic `[warn]  pool has ...` form on "
+        "stderr; got: {!r}".format(err)
+    )
+
 machine.shutdown()
