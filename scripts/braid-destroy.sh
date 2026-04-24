@@ -15,13 +15,39 @@ if [ ${#missing[@]} -gt 0 ]; then
 fi
 
 config="${1:-/etc/braid/config.json}"
+pool_json="/var/lib/braid/pool.json"
 
-# Read disk keys and by_id paths from config
-mapfile -t keys < <(jq -r '.disks | keys[]' "$config")
-declare -A by_id
-for key in "${keys[@]}"; do
-    by_id[$key]=$(jq -r ".disks[\"$key\"].by_id" "$config")
-done
+# Pool membership lives in pool.json (CLI-owned runtime state);
+# /etc/braid/config.json only holds mount_point/fan_control/ups.
+if [ ! -f "$pool_json" ]; then
+    echo "Error: $pool_json not found -- no pool to destroy." >&2
+    echo "If you want to clear residual state, run: sudo rm -rf /var/lib/braid/" >&2
+    exit 1
+fi
+
+# Validate membership and emit name<TAB>by_id tuples. Any reject arm aborts
+# before braid lock, wipefs, or rm -rf.
+# shellcheck disable=SC2016  # $path and $e are jq expressions, not shell
+read_filter='
+  if (.disks // {} | length) == 0 then
+    "pool has no disks in \($path)\n" | halt_error(1)
+  else
+    .disks | to_entries[] as $e
+    | if ($e.value.by_id // "") == "" then
+        "disk \"\($e.key)\" has no by_id in \($path)\n" | halt_error(1)
+      else
+        [$e.key, $e.value.by_id] | @tsv
+      end
+  end'
+
+tsv="$(jq -r --arg path "$pool_json" "$read_filter" "$pool_json")" || exit 1
+
+declare -a keys=()
+declare -A by_id=()
+while IFS=$'\t' read -r name path; do
+    keys+=("$name")
+    by_id[$name]="$path"
+done <<< "$tsv"
 
 # Print summary table
 echo "This will destroy the entire braid pool:"

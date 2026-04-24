@@ -148,6 +148,11 @@
               braid = linuxCrane.braid;
             }
           );
+          braid-destroy = pkgs.testers.nixosTest (
+            import ./tests/cli/braid-destroy.nix {
+              braid = linuxCrane.braid;
+            }
+          );
           remove-no-membership = pkgs.testers.nixosTest (
             import ./tests/cli/remove-no-membership.nix {
               braid = linuxCrane.braid;
