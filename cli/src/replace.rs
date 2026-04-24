@@ -1,5 +1,5 @@
 use crate::cmd::{CmdRequest, CommandRunner, Step};
-use crate::config::{config_read, mapper_name};
+use crate::config::{config_read, mapper_name, Config};
 use crate::confirm;
 use crate::inhibit::AcquireSleepInhibitor;
 use crate::journal;
@@ -7,10 +7,11 @@ use crate::luks::{
     backup_luks_header, ensure_luks_open, luks_format, luks_opts_from_env,
     pool_has_keyfile_enrollment, read_passphrase, verify_passphrase, VerifyOutcome,
 };
-use crate::membership;
+use crate::membership::{self, PoolMembership};
 use crate::parse::parse_btrfs_device_stats;
 use crate::pool::{pool_replace_device, pool_resize_device};
 use crate::preflight;
+use crate::preview::{Preview, PreviewCompleteness};
 use crate::probe::{probe_config_disk, probe_pool, Filesystem, ProbeError};
 use crate::progress::ProgressOutput;
 use crate::state_paths::StatePaths;
@@ -53,11 +54,371 @@ pub struct ReplaceParams<'a> {
     pub sleep_inhibitor: &'a dyn AcquireSleepInhibitor,
 }
 
-pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
+/// Dry-run preview source of truth for `braid replace` plus the preflight
+/// state `execute()` needs to finish the operation. `steps` is the only
+/// render source; `preview()` emits an empty `notes` vec because every
+/// remaining replace diagnostic is confirmation-gated (see
+/// `plan-this-migration-if-radiant-pinwheel.md`, replace recipe) and
+/// must not leak into dry-run or `--yes` real-run output.
+pub struct ReplacePlan {
+    pub steps: Vec<Step>,
+    pub config: Config,
+    pub new_name: String,
+    pub new_by_id: ByIdPath,
+    pub pool: PoolState,
+    pub replace_source: ReplaceSource,
+    pub new_probed: ConfigDisk,
+    pub pre_membership: PoolMembership,
+    pub target_membership: PoolMembership,
+}
+
+impl ReplacePlan {
+    /// Build a `Preview` with `notes` always empty. Dry-run must not
+    /// surface confirmation-only `WARNING:` lines (1-disk leftover,
+    /// keyfile asymmetry); those live in `execute()` behind the
+    /// `!params.yes` gate.
+    pub fn preview(&self) -> Preview {
+        Preview {
+            completeness: PreviewCompleteness::Complete,
+            notes: Vec::new(),
+            steps: self.steps.clone(),
+        }
+    }
+
+    pub fn execute<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
+        self,
+        runner: &R,
+        fs: &F,
+        params: &ReplaceParams<'_>,
+    ) -> Result<(), ReplaceError> {
+        let ReplacePlan {
+            steps: _,
+            config,
+            new_name,
+            new_by_id,
+            pool,
+            replace_source,
+            new_probed,
+            pre_membership,
+            target_membership,
+        } = self;
+
+        let old_mn = mapper_name(params.old_name);
+        let new_mn = mapper_name(&new_name);
+
+        // Confirm
+        if !params.yes {
+            let old_underlying = match &replace_source {
+                ReplaceSource::Live { .. } => pool
+                    .devices
+                    .iter()
+                    .find(|d| d.mapper == old_mn)
+                    .map(|d| d.underlying.as_str()),
+                ReplaceSource::Missing { .. } => None,
+            };
+            let old_hw = old_underlying.map(|u| confirm::query_disk_hw_info(runner, u));
+            let new_hw = confirm::query_disk_hw_info(runner, &new_by_id.0);
+            let is_missing = matches!(&replace_source, ReplaceSource::Missing { .. });
+
+            eprintln!(
+                "{}",
+                format_replace_confirm(
+                    &ReplaceConfirmOld {
+                        name: params.old_name,
+                        hw: old_hw.as_ref(),
+                        source: &replace_source,
+                    },
+                    &ReplaceConfirmNew {
+                        name: new_name.as_str(),
+                        by_id: &new_by_id.0,
+                        hw: &new_hw,
+                        needs_luks_format: matches!(
+                            new_probed.state,
+                            ConfigDiskState::PresentNotLuks
+                        ),
+                        is_rebuild: is_missing,
+                    },
+                    pool.total_devices,
+                )
+            );
+            if pool.total_devices == 1 {
+                eprintln!("WARNING: This replace leaves only 1 disk -- no redundancy.\n");
+            }
+            if matches!(new_probed.state, ConfigDiskState::PresentNotLuks)
+                && params.enroll_key_file.is_none()
+                && pool_has_keyfile_enrollment(runner, &pool.devices)
+            {
+                eprintln!(
+                    "WARNING: Existing pool drives have a keyfile (keyslot-1) for auto-unlock, \
+                     but the new drive will not.\n  \
+                     Passphrase unlock still works, but the keyfile won't unlock the new drive \
+                     until it's enrolled.\n  \
+                     Fix: re-run with --enroll <dir>, or run `braid enroll <dir>` afterward.\n"
+                );
+            }
+            confirm::confirm_yes().map_err(ReplaceError::Validation)?;
+        }
+
+        // Read passphrase
+        let passphrase = read_passphrase(params.passphrase_file, params.passphrase_stdin)?;
+
+        // Reversible checks: reject absent disk, verify passphrase, check not already in pool.
+        if matches!(new_probed.state, ConfigDiskState::Absent) {
+            return Err(ReplaceError::Validation(format!(
+                "new disk '{}' ({}) is not present. Is it plugged in?",
+                new_name, new_by_id
+            )));
+        }
+
+        if matches!(new_probed.state, ConfigDiskState::PresentNotLuks)
+            && let Some(existing) = pool.devices.first()
+        {
+            let status_raw = runner.run(&crate::cmd::CmdRequest::CryptsetupStatus {
+                mapper: existing.mapper.0.clone(),
+            })?;
+            let status = crate::parse::parse_cryptsetup_status(&status_raw)?;
+            if let Some(underlying) = status.device {
+                match verify_passphrase(runner, &underlying, &passphrase)? {
+                    VerifyOutcome::Authenticated => {}
+                    VerifyOutcome::Rejected => {
+                        return Err(ReplaceError::Validation(
+                            "passphrase does not match existing pool member".into(),
+                        ));
+                    }
+                }
+            }
+        }
+
+        // Reversible check: for an already-formatted but closed LUKS disk,
+        // verify the passphrase against the new disk's own LUKS header before
+        // committing the journal. Without this, ensure_luks_open below would be
+        // the first thing to notice a wrong passphrase -- and by then the
+        // journal is already written and the user is forced into braid recover
+        // mode for what is conceptually a preflight failure (see decision 019).
+        if let ConfigDiskState::PresentLuks {
+            mapper_open: false, ..
+        } = new_probed.state
+        {
+            match verify_passphrase(runner, &new_by_id.0, &passphrase)? {
+                VerifyOutcome::Authenticated => {}
+                VerifyOutcome::Rejected => {
+                    return Err(ReplaceError::Validation(format!(
+                        "passphrase rejected by new disk '{new_name}' ({new_by_id})"
+                    )));
+                }
+            }
+        }
+
+        // Guard: new disk must not already be in the pool.
+        check_new_not_in_pool(&new_name, &new_mn, &pool)?;
+
+        // Hold a logind sleep inhibitor for the rest of the replace operation --
+        // covers Step 1 LUKS init, the long-running btrfs replace start, and
+        // the post-replace soft balance for missing-path replaces. Suspending
+        // mid-replace produces kernel-level topology corruption on every kernel
+        // -- see issues #45 and #48 and the upstream warning at
+        // reference/btrfs-progs/Documentation/btrfs-replace.rst:49-50.
+        //
+        // Acquired here, AFTER all interactive/reversible work (confirmation,
+        // passphrase read+verify, check_new_not_in_pool) and BEFORE
+        // journal::write_journal, so that:
+        //   - operator-idle prompts do not block suspend
+        //   - a logind failure aborts cleanly without stranding pending-op.json
+        //     and forcing the user into recovery mode for a preflight failure.
+        let _sleep_inhibitor_guard = params
+            .sleep_inhibitor
+            .acquire("replace in progress")
+            .map_err(|e| {
+                ReplaceError::Validation(format!(
+                    "could not acquire sleep inhibitor (is logind running?): {e}"
+                ))
+            })?;
+
+        // Write journal before irreversible disk ops. pre_membership and
+        // target_membership were computed earlier, before the inhibitor.
+        let journal = journal::build_journal(
+            pre_membership,
+            target_membership.clone(),
+            journal::OpKind::Replace {
+                old_name: params.old_name.to_owned(),
+                new_name: new_name.clone(),
+                new_by_id: new_by_id.clone(),
+            },
+        );
+        journal::write_journal(params.paths, &journal)
+            .map_err(|e| ReplaceError::Validation(e.to_string()))?;
+
+        // Step 1: Init new disk (LUKS format/open) -- irreversible from here.
+        match new_probed.state {
+            ConfigDiskState::Absent => unreachable!("already checked above"),
+            ConfigDiskState::PresentNotLuks => {
+                // Passphrase already verified above.
+                let mut luks_opts = luks_opts_from_env();
+                luks_opts.push("--label".into());
+                luks_opts.push(format!("braid-{new_name}"));
+                luks_format(runner, &new_by_id.0, &passphrase, &luks_opts)?;
+                eprintln!("LUKS formatted: {}", new_by_id);
+
+                let backup_path =
+                    backup_luks_header(runner, &new_by_id.0, &new_mn.0, params.paths)?;
+                eprintln!("LUKS header backed up: {}", backup_path.display());
+
+                ensure_luks_open(runner, fs, &new_name, &new_by_id, &passphrase)?;
+                eprintln!("LUKS opened: {} -> {}", new_by_id, new_mn);
+
+                if let Some(kf) = params.enroll_key_file {
+                    crate::luks::enroll_key_file(runner, &new_by_id.0, &passphrase, kf)?;
+                    eprintln!("Keyfile enrolled in slot 1: {}", new_by_id);
+                }
+            }
+            ConfigDiskState::PresentLuks { mapper_open, .. } => {
+                if !mapper_open {
+                    ensure_luks_open(runner, fs, &new_name, &new_by_id, &passphrase)?;
+                    eprintln!("LUKS opened: {} -> {}", new_by_id, new_mn);
+                } else if !pool.devices.iter().any(|d| d.mapper == new_mn) {
+                    eprintln!(
+                        "note: LUKS mapper is already open but device is not yet in pool. Completing replace."
+                    );
+                }
+            }
+        }
+
+        let new_mapper_path = format!("/dev/mapper/{}", new_mn.0);
+
+        // Step 2+: Execute replacement -- both paths use btrfs replace start.
+        // Live-only: warn if the source device has accumulated I/O errors.
+        if let ReplaceSource::Live { mapper, devid } = &replace_source {
+            let stats_raw = runner.run(&CmdRequest::BtrfsDeviceStatsJson {
+                mount_point: config.mount_point().clone(),
+            });
+            if let Ok(ref raw) = stats_raw
+                && let Ok(stats) = parse_btrfs_device_stats(raw)
+            {
+                let expected_path = format!("/dev/mapper/{}", mapper.0);
+                let has_errs = stats.devices.iter().any(|d| {
+                    d.target.as_path() == Some(expected_path.as_str())
+                        && (d.read_io_errs > 0
+                            || d.write_io_errs > 0
+                            || d.flush_io_errs > 0
+                            || d.corruption_errs > 0
+                            || d.generation_errs > 0)
+                });
+                if has_errs {
+                    eprintln!(
+                        "Warning: source device (devid {devid}) has I/O errors. \
+                         btrfs replace will read from mirrors where possible, \
+                         but may fail if any data lacks a healthy mirror copy."
+                    );
+                }
+            }
+        }
+
+        // Kickoff wording differs (replace-in-place vs rebuild-missing), but the
+        // underlying `btrfs replace start` + resize sequence is identical. Bind
+        // devid here so the shared spine below runs once.
+        let devid = match &replace_source {
+            ReplaceSource::Live { devid, .. } => {
+                eprintln!("Replacing device (devid {devid}) with {}...", new_mn);
+                *devid
+            }
+            ReplaceSource::Missing { devid } => {
+                eprintln!(
+                    "Rebuilding missing device (devid {devid}) onto {}...",
+                    new_mn
+                );
+                *devid
+            }
+        };
+
+        pool_replace_device(
+            runner,
+            devid,
+            &new_mapper_path,
+            config.mount_point(),
+            params.progress,
+        )?;
+        eprintln!("Replace complete.");
+
+        // Live-only: best-effort close of old mapper. Runs BEFORE the resize
+        // so a resize failure does not `?` out and strand the old dm slot
+        // bound to the backing disk until `braid lock` or reboot. Missing has
+        // no old mapper to close.
+        if let ReplaceSource::Live { mapper, .. } = &replace_source {
+            let close_result = runner.run(&CmdRequest::CryptsetupClose {
+                mapper: mapper.0.clone(),
+            });
+            match close_result {
+                Ok(r) if r.exit_status != 0 => {
+                    eprintln!(
+                        "Warning: failed to close LUKS mapper {} (exit {})",
+                        mapper, r.exit_status
+                    );
+                }
+                Err(e) => eprintln!("Warning: failed to close LUKS mapper {}: {}", mapper, e),
+                _ => {
+                    eprintln!(
+                        "Old device closed. If repurposing the physical disk, wipe it separately."
+                    );
+                }
+            }
+        }
+
+        pool_resize_device(runner, devid, config.mount_point())?;
+
+        // Restore RAID1 redundancy for missing-path replacements that clear the last missing device
+        if matches!(&replace_source, ReplaceSource::Missing { .. }) {
+            crate::pool::maybe_restore_raid1(
+                runner,
+                config.mount_point(),
+                pool.missing_count,
+                params.progress,
+            )
+            .map_err(ReplaceError::Pool)?;
+        }
+
+        // Post-commit: write pool.json with enriched metadata and clear journal.
+        let mut target_membership = target_membership;
+        if let Ok(pool_after) = probe_pool(runner, config.mount_point()) {
+            for dev in &pool_after.devices {
+                let Some(name) = crate::config::name_from_mapper(&dev.mapper.0) else {
+                    continue;
+                };
+                if let Some(member) = target_membership.disks.get_mut(name) {
+                    member.luks_uuid = Some(dev.luks_uuid.clone());
+                    member.devid = Some(dev.devid);
+                    if member.added_at.is_none() {
+                        member.added_at = Some(crate::util::now_iso());
+                    }
+                }
+            }
+        }
+        membership::save_membership(&target_membership, params.paths).map_err(|e| {
+            ReplaceError::Validation(format!("failed to persist pool membership: {e}"))
+        })?;
+        journal::clear_journal(params.paths).map_err(|e| ReplaceError::Validation(e.to_string()))?;
+
+        eprintln!("Done. Replaced {} with {}.", params.old_name, new_name);
+        Ok(())
+    }
+}
+
+/// Plan a `braid replace` run. Owns everything above today's `--dry-run`
+/// gate: pending-op preflight, config read, `--new` spec parsing,
+/// `probe_pool` + mounted validation, mutation/UPS preflight, `--old == --new`
+/// guard, replace-source resolution, membership load +
+/// `build_replacement_membership`, new-disk probe, and step compilation.
+/// The returned `ReplacePlan` is the single source of truth for both
+/// `--dry-run` preview and real execution.
+///
+/// Does not read or verify the passphrase, acquire the sleep inhibitor,
+/// or run `check_new_not_in_pool` -- those happen inside
+/// `ReplacePlan::execute` so `--dry-run` keeps short-circuiting before
+/// them.
+pub fn plan_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
     params: &ReplaceParams<'_>,
-) -> Result<(), ReplaceError> {
+) -> Result<ReplacePlan, ReplaceError> {
     preflight::check_no_pending_operation(params.paths).map_err(ReplaceError::Validation)?;
 
     let config = config_read(params.config_path)?;
@@ -115,8 +476,13 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     // aborts cleanly with no pending-op.json on disk and no systemd-inhibit held.
     let pre_membership = membership::load_membership(params.paths)
         .map_err(|e| ReplaceError::Validation(format!("failed to load pool membership: {e}")))?;
-    let target_membership =
-        build_replacement_membership(&pre_membership, params.old_name, new_name, &new_by_id, &replace_source)?;
+    let target_membership = build_replacement_membership(
+        &pre_membership,
+        params.old_name,
+        new_name,
+        &new_by_id,
+        &replace_source,
+    )?;
 
     // Probe --new disk state
     let new_probed = probe_config_disk(runner, fs, new_name, &new_by_id)?;
@@ -136,300 +502,34 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         enroll_key_file: params.enroll_key_file,
     })?;
 
+    Ok(ReplacePlan {
+        steps,
+        config,
+        new_name: new_name.to_owned(),
+        new_by_id,
+        pool,
+        replace_source,
+        new_probed,
+        pre_membership,
+        target_membership,
+    })
+}
+
+pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
+    runner: &R,
+    fs: &F,
+    params: &ReplaceParams<'_>,
+) -> Result<(), ReplaceError> {
+    let plan = plan_replace(runner, fs, params)?;
     if params.dry_run {
-        Step::print_dry_run(&steps);
+        plan.preview().print();
         return Ok(());
     }
-
-    // Confirm
-    if !params.yes {
-        let old_underlying = match &replace_source {
-            ReplaceSource::Live { .. } => pool
-                .devices
-                .iter()
-                .find(|d| d.mapper == old_mn)
-                .map(|d| d.underlying.as_str()),
-            ReplaceSource::Missing { .. } => None,
-        };
-        let old_hw = old_underlying.map(|u| confirm::query_disk_hw_info(runner, u));
-        let new_hw = confirm::query_disk_hw_info(runner, &new_by_id.0);
-        let is_missing = matches!(&replace_source, ReplaceSource::Missing { .. });
-
-        eprintln!(
-            "{}",
-            format_replace_confirm(
-                &ReplaceConfirmOld {
-                    name: params.old_name,
-                    hw: old_hw.as_ref(),
-                    source: &replace_source,
-                },
-                &ReplaceConfirmNew {
-                    name: new_name,
-                    by_id: &new_by_id.0,
-                    hw: &new_hw,
-                    needs_luks_format: matches!(new_probed.state, ConfigDiskState::PresentNotLuks),
-                    is_rebuild: is_missing,
-                },
-                pool.total_devices,
-            )
-        );
-        if pool.total_devices == 1 {
-            eprintln!("WARNING: This replace leaves only 1 disk -- no redundancy.\n");
-        }
-        if matches!(new_probed.state, ConfigDiskState::PresentNotLuks)
-            && params.enroll_key_file.is_none()
-            && pool_has_keyfile_enrollment(runner, &pool.devices)
-        {
-            eprintln!(
-                "WARNING: Existing pool drives have a keyfile (keyslot-1) for auto-unlock, \
-                 but the new drive will not.\n  \
-                 Passphrase unlock still works, but the keyfile won't unlock the new drive \
-                 until it's enrolled.\n  \
-                 Fix: re-run with --enroll <dir>, or run `braid enroll <dir>` afterward.\n"
-            );
-        }
-        confirm::confirm_yes().map_err(ReplaceError::Validation)?;
-    }
-
-    // Read passphrase
-    let passphrase = read_passphrase(params.passphrase_file, params.passphrase_stdin)?;
-    let new_mn = mapper_name(new_name);
-
-    // Reversible checks: reject absent disk, verify passphrase, check not already in pool.
-    if matches!(new_probed.state, ConfigDiskState::Absent) {
-        return Err(ReplaceError::Validation(format!(
-            "new disk '{}' ({}) is not present. Is it plugged in?",
-            new_name, new_by_id
-        )));
-    }
-
-    if matches!(new_probed.state, ConfigDiskState::PresentNotLuks)
-        && let Some(existing) = pool.devices.first() {
-            let status_raw = runner.run(&crate::cmd::CmdRequest::CryptsetupStatus {
-                mapper: existing.mapper.0.clone(),
-            })?;
-            let status = crate::parse::parse_cryptsetup_status(&status_raw)?;
-            if let Some(underlying) = status.device {
-                match verify_passphrase(runner, &underlying, &passphrase)? {
-                    VerifyOutcome::Authenticated => {}
-                    VerifyOutcome::Rejected => {
-                        return Err(ReplaceError::Validation(
-                            "passphrase does not match existing pool member".into(),
-                        ));
-                    }
-                }
-            }
-        }
-
-    // Reversible check: for an already-formatted but closed LUKS disk,
-    // verify the passphrase against the new disk's own LUKS header before
-    // committing the journal. Without this, ensure_luks_open below would be
-    // the first thing to notice a wrong passphrase -- and by then the
-    // journal is already written and the user is forced into braid recover
-    // mode for what is conceptually a preflight failure (see decision 019).
-    if let ConfigDiskState::PresentLuks { mapper_open: false, .. } = new_probed.state {
-        match verify_passphrase(runner, &new_by_id.0, &passphrase)? {
-            VerifyOutcome::Authenticated => {}
-            VerifyOutcome::Rejected => {
-                return Err(ReplaceError::Validation(format!(
-                    "passphrase rejected by new disk '{new_name}' ({new_by_id})"
-                )));
-            }
-        }
-    }
-
-    // Guard: new disk must not already be in the pool.
-    check_new_not_in_pool(new_name, &new_mn, &pool)?;
-
-    // Hold a logind sleep inhibitor for the rest of the replace operation --
-    // covers Step 1 LUKS init, the long-running btrfs replace start, and
-    // the post-replace soft balance for missing-path replaces. Suspending
-    // mid-replace produces kernel-level topology corruption on every kernel
-    // -- see issues #45 and #48 and the upstream warning at
-    // reference/btrfs-progs/Documentation/btrfs-replace.rst:49-50.
-    //
-    // Acquired here, AFTER all interactive/reversible work (confirmation,
-    // passphrase read+verify, check_new_not_in_pool) and BEFORE
-    // journal::write_journal, so that:
-    //   - operator-idle prompts do not block suspend
-    //   - a logind failure aborts cleanly without stranding pending-op.json
-    //     and forcing the user into recovery mode for a preflight failure.
-    let _sleep_inhibitor_guard = params
-        .sleep_inhibitor
-        .acquire("replace in progress")
-        .map_err(|e| {
-            ReplaceError::Validation(format!(
-                "could not acquire sleep inhibitor (is logind running?): {e}"
-            ))
-        })?;
-
-    // Write journal before irreversible disk ops. pre_membership and
-    // target_membership were computed earlier, before the inhibitor.
-    let journal = journal::build_journal(
-        pre_membership,
-        target_membership.clone(),
-        journal::OpKind::Replace {
-            old_name: params.old_name.to_owned(),
-            new_name: new_name.to_owned(),
-            new_by_id: new_by_id.clone(),
-        },
-    );
-    journal::write_journal(params.paths, &journal)
-        .map_err(|e| ReplaceError::Validation(e.to_string()))?;
-
-    // Step 1: Init new disk (LUKS format/open) -- irreversible from here.
-    match new_probed.state {
-        ConfigDiskState::Absent => unreachable!("already checked above"),
-        ConfigDiskState::PresentNotLuks => {
-            // Passphrase already verified above.
-            let mut luks_opts = luks_opts_from_env();
-            luks_opts.push("--label".into());
-            luks_opts.push(format!("braid-{new_name}"));
-            luks_format(runner, &new_by_id.0, &passphrase, &luks_opts)?;
-            eprintln!("LUKS formatted: {}", new_by_id);
-
-            let backup_path = backup_luks_header(runner, &new_by_id.0, &new_mn.0, params.paths)?;
-            eprintln!("LUKS header backed up: {}", backup_path.display());
-
-            ensure_luks_open(runner, fs, new_name, &new_by_id, &passphrase)?;
-            eprintln!("LUKS opened: {} -> {}", new_by_id, new_mn);
-
-            if let Some(kf) = params.enroll_key_file {
-                crate::luks::enroll_key_file(runner, &new_by_id.0, &passphrase, kf)?;
-                eprintln!("Keyfile enrolled in slot 1: {}", new_by_id);
-            }
-        }
-        ConfigDiskState::PresentLuks { mapper_open, .. } => {
-            if !mapper_open {
-                ensure_luks_open(runner, fs, new_name, &new_by_id, &passphrase)?;
-                eprintln!("LUKS opened: {} -> {}", new_by_id, new_mn);
-            } else if !pool.devices.iter().any(|d| d.mapper == new_mn) {
-                eprintln!(
-                    "note: LUKS mapper is already open but device is not yet in pool. Completing replace."
-                );
-            }
-        }
-    }
-
-    let new_mapper_path = format!("/dev/mapper/{}", new_mn.0);
-
-    // Step 2+: Execute replacement -- both paths use btrfs replace start.
-    // Live-only: warn if the source device has accumulated I/O errors.
-    if let ReplaceSource::Live { mapper, devid } = &replace_source {
-        let stats_raw = runner.run(&CmdRequest::BtrfsDeviceStatsJson {
-            mount_point: config.mount_point().clone(),
-        });
-        if let Ok(ref raw) = stats_raw
-            && let Ok(stats) = parse_btrfs_device_stats(raw)
-        {
-            let expected_path = format!("/dev/mapper/{}", mapper.0);
-            let has_errs = stats.devices.iter().any(|d| {
-                d.target.as_path() == Some(expected_path.as_str())
-                    && (d.read_io_errs > 0
-                        || d.write_io_errs > 0
-                        || d.flush_io_errs > 0
-                        || d.corruption_errs > 0
-                        || d.generation_errs > 0)
-            });
-            if has_errs {
-                eprintln!(
-                    "Warning: source device (devid {devid}) has I/O errors. \
-                     btrfs replace will read from mirrors where possible, \
-                     but may fail if any data lacks a healthy mirror copy."
-                );
-            }
-        }
-    }
-
-    // Kickoff wording differs (replace-in-place vs rebuild-missing), but the
-    // underlying `btrfs replace start` + resize sequence is identical. Bind
-    // devid here so the shared spine below runs once.
-    let devid = match &replace_source {
-        ReplaceSource::Live { devid, .. } => {
-            eprintln!("Replacing device (devid {devid}) with {}...", new_mn);
-            *devid
-        }
-        ReplaceSource::Missing { devid } => {
-            eprintln!(
-                "Rebuilding missing device (devid {devid}) onto {}...",
-                new_mn
-            );
-            *devid
-        }
-    };
-
-    pool_replace_device(
-        runner,
-        devid,
-        &new_mapper_path,
-        config.mount_point(),
-        params.progress,
-    )?;
-    eprintln!("Replace complete.");
-
-    // Live-only: best-effort close of old mapper. Runs BEFORE the resize
-    // so a resize failure does not `?` out and strand the old dm slot
-    // bound to the backing disk until `braid lock` or reboot. Missing has
-    // no old mapper to close.
-    if let ReplaceSource::Live { mapper, .. } = &replace_source {
-        let close_result = runner.run(&CmdRequest::CryptsetupClose {
-            mapper: mapper.0.clone(),
-        });
-        match close_result {
-            Ok(r) if r.exit_status != 0 => {
-                eprintln!(
-                    "Warning: failed to close LUKS mapper {} (exit {})",
-                    mapper, r.exit_status
-                );
-            }
-            Err(e) => eprintln!("Warning: failed to close LUKS mapper {}: {}", mapper, e),
-            _ => {
-                eprintln!(
-                    "Old device closed. If repurposing the physical disk, wipe it separately."
-                );
-            }
-        }
-    }
-
-    pool_resize_device(runner, devid, config.mount_point())?;
-
-    // Restore RAID1 redundancy for missing-path replacements that clear the last missing device
-    if matches!(&replace_source, ReplaceSource::Missing { .. }) {
-        crate::pool::maybe_restore_raid1(
-            runner,
-            config.mount_point(),
-            pool.missing_count,
-            params.progress,
-        )
-        .map_err(ReplaceError::Pool)?;
-    }
-
-    // Post-commit: write pool.json with enriched metadata and clear journal.
-    let mut target_membership = target_membership;
-    if let Ok(pool_after) = probe_pool(runner, config.mount_point()) {
-        for dev in &pool_after.devices {
-            let Some(name) = crate::config::name_from_mapper(&dev.mapper.0) else {
-                continue;
-            };
-            if let Some(member) = target_membership.disks.get_mut(name) {
-                member.luks_uuid = Some(dev.luks_uuid.clone());
-                member.devid = Some(dev.devid);
-                if member.added_at.is_none() {
-                    member.added_at = Some(crate::util::now_iso());
-                }
-            }
-        }
-    }
-    membership::save_membership(&target_membership, params.paths)
-        .map_err(|e| ReplaceError::Validation(format!("failed to persist pool membership: {e}")))?;
-    journal::clear_journal(params.paths).map_err(|e| ReplaceError::Validation(e.to_string()))?;
-
-    eprintln!("Done. Replaced {} with {}.", params.old_name, new_name);
-    Ok(())
+    plan.execute(runner, fs, params)
 }
 
 #[derive(Debug)]
-enum ReplaceSource {
+pub enum ReplaceSource {
     /// Old disk is alive in the pool -- replace via `btrfs replace start`.
     Live { mapper: MapperName, devid: u64 },
     /// Old disk is missing -- replace via `btrfs replace start` by devid.
@@ -2951,6 +3051,221 @@ mod tests {
         assert_eq!(
             close_calls, 0,
             "missing path has no old LUKS mapper to close -- CryptsetupClose must not be issued"
+        );
+    }
+
+    /* Intent: the live-path dry-run preview now flows through
+     * `plan_replace(...).preview().render()` (PR 8), and the rendered
+     * bytes must equal today's `Step::render_dry_run(&steps)` output.
+     * The preview must carry zero notes so confirmation-only warnings
+     * never leak into `--dry-run`.
+     *
+     * Why it exists: PR 8 routes `braid replace --dry-run` through
+     * `ReplacePlan::preview()` instead of `Step::print_dry_run(&steps)`.
+     * A regression that added a `PreviewNote` in the planner would
+     * surface the confirmation-only `WARNING:` lines (1-disk, keyfile
+     * asymmetry) on stdout during dry-run. A regression that reordered
+     * steps or dropped the cryptsetup-close step would change the
+     * rendered output. Both failure modes are caught here.
+     *
+     * Scenario: 2-disk pool, operator previews
+     * `braid replace --old disk2 --new disk3=...` with a fresh (but
+     * already-LUKS-open) replacement. Mirrors the fixture used by
+     * `dry_run_does_not_acquire_inhibitor`.
+     */
+    #[test]
+    fn plan_replace_live_preview_has_no_notes_and_matches_legacy_step_render() {
+        let state_tmp = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(state_tmp.path().into());
+        let mut m = PoolMembership::empty();
+        m.disks.insert(
+            "disk1".into(),
+            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
+        );
+        m.disks.insert(
+            "disk2".into(),
+            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk2".into())),
+        );
+        membership::save_membership(&m, &paths).unwrap();
+
+        let config_tmp = tempfile::tempdir().unwrap();
+        let config_path = config_tmp.path().join("config.json");
+        std::fs::write(
+            &config_path,
+            serde_json::to_vec(&serde_json::json!({ "mount_point": "/mnt/storage" })).unwrap(),
+        )
+        .unwrap();
+        let pass_path = config_tmp.path().join("passphrase");
+        std::fs::write(&pass_path, b"test-passphrase\n").unwrap();
+
+        let fs = ReplaceMockFs(vec![
+            "/dev/disk/by-id/virtio-disk3".into(),
+            "/dev/mapper/braid-disk3".into(),
+        ]);
+        let runner = FailingReplaceRunner;
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let plan = plan_replace(
+            &runner,
+            &fs,
+            &ReplaceParams {
+                config_path: &config_path,
+                old_name: "disk2",
+                new_name: "disk3=/dev/disk/by-id/virtio-disk3",
+                missing_id: None,
+                dry_run: true,
+                yes: true,
+                passphrase_stdin: false,
+                passphrase_file: Some(pass_path.as_path()),
+                enroll_key_file: None,
+                progress: crate::progress::ProgressOutput::Off,
+                paths: &paths,
+                sleep_inhibitor: &inhibitor,
+            },
+        )
+        .expect("plan_replace should succeed on live-path fixture");
+
+        let preview = plan.preview();
+        assert!(
+            preview.notes.is_empty(),
+            "ReplacePlan::preview() must emit zero notes -- confirmation warnings stay in execute(), got: {:?}",
+            preview.notes,
+        );
+
+        let rendered = preview.render();
+        let legacy = Step::render_dry_run(&plan.steps);
+        assert_eq!(
+            rendered, legacy,
+            "plan.preview().render() must be byte-equivalent to Step::render_dry_run(&plan.steps) for the live path",
+        );
+
+        assert!(
+            rendered.contains("btrfs replace start"),
+            "live-path preview must contain `btrfs replace start` step, got:\n{rendered}",
+        );
+        assert!(
+            rendered.contains("cryptsetup close braid-disk2"),
+            "live-path preview must close the old mapper, got:\n{rendered}",
+        );
+        assert!(
+            !rendered.contains("WARNING:"),
+            "live-path dry-run preview must not leak the confirmation-only WARNING lines, got:\n{rendered}",
+        );
+        assert!(
+            inhibitor.acquire_count() == 0,
+            "plan_replace must not acquire the sleep inhibitor",
+        );
+    }
+
+    /* Intent: the missing-path dry-run preview flows through
+     * `plan_replace(...).preview().render()` with zero notes and
+     * byte-equivalent output to today's `Step::render_dry_run`.
+     *
+     * Why it exists: same regression surface as the live-path
+     * preview test, but for the `ReplaceSource::Missing` branch
+     * (different step sequence: no cryptsetup close, soft balance at
+     * the tail when clearing the last missing device).
+     *
+     * Scenario: 2-disk pool, devid 2 missing, operator previews
+     * `braid replace --old disk2 --missing-id 2 --new disk3=...`.
+     * Mirrors the fixture used by
+     * `cmd_replace_missing_path_runs_soft_balance_after_replace_and_resize`.
+     */
+    #[test]
+    fn plan_replace_missing_preview_has_no_notes_and_matches_legacy_step_render() {
+        let state_tmp = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(state_tmp.path().into());
+        let mut m = PoolMembership::empty();
+        m.disks.insert(
+            "disk1".into(),
+            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
+        );
+        let mut disk2 = DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk2".into()));
+        disk2.devid = Some(2);
+        m.disks.insert("disk2".into(), disk2);
+        membership::save_membership(&m, &paths).unwrap();
+
+        let config_tmp = tempfile::tempdir().unwrap();
+        let config_path = config_tmp.path().join("config.json");
+        std::fs::write(
+            &config_path,
+            serde_json::to_vec(&serde_json::json!({ "mount_point": "/mnt/storage" })).unwrap(),
+        )
+        .unwrap();
+        let pass_path = config_tmp.path().join("passphrase");
+        std::fs::write(&pass_path, b"test-passphrase\n").unwrap();
+
+        let fs = ReplaceMockFs(vec![
+            "/dev/disk/by-id/virtio-disk3".into(),
+            "/dev/mapper/braid-disk3".into(),
+        ]);
+
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let replace_done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let runner = MissingPathSuccessRunner {
+            log: log.clone(),
+            replace_done: replace_done.clone(),
+        };
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let plan = plan_replace(
+            &runner,
+            &fs,
+            &ReplaceParams {
+                config_path: &config_path,
+                old_name: "disk2",
+                new_name: "disk3=/dev/disk/by-id/virtio-disk3",
+                missing_id: Some(2),
+                dry_run: true,
+                yes: true,
+                passphrase_stdin: false,
+                passphrase_file: Some(pass_path.as_path()),
+                enroll_key_file: None,
+                progress: crate::progress::ProgressOutput::Off,
+                paths: &paths,
+                sleep_inhibitor: &inhibitor,
+            },
+        )
+        .expect("plan_replace should succeed on missing-path fixture");
+
+        let preview = plan.preview();
+        assert!(
+            preview.notes.is_empty(),
+            "ReplacePlan::preview() must emit zero notes on missing path, got: {:?}",
+            preview.notes,
+        );
+
+        let rendered = preview.render();
+        let legacy = Step::render_dry_run(&plan.steps);
+        assert_eq!(
+            rendered, legacy,
+            "plan.preview().render() must be byte-equivalent to Step::render_dry_run(&plan.steps) for the missing path",
+        );
+
+        assert!(
+            rendered.contains("btrfs replace start"),
+            "missing-path preview must contain `btrfs replace start`, got:\n{rendered}",
+        );
+        assert!(
+            !rendered.contains("cryptsetup close"),
+            "missing-path preview must NOT carry a cryptsetup close step (no old mapper), got:\n{rendered}",
+        );
+        assert!(
+            rendered.contains("-dconvert=raid1,soft"),
+            "missing-path preview must carry the soft balance step when clearing the last missing device, got:\n{rendered}",
+        );
+        assert!(
+            !rendered.contains("WARNING:"),
+            "missing-path dry-run preview must not leak confirmation-only WARNING lines, got:\n{rendered}",
+        );
+
+        // plan_replace must not mutate btrfs state -- replace_done
+        // flips only inside execute()'s BtrfsReplaceStart dispatch.
+        assert!(
+            !replace_done.load(std::sync::atomic::Ordering::Relaxed),
+            "plan_replace must not issue btrfs replace start",
+        );
+        assert!(
+            inhibitor.acquire_count() == 0,
+            "plan_replace must not acquire the sleep inhibitor",
         );
     }
 }
