@@ -139,21 +139,27 @@ with subtest("Test 4a: keyfile-asymmetry dry-run -> stdout [warn], stderr empty"
         "dry-run stderr must be empty on success; got: {!r}".format(err)
     )
 
-with subtest("Test 4b: keyfile-asymmetry real-run -> stderr has exact WARNING block"):
-    # Real-run needs a fresh stderr fixture, so close + remount the pool
-    # once to clear state, then add disk3 for real. The pool must stay
-    # mounted with both disks open so pool_has_keyfile_enrollment sees
-    # keyslot-1 on the live pool member.
+with subtest("Test 4b: keyfile-asymmetry real-run -> stderr canonical [warn] block"):
+    # Intent: real-run keyfile-asymmetry now renders as the canonical
+    # `[warn]  Existing pool drives have a keyfile (keyslot-1) ...`
+    # three-line block on stderr -- the SAME bytes dry-run produces on
+    # stdout. The add-local `WARNING: ` legacy replay was removed;
+    # plan-derived Warn notes route through the shared
+    # `preview::render_notes_for_stderr` in both modes.
+    # Why it exists: guards against a regression that reintroduces the
+    # legacy `WARNING:` prefix on the Ok real-run path, producing two
+    # different wordings for the same note across modes.
+    # Scenario: pool is mounted from Test 3 with both disks carrying
+    # keyslot-1; operator adds disk3 without --enroll.
     machine.succeed("mountpoint -q /mnt/storage")
 
-    # Pipe stderr to a file; stdout discarded. Expect success.
     machine.succeed(
         f"{add_cmd_disk3()} >/tmp/rka-stdout 2>/tmp/rka-stderr"
     )
     err = machine.succeed("cat /tmp/rka-stderr")
 
     expected_block = (
-        "WARNING: Existing pool drives have a keyfile (keyslot-1) for auto-unlock,"
+        "[warn]  Existing pool drives have a keyfile (keyslot-1) for auto-unlock,"
         " but the new drive will not.\n"
         "  Passphrase unlock still works, but the keyfile won't unlock the new drive"
         " until it's enrolled.\n"
@@ -161,8 +167,12 @@ with subtest("Test 4b: keyfile-asymmetry real-run -> stderr has exact WARNING bl
         "\n"
     )
     assert expected_block in err, (
-        "real-run stderr must contain the exact legacy 3-line WARNING block"
-        " (with trailing blank line); got: {!r}".format(err)
+        "real-run stderr must contain the canonical `[warn]  ...`"
+        " three-line block (with trailing blank line); got: {!r}".format(err)
+    )
+    assert "WARNING:" not in err, (
+        "real-run stderr must NOT carry the legacy `WARNING:` prefix;"
+        " got: {!r}".format(err)
     )
 
 machine.shutdown()
