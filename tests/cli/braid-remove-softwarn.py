@@ -3,16 +3,18 @@
 # Intent: pin the stdout/stderr contract for the soft-warn branch of
 # `check_eviction_space` on the `remaining >= 2` path. Under
 # `--dry-run` the warning must appear on stdout as a `[warn]  <body>`
-# note and stderr must be empty; under real-run the warning must
-# appear on stderr with the legacy `warning: ` prefix (byte-for-byte
-# wording from before the PR 4 migration).
+# note and stderr must be empty; under real-run the same warning must
+# appear on stderr using the canonical `[warn]  <body>` wording (no
+# legacy `warning: ` prefix -- plan-derived Warn notes now render
+# through the shared `preview::render_notes_for_stderr` helper in both
+# modes).
 #
-# Why it exists: PR 4 moves the warn out of a direct `eprintln!` into
-# a `PreviewNote::Warn`. A regression that either (a) leaks the warn
-# on stderr during `--dry-run` or (b) drops the legacy `warning:`
-# prefix during real-run would only surface through a human noticing
-# drift in an SSH session. Unit tests catch the plan-level shape;
-# this test catches the wire-level stream routing.
+# Why it exists: a regression that either (a) leaks the warn on
+# stderr during `--dry-run`, (b) drops the `[warn]  ` prefix during
+# real-run, or (c) reintroduces the legacy `warning: ` prefix would
+# only surface through a human noticing drift in an SSH session. Unit
+# tests catch the plan-level shape; this test catches the wire-level
+# stream routing.
 #
 # Scenario: 3-disk RAID1 pool, all present. A PATH wrapper intercepts
 # every `btrfs device usage --raw` call and fails it -- `braid
@@ -126,22 +128,25 @@ with subtest("dry-run: warn goes to stdout, stderr is empty"):
     ), f"dry-run stdout must not carry the legacy 'warning:' prefix; got:\n{out}"
     assert err.strip() == "", f"dry-run stderr must be empty; got:\n{err!r}"
 
-# --- Phase 4: Real-run must preserve the legacy `warning: ` stderr line ---
+# --- Phase 4: Real-run must emit the canonical `[warn]  ...` stderr line ---
 # This phase mutates the pool (the remove of disk3 completes), so it
 # must come last.
 
-with subtest("real-run: warn appears on stderr with the legacy prefix"):
+with subtest("real-run: warn appears on stderr with the canonical [warn] prefix"):
     (status, _) = run_with_wrapper(
         "remove disk3 --yes >/tmp/out2 2>/tmp/err2"
     )
     assert status == 0, f"real-run should succeed; exit {status}"
     err2 = machine.succeed("cat /tmp/err2")
     assert (
-        "warning: ENOSPC pre-flight check failed:" in err2
-    ), f"expected legacy 'warning: ...' line on stderr; got:\n{err2}"
+        "[warn]  ENOSPC pre-flight check failed:" in err2
+    ), f"expected canonical '[warn]  ...' line on stderr; got:\n{err2}"
     assert (
         "; proceeding anyway" in err2
     ), f"expected canonical suffix on stderr; got:\n{err2}"
+    assert (
+        "warning:" not in err2
+    ), f"real-run stderr must not carry the legacy 'warning:' prefix; got:\n{err2}"
 
 with subtest("real-run actually removed disk3"):
     fi_show = machine.succeed("btrfs fi show /mnt/storage")
