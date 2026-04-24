@@ -5,8 +5,9 @@ use crate::inhibit::AcquireSleepInhibitor;
 use crate::journal;
 use crate::luks::{
     backup_luks_header, ensure_luks_open, luks_format, luks_opts_from_env,
-    format_keyfile_enrollment_probe_failure, probe_pool_keyfile_enrollment, read_passphrase_with,
-    verify_passphrase, PassphraseReader, VerifyOutcome,
+    format_keyfile_asymmetry_warning, format_keyfile_enrollment_probe_failure,
+    probe_pool_keyfile_enrollment, read_passphrase_with, verify_passphrase, PassphraseReader,
+    VerifyOutcome,
 };
 use crate::membership::{self, PoolMembership};
 use crate::parse::btrfs_filesystem_show::{classify_btrfs_probe, DeviceBtrfsProbe};
@@ -263,24 +264,6 @@ fn format_add_missing_devices_warning(missing_count: u64) -> String {
         missing_count,
         if missing_count == 1 { "" } else { "s" }
     )
-}
-
-/// Returns the keyfile-asymmetry warning body (no legacy `WARNING:` prefix).
-/// Both dry-run and real-run render this body as the canonical
-/// `[warn]  <body>` via `Preview::render` /
-/// `preview::render_notes_for_stderr`. The body ends in `\n` so the
-/// renderer's own `\n` suffix produces a trailing blank line after the
-/// three-line block -- consistent across both modes.
-///
-/// Scoped to `add` only. `replace`'s analogous confirmation warning is
-/// untouched; a follow-up PR may unify the two UX surfaces explicitly.
-pub fn format_add_keyfile_asymmetry_warning() -> String {
-    "Existing pool drives have a keyfile (keyslot-1) for auto-unlock, \
-     but the new drive will not.\n  \
-     Passphrase unlock still works, but the keyfile won't unlock the new drive \
-     until it's enrolled.\n  \
-     Fix: re-run with --enroll <dir>, or run `braid enroll <dir>` afterward.\n"
-        .to_owned()
 }
 
 /// Returns the no-op "nothing to do" message, without any channel-specific
@@ -785,7 +768,7 @@ pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     if any_needs_format && params.enroll_key_file.is_none() {
         let keyfile_probe = probe_pool_keyfile_enrollment(runner, &pool.devices);
         if keyfile_probe.has_enrollment {
-            notes.push(PreviewNote::Warn(format_add_keyfile_asymmetry_warning()));
+            notes.push(PreviewNote::Warn(format_keyfile_asymmetry_warning()));
         } else {
             notes.extend(keyfile_probe.failures.iter().map(|failure| {
                 PreviewNote::Warn(format_keyfile_enrollment_probe_failure(failure))
@@ -3297,7 +3280,7 @@ mod tests {
             1,
             "expected exactly one keyfile-asymmetry Warn, got {warns:?}"
         );
-        assert_eq!(warns[0], &format_add_keyfile_asymmetry_warning());
+        assert_eq!(warns[0], &format_keyfile_asymmetry_warning());
         assert!(
             !warns[0].starts_with("WARNING:"),
             "warn note body must not carry the legacy `WARNING:` prefix"
@@ -3378,7 +3361,7 @@ mod tests {
         );
         assert_eq!(
             warns[1],
-            &format_add_keyfile_asymmetry_warning(),
+            &format_keyfile_asymmetry_warning(),
             "keyfile-asymmetry warning must come second"
         );
     }
@@ -3455,7 +3438,7 @@ mod tests {
         assert_eq!(warns.len(), 1, "expected one Warn note, got {warns:?}");
         assert_eq!(
             warns[0],
-            &format_add_keyfile_asymmetry_warning(),
+            &format_keyfile_asymmetry_warning(),
             "occupied slot 1 must emit only the keyfile-asymmetry warning"
         );
     }
@@ -3648,7 +3631,7 @@ mod tests {
         let notes = vec![
             PreviewNote::Info("Nothing to do -- disk2 already in pool.".into()),
             PreviewNote::Warn(format_add_missing_devices_warning(1)),
-            PreviewNote::Warn(format_add_keyfile_asymmetry_warning()),
+            PreviewNote::Warn(format_keyfile_asymmetry_warning()),
             PreviewNote::PerDisk {
                 name: "diskX".into(),
                 level: crate::preview::NoteLevel::Skip,
