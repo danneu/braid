@@ -71,58 +71,63 @@ with subtest("Dry-run missing-device warning routes to stdout as [warn]"):
 
 # --- Phase 3: real-run -> stderr has exact legacy warning line ---
 
-with subtest("Real-run missing-device warning stays on stderr with legacy prefix"):
+with subtest("Real-run missing-device warning renders as canonical [warn]"):
     # Intent: `braid add disk3` (no --dry-run) with a missing device
-    # must print the legacy `warning: pool has 1 missing device.
+    # must print the canonical `[warn]  pool has 1 missing device.
     # Consider repairing with `braid replace --missing-id <devid>`
-    # first. Use `braid status` to see device IDs.` line on stderr
-    # byte-identically -- the wording hasn't changed, only its
-    # dispatch path.
-    # Why it exists: log scrapers and user-facing docs pin this wording.
-    # Regressions that dropped the `warning:` prefix, reworded the body,
-    # or silently routed the line to stdout must fail here.
+    # first. Use `braid status` to see device IDs.` line on stderr --
+    # the SAME bytes dry-run produces on stdout. The add-local
+    # `warning: ` legacy replay was removed; plan-derived Warn notes
+    # now route through the shared `preview::render_notes_for_stderr`
+    # in both dry-run and real-run.
+    # Why it exists: guards against a regression that reintroduces
+    # the legacy `warning:` prefix on the Ok real-run path, producing
+    # two different wordings for the same note across modes.
     # Scenario: same as Phase 2 but without --dry-run. The add may
     # proceed or fail depending on btrfs's degraded-mount tolerance;
     # the test only asserts the warning wiring, not the downstream
-    # outcome.
-    # Use execute so a downstream btrfs error does not abort the test
-    # before we inspect stderr.
+    # outcome. Use execute so a downstream btrfs error does not
+    # abort the test before we inspect stderr.
     ec = machine.execute(
         f"{add_cmd('disk3')} >/tmp/rmd-stdout 2>/tmp/rmd-stderr"
     )[0]
     err = machine.succeed("cat /tmp/rmd-stderr")
 
     expected_line = (
-        "warning: pool has 1 missing device. Consider repairing with"
+        "[warn]  pool has 1 missing device. Consider repairing with"
         " `braid replace --missing-id <devid>` first. Use `braid status`"
         " to see device IDs."
     )
     assert expected_line in err, (
-        "real-run stderr must contain the exact legacy missing-devices warning line;"
+        "real-run stderr must contain the canonical `[warn]  ...` line;"
+        " exit={} stderr={!r}".format(ec, err)
+    )
+    assert "warning: pool has" not in err, (
+        "real-run stderr must NOT carry the legacy `warning:` prefix;"
         " exit={} stderr={!r}".format(ec, err)
     )
 
-# --- Phase 4: preserved-context failure keeps legacy `warning:` prefix ---
+# --- Phase 4: preserved-context failure uses canonical [warn] on stderr ---
 #
 # Intent: when `plan_add` accumulates the missing-devices warn and then
 # fails later inside `compile_add_steps_multi` (BraidLabeledNoBtrfs
-# identity), stderr must show the legacy `warning: pool has ...` line
-# BEFORE the refusal error -- byte-identical to the Ok-path replay.
+# identity), stderr must show the canonical `[warn]  pool has ...`
+# line BEFORE the refusal error -- the SAME bytes the Ok path
+# (`AddPlan::execute`) emits on real-run stderr and `Preview::render`
+# emits on dry-run stdout.
 #
-# Why it exists: the Err-branch in `cmd_add` used to pipe `report.notes`
-# through the generic `preview::render_notes_for_stderr`, which
-# normalizes `PreviewNote::Warn` to `[warn]  ...`. That silently
-# changed user-visible stderr wording on the refusal path (pre-PR-7
-# users saw `warning: ...`). This subtest pins the Err-path legacy
-# replay so a regression that re-routes through the bracketed formatter
-# fails visibly.
+# Why it exists: both `cmd_add`'s Err branch and `AddPlan::execute` now
+# pipe their notes through the shared `preview::render_notes_for_stderr`
+# helper. If a future change re-introduces a command-local legacy
+# replay on either path, the two paths will diverge. This test pins
+# the unified wording at the CLI boundary.
 #
 # Scenario: pool still has disk2 MISSING (from Phase 1). Craft disk4
 # as a braid-labeled LUKS with zeroed btrfs signature so identity
 # classification returns BraidLabeledNoBtrfs. Run `braid add disk4`
 # (no --dry-run).
 
-with subtest("Phase 4: preserved-context failure keeps legacy warning: prefix"):
+with subtest("Phase 4: preserved-context failure renders canonical [warn]"):
     dev4 = "/dev/disk/by-id/virtio-disk4"
     # LUKS-format disk4 with the braid-<name> label, then open the
     # mapper so plan_add's probe_config_disk sees PresentLuks with
@@ -159,14 +164,14 @@ with subtest("Phase 4: preserved-context failure keeps legacy warning: prefix"):
         "stdout must be empty on failure; got: {!r}".format(out)
     )
     warn_line = (
-        "warning: pool has 1 missing device. Consider repairing with"
+        "[warn]  pool has 1 missing device. Consider repairing with"
         " `braid replace --missing-id <devid>` first. Use `braid status`"
         " to see device IDs."
     )
     warn_pos = err.find(warn_line)
     assert warn_pos != -1, (
-        "stderr must carry the legacy `warning:` prefix on the refusal "
-        "path (NOT `[warn]  ...`); got: {!r}".format(err)
+        "stderr must carry the canonical `[warn]  ...` line on the refusal "
+        "path; got: {!r}".format(err)
     )
     # Identity-error wording comes from identity_to_error's
     # BraidLabeledNoBtrfs branch in cli/src/add.rs.
@@ -179,11 +184,10 @@ with subtest("Phase 4: preserved-context failure keeps legacy warning: prefix"):
         "warning must render BEFORE the error on the preserved-context "
         "stderr path; got: {!r}".format(err)
     )
-    # Regression guard: the generic bracketed form must NOT appear --
-    # that would mean the Err path still routes through
-    # preview::render_notes_for_stderr.
-    assert "[warn]  pool has" not in err, (
-        "Err-path must NOT emit the generic `[warn]  pool has ...` form on "
+    # Regression guard: the legacy `warning:` prefix must NOT appear --
+    # plan-derived Warn notes now share one rendering across modes.
+    assert "warning: pool has" not in err, (
+        "Err-path must NOT emit the legacy `warning: pool has ...` form on "
         "stderr; got: {!r}".format(err)
     )
 

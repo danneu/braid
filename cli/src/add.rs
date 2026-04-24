@@ -15,7 +15,7 @@ use crate::pool::{
     pool_add_device, pool_balance_raid1, pool_bootstrap_mount, pool_bootstrap_mount_raid1,
 };
 use crate::preflight;
-use crate::preview::{PerDiskStyle, Preview, PreviewCompleteness, PreviewNote};
+use crate::preview::{self, PerDiskStyle, Preview, PreviewCompleteness, PreviewNote};
 use crate::probe::{probe_config_disk, probe_pool, Filesystem, ProbeError};
 use crate::progress::ProgressOutput;
 use crate::state_paths::StatePaths;
@@ -251,9 +251,10 @@ pub struct AddParams<'a> {
 }
 
 /// Returns the missing-devices warning body (no legacy `warning:` prefix).
-/// Dry-run wraps this in `PreviewNote::Warn` so `Preview::render` emits
-/// `[warn]  <body>`; real-run prepends `warning: ` when writing to stderr,
-/// preserving today's wording byte-for-byte.
+/// Both dry-run (`Preview::render` on stdout) and real-run
+/// (`preview::render_notes_for_stderr` on stderr) wrap this in
+/// `PreviewNote::Warn` and render it as the canonical `[warn]  <body>`
+/// -- one contract for both modes.
 fn format_add_missing_devices_warning(missing_count: u64) -> String {
     format!(
         "pool has {} missing device{}. \
@@ -265,14 +266,14 @@ fn format_add_missing_devices_warning(missing_count: u64) -> String {
 }
 
 /// Returns the keyfile-asymmetry warning body (no legacy `WARNING:` prefix).
-/// Dry-run wraps this in `PreviewNote::Warn` so `Preview::render` emits
-/// `[warn]  <body>`; real-run prepends `WARNING: ` when writing to stderr,
-/// preserving today's exact 3-line wording (trailing blank line included,
-/// since the body itself ends in `\n`).
+/// Both dry-run and real-run render this body as the canonical
+/// `[warn]  <body>` via `Preview::render` /
+/// `preview::render_notes_for_stderr`. The body ends in `\n` so the
+/// renderer's own `\n` suffix produces a trailing blank line after the
+/// three-line block -- consistent across both modes.
 ///
-/// Scoped to `add` only in this migration. `replace`'s analogous warning
-/// stays inline in its confirmation path; a follow-up PR may unify the
-/// two UX surfaces explicitly.
+/// Scoped to `add` only. `replace`'s analogous confirmation warning is
+/// untouched; a follow-up PR may unify the two UX surfaces explicitly.
 pub fn format_add_keyfile_asymmetry_warning() -> String {
     "Existing pool drives have a keyfile (keyslot-1) for auto-unlock, \
      but the new drive will not.\n  \
@@ -287,37 +288,6 @@ pub fn format_add_keyfile_asymmetry_warning() -> String {
 /// stderr `eprintln!` so both paths see byte-identical wording.
 pub fn format_add_noop(label: &str) -> String {
     format!("Nothing to do -- {label} already in pool.")
-}
-
-/// Render `add`-specific `PreviewNote::Warn` notes to a stderr string with
-/// the legacy `warning: ` / `WARNING: ` prefixes re-added. Shared by the
-/// `Ok` path (`AddPlan::execute`) and the `Err` path (`cmd_add`'s
-/// preserved-context branch) so real-run wording stays byte-identical in
-/// both success and failure flows.
-///
-/// Routing rules:
-/// - Bodies starting with `"Existing pool drives have a keyfile"` are the
-///   keyfile-asymmetry block. The body itself already ends in `\n` (the
-///   legacy format string baked the trailing blank line in), so we append
-///   a single `\n` here to reproduce the original two trailing newlines.
-/// - Every other `Warn` is the missing-devices case (or any future
-///   single-line add warning). Body carries no trailing newline; the
-///   `eprintln!`-equivalent `\n` is supplied here.
-/// Non-`Warn` notes are skipped -- `Info` notes only surface on the Ok
-/// path via `format_add_noop(...)` after this replay.
-fn render_add_notes_for_stderr(notes: &[PreviewNote]) -> String {
-    let mut out = String::new();
-    for note in notes {
-        let PreviewNote::Warn(body) = note else {
-            continue;
-        };
-        if body.starts_with("Existing pool drives have a keyfile") {
-            out.push_str(&format!("WARNING: {body}\n"));
-        } else {
-            out.push_str(&format!("warning: {body}\n"));
-        }
-    }
-    out
 }
 
 /// Labels the disk set for no-op / done messages. Single-disk returns the
@@ -379,23 +349,23 @@ impl AddPlan {
         fs: &F,
         params: &AddParams<'_>,
     ) -> Result<(), AddError> {
-        // Emit accumulated Warn notes to stderr BEFORE any mutation,
-        // using the legacy `warning:` / `WARNING:` prefixes so existing
-        // stderr wording is byte-identical. The missing-devices warning
-        // is appended before the keyfile-asymmetry warning during
-        // planning; iterating in insertion order preserves that sequence.
-        // The same helper runs on the preserved-context Err branch in
-        // `cmd_add`, so success and failure stderr wording agree.
-        eprint!("{}", render_add_notes_for_stderr(&self.notes));
+        // Render accumulated notes to stderr BEFORE any mutation via
+        // the shared renderer. Warn notes emit as the canonical
+        // `[warn]  <body>` (same as dry-run stdout); the no-op Info
+        // note (when steps are empty) emits as the bare noop line.
+        // `cmd_add`'s preserved-context Err branch pipes `report.notes`
+        // through the same helper, so success, failure, and dry-run
+        // stdout share one render contract for these notes.
+        eprint!(
+            "{}",
+            preview::render_notes_for_stderr(&self.notes, Self::STDERR_STYLE),
+        );
 
-        // No-op early-return: if the plan has zero steps, the only work
-        // is to print the `format_add_noop` Info note that the planner
-        // emitted. Must return BEFORE inhibitor acquisition and BEFORE
-        // journal write, matching today's pre-passphrase no-op return
-        // (pinned by `no_journal_on_noop_add`).
+        // No-op early-return: if the plan has zero steps, the Info
+        // note emitted above is the whole user-visible output for
+        // this add. Must return BEFORE inhibitor acquisition and
+        // BEFORE journal write (pinned by `no_journal_on_noop_add`).
         if self.steps.is_empty() {
-            let label = add_label(&self.names);
-            eprintln!("{}", format_add_noop(&label));
             return Ok(());
         }
 
@@ -881,15 +851,15 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         Ok(p) => p,
         Err(e) => {
             // Preserved-context failure: accumulated notes render to
-            // stderr before the error, with the legacy `warning: ` /
-            // `WARNING: ` prefixes re-added. This must match the Ok
-            // path replay in `AddPlan::execute` byte-for-byte --
-            // pre-PR-7, a compile_add_steps_multi failure after a
-            // missing-devices warn surfaced `warning: pool has ...`;
-            // a regression that routes the Err branch through the
-            // generic `[warn]  ...` formatter would silently change
-            // user-visible stderr wording on the refusal path.
-            eprint!("{}", render_add_notes_for_stderr(&report.notes));
+            // stderr before the error via the SAME helper as the Ok
+            // path (`AddPlan::execute`), so a `PreviewNote::Warn`
+            // emitted on the refusal path is byte-identical to the
+            // same note emitted on dry-run stdout and real-run
+            // success stderr.
+            eprint!(
+                "{}",
+                preview::render_notes_for_stderr(&report.notes, AddPlan::STDERR_STYLE),
+            );
             return Err(e);
         }
     };
@@ -3467,56 +3437,63 @@ mod tests {
         );
     }
 
-    /* Intent: `render_add_notes_for_stderr` reproduces today's legacy
-     * `warning: ...` / `WARNING: ...` stderr wording byte-for-byte, and
-     * is the SINGLE source of stderr-replay wording for BOTH the Ok
-     * (`AddPlan::execute`) and Err (`cmd_add` preserved-context) paths.
-     * Why it exists: the preserved-context Err path previously rendered
-     * `report.notes` through the generic `[warn]  ...` formatter, which
-     * silently changed user-visible stderr wording on refusal. Pinning
-     * the helper output here catches a regression that either:
-     *   - drops the `warning: ` / `WARNING: ` prefix,
-     *   - drops the keyfile block's trailing blank line (body ends `\n`
-     *     + helper appends one more),
-     *   - or lets Info/PerDisk notes leak onto stderr through this helper.
-     * Scenario: a notes vec with every variant plus both Warn kinds.
+    /* Intent: the plan-derived Warn notes for `add` render through
+     * ONE contract -- the shared `preview::render_notes_for_stderr`
+     * helper -- across dry-run stdout (via `Preview::render`),
+     * real-run stderr (via `AddPlan::execute`), and preserved-context
+     * Err stderr (via `cmd_add`). The canonical shape is
+     * `[warn]  <body>`; legacy `warning:` / `WARNING:` prefixes are
+     * gone.
+     * Why it exists: a previous iteration of this PR replayed
+     * plan-derived Warn notes with the legacy prefixes on the Ok path
+     * while the Err path used `[warn]  ...`, producing two different
+     * wordings for the same note. This test pins the unified
+     * rendering at the renderer layer so any drift -- a stray
+     * `warning:` prefix reintroduced into a body, an Info-note leak,
+     * or a PerDisk-note leak -- fails here instead of silently
+     * diverging between paths.
+     * Scenario: a notes vec with every variant plus both add-specific
+     * Warn kinds, rendered via the shared helper with
+     * `AddPlan::STDERR_STYLE`.
      */
     #[test]
-    fn render_add_notes_for_stderr_pins_legacy_wording() {
+    fn add_warn_notes_render_canonical_bracketed_form() {
         let notes = vec![
-            PreviewNote::Info("should be ignored".into()),
+            PreviewNote::Info("Nothing to do -- disk2 already in pool.".into()),
             PreviewNote::Warn(format_add_missing_devices_warning(1)),
             PreviewNote::Warn(format_add_keyfile_asymmetry_warning()),
             PreviewNote::PerDisk {
                 name: "diskX".into(),
                 level: crate::preview::NoteLevel::Skip,
-                message: "should be ignored".into(),
+                message: "not present".into(),
             },
         ];
-        let rendered = render_add_notes_for_stderr(&notes);
+        let rendered =
+            preview::render_notes_for_stderr(&notes, AddPlan::STDERR_STYLE);
         let expected = concat!(
-            "warning: pool has 1 missing device. Consider repairing with",
+            "Nothing to do -- disk2 already in pool.\n",
+            "[warn]  pool has 1 missing device. Consider repairing with",
             " `braid replace --missing-id <devid>` first.",
             " Use `braid status` to see device IDs.\n",
-            "WARNING: Existing pool drives have a keyfile (keyslot-1) for auto-unlock,",
+            "[warn]  Existing pool drives have a keyfile (keyslot-1) for auto-unlock,",
             " but the new drive will not.\n",
             "  Passphrase unlock still works, but the keyfile won't unlock the new drive",
             " until it's enrolled.\n",
             "  Fix: re-run with --enroll <dir>, or run `braid enroll <dir>` afterward.\n",
             "\n",
+            "[skip]  disk: diskX     not present\n",
         );
         assert_eq!(rendered, expected);
 
-        // Empty notes = empty string (no `[warn]  ` fallback, no stray newlines).
-        assert_eq!(render_add_notes_for_stderr(&[]), "");
-
-        // Plural-form missing-devices body routes through the same branch.
-        let plural = vec![PreviewNote::Warn(format_add_missing_devices_warning(2))];
-        assert_eq!(
-            render_add_notes_for_stderr(&plural),
-            "warning: pool has 2 missing devices. Consider repairing with \
-             `braid replace --missing-id <devid>` first. Use `braid status` \
-             to see device IDs.\n",
+        // Legacy prefixes MUST NOT appear anywhere in the canonical
+        // render -- this is the intentional behavior change for `add`.
+        assert!(
+            !rendered.contains("warning:"),
+            "legacy `warning:` prefix must be gone from add's render;\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("WARNING:"),
+            "legacy `WARNING:` prefix must be gone from add's render;\n{rendered}"
         );
     }
 
