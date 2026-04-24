@@ -118,6 +118,11 @@
               braid = linuxCrane.braid;
             }
           );
+          braid-add-warnings = pkgs.testers.nixosTest (
+            import ./tests/cli/braid-add-warnings.nix {
+              braid = linuxCrane.braid;
+            }
+          );
           braid-browse = pkgs.testers.nixosTest (
             import ./tests/cli/braid-browse.nix {
               braid = linuxCrane.braid;

@@ -1,5 +1,5 @@
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, Step};
-use crate::config::{config_read, mapper_name};
+use crate::config::{config_read, mapper_name, Config};
 use crate::confirm;
 use crate::inhibit::AcquireSleepInhibitor;
 use crate::journal;
@@ -15,6 +15,7 @@ use crate::pool::{
     pool_add_device, pool_balance_raid1, pool_bootstrap_mount, pool_bootstrap_mount_raid1,
 };
 use crate::preflight;
+use crate::preview::{self, PerDiskStyle, Preview, PreviewCompleteness, PreviewNote};
 use crate::probe::{probe_config_disk, probe_pool, Filesystem, ProbeError};
 use crate::progress::ProgressOutput;
 use crate::state_paths::StatePaths;
@@ -249,31 +250,447 @@ pub struct AddParams<'a> {
     pub passphrase_reader: &'a dyn PassphraseReader,
 }
 
-pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
+/// Returns the missing-devices warning body (no legacy `warning:` prefix).
+/// Dry-run wraps this in `PreviewNote::Warn` so `Preview::render` emits
+/// `[warn]  <body>`; real-run prepends `warning: ` when writing to stderr,
+/// preserving today's wording byte-for-byte.
+fn format_add_missing_devices_warning(missing_count: u64) -> String {
+    format!(
+        "pool has {} missing device{}. \
+         Consider repairing with `braid replace --missing-id <devid>` first. \
+         Use `braid status` to see device IDs.",
+        missing_count,
+        if missing_count == 1 { "" } else { "s" }
+    )
+}
+
+/// Returns the keyfile-asymmetry warning body (no legacy `WARNING:` prefix).
+/// Dry-run wraps this in `PreviewNote::Warn` so `Preview::render` emits
+/// `[warn]  <body>`; real-run prepends `WARNING: ` when writing to stderr,
+/// preserving today's exact 3-line wording (trailing blank line included,
+/// since the body itself ends in `\n`).
+///
+/// Scoped to `add` only in this migration. `replace`'s analogous warning
+/// stays inline in its confirmation path; a follow-up PR may unify the
+/// two UX surfaces explicitly.
+pub fn format_add_keyfile_asymmetry_warning() -> String {
+    "Existing pool drives have a keyfile (keyslot-1) for auto-unlock, \
+     but the new drive will not.\n  \
+     Passphrase unlock still works, but the keyfile won't unlock the new drive \
+     until it's enrolled.\n  \
+     Fix: re-run with --enroll <dir>, or run `braid enroll <dir>` afterward.\n"
+        .to_owned()
+}
+
+/// Returns the no-op "nothing to do" message, without any channel-specific
+/// formatting. Shared by the dry-run `PreviewNote::Info` and the real-run
+/// stderr `eprintln!` so both paths see byte-identical wording.
+pub fn format_add_noop(label: &str) -> String {
+    format!("Nothing to do -- {label} already in pool.")
+}
+
+/// Labels the disk set for no-op / done messages. Single-disk returns the
+/// bare name; multi-disk joins names with `, `.
+fn add_label(names: &[String]) -> String {
+    if names.len() == 1 {
+        names[0].clone()
+    } else {
+        names.join(", ")
+    }
+}
+
+/// Dry-run preview source of truth for `braid add` plus the execute
+/// inputs pre-computed during planning. `notes` + `steps` are both
+/// rendered by `preview()`; `execute()` replays the accumulated notes
+/// to stderr with the legacy `warning: ` / `WARNING: ` prefixes (so
+/// real-run wording stays byte-identical) before any mutation.
+pub struct AddPlan {
+    pub notes: Vec<PreviewNote>,
+    pub steps: Vec<Step>,
+    pub config: Config,
+    pub parsed: Vec<(String, ByIdPath)>,
+    pub names: Vec<String>,
+    pub by_ids: Vec<ByIdPath>,
+    pub probed: Vec<ConfigDisk>,
+    pub pool: PoolState,
+    pub pool_membership: PoolMembership,
+}
+
+/// Report returned by `plan_add`. Shape A: when planning fails after
+/// notes have been accumulated (e.g. a later step rejects after the
+/// missing-devices warning is already in-hand), the notes survive on
+/// `report.notes` so the caller can render them to stderr before the
+/// error. On the `Ok` branch, all accumulated notes have been moved into
+/// `plan.notes` and `report.notes` is empty.
+pub struct AddPlanReport {
+    pub notes: Vec<PreviewNote>,
+    pub result: Result<AddPlan, AddError>,
+}
+
+impl AddPlan {
+    /// Real-run and failure-path stderr for `add` use `Bracketed` per-disk
+    /// style to match other Shape A commands; note that `add` does not
+    /// produce `PerDisk` notes in PR 7, so this constant exists only to
+    /// satisfy the uniform Shape A contract.
+    pub const STDERR_STYLE: PerDiskStyle = PerDiskStyle::Bracketed;
+
+    pub fn preview(&self) -> Preview {
+        Preview {
+            completeness: PreviewCompleteness::Complete,
+            notes: self.notes.clone(),
+            steps: self.steps.clone(),
+        }
+    }
+
+    pub fn execute<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
+        self,
+        runner: &R,
+        fs: &F,
+        params: &AddParams<'_>,
+    ) -> Result<(), AddError> {
+        // Emit accumulated Warn notes to stderr BEFORE any mutation,
+        // using the legacy `warning:` / `WARNING:` prefixes so existing
+        // stderr wording is byte-identical. The missing-devices warning
+        // is appended before the keyfile-asymmetry warning during
+        // planning; iterating in insertion order preserves that sequence.
+        for note in &self.notes {
+            let PreviewNote::Warn(body) = note else { continue };
+            if body.starts_with("Existing pool drives have a keyfile") {
+                // Keyfile-asymmetry block: body already ends in `\n`
+                // (the legacy format string baked the blank line in),
+                // and eprintln! would add a third newline. Use eprint!
+                // with an explicit literal newline to reproduce the
+                // original trailing blank line byte-for-byte.
+                eprint!("WARNING: {body}\n");
+            } else {
+                // Missing-devices (and any future single-line add
+                // warning). Body carries no trailing newline; eprintln!
+                // supplies the single terminator.
+                eprintln!("warning: {body}");
+            }
+        }
+
+        // No-op early-return: if the plan has zero steps, the only work
+        // is to print the `format_add_noop` Info note that the planner
+        // emitted. Must return BEFORE inhibitor acquisition and BEFORE
+        // journal write, matching today's pre-passphrase no-op return
+        // (pinned by `no_journal_on_noop_add`).
+        if self.steps.is_empty() {
+            let label = add_label(&self.names);
+            eprintln!("{}", format_add_noop(&label));
+            return Ok(());
+        }
+
+        // Confirmation -- show device details for sanity-check
+        if !params.yes {
+            let confirm_disks: Vec<AddConfirmDisk> = self
+                .names
+                .iter()
+                .zip(self.by_ids.iter())
+                .zip(self.probed.iter())
+                .map(|((name, by_id), p)| {
+                    let hw = confirm::query_disk_hw_info(runner, &by_id.0);
+                    AddConfirmDisk {
+                        name: name.as_str(),
+                        by_id: &by_id.0,
+                        hw,
+                        needs_luks_format: matches!(p.state, ConfigDiskState::PresentNotLuks),
+                    }
+                })
+                .collect();
+            eprintln!("{}", format_add_confirm(&confirm_disks));
+            confirm::confirm_yes().map_err(AddError::Validation)?;
+        }
+
+        let any_needs_format = self
+            .probed
+            .iter()
+            .any(|p| matches!(p.state, ConfigDiskState::PresentNotLuks));
+
+        // Confirm the new passphrase iff this add will `luks_format` without
+        // a live keyslot to verify against. Otherwise a typo either (a) gets
+        // caught by the `verify_passphrase` block below against the live pool
+        // member, or (b) lands on a no-format path where subsequent open/
+        // identity validation aborts -- both recoverable. Bootstrap and
+        // fresh-disk-into-unassembled-pool have no such safety net, so a typo
+        // becomes the canonical pool passphrase; see plans/wip for details.
+        let confirm_new = any_needs_format && self.pool.devices.is_empty();
+        let passphrase = read_passphrase_with(
+            params.passphrase_file,
+            params.passphrase_stdin,
+            confirm_new,
+            params.passphrase_reader,
+        )?;
+
+        // Verify passphrase against existing pool member (once)
+        if any_needs_format
+            && let Some(existing) = self.pool.devices.first() {
+                let status_raw = runner.run(&crate::cmd::CmdRequest::CryptsetupStatus {
+                    mapper: existing.mapper.0.clone(),
+                })?;
+                let status = crate::parse::parse_cryptsetup_status(&status_raw)?;
+                if let Some(underlying) = status.device {
+                    match verify_passphrase(runner, &underlying, &passphrase)? {
+                        VerifyOutcome::Authenticated => {}
+                        VerifyOutcome::Rejected => {
+                            return Err(AddError::Validation(
+                                "passphrase does not match existing pool member. All disks must use the same passphrase."
+                                    .into(),
+                            ));
+                        }
+                    }
+                }
+            }
+
+        // Pass 1: validate PresentLuks disk identities before any irreversible operation.
+        // Guard closes any mappers we opened for FSID verification if validation fails.
+        let mut luks_guard = LuksCleanupGuard::new(runner);
+        let mut needs_pool_add: Vec<usize> = Vec::new();
+
+        for (i, p) in self.probed.iter().enumerate() {
+            let ConfigDiskState::PresentLuks { mapper_open, .. } = &p.state else {
+                continue;
+            };
+            let name = self.names[i].as_str();
+            let by_id = &self.by_ids[i];
+            let mn = mapper_name(name);
+
+            validate_braid_preconditions(runner, name, &by_id.0, &self.pool)?;
+
+            // Open mapper if closed (now we know it's braid-labeled + pool is up)
+            if !mapper_open {
+                ensure_luks_open(runner, fs, name, by_id, &passphrase)?;
+                luks_guard.track(mn.0.clone());
+                eprintln!("LUKS opened: {} → {}", by_id, mn);
+            }
+
+            let identity = classify_braid_disk_fsid(runner, name, &mn, &self.pool)?;
+            if let Some(err) = identity_to_error(&identity, name) {
+                return Err(err);
+            }
+            match identity {
+                AddLuksIdentity::BraidLabeledAlreadyInPool => continue,
+                AddLuksIdentity::BraidLabeledRecoverable => {
+                    eprintln!(
+                        "note: braid-labeled disk '{}' verified as pool member. \
+                         Completing recovery add.",
+                        name
+                    );
+                    needs_pool_add.push(i);
+                }
+                _ => unreachable!("error variants handled by identity_to_error above"),
+            }
+        }
+
+        let has_fresh_disks = self
+            .probed
+            .iter()
+            .any(|p| matches!(p.state, ConfigDiskState::PresentNotLuks));
+
+        if !has_fresh_disks && needs_pool_add.is_empty() {
+            luks_guard.disarm();
+            let label = add_label(&self.names);
+            eprintln!("{}", format_add_noop(&label));
+            return Ok(());
+        }
+
+        // Hold a logind sleep inhibitor for the rest of the add operation --
+        // covers Pass-2 LUKS format/open of fresh disks, the bootstrap-or-add
+        // pool phase, and the conditional pool_balance_raid1 that converts
+        // single-profile data to RAID1 when the post-add pool has >=2 devices.
+        // The balance is the long-running phase; suspending mid-balance
+        // interrupts the conversion and leaves new data unprotected.
+        //
+        // Acquired here, AFTER all interactive/reversible work (confirmation,
+        // passphrase read+verify, PresentLuks identity checks) and BEFORE
+        // journal::write_journal, so that:
+        //   - operator-idle prompts do not block suspend
+        //   - a logind failure aborts cleanly without stranding pending-op.json
+        //     and forcing the user into recovery mode for an environmental error.
+        let _sleep_inhibitor_guard = params
+            .sleep_inhibitor
+            .acquire("adding disk(s) to pool")
+            .map_err(|e| {
+                AddError::Validation(format!(
+                    "could not acquire sleep inhibitor (is logind running?): {e}"
+                ))
+            })?;
+
+        // All identity checks passed. Write journal before irreversible disk operations.
+        let mut target_membership = self.pool_membership.clone();
+        for (name, by_id) in &self.parsed {
+            target_membership.disks.insert(
+                name.clone(),
+                membership::DiskMember::from_by_id(by_id.clone()),
+            );
+        }
+        let journal = journal::build_journal(
+            self.pool_membership.clone(),
+            target_membership,
+            journal::OpKind::Add {
+                disks: self.parsed.iter().map(|(n, b)| (n.clone(), b.clone())).collect(),
+            },
+        );
+        journal::write_journal(params.paths, &journal)
+            .map_err(|e| AddError::Validation(e.to_string()))?;
+
+        // Pass 2: execute irreversible operations for PresentNotLuks disks.
+        for (i, p) in self.probed.iter().enumerate() {
+            if !matches!(p.state, ConfigDiskState::PresentNotLuks) {
+                continue;
+            }
+            let name = self.names[i].as_str();
+            let by_id = &self.by_ids[i];
+            let mn = mapper_name(name);
+
+            let mut luks_opts = luks_opts_from_env();
+            luks_opts.push("--label".into());
+            luks_opts.push(format!("braid-{name}"));
+            luks_format(runner, &by_id.0, &passphrase, &luks_opts)?;
+            eprintln!("LUKS formatted: {}", by_id);
+
+            let backup_path = backup_luks_header(runner, &by_id.0, &mn.0, params.paths)?;
+            eprintln!("LUKS header backed up: {}", backup_path.display());
+
+            ensure_luks_open(runner, fs, name, by_id, &passphrase)?;
+            luks_guard.track(mn.0.clone());
+            eprintln!("LUKS opened: {} → {}", by_id, mn);
+
+            if let Some(kf) = params.enroll_key_file {
+                crate::luks::enroll_key_file(runner, &by_id.0, &passphrase, kf)?;
+                eprintln!("Keyfile enrolled in slot 1: {}", by_id);
+            }
+
+            needs_pool_add.push(i);
+        }
+
+        // Both passes complete -- mappers are committed for pool operations.
+        luks_guard.disarm();
+
+        // Pool phase
+        let mapper_paths: Vec<String> = needs_pool_add
+            .iter()
+            .map(|&i| format!("/dev/mapper/{}", mapper_name(self.names[i].as_str()).0))
+            .collect();
+
+        let mount_point = self.config.mount_point();
+
+        if !self.pool.mounted {
+            if mapper_paths.len() >= 2 {
+                // Bootstrap with mkfs.btrfs RAID1
+                pool_bootstrap_mount_raid1(runner, &mapper_paths, mount_point)?;
+                eprintln!(
+                    "Pool created (RAID1) and mounted at {}",
+                    mount_point
+                );
+            } else {
+                // Single disk bootstrap
+                pool_bootstrap_mount(runner, &mapper_paths[0], mount_point)?;
+                eprintln!("Pool created and mounted at {}", mount_point);
+            }
+        } else {
+            // Add each to existing pool
+            for mp in &mapper_paths {
+                pool_add_device(runner, mp, mount_point)?;
+                eprintln!("Device added to pool: {}", mp);
+            }
+
+            // Balance to RAID1 if total >= 2
+            let total_after = self.pool.devices.len() + mapper_paths.len();
+            if total_after >= 2 {
+                eprintln!("Balancing to RAID1...");
+                pool_balance_raid1(runner, mount_point, params.progress)?;
+                eprintln!("Balance complete.");
+            }
+        }
+
+        // Post-commit persist: write pool.json only after all disk ops succeed.
+        // Enrich with live metadata (luks_uuid, devid) from pool probe.
+        let mut final_membership = journal.target_membership.clone();
+        if let Ok(pool_after) = probe_pool(runner, mount_point) {
+            for dev in &pool_after.devices {
+                let Some(name) = crate::config::name_from_mapper(&dev.mapper.0) else {
+                    continue;
+                };
+                if let Some(member) = final_membership.disks.get_mut(name) {
+                    member.luks_uuid = Some(dev.luks_uuid.clone());
+                    member.devid = Some(dev.devid);
+                    if member.added_at.is_none() {
+                        member.added_at = Some(crate::util::now_iso());
+                    }
+                }
+            }
+        }
+        // Order matters: save_membership before clear_journal. If save_membership
+        // fails (disk full, permissions), the journal survives and braid recover can
+        // reconstruct pool.json from the live pool. The reverse order (clear first,
+        // then save fails) would leave no recovery path.
+        membership::save_membership(&final_membership, params.paths)?;
+        journal::clear_journal(params.paths).map_err(|e| AddError::Validation(e.to_string()))?;
+
+        let label = if self.names.len() == 1 {
+            format!("{} is", self.names[0])
+        } else {
+            format!("{} are", self.names.join(", "))
+        };
+        eprintln!("Done. {} now part of the pool.", label);
+        Ok(())
+    }
+}
+
+/// Plan a `braid add` run. Owns everything above today's `--dry-run` gate:
+/// pending-op preflight, config read, disk-spec parsing, duplicate-name /
+/// duplicate-by-id validation, membership load, conflict validation,
+/// per-disk probe, pool probe, mutation preflight, UPS preflight, the
+/// missing-devices warning, the keyfile-asymmetry warning, and
+/// `compile_add_steps_multi`. On success, every accumulated note lives on
+/// `plan.notes`; on failure after note accumulation, notes survive on
+/// `report.notes` so `cmd_add` can render them to stderr before the error.
+pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
     params: &AddParams<'_>,
-) -> Result<(), AddError> {
-    preflight::check_no_pending_operation(params.paths).map_err(AddError::Validation)?;
+) -> AddPlanReport {
+    // Accumulator for preview-context notes that must survive a later
+    // planner error (Shape A "notes-carrying report" contract). Notes
+    // added here travel to `report.notes` on the Err branch and move
+    // into `plan.notes` on the Ok branch.
+    let mut notes: Vec<PreviewNote> = Vec::new();
 
-    let config = config_read(params.config_path)?;
+    let err_empty = |e: AddError| AddPlanReport {
+        notes: Vec::new(),
+        result: Err(e),
+    };
+
+    if let Err(msg) = preflight::check_no_pending_operation(params.paths) {
+        return err_empty(AddError::Validation(msg));
+    }
+
+    let config = match config_read(params.config_path) {
+        Ok(c) => c,
+        Err(e) => return err_empty(e.into()),
+    };
 
     // Parse disk specs: name=by_id
-    let parsed: Vec<(String, ByIdPath)> = params
+    let parsed: Vec<(String, ByIdPath)> = match params
         .disk_specs
         .iter()
         .map(|s| membership::parse_disk_spec(s))
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(v) => v,
+        Err(e) => return err_empty(e.into()),
+    };
 
-    let names: Vec<&str> = parsed.iter().map(|(n, _)| n.as_str()).collect();
-    let by_ids: Vec<&ByIdPath> = parsed.iter().map(|(_, b)| b).collect();
+    let names: Vec<String> = parsed.iter().map(|(n, _)| n.clone()).collect();
+    let by_ids: Vec<ByIdPath> = parsed.iter().map(|(_, b)| b.clone()).collect();
 
     // Reject duplicate names upfront
     {
         let mut seen = std::collections::HashSet::new();
         for name in &names {
-            if !seen.insert(*name) {
-                return Err(AddError::Validation(format!(
+            if !seen.insert(name.as_str()) {
+                return err_empty(AddError::Validation(format!(
                     "duplicate disk name: '{name}'"
                 )));
             }
@@ -289,7 +706,7 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         let mut seen = std::collections::HashSet::new();
         for by_id in &by_ids {
             if !seen.insert(by_id.0.as_str()) {
-                return Err(AddError::Validation(format!(
+                return err_empty(AddError::Validation(format!(
                     "duplicate by_id: '{}'",
                     by_id.0
                 )));
@@ -301,24 +718,30 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     let pool_membership = match membership::load_membership(params.paths) {
         Ok(m) => m,
         Err(membership::MembershipError::NotFound(_)) => PoolMembership::empty(),
-        Err(e) => return Err(e.into()),
+        Err(e) => return err_empty(e.into()),
     };
 
     // Validate no conflicts
     for (name, by_id) in &parsed {
-        membership::validate_no_conflicts(&pool_membership, name, &by_id.0)?;
+        if let Err(e) = membership::validate_no_conflicts(&pool_membership, name, &by_id.0) {
+            return err_empty(e.into());
+        }
     }
 
-    // Probe all disks — fail early if any absent
-    let probed: Vec<ConfigDisk> = names
+    // Probe all disks -- fail early if any absent
+    let probed: Vec<ConfigDisk> = match names
         .iter()
         .zip(by_ids.iter())
-        .map(|(name, by_id)| probe_config_disk(runner, fs, name, by_id))
-        .collect::<Result<Vec<_>, _>>()?;
+        .map(|(name, by_id)| probe_config_disk(runner, fs, name.as_str(), by_id))
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(v) => v,
+        Err(e) => return err_empty(e.into()),
+    };
 
     for (i, p) in probed.iter().enumerate() {
         if matches!(p.state, ConfigDiskState::Absent) {
-            return Err(AddError::Validation(format!(
+            return err_empty(AddError::Validation(format!(
                 "disk '{}' ({}) is not present. Is it plugged in?",
                 names[i], by_ids[i]
             )));
@@ -329,326 +752,134 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     let pool = match probe_pool(runner, config.mount_point()) {
         Ok(p) => p,
         Err(ProbeError::NotBtrfs { fstype, .. }) => {
-            return Err(AddError::Validation(format!(
+            return err_empty(AddError::Validation(format!(
                 "{} is already mounted with {fstype}, not btrfs. Unmount it first.",
                 config.mount_point()
             )));
         }
-        Err(e) => return Err(AddError::Probe(e)),
+        Err(e) => return err_empty(AddError::Probe(e)),
     };
 
     if pool.mounted {
         let fsid = pool.fsid.as_deref().expect("mounted pool must have FSID");
-        preflight::require_mutation_preflight(runner, fs, fsid, config.mount_point())
-            .map_err(AddError::Validation)?;
+        if let Err(msg) =
+            preflight::require_mutation_preflight(runner, fs, fsid, config.mount_point())
+        {
+            return err_empty(AddError::Validation(msg));
+        }
     }
-    preflight::check_ups_not_on_battery(runner, config.ups().map(|u| u.name.as_str()), "add")
-        .map_err(AddError::Validation)?;
+    if let Err(msg) =
+        preflight::check_ups_not_on_battery(runner, config.ups().map(|u| u.name.as_str()), "add")
+    {
+        return err_empty(AddError::Validation(msg));
+    }
+
+    // Missing-devices warning: body-only, no legacy `warning:` prefix.
+    // Lives on `notes` so it surfaces on both dry-run stdout (via
+    // `Preview::render`) and real-run stderr (via `AddPlan::execute`
+    // replay with the `warning: ` prefix re-added).
     if pool.missing_count > 0 {
-        eprintln!(
-            "warning: pool has {} missing device{}. \
-             Consider repairing with `braid replace --missing-id <devid>` first. \
-             Use `braid status` to see device IDs.",
+        notes.push(PreviewNote::Warn(format_add_missing_devices_warning(
             pool.missing_count,
-            if pool.missing_count == 1 { "" } else { "s" }
-        );
+        )));
     }
 
     let any_needs_format = probed
         .iter()
         .any(|p| matches!(p.state, ConfigDiskState::PresentNotLuks));
 
+    // Keyfile-asymmetry warning: body-only, no legacy `WARNING:` prefix.
+    // Appended after the missing-devices warning so `AddPlan::execute`
+    // replays them in that order on stderr.
     if any_needs_format
         && params.enroll_key_file.is_none()
         && pool_has_keyfile_enrollment(runner, &pool.devices)
     {
-        eprintln!(
-            "WARNING: Existing pool drives have a keyfile (keyslot-1) for auto-unlock, \
-             but the new drive will not.\n  \
-             Passphrase unlock still works, but the keyfile won't unlock the new drive \
-             until it's enrolled.\n  \
-             Fix: re-run with --enroll <dir>, or run `braid enroll <dir>` afterward.\n"
-        );
+        notes.push(PreviewNote::Warn(format_add_keyfile_asymmetry_warning()));
     }
 
-    // Compile steps for dry-run display
-    let steps = compile_add_steps_multi(
+    // Compile steps. This can fail on PresentLuks identity / foreign-pool
+    // guards -- any accumulated notes up to here (missing-devices,
+    // keyfile-asymmetry) must survive on `report.notes` so the caller can
+    // render them to stderr before the error.
+    let names_refs: Vec<&str> = names.iter().map(String::as_str).collect();
+    let by_ids_refs: Vec<&ByIdPath> = by_ids.iter().collect();
+    let steps = match compile_add_steps_multi(
         runner,
         &AddStepsInput {
-            names: &names,
-            by_ids: &by_ids,
+            names: &names_refs,
+            by_ids: &by_ids_refs,
             probed: &probed,
             pool: &pool,
             mount_point: config.mount_point(),
             paths: params.paths,
             enroll_key_file: params.enroll_key_file,
         },
-    )?;
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            return AddPlanReport {
+                notes,
+                result: Err(e),
+            };
+        }
+    };
+
+    // No-op preview: zero steps + Info note naming the already-in-pool
+    // target(s). The Info note suppresses `Preview::render`'s
+    // `nothing to do.` fallback (see `preview.rs`:
+    // `render_info_note_suppresses_nothing_to_do`), matching real-run's
+    // `eprintln!("Nothing to do -- ...")` wording via the shared
+    // `format_add_noop` helper.
+    if steps.is_empty() {
+        notes.push(PreviewNote::Info(format_add_noop(&add_label(&names))));
+    }
+
+    let plan = AddPlan {
+        notes,
+        steps,
+        config,
+        parsed,
+        names,
+        by_ids,
+        probed,
+        pool,
+        pool_membership,
+    };
+
+    AddPlanReport {
+        notes: Vec::new(),
+        result: Ok(plan),
+    }
+}
+
+pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
+    runner: &R,
+    fs: &F,
+    params: &AddParams<'_>,
+) -> Result<(), AddError> {
+    let report = plan_add(runner, fs, params);
+    let plan = match report.result {
+        Ok(p) => p,
+        Err(e) => {
+            // Preserved-context failure: accumulated notes render to
+            // stderr before the error, so the user sees the planning
+            // context (e.g. the missing-devices warning) that preceded
+            // the later refusal.
+            eprint!(
+                "{}",
+                preview::render_notes_for_stderr(&report.notes, AddPlan::STDERR_STYLE),
+            );
+            return Err(e);
+        }
+    };
 
     if params.dry_run {
-        Step::print_dry_run(&steps);
+        plan.preview().print();
         return Ok(());
     }
 
-    if steps.is_empty() {
-        let label = if names.len() == 1 {
-            names[0].to_owned()
-        } else {
-            names.to_vec().join(", ")
-        };
-        eprintln!("Nothing to do -- {} already in pool.", label);
-        return Ok(());
-    }
-
-    // Confirmation — show device details for sanity-check
-    if !params.yes {
-        let confirm_disks: Vec<AddConfirmDisk> = names
-            .iter()
-            .zip(by_ids.iter())
-            .zip(probed.iter())
-            .map(|((name, by_id), p)| {
-                let hw = confirm::query_disk_hw_info(runner, &by_id.0);
-                AddConfirmDisk {
-                    name,
-                    by_id: &by_id.0,
-                    hw,
-                    needs_luks_format: matches!(p.state, ConfigDiskState::PresentNotLuks),
-                }
-            })
-            .collect();
-        eprintln!("{}", format_add_confirm(&confirm_disks));
-        confirm::confirm_yes().map_err(AddError::Validation)?;
-    }
-
-    // Confirm the new passphrase iff this add will `luks_format` without
-    // a live keyslot to verify against. Otherwise a typo either (a) gets
-    // caught by the `verify_passphrase` block below against the live pool
-    // member, or (b) lands on a no-format path where subsequent open/
-    // identity validation aborts -- both recoverable. Bootstrap and
-    // fresh-disk-into-unassembled-pool have no such safety net, so a typo
-    // becomes the canonical pool passphrase; see plans/wip for details.
-    let confirm_new = any_needs_format && pool.devices.is_empty();
-    let passphrase = read_passphrase_with(
-        params.passphrase_file,
-        params.passphrase_stdin,
-        confirm_new,
-        params.passphrase_reader,
-    )?;
-
-    // Verify passphrase against existing pool member (once)
-    if any_needs_format
-        && let Some(existing) = pool.devices.first() {
-            let status_raw = runner.run(&crate::cmd::CmdRequest::CryptsetupStatus {
-                mapper: existing.mapper.0.clone(),
-            })?;
-            let status = crate::parse::parse_cryptsetup_status(&status_raw)?;
-            if let Some(underlying) = status.device {
-                match verify_passphrase(runner, &underlying, &passphrase)? {
-                    VerifyOutcome::Authenticated => {}
-                    VerifyOutcome::Rejected => {
-                        return Err(AddError::Validation(
-                            "passphrase does not match existing pool member. All disks must use the same passphrase."
-                                .into(),
-                        ));
-                    }
-                }
-            }
-        }
-
-    // Pass 1: validate PresentLuks disk identities before any irreversible operation.
-    // Guard closes any mappers we opened for FSID verification if validation fails.
-    let mut luks_guard = LuksCleanupGuard::new(runner);
-    let mut needs_pool_add: Vec<usize> = Vec::new();
-
-    for (i, p) in probed.iter().enumerate() {
-        let ConfigDiskState::PresentLuks { mapper_open, .. } = &p.state else {
-            continue;
-        };
-        let name = names[i];
-        let by_id = by_ids[i];
-        let mn = mapper_name(name);
-
-        validate_braid_preconditions(runner, name, &by_id.0, &pool)?;
-
-        // Open mapper if closed (now we know it's braid-labeled + pool is up)
-        if !mapper_open {
-            ensure_luks_open(runner, fs, name, by_id, &passphrase)?;
-            luks_guard.track(mn.0.clone());
-            eprintln!("LUKS opened: {} → {}", by_id, mn);
-        }
-
-        let identity = classify_braid_disk_fsid(runner, name, &mn, &pool)?;
-        if let Some(err) = identity_to_error(&identity, name) {
-            return Err(err);
-        }
-        match identity {
-            AddLuksIdentity::BraidLabeledAlreadyInPool => continue,
-            AddLuksIdentity::BraidLabeledRecoverable => {
-                eprintln!(
-                    "note: braid-labeled disk '{}' verified as pool member. \
-                     Completing recovery add.",
-                    name
-                );
-                needs_pool_add.push(i);
-            }
-            _ => unreachable!("error variants handled by identity_to_error above"),
-        }
-    }
-
-    let has_fresh_disks = probed
-        .iter()
-        .any(|p| matches!(p.state, ConfigDiskState::PresentNotLuks));
-
-    if !has_fresh_disks && needs_pool_add.is_empty() {
-        luks_guard.disarm();
-        let label = if names.len() == 1 {
-            names[0].to_owned()
-        } else {
-            names.to_vec().join(", ")
-        };
-        eprintln!("Nothing to do -- {} already in pool.", label);
-        return Ok(());
-    }
-
-    // Hold a logind sleep inhibitor for the rest of the add operation —
-    // covers Pass-2 LUKS format/open of fresh disks, the bootstrap-or-add
-    // pool phase, and the conditional pool_balance_raid1 that converts
-    // single-profile data to RAID1 when the post-add pool has ≥2 devices.
-    // The balance is the long-running phase; suspending mid-balance
-    // interrupts the conversion and leaves new data unprotected.
-    //
-    // Acquired here, AFTER all interactive/reversible work (confirmation,
-    // passphrase read+verify, PresentLuks identity checks) and BEFORE
-    // journal::write_journal, so that:
-    //   - operator-idle prompts do not block suspend
-    //   - a logind failure aborts cleanly without stranding pending-op.json
-    //     and forcing the user into recovery mode for an environmental error.
-    let _sleep_inhibitor_guard = params
-        .sleep_inhibitor
-        .acquire("adding disk(s) to pool")
-        .map_err(|e| {
-            AddError::Validation(format!(
-                "could not acquire sleep inhibitor (is logind running?): {e}"
-            ))
-        })?;
-
-    // All identity checks passed. Write journal before irreversible disk operations.
-    let mut target_membership = pool_membership.clone();
-    for (name, by_id) in &parsed {
-        target_membership.disks.insert(
-            name.clone(),
-            membership::DiskMember::from_by_id(by_id.clone()),
-        );
-    }
-    let journal = journal::build_journal(
-        pool_membership.clone(),
-        target_membership,
-        journal::OpKind::Add {
-            disks: parsed.iter().map(|(n, b)| (n.clone(), b.clone())).collect(),
-        },
-    );
-    journal::write_journal(params.paths, &journal)
-        .map_err(|e| AddError::Validation(e.to_string()))?;
-
-    // Pass 2: execute irreversible operations for PresentNotLuks disks.
-    for (i, p) in probed.iter().enumerate() {
-        if !matches!(p.state, ConfigDiskState::PresentNotLuks) {
-            continue;
-        }
-        let name = names[i];
-        let by_id = by_ids[i];
-        let mn = mapper_name(name);
-
-        let mut luks_opts = luks_opts_from_env();
-        luks_opts.push("--label".into());
-        luks_opts.push(format!("braid-{name}"));
-        luks_format(runner, &by_id.0, &passphrase, &luks_opts)?;
-        eprintln!("LUKS formatted: {}", by_id);
-
-        let backup_path = backup_luks_header(runner, &by_id.0, &mn.0, params.paths)?;
-        eprintln!("LUKS header backed up: {}", backup_path.display());
-
-        ensure_luks_open(runner, fs, name, by_id, &passphrase)?;
-        luks_guard.track(mn.0.clone());
-        eprintln!("LUKS opened: {} → {}", by_id, mn);
-
-        if let Some(kf) = params.enroll_key_file {
-            crate::luks::enroll_key_file(runner, &by_id.0, &passphrase, kf)?;
-            eprintln!("Keyfile enrolled in slot 1: {}", by_id);
-        }
-
-        needs_pool_add.push(i);
-    }
-
-    // Both passes complete — mappers are committed for pool operations.
-    luks_guard.disarm();
-
-    // Pool phase
-    let mapper_paths: Vec<String> = needs_pool_add
-        .iter()
-        .map(|&i| format!("/dev/mapper/{}", mapper_name(names[i]).0))
-        .collect();
-
-    if !pool.mounted {
-        if mapper_paths.len() >= 2 {
-            // Bootstrap with mkfs.btrfs RAID1
-            pool_bootstrap_mount_raid1(runner, &mapper_paths, config.mount_point())?;
-            eprintln!(
-                "Pool created (RAID1) and mounted at {}",
-                config.mount_point()
-            );
-        } else {
-            // Single disk bootstrap
-            pool_bootstrap_mount(runner, &mapper_paths[0], config.mount_point())?;
-            eprintln!("Pool created and mounted at {}", config.mount_point());
-        }
-    } else {
-        // Add each to existing pool
-        for mp in &mapper_paths {
-            pool_add_device(runner, mp, config.mount_point())?;
-            eprintln!("Device added to pool: {}", mp);
-        }
-
-        // Balance to RAID1 if total >= 2
-        let total_after = pool.devices.len() + mapper_paths.len();
-        if total_after >= 2 {
-            eprintln!("Balancing to RAID1...");
-            pool_balance_raid1(runner, config.mount_point(), params.progress)?;
-            eprintln!("Balance complete.");
-        }
-    }
-
-    // Post-commit persist: write pool.json only after all disk ops succeed.
-    // Enrich with live metadata (luks_uuid, devid) from pool probe.
-    let mut final_membership = journal.target_membership.clone();
-    if let Ok(pool_after) = probe_pool(runner, config.mount_point()) {
-        for dev in &pool_after.devices {
-            let Some(name) = crate::config::name_from_mapper(&dev.mapper.0) else {
-                continue;
-            };
-            if let Some(member) = final_membership.disks.get_mut(name) {
-                member.luks_uuid = Some(dev.luks_uuid.clone());
-                member.devid = Some(dev.devid);
-                if member.added_at.is_none() {
-                    member.added_at = Some(crate::util::now_iso());
-                }
-            }
-        }
-    }
-    // Order matters: save_membership before clear_journal. If save_membership
-    // fails (disk full, permissions), the journal survives and braid recover can
-    // reconstruct pool.json from the live pool. The reverse order (clear first,
-    // then save fails) would leave no recovery path.
-    membership::save_membership(&final_membership, params.paths)?;
-    journal::clear_journal(params.paths).map_err(|e| AddError::Validation(e.to_string()))?;
-
-    let label = if names.len() == 1 {
-        format!("{} is", names[0])
-    } else {
-        format!("{} are", names.join(", "))
-    };
-    eprintln!("Done. {} now part of the pool.", label);
-    Ok(())
+    plan.execute(runner, fs, params)
 }
 
 struct AddStepsInput<'a> {
@@ -2754,5 +2985,548 @@ mod tests {
             1,
             "exactly one prompt must have been read (SENTINEL remains)"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // PR 7: plan_add / AddPlan boundary tests (Preview migration)
+    // -----------------------------------------------------------------------
+    //
+    // These tests pin the new Preview-model wiring for `braid add`:
+    //   - pre-plan warnings become PreviewNote::Warn on plan.notes
+    //   - already-in-pool is a note-only success (Info + zero steps)
+    //   - dry-run render passes through plan.preview().render()
+    //   - preserved-context failure carries accumulated notes on
+    //     report.notes when planning bails later
+    //
+    // Fixtures reuse add_test_setup/AddMockFs and a bespoke runner that
+    // can toggle `missing_count` on the pool probe.
+
+    /// Runner for plan_add boundary tests. Same stubs as AddTestRunner
+    /// but exposes a `missing_count` knob that synthesizes `Total devices
+    /// N` with `N - 1` real devid rows plus `N - 1` path-MISSING rows,
+    /// driving probe_pool's missing-device arithmetic (`show.total_devices
+    /// - devices.len()`).
+    ///
+    /// `pool_has_keyfile_enrollment` looks at the existing pool member's
+    /// underlying device via CryptsetupLuksDump json (keyslot-1 present).
+    /// Tests that want the keyfile-asymmetry warning flip
+    /// `pool_has_keyfile` on.
+    struct AddPlanTestRunner {
+        missing_count: u64,
+        pool_has_keyfile: bool,
+    }
+
+    impl AddPlanTestRunner {
+        fn new() -> Self {
+            Self {
+                missing_count: 0,
+                pool_has_keyfile: false,
+            }
+        }
+
+        fn with_missing(mut self, n: u64) -> Self {
+            self.missing_count = n;
+            self
+        }
+
+        fn with_keyfile(mut self) -> Self {
+            self.pool_has_keyfile = true;
+            self
+        }
+    }
+
+    impl CommandRunner for AddPlanTestRunner {
+        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
+            match request {
+                CmdRequest::FindmntJson { mount_point } => Ok(mock_ok(
+                    &format!("findmnt --json --mountpoint {mount_point}"),
+                    r#"{"filesystems":[{"target":"/mnt/storage","source":"/dev/mapper/braid-disk1","fstype":"btrfs"}]}"#,
+                )),
+                CmdRequest::BtrfsFilesystemShow { mount_point } => {
+                    // total = 1 real device (disk1) + missing_count placeholders.
+                    let total = 1 + self.missing_count;
+                    let mut out = format!(
+                        "Label: none  uuid: {POOL_FSID}\n\
+                         \tTotal devices {total} FS bytes used 16.17MiB\n\
+                         \tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n"
+                    );
+                    for i in 0..self.missing_count {
+                        let devid = 2 + i;
+                        out.push_str(&format!(
+                            "\tdevid    {devid} size 0 used 0 path MISSING\n"
+                        ));
+                    }
+                    Ok(mock_ok(
+                        &format!("btrfs filesystem show {mount_point}"),
+                        &out,
+                    ))
+                }
+                CmdRequest::CryptsetupStatus { mapper } if mapper == "braid-disk1" => {
+                    Ok(mock_ok(
+                        &format!("cryptsetup status {mapper}"),
+                        &format!(
+                            "{mapper} is active and is in use.\n  \
+                             type:    LUKS2\n  device:  /dev/vdb\n  mode:    read/write\n"
+                        ),
+                    ))
+                }
+                CmdRequest::CryptsetupLuksUuid { device } => {
+                    // disk1 underlying resolves to a real UUID; new fresh
+                    // disks under test are PresentNotLuks -- luksUUID fails.
+                    if device == "/dev/vdb" || device == "/dev/disk/by-id/virtio-disk1" {
+                        Ok(mock_ok(
+                            &format!("cryptsetup luksUUID {device}"),
+                            "11111111-1111-1111-1111-111111111111\n",
+                        ))
+                    } else {
+                        Ok(RawCommandOutput {
+                            cmd: format!("cryptsetup luksUUID {device}"),
+                            stdout: String::new(),
+                            stderr: "Device is not a valid LUKS device.\n".into(),
+                            exit_status: 1,
+                        })
+                    }
+                }
+                CmdRequest::BtrfsBalanceStatus { .. } => Ok(mock_ok(
+                    "btrfs balance status",
+                    "No balance found on '/mnt/storage'\n",
+                )),
+                CmdRequest::CryptsetupLuksDump { .. } => {
+                    // Controls pool_has_keyfile_enrollment -> check_key_slot.
+                    // keyslot-1 present = pool has a keyfile.
+                    let keyslots = if self.pool_has_keyfile {
+                        r#""0":{"type":"luks2"},"1":{"type":"luks2"}"#
+                    } else {
+                        r#""0":{"type":"luks2"}"#
+                    };
+                    Ok(mock_ok(
+                        "cryptsetup luksDump --dump-json-metadata",
+                        &format!(r#"{{"keyslots":{{{keyslots}}}}}"#),
+                    ))
+                }
+                _ => Err(CmdError::MissingMock),
+            }
+        }
+
+        fn run_with_stdin(
+            &self,
+            request: &CmdRequest,
+            _stdin: &[u8],
+        ) -> Result<RawCommandOutput, CmdError> {
+            self.run(request)
+        }
+    }
+
+    /// Build a fresh-disk AddParams pointing `disk2` at a PresentNotLuks
+    /// fixture. The caller supplies the runner; this helper owns the
+    /// config, paths, and inhibitor lifetimes so each test stays small.
+    struct PlanAddFixture {
+        _state_tmp: tempfile::TempDir,
+        paths: StatePaths,
+        _tmp: tempfile::TempDir,
+        config_path: std::path::PathBuf,
+        pass_path: std::path::PathBuf,
+        inhibitor: crate::inhibit::RecordingInhibitor,
+    }
+
+    fn plan_add_fixture() -> PlanAddFixture {
+        let (state_tmp, paths, tmp, config_path, pass_path) = add_test_setup();
+        PlanAddFixture {
+            _state_tmp: state_tmp,
+            paths,
+            _tmp: tmp,
+            config_path,
+            pass_path,
+            inhibitor: crate::inhibit::RecordingInhibitor::new(),
+        }
+    }
+
+    impl PlanAddFixture {
+        fn params<'a>(
+            &'a self,
+            disk_specs: &'a [String],
+            dry_run: bool,
+        ) -> AddParams<'a> {
+            AddParams {
+                config_path: &self.config_path,
+                disk_specs,
+                dry_run,
+                yes: true,
+                passphrase_stdin: false,
+                passphrase_file: Some(self.pass_path.as_path()),
+                enroll_key_file: None,
+                progress: ProgressOutput::Off,
+                paths: &self.paths,
+                sleep_inhibitor: &self.inhibitor,
+                passphrase_reader: &RpasswordTty,
+            }
+        }
+    }
+
+    /* Intent: plan_add surfaces a pool's missing devices as a single
+     * PreviewNote::Warn whose body is exactly the output of
+     * format_add_missing_devices_warning, with no legacy `warning:` prefix.
+     * Why it exists: PR 7 moves the missing-devices diagnostic from a
+     * direct stderr eprintln! into plan.notes. The renderer owns the
+     * `[warn]  ` / `warning: ` wrapping; a regression that leaks the
+     * legacy prefix into the body would double up as `[warn]  warning:
+     * pool has...` on dry-run stdout.
+     * Scenario: 1 real device + 1 MISSING placeholder, operator tries to
+     * add a fresh disk2.
+     */
+    #[test]
+    fn plan_add_missing_devices_becomes_single_warn_note() {
+        let fixture = plan_add_fixture();
+        let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
+        let runner = AddPlanTestRunner::new().with_missing(1);
+
+        let disk_specs = ["disk2=/dev/disk/by-id/virtio-disk2".to_string()];
+        let report = plan_add(&runner, &fs, &fixture.params(&disk_specs, true));
+        let plan = report
+            .result
+            .expect("plan_add must succeed even with a missing device present");
+
+        let warns: Vec<&String> = plan
+            .notes
+            .iter()
+            .filter_map(|n| match n {
+                PreviewNote::Warn(b) => Some(b),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(warns.len(), 1, "expected exactly one Warn note, got {warns:?}");
+        assert_eq!(warns[0], &format_add_missing_devices_warning(1));
+        assert!(
+            !warns[0].starts_with("warning:"),
+            "warn note body must not carry the legacy `warning:` prefix"
+        );
+    }
+
+    /* Intent: plan_add emits exactly one PreviewNote::Warn with the
+     * keyfile-asymmetry body when the existing pool has keyslot-1 enrolled
+     * but the add omits `--enroll`.
+     * Why it exists: PR 7 routes the legacy WARNING eprintln! through the
+     * shared helper. A regression that left the `WARNING:` prefix baked
+     * into the body would stack as `[warn]  WARNING: ...` on dry-run.
+     * Scenario: 1-disk pool with keyfile on disk1, operator adds a fresh
+     * disk2 without --enroll.
+     */
+    #[test]
+    fn plan_add_keyfile_asymmetry_becomes_warn_note() {
+        let fixture = plan_add_fixture();
+        let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
+        let runner = AddPlanTestRunner::new().with_keyfile();
+
+        let disk_specs = ["disk2=/dev/disk/by-id/virtio-disk2".to_string()];
+        let report = plan_add(&runner, &fs, &fixture.params(&disk_specs, true));
+        let plan = report.result.expect("plan_add should succeed");
+
+        let warns: Vec<&String> = plan
+            .notes
+            .iter()
+            .filter_map(|n| match n {
+                PreviewNote::Warn(b) => Some(b),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            warns.len(),
+            1,
+            "expected exactly one keyfile-asymmetry Warn, got {warns:?}"
+        );
+        assert_eq!(warns[0], &format_add_keyfile_asymmetry_warning());
+        assert!(
+            !warns[0].starts_with("WARNING:"),
+            "warn note body must not carry the legacy `WARNING:` prefix"
+        );
+    }
+
+    /* Intent: when both the missing-devices and keyfile-asymmetry
+     * conditions hold simultaneously, plan.notes carries exactly two Warn
+     * notes in the canonical order: missing-devices FIRST, keyfile
+     * SECOND.
+     * Why it exists: the real-run execute path replays plan.notes in
+     * insertion order to preserve today's eprintln! sequence (missing
+     * first at add.rs:348, keyfile second at :365). Swapping the two
+     * would change the stderr order a user sees.
+     * Scenario: 1 real + 1 MISSING, existing pool has keyslot-1, operator
+     * adds a fresh disk2 without --enroll.
+     */
+    #[test]
+    fn plan_add_warn_notes_preserve_missing_before_keyfile_order() {
+        let fixture = plan_add_fixture();
+        let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
+        let runner = AddPlanTestRunner::new().with_missing(1).with_keyfile();
+
+        let disk_specs = ["disk2=/dev/disk/by-id/virtio-disk2".to_string()];
+        let report = plan_add(&runner, &fs, &fixture.params(&disk_specs, true));
+        let plan = report.result.expect("plan_add should succeed");
+
+        let warns: Vec<&String> = plan
+            .notes
+            .iter()
+            .filter_map(|n| match n {
+                PreviewNote::Warn(b) => Some(b),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(warns.len(), 2, "expected two Warn notes, got {warns:?}");
+        assert_eq!(
+            warns[0],
+            &format_add_missing_devices_warning(1),
+            "missing-devices warning must come first"
+        );
+        assert_eq!(
+            warns[1],
+            &format_add_keyfile_asymmetry_warning(),
+            "keyfile-asymmetry warning must come second"
+        );
+    }
+
+    /* Intent: adding a disk that is already in the pool is a note-only
+     * success: plan.preview().render() outputs exactly the
+     * format_add_noop(label) line, no `nothing to do.` fallback, no step
+     * lines.
+     * Why it exists: PR 7's dry-run contract requires already-in-pool to
+     * become a Preview with zero steps + one Info note. A regression that
+     * dropped the Info note would surface `nothing to do.` (generic
+     * fallback) instead of the specific per-disk message. Complement is
+     * that on the real-run path `no_journal_on_noop_add` still pins the
+     * "no journal, no inhibitor" invariants.
+     * Scenario: disk2 is already a pool member (AddMockFs + disk_in_pool).
+     */
+    #[test]
+    fn plan_add_already_in_pool_is_note_only_success() {
+        let (_state_tmp, paths, _tmp, config_path, pass_path) = add_test_setup();
+        let fs = AddMockFs(vec![
+            "/dev/disk/by-id/virtio-disk2".into(),
+            "/dev/mapper/braid-disk2".into(),
+        ]);
+        let runner = AddTestRunner {
+            disk_in_pool: true,
+            fail_device_add: false,
+            no_btrfs_superblock: false,
+        };
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+
+        let disk_specs = ["disk2=/dev/disk/by-id/virtio-disk2".to_string()];
+        let report = plan_add(
+            &runner,
+            &fs,
+            &AddParams {
+                config_path: &config_path,
+                disk_specs: &disk_specs,
+                dry_run: true,
+                yes: true,
+                passphrase_stdin: false,
+                passphrase_file: Some(pass_path.as_path()),
+                enroll_key_file: None,
+                progress: ProgressOutput::Off,
+                paths: &paths,
+                sleep_inhibitor: &inhibitor,
+                passphrase_reader: &RpasswordTty,
+            },
+        );
+        let plan = report.result.expect("plan_add should succeed for noop");
+        assert!(
+            plan.steps.is_empty(),
+            "note-only success must have zero steps, got: {:?}",
+            plan.steps
+        );
+
+        let rendered = plan.preview().render();
+        let expected = format!("{}\n", format_add_noop("disk2"));
+        assert_eq!(rendered, expected, "exact render must match noop Info line");
+        assert!(
+            !rendered.contains("nothing to do."),
+            "generic `nothing to do.` fallback must NOT appear alongside the Info note"
+        );
+    }
+
+    /* Intent: dry-run render for a fresh single-disk bootstrap goes
+     * through plan_add().preview().render() end-to-end and includes the
+     * LUKS init + mkfs + mount step block with zero accumulated notes on
+     * this clean-bootstrap path.
+     * Why it exists: the previous render test called
+     * Step::render_dry_run(&steps) directly. Moving the assertion to the
+     * plan boundary catches regressions where plan_add forgets to compile
+     * steps, or introduces spurious notes on a fresh bootstrap.
+     * Scenario: empty membership, fresh disk1 probed as PresentNotLuks,
+     * pool unmounted.
+     */
+    #[test]
+    fn plan_add_dry_run_render_fresh_single_disk_bootstrap() {
+        // Fresh state (no pre-seeded membership) so the test exercises
+        // the true bootstrap path.
+        let state_tmp = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(state_tmp.path().into());
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.json");
+        std::fs::write(
+            &config_path,
+            serde_json::to_vec(&serde_json::json!({ "mount_point": "/mnt/storage" })).unwrap(),
+        )
+        .unwrap();
+
+        let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk1".into()]);
+        // AddRecordingRunner with pool_mounted=false drives plan_add's
+        // unmounted-pool branch and simulates disk1 as PresentNotLuks.
+        let runner = AddRecordingRunner::new(false);
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+
+        let disk_specs = ["disk1=/dev/disk/by-id/virtio-disk1".to_string()];
+        let report = plan_add(
+            &runner,
+            &fs,
+            &AddParams {
+                config_path: &config_path,
+                disk_specs: &disk_specs,
+                dry_run: true,
+                yes: true,
+                passphrase_stdin: false,
+                passphrase_file: None,
+                enroll_key_file: None,
+                progress: ProgressOutput::Off,
+                paths: &paths,
+                sleep_inhibitor: &inhibitor,
+                passphrase_reader: &RpasswordTty,
+            },
+        );
+        let plan = report
+            .result
+            .expect("plan_add should succeed for fresh bootstrap");
+        assert!(
+            plan.notes.is_empty(),
+            "fresh bootstrap must emit no warning/info notes, got: {:?}",
+            plan.notes
+        );
+        let rendered = plan.preview().render();
+        assert!(
+            rendered.contains("LUKS format"),
+            "render must include destructive LUKS format step; got: {rendered}"
+        );
+        assert!(
+            rendered.contains("mkfs.btrfs"),
+            "render must include mkfs.btrfs step; got: {rendered}"
+        );
+        assert!(
+            rendered.contains("mount"),
+            "render must include mount step; got: {rendered}"
+        );
+    }
+
+    /* Intent: when a Warn note is present and steps are non-empty, the
+     * preview renders the note BEFORE the step block.
+     * Why it exists: PR 7's preview contract is notes-first, then steps.
+     * A regression that reversed the order would surface warnings after
+     * the destructive plan, defeating their purpose.
+     * Scenario: missing-devices warning on a pool, add a fresh disk with
+     * real work to plan. Pool is mounted so compile_add_steps_multi
+     * returns the `btrfs device add` + balance steps.
+     */
+    #[test]
+    fn plan_add_render_emits_warn_above_steps() {
+        let fixture = plan_add_fixture();
+        let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
+        let runner = AddPlanTestRunner::new().with_missing(1);
+
+        let disk_specs = ["disk2=/dev/disk/by-id/virtio-disk2".to_string()];
+        let report = plan_add(&runner, &fs, &fixture.params(&disk_specs, true));
+        let plan = report.result.expect("plan_add should succeed");
+
+        let rendered = plan.preview().render();
+        let warn_pos = rendered
+            .find("[warn]  pool has 1 missing device")
+            .expect("missing-devices Warn must appear on stdout render");
+        let steps_pos = rendered
+            .find("btrfs device add")
+            .expect("device-add step must appear on stdout render");
+        assert!(
+            warn_pos < steps_pos,
+            "Warn note must render above the step block; got:\n{rendered}"
+        );
+    }
+
+    /* Intent: when plan_add accumulates a Warn note (e.g.
+     * missing-devices) and then fails later inside
+     * compile_add_steps_multi (e.g. BraidLabeledNoBtrfs identity), the
+     * accumulated notes survive on `report.notes` and the result is
+     * Err(...).
+     * Why it exists: Shape A "notes-carrying report" promises preserved
+     * context. Without this, a refused add on a degraded pool would lose
+     * the missing-devices context the user needs to understand the
+     * refusal.
+     * Scenario: 2-disk pool with 1 MISSING placeholder, operator tries
+     * to add disk2 which is a braid-labeled LUKS with no btrfs
+     * superblock (ambiguous identity). plan_add accumulates the
+     * missing-devices warn, then compile_add_steps_multi rejects the
+     * identity.
+     */
+    #[test]
+    fn plan_add_preserves_warn_notes_on_later_failure() {
+        let fixture = plan_add_fixture();
+        let fs = AddMockFs(vec![
+            "/dev/disk/by-id/virtio-disk2".into(),
+            "/dev/mapper/braid-disk2".into(),
+        ]);
+        // AddTestRunner supports no_btrfs_superblock AND reports the
+        // pool with braid-disk1 only. Override by wrapping it with a
+        // runner that also synthesizes MISSING rows.
+        struct MissingAndNoBtrfsRunner {
+            inner: AddTestRunner,
+        }
+        impl CommandRunner for MissingAndNoBtrfsRunner {
+            fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
+                if let CmdRequest::BtrfsFilesystemShow { mount_point } = request {
+                    // 1 real device + 1 MISSING placeholder => missing_count = 1.
+                    return Ok(mock_ok(
+                        &format!("btrfs filesystem show {mount_point}"),
+                        &format!(
+                            "Label: none  uuid: {POOL_FSID}\n\
+                             \tTotal devices 2 FS bytes used 16.17MiB\n\
+                             \tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\
+                             \tdevid    2 size 0 used 0 path MISSING\n"
+                        ),
+                    ));
+                }
+                self.inner.run(request)
+            }
+            fn run_with_stdin(
+                &self,
+                request: &CmdRequest,
+                stdin: &[u8],
+            ) -> Result<RawCommandOutput, CmdError> {
+                self.inner.run_with_stdin(request, stdin)
+            }
+        }
+        let runner = MissingAndNoBtrfsRunner {
+            inner: AddTestRunner {
+                disk_in_pool: false,
+                fail_device_add: false,
+                no_btrfs_superblock: true,
+            },
+        };
+
+        let disk_specs = ["disk2=/dev/disk/by-id/virtio-disk2".to_string()];
+        let report = plan_add(&runner, &fs, &fixture.params(&disk_specs, true));
+
+        assert!(
+            report.result.is_err(),
+            "plan_add must fail on BraidLabeledNoBtrfs identity"
+        );
+        let warns: Vec<&String> = report
+            .notes
+            .iter()
+            .filter_map(|n| match n {
+                PreviewNote::Warn(b) => Some(b),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            warns.len(),
+            1,
+            "missing-devices warn must survive the Err branch on report.notes, got: {warns:?}"
+        );
+        assert_eq!(warns[0], &format_add_missing_devices_warning(1));
     }
 }

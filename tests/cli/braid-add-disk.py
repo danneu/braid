@@ -90,7 +90,46 @@ with subtest("Non-existent key fails add"):
     machine.fail(add_cmd("nonexistent"))
 
 with subtest("Already-in-pool disk is a no-op (exit 0)"):
-    machine.succeed(add_cmd("disk1"))
+    # Intent: `braid add <already-in-pool> --dry-run` is a note-only
+    # success: stdout carries exactly the canonical "Nothing to do --
+    # <name> already in pool." line, stderr is empty, and no step lines
+    # leak onto stdout.
+    # Why it exists: PR 7 routes dry-run through the shared Preview
+    # model. The already-in-pool branch is a zero-step + Info-note
+    # preview. A regression that stacked `nothing to do.` (generic
+    # fallback) on top of the Info note, or routed the note back to
+    # stderr, would still exit 0 and slip past existing coverage.
+    # Scenario: disk1 was added in Phase 1 and is already a pool member.
+    machine.succeed(
+        add_cmd("disk1").replace("--yes", "--yes --dry-run")
+        + " >/tmp/noop-stdout 2>/tmp/noop-stderr"
+    )
+    out = machine.succeed("cat /tmp/noop-stdout")
+    err = machine.succeed("cat /tmp/noop-stderr")
+    assert out == "Nothing to do -- disk1 already in pool.\n", (
+        "dry-run no-op stdout must be exactly the noop Info note; got: {!r}".format(out)
+    )
+    assert err == "", (
+        "dry-run no-op stderr must be empty; got: {!r}".format(err)
+    )
+    assert "nothing to do." not in out, (
+        "generic fallback must not stack with the Info note; got: {!r}".format(out)
+    )
+
+    # Real-run no-op: wording preservation on stderr. Today's message
+    # "Nothing to do -- <name> already in pool." must stay byte-identical
+    # so log scrapers don't drift after the Preview-model migration.
+    machine.succeed(
+        add_cmd("disk1") + " >/tmp/rnoop-stdout 2>/tmp/rnoop-stderr"
+    )
+    out = machine.succeed("cat /tmp/rnoop-stdout")
+    err = machine.succeed("cat /tmp/rnoop-stderr")
+    assert "Nothing to do -- disk1 already in pool." in err, (
+        "real-run no-op stderr must contain the canonical wording; got: {!r}".format(err)
+    )
+    assert out == "", (
+        "real-run no-op stdout must be empty; got: {!r}".format(out)
+    )
 
 # --- Phase 5: Identity check refusals + fresh add after cleanup ---
 

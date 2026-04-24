@@ -23,6 +23,14 @@
           size = 1024;
           driveConfig.deviceExtraOpts.serial = "disk2";
         }
+        # disk3 is the keyfile-asymmetry fixture: the pool (disk1+disk2)
+        # carries keyslot-1 after Phase 2; adding disk3 without --enroll
+        # must surface the `[warn]` / `WARNING:` keyfile-asymmetry
+        # diagnostic on the expected stream.
+        {
+          size = 1024;
+          driveConfig.deviceExtraOpts.serial = "disk3";
+        }
       ];
 
       environment.systemPackages = [
