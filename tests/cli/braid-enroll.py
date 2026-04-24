@@ -251,6 +251,86 @@ with subtest("Test 4c: real-run success path renders plain `skip:` on stderr"):
     # Restore the real pool.json before Test 5 runs.
     machine.succeed("mv /tmp/pool.bak.json /var/lib/braid/pool.json")
 
+# --- Test 4d: `skip: not LUKS-formatted` on real-run success path ---
+#
+# Intent: verify that when a real-run `braid enroll` succeeds with
+# one pool member in the PresentNotLuks probe state, the
+# accumulated skip note renders plain on stderr with the exact
+# wording `skip: <name> not LUKS-formatted`, pre-passphrase, and
+# the surviving candidates' `ok:` status lines follow.
+#
+# Why it exists: Test 4c pins the plain-skip success-path wording
+# for the Absent branch (`not present`); Test 5 in
+# braid-enroll-generate.py pins `not LUKS-formatted` but only on
+# the failure path. Neither anchors the `not LUKS-formatted` skip
+# body on a *successful* real-run. A regression that reworded the
+# not-LUKS-formatted message on the success path specifically
+# (e.g. swapped message bodies between the two ConfigDiskState
+# arms) would not be caught.
+#
+# Scenario: disk1 + disk2 both enrolled (from Test 1). We add a
+# synthetic `disk3` entry to pool.json pointing at a 1 MiB regular
+# file of zeros; probe_config_disk sees `fs.exists=true` and then
+# `cryptsetup luksUUID` exits non-zero on the zero payload
+# ("not a valid LUKS device"), classifying it as PresentNotLuks.
+# Phase A re-checks the dry-run bracketed rendering for this
+# branch under a minimal 2-surviving-candidates setup (less
+# destructive than braid-enroll-generate.py's mixed-skip test).
+# Phase B runs real-run and pins the plain stderr wording.
+# Pool.json is restored before Test 5 so the slot-conflict test
+# still sees its expected state.
+with subtest("Test 4d: dry-run + real-run success path render `skip: not LUKS-formatted`"):
+    close_all()
+
+    # A zero-filled regular file is enough to trip `cryptsetup
+    # luksUUID` into non-zero exit. We do not need a block device
+    # -- cryptsetup reads the payload, fails to find the LUKS
+    # header, and exits with "not a valid LUKS device". That path
+    # is what classifies the disk as PresentNotLuks.
+    machine.succeed("dd if=/dev/zero of=/tmp/fake-not-luks.bin bs=1M count=1")
+
+    machine.succeed("cp /var/lib/braid/pool.json /tmp/pool.bak2.json")
+    machine.succeed(
+        "jq '.disks.disk3 = {\"by_id\": \"/tmp/fake-not-luks.bin\"}' "
+        "/var/lib/braid/pool.json > /tmp/pool.json && "
+        "mv /tmp/pool.json /var/lib/braid/pool.json"
+    )
+
+    # Phase A: dry-run -- bracketed skip on stdout, stderr empty.
+    machine.succeed(
+        "braid enroll /tmp --dry-run >/tmp/t4d.out 2>/tmp/t4d.err"
+    )
+    t4d_out = machine.succeed("cat /tmp/t4d.out")
+    t4d_err = machine.succeed("cat /tmp/t4d.err")
+    assert t4d_err == "", (
+        f"successful --dry-run must leave stderr empty, got: {t4d_err!r}"
+    )
+    assert "[skip]  disk: disk3     not LUKS-formatted\n" in t4d_out, (
+        f"expected bracketed non-LUKS skip on stdout, got: {t4d_out!r}"
+    )
+
+    # Phase B: real-run success -- plain skip on stderr, surviving
+    # candidates classified AlreadyEnrolled (keyfile from Test 1).
+    pq = shlex.quote(passphrase)
+    machine.succeed(
+        f"printf '%s\\n' {pq} | braid enroll /tmp --passphrase-stdin "
+        f">/tmp/t4d.rout 2>/tmp/t4d.rerr"
+    )
+    t4d_rerr = machine.succeed("cat /tmp/t4d.rerr")
+    assert "skip: disk3 not LUKS-formatted" in t4d_rerr, (
+        f"expected plain 'skip: disk3 not LUKS-formatted' on stderr, got: {t4d_rerr!r}"
+    )
+    assert "ok: disk1 -- keyfile already enrolled" in t4d_rerr, (
+        f"expected ok: disk1 line on stderr, got: {t4d_rerr!r}"
+    )
+    assert "ok: disk2 -- keyfile already enrolled" in t4d_rerr, (
+        f"expected ok: disk2 line on stderr, got: {t4d_rerr!r}"
+    )
+
+    # Restore real pool.json and clean up the synthetic device.
+    machine.succeed("mv /tmp/pool.bak2.json /var/lib/braid/pool.json")
+    machine.succeed("rm /tmp/fake-not-luks.bin")
+
 # --- Test 5: Preflight detects slot conflict before any enrollment ---
 
 with subtest("Test 5: preflight detects slot-1 conflict before any mutation"):
