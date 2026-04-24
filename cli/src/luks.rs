@@ -22,6 +22,18 @@ pub enum KeySlotState {
     Occupied,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyfileEnrollmentProbe {
+    pub has_enrollment: bool,
+    pub failures: Vec<KeyfileEnrollmentProbeFailure>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyfileEnrollmentProbeFailure {
+    pub device: String,
+    pub error: String,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum LuksError {
     #[error("{0}")]
@@ -597,22 +609,39 @@ pub fn check_key_slot<R: CommandRunner>(
 }
 
 /// Best-effort check: does any live pool device have a keyfile in slot 1?
-/// Scans all devices; returns true on first occupied slot 1.
-/// Never fails the caller — probe errors are logged and skipped.
-pub fn pool_has_keyfile_enrollment<R: CommandRunner>(runner: &R, devices: &[PoolDevice]) -> bool {
+/// Scans devices until an occupied slot 1 is found. Probe failures are
+/// returned as structured data so callers own diagnostic routing.
+pub fn probe_pool_keyfile_enrollment<R: CommandRunner>(
+    runner: &R,
+    devices: &[PoolDevice],
+) -> KeyfileEnrollmentProbe {
+    let mut failures = Vec::new();
     for dev in devices {
         match check_key_slot(runner, &dev.underlying, LUKS_SLOT_KEYFILE) {
-            Ok(KeySlotState::Occupied) => return true,
-            Ok(KeySlotState::Empty) => {}
-            Err(e) => {
-                eprintln!(
-                    "note: could not check keyfile enrollment on {}: {e}",
-                    dev.underlying
-                );
+            Ok(KeySlotState::Occupied) => {
+                return KeyfileEnrollmentProbe {
+                    has_enrollment: true,
+                    failures,
+                };
             }
+            Ok(KeySlotState::Empty) => {}
+            Err(e) => failures.push(KeyfileEnrollmentProbeFailure {
+                device: dev.underlying.clone(),
+                error: e.to_string(),
+            }),
         }
     }
-    false
+    KeyfileEnrollmentProbe {
+        has_enrollment: false,
+        failures,
+    }
+}
+
+pub fn format_keyfile_enrollment_probe_failure(failure: &KeyfileEnrollmentProbeFailure) -> String {
+    format!(
+        "could not check keyfile enrollment on {}: {}; proceeding as if no keyfile is enrolled",
+        failure.device, failure.error
+    )
 }
 
 /// Scan `dir` for `.luksheader` or `.img` files and return advisories.
@@ -1538,7 +1567,7 @@ mod tests {
         assert_eq!(tty.remaining(), 1, "SENTINEL must remain unconsumed");
     }
 
-    // -- pool_has_keyfile_enrollment tests --
+    // -- probe_pool_keyfile_enrollment tests --
 
     use crate::types::{LuksUuid, MapperName, PoolDevice};
 
@@ -1594,14 +1623,16 @@ mod tests {
     }
 
     /*
-     * Intent: empty device list returns false (no enrollment detected).
+     * Intent: empty device list returns no enrollment and no failures.
      * Why: bootstrap case — no existing pool members to inspect.
      * Scenario: first `braid add` creating a new pool.
      */
     #[test]
     fn enrollment_check_empty_devices() {
         let runner = MockRunner::default();
-        assert!(!pool_has_keyfile_enrollment(&runner, &[]));
+        let probe = probe_pool_keyfile_enrollment(&runner, &[]);
+        assert!(!probe.has_enrollment);
+        assert!(probe.failures.is_empty());
     }
 
     /*
@@ -1614,7 +1645,9 @@ mod tests {
         let dev = make_pool_device("data1", "/dev/sda");
         let (req, resp) = luks_dump_slot1_occupied("/dev/sda");
         let runner = MockRunner::default().with_output(req, resp);
-        assert!(pool_has_keyfile_enrollment(&runner, &[dev]));
+        let probe = probe_pool_keyfile_enrollment(&runner, &[dev]);
+        assert!(probe.has_enrollment);
+        assert!(probe.failures.is_empty());
     }
 
     /*
@@ -1627,7 +1660,9 @@ mod tests {
         let dev = make_pool_device("data1", "/dev/sda");
         let (req, resp) = luks_dump_slot1_empty("/dev/sda");
         let runner = MockRunner::default().with_output(req, resp);
-        assert!(!pool_has_keyfile_enrollment(&runner, &[dev]));
+        let probe = probe_pool_keyfile_enrollment(&runner, &[dev]);
+        assert!(!probe.has_enrollment);
+        assert!(probe.failures.is_empty());
     }
 
     /*
@@ -1644,20 +1679,56 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(req1, resp1)
             .with_output(req2, resp2);
-        assert!(pool_has_keyfile_enrollment(&runner, &[dev1, dev2]));
+        let probe = probe_pool_keyfile_enrollment(&runner, &[dev1, dev2]);
+        assert!(probe.has_enrollment);
+        assert!(probe.failures.is_empty());
     }
 
     /*
-     * Intent: probe errors are swallowed, not propagated.
-     * Why: enrollment check is best-effort — must not abort the command.
+     * Intent: probe errors are returned as structured failures.
+     * Why: callers own diagnostic routing and must not inherit stderr side effects.
      * Scenario: luksDump fails on a device (transient I/O error).
      */
     #[test]
-    fn enrollment_check_error_is_best_effort() {
+    fn enrollment_check_error_is_structured_failure() {
         let dev = make_pool_device("data1", "/dev/sda");
         let (req, resp) = luks_dump_error("/dev/sda");
         let runner = MockRunner::default().with_output(req, resp);
-        assert!(!pool_has_keyfile_enrollment(&runner, &[dev]));
+        let probe = probe_pool_keyfile_enrollment(&runner, &[dev]);
+        assert!(!probe.has_enrollment);
+        assert_eq!(probe.failures.len(), 1);
+        assert_eq!(probe.failures[0].device, "/dev/sda");
+        assert!(
+            probe.failures[0]
+                .error
+                .contains("cryptsetup luksDump failed (exit 5): Device not found"),
+            "unexpected error text: {:?}",
+            probe.failures[0].error
+        );
+        assert_eq!(
+            format_keyfile_enrollment_probe_failure(&probe.failures[0]),
+            "could not check keyfile enrollment on /dev/sda: cryptsetup luksDump failed (exit 5): Device not found; proceeding as if no keyfile is enrolled"
+        );
+    }
+
+    /*
+     * Intent: a later occupied slot still wins after an earlier probe failure.
+     * Why: callers suppress uncertainty notes once any device proves enrollment.
+     * Scenario: one pool member's luksDump fails, another member reports slot 1.
+     */
+    #[test]
+    fn enrollment_check_failure_then_occupied_reports_both() {
+        let dev1 = make_pool_device("data1", "/dev/sda");
+        let dev2 = make_pool_device("data2", "/dev/sdb");
+        let (req1, resp1) = luks_dump_error("/dev/sda");
+        let (req2, resp2) = luks_dump_slot1_occupied("/dev/sdb");
+        let runner = MockRunner::default()
+            .with_output(req1, resp1)
+            .with_output(req2, resp2);
+        let probe = probe_pool_keyfile_enrollment(&runner, &[dev1, dev2]);
+        assert!(probe.has_enrollment);
+        assert_eq!(probe.failures.len(), 1);
+        assert_eq!(probe.failures[0].device, "/dev/sda");
     }
 
     // --- probe_luks_header and guidance helpers ---

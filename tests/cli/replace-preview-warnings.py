@@ -2,6 +2,8 @@
 #
 # See replace-preview-warnings.nix for scenario / intent / rationale.
 
+import base64
+import re
 import shlex
 
 start_all()
@@ -50,6 +52,66 @@ with subtest("Setup: generate and enroll keyfile into both members"):
     pq = shlex.quote(passphrase)
     machine.succeed(
         f"printf '%s\\n' {pq} | braid enroll /tmp/kf --passphrase-stdin"
+    )
+
+# `braid` is wrapped with a tool PATH prefix. Resolve the unwrapped
+# binary so /tmp/wrap/cryptsetup can win PATH lookup in probe-failure
+# regression subtests.
+braid_wrapped_path = machine.succeed("readlink -f $(command -v braid)").strip()
+wrapper_source = machine.succeed(f"cat {braid_wrapped_path}")
+m = re.search(r'(/nix/store/[^"\s]+/bin/braid)(?!\-)', wrapper_source)
+assert m, f"could not locate unwrapped braid in wrapper:\n{wrapper_source}"
+unwrapped_braid = m.group(1)
+real_cryptsetup = machine.succeed("command -v cryptsetup").strip()
+
+
+def install_cryptsetup_luksdump_wrapper(mode):
+    """Install a cryptsetup shim.
+
+    mode='all-fail': every luksDump fails.
+    mode='fail-first': the first luksDump fails, later calls delegate.
+    """
+    if mode == "all-fail":
+        wrapper_template = """#!/usr/bin/env bash
+set -eu
+if [ "${1:-}" = "luksDump" ]; then
+    printf 'forced luksDump failure for replace test\\n' >&2
+    exit 5
+fi
+exec __REAL_CRYPTSETUP__ "$@"
+"""
+    elif mode == "fail-first":
+        wrapper_template = """#!/usr/bin/env bash
+set -eu
+if [ "${1:-}" = "luksDump" ]; then
+    count_file=/tmp/wrap/luksdump-count
+    if [ ! -e "$count_file" ]; then
+        printf 1 > "$count_file"
+        printf 'forced first luksDump failure for replace test\\n' >&2
+        exit 5
+    fi
+fi
+exec __REAL_CRYPTSETUP__ "$@"
+"""
+    else:
+        raise AssertionError(f"unknown wrapper mode: {mode}")
+
+    wrapper_script = wrapper_template.replace("__REAL_CRYPTSETUP__", real_cryptsetup)
+    wrapper_b64 = base64.b64encode(wrapper_script.encode()).decode()
+    machine.succeed(
+        "rm -rf /tmp/wrap && mkdir -p /tmp/wrap && "
+        f"printf '%s' {shlex.quote(wrapper_b64)} | base64 -d > /tmp/wrap/cryptsetup && "
+        "chmod +x /tmp/wrap/cryptsetup"
+    )
+
+
+def replace_unwrapped_cmd(old, new, extra=""):
+    pq = shlex.quote(passphrase)
+    return (
+        f"printf '%s\\n' {pq} | "
+        f"PATH=/tmp/wrap:$PATH BRAID_LUKS_OPTS='{luks_opts}' "
+        f"{unwrapped_braid} replace --old {old} --new {new}=/dev/disk/by-id/virtio-{new} "
+        f"--passphrase-stdin {extra}"
     )
 
 # --- Phase 1: live-path dry-run ---
@@ -108,6 +170,32 @@ with subtest("Phase 1: live-path --dry-run prints preview on stdout, stderr empt
         f" got: {err!r}"
     )
 
+with subtest("Phase 1b: failed keyfile probe stays quiet during dry-run"):
+    # Intent: even when cryptsetup luksDump would fail, replace --dry-run
+    # must not emit keyfile-probe diagnostics on stdout or stderr.
+    # Why it exists: replace keeps keyfile probe diagnostics inside the
+    # interactive confirmation path; dry-run is a preview-only operation.
+    # Scenario: run the unwrapped braid binary with a cryptsetup shim that
+    # fails every luksDump while previewing disk1 -> disk3.
+    install_cryptsetup_luksdump_wrapper("all-fail")
+    (status, _) = machine.execute(
+        f"{replace_unwrapped_cmd('disk1', 'disk3', '--dry-run')} "
+        f">/tmp/probe-dry-out 2>/tmp/probe-dry-err"
+    )
+    assert status == 0, f"dry-run should succeed despite luksDump shim; exit {status}"
+    out = machine.succeed("cat /tmp/probe-dry-out")
+    err = machine.succeed("cat /tmp/probe-dry-err")
+
+    assert "btrfs replace start" in out, (
+        f"dry-run stdout must still contain the replace preview; got: {out!r}"
+    )
+    assert "could not check keyfile enrollment" not in out, (
+        f"dry-run stdout must not carry probe-failure notes; got: {out!r}"
+    )
+    assert err == "", (
+        f"dry-run stderr must stay empty when luksDump is shimmed; got: {err!r}"
+    )
+
 # --- Phase 2: --yes real-run (live path) ---
 
 with subtest("Phase 2: --yes real-run on keyfile pool does not leak WARNING"):
@@ -125,10 +213,12 @@ with subtest("Phase 2: --yes real-run on keyfile pool does not leak WARNING"):
     # Scenario: pool still has disk1 + disk2 with keyfile; disk3 is
     # raw; operator runs `braid replace --yes` without `--enroll`.
     # Pool after: disk2 + disk3 (disk1 replaced in-place).
-    machine.succeed(
-        f"{replace_cmd('disk1', 'disk3', '--yes')} "
+    install_cryptsetup_luksdump_wrapper("all-fail")
+    (status, _) = machine.execute(
+        f"{replace_unwrapped_cmd('disk1', 'disk3', '--yes')} "
         f">/tmp/yes-out 2>/tmp/yes-err"
     )
+    assert status == 0, f"--yes real-run should succeed despite luksDump shim; exit {status}"
     out = machine.succeed("cat /tmp/yes-out")
     err = machine.succeed("cat /tmp/yes-err")
 
@@ -148,6 +238,14 @@ with subtest("Phase 2: --yes real-run on keyfile pool does not leak WARNING"):
         f"--yes real-run stderr must not carry keyfile-asymmetry body;"
         f" got: {err!r}"
     )
+    assert "could not check keyfile enrollment" not in out, (
+        f"--yes real-run stdout must not carry probe-failure note;"
+        f" got: {out!r}"
+    )
+    assert "could not check keyfile enrollment" not in err, (
+        f"--yes real-run stderr must not carry probe-failure note;"
+        f" got: {err!r}"
+    )
 
     # Sanity: the replace actually happened.
     fi_show = machine.succeed("btrfs fi show /mnt/storage")
@@ -156,6 +254,75 @@ with subtest("Phase 2: --yes real-run on keyfile pool does not leak WARNING"):
     )
     assert "/dev/mapper/braid-disk1" not in fi_show, (
         f"--yes real-run should have removed braid-disk1; got:\n{fi_show}"
+    )
+
+with subtest("Phase 2b: enroll replacement disk3 for interactive mixed-case probes"):
+    # Phase 2 replaced disk1 with disk3 without --enroll. Enroll disk3
+    # before the interactive no-mutation checks so a mixed probe
+    # (first luksDump fails, second succeeds) can prove slot 1 is occupied.
+    pq = shlex.quote(passphrase)
+    machine.succeed(
+        f"printf '%s\\n' {pq} | braid enroll /tmp/kf --passphrase-stdin"
+    )
+
+with subtest("Phase 2c: interactive failed probes print note and make no mutation"):
+    # Intent: in interactive confirmation only, failed keyfile probes are
+    # routed to stderr as `note: <body>` when no existing member proves
+    # slot 1 is occupied.
+    # Why it exists: this is the replace-side counterpart to add's
+    # PreviewNote routing. Dry-run and --yes stay quiet, but interactive
+    # operators still get uncertainty context before confirming.
+    # Scenario: every luksDump fails, then the operator answers `no`.
+    install_cryptsetup_luksdump_wrapper("all-fail")
+    (status, _) = machine.execute(
+        "printf 'no\\n' | "
+        "PATH=/tmp/wrap:$PATH "
+        f"{unwrapped_braid} replace --old disk2 --new disk4=/dev/disk/by-id/virtio-disk4 "
+        ">/tmp/int-fail-out 2>/tmp/int-fail-err"
+    )
+    assert status != 0, "interactive `no` should abort the replace"
+    err = machine.succeed("cat /tmp/int-fail-err")
+    assert "note: could not check keyfile enrollment" in err, (
+        f"interactive stderr must contain the probe-failure note; got: {err!r}"
+    )
+    assert "proceeding as if no keyfile is enrolled" in err, (
+        f"interactive stderr must carry the canonical probe-failure suffix; got: {err!r}"
+    )
+    assert "WARNING: Existing pool drives have a keyfile" not in err, (
+        f"all-failure probe must not claim keyfile enrollment; got: {err!r}"
+    )
+    fi_show = machine.succeed("btrfs fi show /mnt/storage")
+    assert "/dev/mapper/braid-disk4" not in fi_show, (
+        f"answering no must not mutate the pool; got:\n{fi_show}"
+    )
+
+with subtest("Phase 2d: interactive mixed failure plus enrollment suppresses note"):
+    # Intent: if one probe fails but another existing member proves slot 1
+    # is occupied, replace prints the keyfile-asymmetry warning and
+    # suppresses the redundant probe-failure note.
+    # Why it exists: the actionable recommendation is to pass --enroll;
+    # uncertainty from a failed earlier probe should not add noise once
+    # enrollment is known.
+    # Scenario: first luksDump fails, the next luksDump delegates to real
+    # cryptsetup and sees the enrolled slot, then the operator answers no.
+    install_cryptsetup_luksdump_wrapper("fail-first")
+    (status, _) = machine.execute(
+        "printf 'no\\n' | "
+        "PATH=/tmp/wrap:$PATH "
+        f"{unwrapped_braid} replace --old disk2 --new disk4=/dev/disk/by-id/virtio-disk4 "
+        ">/tmp/int-mixed-out 2>/tmp/int-mixed-err"
+    )
+    assert status != 0, "interactive `no` should abort the replace"
+    err = machine.succeed("cat /tmp/int-mixed-err")
+    assert "WARNING: Existing pool drives have a keyfile (keyslot-1)" in err, (
+        f"mixed probe stderr must contain keyfile-asymmetry warning; got: {err!r}"
+    )
+    assert "could not check keyfile enrollment" not in err, (
+        f"mixed probe stderr must suppress probe-failure note; got: {err!r}"
+    )
+    fi_show = machine.succeed("btrfs fi show /mnt/storage")
+    assert "/dev/mapper/braid-disk4" not in fi_show, (
+        f"answering no must not mutate the pool; got:\n{fi_show}"
     )
 
 # --- Phase 3: missing-path dry-run ---
