@@ -422,6 +422,11 @@
               braid = linuxCrane.braid;
             }
           );
+          braid-remove-missing-softwarn = pkgs.testers.nixosTest (
+            import ./tests/cli/braid-remove-missing-softwarn.nix {
+              braid = linuxCrane.braid;
+            }
+          );
           remove-missing-membership-readonly = pkgs.testers.nixosTest (
             import ./tests/cli/remove-missing-membership-readonly.nix {
               braid = linuxCrane.braid;
