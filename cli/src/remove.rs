@@ -7,7 +7,7 @@ use crate::membership;
 use crate::parse::{parse_btrfs_device_usage, parse_btrfs_df_json, ParseError};
 use crate::pool::evict_present_device;
 use crate::preflight;
-use crate::preview::{Preview, PreviewCompleteness, PreviewNote};
+use crate::preview::{self, PerDiskStyle, Preview, PreviewCompleteness, PreviewNote};
 use crate::probe::{probe_pool, Filesystem, ProbeError};
 use crate::progress::ProgressOutput;
 use crate::state_paths::StatePaths;
@@ -72,8 +72,9 @@ pub struct RemoveParams<'a> {
 /// inputs pre-computed during planning. `notes` + `steps` are both
 /// rendered by `preview()`; `execute()` consumes the preflight state
 /// (target device, remaining/total counts, mount point) and renders
-/// any accumulated `Warn` notes to stderr with the legacy `warning: `
-/// prefix before mutating.
+/// any accumulated notes to stderr via the shared
+/// `preview::render_notes_for_stderr` helper (canonical `[warn]  <body>`
+/// wording) before mutating.
 pub struct RemovePlan {
     pub notes: Vec<PreviewNote>,
     pub steps: Vec<Step>,
@@ -95,6 +96,12 @@ pub struct RemovePlanReport {
 }
 
 impl RemovePlan {
+    /// Real-run and failure-path stderr for `remove` use `Bracketed`
+    /// per-disk style to match the canonical dry-run render. `remove`
+    /// does not emit `PerDisk` notes today, but the constant keeps the
+    /// Shape A contract uniform with the other migrated commands.
+    pub const STDERR_STYLE: PerDiskStyle = PerDiskStyle::Bracketed;
+
     pub fn preview(&self) -> Preview {
         Preview {
             completeness: PreviewCompleteness::Complete,
@@ -108,16 +115,14 @@ impl RemovePlan {
         runner: &R,
         params: &RemoveParams<'_>,
     ) -> Result<(), RemoveError> {
-        // Emit accumulated Warn notes to stderr with the legacy
-        // `warning: <body>` prefix before any mutation. The preview
-        // renders the same note as `[warn]  <body>` on stdout; real-run
-        // stderr preserves the historic wording so VM log scrapers do
-        // not drift.
-        for note in &self.notes {
-            if let PreviewNote::Warn(body) = note {
-                eprintln!("warning: {body}");
-            }
-        }
+        // Render accumulated notes to stderr via the shared helper
+        // before any mutation. Warn notes emit as the canonical
+        // `[warn]  <body>` (same as dry-run stdout), so both modes
+        // share one render contract for plan-derived notes.
+        eprint!(
+            "{}",
+            preview::render_notes_for_stderr(&self.notes, Self::STDERR_STYLE),
+        );
 
         // Confirm
         if !params.yes {
@@ -2238,6 +2243,36 @@ mod tests {
         assert!(
             rendered.contains("btrfs device remove"),
             "step block must follow the warning; got: {rendered:?}",
+        );
+    }
+
+    /* Intent: plan-derived Warn notes for `remove` render through the
+     * shared `preview::render_notes_for_stderr` helper as the canonical
+     * `[warn]  <body>\n` shape -- the same shape that `Preview::render`
+     * emits on dry-run stdout. Legacy `warning: ` prefixes do not
+     * appear.
+     * Why it exists: this follow-up removes the direct
+     * `eprintln!("warning: {body}")` replay from `RemovePlan::execute`
+     * so real-run stderr now uses the canonical form. A regression
+     * that reintroduces the legacy prefix -- either in execute's
+     * replay or by re-wrapping the body -- fails here.
+     * Scenario: hand-built notes vec with one soft-warn body; render
+     * via `RemovePlan::STDERR_STYLE` and assert byte-exact output with
+     * no `warning:` substring.
+     */
+    #[test]
+    fn remove_warn_notes_render_canonical_bracketed_form() {
+        let notes = vec![PreviewNote::Warn(
+            "ENOSPC pre-flight check failed: boom; proceeding anyway".into(),
+        )];
+        let rendered = preview::render_notes_for_stderr(&notes, RemovePlan::STDERR_STYLE);
+        assert_eq!(
+            rendered,
+            "[warn]  ENOSPC pre-flight check failed: boom; proceeding anyway\n",
+        );
+        assert!(
+            !rendered.contains("warning:"),
+            "legacy `warning:` prefix must be gone from remove's render;\n{rendered}",
         );
     }
 }
