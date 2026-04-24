@@ -750,16 +750,18 @@ pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
 
     if pool.mounted {
         let fsid = pool.fsid.as_deref().expect("mounted pool must have FSID");
-        if let Err(msg) =
-            preflight::require_mutation_preflight(runner, fs, fsid, config.mount_point())
-        {
-            return err_empty(AddError::Validation(msg));
+        match preflight::require_mutation_preflight(runner, fs, fsid, config.mount_point()) {
+            Ok(preflight_notes) => notes.extend(preflight_notes),
+            Err(msg) => return err_empty(AddError::Validation(msg)),
         }
     }
     if let Err(msg) =
         preflight::check_ups_not_on_battery(runner, config.ups().map(|u| u.name.as_str()), "add")
     {
-        return err_empty(AddError::Validation(msg));
+        return AddPlanReport {
+            notes,
+            result: Err(AddError::Validation(msg)),
+        };
     }
 
     // Missing-devices warning: body-only, no legacy `warning:` prefix.
@@ -3578,5 +3580,177 @@ mod tests {
             "missing-devices warn must survive the Err branch on report.notes, got: {warns:?}"
         );
         assert_eq!(warns[0], &format_add_missing_devices_warning(1));
+    }
+
+    /// AddMockFs variant with a configurable sysfs exclusive_operation
+    /// body. Drives preflight's busy-op / paused-balance branches from
+    /// the plan_add boundary tests. Existence-probe paths delegate to
+    /// the inner `AddMockFs`.
+    struct AddMockFsWithSysfs {
+        inner: AddMockFs,
+        sysfs_body: String,
+    }
+
+    impl AddMockFsWithSysfs {
+        fn new(paths: Vec<String>, sysfs_body: &str) -> Self {
+            Self {
+                inner: AddMockFs(paths),
+                sysfs_body: sysfs_body.to_owned(),
+            }
+        }
+    }
+
+    impl crate::probe::Filesystem for AddMockFsWithSysfs {
+        fn exists(&self, path: &str) -> bool {
+            self.inner.exists(path)
+        }
+        fn is_block_device(&self, path: &str) -> bool {
+            self.inner.is_block_device(path)
+        }
+        fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
+            if path.ends_with("/exclusive_operation") {
+                Ok(self.sysfs_body.clone())
+            } else {
+                self.inner.read_to_string(path)
+            }
+        }
+        fn list_dir(&self, path: &str) -> Result<Vec<String>, std::io::Error> {
+            self.inner.list_dir(path)
+        }
+    }
+
+    /* Intent: plan_add surfaces an in-flight exclusive op as a single
+     * PreviewNote::Info whose body says "waiting for in-flight <op> to
+     * finish...", and the rendered preview contains that line above
+     * the step block.
+     * Why it exists: PR 7 moves the busy-op diagnostic from a direct
+     * stderr eprintln! into plan.notes. A regression that leaked the
+     * wording back to stderr would leave dry-run stdout silent about
+     * the enqueue and also break the empty-stderr contract.
+     * Scenario: sysfs reports "device add" while the operator runs
+     * `braid add disk2 --dry-run` against an otherwise healthy pool.
+     */
+    #[test]
+    fn plan_add_preflight_busy_op_becomes_info_note() {
+        let fixture = plan_add_fixture();
+        let fs = AddMockFsWithSysfs::new(
+            vec!["/dev/disk/by-id/virtio-disk2".into()],
+            "device add\n",
+        );
+        let runner = AddPlanTestRunner::new();
+
+        let disk_specs = ["disk2=/dev/disk/by-id/virtio-disk2".to_string()];
+        let report = plan_add(&runner, &fs, &fixture.params(&disk_specs, true));
+        let plan = report
+            .result
+            .expect("plan_add should succeed on clean fixture + busy op");
+
+        assert_eq!(
+            plan.notes.len(),
+            1,
+            "expected one preflight Info note, got {:?}",
+            plan.notes
+        );
+        assert!(
+            matches!(
+                &plan.notes[0],
+                PreviewNote::Info(b) if b.contains("waiting for in-flight") && b.contains("device add")
+            ),
+            "notes[0]={:?}",
+            plan.notes[0],
+        );
+
+        let rendered = plan.preview().render();
+        assert!(
+            rendered.contains("waiting for in-flight device add"),
+            "rendered preview must carry the busy-op Info line, got:\n{rendered}",
+        );
+    }
+
+    /* Intent: when plan_add accumulates a preflight Info note and then
+     * fails on a later hard gate (UPS on battery), the accumulated notes
+     * survive on `report.notes` with `report.result = Err(...)`.
+     * Why it exists: Shape A "notes-carrying report" promises preserved
+     * context. Without this, a UPS refusal on an enqueued-busy pool
+     * would lose the busy-op context the operator needs to understand
+     * what else is happening.
+     * Scenario: sysfs reports "device add" (enqueueable busy), UPS
+     * reports OB (on battery), operator runs `braid add disk2`.
+     */
+    #[test]
+    fn plan_add_preserves_preflight_notes_on_ups_failure() {
+        let fixture = plan_add_fixture();
+        let fs = AddMockFsWithSysfs::new(
+            vec!["/dev/disk/by-id/virtio-disk2".into()],
+            "device add\n",
+        );
+        // Custom runner: delegates to AddPlanTestRunner for everything
+        // except the UPS query, which returns OB. We need the UPS
+        // config attached to params; construct a custom config.
+        struct UpsOnBatteryRunner {
+            inner: AddPlanTestRunner,
+        }
+        impl CommandRunner for UpsOnBatteryRunner {
+            fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
+                match request {
+                    CmdRequest::UpscQuery { name } => Ok(RawCommandOutput {
+                        cmd: format!("upsc {name}"),
+                        stdout: "ups.status: OB\n".into(),
+                        stderr: String::new(),
+                        exit_status: 0,
+                    }),
+                    _ => self.inner.run(request),
+                }
+            }
+            fn run_with_stdin(
+                &self,
+                request: &CmdRequest,
+                stdin: &[u8],
+            ) -> Result<RawCommandOutput, CmdError> {
+                self.inner.run_with_stdin(request, stdin)
+            }
+        }
+        let runner = UpsOnBatteryRunner {
+            inner: AddPlanTestRunner::new(),
+        };
+
+        // Build a config.json that enables a UPS named "ups".
+        let config_json = serde_json::json!({
+            "mount_point": "/mnt/storage",
+            "ups": { "enable": true, "name": "ups" },
+        });
+        std::fs::write(
+            &fixture.config_path,
+            serde_json::to_vec(&config_json).unwrap(),
+        )
+        .unwrap();
+
+        let disk_specs = ["disk2=/dev/disk/by-id/virtio-disk2".to_string()];
+        let report = plan_add(&runner, &fs, &fixture.params(&disk_specs, true));
+
+        match &report.result {
+            Err(AddError::Validation(msg)) => {
+                assert!(
+                    msg.contains("utility power"),
+                    "expected UPS refusal wording, got: {msg}"
+                );
+            }
+            Err(other) => panic!("expected Validation, got: {other:?}"),
+            Ok(_) => panic!("expected Err(Validation), got Ok(_)"),
+        }
+        assert_eq!(
+            report.notes.len(),
+            1,
+            "busy-op Info note must survive the UPS failure on report.notes, got: {:?}",
+            report.notes,
+        );
+        assert!(
+            matches!(
+                &report.notes[0],
+                PreviewNote::Info(b) if b.contains("waiting for in-flight") && b.contains("device add")
+            ),
+            "notes[0]={:?}",
+            report.notes[0],
+        );
     }
 }

@@ -33,6 +33,10 @@
           size = 4096;
           driveConfig.deviceExtraOpts.serial = "disk3";
         }
+        {
+          size = 4096;
+          driveConfig.deviceExtraOpts.serial = "disk4";
+        }
       ];
 
       virtualisation.memorySize = 2048;

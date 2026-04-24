@@ -221,76 +221,96 @@ pub fn plan_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     fs: &F,
     params: &RemoveMissingParams<'_>,
 ) -> RemoveMissingPlanReport {
-    // No per-disk probing happens before validation in this planner, so
-    // `report.notes` is always empty. Any notes discovered during
-    // planning land on `plan.notes` instead.
-    let err = |e: RemoveMissingError| RemoveMissingPlanReport {
+    // Notes accumulator. `err_empty` is correct for pre-preflight exits
+    // (no notes can have accumulated yet). Post-preflight exits return
+    // a notes-preserving report so preflight diagnostics (busy-op Info,
+    // readonly-probe-fail Warn) reach `cmd_remove_missing`'s stderr
+    // render.
+    let mut notes: Vec<PreviewNote> = Vec::new();
+    let err_empty = |e: RemoveMissingError| RemoveMissingPlanReport {
         notes: Vec::new(),
         result: Err(e),
     };
 
     if let Err(msg) = preflight::check_no_pending_operation(params.paths) {
-        return err(RemoveMissingError::Validation(msg));
+        return err_empty(RemoveMissingError::Validation(msg));
     }
 
     let config = match config_read(params.config_path) {
         Ok(c) => c,
-        Err(e) => return err(e.into()),
+        Err(e) => return err_empty(e.into()),
     };
 
     let pool = match probe_pool(runner, config.mount_point()) {
         Ok(p) => p,
         Err(ProbeError::NotBtrfs { .. }) => {
-            return err(RemoveMissingError::Validation(
+            return err_empty(RemoveMissingError::Validation(
                 "pool is not mounted. Nothing to remove.".into(),
             ));
         }
-        Err(e) => return err(RemoveMissingError::Probe(e)),
+        Err(e) => return err_empty(RemoveMissingError::Probe(e)),
     };
 
     if !pool.mounted {
-        return err(RemoveMissingError::Validation(
+        return err_empty(RemoveMissingError::Validation(
             "pool is not mounted. Nothing to remove.".into(),
         ));
     }
 
     // Preflight
     let fsid = pool.fsid.as_deref().expect("mounted pool must have FSID");
-    if let Err(msg) = preflight::require_mutation_preflight(runner, fs, fsid, config.mount_point())
-    {
-        return err(RemoveMissingError::Validation(msg));
+    match preflight::require_mutation_preflight(runner, fs, fsid, config.mount_point()) {
+        Ok(preflight_notes) => notes.extend(preflight_notes),
+        Err(msg) => return err_empty(RemoveMissingError::Validation(msg)),
     }
     if let Err(msg) = preflight::check_ups_not_on_battery(
         runner,
         config.ups().map(|u| u.name.as_str()),
         "remove-missing",
     ) {
-        return err(RemoveMissingError::Validation(msg));
+        return RemoveMissingPlanReport {
+            notes: std::mem::take(&mut notes),
+            result: Err(RemoveMissingError::Validation(msg)),
+        };
     }
 
     if pool.missing_count == 0 {
-        return err(RemoveMissingError::Validation(
-            "no missing devices detected in pool.".into(),
-        ));
+        return RemoveMissingPlanReport {
+            notes: std::mem::take(&mut notes),
+            result: Err(RemoveMissingError::Validation(
+                "no missing devices detected in pool.".into(),
+            )),
+        };
     }
 
     if pool.devices.iter().any(|d| d.devid == params.missing_id) {
-        return err(RemoveMissingError::Validation(format!(
-            "devid {} is a live device, not a missing one. \
-             Use 'braid remove' to remove live devices.",
-            params.missing_id
-        )));
+        return RemoveMissingPlanReport {
+            notes: std::mem::take(&mut notes),
+            result: Err(RemoveMissingError::Validation(format!(
+                "devid {} is a live device, not a missing one. \
+                 Use 'braid remove' to remove live devices.",
+                params.missing_id
+            ))),
+        };
     }
     let missing_devids = match preflight::probe_missing_devids(runner, config.mount_point()) {
         Ok(v) => v,
-        Err(msg) => return err(RemoveMissingError::Validation(msg)),
+        Err(msg) => {
+            return RemoveMissingPlanReport {
+                notes: std::mem::take(&mut notes),
+                result: Err(RemoveMissingError::Validation(msg)),
+            };
+        }
     };
     if !missing_devids.contains(&params.missing_id) {
-        return err(RemoveMissingError::Validation(format!(
-            "devid {} is not a device in this pool. \
-             Use 'braid status' to see device IDs.",
-            params.missing_id
-        )));
+        return RemoveMissingPlanReport {
+            notes: std::mem::take(&mut notes),
+            result: Err(RemoveMissingError::Validation(format!(
+                "devid {} is not a device in this pool. \
+                 Use 'braid status' to see device IDs.",
+                params.missing_id
+            ))),
+        };
     }
 
     // Pre-flight: reject if survivors lack space to absorb the missing
@@ -300,14 +320,18 @@ pub fn plan_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     // Skip when only 1 present device survives: in 2-device RAID1, the
     // survivor already has all data (every chunk is mirrored). This does
     // not match the reproduced relocation-failure mode.
-    let mut notes: Vec<PreviewNote> = Vec::new();
     if pool.devices.len() >= 2 {
         match check_relocation_space(runner, config.mount_point(), Some(params.missing_id)) {
             Ok(RelocationCheck::Proceed) => {}
             Ok(RelocationCheck::ProceedWithWarning(body)) => {
                 notes.push(PreviewNote::Warn(body));
             }
-            Err(e) => return err(e),
+            Err(e) => {
+                return RemoveMissingPlanReport {
+                    notes: std::mem::take(&mut notes),
+                    result: Err(e),
+                };
+            }
         }
     }
 
@@ -342,7 +366,18 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     let report = plan_remove_missing(runner, fs, params);
     let plan = match report.result {
         Ok(p) => p,
-        Err(e) => return Err(e),
+        Err(e) => {
+            // Preserved-context failure: accumulated notes render to
+            // stderr before the error via the SAME helper as the Ok
+            // path (`RemoveMissingPlan::execute`), so preflight
+            // diagnostics surface identically across success, failure,
+            // and dry-run stdout.
+            eprint!(
+                "{}",
+                preview::render_notes_for_stderr(&report.notes, RemoveMissingPlan::STDERR_STYLE),
+            );
+            return Err(e);
+        }
     };
 
     if params.dry_run {
@@ -1694,6 +1729,206 @@ mod tests {
         assert!(
             !rendered.contains("warning:"),
             "legacy `warning:` prefix must be gone from remove-missing's render;\n{rendered}",
+        );
+    }
+
+    /// MockFs variant serving a configurable sysfs exclusive_operation
+    /// body. Drives preflight's busy-op / paused-balance branches from
+    /// the plan_remove_missing boundary tests.
+    struct MockFsWithExclop(String);
+
+    impl Filesystem for MockFsWithExclop {
+        fn exists(&self, _path: &str) -> bool {
+            false
+        }
+        fn is_block_device(&self, _path: &str) -> bool {
+            false
+        }
+        fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
+            if path.ends_with("/exclusive_operation") {
+                Ok(format!("{}\n", self.0))
+            } else {
+                Err(std::io::Error::new(std::io::ErrorKind::NotFound, "mock"))
+            }
+        }
+        fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
+            Ok(vec![])
+        }
+    }
+
+    /* Intent: plan_remove_missing surfaces an in-flight exclusive op
+     * as a PreviewNote::Info on `plan.notes`, and the rendered preview
+     * contains the "waiting for in-flight <op>" line.
+     * Why it exists: PR 7 moves the busy-op diagnostic from a direct
+     * stderr eprintln! into plan.notes. A regression that leaked the
+     * wording back to stderr would break the dry-run stdout-only
+     * contract.
+     * Scenario: 3-device pool with 1 missing device, sysfs reports
+     * "device add". Operator runs `braid remove-missing --missing-id 3
+     * --dry-run`.
+     */
+    #[test]
+    fn plan_remove_missing_preflight_busy_op_becomes_info_note() {
+        let (_tmp, config_path, _state_tmp, state_paths) = three_device_config();
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let runner = ThreeDeviceRunner::new(log.clone(), false);
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let report = plan_remove_missing(
+            &runner,
+            &MockFsWithExclop("device add".into()),
+            &RemoveMissingParams {
+                config_path: &config_path,
+                missing_id: 3,
+                dry_run: true,
+                yes: true,
+                progress: crate::progress::ProgressOutput::Off,
+                paths: &state_paths,
+                sleep_inhibitor: &inhibitor,
+            },
+        );
+        let plan = report
+            .result
+            .expect("plan_remove_missing should succeed with 1 missing + busy op");
+        let info_notes: Vec<&String> = plan
+            .notes
+            .iter()
+            .filter_map(|n| match n {
+                PreviewNote::Info(b) => Some(b),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            info_notes.len(),
+            1,
+            "expected exactly one Info note, got: {:?}",
+            plan.notes
+        );
+        assert!(
+            info_notes[0].contains("waiting for in-flight"),
+            "info body={:?}",
+            info_notes[0],
+        );
+        assert!(
+            info_notes[0].contains("device add"),
+            "info body={:?}",
+            info_notes[0],
+        );
+        let rendered = plan.preview().render();
+        assert!(
+            rendered.contains("waiting for in-flight device add"),
+            "rendered preview must carry the busy-op Info line, got:\n{rendered}",
+        );
+    }
+
+    /* Intent: when plan_remove_missing accumulates a preflight Info
+     * note and then fails on the "no missing devices" validation
+     * (missing_count == 0), the accumulated notes survive on
+     * `report.notes`.
+     * Why it exists: Shape A "notes-carrying report" promises
+     * preserved context; a spurious remove-missing invocation during
+     * an in-flight balance must not hide the busy-op context from the
+     * operator.
+     * Scenario: 2-device healthy pool (zero missing), sysfs reports
+     * "device add". Operator runs `braid remove-missing --missing-id
+     * 999 --dry-run`.
+     */
+    #[test]
+    fn plan_remove_missing_preserves_preflight_notes_on_no_missing_devices() {
+        let (_state_tmp, state_paths) = test_paths(&[
+            ("disk1", "/dev/disk/by-id/virtio-disk1", Some(1)),
+            ("disk2", "/dev/disk/by-id/virtio-disk2", Some(2)),
+        ]);
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.json");
+        let config_json = serde_json::json!({ "mount_point": "/mnt/storage" });
+        std::fs::write(&config_path, serde_json::to_vec(&config_json).unwrap()).unwrap();
+
+        // Healthy runner: 2 present devices, zero missing.
+        struct HealthyRunner {
+            log: Arc<Mutex<Vec<CmdRequest>>>,
+        }
+        impl CommandRunner for HealthyRunner {
+            fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
+                self.log.lock().unwrap().push(request.clone());
+                match request {
+                    CmdRequest::FindmntJson { mount_point } => Ok(mock_out(
+                        &format!("findmnt --json --mountpoint {mount_point}"),
+                        r#"{"filesystems":[{"target":"/mnt/storage","source":"/dev/mapper/braid-disk1","fstype":"btrfs"}]}"#,
+                        0,
+                    )),
+                    CmdRequest::BtrfsFilesystemShow { mount_point } => Ok(mock_out(
+                        &format!("btrfs filesystem show {mount_point}"),
+                        "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\tTotal devices 2 FS bytes used 16.17MiB\n\tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk2\n",
+                        0,
+                    )),
+                    CmdRequest::CryptsetupStatus { mapper } => Ok(mock_out(
+                        &format!("cryptsetup status {mapper}"),
+                        &format!(
+                            "{mapper} is active and is in use.\n  type:    LUKS2\n  device:  /dev/vdb\n  mode:    read/write\n"
+                        ),
+                        0,
+                    )),
+                    CmdRequest::CryptsetupLuksUuid { .. } => Ok(mock_out(
+                        "cryptsetup luksUUID",
+                        "11111111-1111-1111-1111-111111111111\n",
+                        0,
+                    )),
+                    CmdRequest::BtrfsBalanceStatus { .. } => Ok(mock_out(
+                        "btrfs balance status",
+                        "No balance found on '/mnt/storage'\n",
+                        0,
+                    )),
+                    _ => Err(CmdError::MissingMock),
+                }
+            }
+            fn run_with_stdin(
+                &self,
+                request: &CmdRequest,
+                _stdin: &[u8],
+            ) -> Result<RawCommandOutput, CmdError> {
+                self.run(request)
+            }
+        }
+
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let runner = HealthyRunner { log };
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let report = plan_remove_missing(
+            &runner,
+            &MockFsWithExclop("device add".into()),
+            &RemoveMissingParams {
+                config_path: &config_path,
+                missing_id: 999,
+                dry_run: true,
+                yes: true,
+                progress: crate::progress::ProgressOutput::Off,
+                paths: &state_paths,
+                sleep_inhibitor: &inhibitor,
+            },
+        );
+        match &report.result {
+            Err(RemoveMissingError::Validation(msg)) => {
+                assert!(
+                    msg.contains("no missing devices detected"),
+                    "expected 'no missing devices detected' in: {msg}"
+                );
+            }
+            Err(other) => panic!("expected Validation, got: {other:?}"),
+            Ok(_) => panic!("expected Err(Validation), got Ok(_)"),
+        }
+        assert_eq!(
+            report.notes.len(),
+            1,
+            "busy-op Info note must survive the no-missing failure, got: {:?}",
+            report.notes,
+        );
+        assert!(
+            matches!(
+                &report.notes[0],
+                PreviewNote::Info(b) if b.contains("waiting for in-flight") && b.contains("device add")
+            ),
+            "notes[0]={:?}",
+            report.notes[0],
         );
     }
 }

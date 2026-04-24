@@ -5,6 +5,7 @@ use crate::journal;
 use crate::parse::parse_upsc;
 use crate::parse::types::{BtrfsBgType, BtrfsDeviceUsageEntry, BtrfsDfOutput};
 use crate::parse::{parse_btrfs_device_usage, parse_findmnt_json};
+use crate::preview::PreviewNote;
 use crate::probe::Filesystem;
 use crate::state_paths::StatePaths;
 use crate::status::format_bytes;
@@ -105,7 +106,8 @@ enum ExclusiveOpPolicy {
 
     /// Mutating command behavior (`add`, `remove`, `remove-missing`, `replace`):
     /// - `balance paused` => hard error (operator must resume/cancel)
-    /// - any other busy state => warn and proceed
+    /// - any other busy state => `Ok(Some(op))` for the caller to surface
+    ///   as a `PreviewNote::Info`
     ///
     /// Why: these commands invoke btrfs with `--enqueue`, so kernel serialization
     /// is the correctness mechanism and avoids TOCTOU-style preflight busy failures.
@@ -115,14 +117,18 @@ enum ExclusiveOpPolicy {
 
 /// Apply `policy` to the current exclusive-op state read from sysfs.
 ///
-/// Returns `Err(String)` on rejection, `Ok(())` when the caller may proceed.
+/// `Ok(None)` means the pool is idle. `Ok(Some(op))` is reachable only under
+/// `RejectPausedBalanceElseEnqueue` when a non-paused exclusive op is in
+/// flight -- the caller surfaces it as a `PreviewNote::Info`. `Err(msg)`
+/// means the policy rejected the state (paused balance, any busy under
+/// `RejectAnyBusy`, unrecognized value, or sysfs read failure).
 fn check_exclusive_op_with_policy<F: Filesystem + ?Sized>(
     fs: &F,
     fsid: &str,
     policy: ExclusiveOpPolicy,
-) -> Result<(), String> {
+) -> Result<Option<ExclusiveOp>, String> {
     match check_no_exclusive_op(fs, fsid) {
-        Ok(()) => Ok(()),
+        Ok(()) => Ok(None),
         Err(ExclusiveOpError::Busy(op)) => match policy {
             ExclusiveOpPolicy::RejectAnyBusy => {
                 Err(format!("cannot lock: {op} is in progress. Wait for it to finish first."))
@@ -131,10 +137,7 @@ fn check_exclusive_op_with_policy<F: Filesystem + ?Sized>(
                 ExclusiveOp::BalancePaused => {
                     Err("a btrfs balance is paused. Resume or cancel it before proceeding.".into())
                 }
-                _ => {
-                    eprintln!("  waiting for in-flight {op} to finish...");
-                    Ok(())
-                }
+                _ => Ok(Some(op)),
             },
         },
         Err(e) => Err(e.to_string()),
@@ -163,25 +166,28 @@ fn check_no_exclusive_op<F: Filesystem + ?Sized>(
 /// Refuse if the pool is mounted read-only.
 /// Runs its own findmnt probe — avoids adding mount_options to PoolState
 /// and touching all 7+ PoolState construction sites.
+///
+/// `Ok(None)` = writable mount. `Ok(Some(body))` = the probe itself
+/// failed (spawn error or unparseable JSON); the caller wraps `body` in
+/// a `PreviewNote::Warn` so operators know the ro guard did not run.
+/// `Err(msg)` = pool is mounted read-only.
 fn check_not_read_only<R: CommandRunner>(
     runner: &R,
     mount_point: &MountPoint,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     let raw = match runner.run(&CmdRequest::FindmntJson {
         mount_point: mount_point.clone(),
     }) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("warning: read-only pre-flight failed: {e}; proceeding anyway");
-            return Ok(());
+            return Ok(Some(e.to_string()));
         }
     };
 
     let findmnt = match parse_findmnt_json(&raw) {
         Ok(f) => f,
         Err(e) => {
-            eprintln!("warning: read-only pre-flight failed: {e}; proceeding anyway");
-            return Ok(());
+            return Ok(Some(e.to_string()));
         }
     };
 
@@ -196,7 +202,7 @@ fn check_not_read_only<R: CommandRunner>(
                  mount -o remount,rw {mount_point}"
             ));
         }
-    Ok(())
+    Ok(None)
 }
 
 /// Refuse if the pool has missing devices.
@@ -403,22 +409,39 @@ pub fn check_ups_not_on_battery<R: CommandRunner>(
 
 /// Guard for mutating pool commands (add, remove, remove-missing, replace).
 ///
-/// Checks three preconditions before the caller touches the pool:
-///   1. No paused balance is blocking the exclusive-op lock (hard error).
-///   2. No other in-flight exclusive op — prints a wait message and proceeds
-///      on the assumption the kernel will serialize access.
-///   3. The filesystem is not mounted read-only.
+/// Returns accumulated soft-success notes the caller surfaces as
+/// `PreviewNote` entries (dry-run stdout via `Preview::render`, real-run
+/// stderr via `preview::render_notes_for_stderr`, failure-path stderr
+/// via `cmd_*`'s `report.notes` rendering). Never writes to stderr
+/// itself. Hard failures (paused balance, mounted read-only) return
+/// `Err(String)` suitable for wrapping in a command's `Validation`
+/// error variant.
 ///
-/// Returns `Err(String)` suitable for wrapping in a command's
-/// `Validation` error variant.
+/// `Ok(notes)`: the vec may be empty (clean preflight) or carry one
+/// `Info` (busy-op enqueued) and/or one `Warn` (read-only probe
+/// degraded), in that insertion order.
 pub fn require_mutation_preflight<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
     fsid: &str,
     mount_point: &MountPoint,
-) -> Result<(), String> {
-    check_exclusive_op_with_policy(fs, fsid, ExclusiveOpPolicy::RejectPausedBalanceElseEnqueue)?;
-    check_not_read_only(runner, mount_point)
+) -> Result<Vec<PreviewNote>, String> {
+    let mut notes: Vec<PreviewNote> = Vec::new();
+    if let Some(op) = check_exclusive_op_with_policy(
+        fs,
+        fsid,
+        ExclusiveOpPolicy::RejectPausedBalanceElseEnqueue,
+    )? {
+        notes.push(PreviewNote::Info(format!(
+            "waiting for in-flight {op} to finish..."
+        )));
+    }
+    if let Some(probe_err) = check_not_read_only(runner, mount_point)? {
+        notes.push(PreviewNote::Warn(format!(
+            "read-only pre-flight failed: {probe_err}; proceeding anyway"
+        )));
+    }
+    Ok(notes)
 }
 
 /// Guard for `braid lock` (teardown: unmount + close LUKS).
@@ -431,7 +454,7 @@ pub fn require_lock_preflight<F: Filesystem + ?Sized>(
     fs: &F,
     fsid: &str,
 ) -> Result<(), String> {
-    check_exclusive_op_with_policy(fs, fsid, ExclusiveOpPolicy::RejectAnyBusy)
+    check_exclusive_op_with_policy(fs, fsid, ExclusiveOpPolicy::RejectAnyBusy).map(|_| ())
 }
 
 #[cfg(test)]
@@ -611,12 +634,12 @@ mod tests {
         }
     }
 
-    #[test]
-    // Intent: check_not_read_only passes when pool is rw.
-    // Why: Confirms rw mounts are not falsely rejected.
-    // Scenario: Normal pool mount with default options.
-    fn read_only_passes_when_rw() {
-        let runner = MockRunner::default().with_output(
+    /// MockRunner pre-populated with a `FindmntJson` response reporting
+    /// a writable (`rw,...`) mount. Mirrors the mock shape used by
+    /// `read_only_passes_when_rw`; used for every preflight test that
+    /// expects the findmnt probe to succeed.
+    fn rw_runner() -> MockRunner {
+        MockRunner::default().with_output(
             CmdRequest::FindmntJson { mount_point: mp() },
             RawCommandOutput {
                 cmd: "findmnt --json --output TARGET,SOURCE,FSTYPE,OPTIONS --mountpoint /mnt/storage".into(),
@@ -624,8 +647,17 @@ mod tests {
                 stderr: String::new(),
                 exit_status: 0,
             },
-        );
-        assert!(check_not_read_only(&runner, &mp()).is_ok());
+        )
+    }
+
+    #[test]
+    // Intent: check_not_read_only returns Ok(None) when pool is rw.
+    // Why: Confirms rw mounts are not falsely rejected.
+    // Scenario: Normal pool mount with default options.
+    fn read_only_passes_when_rw() {
+        let runner = rw_runner();
+        let out = check_not_read_only(&runner, &mp()).unwrap();
+        assert!(out.is_none(), "expected Ok(None) on rw mount, got {out:?}");
     }
 
     #[test]
@@ -651,12 +683,17 @@ mod tests {
     }
 
     #[test]
-    // Intent: check_not_read_only proceeds when findmnt probe fails.
-    // Why: A bug in the safety check shouldn't block valid operations.
+    // Intent: check_not_read_only surfaces probe-failure body via Ok(Some(_)).
+    // Why: A bug in the safety check shouldn't block valid operations, but the
+    //   caller must still surface a Warn note so operators know the guard did
+    //   not run.
     // Scenario: findmnt not found or permissions issue.
-    fn read_only_proceeds_on_probe_failure() {
+    fn read_only_returns_probe_error_body() {
         let runner = MockRunner::default(); // no mock → MissingMock
-        assert!(check_not_read_only(&runner, &mp()).is_ok());
+        let body = check_not_read_only(&runner, &mp())
+            .unwrap()
+            .expect("expected Ok(Some(_)) with probe-failure body");
+        assert!(!body.is_empty(), "probe-failure body must not be empty");
     }
 
     #[test]
@@ -1128,14 +1165,16 @@ mod tests {
     }
 
     #[test]
-    // Intent: require_mutation_preflight passes when no exclusive op is running
-    //   and pool is writable.
-    // Why: Baseline happy path — mutating commands should proceed on a healthy pool.
-    // Scenario: sysfs says "none", findmnt mock absent (swallowed as warning).
+    // Intent: require_mutation_preflight returns an empty notes vec on the
+    //   clean path (no busy op, rw probe).
+    // Why: Baseline happy path — mutating commands should proceed on a healthy
+    //   pool without emitting any PreviewNote.
+    // Scenario: sysfs says "none", findmnt reports rw.
     fn mutation_preflight_passes_when_none() {
         let fs = MockFs::with_sysfs(FSID, "none\n");
-        let runner = MockRunner::default();
-        assert!(require_mutation_preflight(&runner, &fs, FSID, &mp()).is_ok());
+        let runner = rw_runner();
+        let notes = require_mutation_preflight(&runner, &fs, FSID, &mp()).unwrap();
+        assert!(notes.is_empty(), "expected empty notes, got {notes:?}");
     }
 
     #[test]
@@ -1145,7 +1184,7 @@ mod tests {
     // Scenario: sysfs says "balance paused".
     fn mutation_preflight_rejects_balance_paused() {
         let fs = MockFs::with_sysfs(FSID, "balance paused\n");
-        let runner = MockRunner::default();
+        let runner = rw_runner();
         let err = require_mutation_preflight(&runner, &fs, FSID, &mp()).unwrap_err();
         assert!(
             err.contains("balance is paused"),
@@ -1154,16 +1193,83 @@ mod tests {
     }
 
     #[test]
-    // Intent: require_mutation_preflight proceeds (with stderr warning) when
-    //   another exclusive op is in-flight.
-    // Why: The kernel serializes exclusive ops, so waiting is safe. Blocking
-    //   would prevent queuing.
-    // Scenario: sysfs says "device add" — function returns Ok and prints a
-    //   wait message to stderr (stderr side-effect not captured in unit tests).
-    fn mutation_preflight_proceeds_on_busy_op() {
+    // Intent: require_mutation_preflight surfaces a busy exclusive op as a
+    //   single Info note.
+    // Why: The kernel serializes exclusive ops, so waiting is safe; the
+    //   operator still needs to know the mutation is about to enqueue behind
+    //   the in-flight op.
+    // Scenario: sysfs says "device add", findmnt reports rw.
+    fn mutation_preflight_busy_op_returns_info_note() {
+        let fs = MockFs::with_sysfs(FSID, "device add\n");
+        let runner = rw_runner();
+        let notes = require_mutation_preflight(&runner, &fs, FSID, &mp()).unwrap();
+        assert_eq!(notes.len(), 1, "expected one Info note, got {notes:?}");
+        match &notes[0] {
+            PreviewNote::Info(body) => {
+                assert!(
+                    body.contains("waiting for in-flight"),
+                    "body={body:?}"
+                );
+                assert!(body.contains("device add"), "body={body:?}");
+            }
+            other => panic!("expected Info, got {other:?}"),
+        }
+    }
+
+    #[test]
+    // Intent: require_mutation_preflight surfaces a findmnt probe failure as
+    //   a single Warn note.
+    // Why: The read-only guard is a best-effort safety net; if the probe
+    //   itself fails, the caller must not silently proceed -- operators
+    //   should know the ro mount guard did not run.
+    // Scenario: sysfs says "none"; the runner has no FindmntJson mock, so the
+    //   probe returns MissingMock.
+    fn mutation_preflight_readonly_probe_failure_returns_warn_note() {
+        let fs = MockFs::with_sysfs(FSID, "none\n");
+        let runner = MockRunner::default();
+        let notes = require_mutation_preflight(&runner, &fs, FSID, &mp()).unwrap();
+        assert_eq!(notes.len(), 1, "expected one Warn note, got {notes:?}");
+        match &notes[0] {
+            PreviewNote::Warn(body) => {
+                assert!(
+                    body.starts_with("read-only pre-flight failed:"),
+                    "body={body:?}"
+                );
+                assert!(body.ends_with("; proceeding anyway"), "body={body:?}");
+            }
+            other => panic!("expected Warn, got {other:?}"),
+        }
+    }
+
+    #[test]
+    // Intent: require_mutation_preflight stacks [Info, Warn] when both an
+    //   in-flight exclusive op AND a probe failure happen.
+    // Why: insertion order is load-bearing for the renderer (busy-op Info
+    //   before probe-failure Warn) so dry-run stdout and failure-path stderr
+    //   agree on how the two diagnostics present.
+    // Scenario: sysfs says "device add", runner has no FindmntJson mock.
+    fn mutation_preflight_busy_and_probe_failure_returns_info_then_warn() {
         let fs = MockFs::with_sysfs(FSID, "device add\n");
         let runner = MockRunner::default();
-        assert!(require_mutation_preflight(&runner, &fs, FSID, &mp()).is_ok());
+        let notes = require_mutation_preflight(&runner, &fs, FSID, &mp()).unwrap();
+        assert_eq!(notes.len(), 2, "expected two notes, got {notes:?}");
+        assert!(
+            matches!(
+                &notes[0],
+                PreviewNote::Info(b) if b.contains("waiting for in-flight") && b.contains("device add")
+            ),
+            "notes[0]={:?}",
+            notes[0]
+        );
+        assert!(
+            matches!(
+                &notes[1],
+                PreviewNote::Warn(b) if b.starts_with("read-only pre-flight failed:")
+                    && b.ends_with("; proceeding anyway")
+            ),
+            "notes[1]={:?}",
+            notes[1]
+        );
     }
 
     // --- check_ups_not_on_battery tests ---
