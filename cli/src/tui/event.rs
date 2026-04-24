@@ -8,8 +8,8 @@ use std::time::Duration;
 use ratatui::crossterm::event::{self, KeyEvent};
 
 use crate::tui::app::Message;
-use crate::tui::model::{FanSnapshot, PoolState, UpsSnapshot};
 use crate::tui::keymap;
+use crate::tui::model::{FanSnapshot, PoolState, UpsSnapshot};
 use crate::tui::state::{CmdId, Stream};
 use crate::types::MountPoint;
 
@@ -29,7 +29,9 @@ pub enum Event {
         status: ExitStatus,
     },
     PoolProbeFinished(Box<Result<Option<PoolState>, String>>, Duration),
-    PollRefresh { mount_point: MountPoint },
+    PollRefresh {
+        mount_point: MountPoint,
+    },
     FanProbeFinished(FanSnapshot),
     PollFanRefresh,
     UpsProbeFinished(UpsSnapshot),
@@ -77,9 +79,10 @@ impl InputHandler {
                 match event::poll(Duration::from_millis(100)) {
                     Ok(true) => {
                         if let Ok(event::Event::Key(key)) = event::read()
-                            && thread_tx.send(Event::Key(key)).is_err() {
-                                break;
-                            }
+                            && thread_tx.send(Event::Key(key)).is_err()
+                        {
+                            break;
+                        }
                     }
                     Ok(false) => {
                         if thread_tx.send(Event::Tick).is_err() {

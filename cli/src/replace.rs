@@ -1,19 +1,19 @@
 use crate::cmd::{CmdRequest, CommandRunner, Step};
-use crate::config::{config_read, mapper_name, Config};
+use crate::config::{Config, config_read, mapper_name};
 use crate::confirm;
 use crate::inhibit::AcquireSleepInhibitor;
 use crate::journal;
 use crate::luks::{
-    backup_luks_header, ensure_luks_open, luks_format, luks_opts_from_env,
-    format_keyfile_asymmetry_warning, format_keyfile_enrollment_probe_failure,
-    probe_pool_keyfile_enrollment, read_passphrase, verify_passphrase, VerifyOutcome,
+    VerifyOutcome, backup_luks_header, ensure_luks_open, format_keyfile_asymmetry_warning,
+    format_keyfile_enrollment_probe_failure, luks_format, luks_opts_from_env,
+    probe_pool_keyfile_enrollment, read_passphrase, verify_passphrase,
 };
 use crate::membership::{self, PoolMembership};
 use crate::parse::parse_btrfs_device_stats;
 use crate::pool::{pool_replace_device, pool_resize_device};
 use crate::preflight;
 use crate::preview::{self, PerDiskStyle, Preview, PreviewCompleteness, PreviewNote};
-use crate::probe::{probe_config_disk, probe_pool, Filesystem, ProbeError};
+use crate::probe::{Filesystem, ProbeError, probe_config_disk, probe_pool};
 use crate::progress::ProgressOutput;
 use crate::state_paths::StatePaths;
 use crate::types::*;
@@ -409,7 +409,8 @@ impl ReplacePlan {
         membership::save_membership(&target_membership, params.paths).map_err(|e| {
             ReplaceError::Validation(format!("failed to persist pool membership: {e}"))
         })?;
-        journal::clear_journal(params.paths).map_err(|e| ReplaceError::Validation(e.to_string()))?;
+        journal::clear_journal(params.paths)
+            .map_err(|e| ReplaceError::Validation(e.to_string()))?;
 
         eprintln!("Done. Replaced {} with {}.", params.old_name, new_name);
         Ok(())
@@ -1234,8 +1235,8 @@ mod tests {
         let pool = two_device_pool();
         let runner = MockRunner::default();
         let mn = MapperName("braid-disk2".into());
-        let err = resolve_replace_source(&runner, "disk2", &mn, Some(99), &pool, &mp())
-            .unwrap_err();
+        let err =
+            resolve_replace_source(&runner, "disk2", &mn, Some(99), &pool, &mp()).unwrap_err();
         assert!(
             err.to_string().contains("--missing-id cannot be used"),
             "unexpected error: {err}"
@@ -1252,8 +1253,7 @@ mod tests {
         pool.total_devices = 3;
         let runner = MockRunner::default();
         let mn = MapperName("braid-disk2".into());
-        let err =
-            resolve_replace_source(&runner, "disk2", &mn, None, &pool, &mp()).unwrap_err();
+        let err = resolve_replace_source(&runner, "disk2", &mn, None, &pool, &mp()).unwrap_err();
         assert!(
             err.to_string().contains("missing device"),
             "unexpected error: {err}"
@@ -1318,8 +1318,10 @@ mod tests {
     //   but pool.json only knows about disk1.
     fn build_replacement_membership_missing_rejects_absent_old_name() {
         let mut m = membership::PoolMembership::empty();
-        m.disks
-            .insert("disk1".into(), disk_member_with_devid("/dev/disk/by-id/virtio-disk1", 1));
+        m.disks.insert(
+            "disk1".into(),
+            disk_member_with_devid("/dev/disk/by-id/virtio-disk1", 1),
+        );
 
         let result = build_replacement_membership(
             &m,
@@ -1345,8 +1347,10 @@ mod tests {
     //   records disk2 with devid 3.
     fn build_replacement_membership_missing_rejects_devid_mismatch() {
         let mut m = membership::PoolMembership::empty();
-        m.disks
-            .insert("disk2".into(), disk_member_with_devid("/dev/disk/by-id/virtio-disk2", 3));
+        m.disks.insert(
+            "disk2".into(),
+            disk_member_with_devid("/dev/disk/by-id/virtio-disk2", 3),
+        );
 
         let result = build_replacement_membership(
             &m,
@@ -1369,8 +1373,10 @@ mod tests {
     // Scenario: operator runs live replace with a typo in --old.
     fn build_replacement_membership_live_rejects_absent_old_name() {
         let mut m = membership::PoolMembership::empty();
-        m.disks
-            .insert("disk1".into(), disk_member_with_devid("/dev/disk/by-id/virtio-disk1", 1));
+        m.disks.insert(
+            "disk1".into(),
+            disk_member_with_devid("/dev/disk/by-id/virtio-disk1", 1),
+        );
 
         let result = build_replacement_membership(
             &m,
@@ -1607,7 +1613,8 @@ mod tests {
     fn new_disk_not_in_pool_passes() {
         let pool = two_device_pool();
         let new_mn = mapper_name("disk3");
-        check_new_not_in_pool("disk3", &new_mn, &pool).expect("disk3 is not in pool -- should pass");
+        check_new_not_in_pool("disk3", &new_mn, &pool)
+            .expect("disk3 is not in pool -- should pass");
     }
 
     #[test]
@@ -1699,8 +1706,7 @@ mod tests {
         let runner = mock_with_missing_devids(&[2]);
         let mn = MapperName("braid-disk2".into());
         // Devid 1 is live (in pool.devices)
-        let err = resolve_replace_source(&runner, "disk2", &mn, Some(1), &pool, &mp())
-            .unwrap_err();
+        let err = resolve_replace_source(&runner, "disk2", &mn, Some(1), &pool, &mp()).unwrap_err();
         assert!(
             err.to_string().contains("live device"),
             "expected 'live device' error, got: {err}"
@@ -1718,8 +1724,8 @@ mod tests {
         pool.total_devices = 2;
         let runner = mock_with_missing_devids(&[2]);
         let mn = MapperName("braid-disk2".into());
-        let err = resolve_replace_source(&runner, "disk2", &mn, Some(99), &pool, &mp())
-            .unwrap_err();
+        let err =
+            resolve_replace_source(&runner, "disk2", &mn, Some(99), &pool, &mp()).unwrap_err();
         assert!(
             err.to_string().contains("not a missing device"),
             "expected 'not a missing device' error, got: {err}"
@@ -1737,8 +1743,7 @@ mod tests {
         pool.total_devices = 3;
         let runner = mock_with_missing_devids(&[2, 3]);
         let mn = MapperName("braid-disk2".into());
-        let err =
-            resolve_replace_source(&runner, "disk2", &mn, None, &pool, &mp()).unwrap_err();
+        let err = resolve_replace_source(&runner, "disk2", &mn, None, &pool, &mp()).unwrap_err();
         assert!(
             err.to_string().contains("multiple missing"),
             "expected 'multiple missing' error, got: {err}"
@@ -1875,7 +1880,9 @@ mod tests {
                     };
                     Ok(mock_ok(
                         &format!("cryptsetup status {mapper}"),
-                        &format!("{mapper} is active and is in use.\n  type:    LUKS2\n  device:  {dev}\n  mode:    read/write\n"),
+                        &format!(
+                            "{mapper} is active and is in use.\n  type:    LUKS2\n  device:  {dev}\n  mode:    read/write\n"
+                        ),
                     ))
                 }
                 CmdRequest::CryptsetupLuksUuid { device } => {
@@ -1892,7 +1899,10 @@ mod tests {
                         }
                         _ => "99999999-9999-9999-9999-999999999999",
                     };
-                    Ok(mock_ok(&format!("cryptsetup luksUUID {device}"), &format!("{uuid}\n")))
+                    Ok(mock_ok(
+                        &format!("cryptsetup luksUUID {device}"),
+                        &format!("{uuid}\n"),
+                    ))
                 }
                 CmdRequest::CryptsetupLuksDumpText { device } => Ok(mock_ok(
                     &format!("cryptsetup luksDump {device}"),
@@ -1902,7 +1912,9 @@ mod tests {
                     "btrfs balance status",
                     "No balance found on '/mnt/storage'\n",
                 )),
-                CmdRequest::BtrfsDeviceStatsJson { .. } => Ok(mock_ok("btrfs device stats", r#"{"device-stats": []}"#)),
+                CmdRequest::BtrfsDeviceStatsJson { .. } => {
+                    Ok(mock_ok("btrfs device stats", r#"{"device-stats": []}"#))
+                }
                 CmdRequest::BtrfsReplaceStart { .. } => Ok(RawCommandOutput {
                     cmd: "btrfs replace start".into(),
                     stdout: String::new(),
@@ -2201,7 +2213,9 @@ mod tests {
                     };
                     Ok(mock_ok(
                         &format!("cryptsetup status {mapper}"),
-                        &format!("{mapper} is active and is in use.\n  type:    LUKS2\n  device:  {dev}\n  mode:    read/write\n"),
+                        &format!(
+                            "{mapper} is active and is in use.\n  type:    LUKS2\n  device:  {dev}\n  mode:    read/write\n"
+                        ),
                     ))
                 }
                 CmdRequest::CryptsetupLuksUuid { device } => {
@@ -2217,7 +2231,10 @@ mod tests {
                         }
                         _ => "99999999-9999-9999-9999-999999999999",
                     };
-                    Ok(mock_ok(&format!("cryptsetup luksUUID {device}"), &format!("{uuid}\n")))
+                    Ok(mock_ok(
+                        &format!("cryptsetup luksUUID {device}"),
+                        &format!("{uuid}\n"),
+                    ))
                 }
                 CmdRequest::CryptsetupLuksDumpText { device } => Ok(mock_ok(
                     &format!("cryptsetup luksDump {device}"),
@@ -2230,9 +2247,7 @@ mod tests {
                 CmdRequest::BtrfsDeviceStatsJson { .. } => {
                     Ok(mock_ok("btrfs device stats", r#"{"device-stats": []}"#))
                 }
-                CmdRequest::BtrfsReplaceStart { .. } => {
-                    Ok(mock_ok("btrfs replace start", ""))
-                }
+                CmdRequest::BtrfsReplaceStart { .. } => Ok(mock_ok("btrfs replace start", "")),
                 CmdRequest::CryptsetupClose { .. } => Ok(mock_ok("cryptsetup close", "")),
                 CmdRequest::BtrfsFilesystemResize { .. } => Ok(RawCommandOutput {
                     cmd: "btrfs filesystem resize".into(),
@@ -2326,27 +2341,24 @@ mod tests {
                     "expected typed PoolError::Failed carrying resize message, got: {msg}"
                 );
             }
-            other => panic!(
-                "expected Err(ReplaceError::Pool(PoolError::Failed(..))), got: {other:?}"
-            ),
+            other => {
+                panic!("expected Err(ReplaceError::Pool(PoolError::Failed(..))), got: {other:?}")
+            }
         }
 
         let log = log.lock().unwrap();
         let close_idx = log
             .iter()
-            .position(|r| matches!(
-                r,
-                CmdRequest::CryptsetupClose { mapper } if mapper == "braid-disk2"
-            ))
-            .expect(
-                "cryptsetup close on braid-disk2 must be issued even when resize fails",
-            );
+            .position(|r| {
+                matches!(
+                    r,
+                    CmdRequest::CryptsetupClose { mapper } if mapper == "braid-disk2"
+                )
+            })
+            .expect("cryptsetup close on braid-disk2 must be issued even when resize fails");
         let resize_idx = log
             .iter()
-            .position(|r| matches!(
-                r,
-                CmdRequest::BtrfsFilesystemResize { devid: 2, .. }
-            ))
+            .position(|r| matches!(r, CmdRequest::BtrfsFilesystemResize { devid: 2, .. }))
             .expect("btrfs filesystem resize on devid 2 must be issued");
         assert!(
             close_idx < resize_idx,
@@ -2383,7 +2395,9 @@ mod tests {
                 )),
                 CmdRequest::CryptsetupStatus { mapper } => Ok(mock_ok(
                     &format!("cryptsetup status {mapper}"),
-                    &format!("{mapper} is active and is in use.\n  type:    LUKS2\n  device:  /dev/vda\n  mode:    read/write\n"),
+                    &format!(
+                        "{mapper} is active and is in use.\n  type:    LUKS2\n  device:  /dev/vda\n  mode:    read/write\n"
+                    ),
                 )),
                 CmdRequest::CryptsetupLuksUuid { device } => Ok(mock_ok(
                     &format!("cryptsetup luksUUID {device}"),
@@ -2686,11 +2700,15 @@ mod tests {
                 CmdRequest::CryptsetupStatus { mapper } => match mapper.as_str() {
                     "braid-disk1" => Ok(mock_ok(
                         &format!("cryptsetup status {mapper}"),
-                        &format!("{mapper} is active and is in use.\n  type:    LUKS2\n  device:  /dev/vdb\n  mode:    read/write\n"),
+                        &format!(
+                            "{mapper} is active and is in use.\n  type:    LUKS2\n  device:  /dev/vdb\n  mode:    read/write\n"
+                        ),
                     )),
                     "braid-disk2" => Ok(mock_ok(
                         &format!("cryptsetup status {mapper}"),
-                        &format!("{mapper} is active and is in use.\n  type:    LUKS2\n  device:  /dev/vdc\n  mode:    read/write\n"),
+                        &format!(
+                            "{mapper} is active and is in use.\n  type:    LUKS2\n  device:  /dev/vdc\n  mode:    read/write\n"
+                        ),
                     )),
                     // new disk's mapper is closed -- this is the key
                     // difference vs FailingReplaceRunner.
@@ -2710,12 +2728,13 @@ mod tests {
                         "/dev/vdc" | "/dev/disk/by-id/virtio-disk2" => {
                             "22222222-2222-2222-2222-222222222222"
                         }
-                        "/dev/disk/by-id/virtio-disk3" => {
-                            "33333333-3333-3333-3333-333333333333"
-                        }
+                        "/dev/disk/by-id/virtio-disk3" => "33333333-3333-3333-3333-333333333333",
                         _ => "99999999-9999-9999-9999-999999999999",
                     };
-                    Ok(mock_ok(&format!("cryptsetup luksUUID {device}"), &format!("{uuid}\n")))
+                    Ok(mock_ok(
+                        &format!("cryptsetup luksUUID {device}"),
+                        &format!("{uuid}\n"),
+                    ))
                 }
                 CmdRequest::CryptsetupLuksDumpText { device } => Ok(mock_ok(
                     &format!("cryptsetup luksDump {device}"),
@@ -3029,7 +3048,9 @@ mod tests {
                     };
                     Ok(mock_ok(
                         &format!("cryptsetup status {mapper}"),
-                        &format!("{mapper} is active and is in use.\n  type:    LUKS2\n  device:  {dev}\n  mode:    read/write\n"),
+                        &format!(
+                            "{mapper} is active and is in use.\n  type:    LUKS2\n  device:  {dev}\n  mode:    read/write\n"
+                        ),
                     ))
                 }
                 CmdRequest::CryptsetupLuksUuid { device } => {

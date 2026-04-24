@@ -545,10 +545,7 @@ impl UpsStatusFlag {
     /// `Ob` alone is NOT critical (yellow in the TUI); preflight
     /// refuses on `Ob` separately.
     pub fn is_critical(&self) -> bool {
-        matches!(
-            self,
-            Self::Lb | Self::TestFail | Self::CommBad | Self::Fsd
-        )
+        matches!(self, Self::Lb | Self::TestFail | Self::CommBad | Self::Fsd)
     }
 }
 
@@ -647,9 +644,7 @@ impl UpscOutput {
     /// must render the missing case explicitly).
     pub fn watts_estimated(&self) -> Option<u32> {
         match (self.load_pct, self.realpower_nominal_watts) {
-            (Some(pct), Some(nominal)) => {
-                Some((u32::from(pct) * nominal + 50) / 100)
-            }
+            (Some(pct), Some(nominal)) => Some((u32::from(pct) * nominal + 50) / 100),
             _ => None,
         }
     }

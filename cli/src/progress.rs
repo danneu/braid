@@ -1,5 +1,7 @@
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, RawCommandOutput};
-use crate::parse::{BalanceState, ReplaceState, parse_btrfs_balance_status, parse_btrfs_replace_status};
+use crate::parse::{
+    BalanceState, ReplaceState, parse_btrfs_balance_status, parse_btrfs_replace_status,
+};
 use crate::types::MountPoint;
 use std::io::Write;
 
@@ -165,44 +167,45 @@ pub fn run_with_progress<R: CommandRunner + Sync>(
                 mount_point: mount_point.clone(),
             });
             if let Ok(ref raw) = poll
-                && let Ok(status) = parse_btrfs_balance_status(raw) {
-                    match status.state {
-                        BalanceState::Running {
-                            done_chunks,
-                            estimated_total_chunks,
-                            pct_left,
-                            ..
-                        }
-                        | BalanceState::Paused {
-                            done_chunks,
-                            estimated_total_chunks,
-                            pct_left,
-                            ..
-                        } => match output {
-                            ProgressOutput::Human => {
-                                let msg = format_balance_progress(
-                                    done_chunks,
-                                    estimated_total_chunks,
-                                    pct_left,
-                                );
-                                if msg != last_msg {
-                                    write_progress_line(&msg);
-                                    last_msg = msg;
-                                }
-                            }
-                            ProgressOutput::Json => {
-                                let json = format_balance_progress_json(
-                                    done_chunks,
-                                    estimated_total_chunks,
-                                    pct_left,
-                                );
-                                write_progress_json(&json);
-                            }
-                            ProgressOutput::Off => unreachable!(),
-                        },
-                        BalanceState::None => continue,
+                && let Ok(status) = parse_btrfs_balance_status(raw)
+            {
+                match status.state {
+                    BalanceState::Running {
+                        done_chunks,
+                        estimated_total_chunks,
+                        pct_left,
+                        ..
                     }
+                    | BalanceState::Paused {
+                        done_chunks,
+                        estimated_total_chunks,
+                        pct_left,
+                        ..
+                    } => match output {
+                        ProgressOutput::Human => {
+                            let msg = format_balance_progress(
+                                done_chunks,
+                                estimated_total_chunks,
+                                pct_left,
+                            );
+                            if msg != last_msg {
+                                write_progress_line(&msg);
+                                last_msg = msg;
+                            }
+                        }
+                        ProgressOutput::Json => {
+                            let json = format_balance_progress_json(
+                                done_chunks,
+                                estimated_total_chunks,
+                                pct_left,
+                            );
+                            write_progress_json(&json);
+                        }
+                        ProgressOutput::Off => unreachable!(),
+                    },
+                    BalanceState::None => continue,
                 }
+            }
         }
 
         if output == ProgressOutput::Human {
@@ -238,25 +241,26 @@ pub fn run_replace_with_progress<R: CommandRunner + Sync>(
                 mount_point: mount_point.clone(),
             });
             if let Ok(ref raw) = poll
-                && let Ok(status) = parse_btrfs_replace_status(raw) {
-                    match status.state {
-                        ReplaceState::Running { pct } => match output {
-                            ProgressOutput::Human => {
-                                let msg = format_replace_progress(pct);
-                                if msg != last_msg {
-                                    write_progress_line(&msg);
-                                    last_msg = msg;
-                                }
+                && let Ok(status) = parse_btrfs_replace_status(raw)
+            {
+                match status.state {
+                    ReplaceState::Running { pct } => match output {
+                        ProgressOutput::Human => {
+                            let msg = format_replace_progress(pct);
+                            if msg != last_msg {
+                                write_progress_line(&msg);
+                                last_msg = msg;
                             }
-                            ProgressOutput::Json => {
-                                let json = format_replace_progress_json(pct);
-                                write_progress_json(&json);
-                            }
-                            ProgressOutput::Off => unreachable!(),
-                        },
-                        ReplaceState::Finished | ReplaceState::None => continue,
-                    }
+                        }
+                        ProgressOutput::Json => {
+                            let json = format_replace_progress_json(pct);
+                            write_progress_json(&json);
+                        }
+                        ProgressOutput::Off => unreachable!(),
+                    },
+                    ReplaceState::Finished | ReplaceState::None => continue,
                 }
+            }
         }
 
         if output == ProgressOutput::Human {

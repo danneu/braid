@@ -1,7 +1,7 @@
 use crate::cmd::RawCommandOutput;
 
-use super::types::CryptsetupLuksVersionOutput;
 use super::ParseError;
+use super::types::CryptsetupLuksVersionOutput;
 
 /// Parse the LUKS version from `cryptsetup luksDump` text output.
 ///

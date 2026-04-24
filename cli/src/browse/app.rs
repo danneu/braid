@@ -1,8 +1,8 @@
 use crate::cmd::{CmdRequest, RawCommandOutput};
 use crate::parse::parse_btrfs_subvolume_list;
 
-use super::model::{Model, SubTab, Tab, ViewMode};
 use super::Effect;
+use super::model::{Model, SubTab, Tab, ViewMode};
 
 pub enum Message {
     Quit,

@@ -1,6 +1,6 @@
 use crate::cmd::{CmdRequest, CommandRunner, Step};
 use crate::config::mapper_name;
-use crate::luks::{self, KeySlotState, LuksError, VerifyOutcome, KEYFILE_SIZE, LUKS_SLOT_KEYFILE};
+use crate::luks::{self, KEYFILE_SIZE, KeySlotState, LUKS_SLOT_KEYFILE, LuksError, VerifyOutcome};
 use crate::membership::PoolMembership;
 use crate::preflight;
 use crate::preview::{self, NoteLevel, PerDiskStyle, Preview, PreviewCompleteness, PreviewNote};

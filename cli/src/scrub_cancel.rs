@@ -1,5 +1,5 @@
 use crate::cmd::{CmdError, CmdRequest, CommandRunner};
-use crate::parse::{parse_btrfs_scrub_status, ParseError, ScrubState};
+use crate::parse::{ParseError, ScrubState, parse_btrfs_scrub_status};
 use crate::types::MountPoint;
 
 #[derive(Debug, PartialEq)]

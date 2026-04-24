@@ -10,7 +10,9 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum MembershipError {
-    #[error("pool membership not found at {0} -- run 'braid add' to create a pool or 'braid discover --write' to rebuild from existing disks")]
+    #[error(
+        "pool membership not found at {0} -- run 'braid add' to create a pool or 'braid discover --write' to rebuild from existing disks"
+    )]
     NotFound(String),
     #[error("pool membership file corrupt at {0}: {1}")]
     Corrupt(String, String),
@@ -18,7 +20,9 @@ pub enum MembershipError {
     Write(#[source] std::io::Error),
     #[error("membership conflict: {0}")]
     Conflict(String),
-    #[error("invalid disk name '{0}': must start with a letter, contain only letters, digits, hyphens, or underscores, and be at most 32 characters")]
+    #[error(
+        "invalid disk name '{0}': must start with a letter, contain only letters, digits, hyphens, or underscores, and be at most 32 characters"
+    )]
     InvalidDiskName(String),
     #[error("invalid by_id path '{0}': must start with /dev/disk/by-id/")]
     InvalidByIdPath(String),
@@ -115,12 +119,13 @@ pub fn validate_no_conflicts(
 ) -> Result<(), MembershipError> {
     // Check name reassignment: name exists with different by_id
     if let Some(current) = existing.disks.get(name)
-        && current.by_id.0 != by_id {
-            return Err(MembershipError::Conflict(format!(
-                "disk '{}' already exists with by_id '{}', cannot reassign to '{}'",
-                name, current.by_id, by_id
-            )));
-        }
+        && current.by_id.0 != by_id
+    {
+        return Err(MembershipError::Conflict(format!(
+            "disk '{}' already exists with by_id '{}', cannot reassign to '{}'",
+            name, current.by_id, by_id
+        )));
+    }
 
     // Check by_id rename: by_id exists under different name
     for (existing_name, existing_member) in &existing.disks {

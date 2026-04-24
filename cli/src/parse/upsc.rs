@@ -14,10 +14,8 @@
 //! condition rather than silently treating it as an empty status set.
 
 use crate::cmd::RawCommandOutput;
-use crate::parse::types::{
-    BatteryFields, DeviceFields, InputFields, UpsStatusFlag, UpscOutput,
-};
 use crate::parse::ParseError;
+use crate::parse::types::{BatteryFields, DeviceFields, InputFields, UpsStatusFlag, UpscOutput};
 
 impl UpsStatusFlag {
     fn from_token(tok: &str) -> Self {
@@ -202,9 +200,10 @@ mod tests {
     #[test]
     fn preserves_unknown_flag_verbatim() {
         let out = parse_upsc(&ok("ups.status: OL NEWFLAG\n")).unwrap();
-        assert!(out
-            .status_flags
-            .contains(&UpsStatusFlag::Unknown("NEWFLAG".to_owned())));
+        assert!(
+            out.status_flags
+                .contains(&UpsStatusFlag::Unknown("NEWFLAG".to_owned()))
+        );
     }
 
     // Intent: parse_upsc recognises TESTFAIL and COMMBAD as typed variants.
@@ -327,10 +326,7 @@ ups.test.result: Done and passed\n\
         assert_eq!(only_ups.device.mfr.as_deref(), Some("APC"));
         assert_eq!(only_ups.device.model.as_deref(), Some("Back-UPS"));
         // Both present -- device.* wins.
-        let both = parse_upsc(&ok(
-            "device.mfr: DeviceMfr\nups.mfr: UpsMfr\n",
-        ))
-        .unwrap();
+        let both = parse_upsc(&ok("device.mfr: DeviceMfr\nups.mfr: UpsMfr\n")).unwrap();
         assert_eq!(both.device.mfr.as_deref(), Some("DeviceMfr"));
     }
 

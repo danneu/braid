@@ -2,11 +2,11 @@ use std::thread;
 use std::time::Duration;
 
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, Step};
-use crate::config::{mapper_name, name_from_mapper, Config};
+use crate::config::{Config, mapper_name, name_from_mapper};
 use crate::membership::PoolMembership;
 use crate::preflight;
 use crate::preview::{Preview, PreviewCompleteness, PreviewNote};
-use crate::probe::{probe_fsid, Filesystem};
+use crate::probe::{Filesystem, probe_fsid};
 use crate::status_tag::StatusTag;
 use crate::types::MountPoint;
 
@@ -310,7 +310,9 @@ impl LockPlan {
                     Err(LockError::DeviceBusy(msg)) if umount_error.is_some() => {
                         eprintln!(
                             "{}  disk: {:<7}close failed (umount was stuck): {}",
-                            StatusTag::Warn, name, msg
+                            StatusTag::Warn,
+                            name,
+                            msg
                         );
                     }
                     Err(e) => {
@@ -347,7 +349,9 @@ impl LockPlan {
                 Err(LockError::DeviceBusy(msg)) if umount_error.is_some() => {
                     eprintln!(
                         "{}  disk: {:<7}orphan close failed (umount was stuck): {}",
-                        StatusTag::Warn, disk_name, msg
+                        StatusTag::Warn,
+                        disk_name,
+                        msg
                     );
                 }
                 Err(e) => {
@@ -423,7 +427,12 @@ where
         }
     };
 
-    let steps = compile_lock_steps(pool_was_mounted, &open_mappers, &orphan_mappers, &mount_point);
+    let steps = compile_lock_steps(
+        pool_was_mounted,
+        &open_mappers,
+        &orphan_mappers,
+        &mount_point,
+    );
 
     Ok(LockPlan {
         notes,
@@ -721,7 +730,8 @@ mod tests {
         let config = test_config();
         let membership = test_membership();
 
-        cmd_lock_impl(&runner, &fs, &NoopSleeper, &config, &membership, false).expect("lock should succeed");
+        cmd_lock_impl(&runner, &fs, &NoopSleeper, &config, &membership, false)
+            .expect("lock should succeed");
     }
 
     #[test]
@@ -760,7 +770,8 @@ mod tests {
         let config = test_config();
         let membership = test_membership();
 
-        cmd_lock_impl(&runner, &fs, &NoopSleeper, &config, &membership, false).expect("lock should succeed (partial)");
+        cmd_lock_impl(&runner, &fs, &NoopSleeper, &config, &membership, false)
+            .expect("lock should succeed (partial)");
     }
 
     // Intent: lock fails when umount reports the mount is busy.
@@ -807,8 +818,8 @@ mod tests {
         let config = test_config();
         let membership = test_membership();
 
-        let err =
-            cmd_lock_impl(&runner, &fs, &NoopSleeper, &config, &membership, false).expect_err("should fail on busy");
+        let err = cmd_lock_impl(&runner, &fs, &NoopSleeper, &config, &membership, false)
+            .expect_err("should fail on busy");
         assert!(err.to_string().contains("target is busy"));
     }
 
@@ -855,8 +866,8 @@ mod tests {
         let config = test_config();
         let membership = test_membership();
 
-        let err =
-            cmd_lock_impl(&runner, &fs, &NoopSleeper, &config, &membership, false).expect_err("should fail on busy");
+        let err = cmd_lock_impl(&runner, &fs, &NoopSleeper, &config, &membership, false)
+            .expect_err("should fail on busy");
         let msg = err.to_string();
         assert!(
             msg.contains("lsof") && msg.contains("fuser"),
@@ -981,7 +992,8 @@ mod tests {
         let config = test_config();
         let membership = test_membership();
 
-        cmd_lock_impl(&runner, &fs, &NoopSleeper, &config, &membership, false).expect("lock should close orphan too");
+        cmd_lock_impl(&runner, &fs, &NoopSleeper, &config, &membership, false)
+            .expect("lock should close orphan too");
     }
 
     // Intent: I/O errors scanning /dev/mapper don't prevent closing known
@@ -1031,8 +1043,15 @@ mod tests {
         let config = test_config();
         let membership = test_membership();
 
-        cmd_lock_impl(&runner, &FailListDirFs, &NoopSleeper, &config, &membership, false)
-            .expect("lock should succeed despite list_dir failure");
+        cmd_lock_impl(
+            &runner,
+            &FailListDirFs,
+            &NoopSleeper,
+            &config,
+            &membership,
+            false,
+        )
+        .expect("lock should succeed despite list_dir failure");
     }
 
     /*
@@ -1905,10 +1924,7 @@ mod tests {
         for step in steps {
             for cmd in &step.commands {
                 if let CmdRequest::BtrfsDeviceScanForget { devices } = cmd {
-                    assert!(
-                        found.is_none(),
-                        "multiple forget steps in plan: {steps:?}"
-                    );
+                    assert!(found.is_none(), "multiple forget steps in plan: {steps:?}");
                     found = Some(devices.clone());
                 }
             }
@@ -2022,7 +2038,8 @@ mod tests {
         let config = test_config();
         let membership = test_membership();
 
-        cmd_lock_impl(&runner, &fs, &NoopSleeper, &config, &membership, false).expect("lock should succeed");
+        cmd_lock_impl(&runner, &fs, &NoopSleeper, &config, &membership, false)
+            .expect("lock should succeed");
 
         assert_eq!(
             runner.forget_calls(),

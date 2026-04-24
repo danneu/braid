@@ -10,10 +10,10 @@ use crate::parse::{
     parse_btrfs_device_stats, parse_btrfs_device_usage, parse_btrfs_scrub_status,
     parse_cryptsetup_luks_dump, parse_lsblk_json, parse_smartctl, parse_upsc,
 };
-use crate::probe::{probe_config_disk, probe_pool, Filesystem, ProbeError};
+use crate::probe::{Filesystem, ProbeError, probe_config_disk, probe_pool};
 use crate::state_paths::StatePaths;
 use crate::status::resolve_alert_state;
-use crate::status::{estimate_pool_capacity, get_balance_report, DiskErrors};
+use crate::status::{DiskErrors, estimate_pool_capacity, get_balance_report};
 use crate::tui::model::{
     DaemonStatus, DiskLuksInfo, DiskUsage, DrivingDrive, FanReading, FanSnapshot, PoolState,
     TemperatureDiskId, TemperatureReading, UnpooledDiskRender, UpsSnapshot,
@@ -114,23 +114,22 @@ pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
                 Some(uuid) => TemperatureDiskId::LuksUuid(uuid.clone()),
                 None => TemperatureDiskId::ByIdPath(ByIdPath(by_id_path.clone())),
             };
-            disk_temperature_readings
-                .insert(disk_name.clone(), TemperatureReading { id, celsius });
+            disk_temperature_readings.insert(disk_name.clone(), TemperatureReading { id, celsius });
         }
 
         if let Ok(raw) = runner.run(&CmdRequest::CryptsetupLuksDump {
             device: by_id_path.clone(),
-        })
-            && let Ok(dump) = parse_cryptsetup_luks_dump(&raw) {
-                luks_info.insert(
-                    disk_name.clone(),
-                    DiskLuksInfo {
-                        cipher: dump.cipher,
-                        key_size_bits: dump.key_size_bits,
-                        keyslot_count: dump.keyslot_count,
-                    },
-                );
-            }
+        }) && let Ok(dump) = parse_cryptsetup_luks_dump(&raw)
+        {
+            luks_info.insert(
+                disk_name.clone(),
+                DiskLuksInfo {
+                    cipher: dump.cipher,
+                    key_size_bits: dump.key_size_bits,
+                    keyslot_count: dump.keyslot_count,
+                },
+            );
+        }
     }
 
     // Extract transport type (sata, nvme, usb, etc.) from lsblk tree.
@@ -138,17 +137,18 @@ pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
     // parent's TRAN value. TRAN is only set on physical devices, not dm-crypt.
     let mut disk_transport = HashMap::new();
     if let Ok(lsblk_raw) = runner.run(&CmdRequest::LsblkJson)
-        && let Ok(lsblk) = parse_lsblk_json(&lsblk_raw) {
-            for dev in &lsblk.blockdevices {
-                if let Some(tran) = &dev.tran {
-                    for child in &dev.children {
-                        if let Some(name) = crate::config::name_from_mapper(&child.name) {
-                            disk_transport.insert(name.to_owned(), tran.clone());
-                        }
+        && let Ok(lsblk) = parse_lsblk_json(&lsblk_raw)
+    {
+        for dev in &lsblk.blockdevices {
+            if let Some(tran) = &dev.tran {
+                for child in &dev.children {
+                    if let Some(name) = crate::config::name_from_mapper(&child.name) {
+                        disk_transport.insert(name.to_owned(), tran.clone());
                     }
                 }
             }
         }
+    }
 
     // Device error stats
     let mut device_errors = HashMap::new();
@@ -550,7 +550,10 @@ fn pick_driving(
         });
     }
     let (sd, celsius) = best?;
-    let label = sd_to_friendly.get(sd).cloned().unwrap_or_else(|| sd.clone());
+    let label = sd_to_friendly
+        .get(sd)
+        .cloned()
+        .unwrap_or_else(|| sd.clone());
     Some(DrivingDrive {
         label,
         celsius: *celsius,
@@ -1127,8 +1130,14 @@ mod tests {
         let fs = StubFs::with_paths(&["/dev/disk/by-id/braid-toshiba"]);
 
         let disk_by_id = HashMap::from([
-            ("toshiba".to_owned(), "/dev/disk/by-id/braid-toshiba".to_owned()),
-            ("ironwolf".to_owned(), "/dev/disk/by-id/braid-ironwolf".to_owned()),
+            (
+                "toshiba".to_owned(),
+                "/dev/disk/by-id/braid-toshiba".to_owned(),
+            ),
+            (
+                "ironwolf".to_owned(),
+                "/dev/disk/by-id/braid-ironwolf".to_owned(),
+            ),
         ]);
 
         let pool = probe_pool_for_tui(
@@ -1138,8 +1147,8 @@ mod tests {
             &disk_by_id,
             &test_paths().1,
         )
-            .unwrap()
-            .expect("pool should be Some");
+        .unwrap()
+        .expect("pool should be Some");
 
         assert_eq!(
             pool.unpooled_disks.get("ironwolf"),
@@ -1201,8 +1210,14 @@ mod tests {
         ]);
 
         let disk_by_id = HashMap::from([
-            ("toshiba".to_owned(), "/dev/disk/by-id/braid-toshiba".to_owned()),
-            ("ironwolf".to_owned(), "/dev/disk/by-id/braid-ironwolf".to_owned()),
+            (
+                "toshiba".to_owned(),
+                "/dev/disk/by-id/braid-toshiba".to_owned(),
+            ),
+            (
+                "ironwolf".to_owned(),
+                "/dev/disk/by-id/braid-ironwolf".to_owned(),
+            ),
         ]);
 
         let pool = probe_pool_for_tui(
@@ -1212,8 +1227,8 @@ mod tests {
             &disk_by_id,
             &test_paths().1,
         )
-            .unwrap()
-            .expect("pool should be Some");
+        .unwrap()
+        .expect("pool should be Some");
 
         assert_eq!(
             pool.unpooled_disks.get("ironwolf"),
@@ -1262,8 +1277,14 @@ mod tests {
         ]);
 
         let disk_by_id = HashMap::from([
-            ("toshiba".to_owned(), "/dev/disk/by-id/braid-toshiba".to_owned()),
-            ("ironwolf".to_owned(), "/dev/disk/by-id/braid-ironwolf".to_owned()),
+            (
+                "toshiba".to_owned(),
+                "/dev/disk/by-id/braid-toshiba".to_owned(),
+            ),
+            (
+                "ironwolf".to_owned(),
+                "/dev/disk/by-id/braid-ironwolf".to_owned(),
+            ),
         ]);
 
         let pool = probe_pool_for_tui(
@@ -1273,8 +1294,8 @@ mod tests {
             &disk_by_id,
             &test_paths().1,
         )
-            .unwrap()
-            .expect("pool should be Some");
+        .unwrap()
+        .expect("pool should be Some");
 
         assert_eq!(
             pool.unpooled_disks.get("ironwolf"),
@@ -1334,8 +1355,14 @@ mod tests {
         ]);
 
         let disk_by_id = HashMap::from([
-            ("toshiba".to_owned(), "/dev/disk/by-id/braid-toshiba".to_owned()),
-            ("ironwolf".to_owned(), "/dev/disk/by-id/braid-ironwolf".to_owned()),
+            (
+                "toshiba".to_owned(),
+                "/dev/disk/by-id/braid-toshiba".to_owned(),
+            ),
+            (
+                "ironwolf".to_owned(),
+                "/dev/disk/by-id/braid-ironwolf".to_owned(),
+            ),
         ]);
 
         let pool = probe_pool_for_tui(
@@ -1345,8 +1372,8 @@ mod tests {
             &disk_by_id,
             &test_paths().1,
         )
-            .unwrap()
-            .expect("pool should be Some");
+        .unwrap()
+        .expect("pool should be Some");
 
         assert_eq!(
             pool.unpooled_disks.get("ironwolf"),
@@ -1396,8 +1423,14 @@ mod tests {
         ]);
 
         let disk_by_id = HashMap::from([
-            ("toshiba".to_owned(), "/dev/disk/by-id/braid-toshiba".to_owned()),
-            ("ironwolf".to_owned(), "/dev/disk/by-id/braid-ironwolf".to_owned()),
+            (
+                "toshiba".to_owned(),
+                "/dev/disk/by-id/braid-toshiba".to_owned(),
+            ),
+            (
+                "ironwolf".to_owned(),
+                "/dev/disk/by-id/braid-ironwolf".to_owned(),
+            ),
         ]);
 
         let pool = probe_pool_for_tui(
@@ -1407,8 +1440,8 @@ mod tests {
             &disk_by_id,
             &test_paths().1,
         )
-            .unwrap()
-            .expect("pool should be Some");
+        .unwrap()
+        .expect("pool should be Some");
 
         assert_eq!(
             pool.unpooled_disks.get("ironwolf"),
@@ -1633,10 +1666,22 @@ mod tests {
         let by_id = tmp.path().join("dev/disk/by-id");
 
         // Partition entry pointing at sda.
-        symlink(PathBuf::from("../..").join("sda"), by_id.join("ata-FOO-part1")).unwrap();
+        symlink(
+            PathBuf::from("../..").join("sda"),
+            by_id.join("ata-FOO-part1"),
+        )
+        .unwrap();
         // Non-ata buses that should be excluded.
-        symlink(PathBuf::from("../..").join("sda"), by_id.join("usb-USBSTICK")).unwrap();
-        symlink(PathBuf::from("../..").join("sda"), by_id.join("nvme-Samsung980")).unwrap();
+        symlink(
+            PathBuf::from("../..").join("sda"),
+            by_id.join("usb-USBSTICK"),
+        )
+        .unwrap();
+        symlink(
+            PathBuf::from("../..").join("sda"),
+            by_id.join("nvme-Samsung980"),
+        )
+        .unwrap();
         // Broken symlink.
         symlink(
             PathBuf::from("../..").join("nonexistent"),
@@ -1814,8 +1859,7 @@ mod tests {
             ("\x00garbage\n", 1, DaemonStatus::Unknown),
         ];
         for (stdout, exit, expected) in cases {
-            let mock =
-                MockRunner::default().with_output(req.clone(), raw(stdout, *exit));
+            let mock = MockRunner::default().with_output(req.clone(), raw(stdout, *exit));
             let got = probe_daemon_status(&mock, "hddfancontrol-braid.service");
             assert_eq!(&got, expected, "stdout={stdout:?} exit={exit}");
         }
@@ -1848,9 +1892,7 @@ mod tests {
     fn mock_with_upsc_and_unit(stdout: &str, exit: i32, unit_stdout: &str) -> MockRunner {
         MockRunner::default()
             .with_output(
-                CmdRequest::UpscQuery {
-                    name: "ups".into(),
-                },
+                CmdRequest::UpscQuery { name: "ups".into() },
                 RawCommandOutput {
                     cmd: "upsc ups".into(),
                     stdout: stdout.to_owned(),
@@ -1903,11 +1945,7 @@ mod tests {
     // Scenario: UPS driver reports load but not realpower.nominal.
     #[test]
     fn probe_ups_watts_requires_both_ingredients() {
-        let mock = mock_with_upsc_and_unit(
-            "ups.status: OL\nups.load: 40\n",
-            0,
-            "active\n",
-        );
+        let mock = mock_with_upsc_and_unit("ups.status: OL\nups.load: 40\n", 0, "active\n");
         let snap = probe_ups_for_tui(&mock, "ups");
         assert_eq!(snap.load_pct, Some(40));
         assert_eq!(snap.watts_estimated, None);

@@ -490,8 +490,7 @@ impl CmdRequest {
                 args: vec!["device".into(), "scan".into()],
             },
             CmdRequest::BtrfsDeviceScanForget { devices } => {
-                let mut args: Vec<String> =
-                    vec!["device".into(), "scan".into(), "--forget".into()];
+                let mut args: Vec<String> = vec!["device".into(), "scan".into(), "--forget".into()];
                 args.extend(devices.iter().cloned());
                 CmdArgs {
                     program: "btrfs".to_owned(),

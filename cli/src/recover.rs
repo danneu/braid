@@ -4,13 +4,13 @@ use crate::discover;
 use crate::journal::{self, Journal};
 use crate::membership::{self, DiskMember, PoolMembership};
 use crate::mount::{self, MountError, OpenCredential, OpenPlan};
-use crate::parse::btrfs_filesystem_show::{classify_btrfs_probe, DeviceBtrfsProbe};
-use crate::parse::{parse_btrfs_replace_status, ReplaceState};
+use crate::parse::btrfs_filesystem_show::{DeviceBtrfsProbe, classify_btrfs_probe};
+use crate::parse::{ReplaceState, parse_btrfs_replace_status};
 use crate::preview::{self, PerDiskStyle, Preview, PreviewCompleteness, PreviewNote};
 use crate::probe::{self, Filesystem, ProbeError};
 use crate::progress::ProgressOutput;
 use crate::state_paths::StatePaths;
-use crate::status::{get_balance_report, BalanceReport};
+use crate::status::{BalanceReport, get_balance_report};
 use crate::types::{ByIdPath, MountPoint, PoolState};
 use thiserror::Error;
 
@@ -264,8 +264,7 @@ impl RecoverPlan {
                             && let journal::OpKind::Add { ref disks } = journal.op
                         {
                             let all_no_btrfs = disks.keys().all(|name| {
-                                let mapper =
-                                    format!("/dev/mapper/{}", config::mapper_name(name).0);
+                                let mapper = format!("/dev/mapper/{}", config::mapper_name(name).0);
                                 match runner
                                     .run(&CmdRequest::BtrfsFilesystemShowTarget { target: mapper })
                                 {
@@ -715,9 +714,7 @@ fn wait_for_kernel_replace_to_finish<R: CommandRunner>(runner: &R, mount_point: 
             ReplaceState::Finished | ReplaceState::None => return,
             ReplaceState::Running { pct } => {
                 if last_pct != Some(pct) {
-                    eprintln!(
-                        "  waiting for kernel to finish resumed dev_replace... {pct:.1}%"
-                    );
+                    eprintln!("  waiting for kernel to finish resumed dev_replace... {pct:.1}%");
                     last_pct = Some(pct);
                 }
             }
@@ -841,9 +838,7 @@ fn relock_and_remount<R: CommandRunner, F: Filesystem + ?Sized>(
         .result
         .map_err(|e| RecoverError::Failed(format!("recover remount cycle: plan: {e}")))?
         .ok_or_else(|| {
-            RecoverError::Failed(
-                "recover remount cycle: pool already mounted after umount?".into(),
-            )
+            RecoverError::Failed("recover remount cycle: pool already mounted after umount?".into())
         })?;
     mount::execute_unlock_and_mount(runner, fs, config, &cycle_plan, credential)
         .map_err(|e| RecoverError::Failed(format!("recover remount cycle: re-mount: {e}")))?;
@@ -871,10 +866,7 @@ fn recovery_guidance(
         match op {
             journal::OpKind::Add { disks } => {
                 let names: Vec<_> = disks.keys().map(|n| format!("'{n}'")).collect();
-                format!(
-                    "add completed -- {} now in the pool.",
-                    names.join(", ")
-                )
+                format!("add completed -- {} now in the pool.", names.join(", "))
             }
             journal::OpKind::Remove { name } => {
                 format!("remove completed -- '{name}' is no longer in the pool.")
@@ -1142,9 +1134,10 @@ mod tests {
         let mut resolver = MockByIdResolver::default();
         for (underlying, filename) in mappings {
             resolver.entries.push((*filename).to_string());
-            resolver
-                .canonicalize_results
-                .insert(format!("/dev/disk/by-id/{filename}"), (*underlying).to_string());
+            resolver.canonicalize_results.insert(
+                format!("/dev/disk/by-id/{filename}"),
+                (*underlying).to_string(),
+            );
             resolver
                 .canonicalize_results
                 .insert((*underlying).to_string(), (*underlying).to_string());
@@ -1589,10 +1582,7 @@ mod tests {
             passphrase_file.as_file().write_all(b"testpass").unwrap();
         }
 
-        let resolver = resolver_for(&[
-            ("/dev/vda", "virtio-disk1"),
-            ("/dev/vdb", "virtio-disk2"),
-        ]);
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
         let result = cmd_recover(
             &runner,
             &fs,
@@ -1845,10 +1835,7 @@ mod tests {
             passphrase_file.as_file().write_all(b"testpass").unwrap();
         }
 
-        let resolver = resolver_for(&[
-            ("/dev/vda", "virtio-disk1"),
-            ("/dev/vdb", "virtio-disk2"),
-        ]);
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
         let result = cmd_recover(
             &runner,
             &fs,
@@ -2221,10 +2208,7 @@ mod tests {
             );
 
         // No passphrase — pool is already mounted
-        let resolver = resolver_for(&[
-            ("/dev/vda", "virtio-disk1"),
-            ("/dev/vdb", "virtio-disk2"),
-        ]);
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
         let result = cmd_recover(
             &runner,
             &fs,
@@ -2952,8 +2936,8 @@ mod tests {
             .with_canonical("/dev/disk/by-id/ata-Y", "/dev/sda")
             .with_canonical("/dev/disk/by-id/ata-OTHER", "/dev/sdb");
 
-        let resolved = resolve_by_id_for_underlying(&resolver, "/dev/sda")
-            .expect("resolution should succeed");
+        let resolved =
+            resolve_by_id_for_underlying(&resolver, "/dev/sda").expect("resolution should succeed");
         assert_eq!(
             resolved.0, "/dev/disk/by-id/wwn-X",
             "wwn- has highest priority and must win"
@@ -2974,8 +2958,8 @@ mod tests {
             .with_canonical("/dev/disk/by-id/ata-FOO-part1", "/dev/sda")
             .with_canonical("/dev/disk/by-id/ata-FOO-part2", "/dev/sda");
 
-        let resolved = resolve_by_id_for_underlying(&resolver, "/dev/sda")
-            .expect("resolution should succeed");
+        let resolved =
+            resolve_by_id_for_underlying(&resolver, "/dev/sda").expect("resolution should succeed");
         assert_eq!(
             resolved.0, "/dev/disk/by-id/ata-FOO",
             "partition entries must be filtered, leaving only the whole-disk by-id"
@@ -3282,10 +3266,7 @@ mod tests {
         // replay (mocked above) and the unconditional soft-balance replay
         // (mocked above).
 
-        let resolver = resolver_for(&[
-            ("/dev/vda", "virtio-disk1"),
-            ("/dev/vdc", "virtio-new"),
-        ]);
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdc", "virtio-new")]);
         let result = cmd_recover(
             &runner,
             &fs,
@@ -3431,10 +3412,7 @@ mod tests {
                 ok_raw_empty("btrfs balance start"),
             );
 
-        let resolver = resolver_for(&[
-            ("/dev/vda", "virtio-disk1"),
-            ("/dev/vdb", "virtio-disk2"),
-        ]);
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
         let result = cmd_recover(
             &runner,
             &fs,
@@ -3582,10 +3560,7 @@ mod tests {
         // proving recover correctly leaves the paused balance alone for the
         // remove path.
 
-        let resolver = resolver_for(&[
-            ("/dev/vda", "virtio-disk1"),
-            ("/dev/vdb", "virtio-disk2"),
-        ]);
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
         let result = cmd_recover(
             &runner,
             &fs,

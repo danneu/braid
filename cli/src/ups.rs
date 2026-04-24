@@ -9,9 +9,9 @@
 //! off the parsed model without re-parsing `upsc` output themselves.
 
 use crate::cmd::{CmdRequest, CommandRunner};
-use crate::config::{config_read, ConfigError, Ups};
+use crate::config::{ConfigError, Ups, config_read};
 use crate::parse::parse_upsc;
-use crate::parse::types::{UpscOutput, UpsStatusFlag};
+use crate::parse::types::{UpsStatusFlag, UpscOutput};
 use std::path::Path;
 
 #[derive(Debug, thiserror::Error)]
@@ -66,11 +66,7 @@ fn print_not_enabled(json: bool, _reason: Option<&str>) -> Result<(), UpsError> 
     Ok(())
 }
 
-fn render_live<R: CommandRunner>(
-    runner: &R,
-    ups_cfg: &Ups,
-    json: bool,
-) -> Result<(), UpsError> {
+fn render_live<R: CommandRunner>(runner: &R, ups_cfg: &Ups, json: bool) -> Result<(), UpsError> {
     let raw = match runner.run(&CmdRequest::UpscQuery {
         name: ups_cfg.name.clone(),
     }) {
@@ -282,7 +278,10 @@ mod tests {
             serde_json::to_string_pretty(&JsonReport::Ok(&parsed)).expect("serialize succeeds");
         assert!(text.contains("\"status_flags\""), "got: {text}");
         assert!(text.contains("\"battery\""), "got: {text}");
-        assert!(text.contains("\"OL\""), "flag token appears verbatim: {text}");
+        assert!(
+            text.contains("\"OL\""),
+            "flag token appears verbatim: {text}"
+        );
     }
 
     // Intent: not-enabled --json surfaces the stable error sentinel.
@@ -338,9 +337,7 @@ mod tests {
     #[test]
     fn render_live_non_zero_exit_is_daemon_down() {
         let runner = MockRunner::default().with_output(
-            CmdRequest::UpscQuery {
-                name: "ups".into(),
-            },
+            CmdRequest::UpscQuery { name: "ups".into() },
             RawCommandOutput {
                 cmd: "upsc ups".into(),
                 stdout: String::new(),
@@ -457,10 +454,9 @@ mod tests {
         let parsed = parse_fixture(include_str!(
             "../tests/fixtures/nixos-25.11/upsc/upsc-onbattery.txt"
         ));
-        let value: serde_json::Value = serde_json::from_str(
-            &serde_json::to_string(&JsonReport::Ok(&parsed)).unwrap(),
-        )
-        .unwrap();
+        let value: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&JsonReport::Ok(&parsed)).unwrap())
+                .unwrap();
         let flags = value["status_flags"].as_array().unwrap();
         assert!(flags.iter().any(|v| v == "OB"), "OB in status_flags");
         assert!(
@@ -489,10 +485,9 @@ mod tests {
         let parsed = parse_fixture(include_str!(
             "../tests/fixtures/nixos-25.11/upsc/upsc-lowbattery.txt"
         ));
-        let value: serde_json::Value = serde_json::from_str(
-            &serde_json::to_string(&JsonReport::Ok(&parsed)).unwrap(),
-        )
-        .unwrap();
+        let value: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&JsonReport::Ok(&parsed)).unwrap())
+                .unwrap();
         let flags = value["status_flags"].as_array().unwrap();
         assert!(flags.iter().any(|v| v == "OB"), "OB in status_flags");
         assert!(flags.iter().any(|v| v == "LB"), "LB in status_flags");
@@ -519,10 +514,9 @@ mod tests {
         let parsed = parse_fixture(include_str!(
             "../tests/fixtures/nixos-25.11/upsc/upsc-replace-battery.txt"
         ));
-        let value: serde_json::Value = serde_json::from_str(
-            &serde_json::to_string(&JsonReport::Ok(&parsed)).unwrap(),
-        )
-        .unwrap();
+        let value: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&JsonReport::Ok(&parsed)).unwrap())
+                .unwrap();
         let flags = value["status_flags"].as_array().unwrap();
         assert!(flags.iter().any(|v| v == "OL"));
         assert!(flags.iter().any(|v| v == "RB"));

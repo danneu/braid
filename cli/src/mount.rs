@@ -1,5 +1,5 @@
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, Step};
-use crate::config::{mapper_name, Config};
+use crate::config::{Config, mapper_name};
 use crate::luks::{self, LuksError, VerifyOutcome};
 use crate::membership::PoolMembership;
 use crate::preview::{self, NoteLevel, PerDiskStyle, PreviewNote};
@@ -92,10 +92,7 @@ impl MissingReason {
 /// `"braid <command_hint> --allow-degraded"` that existing tests anchor on.
 ///
 /// `missing` is guaranteed non-empty by the caller.
-fn format_degraded_refused(
-    missing: &[(String, MissingReason)],
-    command_hint: &str,
-) -> String {
+fn format_degraded_refused(missing: &[(String, MissingReason)], command_hint: &str) -> String {
     let total = missing.len();
     let header = if total == 1 {
         "pool has 1 missing device -- refusing to mount degraded".to_owned()
@@ -288,14 +285,15 @@ fn plan_open_pool_inner<R: CommandRunner, F: Filesystem + ?Sized>(
             }
             ConfigDiskState::PresentLuks { uuid, mapper_open } => {
                 if let Some(expected) = &member.luks_uuid
-                    && expected != uuid {
-                        return Err(MountError::Failed(format!(
-                            "disk '{}' LUKS UUID mismatch at {}:\n  \
+                    && expected != uuid
+                {
+                    return Err(MountError::Failed(format!(
+                        "disk '{}' LUKS UUID mismatch at {}:\n  \
                              expected  {}\n  \
                              found     {}",
-                            name, member.by_id, expected, uuid
-                        )));
-                    }
+                        name, member.by_id, expected, uuid
+                    )));
+                }
 
                 if *mapper_open {
                     events.push(ProbeEvent::DiskAlreadyOpen { name: name.clone() });
@@ -510,9 +508,8 @@ fn open_disks_with_passphrase<R: CommandRunner, F: Filesystem + ?Sized>(
     };
     if outcome == VerifyOutcome::Rejected {
         let original_summary = format!("passphrase rejected on '{first_name}'");
-        let ok_fallback = MountError::Failed(format!(
-            "wrong passphrase (verified against {first_name})"
-        ));
+        let ok_fallback =
+            MountError::Failed(format!("wrong passphrase (verified against {first_name})"));
         let header_state = luks::probe_luks_header(runner, &first_by_id.0);
         return Err(explain_open_failure(
             first_name,
@@ -644,9 +641,8 @@ pub fn execute_unlock_and_mount<R: CommandRunner, F: Filesystem + ?Sized>(
             };
             if outcome == VerifyOutcome::Rejected {
                 let original_summary = format!("keyfile rejected on '{first_name}'");
-                let ok_fallback = MountError::Failed(format!(
-                    "wrong keyfile (verified against {first_name})"
-                ));
+                let ok_fallback =
+                    MountError::Failed(format!("wrong keyfile (verified against {first_name})"));
                 let header_state = luks::probe_luks_header(runner, &first_by_id.0);
                 return Err(explain_open_failure(
                     first_name,
@@ -658,9 +654,7 @@ pub fn execute_unlock_and_mount<R: CommandRunner, F: Filesystem + ?Sized>(
             }
 
             for (name, by_id) in &plan.to_unlock {
-                if let Err(e) =
-                    luks::ensure_luks_open_with_key_file(runner, fs, name, by_id, kf)
-                {
+                if let Err(e) = luks::ensure_luks_open_with_key_file(runner, fs, name, by_id, kf) {
                     let header_state = luks::probe_luks_header(runner, &by_id.0);
                     let (original_summary, ok_fallback) = match &e {
                         LuksError::OpenFailed {
@@ -828,8 +822,7 @@ mod tests {
         allow_degraded: bool,
         command_hint: &str,
     ) -> Result<bool, MountError> {
-        let report =
-            plan_open_pool(runner, fs, config, membership, allow_degraded, command_hint);
+        let report = plan_open_pool(runner, fs, config, membership, allow_degraded, command_hint);
         let plan = match report.result? {
             Some(p) => p,
             None => return Ok(false),
@@ -1007,15 +1000,8 @@ mod tests {
             ok_raw("mountpoint"),
         );
 
-        let result = open_and_mount_for_test(
-            &runner,
-            &fs,
-            &config,
-            &membership,
-            None,
-            false,
-            "unlock",
-        );
+        let result =
+            open_and_mount_for_test(&runner, &fs, &config, &membership, None, false, "unlock");
 
         assert!(!result.unwrap());
     }
@@ -1516,10 +1502,8 @@ mod tests {
     /// Scenario: a single Unplugged disk.
     #[test]
     fn format_degraded_refused_unplugged_only_omits_doctor_footer() {
-        let msg = format_degraded_refused(
-            &[("raw".to_owned(), MissingReason::Unplugged)],
-            "unlock",
-        );
+        let msg =
+            format_degraded_refused(&[("raw".to_owned(), MissingReason::Unplugged)], "unlock");
         assert!(
             !msg.contains("braid doctor"),
             "unplugged-only must not include doctor footer: {msg}"
@@ -1668,15 +1652,8 @@ mod tests {
             err_raw("mountpoint", 1, ""),
         );
 
-        let result = open_and_mount_for_test(
-            &runner,
-            &fs,
-            &config,
-            &membership,
-            None,
-            false,
-            "unlock",
-        );
+        let result =
+            open_and_mount_for_test(&runner, &fs, &config, &membership, None, false, "unlock");
 
         let err = result.expect_err("should fail with no unlockable disks");
         let msg = err.to_string();
@@ -1745,15 +1722,8 @@ mod tests {
                 ok_raw("mount"),
             );
 
-        let result = open_and_mount_for_test(
-            &runner,
-            &fs,
-            &config,
-            &membership,
-            None,
-            false,
-            "unlock",
-        );
+        let result =
+            open_and_mount_for_test(&runner, &fs, &config, &membership, None, false, "unlock");
 
         assert!(result.unwrap());
     }
@@ -2124,15 +2094,8 @@ pool already mounted at /mnt/storage
                 ok_raw("mount -o degraded"),
             );
 
-        let result = open_and_mount_for_test(
-            &runner,
-            &fs,
-            &config,
-            &membership,
-            None,
-            true,
-            "unlock",
-        );
+        let result =
+            open_and_mount_for_test(&runner, &fs, &config, &membership, None, true, "unlock");
 
         assert!(
             result.unwrap(),
@@ -2183,15 +2146,8 @@ pool already mounted at /mnt/storage
             .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk2")
             .with_mappers_closed(&["braid-disk1", "braid-disk2"]);
 
-        let result = open_and_mount_for_test(
-            &runner,
-            &fs,
-            &config,
-            &membership,
-            None,
-            false,
-            "unlock",
-        );
+        let result =
+            open_and_mount_for_test(&runner, &fs, &config, &membership, None, false, "unlock");
 
         let err = result.expect_err("should fail on LUKS UUID mismatch");
         let msg = err.to_string();
@@ -2257,15 +2213,8 @@ pool already mounted at /mnt/storage
             )
             .with_mapper_closed("braid-disk2");
 
-        let result = open_and_mount_for_test(
-            &runner,
-            &fs,
-            &config,
-            &membership,
-            None,
-            false,
-            "unlock",
-        );
+        let result =
+            open_and_mount_for_test(&runner, &fs, &config, &membership, None, false, "unlock");
 
         let err = result.expect_err("should fail on LUKS UUID mismatch even with open mapper");
         let msg = err.to_string();
@@ -2603,8 +2552,7 @@ pool already mounted at /mnt/storage
      */
     #[test]
     fn explain_open_failure_ok_preserves_invariant_message() {
-        let fallback_text =
-            "failed to open disk 'disk2': passphrase was verified against 'disk1' but \
+        let fallback_text = "failed to open disk 'disk2': passphrase was verified against 'disk1' but \
              rejected here -- wrong passphrase or permission denied (EPERM). If the \
              passphrase is correct, the single-passphrase invariant may be violated \
              by external LUKS manipulation";
@@ -2682,7 +2630,11 @@ pool already mounted at /mnt/storage
             CmdRequest::CryptsetupLuksDumpText {
                 device: device.into(),
             },
-            err_raw("cryptsetup luksDump", 1, "Cannot read LUKS header metadata."),
+            err_raw(
+                "cryptsetup luksDump",
+                1,
+                "Cannot read LUKS header metadata.",
+            ),
         )
     }
 
@@ -2871,7 +2823,9 @@ pool already mounted at /mnt/storage
             &fs,
             &config,
             &membership,
-            Some(OpenCredential::Passphrase(Zeroizing::new("wrongpass".to_owned()))),
+            Some(OpenCredential::Passphrase(Zeroizing::new(
+                "wrongpass".to_owned(),
+            ))),
             false,
             "unlock",
         );
@@ -3074,8 +3028,7 @@ pool already mounted at /mnt/storage
      */
     #[test]
     fn explain_open_failure_probe_failed_emits_diagnosis_incomplete() {
-        let fallback_text =
-            "failed to open disk 'disk2': passphrase was verified against 'disk1' but \
+        let fallback_text = "failed to open disk 'disk2': passphrase was verified against 'disk1' but \
              rejected here. If the passphrase is correct, the single-passphrase \
              invariant may be violated by external LUKS manipulation";
         let err = explain_open_failure(

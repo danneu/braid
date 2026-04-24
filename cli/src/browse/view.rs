@@ -1,8 +1,8 @@
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph, Row, Table};
-use ratatui::Frame;
 
 use super::model::{Model, Tab, ViewMode};
 
@@ -270,8 +270,8 @@ mod tests {
     use super::*;
     use crate::browse::model::{Model, Tab};
     use crate::parse::types::BtrfsSubvolume;
-    use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     fn render(model: &mut Model, width: u16, height: u16) -> Terminal<TestBackend> {
         let backend = TestBackend::new(width, height);

@@ -2,8 +2,8 @@ use serde::Deserialize;
 
 use crate::cmd::RawCommandOutput;
 
-use super::types::{BtrfsDeviceStatsOutput, DeviceErrorStats, DeviceStatsTarget};
 use super::ParseError;
+use super::types::{BtrfsDeviceStatsOutput, DeviceErrorStats, DeviceStatsTarget};
 
 // --- Serde helper structs (not exposed to domain code) ---
 

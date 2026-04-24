@@ -1,7 +1,7 @@
 use crate::cmd::RawCommandOutput;
 
-use super::types::CryptsetupLuksLabelOutput;
 use super::ParseError;
+use super::types::CryptsetupLuksLabelOutput;
 
 /// Parse the LUKS label from `cryptsetup luksDump` text output.
 ///

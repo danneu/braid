@@ -1,6 +1,6 @@
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, RawCommandOutput};
 use crate::probe::probe_pool;
-use crate::progress::{run_replace_with_progress, run_with_progress, ProgressOutput};
+use crate::progress::{ProgressOutput, run_replace_with_progress, run_with_progress};
 use crate::types::MountPoint;
 
 #[derive(Debug, thiserror::Error)]

@@ -1,7 +1,7 @@
 use crate::cmd::{CmdError, CmdRequest, CommandRunner};
 use crate::parse::{
-    parse_btrfs_balance_status, parse_btrfs_replace_status, parse_btrfs_scrub_status,
-    parse_findmnt_json, BalanceState, ParseError, ReplaceState, ScrubState,
+    BalanceState, ParseError, ReplaceState, ScrubState, parse_btrfs_balance_status,
+    parse_btrfs_replace_status, parse_btrfs_scrub_status, parse_findmnt_json,
 };
 use crate::progress::pct_from_bytes;
 use crate::types::MountPoint;
@@ -257,9 +257,7 @@ mod tests {
 
     fn replace_running(pct: f64) -> (CmdRequest, RawCommandOutput) {
         (
-            CmdRequest::BtrfsReplaceStatus {
-                mount_point: mp(),
-            },
+            CmdRequest::BtrfsReplaceStatus { mount_point: mp() },
             RawCommandOutput {
                 cmd: "btrfs replace status /mnt/storage".into(),
                 stdout: format!(

@@ -1,13 +1,13 @@
 use nom::{
+    IResult,
     bytes::complete::{tag, take_till1},
     character::complete::{not_line_ending, space1},
-    IResult,
 };
 
 use crate::cmd::RawCommandOutput;
 
-use super::types::{BtrfsFilesystemUsageOutput, DataRatio};
 use super::ParseError;
+use super::types::{BtrfsFilesystemUsageOutput, DataRatio};
 
 // ---------------------------------------------------------------------------
 // nom parsers

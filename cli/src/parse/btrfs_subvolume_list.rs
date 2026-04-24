@@ -1,14 +1,14 @@
 use nom::{
+    IResult, Parser,
     bytes::complete::tag,
     character::complete::{digit1, space1},
     combinator::{map_res, rest},
-    IResult, Parser,
 };
 
 use crate::cmd::RawCommandOutput;
 
-use super::types::{BtrfsSubvolume, BtrfsSubvolumeListOutput};
 use super::ParseError;
+use super::types::{BtrfsSubvolume, BtrfsSubvolumeListOutput};
 
 /// Parses one line of `btrfs subvolume list` output.
 ///

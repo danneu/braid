@@ -14,7 +14,7 @@ use event::InputHandler;
 use model::Model;
 use view::view;
 
-use crate::cmd::{CmdRequest, RealRunner, CommandRunner, RawCommandOutput};
+use crate::cmd::{CmdRequest, CommandRunner, RawCommandOutput, RealRunner};
 use crate::parse::parse_btrfs_subvolume_list;
 use crate::types::MountPoint;
 

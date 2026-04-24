@@ -1,13 +1,13 @@
 use nom::{
+    IResult,
     bytes::complete::{tag, take_until},
     character::complete::{not_line_ending, space0, space1, u64 as parse_u64},
-    IResult,
 };
 
 use crate::cmd::RawCommandOutput;
 
-use super::types::{BtrfsFilesystemShowOutput, BtrfsShowDevice};
 use super::ParseError;
+use super::types::{BtrfsFilesystemShowOutput, BtrfsShowDevice};
 
 // ---------------------------------------------------------------------------
 // DeviceBtrfsProbe — classify raw btrfs-filesystem-show output

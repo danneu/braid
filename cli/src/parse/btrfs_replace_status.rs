@@ -1,7 +1,7 @@
 use crate::cmd::RawCommandOutput;
 
-use super::types::{BtrfsReplaceStatusOutput, ReplaceState};
 use super::ParseError;
+use super::types::{BtrfsReplaceStatusOutput, ReplaceState};
 
 /// Parse the output of `btrfs replace status -1 <mount_point>`.
 ///

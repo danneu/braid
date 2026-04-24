@@ -6,7 +6,7 @@ use braid_cli::cmd::RealRunner;
 use braid_cli::config::config_read;
 use braid_cli::doctor::cmd_doctor;
 use braid_cli::probe::RealFilesystem;
-use braid_cli::progress::{resolve_progress_output, ProgressMode};
+use braid_cli::progress::{ProgressMode, resolve_progress_output};
 use braid_cli::state_paths::StatePaths;
 
 #[derive(Debug, Parser)]

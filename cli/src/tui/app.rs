@@ -3,8 +3,10 @@ use std::process::ExitStatus;
 use std::time::{Duration, Instant};
 
 use crate::tui::effect::{Effect, FAN_PROBE_INTERVAL, UPS_PROBE_INTERVAL};
-use crate::tui::model::{FanSnapshot, Model, PoolState, PoolStatus, TemperatureWatermark, UpsSnapshot};
-use crate::tui::state::{CmdId, CmdStatus, CommandState, Stream, MAX_LINES};
+use crate::tui::model::{
+    FanSnapshot, Model, PoolState, PoolStatus, TemperatureWatermark, UpsSnapshot,
+};
+use crate::tui::state::{CmdId, CmdStatus, CommandState, MAX_LINES, Stream};
 
 pub enum Message {
     Quit,
@@ -103,11 +105,13 @@ pub fn update(model: &mut Model, msg: Message) -> Vec<Effect> {
             }
             // Manual `r` refreshes the fan too, but only if one isn't
             // already in flight — the auto-poll will catch up otherwise.
-            if model.fan_control.is_some() && !model.fan_probe_inflight
-                && let Some(fan_effect) = fan_probe_effect(model) {
-                    model.fan_probe_inflight = true;
-                    effects.push(fan_effect);
-                }
+            if model.fan_control.is_some()
+                && !model.fan_probe_inflight
+                && let Some(fan_effect) = fan_probe_effect(model)
+            {
+                model.fan_probe_inflight = true;
+                effects.push(fan_effect);
+            }
             // Manual `r` refreshes the UPS too. Same inflight-guard
             // pattern as the fan section -- a duplicate probe would
             // race with the pending one and the scheduler could lose
@@ -249,10 +253,7 @@ pub fn update(model: &mut Model, msg: Message) -> Vec<Effect> {
         Message::RefreshUps => {
             // Disabled / absent UPS config -> tear the loop down, no
             // further effects. Mirror of the fan loop.
-            let enabled = model
-                .ups_config
-                .as_ref()
-                .is_some_and(|u| u.enable);
+            let enabled = model.ups_config.as_ref().is_some_and(|u| u.enable);
             if !enabled {
                 return vec![];
             }
@@ -550,7 +551,10 @@ mod tests {
         let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Loading);
         let effects = update(
             &mut model,
-            Message::PoolProbeFinished(Box::new(Ok(Some(sample_pool()))), Duration::from_millis(10)),
+            Message::PoolProbeFinished(
+                Box::new(Ok(Some(sample_pool()))),
+                Duration::from_millis(10),
+            ),
         );
         assert!(effects.is_empty(), "got {} effects", effects.len());
     }

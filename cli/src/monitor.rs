@@ -1,12 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::alert::{
-    self, compute_alert_state_with_devid_map, load_acked_stats, merge_into_latch, save_acked_stats,
-    AlertCause,
+    self, AlertCause, compute_alert_state_with_devid_map, load_acked_stats, merge_into_latch,
+    save_acked_stats,
 };
 use crate::cmd::{CmdRequest, CommandRunner};
 use crate::parse::parse_btrfs_device_stats;
-use crate::probe::{probe_pool, ProbeError};
+use crate::probe::{ProbeError, probe_pool};
 use crate::state_paths::StatePaths;
 use crate::types::MountPoint;
 
@@ -76,15 +76,15 @@ pub fn cmd_monitor<R: CommandRunner>(
     for (key, disk) in acked.0.iter_mut() {
         if disk.missing_acked
             && let Ok(devid) = key.parse::<u64>()
-                && present_devids.contains(&devid) {
-                    disk.missing_acked = false;
-                    ack_changed = true;
-                }
-    }
-    if ack_changed
-        && let Err(e) = save_acked_stats(&acked, paths) {
-            eprintln!("Warning: failed to update acked stats: {e}");
+            && present_devids.contains(&devid)
+        {
+            disk.missing_acked = false;
+            ack_changed = true;
         }
+    }
+    if ack_changed && let Err(e) = save_acked_stats(&acked, paths) {
+        eprintln!("Warning: failed to update acked stats: {e}");
+    }
 
     // 8. Compute live alert state
     let live_causes = match compute_alert_state_with_devid_map(
@@ -118,9 +118,10 @@ pub fn cmd_monitor<R: CommandRunner>(
 
     // 11. If merged state active → write latch
     if merged.active
-        && let Err(e) = alert::save_alert_latch(&merged, paths) {
-            eprintln!("Warning: failed to write alert latch: {e}");
-        }
+        && let Err(e) = alert::save_alert_latch(&merged, paths)
+    {
+        eprintln!("Warning: failed to write alert latch: {e}");
+    }
 
     // 12. Return result based on merged state
     if merged.active {

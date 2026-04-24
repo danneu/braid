@@ -91,7 +91,7 @@ pub fn parse_smartctl(raw: &RawCommandOutput) -> SmartProbe {
             return SmartProbe {
                 health: SmartHealth::Unknown,
                 celsius: None,
-            }
+            };
         }
     };
 

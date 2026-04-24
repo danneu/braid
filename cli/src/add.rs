@@ -1,23 +1,22 @@
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, Step};
-use crate::config::{config_read, mapper_name, Config};
+use crate::config::{Config, config_read, mapper_name};
 use crate::confirm;
 use crate::inhibit::AcquireSleepInhibitor;
 use crate::journal;
 use crate::luks::{
-    backup_luks_header, ensure_luks_open, luks_format, luks_opts_from_env,
-    format_keyfile_asymmetry_warning, format_keyfile_enrollment_probe_failure,
-    probe_pool_keyfile_enrollment, read_passphrase_with, verify_passphrase, PassphraseReader,
-    VerifyOutcome,
+    PassphraseReader, VerifyOutcome, backup_luks_header, ensure_luks_open,
+    format_keyfile_asymmetry_warning, format_keyfile_enrollment_probe_failure, luks_format,
+    luks_opts_from_env, probe_pool_keyfile_enrollment, read_passphrase_with, verify_passphrase,
 };
 use crate::membership::{self, PoolMembership};
-use crate::parse::btrfs_filesystem_show::{classify_btrfs_probe, DeviceBtrfsProbe};
+use crate::parse::btrfs_filesystem_show::{DeviceBtrfsProbe, classify_btrfs_probe};
 use crate::parse::parse_btrfs_filesystem_show;
 use crate::pool::{
     pool_add_device, pool_balance_raid1, pool_bootstrap_mount, pool_bootstrap_mount_raid1,
 };
 use crate::preflight;
 use crate::preview::{self, PerDiskStyle, Preview, PreviewCompleteness, PreviewNote};
-use crate::probe::{probe_config_disk, probe_pool, Filesystem, ProbeError};
+use crate::probe::{Filesystem, ProbeError, probe_config_disk, probe_pool};
 use crate::progress::ProgressOutput;
 use crate::state_paths::StatePaths;
 use crate::types::*;
@@ -395,24 +394,23 @@ impl AddPlan {
         )?;
 
         // Verify passphrase against existing pool member (once)
-        if any_needs_format
-            && let Some(existing) = self.pool.devices.first() {
-                let status_raw = runner.run(&crate::cmd::CmdRequest::CryptsetupStatus {
-                    mapper: existing.mapper.0.clone(),
-                })?;
-                let status = crate::parse::parse_cryptsetup_status(&status_raw)?;
-                if let Some(underlying) = status.device {
-                    match verify_passphrase(runner, &underlying, &passphrase)? {
-                        VerifyOutcome::Authenticated => {}
-                        VerifyOutcome::Rejected => {
-                            return Err(AddError::Validation(
+        if any_needs_format && let Some(existing) = self.pool.devices.first() {
+            let status_raw = runner.run(&crate::cmd::CmdRequest::CryptsetupStatus {
+                mapper: existing.mapper.0.clone(),
+            })?;
+            let status = crate::parse::parse_cryptsetup_status(&status_raw)?;
+            if let Some(underlying) = status.device {
+                match verify_passphrase(runner, &underlying, &passphrase)? {
+                    VerifyOutcome::Authenticated => {}
+                    VerifyOutcome::Rejected => {
+                        return Err(AddError::Validation(
                                 "passphrase does not match existing pool member. All disks must use the same passphrase."
                                     .into(),
                             ));
-                        }
                     }
                 }
             }
+        }
 
         // Pass 1: validate PresentLuks disk identities before any irreversible operation.
         // Guard closes any mappers we opened for FSID verification if validation fails.
@@ -500,7 +498,11 @@ impl AddPlan {
             self.pool_membership.clone(),
             target_membership,
             journal::OpKind::Add {
-                disks: self.parsed.iter().map(|(n, b)| (n.clone(), b.clone())).collect(),
+                disks: self
+                    .parsed
+                    .iter()
+                    .map(|(n, b)| (n.clone(), b.clone()))
+                    .collect(),
             },
         );
         journal::write_journal(params.paths, &journal)
@@ -551,10 +553,7 @@ impl AddPlan {
             if mapper_paths.len() >= 2 {
                 // Bootstrap with mkfs.btrfs RAID1
                 pool_bootstrap_mount_raid1(runner, &mapper_paths, mount_point)?;
-                eprintln!(
-                    "Pool created (RAID1) and mounted at {}",
-                    mount_point
-                );
+                eprintln!("Pool created (RAID1) and mounted at {}", mount_point);
             } else {
                 // Single disk bootstrap
                 pool_bootstrap_mount(runner, &mapper_paths[0], mount_point)?;
@@ -1084,7 +1083,12 @@ fn format_add_confirm(disks: &[AddConfirmDisk]) -> String {
     for d in disks {
         msg.push_str(&format!("  {}  {}\n", d.name, d.by_id));
         if let Some(hw_line) = confirm::format_hw_info_line(&d.hw) {
-            msg.push_str(&format!("  {:width$}{}\n", "", hw_line, width = d.name.len() + 2));
+            msg.push_str(&format!(
+                "  {:width$}{}\n",
+                "",
+                hw_line,
+                width = d.name.len() + 2
+            ));
         }
         if d.needs_luks_format {
             msg.push_str(&format!(
@@ -1177,7 +1181,10 @@ mod tests {
         let msg = format_add_confirm(&disks);
         assert!(msg.contains("Add to pool:"));
         assert!(msg.contains("data1"));
-        assert!(!msg.contains("LUKS-formatted"), "no format warning for existing LUKS");
+        assert!(
+            !msg.contains("LUKS-formatted"),
+            "no format warning for existing LUKS"
+        );
     }
 
     #[test]
@@ -2006,7 +2013,9 @@ mod tests {
                     };
                     Ok(mock_ok(
                         &format!("cryptsetup status {mapper}"),
-                        &format!("{mapper} is active and is in use.\n  type:    LUKS2\n  device:  {underlying}\n  mode:    read/write\n"),
+                        &format!(
+                            "{mapper} is active and is in use.\n  type:    LUKS2\n  device:  {underlying}\n  mode:    read/write\n"
+                        ),
                     ))
                 }
                 CmdRequest::CryptsetupLuksUuid { device } => {
@@ -2016,7 +2025,10 @@ mod tests {
                         }
                         _ => "22222222-2222-2222-2222-222222222222",
                     };
-                    Ok(mock_ok(&format!("cryptsetup luksUUID {device}"), &format!("{uuid}\n")))
+                    Ok(mock_ok(
+                        &format!("cryptsetup luksUUID {device}"),
+                        &format!("{uuid}\n"),
+                    ))
                 }
                 CmdRequest::BtrfsBalanceStatus { .. } => Ok(mock_ok(
                     "btrfs balance status",
@@ -2033,13 +2045,17 @@ mod tests {
                         Ok(RawCommandOutput {
                             cmd: format!("btrfs filesystem show {target}"),
                             stdout: String::new(),
-                            stderr: "ERROR: not a valid btrfs filesystem on /dev/mapper/braid-disk2".into(),
+                            stderr:
+                                "ERROR: not a valid btrfs filesystem on /dev/mapper/braid-disk2"
+                                    .into(),
                             exit_status: 1,
                         })
                     } else {
                         Ok(mock_ok(
                             &format!("btrfs filesystem show {target}"),
-                            &format!("Label: none  uuid: {POOL_FSID}\n\tTotal devices 1 FS bytes used 16.17MiB\n\tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n"),
+                            &format!(
+                                "Label: none  uuid: {POOL_FSID}\n\tTotal devices 1 FS bytes used 16.17MiB\n\tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n"
+                            ),
                         ))
                     }
                 }
@@ -2317,7 +2333,9 @@ mod tests {
             },
         );
 
-        let err = result.expect_err("duplicate by_id must be rejected").to_string();
+        let err = result
+            .expect_err("duplicate by_id must be rejected")
+            .to_string();
         assert!(
             err.contains("duplicate by_id"),
             "expected duplicate by_id error, got: {err}"
@@ -3059,9 +3077,7 @@ mod tests {
                     }
                     for i in 0..self.missing_count {
                         let devid = real_devices + 1 + i;
-                        out.push_str(&format!(
-                            "\tdevid    {devid} size 0 used 0 path MISSING\n"
-                        ));
+                        out.push_str(&format!("\tdevid    {devid} size 0 used 0 path MISSING\n"));
                     }
                     Ok(mock_ok(
                         &format!("btrfs filesystem show {mount_point}"),
@@ -3090,16 +3106,16 @@ mod tests {
                     ))
                 }
                 CmdRequest::CryptsetupLuksUuid { device } => {
-                    if let Some(index) = self
-                        .keyfile_probes
-                        .iter()
-                        .enumerate()
-                        .find_map(|(index, _)| {
-                            let disk = index + 1;
-                            let underlying = Self::pool_underlying(index);
-                            let by_id = format!("/dev/disk/by-id/virtio-disk{disk}");
-                            (device == &underlying || device == &by_id).then_some(index)
-                        })
+                    if let Some(index) =
+                        self.keyfile_probes
+                            .iter()
+                            .enumerate()
+                            .find_map(|(index, _)| {
+                                let disk = index + 1;
+                                let underlying = Self::pool_underlying(index);
+                                let by_id = format!("/dev/disk/by-id/virtio-disk{disk}");
+                                (device == &underlying || device == &by_id).then_some(index)
+                            })
                     {
                         Ok(mock_ok(
                             &format!("cryptsetup luksUUID {device}"),
@@ -3188,11 +3204,7 @@ mod tests {
     }
 
     impl PlanAddFixture {
-        fn params<'a>(
-            &'a self,
-            disk_specs: &'a [String],
-            dry_run: bool,
-        ) -> AddParams<'a> {
+        fn params<'a>(&'a self, disk_specs: &'a [String], dry_run: bool) -> AddParams<'a> {
             AddParams {
                 config_path: &self.config_path,
                 disk_specs,
@@ -3240,7 +3252,11 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(warns.len(), 1, "expected exactly one Warn note, got {warns:?}");
+        assert_eq!(
+            warns.len(),
+            1,
+            "expected exactly one Warn note, got {warns:?}"
+        );
         assert_eq!(warns[0], &format_add_missing_devices_warning(1));
         assert!(
             !warns[0].starts_with("warning:"),
@@ -3638,8 +3654,7 @@ mod tests {
                 message: "not present".into(),
             },
         ];
-        let rendered =
-            preview::render_notes_for_stderr(&notes, AddPlan::STDERR_STYLE);
+        let rendered = preview::render_notes_for_stderr(&notes, AddPlan::STDERR_STYLE);
         let expected = concat!(
             "Nothing to do -- disk2 already in pool.\n",
             "[warn]  pool has 1 missing device. Consider repairing with",
@@ -3801,10 +3816,8 @@ mod tests {
     #[test]
     fn plan_add_preflight_busy_op_becomes_info_note() {
         let fixture = plan_add_fixture();
-        let fs = AddMockFsWithSysfs::new(
-            vec!["/dev/disk/by-id/virtio-disk2".into()],
-            "device add\n",
-        );
+        let fs =
+            AddMockFsWithSysfs::new(vec!["/dev/disk/by-id/virtio-disk2".into()], "device add\n");
         let runner = AddPlanTestRunner::new();
 
         let disk_specs = ["disk2=/dev/disk/by-id/virtio-disk2".to_string()];
@@ -3848,10 +3861,8 @@ mod tests {
     #[test]
     fn plan_add_preserves_preflight_notes_on_ups_failure() {
         let fixture = plan_add_fixture();
-        let fs = AddMockFsWithSysfs::new(
-            vec!["/dev/disk/by-id/virtio-disk2".into()],
-            "device add\n",
-        );
+        let fs =
+            AddMockFsWithSysfs::new(vec!["/dev/disk/by-id/virtio-disk2".into()], "device add\n");
         // Custom runner: delegates to AddPlanTestRunner for everything
         // except the UPS query, which returns OB. We need the UPS
         // config attached to params; construct a custom config.

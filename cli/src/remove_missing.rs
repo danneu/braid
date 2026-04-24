@@ -8,7 +8,7 @@ use crate::parse::parse_btrfs_device_usage;
 use crate::pool::pool_remove_devid;
 use crate::preflight;
 use crate::preview::{self, PerDiskStyle, Preview, PreviewCompleteness, PreviewNote};
-use crate::probe::{probe_pool, Filesystem, ProbeError};
+use crate::probe::{Filesystem, ProbeError, probe_pool};
 use crate::progress::ProgressOutput;
 use crate::state_paths::StatePaths;
 use crate::types::MountPoint;
@@ -656,9 +656,7 @@ mod tests {
                     "No balance found on '/mnt/storage'\n",
                     0,
                 )),
-                CmdRequest::BtrfsDeviceRemove { .. } => {
-                    Ok(mock_out("btrfs device remove", "", 0))
-                }
+                CmdRequest::BtrfsDeviceRemove { .. } => Ok(mock_out("btrfs device remove", "", 0)),
                 CmdRequest::BtrfsDeviceUsageRaw { .. } => Ok(mock_out(
                     "btrfs device usage --raw",
                     "/dev/mapper/braid-disk1, ID: 1\n   Device size:           520093696\n   Device slack:                  0\n   Data,RAID1:            67108864\n   Unallocated:           452984832\n\n<missing disk>, ID: 2\n   Device size:                  0\n   Device slack:                  0\n   Data,RAID1:            67108864\n   Unallocated:                  0\n\n",
@@ -1018,9 +1016,7 @@ mod tests {
                     "No balance found on '/mnt/storage'\n",
                     0,
                 )),
-                CmdRequest::BtrfsDeviceRemove { .. } => {
-                    Ok(mock_out("btrfs device remove", "", 0))
-                }
+                CmdRequest::BtrfsDeviceRemove { .. } => Ok(mock_out("btrfs device remove", "", 0)),
                 CmdRequest::BtrfsBalanceRaid1Soft { .. } => {
                     Ok(mock_out("btrfs balance start -dconvert=raid1,soft", "", 0))
                 }
@@ -1206,7 +1202,9 @@ mod tests {
                 }
                 CmdRequest::CryptsetupStatus { mapper } => Ok(mock_out(
                     &format!("cryptsetup status {mapper}"),
-                    &format!("{mapper} is active and is in use.\n  type:    LUKS2\n  device:  /dev/vdb\n  mode:    read/write\n"),
+                    &format!(
+                        "{mapper} is active and is in use.\n  type:    LUKS2\n  device:  /dev/vdb\n  mode:    read/write\n"
+                    ),
                     0,
                 )),
                 CmdRequest::CryptsetupLuksUuid { .. } => Ok(mock_out(
@@ -1219,9 +1217,7 @@ mod tests {
                     "No balance found on '/mnt/storage'\n",
                     0,
                 )),
-                CmdRequest::BtrfsDeviceRemove { .. } => {
-                    Ok(mock_out("btrfs device remove", "", 0))
-                }
+                CmdRequest::BtrfsDeviceRemove { .. } => Ok(mock_out("btrfs device remove", "", 0)),
                 CmdRequest::BtrfsDeviceUsageRaw { .. } => Ok(mock_out(
                     "btrfs device usage --raw",
                     "/dev/mapper/braid-disk1, ID: 1\n   Device size:           520093696\n   Device slack:                  0\n   Data,RAID1:            67108864\n   Unallocated:           452984832\n\n/dev/mapper/braid-disk2, ID: 2\n   Device size:           520093696\n   Device slack:                  0\n   Data,RAID1:            67108864\n   Unallocated:           452984832\n\n<missing disk>, ID: 3\n   Device size:                  0\n   Device slack:                  0\n   Data,RAID1:            67108864\n   Unallocated:                  0\n\n",

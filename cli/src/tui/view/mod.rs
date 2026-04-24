@@ -6,10 +6,10 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 mod help;
 
-use ratatui::widgets::{Block, Borders, Cell, Clear, Padding, Paragraph, Row, Table, TableState};
 use ratatui::Frame;
-use time::macros::format_description;
+use ratatui::widgets::{Block, Borders, Cell, Clear, Padding, Paragraph, Row, Table, TableState};
 use time::PrimitiveDateTime;
+use time::macros::format_description;
 
 use crate::config::FanControl;
 use crate::parse::types::{BtrfsBgType, ScrubState, SmartHealth, UpsStatusFlag};
@@ -267,9 +267,7 @@ fn ups_section(model: &Model) -> Table<'_> {
         .style(Style::default().fg(Color::DarkGray));
 
     let snapshot = model.ups.as_ref();
-    let daemon = snapshot
-        .map(|s| s.daemon)
-        .unwrap_or(DaemonStatus::Unknown);
+    let daemon = snapshot.map(|s| s.daemon).unwrap_or(DaemonStatus::Unknown);
     let dim = matches!(daemon, DaemonStatus::Failed | DaemonStatus::Inactive);
     let sensor_style = if dim {
         Style::default().fg(Color::DarkGray)
@@ -286,10 +284,18 @@ fn ups_section(model: &Model) -> Table<'_> {
 
     let row = Row::new(vec![
         Cell::from(status_text).style(Style::default().fg(status_color)),
-        Cell::from(snapshot.map(format_ups_charge).unwrap_or_else(|| "--".into()))
-            .style(sensor_style),
-        Cell::from(snapshot.map(format_ups_runtime).unwrap_or_else(|| "--".into()))
-            .style(sensor_style),
+        Cell::from(
+            snapshot
+                .map(format_ups_charge)
+                .unwrap_or_else(|| "--".into()),
+        )
+        .style(sensor_style),
+        Cell::from(
+            snapshot
+                .map(format_ups_runtime)
+                .unwrap_or_else(|| "--".into()),
+        )
+        .style(sensor_style),
         Cell::from(snapshot.map(format_ups_load).unwrap_or_else(|| "--".into()))
             .style(sensor_style),
     ]);
@@ -851,10 +857,7 @@ fn view_data(model: &Model, frame: &mut Frame, area: Rect, _now: PrimitiveDateTi
     };
     let disk_height: u16 = model.disk_names.len() as u16 + 2; // +1 border, +1 header
     let fan_enabled = model.fan_control.is_some();
-    let ups_enabled = model
-        .ups_config
-        .as_ref()
-        .is_some_and(|u| u.enable);
+    let ups_enabled = model.ups_config.as_ref().is_some_and(|u| u.enable);
     // border + header + single data row
     let fan_height: u16 = 3;
     let ups_height: u16 = 3;
@@ -939,8 +942,7 @@ fn view_data(model: &Model, frame: &mut Frame, area: Rect, _now: PrimitiveDateTi
             .unwrap_or(DaemonStatus::Unknown);
         let (status_text, status_color) = daemon_status_display(daemon);
         frame.render_widget(
-            fan_section(model)
-                .block(section_block_with_status("Fans", status_text, status_color)),
+            fan_section(model).block(section_block_with_status("Fans", status_text, status_color)),
             chunks[idx],
         );
     }
@@ -953,8 +955,7 @@ fn view_data(model: &Model, frame: &mut Frame, area: Rect, _now: PrimitiveDateTi
             .unwrap_or(DaemonStatus::Unknown);
         let (status_text, status_color) = daemon_status_display(daemon);
         frame.render_widget(
-            ups_section(model)
-                .block(section_block_with_status("UPS", status_text, status_color)),
+            ups_section(model).block(section_block_with_status("UPS", status_text, status_color)),
             chunks[idx],
         );
     }
@@ -1313,8 +1314,8 @@ pub(crate) mod tests {
     use crate::parse::types::{ScrubState, ScrubTimestamp, SmartHealth};
     use crate::tui::model::{DiskLuksInfo, DiskUsage};
     use crate::types::MountPoint;
-    use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     fn render(model: &Model, width: u16, height: u16) -> Terminal<TestBackend> {
         let now = time::macros::datetime!(2026-02-24 02:12:00);
@@ -2005,7 +2006,10 @@ pub(crate) mod tests {
         let model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(sample_pool()));
         let terminal = render(&model, 72, 28);
         let buf = buffer_to_string(&terminal);
-        assert!(!buf.contains("Fans"), "Fans header should be absent:\n{buf}");
+        assert!(
+            !buf.contains("Fans"),
+            "Fans header should be absent:\n{buf}"
+        );
     }
 
     /// Intent: unpooled_disk_status_cell must surface a distinct label per

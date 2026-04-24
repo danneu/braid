@@ -33,8 +33,8 @@ use crate::types::MountPoint;
 
 pub fn run(config_path: &Path, paths: &StatePaths) -> io::Result<()> {
     let config = config_read(config_path).map_err(|e| io::Error::other(e.to_string()))?;
-    let membership = membership::load_membership(paths)
-        .map_err(|e| io::Error::other(e.to_string()))?;
+    let membership =
+        membership::load_membership(paths).map_err(|e| io::Error::other(e.to_string()))?;
     let advisories = luks::header_backup_advisories(paths);
     let mut terminal = ratatui::init();
     let (_input, cmd_tx, rx) = InputHandler::new();
@@ -211,12 +211,42 @@ pub fn run_demo() -> io::Result<()> {
         disk_temperature_readings: HashMap::new(),
         luks_info,
         device_errors: HashMap::from([
-            ("toshiba".to_owned(), DiskErrors { read: 0, write: 0, flush: 0, corruption: 0, generation: 0 }),
-            ("ironwolf".to_owned(), DiskErrors { read: 3, write: 0, flush: 0, corruption: 0, generation: 0 }),
-            ("wdc".to_owned(), DiskErrors { read: 0, write: 0, flush: 0, corruption: 0, generation: 0 }),
+            (
+                "toshiba".to_owned(),
+                DiskErrors {
+                    read: 0,
+                    write: 0,
+                    flush: 0,
+                    corruption: 0,
+                    generation: 0,
+                },
+            ),
+            (
+                "ironwolf".to_owned(),
+                DiskErrors {
+                    read: 3,
+                    write: 0,
+                    flush: 0,
+                    corruption: 0,
+                    generation: 0,
+                },
+            ),
+            (
+                "wdc".to_owned(),
+                DiskErrors {
+                    read: 0,
+                    write: 0,
+                    flush: 0,
+                    corruption: 0,
+                    generation: 0,
+                },
+            ),
         ]),
         unpooled_disks: HashMap::new(),
-        alert_state: crate::alert::AlertState { active: false, causes: vec![] },
+        alert_state: crate::alert::AlertState {
+            active: false,
+            causes: vec![],
+        },
         scrub: ScrubState::Completed {
             started_at: ScrubTimestamp(time::macros::datetime!(2026-02-24 02:00:07)),
             error_count: 0,

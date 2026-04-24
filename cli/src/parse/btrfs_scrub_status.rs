@@ -1,15 +1,15 @@
 use nom::{
+    IResult, Parser,
     branch::alt,
     bytes::complete::tag,
     character::complete::{not_line_ending, space0, u64 as parse_u64},
-    IResult, Parser,
 };
 
 use crate::cmd::RawCommandOutput;
 
+use super::ParseError;
 use super::helpers::{parse_ctime, parse_duration_hms};
 use super::types::{BtrfsScrubStatusOutput, ScrubState, ScrubTimestamp};
-use super::ParseError;
 
 // ---------------------------------------------------------------------------
 // nom parsers — one per line type

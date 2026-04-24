@@ -130,9 +130,9 @@ fn check_exclusive_op_with_policy<F: Filesystem + ?Sized>(
     match check_no_exclusive_op(fs, fsid) {
         Ok(()) => Ok(None),
         Err(ExclusiveOpError::Busy(op)) => match policy {
-            ExclusiveOpPolicy::RejectAnyBusy => {
-                Err(format!("cannot lock: {op} is in progress. Wait for it to finish first."))
-            }
+            ExclusiveOpPolicy::RejectAnyBusy => Err(format!(
+                "cannot lock: {op} is in progress. Wait for it to finish first."
+            )),
             ExclusiveOpPolicy::RejectPausedBalanceElseEnqueue => match op {
                 ExclusiveOp::BalancePaused => {
                     Err("a btrfs balance is paused. Resume or cancel it before proceeding.".into())
@@ -196,12 +196,13 @@ fn check_not_read_only<R: CommandRunner>(
         .iter()
         .find(|e| e.target == mount_point.as_str());
     if let Some(entry) = entry
-        && entry.options.split(',').any(|opt| opt.trim() == "ro") {
-            return Err(format!(
-                "pool is mounted read-only. Remount read-write first:\n  \
+        && entry.options.split(',').any(|opt| opt.trim() == "ro")
+    {
+        return Err(format!(
+            "pool is mounted read-only. Remount read-write first:\n  \
                  mount -o remount,rw {mount_point}"
-            ));
-        }
+        ));
+    }
     Ok(None)
 }
 
@@ -427,11 +428,9 @@ pub fn require_mutation_preflight<R: CommandRunner + Sync, F: Filesystem + ?Size
     mount_point: &MountPoint,
 ) -> Result<Vec<PreviewNote>, String> {
     let mut notes: Vec<PreviewNote> = Vec::new();
-    if let Some(op) = check_exclusive_op_with_policy(
-        fs,
-        fsid,
-        ExclusiveOpPolicy::RejectPausedBalanceElseEnqueue,
-    )? {
+    if let Some(op) =
+        check_exclusive_op_with_policy(fs, fsid, ExclusiveOpPolicy::RejectPausedBalanceElseEnqueue)?
+    {
         notes.push(PreviewNote::Info(format!(
             "waiting for in-flight {op} to finish..."
         )));
@@ -450,10 +449,7 @@ pub fn require_mutation_preflight<R: CommandRunner + Sync, F: Filesystem + ?Size
 /// is mid balance/device-add/device-remove/device-replace/resize.
 ///
 /// Returns `Err(String)` suitable for wrapping in `LockError::Failed`.
-pub fn require_lock_preflight<F: Filesystem + ?Sized>(
-    fs: &F,
-    fsid: &str,
-) -> Result<(), String> {
+pub fn require_lock_preflight<F: Filesystem + ?Sized>(fs: &F, fsid: &str) -> Result<(), String> {
     check_exclusive_op_with_policy(fs, fsid, ExclusiveOpPolicy::RejectAnyBusy).map(|_| ())
 }
 
@@ -1007,10 +1003,7 @@ mod tests {
         let survivor = make_survivor(1000 * 1024 * 1024, 0);
         let err = check_single_survivor_capacity(&df, &survivor)
             .expect_err("should fail: 2 * meta tips over");
-        assert!(
-            err.contains("data + 2 * metadata"),
-            "wrong error: {err}"
-        );
+        assert!(err.contains("data + 2 * metadata"), "wrong error: {err}");
     }
 
     #[test]
@@ -1206,10 +1199,7 @@ mod tests {
         assert_eq!(notes.len(), 1, "expected one Info note, got {notes:?}");
         match &notes[0] {
             PreviewNote::Info(body) => {
-                assert!(
-                    body.contains("waiting for in-flight"),
-                    "body={body:?}"
-                );
+                assert!(body.contains("waiting for in-flight"), "body={body:?}");
                 assert!(body.contains("device add"), "body={body:?}");
             }
             other => panic!("expected Info, got {other:?}"),
@@ -1329,7 +1319,10 @@ mod tests {
     fn ups_low_battery_refuses() {
         let runner = upsc_mock("ups", "ups.status: OL LB\n", 0);
         let err = check_ups_not_on_battery(&runner, Some("ups"), "add").unwrap_err();
-        assert!(err.contains("critical") || err.contains("on-battery"), "got: {err}");
+        assert!(
+            err.contains("critical") || err.contains("on-battery"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -1424,9 +1417,6 @@ mod tests {
             },
         );
         let err = require_mutation_preflight(&runner, &fs, FSID, &mp()).unwrap_err();
-        assert!(
-            err.contains("read-only"),
-            "expected 'read-only' in: {err}"
-        );
+        assert!(err.contains("read-only"), "expected 'read-only' in: {err}");
     }
 }

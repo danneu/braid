@@ -1,8 +1,8 @@
 use crate::cmd::{CmdRequest, CommandRunner};
 use crate::parse::{parse_cryptsetup_luks_label, parse_cryptsetup_luks_version};
 use crate::types::ByIdPath;
-use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
 use std::path::Path;
 
 #[derive(Debug, thiserror::Error)]
@@ -73,9 +73,7 @@ fn discover_from_dir<R: CommandRunner>(
             Err(_) => continue,
         };
         if version != 2 {
-            eprintln!(
-                "warning: skipping {path_str}: LUKS{version} (braid requires LUKS2)"
-            );
+            eprintln!("warning: skipping {path_str}: LUKS{version} (braid requires LUKS2)");
             continue;
         }
 
@@ -86,25 +84,24 @@ fn discover_from_dir<R: CommandRunner>(
         // Check if label matches braid-<name>
         if let Some(label) = label
             && let Some(disk_name) = crate::config::name_from_mapper(&label)
-                && crate::membership::is_valid_disk_name(disk_name) {
-                    match members.entry(disk_name.to_owned()) {
-                        Entry::Vacant(e) => {
-                            e.insert(ByIdPath(path_str));
-                        }
-                        Entry::Occupied(mut e) => {
-                            // Keep the candidate with the best (priority, filename) key so
-                            // selection is fully deterministic regardless of read_dir order.
-                            let existing_name =
-                                e.get().0.rsplit('/').next().unwrap_or("").to_owned();
-                            let candidate_key = (by_id_priority(&name_str), name_str.as_ref());
-                            let existing_key =
-                                (by_id_priority(&existing_name), existing_name.as_str());
-                            if candidate_key < existing_key {
-                                e.insert(ByIdPath(path_str));
-                            }
-                        }
+            && crate::membership::is_valid_disk_name(disk_name)
+        {
+            match members.entry(disk_name.to_owned()) {
+                Entry::Vacant(e) => {
+                    e.insert(ByIdPath(path_str));
+                }
+                Entry::Occupied(mut e) => {
+                    // Keep the candidate with the best (priority, filename) key so
+                    // selection is fully deterministic regardless of read_dir order.
+                    let existing_name = e.get().0.rsplit('/').next().unwrap_or("").to_owned();
+                    let candidate_key = (by_id_priority(&name_str), name_str.as_ref());
+                    let existing_key = (by_id_priority(&existing_name), existing_name.as_str());
+                    if candidate_key < existing_key {
+                        e.insert(ByIdPath(path_str));
                     }
                 }
+            }
+        }
     }
 
     Ok(members)
@@ -204,7 +201,10 @@ mod tests {
         fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
             match request {
                 CmdRequest::CryptsetupIsLuks { device } => {
-                    self.calls.lock().unwrap().push(("isLuks".into(), device.clone()));
+                    self.calls
+                        .lock()
+                        .unwrap()
+                        .push(("isLuks".into(), device.clone()));
                     if self.labels.contains_key(device.as_str()) {
                         Ok(mock_output("cryptsetup", "", 0))
                     } else {
@@ -212,13 +212,12 @@ mod tests {
                     }
                 }
                 CmdRequest::CryptsetupLuksDumpText { device } => {
-                    self.calls.lock().unwrap().push(("luksDump".into(), device.clone()));
+                    self.calls
+                        .lock()
+                        .unwrap()
+                        .push(("luksDump".into(), device.clone()));
                     if let Some(label) = self.labels.get(device.as_str()) {
-                        let version = self
-                            .versions
-                            .get(device.as_str())
-                            .copied()
-                            .unwrap_or(2);
+                        let version = self.versions.get(device.as_str()).copied().unwrap_or(2);
                         Ok(mock_output(
                             "cryptsetup",
                             &format!(
@@ -379,13 +378,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let luks1_path = create_file(dir.path(), "ata-LEGACY_DISK");
         let luks2_path = create_file(dir.path(), "ata-MODERN_DISK");
-        let runner = LabelMap::new(&[
-            (&luks1_path, "braid-legacy"),
-            (&luks2_path, "braid-modern"),
-        ])
-        .with_version(&luks1_path, 1);
+        let runner = LabelMap::new(&[(&luks1_path, "braid-legacy"), (&luks2_path, "braid-modern")])
+            .with_version(&luks1_path, 1);
         let members = discover_from_dir(&runner, dir.path()).unwrap();
-        assert_eq!(members.len(), 1, "expected only the LUKS2 disk: {members:?}");
+        assert_eq!(
+            members.len(),
+            1,
+            "expected only the LUKS2 disk: {members:?}"
+        );
         assert!(
             members.contains_key("modern"),
             "modern (LUKS2) disk should be present: {members:?}"

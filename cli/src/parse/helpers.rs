@@ -1,5 +1,5 @@
-use time::macros::format_description;
 use time::PrimitiveDateTime;
+use time::macros::format_description;
 
 /// Parses a ctime-formatted timestamp string.
 ///

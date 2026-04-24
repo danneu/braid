@@ -4,18 +4,18 @@ use serde::{Deserialize, Serialize};
 
 use crate::alert::{self, AlertCause, AlertState};
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, LsblkFieldKind};
+use crate::config::{self, Config, mapper_name};
 use crate::confirm::get_lsblk_field;
-use crate::config::{self, mapper_name, Config};
 use crate::luks;
 use crate::membership::{self, PoolMembership};
 use crate::parse::types::BalanceState;
 use crate::parse::types::BtrfsDfOutput;
 use crate::parse::{
-    parse_btrfs_balance_status, parse_btrfs_device_stats, parse_btrfs_device_usage,
-    parse_btrfs_df_json, parse_btrfs_filesystem_usage, parse_btrfs_scrub_status,
-    BtrfsDeviceStatsOutput, ParseError, ScrubState,
+    BtrfsDeviceStatsOutput, ParseError, ScrubState, parse_btrfs_balance_status,
+    parse_btrfs_device_stats, parse_btrfs_device_usage, parse_btrfs_df_json,
+    parse_btrfs_filesystem_usage, parse_btrfs_scrub_status,
 };
-use crate::probe::{probe_config_disk, probe_pool, Filesystem, ProbeError};
+use crate::probe::{Filesystem, ProbeError, probe_config_disk, probe_pool};
 use crate::progress::pct_from_bytes;
 use crate::state_paths::StatePaths;
 use crate::types::*;
@@ -771,7 +771,6 @@ pub fn emit_paused_balance_warning<R: CommandRunner>(
     }
 }
 
-
 // ---------------------------------------------------------------------------
 // build_disk_reports
 // ---------------------------------------------------------------------------
@@ -977,19 +976,20 @@ fn format_status_human(
     }
 
     if let Some(ref alloc) = report.allocation
-        && !alloc.is_empty() {
-            out.push_str("Allocation:\n");
-            out.push_str("  Type       Profile  Used        Allocated\n");
-            for a in alloc {
-                out.push_str(&format!(
-                    "  {:<9}  {:<7}  {:<10}  {}\n",
-                    a.bg_type,
-                    a.profile,
-                    format_bytes(a.used_bytes),
-                    format_bytes(a.allocated_bytes),
-                ));
-            }
+        && !alloc.is_empty()
+    {
+        out.push_str("Allocation:\n");
+        out.push_str("  Type       Profile  Used        Allocated\n");
+        for a in alloc {
+            out.push_str(&format!(
+                "  {:<9}  {:<7}  {:<10}  {}\n",
+                a.bg_type,
+                a.profile,
+                format_bytes(a.used_bytes),
+                format_bytes(a.allocated_bytes),
+            ));
         }
+    }
 
     if let Some(ref balance) = report.balance {
         match balance {
@@ -2718,10 +2718,7 @@ mod tests {
                 "No balance found on '/mnt/storage'\n",
             ),
         );
-        assert_eq!(
-            get_balance_report(&runner, &mp()),
-            BalanceReport::Idle
-        );
+        assert_eq!(get_balance_report(&runner, &mp()), BalanceReport::Idle);
     }
 
     #[test]
@@ -2784,10 +2781,7 @@ mod tests {
             },
             err_raw("btrfs balance status", 2, "ERROR: not a btrfs filesystem"),
         );
-        assert_eq!(
-            get_balance_report(&runner, &mp()),
-            BalanceReport::Unknown
-        );
+        assert_eq!(get_balance_report(&runner, &mp()), BalanceReport::Unknown);
     }
 
     #[test]
@@ -3014,9 +3008,7 @@ mod tests {
 
         let runner = MockRunner::default()
             .with_output(
-                CmdRequest::BtrfsFilesystemUsageRaw {
-                    mount_point: mp(),
-                },
+                CmdRequest::BtrfsFilesystemUsageRaw { mount_point: mp() },
                 ok_raw(
                     "btrfs filesystem usage",
                     "Overall:\n\
@@ -3029,9 +3021,7 @@ mod tests {
                 ),
             )
             .with_output(
-                CmdRequest::BtrfsDeviceUsageRaw {
-                    mount_point: mp(),
-                },
+                CmdRequest::BtrfsDeviceUsageRaw { mount_point: mp() },
                 ok_raw(
                     "btrfs device usage",
                     "/dev/dm-0, ID: 1\n\
@@ -4007,9 +3997,7 @@ mod tests {
                     Some(LuksUuid("99999999-9999-9999-9999-999999999999".into()))
                 );
             }
-            other => panic!(
-                "expected StatusError::Probe(MapperConflict), got: {other:?}"
-            ),
+            other => panic!("expected StatusError::Probe(MapperConflict), got: {other:?}"),
         }
     }
 }

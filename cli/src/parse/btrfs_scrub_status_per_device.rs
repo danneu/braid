@@ -1,16 +1,16 @@
 use nom::{
+    IResult,
     bytes::complete::{tag, take_till1, take_until},
     character::complete::{not_line_ending, space0, space1, u64 as parse_u64},
-    IResult,
 };
 
 use crate::cmd::RawCommandOutput;
 
+use super::ParseError;
 use super::helpers::{parse_ctime, parse_duration_hms};
 use super::types::{
     BtrfsScrubStatusPerDeviceOutput, DeviceScrubEntry, DeviceScrubState, ScrubTimestamp,
 };
-use super::ParseError;
 
 const CMD: &str = "btrfs scrub status -d -R";
 

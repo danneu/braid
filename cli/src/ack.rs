@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::alert::{self, save_acked_stats, snapshot_current};
 use crate::cmd::{CmdRequest, CommandRunner};
 use crate::parse::parse_btrfs_device_stats;
-use crate::probe::{probe_pool, ProbeError};
+use crate::probe::{ProbeError, probe_pool};
 use crate::state_paths::StatePaths;
 use crate::types::MountPoint;
 

@@ -4,8 +4,8 @@ use serde::Deserialize;
 
 use crate::cmd::RawCommandOutput;
 
-use super::types::CryptsetupLuksDumpOutput;
 use super::ParseError;
+use super::types::CryptsetupLuksDumpOutput;
 
 // --- Serde helper structs (not exposed to domain code) ---
 
