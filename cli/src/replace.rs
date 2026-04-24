@@ -125,10 +125,7 @@ impl ReplacePlan {
         // BEFORE any mutation. Matches the other Shape A commands so
         // preflight diagnostics surface identically across success,
         // failure, and dry-run stdout.
-        eprint!(
-            "{}",
-            preview::render_notes_for_stderr(&notes, ReplacePlan::STDERR_STYLE),
-        );
+        emit_replace_notes_to_stderr(&notes);
 
         let old_mn = mapper_name(params.old_name);
         let new_mn = mapper_name(&new_name);
@@ -429,13 +426,65 @@ impl ReplacePlan {
     }
 }
 
+fn emit_replace_notes_to_stderr(notes: &[PreviewNote]) {
+    let rendered = preview::render_notes_for_stderr(notes, ReplacePlan::STDERR_STYLE);
+    #[cfg(test)]
+    if replace_stderr_capture::write(&rendered) {
+        return;
+    }
+    eprint!("{rendered}");
+}
+
+#[cfg(test)]
+mod replace_stderr_capture {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static CAPTURED_STDERR: RefCell<Option<String>> = RefCell::new(None);
+    }
+
+    pub(super) fn capture<F, T>(f: F) -> (T, String)
+    where
+        F: FnOnce() -> T,
+    {
+        CAPTURED_STDERR.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            assert!(slot.is_none(), "nested replace stderr capture");
+            *slot = Some(String::new());
+        });
+
+        let result = f();
+        let stderr = CAPTURED_STDERR.with(|slot| {
+            slot.borrow_mut()
+                .take()
+                .expect("replace stderr capture must be active")
+        });
+        (result, stderr)
+    }
+
+    pub(super) fn write(text: &str) -> bool {
+        CAPTURED_STDERR.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            match slot.as_mut() {
+                Some(stderr) => {
+                    stderr.push_str(text);
+                    true
+                }
+                None => false,
+            }
+        })
+    }
+}
+
 /// Plan a `braid replace` run. Owns everything above today's `--dry-run`
 /// gate: pending-op preflight, config read, `--new` spec parsing,
 /// `probe_pool` + mounted validation, mutation/UPS preflight, `--old == --new`
 /// guard, replace-source resolution, membership load +
 /// `build_replacement_membership`, new-disk probe, and step compilation.
-/// The returned `ReplacePlan` is the single source of truth for both
-/// `--dry-run` preview and real execution.
+/// Returns a `ReplacePlanReport`: on success, accumulated notes move into
+/// `plan.notes`; on post-preflight failure, accumulated notes stay on
+/// `report.notes` so `cmd_replace` can render them before returning the
+/// error.
 ///
 /// Does not read or verify the passphrase, acquire the sleep inhibitor,
 /// or run `check_new_not_in_pool` -- those happen inside
@@ -631,10 +680,7 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             // path (`ReplacePlan::execute`), so preflight diagnostics
             // surface identically across success, failure, and dry-run
             // stdout.
-            eprint!(
-                "{}",
-                preview::render_notes_for_stderr(&report.notes, ReplacePlan::STDERR_STYLE),
-            );
+            emit_replace_notes_to_stderr(&report.notes);
             return Err(e);
         }
     };
@@ -3606,6 +3652,84 @@ mod tests {
             ),
             "notes[0]={:?}",
             report.notes[0],
+        );
+    }
+
+    /* Intent: cmd_replace renders preserved preflight notes on the Err
+     * branch before returning the validation error.
+     * Why it exists: planner tests prove `report.notes` survives; this
+     * locks the command wrapper behavior that surfaces those preserved
+     * notes to stderr for the operator.
+     * Scenario: 2-disk pool, sysfs reports "device add", operator runs
+     * `braid replace --old disk2 --new disk2=/...` (same name), so the
+     * command returns the same-name validation error after accumulating
+     * the busy-op Info note.
+     */
+    #[test]
+    fn cmd_replace_renders_preserved_preflight_notes_on_old_equals_new_validation() {
+        let state_tmp = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(state_tmp.path().into());
+        let mut m = PoolMembership::empty();
+        m.disks.insert(
+            "disk1".into(),
+            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
+        );
+        m.disks.insert(
+            "disk2".into(),
+            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk2".into())),
+        );
+        membership::save_membership(&m, &paths).unwrap();
+
+        let config_tmp = tempfile::tempdir().unwrap();
+        let config_path = config_tmp.path().join("config.json");
+        std::fs::write(
+            &config_path,
+            serde_json::to_vec(&serde_json::json!({ "mount_point": "/mnt/storage" })).unwrap(),
+        )
+        .unwrap();
+        let pass_path = config_tmp.path().join("passphrase");
+        std::fs::write(&pass_path, b"test-passphrase\n").unwrap();
+
+        let fs = ReplaceMockFsWithSysfs::new(
+            vec!["/dev/disk/by-id/virtio-disk2".into()],
+            "device add\n",
+        );
+        let runner = FailingReplaceRunner;
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let (result, stderr) = super::replace_stderr_capture::capture(|| {
+            cmd_replace(
+                &runner,
+                &fs,
+                &ReplaceParams {
+                    config_path: &config_path,
+                    old_name: "disk2",
+                    new_name: "disk2=/dev/disk/by-id/virtio-disk2",
+                    missing_id: None,
+                    dry_run: false,
+                    yes: true,
+                    passphrase_stdin: false,
+                    passphrase_file: Some(pass_path.as_path()),
+                    enroll_key_file: None,
+                    progress: crate::progress::ProgressOutput::Off,
+                    paths: &paths,
+                    sleep_inhibitor: &inhibitor,
+                },
+            )
+        });
+
+        match &result {
+            Err(ReplaceError::Validation(msg)) => {
+                assert!(
+                    msg.contains("--old and --new must be different"),
+                    "expected same-name refusal wording, got: {msg}"
+                );
+            }
+            Err(other) => panic!("expected Validation, got: {other:?}"),
+            Ok(_) => panic!("expected Err(Validation), got Ok(_)"),
+        }
+        assert!(
+            stderr.contains("waiting for in-flight device add"),
+            "cmd_replace must render preserved preflight notes to stderr, got:\n{stderr}",
         );
     }
 }

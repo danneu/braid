@@ -87,9 +87,10 @@ pub struct RemovePlan {
     pub mount_point: MountPoint,
 }
 
-/// Report returned by `plan_remove`. `plan_remove` has no pre-validation
-/// per-disk probing, so `notes` is always empty on both branches; the
-/// field exists to keep the Shape A contract uniform across commands.
+/// Report returned by `plan_remove`. On the `Ok` branch, accumulated
+/// notes have moved into `plan.notes` and `report.notes` is empty.
+/// Post-preflight failures preserve accumulated notes on `report.notes`
+/// so `cmd_remove` can render them before returning the error.
 pub struct RemovePlanReport {
     pub notes: Vec<PreviewNote>,
     pub result: Result<RemovePlan, RemoveError>,
@@ -203,8 +204,10 @@ impl RemovePlan {
 /// gate: pending-op preflight, config read, pool probe / mounted
 /// validation, mutation preflight, UPS preflight, target device lookup,
 /// missing-device guard, `compile_remove_present_steps`, and the
-/// eviction-space preflight. The returned `RemovePlan` is the single
-/// source of truth for both `--dry-run` preview and real execution.
+/// eviction-space preflight. Returns a `RemovePlanReport`: on success,
+/// accumulated notes move into `plan.notes`; on post-preflight failure,
+/// accumulated notes stay on `report.notes` so `cmd_remove` can render
+/// them before returning the error.
 pub fn plan_remove<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,

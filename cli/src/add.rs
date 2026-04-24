@@ -302,9 +302,10 @@ fn add_label(names: &[String]) -> String {
 
 /// Dry-run preview source of truth for `braid add` plus the execute
 /// inputs pre-computed during planning. `notes` + `steps` are both
-/// rendered by `preview()`; `execute()` replays the accumulated notes
-/// to stderr with the legacy `warning: ` / `WARNING: ` prefixes (so
-/// real-run wording stays byte-identical) before any mutation.
+/// rendered by `preview()`; `execute()` renders the accumulated notes
+/// to stderr through `preview::render_notes_for_stderr` before any
+/// mutation. Warn notes use canonical `[warn]  <body>` wording and
+/// Info notes render bare.
 pub struct AddPlan {
     pub notes: Vec<PreviewNote>,
     pub steps: Vec<Step>,
@@ -767,7 +768,7 @@ pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     // Missing-devices warning: body-only, no legacy `warning:` prefix.
     // Lives on `notes` so it surfaces on both dry-run stdout (via
     // `Preview::render`) and real-run stderr (via `AddPlan::execute`
-    // replay with the `warning: ` prefix re-added).
+    // using `preview::render_notes_for_stderr`).
     if pool.missing_count > 0 {
         notes.push(PreviewNote::Warn(format_add_missing_devices_warning(
             pool.missing_count,
