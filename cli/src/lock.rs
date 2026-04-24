@@ -25,9 +25,28 @@ fn tag(label: &str) -> String {
 const CLOSE_RETRY_ATTEMPTS: u32 = 3;
 const CLOSE_RETRY_DELAY: Duration = Duration::from_millis(500);
 
+/// Abstraction over `thread::sleep` so unit tests can drive the retry
+/// loop without paying real wall-clock time. The production path uses
+/// `RealSleeper`; tests inject a noop or recording sleeper.
+trait Sleeper {
+    fn sleep(&self, duration: Duration);
+}
+
+struct RealSleeper;
+
+impl Sleeper for RealSleeper {
+    fn sleep(&self, duration: Duration) {
+        thread::sleep(duration);
+    }
+}
+
 /// Close a LUKS mapper, retrying up to 3 times if the error indicates the
 /// device is busy. Non-busy errors fail immediately.
-fn close_mapper_with_retry<R: CommandRunner>(runner: &R, mapper: &str) -> Result<(), LockError> {
+fn close_mapper_with_retry<R: CommandRunner, S: Sleeper>(
+    runner: &R,
+    sleeper: &S,
+    mapper: &str,
+) -> Result<(), LockError> {
     for attempt in 1..=CLOSE_RETRY_ATTEMPTS {
         let result = runner.run(&CmdRequest::CryptsetupClose {
             mapper: mapper.to_owned(),
@@ -56,7 +75,7 @@ fn close_mapper_with_retry<R: CommandRunner>(runner: &R, mapper: &str) -> Result
         eprintln!(
             "[warn]  cryptsetup close {mapper} busy, retrying ({attempt}/{CLOSE_RETRY_ATTEMPTS})..."
         );
-        thread::sleep(CLOSE_RETRY_DELAY);
+        sleeper.sleep(CLOSE_RETRY_DELAY);
     }
     unreachable!()
 }
@@ -223,6 +242,22 @@ pub fn cmd_lock<R: CommandRunner, F: Filesystem + ?Sized>(
     membership: &PoolMembership,
     dry_run: bool,
 ) -> Result<(), LockError> {
+    cmd_lock_impl(runner, fs, &RealSleeper, config, membership, dry_run)
+}
+
+fn cmd_lock_impl<R, F, S>(
+    runner: &R,
+    fs: &F,
+    sleeper: &S,
+    config: &Config,
+    membership: &PoolMembership,
+    dry_run: bool,
+) -> Result<(), LockError>
+where
+    R: CommandRunner,
+    F: Filesystem + ?Sized,
+    S: Sleeper,
+{
     let mount_point = config.mount_point();
 
     // 1. Check if pool is mounted
@@ -319,7 +354,7 @@ pub fn cmd_lock<R: CommandRunner, F: Filesystem + ?Sized>(
         let mapper_path = format!("/dev/mapper/{}", mn.0);
 
         if fs.exists(&mapper_path) {
-            match close_mapper_with_retry(runner, &mn.0) {
+            match close_mapper_with_retry(runner, sleeper, &mn.0) {
                 Ok(()) => {
                     eprintln!("{}  disk: {:<7}locked", tag("ok"), name);
                 }
@@ -354,7 +389,7 @@ pub fn cmd_lock<R: CommandRunner, F: Filesystem + ?Sized>(
         eprintln!(
             "[warn]  orphaned mapper {entry} (not in pool.json -- likely a prior crash)"
         );
-        match close_mapper_with_retry(runner, entry) {
+        match close_mapper_with_retry(runner, sleeper, entry) {
             Ok(()) => {
                 eprintln!("{}  disk: {:<7}locked (orphan)", tag("ok"), disk_name);
             }
@@ -517,6 +552,14 @@ mod tests {
         }
     }
 
+    /// Test sleeper that records zero wall time. Default choice for
+    /// every lock test that drives `cmd_lock_impl`; the retry loop still
+    /// executes the correct number of iterations, just without blocking.
+    struct NoopSleeper;
+    impl Sleeper for NoopSleeper {
+        fn sleep(&self, _duration: Duration) {}
+    }
+
     fn ok_raw(cmd: &str) -> RawCommandOutput {
         RawCommandOutput {
             cmd: cmd.to_owned(),
@@ -638,7 +681,7 @@ mod tests {
         let config = test_config();
         let membership = test_membership();
 
-        cmd_lock(&runner, &fs, &config, &membership, false).expect("lock should succeed");
+        cmd_lock_impl(&runner, &fs, &NoopSleeper, &config, &membership, false).expect("lock should succeed");
     }
 
     #[test]
@@ -653,7 +696,7 @@ mod tests {
         let config = test_config();
         let membership = test_membership();
 
-        cmd_lock(&runner, &fs, &config, &membership, false)
+        cmd_lock_impl(&runner, &fs, &NoopSleeper, &config, &membership, false)
             .expect("lock should succeed (already locked)");
     }
 
@@ -677,7 +720,7 @@ mod tests {
         let config = test_config();
         let membership = test_membership();
 
-        cmd_lock(&runner, &fs, &config, &membership, false).expect("lock should succeed (partial)");
+        cmd_lock_impl(&runner, &fs, &NoopSleeper, &config, &membership, false).expect("lock should succeed (partial)");
     }
 
     // Intent: lock fails when umount reports the mount is busy.
@@ -725,7 +768,7 @@ mod tests {
         let membership = test_membership();
 
         let err =
-            cmd_lock(&runner, &fs, &config, &membership, false).expect_err("should fail on busy");
+            cmd_lock_impl(&runner, &fs, &NoopSleeper, &config, &membership, false).expect_err("should fail on busy");
         assert!(err.to_string().contains("target is busy"));
     }
 
@@ -773,7 +816,7 @@ mod tests {
         let membership = test_membership();
 
         let err =
-            cmd_lock(&runner, &fs, &config, &membership, false).expect_err("should fail on busy");
+            cmd_lock_impl(&runner, &fs, &NoopSleeper, &config, &membership, false).expect_err("should fail on busy");
         let msg = err.to_string();
         assert!(
             msg.contains("lsof") && msg.contains("fuser"),
@@ -802,7 +845,7 @@ mod tests {
 
         // If BtrfsDeviceScanForget were not called, MockRunner would return
         // MissingMock and the test would fail.
-        cmd_lock(&runner, &fs, &config, &membership, false)
+        cmd_lock_impl(&runner, &fs, &NoopSleeper, &config, &membership, false)
             .expect("lock should succeed with forget");
     }
 
@@ -845,7 +888,7 @@ mod tests {
         let config = test_config();
         let membership = test_membership();
 
-        cmd_lock(&runner, &fs, &config, &membership, false)
+        cmd_lock_impl(&runner, &fs, &NoopSleeper, &config, &membership, false)
             .expect("lock should succeed even when forget fails");
     }
 
@@ -898,7 +941,7 @@ mod tests {
         let config = test_config();
         let membership = test_membership();
 
-        cmd_lock(&runner, &fs, &config, &membership, false).expect("lock should close orphan too");
+        cmd_lock_impl(&runner, &fs, &NoopSleeper, &config, &membership, false).expect("lock should close orphan too");
     }
 
     // Intent: I/O errors scanning /dev/mapper don't prevent closing known
@@ -948,7 +991,7 @@ mod tests {
         let config = test_config();
         let membership = test_membership();
 
-        cmd_lock(&runner, &FailListDirFs, &config, &membership, false)
+        cmd_lock_impl(&runner, &FailListDirFs, &NoopSleeper, &config, &membership, false)
             .expect("lock should succeed despite list_dir failure");
     }
 
@@ -1113,7 +1156,7 @@ mod tests {
         let config = test_config();
         let membership = test_membership();
 
-        let err = cmd_lock(&runner, &fs, &config, &membership, false)
+        let err = cmd_lock_impl(&runner, &fs, &NoopSleeper, &config, &membership, false)
             .expect_err("should fail — umount error is the root cause");
         let msg = err.to_string();
         assert!(
@@ -1156,7 +1199,7 @@ mod tests {
         let config = test_config();
         let membership = test_membership();
 
-        let err = cmd_lock(&runner, &fs, &config, &membership, false)
+        let err = cmd_lock_impl(&runner, &fs, &NoopSleeper, &config, &membership, false)
             .expect_err("should fail with umount error");
         let msg = err.to_string();
         assert!(
@@ -1193,7 +1236,7 @@ mod tests {
         let config = test_config();
         let membership = test_membership();
 
-        let err = cmd_lock(&runner, &fs, &config, &membership, false)
+        let err = cmd_lock_impl(&runner, &fs, &NoopSleeper, &config, &membership, false)
             .expect_err("should fail with mapper error");
         let msg = err.to_string();
         assert!(
@@ -1226,7 +1269,7 @@ mod tests {
         let config = test_config();
         let membership = test_membership();
 
-        let err = cmd_lock(&runner, &fs, &config, &membership, false)
+        let err = cmd_lock_impl(&runner, &fs, &NoopSleeper, &config, &membership, false)
             .expect_err("should fail on mapper close");
         let msg = err.to_string();
         assert!(
@@ -1276,7 +1319,7 @@ mod tests {
         let config = test_config();
         let membership = test_membership();
 
-        let err = cmd_lock(&runner, &fs, &config, &membership, false)
+        let err = cmd_lock_impl(&runner, &fs, &NoopSleeper, &config, &membership, false)
             .expect_err("should fail with umount error");
         let msg = err.to_string();
         assert!(
@@ -1322,7 +1365,7 @@ mod tests {
         let config = test_config();
         let membership = test_membership();
 
-        let err = cmd_lock(&runner, &fs, &config, &membership, false)
+        let err = cmd_lock_impl(&runner, &fs, &NoopSleeper, &config, &membership, false)
             .expect_err("should fail with orphan error");
         let msg = err.to_string();
         assert!(
@@ -1376,7 +1419,7 @@ mod tests {
         let config = test_config();
         let membership = test_membership();
 
-        let err = cmd_lock(&runner, &fs, &config, &membership, false)
+        let err = cmd_lock_impl(&runner, &fs, &NoopSleeper, &config, &membership, false)
             .expect_err("should fail on orphan close");
         assert!(
             err.to_string().contains("braid-orphan"),
@@ -1411,7 +1454,7 @@ mod tests {
         let config = test_config();
         let membership = test_membership();
 
-        let err = cmd_lock(&runner, &fs, &config, &membership, false)
+        let err = cmd_lock_impl(&runner, &fs, &NoopSleeper, &config, &membership, false)
             .expect_err("should fail with mapper error");
         assert!(
             err.to_string().contains("braid-aaa"),
@@ -1450,7 +1493,7 @@ mod tests {
         let config = test_config();
         let membership = test_membership();
 
-        let err = cmd_lock(&runner, &fs, &config, &membership, false)
+        let err = cmd_lock_impl(&runner, &fs, &NoopSleeper, &config, &membership, false)
             .expect_err("should fail with first mapper error");
         let msg = err.to_string();
         assert!(
@@ -1506,7 +1549,7 @@ mod tests {
         let config = test_config();
         let membership = test_membership();
 
-        cmd_lock(&runner, &fs, &config, &membership, false)
+        cmd_lock_impl(&runner, &fs, &NoopSleeper, &config, &membership, false)
             .expect("lock should succeed after retry");
 
         let calls = runner.close_calls();
@@ -1560,7 +1603,7 @@ mod tests {
         let config = test_config();
         let membership = test_membership();
 
-        let err = cmd_lock(&runner, &fs, &config, &membership, false)
+        let err = cmd_lock_impl(&runner, &fs, &NoopSleeper, &config, &membership, false)
             .expect_err("busy close should bubble up after retries exhaust");
         assert!(
             matches!(err, LockError::DeviceBusy(_)),
@@ -1611,7 +1654,7 @@ mod tests {
         let config = test_config();
         let membership = test_membership();
 
-        let err = cmd_lock(&runner, &fs, &config, &membership, false)
+        let err = cmd_lock_impl(&runner, &fs, &NoopSleeper, &config, &membership, false)
             .expect_err("should fail: busy retries exhausted");
         // Variant check is orthogonal to text check: guards against a rename
         // that also updates the #[error(...)] attribute and still renders
@@ -1649,7 +1692,7 @@ mod tests {
         let config = test_config();
         let membership = test_membership();
 
-        let err = cmd_lock(&runner, &fs, &config, &membership, false)
+        let err = cmd_lock_impl(&runner, &fs, &NoopSleeper, &config, &membership, false)
             .expect_err("should refuse — balance is active");
         let msg = err.to_string();
         assert!(
@@ -1674,7 +1717,7 @@ mod tests {
         let config = test_config();
         let membership = test_membership();
 
-        let err = cmd_lock(&runner, &fs, &config, &membership, false)
+        let err = cmd_lock_impl(&runner, &fs, &NoopSleeper, &config, &membership, false)
             .expect_err("should refuse — balance is paused");
         let msg = err.to_string();
         assert!(
@@ -1719,7 +1762,7 @@ mod tests {
         let config = test_config();
         let membership = test_membership();
 
-        let err = cmd_lock(&runner, &fs, &config, &membership, false)
+        let err = cmd_lock_impl(&runner, &fs, &NoopSleeper, &config, &membership, false)
             .expect_err("should refuse -- mount is not btrfs");
         let msg = err.to_string();
         assert!(
@@ -1910,7 +1953,7 @@ mod tests {
         let config = test_config();
         let membership = test_membership();
 
-        cmd_lock(&runner, &fs, &config, &membership, false).expect("lock should succeed");
+        cmd_lock_impl(&runner, &fs, &NoopSleeper, &config, &membership, false).expect("lock should succeed");
 
         assert_eq!(
             runner.forget_calls(),
@@ -1972,7 +2015,7 @@ mod tests {
         let config = test_config();
         let membership = test_membership();
 
-        cmd_lock(&runner, &fs, &config, &membership, false)
+        cmd_lock_impl(&runner, &fs, &NoopSleeper, &config, &membership, false)
             .expect("lock should succeed and close orphan");
 
         assert_eq!(
@@ -1983,6 +2026,153 @@ mod tests {
                 "/dev/mapper/braid-ccc".to_string(),
             ]],
             "forget must include the orphan mapper in the close set"
+        );
+    }
+
+    /*
+     * Intent: close_mapper_with_retry sleeps exactly CLOSE_RETRY_DELAY
+     *   between busy attempts, and the prod value of CLOSE_RETRY_DELAY
+     *   remains 500ms.
+     *
+     * Why it exists: the retry delay papers over a kernel-level race
+     *   between umount and cryptsetup close on multi-device btrfs (see
+     *   commit 1484ff1 and tests/repro/cryptsetup-close-btrfs-held.py).
+     *   The repro test is race-dependent and the CLI-level VM test
+     *   braid-lock-btrfs-held.py relies on the same race to trigger the
+     *   retry path -- neither deterministically catches a regression
+     *   that removes, zeroes, or bypasses the sleep. This test locks
+     *   the contract at the helper.
+     *
+     * Scenario: a busy close error repeats for all CLOSE_RETRY_ATTEMPTS
+     *   tries; the RecordingSleeper captures (CLOSE_RETRY_ATTEMPTS - 1)
+     *   sleep calls, each exactly CLOSE_RETRY_DELAY, and the returned
+     *   error is DeviceBusy.
+     */
+    #[test]
+    fn close_mapper_with_retry_sleeps_prod_delay_between_busy_attempts() {
+        struct RecordingSleeper(Mutex<Vec<Duration>>);
+        impl Sleeper for RecordingSleeper {
+            fn sleep(&self, d: Duration) {
+                self.0.lock().unwrap().push(d);
+            }
+        }
+
+        let sleeper = RecordingSleeper(Mutex::new(Vec::new()));
+        let runner = MockRunner::default().with_output(
+            CmdRequest::CryptsetupClose {
+                mapper: "braid-aaa".into(),
+            },
+            err_raw(
+                "cryptsetup close braid-aaa",
+                5,
+                "Device braid-aaa is still in use.",
+            ),
+        );
+
+        let err = close_mapper_with_retry(&runner, &sleeper, "braid-aaa")
+            .expect_err("should exhaust retries and return DeviceBusy");
+        assert!(
+            matches!(err, LockError::DeviceBusy(_)),
+            "expected DeviceBusy after retry exhaustion, got: {err:?}"
+        );
+
+        let recorded = sleeper.0.lock().unwrap().clone();
+        assert_eq!(
+            recorded.len(),
+            (CLOSE_RETRY_ATTEMPTS - 1) as usize,
+            "expected one sleep between each pair of attempts, got: {recorded:?}"
+        );
+        for d in &recorded {
+            assert_eq!(
+                *d, CLOSE_RETRY_DELAY,
+                "each retry must sleep CLOSE_RETRY_DELAY, got: {recorded:?}"
+            );
+        }
+        assert_eq!(
+            CLOSE_RETRY_DELAY,
+            Duration::from_millis(500),
+            "prod CLOSE_RETRY_DELAY must stay 500ms; if you intend to \
+             change this, update the kernel-race justification in the \
+             commit message"
+        );
+    }
+
+    /*
+     * Intent: public cmd_lock wires a real sleeper. An always-busy
+     *   mapper makes the wrapper pay measurable wall-clock sleep time
+     *   before returning DeviceBusy, proving &RealSleeper (not
+     *   &NoopSleeper) is on the hot path.
+     *
+     * Why it exists: the helper-level RecordingSleeper test proves
+     *   close_mapper_with_retry uses CLOSE_RETRY_DELAY, but does not
+     *   prove the public wrapper hands in &RealSleeper. A regression
+     *   that shipped &NoopSleeper (or dropped the sleeper entirely) in
+     *   production would leave lock reliability race-dependent and
+     *   pass every helper-level unit test -- including
+     *   braid-lock-btrfs-held.py, which only asserts success and does
+     *   not deterministically force the retry path.
+     *
+     * Scenario: umount succeeds, then every mapper close returns
+     *   "is still in use" so the retry loop runs to exhaustion. Because
+     *   umount did not set umount_error, DeviceBusy is NOT suppressed:
+     *   it becomes first_mapper_error and is the returned value. Wall
+     *   time is bounded below by (CLOSE_RETRY_ATTEMPTS - 1) *
+     *   CLOSE_RETRY_DELAY for a single mapper; we assert a tolerant
+     *   lower bound of that amount to stay robust on slow CI while
+     *   still failing loudly if no real sleep happened.
+     */
+    #[test]
+    fn cmd_lock_wrapper_uses_real_sleeper() {
+        use std::time::Instant;
+
+        let runner = mounted_runner()
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: "braid-aaa".into(),
+                },
+                err_raw(
+                    "cryptsetup close braid-aaa",
+                    5,
+                    "Device braid-aaa is still in use.",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: "braid-bbb".into(),
+                },
+                err_raw(
+                    "cryptsetup close braid-bbb",
+                    5,
+                    "Device braid-bbb is still in use.",
+                ),
+            );
+        let fs = MockFs::new(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]);
+        let config = test_config();
+        let membership = test_membership();
+
+        let start = Instant::now();
+        let err = cmd_lock(&runner, &fs, &config, &membership, false)
+            .expect_err("should fail with DeviceBusy after retry exhaustion");
+        let elapsed = start.elapsed();
+
+        assert!(
+            matches!(err, LockError::DeviceBusy(_)),
+            "expected DeviceBusy from public wrapper, got: {err:?}"
+        );
+
+        // Both mappers hit the full retry loop: expected total real
+        // sleep is 2 * (CLOSE_RETRY_ATTEMPTS - 1) * CLOSE_RETRY_DELAY =
+        // 2s. We assert a tolerant lower bound of one mapper's worth
+        // (~900ms) so scheduler jitter on slow CI does not cause flake,
+        // while still catching a NoopSleeper regression (which would
+        // complete in microseconds).
+        let min_expected =
+            CLOSE_RETRY_DELAY * (CLOSE_RETRY_ATTEMPTS - 1) - Duration::from_millis(100);
+        assert!(
+            elapsed >= min_expected,
+            "wrapper must use RealSleeper -- elapsed {:?} < min {:?}",
+            elapsed,
+            min_expected,
         );
     }
 }
