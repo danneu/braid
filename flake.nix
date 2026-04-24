@@ -412,6 +412,11 @@
               braid = linuxCrane.braid;
             }
           );
+          braid-remove-softwarn = pkgs.testers.nixosTest (
+            import ./tests/cli/braid-remove-softwarn.nix {
+              braid = linuxCrane.braid;
+            }
+          );
           braid-remove-missing-enospc = pkgs.testers.nixosTest (
             import ./tests/cli/braid-remove-missing-enospc.nix {
               braid = linuxCrane.braid;
