@@ -3,9 +3,10 @@ use crate::config::{self, Config};
 use crate::discover;
 use crate::journal::{self, Journal};
 use crate::membership::{self, DiskMember, PoolMembership};
-use crate::mount::{self, MountError, OpenCredential};
+use crate::mount::{self, MountError, OpenCredential, OpenPlan};
 use crate::parse::btrfs_filesystem_show::{classify_btrfs_probe, DeviceBtrfsProbe};
 use crate::parse::{parse_btrfs_replace_status, ReplaceState};
+use crate::preview::{self, PerDiskStyle, Preview, PreviewCompleteness, PreviewNote};
 use crate::probe::{self, Filesystem, ProbeError};
 use crate::progress::ProgressOutput;
 use crate::state_paths::StatePaths;
@@ -138,97 +139,312 @@ pub struct RecoverParams<'a> {
     pub progress: ProgressOutput,
 }
 
-pub fn cmd_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
+/// Dry-run preview source of truth for `braid recover` plus the
+/// execute inputs pre-computed during planning. `notes` + `steps` are
+/// both rendered by `preview()`; `execute()` renders `notes` to stderr
+/// with `STDERR_STYLE` before any mutation, preserving today's
+/// "entry banner then probe context then work" real-run sequence.
+///
+/// `open_plan` is `None` when the pool was already mounted at probe
+/// time. `notes` carries the entry-banner `Info` note first, then the
+/// `ProbeEvent`-derived notes (including `AlreadyMounted`) so both
+/// `preview()` and `execute()` surface them in order.
+#[derive(Debug)]
+pub struct RecoverPlan {
+    pub notes: Vec<PreviewNote>,
+    pub steps: Vec<Step>,
+    pub open_plan: Option<OpenPlan>,
+    pub journal: Journal,
+    pub union: PoolMembership,
+}
+
+/// Report returned by `plan_recover`. On the `Ok` branch, all
+/// accumulated notes (entry banner + probe events) have been moved
+/// into `plan.notes` and `notes` here is empty. On the `Err` branch,
+/// `notes` carries the banner + per-disk context accumulated before
+/// planning bailed (e.g. `DegradedRefused`) so the caller can render
+/// it to stderr before the error.
+pub struct RecoverPlanReport {
+    pub notes: Vec<PreviewNote>,
+    pub result: Result<RecoverPlan, RecoverError>,
+}
+
+/// Format the entry-banner line that both dry-run preview and real-run
+/// stderr share. Wording is pinned byte-for-byte against the pre-PR 6
+/// `eprintln!` that announced the start of recovery.
+pub fn format_recover_entry(journal: &Journal) -> String {
+    format!(
+        "Recovering from interrupted {:?} operation (started {})...",
+        journal_op_label(journal),
+        journal.started_at
+    )
+}
+
+impl RecoverPlan {
+    /// Real-run and failure-path stderr both use `Bracketed`, matching
+    /// today's `mount::render_probe_events` output. `Preview::render`
+    /// is already `Bracketed`, so success/failure/real-run all share
+    /// the same per-disk wording.
+    pub const STDERR_STYLE: PerDiskStyle = PerDiskStyle::Bracketed;
+
+    pub fn preview(&self) -> Preview {
+        Preview {
+            completeness: PreviewCompleteness::Complete,
+            notes: self.notes.clone(),
+            steps: self.steps.clone(),
+        }
+    }
+
+    pub fn execute<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
+        self,
+        runner: &R,
+        fs: &F,
+        by_id_resolver: &dyn ByIdResolver,
+        params: &RecoverParams<'_>,
+    ) -> Result<(), RecoverError> {
+        // Render accumulated notes (entry banner + probe events) to
+        // stderr before any mutation. This replaces today's pair of
+        // `eprintln!(entry)` + `mount::print_probe_events(&events)`
+        // calls with byte-identical output in the same order.
+        eprint!(
+            "{}",
+            preview::render_notes_for_stderr(&self.notes, Self::STDERR_STYLE),
+        );
+
+        let RecoverPlan {
+            notes: _,
+            steps: _,
+            open_plan,
+            journal,
+            union,
+        } = self;
+
+        // Recover-specific gate: resolve a credential whenever we have
+        // an initial mount plan (i.e. the pool is not already mounted).
+        // This is EAGER on purpose -- even if the initial plan's
+        // `to_unlock` is empty (every mapper already open), the
+        // post-mount relock cycle below closes every mapper and must
+        // reopen them, so a credential is required regardless. The
+        // resolved credential lives in this local across both execute
+        // calls (initial mount and the cycle remount).
+        let credential = match open_plan.as_ref() {
+            Some(_) => Some(
+                mount::resolve_credential(
+                    params.passphrase_stdin,
+                    params.passphrase_file,
+                    None, // recover does not expose --key-file today
+                )
+                .map_err(|e| RecoverError::Failed(format!("recover: {e}")))?,
+            ),
+            None => None, // already mounted, no cycle, no credential needed
+        };
+
+        // Initial mount. Dispatch on `p.to_unlock.is_empty()` to the
+        // matching execute entry point. The `expect` in the else arm
+        // is load-bearing: the match above guarantees `credential` is
+        // `Some` whenever `open_plan` is `Some`.
+        let just_mounted = match open_plan.as_ref() {
+            None => false, // already mounted
+            Some(p) => {
+                let res = if p.to_unlock.is_empty() {
+                    mount::execute_mount_only(runner, fs, params.config, p)
+                } else {
+                    let cred = credential
+                        .as_ref()
+                        .expect("credential resolved above when open_plan is Some");
+                    mount::execute_unlock_and_mount(runner, fs, params.config, p, cred)
+                };
+                match res {
+                    Ok(b) => b,
+                    Err(e) => {
+                        // Bootstrap mount failure: probe the target devices to confirm no btrfs
+                        // superblock exists — only then is it safe to advise wiping.
+                        if journal.pre_membership.disks.is_empty()
+                            && let mount::MountError::MountFailed(_) = &e
+                            && let journal::OpKind::Add { ref disks } = journal.op
+                        {
+                            let all_no_btrfs = disks.keys().all(|name| {
+                                let mapper =
+                                    format!("/dev/mapper/{}", config::mapper_name(name).0);
+                                match runner
+                                    .run(&CmdRequest::BtrfsFilesystemShowTarget { target: mapper })
+                                {
+                                    Ok(raw) => matches!(
+                                        classify_btrfs_probe(&raw),
+                                        DeviceBtrfsProbe::NoBtrfs
+                                    ),
+                                    Err(_) => false,
+                                }
+                            });
+                            if all_no_btrfs {
+                                let disk_list: Vec<_> = union
+                                    .disks
+                                    .iter()
+                                    .map(|(name, m)| format!("  {} ({})", name, m.by_id))
+                                    .collect();
+                                return Err(RecoverError::Failed(format!(
+                                    "bootstrap add was interrupted before the filesystem was \
+                                     created.\n\
+                                     The pool does not exist yet, so there is nothing to \
+                                     recover.\n\n\
+                                     To return to a clean state:\n\
+                                     1. rm {}\n\
+                                     2. Wipe the LUKS container from each disk that was being \
+                                        added:\n{}\n\
+                                        e.g.: wipefs -a /dev/disk/by-id/<device>\n\
+                                     3. Re-run braid add",
+                                    params.paths.pending_op_json().display(),
+                                    disk_list.join("\n"),
+                                )));
+                            }
+                        }
+                        return Err(e.into());
+                    }
+                }
+            }
+        };
+
+        // Force fresh kernel state before probing when we just mounted.
+        //
+        // When the kernel resumes an interrupted btrfs replace during the
+        // mount call above, two problems compound:
+        //
+        //   (a) The resume worker (btrfs_resume_dev_replace_async) runs
+        //       asynchronously in a kthread, so umount does NOT wait for it
+        //       to finish. probe_pool can run while the resume is still in
+        //       progress and read transient mid-resume topology.
+        //   (b) The kernel commits the post-completion devid swap to disk
+        //       correctly but the in-memory `btrfs_fs_devices` for this
+        //       mount session retains the pre-resume topology — including a
+        //       phantom MISSING devid for the temporary replace target —
+        //       even after the resume finishes.
+        //
+        // Skipped when the pool was already mounted before recover started:
+        // we don't know who's using that mount and umount could fail with
+        // EBUSY. The bug only manifests on the mount session that triggered
+        // the kernel resume, which is one we just opened ourselves.
+        if just_mounted {
+            wait_for_kernel_replace_to_finish(runner, params.config.mount_point());
+            // We mounted, so open_plan was Some, so credential was eagerly resolved
+            // above (recover always reads the passphrase when not already mounted).
+            let cred = credential
+                .as_ref()
+                .expect("just_mounted implies open_plan was Some and credential was resolved");
+            relock_and_remount(
+                runner,
+                fs,
+                params.config,
+                &union,
+                params.allow_degraded,
+                cred,
+            )?;
+        }
+
+        // 3. Probe live pool state
+        let mount_point = params.config.mount_point();
+        let pool = probe::probe_pool(runner, mount_point)?;
+
+        // 4. Build new membership from live pool state
+        let mut recovered = PoolMembership::empty();
+        for dev in &pool.devices {
+            let Some(name) = config::name_from_mapper(&dev.mapper.0) else {
+                eprintln!("  skip: device {} has no braid- prefix", dev.mapper.0);
+                continue;
+            };
+            // Sanity check: refuse to handle live pool members the journal never recorded.
+            if !union.disks.contains_key(name) {
+                return Err(RecoverError::Failed(format!(
+                    "device {} is in the live pool but has no by-id path in either \
+                     the pre-operation or target membership snapshot.\n\
+                     This must be resolved manually -- provide the correct \
+                     /dev/disk/by-id/ path and re-run recovery.",
+                    dev.mapper.0
+                )));
+            }
+            // Resolve by_id from the live device's identity, not from the journal.
+            let by_id = resolve_by_id_for_underlying(by_id_resolver, &dev.underlying)?;
+            recovered.disks.insert(
+                name.to_owned(),
+                DiskMember::enriched(by_id, dev.luks_uuid.clone(), dev.devid),
+            );
+        }
+
+        // 5. Report what changed
+        let pre_names: std::collections::BTreeSet<_> =
+            journal.pre_membership.disks.keys().collect();
+        let target_names: std::collections::BTreeSet<_> =
+            journal.target_membership.disks.keys().collect();
+        let recovered_names: std::collections::BTreeSet<_> = recovered.disks.keys().collect();
+
+        eprintln!("  pre-operation membership:  {:?}", pre_names);
+        eprintln!("  target membership:         {:?}", target_names);
+        eprintln!("  recovered (live pool):     {:?}", recovered_names);
+
+        eprintln!(
+            "note: {}",
+            recovery_guidance(&journal.op, &pre_names, &target_names, &recovered_names)
+        );
+
+        // 6. Write recovered membership
+        membership::save_membership(&recovered, params.paths)?;
+        eprintln!("pool.json written from live pool state.");
+
+        // 7. Replay any post-mutation steps the original command would have run
+        //    after its slow phase but before clearing the journal.
+        replay_post_mutation(runner, mount_point, &journal.op, &pool, params.progress)?;
+
+        // 8. Clear journal LAST.
+        journal::clear_journal(params.paths).map_err(|e| RecoverError::Journal(e.to_string()))?;
+        eprintln!("pending-op.json cleared. Recovery complete.");
+
+        Ok(())
+    }
+}
+
+/// Plan a `braid recover` run. Owns everything above today's real-run
+/// mutation body: journal load, `union_memberships`,
+/// `mount::plan_open_pool`, ProbeEvent-to-PreviewNote conversion,
+/// dry-run already-mounted reconciliation, and dry-run step
+/// construction (write pool.json / clear pending-op.json, plus
+/// compile_open_steps when an initial mount is required).
+///
+/// On success, accumulated notes (entry banner + probe events) live
+/// on `plan.notes` (the single render source for both preview and
+/// execute). On failure after accumulating notes, those notes move
+/// to `report.notes` so the caller can render them to stderr before
+/// the error.
+pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
-    by_id_resolver: &dyn ByIdResolver,
     params: &RecoverParams<'_>,
-) -> Result<(), RecoverError> {
-    // 1. Load journal (required — nothing to recover if absent)
+) -> RecoverPlanReport {
+    // 1. Load journal (required -- nothing to recover if absent). The
+    // no-journal failure is a no-context failure by design: nothing has
+    // been probed or accumulated yet, so `report.notes` stays empty.
     let journal = match journal::load_journal(params.paths) {
         Ok(Some(j)) => j,
         Ok(None) => {
-            return Err(RecoverError::Failed(
-                "no pending operation journal found -- nothing to recover".into(),
-            ));
+            return RecoverPlanReport {
+                notes: Vec::new(),
+                result: Err(RecoverError::Failed(
+                    "no pending operation journal found -- nothing to recover".into(),
+                )),
+            };
         }
-        Err(e) => return Err(RecoverError::Journal(e.to_string())),
+        Err(e) => {
+            return RecoverPlanReport {
+                notes: Vec::new(),
+                result: Err(RecoverError::Journal(e.to_string())),
+            };
+        }
     };
 
-    eprintln!(
-        "Recovering from interrupted {:?} operation (started {})...",
-        journal_op_label(&journal),
-        journal.started_at
-    );
+    // Entry banner always comes first -- whether the run succeeds, fails at
+    // plan_open_pool, or fails at the already-mounted reconciliation.
+    let mut notes = vec![PreviewNote::Info(format_recover_entry(&journal))];
 
-    // 2. Open LUKS devices and mount the pool if needed
     let union = union_memberships(&journal);
 
-    // Dry-run: probe + validate (same errors as execution), then print plan
-    if params.dry_run {
-        let report = mount::plan_open_pool(
-            runner,
-            fs,
-            params.config,
-            &union,
-            params.allow_degraded,
-            "recover",
-        );
-        mount::print_probe_events(&report.events);
-        let plan = report.result?;
-        let mut steps = Vec::new();
-        if let Some(plan) = &plan {
-            steps.extend(mount::compile_open_steps(
-                plan,
-                params.config.mount_point(),
-                None,
-            ));
-        } else {
-            // Pool is already mounted — run the same read-only reconciliation
-            // validation that execution does (probe_pool + membership construction).
-            // This catches errors like "device X has no by-id path in either snapshot"
-            // before claiming recovery is ready.
-            let mount_point = params.config.mount_point();
-            let pool = probe::probe_pool(runner, mount_point)?;
-            for dev in &pool.devices {
-                let Some(name) = config::name_from_mapper(&dev.mapper.0) else {
-                    continue;
-                };
-                if !union.disks.contains_key(name) {
-                    return Err(RecoverError::Failed(format!(
-                        "device {} is in the live pool but has no by-id path in either \
-                         the pre-operation or target membership snapshot.\n\
-                         This must be resolved manually -- provide the correct \
-                         /dev/disk/by-id/ path and re-run recovery.",
-                        dev.mapper.0
-                    )));
-                }
-            }
-        }
-        // State recovery steps are always shown (recover writes pool.json even when mounted)
-        steps.push(Step {
-            risk: "safe",
-            description: format!(
-                "write recovered pool.json → {}",
-                params.paths.pool_json().display()
-            ),
-            commands: vec![],
-        });
-        steps.push(Step {
-            risk: "safe",
-            description: format!(
-                "clear pending-op.json → {}",
-                params.paths.pending_op_json().display()
-            ),
-            commands: vec![],
-        });
-        Step::print_dry_run(&steps);
-        return Ok(());
-    }
-
-    // Plan once. plan_open_pool returns None when the pool is already
-    // mounted (this replaces the manual MountpointCheck the previous
-    // implementation hoisted here for the same purpose).
     let report = mount::plan_open_pool(
         runner,
         fs,
@@ -237,203 +453,124 @@ pub fn cmd_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         params.allow_degraded,
         "recover",
     );
-    mount::print_probe_events(&report.events);
-    let plan = report.result?;
+    for event in &report.events {
+        notes.push(event.to_preview_note());
+    }
 
-    // Recover-specific gate: resolve a credential whenever we have a plan
-    // (i.e. the pool is not already mounted). This is EAGER on purpose —
-    // even if the initial plan's `to_unlock` is empty (every mapper already
-    // open), the post-mount relock cycle below closes every mapper and must
-    // reopen them, so a credential is required regardless. The resolved
-    // credential lives in this local across both execute calls (initial
-    // mount and the cycle remount).
-    let credential = match plan.as_ref() {
-        Some(_) => Some(
-            mount::resolve_credential(
-                params.passphrase_stdin,
-                params.passphrase_file,
-                None, // recover does not expose --key-file today
-            )
-            .map_err(|e| RecoverError::Failed(format!("recover: {e}")))?,
-        ),
-        None => None, // already mounted, no cycle, no credential needed
+    let open_plan = match report.result {
+        Ok(op) => op,
+        Err(e) => {
+            return RecoverPlanReport {
+                notes,
+                result: Err(RecoverError::Mount(e)),
+            };
+        }
     };
 
-    // Initial mount. Dispatch on `p.to_unlock.is_empty()` to the matching
-    // execute entry point. The `expect` in the else arm is load-bearing:
-    // the match above guarantees `credential` is `Some` whenever `plan`
-    // is `Some`.
-    let just_mounted = match plan.as_ref() {
-        None => false, // already mounted
-        Some(p) => {
-            let res = if p.to_unlock.is_empty() {
-                mount::execute_mount_only(runner, fs, params.config, p)
-            } else {
-                let cred = credential
-                    .as_ref()
-                    .expect("credential resolved above when plan is Some");
-                mount::execute_unlock_and_mount(runner, fs, params.config, p, cred)
+    // Build dry-run steps.
+    let mut steps = Vec::new();
+    if let Some(op) = &open_plan {
+        steps.extend(mount::compile_open_steps(
+            op,
+            params.config.mount_point(),
+            None,
+        ));
+    } else if params.dry_run {
+        // Pool is already mounted -- run the same read-only reconciliation
+        // validation that execution's later probe_pool loop does. This
+        // catches errors like "device X has no by-id path in either
+        // snapshot" before claiming recovery is ready. Kept dry-run only
+        // to preserve today's asymmetry: real-run already-mounted skips
+        // this check because it happens implicitly downstream in
+        // `execute()` when it walks the probed pool devices.
+        let mount_point = params.config.mount_point();
+        let pool = match probe::probe_pool(runner, mount_point) {
+            Ok(p) => p,
+            Err(e) => {
+                return RecoverPlanReport {
+                    notes,
+                    result: Err(e.into()),
+                };
+            }
+        };
+        for dev in &pool.devices {
+            let Some(name) = config::name_from_mapper(&dev.mapper.0) else {
+                continue;
             };
-            match res {
-                Ok(b) => b,
-                Err(e) => {
-                    // Bootstrap mount failure: probe the target devices to confirm no btrfs
-                    // superblock exists — only then is it safe to advise wiping.
-                    if journal.pre_membership.disks.is_empty()
-                        && let mount::MountError::MountFailed(_) = &e
-                        && let journal::OpKind::Add { ref disks } = journal.op
-                    {
-                        let all_no_btrfs = disks.keys().all(|name| {
-                            let mapper = format!("/dev/mapper/{}", config::mapper_name(name).0);
-                            match runner
-                                .run(&CmdRequest::BtrfsFilesystemShowTarget { target: mapper })
-                            {
-                                Ok(raw) => {
-                                    matches!(classify_btrfs_probe(&raw), DeviceBtrfsProbe::NoBtrfs)
-                                }
-                                Err(_) => false,
-                            }
-                        });
-                        if all_no_btrfs {
-                            let disk_list: Vec<_> = union
-                                .disks
-                                .iter()
-                                .map(|(name, m)| format!("  {} ({})", name, m.by_id))
-                                .collect();
-                            return Err(RecoverError::Failed(format!(
-                                "bootstrap add was interrupted before the filesystem was \
-                                 created.\n\
-                                 The pool does not exist yet, so there is nothing to \
-                                 recover.\n\n\
-                                 To return to a clean state:\n\
-                                 1. rm {}\n\
-                                 2. Wipe the LUKS container from each disk that was being \
-                                    added:\n{}\n\
-                                    e.g.: wipefs -a /dev/disk/by-id/<device>\n\
-                                 3. Re-run braid add",
-                                params.paths.pending_op_json().display(),
-                                disk_list.join("\n"),
-                            )));
-                        }
-                    }
-                    return Err(e.into());
-                }
+            if !union.disks.contains_key(name) {
+                return RecoverPlanReport {
+                    notes,
+                    result: Err(RecoverError::Failed(format!(
+                        "device {} is in the live pool but has no by-id path in either \
+                         the pre-operation or target membership snapshot.\n\
+                         This must be resolved manually -- provide the correct \
+                         /dev/disk/by-id/ path and re-run recovery.",
+                        dev.mapper.0
+                    ))),
+                };
             }
         }
+    }
+
+    // State recovery steps are always shown (recover writes pool.json
+    // even when mounted).
+    steps.push(Step {
+        risk: "safe",
+        description: format!(
+            "write recovered pool.json → {}",
+            params.paths.pool_json().display()
+        ),
+        commands: vec![],
+    });
+    steps.push(Step {
+        risk: "safe",
+        description: format!(
+            "clear pending-op.json → {}",
+            params.paths.pending_op_json().display()
+        ),
+        commands: vec![],
+    });
+
+    RecoverPlanReport {
+        notes: Vec::new(),
+        result: Ok(RecoverPlan {
+            notes,
+            steps,
+            open_plan,
+            journal,
+            union,
+        }),
+    }
+}
+
+pub fn cmd_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
+    runner: &R,
+    fs: &F,
+    by_id_resolver: &dyn ByIdResolver,
+    params: &RecoverParams<'_>,
+) -> Result<(), RecoverError> {
+    let report = plan_recover(runner, fs, params);
+    let plan = match report.result {
+        Ok(p) => p,
+        Err(e) => {
+            // Preserved-context failure: any accumulated notes (entry
+            // banner + per-disk probe events) render to stderr before
+            // the error, mirroring today's `eprintln!(entry)` +
+            // `mount::print_probe_events` + `?` sequence.
+            eprint!(
+                "{}",
+                preview::render_notes_for_stderr(&report.notes, RecoverPlan::STDERR_STYLE),
+            );
+            return Err(e);
+        }
     };
 
-    // 2.5 Force fresh kernel state before probing.
-    //
-    // When the kernel resumes an interrupted btrfs replace during the
-    // mount call above, two problems compound:
-    //
-    //   (a) The resume worker (btrfs_resume_dev_replace_async) runs
-    //       asynchronously in a kthread, so umount does NOT wait for it
-    //       to finish. probe_pool can run while the resume is still in
-    //       progress and read transient mid-resume topology.
-    //   (b) The kernel commits the post-completion devid swap to disk
-    //       correctly but the in-memory `btrfs_fs_devices` for this
-    //       mount session retains the pre-resume topology — including a
-    //       phantom MISSING devid for the temporary replace target —
-    //       even after the resume finishes.
-    //
-    // The fix is two steps:
-    //
-    //   1. Wait for the kernel resume to actually finish (poll
-    //      `btrfs replace status` until it reports Finished or None).
-    //   2. Cycle the mount end-to-end (umount + scan --forget + close
-    //      LUKS + reopen + remount) so the kernel rebuilds fs_devices
-    //      from the on-disk chunk tree. Empirically (see
-    //      plans/wip/sharded-drifting-beaver-findings.md), `umount +
-    //      scan --forget + remount` ALONE is not enough — the LUKS
-    //      close+reopen is load-bearing.
-    //
-    // Skipped when the pool was already mounted before recover started:
-    // we don't know who's using that mount and umount could fail with
-    // EBUSY. The bug only manifests on the mount session that triggered
-    // the kernel resume, which is one we just opened ourselves.
-    if just_mounted {
-        wait_for_kernel_replace_to_finish(runner, params.config.mount_point());
-        // We mounted, so plan was Some, so credential was eagerly resolved
-        // above (recover always reads the passphrase when not already mounted).
-        let cred = credential
-            .as_ref()
-            .expect("just_mounted implies plan was Some and credential was resolved");
-        relock_and_remount(
-            runner,
-            fs,
-            params.config,
-            &union,
-            params.allow_degraded,
-            cred,
-        )?;
+    if params.dry_run {
+        plan.preview().print();
+        return Ok(());
     }
 
-    // 3. Probe live pool state
-    let mount_point = params.config.mount_point();
-    let pool = probe::probe_pool(runner, mount_point)?;
-
-    // 4. Build new membership from live pool state
-    let mut recovered = PoolMembership::empty();
-    for dev in &pool.devices {
-        let Some(name) = config::name_from_mapper(&dev.mapper.0) else {
-            eprintln!("  skip: device {} has no braid- prefix", dev.mapper.0);
-            continue;
-        };
-        // Sanity check: refuse to handle live pool members the journal never recorded.
-        // The journal still records intent (which devices the operation was acting on);
-        // an unknown device means something bypassed braid and we should not silently
-        // adopt it.
-        if !union.disks.contains_key(name) {
-            return Err(RecoverError::Failed(format!(
-                "device {} is in the live pool but has no by-id path in either \
-                 the pre-operation or target membership snapshot.\n\
-                 This must be resolved manually -- provide the correct \
-                 /dev/disk/by-id/ path and re-run recovery.",
-                dev.mapper.0
-            )));
-        }
-        // Resolve by_id from the live device's identity, not from the journal.
-        // The journal value can be stale if hardware enumeration changed since the
-        // mutation started; resolving against /dev/disk/by-id/ at recovery time
-        // gives us a fresh, identity-bound symlink.
-        let by_id = resolve_by_id_for_underlying(by_id_resolver, &dev.underlying)?;
-        recovered.disks.insert(
-            name.to_owned(),
-            DiskMember::enriched(by_id, dev.luks_uuid.clone(), dev.devid),
-        );
-    }
-
-    // 5. Report what changed
-    let pre_names: std::collections::BTreeSet<_> = journal.pre_membership.disks.keys().collect();
-    let target_names: std::collections::BTreeSet<_> =
-        journal.target_membership.disks.keys().collect();
-    let recovered_names: std::collections::BTreeSet<_> = recovered.disks.keys().collect();
-
-    eprintln!("  pre-operation membership:  {:?}", pre_names);
-    eprintln!("  target membership:         {:?}", target_names);
-    eprintln!("  recovered (live pool):     {:?}", recovered_names);
-
-    eprintln!(
-        "note: {}",
-        recovery_guidance(&journal.op, &pre_names, &target_names, &recovered_names)
-    );
-
-    // 6. Write recovered membership
-    membership::save_membership(&recovered, params.paths)?;
-    eprintln!("pool.json written from live pool state.");
-
-    // 7. Replay any post-mutation steps the original command would have run
-    //    after its slow phase but before clearing the journal. Order matters:
-    //    if a *second* forced shutdown lands during these steps, the journal
-    //    is still on disk so recover can re-run idempotently.
-    replay_post_mutation(runner, mount_point, &journal.op, &pool, params.progress)?;
-
-    // 8. Clear journal LAST.
-    journal::clear_journal(params.paths).map_err(|e| RecoverError::Journal(e.to_string()))?;
-    eprintln!("pending-op.json cleared. Recovery complete.");
-
-    Ok(())
+    plan.execute(runner, fs, by_id_resolver, params)
 }
 
 /// Re-issue the per-op steps that originally run after the long phase but
@@ -803,6 +940,7 @@ mod tests {
     use crate::cmd::{CmdRequest, MockRunner, RawCommandOutput};
     use crate::journal::{self, OpKind};
     use crate::mount::MountError;
+    use crate::preview::NoteLevel;
     use crate::probe::Filesystem;
     use crate::types::{ByIdPath, MountPoint};
     use std::collections::BTreeMap;
@@ -3474,6 +3612,363 @@ mod tests {
         assert!(
             !paths.pending_op_json().exists(),
             "journal must be cleared so the operator can re-run braid remove cleanly"
+        );
+    }
+
+    // ----- PR 6 planner-boundary tests -----
+
+    /* Intent: dry-run stepful success on a not-mounted pool renders
+     * the entry banner first, then per-disk probe notes, then the
+     * open/scan/mount steps, and finally the write-pool.json /
+     * clear-pending-op.json steps.
+     *
+     * Why it exists: PR 6 moves recover's pre-dry-run-gate probe and
+     * step compilation into `plan_recover`. A regression that either
+     * dropped the entry banner, reordered notes vs. steps, or dropped
+     * the state-recovery steps would break the dry-run contract pinned
+     * by the CLI test's stdout/stderr split. Covers the planner
+     * boundary independently of the subprocess wire contract.
+     *
+     * Scenario: 2-disk journal (pre={disk1,disk2}, target +disk3);
+     * union = {disk1,disk2,disk3}. disk1 and disk2 are present and
+     * closed; disk3 is absent (not in fs). allow_degraded=true permits
+     * plan_open_pool to succeed; dry_run=true.
+     */
+    #[test]
+    fn plan_recover_dry_run_stepful_not_mounted() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let fs = MockFs::new(&[
+            "/dev/disk/by-id/virtio-disk1",
+            "/dev/disk/by-id/virtio-disk2",
+        ]);
+
+        let journal = two_disk_journal();
+        journal::write_journal(&paths, &journal).unwrap();
+
+        let (mp_req, mp_out) = mountpoint_fail();
+        let runner = MockRunner::default()
+            .with_output(mp_req, mp_out)
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/virtio-disk1",
+                    "11111111-1111-1111-1111-111111111111",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/virtio-disk2",
+                    "22222222-2222-2222-2222-222222222222",
+                ),
+            )
+            .with_luks_dump_text_luks2_for(&[
+                "/dev/disk/by-id/virtio-disk1",
+                "/dev/disk/by-id/virtio-disk2",
+            ])
+            .with_mappers_closed(&["braid-disk1", "braid-disk2"]);
+
+        let params = RecoverParams {
+            config: &config,
+            paths: &paths,
+            passphrase_stdin: false,
+            passphrase_file: None,
+            allow_degraded: true,
+            dry_run: true,
+            progress: ProgressOutput::Off,
+        };
+
+        let rendered = plan_recover(&runner, &fs, &params)
+            .result
+            .expect("plan_recover should succeed with allow_degraded=true")
+            .preview()
+            .render();
+
+        let entry_banner = format_recover_entry(&journal);
+        assert!(
+            rendered.starts_with(&format!("{entry_banner}\n")),
+            "rendered preview must start with the entry banner, got: {rendered:?}",
+        );
+
+        let entry_pos = 0usize;
+        let disk1_pos = rendered
+            .find("[ok  ]  disk: disk1")
+            .unwrap_or_else(|| panic!("disk1 probe note missing: {rendered:?}"));
+        let disk2_pos = rendered
+            .find("[ok  ]  disk: disk2")
+            .unwrap_or_else(|| panic!("disk2 probe note missing: {rendered:?}"));
+        let disk3_pos = rendered
+            .find("[skip]  disk: disk3")
+            .unwrap_or_else(|| panic!("disk3 skip note missing: {rendered:?}"));
+        let scan_pos = rendered
+            .find("btrfs device scan")
+            .unwrap_or_else(|| panic!("btrfs device scan step missing: {rendered:?}"));
+        let write_pos = rendered
+            .find("write recovered pool.json")
+            .unwrap_or_else(|| panic!("write pool.json step missing: {rendered:?}"));
+        let clear_pos = rendered
+            .find("clear pending-op.json")
+            .unwrap_or_else(|| panic!("clear pending-op.json step missing: {rendered:?}"));
+
+        assert!(
+            entry_pos < disk1_pos
+                && disk1_pos < disk2_pos
+                && disk2_pos < disk3_pos
+                && disk3_pos < scan_pos
+                && scan_pos < write_pos
+                && write_pos < clear_pos,
+            "expected entry < probe notes < open/scan < write/clear, got: {rendered:?}",
+        );
+
+        assert!(
+            rendered.contains("LUKS open /dev/disk/by-id/virtio-disk1"),
+            "expected disk1 LUKS open step, got: {rendered:?}",
+        );
+        assert!(
+            rendered.contains("LUKS open /dev/disk/by-id/virtio-disk2"),
+            "expected disk2 LUKS open step, got: {rendered:?}",
+        );
+    }
+
+    /* Intent: dry-run stepful success on an already-mounted pool
+     * renders the entry banner, the `pool already mounted at
+     * /mnt/storage` Info note, and the write/clear state-recovery
+     * steps on a single preview; the literal `nothing to do.\n`
+     * fallback must NOT appear because steps are non-empty.
+     *
+     * Why it exists: recover's already-mounted dry-run is stepful
+     * (not note-only) -- state recovery steps always run. A regression
+     * that dropped the state-recovery steps, widened the reconciliation
+     * into real-run mount work, or appended `nothing to do.` would
+     * break the dry-run contract.
+     *
+     * Scenario: pool already mounted; plan_open_pool short-circuits
+     * to Ok(None) with a single AlreadyMounted event. The dry-run
+     * reconciliation walks the probed pool and finds both live
+     * devices in the journal union, so it proceeds to emit the
+     * write/clear steps.
+     */
+    #[test]
+    fn plan_recover_dry_run_stepful_already_mounted() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let fs = MockFs::new(&[]);
+
+        let journal = two_disk_journal();
+        journal::write_journal(&paths, &journal).unwrap();
+
+        let (mp_req, mp_out) = mountpoint_ok();
+        let runner = MockRunner::default()
+            .with_output(mp_req, mp_out)
+            // probe_pool (dry-run reconciliation) -- live pool has both disks.
+            .with_output(
+                CmdRequest::FindmntJson {
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                ok_raw(
+                    "findmnt",
+                    r#"{"filesystems": [{"target":"/mnt/storage","source":"/dev/mapper/braid-disk1","fstype":"btrfs"}]}"#,
+                ),
+            )
+            .with_output(
+                CmdRequest::BtrfsFilesystemShow {
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                btrfs_show_two_disks(),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-disk1".into(),
+                },
+                cryptsetup_status_active("braid-disk1", "/dev/vda"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vda".into(),
+                },
+                cryptsetup_uuid_ok("/dev/vda", "11111111-1111-1111-1111-111111111111"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-disk2".into(),
+                },
+                cryptsetup_status_active("braid-disk2", "/dev/vdb"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vdb".into(),
+                },
+                cryptsetup_uuid_ok("/dev/vdb", "22222222-2222-2222-2222-222222222222"),
+            );
+
+        let params = RecoverParams {
+            config: &config,
+            paths: &paths,
+            passphrase_stdin: false,
+            passphrase_file: None,
+            allow_degraded: false,
+            dry_run: true,
+            progress: ProgressOutput::Off,
+        };
+
+        let rendered = plan_recover(&runner, &fs, &params)
+            .result
+            .expect("plan_recover should succeed on already-mounted pool")
+            .preview()
+            .render();
+
+        let entry_banner = format_recover_entry(&journal);
+        assert!(
+            rendered.contains(&entry_banner),
+            "rendered preview must contain the entry banner, got: {rendered:?}",
+        );
+        assert!(
+            rendered.contains("pool already mounted at /mnt/storage"),
+            "rendered preview must contain the AlreadyMounted note, got: {rendered:?}",
+        );
+        assert!(
+            rendered.contains("write recovered pool.json"),
+            "rendered preview must contain the write-pool.json step, got: {rendered:?}",
+        );
+        assert!(
+            rendered.contains("clear pending-op.json"),
+            "rendered preview must contain the clear-pending-op.json step, got: {rendered:?}",
+        );
+        assert!(
+            !rendered.contains("nothing to do."),
+            "stepful preview must not emit the `nothing to do.` fallback, got: {rendered:?}",
+        );
+    }
+
+    /* Intent: a degraded-refusal at the planner boundary preserves the
+     * entry banner + per-disk probe notes on `RecoverPlanReport.notes`
+     * in order, and routes the error as
+     * `RecoverError::Mount(MountError::DegradedRefused(_))`.
+     *
+     * Why it exists: Shape A's preserved-context contract for recover
+     * says the entry banner and accumulated probe context survive the
+     * `Err` path so `cmd_recover` can render them to stderr before the
+     * refusal message -- mirroring today's
+     * `eprintln!(entry) + print_probe_events + ?` sequence. Without
+     * this boundary test, a regression that dropped the banner from the
+     * failure path or reordered the notes could still pass the
+     * end-to-end CLI test (which only greps for substring markers)
+     * while breaking the planner's documented contract.
+     *
+     * Scenario: 2-disk journal with union = {disk1, disk2, disk3};
+     * disk1 + disk2 are present and closed, disk3 is absent;
+     * allow_degraded=false. plan_open_pool accumulates
+     * DiskAvailable(disk1), DiskAvailable(disk2), DiskAbsent(disk3),
+     * then returns DegradedRefused.
+     */
+    #[test]
+    fn plan_recover_preserves_notes_on_degraded_refused() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let fs = MockFs::new(&[
+            "/dev/disk/by-id/virtio-disk1",
+            "/dev/disk/by-id/virtio-disk2",
+        ]);
+
+        let journal = two_disk_journal();
+        journal::write_journal(&paths, &journal).unwrap();
+
+        let (mp_req, mp_out) = mountpoint_fail();
+        let runner = MockRunner::default()
+            .with_output(mp_req, mp_out)
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/virtio-disk1",
+                    "11111111-1111-1111-1111-111111111111",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/virtio-disk2",
+                    "22222222-2222-2222-2222-222222222222",
+                ),
+            )
+            .with_luks_dump_text_luks2_for(&[
+                "/dev/disk/by-id/virtio-disk1",
+                "/dev/disk/by-id/virtio-disk2",
+            ])
+            .with_mappers_closed(&["braid-disk1", "braid-disk2"]);
+
+        let params = RecoverParams {
+            config: &config,
+            paths: &paths,
+            passphrase_stdin: false,
+            passphrase_file: None,
+            allow_degraded: false,
+            dry_run: true,
+            progress: ProgressOutput::Off,
+        };
+
+        let report = plan_recover(&runner, &fs, &params);
+
+        let entry_banner = format_recover_entry(&journal);
+        assert!(
+            matches!(&report.notes[0], PreviewNote::Info(msg) if msg == &entry_banner),
+            "first note must be the entry banner, got: {:?}",
+            report.notes,
+        );
+
+        let per_disk: Vec<&PreviewNote> = report
+            .notes
+            .iter()
+            .filter(|n| matches!(n, PreviewNote::PerDisk { .. }))
+            .collect();
+        assert_eq!(
+            per_disk.len(),
+            3,
+            "report.notes must carry one per-disk note per union disk, got: {:?}",
+            report.notes,
+        );
+        assert!(
+            matches!(
+                per_disk[0],
+                PreviewNote::PerDisk { name, level: NoteLevel::Ok, .. } if name == "disk1",
+            ),
+            "first per-disk note must be disk1 Ok, got: {:?}",
+            per_disk[0],
+        );
+        assert!(
+            matches!(
+                per_disk[1],
+                PreviewNote::PerDisk { name, level: NoteLevel::Ok, .. } if name == "disk2",
+            ),
+            "second per-disk note must be disk2 Ok, got: {:?}",
+            per_disk[1],
+        );
+        assert!(
+            matches!(
+                per_disk[2],
+                PreviewNote::PerDisk { name, level: NoteLevel::Skip, .. } if name == "disk3",
+            ),
+            "third per-disk note must be disk3 Skip, got: {:?}",
+            per_disk[2],
+        );
+
+        let err = report
+            .result
+            .expect_err("degraded refusal must surface as Err");
+        assert!(
+            matches!(&err, RecoverError::Mount(MountError::DegradedRefused(_))),
+            "expected DegradedRefused, got: {err:?}",
         );
     }
 }

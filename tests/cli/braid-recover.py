@@ -84,6 +84,178 @@ with subtest("braid unlock refuses with journal present"):
         f"Expected 'interrupted operation' in output, got: {output}"
     )
 
+# --- Phase 3.5: dry-run contracts for `braid recover` (PR 6) ---
+#
+# Intent: pin the stdout/stderr split of `braid recover --dry-run`.
+# Successful dry-run must print exactly one rendered Preview to stdout
+# (entry banner, probe notes, step block) with stderr empty. Preview-
+# generation failures must print accumulated context + error to stderr
+# and keep stdout empty.
+#
+# Why it exists: PR 6 migrates recover to the shared `Preview` /
+# plan-object shape. Without subprocess tests, a regression that leaked
+# probe lines to stderr on success, routed the entry banner back to
+# stderr in dry-run, dropped state-recovery steps, or dropped the
+# preserved-context notes on the failure path would pass the Rust unit
+# tests (which don't cross the stdout/stderr boundary) while breaking
+# the new wire contract.
+
+# --- Test 3a: dry-run preserved-context failure (DegradedRefused) ---
+#
+# Scenario: re-inject a journal whose target_membership includes a
+# third disk (disk3) that is not plugged in. With no --allow-degraded,
+# plan_open_pool accumulates per-disk probe events (disk1+disk2
+# available, disk3 absent) and then returns DegradedRefused. cmd_recover
+# must render those accumulated notes to stderr before the refusal
+# message, with stdout empty and a nonzero exit code.
+with subtest("Test 3a: dry-run preserved-context failure -> stdout empty, stderr has context"):
+    # Build a journal whose target_membership contains disk3 in
+    # addition to the existing disk1+disk2. disk3 has no virtio-disk3
+    # device (nothing plugged), so plan_open_pool emits DiskAbsent for
+    # it and then refuses the degraded mount.
+    target_with_disk3 = {
+        "disks": {
+            **pool_json["disks"],
+            "disk3": {"by_id": "/dev/disk/by-id/virtio-disk3"},
+        },
+    }
+    journal_deg = {
+        "started_at": "2026-01-01T00:00:00Z",
+        "op": {
+            "op": "Add",
+            "disks": {"disk3": "/dev/disk/by-id/virtio-disk3"},
+        },
+        "pre_membership": pool_json,
+        "target_membership": target_with_disk3,
+    }
+    machine.succeed(
+        f"cat > /var/lib/braid/pending-op.json << 'JOURNAL_EOF'\n"
+        f"{json.dumps(journal_deg)}\n"
+        f"JOURNAL_EOF"
+    )
+
+    exit_code, _ = machine.execute(
+        "braid recover --dry-run >/tmp/pcf-stdout 2>/tmp/pcf-stderr"
+    )
+    assert exit_code != 0, f"recover --dry-run should refuse without --allow-degraded, got exit {exit_code}"
+
+    out = machine.succeed("cat /tmp/pcf-stdout")
+    err = machine.succeed("cat /tmp/pcf-stderr")
+
+    assert out == "", (
+        "stdout must be empty on preview-generation failure; got: {!r}".format(out)
+    )
+    assert "Recovering from interrupted" in err, (
+        "stderr must contain the entry banner before the error; got: {!r}".format(err)
+    )
+    # Probe notes for the two present disks appear before the refusal.
+    for name in ("disk1", "disk2"):
+        marker = "[ok  ]  disk: {}".format(name)
+        assert marker in err, (
+            "stderr must contain probe note {!r}; got: {!r}".format(marker, err)
+        )
+    assert "[skip]  disk: disk3" in err, (
+        "stderr must contain the absent-disk skip note; got: {!r}".format(err)
+    )
+    # Banner + per-disk notes precede the refusal message.
+    banner_pos = err.find("Recovering from interrupted")
+    disk3_pos = err.find("[skip]  disk: disk3")
+    refusal_pos = err.find("refusing to mount")
+    assert banner_pos != -1 and disk3_pos != -1 and refusal_pos != -1, (
+        "expected banner, skip note, and refusal markers in stderr; got: {!r}".format(err)
+    )
+    assert banner_pos < disk3_pos < refusal_pos, (
+        "expected banner < skip note < refusal in stderr; got: {!r}".format(err)
+    )
+
+    # Restore the simple journal for the following subtests.
+    journal_json = json.dumps(journal)
+    machine.succeed(
+        f"cat > /var/lib/braid/pending-op.json << 'JOURNAL_EOF'\n"
+        f"{journal_json}\n"
+        f"JOURNAL_EOF"
+    )
+
+# --- Test 3b: dry-run stepful success when pool not mounted ---
+#
+# Scenario: pool is locked (from Phase 2) and the simple journal is
+# present. `braid recover --dry-run` must print the entry banner, the
+# per-disk probe notes, and the full step block (LUKS open, btrfs
+# device scan, mount, write pool.json, clear pending-op.json) to
+# stdout. stderr must be exactly empty.
+with subtest("Test 3b: dry-run stepful not-mounted -> stdout has banner+notes+steps, stderr empty"):
+    machine.fail("mountpoint -q /mnt/storage")
+
+    machine.succeed(
+        "braid recover --dry-run >/tmp/drn-stdout 2>/tmp/drn-stderr"
+    )
+    out = machine.succeed("cat /tmp/drn-stdout")
+    err = machine.succeed("cat /tmp/drn-stderr")
+
+    assert err == "", (
+        "stderr must be empty on dry-run success; got: {!r}".format(err)
+    )
+    assert "Recovering from interrupted" in out, (
+        "stdout must contain the entry banner; got: {!r}".format(out)
+    )
+    for name in ("disk1", "disk2"):
+        marker = "[ok  ]  disk: {}".format(name)
+        assert marker in out, (
+            "stdout must contain probe note {!r}; got: {!r}".format(marker, out)
+        )
+    assert "LUKS open" in out, (
+        "stdout must contain LUKS open step; got: {!r}".format(out)
+    )
+    assert "btrfs device scan" in out, (
+        "stdout must contain btrfs device scan step; got: {!r}".format(out)
+    )
+    assert "write recovered pool.json" in out, (
+        "stdout must contain write pool.json step; got: {!r}".format(out)
+    )
+    assert "clear pending-op.json" in out, (
+        "stdout must contain clear pending-op.json step; got: {!r}".format(out)
+    )
+    banner_pos = out.find("Recovering from interrupted")
+    probe_pos = out.find("[ok  ]  disk: disk1")
+    scan_pos = out.find("btrfs device scan")
+    write_pos = out.find("write recovered pool.json")
+    assert banner_pos < probe_pos < scan_pos < write_pos, (
+        "expected banner < probe notes < scan/steps < write step; got: {!r}".format(out)
+    )
+
+    # Dry-run is read-only: pool is still locked.
+    machine.fail("mountpoint -q /mnt/storage")
+
+# --- Test 3c: no-journal failure (no-context) ---
+#
+# Scenario: temporarily move pending-op.json aside. `braid recover
+# --dry-run` has nothing to recover; the failure happens before any
+# probe context accumulates. stdout must be empty and stderr must
+# contain only the error message.
+with subtest("Test 3c: no-journal failure -> stdout empty, stderr has only the error"):
+    machine.succeed("mv /var/lib/braid/pending-op.json /tmp/saved-pending-op.json")
+
+    exit_code, _ = machine.execute(
+        "braid recover --dry-run >/tmp/nj-stdout 2>/tmp/nj-stderr"
+    )
+    assert exit_code != 0, f"recover --dry-run with no journal should fail, got exit {exit_code}"
+
+    out = machine.succeed("cat /tmp/nj-stdout")
+    err = machine.succeed("cat /tmp/nj-stderr")
+
+    assert out == "", (
+        "stdout must be empty on no-context failure; got: {!r}".format(out)
+    )
+    assert "no pending operation journal found -- nothing to recover" in err, (
+        "stderr must name the missing-journal condition; got: {!r}".format(err)
+    )
+    assert "Recovering from interrupted" not in err, (
+        "stderr must not contain the entry banner when no journal is loaded; got: {!r}".format(err)
+    )
+
+    # Restore the simple journal for the remaining real-run subtest.
+    machine.succeed("mv /tmp/saved-pending-op.json /var/lib/braid/pending-op.json")
+
 # --- Phase 4: braid recover self-mounts and recovers ---
 
 with subtest("braid recover self-mounts and rebuilds pool.json"):
@@ -101,6 +273,60 @@ with subtest("braid recover self-mounts and rebuilds pool.json"):
 
     # pending-op.json must be cleared
     machine.fail("test -f /var/lib/braid/pending-op.json")
+
+# --- Test 4a: dry-run stepful already-mounted -> stdout has banner + AlreadyMounted + write/clear steps ---
+#
+# Scenario: pool is now mounted (from Phase 4) and the journal has been
+# cleared. Re-inject the simple journal and run `braid recover
+# --dry-run`. plan_open_pool returns None (already mounted), so the
+# preview contains the entry banner + "pool already mounted at
+# /mnt/storage" Info note + the write/clear state-recovery steps.
+# stderr must stay empty because this is still a dry-run success.
+with subtest("Test 4a: dry-run already-mounted stepful -> stdout has banner + AlreadyMounted + steps"):
+    machine.succeed("mountpoint -q /mnt/storage")
+
+    # Re-inject the simple journal.
+    machine.succeed(
+        f"cat > /var/lib/braid/pending-op.json << 'JOURNAL_EOF'\n"
+        f"{journal_json}\n"
+        f"JOURNAL_EOF"
+    )
+
+    machine.succeed(
+        "braid recover --dry-run >/tmp/dra-stdout 2>/tmp/dra-stderr"
+    )
+    out = machine.succeed("cat /tmp/dra-stdout")
+    err = machine.succeed("cat /tmp/dra-stderr")
+
+    assert err == "", (
+        "stderr must be empty on dry-run success; got: {!r}".format(err)
+    )
+    assert "Recovering from interrupted" in out, (
+        "stdout must contain the entry banner; got: {!r}".format(out)
+    )
+    assert "pool already mounted at /mnt/storage" in out, (
+        "stdout must contain the AlreadyMounted note; got: {!r}".format(out)
+    )
+    assert "write recovered pool.json" in out, (
+        "stdout must contain write pool.json step; got: {!r}".format(out)
+    )
+    assert "clear pending-op.json" in out, (
+        "stdout must contain clear pending-op.json step; got: {!r}".format(out)
+    )
+    # Stepful success must not emit the generic `nothing to do.` fallback.
+    assert "nothing to do." not in out, (
+        "stepful dry-run must not emit the `nothing to do.` fallback; got: {!r}".format(out)
+    )
+    # The already-mounted case also must not emit mount/LUKS-open steps.
+    assert "LUKS open" not in out, (
+        "already-mounted dry-run must not emit LUKS open steps; got: {!r}".format(out)
+    )
+
+    # Dry-run is read-only: journal must still be present.
+    machine.succeed("test -f /var/lib/braid/pending-op.json")
+    # Clear the journal so the remaining phases (data intact + normal
+    # ops) see the clean post-recovery state.
+    machine.succeed("rm /var/lib/braid/pending-op.json")
 
 # --- Phase 5: Test data intact ---
 

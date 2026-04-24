@@ -152,6 +152,94 @@ with subtest("Test 2c: already-mounted unlock -> exit 0, stderr message, no remo
         )
     )
 
+# --- Test 2d: dry-run already-mounted -> note-only success on stdout ---
+#
+# Intent: `braid unlock --dry-run` against an already-mounted pool prints
+# exactly `pool already mounted at /mnt/storage\n` to stdout, keeps stderr
+# empty, and does not emit any step lines.
+#
+# Why it exists: PR 5 routes unlock through the shared Preview model. The
+# note-only success path (AlreadyMounted -> Info note + zero steps) is the
+# guardrail against silent regression of the new "notes with zero steps"
+# dry-run contract. Without this subtest, a regression that reintroduced a
+# trailing `nothing to do.` line, leaked step lines onto stdout, or routed
+# the message back to stderr would still pass Test 2c (which only pins the
+# real-run channel for the already-mounted case).
+#
+# Scenario: pool is mounted from Tests 1/2/2c. Invoke `braid unlock --dry-run`
+# with stdout and stderr captured separately.
+with subtest("Test 2d: dry-run already-mounted -> stdout Info note, stderr empty"):
+    machine.succeed("mountpoint -q /mnt/storage")
+
+    machine.succeed(
+        "braid unlock --dry-run >/tmp/dam-stdout 2>/tmp/dam-stderr"
+    )
+    out = machine.succeed("cat /tmp/dam-stdout")
+    err = machine.succeed("cat /tmp/dam-stderr")
+
+    assert out == "pool already mounted at /mnt/storage\n", (
+        "stdout must be exactly the Info note; got: {!r}".format(out)
+    )
+    assert err == "", (
+        "stderr must be empty on dry-run success; got: {!r}".format(err)
+    )
+    # Belt-and-suspenders: no step lines leaked onto stdout.
+    assert "LUKS open" not in out, (
+        "step lines must not appear in a note-only dry-run; got: {!r}".format(out)
+    )
+    assert "btrfs device scan" not in out, (
+        "step lines must not appear in a note-only dry-run; got: {!r}".format(out)
+    )
+
+# --- Test 2e: dry-run stepful success -> probe notes + step block on stdout ---
+#
+# Intent: `braid unlock --dry-run` against a locked pool prints bracketed
+# per-disk probe notes followed by the LUKS open / btrfs scan / mount step
+# block to stdout, with stderr exactly empty and no side effects.
+#
+# Why it exists: PR 5 requires dry-run stepful success to include probe
+# notes on stdout BEFORE the open/scan/mount steps. A regression that
+# dropped the probe notes, leaked them to stderr, or reordered them after
+# the step block would break the new "probe context precedes steps" dry-run
+# contract.
+#
+# Scenario: close the pool so it is fully locked, then run
+# `braid unlock --dry-run` with stdout and stderr captured separately.
+with subtest("Test 2e: dry-run stepful -> stdout has probe + steps, stderr empty"):
+    close_all()
+    machine.fail("mountpoint -q /mnt/storage")
+
+    machine.succeed(
+        "braid unlock --dry-run >/tmp/dru-stdout 2>/tmp/dru-stderr"
+    )
+    out = machine.succeed("cat /tmp/dru-stdout")
+    err = machine.succeed("cat /tmp/dru-stderr")
+
+    assert err == "", (
+        "stderr must be empty on dry-run success; got: {!r}".format(err)
+    )
+    for name in ("disk1", "disk2", "disk3"):
+        marker = "[ok  ]  disk: {}".format(name)
+        assert marker in out, (
+            "expected probe note {!r} on stdout; got: {!r}".format(marker, out)
+        )
+    assert "LUKS open" in out, (
+        "expected LUKS open step on stdout; got: {!r}".format(out)
+    )
+    assert "btrfs device scan" in out, (
+        "expected btrfs device scan step on stdout; got: {!r}".format(out)
+    )
+
+    probe_pos = out.find("[ok  ]  disk: disk1")
+    scan_pos = out.find("btrfs device scan")
+    assert probe_pos != -1 and probe_pos < scan_pos, (
+        "probe notes must render before the step block; got: {!r}".format(out)
+    )
+
+    # Dry-run is read-only: pool is still locked and no mapper exists.
+    machine.fail("mountpoint -q /mnt/storage")
+    machine.fail("test -e /dev/mapper/braid-disk1")
+
 # --- Test 2b: Unlock enriches pool.json ---
 
 with subtest("Test 2b: unlock enriches pool.json with runtime metadata"):
@@ -195,20 +283,95 @@ with subtest("Test 3: partial state — one mapper closed, pool unmounted"):
     content = machine.succeed("cat /mnt/storage/test.txt").strip()
     assert content == "persistent data", f"Expected 'persistent data', got '{content}'"
 
-# --- Test 4a: Missing disk — refuses degraded by default ---
-
-with subtest("Test 4a: missing disk — refuses degraded by default"):
+# --- Test 4a: Missing disk -- refuses degraded by default ---
+#
+# Strengthened for PR 5: capture stdout and stderr separately and pin the
+# preserved-context contract. Accumulated per-disk probe notes render to
+# stderr BEFORE the refusal message; stdout stays empty on the failure
+# path. A regression that leaked the refusal onto stdout, dropped the
+# probe context, or reordered it after the refusal would break the Shape A
+# contract for unlock.
+with subtest("Test 4a: missing disk -- refuses degraded, probe context precedes refusal on stderr"):
     close_all()
 
     # Remove disk3's by-id symlink to simulate unplugged disk
     machine.succeed("rm -f /dev/disk/by-id/virtio-disk3")
 
-    ret = machine.execute(unlock_cmd(passphrase) + " 2>&1")
-    assert ret[0] != 0, "Expected non-zero exit for degraded refusal"
-    assert "refusing to mount degraded" in ret[1], \
-        f"Expected 'refusing to mount degraded' in output, got: {ret[1]}"
-    assert "--allow-degraded" in ret[1], \
-        f"Expected '--allow-degraded' hint in output, got: {ret[1]}"
+    ret = machine.execute(
+        f"{unlock_cmd(passphrase)} >/tmp/r4a-stdout 2>/tmp/r4a-stderr"
+    )
+    out = machine.succeed("cat /tmp/r4a-stdout")
+    err = machine.succeed("cat /tmp/r4a-stderr")
+
+    assert ret[0] != 0, "expected non-zero exit for degraded refusal"
+    assert out == "", (
+        "stdout must be empty on failure path; got: {!r}".format(out)
+    )
+    assert "refusing to mount degraded" in err, (
+        "expected refusal message on stderr; got: {!r}".format(err)
+    )
+    assert "--allow-degraded" in err, (
+        "expected --allow-degraded hint on stderr; got: {!r}".format(err)
+    )
+
+    # Probe notes must precede the refusal on stderr (Shape A contract).
+    probe_marker = "[skip]  disk: disk3"
+    refusal_marker = "refusing to mount degraded"
+    probe_pos = err.find(probe_marker)
+    refusal_pos = err.find(refusal_marker)
+    assert probe_pos != -1, (
+        "expected bracketed probe note for absent disk3 on stderr; got: {!r}".format(err)
+    )
+    assert probe_pos < refusal_pos, (
+        "probe notes must render before the refusal on stderr; got: {!r}".format(err)
+    )
+
+    machine.fail("mountpoint -q /mnt/storage")
+
+# --- Test 4a_dry: dry-run degraded refusal matches real-run contract ---
+#
+# Intent: `braid unlock --dry-run` against a pool with a missing member and
+# no `--allow-degraded` must exit nonzero with stdout empty and stderr
+# showing the accumulated probe notes followed by the refusal message.
+#
+# Why it exists: PR 5's failure-with-preserved-context contract applies to
+# both real-run and dry-run. Without this subtest, a regression where the
+# dry-run path skipped the note-to-stderr render (e.g. because the planner
+# preserved notes only on the success branch) would slip through while the
+# real-run Test 4a kept passing.
+#
+# Scenario: reuse Test 4a's teardown (pool closed, disk3 symlink gone).
+with subtest("Test 4a_dry: dry-run missing disk -- stderr has probe + refusal, stdout empty"):
+    # Idempotent: Test 4a left this state; redo to keep the test
+    # self-contained if subtests are reordered.
+    close_all()
+    machine.succeed("rm -f /dev/disk/by-id/virtio-disk3")
+
+    ret = machine.execute(
+        "braid unlock --dry-run >/tmp/d4a-stdout 2>/tmp/d4a-stderr"
+    )
+    out = machine.succeed("cat /tmp/d4a-stdout")
+    err = machine.succeed("cat /tmp/d4a-stderr")
+
+    assert ret[0] != 0, "expected non-zero exit for dry-run degraded refusal"
+    assert out == "", (
+        "stdout must be empty on dry-run failure; got: {!r}".format(out)
+    )
+    assert "refusing to mount degraded" in err, (
+        "expected refusal message on stderr; got: {!r}".format(err)
+    )
+
+    probe_marker = "[skip]  disk: disk3"
+    refusal_marker = "refusing to mount degraded"
+    probe_pos = err.find(probe_marker)
+    refusal_pos = err.find(refusal_marker)
+    assert probe_pos != -1, (
+        "expected bracketed probe note for absent disk3 on stderr; got: {!r}".format(err)
+    )
+    assert probe_pos < refusal_pos, (
+        "probe notes must render before refusal on stderr; got: {!r}".format(err)
+    )
+
     machine.fail("mountpoint -q /mnt/storage")
 
 # --- Test 4b: Missing disk — --allow-degraded mounts degraded ---

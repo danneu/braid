@@ -1,8 +1,9 @@
 use crate::cmd::{CommandRunner, Step};
 use crate::config::Config;
 use crate::membership::{self, PoolMembership};
-use crate::mount::{self, MountError};
+use crate::mount::{self, MountError, OpenPlan, ProbeEvent};
 use crate::preflight;
+use crate::preview::{self, PerDiskStyle, Preview, PreviewCompleteness, PreviewNote};
 use crate::probe::{self, Filesystem};
 use crate::state_paths::StatePaths;
 use std::path::Path;
@@ -28,14 +29,132 @@ pub struct UnlockParams<'a> {
     pub dry_run: bool,
 }
 
-pub fn cmd_unlock<R: CommandRunner, F: Filesystem + ?Sized>(
+/// Dry-run preview source of truth for `braid unlock` plus the execute
+/// inputs pre-computed during planning. `notes` + `steps` are both
+/// rendered by `preview()`; `execute()` renders `notes` to stderr with
+/// `STDERR_STYLE` before any mutation, preserving today's "probe
+/// context then work" real-run sequence.
+///
+/// `open_plan` is `None` when the pool was already mounted at probe
+/// time. `notes` still carries the `AlreadyMounted` Info note in that
+/// case so `preview()` and `execute()` both surface it.
+#[derive(Debug)]
+pub struct UnlockPlan {
+    pub notes: Vec<PreviewNote>,
+    pub steps: Vec<Step>,
+    pub open_plan: Option<OpenPlan>,
+}
+
+/// Report returned by `plan_unlock`. On the `Ok` branch, all
+/// accumulated probe notes have been moved into `plan.notes` and
+/// `notes` here is empty. On the `Err` branch, `notes` carries the
+/// per-disk context accumulated before `plan_open_pool` bailed (e.g.
+/// `DegradedRefused`) so the caller can render it to stderr before the
+/// error.
+pub struct UnlockPlanReport {
+    pub notes: Vec<PreviewNote>,
+    pub result: Result<UnlockPlan, UnlockError>,
+}
+
+impl UnlockPlan {
+    /// Real-run and failure-path stderr both use `Bracketed`, matching
+    /// today's `mount::render_probe_events` output. `Preview::render`
+    /// is already `Bracketed`, so success/failure/real-run all share
+    /// the same per-disk wording.
+    pub const STDERR_STYLE: PerDiskStyle = PerDiskStyle::Bracketed;
+
+    pub fn preview(&self) -> Preview {
+        Preview {
+            completeness: PreviewCompleteness::Complete,
+            notes: self.notes.clone(),
+            steps: self.steps.clone(),
+        }
+    }
+
+    pub fn execute<R: CommandRunner, F: Filesystem + ?Sized>(
+        self,
+        runner: &R,
+        fs: &F,
+        params: &UnlockParams<'_>,
+    ) -> Result<(), UnlockError> {
+        // Render accumulated probe notes to stderr before any mutation.
+        // In the already-mounted case this emits the "pool already
+        // mounted at <mp>" Info note (byte-identical to today's
+        // `print_probe_events` output for that event).
+        eprint!(
+            "{}",
+            preview::render_notes_for_stderr(&self.notes, Self::STDERR_STYLE),
+        );
+
+        let Some(plan) = self.open_plan else {
+            // Pool was already mounted (plan_open_pool returned None).
+            return Ok(());
+        };
+
+        // Contract:
+        // - Pure operator command: bring the pool online from authoritative state.
+        // - Membership comes from pool.json; unlock never creates, repairs, or rewrites it.
+        // - Probe only configured members, open what is available, and mount the pool.
+        // - Refuse degraded mounts unless --allow-degraded is explicit.
+        // - After a successful mount, pool.json enriched fields (luks_uuid, devid) are
+        //   refreshed best-effort, but correctness never depends on that write.
+
+        // Unlock-specific gate: only resolve a credential if there is
+        // something to unlock. Preserves the "no prompt when every
+        // mapper is already open" UX rule that used to live inside
+        // open_and_mount_pool. Pinned by
+        // cmd_unlock_skips_credential_resolution_when_nothing_to_unlock.
+        if plan.to_unlock.is_empty() {
+            mount::execute_mount_only(runner, fs, params.config, &plan)?;
+        } else {
+            let credential = mount::resolve_credential(
+                params.passphrase_stdin,
+                params.passphrase_file,
+                params.key_file,
+            )?;
+            mount::execute_unlock_and_mount(runner, fs, params.config, &plan, &credential)?;
+        }
+
+        let mount_point = params.config.mount_point();
+
+        // Enrich pool.json with live metadata (luks_uuid, devid) -- best-effort.
+        // A rare race where probe_pool sees mounted=false after a successful
+        // mount leaves `pool_after.devices` empty, so refresh_pool_metadata
+        // no-ops. That is acceptable: correctness never depends on this write
+        // (see contract above). Pinned by
+        // unlock_tolerates_post_mount_probe_mounted_false.
+        if let Ok(pool_after) = probe::probe_pool(runner, mount_point) {
+            membership::refresh_pool_metadata(&pool_after, params.paths);
+        }
+
+        // Best-effort: warn if a paused balance was found on mount.
+        // skip_balance prevents the kernel from resuming it silently, but the
+        // user should know so they can resume or cancel explicitly.
+        crate::status::emit_paused_balance_warning(runner, mount_point, &mut std::io::stderr());
+
+        Ok(())
+    }
+}
+
+/// Plan a `braid unlock` run. Owns everything above today's `--dry-run`
+/// gate: pending-op preflight, `mount::plan_open_pool`, conversion of
+/// every `ProbeEvent` to a `PreviewNote`, and `compile_open_steps` when
+/// an `OpenPlan` is produced. On success, accumulated probe notes live
+/// on `plan.notes` (the single render source for both preview and
+/// execute). On failure, notes move to `report.notes` so the caller can
+/// render them to stderr before the error.
+pub fn plan_unlock<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
     params: &UnlockParams<'_>,
-) -> Result<(), UnlockError> {
-    preflight::check_no_pending_operation(params.paths).map_err(UnlockError::Failed)?;
+) -> UnlockPlanReport {
+    if let Err(msg) = preflight::check_no_pending_operation(params.paths) {
+        return UnlockPlanReport {
+            notes: Vec::new(),
+            result: Err(UnlockError::Failed(msg)),
+        };
+    }
 
-    // Plan once (read-only). Reused by dry-run and execution.
     let report = mount::plan_open_pool(
         runner,
         fs,
@@ -44,63 +163,62 @@ pub fn cmd_unlock<R: CommandRunner, F: Filesystem + ?Sized>(
         params.allow_degraded,
         "unlock",
     );
-    mount::print_probe_events(&report.events);
-    let plan = report.result?;
+    let notes: Vec<PreviewNote> = report
+        .events
+        .iter()
+        .map(ProbeEvent::to_preview_note)
+        .collect();
 
-    // Dry-run: print steps and exit. plan_open_pool already validated.
-    if params.dry_run {
-        if let Some(ref p) = plan {
-            let steps = mount::compile_open_steps(p, params.config.mount_point(), params.key_file);
-            Step::print_dry_run(&steps);
+    match report.result {
+        Ok(open_plan) => {
+            let steps = match &open_plan {
+                Some(op) => {
+                    mount::compile_open_steps(op, params.config.mount_point(), params.key_file)
+                }
+                None => Vec::new(),
+            };
+            UnlockPlanReport {
+                notes: Vec::new(),
+                result: Ok(UnlockPlan {
+                    notes,
+                    steps,
+                    open_plan,
+                }),
+            }
         }
-        return Ok(());
+        Err(e) => UnlockPlanReport {
+            notes,
+            result: Err(UnlockError::Mount(e)),
+        },
     }
+}
 
-    // Contract:
-    // - Pure operator command: bring the pool online from authoritative state.
-    // - Membership comes from pool.json; unlock never creates, repairs, or rewrites it.
-    // - Probe only configured members, open what is available, and mount the pool.
-    // - Refuse degraded mounts unless --allow-degraded is explicit.
-    // - After a successful mount, pool.json enriched fields (luks_uuid, devid) are
-    //   refreshed best-effort, but correctness never depends on that write.
-
-    let Some(plan) = plan else {
-        // Pool was already mounted (plan_open_pool returned None).
-        return Ok(());
+pub fn cmd_unlock<R: CommandRunner, F: Filesystem + ?Sized>(
+    runner: &R,
+    fs: &F,
+    params: &UnlockParams<'_>,
+) -> Result<(), UnlockError> {
+    let report = plan_unlock(runner, fs, params);
+    let plan = match report.result {
+        Ok(p) => p,
+        Err(e) => {
+            // Preserved-context failure: accumulated probe notes render
+            // to stderr before the error, mirroring today's
+            // `print_probe_events` + `?` sequence.
+            eprint!(
+                "{}",
+                preview::render_notes_for_stderr(&report.notes, UnlockPlan::STDERR_STYLE),
+            );
+            return Err(e);
+        }
     };
 
-    // Unlock-specific gate: only resolve a credential if there is something
-    // to unlock. Preserves the "no prompt when every mapper is already open"
-    // UX rule that used to live inside open_and_mount_pool.
-    if plan.to_unlock.is_empty() {
-        mount::execute_mount_only(runner, fs, params.config, &plan)?;
-    } else {
-        let credential = mount::resolve_credential(
-            params.passphrase_stdin,
-            params.passphrase_file,
-            params.key_file,
-        )?;
-        mount::execute_unlock_and_mount(runner, fs, params.config, &plan, &credential)?;
+    if params.dry_run {
+        plan.preview().print();
+        return Ok(());
     }
 
-    let mount_point = params.config.mount_point();
-
-    // Enrich pool.json with live metadata (luks_uuid, devid) -- best-effort.
-    // A rare race where probe_pool sees mounted=false after a successful
-    // mount leaves `pool_after.devices` empty, so refresh_pool_metadata
-    // no-ops. That is acceptable: correctness never depends on this write
-    // (see contract above). Pinned by
-    // unlock_tolerates_post_mount_probe_mounted_false.
-    if let Ok(pool_after) = probe::probe_pool(runner, mount_point) {
-        membership::refresh_pool_metadata(&pool_after, params.paths);
-    }
-
-    // Best-effort: warn if a paused balance was found on mount.
-    // skip_balance prevents the kernel from resuming it silently, but the user
-    // should know so they can resume or cancel explicitly.
-    crate::status::emit_paused_balance_warning(runner, mount_point, &mut std::io::stderr());
-
-    Ok(())
+    plan.execute(runner, fs, params)
 }
 
 #[cfg(test)]
@@ -110,6 +228,7 @@ mod tests {
     use crate::config::Config;
     use crate::membership::{DiskMember, PoolMembership};
     use crate::mount::MountError;
+    use crate::preview::NoteLevel;
     use crate::probe::Filesystem;
     use crate::state_paths::StatePaths;
     use crate::types::{ByIdPath, MountPoint};
@@ -759,11 +878,22 @@ mod tests {
         result.expect("unlock should succeed even with paused balance");
     }
 
-    // Intent: dry-run for unlock with 2 closed disks shows LUKS open + scan + mount.
-    // Why: verifies plan_open_pool + compile_open_steps integration via cmd_unlock.
-    // Scenario: 2-disk pool, both present, both closed, --dry-run.
+    /* Intent: dry-run success for two closed disks renders probe notes
+     * above the step block, and the block still carries the expected
+     * open/scan/mount steps.
+     *
+     * Why it exists: the PR 5 migration routes unlock through
+     * `plan_unlock().result.unwrap().preview().render()`. A regression
+     * that either drops the probe notes, drops the steps, or swaps
+     * their order would break the "probe context before steps" dry-run
+     * contract. Pins the new planner boundary.
+     *
+     * Scenario: 2-disk pool, both present and closed, `--dry-run`.
+     * `plan_open_pool` emits two `DiskAvailable` events; planner
+     * converts them to `PerDisk { level: Ok, message: "found" }` notes.
+     */
     #[test]
-    fn dry_run_render_unlock_2_closed_disks() {
+    fn plan_unlock_dry_run_render_2_closed_disks() {
         let (_state_dir, sp) = test_paths();
         let config = Config::new(MountPoint("/mnt/storage".to_owned())).unwrap();
         let mut disks = BTreeMap::new();
@@ -817,29 +947,157 @@ mod tests {
             ])
             .with_mappers_closed(&["braid-disk1", "braid-disk2"]);
 
-        // dry_run = true, no passphrase needed
-        let result = cmd_unlock(
-            &runner,
-            &fs,
-            &UnlockParams {
-                config: &config,
-                membership: &membership,
-                paths: &sp,
-                passphrase_stdin: false,
-                passphrase_file: None,
-                key_file: None,
-                allow_degraded: false,
-                dry_run: true,
-            },
+        let params = UnlockParams {
+            config: &config,
+            membership: &membership,
+            paths: &sp,
+            passphrase_stdin: false,
+            passphrase_file: None,
+            key_file: None,
+            allow_degraded: false,
+            dry_run: true,
+        };
+
+        let rendered = plan_unlock(&runner, &fs, &params)
+            .result
+            .expect("plan_unlock should succeed on 2-disk closed pool")
+            .preview()
+            .render();
+
+        let note1 = "[ok  ]  disk: disk1     found\n";
+        let note2 = "[ok  ]  disk: disk2     found\n";
+        let scan = "btrfs device scan";
+
+        let pos1 = rendered
+            .find(note1)
+            .unwrap_or_else(|| panic!("probe note for disk1 missing: {rendered:?}"));
+        let pos2 = rendered
+            .find(note2)
+            .unwrap_or_else(|| panic!("probe note for disk2 missing: {rendered:?}"));
+        let scan_pos = rendered
+            .find(scan)
+            .unwrap_or_else(|| panic!("btrfs device scan step missing: {rendered:?}"));
+
+        assert!(
+            pos1 < pos2 && pos2 < scan_pos,
+            "probe notes must render before the step block, got: {rendered:?}",
         );
-        result.expect("dry-run unlock should succeed");
+
+        assert!(
+            rendered.contains("LUKS open /dev/disk/by-id/virtio-disk1"),
+            "expected disk1 LUKS open step, got: {rendered:?}",
+        );
+        assert!(
+            rendered.contains("LUKS open /dev/disk/by-id/virtio-disk2"),
+            "expected disk2 LUKS open step, got: {rendered:?}",
+        );
+        assert!(
+            rendered.contains("mount"),
+            "expected mount step, got: {rendered:?}",
+        );
     }
 
-    // Intent: dry-run for unlock with degraded refusal returns the same error.
-    // Why: dry-run must run the same validation as execution.
-    // Scenario: 3-disk pool, disk3 absent, --dry-run without --allow-degraded.
+    /* Intent: when the pool is already mounted, `plan_unlock` returns
+     * an `UnlockPlan` with `open_plan: None`, the `AlreadyMounted`
+     * Info note on `plan.notes`, and zero steps; `preview().render()`
+     * produces exactly `pool already mounted at /mnt/storage\n`.
+     *
+     * Why it exists: the note-only success path is the guardrail
+     * against silent regression of the new "notes with zero steps"
+     * dry-run contract. Without this test, a refactor that routed the
+     * already-mounted message back through the generic
+     * `nothing to do.` fallback (or appended spurious step lines)
+     * would slip through.
+     *
+     * Scenario: 2-disk pool whose mountpoint check returns exit 0.
+     * `plan_open_pool` short-circuits to `Ok(None)` with a single
+     * `AlreadyMounted` event, which becomes the sole `Info` note on
+     * the returned `UnlockPlan`.
+     */
     #[test]
-    fn dry_run_unlock_degraded_refused() {
+    fn plan_unlock_note_only_success_when_already_mounted() {
+        let (_state_dir, sp) = test_paths();
+        let config = Config::new(MountPoint("/mnt/storage".to_owned())).unwrap();
+        let mut disks = BTreeMap::new();
+        for (name, path) in [
+            ("disk1", "/dev/disk/by-id/virtio-disk1"),
+            ("disk2", "/dev/disk/by-id/virtio-disk2"),
+        ] {
+            disks.insert(
+                name.to_owned(),
+                DiskMember::from_by_id(ByIdPath(path.to_owned())),
+            );
+        }
+        let membership = PoolMembership { disks };
+        let fs = MockFs::new(&[
+            "/dev/disk/by-id/virtio-disk1",
+            "/dev/disk/by-id/virtio-disk2",
+        ]);
+
+        // mountpoint check returns 0 -> pool already mounted.
+        let runner = MockRunner::default().with_output(
+            CmdRequest::MountpointCheck {
+                path: MountPoint("/mnt/storage".to_owned()),
+            },
+            ok_raw("mountpoint"),
+        );
+
+        let params = UnlockParams {
+            config: &config,
+            membership: &membership,
+            paths: &sp,
+            passphrase_stdin: false,
+            passphrase_file: None,
+            key_file: None,
+            allow_degraded: false,
+            dry_run: true,
+        };
+
+        let plan = plan_unlock(&runner, &fs, &params)
+            .result
+            .expect("plan_unlock should succeed on already-mounted pool");
+
+        assert!(
+            plan.open_plan.is_none(),
+            "open_plan must be None on already-mounted pool",
+        );
+        assert!(
+            plan.steps.is_empty(),
+            "steps must be empty on already-mounted pool, got: {:?}",
+            plan.steps,
+        );
+
+        let rendered = plan.preview().render();
+        assert_eq!(
+            rendered, "pool already mounted at /mnt/storage\n",
+            "note-only success must render exactly the Info note",
+        );
+    }
+
+    /* Intent: a degraded refusal at the planner boundary preserves
+     * per-disk probe notes on `UnlockPlanReport.notes` in probe order,
+     * and routes the error as
+     * `UnlockError::Mount(MountError::DegradedRefused(_))`.
+     *
+     * Why it exists: Shape A's preserved-context contract says
+     * accumulated notes survive the `Err` path so `cmd_unlock` can
+     * render them to stderr before the refusal message -- mirroring
+     * today's `print_probe_events` + `?` sequence. Without this
+     * boundary test, a regression that either dropped the notes or
+     * reordered them would still pass the end-to-end CLI test (which
+     * only greps for substring markers) while breaking the planner's
+     * documented contract.
+     *
+     * Scenario: 3-disk pool, disk3 classified as PresentNotLuks
+     * (Unreadable), no `--allow-degraded`. `plan_open_pool` emits
+     * DiskAvailable(disk1), DiskAvailable(disk2),
+     * DiskLuksHeaderUnreadable(disk3), then returns DegradedRefused.
+     * `plan_unlock` converts those three events into notes on
+     * `report.notes` in that order and surfaces the error via
+     * `report.result`.
+     */
+    #[test]
+    fn plan_unlock_preserves_notes_on_degraded_refused() {
         let (_state_dir, sp) = test_paths();
         let config = three_disk_config();
         let membership = three_disk_membership();
@@ -893,25 +1151,61 @@ mod tests {
             ])
             .with_mappers_closed(&["braid-disk1", "braid-disk2"]);
 
-        let result = cmd_unlock(
-            &runner,
-            &fs,
-            &UnlockParams {
-                config: &config,
-                membership: &membership,
-                paths: &sp,
-                passphrase_stdin: false,
-                passphrase_file: None,
-                key_file: None,
-                allow_degraded: false,
-                dry_run: true,
-            },
+        let params = UnlockParams {
+            config: &config,
+            membership: &membership,
+            paths: &sp,
+            passphrase_stdin: false,
+            passphrase_file: None,
+            key_file: None,
+            allow_degraded: false,
+            dry_run: true,
+        };
+
+        let report = plan_unlock(&runner, &fs, &params);
+
+        let per_disk: Vec<&PreviewNote> = report
+            .notes
+            .iter()
+            .filter(|n| matches!(n, PreviewNote::PerDisk { .. }))
+            .collect();
+        assert_eq!(
+            per_disk.len(),
+            3,
+            "report.notes must carry one per-disk note per membership disk, got: {:?}",
+            report.notes,
+        );
+        assert!(
+            matches!(
+                per_disk[0],
+                PreviewNote::PerDisk { name, level: NoteLevel::Ok, .. } if name == "disk1",
+            ),
+            "first note must be disk1 Ok, got: {:?}",
+            per_disk[0],
+        );
+        assert!(
+            matches!(
+                per_disk[1],
+                PreviewNote::PerDisk { name, level: NoteLevel::Ok, .. } if name == "disk2",
+            ),
+            "second note must be disk2 Ok, got: {:?}",
+            per_disk[1],
+        );
+        assert!(
+            matches!(
+                per_disk[2],
+                PreviewNote::PerDisk { name, level: NoteLevel::Skip, .. } if name == "disk3",
+            ),
+            "third note must be disk3 Skip, got: {:?}",
+            per_disk[2],
         );
 
-        let err = result.expect_err("dry-run should refuse degraded mount");
+        let err = report
+            .result
+            .expect_err("degraded refusal must surface as Err");
         assert!(
             matches!(&err, UnlockError::Mount(MountError::DegradedRefused(_))),
-            "expected DegradedRefused, got: {err:?}"
+            "expected DegradedRefused, got: {err:?}",
         );
     }
 
