@@ -2,6 +2,7 @@ use crate::cmd::{CmdError, CmdRequest, CommandRunner, Step};
 use crate::config::{mapper_name, Config};
 use crate::luks::{self, LuksError, VerifyOutcome};
 use crate::membership::PoolMembership;
+use crate::preview::{self, NoteLevel, PerDiskStyle, PreviewNote};
 use crate::probe::{self, Filesystem, ProbeError};
 use crate::status_tag::StatusTag;
 use crate::types::{ByIdPath, ConfigDiskState, MountPoint};
@@ -145,6 +146,46 @@ pub enum ProbeEvent {
     DiskLuksHeaderDamaged { name: String },
     DiskAlreadyOpen { name: String },
     DiskAvailable { name: String },
+}
+
+impl ProbeEvent {
+    /// Map a probe event to the shared `PreviewNote` shape used by the
+    /// project-wide dry-run preview model. `AlreadyMounted` becomes an
+    /// `Info` note; per-disk variants become `PerDisk` notes whose
+    /// rendered bytes (under `PerDiskStyle::Bracketed`) match
+    /// `render_probe_events`'s legacy line format.
+    pub fn to_preview_note(&self) -> PreviewNote {
+        match self {
+            ProbeEvent::AlreadyMounted { mount_point } => {
+                PreviewNote::Info(format!("pool already mounted at {mount_point}"))
+            }
+            ProbeEvent::DiskAbsent { name } => PreviewNote::PerDisk {
+                name: name.clone(),
+                level: NoteLevel::Skip,
+                message: "not found (unplugged?)".to_owned(),
+            },
+            ProbeEvent::DiskLuksHeaderUnreadable { name } => PreviewNote::PerDisk {
+                name: name.clone(),
+                level: NoteLevel::Skip,
+                message: "LUKS header unreadable".to_owned(),
+            },
+            ProbeEvent::DiskLuksHeaderDamaged { name } => PreviewNote::PerDisk {
+                name: name.clone(),
+                level: NoteLevel::Skip,
+                message: "LUKS header metadata damaged".to_owned(),
+            },
+            ProbeEvent::DiskAlreadyOpen { name } => PreviewNote::PerDisk {
+                name: name.clone(),
+                level: NoteLevel::Ok,
+                message: "already open".to_owned(),
+            },
+            ProbeEvent::DiskAvailable { name } => PreviewNote::PerDisk {
+                name: name.clone(),
+                level: NoteLevel::Ok,
+                message: "found".to_owned(),
+            },
+        }
+    }
 }
 
 /// Outcome of `plan_open_pool`. `events` are always populated, even on
@@ -307,47 +348,14 @@ fn plan_open_pool_inner<R: CommandRunner, F: Filesystem + ?Sized>(
 /// Render a probe-event sequence to a multi-line string. Pure: no I/O,
 /// no global state. The exact byte output is a behavioral contract --
 /// see `render_probe_events_formats_mixed_probe_result`.
+///
+/// Routes through the shared `preview::render_notes_for_stderr` helper
+/// (Bracketed style) so that this function and the project-wide
+/// `Preview` model stay byte-for-byte identical for these notes. The
+/// per-event wording lives in `ProbeEvent::to_preview_note`.
 pub fn render_probe_events(events: &[ProbeEvent]) -> String {
-    let mut out = String::new();
-    for ev in events {
-        match ev {
-            ProbeEvent::AlreadyMounted { mount_point } => {
-                out.push_str(&format!("pool already mounted at {mount_point}\n"));
-            }
-            ProbeEvent::DiskAbsent { name } => {
-                out.push_str(&format!(
-                    "{}  disk: {:<10}not found (unplugged?)\n",
-                    StatusTag::Skip,
-                    name
-                ));
-            }
-            ProbeEvent::DiskLuksHeaderUnreadable { name } => {
-                out.push_str(&format!(
-                    "{}  disk: {:<10}LUKS header unreadable\n",
-                    StatusTag::Skip,
-                    name
-                ));
-            }
-            ProbeEvent::DiskLuksHeaderDamaged { name } => {
-                out.push_str(&format!(
-                    "{}  disk: {:<10}LUKS header metadata damaged\n",
-                    StatusTag::Skip,
-                    name
-                ));
-            }
-            ProbeEvent::DiskAlreadyOpen { name } => {
-                out.push_str(&format!(
-                    "{}  disk: {:<10}already open\n",
-                    StatusTag::Ok,
-                    name
-                ));
-            }
-            ProbeEvent::DiskAvailable { name } => {
-                out.push_str(&format!("{}  disk: {:<10}found\n", StatusTag::Ok, name));
-            }
-        }
-    }
-    out
+    let notes: Vec<PreviewNote> = events.iter().map(ProbeEvent::to_preview_note).collect();
+    preview::render_notes_for_stderr(&notes, PerDiskStyle::Bracketed)
 }
 
 /// Thin stderr wrapper around `render_probe_events`. Callers invoke
@@ -1852,11 +1860,12 @@ mod tests {
     /// output for every `ProbeEvent` variant.
     ///
     /// Why: The pre-refactor behavior of `plan_open_pool` was to emit
-    /// these exact lines inline via `eprintln!`. After extracting a pure
-    /// renderer, the caller-side `print_probe_events` wraps it with
-    /// `eprint!`, so wording/padding/tag drift is only detectable via
-    /// this test. A failure here means user-visible stderr output from
-    /// unlock/recover has shifted.
+    /// these exact lines inline via `eprintln!`. The function now
+    /// routes through the shared `preview::render_notes_for_stderr`
+    /// helper, so wording/padding/tag drift can come from either side
+    /// (probe-event -> note mapping or the shared renderer). A failure
+    /// here means user-visible stderr output from unlock/recover has
+    /// shifted.
     ///
     /// Scenario: a single fixture vector containing every variant,
     /// including both disk states and the already-mounted header line.
@@ -1898,6 +1907,84 @@ pool already mounted at /mnt/storage
             rendered, expected,
             "render_probe_events output drifted from the pre-refactor stderr format"
         );
+    }
+
+    /*
+     * Intent: each ProbeEvent variant must round-trip through
+     * `to_preview_note` + `preview::render_notes_for_stderr(Bracketed)`
+     * to the legacy `render_probe_events` line for that variant -- per
+     * variant, byte-for-byte.
+     *
+     * Why it exists: PR 0 introduces a per-variant adapter
+     * (`ProbeEvent::to_preview_note`) and routes `render_probe_events`
+     * through the shared preview renderer. The aggregated mixed-events
+     * test (`render_probe_events_formats_mixed_probe_result`) catches
+     * drift in the combined output, but a per-variant test localises
+     * any wording drift to a single arm of `to_preview_note`. Listed in
+     * the plan's risks section.
+     *
+     * Scenario: render each ProbeEvent variant individually, both via
+     * the legacy public API and via the new note adapter, and assert
+     * byte equality with the pinned legacy line for that variant.
+     */
+    #[test]
+    fn probe_event_to_preview_note_preserves_byte_format() {
+        let cases: Vec<(ProbeEvent, &'static str)> = vec![
+            (
+                ProbeEvent::AlreadyMounted {
+                    mount_point: "/mnt/storage".to_owned(),
+                },
+                "pool already mounted at /mnt/storage\n",
+            ),
+            (
+                ProbeEvent::DiskAbsent {
+                    name: "disk1".to_owned(),
+                },
+                "[skip]  disk: disk1     not found (unplugged?)\n",
+            ),
+            (
+                ProbeEvent::DiskLuksHeaderUnreadable {
+                    name: "disk2".to_owned(),
+                },
+                "[skip]  disk: disk2     LUKS header unreadable\n",
+            ),
+            (
+                ProbeEvent::DiskLuksHeaderDamaged {
+                    name: "disk3".to_owned(),
+                },
+                "[skip]  disk: disk3     LUKS header metadata damaged\n",
+            ),
+            (
+                ProbeEvent::DiskAlreadyOpen {
+                    name: "disk4".to_owned(),
+                },
+                "[ok  ]  disk: disk4     already open\n",
+            ),
+            (
+                ProbeEvent::DiskAvailable {
+                    name: "disk5".to_owned(),
+                },
+                "[ok  ]  disk: disk5     found\n",
+            ),
+        ];
+
+        for (event, expected) in &cases {
+            let via_legacy = render_probe_events(std::slice::from_ref(event));
+            assert_eq!(
+                &via_legacy, *expected,
+                "render_probe_events drifted for {event:?}",
+            );
+
+            let note = event.to_preview_note();
+            let via_adapter = preview::render_notes_for_stderr(
+                std::slice::from_ref(&note),
+                PerDiskStyle::Bracketed,
+            );
+            assert_eq!(
+                &via_adapter, *expected,
+                "to_preview_note + render_notes_for_stderr drifted for {event:?}",
+            );
+        }
     }
 
     /// Intent: `plan_open_pool` must return the events it accumulated
