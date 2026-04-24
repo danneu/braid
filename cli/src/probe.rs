@@ -338,6 +338,55 @@ pub fn probe_pool<R: CommandRunner>(
 }
 
 // ---------------------------------------------------------------------------
+// probe_fsid
+// ---------------------------------------------------------------------------
+
+/// Resolve a mounted pool's FSID for preflight checks against
+/// `/sys/fs/btrfs/<fsid>/exclusive_operation`, without probing
+/// per-device cryptsetup state.
+///
+/// Preserves the `NotBtrfs` contract from `probe_pool`: if the mount
+/// point is held by a non-btrfs filesystem, returns `ProbeError::NotBtrfs`
+/// rather than a generic parse failure from `btrfs filesystem show`.
+///
+/// Caller must have already confirmed the mount point is active (e.g.
+/// via `CmdRequest::MountpointCheck`).
+pub fn probe_fsid<R: CommandRunner>(
+    runner: &R,
+    mount_point: &MountPoint,
+) -> Result<String, ProbeError> {
+    let findmnt_raw = runner.run(&CmdRequest::FindmntJson {
+        mount_point: mount_point.clone(),
+    })?;
+    let findmnt = crate::parse::parse_findmnt_json(&findmnt_raw)?;
+
+    let entry = findmnt
+        .filesystems
+        .iter()
+        .find(|e| e.target == mount_point.as_str())
+        .ok_or_else(|| ProbeError::PoolDevice {
+            mapper: mount_point.0.clone(),
+            detail: "mount point not present in findmnt output".into(),
+        })?;
+
+    if entry.fstype != "btrfs" {
+        return Err(ProbeError::NotBtrfs {
+            mount_point: mount_point.0.clone(),
+            fstype: entry.fstype.clone(),
+        });
+    }
+
+    let show_raw = runner.run(&CmdRequest::BtrfsFilesystemShow {
+        mount_point: mount_point.clone(),
+    })?;
+    let show = parse_btrfs_filesystem_show(&show_raw)?;
+    show.uuid.ok_or_else(|| ProbeError::PoolDevice {
+        mapper: mount_point.0.clone(),
+        detail: "mounted pool has no FSID in btrfs filesystem show output".into(),
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1387,6 +1436,88 @@ mod tests {
             matches!(err, ProbeError::PoolDevice { ref detail, .. }
                 if detail.contains("no FSID")),
             "expected ProbeError::PoolDevice about missing FSID, got: {err:?}"
+        );
+    }
+
+    // -- probe_fsid tests --
+
+    // Intent: probe_fsid returns the FSID using exactly two subprocesses
+    //   (findmnt + btrfs filesystem show).
+    // Why: cmd_lock's preflight only needs the FSID. If probe_fsid
+    //   silently starts issuing per-device cryptsetup calls it would
+    //   regress the point of the refactor (fewer subprocesses, smaller
+    //   failure surface). MockRunner panics on any CmdRequest without a
+    //   registered mock, so only FindmntJson + BtrfsFilesystemShow being
+    //   registered mechanically proves the helper stays narrow.
+    // Scenario: a mounted btrfs pool; probe_fsid extracts the uuid from
+    //   btrfs-show output without touching cryptsetup.
+    #[test]
+    fn probe_fsid_happy() {
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::FindmntJson {
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                },
+                findmnt_btrfs(),
+            )
+            .with_output(
+                CmdRequest::BtrfsFilesystemShow {
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                },
+                btrfs_show_2disk(),
+            );
+
+        let fsid = probe_fsid(&runner, &mp()).unwrap();
+        assert_eq!(fsid, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+    }
+
+    // Intent: probe_fsid preserves probe_pool's NotBtrfs contract.
+    // Why: cmd_lock relies on this typed error to report "this mount is
+    //   not ours" rather than a generic btrfs-show parse failure.
+    //   Downgrading NotBtrfs to a plain command failure would degrade
+    //   the user-facing message on a mis-configured mount.
+    // Scenario: findmnt reports the mount point is ext4. probe_fsid must
+    //   reject with ProbeError::NotBtrfs{fstype:"ext4"} before running
+    //   btrfs filesystem show.
+    #[test]
+    fn probe_fsid_rejects_non_btrfs() {
+        let runner = MockRunner::default().with_output(
+            CmdRequest::FindmntJson {
+                mount_point: MountPoint("/mnt/storage".to_owned()),
+            },
+            findmnt_ext4(),
+        );
+
+        let err = probe_fsid(&runner, &mp()).unwrap_err();
+        assert!(
+            matches!(err, ProbeError::NotBtrfs { ref fstype, .. } if fstype == "ext4"),
+            "expected ProbeError::NotBtrfs, got: {err:?}"
+        );
+    }
+
+    // Intent: probe_fsid errors when findmnt returns no entry for the
+    //   mount point (e.g. the mount raced to unmount between
+    //   MountpointCheck and probe_fsid).
+    // Why: silently returning "no FSID" or some default would let
+    //   cmd_lock dereference a non-existent sysfs path and either
+    //   succeed vacuously or yield a confusing I/O error. A typed
+    //   PoolDevice error surfaces the state clearly.
+    // Scenario: findmnt returns exit 1 with empty stdout (no
+    //   filesystems found for mount point).
+    #[test]
+    fn probe_fsid_mount_not_in_findmnt() {
+        let runner = MockRunner::default().with_output(
+            CmdRequest::FindmntJson {
+                mount_point: MountPoint("/mnt/storage".to_owned()),
+            },
+            findmnt_empty(),
+        );
+
+        let err = probe_fsid(&runner, &mp()).unwrap_err();
+        assert!(
+            matches!(err, ProbeError::PoolDevice { ref detail, .. }
+                if detail.contains("not present in findmnt")),
+            "expected ProbeError::PoolDevice (mount not in findmnt), got: {err:?}"
         );
     }
 }
