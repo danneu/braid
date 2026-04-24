@@ -114,4 +114,75 @@ with subtest("Test 4: slot conflict prevents keyfile creation"):
     # Verify keyfile was NOT created (preflight prevented generation)
     machine.fail("test -f /tmp/usb/braid.key")
 
+# --- Test 5: No-candidates preserved-context failure ---
+#
+# Intent: verify that when every pool member is non-LUKS, a real-run
+# `braid enroll` prints each accumulated `skip: <name> not LUKS-
+# formatted` line to stderr *before* the `no present LUKS disks
+# found...` validation error -- the preserved-context failure
+# contract for the Shape A `enroll` migration.
+#
+# Why it exists: the `Preview` migration converted today's direct
+# `eprintln!("skip: ...")` calls to `PreviewNote::PerDisk { Skip }`
+# entries accumulated on the `EnrollPlanReport`. On the `Err` branch
+# the cmd wrapper renders those notes to stderr before propagating
+# the error. A regression that dropped the notes on failure -- or
+# re-ordered them after the error -- would silently strip the
+# user-visible discovery context that explains *why* no candidates
+# were found.
+#
+# Scenario: after Test 4, both disks are LUKS-formatted with slot-1
+# in unusual states. We wipe both LUKS headers so discovery sees
+# both disks as PresentNotLuks, producing zero candidates. The
+# destructive wipefs is safe here -- this is the last subtest, and
+# the VM is torn down on shutdown.
+with subtest("Test 5: no-candidates preserved-context failure"):
+    close_all()
+
+    # Wipe the LUKS headers so both disks become "not LUKS-formatted"
+    # from braid's point of view. --force is required because wipefs
+    # otherwise refuses to touch a LUKS-formatted block device.
+    for dev in ["virtio-disk1", "virtio-disk2"]:
+        machine.succeed(f"wipefs --all --force /dev/disk/by-id/{dev}")
+
+    machine.execute("rm -f /tmp/usb/braid.key")
+
+    pq = shlex.quote(passphrase)
+    # NixOS test driver uses `set -euo pipefail`; capture the expected
+    # nonzero exit via `|| rc=$?` instead of a bare `; echo $?`.
+    machine.succeed(
+        f"rc=0; printf '%s\\n' {pq} | braid enroll /tmp/usb --generate --passphrase-stdin "
+        f">/tmp/noc.out 2>/tmp/noc.err || rc=$?; echo $rc > /tmp/noc.rc"
+    )
+    rc = machine.succeed("cat /tmp/noc.rc").strip()
+    err = machine.succeed("cat /tmp/noc.err")
+    out = machine.succeed("cat /tmp/noc.out")
+    assert rc != "0", f"expected nonzero exit on no-candidates; got rc={rc}"
+    assert out == "", f"stdout must be empty on failure path, got: {out!r}"
+    # Each membership disk accumulates a plain skip line, in iteration order.
+    assert "skip: disk1 not LUKS-formatted" in err, (
+        f"expected plain skip line for disk1, got: {err!r}"
+    )
+    assert "skip: disk2 not LUKS-formatted" in err, (
+        f"expected plain skip line for disk2, got: {err!r}"
+    )
+    assert "no present LUKS disks" in err, (
+        f"expected no-candidates validation error, got: {err!r}"
+    )
+    # Ordering contract: both skip lines precede the validation error.
+    d1_idx = err.find("skip: disk1 not LUKS-formatted")
+    d2_idx = err.find("skip: disk2 not LUKS-formatted")
+    err_idx = err.find("no present LUKS disks")
+    assert d1_idx != -1 and d2_idx != -1 and err_idx != -1, (
+        f"missing expected line(s) in stderr: {err!r}"
+    )
+    assert d1_idx < err_idx, (
+        f"disk1 skip line must precede error; got:\n{err!r}"
+    )
+    assert d2_idx < err_idx, (
+        f"disk2 skip line must precede error; got:\n{err!r}"
+    )
+    # Keyfile must not have been created on the failure path.
+    machine.fail("test -f /tmp/usb/braid.key")
+
 machine.shutdown()
