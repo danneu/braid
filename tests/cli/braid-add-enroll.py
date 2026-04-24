@@ -16,6 +16,8 @@
 # in slot 1. Lock pool. Unlock with keyfile. Verify passphrase still
 # works on both disks.
 
+import base64
+import re
 import shlex
 
 start_all()
@@ -139,7 +141,64 @@ with subtest("Test 4a: keyfile-asymmetry dry-run -> stdout [warn], stderr empty"
         "dry-run stderr must be empty on success; got: {!r}".format(err)
     )
 
-with subtest("Test 4b: keyfile-asymmetry real-run -> stderr canonical [warn] block"):
+with subtest("Test 4b: failed keyfile probe dry-run -> stdout [warn], stderr empty"):
+    # Intent: if keyfile-enrollment probing cannot inspect the existing
+    # pool members, `braid add --dry-run` must surface the uncertainty as
+    # a PreviewNote::Warn on stdout and keep stderr empty.
+    # Why it exists: the LUKS helper used to print probe failures directly
+    # to stderr. Dry-run success output is stdout-owned, so stderr leakage
+    # broke scripts that treat dry-runs as clean previews.
+    # Scenario: invoke the unwrapped braid binary with a PATH shim where
+    # cryptsetup fails only `luksDump`; all other cryptsetup calls delegate
+    # to the real binary.
+    machine.succeed("mountpoint -q /mnt/storage")
+
+    braid_wrapped_path = machine.succeed("readlink -f $(command -v braid)").strip()
+    wrapper_source = machine.succeed(f"cat {braid_wrapped_path}")
+    m = re.search(r'(/nix/store/[^"\s]+/bin/braid)(?!\-)', wrapper_source)
+    assert m, f"could not locate unwrapped braid in wrapper:\n{wrapper_source}"
+    unwrapped_braid = m.group(1)
+    real_cryptsetup = machine.succeed("command -v cryptsetup").strip()
+
+    wrapper_template = """#!/usr/bin/env bash
+set -eu
+if [ "${1:-}" = "luksDump" ]; then
+    printf 'forced luksDump failure for add dry-run\\n' >&2
+    exit 5
+fi
+exec __REAL_CRYPTSETUP__ "$@"
+"""
+    wrapper_script = wrapper_template.replace("__REAL_CRYPTSETUP__", real_cryptsetup)
+    wrapper_b64 = base64.b64encode(wrapper_script.encode()).decode()
+    machine.succeed(
+        "rm -rf /tmp/wrap && mkdir -p /tmp/wrap && "
+        f"printf '%s' {shlex.quote(wrapper_b64)} | base64 -d > /tmp/wrap/cryptsetup && "
+        "chmod +x /tmp/wrap/cryptsetup"
+    )
+
+    (status, _) = machine.execute(
+        "PATH=/tmp/wrap:$PATH "
+        f"{unwrapped_braid} add disk3=/dev/disk/by-id/virtio-disk3 --dry-run "
+        ">/tmp/probe-out 2>/tmp/probe-err"
+    )
+    assert status == 0, f"dry-run should succeed despite luksDump shim; exit {status}"
+    out = machine.succeed("cat /tmp/probe-out")
+    err = machine.succeed("cat /tmp/probe-err")
+
+    assert "[warn]  could not check keyfile enrollment" in out, (
+        "dry-run stdout must surface the probe-failure Warn; got: {!r}".format(out)
+    )
+    assert "proceeding as if no keyfile is enrolled" in out, (
+        "dry-run stdout must carry the canonical probe-failure suffix; got: {!r}".format(out)
+    )
+    assert "LUKS format /dev/disk/by-id/virtio-disk3" in out, (
+        "dry-run stdout must still contain the normal preview steps; got: {!r}".format(out)
+    )
+    assert err == "", (
+        "dry-run stderr must stay empty when the probe fails; got: {!r}".format(err)
+    )
+
+with subtest("Test 4c: keyfile-asymmetry real-run -> stderr canonical [warn] block"):
     # Intent: real-run keyfile-asymmetry now renders as the canonical
     # `[warn]  Existing pool drives have a keyfile (keyslot-1) ...`
     # three-line block on stderr -- the SAME bytes dry-run produces on

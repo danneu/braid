@@ -5,7 +5,8 @@ use crate::inhibit::AcquireSleepInhibitor;
 use crate::journal;
 use crate::luks::{
     backup_luks_header, ensure_luks_open, luks_format, luks_opts_from_env,
-    pool_has_keyfile_enrollment, read_passphrase, verify_passphrase, VerifyOutcome,
+    format_keyfile_enrollment_probe_failure, probe_pool_keyfile_enrollment, read_passphrase,
+    verify_passphrase, VerifyOutcome,
 };
 use crate::membership::{self, PoolMembership};
 use crate::parse::parse_btrfs_device_stats;
@@ -144,8 +145,8 @@ impl ReplacePlan {
             let new_hw = confirm::query_disk_hw_info(runner, &new_by_id.0);
             let is_missing = matches!(&replace_source, ReplaceSource::Missing { .. });
 
-            eprintln!(
-                "{}",
+            emit_replace_stderr(&format!(
+                "{}\n",
                 format_replace_confirm(
                     &ReplaceConfirmOld {
                         name: params.old_name,
@@ -164,22 +165,18 @@ impl ReplacePlan {
                     },
                     pool.total_devices,
                 )
-            );
+            ));
             if pool.total_devices == 1 {
-                eprintln!("WARNING: This replace leaves only 1 disk -- no redundancy.\n");
-            }
-            if matches!(new_probed.state, ConfigDiskState::PresentNotLuks)
-                && params.enroll_key_file.is_none()
-                && pool_has_keyfile_enrollment(runner, &pool.devices)
-            {
-                eprintln!(
-                    "WARNING: Existing pool drives have a keyfile (keyslot-1) for auto-unlock, \
-                     but the new drive will not.\n  \
-                     Passphrase unlock still works, but the keyfile won't unlock the new drive \
-                     until it's enrolled.\n  \
-                     Fix: re-run with --enroll <dir>, or run `braid enroll <dir>` afterward.\n"
+                emit_replace_stderr(
+                    "WARNING: This replace leaves only 1 disk -- no redundancy.\n\n",
                 );
             }
+            emit_replace_keyfile_confirmation_diagnostics(
+                runner,
+                &pool,
+                &new_probed,
+                params.enroll_key_file,
+            );
             confirm::confirm_yes().map_err(ReplaceError::Validation)?;
         }
 
@@ -428,8 +425,41 @@ impl ReplacePlan {
 
 fn emit_replace_notes_to_stderr(notes: &[PreviewNote]) {
     let rendered = preview::render_notes_for_stderr(notes, ReplacePlan::STDERR_STYLE);
+    emit_replace_stderr(&rendered);
+}
+
+fn emit_replace_keyfile_confirmation_diagnostics<R: CommandRunner>(
+    runner: &R,
+    pool: &PoolState,
+    new_probed: &ConfigDisk,
+    enroll_key_file: Option<&Path>,
+) {
+    if !matches!(new_probed.state, ConfigDiskState::PresentNotLuks) || enroll_key_file.is_some() {
+        return;
+    }
+
+    let keyfile_probe = probe_pool_keyfile_enrollment(runner, &pool.devices);
+    if keyfile_probe.has_enrollment {
+        emit_replace_stderr(
+            "WARNING: Existing pool drives have a keyfile (keyslot-1) for auto-unlock, \
+             but the new drive will not.\n  \
+             Passphrase unlock still works, but the keyfile won't unlock the new drive \
+             until it's enrolled.\n  \
+             Fix: re-run with --enroll <dir>, or run `braid enroll <dir>` afterward.\n\n",
+        );
+    } else {
+        for failure in &keyfile_probe.failures {
+            emit_replace_stderr(&format!(
+                "note: {}\n",
+                format_keyfile_enrollment_probe_failure(failure)
+            ));
+        }
+    }
+}
+
+fn emit_replace_stderr(rendered: &str) {
     #[cfg(test)]
-    if replace_stderr_capture::write(&rendered) {
+    if replace_stderr_capture::write(rendered) {
         return;
     }
     eprint!("{rendered}");
@@ -3652,6 +3682,256 @@ mod tests {
             ),
             "notes[0]={:?}",
             report.notes[0],
+        );
+    }
+
+    #[derive(Clone, Copy)]
+    enum ReplaceKeyfileProbe {
+        Occupied,
+        Failure,
+    }
+
+    struct ReplaceKeyfileProbeRunner {
+        probes: Vec<ReplaceKeyfileProbe>,
+        log: std::sync::Arc<std::sync::Mutex<Vec<CmdRequest>>>,
+    }
+
+    impl ReplaceKeyfileProbeRunner {
+        fn new(probes: Vec<ReplaceKeyfileProbe>) -> Self {
+            Self {
+                probes,
+                log: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            }
+        }
+
+        fn requests(&self) -> Vec<CmdRequest> {
+            self.log.lock().unwrap().clone()
+        }
+
+        fn probe_for_device(&self, device: &str) -> Option<ReplaceKeyfileProbe> {
+            ["/dev/vda", "/dev/vdb", "/dev/vdc"]
+                .iter()
+                .position(|candidate| *candidate == device)
+                .and_then(|index| self.probes.get(index).copied())
+        }
+    }
+
+    impl CmdRunner2 for ReplaceKeyfileProbeRunner {
+        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
+            self.log.lock().unwrap().push(request.clone());
+            match request {
+                CmdRequest::CryptsetupLuksUuid { device }
+                    if device == "/dev/disk/by-id/virtio-disk3" =>
+                {
+                    Ok(RawCommandOutput {
+                        cmd: format!("cryptsetup luksUUID {device}"),
+                        stdout: String::new(),
+                        stderr: "Device is not a valid LUKS device.\n".into(),
+                        exit_status: 1,
+                    })
+                }
+                CmdRequest::CryptsetupLuksDump { device } => match self.probe_for_device(device) {
+                    Some(ReplaceKeyfileProbe::Occupied) => Ok(mock_ok(
+                        "cryptsetup luksDump --dump-json-metadata",
+                        r#"{"keyslots":{"0":{"type":"luks2"},"1":{"type":"luks2"}}}"#,
+                    )),
+                    Some(ReplaceKeyfileProbe::Failure) => Ok(RawCommandOutput {
+                        cmd: format!("cryptsetup luksDump --dump-json-metadata {device}"),
+                        stdout: String::new(),
+                        stderr: format!("forced luksDump failure on {device}"),
+                        exit_status: 5,
+                    }),
+                    None => Err(CmdError::MissingMock),
+                },
+                _ => FailingReplaceRunner.run(request),
+            }
+        }
+
+        fn run_with_stdin(
+            &self,
+            request: &CmdRequest,
+            _stdin: &[u8],
+        ) -> Result<RawCommandOutput, CmdError> {
+            self.log.lock().unwrap().push(request.clone());
+            self.run(request)
+        }
+    }
+
+    struct PlanReplaceFixture {
+        _state_tmp: tempfile::TempDir,
+        paths: StatePaths,
+        _config_tmp: tempfile::TempDir,
+        config_path: std::path::PathBuf,
+        pass_path: std::path::PathBuf,
+        inhibitor: crate::inhibit::RecordingInhibitor,
+    }
+
+    fn plan_replace_fixture() -> PlanReplaceFixture {
+        let state_tmp = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(state_tmp.path().into());
+        let mut m = PoolMembership::empty();
+        m.disks.insert(
+            "disk1".into(),
+            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
+        );
+        m.disks.insert(
+            "disk2".into(),
+            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk2".into())),
+        );
+        membership::save_membership(&m, &paths).unwrap();
+
+        let config_tmp = tempfile::tempdir().unwrap();
+        let config_path = config_tmp.path().join("config.json");
+        std::fs::write(
+            &config_path,
+            serde_json::to_vec(&serde_json::json!({ "mount_point": "/mnt/storage" })).unwrap(),
+        )
+        .unwrap();
+        let pass_path = config_tmp.path().join("passphrase");
+        std::fs::write(&pass_path, b"test-passphrase\n").unwrap();
+
+        PlanReplaceFixture {
+            _state_tmp: state_tmp,
+            paths,
+            _config_tmp: config_tmp,
+            config_path,
+            pass_path,
+            inhibitor: crate::inhibit::RecordingInhibitor::new(),
+        }
+    }
+
+    impl PlanReplaceFixture {
+        fn params(&self, dry_run: bool, yes: bool) -> ReplaceParams<'_> {
+            ReplaceParams {
+                config_path: &self.config_path,
+                old_name: "disk2",
+                new_name: "disk3=/dev/disk/by-id/virtio-disk3",
+                missing_id: None,
+                dry_run,
+                yes,
+                passphrase_stdin: false,
+                passphrase_file: Some(self.pass_path.as_path()),
+                enroll_key_file: None,
+                progress: crate::progress::ProgressOutput::Off,
+                paths: &self.paths,
+                sleep_inhibitor: &self.inhibitor,
+            }
+        }
+    }
+
+    fn fresh_replace_disk() -> ConfigDisk {
+        ConfigDisk {
+            name: "disk3".into(),
+            by_id_path: ByIdPath("/dev/disk/by-id/virtio-disk3".into()),
+            state: ConfigDiskState::PresentNotLuks,
+        }
+    }
+
+    /* Intent: plan_replace dry-run does not probe keyfile enrollment and
+     * does not surface probe uncertainty as a preview note.
+     * Why it exists: replace keyfile diagnostics are confirmation-only; a
+     * dry-run must remain stdout-only step preview even if luksDump would
+     * fail during an interactive confirmation.
+     * Scenario: operator previews replacing disk2 with raw disk3 while
+     * existing pool members would fail the keyfile probe.
+     */
+    #[test]
+    fn plan_replace_dry_run_skips_keyfile_probe_failure_notes() {
+        let fixture = plan_replace_fixture();
+        let fs = ReplaceMockFs(vec!["/dev/disk/by-id/virtio-disk3".into()]);
+        let runner = ReplaceKeyfileProbeRunner::new(vec![
+            ReplaceKeyfileProbe::Failure,
+            ReplaceKeyfileProbe::Failure,
+        ]);
+
+        let report = plan_replace(&runner, &fs, &fixture.params(true, false));
+        let plan = report.result.expect("plan_replace should succeed");
+        let rendered = plan.preview().render();
+
+        assert!(
+            !rendered.contains("could not check keyfile enrollment"),
+            "dry-run preview must not include probe-failure notes, got:\n{rendered}",
+        );
+        assert!(
+            !rendered.contains("Existing pool drives have a keyfile"),
+            "dry-run preview must not include confirmation-only keyfile warning, got:\n{rendered}",
+        );
+        assert!(
+            !runner
+                .requests()
+                .iter()
+                .any(|request| matches!(request, CmdRequest::CryptsetupLuksDump { .. })),
+            "plan_replace dry-run must not run the keyfile enrollment probe"
+        );
+    }
+
+    /* Intent: interactive replace emits explicit probe-failure notes when
+     * no existing device proves slot 1 is occupied.
+     * Why it exists: probe failures are structured data now; replace owns
+     * stderr routing and should only print uncertainty notes in the
+     * interactive confirmation path.
+     * Scenario: both existing pool devices fail luksDump while replacing
+     * with a raw disk and omitting --enroll.
+     */
+    #[test]
+    fn plan_replace_interactive_probe_failure_note_when_no_enrollment_found() {
+        let pool = two_device_pool();
+        let new_probed = fresh_replace_disk();
+        let runner = ReplaceKeyfileProbeRunner::new(vec![
+            ReplaceKeyfileProbe::Failure,
+            ReplaceKeyfileProbe::Failure,
+        ]);
+
+        let ((), stderr) = super::replace_stderr_capture::capture(|| {
+            emit_replace_keyfile_confirmation_diagnostics(&runner, &pool, &new_probed, None);
+        });
+
+        assert!(
+            stderr.contains(
+                "note: could not check keyfile enrollment on /dev/vda: cryptsetup luksDump failed (exit 5): forced luksDump failure on /dev/vda; proceeding as if no keyfile is enrolled"
+            ),
+            "interactive confirmation must print the first probe-failure note, got:\n{stderr}",
+        );
+        assert!(
+            stderr.contains(
+                "note: could not check keyfile enrollment on /dev/vdb: cryptsetup luksDump failed (exit 5): forced luksDump failure on /dev/vdb; proceeding as if no keyfile is enrolled"
+            ),
+            "interactive confirmation must print the second probe-failure note, got:\n{stderr}",
+        );
+        assert!(
+            !stderr.contains("WARNING: Existing pool drives have a keyfile"),
+            "probe-failure-only case must not print keyfile-asymmetry warning, got:\n{stderr}",
+        );
+    }
+
+    /* Intent: interactive replace suppresses probe-failure uncertainty
+     * notes once another pool member proves slot 1 is occupied.
+     * Why it exists: the actionable diagnostic is keyfile asymmetry; the
+     * failed probe does not change the recommendation once enrollment is
+     * known to exist.
+     * Scenario: disk1's luksDump fails, disk2 reports slot 1 occupied,
+     * and the operator replaces with a raw disk without --enroll.
+     */
+    #[test]
+    fn plan_replace_interactive_mixed_failure_and_enrollment_suppresses_probe_note() {
+        let pool = two_device_pool();
+        let new_probed = fresh_replace_disk();
+        let runner = ReplaceKeyfileProbeRunner::new(vec![
+            ReplaceKeyfileProbe::Failure,
+            ReplaceKeyfileProbe::Occupied,
+        ]);
+
+        let ((), stderr) = super::replace_stderr_capture::capture(|| {
+            emit_replace_keyfile_confirmation_diagnostics(&runner, &pool, &new_probed, None);
+        });
+
+        assert!(
+            stderr.contains("WARNING: Existing pool drives have a keyfile (keyslot-1)"),
+            "mixed probe result must print the keyfile-asymmetry warning, got:\n{stderr}",
+        );
+        assert!(
+            !stderr.contains("could not check keyfile enrollment"),
+            "occupied slot 1 must suppress probe-failure uncertainty notes, got:\n{stderr}",
         );
     }
 
