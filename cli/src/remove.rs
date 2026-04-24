@@ -7,6 +7,7 @@ use crate::membership;
 use crate::parse::{parse_btrfs_device_usage, parse_btrfs_df_json, ParseError};
 use crate::pool::evict_present_device;
 use crate::preflight;
+use crate::preview::{Preview, PreviewCompleteness, PreviewNote};
 use crate::probe::{probe_pool, Filesystem, ProbeError};
 use crate::progress::ProgressOutput;
 use crate::state_paths::StatePaths;
@@ -67,37 +68,187 @@ pub struct RemoveParams<'a> {
     pub sleep_inhibitor: &'a dyn AcquireSleepInhibitor,
 }
 
-pub fn cmd_remove<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
+/// Dry-run preview source of truth for `braid remove` plus the execute
+/// inputs pre-computed during planning. `notes` + `steps` are both
+/// rendered by `preview()`; `execute()` consumes the preflight state
+/// (target device, remaining/total counts, mount point) and renders
+/// any accumulated `Warn` notes to stderr with the legacy `warning: `
+/// prefix before mutating.
+pub struct RemovePlan {
+    pub notes: Vec<PreviewNote>,
+    pub steps: Vec<Step>,
+    pub name: String,
+    pub target_devid: u64,
+    pub target_mapper: MapperName,
+    pub target_underlying: String,
+    pub remaining: usize,
+    pub total: usize,
+    pub mount_point: MountPoint,
+}
+
+/// Report returned by `plan_remove`. `plan_remove` has no pre-validation
+/// per-disk probing, so `notes` is always empty on both branches; the
+/// field exists to keep the Shape A contract uniform across commands.
+pub struct RemovePlanReport {
+    pub notes: Vec<PreviewNote>,
+    pub result: Result<RemovePlan, RemoveError>,
+}
+
+impl RemovePlan {
+    pub fn preview(&self) -> Preview {
+        Preview {
+            completeness: PreviewCompleteness::Complete,
+            notes: self.notes.clone(),
+            steps: self.steps.clone(),
+        }
+    }
+
+    pub fn execute<R: CommandRunner + Sync>(
+        self,
+        runner: &R,
+        params: &RemoveParams<'_>,
+    ) -> Result<(), RemoveError> {
+        // Emit accumulated Warn notes to stderr with the legacy
+        // `warning: <body>` prefix before any mutation. The preview
+        // renders the same note as `[warn]  <body>` on stdout; real-run
+        // stderr preserves the historic wording so VM log scrapers do
+        // not drift.
+        for note in &self.notes {
+            if let PreviewNote::Warn(body) = note {
+                eprintln!("warning: {body}");
+            }
+        }
+
+        // Confirm
+        if !params.yes {
+            let hw = confirm::query_disk_hw_info(runner, &self.target_underlying);
+            eprintln!(
+                "{}",
+                format_remove_confirm(
+                    &RemoveConfirmDisk {
+                        name: &self.name,
+                        hw: Some(&hw),
+                        devid: self.target_devid,
+                    },
+                    self.remaining,
+                    self.total,
+                )
+            );
+            if self.remaining == 1 {
+                eprintln!("WARNING: Pool will have 1 disk -- no RAID1 redundancy.\n");
+            }
+            confirm::confirm_yes().map_err(RemoveError::Validation)?;
+        }
+
+        // Hold a logind sleep inhibitor for the rest of the remove operation --
+        // covers the optional pre-remove RAID1->single balance, the long-running
+        // btrfs device remove (data migration), and the post-op LUKS close +
+        // membership persist. Suspending mid-remove can leave the kernel-side
+        // device-remove state machine in a partially-relocated state requiring
+        // recovery.
+        //
+        // Acquired here, AFTER all interactive/reversible work (confirmation)
+        // and BEFORE journal::write_journal, so that:
+        //   - operator-idle prompts do not block suspend
+        //   - a logind failure aborts cleanly without stranding pending-op.json
+        //     and forcing the user into recovery mode for an environmental error.
+        let _sleep_inhibitor_guard = params
+            .sleep_inhibitor
+            .acquire("removing disk from pool")
+            .map_err(|e| {
+                RemoveError::Validation(format!(
+                    "could not acquire sleep inhibitor (is logind running?): {e}"
+                ))
+            })?;
+
+        // Build target membership and write journal before irreversible disk op.
+        let pre_membership = membership::load_membership(params.paths)
+            .map_err(|e| RemoveError::Validation(format!("failed to load pool membership: {e}")))?;
+        let mut target_membership = pre_membership.clone();
+        target_membership.disks.remove(&self.name);
+        let journal = journal::build_journal(
+            pre_membership,
+            target_membership.clone(),
+            journal::OpKind::Remove {
+                name: self.name.clone(),
+            },
+        );
+        journal::write_journal(params.paths, &journal)
+            .map_err(|e| RemoveError::Validation(e.to_string()))?;
+
+        // Execute
+        evict_present_device(
+            runner,
+            &self.target_mapper.0,
+            &self.mount_point,
+            params.progress,
+        )?;
+
+        // Post-commit: write pool.json and clear journal.
+        membership::save_membership(&target_membership, params.paths)
+            .map_err(map_membership_persist_failure)?;
+        journal::clear_journal(params.paths).map_err(map_journal_clear_failure)?;
+
+        eprintln!("Done. Disk '{}' removed from pool.", self.name);
+        Ok(())
+    }
+}
+
+/// Plan a `braid remove` run. Owns everything above today's `--dry-run`
+/// gate: pending-op preflight, config read, pool probe / mounted
+/// validation, mutation preflight, UPS preflight, target device lookup,
+/// missing-device guard, `compile_remove_present_steps`, and the
+/// eviction-space preflight. The returned `RemovePlan` is the single
+/// source of truth for both `--dry-run` preview and real execution.
+pub fn plan_remove<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
     params: &RemoveParams<'_>,
-) -> Result<(), RemoveError> {
-    preflight::check_no_pending_operation(params.paths).map_err(RemoveError::Validation)?;
+) -> RemovePlanReport {
+    // No per-disk probing happens before validation in this planner, so
+    // `report.notes` is always empty. Any notes discovered during
+    // planning land on `plan.notes` instead.
+    let err = |e: RemoveError| RemovePlanReport {
+        notes: Vec::new(),
+        result: Err(e),
+    };
 
-    let config = config_read(params.config_path)?;
+    if let Err(msg) = preflight::check_no_pending_operation(params.paths) {
+        return err(RemoveError::Validation(msg));
+    }
+
+    let config = match config_read(params.config_path) {
+        Ok(c) => c,
+        Err(e) => return err(e.into()),
+    };
 
     let pool = match probe_pool(runner, config.mount_point()) {
         Ok(p) => p,
         Err(ProbeError::NotBtrfs { .. }) => {
-            return Err(RemoveError::Validation(
+            return err(RemoveError::Validation(
                 "pool is not mounted. Nothing to remove.".into(),
             ));
         }
-        Err(e) => return Err(RemoveError::Probe(e)),
+        Err(e) => return err(RemoveError::Probe(e)),
     };
 
     if !pool.mounted {
-        return Err(RemoveError::Validation(
+        return err(RemoveError::Validation(
             "pool is not mounted. Nothing to remove.".into(),
         ));
     }
 
     // Preflight
     let fsid = pool.fsid.as_deref().expect("mounted pool must have FSID");
-    preflight::require_mutation_preflight(runner, fs, fsid, config.mount_point())
-        .map_err(RemoveError::Validation)?;
-    preflight::check_ups_not_on_battery(runner, config.ups().map(|u| u.name.as_str()), "remove")
-        .map_err(RemoveError::Validation)?;
+    if let Err(msg) = preflight::require_mutation_preflight(runner, fs, fsid, config.mount_point())
+    {
+        return err(RemoveError::Validation(msg));
+    }
+    if let Err(msg) =
+        preflight::check_ups_not_on_battery(runner, config.ups().map(|u| u.name.as_str()), "remove")
+    {
+        return err(RemoveError::Validation(msg));
+    }
 
     let mn = mapper_name(params.name);
 
@@ -115,101 +266,99 @@ pub fn cmd_remove<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
                     if pool.missing_count == 1 { "" } else { "s" }
                 ));
             }
-            return Err(RemoveError::Validation(msg));
+            return err(RemoveError::Validation(msg));
         }
     };
 
-    preflight::check_no_missing_devices(pool.missing_count, "remove a live disk from the pool")
-        .map_err(RemoveError::Validation)?;
+    if let Err(msg) =
+        preflight::check_no_missing_devices(pool.missing_count, "remove a live disk from the pool")
+    {
+        return err(RemoveError::Validation(msg));
+    }
 
     // compile_remove_present_steps owns the remaining == 0 rejection
     // (last-disk gate). Run it first so that `check_eviction_space` is
     // always reached with `remaining >= 1`; the capacity helper does not
     // need to handle the 0-case.
-    let steps = compile_remove_present_steps(&mn, &pool, config.mount_point())?;
+    let steps = match compile_remove_present_steps(&mn, &pool, config.mount_point()) {
+        Ok(s) => s,
+        Err(e) => return err(e),
+    };
 
     let remaining = pool.devices.len() - 1;
+    let total = pool.devices.len();
     // Pre-flight: reject if the surviving devices lack space to absorb
     // data from the device being removed. Without this, btrfs will
     // either ENOSPC instantly or crash the filesystem to read-only
     // mid-relocation (see tests/repro/). The helper dispatches on
     // `remaining` -- the >=2-survivor path and the 1-survivor path use
-    // different models and different error policies.
-    check_eviction_space(runner, config.mount_point(), target, remaining)?;
+    // different models and different error policies. A soft-warn on
+    // the >=2 path becomes a `PreviewNote::Warn`; any hard failure
+    // returns `Err`.
+    let mut notes: Vec<PreviewNote> = Vec::new();
+    match check_eviction_space(runner, config.mount_point(), target, remaining) {
+        Ok(EvictionCheck::Proceed) => {}
+        Ok(EvictionCheck::ProceedWithWarning(body)) => {
+            notes.push(PreviewNote::Warn(body));
+        }
+        Err(e) => return err(e),
+    }
+
+    let plan = RemovePlan {
+        notes,
+        steps,
+        name: params.name.to_owned(),
+        target_devid: target.devid,
+        target_mapper: mn,
+        target_underlying: target.underlying.clone(),
+        remaining,
+        total,
+        mount_point: config.mount_point().clone(),
+    };
+
+    RemovePlanReport {
+        notes: Vec::new(),
+        result: Ok(plan),
+    }
+}
+
+pub fn cmd_remove<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
+    runner: &R,
+    fs: &F,
+    params: &RemoveParams<'_>,
+) -> Result<(), RemoveError> {
+    let report = plan_remove(runner, fs, params);
+    let plan = match report.result {
+        Ok(p) => p,
+        Err(e) => return Err(e),
+    };
 
     if params.dry_run {
-        Step::print_dry_run(&steps);
+        plan.preview().print();
         return Ok(());
     }
 
-    // Confirm
-    if !params.yes {
-        let hw = confirm::query_disk_hw_info(runner, &target.underlying);
-        let total = pool.devices.len();
-        eprintln!(
-            "{}",
-            format_remove_confirm(
-                &RemoveConfirmDisk {
-                    name: params.name,
-                    hw: Some(&hw),
-                    devid: target.devid,
-                },
-                remaining,
-                total,
-            )
-        );
-        if remaining == 1 {
-            eprintln!("WARNING: Pool will have 1 disk -- no RAID1 redundancy.\n");
-        }
-        confirm::confirm_yes().map_err(RemoveError::Validation)?;
-    }
+    plan.execute(runner, params)
+}
 
-    // Hold a logind sleep inhibitor for the rest of the remove operation --
-    // covers the optional pre-remove RAID1->single balance, the long-running
-    // btrfs device remove (data migration), and the post-op LUKS close +
-    // membership persist. Suspending mid-remove can leave the kernel-side
-    // device-remove state machine in a partially-relocated state requiring
-    // recovery.
-    //
-    // Acquired here, AFTER all interactive/reversible work (confirmation)
-    // and BEFORE journal::write_journal, so that:
-    //   - operator-idle prompts do not block suspend
-    //   - a logind failure aborts cleanly without stranding pending-op.json
-    //     and forcing the user into recovery mode for an environmental error.
-    let _sleep_inhibitor_guard = params
-        .sleep_inhibitor
-        .acquire("removing disk from pool")
-        .map_err(|e| {
-            RemoveError::Validation(format!(
-                "could not acquire sleep inhibitor (is logind running?): {e}"
-            ))
-        })?;
-
-    // Build target membership and write journal before irreversible disk op.
-    let pre_membership = membership::load_membership(params.paths)
-        .map_err(|e| RemoveError::Validation(format!("failed to load pool membership: {e}")))?;
-    let mut target_membership = pre_membership.clone();
-    target_membership.disks.remove(params.name);
-    let journal = journal::build_journal(
-        pre_membership,
-        target_membership.clone(),
-        journal::OpKind::Remove {
-            name: params.name.to_owned(),
-        },
-    );
-    journal::write_journal(params.paths, &journal)
-        .map_err(|e| RemoveError::Validation(e.to_string()))?;
-
-    // Execute
-    evict_present_device(runner, &mn.0, config.mount_point(), params.progress)?;
-
-    // Post-commit: write pool.json and clear journal.
-    membership::save_membership(&target_membership, params.paths)
-        .map_err(map_membership_persist_failure)?;
-    journal::clear_journal(params.paths).map_err(map_journal_clear_failure)?;
-
-    eprintln!("Done. Disk '{}' removed from pool.", params.name);
-    Ok(())
+/// Outcome of the eviction-space preflight's `remaining >= 2` branch.
+/// `Proceed` means either the check ran and survivors have enough
+/// space, or the check wasn't needed. `ProceedWithWarning(body)` means
+/// the check itself failed (spawn error or non-`CommandFailed` parse
+/// error) and the caller should surface the warning body to the user
+/// but still proceed -- a bug in this best-effort safety net must not
+/// block a valid operation, because `btrfs device remove` will ENOSPC
+/// cleanly when there are `>= 2` survivors. A hard "survivors lack
+/// space" outcome, or a `CommandFailed` parse (btrfs itself refused),
+/// is a `RemoveError::Validation` instead.
+///
+/// Note: the `remaining == 1` branch (`check_single_survivor`) does
+/// not use this enum -- it is fail-closed on every input uncertainty
+/// and returns `Err` directly. Do **not** unify the two branches.
+#[derive(Debug)]
+pub(crate) enum EvictionCheck {
+    Proceed,
+    ProceedWithWarning(String),
 }
 
 /// Check that the surviving device(s) have enough space to absorb data from
@@ -220,10 +369,12 @@ pub fn cmd_remove<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
 ///
 /// - `remaining >= 2`: RAID1-aware per-type check via
 ///   `check_raid1_relocation_space`. Input uncertainty (spawn errors,
-///   non-`CommandFailed` parse errors) is *warn-and-proceed* -- a best-effort
-///   preflight miss here falls through to `btrfs device remove`, which ENOSPCs
-///   cleanly without corrupting the filesystem. Only a `CommandFailed` parse
-///   error (btrfs itself refused) is surfaced as a validation error.
+///   non-`CommandFailed` parse errors) is *warn-and-proceed* -- the caller
+///   receives `EvictionCheck::ProceedWithWarning(body)` and surfaces the
+///   warning through the preview + execute paths. A best-effort preflight
+///   miss here falls through to `btrfs device remove`, which ENOSPCs cleanly
+///   without corrupting the filesystem. Only a `CommandFailed` parse error
+///   (btrfs itself refused) is surfaced as a validation error.
 ///
 /// - `remaining == 1`: single-survivor capacity check. Every input uncertainty
 ///   -- spawn error, parser-shape error, `CommandFailed`, or "survivor entry
@@ -236,24 +387,28 @@ pub fn cmd_remove<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
 ///
 /// `remaining == 0` is not a valid input; `compile_remove_present_steps` has
 /// already rejected the last-disk case upstream.
-fn check_eviction_space<R: CommandRunner>(
+pub(crate) fn check_eviction_space<R: CommandRunner>(
     runner: &R,
     mount_point: &MountPoint,
     target: &PoolDevice,
     remaining: usize,
-) -> Result<(), RemoveError> {
+) -> Result<EvictionCheck, RemoveError> {
     if remaining == 1 {
-        return check_single_survivor(runner, mount_point, target);
+        return check_single_survivor(runner, mount_point, target).map(|()| EvictionCheck::Proceed);
     }
 
-    // remaining >= 2: existing warn-and-proceed policy.
+    // remaining >= 2: existing warn-and-proceed policy. Instead of
+    // printing directly, we surface the warning body to the caller so
+    // the preview + execute paths own the rendering. See the
+    // `EvictionCheck` docstring for the rationale.
     let raw = match runner.run(&CmdRequest::BtrfsDeviceUsageRaw {
         mount_point: mount_point.clone(),
     }) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("warning: ENOSPC pre-flight check failed: {e}; proceeding anyway");
-            return Ok(());
+            return Ok(EvictionCheck::ProceedWithWarning(format!(
+                "ENOSPC pre-flight check failed: {e}; proceeding anyway"
+            )));
         }
     };
 
@@ -267,8 +422,9 @@ fn check_eviction_space<R: CommandRunner>(
             )));
         }
         Err(e) => {
-            eprintln!("warning: ENOSPC pre-flight check failed: {e}; proceeding anyway");
-            return Ok(());
+            return Ok(EvictionCheck::ProceedWithWarning(format!(
+                "ENOSPC pre-flight check failed: {e}; proceeding anyway"
+            )));
         }
     };
 
@@ -283,11 +439,13 @@ fn check_eviction_space<R: CommandRunner>(
         .filter(|d| d.devid != target.devid)
         .collect();
 
-    preflight::check_raid1_relocation_space(&target_devs, &remaining_devs).map_err(|e| {
-        RemoveError::Validation(format!(
-            "{e}\n\nFree up space by deleting files, or add a new device first with `braid add`."
-        ))
-    })
+    preflight::check_raid1_relocation_space(&target_devs, &remaining_devs)
+        .map(|()| EvictionCheck::Proceed)
+        .map_err(|e| {
+            RemoveError::Validation(format!(
+                "{e}\n\nFree up space by deleting files, or add a new device first with `braid add`."
+            ))
+        })
 }
 
 /// 2->1 branch of `check_eviction_space`. Fail-closed on every input
@@ -1311,7 +1469,10 @@ mod tests {
         match err {
             RemoveError::Validation(msg) => {
                 assert!(msg.contains("ENOSPC pre-flight (2->1)"), "got: {msg}");
-                assert!(msg.contains("btrfs device usage spawn failed"), "got: {msg}");
+                assert!(
+                    msg.contains("btrfs device usage spawn failed"),
+                    "got: {msg}"
+                );
                 assert!(msg.contains("validated survivor capacity"), "got: {msg}");
             }
             other => panic!("expected RemoveError::Validation, got {other:?}"),
@@ -1357,7 +1518,10 @@ mod tests {
         match err {
             RemoveError::Validation(msg) => {
                 assert!(msg.contains("ENOSPC pre-flight (2->1)"), "got: {msg}");
-                assert!(msg.contains("btrfs device usage output unparseable"), "got: {msg}");
+                assert!(
+                    msg.contains("btrfs device usage output unparseable"),
+                    "got: {msg}"
+                );
             }
             other => panic!("expected RemoveError::Validation, got {other:?}"),
         }
@@ -1415,7 +1579,10 @@ mod tests {
         match err {
             RemoveError::Validation(msg) => {
                 assert!(msg.contains("ENOSPC pre-flight (2->1)"), "got: {msg}");
-                assert!(msg.contains("btrfs filesystem df spawn failed"), "got: {msg}");
+                assert!(
+                    msg.contains("btrfs filesystem df spawn failed"),
+                    "got: {msg}"
+                );
                 assert!(msg.contains("validated survivor capacity"), "got: {msg}");
             }
             other => panic!("expected RemoveError::Validation, got {other:?}"),
@@ -1477,7 +1644,10 @@ mod tests {
         match err {
             RemoveError::Validation(msg) => {
                 assert!(msg.contains("ENOSPC pre-flight (2->1)"), "got: {msg}");
-                assert!(msg.contains("btrfs filesystem df output unparseable"), "got: {msg}");
+                assert!(
+                    msg.contains("btrfs filesystem df output unparseable"),
+                    "got: {msg}"
+                );
             }
             other => panic!("expected RemoveError::Validation, got {other:?}"),
         }
@@ -1535,7 +1705,10 @@ mod tests {
             .expect_err("2->1 preflight must fail closed when survivor is missing");
         match err {
             RemoveError::Validation(msg) => {
-                assert!(msg.contains("did not list the surviving device"), "got: {msg}");
+                assert!(
+                    msg.contains("did not list the surviving device"),
+                    "got: {msg}"
+                );
                 assert!(msg.contains("target devid"), "got: {msg}");
             }
             other => panic!("expected RemoveError::Validation, got {other:?}"),
@@ -1604,5 +1777,467 @@ mod tests {
             }
             other => panic!("expected RemoveError::Validation, got {other:?}"),
         }
+    }
+
+    // ---------------------------------------------------------------
+    // Planner-level tests for the soft-warn branch on `remaining >= 2`.
+    //
+    // These exercise the new `EvictionCheck::ProceedWithWarning` outcome
+    // and its surfacing as a `PreviewNote::Warn` on `RemovePlan.notes`.
+    // ---------------------------------------------------------------
+
+    /// Runner for 3-disk remove scenarios where `btrfs device usage
+    /// --raw` is the only request we want to override -- every other
+    /// request delegates to the base `RecordingRunner`. Used to force
+    /// the soft-warn branch of `check_eviction_space` on the
+    /// `remaining >= 2` path.
+    #[derive(Clone)]
+    enum UsageOverride {
+        /// Runner spawn error (simulates "btrfs binary missing / EACCES").
+        SpawnError,
+        /// btrfs exit 0 with a device header but no required fields --
+        /// the parser returns `ParseError::MissingField`, which is a
+        /// non-`CommandFailed` parse error (soft-warn branch).
+        ParseShapeError,
+    }
+
+    /// Canonical stdout used by `UsageOverride::ParseShapeError`.
+    /// A single device header with no `Device size` / `Device slack` /
+    /// `Unallocated` lines triggers `ParseError::MissingField` when
+    /// the parser finalizes the partial device.
+    const PARSE_SHAPE_ERROR_STDOUT: &str = "/dev/mapper/braid-disk1, ID: 1\n";
+
+    fn three_disk_pool_setup(
+        tmp_state: &tempfile::TempDir,
+        tmp_cfg: &tempfile::TempDir,
+    ) -> (StatePaths, std::path::PathBuf) {
+        let paths = StatePaths::custom(tmp_state.path().into());
+        let mut m = PoolMembership::empty();
+        for name in ["disk1", "disk2", "disk3"] {
+            m.disks.insert(
+                name.to_string(),
+                membership::DiskMember::from_by_id(ByIdPath(format!(
+                    "/dev/disk/by-id/virtio-{name}"
+                ))),
+            );
+        }
+        membership::save_membership_to(&m, &paths.pool_json()).unwrap();
+
+        let config_path = tmp_cfg.path().join("config.json");
+        let mut disks = BTreeMap::new();
+        for name in ["disk1", "disk2", "disk3"] {
+            disks.insert(
+                name.to_string(),
+                serde_json::json!({ "by_id": format!("/dev/disk/by-id/virtio-{name}") }),
+            );
+        }
+        let config_json = serde_json::json!({
+            "disks": disks,
+            "mount_point": "/mnt/storage",
+        });
+        std::fs::write(&config_path, serde_json::to_vec(&config_json).unwrap()).unwrap();
+
+        (paths, config_path)
+    }
+
+    /// Extend the base `RecordingRunner` to respond to the 3-disk
+    /// `btrfs fi show` layout that `probe_pool` expects. Without
+    /// overriding `BtrfsFilesystemShow`, probe_pool reports only 2
+    /// devices and the membership lookup fails before the preflight
+    /// runs.
+    #[derive(Clone)]
+    struct ThreeDiskRecordingRunner {
+        log: Arc<Mutex<Vec<CmdRequest>>>,
+    }
+
+    impl CommandRunner for ThreeDiskRecordingRunner {
+        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
+            self.log.lock().unwrap().push(request.clone());
+            match request {
+                CmdRequest::FindmntJson { mount_point } => Ok(mock_out(
+                    &format!("findmnt --json --mountpoint {mount_point}"),
+                    r#"{"filesystems":[{"target":"/mnt/storage","source":"/dev/mapper/braid-disk1","fstype":"btrfs"}]}"#,
+                    0,
+                )),
+                CmdRequest::BtrfsFilesystemShow { mount_point } => Ok(mock_out(
+                    &format!("btrfs filesystem show {mount_point}"),
+                    "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\tTotal devices 3 FS bytes used 16.17MiB\n\tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk2\n\tdevid    3 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk3\n",
+                    0,
+                )),
+                CmdRequest::CryptsetupStatus { mapper } => {
+                    let dev = match mapper.as_str() {
+                        "braid-disk1" => "/dev/vda",
+                        "braid-disk2" => "/dev/vdb",
+                        _ => "/dev/vdc",
+                    };
+                    Ok(mock_out(
+                        &format!("cryptsetup status {mapper}"),
+                        &format!(
+                            "{mapper} is active and is in use.\n  type:    LUKS2\n  device:  {dev}\n  mode:    read/write\n"
+                        ),
+                        0,
+                    ))
+                }
+                CmdRequest::CryptsetupLuksUuid { device } => {
+                    let uuid = match device.as_str() {
+                        "/dev/vda" => "11111111-1111-1111-1111-111111111111",
+                        "/dev/vdb" => "22222222-2222-2222-2222-222222222222",
+                        _ => "33333333-3333-3333-3333-333333333333",
+                    };
+                    Ok(mock_out(
+                        &format!("cryptsetup luksUUID {device}"),
+                        &format!("{uuid}\n"),
+                        0,
+                    ))
+                }
+                CmdRequest::BtrfsBalanceStatus { .. } => Ok(mock_out(
+                    "btrfs balance status",
+                    "No balance found on '/mnt/storage'\n",
+                    0,
+                )),
+                _ => Err(CmdError::MissingMock),
+            }
+        }
+
+        fn run_with_stdin(
+            &self,
+            request: &CmdRequest,
+            _stdin: &[u8],
+        ) -> Result<RawCommandOutput, CmdError> {
+            self.run(request)
+        }
+    }
+
+    /// Wraps `ThreeDiskRecordingRunner` with an override for
+    /// `BtrfsDeviceUsageRaw`, mirroring `UsageOverrideRunner` but on
+    /// the 3-disk (remaining == 2) flow the planner needs.
+    #[derive(Clone)]
+    struct ThreeDiskUsageOverrideRunner {
+        inner: ThreeDiskRecordingRunner,
+        usage_override: UsageOverride,
+    }
+
+    impl CommandRunner for ThreeDiskUsageOverrideRunner {
+        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
+            if let CmdRequest::BtrfsDeviceUsageRaw { .. } = request {
+                self.inner.log.lock().unwrap().push(request.clone());
+                return match self.usage_override {
+                    UsageOverride::SpawnError => Err(CmdError::MissingMock),
+                    UsageOverride::ParseShapeError => Ok(mock_out(
+                        "btrfs device usage --raw /mnt/storage",
+                        PARSE_SHAPE_ERROR_STDOUT,
+                        0,
+                    )),
+                };
+            }
+            self.inner.run(request)
+        }
+
+        fn run_with_stdin(
+            &self,
+            request: &CmdRequest,
+            _stdin: &[u8],
+        ) -> Result<RawCommandOutput, CmdError> {
+            self.run(request)
+        }
+    }
+
+    /* Intent: `check_eviction_space` returns `ProceedWithWarning(body)`
+     * on the `remaining >= 2` path when the underlying `btrfs device
+     * usage --raw` command cannot be spawned.
+     * Why it exists: PR 4 of the Preview migration removes the direct
+     * `eprintln!` from the helper. The soft-warn must now surface as
+     * a body-only string the planner wraps in a `PreviewNote::Warn`.
+     * A regression that falls through to `Proceed` (swallowing the
+     * warning) or to `Err` (hard-rejecting a recoverable case) fails
+     * this test.
+     * Scenario: 3->2 remove on a host where the runner cannot invoke
+     * btrfs; the helper returns `ProceedWithWarning` with the
+     * canonical body `ENOSPC pre-flight check failed: ...;
+     * proceeding anyway` (no `warning:` prefix).
+     */
+    #[test]
+    fn check_eviction_space_ge2_soft_warns_on_usage_spawn_error() {
+        struct UsageSpawnFailRunner;
+        impl CommandRunner for UsageSpawnFailRunner {
+            fn run(&self, _request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
+                Err(CmdError::MissingMock)
+            }
+            fn run_with_stdin(
+                &self,
+                request: &CmdRequest,
+                _stdin: &[u8],
+            ) -> Result<RawCommandOutput, CmdError> {
+                self.run(request)
+            }
+        }
+        let mount = MountPoint("/mnt/storage".to_owned());
+        let target = test_target_device();
+        let outcome = check_eviction_space(&UsageSpawnFailRunner, &mount, &target, 2)
+            .expect("soft-warn branch must not return Err");
+        match outcome {
+            EvictionCheck::ProceedWithWarning(body) => {
+                assert!(
+                    body.starts_with("ENOSPC pre-flight check failed:"),
+                    "body must lead with canonical prefix; got: {body}",
+                );
+                assert!(
+                    body.ends_with("; proceeding anyway"),
+                    "body must end with canonical suffix; got: {body}",
+                );
+                assert!(
+                    !body.starts_with("warning:"),
+                    "body must NOT carry the legacy `warning:` prefix; got: {body}",
+                );
+            }
+            other => panic!("expected ProceedWithWarning, got {other:?}"),
+        }
+    }
+
+    /* Intent: `check_eviction_space` returns `ProceedWithWarning(body)`
+     * on the `remaining >= 2` path when `btrfs device usage --raw`
+     * exits 0 with unparseable output.
+     * Why it exists: this is the non-`CommandFailed` parse-error
+     * branch of the helper. The existing
+     * `check_eviction_space_surfaces_command_failed_as_validation`
+     * test pins the hard-reject case (exit non-zero = `CommandFailed`
+     * -> `Err`); this new test pins the symmetric soft-warn case
+     * (exit 0 but shape wrong) so PR 4's refactor preserves the
+     * asymmetry between parse-error variants.
+     * Scenario: 3->2 remove where btrfs printed something unexpected
+     * but returned 0; the helper returns `ProceedWithWarning` with
+     * the canonical body.
+     */
+    #[test]
+    fn check_eviction_space_ge2_soft_warns_on_parse_shape_error() {
+        struct UsageParseShapeRunner;
+        impl CommandRunner for UsageParseShapeRunner {
+            fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
+                match request {
+                    CmdRequest::BtrfsDeviceUsageRaw { .. } => Ok(mock_out(
+                        "btrfs device usage --raw /mnt/storage",
+                        PARSE_SHAPE_ERROR_STDOUT,
+                        0,
+                    )),
+                    _ => Err(CmdError::MissingMock),
+                }
+            }
+            fn run_with_stdin(
+                &self,
+                request: &CmdRequest,
+                _stdin: &[u8],
+            ) -> Result<RawCommandOutput, CmdError> {
+                self.run(request)
+            }
+        }
+        let mount = MountPoint("/mnt/storage".to_owned());
+        let target = test_target_device();
+        let outcome = check_eviction_space(&UsageParseShapeRunner, &mount, &target, 2)
+            .expect("soft-warn branch must not return Err");
+        match outcome {
+            EvictionCheck::ProceedWithWarning(body) => {
+                assert!(
+                    body.starts_with("ENOSPC pre-flight check failed:"),
+                    "body must lead with canonical prefix; got: {body}",
+                );
+                assert!(
+                    body.ends_with("; proceeding anyway"),
+                    "body must end with canonical suffix; got: {body}",
+                );
+            }
+            other => panic!("expected ProceedWithWarning, got {other:?}"),
+        }
+    }
+
+    /* Intent: `plan_remove` returns `Ok(RemovePlan)` carrying exactly
+     * one `PreviewNote::Warn` and the expected steps when the
+     * `remaining >= 2` eviction preflight hits a spawn-error
+     * soft-warn.
+     * Why it exists: this is the planner-level contract for the
+     * soft-warn path. A regression that drops the warning on the
+     * floor (no note) or hard-rejects (Err) or misroutes the body
+     * (wrong note variant) fails this test. It complements the
+     * unit-level `EvictionCheck` tests by also exercising the wiring
+     * inside `plan_remove` that converts the outcome into a note.
+     * Scenario: 3-disk RAID1 pool; removing disk3 would normally
+     * succeed, but btrfs can't be spawned for the preflight check.
+     */
+    #[test]
+    fn plan_remove_surfaces_soft_warn_as_preview_note_on_spawn_error() {
+        let state_tmp = tempfile::tempdir().unwrap();
+        let cfg_tmp = tempfile::tempdir().unwrap();
+        let (paths, config_path) = three_disk_pool_setup(&state_tmp, &cfg_tmp);
+
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let inner = ThreeDiskRecordingRunner { log: log.clone() };
+        let runner = ThreeDiskUsageOverrideRunner {
+            inner,
+            usage_override: UsageOverride::SpawnError,
+        };
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let params = RemoveParams {
+            config_path: Path::new(&config_path),
+            name: "disk3",
+            dry_run: true,
+            yes: true,
+            progress: ProgressOutput::Off,
+            paths: &paths,
+            sleep_inhibitor: &inhibitor,
+        };
+
+        let report = plan_remove(&runner, &MockFs, &params);
+        assert!(
+            report.notes.is_empty(),
+            "report.notes must be empty (no pre-validation probing)",
+        );
+        let plan = report
+            .result
+            .expect("soft-warn case must produce an Ok plan");
+        assert_eq!(
+            plan.notes.len(),
+            1,
+            "soft-warn must produce exactly one note; got {:?}",
+            plan.notes,
+        );
+        match &plan.notes[0] {
+            PreviewNote::Warn(body) => {
+                assert!(
+                    body.starts_with("ENOSPC pre-flight check failed:"),
+                    "body must lead with canonical prefix; got: {body}",
+                );
+                assert!(
+                    !body.starts_with("warning:"),
+                    "body must NOT carry the legacy `warning:` prefix; got: {body}",
+                );
+            }
+            other => panic!("expected PreviewNote::Warn, got {other:?}"),
+        }
+        // Steps for a 3->2 remove are: device remove + cryptsetup close.
+        // The planner still emits the full step list even when the
+        // preflight soft-warned.
+        assert_eq!(
+            plan.steps.len(),
+            2,
+            "3->2 remove plan must emit 2 steps; got {:?}",
+            plan.steps,
+        );
+    }
+
+    /* Intent: `plan_remove` returns `Ok(RemovePlan)` carrying exactly
+     * one `PreviewNote::Warn` when the `remaining >= 2` eviction
+     * preflight hits a non-`CommandFailed` parse error.
+     * Why it exists: symmetric guardrail to
+     * `plan_remove_surfaces_soft_warn_as_preview_note_on_spawn_error`
+     * for the parse-shape branch of `check_eviction_space`. Without
+     * this test, a regression that specifically breaks the parse
+     * branch (e.g. swallowing the body) would be missed.
+     * Scenario: 3-disk RAID1 pool; removing disk3 where `btrfs
+     * device usage --raw` returns exit 0 with unparseable stdout.
+     */
+    #[test]
+    fn plan_remove_surfaces_soft_warn_as_preview_note_on_parse_error() {
+        let state_tmp = tempfile::tempdir().unwrap();
+        let cfg_tmp = tempfile::tempdir().unwrap();
+        let (paths, config_path) = three_disk_pool_setup(&state_tmp, &cfg_tmp);
+
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let inner = ThreeDiskRecordingRunner { log: log.clone() };
+        let runner = ThreeDiskUsageOverrideRunner {
+            inner,
+            usage_override: UsageOverride::ParseShapeError,
+        };
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let params = RemoveParams {
+            config_path: Path::new(&config_path),
+            name: "disk3",
+            dry_run: true,
+            yes: true,
+            progress: ProgressOutput::Off,
+            paths: &paths,
+            sleep_inhibitor: &inhibitor,
+        };
+
+        let report = plan_remove(&runner, &MockFs, &params);
+        let plan = report
+            .result
+            .expect("soft-warn case must produce an Ok plan");
+        assert_eq!(
+            plan.notes.len(),
+            1,
+            "soft-warn must produce exactly one note; got {:?}",
+            plan.notes,
+        );
+        match &plan.notes[0] {
+            PreviewNote::Warn(body) => {
+                assert!(
+                    body.starts_with("ENOSPC pre-flight check failed:"),
+                    "body must lead with canonical prefix; got: {body}",
+                );
+            }
+            other => panic!("expected PreviewNote::Warn, got {other:?}"),
+        }
+        assert_eq!(
+            plan.steps.len(),
+            2,
+            "3->2 remove plan must emit 2 steps; got {:?}",
+            plan.steps,
+        );
+    }
+
+    /* Intent: `plan.preview().render()` places the soft-warn note
+     * above the dry-run step block using the canonical `[warn]
+     * <body>` form.
+     * Why it exists: this is the preview boundary test -- it pins the
+     * full rendered string so a regression in `Preview::render`'s
+     * notes-before-steps contract, or in the body wording, fails
+     * here. Unit tests on `check_eviction_space` cannot catch
+     * rendering bugs; this test can.
+     * Scenario: same 3-disk soft-warn case; assert the rendered
+     * string starts with `[warn]  ENOSPC pre-flight check failed:
+     * ...; proceeding anyway\n` and continues into the step rows.
+     */
+    #[test]
+    fn plan_preview_renders_soft_warn_above_dry_run_steps() {
+        let state_tmp = tempfile::tempdir().unwrap();
+        let cfg_tmp = tempfile::tempdir().unwrap();
+        let (paths, config_path) = three_disk_pool_setup(&state_tmp, &cfg_tmp);
+
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let inner = ThreeDiskRecordingRunner { log: log.clone() };
+        let runner = ThreeDiskUsageOverrideRunner {
+            inner,
+            usage_override: UsageOverride::SpawnError,
+        };
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let params = RemoveParams {
+            config_path: Path::new(&config_path),
+            name: "disk3",
+            dry_run: true,
+            yes: true,
+            progress: ProgressOutput::Off,
+            paths: &paths,
+            sleep_inhibitor: &inhibitor,
+        };
+
+        let plan = plan_remove(&runner, &MockFs, &params)
+            .result
+            .expect("soft-warn case must produce an Ok plan");
+        let rendered = plan.preview().render();
+        let lines: Vec<&str> = rendered.lines().collect();
+        assert!(
+            !lines.is_empty(),
+            "rendered preview must not be empty; got: {rendered:?}",
+        );
+        assert_eq!(
+            lines[0],
+            "[warn]  ENOSPC pre-flight check failed: mock output missing for request; proceeding anyway",
+            "warning must be the first line of the rendered preview; got: {rendered:?}",
+        );
+        // The remaining lines are the step block. Spot-check the
+        // device-remove row is present after the warning.
+        assert!(
+            rendered.contains("btrfs device remove"),
+            "step block must follow the warning; got: {rendered:?}",
+        );
     }
 }
