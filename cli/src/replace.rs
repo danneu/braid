@@ -11,7 +11,7 @@ use crate::membership::{self, PoolMembership};
 use crate::parse::parse_btrfs_device_stats;
 use crate::pool::{pool_replace_device, pool_resize_device};
 use crate::preflight;
-use crate::preview::{Preview, PreviewCompleteness};
+use crate::preview::{self, PerDiskStyle, Preview, PreviewCompleteness, PreviewNote};
 use crate::probe::{probe_config_disk, probe_pool, Filesystem, ProbeError};
 use crate::progress::ProgressOutput;
 use crate::state_paths::StatePaths;
@@ -55,12 +55,14 @@ pub struct ReplaceParams<'a> {
 }
 
 /// Dry-run preview source of truth for `braid replace` plus the preflight
-/// state `execute()` needs to finish the operation. `steps` is the only
-/// render source; `preview()` emits an empty `notes` vec because every
-/// remaining replace diagnostic is confirmation-gated (see
-/// `plan-this-migration-if-radiant-pinwheel.md`, replace recipe) and
-/// must not leak into dry-run or `--yes` real-run output.
+/// state `execute()` needs to finish the operation. `notes` carries
+/// plan-derived preflight diagnostics (busy-op Info, readonly-probe-fail
+/// Warn) so both dry-run stdout and real-run stderr see the same wording;
+/// confirmation-only `WARNING:` lines (1-disk leftover, keyfile
+/// asymmetry) stay in `execute()` behind the `!params.yes` gate and do
+/// not appear on dry-run or `--yes` real-run.
 pub struct ReplacePlan {
+    pub notes: Vec<PreviewNote>,
     pub steps: Vec<Step>,
     pub config: Config,
     pub new_name: String,
@@ -72,15 +74,30 @@ pub struct ReplacePlan {
     pub target_membership: PoolMembership,
 }
 
+/// Report returned by `plan_replace`. Shape A: when planning fails after
+/// notes have been accumulated (e.g. a post-preflight validation rejects),
+/// the notes survive on `report.notes` so `cmd_replace` can render them
+/// to stderr before the error. On the `Ok` branch, accumulated notes have
+/// moved into `plan.notes` and `report.notes` is empty.
+pub struct ReplacePlanReport {
+    pub notes: Vec<PreviewNote>,
+    pub result: Result<ReplacePlan, ReplaceError>,
+}
+
 impl ReplacePlan {
-    /// Build a `Preview` with `notes` always empty. Dry-run must not
-    /// surface confirmation-only `WARNING:` lines (1-disk leftover,
-    /// keyfile asymmetry); those live in `execute()` behind the
-    /// `!params.yes` gate.
+    /// Real-run and failure-path stderr for `replace` use `Bracketed`
+    /// per-disk style to match the canonical dry-run render. `replace`
+    /// does not emit `PerDisk` notes today, but the constant keeps the
+    /// Shape A contract uniform with the other migrated commands.
+    pub const STDERR_STYLE: PerDiskStyle = PerDiskStyle::Bracketed;
+
+    /// Build a `Preview` carrying any plan-derived notes. Confirmation-only
+    /// `WARNING:` lines (1-disk leftover, keyfile asymmetry) stay in
+    /// `execute()` behind the `!params.yes` gate and do not appear here.
     pub fn preview(&self) -> Preview {
         Preview {
             completeness: PreviewCompleteness::Complete,
-            notes: Vec::new(),
+            notes: self.notes.clone(),
             steps: self.steps.clone(),
         }
     }
@@ -92,6 +109,7 @@ impl ReplacePlan {
         params: &ReplaceParams<'_>,
     ) -> Result<(), ReplaceError> {
         let ReplacePlan {
+            notes,
             steps: _,
             config,
             new_name,
@@ -102,6 +120,15 @@ impl ReplacePlan {
             pre_membership,
             target_membership,
         } = self;
+
+        // Render accumulated notes to stderr via the shared helper
+        // BEFORE any mutation. Matches the other Shape A commands so
+        // preflight diagnostics surface identically across success,
+        // failure, and dry-run stdout.
+        eprint!(
+            "{}",
+            preview::render_notes_for_stderr(&notes, ReplacePlan::STDERR_STYLE),
+        );
 
         let old_mn = mapper_name(params.old_name);
         let new_mn = mapper_name(&new_name);
@@ -418,79 +445,142 @@ pub fn plan_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
     params: &ReplaceParams<'_>,
-) -> Result<ReplacePlan, ReplaceError> {
-    preflight::check_no_pending_operation(params.paths).map_err(ReplaceError::Validation)?;
+) -> ReplacePlanReport {
+    // Notes accumulator. `err_empty` is correct for pre-preflight exits
+    // (no notes can have accumulated yet). Post-preflight exits return
+    // a notes-preserving report so preflight diagnostics (busy-op Info,
+    // readonly-probe-fail Warn) reach `cmd_replace`'s stderr render.
+    let mut notes: Vec<PreviewNote> = Vec::new();
+    let err_empty = |e: ReplaceError| ReplacePlanReport {
+        notes: Vec::new(),
+        result: Err(e),
+    };
 
-    let config = config_read(params.config_path)?;
+    if let Err(msg) = preflight::check_no_pending_operation(params.paths) {
+        return err_empty(ReplaceError::Validation(msg));
+    }
+
+    let config = match config_read(params.config_path) {
+        Ok(c) => c,
+        Err(e) => return err_empty(e.into()),
+    };
 
     // Parse new_name as name=by_id spec
-    let (new_name_parsed, new_by_id) = membership::parse_disk_spec(params.new_name)
-        .map_err(|e| ReplaceError::Validation(e.to_string()))?;
+    let (new_name_parsed, new_by_id) = match membership::parse_disk_spec(params.new_name) {
+        Ok(v) => v,
+        Err(e) => return err_empty(ReplaceError::Validation(e.to_string())),
+    };
     let new_name = new_name_parsed.as_str();
 
     let pool = match probe_pool(runner, config.mount_point()) {
         Ok(p) => p,
         Err(ProbeError::NotBtrfs { .. }) => {
-            return Err(ReplaceError::Validation(
+            return err_empty(ReplaceError::Validation(
                 "pool is not mounted. Cannot replace.".into(),
             ));
         }
-        Err(e) => return Err(ReplaceError::Probe(e)),
+        Err(e) => return err_empty(ReplaceError::Probe(e)),
     };
 
     if !pool.mounted {
-        return Err(ReplaceError::Validation(
+        return err_empty(ReplaceError::Validation(
             "pool is not mounted. Cannot replace.".into(),
         ));
     }
 
     // Preflight
     let fsid = pool.fsid.as_deref().expect("mounted pool must have FSID");
-    preflight::require_mutation_preflight(runner, fs, fsid, config.mount_point())
-        .map_err(ReplaceError::Validation)?;
-    preflight::check_ups_not_on_battery(runner, config.ups().map(|u| u.name.as_str()), "replace")
-        .map_err(ReplaceError::Validation)?;
+    match preflight::require_mutation_preflight(runner, fs, fsid, config.mount_point()) {
+        Ok(preflight_notes) => notes.extend(preflight_notes),
+        Err(msg) => return err_empty(ReplaceError::Validation(msg)),
+    }
+    if let Err(msg) = preflight::check_ups_not_on_battery(
+        runner,
+        config.ups().map(|u| u.name.as_str()),
+        "replace",
+    ) {
+        return ReplacePlanReport {
+            notes: std::mem::take(&mut notes),
+            result: Err(ReplaceError::Validation(msg)),
+        };
+    }
 
     // --old == --new: reject early.
     if params.old_name == new_name {
-        return Err(ReplaceError::Validation(
-            "--old and --new must be different disks".into(),
-        ));
+        return ReplacePlanReport {
+            notes: std::mem::take(&mut notes),
+            result: Err(ReplaceError::Validation(
+                "--old and --new must be different disks".into(),
+            )),
+        };
     }
 
     // Resolve --old: live or missing (by devid).
     let old_mn = mapper_name(params.old_name);
-    let replace_source = resolve_replace_source(
+    let replace_source = match resolve_replace_source(
         runner,
         params.old_name,
         &old_mn,
         params.missing_id,
         &pool,
         config.mount_point(),
-    )?;
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            return ReplacePlanReport {
+                notes: std::mem::take(&mut notes),
+                result: Err(e),
+            };
+        }
+    };
 
     // Validate --old against pool.json membership before any irreversible work.
     // build_replacement_membership rejects absent old_name and (on Missing path)
     // a devid mismatch between pool.json and the resolved missing devid. Running
     // it here -- before the inhibitor and journal write -- means a typo in --old
     // aborts cleanly with no pending-op.json on disk and no systemd-inhibit held.
-    let pre_membership = membership::load_membership(params.paths)
-        .map_err(|e| ReplaceError::Validation(format!("failed to load pool membership: {e}")))?;
-    let target_membership = build_replacement_membership(
+    let pre_membership = match membership::load_membership(params.paths) {
+        Ok(m) => m,
+        Err(e) => {
+            return ReplacePlanReport {
+                notes: std::mem::take(&mut notes),
+                result: Err(ReplaceError::Validation(format!(
+                    "failed to load pool membership: {e}"
+                ))),
+            };
+        }
+    };
+    let target_membership = match build_replacement_membership(
         &pre_membership,
         params.old_name,
         new_name,
         &new_by_id,
         &replace_source,
-    )?;
+    ) {
+        Ok(m) => m,
+        Err(e) => {
+            return ReplacePlanReport {
+                notes: std::mem::take(&mut notes),
+                result: Err(e),
+            };
+        }
+    };
 
     // Probe --new disk state
-    let new_probed = probe_config_disk(runner, fs, new_name, &new_by_id)?;
+    let new_probed = match probe_config_disk(runner, fs, new_name, &new_by_id) {
+        Ok(p) => p,
+        Err(e) => {
+            return ReplacePlanReport {
+                notes: std::mem::take(&mut notes),
+                result: Err(e.into()),
+            };
+        }
+    };
 
     // Compile steps
     let will_clear_last_missing =
         matches!(&replace_source, ReplaceSource::Missing { .. }) && pool.missing_count == 1;
-    let steps = compile_replace_steps(&ReplaceStepsInput {
+    let steps = match compile_replace_steps(&ReplaceStepsInput {
         new_name,
         new_by_id: &new_by_id,
         new_probed: &new_probed,
@@ -500,19 +590,31 @@ pub fn plan_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         total_devices: pool.total_devices,
         paths: params.paths,
         enroll_key_file: params.enroll_key_file,
-    })?;
+    }) {
+        Ok(s) => s,
+        Err(e) => {
+            return ReplacePlanReport {
+                notes: std::mem::take(&mut notes),
+                result: Err(e),
+            };
+        }
+    };
 
-    Ok(ReplacePlan {
-        steps,
-        config,
-        new_name: new_name.to_owned(),
-        new_by_id,
-        pool,
-        replace_source,
-        new_probed,
-        pre_membership,
-        target_membership,
-    })
+    ReplacePlanReport {
+        notes: Vec::new(),
+        result: Ok(ReplacePlan {
+            notes,
+            steps,
+            config,
+            new_name: new_name.to_owned(),
+            new_by_id,
+            pool,
+            replace_source,
+            new_probed,
+            pre_membership,
+            target_membership,
+        }),
+    }
 }
 
 pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
@@ -520,7 +622,22 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     fs: &F,
     params: &ReplaceParams<'_>,
 ) -> Result<(), ReplaceError> {
-    let plan = plan_replace(runner, fs, params)?;
+    let report = plan_replace(runner, fs, params);
+    let plan = match report.result {
+        Ok(p) => p,
+        Err(e) => {
+            // Preserved-context failure: accumulated notes render to
+            // stderr before the error via the SAME helper as the Ok
+            // path (`ReplacePlan::execute`), so preflight diagnostics
+            // surface identically across success, failure, and dry-run
+            // stdout.
+            eprint!(
+                "{}",
+                preview::render_notes_for_stderr(&report.notes, ReplacePlan::STDERR_STYLE),
+            );
+            return Err(e);
+        }
+    };
     if params.dry_run {
         plan.preview().print();
         return Ok(());
@@ -3054,19 +3171,18 @@ mod tests {
         );
     }
 
-    /* Intent: the live-path dry-run preview now flows through
-     * `plan_replace(...).preview().render()` (PR 8), and the rendered
-     * bytes must equal today's `Step::render_dry_run(&steps)` output.
-     * The preview must carry zero notes so confirmation-only warnings
-     * never leak into `--dry-run`.
+    /* Intent: the live-path dry-run preview flows through
+     * `plan_replace(...).preview().render()`, and confirmation-only
+     * `WARNING:` lines (1-disk leftover, keyfile asymmetry) must never
+     * leak into `--dry-run` stdout.
      *
-     * Why it exists: PR 8 routes `braid replace --dry-run` through
+     * Why it exists: `braid replace --dry-run` routes through
      * `ReplacePlan::preview()` instead of `Step::print_dry_run(&steps)`.
-     * A regression that added a `PreviewNote` in the planner would
-     * surface the confirmation-only `WARNING:` lines (1-disk, keyfile
-     * asymmetry) on stdout during dry-run. A regression that reordered
-     * steps or dropped the cryptsetup-close step would change the
-     * rendered output. Both failure modes are caught here.
+     * A regression that surfaced the confirmation-only `WARNING:` lines
+     * on dry-run would change the bytes an operator sees. A regression
+     * that reordered steps or dropped the cryptsetup-close step would
+     * also change the rendered output. Both failure modes are caught
+     * here.
      *
      * Scenario: 2-disk pool, operator previews
      * `braid replace --old disk2 --new disk3=...` with a fresh (but
@@ -3104,7 +3220,7 @@ mod tests {
         ]);
         let runner = FailingReplaceRunner;
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
-        let plan = plan_replace(
+        let report = plan_replace(
             &runner,
             &fs,
             &ReplaceParams {
@@ -3121,18 +3237,24 @@ mod tests {
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
             },
-        )
-        .expect("plan_replace should succeed on live-path fixture");
+        );
+        assert!(
+            report.notes.is_empty(),
+            "replace preview fixture must not accumulate preflight notes on the Ok path: {:?}",
+            report.notes,
+        );
+        let plan = report
+            .result
+            .expect("plan_replace should succeed on live-path fixture");
 
         let preview = plan.preview();
-        assert!(
-            preview.notes.is_empty(),
-            "ReplacePlan::preview() must emit zero notes -- confirmation warnings stay in execute(), got: {:?}",
-            preview.notes,
-        );
-
         let rendered = preview.render();
         let legacy = Step::render_dry_run(&plan.steps);
+        // Byte-equivalence holds because this fixture produces zero
+        // notes (clean preflight on a rw pool with no busy op). A
+        // future fixture with real preflight notes would render them
+        // above the step block and byte-equivalence would no longer
+        // hold.
         assert_eq!(
             rendered, legacy,
             "plan.preview().render() must be byte-equivalent to Step::render_dry_run(&plan.steps) for the live path",
@@ -3157,8 +3279,8 @@ mod tests {
     }
 
     /* Intent: the missing-path dry-run preview flows through
-     * `plan_replace(...).preview().render()` with zero notes and
-     * byte-equivalent output to today's `Step::render_dry_run`.
+     * `plan_replace(...).preview().render()`, and confirmation-only
+     * `WARNING:` lines must never leak into `--dry-run` stdout.
      *
      * Why it exists: same regression surface as the live-path
      * preview test, but for the `ReplaceSource::Missing` branch
@@ -3206,7 +3328,7 @@ mod tests {
             replace_done: replace_done.clone(),
         };
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
-        let plan = plan_replace(
+        let report = plan_replace(
             &runner,
             &fs,
             &ReplaceParams {
@@ -3223,18 +3345,24 @@ mod tests {
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
             },
-        )
-        .expect("plan_replace should succeed on missing-path fixture");
+        );
+        assert!(
+            report.notes.is_empty(),
+            "replace preview fixture must not accumulate preflight notes on the Ok path: {:?}",
+            report.notes,
+        );
+        let plan = report
+            .result
+            .expect("plan_replace should succeed on missing-path fixture");
 
         let preview = plan.preview();
-        assert!(
-            preview.notes.is_empty(),
-            "ReplacePlan::preview() must emit zero notes on missing path, got: {:?}",
-            preview.notes,
-        );
-
         let rendered = preview.render();
         let legacy = Step::render_dry_run(&plan.steps);
+        // Byte-equivalence holds because this fixture produces zero
+        // notes (clean preflight on a rw pool with no busy op). A
+        // future fixture with real preflight notes would render them
+        // above the step block and byte-equivalence would no longer
+        // hold.
         assert_eq!(
             rendered, legacy,
             "plan.preview().render() must be byte-equivalent to Step::render_dry_run(&plan.steps) for the missing path",
@@ -3266,6 +3394,218 @@ mod tests {
         assert!(
             inhibitor.acquire_count() == 0,
             "plan_replace must not acquire the sleep inhibitor",
+        );
+    }
+
+    /// ReplaceMockFs variant with a configurable sysfs
+    /// exclusive_operation body. Drives preflight's busy-op /
+    /// paused-balance branches from the plan_replace boundary tests.
+    struct ReplaceMockFsWithSysfs {
+        inner: ReplaceMockFs,
+        sysfs_body: String,
+    }
+
+    impl ReplaceMockFsWithSysfs {
+        fn new(paths: Vec<String>, sysfs_body: &str) -> Self {
+            Self {
+                inner: ReplaceMockFs(paths),
+                sysfs_body: sysfs_body.to_owned(),
+            }
+        }
+    }
+
+    impl crate::probe::Filesystem for ReplaceMockFsWithSysfs {
+        fn exists(&self, path: &str) -> bool {
+            self.inner.exists(path)
+        }
+        fn is_block_device(&self, path: &str) -> bool {
+            self.inner.is_block_device(path)
+        }
+        fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
+            if path.ends_with("/exclusive_operation") {
+                Ok(self.sysfs_body.clone())
+            } else {
+                self.inner.read_to_string(path)
+            }
+        }
+        fn list_dir(&self, path: &str) -> Result<Vec<String>, std::io::Error> {
+            self.inner.list_dir(path)
+        }
+    }
+
+    /* Intent: plan_replace surfaces an in-flight exclusive op as a
+     * PreviewNote::Info on `plan.notes`, and the rendered preview
+     * contains the "waiting for in-flight <op>" line. Confirmation-only
+     * `WARNING:` lines still do not leak into the preview.
+     * Why it exists: Shape A migration moves the busy-op diagnostic
+     * from stderr into plan.notes; a regression leaking it back to
+     * stderr breaks the dry-run stdout-only contract.
+     * Scenario: 2-disk pool, sysfs reports "device add", operator
+     * previews `braid replace --old disk2 --new disk3=...`. Mirrors
+     * the live-path preview fixture.
+     */
+    #[test]
+    fn plan_replace_preflight_busy_op_becomes_info_note() {
+        let state_tmp = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(state_tmp.path().into());
+        let mut m = PoolMembership::empty();
+        m.disks.insert(
+            "disk1".into(),
+            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
+        );
+        m.disks.insert(
+            "disk2".into(),
+            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk2".into())),
+        );
+        membership::save_membership(&m, &paths).unwrap();
+
+        let config_tmp = tempfile::tempdir().unwrap();
+        let config_path = config_tmp.path().join("config.json");
+        std::fs::write(
+            &config_path,
+            serde_json::to_vec(&serde_json::json!({ "mount_point": "/mnt/storage" })).unwrap(),
+        )
+        .unwrap();
+        let pass_path = config_tmp.path().join("passphrase");
+        std::fs::write(&pass_path, b"test-passphrase\n").unwrap();
+
+        let fs = ReplaceMockFsWithSysfs::new(
+            vec![
+                "/dev/disk/by-id/virtio-disk3".into(),
+                "/dev/mapper/braid-disk3".into(),
+            ],
+            "device add\n",
+        );
+        let runner = FailingReplaceRunner;
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let report = plan_replace(
+            &runner,
+            &fs,
+            &ReplaceParams {
+                config_path: &config_path,
+                old_name: "disk2",
+                new_name: "disk3=/dev/disk/by-id/virtio-disk3",
+                missing_id: None,
+                dry_run: true,
+                yes: true,
+                passphrase_stdin: false,
+                passphrase_file: Some(pass_path.as_path()),
+                enroll_key_file: None,
+                progress: crate::progress::ProgressOutput::Off,
+                paths: &paths,
+                sleep_inhibitor: &inhibitor,
+            },
+        );
+        let plan = report
+            .result
+            .expect("plan_replace should succeed on live-path fixture + busy op");
+        assert_eq!(
+            plan.notes.len(),
+            1,
+            "expected one preflight Info note, got {:?}",
+            plan.notes,
+        );
+        assert!(
+            matches!(
+                &plan.notes[0],
+                PreviewNote::Info(b) if b.contains("waiting for in-flight") && b.contains("device add")
+            ),
+            "notes[0]={:?}",
+            plan.notes[0],
+        );
+        let rendered = plan.preview().render();
+        assert!(
+            rendered.contains("waiting for in-flight device add"),
+            "rendered preview must carry the busy-op Info line, got:\n{rendered}",
+        );
+        assert!(
+            !rendered.contains("WARNING:"),
+            "confirmation-only WARNING lines must not leak into preview, got:\n{rendered}",
+        );
+    }
+
+    /* Intent: when plan_replace accumulates a preflight Info note and
+     * then fails on the `--old == --new` validation, the accumulated
+     * notes survive on `report.notes`.
+     * Why it exists: Shape A "notes-carrying report" promises
+     * preserved context; a same-name --old/--new typo during an
+     * in-flight balance must not hide the busy-op context from the
+     * operator.
+     * Scenario: 2-disk pool, sysfs reports "device add", operator
+     * runs `braid replace --old disk2 --new disk2=/...` (same name).
+     */
+    #[test]
+    fn plan_replace_preserves_preflight_notes_on_old_equals_new_validation() {
+        let state_tmp = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(state_tmp.path().into());
+        let mut m = PoolMembership::empty();
+        m.disks.insert(
+            "disk1".into(),
+            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
+        );
+        m.disks.insert(
+            "disk2".into(),
+            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk2".into())),
+        );
+        membership::save_membership(&m, &paths).unwrap();
+
+        let config_tmp = tempfile::tempdir().unwrap();
+        let config_path = config_tmp.path().join("config.json");
+        std::fs::write(
+            &config_path,
+            serde_json::to_vec(&serde_json::json!({ "mount_point": "/mnt/storage" })).unwrap(),
+        )
+        .unwrap();
+        let pass_path = config_tmp.path().join("passphrase");
+        std::fs::write(&pass_path, b"test-passphrase\n").unwrap();
+
+        let fs = ReplaceMockFsWithSysfs::new(
+            vec!["/dev/disk/by-id/virtio-disk2".into()],
+            "device add\n",
+        );
+        let runner = FailingReplaceRunner;
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let report = plan_replace(
+            &runner,
+            &fs,
+            &ReplaceParams {
+                config_path: &config_path,
+                old_name: "disk2",
+                new_name: "disk2=/dev/disk/by-id/virtio-disk2",
+                missing_id: None,
+                dry_run: true,
+                yes: true,
+                passphrase_stdin: false,
+                passphrase_file: Some(pass_path.as_path()),
+                enroll_key_file: None,
+                progress: crate::progress::ProgressOutput::Off,
+                paths: &paths,
+                sleep_inhibitor: &inhibitor,
+            },
+        );
+        match &report.result {
+            Err(ReplaceError::Validation(msg)) => {
+                assert!(
+                    msg.contains("--old and --new must be different"),
+                    "expected same-name refusal wording, got: {msg}"
+                );
+            }
+            Err(other) => panic!("expected Validation, got: {other:?}"),
+            Ok(_) => panic!("expected Err(Validation), got Ok(_)"),
+        }
+        assert_eq!(
+            report.notes.len(),
+            1,
+            "busy-op Info note must survive the same-name failure, got: {:?}",
+            report.notes,
+        );
+        assert!(
+            matches!(
+                &report.notes[0],
+                PreviewNote::Info(b) if b.contains("waiting for in-flight") && b.contains("device add")
+            ),
+            "notes[0]={:?}",
+            report.notes[0],
         );
     }
 }
