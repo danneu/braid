@@ -65,6 +65,9 @@ with subtest("Dry-run missing-device warning routes to stdout as [warn]"):
     assert "warning:" not in out, (
         "dry-run note body must not carry the legacy `warning:` prefix; got: {!r}".format(out)
     )
+    assert "\x1b[" not in out, (
+        "dry-run stdout must be plain without a TTY; got: {!r}".format(out)
+    )
     assert err == "", (
         "dry-run stderr must be empty on success; got: {!r}".format(err)
     )
@@ -105,6 +108,9 @@ with subtest("Real-run missing-device warning renders as canonical [warn]"):
     assert "warning: pool has" not in err, (
         "real-run stderr must NOT carry the legacy `warning:` prefix;"
         " exit={} stderr={!r}".format(ec, err)
+    )
+    assert "\x1b[" not in err, (
+        "real-run stderr must be plain without a TTY; exit={} stderr={!r}".format(ec, err)
     )
 
 # --- Phase 4: preserved-context failure uses canonical [warn] on stderr ---

@@ -418,8 +418,13 @@ impl ReplacePlan {
 }
 
 fn emit_replace_notes_to_stderr(notes: &[PreviewNote]) {
-    let rendered = preview::render_notes_for_stderr(notes, ReplacePlan::STDERR_STYLE);
+    let rendered =
+        render_replace_notes_for_stderr(notes, crate::status_tag::color_enabled_for_stderr());
     emit_replace_stderr(&rendered);
+}
+
+fn render_replace_notes_for_stderr(notes: &[PreviewNote], color_enabled: bool) -> String {
+    preview::render_notes_for_stderr_with(notes, ReplacePlan::STDERR_STYLE, color_enabled)
 }
 
 fn emit_replace_stderr(rendered: &str) {
@@ -696,7 +701,7 @@ pub fn cmd_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         }
     };
     if params.dry_run {
-        plan.preview().print();
+        plan.preview().print_colored();
         return Ok(());
     }
     plan.execute(runner, fs, params)
@@ -1085,6 +1090,34 @@ mod tests {
 
     fn mp() -> MountPoint {
         MountPoint("/mnt/storage".into())
+    }
+
+    /* Intent: replace's stderr-note wrapper colors only bracketed
+     * warning tags.
+     * Why it exists: replace routes notes through a capture-aware
+     * wrapper, so it needs direct coverage in addition to Preview's
+     * shared renderer tests.
+     * Scenario: an Info note followed by a Warn note is rendered in
+     * plain and colored modes.
+     */
+    #[test]
+    fn render_replace_notes_for_stderr_colors_only_warn_tag() {
+        let notes = vec![
+            PreviewNote::Info("waiting for in-flight device add".into()),
+            PreviewNote::Warn("pool is mounted read-only".into()),
+        ];
+
+        let plain = render_replace_notes_for_stderr(&notes, false);
+        assert_eq!(
+            plain,
+            "waiting for in-flight device add\n[warn]  pool is mounted read-only\n"
+        );
+
+        let colored = render_replace_notes_for_stderr(&notes, true);
+        assert_eq!(
+            colored,
+            "waiting for in-flight device add\n\x1b[33m[warn]\x1b[0m  pool is mounted read-only\n"
+        );
     }
 
     #[test]

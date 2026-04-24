@@ -83,7 +83,11 @@ impl UnlockPlan {
         // `print_probe_events` output for that event).
         eprint!(
             "{}",
-            preview::render_notes_for_stderr(&self.notes, Self::STDERR_STYLE),
+            preview::render_notes_for_stderr_with(
+                &self.notes,
+                Self::STDERR_STYLE,
+                crate::status_tag::color_enabled_for_stderr(),
+            ),
         );
 
         let Some(plan) = self.open_plan else {
@@ -207,14 +211,18 @@ pub fn cmd_unlock<R: CommandRunner, F: Filesystem + ?Sized>(
             // `print_probe_events` + `?` sequence.
             eprint!(
                 "{}",
-                preview::render_notes_for_stderr(&report.notes, UnlockPlan::STDERR_STYLE),
+                preview::render_notes_for_stderr_with(
+                    &report.notes,
+                    UnlockPlan::STDERR_STYLE,
+                    crate::status_tag::color_enabled_for_stderr(),
+                ),
             );
             return Err(e);
         }
     };
 
     if params.dry_run {
-        plan.preview().print();
+        plan.preview().print_colored();
         return Ok(());
     }
 

@@ -146,6 +146,7 @@ with subtest("dry-run: warn goes to stdout, stderr is empty"):
     assert (
         "warning:" not in out
     ), f"dry-run stdout must not carry the legacy 'warning:' prefix; got:\n{out}"
+    assert "\x1b[" not in out, f"dry-run stdout must be plain without a TTY; got:\n{out}"
     assert err.strip() == "", f"dry-run stderr must be empty; got:\n{err!r}"
 
 # --- Phase 5: Real-run must emit the canonical `[warn]  ...` stderr line ---
@@ -168,6 +169,7 @@ with subtest("real-run: warn appears on stderr with the canonical [warn] prefix"
     assert (
         "warning:" not in err2
     ), f"real-run stderr must not carry the legacy 'warning:' prefix; got:\n{err2}"
+    assert "\x1b[" not in err2, f"real-run stderr must be plain without a TTY; got:\n{err2}"
 
 with subtest("real-run actually removed the missing device"):
     fi_show = machine.succeed("btrfs fi show /mnt/storage")

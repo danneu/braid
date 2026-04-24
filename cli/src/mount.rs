@@ -4,7 +4,7 @@ use crate::luks::{self, LuksError, VerifyOutcome};
 use crate::membership::PoolMembership;
 use crate::preview::{self, NoteLevel, PerDiskStyle, PreviewNote};
 use crate::probe::{self, Filesystem, ProbeError};
-use crate::status_tag::StatusTag;
+use crate::status_tag::{StatusTag, color_enabled_for_stderr, render_status_tag};
 use crate::types::{ByIdPath, ConfigDiskState, MountPoint};
 use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
@@ -360,7 +360,12 @@ pub fn render_probe_events(events: &[ProbeEvent]) -> String {
 /// this after `plan_open_pool` but before propagating any error, so
 /// per-disk context always precedes a failure message.
 pub fn print_probe_events(events: &[ProbeEvent]) {
-    let text = render_probe_events(events);
+    let notes: Vec<PreviewNote> = events.iter().map(ProbeEvent::to_preview_note).collect();
+    let text = preview::render_notes_for_stderr_with(
+        &notes,
+        PerDiskStyle::Bracketed,
+        color_enabled_for_stderr(),
+    );
     if !text.is_empty() {
         eprint!("{text}");
     }
@@ -485,6 +490,7 @@ fn open_disks_with_passphrase<R: CommandRunner, F: Filesystem + ?Sized>(
     fs: &F,
     to_unlock: &[(String, ByIdPath)],
     passphrase: &str,
+    color_enabled: bool,
 ) -> Result<(), MountError> {
     let (ref first_name, ref first_by_id) = to_unlock[0];
     let outcome = match luks::verify_passphrase(runner, &first_by_id.0, passphrase) {
@@ -554,7 +560,11 @@ fn open_disks_with_passphrase<R: CommandRunner, F: Filesystem + ?Sized>(
                 ok_fallback,
             ));
         }
-        eprintln!("{}  disk: {:<10}unlocked", StatusTag::Ok, name);
+        eprintln!(
+            "{}  disk: {:<10}unlocked",
+            render_status_tag(StatusTag::Ok, color_enabled),
+            name
+        );
     }
 
     Ok(())
@@ -586,7 +596,8 @@ pub fn execute_mount_only<R: CommandRunner, F: Filesystem + ?Sized>(
             "internal: execute_mount_only called with non-empty plan.to_unlock".into(),
         ));
     }
-    scan_and_mount(runner, fs, config, plan)
+    let color_enabled = color_enabled_for_stderr();
+    scan_and_mount(runner, fs, config, plan, color_enabled)
 }
 
 /// Execute a pre-built `OpenPlan` that has disks to unlock.
@@ -610,6 +621,7 @@ pub fn execute_unlock_and_mount<R: CommandRunner, F: Filesystem + ?Sized>(
     plan: &OpenPlan,
     credential: &OpenCredential,
 ) -> Result<bool, MountError> {
+    let color_enabled = color_enabled_for_stderr();
     if plan.to_unlock.is_empty() {
         return Err(MountError::Failed(
             "internal: execute_unlock_and_mount called with empty plan.to_unlock".into(),
@@ -687,15 +699,19 @@ pub fn execute_unlock_and_mount<R: CommandRunner, F: Filesystem + ?Sized>(
                         ok_fallback,
                     ));
                 }
-                eprintln!("{}  disk: {:<10}unlocked", StatusTag::Ok, name);
+                eprintln!(
+                    "{}  disk: {:<10}unlocked",
+                    render_status_tag(StatusTag::Ok, color_enabled),
+                    name
+                );
             }
         }
         OpenCredential::Passphrase(pp) => {
-            open_disks_with_passphrase(runner, fs, &plan.to_unlock, pp.as_str())?;
+            open_disks_with_passphrase(runner, fs, &plan.to_unlock, pp.as_str(), color_enabled)?;
         }
     }
 
-    scan_and_mount(runner, fs, config, plan)
+    scan_and_mount(runner, fs, config, plan, color_enabled)
 }
 
 /// Shared tail for both execute entry points: btrfs device scan, ensure the
@@ -706,6 +722,7 @@ fn scan_and_mount<R: CommandRunner, F: Filesystem + ?Sized>(
     _fs: &F,
     config: &Config,
     plan: &OpenPlan,
+    color_enabled: bool,
 ) -> Result<bool, MountError> {
     let mount_point = config.mount_point();
 
@@ -741,7 +758,12 @@ fn scan_and_mount<R: CommandRunner, F: Filesystem + ?Sized>(
         )));
     }
 
-    eprintln!("{}  {:<10}mounted {}", StatusTag::Ok, "pool", mount_point);
+    eprintln!(
+        "{}  {:<10}mounted {}",
+        render_status_tag(StatusTag::Ok, color_enabled),
+        "pool",
+        mount_point
+    );
 
     Ok(true)
 }

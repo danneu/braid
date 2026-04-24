@@ -11,7 +11,7 @@
 use serde::Serialize;
 
 use crate::cmd::Step;
-use crate::status_tag::StatusTag;
+use crate::status_tag::{StatusTag, color_enabled_for_stdout, render_status_tag};
 
 /// One renderable dry-run preview. `notes` and `steps` render in the
 /// fixed order documented on `Preview::render`. `Step` is not yet
@@ -97,10 +97,16 @@ fn format_per_disk_line(
     level: NoteLevel,
     message: &str,
     style: PerDiskStyle,
+    color_enabled: bool,
 ) -> String {
     match style {
         PerDiskStyle::Bracketed => {
-            format!("{}  disk: {:<10}{}\n", level.to_status_tag(), name, message)
+            format!(
+                "{}  disk: {:<10}{}\n",
+                render_status_tag(level.to_status_tag(), color_enabled),
+                name,
+                message
+            )
         }
         PerDiskStyle::Plain => {
             format!("{}: {} {}\n", level.plain_label(), name, message)
@@ -111,6 +117,14 @@ fn format_per_disk_line(
 /// Render only the `PerDisk` notes from `notes` in insertion order
 /// using the given style. Non-`PerDisk` notes are skipped.
 pub fn render_per_disk_notes(notes: &[PreviewNote], style: PerDiskStyle) -> String {
+    render_per_disk_notes_with(notes, style, false)
+}
+
+pub fn render_per_disk_notes_with(
+    notes: &[PreviewNote],
+    style: PerDiskStyle,
+    color_enabled: bool,
+) -> String {
     let mut out = String::new();
     for note in notes {
         if let PreviewNote::PerDisk {
@@ -119,7 +133,13 @@ pub fn render_per_disk_notes(notes: &[PreviewNote], style: PerDiskStyle) -> Stri
             message,
         } = note
         {
-            out.push_str(&format_per_disk_line(name, *level, message, style));
+            out.push_str(&format_per_disk_line(
+                name,
+                *level,
+                message,
+                style,
+                color_enabled,
+            ));
         }
     }
     out
@@ -132,6 +152,14 @@ pub fn render_per_disk_notes(notes: &[PreviewNote], style: PerDiskStyle) -> Stri
 /// per-disk style (e.g. `enroll` real-run uses `Plain` to preserve
 /// today's `skip: <name> ...` wording).
 pub fn render_notes_for_stderr(notes: &[PreviewNote], style: PerDiskStyle) -> String {
+    render_notes_for_stderr_with(notes, style, false)
+}
+
+pub fn render_notes_for_stderr_with(
+    notes: &[PreviewNote],
+    style: PerDiskStyle,
+    color_enabled: bool,
+) -> String {
     let mut out = String::new();
     for note in notes {
         match note {
@@ -140,14 +168,23 @@ pub fn render_notes_for_stderr(notes: &[PreviewNote], style: PerDiskStyle) -> St
                 out.push('\n');
             }
             PreviewNote::Warn(msg) => {
-                out.push_str(&format!("[warn]  {msg}\n"));
+                out.push_str(&format!(
+                    "{}  {msg}\n",
+                    render_status_tag(StatusTag::Warn, color_enabled)
+                ));
             }
             PreviewNote::PerDisk {
                 name,
                 level,
                 message,
             } => {
-                out.push_str(&format_per_disk_line(name, *level, message, style));
+                out.push_str(&format_per_disk_line(
+                    name,
+                    *level,
+                    message,
+                    style,
+                    color_enabled,
+                ));
             }
         }
     }
@@ -167,6 +204,10 @@ impl Preview {
     ///    `note: preview incomplete -- <reason>` line per
     ///    `PreviewGap`. Empty in PR 0.
     pub fn render(&self) -> String {
+        self.render_with(false)
+    }
+
+    pub fn render_with(&self, color_enabled: bool) -> String {
         let mut out = String::new();
 
         for note in &self.notes {
@@ -176,7 +217,10 @@ impl Preview {
                     out.push('\n');
                 }
                 PreviewNote::Warn(msg) => {
-                    out.push_str(&format!("[warn]  {msg}\n"));
+                    out.push_str(&format!(
+                        "{}  {msg}\n",
+                        render_status_tag(StatusTag::Warn, color_enabled)
+                    ));
                 }
                 PreviewNote::PerDisk {
                     name,
@@ -188,6 +232,7 @@ impl Preview {
                         *level,
                         message,
                         PerDiskStyle::Bracketed,
+                        color_enabled,
                     ));
                 }
             }
@@ -218,6 +263,10 @@ impl Preview {
 
     pub fn print(&self) {
         print!("{}", self.render());
+    }
+
+    pub fn print_colored(&self) {
+        print!("{}", self.render_with(color_enabled_for_stdout()));
     }
 }
 
@@ -251,6 +300,29 @@ mod tests {
         let rendered = preview.render();
         let expected = "\
 [warn]  scan failed
+[safe       ] btrfs device scan
+               $ btrfs device scan
+";
+        assert_eq!(rendered, expected);
+    }
+
+    /* Intent: color-aware rendering only wraps status tags.
+     * Why it exists: dry-run stdout can opt into color for TTYs, but
+     * step rendering and note bodies must stay byte-identical after
+     * ANSI stripping so the dry-run contract remains stable.
+     * Scenario: a Warn note plus one Step rendered through the colored
+     * companion.
+     */
+    #[test]
+    fn render_with_colors_only_warn_tag_before_steps() {
+        let preview = Preview {
+            completeness: PreviewCompleteness::Complete,
+            notes: vec![PreviewNote::Warn("scan failed".into())],
+            steps: vec![sample_step("btrfs device scan")],
+        };
+        let rendered = preview.render_with(true);
+        let expected = "\
+\x1b[33m[warn]\x1b[0m  scan failed
 [safe       ] btrfs device scan
                $ btrfs device scan
 ";
@@ -429,6 +501,33 @@ mod tests {
 pool already mounted at /mnt/storage
 [skip]  disk: disk1     not found (unplugged?)
 [warn]  pool has 1 missing device(s)
+";
+        assert_eq!(rendered, expected);
+    }
+
+    /* Intent: color-aware stderr rendering only wraps bracketed status
+     * tags, never Info lines or message bodies.
+     * Why it exists: live command output should become easier to scan
+     * in TTYs without changing the text contract once ANSI is stripped.
+     * Scenario: one note of each kind in a fixed order, rendered in
+     * Bracketed style with color enabled.
+     */
+    #[test]
+    fn render_notes_for_stderr_with_colors_bracketed_tags_only() {
+        let notes = vec![
+            PreviewNote::Info("pool already mounted at /mnt/storage".into()),
+            PreviewNote::PerDisk {
+                name: "disk1".into(),
+                level: NoteLevel::Skip,
+                message: "not found (unplugged?)".into(),
+            },
+            PreviewNote::Warn("pool has 1 missing device(s)".into()),
+        ];
+        let rendered = render_notes_for_stderr_with(&notes, PerDiskStyle::Bracketed, true);
+        let expected = "\
+pool already mounted at /mnt/storage
+\x1b[90m[skip]\x1b[0m  disk: disk1     not found (unplugged?)
+\x1b[33m[warn]\x1b[0m  pool has 1 missing device(s)
 ";
         assert_eq!(rendered, expected);
     }

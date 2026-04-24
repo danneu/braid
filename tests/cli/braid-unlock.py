@@ -69,7 +69,16 @@ with subtest("Setup: create 3-disk pool"):
 # --- Test 1: Happy path ---
 
 with subtest("Test 1: happy path — all locked, unlock opens everything"):
-    machine.succeed(unlock_cmd(passphrase))
+    machine.succeed(
+        f"{unlock_cmd(passphrase)} >/tmp/probe-stdout 2>/tmp/probe-stderr"
+    )
+    probe_err = machine.succeed("cat /tmp/probe-stderr")
+    assert "[ok  ]  disk: disk1" in probe_err, (
+        f"expected probe stderr rows, got: {probe_err!r}"
+    )
+    assert "\x1b[" not in probe_err, (
+        f"unlock stderr must be plain without a TTY, got: {probe_err!r}"
+    )
 
     # Pool mounted
     machine.succeed("mountpoint -q /mnt/storage")

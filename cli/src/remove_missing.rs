@@ -125,7 +125,11 @@ impl RemoveMissingPlan {
         // share one render contract for plan-derived notes.
         eprint!(
             "{}",
-            preview::render_notes_for_stderr(&self.notes, Self::STDERR_STYLE),
+            preview::render_notes_for_stderr_with(
+                &self.notes,
+                Self::STDERR_STYLE,
+                crate::status_tag::color_enabled_for_stderr(),
+            ),
         );
 
         // Resolve devid->name from enriched pool.json before confirmation and journal.
@@ -377,14 +381,18 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             // and dry-run stdout.
             eprint!(
                 "{}",
-                preview::render_notes_for_stderr(&report.notes, RemoveMissingPlan::STDERR_STYLE),
+                preview::render_notes_for_stderr_with(
+                    &report.notes,
+                    RemoveMissingPlan::STDERR_STYLE,
+                    crate::status_tag::color_enabled_for_stderr(),
+                ),
             );
             return Err(e);
         }
     };
 
     if params.dry_run {
-        plan.preview().print();
+        plan.preview().print_colored();
         return Ok(());
     }
 

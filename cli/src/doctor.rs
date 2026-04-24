@@ -26,7 +26,7 @@ use crate::parse::types::{BtrfsBgType, BtrfsDfOutput, BtrfsProfile};
 use crate::preflight;
 use crate::state_paths::StatePaths;
 use crate::status::format_bytes;
-use crate::status_tag::StatusTag;
+use crate::status_tag::{StatusTag, color_enabled_for_stdout, render_status_tag};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -892,6 +892,10 @@ pub fn run_doctor<R: CommandRunner>(
 // ---------------------------------------------------------------------------
 
 pub fn format_doctor_human(report: &DoctorReport) -> String {
+    format_doctor_human_with(report, false)
+}
+
+pub fn format_doctor_human_with(report: &DoctorReport, color_enabled: bool) -> String {
     let mut out = String::new();
     for c in &report.checks {
         let tag = match c.status {
@@ -916,7 +920,11 @@ pub fn format_doctor_human(report: &DoctorReport) -> String {
             "braid_online_active" => "braid-online",
             other => other,
         };
-        out.push_str(&format!("{tag}  {label:<14}  {}\n", c.message));
+        out.push_str(&format!(
+            "{}  {label:<14}  {}\n",
+            render_status_tag(tag, color_enabled),
+            c.message
+        ));
     }
     out
 }
@@ -944,7 +952,10 @@ pub fn cmd_doctor(config_path: &Path, paths: &StatePaths, json: bool) -> Result<
             serde_json::to_string_pretty(&report).map_err(DoctorError::Serialize)?
         );
     } else {
-        print!("{}", format_doctor_human(&report));
+        print!(
+            "{}",
+            format_doctor_human_with(&report, color_enabled_for_stdout())
+        );
     }
 
     match report.status {
@@ -1164,6 +1175,50 @@ mod tests {
         let human = format_doctor_human(&report);
         assert!(human.contains("[fail]"), "expected [fail] tag:\n{human}");
         assert!(human.contains("[skip]"), "expected [skip] tag:\n{human}");
+    }
+
+    /* Intent: color-aware doctor output wraps each status tag and
+     * leaves the label/message columns untouched.
+     * Why it exists: `braid doctor` human output is a direct stdout
+     * renderer, separate from the shared Preview path.
+     * Scenario: one check at each severity is rendered with color
+     * enabled and compared byte-for-byte.
+     */
+    #[test]
+    fn human_format_with_colors_wraps_only_tags() {
+        let report = DoctorReport {
+            status: CheckStatus::Fail,
+            checks: vec![
+                CheckResult {
+                    name: "config_file".into(),
+                    status: CheckStatus::Ok,
+                    message: "present".into(),
+                },
+                CheckResult {
+                    name: "config_permissions".into(),
+                    status: CheckStatus::Warn,
+                    message: "world-writable".into(),
+                },
+                CheckResult {
+                    name: "declared_disks".into(),
+                    status: CheckStatus::Fail,
+                    message: "missing disk1".into(),
+                },
+                CheckResult {
+                    name: "pool_missing_devices".into(),
+                    status: CheckStatus::Skip,
+                    message: "pool offline".into(),
+                },
+            ],
+        };
+        let human = format_doctor_human_with(&report, true);
+        let expected = "\
+\x1b[32m[ok  ]\x1b[0m  config file     present
+\x1b[33m[warn]\x1b[0m  config perms    world-writable
+\x1b[31m[fail]\x1b[0m  declared disks  missing disk1
+\x1b[90m[skip]\x1b[0m  missing devs    pool offline
+";
+        assert_eq!(human, expected);
     }
 
     #[test]

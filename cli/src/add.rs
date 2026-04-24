@@ -341,7 +341,11 @@ impl AddPlan {
         // stdout share one render contract for these notes.
         eprint!(
             "{}",
-            preview::render_notes_for_stderr(&self.notes, Self::STDERR_STYLE),
+            preview::render_notes_for_stderr_with(
+                &self.notes,
+                Self::STDERR_STYLE,
+                crate::status_tag::color_enabled_for_stderr(),
+            ),
         );
 
         // No-op early-return: if the plan has zero steps, the Info
@@ -847,14 +851,18 @@ pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             // success stderr.
             eprint!(
                 "{}",
-                preview::render_notes_for_stderr(&report.notes, AddPlan::STDERR_STYLE),
+                preview::render_notes_for_stderr_with(
+                    &report.notes,
+                    AddPlan::STDERR_STYLE,
+                    crate::status_tag::color_enabled_for_stderr(),
+                ),
             );
             return Err(e);
         }
     };
 
     if params.dry_run {
-        plan.preview().print();
+        plan.preview().print_colored();
         return Ok(());
     }
 

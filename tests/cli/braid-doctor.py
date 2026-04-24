@@ -24,6 +24,7 @@ with subtest("Valid config — human output"):
     assert "config file" in output, f"Expected 'config file':\n{output}"
     assert "config schema" in output, f"Expected 'config schema':\n{output}"
     assert "config perms" in output, f"Expected 'config perms':\n{output}"
+    assert "\x1b[" not in output, f"human output must be plain without a TTY:\n{output}"
 
 with subtest("Valid config — JSON output"):
     raw = machine.succeed("braid doctor --json")

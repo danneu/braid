@@ -308,6 +308,9 @@ with subtest("Test 4d: dry-run + real-run success path render `skip: not LUKS-fo
     assert "[skip]  disk: disk3     not LUKS-formatted\n" in t4d_out, (
         f"expected bracketed non-LUKS skip on stdout, got: {t4d_out!r}"
     )
+    assert "\x1b[" not in t4d_out, (
+        f"dry-run stdout must be plain without a TTY, got: {t4d_out!r}"
+    )
 
     # Phase B: real-run success -- plain skip on stderr, surviving
     # candidates classified AlreadyEnrolled (keyfile from Test 1).

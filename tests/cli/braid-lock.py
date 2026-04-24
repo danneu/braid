@@ -58,7 +58,14 @@ with subtest("Test 1: happy path — mounted pool locks cleanly"):
     for k in ["disk1", "disk2", "disk3"]:
         machine.succeed(f"test -e /dev/mapper/braid-{k}")
 
-    machine.succeed("braid lock")
+    machine.succeed("braid lock >/tmp/live-stdout 2>/tmp/live-stderr")
+    live_stderr = machine.succeed("cat /tmp/live-stderr")
+    assert "unmounted /mnt/storage" in live_stderr, (
+        f"expected live lock stderr row, got: {live_stderr!r}"
+    )
+    assert "\x1b[" not in live_stderr, (
+        f"lock stderr must be plain without a TTY, got: {live_stderr!r}"
+    )
 
     # Pool unmounted
     machine.fail("mountpoint -q /mnt/storage")
@@ -144,6 +151,7 @@ with subtest("Test 5: dry-run preview goes to stdout"):
     stderr = machine.succeed("cat /tmp/lock-stderr")
 
     assert stdout == "nothing to do.\n", f"unexpected stdout: {stdout!r}"
+    assert "\x1b[" not in stdout, f"dry-run stdout must be plain without a TTY: {stdout!r}"
     assert stderr == "", f"expected empty stderr, got: {stderr!r}"
 
 machine.shutdown()

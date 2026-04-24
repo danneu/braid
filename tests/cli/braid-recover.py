@@ -157,6 +157,9 @@ with subtest("Test 3a: dry-run preserved-context failure -> stdout empty, stderr
     assert "[skip]  disk: disk3" in err, (
         "stderr must contain the absent-disk skip note; got: {!r}".format(err)
     )
+    assert "\x1b[" not in err, (
+        "stderr must be plain without a TTY; got: {!r}".format(err)
+    )
     # Banner + per-disk notes precede the refusal message.
     banner_pos = err.find("Recovering from interrupted")
     disk3_pos = err.find("[skip]  disk: disk3")
@@ -203,6 +206,9 @@ with subtest("Test 3b: dry-run stepful not-mounted -> stdout has banner+notes+st
         assert marker in out, (
             "stdout must contain probe note {!r}; got: {!r}".format(marker, out)
         )
+    assert "\x1b[" not in out, (
+        "stdout must be plain without a TTY; got: {!r}".format(out)
+    )
     assert "LUKS open" in out, (
         "stdout must contain LUKS open step; got: {!r}".format(out)
     )

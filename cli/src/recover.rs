@@ -208,7 +208,11 @@ impl RecoverPlan {
         // calls with byte-identical output in the same order.
         eprint!(
             "{}",
-            preview::render_notes_for_stderr(&self.notes, Self::STDERR_STYLE),
+            preview::render_notes_for_stderr_with(
+                &self.notes,
+                Self::STDERR_STYLE,
+                crate::status_tag::color_enabled_for_stderr(),
+            ),
         );
 
         let RecoverPlan {
@@ -558,14 +562,18 @@ pub fn cmd_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             // `mount::print_probe_events` + `?` sequence.
             eprint!(
                 "{}",
-                preview::render_notes_for_stderr(&report.notes, RecoverPlan::STDERR_STYLE),
+                preview::render_notes_for_stderr_with(
+                    &report.notes,
+                    RecoverPlan::STDERR_STYLE,
+                    crate::status_tag::color_enabled_for_stderr(),
+                ),
             );
             return Err(e);
         }
     };
 
     if params.dry_run {
-        plan.preview().print();
+        plan.preview().print_colored();
         return Ok(());
     }
 

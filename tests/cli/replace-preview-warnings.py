@@ -163,6 +163,9 @@ with subtest("Phase 1: live-path --dry-run prints preview on stdout, stderr empt
         f"dry-run stderr must not carry the keyfile-asymmetry body;"
         f" got: {err!r}"
     )
+    assert "\x1b[" not in out, (
+        f"dry-run stdout must be plain without a TTY; got: {out!r}"
+    )
 
 with subtest("Phase 1b: failed keyfile probe becomes dry-run warning"):
     # Intent: when cryptsetup luksDump fails, replace --dry-run must emit

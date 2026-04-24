@@ -376,7 +376,11 @@ impl EnrollPlan {
         // `eprintln!` path.
         eprint!(
             "{}",
-            preview::render_notes_for_stderr(&self.notes, Self::STDERR_STYLE)
+            preview::render_notes_for_stderr_with(
+                &self.notes,
+                Self::STDERR_STYLE,
+                crate::status_tag::color_enabled_for_stderr(),
+            )
         );
 
         let passphrase = luks::read_passphrase(params.passphrase_file, params.passphrase_stdin)?;
@@ -519,14 +523,18 @@ pub fn cmd_enroll_key_file<R: CommandRunner, F: Filesystem + ?Sized>(
             // the no-candidates path.
             eprint!(
                 "{}",
-                preview::render_notes_for_stderr(&report.notes, EnrollPlan::STDERR_STYLE)
+                preview::render_notes_for_stderr_with(
+                    &report.notes,
+                    EnrollPlan::STDERR_STYLE,
+                    crate::status_tag::color_enabled_for_stderr(),
+                )
             );
             return Err(e);
         }
     };
 
     if params.dry_run {
-        plan.preview().print();
+        plan.preview().print_colored();
         return Ok(());
     }
 
