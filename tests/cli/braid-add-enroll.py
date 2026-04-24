@@ -90,4 +90,79 @@ with subtest("Test 3: passphrase still works"):
     content = machine.succeed("cat /mnt/storage/test.txt").strip()
     assert content == "add-enroll test", f"Expected 'add-enroll test', got '{content}'"
 
+# --- Test 4: keyfile-asymmetry warning routing (dry-run vs real-run) ---
+#
+# Intent: `braid add disk3` on a pool where the existing drives carry a
+# keyfile (keyslot-1), but the add omits `--enroll`, must surface the
+# keyfile-asymmetry diagnostic on the correct stream for each mode:
+#   - `--dry-run`: stdout includes `[warn]  Existing pool drives have a
+#     keyfile (keyslot-1) ...`; stderr is empty.
+#   - real-run: stderr contains the exact legacy three-line `WARNING:`
+#     block (including the trailing blank line), byte-for-byte.
+#
+# Why it exists: PR 7 moves the legacy `WARNING:` eprintln! from a raw
+# stderr write into a `PreviewNote::Warn` whose body is shared between
+# dry-run and real-run. A regression that left `WARNING:` baked into the
+# note body, dropped the trailing blank line, or routed the dry-run
+# diagnostic back to stderr would still exit 0 and slip past the
+# existing --enroll coverage.
+#
+# Scenario: after Test 3 the pool has both disk1 and disk2 with
+# keyslot-1 populated. Operator wants to add disk3, forgets `--enroll`.
+
+def add_cmd_disk3(extra=""):
+    pq = shlex.quote(passphrase)
+    return (
+        f"printf '%s\\n' {pq} | "
+        f"BRAID_LUKS_OPTS='{luks_opts}' "
+        f"braid add disk3=/dev/disk/by-id/virtio-disk3 --passphrase-stdin --yes {extra}"
+    )
+
+
+with subtest("Test 4a: keyfile-asymmetry dry-run -> stdout [warn], stderr empty"):
+    # Pool is mounted from Test 3, both disks have keyslot-1.
+    machine.succeed("mountpoint -q /mnt/storage")
+
+    machine.succeed(
+        f"{add_cmd_disk3('--dry-run')} >/tmp/ka-stdout 2>/tmp/ka-stderr"
+    )
+    out = machine.succeed("cat /tmp/ka-stdout")
+    err = machine.succeed("cat /tmp/ka-stderr")
+
+    assert "[warn]  Existing pool drives have a keyfile (keyslot-1)" in out, (
+        "dry-run stdout must surface the keyfile-asymmetry Warn; got: {!r}".format(out)
+    )
+    assert "WARNING:" not in out, (
+        "dry-run must NOT carry the legacy `WARNING:` prefix in the note body; got: {!r}".format(out)
+    )
+    assert err == "", (
+        "dry-run stderr must be empty on success; got: {!r}".format(err)
+    )
+
+with subtest("Test 4b: keyfile-asymmetry real-run -> stderr has exact WARNING block"):
+    # Real-run needs a fresh stderr fixture, so close + remount the pool
+    # once to clear state, then add disk3 for real. The pool must stay
+    # mounted with both disks open so pool_has_keyfile_enrollment sees
+    # keyslot-1 on the live pool member.
+    machine.succeed("mountpoint -q /mnt/storage")
+
+    # Pipe stderr to a file; stdout discarded. Expect success.
+    machine.succeed(
+        f"{add_cmd_disk3()} >/tmp/rka-stdout 2>/tmp/rka-stderr"
+    )
+    err = machine.succeed("cat /tmp/rka-stderr")
+
+    expected_block = (
+        "WARNING: Existing pool drives have a keyfile (keyslot-1) for auto-unlock,"
+        " but the new drive will not.\n"
+        "  Passphrase unlock still works, but the keyfile won't unlock the new drive"
+        " until it's enrolled.\n"
+        "  Fix: re-run with --enroll <dir>, or run `braid enroll <dir>` afterward.\n"
+        "\n"
+    )
+    assert expected_block in err, (
+        "real-run stderr must contain the exact legacy 3-line WARNING block"
+        " (with trailing blank line); got: {!r}".format(err)
+    )
+
 machine.shutdown()
