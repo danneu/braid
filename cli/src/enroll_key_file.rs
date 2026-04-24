@@ -3,6 +3,7 @@ use crate::config::mapper_name;
 use crate::luks::{self, KeySlotState, LuksError, VerifyOutcome, KEYFILE_SIZE, LUKS_SLOT_KEYFILE};
 use crate::membership::PoolMembership;
 use crate::preflight;
+use crate::preview::{self, NoteLevel, PerDiskStyle, Preview, PreviewCompleteness, PreviewNote};
 use crate::probe::{self, Filesystem};
 use crate::state_paths::StatePaths;
 use crate::types::{ByIdPath, ConfigDiskState};
@@ -49,23 +50,44 @@ enum EnrollmentPlanMode {
     GenerateNew,
 }
 
-/// Discovery phase: iterate membership disks and collect present LUKS candidates.
-/// Absent and non-LUKS disks are silently skipped.
-/// Errors if zero candidates found.
+/// Discovery phase: iterate membership disks and collect present LUKS
+/// candidates. Absent and non-LUKS disks become `PreviewNote::PerDisk`
+/// Skip notes accumulated alongside the candidate list. The caller
+/// routes notes to the appropriate channel (dry-run stdout via
+/// `Preview::render`, real-run stderr prelude, or failure-path stderr
+/// via `render_notes_for_stderr`). Probe errors propagate with any
+/// notes accumulated so far; zero candidates after the loop is a
+/// preserved-context failure.
 fn discover_enrollment_candidates<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
     membership: &PoolMembership,
-) -> Result<Vec<(String, ByIdPath)>, EnrollKeyFileError> {
-    let mut candidates = Vec::new();
+) -> (
+    Vec<PreviewNote>,
+    Result<Vec<(String, ByIdPath)>, EnrollKeyFileError>,
+) {
+    let mut notes: Vec<PreviewNote> = Vec::new();
+    let mut candidates: Vec<(String, ByIdPath)> = Vec::new();
+
     for (name, member) in &membership.disks {
-        let probed = probe::probe_config_disk(runner, fs, name, &member.by_id)?;
+        let probed = match probe::probe_config_disk(runner, fs, name, &member.by_id) {
+            Ok(p) => p,
+            Err(e) => return (notes, Err(e.into())),
+        };
         match &probed.state {
             ConfigDiskState::Absent => {
-                eprintln!("skip: {} not present", name);
+                notes.push(PreviewNote::PerDisk {
+                    name: name.clone(),
+                    level: NoteLevel::Skip,
+                    message: "not present".into(),
+                });
             }
             ConfigDiskState::PresentNotLuks => {
-                eprintln!("skip: {} not LUKS-formatted", name);
+                notes.push(PreviewNote::PerDisk {
+                    name: name.clone(),
+                    level: NoteLevel::Skip,
+                    message: "not LUKS-formatted".into(),
+                });
             }
             ConfigDiskState::PresentLuks { .. } => {
                 candidates.push((name.clone(), member.by_id.clone()));
@@ -74,12 +96,15 @@ fn discover_enrollment_candidates<R: CommandRunner, F: Filesystem + ?Sized>(
     }
 
     if candidates.is_empty() {
-        return Err(EnrollKeyFileError::Validation(
-            "no present LUKS disks found to enroll keyfile into".into(),
-        ));
+        return (
+            notes,
+            Err(EnrollKeyFileError::Validation(
+                "no present LUKS disks found to enroll keyfile into".into(),
+            )),
+        );
     }
 
-    Ok(candidates)
+    (notes, Ok(candidates))
 }
 
 /// Verify the supplied passphrase against the first candidate disk.
@@ -299,115 +324,213 @@ pub struct EnrollKeyFileParams<'a> {
     pub paths: &'a StatePaths,
 }
 
-pub fn cmd_enroll_key_file<R: CommandRunner, F: Filesystem + ?Sized>(
-    runner: &R,
-    fs: &F,
-    params: &EnrollKeyFileParams<'_>,
-) -> Result<(), EnrollKeyFileError> {
-    preflight::check_no_pending_operation(params.paths).map_err(EnrollKeyFileError::Validation)?;
+/// Report returned by `plan_enroll`. On the `Ok` branch, `notes` is
+/// always empty and all accumulated per-disk skip notes live on
+/// `EnrollPlan.notes` (the single source of truth for successful
+/// preview + real-run stderr prelude). On the `Err` branch, `notes`
+/// carries the discovery notes accumulated before the failure so the
+/// caller can render them to stderr before the error -- preserving
+/// today's "skip: <name> not present" lines that printed before the
+/// "no present LUKS disks" error.
+#[derive(Debug)]
+pub struct EnrollPlanReport {
+    pub notes: Vec<PreviewNote>,
+    pub result: Result<EnrollPlan, EnrollKeyFileError>,
+}
 
-    if params.generate {
-        // --generate: keyfile must NOT exist
-        if params.key_file_path.exists() {
-            return Err(EnrollKeyFileError::Validation(format!(
-                "braid.key already exists at {}; remove it manually if you want to generate a new one",
-                params.key_file_path.display()
-            )));
+/// Dry-run preview source of truth for `braid enroll` plus the
+/// execute inputs pre-computed during planning. `notes` + `steps` are
+/// both rendered by `preview()`; `execute()` renders `notes` to stderr
+/// (using `STDERR_STYLE`) before any mutation.
+#[derive(Debug)]
+pub struct EnrollPlan {
+    pub notes: Vec<PreviewNote>,
+    pub steps: Vec<Step>,
+    pub candidates: Vec<(String, ByIdPath)>,
+    pub generate: bool,
+}
+
+impl EnrollPlan {
+    /// Real-run and failure-path stderr both use `Plain` for `enroll`
+    /// so today's pre-passphrase `skip: <name> not present` wording
+    /// survives the migration byte-for-byte. `Preview::render` itself
+    /// always uses `Bracketed`, so dry-run stdout wording differs --
+    /// the "two products, two formats" call-out in the plan.
+    pub const STDERR_STYLE: PerDiskStyle = PerDiskStyle::Plain;
+
+    pub fn preview(&self) -> Preview {
+        Preview {
+            completeness: PreviewCompleteness::Complete,
+            notes: self.notes.clone(),
+            steps: self.steps.clone(),
         }
+    }
 
-        // 1. Discover candidates
-        let candidates = discover_enrollment_candidates(runner, fs, params.membership)?;
+    pub fn execute<R: CommandRunner>(
+        self,
+        runner: &R,
+        params: &EnrollKeyFileParams<'_>,
+    ) -> Result<(), EnrollKeyFileError> {
+        // Pre-passphrase: emit accumulated skip notes to stderr, same
+        // wording as today's `skip: <name> ...` lines from the direct
+        // `eprintln!` path.
+        eprint!(
+            "{}",
+            preview::render_notes_for_stderr(&self.notes, Self::STDERR_STYLE)
+        );
 
-        // Dry-run: show what would happen, skip passphrase + mutations
-        if params.dry_run {
-            let steps = compile_enroll_steps(
-                &candidates,
-                params.key_file_path,
-                params.generate,
-                params.paths,
-            );
-            Step::print_dry_run(&steps);
-            return Ok(());
-        }
-
-        // 2. Read passphrase
         let passphrase = luks::read_passphrase(params.passphrase_file, params.passphrase_stdin)?;
 
-        // 3. Plan enrollment (preflight: passphrase + slot conflict detection).
-        //    GenerateNew skips the keyfile probe -- the file does not exist yet.
-        let plan = plan_enrollment(
+        let mode = if self.generate {
+            EnrollmentPlanMode::GenerateNew
+        } else {
+            EnrollmentPlanMode::ExistingKeyfile
+        };
+        // `plan_enrollment` emits the `ok:` / `enroll:` status lines
+        // directly on stderr -- intentionally scoped out of this
+        // migration (they require a resolved passphrase and must not
+        // leak before a wrong-passphrase error).
+        let enrollment = plan_enrollment(
             runner,
-            &candidates,
+            &self.candidates,
             params.key_file_path,
             &passphrase,
-            EnrollmentPlanMode::GenerateNew,
+            mode,
         )?;
 
-        // 4. Only if preflight passes: generate keyfile
-        generate_key_file(params.key_file_path)?;
-        eprintln!("ok: generated {}", params.key_file_path.display());
+        if self.generate {
+            generate_key_file(params.key_file_path)?;
+            eprintln!("ok: generated {}", params.key_file_path.display());
+        }
 
-        // 5. Apply enrollment
         apply_enrollment(
             runner,
-            &plan,
+            &enrollment,
             &passphrase,
             params.key_file_path,
             params.paths,
         )?;
-    } else {
-        // Existing flow: keyfile must exist
-        if !params.key_file_path.exists() {
+
+        Ok(())
+    }
+}
+
+/// No-context preview-generation failure for bad `--key-file` paths.
+/// Lives in `plan_enroll` so cmd-level code has a single planner
+/// entry point. Failures here have no accumulated notes.
+fn validate_key_file_path(key_file_path: &Path, generate: bool) -> Result<(), EnrollKeyFileError> {
+    if generate {
+        if key_file_path.exists() {
             return Err(EnrollKeyFileError::Validation(format!(
-                "keyfile not found: {}",
-                params.key_file_path.display()
+                "braid.key already exists at {}; remove it manually if you want to generate a new one",
+                key_file_path.display()
             )));
         }
-        let meta = std::fs::metadata(params.key_file_path).map_err(|e| {
+    } else {
+        if !key_file_path.exists() {
+            return Err(EnrollKeyFileError::Validation(format!(
+                "keyfile not found: {}",
+                key_file_path.display()
+            )));
+        }
+        let meta = std::fs::metadata(key_file_path).map_err(|e| {
             EnrollKeyFileError::Validation(format!(
                 "cannot read keyfile {}: {e}",
-                params.key_file_path.display()
+                key_file_path.display()
             ))
         })?;
         if !meta.is_file() {
             return Err(EnrollKeyFileError::Validation(format!(
                 "keyfile is not a regular file: {}",
-                params.key_file_path.display()
+                key_file_path.display()
             )));
         }
+    }
+    Ok(())
+}
 
-        let candidates = discover_enrollment_candidates(runner, fs, params.membership)?;
-
-        // Dry-run: show what would happen, skip passphrase + mutations
-        if params.dry_run {
-            let steps = compile_enroll_steps(
-                &candidates,
-                params.key_file_path,
-                params.generate,
-                params.paths,
-            );
-            Step::print_dry_run(&steps);
-            return Ok(());
-        }
-
-        let passphrase = luks::read_passphrase(params.passphrase_file, params.passphrase_stdin)?;
-        let plan = plan_enrollment(
-            runner,
-            &candidates,
-            params.key_file_path,
-            &passphrase,
-            EnrollmentPlanMode::ExistingKeyfile,
-        )?;
-        apply_enrollment(
-            runner,
-            &plan,
-            &passphrase,
-            params.key_file_path,
-            params.paths,
-        )?;
+/// Plan a `braid enroll` run. Owns the pending-op preflight,
+/// keyfile-path validation, and pre-passphrase discovery. Per-disk
+/// skip notes land on `EnrollPlan.notes` when discovery produces at
+/// least one candidate, or on `EnrollPlanReport.notes` when the
+/// planner bails (e.g. no candidates, mid-loop probe error).
+pub fn plan_enroll<R: CommandRunner, F: Filesystem + ?Sized>(
+    runner: &R,
+    fs: &F,
+    membership: &PoolMembership,
+    key_file_path: &Path,
+    generate: bool,
+    paths: &StatePaths,
+) -> EnrollPlanReport {
+    if let Err(msg) = preflight::check_no_pending_operation(paths) {
+        return EnrollPlanReport {
+            notes: Vec::new(),
+            result: Err(EnrollKeyFileError::Validation(msg)),
+        };
     }
 
-    Ok(())
+    if let Err(e) = validate_key_file_path(key_file_path, generate) {
+        return EnrollPlanReport {
+            notes: Vec::new(),
+            result: Err(e),
+        };
+    }
+
+    let (notes, discovery) = discover_enrollment_candidates(runner, fs, membership);
+    match discovery {
+        Ok(candidates) => {
+            let steps = compile_enroll_steps(&candidates, key_file_path, generate, paths);
+            EnrollPlanReport {
+                notes: Vec::new(),
+                result: Ok(EnrollPlan {
+                    notes,
+                    steps,
+                    candidates,
+                    generate,
+                }),
+            }
+        }
+        Err(e) => EnrollPlanReport {
+            notes,
+            result: Err(e),
+        },
+    }
+}
+
+pub fn cmd_enroll_key_file<R: CommandRunner, F: Filesystem + ?Sized>(
+    runner: &R,
+    fs: &F,
+    params: &EnrollKeyFileParams<'_>,
+) -> Result<(), EnrollKeyFileError> {
+    let report = plan_enroll(
+        runner,
+        fs,
+        params.membership,
+        params.key_file_path,
+        params.generate,
+        params.paths,
+    );
+    let plan = match report.result {
+        Ok(p) => p,
+        Err(e) => {
+            // Preserved-context failure: accumulated skip notes render
+            // to stderr before the error message, mirroring today's
+            // `eprintln!("skip: ...")` + validation-error sequence on
+            // the no-candidates path.
+            eprint!(
+                "{}",
+                preview::render_notes_for_stderr(&report.notes, EnrollPlan::STDERR_STYLE)
+            );
+            return Err(e);
+        }
+    };
+
+    if params.dry_run {
+        plan.preview().print();
+        return Ok(());
+    }
+
+    plan.execute(runner, params)
 }
 
 #[cfg(test)]
@@ -601,15 +724,24 @@ mod tests {
         )
     }
 
-    // ---- discover_enrollment_candidates tests ----
+    // ---- plan_enroll discovery tests ----
+    //
+    // These tests exercise `plan_enroll(..., generate=true, ...)` because
+    // `--generate` requires the keyfile path to NOT exist, so the temp
+    // path (never created) satisfies the pre-discovery validation with
+    // zero setup. Mode choice is irrelevant to the discovery behavior
+    // being asserted here.
 
     /*
-     * Intent: verify that two present LUKS disks are both returned as candidates.
-     * Why: ensures the discovery phase correctly identifies all eligible disks.
+     * Intent: verify that two present LUKS disks are both returned as
+     *   candidates with zero accumulated skip notes.
+     * Why: ensures the discovery phase correctly identifies all
+     *   eligible disks on the happy path and does not synthesize
+     *   spurious notes when every member is present and LUKS.
      * Scenario: normal 2-disk pool, both disks present and LUKS-formatted.
      */
     #[test]
-    fn discover_two_present_luks_disks() {
+    fn plan_discover_two_present_luks_disks() {
         let (req1, out1) = luks_uuid_ok("/dev/disk/by-id/d1");
         let (req2, out2) = luks_uuid_ok("/dev/disk/by-id/d2");
         let runner = MockRunner::default()
@@ -623,20 +755,35 @@ mod tests {
             ("disk1", "/dev/disk/by-id/d1"),
             ("disk2", "/dev/disk/by-id/d2"),
         ]);
+        let (tmp, paths) = test_paths();
+        let kf = tmp.path().join("braid.key");
 
-        let result = discover_enrollment_candidates(&runner, &fs, &membership).unwrap();
-        assert_eq!(result.len(), 2);
-        assert_eq!(result[0].0, "disk1");
-        assert_eq!(result[1].0, "disk2");
+        let report = plan_enroll(&runner, &fs, &membership, &kf, true, &paths);
+        assert!(
+            report.notes.is_empty(),
+            "report.notes should be empty on success"
+        );
+        let plan = report.result.expect("plan_enroll should succeed");
+        assert_eq!(plan.candidates.len(), 2);
+        assert_eq!(plan.candidates[0].0, "disk1");
+        assert_eq!(plan.candidates[1].0, "disk2");
+        assert!(
+            plan.notes.is_empty(),
+            "plan.notes should be empty when all candidates present"
+        );
     }
 
     /*
-     * Intent: verify skip semantics for absent disks.
-     * Why: absent disks should be silently skipped, not cause errors.
+     * Intent: an absent disk becomes a `PreviewNote::PerDisk { Skip }`
+     *   on the successful plan, alongside the surviving LUKS candidate.
+     * Why: the migration must replace today's `eprintln!("skip: X not
+     *   present")` with a note surfaced via Preview/render_notes_for_stderr.
+     *   Asserts both the candidate survives and the skip note shape/body
+     *   are preserved.
      * Scenario: 2-disk pool but one disk is unplugged.
      */
     #[test]
-    fn discover_one_absent_one_present() {
+    fn plan_discover_absent_disk_accumulates_skip_note() {
         let (req, out) = luks_uuid_ok("/dev/disk/by-id/d2");
         let runner = MockRunner::default()
             .with_output(req, out)
@@ -647,19 +794,43 @@ mod tests {
             ("disk1", "/dev/disk/by-id/d1"),
             ("disk2", "/dev/disk/by-id/d2"),
         ]);
+        let (tmp, paths) = test_paths();
+        let kf = tmp.path().join("braid.key");
 
-        let result = discover_enrollment_candidates(&runner, &fs, &membership).unwrap();
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].0, "disk2");
+        let report = plan_enroll(&runner, &fs, &membership, &kf, true, &paths);
+        assert!(
+            report.notes.is_empty(),
+            "report.notes should be empty on success"
+        );
+        let plan = report
+            .result
+            .expect("plan_enroll should succeed with one candidate");
+        assert_eq!(plan.candidates.len(), 1);
+        assert_eq!(plan.candidates[0].0, "disk2");
+        assert_eq!(plan.notes.len(), 1);
+        match &plan.notes[0] {
+            PreviewNote::PerDisk {
+                name,
+                level,
+                message,
+            } => {
+                assert_eq!(name, "disk1");
+                assert!(matches!(level, NoteLevel::Skip));
+                assert_eq!(message, "not present");
+            }
+            other => panic!("expected PerDisk Skip note, got {other:?}"),
+        }
     }
 
     /*
-     * Intent: verify skip semantics for non-LUKS disks.
-     * Why: disks without LUKS headers can't have keyfiles enrolled.
+     * Intent: a present-but-non-LUKS disk becomes a Skip note with
+     *   body `not LUKS-formatted`, alongside the surviving LUKS candidate.
+     * Why: distinguishes non-LUKS skip wording from absent-disk wording;
+     *   drift here would silently change user-visible stderr text.
      * Scenario: config lists a disk that isn't LUKS-formatted yet.
      */
     #[test]
-    fn discover_one_not_luks_one_luks() {
+    fn plan_discover_non_luks_disk_accumulates_skip_note() {
         let (req1, out1) = luks_uuid_not_luks("/dev/disk/by-id/d1");
         let (req2, out2) = luks_uuid_ok("/dev/disk/by-id/d2");
         let runner = MockRunner::default()
@@ -672,51 +843,156 @@ mod tests {
             ("disk1", "/dev/disk/by-id/d1"),
             ("disk2", "/dev/disk/by-id/d2"),
         ]);
+        let (tmp, paths) = test_paths();
+        let kf = tmp.path().join("braid.key");
 
-        let result = discover_enrollment_candidates(&runner, &fs, &membership).unwrap();
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].0, "disk2");
+        let report = plan_enroll(&runner, &fs, &membership, &kf, true, &paths);
+        assert!(report.notes.is_empty());
+        let plan = report.result.expect("plan_enroll should succeed");
+        assert_eq!(plan.candidates.len(), 1);
+        assert_eq!(plan.candidates[0].0, "disk2");
+        assert_eq!(plan.notes.len(), 1);
+        match &plan.notes[0] {
+            PreviewNote::PerDisk {
+                name,
+                level,
+                message,
+            } => {
+                assert_eq!(name, "disk1");
+                assert!(matches!(level, NoteLevel::Skip));
+                assert_eq!(message, "not LUKS-formatted");
+            }
+            other => panic!("expected PerDisk Skip note, got {other:?}"),
+        }
     }
 
     /*
-     * Intent: verify error when all disks are absent.
-     * Why: there's nothing to enroll into, the user should know.
+     * Intent: when every membership disk is absent, `plan_enroll`
+     *   returns `Err(no present LUKS disks...)` with *all* accumulated
+     *   skip notes preserved on `report.notes` -- the preserved-context
+     *   failure contract.
+     * Why: this pins the shape A failure path for `enroll`. Today's
+     *   behavior prints each `skip:` line before the validation error;
+     *   the migrated code must surface the same ordered context so the
+     *   cmd wrapper can render skips-then-error to stderr.
      * Scenario: all disks unplugged.
      */
     #[test]
-    fn discover_all_absent_errors() {
+    fn plan_all_absent_preserves_skip_notes_in_err() {
         let runner = MockRunner::default();
         let fs = MockFs::new(&[]);
-        let membership = make_membership(&[("disk1", "/dev/disk/by-id/d1")]);
+        let membership = make_membership(&[
+            ("disk1", "/dev/disk/by-id/d1"),
+            ("disk2", "/dev/disk/by-id/d2"),
+        ]);
+        let (tmp, paths) = test_paths();
+        let kf = tmp.path().join("braid.key");
 
-        let result = discover_enrollment_candidates(&runner, &fs, &membership);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
+        let report = plan_enroll(&runner, &fs, &membership, &kf, true, &paths);
+        let err = report.result.expect_err("expected no-candidates error");
         assert!(
             err.to_string().contains("no present LUKS disks found"),
             "unexpected error: {err}"
         );
+        assert_eq!(
+            report.notes.len(),
+            2,
+            "both skip notes must survive the Err branch"
+        );
+        for (i, name) in ["disk1", "disk2"].iter().enumerate() {
+            match &report.notes[i] {
+                PreviewNote::PerDisk {
+                    name: actual_name,
+                    level,
+                    message,
+                } => {
+                    assert_eq!(actual_name, name);
+                    assert!(matches!(level, NoteLevel::Skip));
+                    assert_eq!(message, "not present");
+                }
+                other => panic!("expected PerDisk Skip, got {other:?}"),
+            }
+        }
     }
 
     /*
-     * Intent: verify error when all present disks are non-LUKS.
-     * Why: same as absent case — nothing to enroll into.
+     * Intent: when every membership disk is present but non-LUKS,
+     *   `plan_enroll` errors with preserved `not LUKS-formatted` skip
+     *   notes.
+     * Why: same preserved-context contract as all-absent, distinct
+     *   skip-body path (non-LUKS vs. absent).
      * Scenario: disks are present but not yet LUKS-formatted.
      */
     #[test]
-    fn discover_all_not_luks_errors() {
+    fn plan_all_not_luks_preserves_skip_notes_in_err() {
         let (req, out) = luks_uuid_not_luks("/dev/disk/by-id/d1");
         let runner = MockRunner::default().with_output(req, out);
         let fs = MockFs::new(&["/dev/disk/by-id/d1"]);
         let membership = make_membership(&[("disk1", "/dev/disk/by-id/d1")]);
+        let (tmp, paths) = test_paths();
+        let kf = tmp.path().join("braid.key");
 
-        let result = discover_enrollment_candidates(&runner, &fs, &membership);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
+        let report = plan_enroll(&runner, &fs, &membership, &kf, true, &paths);
+        let err = report.result.expect_err("expected no-candidates error");
         assert!(
             err.to_string().contains("no present LUKS disks found"),
             "unexpected error: {err}"
         );
+        assert_eq!(report.notes.len(), 1);
+        match &report.notes[0] {
+            PreviewNote::PerDisk {
+                name,
+                level,
+                message,
+            } => {
+                assert_eq!(name, "disk1");
+                assert!(matches!(level, NoteLevel::Skip));
+                assert_eq!(message, "not LUKS-formatted");
+            }
+            other => panic!("expected PerDisk Skip, got {other:?}"),
+        }
+    }
+
+    /*
+     * Intent: the same accumulated Skip note renders bracketed in the
+     *   dry-run `Preview` (stdout), and plain via
+     *   `render_notes_for_stderr(..., Plain)` (real-run/failure stderr).
+     * Why: the plan deliberately keeps enroll's real-run stderr wording
+     *   as plain `skip: X not present` (byte-identical to today), while
+     *   dry-run stdout uses the canonical bracketed shape. This pins
+     *   both renderings to the single source-of-truth note on the plan.
+     * Scenario: 1 absent + 1 present LUKS; plan.notes carries a single
+     *   Skip note and we assert both stdout-shape and stderr-shape
+     *   contain the disk1-skip line with their respective formats.
+     */
+    #[test]
+    fn plan_skip_note_renders_bracketed_in_preview_and_plain_in_stderr() {
+        let (req, out) = luks_uuid_ok("/dev/disk/by-id/d2");
+        let runner = MockRunner::default()
+            .with_output(req, out)
+            .with_luks_dump_text_luks2("/dev/disk/by-id/d2")
+            .with_mapper_closed("braid-disk2");
+        let fs = MockFs::new(&["/dev/disk/by-id/d2"]);
+        let membership = make_membership(&[
+            ("disk1", "/dev/disk/by-id/d1"),
+            ("disk2", "/dev/disk/by-id/d2"),
+        ]);
+        let (tmp, paths) = test_paths();
+        let kf = tmp.path().join("braid.key");
+
+        let plan = plan_enroll(&runner, &fs, &membership, &kf, true, &paths)
+            .result
+            .expect("plan_enroll should succeed");
+
+        let rendered_stdout = plan.preview().render();
+        assert!(
+            rendered_stdout.contains("[skip]  disk: disk1     not present\n"),
+            "bracketed skip missing from preview stdout: {rendered_stdout}"
+        );
+
+        let rendered_stderr =
+            preview::render_notes_for_stderr(&plan.notes, EnrollPlan::STDERR_STYLE);
+        assert_eq!(rendered_stderr, "skip: disk1 not present\n");
     }
 
     // ---- plan_enrollment tests ----
