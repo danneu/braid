@@ -29,6 +29,7 @@
         braid
         pkgs.cryptsetup
         pkgs.btrfs-progs
+        pkgs.jq
       ];
 
       environment.etc."braid/config.json".text = builtins.toJSON {

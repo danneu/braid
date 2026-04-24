@@ -114,39 +114,90 @@ with subtest("Test 4: slot conflict prevents keyfile creation"):
     # Verify keyfile was NOT created (preflight prevented generation)
     machine.fail("test -f /tmp/usb/braid.key")
 
-# --- Test 5: No-candidates preserved-context failure ---
+# --- Test 5: dry-run + real-run surface mixed skip notes (both variants) ---
 #
-# Intent: verify that when every pool member is non-LUKS, a real-run
-# `braid enroll` prints each accumulated `skip: <name> not LUKS-
-# formatted` line to stderr *before* the `no present LUKS disks
-# found...` validation error -- the preserved-context failure
-# contract for the Shape A `enroll` migration.
+# Intent: verify that discovery skip notes render correctly on BOTH
+# the dry-run success path (bracketed on stdout, stderr empty) and
+# the real-run no-candidates failure path (plain on stderr,
+# preceding the validation error). Covers both skip variants: the
+# `PresentNotLuks` branch via wipefs, and the `Absent` branch via a
+# pool.json edit pointing disk2 at a nonexistent by-id path.
 #
-# Why it exists: the `Preview` migration converted today's direct
-# `eprintln!("skip: ...")` calls to `PreviewNote::PerDisk { Skip }`
-# entries accumulated on the `EnrollPlanReport`. On the `Err` branch
-# the cmd wrapper renders those notes to stderr before propagating
-# the error. A regression that dropped the notes on failure -- or
-# re-ordered them after the error -- would silently strip the
-# user-visible discovery context that explains *why* no candidates
-# were found.
+# Why it exists: the `Preview` migration turned today's direct
+# `eprintln!("skip: X not present")` and
+# `eprintln!("skip: X not LUKS-formatted")` lines into a single
+# `PreviewNote::PerDisk { Skip }` shape. Two regressions must be
+# caught here:
+#   1. Dry-run stream routing: the skip notes must appear on stdout
+#      (via `Preview::render`, bracketed), not stderr. A regression
+#      that left them on stderr would silently violate the project-
+#      wide "successful --dry-run = empty stderr" rule.
+#   2. Preserved-context failure: on the no-candidates Err branch,
+#      the same notes must render on stderr (via
+#      `render_notes_for_stderr(.., Plain)`) *before* the validation
+#      error, preserving today's stderr ordering byte-for-byte.
 #
 # Scenario: after Test 4, both disks are LUKS-formatted with slot-1
-# in unusual states. We wipe both LUKS headers so discovery sees
-# both disks as PresentNotLuks, producing zero candidates. The
-# destructive wipefs is safe here -- this is the last subtest, and
+# in unusual states. We wipe disk1's LUKS header (PresentNotLuks)
+# and rewrite pool.json so disk2 points at a fabricated by-id path
+# that does not exist (Absent). This produces zero candidates --
+# dry-run renders the two skip notes + nothing-to-do fallback;
+# real-run renders the two skip notes + validation error. The
+# destructive state is safe here -- this is the last subtest, and
 # the VM is torn down on shutdown.
-with subtest("Test 5: no-candidates preserved-context failure"):
+with subtest("Test 5: dry-run + real-run surface mixed skip notes"):
     close_all()
 
-    # Wipe the LUKS headers so both disks become "not LUKS-formatted"
-    # from braid's point of view. --force is required because wipefs
-    # otherwise refuses to touch a LUKS-formatted block device.
-    for dev in ["virtio-disk1", "virtio-disk2"]:
-        machine.succeed(f"wipefs --all --force /dev/disk/by-id/{dev}")
-
+    # Arrange three membership entries of different probe-state flavors:
+    #   disk1 -- PresentNotLuks via `wipefs --all --force` (requires
+    #            --force because wipefs refuses a LUKS-formatted device).
+    #   disk2 -- PresentLuks, the surviving candidate that keeps
+    #            plan_enroll on the Ok branch so the dry-run preview
+    #            actually renders (a zero-candidate plan returns Err
+    #            in plan_enroll -- there is no "successful dry-run
+    #            with zero steps" once we drop to zero candidates).
+    #   disk3 -- Absent via a pool.json edit pointing its by_id at a
+    #            path udev never populated. probe_config_disk hits
+    #            fs.exists=false and returns ConfigDiskState::Absent.
+    # This setup gives both skip variants (not LUKS-formatted + not
+    # present) on the success path, which is what the dry-run Preview
+    # renders in bracketed form.
+    machine.succeed("wipefs --all --force /dev/disk/by-id/virtio-disk1")
+    machine.succeed(
+        "jq '.disks.disk3 = {\"by_id\": \"/dev/disk/by-id/virtio-missing\"}' "
+        "/var/lib/braid/pool.json > /tmp/pool.json && "
+        "mv /tmp/pool.json /var/lib/braid/pool.json"
+    )
     machine.execute("rm -f /tmp/usb/braid.key")
 
+    # Phase A: dry-run success -- both bracketed skip notes on stdout,
+    # surviving disk2 enroll step also on stdout, stderr empty.
+    machine.succeed(
+        "braid enroll /tmp/usb --generate --dry-run "
+        ">/tmp/mx.out 2>/tmp/mx.err"
+    )
+    mx_out = machine.succeed("cat /tmp/mx.out")
+    mx_err = machine.succeed("cat /tmp/mx.err")
+    assert mx_err == "", (
+        f"successful --dry-run must leave stderr empty, got: {mx_err!r}"
+    )
+    # Bracketed shape is `[skip]  disk: <name:<10>><message>\n` --
+    # matches `format_per_disk_line(.., PerDiskStyle::Bracketed)`.
+    assert "[skip]  disk: disk1     not LUKS-formatted\n" in mx_out, (
+        f"expected bracketed non-LUKS skip for disk1 on stdout, got: {mx_out!r}"
+    )
+    assert "[skip]  disk: disk3     not present\n" in mx_out, (
+        f"expected bracketed absent skip for disk3 on stdout, got: {mx_out!r}"
+    )
+    # Sanity: the surviving candidate (disk2) contributes a step.
+    assert "enroll keyfile" in mx_out, (
+        f"expected enroll step for disk2 on stdout, got: {mx_out!r}"
+    )
+
+    # Phase B: drop to zero candidates, real-run -- preserved-context
+    # failure. All three skip variants render plain on stderr, then
+    # the validation error.
+    machine.succeed("wipefs --all --force /dev/disk/by-id/virtio-disk2")
     pq = shlex.quote(passphrase)
     # NixOS test driver uses `set -euo pipefail`; capture the expected
     # nonzero exit via `|| rc=$?` instead of a bare `; echo $?`.
@@ -159,29 +210,29 @@ with subtest("Test 5: no-candidates preserved-context failure"):
     out = machine.succeed("cat /tmp/noc.out")
     assert rc != "0", f"expected nonzero exit on no-candidates; got rc={rc}"
     assert out == "", f"stdout must be empty on failure path, got: {out!r}"
-    # Each membership disk accumulates a plain skip line, in iteration order.
     assert "skip: disk1 not LUKS-formatted" in err, (
-        f"expected plain skip line for disk1, got: {err!r}"
+        f"expected plain non-LUKS skip for disk1, got: {err!r}"
     )
     assert "skip: disk2 not LUKS-formatted" in err, (
-        f"expected plain skip line for disk2, got: {err!r}"
+        f"expected plain non-LUKS skip for disk2, got: {err!r}"
+    )
+    assert "skip: disk3 not present" in err, (
+        f"expected plain absent skip for disk3, got: {err!r}"
     )
     assert "no present LUKS disks" in err, (
         f"expected no-candidates validation error, got: {err!r}"
     )
-    # Ordering contract: both skip lines precede the validation error.
-    d1_idx = err.find("skip: disk1 not LUKS-formatted")
-    d2_idx = err.find("skip: disk2 not LUKS-formatted")
+    # Ordering contract: all three skip lines precede the error.
     err_idx = err.find("no present LUKS disks")
-    assert d1_idx != -1 and d2_idx != -1 and err_idx != -1, (
-        f"missing expected line(s) in stderr: {err!r}"
-    )
-    assert d1_idx < err_idx, (
-        f"disk1 skip line must precede error; got:\n{err!r}"
-    )
-    assert d2_idx < err_idx, (
-        f"disk2 skip line must precede error; got:\n{err!r}"
-    )
+    for marker in [
+        "skip: disk1 not LUKS-formatted",
+        "skip: disk2 not LUKS-formatted",
+        "skip: disk3 not present",
+    ]:
+        idx = err.find(marker)
+        assert idx < err_idx, (
+            f"expected {marker!r} to precede no-candidates error; got:\n{err!r}"
+        )
     # Keyfile must not have been created on the failure path.
     machine.fail("test -f /tmp/usb/braid.key")
 
