@@ -107,6 +107,14 @@ sudo braid lock
 
 See the [command reference](manual/commands/) for full usage of each command.
 
+## Preview with --dry-run
+
+Every mutating command (`add`, `remove`, `remove-missing`, `replace`, `unlock`, `lock`, `recover`, `enroll`) takes `--dry-run`. A successful dry-run prints one complete preview to stdout -- warnings that qualify the preview are part of it, and stderr stays empty. Real runs may still print confirmations, progress, and failures to stderr.
+
+```sh
+sudo braid add toshiba=/dev/disk/by-id/ata-Toshiba_MN07_XXXX --dry-run
+```
+
 ## Manual
 
 ### Commands
