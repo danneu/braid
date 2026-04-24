@@ -308,6 +308,11 @@
               braid = linuxCrane.braid;
             }
           );
+          replace-preview-warnings = pkgs.testers.nixosTest (
+            import ./tests/cli/replace-preview-warnings.nix {
+              braid = linuxCrane.braid;
+            }
+          );
           tool-versions = pkgs.testers.nixosTest (
             import ./tests/cli/tool-versions.nix {
               braid-cli-unwrapped = linuxCrane.braid-cli-unwrapped;
