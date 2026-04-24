@@ -251,7 +251,7 @@ impl CmdArgs {
 }
 
 /// A step in a dry-run plan.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Step {
     pub risk: &'static str,
     pub description: String,
