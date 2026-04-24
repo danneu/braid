@@ -7,6 +7,7 @@ use crate::membership;
 use crate::parse::parse_btrfs_device_usage;
 use crate::pool::pool_remove_devid;
 use crate::preflight;
+use crate::preview::{Preview, PreviewCompleteness, PreviewNote};
 use crate::probe::{probe_pool, Filesystem, ProbeError};
 use crate::progress::ProgressOutput;
 use crate::state_paths::StatePaths;
@@ -70,59 +71,216 @@ pub struct RemoveMissingParams<'a> {
     pub sleep_inhibitor: &'a dyn AcquireSleepInhibitor,
 }
 
-pub fn cmd_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
+/// Dry-run preview source of truth for `braid remove-missing` plus the
+/// execute inputs pre-computed during planning. `notes` + `steps` are
+/// both rendered by `preview()`; `execute()` consumes the preflight
+/// state (`missing_id`, `missing_count`, `remaining_present`) and
+/// renders any accumulated `Warn` notes to stderr with the legacy
+/// `warning: ` prefix before mutating.
+pub struct RemoveMissingPlan {
+    pub notes: Vec<PreviewNote>,
+    pub steps: Vec<Step>,
+    pub missing_id: u64,
+    pub will_clear_last_missing: bool,
+    pub remaining_present: usize,
+    pub missing_count: u64,
+    pub mount_point: MountPoint,
+}
+
+/// Report returned by `plan_remove_missing`. `plan_remove_missing` has
+/// no pre-validation per-disk probing, so `notes` is always empty on
+/// both branches; the field exists to keep the Shape A contract
+/// uniform across commands.
+pub struct RemoveMissingPlanReport {
+    pub notes: Vec<PreviewNote>,
+    pub result: Result<RemoveMissingPlan, RemoveMissingError>,
+}
+
+impl RemoveMissingPlan {
+    pub fn preview(&self) -> Preview {
+        Preview {
+            completeness: PreviewCompleteness::Complete,
+            notes: self.notes.clone(),
+            steps: self.steps.clone(),
+        }
+    }
+
+    pub fn execute<R: CommandRunner + Sync>(
+        self,
+        runner: &R,
+        params: &RemoveMissingParams<'_>,
+    ) -> Result<(), RemoveMissingError> {
+        // Emit accumulated Warn notes to stderr with the legacy
+        // `warning: <body>` prefix before any mutation. The preview
+        // renders the same note as `[warn]  <body>` on stdout; real-run
+        // stderr preserves the historic wording so VM log scrapers do
+        // not drift.
+        for note in &self.notes {
+            if let PreviewNote::Warn(body) = note {
+                eprintln!("warning: {body}");
+            }
+        }
+
+        // Resolve devid->name from enriched pool.json before confirmation and journal.
+        let pre_membership = membership::load_membership(params.paths).map_err(|e| {
+            RemoveMissingError::Validation(format!("failed to load pool membership: {e}"))
+        })?;
+        let (resolved_devid, name_to_remove) =
+            resolve_removal_target(Some(self.missing_id), &pre_membership)?;
+
+        // Confirm
+        if !params.yes {
+            eprintln!(
+                "{}",
+                format_remove_missing_confirm(
+                    &name_to_remove,
+                    resolved_devid,
+                    self.remaining_present,
+                    self.missing_count,
+                )
+            );
+            confirm::confirm_yes().map_err(RemoveMissingError::Validation)?;
+        }
+
+        // Hold a logind sleep inhibitor for the rest of the remove-missing
+        // operation -- covers the btrfs device remove (fast metadata-only) and
+        // the post-op maybe_restore_raid1 soft balance, which converts
+        // single-profile chunks created during degraded operation back to RAID1
+        // and can be long-running. Suspending mid-soft-balance interrupts the
+        // restoration and leaves chunks unprotected.
+        //
+        // Acquired here, AFTER all interactive/reversible work (confirmation)
+        // and BEFORE journal::write_journal, so that:
+        //   - operator-idle prompts do not block suspend
+        //   - a logind failure aborts cleanly without stranding pending-op.json
+        //     and forcing the user into recovery mode for an environmental error.
+        let _sleep_inhibitor_guard = params
+            .sleep_inhibitor
+            .acquire("removing missing device from pool")
+            .map_err(|e| {
+                RemoveMissingError::Validation(format!(
+                    "could not acquire sleep inhibitor (is logind running?): {e}"
+                ))
+            })?;
+
+        // Build journal before btrfs operation.
+        let mut target_membership = pre_membership.clone();
+        target_membership.disks.remove(&name_to_remove);
+        let journal = journal::build_journal(
+            pre_membership,
+            target_membership.clone(),
+            journal::OpKind::RemoveMissing {
+                devid: resolved_devid,
+            },
+        );
+        journal::write_journal(params.paths, &journal)
+            .map_err(|e| RemoveMissingError::Validation(e.to_string()))?;
+
+        // Execute
+        eprintln!(
+            "Removing missing device (devid {}) from pool...",
+            resolved_devid
+        );
+        pool_remove_devid(runner, &self.mount_point, resolved_devid)?;
+
+        crate::pool::maybe_restore_raid1(
+            runner,
+            &self.mount_point,
+            self.missing_count,
+            params.progress,
+        )
+        .map_err(RemoveMissingError::Pool)?;
+
+        // Post-commit: write pool.json and clear journal only after the full operation succeeds.
+        membership::save_membership(&target_membership, params.paths).map_err(|e| {
+            RemoveMissingError::Validation(format!("failed to persist pool membership: {e}"))
+        })?;
+        journal::clear_journal(params.paths)
+            .map_err(|e| RemoveMissingError::Validation(e.to_string()))?;
+
+        eprintln!("Done. Missing device removed from pool.");
+        Ok(())
+    }
+}
+
+/// Plan a `braid remove-missing` run. Owns everything above today's
+/// `--dry-run` gate: pending-op preflight, config read, pool probe /
+/// mounted validation, mutation preflight, UPS preflight,
+/// missing-device validations, `probe_missing_devids`, the
+/// relocation-space preflight, and `compile_steps`. The returned
+/// `RemoveMissingPlan` is the single source of truth for both
+/// `--dry-run` preview and real execution.
+pub fn plan_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
     params: &RemoveMissingParams<'_>,
-) -> Result<(), RemoveMissingError> {
-    preflight::check_no_pending_operation(params.paths).map_err(RemoveMissingError::Validation)?;
+) -> RemoveMissingPlanReport {
+    // No per-disk probing happens before validation in this planner, so
+    // `report.notes` is always empty. Any notes discovered during
+    // planning land on `plan.notes` instead.
+    let err = |e: RemoveMissingError| RemoveMissingPlanReport {
+        notes: Vec::new(),
+        result: Err(e),
+    };
 
-    let config = config_read(params.config_path)?;
+    if let Err(msg) = preflight::check_no_pending_operation(params.paths) {
+        return err(RemoveMissingError::Validation(msg));
+    }
+
+    let config = match config_read(params.config_path) {
+        Ok(c) => c,
+        Err(e) => return err(e.into()),
+    };
 
     let pool = match probe_pool(runner, config.mount_point()) {
         Ok(p) => p,
         Err(ProbeError::NotBtrfs { .. }) => {
-            return Err(RemoveMissingError::Validation(
+            return err(RemoveMissingError::Validation(
                 "pool is not mounted. Nothing to remove.".into(),
             ));
         }
-        Err(e) => return Err(RemoveMissingError::Probe(e)),
+        Err(e) => return err(RemoveMissingError::Probe(e)),
     };
 
     if !pool.mounted {
-        return Err(RemoveMissingError::Validation(
+        return err(RemoveMissingError::Validation(
             "pool is not mounted. Nothing to remove.".into(),
         ));
     }
 
     // Preflight
     let fsid = pool.fsid.as_deref().expect("mounted pool must have FSID");
-    preflight::require_mutation_preflight(runner, fs, fsid, config.mount_point())
-        .map_err(RemoveMissingError::Validation)?;
-    preflight::check_ups_not_on_battery(
+    if let Err(msg) = preflight::require_mutation_preflight(runner, fs, fsid, config.mount_point())
+    {
+        return err(RemoveMissingError::Validation(msg));
+    }
+    if let Err(msg) = preflight::check_ups_not_on_battery(
         runner,
         config.ups().map(|u| u.name.as_str()),
         "remove-missing",
-    )
-    .map_err(RemoveMissingError::Validation)?;
+    ) {
+        return err(RemoveMissingError::Validation(msg));
+    }
 
     if pool.missing_count == 0 {
-        return Err(RemoveMissingError::Validation(
+        return err(RemoveMissingError::Validation(
             "no missing devices detected in pool.".into(),
         ));
     }
 
     if pool.devices.iter().any(|d| d.devid == params.missing_id) {
-        return Err(RemoveMissingError::Validation(format!(
+        return err(RemoveMissingError::Validation(format!(
             "devid {} is a live device, not a missing one. \
              Use 'braid remove' to remove live devices.",
             params.missing_id
         )));
     }
-    let missing_devids = preflight::probe_missing_devids(runner, config.mount_point())
-        .map_err(RemoveMissingError::Validation)?;
+    let missing_devids = match preflight::probe_missing_devids(runner, config.mount_point()) {
+        Ok(v) => v,
+        Err(msg) => return err(RemoveMissingError::Validation(msg)),
+    };
     if !missing_devids.contains(&params.missing_id) {
-        return Err(RemoveMissingError::Validation(format!(
+        return err(RemoveMissingError::Validation(format!(
             "devid {} is not a device in this pool. \
              Use 'braid status' to see device IDs.",
             params.missing_id
@@ -136,8 +294,15 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     // Skip when only 1 present device survives: in 2-device RAID1, the
     // survivor already has all data (every chunk is mirrored). This does
     // not match the reproduced relocation-failure mode.
+    let mut notes: Vec<PreviewNote> = Vec::new();
     if pool.devices.len() >= 2 {
-        check_relocation_space(runner, config.mount_point(), Some(params.missing_id))?;
+        match check_relocation_space(runner, config.mount_point(), Some(params.missing_id)) {
+            Ok(RelocationCheck::Proceed) => {}
+            Ok(RelocationCheck::ProceedWithWarning(body)) => {
+                notes.push(PreviewNote::Warn(body));
+            }
+            Err(e) => return err(e),
+        }
     }
 
     let will_clear_last_missing = pool.missing_count == 1;
@@ -149,90 +314,50 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         config.mount_point(),
     );
 
+    RemoveMissingPlanReport {
+        notes: Vec::new(),
+        result: Ok(RemoveMissingPlan {
+            notes,
+            steps,
+            missing_id: params.missing_id,
+            will_clear_last_missing,
+            remaining_present,
+            missing_count: pool.missing_count,
+            mount_point: config.mount_point().clone(),
+        }),
+    }
+}
+
+pub fn cmd_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
+    runner: &R,
+    fs: &F,
+    params: &RemoveMissingParams<'_>,
+) -> Result<(), RemoveMissingError> {
+    let report = plan_remove_missing(runner, fs, params);
+    let plan = match report.result {
+        Ok(p) => p,
+        Err(e) => return Err(e),
+    };
+
     if params.dry_run {
-        Step::print_dry_run(&steps);
+        plan.preview().print();
         return Ok(());
     }
 
-    // Resolve devid->name from enriched pool.json before confirmation and journal.
-    let pre_membership = membership::load_membership(params.paths).map_err(|e| {
-        RemoveMissingError::Validation(format!("failed to load pool membership: {e}"))
-    })?;
-    let (resolved_devid, name_to_remove) =
-        resolve_removal_target(Some(params.missing_id), &pre_membership)?;
+    plan.execute(runner, params)
+}
 
-    // Confirm
-    if !params.yes {
-        eprintln!(
-            "{}",
-            format_remove_missing_confirm(
-                &name_to_remove,
-                resolved_devid,
-                remaining_present,
-                pool.missing_count,
-            )
-        );
-        confirm::confirm_yes().map_err(RemoveMissingError::Validation)?;
-    }
-
-    // Hold a logind sleep inhibitor for the rest of the remove-missing
-    // operation -- covers the btrfs device remove (fast metadata-only) and
-    // the post-op maybe_restore_raid1 soft balance, which converts
-    // single-profile chunks created during degraded operation back to RAID1
-    // and can be long-running. Suspending mid-soft-balance interrupts the
-    // restoration and leaves chunks unprotected.
-    //
-    // Acquired here, AFTER all interactive/reversible work (confirmation)
-    // and BEFORE journal::write_journal, so that:
-    //   - operator-idle prompts do not block suspend
-    //   - a logind failure aborts cleanly without stranding pending-op.json
-    //     and forcing the user into recovery mode for an environmental error.
-    let _sleep_inhibitor_guard = params
-        .sleep_inhibitor
-        .acquire("removing missing device from pool")
-        .map_err(|e| {
-            RemoveMissingError::Validation(format!(
-                "could not acquire sleep inhibitor (is logind running?): {e}"
-            ))
-        })?;
-
-    // Build journal before btrfs operation.
-    let mut target_membership = pre_membership.clone();
-    target_membership.disks.remove(&name_to_remove);
-    let journal = journal::build_journal(
-        pre_membership,
-        target_membership.clone(),
-        journal::OpKind::RemoveMissing {
-            devid: resolved_devid,
-        },
-    );
-    journal::write_journal(params.paths, &journal)
-        .map_err(|e| RemoveMissingError::Validation(e.to_string()))?;
-
-    // Execute
-    eprintln!(
-        "Removing missing device (devid {}) from pool...",
-        resolved_devid
-    );
-    pool_remove_devid(runner, config.mount_point(), resolved_devid)?;
-
-    crate::pool::maybe_restore_raid1(
-        runner,
-        config.mount_point(),
-        pool.missing_count,
-        params.progress,
-    )
-    .map_err(RemoveMissingError::Pool)?;
-
-    // Post-commit: write pool.json and clear journal only after the full operation succeeds.
-    membership::save_membership(&target_membership, params.paths).map_err(|e| {
-        RemoveMissingError::Validation(format!("failed to persist pool membership: {e}"))
-    })?;
-    journal::clear_journal(params.paths)
-        .map_err(|e| RemoveMissingError::Validation(e.to_string()))?;
-
-    eprintln!("Done. Missing device removed from pool.");
-    Ok(())
+/// Outcome of the relocation-space preflight. `Proceed` means either
+/// the check ran and survivors have enough space, or it was skipped.
+/// `ProceedWithWarning` means the check itself failed (command or
+/// parse error) and the caller should surface the warning body to the
+/// user but still proceed -- a bug in the safety net must not block a
+/// valid operation. A hard "survivors lack space" outcome is a
+/// `RemoveMissingError::Validation` instead.
+#[derive(Debug)]
+pub(crate) enum RelocationCheck {
+    Proceed,
+    ProceedWithWarning(String),
 }
 
 /// Check that surviving devices have enough RAID1-aware, per-type space to absorb
@@ -245,28 +370,31 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
 /// and missing devices always report 0. Their allocation lines (Data, Metadata,
 /// System) are preserved and accurate.
 ///
-/// If the check itself fails (parse error, command error), we log a warning and
-/// proceed -- a bug in the safety net shouldn't block a valid operation.
-fn check_relocation_space<R: CommandRunner>(
+/// If the check itself fails (parse error, command error), the caller receives
+/// `ProceedWithWarning(body)` so it can surface the warning through the
+/// preview + execute paths without this helper printing directly.
+pub(crate) fn check_relocation_space<R: CommandRunner>(
     runner: &R,
     mount_point: &MountPoint,
     missing_id: Option<u64>,
-) -> Result<(), RemoveMissingError> {
+) -> Result<RelocationCheck, RemoveMissingError> {
     let raw = match runner.run(&CmdRequest::BtrfsDeviceUsageRaw {
         mount_point: mount_point.clone(),
     }) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("warning: ENOSPC pre-flight check failed: {e}; proceeding anyway");
-            return Ok(());
+            return Ok(RelocationCheck::ProceedWithWarning(format!(
+                "ENOSPC pre-flight check failed: {e}; proceeding anyway"
+            )));
         }
     };
 
     let usage = match parse_btrfs_device_usage(&raw) {
         Ok(u) => u,
         Err(e) => {
-            eprintln!("warning: ENOSPC pre-flight check failed: {e}; proceeding anyway");
-            return Ok(());
+            return Ok(RelocationCheck::ProceedWithWarning(format!(
+                "ENOSPC pre-flight check failed: {e}; proceeding anyway"
+            )));
         }
     };
 
@@ -278,11 +406,13 @@ fn check_relocation_space<R: CommandRunner>(
         .collect();
     let remaining: Vec<_> = usage.devices.iter().filter(|d| d.device_size > 0).collect();
 
-    preflight::check_raid1_relocation_space(&target, &remaining).map_err(|e| {
-        RemoveMissingError::Validation(format!(
-            "{e}\n\nFree up space by deleting files, or add a new device first with `braid add`."
-        ))
-    })
+    preflight::check_raid1_relocation_space(&target, &remaining)
+        .map(|()| RelocationCheck::Proceed)
+        .map_err(|e| {
+            RemoveMissingError::Validation(format!(
+                "{e}\n\nFree up space by deleting files, or add a new device first with `braid add`."
+            ))
+        })
 }
 
 fn compile_steps(
@@ -1249,5 +1379,284 @@ mod tests {
         let msg = format_remove_missing_confirm("toshiba", 2, 1, 1);
         assert!(msg.contains("Surviving disk already has all data"));
         assert!(msg.contains("1 present + 1 missing -> 1 disk"));
+    }
+
+    // --- plan_remove_missing soft-warn tests ---
+
+    /// 3-device pool runner where `BtrfsDeviceUsageRaw` succeeds the
+    /// first time (used by `probe_missing_devids` to validate the
+    /// --missing-id argument) and fails the second time (used by
+    /// `check_relocation_space`) per `failure_mode`. Lets us exercise
+    /// the soft-warn paths from `plan_remove_missing` without tripping
+    /// the earlier validations.
+    #[derive(Clone, Copy)]
+    enum UsageFailureMode {
+        /// Command error on the second call (models a failing
+        /// `btrfs device usage --raw` invocation).
+        CmdError,
+        /// Unparseable stdout on the second call (models upstream
+        /// output drift that breaks `parse_btrfs_device_usage`).
+        ParseError,
+    }
+
+    struct ThreeDeviceSoftWarnRunner {
+        usage_calls: Arc<Mutex<u32>>,
+        failure_mode: UsageFailureMode,
+    }
+
+    impl ThreeDeviceSoftWarnRunner {
+        fn new(failure_mode: UsageFailureMode) -> Self {
+            Self {
+                usage_calls: Arc::new(Mutex::new(0)),
+                failure_mode,
+            }
+        }
+    }
+
+    impl CommandRunner for ThreeDeviceSoftWarnRunner {
+        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
+            match request {
+                CmdRequest::FindmntJson { mount_point } => Ok(mock_out(
+                    &format!("findmnt --json --mountpoint {mount_point}"),
+                    r#"{"filesystems":[{"target":"/mnt/storage","source":"/dev/mapper/braid-disk1","fstype":"btrfs"}]}"#,
+                    0,
+                )),
+                CmdRequest::BtrfsFilesystemShow { mount_point } => Ok(mock_out(
+                    &format!("btrfs filesystem show {mount_point}"),
+                    "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\tTotal devices 3 FS bytes used 16.17MiB\n\tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk2\n\tdevid    3 size 0 used 0 path MISSING\n",
+                    0,
+                )),
+                CmdRequest::CryptsetupStatus { mapper } => Ok(mock_out(
+                    &format!("cryptsetup status {mapper}"),
+                    &format!(
+                        "{mapper} is active and is in use.\n  type:    LUKS2\n  device:  /dev/vdb\n  mode:    read/write\n"
+                    ),
+                    0,
+                )),
+                CmdRequest::CryptsetupLuksUuid { .. } => Ok(mock_out(
+                    "cryptsetup luksUUID",
+                    "11111111-1111-1111-1111-111111111111\n",
+                    0,
+                )),
+                CmdRequest::BtrfsBalanceStatus { .. } => Ok(mock_out(
+                    "btrfs balance status",
+                    "No balance found on '/mnt/storage'\n",
+                    0,
+                )),
+                CmdRequest::BtrfsDeviceUsageRaw { .. } => {
+                    let mut n = self.usage_calls.lock().unwrap();
+                    *n += 1;
+                    if *n == 1 {
+                        // First call: probe_missing_devids. Needs valid
+                        // output identifying devid 3 as missing.
+                        Ok(mock_out(
+                            "btrfs device usage --raw",
+                            "/dev/mapper/braid-disk1, ID: 1\n   Device size:           520093696\n   Device slack:                  0\n   Data,RAID1:            67108864\n   Unallocated:           452984832\n\n/dev/mapper/braid-disk2, ID: 2\n   Device size:           520093696\n   Device slack:                  0\n   Data,RAID1:            67108864\n   Unallocated:           452984832\n\n<missing disk>, ID: 3\n   Device size:                  0\n   Device slack:                  0\n   Data,RAID1:            67108864\n   Unallocated:                  0\n\n",
+                            0,
+                        ))
+                    } else {
+                        match self.failure_mode {
+                            UsageFailureMode::CmdError => Err(CmdError::MissingMock),
+                            UsageFailureMode::ParseError => {
+                                // Nonzero exit_status funnels through
+                                // `ParseError::CommandFailed` inside
+                                // `parse_btrfs_device_usage`; the parser
+                                // itself is forgiving of unknown lines,
+                                // so this is the narrowest way to force
+                                // the parse-error soft-warn branch.
+                                Ok(RawCommandOutput {
+                                    cmd: "btrfs device usage --raw".to_owned(),
+                                    stdout: String::new(),
+                                    stderr: "boom".to_owned(),
+                                    exit_status: 1,
+                                })
+                            }
+                        }
+                    }
+                }
+                _ => Err(CmdError::MissingMock),
+            }
+        }
+
+        fn run_with_stdin(
+            &self,
+            request: &CmdRequest,
+            _stdin: &[u8],
+        ) -> Result<RawCommandOutput, CmdError> {
+            self.run(request)
+        }
+    }
+
+    /* Intent: when the relocation-space preflight fails with a command
+     * error, `plan_remove_missing` returns a successful plan carrying
+     * one `PreviewNote::Warn` with the ENOSPC soft-warn body and the
+     * usual compiled steps.
+     *
+     * Why it exists: PR 3 moves the direct `eprintln!("warning: ...")`
+     * into the preview model. Without this test, a regression that
+     * dropped the note or re-added the direct stderr print from the
+     * preflight helper would still pass the older "proceeds on command
+     * error" test (which only asserts control flow).
+     *
+     * Scenario: 3-disk RAID1 pool with devid 3 missing; the second
+     * `btrfs device usage --raw` call (from check_relocation_space)
+     * fails with a CmdError so the planner routes the soft-warn into
+     * plan.notes instead of stderr.
+     */
+    #[test]
+    fn plan_remove_missing_surfaces_soft_warn_on_command_error() {
+        let (_tmp, config_path, _state_tmp, state_paths) = three_device_config();
+        let runner = ThreeDeviceSoftWarnRunner::new(UsageFailureMode::CmdError);
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let report = plan_remove_missing(
+            &runner,
+            &MockFs,
+            &RemoveMissingParams {
+                config_path: &config_path,
+                missing_id: 3,
+                dry_run: true,
+                yes: true,
+                progress: crate::progress::ProgressOutput::Off,
+                paths: &state_paths,
+                sleep_inhibitor: &inhibitor,
+            },
+        );
+        assert!(
+            report.notes.is_empty(),
+            "report.notes must stay empty on success -- notes land on plan.notes"
+        );
+        let plan = report.result.expect("planning should succeed");
+        assert_eq!(plan.notes.len(), 1, "expected exactly one soft-warn note");
+        match &plan.notes[0] {
+            PreviewNote::Warn(body) => {
+                assert!(
+                    body.starts_with("ENOSPC pre-flight check failed: "),
+                    "warning body must start with the canonical prefix; got {body:?}"
+                );
+                assert!(
+                    body.ends_with("; proceeding anyway"),
+                    "warning body must end with the canonical suffix; got {body:?}"
+                );
+                assert!(
+                    !body.starts_with("warning:"),
+                    "warn body must not carry the legacy 'warning:' prefix; got {body:?}"
+                );
+            }
+            other => panic!("expected PreviewNote::Warn, got {other:?}"),
+        }
+        // Steps are still compiled: devid 3 is the last missing in a
+        // 2-survivor pool so the soft balance step must be present.
+        let descriptions: Vec<&str> = plan.steps.iter().map(|s| s.description.as_str()).collect();
+        assert!(
+            descriptions
+                .iter()
+                .any(|d| d.contains("target specific missing device")),
+            "expected device remove step; got {descriptions:?}"
+        );
+        assert!(
+            descriptions
+                .iter()
+                .any(|d| d.contains("restore redundancy")),
+            "expected soft balance step; got {descriptions:?}"
+        );
+    }
+
+    /* Intent: when the relocation-space preflight's parse fails, the
+     * planner still returns a successful plan carrying the soft-warn
+     * note, same as the command-error branch.
+     *
+     * Why it exists: `check_relocation_space` has two soft-warn
+     * branches (command error, parse error). Both used to share one
+     * `eprintln!` site; after the refactor, each builds a warn body
+     * independently. This test is the parse-error twin of the
+     * command-error test above and guards against drift between the
+     * two bodies.
+     *
+     * Scenario: same 3-disk pool; the second `btrfs device usage
+     * --raw` call returns unparseable stdout, triggering
+     * `parse_btrfs_device_usage` to error.
+     */
+    #[test]
+    fn plan_remove_missing_surfaces_soft_warn_on_parse_error() {
+        let (_tmp, config_path, _state_tmp, state_paths) = three_device_config();
+        let runner = ThreeDeviceSoftWarnRunner::new(UsageFailureMode::ParseError);
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let report = plan_remove_missing(
+            &runner,
+            &MockFs,
+            &RemoveMissingParams {
+                config_path: &config_path,
+                missing_id: 3,
+                dry_run: true,
+                yes: true,
+                progress: crate::progress::ProgressOutput::Off,
+                paths: &state_paths,
+                sleep_inhibitor: &inhibitor,
+            },
+        );
+        let plan = report.result.expect("planning should succeed");
+        assert_eq!(plan.notes.len(), 1, "expected exactly one soft-warn note");
+        match &plan.notes[0] {
+            PreviewNote::Warn(body) => {
+                assert!(
+                    body.starts_with("ENOSPC pre-flight check failed: "),
+                    "warning body must start with the canonical prefix; got {body:?}"
+                );
+                assert!(
+                    body.ends_with("; proceeding anyway"),
+                    "warning body must end with the canonical suffix; got {body:?}"
+                );
+            }
+            other => panic!("expected PreviewNote::Warn, got {other:?}"),
+        }
+        assert!(!plan.steps.is_empty(), "steps must still be compiled");
+    }
+
+    /* Intent: `plan.preview().render()` places the ENOSPC soft-warn
+     * line above the step block and uses the canonical `[warn]  <body>`
+     * shape (no legacy `warning:` prefix).
+     *
+     * Why it exists: the dry-run stdout contract for remove-missing in
+     * PR 3 is "warn note(s) render before steps" and the warn body is
+     * body-only. Without a preview-boundary test, a regression that
+     * rendered the warn inline with steps, dropped the `[warn]  `
+     * prefix, or re-added the `warning:` prefix would only surface in
+     * the VM stream-routing test -- adding a unit guardrail here is
+     * cheap and catches drift before the VM layer.
+     *
+     * Scenario: a hand-built plan with one soft-warn note and the
+     * compiled steps for devid-3 removal on a 2-survivor pool; assert
+     * the rendered byte sequence starts with the warn line and is
+     * followed by the dry-run step lines.
+     */
+    #[test]
+    fn plan_preview_renders_warn_above_steps() {
+        let plan = RemoveMissingPlan {
+            notes: vec![PreviewNote::Warn(
+                "ENOSPC pre-flight check failed: boom; proceeding anyway".into(),
+            )],
+            steps: compile_steps(3, true, 2, &MountPoint("/mnt/storage".into())),
+            missing_id: 3,
+            will_clear_last_missing: true,
+            remaining_present: 2,
+            missing_count: 1,
+            mount_point: MountPoint("/mnt/storage".into()),
+        };
+        let rendered = plan.preview().render();
+        let lines: Vec<&str> = rendered.lines().collect();
+        assert_eq!(
+            lines[0], "[warn]  ENOSPC pre-flight check failed: boom; proceeding anyway",
+            "warn note must render first; got full output:\n{rendered}"
+        );
+        assert!(
+            lines[1].starts_with("[long"),
+            "step block must follow the warn line; got lines[1]={:?}",
+            lines[1]
+        );
+        assert!(
+            lines[1].contains("target specific missing device"),
+            "first step must be the device-remove step; got lines[1]={:?}",
+            lines[1]
+        );
     }
 }
