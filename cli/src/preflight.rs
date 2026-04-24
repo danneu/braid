@@ -1167,7 +1167,7 @@ mod tests {
     #[test]
     // Intent: require_mutation_preflight returns an empty notes vec on the
     //   clean path (no busy op, rw probe).
-    // Why: Baseline happy path — mutating commands should proceed on a healthy
+    // Why: Baseline happy path -- mutating commands should proceed on a healthy
     //   pool without emitting any PreviewNote.
     // Scenario: sysfs says "none", findmnt reports rw.
     fn mutation_preflight_passes_when_none() {
