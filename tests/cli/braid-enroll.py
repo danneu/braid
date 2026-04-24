@@ -54,7 +54,22 @@ with subtest("Generate random keyfile"):
 with subtest("Test 1: enroll keyfile into all pool disks"):
     pq = shlex.quote(passphrase)
     machine.succeed(
-        f"printf '%s\\n' {pq} | braid enroll /tmp --passphrase-stdin"
+        f"printf '%s\\n' {pq} | braid enroll /tmp --passphrase-stdin "
+        f">/tmp/t1.out 2>/tmp/t1.err"
+    )
+
+    # Behavioral wording lock (plan: "real-run wording unchanged"):
+    # `plan_enrollment` emits the pre-apply `enroll: ...` line for
+    # every candidate needing enrollment. A regression that hoisted
+    # these into pre-passphrase notes, reworded them, or dropped
+    # them entirely would silently change a user-visible stderr
+    # string; we pin both lines byte-for-byte here.
+    t1_err = machine.succeed("cat /tmp/t1.err")
+    assert "enroll: disk1 -- will add keyfile to slot 1" in t1_err, (
+        f"expected exact 'enroll: disk1 --' line on stderr, got: {t1_err!r}"
+    )
+    assert "enroll: disk2 -- will add keyfile to slot 1" in t1_err, (
+        f"expected exact 'enroll: disk2 --' line on stderr, got: {t1_err!r}"
     )
 
     # Verify slot 1 is occupied on both disks
@@ -108,7 +123,21 @@ with subtest("Test 2: unlock with keyfile"):
 with subtest("Test 3: re-enroll is idempotent"):
     pq = shlex.quote(passphrase)
     machine.succeed(
-        f"printf '%s\\n' {pq} | braid enroll /tmp --passphrase-stdin"
+        f"printf '%s\\n' {pq} | braid enroll /tmp --passphrase-stdin "
+        f">/tmp/t3.out 2>/tmp/t3.err"
+    )
+
+    # Behavioral wording lock: in the idempotent re-enroll path,
+    # `plan_enrollment` hits the `AlreadyEnrolled` branch and emits
+    # the exact `ok: <name> -- keyfile already enrolled` line per
+    # disk. Regressions in that branch's wording would only be
+    # caught by pinning the exact string.
+    t3_err = machine.succeed("cat /tmp/t3.err")
+    assert "ok: disk1 -- keyfile already enrolled" in t3_err, (
+        f"expected exact 'ok: disk1 -- keyfile already enrolled' on stderr, got: {t3_err!r}"
+    )
+    assert "ok: disk2 -- keyfile already enrolled" in t3_err, (
+        f"expected exact 'ok: disk2 -- keyfile already enrolled' on stderr, got: {t3_err!r}"
     )
 
 # --- Test 4: Passphrase still works after keyfile enrollment ---
@@ -164,6 +193,63 @@ with subtest("Test 4b: wrong passphrase does not leak ok:/enroll: status lines")
             f"enroll: status line leaked before wrong-passphrase error: {line!r}\n"
             f"full stderr: {err!r}"
         )
+
+# --- Test 4c: Real-run success path renders `skip:` plain on stderr ---
+#
+# Intent: verify that when a real-run `braid enroll` succeeds with
+# at least one pool member absent, the accumulated skip note
+# renders on stderr in the plain `skip: <name> not present`
+# wording -- pre-passphrase, before the surviving candidate's
+# `ok:` / `enroll:` status lines.
+#
+# Why it exists: the migration's "success-path real-run" coverage
+# otherwise only asserts `enroll:` (Test 1) and `ok:` (Test 3)
+# wording; the exact plain `skip:` wording on a *successful* run
+# has no behavioral anchor. Only the no-candidates failure path in
+# `braid-enroll-generate.py` asserts plain skip wording today, and
+# a regression that reworded the success-path skip render (or
+# routed it to stdout) would not be caught there. This pins the
+# contract: the same note body renders on stderr during a real-run
+# that still finds at least one candidate.
+#
+# Scenario: disk1 + disk2 both enrolled (from Test 1). We edit
+# pool.json to add a synthetic `disk3` member pointing at a by-id
+# path that does not exist, making the Absent branch fire during
+# discovery while the two real members remain as `AlreadyEnrolled`
+# candidates. Pool.json is restored before Test 5 so the slot-
+# conflict test sees its expected state.
+with subtest("Test 4c: real-run success path renders plain `skip:` on stderr"):
+    close_all()
+
+    machine.succeed("cp /var/lib/braid/pool.json /tmp/pool.bak.json")
+    machine.succeed(
+        "jq '.disks.disk3 = {\"by_id\": \"/dev/disk/by-id/virtio-missing\"}' "
+        "/var/lib/braid/pool.json > /tmp/pool.json && "
+        "mv /tmp/pool.json /var/lib/braid/pool.json"
+    )
+
+    pq = shlex.quote(passphrase)
+    machine.succeed(
+        f"printf '%s\\n' {pq} | braid enroll /tmp --passphrase-stdin "
+        f">/tmp/t4c.out 2>/tmp/t4c.err"
+    )
+    t4c_err = machine.succeed("cat /tmp/t4c.err")
+    # Plain skip wording for the absent synthetic disk -- pins the
+    # `render_notes_for_stderr(.., PerDiskStyle::Plain)` output shape.
+    assert "skip: disk3 not present" in t4c_err, (
+        f"expected plain 'skip: disk3 not present' on stderr, got: {t4c_err!r}"
+    )
+    # Sanity: surviving real members were still classified post-
+    # passphrase as AlreadyEnrolled (they hold the keyfile from Test 1).
+    assert "ok: disk1 -- keyfile already enrolled" in t4c_err, (
+        f"expected ok: disk1 -- keyfile already enrolled, got: {t4c_err!r}"
+    )
+    assert "ok: disk2 -- keyfile already enrolled" in t4c_err, (
+        f"expected ok: disk2 -- keyfile already enrolled, got: {t4c_err!r}"
+    )
+
+    # Restore the real pool.json before Test 5 runs.
+    machine.succeed("mv /tmp/pool.bak.json /var/lib/braid/pool.json")
 
 # --- Test 5: Preflight detects slot conflict before any enrollment ---
 
