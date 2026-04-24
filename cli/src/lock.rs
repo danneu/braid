@@ -5,8 +5,10 @@ use crate::cmd::{CmdError, CmdRequest, CommandRunner, Step};
 use crate::config::{mapper_name, name_from_mapper, Config};
 use crate::membership::PoolMembership;
 use crate::preflight;
+use crate::preview::{Preview, PreviewCompleteness, PreviewNote};
 use crate::probe::{probe_fsid, Filesystem};
 use crate::status_tag::StatusTag;
+use crate::types::MountPoint;
 
 #[derive(Debug, thiserror::Error)]
 pub enum LockError {
@@ -24,7 +26,7 @@ const CLOSE_RETRY_DELAY: Duration = Duration::from_millis(500);
 /// Abstraction over `thread::sleep` so unit tests can drive the retry
 /// loop without paying real wall-clock time. The production path uses
 /// `RealSleeper`; tests inject a noop or recording sleeper.
-trait Sleeper {
+pub(crate) trait Sleeper {
     fn sleep(&self, duration: Duration);
 }
 
@@ -141,7 +143,7 @@ pub fn compile_lock_steps(
     pool_was_mounted: bool,
     open_mappers: &[String],
     orphan_mappers: &[String],
-    mount_point: &crate::types::MountPoint,
+    mount_point: &MountPoint,
 ) -> Vec<Step> {
     let mut steps = Vec::new();
 
@@ -192,21 +194,218 @@ pub fn compile_lock_steps(
     steps
 }
 
-/// Render the full `braid lock --dry-run` preview as a single String.
-/// The preview includes a `[warn]` line when /dev/mapper cannot be
-/// scanned for orphans, followed by either the rendered step block or
-/// the literal `nothing to do.` sentinel. This is the user-visible
-/// contract boundary for the dry-run output; the caller is a thin
-/// printer.
-pub fn render_lock_dry_run<F: Filesystem + ?Sized>(
-    pool_was_mounted: bool,
-    fs: &F,
-    membership: &PoolMembership,
-    mount_point: &crate::types::MountPoint,
-) -> String {
-    use std::fmt::Write;
+/// The dry-run preview source of truth for `braid lock` and the set of
+/// execute inputs pre-computed during planning. `notes` + `steps` are
+/// both rendered by `preview()`; `execute()` consumes the preflight
+/// result (`pool_was_mounted`), the already-scanned `orphan_mappers`
+/// set, and emits accumulated `Warn` notes to stderr before mutating.
+pub struct LockPlan {
+    pub notes: Vec<PreviewNote>,
+    pub steps: Vec<Step>,
+    pub pool_was_mounted: bool,
+    pub orphan_mappers: Vec<String>,
+    pub mount_point: MountPoint,
+}
 
-    let mut out = String::new();
+impl LockPlan {
+    pub fn preview(&self) -> Preview {
+        Preview {
+            completeness: PreviewCompleteness::Complete,
+            notes: self.notes.clone(),
+            steps: self.steps.clone(),
+        }
+    }
+
+    pub(crate) fn execute<R, F, S>(
+        self,
+        runner: &R,
+        fs: &F,
+        sleeper: &S,
+        membership: &PoolMembership,
+    ) -> Result<(), LockError>
+    where
+        R: CommandRunner,
+        F: Filesystem + ?Sized,
+        S: Sleeper,
+    {
+        // Emit accumulated Warn notes to stderr before any mutation --
+        // today's real-run orphan-scan warn sits at the top of the work
+        // section, and the plan carries that warn as a PreviewNote::Warn.
+        for note in &self.notes {
+            if let PreviewNote::Warn(body) = note {
+                eprintln!("{}  {body}", StatusTag::Warn);
+            }
+        }
+
+        let mount_point = &self.mount_point;
+        let orphan_mappers = &self.orphan_mappers;
+
+        // 2. If mounted → unmount
+        let mut umount_error: Option<LockError> = None;
+        let mut first_mapper_error: Option<LockError> = None;
+        if self.pool_was_mounted {
+            let umount_result = runner.run(&CmdRequest::Umount {
+                mount_point: mount_point.clone(),
+            })?;
+            if umount_result.exit_status != 0 {
+                let err = LockError::Failed(format!(
+                    "umount {mount_point} failed (exit {}): {}\n\
+                     hint: a process may be using files on the mount. \
+                     Run 'lsof {mount_point}' or 'fuser -vm {mount_point}' to identify it.",
+                    umount_result.exit_status,
+                    umount_result.stderr.trim(),
+                    mount_point = mount_point,
+                ));
+                eprintln!("{}  {err}", StatusTag::Fail);
+                eprintln!(
+                    "{}  attempting to close LUKS mappers despite umount failure...",
+                    StatusTag::Warn
+                );
+                umount_error = Some(err);
+            } else {
+                eprintln!("{}  {:<14}unmounted {}", StatusTag::Ok, "pool", mount_point);
+
+                // Clear btrfs kernel scan registry so that cryptsetup close
+                // doesn't race against stale device references on multi-device
+                // pools. Scope to the close set (membership + orphan mappers)
+                // -- the no-arg form is kernel-global and would invalidate
+                // scan entries for unrelated btrfs filesystems on the host.
+                let forget_devs = lock_forget_devices(fs, membership, orphan_mappers);
+                if !forget_devs.is_empty() {
+                    let forget_result = runner.run(&CmdRequest::BtrfsDeviceScanForget {
+                        devices: forget_devs,
+                    });
+                    match forget_result {
+                        Ok(r) if r.exit_status == 0 => {}
+                        Ok(r) => {
+                            eprintln!(
+                                "{}  btrfs device scan --forget failed (exit {}): {} (continuing)",
+                                StatusTag::Warn,
+                                r.exit_status,
+                                r.stderr.trim()
+                            );
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "{}  btrfs device scan --forget failed: {e} (continuing)",
+                                StatusTag::Warn
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. Close each mapper
+        let mut all_already_closed = true;
+        for name in membership.disks.keys() {
+            let mn = mapper_name(name);
+            let mapper_path = format!("/dev/mapper/{}", mn.0);
+
+            if fs.exists(&mapper_path) {
+                match close_mapper_with_retry(runner, sleeper, &mn.0) {
+                    Ok(()) => {
+                        eprintln!("{}  disk: {:<7}locked", StatusTag::Ok, name);
+                    }
+                    Err(LockError::DeviceBusy(msg)) if umount_error.is_some() => {
+                        eprintln!(
+                            "{}  disk: {:<7}close failed (umount was stuck): {}",
+                            StatusTag::Warn, name, msg
+                        );
+                    }
+                    Err(e) => {
+                        eprintln!("{}  disk: {:<7}{}", StatusTag::Fail, name, e);
+                        if first_mapper_error.is_none() {
+                            first_mapper_error = Some(e);
+                        }
+                    }
+                }
+                all_already_closed = false;
+            } else {
+                eprintln!("{}  disk: {:<7}already closed", StatusTag::Ok, name);
+            }
+        }
+
+        // 3b. Close orphaned braid-* mappers (precomputed during
+        // planning so the forget call shared the same close-set). An
+        // orphan is detected iff fs.exists was true at plan time;
+        // re-check to cover the narrow window where it disappeared on
+        // its own.
+        for entry in orphan_mappers {
+            let disk_name = name_from_mapper(entry).unwrap_or(entry);
+            if !fs.exists(&format!("/dev/mapper/{entry}")) {
+                continue;
+            }
+            eprintln!(
+                "{}  orphaned mapper {entry} (not in pool.json -- likely a prior crash)",
+                StatusTag::Warn
+            );
+            match close_mapper_with_retry(runner, sleeper, entry) {
+                Ok(()) => {
+                    eprintln!("{}  disk: {:<7}locked (orphan)", StatusTag::Ok, disk_name);
+                }
+                Err(LockError::DeviceBusy(msg)) if umount_error.is_some() => {
+                    eprintln!(
+                        "{}  disk: {:<7}orphan close failed (umount was stuck): {}",
+                        StatusTag::Warn, disk_name, msg
+                    );
+                }
+                Err(e) => {
+                    eprintln!("{}  disk: {:<7}orphan: {}", StatusTag::Fail, disk_name, e);
+                    if first_mapper_error.is_none() {
+                        first_mapper_error = Some(e);
+                    }
+                }
+            }
+            all_already_closed = false;
+        }
+
+        // 4. Return first fatal mapper error if any, otherwise deferred umount error
+        if let Some(e) = first_mapper_error {
+            return Err(e);
+        }
+        if let Some(e) = umount_error {
+            return Err(e);
+        }
+
+        // 5. If nothing was done → short message
+        if !self.pool_was_mounted && all_already_closed {
+            eprintln!("pool already locked");
+        }
+
+        Ok(())
+    }
+}
+
+/// Plan a `braid lock` run. Owns the mountpoint probe, preflight,
+/// open-mapper discovery, orphan scan, step compilation, and any
+/// `PreviewNote::Warn` accumulated from a failed orphan scan. The
+/// returned `LockPlan` is the single source of truth for both
+/// `--dry-run` preview and real execution.
+pub fn plan_lock<R, F>(
+    runner: &R,
+    fs: &F,
+    config: &Config,
+    membership: &PoolMembership,
+) -> Result<LockPlan, LockError>
+where
+    R: CommandRunner,
+    F: Filesystem + ?Sized,
+{
+    let mount_point = config.mount_point().clone();
+
+    // 1. Check if pool is mounted
+    let mp_result = runner.run(&CmdRequest::MountpointCheck {
+        path: mount_point.clone(),
+    })?;
+    let pool_was_mounted = mp_result.exit_status == 0;
+
+    // Preflight
+    if pool_was_mounted {
+        let fsid = probe_fsid(runner, &mount_point)
+            .map_err(|e| LockError::Failed(format!("cannot probe pool: {e}")))?;
+        preflight::require_lock_preflight(fs, &fsid).map_err(LockError::Failed)?;
+    }
 
     let open_mappers: Vec<String> = membership
         .disks
@@ -215,21 +414,24 @@ pub fn render_lock_dry_run<F: Filesystem + ?Sized>(
         .filter(|m| fs.exists(&format!("/dev/mapper/{m}")))
         .collect();
 
+    let mut notes: Vec<PreviewNote> = Vec::new();
     let orphan_mappers = match scan_orphan_mappers(fs, membership) {
         Ok(v) => v,
         Err(e) => {
-            writeln!(out, "{}  {}", StatusTag::Warn, orphan_scan_warn_body(&e)).unwrap();
+            notes.push(PreviewNote::Warn(orphan_scan_warn_body(&e)));
             Vec::new()
         }
     };
 
-    let steps = compile_lock_steps(pool_was_mounted, &open_mappers, &orphan_mappers, mount_point);
-    if steps.is_empty() {
-        out.push_str("nothing to do.\n");
-    } else {
-        out.push_str(&Step::render_dry_run(&steps));
-    }
-    out
+    let steps = compile_lock_steps(pool_was_mounted, &open_mappers, &orphan_mappers, &mount_point);
+
+    Ok(LockPlan {
+        notes,
+        steps,
+        pool_was_mounted,
+        orphan_mappers,
+        mount_point,
+    })
 }
 
 pub fn cmd_lock<R: CommandRunner, F: Filesystem + ?Sized>(
@@ -255,179 +457,12 @@ where
     F: Filesystem + ?Sized,
     S: Sleeper,
 {
-    let mount_point = config.mount_point();
-
-    // 1. Check if pool is mounted
-    let mp_result = runner.run(&CmdRequest::MountpointCheck {
-        path: mount_point.clone(),
-    })?;
-    let pool_was_mounted = mp_result.exit_status == 0;
-
-    // Preflight
-    if pool_was_mounted {
-        let fsid = probe_fsid(runner, mount_point)
-            .map_err(|e| LockError::Failed(format!("cannot probe pool: {e}")))?;
-        preflight::require_lock_preflight(fs, &fsid).map_err(LockError::Failed)?;
-    }
-
-    // Dry-run: render the full preview via render_lock_dry_run and
-    // print it to stdout as one stream. The helper owns the orphan scan
-    // so a /dev/mapper read failure surfaces as a `[warn]` line inside
-    // the preview, mirroring the real-run warn below.
+    let plan = plan_lock(runner, fs, config, membership)?;
     if dry_run {
-        print!(
-            "{}",
-            render_lock_dry_run(pool_was_mounted, fs, membership, mount_point)
-        );
+        plan.preview().print();
         return Ok(());
     }
-
-    // Runtime orphan probe. Computed once here (after the dry-run
-    // early return) so the close loop and the forget device list see
-    // the same set. An unreadable /dev/mapper is surfaced as a `[warn]`
-    // line (mirroring the dry-run preview) and treated as an empty
-    // orphan set -- the primary close loop still runs.
-    let orphan_mappers = match scan_orphan_mappers(fs, membership) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("{}  {}", StatusTag::Warn, orphan_scan_warn_body(&e));
-            Vec::new()
-        }
-    };
-
-    // 2. If mounted → unmount
-    let mut umount_error: Option<LockError> = None;
-    let mut first_mapper_error: Option<LockError> = None;
-    if pool_was_mounted {
-        let umount_result = runner.run(&CmdRequest::Umount {
-            mount_point: mount_point.clone(),
-        })?;
-        if umount_result.exit_status != 0 {
-            let err = LockError::Failed(format!(
-                "umount {mount_point} failed (exit {}): {}\n\
-                 hint: a process may be using files on the mount. \
-                 Run 'lsof {mount_point}' or 'fuser -vm {mount_point}' to identify it.",
-                umount_result.exit_status,
-                umount_result.stderr.trim(),
-                mount_point = mount_point,
-            ));
-            eprintln!("{}  {err}", StatusTag::Fail);
-            eprintln!(
-                "{}  attempting to close LUKS mappers despite umount failure...",
-                StatusTag::Warn
-            );
-            umount_error = Some(err);
-        } else {
-            eprintln!("{}  {:<14}unmounted {}", StatusTag::Ok, "pool", mount_point);
-
-            // Clear btrfs kernel scan registry so that cryptsetup close
-            // doesn't race against stale device references on multi-device
-            // pools. Scope to the close set (membership + orphan mappers)
-            // -- the no-arg form is kernel-global and would invalidate
-            // scan entries for unrelated btrfs filesystems on the host.
-            let forget_devs = lock_forget_devices(fs, membership, &orphan_mappers);
-            if !forget_devs.is_empty() {
-                let forget_result = runner.run(&CmdRequest::BtrfsDeviceScanForget {
-                    devices: forget_devs,
-                });
-                match forget_result {
-                    Ok(r) if r.exit_status == 0 => {}
-                    Ok(r) => {
-                        eprintln!(
-                            "{}  btrfs device scan --forget failed (exit {}): {} (continuing)",
-                            StatusTag::Warn,
-                            r.exit_status,
-                            r.stderr.trim()
-                        );
-                    }
-                    Err(e) => {
-                        eprintln!(
-                            "{}  btrfs device scan --forget failed: {e} (continuing)",
-                            StatusTag::Warn
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    // 3. Close each mapper
-    let mut all_already_closed = true;
-    for name in membership.disks.keys() {
-        let mn = mapper_name(name);
-        let mapper_path = format!("/dev/mapper/{}", mn.0);
-
-        if fs.exists(&mapper_path) {
-            match close_mapper_with_retry(runner, sleeper, &mn.0) {
-                Ok(()) => {
-                    eprintln!("{}  disk: {:<7}locked", StatusTag::Ok, name);
-                }
-                Err(LockError::DeviceBusy(msg)) if umount_error.is_some() => {
-                    eprintln!(
-                        "{}  disk: {:<7}close failed (umount was stuck): {}",
-                        StatusTag::Warn, name, msg
-                    );
-                }
-                Err(e) => {
-                    eprintln!("{}  disk: {:<7}{}", StatusTag::Fail, name, e);
-                    if first_mapper_error.is_none() {
-                        first_mapper_error = Some(e);
-                    }
-                }
-            }
-            all_already_closed = false;
-        } else {
-            eprintln!("{}  disk: {:<7}already closed", StatusTag::Ok, name);
-        }
-    }
-
-    // 3b. Close orphaned braid-* mappers (precomputed above so the
-    // forget call shared the same close-set). An orphan is detected
-    // iff fs.exists was true at probe time; re-check to cover the
-    // narrow window where it disappeared on its own.
-    for entry in &orphan_mappers {
-        let disk_name = name_from_mapper(entry).unwrap_or(entry);
-        if !fs.exists(&format!("/dev/mapper/{entry}")) {
-            continue;
-        }
-        eprintln!(
-            "{}  orphaned mapper {entry} (not in pool.json -- likely a prior crash)",
-            StatusTag::Warn
-        );
-        match close_mapper_with_retry(runner, sleeper, entry) {
-            Ok(()) => {
-                eprintln!("{}  disk: {:<7}locked (orphan)", StatusTag::Ok, disk_name);
-            }
-            Err(LockError::DeviceBusy(msg)) if umount_error.is_some() => {
-                eprintln!(
-                    "{}  disk: {:<7}orphan close failed (umount was stuck): {}",
-                    StatusTag::Warn, disk_name, msg
-                );
-            }
-            Err(e) => {
-                eprintln!("{}  disk: {:<7}orphan: {}", StatusTag::Fail, disk_name, e);
-                if first_mapper_error.is_none() {
-                    first_mapper_error = Some(e);
-                }
-            }
-        }
-        all_already_closed = false;
-    }
-
-    // 4. Return first fatal mapper error if any, otherwise deferred umount error
-    if let Some(e) = first_mapper_error {
-        return Err(e);
-    }
-    if let Some(e) = umount_error {
-        return Err(e);
-    }
-
-    // 5. If nothing was done → short message
-    if !pool_was_mounted && all_already_closed {
-        eprintln!("pool already locked");
-    }
-
-    Ok(())
+    plan.execute(runner, fs, sleeper, membership)
 }
 
 #[cfg(test)]
@@ -1032,8 +1067,17 @@ mod tests {
             }
         }
 
-        let mount_point = MountPoint("/mnt/storage".to_owned());
-        let output = render_lock_dry_run(false, &FailListDirFs, &test_membership(), &mount_point);
+        // Pool is not mounted -- mountpoint check returns non-zero.
+        let runner = MockRunner::default().with_output(
+            CmdRequest::MountpointCheck {
+                path: MountPoint("/mnt/storage".to_owned()),
+            },
+            err_raw("mountpoint -q /mnt/storage", 1, ""),
+        );
+        let config = test_config();
+        let plan = plan_lock(&runner, &FailListDirFs, &config, &test_membership())
+            .expect("plan_lock should succeed with list_dir failure");
+        let output = plan.preview().render();
 
         assert!(
             output.starts_with(
@@ -1052,9 +1096,10 @@ mod tests {
     }
 
     /*
-     * Intent: `render_lock_dry_run` renders the full happy-path preview --
-     *   umount + scoped forget + per-mapper closes (membership and orphan).
-     * Why it exists: the preview helper is the sole boundary between
+     * Intent: `plan_lock(...).preview().render()` produces the full
+     *   happy-path preview -- umount + scoped forget + per-mapper
+     *   closes (membership and orphan).
+     * Why it exists: the plan's preview is the sole boundary between
      *   `cmd_lock` dry-run and the user; a refactor that drops any of
      *   these steps must fail a test, not only `compile_lock_steps`'
      *   isolated tests.
@@ -1064,13 +1109,23 @@ mod tests {
      */
     #[test]
     fn dry_run_preview_mounted_happy_path() {
+        // Mounted pool needs MountpointCheck ok + probe_fsid mocks for
+        // preflight. Plan-only path -- no umount/forget/close mocks.
+        let runner = with_fsid_probe_mocks(MockRunner::default().with_output(
+            CmdRequest::MountpointCheck {
+                path: MountPoint("/mnt/storage".to_owned()),
+            },
+            ok_raw("mountpoint -q /mnt/storage"),
+        ));
         let fs = MockFs::new(&[
             "/dev/mapper/braid-aaa",
             "/dev/mapper/braid-bbb",
             "/dev/mapper/braid-ccc",
         ]);
-        let mount_point = MountPoint("/mnt/storage".to_owned());
-        let output = render_lock_dry_run(true, &fs, &test_membership(), &mount_point);
+        let config = test_config();
+        let plan = plan_lock(&runner, &fs, &config, &test_membership())
+            .expect("plan_lock should succeed on mounted pool");
+        let output = plan.preview().render();
 
         assert!(
             !output.contains("[warn]"),
@@ -1099,8 +1154,9 @@ mod tests {
     }
 
     /*
-     * Intent: `render_lock_dry_run` emits exactly `nothing to do.\n` when
-     *   the pool is unmounted with no open membership or orphan mappers.
+     * Intent: `plan_lock(...).preview().render()` emits exactly
+     *   `nothing to do.\n` when the pool is unmounted with no open
+     *   membership or orphan mappers.
      * Why it exists: the no-op branch is easy to regress silently -- a
      *   helper refactor could drop or alter the line and all other tests
      *   would stay green.
@@ -1109,9 +1165,17 @@ mod tests {
      */
     #[test]
     fn dry_run_preview_nothing_to_do() {
+        let runner = MockRunner::default().with_output(
+            CmdRequest::MountpointCheck {
+                path: MountPoint("/mnt/storage".to_owned()),
+            },
+            err_raw("mountpoint -q /mnt/storage", 1, ""),
+        );
         let fs = MockFs::new(&[]);
-        let mount_point = MountPoint("/mnt/storage".to_owned());
-        let output = render_lock_dry_run(false, &fs, &test_membership(), &mount_point);
+        let config = test_config();
+        let plan = plan_lock(&runner, &fs, &config, &test_membership())
+            .expect("plan_lock should succeed on already-locked pool");
+        let output = plan.preview().render();
 
         assert_eq!(output, "nothing to do.\n", "unexpected preview: {output:?}");
     }
