@@ -98,11 +98,10 @@ with subtest("braid add waits for balance and succeeds"):
 #    returned that eprintln! would fail this subtest.
 with subtest("dry-run during in-flight balance routes notes to stdout only"):
     # Start another background balance so the add --dry-run path
-    # observes an active exclusive op. RAID1 conversion is a no-op now
-    # (pool is already single), so use the reverse direction to produce
-    # real work.
+    # observes an active exclusive op. braid add disk3 has restored RAID1,
+    # so convert RAID1 -> single/DUP to produce real work.
     machine.execute(
-        "btrfs balance start -dconvert=raid1 -mconvert=raid1 -f /mnt/storage "
+        "btrfs balance start -dconvert=single -mconvert=dup -f /mnt/storage "
         "> /tmp/balance2.log 2>&1 &"
     )
 
