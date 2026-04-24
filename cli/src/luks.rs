@@ -644,6 +644,18 @@ pub fn format_keyfile_enrollment_probe_failure(failure: &KeyfileEnrollmentProbeF
     )
 }
 
+/// Returns the keyfile-asymmetry warning body with no channel-specific prefix.
+/// `PreviewNote::Warn` owns the `[warn]` prefix for dry-run stdout and real-run
+/// stderr renders.
+pub fn format_keyfile_asymmetry_warning() -> String {
+    "Existing pool drives have a keyfile (keyslot-1) for auto-unlock, \
+     but the new drive will not.\n  \
+     Passphrase unlock still works, but the keyfile won't unlock the new drive \
+     until it's enrolled.\n  \
+     Fix: re-run with --enroll <dir>, or run `braid enroll <dir>` afterward.\n"
+        .to_owned()
+}
+
 /// Scan `dir` for `.luksheader` or `.img` files and return advisories.
 /// Extracted so tests can pass a tempdir instead of the real path.
 fn header_backup_advisories_in(dir: &std::path::Path) -> Vec<String> {

@@ -41,9 +41,8 @@ with subtest("Setup: build 2-disk pool"):
 with subtest("Setup: generate and enroll keyfile into both members"):
     # Mirrors braid-enroll.py's fixture. After this, the pool carries
     # keyfile enrollment in LUKS slot 1 on every member -- the
-    # precondition for the keyfile-asymmetry warning to fire inside
-    # replace's confirmation path when the replacement disk is
-    # PresentNotLuks and --enroll is omitted.
+    # precondition for the keyfile-asymmetry PreviewNote to fire when
+    # the replacement disk is PresentNotLuks and --enroll is omitted.
     machine.succeed("mkdir -p /tmp/kf")
     machine.succeed(
         "dd if=/dev/urandom of=/tmp/kf/braid.key bs=4096 count=1 iflag=fullblock"
@@ -123,16 +122,11 @@ with subtest("Phase 1: live-path --dry-run prints preview on stdout, stderr empt
     # stderr empty. This simultaneously pins two contracts:
     #   (a) dry-run is rendered via `ReplacePlan::preview().print()`
     #       to stdout only (PR 8 Preview migration);
-    #   (b) the keyfile-asymmetry `WARNING:` block stays
-    #       confirmation-only -- it must NOT appear anywhere on
-    #       dry-run output even when the pool/fixture would trigger
-    #       it in the interactive confirmation path.
-    # Why it exists: a regression that widened the warning into a
-    # `PreviewNote::Warn`, or that leaked stderr during dry-run,
-    # would start surfacing a net-new line on every `replace
-    # --dry-run` whose pool happens to carry a keyfile. The plan
-    # (replace recipe) pins this warning as confirmation-only; this
-    # test is the behavioral lock.
+    #   (b) keyfile-asymmetry is a PreviewNote::Warn on stdout, not a
+    #       legacy confirmation-only `WARNING:` block on stderr.
+    # Why it exists: dry-run should show interpretive replacement risks
+    # in the single Preview stream while preserving empty stderr on
+    # success.
     # Scenario: healthy 2-disk pool with keyfile enrolled; disk3 is
     # raw; operator previews the swap without passing `--enroll`.
     machine.succeed(
@@ -154,15 +148,15 @@ with subtest("Phase 1: live-path --dry-run prints preview on stdout, stderr empt
         f"live-path dry-run stderr must be empty on success; got: {err!r}"
     )
     assert "WARNING:" not in out, (
-        f"live-path dry-run stdout must not leak the confirmation-only"
-        f" keyfile-asymmetry WARNING; got: {out!r}"
+        f"live-path dry-run stdout must not use legacy WARNING prefix;"
+        f" got: {out!r}"
     )
     assert "WARNING:" not in err, (
-        f"live-path dry-run stderr must not leak the confirmation-only"
-        f" keyfile-asymmetry WARNING; got: {err!r}"
+        f"live-path dry-run stderr must not use legacy WARNING prefix;"
+        f" got: {err!r}"
     )
-    assert "Existing pool drives have a keyfile" not in out, (
-        f"dry-run stdout must not carry the keyfile-asymmetry body;"
+    assert "[warn]  Existing pool drives have a keyfile (keyslot-1)" in out, (
+        f"dry-run stdout must carry the keyfile-asymmetry warning;"
         f" got: {out!r}"
     )
     assert "Existing pool drives have a keyfile" not in err, (
@@ -170,11 +164,13 @@ with subtest("Phase 1: live-path --dry-run prints preview on stdout, stderr empt
         f" got: {err!r}"
     )
 
-with subtest("Phase 1b: failed keyfile probe stays quiet during dry-run"):
-    # Intent: even when cryptsetup luksDump would fail, replace --dry-run
-    # must not emit keyfile-probe diagnostics on stdout or stderr.
-    # Why it exists: replace keeps keyfile probe diagnostics inside the
-    # interactive confirmation path; dry-run is a preview-only operation.
+with subtest("Phase 1b: failed keyfile probe becomes dry-run warning"):
+    # Intent: when cryptsetup luksDump fails, replace --dry-run must emit
+    # probe uncertainty as a PreviewNote::Warn on stdout and keep stderr
+    # empty.
+    # Why it exists: successful dry-run owns a single stdout Preview stream;
+    # interpretive diagnostics belong there, not in stderr or a suppressed
+    # side path.
     # Scenario: run the unwrapped braid binary with a cryptsetup shim that
     # fails every luksDump while previewing disk1 -> disk3.
     install_cryptsetup_luksdump_wrapper("all-fail")
@@ -189,8 +185,11 @@ with subtest("Phase 1b: failed keyfile probe stays quiet during dry-run"):
     assert "btrfs replace start" in out, (
         f"dry-run stdout must still contain the replace preview; got: {out!r}"
     )
-    assert "could not check keyfile enrollment" not in out, (
-        f"dry-run stdout must not carry probe-failure notes; got: {out!r}"
+    assert "[warn]  could not check keyfile enrollment" in out, (
+        f"dry-run stdout must carry probe-failure warning notes; got: {out!r}"
+    )
+    assert "proceeding as if no keyfile is enrolled" in out, (
+        f"dry-run stdout must carry the canonical probe-failure suffix; got: {out!r}"
     )
     assert err == "", (
         f"dry-run stderr must stay empty when luksDump is shimmed; got: {err!r}"
@@ -198,18 +197,13 @@ with subtest("Phase 1b: failed keyfile probe stays quiet during dry-run"):
 
 # --- Phase 2: --yes real-run (live path) ---
 
-with subtest("Phase 2: --yes real-run on keyfile pool does not leak WARNING"):
-    # Intent: `braid replace --yes` (no `--dry-run`) on a pool that
-    # would trigger the keyfile-asymmetry warning in the interactive
-    # confirmation path must NOT emit the `WARNING:` block on stdout
-    # or stderr. The warning is gated by `!params.yes` inside
-    # `ReplacePlan::execute`; scripts relying on quiet `--yes` output
-    # must not suddenly see a new stderr line.
-    # Why it exists: regression guard against dropping the
-    # `!params.yes` gate or routing the warning through
-    # `Preview::render` during the PR 8 refactor. An `--yes` run on
-    # the same fixture must exercise the mutation path and come back
-    # clean.
+with subtest("Phase 2: --yes real-run renders probe warning on stderr"):
+    # Intent: `braid replace --yes` (no `--dry-run`) with failed
+    # keyfile probes must render the same PreviewNote warning to stderr
+    # before mutating.
+    # Why it exists: real-run and dry-run should share note wording while
+    # preserving stream ownership: stdout is for command output, stderr is
+    # for real-run diagnostics.
     # Scenario: pool still has disk1 + disk2 with keyfile; disk3 is
     # raw; operator runs `braid replace --yes` without `--enroll`.
     # Pool after: disk2 + disk3 (disk1 replaced in-place).
@@ -223,11 +217,11 @@ with subtest("Phase 2: --yes real-run on keyfile pool does not leak WARNING"):
     err = machine.succeed("cat /tmp/yes-err")
 
     assert "WARNING:" not in out, (
-        f"--yes real-run stdout must not leak keyfile-asymmetry WARNING;"
+        f"--yes real-run stdout must not use legacy WARNING prefix;"
         f" got: {out!r}"
     )
     assert "WARNING:" not in err, (
-        f"--yes real-run stderr must not leak keyfile-asymmetry WARNING;"
+        f"--yes real-run stderr must not use legacy WARNING prefix;"
         f" got: {err!r}"
     )
     assert "Existing pool drives have a keyfile" not in out, (
@@ -239,11 +233,15 @@ with subtest("Phase 2: --yes real-run on keyfile pool does not leak WARNING"):
         f" got: {err!r}"
     )
     assert "could not check keyfile enrollment" not in out, (
-        f"--yes real-run stdout must not carry probe-failure note;"
+        f"--yes real-run stdout must not carry probe-failure warning;"
         f" got: {out!r}"
     )
-    assert "could not check keyfile enrollment" not in err, (
-        f"--yes real-run stderr must not carry probe-failure note;"
+    assert "[warn]  could not check keyfile enrollment" in err, (
+        f"--yes real-run stderr must carry probe-failure warning;"
+        f" got: {err!r}"
+    )
+    assert "proceeding as if no keyfile is enrolled" in err, (
+        f"--yes real-run stderr must carry canonical probe-failure suffix;"
         f" got: {err!r}"
     )
 
@@ -265,13 +263,12 @@ with subtest("Phase 2b: enroll replacement disk3 for interactive mixed-case prob
         f"printf '%s\\n' {pq} | braid enroll /tmp/kf --passphrase-stdin"
     )
 
-with subtest("Phase 2c: interactive failed probes print note and make no mutation"):
-    # Intent: in interactive confirmation only, failed keyfile probes are
-    # routed to stderr as `note: <body>` when no existing member proves
-    # slot 1 is occupied.
-    # Why it exists: this is the replace-side counterpart to add's
-    # PreviewNote routing. Dry-run and --yes stay quiet, but interactive
-    # operators still get uncertainty context before confirming.
+with subtest("Phase 2c: interactive failed probes print warning and make no mutation"):
+    # Intent: failed keyfile probes are routed to stderr as canonical
+    # PreviewNote warnings when no existing member proves slot 1 is
+    # occupied.
+    # Why it exists: interactive replace uses the same plan notes as
+    # dry-run and --yes, so operators see one diagnostic style.
     # Scenario: every luksDump fails, then the operator answers `no`.
     install_cryptsetup_luksdump_wrapper("all-fail")
     (status, _) = machine.execute(
@@ -282,13 +279,13 @@ with subtest("Phase 2c: interactive failed probes print note and make no mutatio
     )
     assert status != 0, "interactive `no` should abort the replace"
     err = machine.succeed("cat /tmp/int-fail-err")
-    assert "note: could not check keyfile enrollment" in err, (
-        f"interactive stderr must contain the probe-failure note; got: {err!r}"
+    assert "[warn]  could not check keyfile enrollment" in err, (
+        f"interactive stderr must contain the probe-failure warning; got: {err!r}"
     )
     assert "proceeding as if no keyfile is enrolled" in err, (
         f"interactive stderr must carry the canonical probe-failure suffix; got: {err!r}"
     )
-    assert "WARNING: Existing pool drives have a keyfile" not in err, (
+    assert "Existing pool drives have a keyfile" not in err, (
         f"all-failure probe must not claim keyfile enrollment; got: {err!r}"
     )
     fi_show = machine.succeed("btrfs fi show /mnt/storage")
@@ -296,10 +293,10 @@ with subtest("Phase 2c: interactive failed probes print note and make no mutatio
         f"answering no must not mutate the pool; got:\n{fi_show}"
     )
 
-with subtest("Phase 2d: interactive mixed failure plus enrollment suppresses note"):
+with subtest("Phase 2d: interactive mixed failure plus enrollment suppresses probe warning"):
     # Intent: if one probe fails but another existing member proves slot 1
     # is occupied, replace prints the keyfile-asymmetry warning and
-    # suppresses the redundant probe-failure note.
+    # suppresses the redundant probe-failure warning.
     # Why it exists: the actionable recommendation is to pass --enroll;
     # uncertainty from a failed earlier probe should not add noise once
     # enrollment is known.
@@ -314,8 +311,11 @@ with subtest("Phase 2d: interactive mixed failure plus enrollment suppresses not
     )
     assert status != 0, "interactive `no` should abort the replace"
     err = machine.succeed("cat /tmp/int-mixed-err")
-    assert "WARNING: Existing pool drives have a keyfile (keyslot-1)" in err, (
+    assert "[warn]  Existing pool drives have a keyfile (keyslot-1)" in err, (
         f"mixed probe stderr must contain keyfile-asymmetry warning; got: {err!r}"
+    )
+    assert "WARNING:" not in err, (
+        f"mixed probe stderr must not use legacy WARNING prefix; got: {err!r}"
     )
     assert "could not check keyfile enrollment" not in err, (
         f"mixed probe stderr must suppress probe-failure note; got: {err!r}"

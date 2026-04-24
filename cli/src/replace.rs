@@ -5,8 +5,8 @@ use crate::inhibit::AcquireSleepInhibitor;
 use crate::journal;
 use crate::luks::{
     backup_luks_header, ensure_luks_open, luks_format, luks_opts_from_env,
-    format_keyfile_enrollment_probe_failure, probe_pool_keyfile_enrollment, read_passphrase,
-    verify_passphrase, VerifyOutcome,
+    format_keyfile_asymmetry_warning, format_keyfile_enrollment_probe_failure,
+    probe_pool_keyfile_enrollment, read_passphrase, verify_passphrase, VerifyOutcome,
 };
 use crate::membership::{self, PoolMembership};
 use crate::parse::parse_btrfs_device_stats;
@@ -58,10 +58,9 @@ pub struct ReplaceParams<'a> {
 /// Dry-run preview source of truth for `braid replace` plus the preflight
 /// state `execute()` needs to finish the operation. `notes` carries
 /// plan-derived preflight diagnostics (busy-op Info, readonly-probe-fail
-/// Warn) so both dry-run stdout and real-run stderr see the same wording;
-/// confirmation-only `WARNING:` lines (1-disk leftover, keyfile
-/// asymmetry) stay in `execute()` behind the `!params.yes` gate and do
-/// not appear on dry-run or `--yes` real-run.
+/// Warn) and keyfile enrollment diagnostics so both dry-run stdout and
+/// real-run stderr see the same wording. The 1-disk leftover `WARNING:`
+/// remains confirmation-only behind the `!params.yes` gate.
 pub struct ReplacePlan {
     pub notes: Vec<PreviewNote>,
     pub steps: Vec<Step>,
@@ -92,9 +91,9 @@ impl ReplacePlan {
     /// Shape A contract uniform with the other migrated commands.
     pub const STDERR_STYLE: PerDiskStyle = PerDiskStyle::Bracketed;
 
-    /// Build a `Preview` carrying any plan-derived notes. Confirmation-only
-    /// `WARNING:` lines (1-disk leftover, keyfile asymmetry) stay in
-    /// `execute()` behind the `!params.yes` gate and do not appear here.
+    /// Build a `Preview` carrying any plan-derived notes. The 1-disk
+    /// leftover `WARNING:` line stays in `execute()` behind the
+    /// `!params.yes` gate and does not appear here.
     pub fn preview(&self) -> Preview {
         Preview {
             completeness: PreviewCompleteness::Complete,
@@ -171,12 +170,6 @@ impl ReplacePlan {
                     "WARNING: This replace leaves only 1 disk -- no redundancy.\n\n",
                 );
             }
-            emit_replace_keyfile_confirmation_diagnostics(
-                runner,
-                &pool,
-                &new_probed,
-                params.enroll_key_file,
-            );
             confirm::confirm_yes().map_err(ReplaceError::Validation)?;
         }
 
@@ -428,35 +421,6 @@ fn emit_replace_notes_to_stderr(notes: &[PreviewNote]) {
     emit_replace_stderr(&rendered);
 }
 
-fn emit_replace_keyfile_confirmation_diagnostics<R: CommandRunner>(
-    runner: &R,
-    pool: &PoolState,
-    new_probed: &ConfigDisk,
-    enroll_key_file: Option<&Path>,
-) {
-    if !matches!(new_probed.state, ConfigDiskState::PresentNotLuks) || enroll_key_file.is_some() {
-        return;
-    }
-
-    let keyfile_probe = probe_pool_keyfile_enrollment(runner, &pool.devices);
-    if keyfile_probe.has_enrollment {
-        emit_replace_stderr(
-            "WARNING: Existing pool drives have a keyfile (keyslot-1) for auto-unlock, \
-             but the new drive will not.\n  \
-             Passphrase unlock still works, but the keyfile won't unlock the new drive \
-             until it's enrolled.\n  \
-             Fix: re-run with --enroll <dir>, or run `braid enroll <dir>` afterward.\n\n",
-        );
-    } else {
-        for failure in &keyfile_probe.failures {
-            emit_replace_stderr(&format!(
-                "note: {}\n",
-                format_keyfile_enrollment_probe_failure(failure)
-            ));
-        }
-    }
-}
-
 fn emit_replace_stderr(rendered: &str) {
     #[cfg(test)]
     if replace_stderr_capture::write(rendered) {
@@ -655,6 +619,22 @@ pub fn plan_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             };
         }
     };
+
+    // Keyfile diagnostics are plan notes, not confirmation-only stderr.
+    // This keeps dry-run stdout, real-run stderr, and preserved-error
+    // stderr on the same PreviewNote contract used by `add`.
+    if matches!(new_probed.state, ConfigDiskState::PresentNotLuks)
+        && params.enroll_key_file.is_none()
+    {
+        let keyfile_probe = probe_pool_keyfile_enrollment(runner, &pool.devices);
+        if keyfile_probe.has_enrollment {
+            notes.push(PreviewNote::Warn(format_keyfile_asymmetry_warning()));
+        } else {
+            notes.extend(keyfile_probe.failures.iter().map(|failure| {
+                PreviewNote::Warn(format_keyfile_enrollment_probe_failure(failure))
+            }));
+        }
+    }
 
     // Compile steps
     let will_clear_last_missing =
@@ -3248,13 +3228,12 @@ mod tests {
     }
 
     /* Intent: the live-path dry-run preview flows through
-     * `plan_replace(...).preview().render()`, and confirmation-only
-     * `WARNING:` lines (1-disk leftover, keyfile asymmetry) must never
-     * leak into `--dry-run` stdout.
+     * `plan_replace(...).preview().render()`, and the confirmation-only
+     * 1-disk `WARNING:` line must never leak into `--dry-run` stdout.
      *
      * Why it exists: `braid replace --dry-run` routes through
      * `ReplacePlan::preview()` instead of `Step::print_dry_run(&steps)`.
-     * A regression that surfaced the confirmation-only `WARNING:` lines
+     * A regression that surfaced the confirmation-only `WARNING:` line
      * on dry-run would change the bytes an operator sees. A regression
      * that reordered steps or dropped the cryptsetup-close step would
      * also change the rendered output. Both failure modes are caught
@@ -3346,7 +3325,7 @@ mod tests {
         );
         assert!(
             !rendered.contains("WARNING:"),
-            "live-path dry-run preview must not leak the confirmation-only WARNING lines, got:\n{rendered}",
+            "live-path dry-run preview must not leak confirmation-only WARNING lines, got:\n{rendered}",
         );
         assert!(
             inhibitor.acquire_count() == 0,
@@ -3355,8 +3334,8 @@ mod tests {
     }
 
     /* Intent: the missing-path dry-run preview flows through
-     * `plan_replace(...).preview().render()`, and confirmation-only
-     * `WARNING:` lines must never leak into `--dry-run` stdout.
+     * `plan_replace(...).preview().render()`, and the confirmation-only
+     * 1-disk `WARNING:` line must never leak into `--dry-run` stdout.
      *
      * Why it exists: same regression surface as the live-path
      * preview test, but for the `ReplaceSource::Missing` branch
@@ -3512,7 +3491,7 @@ mod tests {
     /* Intent: plan_replace surfaces an in-flight exclusive op as a
      * PreviewNote::Info on `plan.notes`, and the rendered preview
      * contains the "waiting for in-flight <op>" line. Confirmation-only
-     * `WARNING:` lines still do not leak into the preview.
+     * 1-disk `WARNING:` output still does not leak into the preview.
      * Why it exists: Shape A migration moves the busy-op diagnostic
      * from stderr into plan.notes; a regression leaking it back to
      * stderr breaks the dry-run stdout-only contract.
@@ -3819,27 +3798,20 @@ mod tests {
         }
     }
 
-    fn fresh_replace_disk() -> ConfigDisk {
-        ConfigDisk {
-            name: "disk3".into(),
-            by_id_path: ByIdPath("/dev/disk/by-id/virtio-disk3".into()),
-            state: ConfigDiskState::PresentNotLuks,
-        }
-    }
-
-    /* Intent: plan_replace dry-run does not probe keyfile enrollment and
-     * does not surface probe uncertainty as a preview note.
-     * Why it exists: replace keyfile diagnostics are confirmation-only; a
-     * dry-run must remain stdout-only step preview even if luksDump would
-     * fail during an interactive confirmation.
+    /* Intent: plan_replace turns keyfile probe failures into warning notes
+     * on the replacement plan.
+     * Why it exists: dry-run, real-run, and preserved-error output should use
+     * the same PreviewNote contract instead of a confirmation-only stderr
+     * side path.
      * Scenario: operator previews replacing disk2 with raw disk3 while
      * existing pool members would fail the keyfile probe.
      */
     #[test]
-    fn plan_replace_dry_run_skips_keyfile_probe_failure_notes() {
+    fn plan_replace_keyfile_probe_failure_becomes_warn_notes() {
         let fixture = plan_replace_fixture();
         let fs = ReplaceMockFs(vec!["/dev/disk/by-id/virtio-disk3".into()]);
         let runner = ReplaceKeyfileProbeRunner::new(vec![
+            ReplaceKeyfileProbe::Failure,
             ReplaceKeyfileProbe::Failure,
             ReplaceKeyfileProbe::Failure,
         ]);
@@ -3849,89 +3821,76 @@ mod tests {
         let rendered = plan.preview().render();
 
         assert!(
-            !rendered.contains("could not check keyfile enrollment"),
-            "dry-run preview must not include probe-failure notes, got:\n{rendered}",
+            rendered.contains(
+                "[warn]  could not check keyfile enrollment on /dev/vdb: cryptsetup luksDump failed (exit 5): forced luksDump failure on /dev/vdb; proceeding as if no keyfile is enrolled"
+            ),
+            "dry-run preview must include the first probe-failure warning, got:\n{rendered}",
+        );
+        assert!(
+            rendered.contains(
+                "[warn]  could not check keyfile enrollment on /dev/vdc: cryptsetup luksDump failed (exit 5): forced luksDump failure on /dev/vdc; proceeding as if no keyfile is enrolled"
+            ),
+            "dry-run preview must include the second probe-failure warning, got:\n{rendered}",
         );
         assert!(
             !rendered.contains("Existing pool drives have a keyfile"),
-            "dry-run preview must not include confirmation-only keyfile warning, got:\n{rendered}",
+            "probe-failure-only case must not emit the keyfile-asymmetry warning, got:\n{rendered}",
         );
         assert!(
-            !runner
+            runner
                 .requests()
                 .iter()
                 .any(|request| matches!(request, CmdRequest::CryptsetupLuksDump { .. })),
-            "plan_replace dry-run must not run the keyfile enrollment probe"
+            "plan_replace must run the keyfile enrollment probe"
         );
     }
 
-    /* Intent: interactive replace emits explicit probe-failure notes when
-     * no existing device proves slot 1 is occupied.
-     * Why it exists: probe failures are structured data now; replace owns
-     * stderr routing and should only print uncertainty notes in the
-     * interactive confirmation path.
-     * Scenario: both existing pool devices fail luksDump while replacing
-     * with a raw disk and omitting --enroll.
+    /* Intent: plan_replace emits keyfile-asymmetry as a PreviewNote::Warn
+     * once any pool member proves slot 1 is occupied.
+     * Why it exists: replace should use the same keyfile warning policy and
+     * wording as add, with no legacy `WARNING:` block.
+     * Scenario: disk1's luksDump fails, disk2 reports slot 1 occupied, and
+     * the operator replaces with a raw disk without --enroll.
      */
     #[test]
-    fn plan_replace_interactive_probe_failure_note_when_no_enrollment_found() {
-        let pool = two_device_pool();
-        let new_probed = fresh_replace_disk();
+    fn plan_replace_keyfile_asymmetry_suppresses_probe_failure_warning() {
+        let fixture = plan_replace_fixture();
+        let fs = ReplaceMockFs(vec!["/dev/disk/by-id/virtio-disk3".into()]);
         let runner = ReplaceKeyfileProbeRunner::new(vec![
             ReplaceKeyfileProbe::Failure,
-            ReplaceKeyfileProbe::Failure,
-        ]);
-
-        let ((), stderr) = super::replace_stderr_capture::capture(|| {
-            emit_replace_keyfile_confirmation_diagnostics(&runner, &pool, &new_probed, None);
-        });
-
-        assert!(
-            stderr.contains(
-                "note: could not check keyfile enrollment on /dev/vda: cryptsetup luksDump failed (exit 5): forced luksDump failure on /dev/vda; proceeding as if no keyfile is enrolled"
-            ),
-            "interactive confirmation must print the first probe-failure note, got:\n{stderr}",
-        );
-        assert!(
-            stderr.contains(
-                "note: could not check keyfile enrollment on /dev/vdb: cryptsetup luksDump failed (exit 5): forced luksDump failure on /dev/vdb; proceeding as if no keyfile is enrolled"
-            ),
-            "interactive confirmation must print the second probe-failure note, got:\n{stderr}",
-        );
-        assert!(
-            !stderr.contains("WARNING: Existing pool drives have a keyfile"),
-            "probe-failure-only case must not print keyfile-asymmetry warning, got:\n{stderr}",
-        );
-    }
-
-    /* Intent: interactive replace suppresses probe-failure uncertainty
-     * notes once another pool member proves slot 1 is occupied.
-     * Why it exists: the actionable diagnostic is keyfile asymmetry; the
-     * failed probe does not change the recommendation once enrollment is
-     * known to exist.
-     * Scenario: disk1's luksDump fails, disk2 reports slot 1 occupied,
-     * and the operator replaces with a raw disk without --enroll.
-     */
-    #[test]
-    fn plan_replace_interactive_mixed_failure_and_enrollment_suppresses_probe_note() {
-        let pool = two_device_pool();
-        let new_probed = fresh_replace_disk();
-        let runner = ReplaceKeyfileProbeRunner::new(vec![
             ReplaceKeyfileProbe::Failure,
             ReplaceKeyfileProbe::Occupied,
         ]);
 
-        let ((), stderr) = super::replace_stderr_capture::capture(|| {
-            emit_replace_keyfile_confirmation_diagnostics(&runner, &pool, &new_probed, None);
-        });
+        let report = plan_replace(&runner, &fs, &fixture.params(true, false));
+        let plan = report.result.expect("plan_replace should succeed");
+        let rendered = plan.preview().render();
 
-        assert!(
-            stderr.contains("WARNING: Existing pool drives have a keyfile (keyslot-1)"),
-            "mixed probe result must print the keyfile-asymmetry warning, got:\n{stderr}",
+        assert_eq!(
+            plan.notes.len(),
+            1,
+            "occupied slot 1 must emit exactly one warning, got {:?}",
+            plan.notes
         );
         assert!(
-            !stderr.contains("could not check keyfile enrollment"),
-            "occupied slot 1 must suppress probe-failure uncertainty notes, got:\n{stderr}",
+            matches!(
+                &plan.notes[0],
+                PreviewNote::Warn(body) if body == &format_keyfile_asymmetry_warning()
+            ),
+            "occupied slot 1 must emit only the keyfile-asymmetry warning, got {:?}",
+            plan.notes
+        );
+        assert!(
+            rendered.contains("[warn]  Existing pool drives have a keyfile (keyslot-1)"),
+            "mixed probe result must render canonical keyfile-asymmetry warning, got:\n{rendered}",
+        );
+        assert!(
+            !rendered.contains("WARNING:"),
+            "keyfile-asymmetry warning must not use legacy WARNING prefix, got:\n{rendered}",
+        );
+        assert!(
+            !rendered.contains("could not check keyfile enrollment"),
+            "occupied slot 1 must suppress probe-failure uncertainty notes, got:\n{rendered}",
         );
     }
 
