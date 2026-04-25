@@ -181,12 +181,12 @@ with subtest("Test 5: dry-run + real-run surface mixed skip notes"):
     assert mx_err == "", (
         f"successful --dry-run must leave stderr empty, got: {mx_err!r}"
     )
-    # Bracketed shape is `[skip]  disk: <name:<10>><message>\n` --
+    # Bracketed shape is `[skip] disk <name>: <message>\n` --
     # matches `format_per_disk_line(.., PerDiskStyle::Bracketed)`.
-    assert "[skip]  disk: disk1     not LUKS-formatted\n" in mx_out, (
+    assert "[skip] disk disk1: not LUKS-formatted\n" in mx_out, (
         f"expected bracketed non-LUKS skip for disk1 on stdout, got: {mx_out!r}"
     )
-    assert "[skip]  disk: disk3     not present\n" in mx_out, (
+    assert "[skip] disk disk3: not present\n" in mx_out, (
         f"expected bracketed absent skip for disk3 on stdout, got: {mx_out!r}"
     )
     # Sanity: the surviving candidate (disk2) contributes a step.

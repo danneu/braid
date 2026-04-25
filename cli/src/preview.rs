@@ -11,7 +11,7 @@
 use serde::Serialize;
 
 use crate::cmd::Step;
-use crate::status_tag::{StatusTag, color_enabled_for_stdout, render_status_tag};
+use crate::status_tag::{StatusTag, color_enabled_for_stdout, status_line};
 
 /// One renderable dry-run preview. `notes` and `steps` render in the
 /// fixed order documented on `Preview::render`. `Step` is not yet
@@ -62,8 +62,8 @@ pub enum NoteLevel {
     Error,
 }
 
-/// Per-disk line shape. `Bracketed` matches today's
-/// `mount::render_probe_events` output (`[ok  ]  disk: <name>    <msg>`);
+/// Per-disk line shape. `Bracketed` matches the event-log shape
+/// (`[ok]   disk <name>: <msg>`);
 /// `Plain` matches today's `enroll` discovery lines
 /// (`<tag>: <name> <msg>`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,14 +100,11 @@ fn format_per_disk_line(
     color_enabled: bool,
 ) -> String {
     match style {
-        PerDiskStyle::Bracketed => {
-            format!(
-                "{}  disk: {:<10}{}\n",
-                render_status_tag(level.to_status_tag(), color_enabled),
-                name,
-                message
-            )
-        }
+        PerDiskStyle::Bracketed => status_line(
+            level.to_status_tag(),
+            color_enabled,
+            &format!("disk {name}: {message}"),
+        ),
         PerDiskStyle::Plain => {
             format!("{}: {} {}\n", level.plain_label(), name, message)
         }
@@ -147,10 +144,10 @@ pub fn render_per_disk_notes_with(
 
 /// Render every note in `notes` for stderr (failure-path or real-run
 /// prelude). `Info` renders unadorned, `Warn` renders as
-/// `[warn]  <body>`, and `PerDisk` uses the given style. Mirrors
-/// `Preview::render`'s notes section but lets callers pick the
-/// per-disk style (e.g. `enroll` real-run uses `Plain` to preserve
-/// today's `skip: <name> ...` wording).
+/// `[warn] <body>` with a 7-column visible prefix, and `PerDisk` uses
+/// the given style. Mirrors `Preview::render`'s notes section but lets
+/// callers pick the per-disk style (e.g. `enroll` real-run uses
+/// `Plain` to preserve today's `skip: <name> ...` wording).
 pub fn render_notes_for_stderr(notes: &[PreviewNote], style: PerDiskStyle) -> String {
     render_notes_for_stderr_with(notes, style, false)
 }
@@ -168,10 +165,7 @@ pub fn render_notes_for_stderr_with(
                 out.push('\n');
             }
             PreviewNote::Warn(msg) => {
-                out.push_str(&format!(
-                    "{}  {msg}\n",
-                    render_status_tag(StatusTag::Warn, color_enabled)
-                ));
+                out.push_str(&status_line(StatusTag::Warn, color_enabled, msg));
             }
             PreviewNote::PerDisk {
                 name,
@@ -196,7 +190,7 @@ impl Preview {
     ///
     /// 1. `notes` in insertion order. `PerDisk` always renders in
     ///    `Bracketed` style; `Info` renders unadorned; `Warn` renders
-    ///    as `[warn]  <body>`.
+    ///    as `[warn] <body>` with a 7-column visible prefix.
     /// 2. Steps via `Step::render_dry_run`. If `steps` is empty *and*
     ///    no `Info` note is present, the literal `nothing to do.\n`
     ///    is emitted (preserves `lock`'s today contract).
@@ -217,10 +211,7 @@ impl Preview {
                     out.push('\n');
                 }
                 PreviewNote::Warn(msg) => {
-                    out.push_str(&format!(
-                        "{}  {msg}\n",
-                        render_status_tag(StatusTag::Warn, color_enabled)
-                    ));
+                    out.push_str(&status_line(StatusTag::Warn, color_enabled, msg));
                 }
                 PreviewNote::PerDisk {
                     name,
@@ -299,7 +290,7 @@ mod tests {
         };
         let rendered = preview.render();
         let expected = "\
-[warn]  scan failed
+[warn] scan failed
 [safe       ] btrfs device scan
                $ btrfs device scan
 ";
@@ -322,7 +313,7 @@ mod tests {
         };
         let rendered = preview.render_with(true);
         let expected = "\
-\x1b[33m[warn]\x1b[0m  scan failed
+\x1b[33m[warn]\x1b[0m scan failed
 [safe       ] btrfs device scan
                $ btrfs device scan
 ";
@@ -386,7 +377,7 @@ mod tests {
         };
         assert_eq!(
             preview.render(),
-            "[warn]  orphan scan failed\nnothing to do.\n",
+            "[warn] orphan scan failed\nnothing to do.\n",
         );
     }
 
@@ -412,8 +403,30 @@ mod tests {
         };
         let rendered = preview.render();
         assert!(
-            rendered.starts_with("[skip]  disk: disk1     not present\n"),
+            rendered.starts_with("[skip] disk disk1: not present\n"),
             "unexpected rendering: {rendered:?}",
+        );
+    }
+
+    /* Intent: long disk names keep a visible delimiter before the action.
+     * Why it exists: the old fixed-width name column let validated disk
+     * names longer than the column run directly into the message text.
+     * Scenario: a bracketed per-disk line for a long but valid disk name.
+     */
+    #[test]
+    fn format_per_disk_line_long_name_keeps_action_separated() {
+        let long_name = "diskname-with-30-character-id";
+        let notes = vec![PreviewNote::PerDisk {
+            name: long_name.into(),
+            level: NoteLevel::Ok,
+            message: "locked".into(),
+        }];
+
+        let rendered = render_per_disk_notes(&notes, PerDiskStyle::Bracketed);
+
+        assert!(
+            rendered.contains(&format!("disk {long_name}: locked")),
+            "long-name row must keep a colon+space delimiter, got: {rendered:?}",
         );
     }
 
@@ -471,12 +484,12 @@ mod tests {
         let bracketed = render_per_disk_notes(&notes, PerDiskStyle::Bracketed);
         assert_eq!(
             bracketed,
-            "[skip]  disk: diskA     not present\n[ok  ]  disk: diskB     found\n",
+            "[skip] disk diskA: not present\n[ok]   disk diskB: found\n",
         );
     }
 
     /* Intent: render_notes_for_stderr emits every note kind in
-     * insertion order: Info unadorned, Warn as `[warn]  <body>`,
+     * insertion order: Info unadorned, Warn as `[warn] <body>`,
      * PerDisk via the chosen style.
      * Why it exists: this helper is the failure-path / real-run
      * prelude renderer for Shape A commands. Wording or ordering
@@ -499,8 +512,8 @@ mod tests {
         let rendered = render_notes_for_stderr(&notes, PerDiskStyle::Bracketed);
         let expected = "\
 pool already mounted at /mnt/storage
-[skip]  disk: disk1     not found (unplugged?)
-[warn]  pool has 1 missing device(s)
+[skip] disk disk1: not found (unplugged?)
+[warn] pool has 1 missing device(s)
 ";
         assert_eq!(rendered, expected);
     }
@@ -526,8 +539,8 @@ pool already mounted at /mnt/storage
         let rendered = render_notes_for_stderr_with(&notes, PerDiskStyle::Bracketed, true);
         let expected = "\
 pool already mounted at /mnt/storage
-\x1b[90m[skip]\x1b[0m  disk: disk1     not found (unplugged?)
-\x1b[33m[warn]\x1b[0m  pool has 1 missing device(s)
+\x1b[90m[skip]\x1b[0m disk disk1: not found (unplugged?)
+\x1b[33m[warn]\x1b[0m pool has 1 missing device(s)
 ";
         assert_eq!(rendered, expected);
     }

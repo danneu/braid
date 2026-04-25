@@ -253,7 +253,7 @@ pub struct AddParams<'a> {
 /// Returns the missing-devices warning body (no legacy `warning:` prefix).
 /// Both dry-run (`Preview::render` on stdout) and real-run
 /// (`preview::render_notes_for_stderr` on stderr) wrap this in
-/// `PreviewNote::Warn` and render it as the canonical `[warn]  <body>`
+/// `PreviewNote::Warn` and render it as the canonical `[warn] <body>`
 /// -- one contract for both modes.
 fn format_add_missing_devices_warning(missing_count: u64) -> String {
     format!(
@@ -286,7 +286,7 @@ fn add_label(names: &[String]) -> String {
 /// inputs pre-computed during planning. `notes` + `steps` are both
 /// rendered by `preview()`; `execute()` renders the accumulated notes
 /// to stderr through `preview::render_notes_for_stderr` before any
-/// mutation. Warn notes use canonical `[warn]  <body>` wording and
+/// mutation. Warn notes use canonical `[warn] <body>` wording and
 /// Info notes render bare.
 pub struct AddPlan {
     pub notes: Vec<PreviewNote>,
@@ -334,7 +334,7 @@ impl AddPlan {
     ) -> Result<(), AddError> {
         // Render accumulated notes to stderr BEFORE any mutation via
         // the shared renderer. Warn notes emit as the canonical
-        // `[warn]  <body>` (same as dry-run stdout); the no-op Info
+        // `[warn] <body>` (same as dry-run stdout); the no-op Info
         // note (when steps are empty) emits as the bare noop line.
         // `cmd_add`'s preserved-context Err branch pipes `report.notes`
         // through the same helper, so success, failure, and dry-run
@@ -3234,8 +3234,8 @@ mod tests {
      * format_add_missing_devices_warning, with no legacy `warning:` prefix.
      * Why it exists: PR 7 moves the missing-devices diagnostic from a
      * direct stderr eprintln! into plan.notes. The renderer owns the
-     * `[warn]  ` / `warning: ` wrapping; a regression that leaks the
-     * legacy prefix into the body would double up as `[warn]  warning:
+     * `[warn] ` / `warning: ` wrapping; a regression that leaks the
+     * legacy prefix into the body would double up as `[warn] warning:
      * pool has...` on dry-run stdout.
      * Scenario: 1 real device + 1 MISSING placeholder, operator tries to
      * add a fresh disk2.
@@ -3277,7 +3277,7 @@ mod tests {
      * but the add omits `--enroll`.
      * Why it exists: PR 7 routes the legacy WARNING eprintln! through the
      * shared helper. A regression that left the `WARNING:` prefix baked
-     * into the body would stack as `[warn]  WARNING: ...` on dry-run.
+     * into the body would stack as `[warn] WARNING: ...` on dry-run.
      * Scenario: 1-disk pool with keyfile on disk1, operator adds a fresh
      * disk2 without --enroll.
      */
@@ -3620,7 +3620,7 @@ mod tests {
 
         let rendered = plan.preview().render();
         let warn_pos = rendered
-            .find("[warn]  pool has 1 missing device")
+            .find("[warn] pool has 1 missing device")
             .expect("missing-devices Warn must appear on stdout render");
         let steps_pos = rendered
             .find("btrfs device add")
@@ -3636,11 +3636,11 @@ mod tests {
      * helper -- across dry-run stdout (via `Preview::render`),
      * real-run stderr (via `AddPlan::execute`), and preserved-context
      * Err stderr (via `cmd_add`). The canonical shape is
-     * `[warn]  <body>`; legacy `warning:` / `WARNING:` prefixes are
+     * `[warn] <body>`; legacy `warning:` / `WARNING:` prefixes are
      * gone.
      * Why it exists: a previous iteration of this PR replayed
      * plan-derived Warn notes with the legacy prefixes on the Ok path
-     * while the Err path used `[warn]  ...`, producing two different
+     * while the Err path used `[warn] ...`, producing two different
      * wordings for the same note. This test pins the unified
      * rendering at the renderer layer so any drift -- a stray
      * `warning:` prefix reintroduced into a body, an Info-note leak,
@@ -3665,16 +3665,16 @@ mod tests {
         let rendered = preview::render_notes_for_stderr(&notes, AddPlan::STDERR_STYLE);
         let expected = concat!(
             "Nothing to do -- disk2 already in pool.\n",
-            "[warn]  pool has 1 missing device. Consider repairing with",
+            "[warn] pool has 1 missing device. Consider repairing with",
             " `braid replace --missing-id <devid>` first.",
             " Use `braid status` to see device IDs.\n",
-            "[warn]  Existing pool drives have a keyfile (keyslot-1) for auto-unlock,",
+            "[warn] Existing pool drives have a keyfile (keyslot-1) for auto-unlock,",
             " but the new drive will not.\n",
             "  Passphrase unlock still works, but the keyfile won't unlock the new drive",
             " until it's enrolled.\n",
             "  Fix: re-run with --enroll <dir>, or run `braid enroll <dir>` afterward.\n",
             "\n",
-            "[skip]  disk: diskX     not present\n",
+            "[skip] disk diskX: not present\n",
         );
         assert_eq!(rendered, expected);
 

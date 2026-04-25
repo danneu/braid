@@ -4,7 +4,7 @@ use crate::luks::{self, LuksError, VerifyOutcome};
 use crate::membership::PoolMembership;
 use crate::preview::{self, NoteLevel, PerDiskStyle, PreviewNote};
 use crate::probe::{self, Filesystem, ProbeError};
-use crate::status_tag::{StatusTag, color_enabled_for_stderr, render_status_tag};
+use crate::status_tag::{StatusTag, color_enabled_for_stderr, status_line};
 use crate::types::{ByIdPath, ConfigDiskState, MountPoint};
 use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
@@ -150,7 +150,7 @@ impl ProbeEvent {
     /// project-wide dry-run preview model. `AlreadyMounted` becomes an
     /// `Info` note; per-disk variants become `PerDisk` notes whose
     /// rendered bytes (under `PerDiskStyle::Bracketed`) match
-    /// `render_probe_events`'s legacy line format.
+    /// `render_probe_events`'s line format.
     pub fn to_preview_note(&self) -> PreviewNote {
         match self {
             ProbeEvent::AlreadyMounted { mount_point } => {
@@ -560,10 +560,13 @@ fn open_disks_with_passphrase<R: CommandRunner, F: Filesystem + ?Sized>(
                 ok_fallback,
             ));
         }
-        eprintln!(
-            "{}  disk: {:<10}unlocked",
-            render_status_tag(StatusTag::Ok, color_enabled),
-            name
+        eprint!(
+            "{}",
+            status_line(
+                StatusTag::Ok,
+                color_enabled,
+                &format!("disk {name}: unlocked")
+            )
         );
     }
 
@@ -699,10 +702,13 @@ pub fn execute_unlock_and_mount<R: CommandRunner, F: Filesystem + ?Sized>(
                         ok_fallback,
                     ));
                 }
-                eprintln!(
-                    "{}  disk: {:<10}unlocked",
-                    render_status_tag(StatusTag::Ok, color_enabled),
-                    name
+                eprint!(
+                    "{}",
+                    status_line(
+                        StatusTag::Ok,
+                        color_enabled,
+                        &format!("disk {name}: unlocked")
+                    )
                 );
             }
         }
@@ -758,11 +764,13 @@ fn scan_and_mount<R: CommandRunner, F: Filesystem + ?Sized>(
         )));
     }
 
-    eprintln!(
-        "{}  {:<10}mounted {}",
-        render_status_tag(StatusTag::Ok, color_enabled),
-        "pool",
-        mount_point
+    eprint!(
+        "{}",
+        status_line(
+            StatusTag::Ok,
+            color_enabled,
+            &format!("pool: mounted {mount_point}")
+        )
     );
 
     Ok(true)
@@ -1888,11 +1896,11 @@ mod tests {
 
         let expected = "\
 pool already mounted at /mnt/storage
-[skip]  disk: disk1     not found (unplugged?)
-[skip]  disk: disk2     LUKS header unreadable
-[skip]  disk: disk3     LUKS header metadata damaged
-[ok  ]  disk: disk4     already open
-[ok  ]  disk: disk5     found
+[skip] disk disk1: not found (unplugged?)
+[skip] disk disk2: LUKS header unreadable
+[skip] disk disk3: LUKS header metadata damaged
+[ok]   disk disk4: already open
+[ok]   disk disk5: found
 ";
 
         assert_eq!(
@@ -1932,31 +1940,31 @@ pool already mounted at /mnt/storage
                 ProbeEvent::DiskAbsent {
                     name: "disk1".to_owned(),
                 },
-                "[skip]  disk: disk1     not found (unplugged?)\n",
+                "[skip] disk disk1: not found (unplugged?)\n",
             ),
             (
                 ProbeEvent::DiskLuksHeaderUnreadable {
                     name: "disk2".to_owned(),
                 },
-                "[skip]  disk: disk2     LUKS header unreadable\n",
+                "[skip] disk disk2: LUKS header unreadable\n",
             ),
             (
                 ProbeEvent::DiskLuksHeaderDamaged {
                     name: "disk3".to_owned(),
                 },
-                "[skip]  disk: disk3     LUKS header metadata damaged\n",
+                "[skip] disk disk3: LUKS header metadata damaged\n",
             ),
             (
                 ProbeEvent::DiskAlreadyOpen {
                     name: "disk4".to_owned(),
                 },
-                "[ok  ]  disk: disk4     already open\n",
+                "[ok]   disk disk4: already open\n",
             ),
             (
                 ProbeEvent::DiskAvailable {
                     name: "disk5".to_owned(),
                 },
-                "[ok  ]  disk: disk5     found\n",
+                "[ok]   disk disk5: found\n",
             ),
         ];
 

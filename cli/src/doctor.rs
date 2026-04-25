@@ -26,7 +26,7 @@ use crate::parse::types::{BtrfsBgType, BtrfsDfOutput, BtrfsProfile};
 use crate::preflight;
 use crate::state_paths::StatePaths;
 use crate::status::format_bytes;
-use crate::status_tag::{StatusTag, color_enabled_for_stdout, render_status_tag};
+use crate::status_tag::{StatusTag, color_enabled_for_stdout, status_line};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -920,10 +920,10 @@ pub fn format_doctor_human_with(report: &DoctorReport, color_enabled: bool) -> S
             "braid_online_active" => "braid-online",
             other => other,
         };
-        out.push_str(&format!(
-            "{}  {label:<14}  {}\n",
-            render_status_tag(tag, color_enabled),
-            c.message
+        out.push_str(&status_line(
+            tag,
+            color_enabled,
+            &format!("{label:<14}  {}", c.message),
         ));
     }
     out
@@ -1153,7 +1153,7 @@ mod tests {
         let f = write_temp(valid_config_json());
         let report = run_doctor(f.path(), &mock(), &isolated_paths().1, false);
         let human = format_doctor_human(&report);
-        assert!(human.contains("[ok  ]"), "expected [ok  ] tag:\n{human}");
+        assert!(human.contains("[ok]"), "expected [ok] tag:\n{human}");
         assert!(
             human.contains("config file"),
             "expected 'config file':\n{human}"
@@ -1213,10 +1213,10 @@ mod tests {
         };
         let human = format_doctor_human_with(&report, true);
         let expected = "\
-\x1b[32m[ok  ]\x1b[0m  config file     present
-\x1b[33m[warn]\x1b[0m  config perms    world-writable
-\x1b[31m[fail]\x1b[0m  declared disks  missing disk1
-\x1b[90m[skip]\x1b[0m  missing devs    pool offline
+\x1b[32m[ok]\x1b[0m   config file     present
+\x1b[33m[warn]\x1b[0m config perms    world-writable
+\x1b[31m[fail]\x1b[0m declared disks  missing disk1
+\x1b[90m[skip]\x1b[0m missing devs    pool offline
 ";
         assert_eq!(human, expected);
     }

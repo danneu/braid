@@ -14,7 +14,7 @@ rebalance and you carry a silent data-loss time bomb indefinitely.
 
 ```
 $ braid unlock
-[skip]  disk: disk3     not found (unplugged?)
+[skip] disk disk3: not found (unplugged?)
 error: pool has 1 missing device — refusing to mount degraded
        new writes would have ZERO redundancy (single-profile chunks)
 hint:  braid unlock --allow-degraded
@@ -32,8 +32,8 @@ hint:  braid unlock --allow-degraded
 
 ```
 $ braid unlock
-[skip]  disk: disk3     not found (unplugged?)
-[warn]  pool: mounted READ-ONLY (degraded — 1 missing device)
+[skip] disk disk3: not found (unplugged?)
+[warn] pool: mounted READ-ONLY (degraded — 1 missing device)
 hint:   braid unlock --allow-degraded for read-write access
 ```
 
@@ -49,7 +49,7 @@ hint:   braid unlock --allow-degraded for read-write access
 
 ```
 $ braid unlock
-[skip]  disk: disk3     not found (unplugged?)
+[skip] disk disk3: not found (unplugged?)
 [WARN]  1 missing device — mounting degraded means new writes have
         ZERO redundancy until you replace the drive and rebalance.
 
@@ -68,7 +68,7 @@ $ braid unlock
 
 ```
 $ braid unlock
-[skip]  disk: disk3     not found (unplugged?)
+[skip] disk disk3: not found (unplugged?)
 [WARN]  pool: mounted DEGRADED — new writes have NO redundancy
 [WARN]  replace the failed drive with `braid replace disk3 /dev/disk/by-id/new-drive`
 

@@ -19,6 +19,7 @@ machine.wait_for_unit("multi-user.target")
 
 passphrase = "testpassphrase"
 luks_opts = "--pbkdf pbkdf2 --pbkdf-force-iterations 1000"
+disk_names = ["disk1", "disk2", "longdisk3"]
 
 
 def add_cmd(key):
@@ -40,9 +41,8 @@ def unlock_cmd():
 # --- Setup: Create a 3-disk RAID1 pool with test data ---
 
 with subtest("Setup: create 3-disk pool"):
-    machine.succeed(add_cmd("disk1"))
-    machine.succeed(add_cmd("disk2"))
-    machine.succeed(add_cmd("disk3"))
+    for disk in disk_names:
+        machine.succeed(add_cmd(disk))
 
     # Write test data
     machine.succeed("echo 'persistent data' > /mnt/storage/test.txt")
@@ -55,13 +55,17 @@ with subtest("Setup: create 3-disk pool"):
 
 with subtest("Test 1: happy path — mounted pool locks cleanly"):
     machine.succeed("mountpoint -q /mnt/storage")
-    for k in ["disk1", "disk2", "disk3"]:
+    for k in disk_names:
         machine.succeed(f"test -e /dev/mapper/braid-{k}")
 
     machine.succeed("braid lock >/tmp/live-stdout 2>/tmp/live-stderr")
     live_stderr = machine.succeed("cat /tmp/live-stderr")
-    assert "unmounted /mnt/storage" in live_stderr, (
-        f"expected live lock stderr row, got: {live_stderr!r}"
+    live_stderr_lines = live_stderr.splitlines()
+    assert "[ok]   pool: unmounted /mnt/storage" in live_stderr_lines, (
+        f"expected exact live pool row, got: {live_stderr!r}"
+    )
+    assert "[ok]   disk longdisk3: locked" in live_stderr_lines, (
+        f"expected exact long-name disk row, got: {live_stderr!r}"
     )
     assert "\x1b[" not in live_stderr, (
         f"lock stderr must be plain without a TTY, got: {live_stderr!r}"
@@ -71,7 +75,7 @@ with subtest("Test 1: happy path — mounted pool locks cleanly"):
     machine.fail("mountpoint -q /mnt/storage")
 
     # All mappers closed
-    for k in ["disk1", "disk2", "disk3"]:
+    for k in disk_names:
         machine.fail(f"test -e /dev/mapper/braid-{k}")
 
 # --- Test 2: Idempotent ---
@@ -84,7 +88,7 @@ with subtest("Test 2: idempotent — lock again exits 0"):
 
     # Still no mappers
     machine.fail("mountpoint -q /mnt/storage")
-    for k in ["disk1", "disk2", "disk3"]:
+    for k in disk_names:
         machine.fail(f"test -e /dev/mapper/braid-{k}")
 
 # --- Test 3: Partial state ---
@@ -102,14 +106,14 @@ with subtest("Test 3: partial state — closes remaining mappers"):
     machine.succeed("umount /mnt/storage")
     machine.succeed("cryptsetup close braid-disk1")
 
-    # disk2 and disk3 still open
+    # disk2 and longdisk3 still open
     machine.succeed("test -e /dev/mapper/braid-disk2")
-    machine.succeed("test -e /dev/mapper/braid-disk3")
+    machine.succeed("test -e /dev/mapper/braid-longdisk3")
 
     machine.succeed("braid lock")
 
     # All mappers now closed
-    for k in ["disk1", "disk2", "disk3"]:
+    for k in disk_names:
         machine.fail(f"test -e /dev/mapper/braid-{k}")
 
 # --- Test 4: Round-trip ---
@@ -121,7 +125,7 @@ with subtest("Test 4: round-trip — lock then unlock, data intact"):
     machine.succeed(unlock_cmd())
 
     machine.succeed("mountpoint -q /mnt/storage")
-    for k in ["disk1", "disk2", "disk3"]:
+    for k in disk_names:
         machine.succeed(f"test -e /dev/mapper/braid-{k}")
 
     content = machine.succeed("cat /mnt/storage/test.txt").strip()
@@ -141,7 +145,7 @@ with subtest("Test 5: dry-run preview goes to stdout"):
     # Lock the pool so dry-run has no work to do -- shortest deterministic preview.
     machine.succeed("braid lock")
     machine.fail("mountpoint -q /mnt/storage")
-    for k in ["disk1", "disk2", "disk3"]:
+    for k in disk_names:
         machine.fail(f"test -e /dev/mapper/braid-{k}")
 
     machine.succeed(

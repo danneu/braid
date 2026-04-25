@@ -44,10 +44,10 @@ with subtest("Kill disk2: unmount, close mapper, remount degraded"):
 with subtest("Dry-run missing-device warning routes to stdout as [warn]"):
     # Intent: `braid add disk3 --dry-run` on a pool with a missing
     # device must surface the missing-devices diagnostic on stdout via
-    # `[warn]  pool has 1 missing device...`, with stderr empty.
+    # `[warn] pool has 1 missing device...`, with stderr empty.
     # Why it exists: PR 7 migrated the legacy stderr eprintln! to a
     # `PreviewNote::Warn` body. A regression that left `warning:` baked
-    # into the body would stack as `[warn]  warning: pool has ...`;
+    # into the body would stack as `[warn] warning: pool has ...`;
     # a regression that routed the note back to stderr would exit 0
     # and still slip past add-lifecycle coverage.
     # Scenario: 2-disk pool with 1 missing, operator starts planning an
@@ -58,8 +58,8 @@ with subtest("Dry-run missing-device warning routes to stdout as [warn]"):
     out = machine.succeed("cat /tmp/md-stdout")
     err = machine.succeed("cat /tmp/md-stderr")
 
-    assert "[warn]  pool has 1 missing device" in out, (
-        "dry-run stdout must contain the `[warn]  pool has ...` body-only line;"
+    assert "[warn] pool has 1 missing device" in out, (
+        "dry-run stdout must contain the `[warn] pool has ...` body-only line;"
         " got: {!r}".format(out)
     )
     assert "warning:" not in out, (
@@ -76,7 +76,7 @@ with subtest("Dry-run missing-device warning routes to stdout as [warn]"):
 
 with subtest("Real-run missing-device warning renders as canonical [warn]"):
     # Intent: `braid add disk3` (no --dry-run) with a missing device
-    # must print the canonical `[warn]  pool has 1 missing device.
+    # must print the canonical `[warn] pool has 1 missing device.
     # Consider repairing with `braid replace --missing-id <devid>`
     # first. Use `braid status` to see device IDs.` line on stderr --
     # the SAME bytes dry-run produces on stdout. The add-local
@@ -97,12 +97,12 @@ with subtest("Real-run missing-device warning renders as canonical [warn]"):
     err = machine.succeed("cat /tmp/rmd-stderr")
 
     expected_line = (
-        "[warn]  pool has 1 missing device. Consider repairing with"
+        "[warn] pool has 1 missing device. Consider repairing with"
         " `braid replace --missing-id <devid>` first. Use `braid status`"
         " to see device IDs."
     )
     assert expected_line in err, (
-        "real-run stderr must contain the canonical `[warn]  ...` line;"
+        "real-run stderr must contain the canonical `[warn] ...` line;"
         " exit={} stderr={!r}".format(ec, err)
     )
     assert "warning: pool has" not in err, (
@@ -117,7 +117,7 @@ with subtest("Real-run missing-device warning renders as canonical [warn]"):
 #
 # Intent: when `plan_add` accumulates the missing-devices warn and then
 # fails later inside `compile_add_steps_multi` (BraidLabeledNoBtrfs
-# identity), stderr must show the canonical `[warn]  pool has ...`
+# identity), stderr must show the canonical `[warn] pool has ...`
 # line BEFORE the refusal error -- the SAME bytes the Ok path
 # (`AddPlan::execute`) emits on real-run stderr and `Preview::render`
 # emits on dry-run stdout.
@@ -170,13 +170,13 @@ with subtest("Phase 4: preserved-context failure renders canonical [warn]"):
         "stdout must be empty on failure; got: {!r}".format(out)
     )
     warn_line = (
-        "[warn]  pool has 1 missing device. Consider repairing with"
+        "[warn] pool has 1 missing device. Consider repairing with"
         " `braid replace --missing-id <devid>` first. Use `braid status`"
         " to see device IDs."
     )
     warn_pos = err.find(warn_line)
     assert warn_pos != -1, (
-        "stderr must carry the canonical `[warn]  ...` line on the refusal "
+        "stderr must carry the canonical `[warn] ...` line on the refusal "
         "path; got: {!r}".format(err)
     )
     # Identity-error wording comes from identity_to_error's

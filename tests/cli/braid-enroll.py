@@ -305,7 +305,7 @@ with subtest("Test 4d: dry-run + real-run success path render `skip: not LUKS-fo
     assert t4d_err == "", (
         f"successful --dry-run must leave stderr empty, got: {t4d_err!r}"
     )
-    assert "[skip]  disk: disk3     not LUKS-formatted\n" in t4d_out, (
+    assert "[skip] disk disk3: not LUKS-formatted\n" in t4d_out, (
         f"expected bracketed non-LUKS skip on stdout, got: {t4d_out!r}"
     )
     assert "\x1b[" not in t4d_out, (

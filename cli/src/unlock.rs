@@ -972,8 +972,8 @@ mod tests {
             .preview()
             .render();
 
-        let note1 = "[ok  ]  disk: disk1     found\n";
-        let note2 = "[ok  ]  disk: disk2     found\n";
+        let note1 = "[ok]   disk disk1: found\n";
+        let note2 = "[ok]   disk disk2: found\n";
         let scan = "btrfs device scan";
 
         let pos1 = rendered

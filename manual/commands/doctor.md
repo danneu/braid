@@ -19,14 +19,14 @@ sudo braid doctor
 Output:
 
 ```
-[ok  ]  config file     /etc/braid/config.json exists and is valid JSON
-[ok  ]  config schema   required fields present and valid
-[ok  ]  config perms    /etc/braid/config.json permissions ok
-[ok  ]  declared disks  all 3 declared disk(s) present
-[ok  ]  missing devs    no missing devices
-[ok  ]  data profiles   data profile: RAID1
-[ok  ]  meta profiles   metadata profile: RAID1
-[ok  ]  alert beep      alert test beep played (1 kHz, 500 ms) — same beep braid will use for real disk alerts
+[ok]   config file     /etc/braid/config.json exists and is valid JSON
+[ok]   config schema   required fields present and valid
+[ok]   config perms    /etc/braid/config.json permissions ok
+[ok]   declared disks  all 3 declared disk(s) present
+[ok]   missing devs    no missing devices
+[ok]   data profiles   data profile: RAID1
+[ok]   meta profiles   metadata profile: RAID1
+[ok]   alert beep      alert test beep played (1 kHz, 500 ms) — same beep braid will use for real disk alerts
 ```
 
 ## Machine-readable output

@@ -73,7 +73,7 @@ pub struct RemoveParams<'a> {
 /// rendered by `preview()`; `execute()` consumes the preflight state
 /// (target device, remaining/total counts, mount point) and renders
 /// any accumulated notes to stderr via the shared
-/// `preview::render_notes_for_stderr` helper (canonical `[warn]  <body>`
+/// `preview::render_notes_for_stderr` helper (canonical `[warn] <body>`
 /// wording) before mutating.
 pub struct RemovePlan {
     pub notes: Vec<PreviewNote>,
@@ -118,7 +118,7 @@ impl RemovePlan {
     ) -> Result<(), RemoveError> {
         // Render accumulated notes to stderr via the shared helper
         // before any mutation. Warn notes emit as the canonical
-        // `[warn]  <body>` (same as dry-run stdout), so both modes
+        // `[warn] <body>` (same as dry-run stdout), so both modes
         // share one render contract for plan-derived notes.
         eprint!(
             "{}",
@@ -2240,7 +2240,7 @@ mod tests {
      * here. Unit tests on `check_eviction_space` cannot catch
      * rendering bugs; this test can.
      * Scenario: same 3-disk soft-warn case; assert the rendered
-     * string starts with `[warn]  ENOSPC pre-flight check failed:
+     * string starts with `[warn] ENOSPC pre-flight check failed:
      * ...; proceeding anyway\n` and continues into the step rows.
      */
     #[test]
@@ -2277,7 +2277,7 @@ mod tests {
         );
         assert_eq!(
             lines[0],
-            "[warn]  ENOSPC pre-flight check failed: mock output missing for request; proceeding anyway",
+            "[warn] ENOSPC pre-flight check failed: mock output missing for request; proceeding anyway",
             "warning must be the first line of the rendered preview; got: {rendered:?}",
         );
         // The remaining lines are the step block. Spot-check the
@@ -2290,7 +2290,7 @@ mod tests {
 
     /* Intent: plan-derived Warn notes for `remove` render through the
      * shared `preview::render_notes_for_stderr` helper as the canonical
-     * `[warn]  <body>\n` shape -- the same shape that `Preview::render`
+     * `[warn] <body>\n` shape -- the same shape that `Preview::render`
      * emits on dry-run stdout. Legacy `warning: ` prefixes do not
      * appear.
      * Why it exists: this follow-up removes the direct
@@ -2310,7 +2310,7 @@ mod tests {
         let rendered = preview::render_notes_for_stderr(&notes, RemovePlan::STDERR_STYLE);
         assert_eq!(
             rendered,
-            "[warn]  ENOSPC pre-flight check failed: boom; proceeding anyway\n",
+            "[warn] ENOSPC pre-flight check failed: boom; proceeding anyway\n",
         );
         assert!(
             !rendered.contains("warning:"),

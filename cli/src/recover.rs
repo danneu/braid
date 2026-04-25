@@ -3681,13 +3681,13 @@ mod tests {
 
         let entry_pos = 0usize;
         let disk1_pos = rendered
-            .find("[ok  ]  disk: disk1")
+            .find("[ok]   disk disk1")
             .unwrap_or_else(|| panic!("disk1 probe note missing: {rendered:?}"));
         let disk2_pos = rendered
-            .find("[ok  ]  disk: disk2")
+            .find("[ok]   disk disk2")
             .unwrap_or_else(|| panic!("disk2 probe note missing: {rendered:?}"));
         let disk3_pos = rendered
-            .find("[skip]  disk: disk3")
+            .find("[skip] disk disk3")
             .unwrap_or_else(|| panic!("disk3 skip note missing: {rendered:?}"));
         let scan_pos = rendered
             .find("btrfs device scan")

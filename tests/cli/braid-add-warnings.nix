@@ -8,7 +8,7 @@
 #
 # Why: PR 7 moved `eprintln!("warning: pool has N missing device...")`
 # from a raw stderr write into `plan.notes`. Dry-run must emit the
-# canonical `[warn]  pool has ...` body-only form on stdout; real-run
+# canonical `[warn] pool has ...` body-only form on stdout; real-run
 # must preserve today's `warning: pool has ...` stderr wording
 # byte-identically so log scrapers do not drift.
 #

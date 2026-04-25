@@ -1,10 +1,11 @@
 use std::io::IsTerminal;
 
-/// A 4-char bracket status tag for human CLI status rows.
+/// Bracket status tags for human CLI status rows.
 ///
-/// Used by `lock`, `mount`, and `doctor` to prefix per-item outcome
-/// lines. The bracketed form is always 6 columns wide so consecutive
-/// rows align.
+/// `render_status_tag` returns the bare bracketed tag. Use
+/// `status_line` to produce the canonical 7-column visible prefix for
+/// event-log rows. Padding is derived from the status level before
+/// color is applied, so ANSI bytes do not affect visible width.
 ///
 /// Distinct from the dry-run risk tag in `cmd::Step::print_dry_run`,
 /// which uses an 11-wide column for `safe` / `destructive` etc.
@@ -18,15 +19,30 @@ pub enum StatusTag {
 
 pub fn render_status_tag(tag: StatusTag, color_enabled: bool) -> &'static str {
     match (tag, color_enabled) {
-        (StatusTag::Ok, false) => "[ok  ]",
+        (StatusTag::Ok, false) => "[ok]",
         (StatusTag::Warn, false) => "[warn]",
         (StatusTag::Fail, false) => "[fail]",
         (StatusTag::Skip, false) => "[skip]",
-        (StatusTag::Ok, true) => "\x1b[32m[ok  ]\x1b[0m",
+        (StatusTag::Ok, true) => "\x1b[32m[ok]\x1b[0m",
         (StatusTag::Warn, true) => "\x1b[33m[warn]\x1b[0m",
         (StatusTag::Fail, true) => "\x1b[31m[fail]\x1b[0m",
         (StatusTag::Skip, true) => "\x1b[90m[skip]\x1b[0m",
     }
+}
+
+fn status_tag_pad(tag: StatusTag) -> &'static str {
+    match tag {
+        StatusTag::Ok => "   ",
+        StatusTag::Warn | StatusTag::Fail | StatusTag::Skip => " ",
+    }
+}
+
+pub fn status_line(tag: StatusTag, color_enabled: bool, body: &str) -> String {
+    format!(
+        "{}{}{body}\n",
+        render_status_tag(tag, color_enabled),
+        status_tag_pad(tag),
+    )
 }
 
 pub fn should_color_status_tags(is_terminal: bool, no_color_active: bool) -> bool {
@@ -76,11 +92,46 @@ mod tests {
         stripped
     }
 
+    /* Intent: the shared status-line writer keeps every visible body
+     * start at column 8, regardless of tag length or ANSI color.
+     * Why it exists: command output should scan as an event log without
+     * callers reimplementing padding around colored or uncolored tags.
+     * Scenario: each status level renders a one-byte body in plain and
+     * colored modes.
+     */
+    #[test]
+    fn status_line_prefix_is_seven_visible_columns() {
+        for tag in [
+            StatusTag::Ok,
+            StatusTag::Warn,
+            StatusTag::Fail,
+            StatusTag::Skip,
+        ] {
+            let plain = status_line(tag, false, "x");
+            assert_eq!(plain.find('x'), Some(7), "plain line: {plain:?}");
+            assert_eq!(plain[..7].chars().count(), 7);
+
+            let colored = strip_ansi(&status_line(tag, true, "x"));
+            assert_eq!(colored.find('x'), Some(7), "colored line: {colored:?}");
+            assert_eq!(colored[..7].chars().count(), 7);
+        }
+    }
+
+    /* Intent: the shared status-line writer leaves the caller-supplied
+     * body text intact.
+     * Why it exists: row callers own their subject/action wording; the
+     * prefix helper must not rewrite or trim the body.
+     * Scenario: an Ok line with a short body.
+     */
+    #[test]
+    fn status_line_passes_body_through_unchanged() {
+        assert!(status_line(StatusTag::Ok, false, "hello").ends_with("hello\n"));
+    }
+
     #[test]
     fn status_tag_pins_four_known_levels() {
-        // Byte-pin cross-command contract: lock/mount/doctor all rely
-        // on these exact strings for column alignment.
-        assert_eq!(render_status_tag(StatusTag::Ok, false), "[ok  ]");
+        // Byte-pin the bare tag strings. `status_line` owns row padding.
+        assert_eq!(render_status_tag(StatusTag::Ok, false), "[ok]");
         assert_eq!(render_status_tag(StatusTag::Warn, false), "[warn]");
         assert_eq!(render_status_tag(StatusTag::Fail, false), "[fail]");
         assert_eq!(render_status_tag(StatusTag::Skip, false), "[skip]");
@@ -96,7 +147,7 @@ mod tests {
     fn status_tag_pins_colored_levels() {
         assert_eq!(
             render_status_tag(StatusTag::Ok, true),
-            "\x1b[32m[ok  ]\x1b[0m"
+            "\x1b[32m[ok]\x1b[0m"
         );
         assert_eq!(
             render_status_tag(StatusTag::Warn, true),

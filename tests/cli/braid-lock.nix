@@ -23,7 +23,7 @@
         }
         {
           size = 1024;
-          driveConfig.deviceExtraOpts.serial = "disk3";
+          driveConfig.deviceExtraOpts.serial = "longdisk3";
         }
       ];
 

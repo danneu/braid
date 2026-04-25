@@ -7,7 +7,7 @@ use crate::membership::PoolMembership;
 use crate::preflight;
 use crate::preview::{Preview, PreviewCompleteness, PreviewNote};
 use crate::probe::{Filesystem, probe_fsid};
-use crate::status_tag::{StatusTag, color_enabled_for_stderr, render_status_tag};
+use crate::status_tag::{StatusTag, color_enabled_for_stderr, status_line};
 use crate::types::MountPoint;
 
 #[derive(Debug, thiserror::Error)]
@@ -71,9 +71,15 @@ fn close_mapper_with_retry<R: CommandRunner, S: Sleeper>(
         if attempt == CLOSE_RETRY_ATTEMPTS {
             return Err(LockError::DeviceBusy(msg));
         }
-        eprintln!(
-            "{}  cryptsetup close {mapper} busy, retrying ({attempt}/{CLOSE_RETRY_ATTEMPTS})...",
-            render_status_tag(StatusTag::Warn, color_enabled)
+        eprint!(
+            "{}",
+            status_line(
+                StatusTag::Warn,
+                color_enabled,
+                &format!(
+                    "cryptsetup close {mapper} busy, retrying ({attempt}/{CLOSE_RETRY_ATTEMPTS})..."
+                )
+            )
         );
         sleeper.sleep(CLOSE_RETRY_DELAY);
     }
@@ -230,14 +236,14 @@ impl LockPlan {
         S: Sleeper,
     {
         let color_enabled = color_enabled_for_stderr();
-        let tag = |t| render_status_tag(t, color_enabled);
+        let line = |t, body: &str| status_line(t, color_enabled, body);
 
         // Emit accumulated Warn notes to stderr before any mutation --
         // today's real-run orphan-scan warn sits at the top of the work
         // section, and the plan carries that warn as a PreviewNote::Warn.
         for note in &self.notes {
             if let PreviewNote::Warn(body) = note {
-                eprintln!("{}  {body}", tag(StatusTag::Warn));
+                eprint!("{}", line(StatusTag::Warn, body));
             }
         }
 
@@ -260,18 +266,19 @@ impl LockPlan {
                     umount_result.stderr.trim(),
                     mount_point = mount_point,
                 ));
-                eprintln!("{}  {err}", tag(StatusTag::Fail));
-                eprintln!(
-                    "{}  attempting to close LUKS mappers despite umount failure...",
-                    tag(StatusTag::Warn)
+                eprint!("{}", line(StatusTag::Fail, &format!("{err}")));
+                eprint!(
+                    "{}",
+                    line(
+                        StatusTag::Warn,
+                        "attempting to close LUKS mappers despite umount failure..."
+                    )
                 );
                 umount_error = Some(err);
             } else {
-                eprintln!(
-                    "{}  {:<14}unmounted {}",
-                    tag(StatusTag::Ok),
-                    "pool",
-                    mount_point
+                eprint!(
+                    "{}",
+                    line(StatusTag::Ok, &format!("pool: unmounted {mount_point}"))
                 );
 
                 // Clear btrfs kernel scan registry so that cryptsetup close
@@ -287,17 +294,25 @@ impl LockPlan {
                     match forget_result {
                         Ok(r) if r.exit_status == 0 => {}
                         Ok(r) => {
-                            eprintln!(
-                                "{}  btrfs device scan --forget failed (exit {}): {} (continuing)",
-                                tag(StatusTag::Warn),
-                                r.exit_status,
-                                r.stderr.trim()
+                            eprint!(
+                                "{}",
+                                line(
+                                    StatusTag::Warn,
+                                    &format!(
+                                        "btrfs device scan --forget failed (exit {}): {} (continuing)",
+                                        r.exit_status,
+                                        r.stderr.trim()
+                                    )
+                                )
                             );
                         }
                         Err(e) => {
-                            eprintln!(
-                                "{}  btrfs device scan --forget failed: {e} (continuing)",
-                                tag(StatusTag::Warn)
+                            eprint!(
+                                "{}",
+                                line(
+                                    StatusTag::Warn,
+                                    &format!("btrfs device scan --forget failed: {e} (continuing)")
+                                )
                             );
                         }
                     }
@@ -314,18 +329,19 @@ impl LockPlan {
             if fs.exists(&mapper_path) {
                 match close_mapper_with_retry(runner, sleeper, &mn.0, color_enabled) {
                     Ok(()) => {
-                        eprintln!("{}  disk: {:<7}locked", tag(StatusTag::Ok), name);
+                        eprint!("{}", line(StatusTag::Ok, &format!("disk {name}: locked")));
                     }
                     Err(LockError::DeviceBusy(msg)) if umount_error.is_some() => {
-                        eprintln!(
-                            "{}  disk: {:<7}close failed (umount was stuck): {}",
-                            tag(StatusTag::Warn),
-                            name,
-                            msg
+                        eprint!(
+                            "{}",
+                            line(
+                                StatusTag::Warn,
+                                &format!("disk {name}: close failed (umount was stuck): {msg}")
+                            )
                         );
                     }
                     Err(e) => {
-                        eprintln!("{}  disk: {:<7}{}", tag(StatusTag::Fail), name, e);
+                        eprint!("{}", line(StatusTag::Fail, &format!("disk {name}: {e}")));
                         if first_mapper_error.is_none() {
                             first_mapper_error = Some(e);
                         }
@@ -333,7 +349,10 @@ impl LockPlan {
                 }
                 all_already_closed = false;
             } else {
-                eprintln!("{}  disk: {:<7}already closed", tag(StatusTag::Ok), name);
+                eprint!(
+                    "{}",
+                    line(StatusTag::Ok, &format!("disk {name}: already closed"))
+                );
             }
         }
 
@@ -347,32 +366,35 @@ impl LockPlan {
             if !fs.exists(&format!("/dev/mapper/{entry}")) {
                 continue;
             }
-            eprintln!(
-                "{}  orphaned mapper {entry} (not in pool.json -- likely a prior crash)",
-                tag(StatusTag::Warn)
+            eprint!(
+                "{}",
+                line(
+                    StatusTag::Warn,
+                    &format!("orphaned mapper {entry} (not in pool.json -- likely a prior crash)")
+                )
             );
             match close_mapper_with_retry(runner, sleeper, entry, color_enabled) {
                 Ok(()) => {
-                    eprintln!(
-                        "{}  disk: {:<7}locked (orphan)",
-                        tag(StatusTag::Ok),
-                        disk_name
+                    eprint!(
+                        "{}",
+                        line(StatusTag::Ok, &format!("disk {disk_name}: locked (orphan)"))
                     );
                 }
                 Err(LockError::DeviceBusy(msg)) if umount_error.is_some() => {
-                    eprintln!(
-                        "{}  disk: {:<7}orphan close failed (umount was stuck): {}",
-                        tag(StatusTag::Warn),
-                        disk_name,
-                        msg
+                    eprint!(
+                        "{}",
+                        line(
+                            StatusTag::Warn,
+                            &format!(
+                                "disk {disk_name}: orphan close failed (umount was stuck): {msg}"
+                            )
+                        )
                     );
                 }
                 Err(e) => {
-                    eprintln!(
-                        "{}  disk: {:<7}orphan: {}",
-                        tag(StatusTag::Fail),
-                        disk_name,
-                        e
+                    eprint!(
+                        "{}",
+                        line(StatusTag::Fail, &format!("disk {disk_name}: orphan: {e}"))
                     );
                     if first_mapper_error.is_none() {
                         first_mapper_error = Some(e);
@@ -1118,7 +1140,7 @@ mod tests {
 
         assert!(
             output.starts_with(
-                "[warn]  could not scan /dev/mapper for orphans: permission denied (skipping)\n"
+                "[warn] could not scan /dev/mapper for orphans: permission denied (skipping)\n"
             ),
             "preview must start with the exact [warn] line, got:\n{output}"
         );

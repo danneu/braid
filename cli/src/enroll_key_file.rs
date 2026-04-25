@@ -50,6 +50,12 @@ enum EnrollmentPlanMode {
     GenerateNew,
 }
 
+pub type EnrollmentCandidate = (String, ByIdPath);
+type EnrollmentCandidateDiscovery = (
+    Vec<PreviewNote>,
+    Result<Vec<EnrollmentCandidate>, EnrollKeyFileError>,
+);
+
 /// Discovery phase: iterate membership disks and collect present LUKS
 /// candidates. Absent and non-LUKS disks become `PreviewNote::PerDisk`
 /// Skip notes accumulated alongside the candidate list. The caller
@@ -62,12 +68,9 @@ fn discover_enrollment_candidates<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
     membership: &PoolMembership,
-) -> (
-    Vec<PreviewNote>,
-    Result<Vec<(String, ByIdPath)>, EnrollKeyFileError>,
-) {
+) -> EnrollmentCandidateDiscovery {
     let mut notes: Vec<PreviewNote> = Vec::new();
-    let mut candidates: Vec<(String, ByIdPath)> = Vec::new();
+    let mut candidates: Vec<EnrollmentCandidate> = Vec::new();
 
     for (name, member) in &membership.disks {
         let probed = match probe::probe_config_disk(runner, fs, name, &member.by_id) {
@@ -114,7 +117,7 @@ fn discover_enrollment_candidates<R: CommandRunner, F: Filesystem + ?Sized>(
 /// than partway through enrollment.
 fn verify_first_candidate_passphrase<R: CommandRunner>(
     runner: &R,
-    candidates: &[(String, ByIdPath)],
+    candidates: &[EnrollmentCandidate],
     passphrase: &str,
 ) -> Result<(), EnrollKeyFileError> {
     let (first_name, first_by_id) = &candidates[0];
@@ -158,7 +161,7 @@ fn check_slot_one_available<R: CommandRunner>(
 ///   `NeedsEnroll` actions.
 fn plan_enrollment<R: CommandRunner>(
     runner: &R,
-    candidates: &[(String, ByIdPath)],
+    candidates: &[EnrollmentCandidate],
     key_file_path: &Path,
     passphrase: &str,
     mode: EnrollmentPlanMode,
@@ -273,7 +276,7 @@ fn generate_key_file(path: &Path) -> Result<(), std::io::Error> {
 
 /// Compile dry-run steps from discovered candidates.
 pub fn compile_enroll_steps(
-    candidates: &[(String, ByIdPath)],
+    candidates: &[EnrollmentCandidate],
     key_file_path: &Path,
     generate: bool,
     paths: &StatePaths,
@@ -346,7 +349,7 @@ pub struct EnrollPlanReport {
 pub struct EnrollPlan {
     pub notes: Vec<PreviewNote>,
     pub steps: Vec<Step>,
-    pub candidates: Vec<(String, ByIdPath)>,
+    pub candidates: Vec<EnrollmentCandidate>,
     pub generate: bool,
 }
 
@@ -994,7 +997,7 @@ mod tests {
 
         let rendered_stdout = plan.preview().render();
         assert!(
-            rendered_stdout.contains("[skip]  disk: disk1     not present\n"),
+            rendered_stdout.contains("[skip] disk disk1: not present\n"),
             "bracketed skip missing from preview stdout: {rendered_stdout}"
         );
 

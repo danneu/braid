@@ -150,11 +150,11 @@ with subtest("Test 3a: dry-run preserved-context failure -> stdout empty, stderr
     )
     # Probe notes for the two present disks appear before the refusal.
     for name in ("disk1", "disk2"):
-        marker = "[ok  ]  disk: {}".format(name)
+        marker = "[ok]   disk {}".format(name)
         assert marker in err, (
             "stderr must contain probe note {!r}; got: {!r}".format(marker, err)
         )
-    assert "[skip]  disk: disk3" in err, (
+    assert "[skip] disk disk3" in err, (
         "stderr must contain the absent-disk skip note; got: {!r}".format(err)
     )
     assert "\x1b[" not in err, (
@@ -162,7 +162,7 @@ with subtest("Test 3a: dry-run preserved-context failure -> stdout empty, stderr
     )
     # Banner + per-disk notes precede the refusal message.
     banner_pos = err.find("Recovering from interrupted")
-    disk3_pos = err.find("[skip]  disk: disk3")
+    disk3_pos = err.find("[skip] disk disk3")
     refusal_pos = err.find("refusing to mount")
     assert banner_pos != -1 and disk3_pos != -1 and refusal_pos != -1, (
         "expected banner, skip note, and refusal markers in stderr; got: {!r}".format(err)
@@ -202,7 +202,7 @@ with subtest("Test 3b: dry-run stepful not-mounted -> stdout has banner+notes+st
         "stdout must contain the entry banner; got: {!r}".format(out)
     )
     for name in ("disk1", "disk2"):
-        marker = "[ok  ]  disk: {}".format(name)
+        marker = "[ok]   disk {}".format(name)
         assert marker in out, (
             "stdout must contain probe note {!r}; got: {!r}".format(marker, out)
         )
@@ -222,7 +222,7 @@ with subtest("Test 3b: dry-run stepful not-mounted -> stdout has banner+notes+st
         "stdout must contain clear pending-op.json step; got: {!r}".format(out)
     )
     banner_pos = out.find("Recovering from interrupted")
-    probe_pos = out.find("[ok  ]  disk: disk1")
+    probe_pos = out.find("[ok]   disk disk1")
     scan_pos = out.find("btrfs device scan")
     write_pos = out.find("write recovered pool.json")
     assert banner_pos < probe_pos < scan_pos < write_pos, (

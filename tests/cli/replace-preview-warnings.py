@@ -155,7 +155,7 @@ with subtest("Phase 1: live-path --dry-run prints preview on stdout, stderr empt
         f"live-path dry-run stderr must not use legacy WARNING prefix;"
         f" got: {err!r}"
     )
-    assert "[warn]  Existing pool drives have a keyfile (keyslot-1)" in out, (
+    assert "[warn] Existing pool drives have a keyfile (keyslot-1)" in out, (
         f"dry-run stdout must carry the keyfile-asymmetry warning;"
         f" got: {out!r}"
     )
@@ -188,7 +188,7 @@ with subtest("Phase 1b: failed keyfile probe becomes dry-run warning"):
     assert "btrfs replace start" in out, (
         f"dry-run stdout must still contain the replace preview; got: {out!r}"
     )
-    assert "[warn]  could not check keyfile enrollment" in out, (
+    assert "[warn] could not check keyfile enrollment" in out, (
         f"dry-run stdout must carry probe-failure warning notes; got: {out!r}"
     )
     assert "proceeding as if no keyfile is enrolled" in out, (
@@ -239,7 +239,7 @@ with subtest("Phase 2: --yes real-run renders probe warning on stderr"):
         f"--yes real-run stdout must not carry probe-failure warning;"
         f" got: {out!r}"
     )
-    assert "[warn]  could not check keyfile enrollment" in err, (
+    assert "[warn] could not check keyfile enrollment" in err, (
         f"--yes real-run stderr must carry probe-failure warning;"
         f" got: {err!r}"
     )
@@ -282,7 +282,7 @@ with subtest("Phase 2c: interactive failed probes print warning and make no muta
     )
     assert status != 0, "interactive `no` should abort the replace"
     err = machine.succeed("cat /tmp/int-fail-err")
-    assert "[warn]  could not check keyfile enrollment" in err, (
+    assert "[warn] could not check keyfile enrollment" in err, (
         f"interactive stderr must contain the probe-failure warning; got: {err!r}"
     )
     assert "proceeding as if no keyfile is enrolled" in err, (
@@ -314,7 +314,7 @@ with subtest("Phase 2d: interactive mixed failure plus enrollment suppresses pro
     )
     assert status != 0, "interactive `no` should abort the replace"
     err = machine.succeed("cat /tmp/int-mixed-err")
-    assert "[warn]  Existing pool drives have a keyfile (keyslot-1)" in err, (
+    assert "[warn] Existing pool drives have a keyfile (keyslot-1)" in err, (
         f"mixed probe stderr must contain keyfile-asymmetry warning; got: {err!r}"
     )
     assert "WARNING:" not in err, (

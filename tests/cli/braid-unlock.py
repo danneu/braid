@@ -73,7 +73,7 @@ with subtest("Test 1: happy path — all locked, unlock opens everything"):
         f"{unlock_cmd(passphrase)} >/tmp/probe-stdout 2>/tmp/probe-stderr"
     )
     probe_err = machine.succeed("cat /tmp/probe-stderr")
-    assert "[ok  ]  disk: disk1" in probe_err, (
+    assert "[ok]   disk disk1" in probe_err, (
         f"expected probe stderr rows, got: {probe_err!r}"
     )
     assert "\x1b[" not in probe_err, (
@@ -228,7 +228,7 @@ with subtest("Test 2e: dry-run stepful -> stdout has probe + steps, stderr empty
         "stderr must be empty on dry-run success; got: {!r}".format(err)
     )
     for name in ("disk1", "disk2", "disk3"):
-        marker = "[ok  ]  disk: {}".format(name)
+        marker = "[ok]   disk {}".format(name)
         assert marker in out, (
             "expected probe note {!r} on stdout; got: {!r}".format(marker, out)
         )
@@ -239,7 +239,7 @@ with subtest("Test 2e: dry-run stepful -> stdout has probe + steps, stderr empty
         "expected btrfs device scan step on stdout; got: {!r}".format(out)
     )
 
-    probe_pos = out.find("[ok  ]  disk: disk1")
+    probe_pos = out.find("[ok]   disk disk1")
     scan_pos = out.find("btrfs device scan")
     assert probe_pos != -1 and probe_pos < scan_pos, (
         "probe notes must render before the step block; got: {!r}".format(out)
@@ -324,7 +324,7 @@ with subtest("Test 4a: missing disk -- refuses degraded, probe context precedes 
     )
 
     # Probe notes must precede the refusal on stderr (Shape A contract).
-    probe_marker = "[skip]  disk: disk3"
+    probe_marker = "[skip] disk disk3"
     refusal_marker = "refusing to mount degraded"
     probe_pos = err.find(probe_marker)
     refusal_pos = err.find(refusal_marker)
@@ -370,7 +370,7 @@ with subtest("Test 4a_dry: dry-run missing disk -- stderr has probe + refusal, s
         "expected refusal message on stderr; got: {!r}".format(err)
     )
 
-    probe_marker = "[skip]  disk: disk3"
+    probe_marker = "[skip] disk disk3"
     refusal_marker = "refusing to mount degraded"
     probe_pos = err.find(probe_marker)
     refusal_pos = err.find(refusal_marker)

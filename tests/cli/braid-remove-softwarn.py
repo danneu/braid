@@ -2,15 +2,15 @@
 #
 # Intent: pin the stdout/stderr contract for the soft-warn branch of
 # `check_eviction_space` on the `remaining >= 2` path. Under
-# `--dry-run` the warning must appear on stdout as a `[warn]  <body>`
+# `--dry-run` the warning must appear on stdout as a `[warn] <body>`
 # note and stderr must be empty; under real-run the same warning must
-# appear on stderr using the canonical `[warn]  <body>` wording (no
+# appear on stderr using the canonical `[warn] <body>` wording (no
 # legacy `warning: ` prefix -- plan-derived Warn notes now render
 # through the shared `preview::render_notes_for_stderr` helper in both
 # modes).
 #
 # Why it exists: a regression that either (a) leaks the warn on
-# stderr during `--dry-run`, (b) drops the `[warn]  ` prefix during
+# stderr during `--dry-run`, (b) drops the `[warn] ` prefix during
 # real-run, or (c) reintroduces the legacy `warning: ` prefix would
 # only surface through a human noticing drift in an SSH session. Unit
 # tests catch the plan-level shape; this test catches the wire-level
@@ -118,7 +118,7 @@ with subtest("dry-run: warn goes to stdout, stderr is empty"):
     out = machine.succeed("cat /tmp/out")
     err = machine.succeed("cat /tmp/err")
     assert (
-        "[warn]  ENOSPC pre-flight check failed:" in out
+        "[warn] ENOSPC pre-flight check failed:" in out
     ), f"expected [warn] line on stdout; got:\n{out}"
     assert (
         "; proceeding anyway" in out
@@ -129,7 +129,7 @@ with subtest("dry-run: warn goes to stdout, stderr is empty"):
     assert "\x1b[" not in out, f"dry-run stdout must be plain without a TTY; got:\n{out}"
     assert err.strip() == "", f"dry-run stderr must be empty; got:\n{err!r}"
 
-# --- Phase 4: Real-run must emit the canonical `[warn]  ...` stderr line ---
+# --- Phase 4: Real-run must emit the canonical `[warn] ...` stderr line ---
 # This phase mutates the pool (the remove of disk3 completes), so it
 # must come last.
 
@@ -140,8 +140,8 @@ with subtest("real-run: warn appears on stderr with the canonical [warn] prefix"
     assert status == 0, f"real-run should succeed; exit {status}"
     err2 = machine.succeed("cat /tmp/err2")
     assert (
-        "[warn]  ENOSPC pre-flight check failed:" in err2
-    ), f"expected canonical '[warn]  ...' line on stderr; got:\n{err2}"
+        "[warn] ENOSPC pre-flight check failed:" in err2
+    ), f"expected canonical '[warn] ...' line on stderr; got:\n{err2}"
     assert (
         "; proceeding anyway" in err2
     ), f"expected canonical suffix on stderr; got:\n{err2}"

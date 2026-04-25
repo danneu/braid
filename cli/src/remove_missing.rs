@@ -76,7 +76,7 @@ pub struct RemoveMissingParams<'a> {
 /// both rendered by `preview()`; `execute()` consumes the preflight
 /// state (`missing_id`, `missing_count`, `remaining_present`) and
 /// renders any accumulated notes to stderr via the shared
-/// `preview::render_notes_for_stderr` helper (canonical `[warn]  <body>`
+/// `preview::render_notes_for_stderr` helper (canonical `[warn] <body>`
 /// wording) before mutating.
 pub struct RemoveMissingPlan {
     pub notes: Vec<PreviewNote>,
@@ -121,7 +121,7 @@ impl RemoveMissingPlan {
     ) -> Result<(), RemoveMissingError> {
         // Render accumulated notes to stderr via the shared helper
         // before any mutation. Warn notes emit as the canonical
-        // `[warn]  <body>` (same as dry-run stdout), so both modes
+        // `[warn] <body>` (same as dry-run stdout), so both modes
         // share one render contract for plan-derived notes.
         eprint!(
             "{}",
@@ -1661,13 +1661,13 @@ mod tests {
     }
 
     /* Intent: `plan.preview().render()` places the ENOSPC soft-warn
-     * line above the step block and uses the canonical `[warn]  <body>`
+     * line above the step block and uses the canonical `[warn] <body>`
      * shape (no legacy `warning:` prefix).
      *
      * Why it exists: the dry-run stdout contract for remove-missing in
      * PR 3 is "warn note(s) render before steps" and the warn body is
      * body-only. Without a preview-boundary test, a regression that
-     * rendered the warn inline with steps, dropped the `[warn]  `
+     * rendered the warn inline with steps, dropped the `[warn] `
      * prefix, or re-added the `warning:` prefix would only surface in
      * the VM stream-routing test -- adding a unit guardrail here is
      * cheap and catches drift before the VM layer.
@@ -1693,7 +1693,7 @@ mod tests {
         let rendered = plan.preview().render();
         let lines: Vec<&str> = rendered.lines().collect();
         assert_eq!(
-            lines[0], "[warn]  ENOSPC pre-flight check failed: boom; proceeding anyway",
+            lines[0], "[warn] ENOSPC pre-flight check failed: boom; proceeding anyway",
             "warn note must render first; got full output:\n{rendered}"
         );
         assert!(
@@ -1710,7 +1710,7 @@ mod tests {
 
     /* Intent: plan-derived Warn notes for `remove-missing` render
      * through the shared `preview::render_notes_for_stderr` helper as
-     * the canonical `[warn]  <body>\n` shape -- the same shape that
+     * the canonical `[warn] <body>\n` shape -- the same shape that
      * `Preview::render` emits on dry-run stdout. Legacy `warning: `
      * prefixes do not appear.
      * Why it exists: this follow-up removes the direct
@@ -1731,7 +1731,7 @@ mod tests {
         let rendered = preview::render_notes_for_stderr(&notes, RemoveMissingPlan::STDERR_STYLE);
         assert_eq!(
             rendered,
-            "[warn]  ENOSPC pre-flight check failed: boom; proceeding anyway\n",
+            "[warn] ENOSPC pre-flight check failed: boom; proceeding anyway\n",
         );
         assert!(
             !rendered.contains("warning:"),

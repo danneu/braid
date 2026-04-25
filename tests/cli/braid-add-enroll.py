@@ -97,7 +97,7 @@ with subtest("Test 3: passphrase still works"):
 # Intent: `braid add disk3` on a pool where the existing drives carry a
 # keyfile (keyslot-1), but the add omits `--enroll`, must surface the
 # keyfile-asymmetry diagnostic on the correct stream for each mode:
-#   - `--dry-run`: stdout includes `[warn]  Existing pool drives have a
+#   - `--dry-run`: stdout includes `[warn] Existing pool drives have a
 #     keyfile (keyslot-1) ...`; stderr is empty.
 #   - real-run: stderr contains the exact legacy three-line `WARNING:`
 #     block (including the trailing blank line), byte-for-byte.
@@ -131,7 +131,7 @@ with subtest("Test 4a: keyfile-asymmetry dry-run -> stdout [warn], stderr empty"
     out = machine.succeed("cat /tmp/ka-stdout")
     err = machine.succeed("cat /tmp/ka-stderr")
 
-    assert "[warn]  Existing pool drives have a keyfile (keyslot-1)" in out, (
+    assert "[warn] Existing pool drives have a keyfile (keyslot-1)" in out, (
         "dry-run stdout must surface the keyfile-asymmetry Warn; got: {!r}".format(out)
     )
     assert "WARNING:" not in out, (
@@ -185,7 +185,7 @@ exec __REAL_CRYPTSETUP__ "$@"
     out = machine.succeed("cat /tmp/probe-out")
     err = machine.succeed("cat /tmp/probe-err")
 
-    assert "[warn]  could not check keyfile enrollment" in out, (
+    assert "[warn] could not check keyfile enrollment" in out, (
         "dry-run stdout must surface the probe-failure Warn; got: {!r}".format(out)
     )
     assert "proceeding as if no keyfile is enrolled" in out, (
@@ -200,7 +200,7 @@ exec __REAL_CRYPTSETUP__ "$@"
 
 with subtest("Test 4c: keyfile-asymmetry real-run -> stderr canonical [warn] block"):
     # Intent: real-run keyfile-asymmetry now renders as the canonical
-    # `[warn]  Existing pool drives have a keyfile (keyslot-1) ...`
+    # `[warn] Existing pool drives have a keyfile (keyslot-1) ...`
     # three-line block on stderr -- the SAME bytes dry-run produces on
     # stdout. The add-local `WARNING: ` legacy replay was removed;
     # plan-derived Warn notes route through the shared
@@ -218,7 +218,7 @@ with subtest("Test 4c: keyfile-asymmetry real-run -> stderr canonical [warn] blo
     err = machine.succeed("cat /tmp/rka-stderr")
 
     expected_block = (
-        "[warn]  Existing pool drives have a keyfile (keyslot-1) for auto-unlock,"
+        "[warn] Existing pool drives have a keyfile (keyslot-1) for auto-unlock,"
         " but the new drive will not.\n"
         "  Passphrase unlock still works, but the keyfile won't unlock the new drive"
         " until it's enrolled.\n"
@@ -226,7 +226,7 @@ with subtest("Test 4c: keyfile-asymmetry real-run -> stderr canonical [warn] blo
         "\n"
     )
     assert expected_block in err, (
-        "real-run stderr must contain the canonical `[warn]  ...`"
+        "real-run stderr must contain the canonical `[warn] ...`"
         " three-line block (with trailing blank line); got: {!r}".format(err)
     )
     assert "WARNING:" not in err, (

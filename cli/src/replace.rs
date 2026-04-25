@@ -1110,13 +1110,13 @@ mod tests {
         let plain = render_replace_notes_for_stderr(&notes, false);
         assert_eq!(
             plain,
-            "waiting for in-flight device add\n[warn]  pool is mounted read-only\n"
+            "waiting for in-flight device add\n[warn] pool is mounted read-only\n"
         );
 
         let colored = render_replace_notes_for_stderr(&notes, true);
         assert_eq!(
             colored,
-            "waiting for in-flight device add\n\x1b[33m[warn]\x1b[0m  pool is mounted read-only\n"
+            "waiting for in-flight device add\n\x1b[33m[warn]\x1b[0m pool is mounted read-only\n"
         );
     }
 
@@ -3876,13 +3876,13 @@ mod tests {
 
         assert!(
             rendered.contains(
-                "[warn]  could not check keyfile enrollment on /dev/vdb: cryptsetup luksDump failed (exit 5): forced luksDump failure on /dev/vdb; proceeding as if no keyfile is enrolled"
+                "[warn] could not check keyfile enrollment on /dev/vdb: cryptsetup luksDump failed (exit 5): forced luksDump failure on /dev/vdb; proceeding as if no keyfile is enrolled"
             ),
             "dry-run preview must include the first probe-failure warning, got:\n{rendered}",
         );
         assert!(
             rendered.contains(
-                "[warn]  could not check keyfile enrollment on /dev/vdc: cryptsetup luksDump failed (exit 5): forced luksDump failure on /dev/vdc; proceeding as if no keyfile is enrolled"
+                "[warn] could not check keyfile enrollment on /dev/vdc: cryptsetup luksDump failed (exit 5): forced luksDump failure on /dev/vdc; proceeding as if no keyfile is enrolled"
             ),
             "dry-run preview must include the second probe-failure warning, got:\n{rendered}",
         );
@@ -3935,7 +3935,7 @@ mod tests {
             plan.notes
         );
         assert!(
-            rendered.contains("[warn]  Existing pool drives have a keyfile (keyslot-1)"),
+            rendered.contains("[warn] Existing pool drives have a keyfile (keyslot-1)"),
             "mixed probe result must render canonical keyfile-asymmetry warning, got:\n{rendered}",
         );
         assert!(
