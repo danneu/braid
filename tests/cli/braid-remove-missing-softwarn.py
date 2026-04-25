@@ -15,10 +15,8 @@
 # the plan-level shape; this test catches the wire-level stream routing.
 #
 # Scenario: 3-disk RAID1 pool, disk3 dies, pool mounted degraded. A PATH
-# wrapper intercepts `btrfs device usage --raw` and fails the second
-# call, which is the one issued by `check_relocation_space` -- the
-# first call comes from `probe_missing_devids` and is passed through so
-# the --missing-id validation still succeeds.
+# wrapper intercepts `btrfs device usage --raw` and fails the single
+# call issued by `check_relocation_space`.
 
 import base64
 import json
@@ -69,8 +67,8 @@ with subtest("Simulate disk3 death and mount degraded"):
 
 missing_devid = get_missing_devid()
 
-# --- Phase 3: Install a wrapper that fails the second `btrfs device
-#     usage --raw` invocation (the one inside check_relocation_space).
+# --- Phase 3: Install a wrapper that fails `btrfs device usage --raw`
+#     inside check_relocation_space.
 #
 # `braid` in nixpkgs is wrapped by makeWrapper with `--prefix PATH :
 # ${toolPath}`, which forcibly prepends btrfs-progs to PATH. A plain
@@ -98,10 +96,8 @@ if [ "${1:-}" = "device" ] && [ "${2:-}" = "usage" ] && [ "${3:-}" = "--raw" ]; 
     n=$(cat "$COUNTER" 2>/dev/null || echo 0)
     n=$((n + 1))
     echo "$n" > "$COUNTER"
-    if [ "$n" -ge 2 ]; then
-        echo "simulated btrfs failure (call $n)" >&2
-        exit 1
-    fi
+    echo "simulated btrfs failure (call $n)" >&2
+    exit 1
 fi
 exec __REAL_BTRFS__ "$@"
 """

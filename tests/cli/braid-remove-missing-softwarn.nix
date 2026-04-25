@@ -15,10 +15,8 @@
 # caught by a human noticing drift in their SSH session.
 #
 # The test forces the soft-warn branch by wrapping `btrfs` on PATH with
-# a counter-based shim that delegates the first `btrfs device usage
-# --raw` call (used by `probe_missing_devids` to validate the
-# --missing-id argument) to the real binary, but errors on every
-# subsequent call (which lands in `check_relocation_space`).
+# a shim that fails the single `btrfs device usage --raw` call issued by
+# `check_relocation_space`.
 #
 # Dependencies: braid add (builds the test pool).
 { braid }:

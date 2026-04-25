@@ -228,8 +228,8 @@ impl RemoveMissingPlan {
 /// Plan a `braid remove-missing` run. Owns everything above today's
 /// `--dry-run` gate: pending-op preflight, config read, pool probe /
 /// mounted validation, mutation preflight, UPS preflight,
-/// missing-device validations, `probe_missing_devids`, the
-/// relocation-space preflight, and `compile_steps`. Returns a
+/// missing-device validations, the relocation-space preflight, and
+/// `compile_steps`. Returns a
 /// `RemoveMissingPlanReport`: on success, accumulated notes move into
 /// `plan.notes`; on post-preflight failure, accumulated notes stay on
 /// `report.notes` so `cmd_remove_missing` can render them before
@@ -311,16 +311,7 @@ pub fn plan_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             ))),
         };
     }
-    let missing_devids = match preflight::probe_missing_devids(runner, config.mount_point()) {
-        Ok(v) => v,
-        Err(msg) => {
-            return RemoveMissingPlanReport {
-                notes: std::mem::take(&mut notes),
-                result: Err(RemoveMissingError::Validation(msg)),
-            };
-        }
-    };
-    if !missing_devids.contains(&params.missing_id) {
+    if !pool.missing_devids.contains(&params.missing_id) {
         return RemoveMissingPlanReport {
             notes: std::mem::take(&mut notes),
             result: Err(RemoveMissingError::Validation(format!(
@@ -677,11 +668,6 @@ mod tests {
                     0,
                 )),
                 CmdRequest::BtrfsDeviceRemove { .. } => Ok(mock_out("btrfs device remove", "", 0)),
-                CmdRequest::BtrfsDeviceUsageRaw { .. } => Ok(mock_out(
-                    "btrfs device usage --raw",
-                    "/dev/mapper/braid-disk1, ID: 1\n   Device size:           520093696\n   Device slack:                  0\n   Data,RAID1:            67108864\n   Unallocated:           452984832\n\n<missing disk>, ID: 2\n   Device size:                  0\n   Device slack:                  0\n   Data,RAID1:            67108864\n   Unallocated:                  0\n\n",
-                    0,
-                )),
                 _ => Err(CmdError::MissingMock),
             }
         }
@@ -695,17 +681,20 @@ mod tests {
         }
     }
 
+    /*
+     * Intent: cmd_remove_missing succeeds when the pool has 1 present device
+     * and 1 missing device without invoking `btrfs device usage --raw`.
+     *
+     * Why it exists: Single-survivor removal skips the ENOSPC pre-flight
+     * check, and missing-id validation must use the already-probed pool
+     * state instead of a redundant device-usage probe.
+     *
+     * Scenario: User's 2-disk NAS has one drive die. They run
+     * `braid remove-missing`. The operation succeeds because no data
+     * relocation is needed.
+     */
     #[test]
-    // Intent: cmd_remove_missing succeeds when the pool has 1 present device and
-    //   1 missing device, without invoking the ENOSPC pre-flight check.
-    //
-    // Why: In a 2-device RAID1 pool with 1 missing device, the survivor already
-    //   has all data (every chunk is mirrored). This does not match the reproduced
-    //   relocation-failure mode. The pre-flight check would false-positive.
-    //
-    // Scenario: User's 2-disk NAS has one drive die. They run braid remove-missing.
-    //   The operation succeeds because no data relocation is needed.
-    fn enospc_check_skipped_for_single_survivor() {
+    fn no_usage_probe_for_single_survivor() {
         let (_state_tmp, state_paths) = test_paths(&[
             ("disk1", "/dev/disk/by-id/virtio-disk1", Some(1)),
             ("disk2", "/dev/disk/by-id/virtio-disk2", Some(2)),
@@ -734,8 +723,9 @@ mod tests {
         )
         .expect("remove-missing should succeed");
 
-        // BtrfsDeviceUsageRaw is called once (by probe_missing_devids), but
-        // the ENOSPC check_relocation_space should be skipped for single-survivor.
+        // No BtrfsDeviceUsageRaw calls are expected: missing-id validation
+        // uses PoolState::missing_devids, and check_relocation_space is
+        // skipped for single-survivor removal.
         let usage_calls = log
             .lock()
             .unwrap()
@@ -743,9 +733,10 @@ mod tests {
             .filter(|c| matches!(c, CmdRequest::BtrfsDeviceUsageRaw { .. }))
             .count();
         assert_eq!(
-            usage_calls, 1,
-            "Expected exactly 1 BtrfsDeviceUsageRaw call (probe_missing_devids only); \
-             ENOSPC pre-flight should be skipped for single-survivor removal"
+            usage_calls, 0,
+            "Expected no BtrfsDeviceUsageRaw calls; missing-id validation should \
+             use the pool probe and ENOSPC pre-flight should be skipped for \
+             single-survivor removal"
         );
         // Locks in the seam placement: a successful remove-missing must take
         // the inhibitor exactly once before journal::write_journal.
@@ -1104,6 +1095,107 @@ mod tests {
             ("disk3", "/dev/disk/by-id/virtio-disk3", Some(3)),
         ]);
         (tmp, config_path, state_tmp, state_paths)
+    }
+
+    /*
+     * Intent: `plan_remove_missing` rejects a wrong `--missing-id` by
+     * checking the missing devids reported by the already-probed pool.
+     *
+     * Why it exists: The target-validation contract must not regress
+     * to a redundant `btrfs device usage --raw` probe before rejecting
+     * an ID that is absent from `PoolState::missing_devids`.
+     *
+     * Scenario: a 3-device pool has devid 3 reported as `MISSING` by
+     * `btrfs filesystem show`, but the operator passes
+     * `--missing-id 99`.
+     */
+    #[test]
+    fn plan_remove_missing_rejects_wrong_missing_id_from_pool_state() {
+        let (_tmp, config_path, _state_tmp, state_paths) = three_device_config();
+
+        struct WrongMissingIdRunner {
+            log: Arc<Mutex<Vec<CmdRequest>>>,
+        }
+
+        impl CommandRunner for WrongMissingIdRunner {
+            fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
+                self.log.lock().unwrap().push(request.clone());
+                match request {
+                    CmdRequest::FindmntJson { mount_point } => Ok(mock_out(
+                        &format!("findmnt --json --mountpoint {mount_point}"),
+                        r#"{"filesystems":[{"target":"/mnt/storage","source":"/dev/mapper/braid-disk1","fstype":"btrfs"}]}"#,
+                        0,
+                    )),
+                    CmdRequest::BtrfsFilesystemShow { mount_point } => Ok(mock_out(
+                        &format!("btrfs filesystem show {mount_point}"),
+                        "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\tTotal devices 3 FS bytes used 16.17MiB\n\tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk2\n\tdevid    3 size 0 used 0 path MISSING\n",
+                        0,
+                    )),
+                    CmdRequest::CryptsetupStatus { mapper } => Ok(mock_out(
+                        &format!("cryptsetup status {mapper}"),
+                        &format!(
+                            "{mapper} is active and is in use.\n  type:    LUKS2\n  device:  /dev/vdb\n  mode:    read/write\n"
+                        ),
+                        0,
+                    )),
+                    CmdRequest::CryptsetupLuksUuid { .. } => Ok(mock_out(
+                        "cryptsetup luksUUID",
+                        "11111111-1111-1111-1111-111111111111\n",
+                        0,
+                    )),
+                    CmdRequest::BtrfsBalanceStatus { .. } => Ok(mock_out(
+                        "btrfs balance status",
+                        "No balance found on '/mnt/storage'\n",
+                        0,
+                    )),
+                    _ => Err(CmdError::MissingMock),
+                }
+            }
+
+            fn run_with_stdin(
+                &self,
+                request: &CmdRequest,
+                _stdin: &[u8],
+            ) -> Result<RawCommandOutput, CmdError> {
+                self.run(request)
+            }
+        }
+
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let runner = WrongMissingIdRunner {
+            log: Arc::clone(&log),
+        };
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let report = plan_remove_missing(
+            &runner,
+            &MockFs,
+            &RemoveMissingParams {
+                config_path: &config_path,
+                missing_id: 99,
+                dry_run: true,
+                yes: true,
+                progress: crate::progress::ProgressOutput::Off,
+                paths: &state_paths,
+                sleep_inhibitor: &inhibitor,
+                sleeper: &crate::progress::NoopSleeper,
+            },
+        );
+
+        match &report.result {
+            Err(RemoveMissingError::Validation(msg)) => assert_eq!(
+                msg,
+                "devid 99 is not a device in this pool. Use 'braid status' to see device IDs.",
+            ),
+            Err(other) => panic!("expected Validation, got: {other:?}"),
+            Ok(_) => panic!("expected Err(Validation), got Ok(_)"),
+        }
+        assert!(
+            !log.lock()
+                .unwrap()
+                .iter()
+                .any(|c| matches!(c, CmdRequest::BtrfsDeviceUsageRaw { .. })),
+            "wrong-id validation must not call BtrfsDeviceUsageRaw"
+        );
     }
 
     #[test]
@@ -1540,33 +1632,27 @@ mod tests {
 
     // --- plan_remove_missing soft-warn tests ---
 
-    /// 3-device pool runner where `BtrfsDeviceUsageRaw` succeeds the
-    /// first time (used by `probe_missing_devids` to validate the
-    /// --missing-id argument) and fails the second time (used by
-    /// `check_relocation_space`) per `failure_mode`. Lets us exercise
-    /// the soft-warn paths from `plan_remove_missing` without tripping
-    /// the earlier validations.
+    /// 3-device pool runner where the single `BtrfsDeviceUsageRaw`
+    /// call comes from `check_relocation_space` and fails per
+    /// `failure_mode`. Lets us exercise the soft-warn paths from
+    /// `plan_remove_missing` without tripping the earlier validations.
     #[derive(Clone, Copy)]
     enum UsageFailureMode {
-        /// Command error on the second call (models a failing
+        /// Command error from the relocation-space preflight (models a failing
         /// `btrfs device usage --raw` invocation).
         CmdError,
-        /// Unparseable stdout on the second call (models upstream
+        /// Unparseable output from the relocation-space preflight (models upstream
         /// output drift that breaks `parse_btrfs_device_usage`).
         ParseError,
     }
 
     struct ThreeDeviceSoftWarnRunner {
-        usage_calls: Arc<Mutex<u32>>,
         failure_mode: UsageFailureMode,
     }
 
     impl ThreeDeviceSoftWarnRunner {
         fn new(failure_mode: UsageFailureMode) -> Self {
-            Self {
-                usage_calls: Arc::new(Mutex::new(0)),
-                failure_mode,
-            }
+            Self { failure_mode }
         }
     }
 
@@ -1600,37 +1686,23 @@ mod tests {
                     "No balance found on '/mnt/storage'\n",
                     0,
                 )),
-                CmdRequest::BtrfsDeviceUsageRaw { .. } => {
-                    let mut n = self.usage_calls.lock().unwrap();
-                    *n += 1;
-                    if *n == 1 {
-                        // First call: probe_missing_devids. Needs valid
-                        // output identifying devid 3 as missing.
-                        Ok(mock_out(
-                            "btrfs device usage --raw",
-                            "/dev/mapper/braid-disk1, ID: 1\n   Device size:           520093696\n   Device slack:                  0\n   Data,RAID1:            67108864\n   Unallocated:           452984832\n\n/dev/mapper/braid-disk2, ID: 2\n   Device size:           520093696\n   Device slack:                  0\n   Data,RAID1:            67108864\n   Unallocated:           452984832\n\n<missing disk>, ID: 3\n   Device size:                  0\n   Device slack:                  0\n   Data,RAID1:            67108864\n   Unallocated:                  0\n\n",
-                            0,
-                        ))
-                    } else {
-                        match self.failure_mode {
-                            UsageFailureMode::CmdError => Err(CmdError::MissingMock),
-                            UsageFailureMode::ParseError => {
-                                // Nonzero exit_status funnels through
-                                // `ParseError::CommandFailed` inside
-                                // `parse_btrfs_device_usage`; the parser
-                                // itself is forgiving of unknown lines,
-                                // so this is the narrowest way to force
-                                // the parse-error soft-warn branch.
-                                Ok(RawCommandOutput {
-                                    cmd: "btrfs device usage --raw".to_owned(),
-                                    stdout: String::new(),
-                                    stderr: "boom".to_owned(),
-                                    exit_status: 1,
-                                })
-                            }
-                        }
+                CmdRequest::BtrfsDeviceUsageRaw { .. } => match self.failure_mode {
+                    UsageFailureMode::CmdError => Err(CmdError::MissingMock),
+                    UsageFailureMode::ParseError => {
+                        // Nonzero exit_status funnels through
+                        // `ParseError::CommandFailed` inside
+                        // `parse_btrfs_device_usage`; the parser itself
+                        // is forgiving of unknown lines, so this is the
+                        // narrowest way to force the parse-error soft-warn
+                        // branch.
+                        Ok(RawCommandOutput {
+                            cmd: "btrfs device usage --raw".to_owned(),
+                            stdout: String::new(),
+                            stderr: "boom".to_owned(),
+                            exit_status: 1,
+                        })
                     }
-                }
+                },
                 _ => Err(CmdError::MissingMock),
             }
         }
@@ -1655,9 +1727,9 @@ mod tests {
      * preflight helper would still pass the older "proceeds on command
      * error" test (which only asserts control flow).
      *
-     * Scenario: 3-disk RAID1 pool with devid 3 missing; the second
-     * `btrfs device usage --raw` call (from check_relocation_space)
-     * fails with a CmdError so the planner routes the soft-warn into
+     * Scenario: 3-disk RAID1 pool with devid 3 missing; the
+     * `btrfs device usage --raw` call from check_relocation_space fails
+     * with a CmdError so the planner routes the soft-warn into
      * plan.notes instead of stderr.
      */
     #[test]
@@ -1730,8 +1802,8 @@ mod tests {
      * command-error test above and guards against drift between the
      * two bodies.
      *
-     * Scenario: same 3-disk pool; the second `btrfs device usage
-     * --raw` call returns unparseable stdout, triggering
+     * Scenario: same 3-disk pool; the `btrfs device usage --raw` call
+     * returns unparseable stdout, triggering
      * `parse_btrfs_device_usage` to error.
      */
     #[test]
