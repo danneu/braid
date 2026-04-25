@@ -19,8 +19,9 @@
 #   2-disk tests/repro/degraded-soft-balance.py scenario does. The
 #   soft balance fired by maybe_restore_raid1 is therefore a near-no-op
 #   in this topology, and the entire mutation window is fast (~hundreds
-#   of ms, dominated by `btrfs device remove <devid>` which is
-#   metadata-only since the device is already gone).
+#   of ms in this fixture. Real `btrfs device remove <devid>` can still
+#   relocate chunks and take minutes when the missing device had data
+#   allocated; this test does not depend on that duration.
 #
 #   We still need a 3-disk pool because maybe_restore_raid1's "≥2
 #   surviving devices" gate would not fire on a 2-disk pool (which
@@ -155,9 +156,9 @@ with subtest("Start remove-missing and catch the brief inhibitor window"):
     machine.execute(remove_missing_cmd_bg(missing_devid))
 
     # Tight polling: 10 ms intervals, up to 5 seconds. The mutation
-    # window is short (fast metadata-only btrfs device remove + near-noop
-    # soft balance), so we need fine granularity to catch the inhibitor
-    # before braid drops it.
+    # window in this fixture is short (device remove + near-noop soft
+    # balance), so we need fine granularity to catch the inhibitor before
+    # braid drops it.
     inh = None
     for _ in range(500):
         inh = find_braid_sleep_inhibitor(list_inhibitors())

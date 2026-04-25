@@ -4,6 +4,51 @@ use crate::parse::{
 };
 use crate::types::MountPoint;
 use std::io::Write;
+use std::time::Duration;
+
+pub(crate) const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
+
+pub trait Sleeper: Sync {
+    fn sleep(&self, duration: Duration);
+}
+
+pub struct RealSleeper;
+
+impl Sleeper for RealSleeper {
+    fn sleep(&self, duration: Duration) {
+        std::thread::sleep(duration);
+    }
+}
+
+#[cfg(test)]
+pub(crate) struct NoopSleeper;
+
+#[cfg(test)]
+impl Sleeper for NoopSleeper {
+    fn sleep(&self, _duration: Duration) {}
+}
+
+pub(crate) trait ProgressSink: Sync {
+    fn write_line(&self, msg: &str);
+    fn write_json(&self, msg: &str);
+    fn clear(&self);
+}
+
+pub(crate) struct StderrSink;
+
+impl ProgressSink for StderrSink {
+    fn write_line(&self, msg: &str) {
+        write_progress_line(msg);
+    }
+
+    fn write_json(&self, msg: &str) {
+        write_progress_json(msg);
+    }
+
+    fn clear(&self) {
+        clear_progress_line();
+    }
+}
 
 // ---------------------------------------------------------------------------
 // ProgressMode (shared by init-disk and apply)
@@ -82,6 +127,17 @@ pub fn format_replace_progress_json(pct: f64) -> String {
     format!(r#"{{"event":"progress","operation":"replace","pct_done":{pct:.1}}}"#)
 }
 
+pub(crate) fn format_device_remove_heartbeat(elapsed: Duration) -> String {
+    format!("  device remove: working ({}s elapsed)", elapsed.as_secs())
+}
+
+pub(crate) fn format_device_remove_heartbeat_json(elapsed: Duration) -> String {
+    format!(
+        r#"{{"event":"device_remove_heartbeat","elapsed_secs":{}}}"#,
+        elapsed.as_secs()
+    )
+}
+
 pub fn pct_from_bytes(done: u64, total: u64) -> Option<u8> {
     if total == 0 {
         return None;
@@ -138,8 +194,13 @@ fn clear_progress_line() {
 // Threaded runner
 // ---------------------------------------------------------------------------
 
-/// Run a blocking btrfs command with progress polling.
-/// Works for BtrfsBalanceRaid1, BtrfsBalanceSingle, and BtrfsDeviceRemove.
+/// Run a blocking balance-driven btrfs command with progress
+/// polling via `btrfs balance status`.
+/// Works for BtrfsBalanceRaid1, BtrfsBalanceSingle, and the
+/// BtrfsBalance* variants. NOT suitable for BtrfsDeviceRemove --
+/// device remove uses its own exclusive-op path and does not
+/// surface in balance status; route those through
+/// `run_device_remove_with_progress` instead.
 pub fn run_with_progress<R: CommandRunner + Sync>(
     runner: &R,
     request: &CmdRequest,
@@ -215,6 +276,69 @@ pub fn run_with_progress<R: CommandRunner + Sync>(
     })
 }
 
+pub(crate) fn run_device_remove_with_progress<R: CommandRunner + Sync>(
+    runner: &R,
+    request: &CmdRequest,
+    output: ProgressOutput,
+) -> Result<RawCommandOutput, CmdError> {
+    run_device_remove_with_progress_using(runner, request, output, &RealSleeper, &StderrSink)
+}
+
+pub(crate) fn run_device_remove_with_progress_using<R, S, W>(
+    runner: &R,
+    request: &CmdRequest,
+    output: ProgressOutput,
+    sleeper: &S,
+    sink: &W,
+) -> Result<RawCommandOutput, CmdError>
+where
+    R: CommandRunner + Sync,
+    S: Sleeper + ?Sized,
+    W: ProgressSink + ?Sized,
+{
+    if output == ProgressOutput::Off {
+        return runner.run(request);
+    }
+
+    std::thread::scope(|s| {
+        let handle = s.spawn(|| runner.run(request));
+
+        let mut elapsed = Duration::ZERO;
+        let mut last_msg = String::new();
+        loop {
+            if handle.is_finished() {
+                break;
+            }
+
+            sleeper.sleep(HEARTBEAT_INTERVAL);
+            elapsed += HEARTBEAT_INTERVAL;
+
+            if handle.is_finished() {
+                break;
+            }
+
+            match output {
+                ProgressOutput::Human => {
+                    let msg = format_device_remove_heartbeat(elapsed);
+                    if msg != last_msg {
+                        sink.write_line(&msg);
+                        last_msg = msg;
+                    }
+                }
+                ProgressOutput::Json => {
+                    sink.write_json(&format_device_remove_heartbeat_json(elapsed));
+                }
+                ProgressOutput::Off => unreachable!(),
+            }
+        }
+
+        if output == ProgressOutput::Human {
+            sink.clear();
+        }
+        handle.join().expect("command thread panicked")
+    })
+}
+
 /// Run a blocking btrfs replace command with progress polling.
 pub fn run_replace_with_progress<R: CommandRunner + Sync>(
     runner: &R,
@@ -278,6 +402,8 @@ pub fn run_replace_with_progress<R: CommandRunner + Sync>(
 mod tests {
     use super::*;
     use crate::cmd::{MockRunner, RawCommandOutput};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Condvar, Mutex};
 
     // --- Pure formatting tests ---
 
@@ -307,6 +433,30 @@ mod tests {
         assert_eq!(
             format_balance_progress_json(3, 10, 70),
             r#"{"event":"progress","done_chunks":3,"estimated_total_chunks":10,"pct_left":70}"#
+        );
+    }
+
+    #[test]
+    fn format_device_remove_heartbeat_basic() {
+        assert_eq!(
+            format_device_remove_heartbeat(Duration::ZERO),
+            "  device remove: working (0s elapsed)"
+        );
+        assert_eq!(
+            format_device_remove_heartbeat(Duration::from_secs(7)),
+            "  device remove: working (7s elapsed)"
+        );
+        assert_eq!(
+            format_device_remove_heartbeat(Duration::from_secs(120)),
+            "  device remove: working (120s elapsed)"
+        );
+    }
+
+    #[test]
+    fn format_device_remove_heartbeat_json_basic() {
+        assert_eq!(
+            format_device_remove_heartbeat_json(Duration::from_secs(7)),
+            r#"{"event":"device_remove_heartbeat","elapsed_secs":7}"#
         );
     }
 
@@ -451,6 +601,268 @@ mod tests {
 
     fn mp() -> MountPoint {
         MountPoint("/mnt/storage".into())
+    }
+
+    fn device_remove_request() -> CmdRequest {
+        CmdRequest::BtrfsDeviceRemove {
+            device: "/dev/mapper/braid-disk2".to_owned(),
+            mount_point: mp(),
+        }
+    }
+
+    #[derive(Default)]
+    struct RemoveGate {
+        released: bool,
+        done: bool,
+    }
+
+    #[derive(Clone)]
+    struct BlockingRemoveRunner {
+        gate: Arc<(Mutex<RemoveGate>, Condvar)>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl BlockingRemoveRunner {
+        fn new() -> Self {
+            Self {
+                gate: Arc::new((Mutex::new(RemoveGate::default()), Condvar::new())),
+                calls: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+
+        fn gate(&self) -> Arc<(Mutex<RemoveGate>, Condvar)> {
+            Arc::clone(&self.gate)
+        }
+    }
+
+    impl CommandRunner for BlockingRemoveRunner {
+        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
+            match request {
+                CmdRequest::BtrfsDeviceRemove { .. } => {
+                    self.calls.fetch_add(1, Ordering::SeqCst);
+                    let (lock, cvar) = &*self.gate;
+                    let mut state = lock.lock().unwrap();
+                    while !state.released {
+                        state = cvar.wait(state).unwrap();
+                    }
+                    state.done = true;
+                    cvar.notify_all();
+                    Ok(ok_raw("btrfs device remove", ""))
+                }
+                _ => Err(CmdError::MissingMock),
+            }
+        }
+
+        fn run_with_stdin(
+            &self,
+            request: &CmdRequest,
+            _stdin: &[u8],
+        ) -> Result<RawCommandOutput, CmdError> {
+            self.run(request)
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct FakeSleeper {
+        calls: Arc<Mutex<Vec<Duration>>>,
+    }
+
+    impl FakeSleeper {
+        fn calls(&self) -> Vec<Duration> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    impl Sleeper for FakeSleeper {
+        fn sleep(&self, duration: Duration) {
+            self.calls.lock().unwrap().push(duration);
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct RecordingSink {
+        lines: Arc<Mutex<Vec<String>>>,
+        jsons: Arc<Mutex<Vec<String>>>,
+        clears: Arc<AtomicUsize>,
+        gate: Option<Arc<(Mutex<RemoveGate>, Condvar)>>,
+    }
+
+    impl RecordingSink {
+        fn with_gate(gate: Arc<(Mutex<RemoveGate>, Condvar)>) -> Self {
+            Self {
+                gate: Some(gate),
+                ..Self::default()
+            }
+        }
+
+        fn lines(&self) -> Vec<String> {
+            self.lines.lock().unwrap().clone()
+        }
+
+        fn jsons(&self) -> Vec<String> {
+            self.jsons.lock().unwrap().clone()
+        }
+
+        fn clears(&self) -> usize {
+            self.clears.load(Ordering::SeqCst)
+        }
+
+        fn release_worker_and_wait(&self) {
+            let Some(gate) = &self.gate else {
+                return;
+            };
+            let (lock, cvar) = &**gate;
+            let mut state = lock.lock().unwrap();
+            state.released = true;
+            cvar.notify_all();
+            while !state.done {
+                state = cvar.wait(state).unwrap();
+            }
+        }
+    }
+
+    impl ProgressSink for RecordingSink {
+        fn write_line(&self, msg: &str) {
+            self.lines.lock().unwrap().push(msg.to_owned());
+            self.release_worker_and_wait();
+        }
+
+        fn write_json(&self, msg: &str) {
+            self.jsons.lock().unwrap().push(msg.to_owned());
+            self.release_worker_and_wait();
+        }
+
+        fn clear(&self) {
+            self.clears.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /*
+     * Intent: the device-remove progress helper emits a human heartbeat
+     * while the worker is running and clears on completion.
+     * Why it exists: the original bug was that `btrfs device remove`
+     * produced no operator output on slow pools.
+     * Scenario: a mock device remove blocks until the first heartbeat
+     * reaches the sink, then returns.
+     */
+    #[test]
+    fn device_remove_emits_heartbeat_human() {
+        let runner = BlockingRemoveRunner::new();
+        let sleeper = FakeSleeper::default();
+        let sink = RecordingSink::with_gate(runner.gate());
+
+        let result = run_device_remove_with_progress_using(
+            &runner,
+            &device_remove_request(),
+            ProgressOutput::Human,
+            &sleeper,
+            &sink,
+        );
+
+        assert!(result.is_ok(), "device remove should succeed: {result:?}");
+        let lines = sink.lines();
+        assert!(
+            !lines.is_empty(),
+            "expected at least one heartbeat line to be written"
+        );
+        assert_eq!(lines[0], format_device_remove_heartbeat(HEARTBEAT_INTERVAL));
+        assert_eq!(sink.jsons(), Vec::<String>::new());
+        assert_eq!(sink.clears(), 1, "human progress should clear once");
+    }
+
+    /*
+     * Intent: JSON progress mode emits device-remove heartbeat events.
+     * Why it exists: JSON mode must not silently drop the liveness signal.
+     * Scenario: same blocked device remove as the human-mode test, but
+     * using the newline-delimited JSON progress pathway.
+     */
+    #[test]
+    fn device_remove_emits_heartbeat_json() {
+        let runner = BlockingRemoveRunner::new();
+        let sleeper = FakeSleeper::default();
+        let sink = RecordingSink::with_gate(runner.gate());
+
+        let result = run_device_remove_with_progress_using(
+            &runner,
+            &device_remove_request(),
+            ProgressOutput::Json,
+            &sleeper,
+            &sink,
+        );
+
+        assert!(result.is_ok(), "device remove should succeed: {result:?}");
+        let jsons = sink.jsons();
+        assert!(
+            !jsons.is_empty(),
+            "expected at least one heartbeat JSON event to be written"
+        );
+        assert_eq!(
+            jsons[0],
+            format_device_remove_heartbeat_json(HEARTBEAT_INTERVAL)
+        );
+        assert_eq!(sink.lines(), Vec::<String>::new());
+        assert_eq!(sink.clears(), 0, "JSON progress should not clear");
+    }
+
+    /*
+     * Intent: ProgressOutput::Off short-circuits to runner.run with no
+     * heartbeat emission.
+     * Why it exists: callers use Off as the quiet escape hatch.
+     * Scenario: a successful device remove runs without touching the
+     * injected sleeper or sink.
+     */
+    #[test]
+    fn device_remove_off_emits_nothing() {
+        let runner = MockRunner::default()
+            .with_output(device_remove_request(), ok_raw("btrfs device remove", ""));
+        let sleeper = FakeSleeper::default();
+        let sink = RecordingSink::default();
+
+        let result = run_device_remove_with_progress_using(
+            &runner,
+            &device_remove_request(),
+            ProgressOutput::Off,
+            &sleeper,
+            &sink,
+        );
+
+        assert!(result.is_ok(), "device remove should succeed: {result:?}");
+        assert_eq!(sink.lines(), Vec::<String>::new());
+        assert_eq!(sink.jsons(), Vec::<String>::new());
+        assert_eq!(sink.clears(), 0);
+        assert!(
+            sleeper.calls().is_empty(),
+            "Off mode must not call the sleeper"
+        );
+    }
+
+    /*
+     * Intent: the device-remove helper asks the Sleeper for the configured
+     * heartbeat interval.
+     * Why it exists: the cadence is user-visible and should not drift
+     * silently.
+     * Scenario: a blocked device remove runs through one heartbeat tick.
+     */
+    #[test]
+    fn device_remove_sleeps_at_configured_interval() {
+        let runner = BlockingRemoveRunner::new();
+        let sleeper = FakeSleeper::default();
+        let sink = RecordingSink::with_gate(runner.gate());
+
+        let result = run_device_remove_with_progress_using(
+            &runner,
+            &device_remove_request(),
+            ProgressOutput::Human,
+            &sleeper,
+            &sink,
+        );
+
+        assert!(result.is_ok(), "device remove should succeed: {result:?}");
+        let calls = sleeper.calls();
+        assert!(
+            calls.iter().any(|d| *d == HEARTBEAT_INTERVAL),
+            "expected a sleep call for {HEARTBEAT_INTERVAL:?}, got {calls:?}"
+        );
     }
 
     #[test]

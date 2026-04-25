@@ -5,11 +5,11 @@ use crate::inhibit::AcquireSleepInhibitor;
 use crate::journal;
 use crate::membership;
 use crate::parse::parse_btrfs_device_usage;
-use crate::pool::pool_remove_devid;
+use crate::pool::pool_remove_device_using;
 use crate::preflight;
 use crate::preview::{self, PerDiskStyle, Preview, PreviewCompleteness, PreviewNote};
 use crate::probe::{Filesystem, ProbeError, probe_pool};
-use crate::progress::ProgressOutput;
+use crate::progress::{self, ProgressOutput};
 use crate::state_paths::StatePaths;
 use crate::types::MountPoint;
 use std::path::Path;
@@ -69,6 +69,10 @@ pub struct RemoveMissingParams<'a> {
     /// portion of the remove-missing. Production passes `&RealSleepInhibitor`;
     /// unit tests pass `&RecordingInhibitor` to avoid spawning subprocesses.
     pub sleep_inhibitor: &'a dyn AcquireSleepInhibitor,
+    /// Seam for the device-remove heartbeat loop. Production passes
+    /// `&progress::RealSleeper`; tests pass `&progress::NoopSleeper`
+    /// so progress-path coverage does not pay real wall-clock time.
+    pub sleeper: &'a dyn progress::Sleeper,
 }
 
 /// Dry-run preview source of truth for `braid remove-missing` plus the
@@ -154,11 +158,11 @@ impl RemoveMissingPlan {
         }
 
         // Hold a logind sleep inhibitor for the rest of the remove-missing
-        // operation -- covers the btrfs device remove (fast metadata-only) and
-        // the post-op maybe_restore_raid1 soft balance, which converts
-        // single-profile chunks created during degraded operation back to RAID1
-        // and can be long-running. Suspending mid-soft-balance interrupts the
-        // restoration and leaves chunks unprotected.
+        // operation -- covers the btrfs device remove (chunk relocation; can
+        // run for minutes when the missing device had data allocated) and the
+        // post-op maybe_restore_raid1 soft balance, which converts single-profile
+        // chunks created during degraded operation back to RAID1. Suspending
+        // mid-operation can leave chunks unprotected or force recovery.
         //
         // Acquired here, AFTER all interactive/reversible work (confirmation)
         // and BEFORE journal::write_journal, so that:
@@ -192,7 +196,14 @@ impl RemoveMissingPlan {
             "Removing missing device (devid {}) from pool...",
             resolved_devid
         );
-        pool_remove_devid(runner, &self.mount_point, resolved_devid)?;
+        pool_remove_device_using(
+            runner,
+            &resolved_devid.to_string(),
+            &self.mount_point,
+            params.progress,
+            params.sleeper,
+            &progress::StderrSink,
+        )?;
 
         crate::pool::maybe_restore_raid1(
             runner,
@@ -608,6 +619,7 @@ mod tests {
         }
     }
 
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
 
     /// End-to-end runner that records all calls, modeling a pool with
@@ -717,6 +729,7 @@ mod tests {
                 progress: crate::progress::ProgressOutput::Off,
                 paths: &state_paths,
                 sleep_inhibitor: &inhibitor,
+                sleeper: &crate::progress::NoopSleeper,
             },
         )
         .expect("remove-missing should succeed");
@@ -964,6 +977,8 @@ mod tests {
         log: Arc<Mutex<Vec<CmdRequest>>>,
         /// If true, post-op probe still shows 1 missing
         still_degraded_after: bool,
+        remove_thread_id: Option<Arc<Mutex<Option<std::thread::ThreadId>>>>,
+        remove_done: Option<Arc<AtomicBool>>,
     }
 
     impl ThreeDeviceRunner {
@@ -971,6 +986,22 @@ mod tests {
             Self {
                 log,
                 still_degraded_after: still_degraded,
+                remove_thread_id: None,
+                remove_done: None,
+            }
+        }
+
+        fn with_thread_recorder(
+            log: Arc<Mutex<Vec<CmdRequest>>>,
+            still_degraded: bool,
+            remove_thread_id: Arc<Mutex<Option<std::thread::ThreadId>>>,
+            remove_done: Arc<AtomicBool>,
+        ) -> Self {
+            Self {
+                log,
+                still_degraded_after: still_degraded,
+                remove_thread_id: Some(remove_thread_id),
+                remove_done: Some(remove_done),
             }
         }
     }
@@ -1024,7 +1055,15 @@ mod tests {
                     "No balance found on '/mnt/storage'\n",
                     0,
                 )),
-                CmdRequest::BtrfsDeviceRemove { .. } => Ok(mock_out("btrfs device remove", "", 0)),
+                CmdRequest::BtrfsDeviceRemove { .. } => {
+                    if let Some(remove_thread_id) = &self.remove_thread_id {
+                        *remove_thread_id.lock().unwrap() = Some(std::thread::current().id());
+                    }
+                    if let Some(remove_done) = &self.remove_done {
+                        remove_done.store(true, Ordering::SeqCst);
+                    }
+                    Ok(mock_out("btrfs device remove", "", 0))
+                }
                 CmdRequest::BtrfsBalanceRaid1Soft { .. } => {
                     Ok(mock_out("btrfs balance start -dconvert=raid1,soft", "", 0))
                 }
@@ -1089,6 +1128,7 @@ mod tests {
                 progress: crate::progress::ProgressOutput::Off,
                 paths: &state_paths,
                 sleep_inhibitor: &inhibitor,
+                sleeper: &crate::progress::NoopSleeper,
             },
         )
         .expect("remove-missing should succeed");
@@ -1143,6 +1183,7 @@ mod tests {
                 progress: crate::progress::ProgressOutput::Off,
                 paths: &state_paths,
                 sleep_inhibitor: &inhibitor,
+                sleeper: &crate::progress::NoopSleeper,
             },
         )
         .expect("remove-missing should succeed");
@@ -1162,6 +1203,72 @@ mod tests {
             1,
             "sleep inhibitor must be acquired exactly once before journal::write_journal, \
              even when no soft balance runs"
+        );
+    }
+
+    /*
+     * Intent: cmd_remove_missing routes the device-remove phase through the
+     * progress helper when progress output is enabled.
+     * Why it exists: a direct runner.run or forced ProgressOutput::Off at this
+     * layer would make slow `btrfs device remove <devid>` operations silent
+     * again even though the pool helper itself supports heartbeats.
+     * Scenario: a 3-device pool has one targeted missing device and remains
+     * degraded after removal, so the only BtrfsDeviceRemove observed is the
+     * remove-missing phase; the mock records which thread ran that command.
+     */
+    #[test]
+    fn device_remove_runs_on_progress_worker_thread() {
+        let (_tmp, config_path, _state_tmp, state_paths) = three_device_config();
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::new(Mutex::new(None));
+        let remove_done = Arc::new(AtomicBool::new(false));
+        let runner = ThreeDeviceRunner::with_thread_recorder(
+            log,
+            true,
+            Arc::clone(&recorded),
+            Arc::clone(&remove_done),
+        );
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        struct WaitForRemoveDoneSleeper {
+            remove_done: Arc<AtomicBool>,
+        }
+        impl progress::Sleeper for WaitForRemoveDoneSleeper {
+            fn sleep(&self, _duration: std::time::Duration) {
+                while !self.remove_done.load(Ordering::SeqCst) {
+                    std::thread::yield_now();
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
+        let sleeper = WaitForRemoveDoneSleeper {
+            remove_done: Arc::clone(&remove_done),
+        };
+        let calling_thread = std::thread::current().id();
+
+        cmd_remove_missing(
+            &runner,
+            &MockFs,
+            &RemoveMissingParams {
+                config_path: &config_path,
+                missing_id: 3,
+                dry_run: false,
+                yes: true,
+                progress: crate::progress::ProgressOutput::Human,
+                paths: &state_paths,
+                sleep_inhibitor: &inhibitor,
+                sleeper: &sleeper,
+            },
+        )
+        .expect("remove-missing should succeed");
+
+        let observed = recorded
+            .lock()
+            .unwrap()
+            .expect("BtrfsDeviceRemove must be dispatched");
+        assert_ne!(
+            observed, calling_thread,
+            "BtrfsDeviceRemove must run on the progress helper worker thread when \
+             ProgressOutput::Human is threaded through"
         );
     }
 
@@ -1279,6 +1386,7 @@ mod tests {
                 progress: crate::progress::ProgressOutput::Off,
                 paths: &state_paths,
                 sleep_inhibitor: &inhibitor,
+                sleeper: &crate::progress::NoopSleeper,
             },
         );
 
@@ -1324,6 +1432,7 @@ mod tests {
                 progress: crate::progress::ProgressOutput::Off,
                 paths: &state_paths,
                 sleep_inhibitor: &inhibitor,
+                sleeper: &crate::progress::NoopSleeper,
             },
         );
 
@@ -1567,6 +1676,7 @@ mod tests {
                 progress: crate::progress::ProgressOutput::Off,
                 paths: &state_paths,
                 sleep_inhibitor: &inhibitor,
+                sleeper: &crate::progress::NoopSleeper,
             },
         );
         assert!(
@@ -1640,6 +1750,7 @@ mod tests {
                 progress: crate::progress::ProgressOutput::Off,
                 paths: &state_paths,
                 sleep_inhibitor: &inhibitor,
+                sleeper: &crate::progress::NoopSleeper,
             },
         );
         let plan = report.result.expect("planning should succeed");
@@ -1791,6 +1902,7 @@ mod tests {
                 progress: crate::progress::ProgressOutput::Off,
                 paths: &state_paths,
                 sleep_inhibitor: &inhibitor,
+                sleeper: &crate::progress::NoopSleeper,
             },
         );
         let plan = report
@@ -1911,6 +2023,7 @@ mod tests {
                 progress: crate::progress::ProgressOutput::Off,
                 paths: &state_paths,
                 sleep_inhibitor: &inhibitor,
+                sleeper: &crate::progress::NoopSleeper,
             },
         );
         match &report.result {

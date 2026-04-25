@@ -89,7 +89,10 @@ The protected scope includes:
 The protected scope includes:
 
 - journal write
-- `pool_remove_devid` (fast metadata-only)
+- `btrfs device remove <devid>` (chunk relocation via
+  `btrfs_shrink_device`; can run for minutes when the missing device had data
+  allocated because surviving RAID1 stripes are rewritten into newly allocated
+  chunks on remaining devices)
 - the conditional `maybe_restore_raid1` soft balance that converts single-profile chunks (created during degraded operation) back to RAID1 when clearing the last missing device on a multi-disk pool
 - post-op membership persistence
 

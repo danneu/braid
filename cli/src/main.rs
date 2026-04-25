@@ -366,6 +366,7 @@ fn main() {
                     progress,
                     paths: &paths,
                     sleep_inhibitor: &sleep_inhibitor,
+                    sleeper: &braid_cli::progress::RealSleeper,
                 },
             ) {
                 print_cli_error(&e.to_string());

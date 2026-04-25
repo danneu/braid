@@ -1,6 +1,9 @@
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, RawCommandOutput};
 use crate::probe::probe_pool;
-use crate::progress::{ProgressOutput, run_replace_with_progress, run_with_progress};
+use crate::progress::{
+    self, ProgressOutput, run_device_remove_with_progress, run_replace_with_progress,
+    run_with_progress,
+};
 use crate::types::MountPoint;
 
 #[derive(Debug, thiserror::Error)]
@@ -181,38 +184,47 @@ pub fn pool_remove_device<R: CommandRunner + Sync>(
     mount_point: &MountPoint,
     progress: ProgressOutput,
 ) -> Result<(), PoolError> {
-    let result = run_with_progress(
+    let result = run_device_remove_with_progress(
         runner,
         &CmdRequest::BtrfsDeviceRemove {
             device: device.to_owned(),
             mount_point: mount_point.clone(),
         },
-        mount_point,
         progress,
     )?;
+    device_remove_result(result)
+}
+
+pub(crate) fn pool_remove_device_using<R, S, W>(
+    runner: &R,
+    device: &str,
+    mount_point: &MountPoint,
+    progress: ProgressOutput,
+    sleeper: &S,
+    sink: &W,
+) -> Result<(), PoolError>
+where
+    R: CommandRunner + Sync,
+    S: progress::Sleeper + ?Sized,
+    W: progress::ProgressSink + ?Sized,
+{
+    let result = progress::run_device_remove_with_progress_using(
+        runner,
+        &CmdRequest::BtrfsDeviceRemove {
+            device: device.to_owned(),
+            mount_point: mount_point.clone(),
+        },
+        progress,
+        sleeper,
+        sink,
+    )?;
+    device_remove_result(result)
+}
+
+fn device_remove_result(result: RawCommandOutput) -> Result<(), PoolError> {
     if result.exit_status != 0 {
         return Err(PoolError::Failed(format!(
             "btrfs device remove failed (exit {}): {}",
-            result.exit_status,
-            result.stderr.trim()
-        )));
-    }
-    Ok(())
-}
-
-/// Remove a specific device by devid from the pool.
-pub fn pool_remove_devid<R: CommandRunner + Sync>(
-    runner: &R,
-    mount_point: &MountPoint,
-    devid: u64,
-) -> Result<(), PoolError> {
-    let result = runner.run(&CmdRequest::BtrfsDeviceRemove {
-        device: devid.to_string(),
-        mount_point: mount_point.clone(),
-    })?;
-    if result.exit_status != 0 {
-        return Err(PoolError::Failed(format!(
-            "btrfs device remove devid {devid} failed (exit {}): {}",
             result.exit_status,
             result.stderr.trim()
         )));
@@ -402,7 +414,10 @@ pub fn pool_bootstrap_mount_raid1<R: CommandRunner + Sync>(
 mod tests {
     use super::*;
     use crate::cmd::{MockRunner, RawCommandOutput};
-    use crate::progress::ProgressOutput;
+    use crate::progress::{self, ProgressOutput};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Condvar, Mutex};
+    use std::time::Duration;
 
     fn ok_raw() -> RawCommandOutput {
         RawCommandOutput {
@@ -418,7 +433,169 @@ mod tests {
     }
 
     use crate::cmd::CmdError;
-    use std::sync::{Arc, Mutex};
+
+    #[derive(Default)]
+    struct RemoveGate {
+        released: bool,
+        done: bool,
+    }
+
+    #[derive(Clone)]
+    struct BlockingRemoveRunner {
+        gate: Arc<(Mutex<RemoveGate>, Condvar)>,
+    }
+
+    impl BlockingRemoveRunner {
+        fn new() -> Self {
+            Self {
+                gate: Arc::new((Mutex::new(RemoveGate::default()), Condvar::new())),
+            }
+        }
+
+        fn gate(&self) -> Arc<(Mutex<RemoveGate>, Condvar)> {
+            Arc::clone(&self.gate)
+        }
+    }
+
+    impl CommandRunner for BlockingRemoveRunner {
+        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
+            match request {
+                CmdRequest::BtrfsDeviceRemove { .. } => {
+                    let (lock, cvar) = &*self.gate;
+                    let mut state = lock.lock().unwrap();
+                    while !state.released {
+                        state = cvar.wait(state).unwrap();
+                    }
+                    state.done = true;
+                    cvar.notify_all();
+                    Ok(ok_raw())
+                }
+                _ => Err(CmdError::MissingMock),
+            }
+        }
+
+        fn run_with_stdin(
+            &self,
+            request: &CmdRequest,
+            _stdin: &[u8],
+        ) -> Result<RawCommandOutput, CmdError> {
+            self.run(request)
+        }
+    }
+
+    #[derive(Default)]
+    struct FakeSleeper {
+        calls: Mutex<Vec<Duration>>,
+    }
+
+    impl FakeSleeper {
+        fn calls(&self) -> Vec<Duration> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    impl progress::Sleeper for FakeSleeper {
+        fn sleep(&self, duration: Duration) {
+            self.calls.lock().unwrap().push(duration);
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingSink {
+        lines: Mutex<Vec<String>>,
+        jsons: Mutex<Vec<String>>,
+        clears: AtomicUsize,
+        gate: Option<Arc<(Mutex<RemoveGate>, Condvar)>>,
+    }
+
+    impl RecordingSink {
+        fn with_gate(gate: Arc<(Mutex<RemoveGate>, Condvar)>) -> Self {
+            Self {
+                gate: Some(gate),
+                ..Self::default()
+            }
+        }
+
+        fn lines(&self) -> Vec<String> {
+            self.lines.lock().unwrap().clone()
+        }
+
+        fn clears(&self) -> usize {
+            self.clears.load(Ordering::SeqCst)
+        }
+
+        fn release_worker_and_wait(&self) {
+            let Some(gate) = &self.gate else {
+                return;
+            };
+            let (lock, cvar) = &**gate;
+            let mut state = lock.lock().unwrap();
+            state.released = true;
+            cvar.notify_all();
+            while !state.done {
+                state = cvar.wait(state).unwrap();
+            }
+        }
+    }
+
+    impl progress::ProgressSink for RecordingSink {
+        fn write_line(&self, msg: &str) {
+            self.lines.lock().unwrap().push(msg.to_owned());
+            self.release_worker_and_wait();
+        }
+
+        fn write_json(&self, msg: &str) {
+            self.jsons.lock().unwrap().push(msg.to_owned());
+            self.release_worker_and_wait();
+        }
+
+        fn clear(&self) {
+            self.clears.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /*
+     * Intent: pool_remove_device_using routes device removal through the
+     * heartbeat progress helper.
+     * Why it exists: the pool layer owns the btrfs device-remove call; a
+     * direct runner.run here would make slow removals silent again.
+     * Scenario: a mocked remove blocks until the first human heartbeat is
+     * written, then completes successfully.
+     */
+    #[test]
+    fn pool_remove_device_using_emits_heartbeat() {
+        let runner = BlockingRemoveRunner::new();
+        let sleeper = FakeSleeper::default();
+        let sink = RecordingSink::with_gate(runner.gate());
+
+        let result = pool_remove_device_using(
+            &runner,
+            "/dev/mapper/braid-disk2",
+            &mp(),
+            ProgressOutput::Human,
+            &sleeper,
+            &sink,
+        );
+
+        assert!(result.is_ok(), "pool remove should succeed: {result:?}");
+        let lines = sink.lines();
+        assert!(
+            !lines.is_empty(),
+            "expected pool remove to emit a heartbeat"
+        );
+        assert_eq!(
+            lines[0],
+            progress::format_device_remove_heartbeat(progress::HEARTBEAT_INTERVAL)
+        );
+        assert_eq!(sink.clears(), 1, "human progress should clear once");
+        assert!(
+            sleeper
+                .calls()
+                .iter()
+                .any(|d| *d == progress::HEARTBEAT_INTERVAL),
+            "pool remove should sleep at the configured heartbeat interval"
+        );
+    }
 
     /// Recording runner that models a post-operation pool state for
     /// maybe_restore_raid1 tests.
