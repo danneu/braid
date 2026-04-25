@@ -109,6 +109,14 @@ with subtest("Replace with wrong passphrase fails"):
     )
     print(f"Wrong passphrase output (exit {status}):\n{output}")
     assert status != 0, f"Expected failure, got exit 0: {output}"
+    wait_line = "[wait] passphrase: checking against disk3..."
+    error_marker = "passphrase rejected by new disk"
+    assert wait_line in output, (
+        f"Expected passphrase wait line before new-disk rejection:\n{output}"
+    )
+    assert output.find(wait_line) < output.find(error_marker), (
+        f"Wait line should appear before the new-disk rejection:\n{output}"
+    )
     assert "passphrase" in output.lower(), (
         f"Expected passphrase error message:\n{output}"
     )

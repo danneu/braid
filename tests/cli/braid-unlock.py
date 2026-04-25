@@ -76,6 +76,14 @@ with subtest("Test 1: happy path — all locked, unlock opens everything"):
     assert "[ok]   disk disk1" in probe_err, (
         f"expected probe stderr rows, got: {probe_err!r}"
     )
+    wait_line = "[wait] passphrase: checking against disk1...\n"
+    unlocked_line = "[ok]   disk disk1: unlocked\n"
+    assert wait_line in probe_err, (
+        f"expected credential verification wait line, got: {probe_err!r}"
+    )
+    assert probe_err.find(wait_line) < probe_err.find(unlocked_line), (
+        f"wait line must precede first unlocked row, got: {probe_err!r}"
+    )
     assert "\x1b[" not in probe_err, (
         f"unlock stderr must be plain without a TTY, got: {probe_err!r}"
     )

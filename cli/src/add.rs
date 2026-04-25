@@ -1,5 +1,5 @@
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, Step};
-use crate::config::{Config, config_read, mapper_name};
+use crate::config::{Config, config_read, mapper_name, name_from_mapper};
 use crate::confirm;
 use crate::inhibit::AcquireSleepInhibitor;
 use crate::journal;
@@ -19,6 +19,7 @@ use crate::preview::{self, PerDiskStyle, Preview, PreviewCompleteness, PreviewNo
 use crate::probe::{Filesystem, ProbeError, probe_config_disk, probe_pool};
 use crate::progress::ProgressOutput;
 use crate::state_paths::StatePaths;
+use crate::status_tag::{CredentialKind, color_enabled_for_stderr, emit_credential_wait_line};
 use crate::types::*;
 use std::path::Path;
 
@@ -404,6 +405,13 @@ impl AddPlan {
             })?;
             let status = crate::parse::parse_cryptsetup_status(&status_raw)?;
             if let Some(underlying) = status.device {
+                let display_name =
+                    name_from_mapper(&existing.mapper.0).unwrap_or(existing.mapper.0.as_str());
+                emit_credential_wait_line(
+                    CredentialKind::Passphrase,
+                    color_enabled_for_stderr(),
+                    display_name,
+                );
                 match verify_passphrase(runner, &underlying, &passphrase)? {
                     VerifyOutcome::Authenticated => {}
                     VerifyOutcome::Rejected => {

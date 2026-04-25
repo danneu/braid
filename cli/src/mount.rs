@@ -4,7 +4,9 @@ use crate::luks::{self, LuksError, VerifyOutcome};
 use crate::membership::PoolMembership;
 use crate::preview::{self, NoteLevel, PerDiskStyle, PreviewNote};
 use crate::probe::{self, Filesystem, ProbeError};
-use crate::status_tag::{StatusTag, color_enabled_for_stderr, status_line};
+use crate::status_tag::{
+    CredentialKind, StatusTag, color_enabled_for_stderr, emit_credential_wait_line, status_line,
+};
 use crate::types::{ByIdPath, ConfigDiskState, MountPoint};
 use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
@@ -493,6 +495,7 @@ fn open_disks_with_passphrase<R: CommandRunner, F: Filesystem + ?Sized>(
     color_enabled: bool,
 ) -> Result<(), MountError> {
     let (ref first_name, ref first_by_id) = to_unlock[0];
+    emit_credential_wait_line(CredentialKind::Passphrase, color_enabled, first_name);
     let outcome = match luks::verify_passphrase(runner, &first_by_id.0, passphrase) {
         Ok(o) => o,
         Err(e @ LuksError::OpenFailed { .. }) => {
@@ -635,6 +638,7 @@ pub fn execute_unlock_and_mount<R: CommandRunner, F: Filesystem + ?Sized>(
         OpenCredential::KeyFile(kf) => {
             let kf = kf.as_path();
             let (ref first_name, ref first_by_id) = plan.to_unlock[0];
+            emit_credential_wait_line(CredentialKind::KeyFile, color_enabled, first_name);
             let outcome = match luks::verify_key_file(runner, &first_by_id.0, kf) {
                 Ok(o) => o,
                 Err(e @ LuksError::OpenFailed { .. }) => {

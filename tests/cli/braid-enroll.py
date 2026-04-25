@@ -65,6 +65,18 @@ with subtest("Test 1: enroll keyfile into all pool disks"):
     # them entirely would silently change a user-visible stderr
     # string; we pin both lines byte-for-byte here.
     t1_err = machine.succeed("cat /tmp/t1.err")
+    assert "[wait] passphrase: checking against disk1..." in t1_err, (
+        f"expected passphrase verification wait line on stderr, got: {t1_err!r}"
+    )
+    for name in ("disk1", "disk2"):
+        marker = f"[wait] keyfile: checking against {name}..."
+        enroll_marker = f"enroll: {name} -- will add keyfile to slot 1"
+        assert marker in t1_err, (
+            f"expected keyfile verification wait line {marker!r}, got: {t1_err!r}"
+        )
+        assert t1_err.find(marker) < t1_err.find(enroll_marker), (
+            f"keyfile wait line must precede enroll row for {name}, got: {t1_err!r}"
+        )
     assert "enroll: disk1 -- will add keyfile to slot 1" in t1_err, (
         f"expected exact 'enroll: disk1 --' line on stderr, got: {t1_err!r}"
     )
@@ -182,6 +194,9 @@ with subtest("Test 4b: wrong passphrase does not leak ok:/enroll: status lines")
     rc = machine.succeed("cat /tmp/wp.rc").strip()
     err = machine.succeed("cat /tmp/wp.err")
     assert rc != "0", f"expected nonzero exit on wrong passphrase; got rc={rc}, err={err!r}"
+    assert "[wait] passphrase: checking against disk1..." in err, (
+        f"expected passphrase verification wait line before rejection, got: {err!r}"
+    )
     assert "wrong passphrase" in err, f"expected wrong-passphrase error, got: {err!r}"
     for line in err.splitlines():
         stripped = line.strip()

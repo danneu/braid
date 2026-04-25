@@ -71,6 +71,14 @@ with subtest("Add with wrong passphrase fails"):
     )
     print("Wrong passphrase output (exit " + str(status) + "):\n" + output)
     assert status != 0, "Expected failure, got exit 0: " + output
+    wait_line = "[wait] passphrase: checking against disk1..."
+    error_marker = "passphrase does not match existing pool member"
+    assert wait_line in output, (
+        "Expected passphrase wait line before mismatch error:\n" + output
+    )
+    assert output.find(wait_line) < output.find(error_marker), (
+        "Wait line should appear before the mismatch error:\n" + output
+    )
     assert "passphrase" in output.lower(), (
         "Expected passphrase error message:\n" + output
     )

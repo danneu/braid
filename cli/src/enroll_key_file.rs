@@ -6,6 +6,7 @@ use crate::preflight;
 use crate::preview::{self, NoteLevel, PerDiskStyle, Preview, PreviewCompleteness, PreviewNote};
 use crate::probe::{self, Filesystem};
 use crate::state_paths::StatePaths;
+use crate::status_tag::{CredentialKind, color_enabled_for_stderr, emit_credential_wait_line};
 use crate::types::{ByIdPath, ConfigDiskState};
 use std::io::Read;
 use std::os::unix::fs::OpenOptionsExt;
@@ -121,6 +122,11 @@ fn verify_first_candidate_passphrase<R: CommandRunner>(
     passphrase: &str,
 ) -> Result<(), EnrollKeyFileError> {
     let (first_name, first_by_id) = &candidates[0];
+    emit_credential_wait_line(
+        CredentialKind::Passphrase,
+        color_enabled_for_stderr(),
+        first_name,
+    );
     match luks::verify_passphrase(runner, &first_by_id.0, passphrase)? {
         VerifyOutcome::Authenticated => Ok(()),
         VerifyOutcome::Rejected => Err(EnrollKeyFileError::Validation(format!(
@@ -178,6 +184,7 @@ fn plan_enrollment<R: CommandRunner>(
             // and must NOT be silently treated as "not enrolled" -- doing so
             // would let the flow proceed to slot preflight on a device that
             // may not even be readable.
+            emit_credential_wait_line(CredentialKind::KeyFile, color_enabled_for_stderr(), name);
             match luks::verify_key_file(runner, &by_id.0, key_file_path)? {
                 VerifyOutcome::Authenticated => {
                     eprintln!("ok: {} -- keyfile already enrolled", name);

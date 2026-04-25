@@ -15,6 +15,22 @@ pub enum StatusTag {
     Warn,
     Fail,
     Skip,
+    Wait,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CredentialKind {
+    Passphrase,
+    KeyFile,
+}
+
+impl CredentialKind {
+    fn label(self) -> &'static str {
+        match self {
+            CredentialKind::Passphrase => "passphrase",
+            CredentialKind::KeyFile => "keyfile",
+        }
+    }
 }
 
 pub fn render_status_tag(tag: StatusTag, color_enabled: bool) -> &'static str {
@@ -23,17 +39,19 @@ pub fn render_status_tag(tag: StatusTag, color_enabled: bool) -> &'static str {
         (StatusTag::Warn, false) => "[warn]",
         (StatusTag::Fail, false) => "[fail]",
         (StatusTag::Skip, false) => "[skip]",
+        (StatusTag::Wait, false) => "[wait]",
         (StatusTag::Ok, true) => "\x1b[32m[ok]\x1b[0m",
         (StatusTag::Warn, true) => "\x1b[33m[warn]\x1b[0m",
         (StatusTag::Fail, true) => "\x1b[31m[fail]\x1b[0m",
         (StatusTag::Skip, true) => "\x1b[90m[skip]\x1b[0m",
+        (StatusTag::Wait, true) => "\x1b[90m[wait]\x1b[0m",
     }
 }
 
 fn status_tag_pad(tag: StatusTag) -> &'static str {
     match tag {
         StatusTag::Ok => "   ",
-        StatusTag::Warn | StatusTag::Fail | StatusTag::Skip => " ",
+        StatusTag::Warn | StatusTag::Fail | StatusTag::Skip | StatusTag::Wait => " ",
     }
 }
 
@@ -43,6 +61,18 @@ pub fn status_line(tag: StatusTag, color_enabled: bool, body: &str) -> String {
         render_status_tag(tag, color_enabled),
         status_tag_pad(tag),
     )
+}
+
+pub fn credential_wait_line(kind: CredentialKind, color_enabled: bool, name: &str) -> String {
+    status_line(
+        StatusTag::Wait,
+        color_enabled,
+        &format!("{}: checking against {name}...", kind.label()),
+    )
+}
+
+pub fn emit_credential_wait_line(kind: CredentialKind, color_enabled: bool, name: &str) {
+    eprint!("{}", credential_wait_line(kind, color_enabled, name));
 }
 
 pub fn should_color_status_tags(is_terminal: bool, no_color_active: bool) -> bool {
@@ -106,6 +136,7 @@ mod tests {
             StatusTag::Warn,
             StatusTag::Fail,
             StatusTag::Skip,
+            StatusTag::Wait,
         ] {
             let plain = status_line(tag, false, "x");
             assert_eq!(plain.find('x'), Some(7), "plain line: {plain:?}");
@@ -129,12 +160,13 @@ mod tests {
     }
 
     #[test]
-    fn status_tag_pins_four_known_levels() {
+    fn status_tag_pins_known_levels() {
         // Byte-pin the bare tag strings. `status_line` owns row padding.
         assert_eq!(render_status_tag(StatusTag::Ok, false), "[ok]");
         assert_eq!(render_status_tag(StatusTag::Warn, false), "[warn]");
         assert_eq!(render_status_tag(StatusTag::Fail, false), "[fail]");
         assert_eq!(render_status_tag(StatusTag::Skip, false), "[skip]");
+        assert_eq!(render_status_tag(StatusTag::Wait, false), "[wait]");
     }
 
     /* Intent: pin the exact ANSI-wrapped status tag bytes.
@@ -161,6 +193,10 @@ mod tests {
             render_status_tag(StatusTag::Skip, true),
             "\x1b[90m[skip]\x1b[0m"
         );
+        assert_eq!(
+            render_status_tag(StatusTag::Wait, true),
+            "\x1b[90m[wait]\x1b[0m"
+        );
     }
 
     /* Intent: colored tags strip back to the existing plain tags.
@@ -176,12 +212,31 @@ mod tests {
             StatusTag::Warn,
             StatusTag::Fail,
             StatusTag::Skip,
+            StatusTag::Wait,
         ] {
             assert_eq!(
                 strip_ansi(render_status_tag(tag, true)),
                 render_status_tag(tag, false)
             );
         }
+    }
+
+    /* Intent: credential verification wait rows use the shared status-line
+     * renderer and fixed wording for both credential kinds.
+     * Why it exists: every command that validates a passphrase or keyfile
+     * should fill the silent cryptsetup delay with byte-identical rows.
+     * Scenario: passphrase and keyfile wait lines render in plain mode.
+     */
+    #[test]
+    fn credential_wait_line_formats_known_credentials() {
+        assert_eq!(
+            credential_wait_line(CredentialKind::Passphrase, false, "disk1"),
+            "[wait] passphrase: checking against disk1...\n"
+        );
+        assert_eq!(
+            credential_wait_line(CredentialKind::KeyFile, false, "disk1"),
+            "[wait] keyfile: checking against disk1...\n"
+        );
     }
 
     /* Intent: gate color on both TTY detection and NO_COLOR state.

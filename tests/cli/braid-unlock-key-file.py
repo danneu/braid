@@ -59,7 +59,18 @@ with subtest("Setup: create pool and enroll keyfile"):
 
 with subtest("Test 1: correct keyfile unlocks"):
     close_all()
-    machine.succeed("braid unlock --key-file /tmp/braid.key")
+    machine.succeed(
+        "braid unlock --key-file /tmp/braid.key >/tmp/kfu.out 2>/tmp/kfu.err"
+    )
+    err = machine.succeed("cat /tmp/kfu.err")
+    wait_line = "[wait] keyfile: checking against disk1...\n"
+    unlocked_line = "[ok]   disk disk1: unlocked\n"
+    assert wait_line in err, (
+        f"expected keyfile verification wait line, got: {err!r}"
+    )
+    assert err.find(wait_line) < err.find(unlocked_line), (
+        f"wait line must precede first unlocked row, got: {err!r}"
+    )
     machine.succeed("mountpoint -q /mnt/storage")
     content = machine.succeed("cat /mnt/storage/test.txt").strip()
     assert content == "keyfile unlock test", f"Expected 'keyfile unlock test', got '{content}'"

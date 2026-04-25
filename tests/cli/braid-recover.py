@@ -266,7 +266,17 @@ with subtest("Test 3c: no-journal failure -> stdout empty, stderr has only the e
 
 with subtest("braid recover self-mounts and rebuilds pool.json"):
     machine.succeed(
-        f"printf '%s\\n' {pq} | braid recover --passphrase-stdin"
+        f"printf '%s\\n' {pq} | braid recover --passphrase-stdin "
+        f">/tmp/recover.out 2>/tmp/recover.err"
+    )
+    err = machine.succeed("cat /tmp/recover.err")
+    wait_line = "[wait] passphrase: checking against disk1...\n"
+    unlocked_line = "[ok]   disk disk1: unlocked\n"
+    assert wait_line in err, (
+        f"expected recover passphrase wait line, got: {err!r}"
+    )
+    assert err.find(wait_line) < err.find(unlocked_line), (
+        f"wait line must precede first unlocked row, got: {err!r}"
     )
 
     # Pool must be mounted
