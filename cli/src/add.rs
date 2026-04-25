@@ -245,7 +245,7 @@ pub struct AddParams<'a> {
     /// unit tests pass `&RecordingInhibitor` to avoid spawning subprocesses.
     pub sleep_inhibitor: &'a dyn AcquireSleepInhibitor,
     /// Seam for reading a LUKS passphrase from the TTY. Production
-    /// passes `&RpasswordTty`; tests pass a scripted reader so the
+    /// passes `&RealTty`; tests pass a scripted reader so the
     /// bootstrap-confirm path is observable at the `cmd_add` layer.
     pub passphrase_reader: &'a dyn PassphraseReader,
 }
@@ -1112,7 +1112,7 @@ fn format_add_confirm(disks: &[AddConfirmDisk]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::luks::{RpasswordTty, ScriptedPassphraseReader};
+    use crate::luks::{RealTty, ScriptedPassphraseReader};
 
     fn test_paths() -> (tempfile::TempDir, StatePaths) {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1249,7 +1249,7 @@ mod tests {
                 progress: ProgressOutput::Off,
                 paths: &sp,
                 sleep_inhibitor: &inhibitor,
-                passphrase_reader: &RpasswordTty,
+                passphrase_reader: &RealTty,
             },
         );
         let err = result.unwrap_err().to_string();
@@ -2157,7 +2157,7 @@ mod tests {
                 progress: ProgressOutput::Off,
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
-                passphrase_reader: &RpasswordTty,
+                passphrase_reader: &RealTty,
             },
         )
         .expect("no-op add should succeed");
@@ -2212,7 +2212,7 @@ mod tests {
                 progress: ProgressOutput::Off,
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
-                passphrase_reader: &RpasswordTty,
+                passphrase_reader: &RealTty,
             },
         );
 
@@ -2272,7 +2272,7 @@ mod tests {
                 progress: ProgressOutput::Off,
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
-                passphrase_reader: &RpasswordTty,
+                passphrase_reader: &RealTty,
             },
         );
 
@@ -2337,7 +2337,7 @@ mod tests {
                 progress: ProgressOutput::Off,
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
-                passphrase_reader: &RpasswordTty,
+                passphrase_reader: &RealTty,
             },
         );
 
@@ -2428,7 +2428,7 @@ mod tests {
                 progress: ProgressOutput::Off,
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
-                passphrase_reader: &RpasswordTty,
+                passphrase_reader: &RealTty,
             },
         );
 
@@ -3224,7 +3224,7 @@ mod tests {
                 progress: ProgressOutput::Off,
                 paths: &self.paths,
                 sleep_inhibitor: &self.inhibitor,
-                passphrase_reader: &RpasswordTty,
+                passphrase_reader: &RealTty,
             }
         }
     }
@@ -3508,7 +3508,7 @@ mod tests {
                 progress: ProgressOutput::Off,
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
-                passphrase_reader: &RpasswordTty,
+                passphrase_reader: &RealTty,
             },
         );
         let plan = report.result.expect("plan_add should succeed for noop");
@@ -3573,7 +3573,7 @@ mod tests {
                 progress: ProgressOutput::Off,
                 paths: &paths,
                 sleep_inhibitor: &inhibitor,
-                passphrase_reader: &RpasswordTty,
+                passphrase_reader: &RealTty,
             },
         );
         let plan = report

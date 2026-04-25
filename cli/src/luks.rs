@@ -3,9 +3,11 @@ use crate::config::mapper_name;
 use crate::probe::Filesystem;
 use crate::state_paths::StatePaths;
 use crate::types::{ByIdPath, PoolDevice};
-use std::io::BufRead;
+use std::io::{BufRead, Write};
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::io::{AsRawFd, RawFd};
 use std::path::PathBuf;
+use zeroize::Zeroizing;
 
 /// LUKS key slot 1: binary random keyfile (no PBKDF, raw key material).
 pub const LUKS_SLOT_KEYFILE: u8 = 1;
@@ -59,7 +61,7 @@ pub enum LuksError {
 }
 
 /// Abstraction over the TTY passphrase read. Production uses
-/// [`RpasswordTty`] (rpassword-backed, echo-suppressed). Tests inject a
+/// [`RealTty`] (termios-backed, echo-suppressed). Tests inject a
 /// scripted reader so `cmd_add` can be exercised without a PTY.
 pub trait PassphraseReader {
     /// Read a passphrase from the terminal with the given prompt label,
@@ -68,16 +70,82 @@ pub trait PassphraseReader {
     fn read_tty(&self, label: &str) -> Result<String, LuksError>;
 }
 
-/// Production TTY reader backed by rpassword.
-pub struct RpasswordTty;
+/// Production TTY reader backed by /dev/tty and libc termios.
+pub struct RealTty;
 
-impl PassphraseReader for RpasswordTty {
+impl PassphraseReader for RealTty {
     fn read_tty(&self, label: &str) -> Result<String, LuksError> {
-        eprint!("{label}");
-        let raw = rpassword::read_password().map_err(|e| {
-            LuksError::Validation(format!("failed to read passphrase from terminal: {e}"))
-        })?;
-        validate_passphrase(&raw, "terminal")
+        let mut tty = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/tty")
+            .map_err(|_| {
+                LuksError::Validation(
+                    "no controlling terminal -- pass --passphrase-stdin or \
+                     --passphrase-file for non-interactive use"
+                        .into(),
+                )
+            })?;
+        read_tty_from_file(&mut tty, label)
+    }
+}
+
+#[doc(hidden)]
+pub fn read_tty_from_file(tty: &mut std::fs::File, label: &str) -> Result<String, LuksError> {
+    let fd = tty.as_raw_fd();
+    let orig = tcgetattr(fd)?;
+    let mut modified = orig;
+    modified.c_lflag &= !libc::ECHO;
+    modified.c_lflag |= libc::ECHONL;
+
+    let _guard = TermiosGuard::install(fd, modified, orig)?;
+    tty.write_all(label.as_bytes())?;
+    tty.flush()?;
+
+    let mut raw: Zeroizing<String> = Zeroizing::new(String::new());
+    std::io::BufReader::new(&mut *tty).read_line(&mut *raw)?;
+    validate_passphrase(&raw, "terminal")
+}
+
+fn tcgetattr(fd: RawFd) -> std::io::Result<libc::termios> {
+    let mut termios = std::mem::MaybeUninit::<libc::termios>::zeroed();
+    let rc = unsafe { libc::tcgetattr(fd, termios.as_mut_ptr()) };
+    if rc == -1 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(unsafe { termios.assume_init() })
+    }
+}
+
+fn tcsetattr_now(fd: RawFd, termios: &libc::termios) -> std::io::Result<()> {
+    let rc = unsafe { libc::tcsetattr(fd, libc::TCSANOW, termios) };
+    if rc == -1 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+// Restores only on normal returns and Rust unwinds; process signals skip Drop.
+struct TermiosGuard {
+    fd: RawFd,
+    orig: libc::termios,
+}
+
+impl TermiosGuard {
+    fn install(
+        fd: RawFd,
+        modified: libc::termios,
+        orig: libc::termios,
+    ) -> std::io::Result<TermiosGuard> {
+        tcsetattr_now(fd, &modified)?;
+        Ok(TermiosGuard { fd, orig })
+    }
+}
+
+impl Drop for TermiosGuard {
+    fn drop(&mut self) {
+        let _ = tcsetattr_now(self.fd, &self.orig);
     }
 }
 
@@ -124,7 +192,7 @@ pub fn read_passphrase(
     passphrase_file: Option<&std::path::Path>,
     passphrase_stdin: bool,
 ) -> Result<String, LuksError> {
-    read_passphrase_with(passphrase_file, passphrase_stdin, false, &RpasswordTty)
+    read_passphrase_with(passphrase_file, passphrase_stdin, false, &RealTty)
 }
 
 /// Read a passphrase, optionally confirming on the TTY when the caller
@@ -688,6 +756,7 @@ mod tests {
     use crate::cmd::{CmdRequest, MockRunner, RawCommandOutput};
     use crate::probe::Filesystem;
     use crate::types::ByIdPath;
+    use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 
     struct MockFs {
         paths: Vec<String>,
@@ -717,6 +786,110 @@ mod tests {
         fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
             Ok(vec![])
         }
+    }
+
+    fn open_pty_pair() -> (std::fs::File, std::fs::File) {
+        let mut master = -1;
+        let mut slave = -1;
+        let rc = unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(
+            rc,
+            0,
+            "openpty failed: {}",
+            std::io::Error::last_os_error()
+        );
+        unsafe {
+            (
+                std::fs::File::from_raw_fd(master),
+                std::fs::File::from_raw_fd(slave),
+            )
+        }
+    }
+
+    fn flip_echo(termios: &mut libc::termios) {
+        if termios.c_lflag & libc::ECHO == 0 {
+            termios.c_lflag |= libc::ECHO;
+        } else {
+            termios.c_lflag &= !libc::ECHO;
+        }
+    }
+
+    fn termios_bytes(termios: &libc::termios) -> &[u8] {
+        unsafe {
+            std::slice::from_raw_parts(
+                (termios as *const libc::termios).cast::<u8>(),
+                std::mem::size_of::<libc::termios>(),
+            )
+        }
+    }
+
+    fn assert_termios_eq(expected: &libc::termios, actual: &libc::termios) {
+        assert_eq!(termios_bytes(expected), termios_bytes(actual));
+    }
+
+    /*
+     * Intent: TermiosGuard restores the original terminal attributes on drop.
+     * Why it exists: the passphrase reader disables echo, so every normal
+     *   return path must put the terminal back before the file descriptor drops.
+     * Scenario: read_tty_from_file installs no-echo mode, finishes normally,
+     *   and the user gets their shell prompt with echo restored.
+     */
+    #[test]
+    fn termios_guard_restores_on_drop() {
+        let (_master, slave) = open_pty_pair();
+        let fd = slave.as_raw_fd();
+        let before = tcgetattr(fd).unwrap();
+        let mut modified = before;
+        flip_echo(&mut modified);
+
+        {
+            let _guard = TermiosGuard::install(fd, modified, before).unwrap();
+            let during = tcgetattr(fd).unwrap();
+            assert_termios_eq(&modified, &during);
+        }
+
+        let after = tcgetattr(fd).unwrap();
+        assert_termios_eq(&before, &after);
+    }
+
+    /*
+     * Intent: TermiosGuard restores the original terminal attributes on `?`
+     *   early return.
+     * Why it exists: read_tty_from_file can fail after echo is disabled, and
+     *   the error path must not strand the terminal in no-echo mode.
+     * Scenario: a prompt write or line read fails after termios installation,
+     *   returning through `?` while the guard is still in scope.
+     */
+    #[test]
+    fn termios_guard_restores_on_question_mark_return() {
+        fn install_then_fail(fd: RawFd, before: libc::termios) -> std::io::Result<()> {
+            let mut modified = before;
+            flip_echo(&mut modified);
+            let _guard = TermiosGuard::install(fd, modified, before)?;
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "forced early return",
+            ))?;
+            Ok(())
+        }
+
+        let (_master, slave) = open_pty_pair();
+        let fd = slave.as_raw_fd();
+        let before = tcgetattr(fd).unwrap();
+
+        let err = install_then_fail(fd, before).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::Other);
+
+        let after = tcgetattr(fd).unwrap();
+        assert_termios_eq(&before, &after);
     }
 
     /*

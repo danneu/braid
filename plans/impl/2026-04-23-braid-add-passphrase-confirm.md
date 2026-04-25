@@ -69,9 +69,9 @@ pub trait PassphraseReader {
     fn read_tty(&self, label: &str) -> Result<String, LuksError>;
 }
 
-pub struct RpasswordTty;
+pub struct RealTty;
 
-impl PassphraseReader for RpasswordTty {
+impl PassphraseReader for RealTty {
     fn read_tty(&self, label: &str) -> Result<String, LuksError> {
         eprint!("{label}");
         let raw = rpassword::read_password().map_err(...)?;
@@ -153,7 +153,7 @@ pub fn read_passphrase(
     passphrase_file: Option<&Path>,
     passphrase_stdin: bool,
 ) -> Result<String, LuksError> {
-    read_passphrase_with(passphrase_file, passphrase_stdin, false, &RpasswordTty)
+    read_passphrase_with(passphrase_file, passphrase_stdin, false, &RealTty)
 }
 
 /// Testable stdin reader (parallels `confirm_yes_from`). Takes a
@@ -178,7 +178,7 @@ fn check_passphrase_match(first: String, second: String) -> Result<String, LuksE
 ```
 
 Refactor the existing private `prompt_passphrase_tty` (and any TTY-reach
-in `read_passphrase`) to delegate through `RpasswordTty.read_tty`, so
+in `read_passphrase`) to delegate through `RealTty.read_tty`, so
 there is one rpassword implementation.
 
 ### Seam wiring in `AddParams`
@@ -193,7 +193,7 @@ pub struct AddParams<'a> {
 }
 ```
 
-Production (`cli/src/main.rs`) passes `&RpasswordTty`. Tests pass a
+Production (`cli/src/main.rs`) passes `&RealTty`. Tests pass a
 scripted reader.
 
 In `cmd_add` -- single call site for both branches:
@@ -219,12 +219,12 @@ other validation errors.
 
 ## Files
 
-- `cli/src/luks.rs` -- add `PassphraseReader` trait, `RpasswordTty`,
+- `cli/src/luks.rs` -- add `PassphraseReader` trait, `RealTty`,
   module-scope `#[cfg(test)] pub(crate) ScriptedPassphraseReader`
   (shared with `add.rs` tests), public `read_passphrase_with`, private
   `read_passphrase_with_readers`, `read_passphrase_stdin_from`,
   `check_passphrase_match`; refactor `prompt_passphrase_tty` to
-  delegate through `RpasswordTty`; `read_passphrase` becomes a thin
+  delegate through `RealTty`; `read_passphrase` becomes a thin
   wrapper. Also `use std::io::BufRead;` at the top for the `&mut dyn
   BufRead` signatures.
 - `cli/src/add.rs` -- add `passphrase_reader: &'a dyn PassphraseReader`
@@ -232,14 +232,14 @@ other validation errors.
   `use crate::luks::{...}`); replace direct `read_passphrase` call
   with `read_passphrase_with` gated on `confirm_new`; update every
   existing test harness that constructs `AddParams` to pass
-  `passphrase_reader: &RpasswordTty` (those tests use
+  `passphrase_reader: &RealTty` (those tests use
   `passphrase_file: Some(...)`, so the TTY reader is never consulted
   -- safe placeholder). In the `#[cfg(test)] mod tests` block, add
-  `use crate::luks::{RpasswordTty, ScriptedPassphraseReader};` so the
+  `use crate::luks::{RealTty, ScriptedPassphraseReader};` so the
   production reader is only imported under cfg(test) (it would
   otherwise trigger `unused_import` since non-test code only needs
   `PassphraseReader`).
-- `cli/src/main.rs` -- construct `&braid_cli::luks::RpasswordTty` and
+- `cli/src/main.rs` -- construct `&braid_cli::luks::RealTty` and
   pass it as `passphrase_reader` into `AddParams` for the
   `Commands::Add` dispatch.
 - No changes to `replace.rs`, `enroll_key_file.rs`, `mount.rs`.
