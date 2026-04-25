@@ -810,12 +810,7 @@ mod tests {
                 std::ptr::null_mut(),
             )
         };
-        assert_eq!(
-            rc,
-            0,
-            "openpty failed: {}",
-            std::io::Error::last_os_error()
-        );
+        assert_eq!(rc, 0, "openpty failed: {}", std::io::Error::last_os_error());
         unsafe {
             (
                 std::fs::File::from_raw_fd(master),

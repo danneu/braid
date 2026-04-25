@@ -67,12 +67,7 @@ fn open_pty_pair() -> (File, File) {
             std::ptr::null_mut(),
         )
     };
-    assert_eq!(
-        rc,
-        0,
-        "openpty failed: {}",
-        std::io::Error::last_os_error()
-    );
+    assert_eq!(rc, 0, "openpty failed: {}", std::io::Error::last_os_error());
     unsafe { (File::from_raw_fd(master), File::from_raw_fd(slave)) }
 }
 
@@ -80,7 +75,10 @@ fn tcgetattr(fd: RawFd) -> Result<libc::termios, String> {
     let mut termios = std::mem::MaybeUninit::<libc::termios>::zeroed();
     let rc = unsafe { libc::tcgetattr(fd, termios.as_mut_ptr()) };
     if rc == -1 {
-        Err(format!("tcgetattr failed: {}", std::io::Error::last_os_error()))
+        Err(format!(
+            "tcgetattr failed: {}",
+            std::io::Error::last_os_error()
+        ))
     } else {
         Ok(unsafe { termios.assume_init() })
     }
@@ -133,8 +131,8 @@ fn probe_deadlock_immunity() -> Result<(), String> {
     master_file
         .write_all(b"x\n")
         .map_err(|e| format!("failed to write passphrase to pty master: {e}"))?;
-    let got = braid_cli::luks::read_tty_from_file(&mut slave_file, PROMPT)
-        .map_err(|e| e.to_string())?;
+    let got =
+        braid_cli::luks::read_tty_from_file(&mut slave_file, PROMPT).map_err(|e| e.to_string())?;
     assert_eq!(got, "x");
     Ok(())
 }
