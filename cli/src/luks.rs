@@ -202,19 +202,29 @@ pub fn read_passphrase(
 /// - TTY input reads once; if `confirm_new`, prompts again and requires
 ///   a byte-exact match.
 ///
-/// Thin wrapper -- locks process stdin and delegates.
+/// Thin wrapper -- only locks process stdin for the stdin branch.
 pub fn read_passphrase_with(
     passphrase_file: Option<&std::path::Path>,
     passphrase_stdin: bool,
     confirm_new: bool,
     tty: &dyn PassphraseReader,
 ) -> Result<String, LuksError> {
-    let mut stdin = std::io::stdin().lock();
+    if passphrase_file.is_none() && passphrase_stdin {
+        let mut stdin = std::io::stdin().lock();
+        return read_passphrase_with_readers(
+            passphrase_file,
+            passphrase_stdin,
+            confirm_new,
+            &mut stdin,
+            tty,
+        );
+    }
+    let mut unused_stdin = std::io::Cursor::new(&[][..]);
     read_passphrase_with_readers(
         passphrase_file,
         passphrase_stdin,
         confirm_new,
-        &mut stdin,
+        &mut unused_stdin,
         tty,
     )
 }
