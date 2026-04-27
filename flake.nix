@@ -118,6 +118,11 @@
               braid = linuxCrane.braid;
             }
           );
+          braid-add-persists-before-balance = pkgs.testers.nixosTest (
+            import ./tests/cli/braid-add-persists-before-balance.nix {
+              braid = linuxCrane.braid;
+            }
+          );
           braid-add-warnings = pkgs.testers.nixosTest (
             import ./tests/cli/braid-add-warnings.nix {
               braid = linuxCrane.braid;

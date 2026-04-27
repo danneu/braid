@@ -283,6 +283,29 @@ fn add_label(names: &[String]) -> String {
     }
 }
 
+fn enrich_from_live_pool<R: CommandRunner>(
+    runner: &R,
+    mount_point: &MountPoint,
+    membership: &mut PoolMembership,
+) {
+    // Silent on probe failure: luks_uuid, devid, and added_at are best-effort
+    // metadata, and recovery can re-derive them from the live pool if missing.
+    if let Ok(pool_after) = probe_pool(runner, mount_point) {
+        for dev in &pool_after.devices {
+            let Some(name) = name_from_mapper(&dev.mapper.0) else {
+                continue;
+            };
+            if let Some(member) = membership.disks.get_mut(name) {
+                member.luks_uuid = Some(dev.luks_uuid.clone());
+                member.devid = Some(dev.devid);
+                if member.added_at.is_none() {
+                    member.added_at = Some(crate::util::now_iso());
+                }
+            }
+        }
+    }
+}
+
 /// Dry-run preview source of truth for `braid add` plus the execute
 /// inputs pre-computed during planning. `notes` + `steps` are both
 /// rendered by `preview()`; `execute()` renders the accumulated notes
@@ -571,12 +594,30 @@ impl AddPlan {
                 pool_bootstrap_mount(runner, &mapper_paths[0], mount_point)?;
                 eprintln!("Pool created and mounted at {}", mount_point);
             }
+
+            // Bootstrap post-commit persist: write pool.json after mkfs + mount.
+            // Enrich with live metadata (luks_uuid, devid) from pool probe.
+            let mut final_membership = journal.target_membership.clone();
+            enrich_from_live_pool(runner, mount_point, &mut final_membership);
+            membership::save_membership(&final_membership, params.paths)?;
+            // Order matters: save_membership before clear_journal. If
+            // save_membership fails, the journal survives and recover can
+            // reconstruct pool.json from the live pool.
+            journal::clear_journal(params.paths)
+                .map_err(|e| AddError::Validation(e.to_string()))?;
         } else {
             // Add each to existing pool
             for mp in &mapper_paths {
                 pool_add_device(runner, mp, mount_point)?;
                 eprintln!("Device added to pool: {}", mp);
             }
+
+            // Membership is committed by btrfs device add. Persist it before
+            // the long post-add balance while leaving the journal in place so
+            // recovery still knows the balance is owed if interrupted.
+            let mut final_membership = journal.target_membership.clone();
+            enrich_from_live_pool(runner, mount_point, &mut final_membership);
+            membership::save_membership(&final_membership, params.paths)?;
 
             // Balance to RAID1 if total >= 2
             let total_after = self.pool.devices.len() + mapper_paths.len();
@@ -585,31 +626,12 @@ impl AddPlan {
                 pool_balance_raid1(runner, mount_point, params.progress)?;
                 eprintln!("Balance complete.");
             }
-        }
 
-        // Post-commit persist: write pool.json only after all disk ops succeed.
-        // Enrich with live metadata (luks_uuid, devid) from pool probe.
-        let mut final_membership = journal.target_membership.clone();
-        if let Ok(pool_after) = probe_pool(runner, mount_point) {
-            for dev in &pool_after.devices {
-                let Some(name) = crate::config::name_from_mapper(&dev.mapper.0) else {
-                    continue;
-                };
-                if let Some(member) = final_membership.disks.get_mut(name) {
-                    member.luks_uuid = Some(dev.luks_uuid.clone());
-                    member.devid = Some(dev.devid);
-                    if member.added_at.is_none() {
-                        member.added_at = Some(crate::util::now_iso());
-                    }
-                }
-            }
+            // Leave the journal until the balance completes; interruption
+            // after the membership commit still needs recovery replay.
+            journal::clear_journal(params.paths)
+                .map_err(|e| AddError::Validation(e.to_string()))?;
         }
-        // Order matters: save_membership before clear_journal. If save_membership
-        // fails (disk full, permissions), the journal survives and braid recover can
-        // reconstruct pool.json from the live pool. The reverse order (clear first,
-        // then save fails) would leave no recovery path.
-        membership::save_membership(&final_membership, params.paths)?;
-        journal::clear_journal(params.paths).map_err(|e| AddError::Validation(e.to_string()))?;
 
         let label = if self.names.len() == 1 {
             format!("{} is", self.names[0])

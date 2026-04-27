@@ -82,8 +82,8 @@ The name is used in pool.json, LUKS mapper names (`braid-toshiba1`), and all fut
 2. Shows a confirmation prompt with disk model, serial, and size
 3. For fresh disks: LUKS-formats the disk with the pool passphrase, creates a LUKS header backup, and opens the LUKS mapper
 4. If no pool exists: creates a btrfs filesystem (RAID1 if 2+ disks, single if 1 disk)
-5. If a pool exists: adds the device to the existing btrfs filesystem, then balances data to RAID1
-6. Saves the updated pool membership to pool.json
+5. If a pool exists: adds the device to the existing btrfs filesystem and records the new membership in pool.json
+6. If the pool now has 2+ disks: balances data to RAID1
 
 A sleep inhibitor is held during all irreversible operations to prevent the system from suspending mid-operation.
 

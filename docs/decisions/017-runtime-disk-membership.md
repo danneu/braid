@@ -27,7 +27,7 @@ Move disk membership to a CLI-owned runtime state file. The NixOS module provide
   }
 }
 ```
-The `luks_uuid`, `devid`, and `added_at` fields are populated after disk operations succeed. `unlock` enriches them on each mount via `refresh_pool_metadata`. They replace the former `disk-map.json` advisory file.
+The `luks_uuid`, `devid`, and `added_at` fields are populated after the btrfs membership change commits. `unlock` enriches them on each mount via `refresh_pool_metadata`. They replace the former `disk-map.json` advisory file.
 
 **`/etc/braid/config.json`** — machine config (no disk information):
 ```json
@@ -38,9 +38,13 @@ The `luks_uuid`, `devid`, and `added_at` fields are populated after disk operati
 
 ### Mutation ordering
 
-All mutating commands: validate → write journal (`pending-op.json` with pre/target membership snapshots) → irreversible disk operation → write `pool.json` → clear journal.
+All mutating commands validate, write `pending-op.json` with pre/target membership snapshots, perform the irreversible btrfs membership change, write `pool.json` to reflect the committed live membership, then perform any required post-mutation maintenance before clearing the journal.
 
-Post-commit persist ensures `pool.json` only reflects completed operations. The journal provides crash safety: if braid crashes mid-operation, the journal triggers recovery mode on next invocation.
+`pool.json` reflects committed btrfs membership, not necessarily completion of follow-up maintenance such as RAID1 rebalance or resize. While `pending-op.json` exists, `braid recover` is responsible for replaying or completing any owed post-mutation work before clearing the journal.
+
+For `add`, membership commits when `btrfs device add` returns success; the post-add RAID1 balance is follow-up maintenance. For `remove`, membership commits when `btrfs device remove` returns success; writing `pool.json` before that would be wrong because btrfs still owns the device.
+
+The journal provides crash safety: if braid crashes mid-operation, the journal triggers recovery mode on next invocation.
 
 ### Recovery mode
 
