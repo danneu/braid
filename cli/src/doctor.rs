@@ -70,6 +70,19 @@ struct DoctorContext<'a, R: CommandRunner> {
     df_snapshot: Option<DfSnapshot>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct DoctorOptions {
+    pub json: bool,
+    pub beep: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct BeepCheckOptions {
+    is_root: bool,
+    json_output: bool,
+    play_beep: bool,
+}
+
 // ---------------------------------------------------------------------------
 // Checks
 // ---------------------------------------------------------------------------
@@ -566,9 +579,10 @@ fn check_metadata_profile_mismatch<R: CommandRunner>(
 
 /// Doctor check for the PC speaker alert path.
 ///
-/// Plays a short alert test beep (1 kHz, 500 ms) via the canonical
-/// `braid-beep-probe` wrapper — the same code path the alert service uses.
-/// A successful run is *both* a notifier-health check and a positive
+/// By default, validates the notifier config without playing sound. Passing
+/// `--beep` plays a short alert test beep (1 kHz, 500 ms) via the canonical
+/// `braid-beep-probe` wrapper -- the same code path the alert service uses.
+/// A successful `--beep` run is both a notifier-health check and a positive
 /// guarantee that future disk alerts will produce the same audible beep.
 ///
 /// `--json` mode (`json_output = true`) suppresses the beep: machine-readable
@@ -579,9 +593,20 @@ fn check_metadata_profile_mismatch<R: CommandRunner>(
 /// real `geteuid()` syscall; unit tests target `check_beep_path_inner`
 /// directly so the geteuid and json branches are exercised deterministically
 /// regardless of which UID `cargo test` runs under.
-fn check_beep_path<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>, json: bool) -> CheckResult {
+fn check_beep_path<R: CommandRunner>(
+    ctx: &mut DoctorContext<'_, R>,
+    options: DoctorOptions,
+) -> CheckResult {
     let is_root = unsafe { libc::geteuid() } == 0;
-    check_beep_path_inner(ctx, Path::new(NOTIFIER_CONFIG_PATH), is_root, json)
+    check_beep_path_inner(
+        ctx,
+        Path::new(NOTIFIER_CONFIG_PATH),
+        BeepCheckOptions {
+            is_root,
+            json_output: options.json,
+            play_beep: options.beep,
+        },
+    )
 }
 
 /// UPS doctor check: warn when `braid.ups.enable = true` but the
@@ -730,12 +755,11 @@ fn check_braid_online_active_when_mounted<R: CommandRunner>(
 fn check_beep_path_inner<R: CommandRunner>(
     ctx: &mut DoctorContext<'_, R>,
     notifier_path: &Path,
-    is_root: bool,
-    json_output: bool,
+    options: BeepCheckOptions,
 ) -> CheckResult {
     let name = "beep_path".to_string();
 
-    // 1. Read the notifier config the NixOS module wrote. Absent → Skip.
+    // 1. Read the notifier config the NixOS module wrote. Absent -> Skip.
     //    A bare `braid` install (no monitor module imported) won't have it.
     let raw = match std::fs::read_to_string(notifier_path) {
         Ok(s) => s,
@@ -780,7 +804,7 @@ fn check_beep_path_inner<R: CommandRunner>(
     //    callers always get the actionable "use sudo" hint regardless of
     //    output mode. The is_root flag is computed by the public wrapper
     //    above so unit tests can deterministically exercise both branches.
-    if !is_root {
+    if !options.is_root {
         return CheckResult {
             name,
             status: CheckStatus::Skip,
@@ -788,22 +812,31 @@ fn check_beep_path_inner<R: CommandRunner>(
         };
     }
 
-    // 5. JSON mode is for programmatic consumption — emitting an audible
+    // 5. JSON mode is for programmatic consumption -- emitting an audible
     //    side effect from a data-output command is wrong. The check still
     //    appears in the report (as Skip) so scripts auditing doctor output
     //    can see it; the wrapper is simply never invoked.
-    if json_output {
+    if options.json_output {
         return CheckResult {
             name,
             status: CheckStatus::Skip,
-            message: "skipped in --json mode -- run without --json to play \
-                      the alert test beep"
+            message: "skipped in --json mode -- rerun with --beep without --json to play the alert test beep"
                 .into(),
         };
     }
 
-    // 6. Run the canonical wrapper. This PLAYS the real short alert beep
-    //    (1 kHz, 500 ms) — same code path the alert service uses. Hearing
+    // 6. Plain doctor confirms beep monitoring is configured without playing
+    //    sound. The runner is only invoked for explicit --beep.
+    if !options.play_beep {
+        return CheckResult {
+            name,
+            status: CheckStatus::Skip,
+            message: "skipped (pass --beep to play the audible alert test beep)".into(),
+        };
+    }
+
+    // 7. Run the canonical wrapper. This PLAYS the real short alert beep
+    //    (1 kHz, 500 ms) -- same code path the alert service uses. Hearing
     //    the beep is both the success signal AND a preview of what real
     //    disk alerts will sound like.
     match ctx
@@ -813,8 +846,7 @@ fn check_beep_path_inner<R: CommandRunner>(
         Ok(out) if out.exit_status == 0 => CheckResult {
             name,
             status: CheckStatus::Ok,
-            message: "alert test beep played (1 kHz, 500 ms) -- \
-                      same beep braid will use for real disk alerts"
+            message: "alert test beep command succeeded -- you should have heard a 1 kHz, 500 ms disk-alert beep"
                 .into(),
         },
         Ok(out) => CheckResult {
@@ -861,7 +893,7 @@ pub fn run_doctor<R: CommandRunner>(
     config_path: &Path,
     runner: &R,
     paths: &StatePaths,
-    json: bool,
+    options: DoctorOptions,
 ) -> DoctorReport {
     let mut ctx = DoctorContext {
         config_path: config_path.to_owned(),
@@ -880,7 +912,7 @@ pub fn run_doctor<R: CommandRunner>(
         check_pool_missing_devices(&mut ctx),
         check_data_profile_mismatch(&mut ctx),
         check_metadata_profile_mismatch(&mut ctx),
-        check_beep_path(&mut ctx, json),
+        check_beep_path(&mut ctx, options),
         check_ups_daemon_up(&mut ctx),
         check_braid_online_active_when_mounted(&mut ctx),
     ];
@@ -944,11 +976,15 @@ pub enum DoctorError {
     Serialize(#[source] serde_json::Error),
 }
 
-pub fn cmd_doctor(config_path: &Path, paths: &StatePaths, json: bool) -> Result<(), DoctorError> {
+pub fn cmd_doctor(
+    config_path: &Path,
+    paths: &StatePaths,
+    options: DoctorOptions,
+) -> Result<(), DoctorError> {
     let runner = RealRunner;
-    let report = run_doctor(config_path, &runner, paths, json);
+    let report = run_doctor(config_path, &runner, paths, options);
 
-    if json {
+    if options.json {
         // serde_json::to_string_pretty won't fail on our types
         println!(
             "{}",
@@ -994,6 +1030,21 @@ mod tests {
         MockRunner::default()
     }
 
+    fn human_options() -> DoctorOptions {
+        DoctorOptions {
+            json: false,
+            beep: false,
+        }
+    }
+
+    fn beep_check_options(is_root: bool, json_output: bool, play_beep: bool) -> BeepCheckOptions {
+        BeepCheckOptions {
+            is_root,
+            json_output,
+            play_beep,
+        }
+    }
+
     fn write_temp(content: &str) -> NamedTempFile {
         let mut f = NamedTempFile::new().unwrap();
         f.write_all(content.as_bytes()).unwrap();
@@ -1013,7 +1064,7 @@ mod tests {
     fn valid_config_parses_ok_disks_warn() {
         let f = write_temp(valid_config_json());
         let (_dir, paths) = isolated_paths();
-        let report = run_doctor(f.path(), &mock(), &paths, false);
+        let report = run_doctor(f.path(), &mock(), &paths, human_options());
         assert_eq!(report.checks.len(), 10);
         assert_eq!(find_check(&report, "config_file").status, CheckStatus::Ok);
         assert_eq!(find_check(&report, "config_schema").status, CheckStatus::Ok);
@@ -1033,7 +1084,7 @@ mod tests {
             Path::new("/tmp/nonexistent-braid-doctor-test.json"),
             &mock(),
             &isolated_paths().1,
-            false,
+            human_options(),
         );
         assert_eq!(report.status, CheckStatus::Fail);
         assert_eq!(find_check(&report, "config_file").status, CheckStatus::Fail);
@@ -1050,7 +1101,7 @@ mod tests {
     #[test]
     fn invalid_json_fail_skip() {
         let f = write_temp("not json at all {{{");
-        let report = run_doctor(f.path(), &mock(), &isolated_paths().1, false);
+        let report = run_doctor(f.path(), &mock(), &isolated_paths().1, human_options());
         assert_eq!(report.status, CheckStatus::Fail);
         assert_eq!(find_check(&report, "config_file").status, CheckStatus::Fail);
         assert_eq!(
@@ -1067,7 +1118,7 @@ mod tests {
     fn valid_json_with_extra_fields_parses_ok() {
         // Config no longer has disks — extra fields are ignored.
         let f = write_temp(r#"{"disks":{},"mount_point":"/mnt/storage"}"#);
-        let report = run_doctor(f.path(), &mock(), &isolated_paths().1, false);
+        let report = run_doctor(f.path(), &mock(), &isolated_paths().1, human_options());
         assert_eq!(find_check(&report, "config_file").status, CheckStatus::Ok);
         assert_eq!(find_check(&report, "config_schema").status, CheckStatus::Ok);
     }
@@ -1075,7 +1126,7 @@ mod tests {
     #[test]
     fn valid_json_bad_schema_empty_mount() {
         let f = write_temp(r#"{"disks":{"a":{"by_id":"/dev/disk/by-id/a"}},"mount_point":""}"#);
-        let report = run_doctor(f.path(), &mock(), &isolated_paths().1, false);
+        let report = run_doctor(f.path(), &mock(), &isolated_paths().1, human_options());
         assert_eq!(find_check(&report, "config_file").status, CheckStatus::Ok);
         let schema = find_check(&report, "config_schema");
         assert_eq!(schema.status, CheckStatus::Fail);
@@ -1101,7 +1152,7 @@ mod tests {
                 "ups": { "enable": true, "name": "ups" }
             }"#,
         );
-        let report = run_doctor(f.path(), &mock(), &isolated_paths().1, false);
+        let report = run_doctor(f.path(), &mock(), &isolated_paths().1, human_options());
 
         assert_eq!(find_check(&report, "config_file").status, CheckStatus::Ok);
 
@@ -1198,7 +1249,7 @@ mod tests {
     #[test]
     fn human_format_contains_tags() {
         let f = write_temp(valid_config_json());
-        let report = run_doctor(f.path(), &mock(), &isolated_paths().1, false);
+        let report = run_doctor(f.path(), &mock(), &isolated_paths().1, human_options());
         let human = format_doctor_human(&report);
         assert!(human.contains("[ok]"), "expected [ok] tag:\n{human}");
         assert!(
@@ -1217,7 +1268,7 @@ mod tests {
             Path::new("/tmp/nonexistent-braid-doctor-test.json"),
             &mock(),
             &isolated_paths().1,
-            false,
+            human_options(),
         );
         let human = format_doctor_human(&report);
         assert!(human.contains("[fail]"), "expected [fail] tag:\n{human}");
@@ -1273,7 +1324,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let f = write_temp(valid_config_json());
         std::fs::set_permissions(f.path(), std::fs::Permissions::from_mode(0o666)).unwrap();
-        let report = run_doctor(f.path(), &mock(), &isolated_paths().1, false);
+        let report = run_doctor(f.path(), &mock(), &isolated_paths().1, human_options());
         let perm = find_check(&report, "config_permissions");
         assert_eq!(perm.status, CheckStatus::Warn);
         assert!(perm.message.contains("world-writable"), "{}", perm.message);
@@ -1285,7 +1336,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let f = write_temp(valid_config_json());
         std::fs::set_permissions(f.path(), std::fs::Permissions::from_mode(0o600)).unwrap();
-        let report = run_doctor(f.path(), &mock(), &isolated_paths().1, false);
+        let report = run_doctor(f.path(), &mock(), &isolated_paths().1, human_options());
         let perm = find_check(&report, "config_permissions");
         // May still warn about uid (tests don't run as root), but should not
         // warn about world/group bits.
@@ -1307,7 +1358,7 @@ mod tests {
             Path::new("/tmp/nonexistent-braid-doctor-test.json"),
             &mock(),
             &isolated_paths().1,
-            false,
+            human_options(),
         );
         let perm = find_check(&report, "config_permissions");
         assert_eq!(perm.status, CheckStatus::Skip);
@@ -1316,7 +1367,7 @@ mod tests {
     #[test]
     fn human_format_contains_perms_label() {
         let f = write_temp(valid_config_json());
-        let report = run_doctor(f.path(), &mock(), &isolated_paths().1, false);
+        let report = run_doctor(f.path(), &mock(), &isolated_paths().1, human_options());
         let human = format_doctor_human(&report);
         assert!(
             human.contains("config perms"),
@@ -1328,7 +1379,7 @@ mod tests {
     fn declared_disks_skips_when_no_membership() {
         let f = write_temp(r#"{"mount_point":"/mnt/storage"}"#);
         let (_dir, paths) = isolated_paths();
-        let report = run_doctor(f.path(), &mock(), &paths, false);
+        let report = run_doctor(f.path(), &mock(), &paths, human_options());
         let check = find_check(&report, "declared_disks");
         assert_eq!(check.status, CheckStatus::Skip);
     }
@@ -1340,7 +1391,7 @@ mod tests {
             Path::new("/tmp/nonexistent-braid-doctor-test.json"),
             &mock(),
             &paths,
-            false,
+            human_options(),
         );
         let check = find_check(&report, "declared_disks");
         assert_eq!(check.status, CheckStatus::Skip);
@@ -1350,7 +1401,7 @@ mod tests {
     fn declared_disks_skip_when_bad_schema() {
         let f = write_temp(r#"{"disks":{},"mount_point":"/mnt/storage"}"#);
         let (_dir, paths) = isolated_paths();
-        let report = run_doctor(f.path(), &mock(), &paths, false);
+        let report = run_doctor(f.path(), &mock(), &paths, human_options());
         let check = find_check(&report, "declared_disks");
         assert_eq!(check.status, CheckStatus::Skip);
     }
@@ -1581,7 +1632,7 @@ mod tests {
     #[test]
     fn human_format_contains_declared_disks_label() {
         let f = write_temp(valid_config_json());
-        let report = run_doctor(f.path(), &mock(), &isolated_paths().1, false);
+        let report = run_doctor(f.path(), &mock(), &isolated_paths().1, human_options());
         let human = format_doctor_human(&report);
         assert!(
             human.contains("declared disks"),
@@ -1674,7 +1725,7 @@ mod tests {
             .with_output(mp_req, mp_out)
             .with_output(df_req, df_out);
         let f = write_temp(valid_config_json());
-        let report = run_doctor(f.path(), &runner, &isolated_paths().1, false);
+        let report = run_doctor(f.path(), &runner, &isolated_paths().1, human_options());
         let check = find_check(&report, "data_profile_mismatch");
         assert_eq!(check.status, CheckStatus::Ok);
         assert!(
@@ -1692,7 +1743,7 @@ mod tests {
             .with_output(mp_req, mp_out)
             .with_output(df_req, df_out);
         let f = write_temp(valid_config_json());
-        let report = run_doctor(f.path(), &runner, &isolated_paths().1, false);
+        let report = run_doctor(f.path(), &runner, &isolated_paths().1, human_options());
         let check = find_check(&report, "data_profile_mismatch");
         assert_eq!(check.status, CheckStatus::Warn);
         assert!(
@@ -1722,7 +1773,7 @@ mod tests {
             .with_output(mp_req, mp_out)
             .with_output(df_req, df_out);
         let f = write_temp(valid_config_json());
-        let report = run_doctor(f.path(), &runner, &isolated_paths().1, false);
+        let report = run_doctor(f.path(), &runner, &isolated_paths().1, human_options());
         let check = find_check(&report, "data_profile_mismatch");
         assert_eq!(check.status, CheckStatus::Ok);
     }
@@ -1733,7 +1784,7 @@ mod tests {
             Path::new("/tmp/nonexistent-braid-doctor-test.json"),
             &mock(),
             &isolated_paths().1,
-            false,
+            human_options(),
         );
         let check = find_check(&report, "data_profile_mismatch");
         assert_eq!(check.status, CheckStatus::Skip);
@@ -1749,7 +1800,7 @@ mod tests {
         let (mp_req, mp_out) = mountpoint_fail();
         let runner = mock().with_output(mp_req, mp_out);
         let f = write_temp(valid_config_json());
-        let report = run_doctor(f.path(), &runner, &isolated_paths().1, false);
+        let report = run_doctor(f.path(), &runner, &isolated_paths().1, human_options());
         let check = find_check(&report, "data_profile_mismatch");
         assert_eq!(check.status, CheckStatus::Skip);
         assert!(check.message.contains("not mounted"), "{}", check.message);
@@ -1763,7 +1814,7 @@ mod tests {
             .with_output(mp_req, mp_out)
             .with_output(df_req, df_out);
         let f = write_temp(valid_config_json());
-        let report = run_doctor(f.path(), &runner, &isolated_paths().1, false);
+        let report = run_doctor(f.path(), &runner, &isolated_paths().1, human_options());
         let check = find_check(&report, "data_profile_mismatch");
         assert_eq!(check.status, CheckStatus::Warn);
         assert!(
@@ -1796,7 +1847,7 @@ mod tests {
             .with_output(mp_req, mp_out)
             .with_output(df_req, df_out);
         let f = write_temp(valid_config_json());
-        let report = run_doctor(f.path(), &runner, &isolated_paths().1, false);
+        let report = run_doctor(f.path(), &runner, &isolated_paths().1, human_options());
         let check = find_check(&report, "metadata_profile_mismatch");
         assert_eq!(check.status, CheckStatus::Ok);
         assert!(
@@ -1819,7 +1870,7 @@ mod tests {
             .with_output(mp_req, mp_out)
             .with_output(df_req, df_out);
         let f = write_temp(valid_config_json());
-        let report = run_doctor(f.path(), &runner, &isolated_paths().1, false);
+        let report = run_doctor(f.path(), &runner, &isolated_paths().1, human_options());
         let check = find_check(&report, "metadata_profile_mismatch");
         assert_eq!(check.status, CheckStatus::Warn);
         assert!(
@@ -1844,7 +1895,7 @@ mod tests {
             Path::new("/tmp/nonexistent-braid-doctor-test.json"),
             &mock(),
             &isolated_paths().1,
-            false,
+            human_options(),
         );
         let check = find_check(&report, "metadata_profile_mismatch");
         assert_eq!(check.status, CheckStatus::Skip);
@@ -1863,7 +1914,7 @@ mod tests {
         let (mp_req, mp_out) = mountpoint_fail();
         let runner = mock().with_output(mp_req, mp_out);
         let f = write_temp(valid_config_json());
-        let report = run_doctor(f.path(), &runner, &isolated_paths().1, false);
+        let report = run_doctor(f.path(), &runner, &isolated_paths().1, human_options());
         let check = find_check(&report, "metadata_profile_mismatch");
         assert_eq!(check.status, CheckStatus::Skip);
         assert!(check.message.contains("not mounted"), "{}", check.message);
@@ -1880,7 +1931,7 @@ mod tests {
             .with_output(mp_req, mp_out)
             .with_output(df_req, df_out);
         let f = write_temp(valid_config_json());
-        let report = run_doctor(f.path(), &runner, &isolated_paths().1, false);
+        let report = run_doctor(f.path(), &runner, &isolated_paths().1, human_options());
         let human = format_doctor_human(&report);
         assert!(
             human.contains("meta profiles"),
@@ -1953,7 +2004,7 @@ mod tests {
             .with_output(df_req, df_out)
             .with_output(du_req, du_out);
         let f = write_temp(valid_config_json());
-        let report = run_doctor(f.path(), &runner, &isolated_paths().1, false);
+        let report = run_doctor(f.path(), &runner, &isolated_paths().1, human_options());
         let check = find_check(&report, "pool_missing_devices");
         assert_eq!(check.status, CheckStatus::Ok);
         assert!(check.message.contains("no missing"), "{}", check.message);
@@ -1972,7 +2023,7 @@ mod tests {
             .with_output(df_req, df_out)
             .with_output(du_req, du_out);
         let f = write_temp(valid_config_json());
-        let report = run_doctor(f.path(), &runner, &isolated_paths().1, false);
+        let report = run_doctor(f.path(), &runner, &isolated_paths().1, human_options());
         let check = find_check(&report, "pool_missing_devices");
         assert_eq!(check.status, CheckStatus::Warn);
         assert!(
@@ -2005,7 +2056,7 @@ mod tests {
         let (mp_req, mp_out) = mountpoint_fail();
         let runner = mock().with_output(mp_req, mp_out);
         let f = write_temp(valid_config_json());
-        let report = run_doctor(f.path(), &runner, &isolated_paths().1, false);
+        let report = run_doctor(f.path(), &runner, &isolated_paths().1, human_options());
         let check = find_check(&report, "pool_missing_devices");
         assert_eq!(check.status, CheckStatus::Skip);
     }
@@ -2023,7 +2074,7 @@ mod tests {
             .with_output(df_req, df_out)
             .with_output(du_req, du_out);
         let f = write_temp(valid_config_json());
-        let report = run_doctor(f.path(), &runner, &isolated_paths().1, false);
+        let report = run_doctor(f.path(), &runner, &isolated_paths().1, human_options());
         let human = format_doctor_human(&report);
         assert!(
             human.contains("missing devs"),
@@ -2070,8 +2121,11 @@ mod tests {
         let result = check_beep_path_inner(
             &mut ctx,
             Path::new("/tmp/nonexistent-braid-notifier-config-doctor-test.json"),
-            true,  // is_root: irrelevant since the file doesn't exist
-            false, // json_output: irrelevant since the file doesn't exist
+            beep_check_options(
+                true,  // is_root: irrelevant since the file doesn't exist
+                false, // json_output: irrelevant since the file doesn't exist
+                false, // play_beep: irrelevant since the file doesn't exist
+            ),
         );
         assert_eq!(result.name, "beep_path");
         assert_eq!(result.status, CheckStatus::Skip);
@@ -2094,7 +2148,8 @@ mod tests {
         let (_dir, paths) = isolated_paths();
         let runner = mock();
         let mut ctx = beep_ctx(&runner, &paths);
-        let result = check_beep_path_inner(&mut ctx, f.path(), true, false);
+        let result =
+            check_beep_path_inner(&mut ctx, f.path(), beep_check_options(true, false, false));
         assert_eq!(result.status, CheckStatus::Fail);
         assert!(
             result.message.contains("malformed"),
@@ -2116,7 +2171,8 @@ mod tests {
         let (_dir, paths) = isolated_paths();
         let runner = mock();
         let mut ctx = beep_ctx(&runner, &paths);
-        let result = check_beep_path_inner(&mut ctx, f.path(), true, false);
+        let result =
+            check_beep_path_inner(&mut ctx, f.path(), beep_check_options(true, false, false));
         assert_eq!(result.status, CheckStatus::Skip);
         assert!(
             result.message.contains("beep monitoring disabled"),
@@ -2146,7 +2202,8 @@ mod tests {
         // Fail message — pinning the runner-not-invoked invariant.
         let runner = mock();
         let mut ctx = beep_ctx(&runner, &paths);
-        let result = check_beep_path_inner(&mut ctx, f.path(), false, false);
+        let result =
+            check_beep_path_inner(&mut ctx, f.path(), beep_check_options(false, false, true));
         assert_eq!(result.status, CheckStatus::Skip);
         assert!(
             result.message.contains("requires root"),
@@ -2162,7 +2219,8 @@ mod tests {
 
     // Intent: when invoked in --json mode, the check skips with a clear
     //   "json mode" message AND does not invoke the runner at all, even
-    //   when is_root=true and a real-looking probe path is configured.
+    //   when is_root=true, play_beep=true, and a real-looking probe path is
+    //   configured.
     // Why: `braid doctor --json` is for programmatic consumption — emitting
     //   an audible side effect from a data-output command would surprise
     //   any script piping doctor's JSON into a monitoring system. The
@@ -2184,30 +2242,47 @@ mod tests {
         let result = check_beep_path_inner(
             &mut ctx,
             f.path(),
-            true, // is_root: yes
-            true, // json_output: yes
+            beep_check_options(
+                true, // is_root: yes
+                true, // json_output: yes
+                true, // play_beep: yes, but --json still suppresses it
+            ),
         );
         assert_eq!(result.status, CheckStatus::Skip);
-        assert!(
-            result.message.to_lowercase().contains("json"),
-            "skip message must mention --json mode: {}",
-            result.message
-        );
-        assert!(
-            result.message.contains("alert test beep"),
-            "skip message must mention the alert test beep (product framing): {}",
-            result.message
+        assert_eq!(
+            result.message,
+            "skipped in --json mode -- rerun with --beep without --json to play the alert test beep"
         );
     }
 
-    // Intent: when the wrapper exits 0, the check returns Ok and the
-    //   message explicitly mentions the alert test beep (product framing).
-    // Why: pins the dual-purpose "health check + alert preview" framing in
-    //   the user-facing copy. A regression that says "path invokable" or
-    //   similar implementation language would silently degrade the framing
-    //   even though the status is still Ok.
-    // Scenario: healthy NAS, root user, `braid doctor` plays the beep end
-    //   to end and reports success.
+    // Intent: plain doctor skips the audible beep check by default and does
+    //   not invoke the runner.
+    // Why: the alert sound must be opt-in so ordinary diagnostics stay quiet.
+    //   MockRunner has no BraidBeepProbe output; if the wrapper were invoked,
+    //   MissingMock would turn this into Fail instead of Skip.
+    // Scenario: operator runs `sudo braid doctor` on a NAS where beep alerting
+    //   is configured but does not want to play the alert sound.
+    #[test]
+    fn beep_path_skips_by_default_without_invoking_runner() {
+        let f = write_temp(r#"{"beep_probe_path": "/nix/store/fake/bin/braid-beep-probe"}"#);
+        let (_dir, paths) = isolated_paths();
+        let runner = mock();
+        let mut ctx = beep_ctx(&runner, &paths);
+        let result =
+            check_beep_path_inner(&mut ctx, f.path(), beep_check_options(true, false, false));
+        assert_eq!(result.status, CheckStatus::Skip);
+        assert_eq!(
+            result.message,
+            "skipped (pass --beep to play the audible alert test beep)"
+        );
+    }
+
+    // Intent: when --beep is explicit and the wrapper exits 0, the check
+    //   returns Ok and the message tells the operator what they should have
+    //   heard.
+    // Why: pins the opt-in alert-preview framing in the user-facing copy.
+    // Scenario: healthy NAS, root user, `braid doctor --beep` plays the beep
+    //   end to end and reports success.
     #[test]
     fn beep_path_ok_on_zero_exit() {
         let probe_path = "/nix/store/fake/bin/braid-beep-probe";
@@ -2225,12 +2300,12 @@ mod tests {
             },
         );
         let mut ctx = beep_ctx(&runner, &paths);
-        let result = check_beep_path_inner(&mut ctx, f.path(), true, false);
+        let result =
+            check_beep_path_inner(&mut ctx, f.path(), beep_check_options(true, false, true));
         assert_eq!(result.status, CheckStatus::Ok);
-        assert!(
-            result.message.contains("alert test beep"),
-            "Ok message must mention the alert test beep: {}",
-            result.message
+        assert_eq!(
+            result.message,
+            "alert test beep command succeeded -- you should have heard a 1 kHz, 500 ms disk-alert beep"
         );
     }
 
@@ -2260,7 +2335,8 @@ mod tests {
             },
         );
         let mut ctx = beep_ctx(&runner, &paths);
-        let result = check_beep_path_inner(&mut ctx, f.path(), true, false);
+        let result =
+            check_beep_path_inner(&mut ctx, f.path(), beep_check_options(true, false, true));
         assert_eq!(result.status, CheckStatus::Fail);
         assert!(
             result.message.contains("could not play alert test beep"),

@@ -69,6 +69,15 @@ systemd timer + oneshot service. No mount condition on the timer — `braid moni
 
 `braid.monitor.enable` defaults to true when `braid.enable` is true. beep/pcspkr failures are silently swallowed.
 
+### Audible doctor beep is opt-in
+
+Plain `braid doctor` reports the alert-beep check as skipped after confirming
+beep monitoring is configured. `braid doctor --beep` runs the canonical
+`braid-beep-probe` wrapper so operators can test the real alert sound on
+purpose. `braid doctor --json` always skips the audible probe, even when
+combined with `--beep`, so machine-readable output has no audible side
+effects.
+
 ### Latch as append/refresh log
 
 The alert latch is an append/refresh log of all unacked causes from all sources. Each monitor cycle loads the existing latch, computes new causes, and merges. Previously-latched causes that aren't re-detected are carried forward. Newly-detected causes replace their latched counterpart (same key = fresher evidence). This ensures all cause types persist until `braid ack`, even if the triggering condition resolves — fixing the invariant for all sources, not just journal.

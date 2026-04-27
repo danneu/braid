@@ -210,8 +210,8 @@ pub enum CmdRequest {
     },
     /// Run the canonical `braid-beep-probe` wrapper. The path is read at
     /// runtime from `/etc/braid/notifier-config.json` (written by the NixOS
-    /// monitor module). Used by `braid doctor` to play the alert test beep
-    /// — the same code path the alert service uses, so a successful run is
+    /// monitor module). Used by `braid doctor --beep` to play the alert test beep
+    /// -- the same code path the alert service uses, so a successful run is
     /// both a notifier-health check and a preview of the real alert beep.
     BraidBeepProbe {
         path: String,

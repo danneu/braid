@@ -26,7 +26,13 @@ Output:
 [ok]   missing devs    no missing devices
 [ok]   data profiles   data profile: RAID1
 [ok]   meta profiles   metadata profile: RAID1
-[ok]   alert beep      alert test beep played (1 kHz, 500 ms) — same beep braid will use for real disk alerts
+[skip] alert beep      skipped (pass --beep to play the audible alert test beep)
+```
+
+To test the real alert sound:
+
+```
+sudo braid doctor --beep
 ```
 
 ## Machine-readable output
@@ -37,7 +43,7 @@ sudo braid doctor --json
 
 Prints a JSON object with `status` (one of `ok`, `warn`, `fail`, `skip`) and a `checks` array. Each check has `name`, `status`, and `message`.
 
-Note: `--json` mode skips the alert beep test (no audible side effects in machine-readable output). The check still appears in the report as `skip`.
+Note: `--json` mode skips the alert beep test even when combined with `--beep` (no audible side effects in machine-readable output). The check still appears in the report as `skip`.
 
 ## What it checks
 
@@ -50,13 +56,14 @@ Note: `--json` mode skips the alert beep test (no audible side effects in machin
 | `pool_missing_devices` | No btrfs missing devices in the live pool |
 | `data_profile_mismatch` | Data block groups all use the same RAID profile |
 | `metadata_profile_mismatch` | Metadata block groups all use the same RAID profile |
-| `beep_path` | PC speaker alert beep plays successfully |
+| `beep_path` | PC speaker alert beep is configured; with `--beep`, the alert beep command succeeds |
 
 ## Flags
 
 | Flag | Effect |
 | --- | --- |
 | `--json` | Machine-readable JSON output (suppresses alert beep test) |
+| `--beep` | Play the audible alert test beep (ignored in `--json` mode) |
 
 ## Exit codes
 
@@ -68,8 +75,9 @@ Note: `--json` mode skips the alert beep test (no audible side effects in machin
 1. Reads and validates `/etc/braid/config.json`.
 2. Loads `pool.json` and probes each declared disk via `cryptsetup isLuks` and `cryptsetup luksDump`.
 3. If the pool is mounted, queries `btrfs filesystem df` to check RAID profile consistency and probes for missing devices.
-4. If the braid monitor NixOS module is configured and running as root (not `--json`), plays a short test beep through the canonical beep wrapper.
-5. Aggregates results and prints a summary.
+4. If the braid monitor NixOS module is configured, reports the alert beep check as skipped by default.
+5. With `--beep` and without `--json`, plays a short test beep through the canonical beep wrapper.
+6. Aggregates results and prints a summary.
 
 ## Related commands
 

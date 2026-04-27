@@ -1,6 +1,6 @@
 # Test: braid shell completion
 #
-# What: End-to-end tests for shell completion — registration script generation
+# What: End-to-end tests for shell completion -- registration script generation
 # for bash/zsh/fish, subcommand and flag candidate correctness, dynamic disk
 # name candidates from config, --config override, and missing-config fallback.
 #
@@ -71,6 +71,11 @@ with subtest("remove-missing flag completion"):
 with subtest("status flag completion"):
     output = machine.succeed("bash /tmp/get-completions.sh braid status --")
     assert "--json" in output, f"Expected --json: {output}"
+
+with subtest("doctor flag completion"):
+    output = machine.succeed("bash /tmp/get-completions.sh braid doctor --")
+    assert "--json" in output, f"Expected --json: {output}"
+    assert "--beep" in output, f"Expected --beep: {output}"
 
 # --- Fish end-to-end: source completions, trigger them, assert candidates ---
 

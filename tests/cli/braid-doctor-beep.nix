@@ -1,15 +1,20 @@
-# Test: braid doctor — PC speaker probe (beep_path check)
+# Test: braid doctor -- PC speaker probe (beep_path check)
 #
-# What: Validates that the doctor `beep_path` check plays the alert test
-# beep in human mode (Ok when the wrapper works, Fail when it does not,
-# recovery when the underlying issue is resolved) and skips silently in
-# `--json` mode regardless of speaker state.
+# Intent: Validates that the doctor `beep_path` check skips by default, plays
+# the alert test beep only when `--beep` is passed, reports wrapper failures
+# for explicit `--beep`, and skips silently in `--json` mode even when
+# `--beep` is also passed.
 #
-# Why: Without an active alert, a broken PC speaker is invisible — the alert
+# Why: Without an active alert, a broken PC speaker is invisible -- the alert
 # service's `|| true` swallows beep failures and the user only discovers the
-# problem when a real disk alert produces no sound. doctor exists precisely
-# to surface this kind of latent breakage. `--json` mode must never produce
-# audible side effects so scripts piping doctor output stay silent.
+# problem when a real disk alert produces no sound. doctor exists to surface
+# this kind of latent breakage, but the audible test must be opt-in. `--json`
+# mode must never produce audible side effects so scripts piping doctor output
+# stay silent.
+#
+# Scenario: NixOS machine with braid.monitor.beep = true and pkgs.beep
+# replaced by a flag-file-gated mock. The test toggles /tmp/beep-broken and
+# checks /tmp/beep-invoked to distinguish skip from real wrapper execution.
 { braid }:
 {
   name = "braid-doctor-beep";
@@ -25,6 +30,7 @@
       nixpkgs.overlays = [
         (final: prev: {
           beep = prev.writeShellScriptBin "beep" ''
+            touch /tmp/beep-invoked
             if [ -f /tmp/beep-broken ]; then
               echo "mock beep: failing per /tmp/beep-broken" >&2
               exit 1

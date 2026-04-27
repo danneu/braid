@@ -1,22 +1,21 @@
-# Test: braid doctor — PC speaker probe (beep_path check)
+# Test: braid doctor -- PC speaker probe (beep_path check)
 #
-# Intent: Verify the new doctor `beep_path` check across its live branches:
-#   human-mode Ok (working wrapper plays the beep), human-mode Fail (broken
-#   wrapper), recovery, and JSON-mode Skip (the beep is suppressed for
-#   programmatic consumption regardless of speaker state).
+# Intent: Verify the doctor `beep_path` check across its live branches:
+#   plain doctor skips without playing sound, explicit `--beep` reports Ok
+#   or Fail from the wrapper, and JSON mode skips even when combined with
+#   `--beep`.
 #
 # Why it exists: Doctor is the proactive diagnostic surface for "is braid
-#   wired up correctly?" Without this check, a broken PC speaker is invisible
-#   until a real alert silently fails to make a sound. This test pins the
-#   check's behavior so a regression that re-introduces silent best-effort
-#   beeping, OR a regression that lets `braid doctor --json` produce audible
-#   side effects (which would surprise scripts piping it into a monitoring
-#   system), is caught.
+#   wired up correctly?" The alert test sound must be explicit so routine
+#   doctor runs stay quiet, while `--beep` still catches a broken speaker
+#   before a real disk alert silently fails. JSON output must never produce
+#   audible side effects.
 #
 # Scenario: NixOS machine with braid.monitor.beep = true and pkgs.beep
 #   replaced by a flag-file-gated mock. /etc/braid/notifier-config.json is
 #   written by the module. Subtests touch/remove /tmp/beep-broken to drive
-#   the healthy/broken branches.
+#   the healthy/broken branches and inspect /tmp/beep-invoked to prove
+#   whether the wrapper ran.
 
 import json
 
@@ -28,39 +27,47 @@ with subtest("Notifier config was written by the module"):
     assert cfg["beep_probe_path"] is not None
     assert "braid-beep-probe" in cfg["beep_probe_path"]
 
-# Human-mode subtests: these actually invoke the wrapper (the mock beep).
-# `braid doctor` without --json is the operator-facing path, where playing
-# the beep is the entire point of the check.
+with subtest("Plain doctor skips beep even when mock beep is broken"):
+    machine.succeed("rm -f /tmp/beep-invoked; touch /tmp/beep-broken")
+    out = machine.succeed("braid doctor")
+    assert (
+        "skipped (pass --beep to play the audible alert test beep)" in out
+    ), f"expected default skip message, got: {out}"
+    machine.fail("test -e /tmp/beep-invoked")
 
-with subtest("Healthy beep (human mode): doctor exits 0"):
-    machine.succeed("rm -f /tmp/beep-broken")
-    machine.succeed("braid doctor")
+with subtest("Explicit --beep succeeds when mock beep is healthy"):
+    machine.succeed("rm -f /tmp/beep-broken /tmp/beep-invoked")
+    out = machine.succeed("braid doctor --beep")
+    assert (
+        "alert test beep command succeeded -- you should have heard a 1 kHz, 500 ms disk-alert beep"
+        in out
+    ), f"expected --beep success message, got: {out}"
+    machine.succeed("test -e /tmp/beep-invoked")
 
-with subtest("Broken beep (human mode): doctor exits 1"):
-    machine.succeed("touch /tmp/beep-broken")
-    rc, _ = machine.execute("braid doctor")
-    assert rc == 1, f"expected exit 1 for broken beep in human mode, got {rc}"
+with subtest("Explicit --beep fails when mock beep is broken"):
+    machine.succeed("rm -f /tmp/beep-invoked; touch /tmp/beep-broken")
+    rc, _ = machine.execute("braid doctor --beep")
+    assert rc == 1, f"expected exit 1 for broken beep with --beep, got {rc}"
+    machine.succeed("test -e /tmp/beep-invoked")
 
-with subtest("Recovery (human mode): clearing the flag returns to exit 0"):
-    machine.succeed("rm -f /tmp/beep-broken")
-    machine.succeed("braid doctor")
-
-# JSON-mode subtest: must NEVER play the beep regardless of speaker state.
-
-with subtest("JSON mode: beep_path is always Skip (beep never played)"):
+with subtest("JSON plus --beep skips without invoking wrapper"):
     # Use broken beep to prove that the wrapper is not invoked even when it
-    # would fail — the Skip must happen before any subprocess is spawned.
-    # Broken speaker in human mode → exit 1, but JSON mode → exit 0 (Skip ≠ Fail).
-    machine.succeed("touch /tmp/beep-broken")
-    out = machine.succeed("braid doctor --json")
+    # would fail -- the Skip must happen before any subprocess is spawned.
+    machine.succeed("rm -f /tmp/beep-invoked; touch /tmp/beep-broken")
+    out = machine.succeed("braid doctor --json --beep")
     report = json.loads(out)
     beep = next(c for c in report["checks"] if c["name"] == "beep_path")
     assert beep["status"] == "skip", f"expected skip in json mode, got {beep}"
-    assert "json" in beep["message"].lower(), (
-        f"Skip message must explain suppression in --json mode: {beep['message']}"
+    assert (
+        beep["message"]
+        == "skipped in --json mode -- rerun with --beep without --json to play the alert test beep"
+    ), (
+        "Skip message must explain suppression in --json mode: "
+        f"{beep['message']}"
     )
+    machine.fail("test -e /tmp/beep-invoked")
     # Clean up so the next VM test (if any) starts from the healthy state.
-    machine.succeed("rm -f /tmp/beep-broken")
+    machine.succeed("rm -f /tmp/beep-broken /tmp/beep-invoked")
 
 # NOTE on the missing non-root subtest:
 #
@@ -69,7 +76,7 @@ with subtest("JSON mode: beep_path is always Skip (beep never played)"):
 # constructs the context directly and asserts the runner is never invoked.
 # It is intentionally NOT exercised here. `sudo -u tester braid doctor` would
 # exit 1 with "braid must be run as root" because main.rs:244-251 rejects
-# every command except `tui --demo` for non-root users — the request never
+# every command except `tui --demo` for non-root users -- the request never
 # reaches cmd_doctor. Reaching the inner branch from a VM would require
 # relaxing that top-level CLI gate, which is intentionally out of scope.
 

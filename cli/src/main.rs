@@ -4,7 +4,7 @@ use std::path::Path;
 
 use braid_cli::cmd::RealRunner;
 use braid_cli::config::config_read;
-use braid_cli::doctor::cmd_doctor;
+use braid_cli::doctor::{DoctorOptions, cmd_doctor};
 use braid_cli::probe::RealFilesystem;
 use braid_cli::progress::{ProgressMode, resolve_progress_output};
 use braid_cli::state_paths::StatePaths;
@@ -191,8 +191,12 @@ struct StatusArgs {
 
 #[derive(Debug, Args)]
 struct DoctorArgs {
+    /// Emit the parsed doctor report as JSON instead of human output.
     #[arg(long)]
     json: bool,
+    /// Play the audible alert test beep when checking the alert path.
+    #[arg(long)]
+    beep: bool,
 }
 
 #[derive(Debug, Args)]
@@ -424,7 +428,14 @@ fn main() {
             }
         }
         Commands::Doctor(args) => {
-            if let Err(e) = cmd_doctor(Path::new(&config_path), &paths, args.json) {
+            if let Err(e) = cmd_doctor(
+                Path::new(&config_path),
+                &paths,
+                DoctorOptions {
+                    json: args.json,
+                    beep: args.beep,
+                },
+            ) {
                 print_cli_error(&e.to_string());
                 std::process::exit(1);
             }
