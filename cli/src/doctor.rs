@@ -57,8 +57,7 @@ pub struct DoctorReport {
 
 enum DfSnapshot {
     NotMounted,
-    QueryFailed(String),
-    ParseFailed(String),
+    Error(String),
     Ok(BtrfsDfOutput),
 }
 
@@ -461,14 +460,14 @@ fn ensure_df_snapshot<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) {
     {
         Ok(raw) => raw,
         Err(e) => {
-            ctx.df_snapshot = Some(DfSnapshot::QueryFailed(e.to_string()));
+            ctx.df_snapshot = Some(DfSnapshot::Error(e.to_string()));
             return;
         }
     };
 
     match parse_btrfs_df_json(&raw) {
         Ok(df) => ctx.df_snapshot = Some(DfSnapshot::Ok(df)),
-        Err(e) => ctx.df_snapshot = Some(DfSnapshot::ParseFailed(e.to_string())),
+        Err(e) => ctx.df_snapshot = Some(DfSnapshot::Error(e.to_string())),
     }
 }
 
@@ -500,15 +499,10 @@ fn check_profile_mismatch<R: CommandRunner>(
             status: CheckStatus::Skip,
             message: "skipped (pool not mounted)".into(),
         },
-        DfSnapshot::QueryFailed(e) => CheckResult {
+        DfSnapshot::Error(e) => CheckResult {
             name: check_name.into(),
             status: CheckStatus::Warn,
-            message: format!("could not query {type_label} profiles: {e}"),
-        },
-        DfSnapshot::ParseFailed(e) => CheckResult {
-            name: check_name.into(),
-            status: CheckStatus::Warn,
-            message: format!("could not parse {type_label} profiles: {e}"),
+            message: format!("could not inspect {type_label} profiles: {e}"),
         },
         DfSnapshot::Ok(df) => {
             let entries: Vec<_> = df.entries.iter().filter(|e| e.bg_type == bg_type).collect();
@@ -1975,8 +1969,8 @@ mod tests {
         let data = find_check(&report, "data_profile_mismatch");
         assert_eq!(data.status, CheckStatus::Warn);
         assert!(
-            data.message.contains("could not query data profiles"),
-            "expected data query warning: {}",
+            data.message.contains("could not inspect data profiles"),
+            "expected data inspect warning: {}",
             data.message
         );
 
@@ -1985,8 +1979,8 @@ mod tests {
         assert!(
             metadata
                 .message
-                .contains("could not query metadata profiles"),
-            "expected metadata query warning: {}",
+                .contains("could not inspect metadata profiles"),
+            "expected metadata inspect warning: {}",
             metadata.message
         );
     }
@@ -2009,8 +2003,8 @@ mod tests {
         let check = find_check(&report, "data_profile_mismatch");
         assert_eq!(check.status, CheckStatus::Warn);
         assert!(
-            check.message.contains("could not parse data profiles"),
-            "expected parse warning: {}",
+            check.message.contains("could not inspect data profiles"),
+            "expected inspect warning: {}",
             check.message
         );
     }
@@ -2034,8 +2028,8 @@ mod tests {
         let data = find_check(&report, "data_profile_mismatch");
         assert_eq!(data.status, CheckStatus::Warn);
         assert!(
-            data.message.contains("could not parse data profiles"),
-            "expected data parse warning: {}",
+            data.message.contains("could not inspect data profiles"),
+            "expected data inspect warning: {}",
             data.message
         );
 
@@ -2044,8 +2038,8 @@ mod tests {
         assert!(
             metadata
                 .message
-                .contains("could not parse metadata profiles"),
-            "expected metadata parse warning: {}",
+                .contains("could not inspect metadata profiles"),
+            "expected metadata inspect warning: {}",
             metadata.message
         );
     }
