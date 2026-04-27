@@ -707,11 +707,12 @@ fn check_braid_online_active_when_mounted<R: CommandRunner>(
             };
         }
     };
-    match raw.stdout.trim() {
-        "active" => CheckResult {
+    let state = raw.stdout.trim();
+    match state {
+        "active" | "activating" | "reloading" => CheckResult {
             name,
             status: CheckStatus::Ok,
-            message: "braid-online.service is active".into(),
+            message: format!("braid-online.service is {state}"),
         },
         other => CheckResult {
             name,
@@ -2415,6 +2416,48 @@ mod tests {
         let mut ctx = ups_ctx(&runner, &paths, config_with_ups_enabled());
         let r = check_braid_online_active_when_mounted(&mut ctx);
         assert_eq!(r.status, CheckStatus::Ok);
+    }
+
+    /* Intent: check_braid_online_active_when_mounted treats safe
+     * systemctl transient states as Ok while the pool is mounted.
+     * Why it exists: systemctl is-active can briefly report activating
+     * or reloading; those states should not trigger the alarmist UPS
+     * shutdown failure copy.
+     * Scenario: operator manually starts braid-online.service and runs
+     * `braid doctor` before systemd has fully settled the unit.
+     */
+    #[test]
+    fn braid_online_check_ok_when_transiently_starting_or_reloading() {
+        for status in ["activating", "reloading"] {
+            let runner = MockRunner::default()
+                .with_output(
+                    CmdRequest::MountpointCheck {
+                        path: MountPoint("/mnt/storage".into()),
+                    },
+                    RawCommandOutput {
+                        cmd: "mountpoint".into(),
+                        stdout: String::new(),
+                        stderr: String::new(),
+                        exit_status: 0,
+                    },
+                )
+                .with_output(
+                    CmdRequest::SystemctlIsActive {
+                        unit: "braid-online.service".into(),
+                    },
+                    RawCommandOutput {
+                        cmd: "systemctl is-active braid-online.service".into(),
+                        stdout: format!("{status}\n"),
+                        stderr: String::new(),
+                        exit_status: 0,
+                    },
+                );
+            let (_dir, paths) = isolated_paths();
+            let mut ctx = ups_ctx(&runner, &paths, config_with_ups_enabled());
+            let r = check_braid_online_active_when_mounted(&mut ctx);
+            assert_eq!(r.status, CheckStatus::Ok, "status={status}");
+            assert!(r.message.contains(status), "message={}", r.message);
+        }
     }
 
     // Intent: check_braid_online_active_when_mounted skips when pool

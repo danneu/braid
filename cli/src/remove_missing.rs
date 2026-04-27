@@ -287,9 +287,10 @@ pub fn plan_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     if pool.missing_count == 0 {
         return RemoveMissingPlanReport {
             notes: std::mem::take(&mut notes),
-            result: Err(RemoveMissingError::Validation(
-                "no missing devices detected in pool.".into(),
-            )),
+            result: Err(RemoveMissingError::Validation(format!(
+                "no missing devices detected in pool (devid {} was not found among them).",
+                params.missing_id
+            ))),
         };
     }
 
@@ -624,6 +625,103 @@ mod tests {
             stdout: stdout.to_owned(),
             stderr: String::new(),
             exit_status,
+        }
+    }
+
+    struct HealthyPoolRunner;
+
+    impl CommandRunner for HealthyPoolRunner {
+        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
+            match request {
+                CmdRequest::FindmntJson { mount_point } => Ok(mock_out(
+                    &format!("findmnt --json --mountpoint {mount_point}"),
+                    r#"{"filesystems":[{"target":"/mnt/storage","source":"/dev/mapper/braid-disk1","fstype":"btrfs"}]}"#,
+                    0,
+                )),
+                CmdRequest::BtrfsFilesystemShow { mount_point } => Ok(mock_out(
+                    &format!("btrfs filesystem show {mount_point}"),
+                    "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\tTotal devices 2 FS bytes used 16.17MiB\n\tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk2\n",
+                    0,
+                )),
+                CmdRequest::CryptsetupStatus { mapper } => Ok(mock_out(
+                    &format!("cryptsetup status {mapper}"),
+                    &format!(
+                        "{mapper} is active and is in use.\n  type:    LUKS2\n  device:  /dev/vdb\n  mode:    read/write\n"
+                    ),
+                    0,
+                )),
+                CmdRequest::CryptsetupLuksUuid { .. } => Ok(mock_out(
+                    "cryptsetup luksUUID",
+                    "11111111-1111-1111-1111-111111111111\n",
+                    0,
+                )),
+                CmdRequest::BtrfsBalanceStatus { .. } => Ok(mock_out(
+                    "btrfs balance status",
+                    "No balance found on '/mnt/storage'\n",
+                    0,
+                )),
+                _ => Err(CmdError::MissingMock),
+            }
+        }
+
+        fn run_with_stdin(
+            &self,
+            request: &CmdRequest,
+            _stdin: &[u8],
+        ) -> Result<RawCommandOutput, CmdError> {
+            self.run(request)
+        }
+    }
+
+    struct NullUnderlyingPoolRunner;
+
+    impl CommandRunner for NullUnderlyingPoolRunner {
+        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
+            match request {
+                CmdRequest::FindmntJson { mount_point } => Ok(mock_out(
+                    &format!("findmnt --json --mountpoint {mount_point}"),
+                    r#"{"filesystems":[{"target":"/mnt/storage","source":"/dev/mapper/braid-disk1","fstype":"btrfs"}]}"#,
+                    0,
+                )),
+                CmdRequest::BtrfsFilesystemShow { mount_point } => Ok(mock_out(
+                    &format!("btrfs filesystem show {mount_point}"),
+                    "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\tTotal devices 2 FS bytes used 16.17MiB\n\tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk2\n",
+                    0,
+                )),
+                CmdRequest::CryptsetupStatus { mapper } if mapper == "braid-disk2" => Ok(mock_out(
+                    &format!("cryptsetup status {mapper}"),
+                    &format!(
+                        "{mapper} is active and is in use.\n  type:    LUKS2\n  device:  (null)\n  mode:    read/write\n"
+                    ),
+                    0,
+                )),
+                CmdRequest::CryptsetupStatus { mapper } => Ok(mock_out(
+                    &format!("cryptsetup status {mapper}"),
+                    &format!(
+                        "{mapper} is active and is in use.\n  type:    LUKS2\n  device:  /dev/vdb\n  mode:    read/write\n"
+                    ),
+                    0,
+                )),
+                CmdRequest::CryptsetupLuksUuid { .. } => Ok(mock_out(
+                    "cryptsetup luksUUID",
+                    "11111111-1111-1111-1111-111111111111\n",
+                    0,
+                )),
+                CmdRequest::BtrfsBalanceStatus { .. } => Ok(mock_out(
+                    "btrfs balance status",
+                    "No balance found on '/mnt/storage'\n",
+                    0,
+                )),
+                _ => Err(CmdError::MissingMock),
+            }
+        }
+
+        fn run_with_stdin(
+            &self,
+            request: &CmdRequest,
+            _stdin: &[u8],
+        ) -> Result<RawCommandOutput, CmdError> {
+            self.run(request)
         }
     }
 
@@ -2147,55 +2245,7 @@ mod tests {
         let config_json = serde_json::json!({ "mount_point": "/mnt/storage" });
         std::fs::write(&config_path, serde_json::to_vec(&config_json).unwrap()).unwrap();
 
-        // Healthy runner: 2 present devices, zero missing.
-        struct HealthyRunner {
-            log: Arc<Mutex<Vec<CmdRequest>>>,
-        }
-        impl CommandRunner for HealthyRunner {
-            fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
-                self.log.lock().unwrap().push(request.clone());
-                match request {
-                    CmdRequest::FindmntJson { mount_point } => Ok(mock_out(
-                        &format!("findmnt --json --mountpoint {mount_point}"),
-                        r#"{"filesystems":[{"target":"/mnt/storage","source":"/dev/mapper/braid-disk1","fstype":"btrfs"}]}"#,
-                        0,
-                    )),
-                    CmdRequest::BtrfsFilesystemShow { mount_point } => Ok(mock_out(
-                        &format!("btrfs filesystem show {mount_point}"),
-                        "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\tTotal devices 2 FS bytes used 16.17MiB\n\tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk2\n",
-                        0,
-                    )),
-                    CmdRequest::CryptsetupStatus { mapper } => Ok(mock_out(
-                        &format!("cryptsetup status {mapper}"),
-                        &format!(
-                            "{mapper} is active and is in use.\n  type:    LUKS2\n  device:  /dev/vdb\n  mode:    read/write\n"
-                        ),
-                        0,
-                    )),
-                    CmdRequest::CryptsetupLuksUuid { .. } => Ok(mock_out(
-                        "cryptsetup luksUUID",
-                        "11111111-1111-1111-1111-111111111111\n",
-                        0,
-                    )),
-                    CmdRequest::BtrfsBalanceStatus { .. } => Ok(mock_out(
-                        "btrfs balance status",
-                        "No balance found on '/mnt/storage'\n",
-                        0,
-                    )),
-                    _ => Err(CmdError::MissingMock),
-                }
-            }
-            fn run_with_stdin(
-                &self,
-                request: &CmdRequest,
-                _stdin: &[u8],
-            ) -> Result<RawCommandOutput, CmdError> {
-                self.run(request)
-            }
-        }
-
-        let log = Arc::new(Mutex::new(Vec::new()));
-        let runner = HealthyRunner { log };
+        let runner = HealthyPoolRunner;
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
         let report = plan_remove_missing(
             &runner,
@@ -2217,6 +2267,10 @@ mod tests {
                     msg.contains("no missing devices detected"),
                     "expected 'no missing devices detected' in: {msg}"
                 );
+                assert!(
+                    msg.contains("devid 999"),
+                    "expected requested devid in no-missing validation: {msg}"
+                );
             }
             Err(other) => panic!("expected Validation, got: {other:?}"),
             Ok(_) => panic!("expected Err(Validation), got Ok(_)"),
@@ -2235,5 +2289,114 @@ mod tests {
             "notes[0]={:?}",
             report.notes[0],
         );
+    }
+
+    /* Intent: a healthy pool with a live-device `--missing-id` still fails
+     * with the zero-missing validation before live-device validation.
+     * Why it exists: the explicit `missing_count == 0` branch preserves
+     * existing error precedence; moving that wording into the membership
+     * check would change the user-facing error for live devids in healthy
+     * pools.
+     * Scenario: 2-device healthy pool. Operator accidentally runs
+     * `braid remove-missing --missing-id 1 --dry-run`.
+     */
+    #[test]
+    fn plan_remove_missing_zero_missing_precedes_live_device_validation() {
+        let (_state_tmp, state_paths) = test_paths(&[
+            ("disk1", "/dev/disk/by-id/virtio-disk1", Some(1)),
+            ("disk2", "/dev/disk/by-id/virtio-disk2", Some(2)),
+        ]);
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.json");
+        let config_json = serde_json::json!({ "mount_point": "/mnt/storage" });
+        std::fs::write(&config_path, serde_json::to_vec(&config_json).unwrap()).unwrap();
+
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let report = plan_remove_missing(
+            &HealthyPoolRunner,
+            &MockFs,
+            &RemoveMissingParams {
+                config_path: &config_path,
+                missing_id: 1,
+                dry_run: true,
+                yes: true,
+                progress: crate::progress::ProgressOutput::Off,
+                paths: &state_paths,
+                sleep_inhibitor: &inhibitor,
+                sleeper: &crate::progress::NoopSleeper,
+            },
+        );
+
+        match &report.result {
+            Err(RemoveMissingError::Validation(msg)) => {
+                assert!(
+                    msg.contains("no missing devices detected"),
+                    "expected no-missing validation, got: {msg}"
+                );
+                assert!(
+                    !msg.contains("live device"),
+                    "zero-missing validation must precede live-device validation: {msg}"
+                );
+                assert!(
+                    msg.contains("devid 1"),
+                    "expected requested devid in no-missing validation: {msg}"
+                );
+            }
+            Err(other) => panic!("expected Validation, got: {other:?}"),
+            Ok(_) => panic!("expected Err(Validation), got Ok(_)"),
+        }
+    }
+
+    /* Intent: a null-underlying hot-unplugged device is not reported as
+     * "no missing devices" just because `PoolState::missing_devids` is empty.
+     * Why it exists: `remove-missing` must key the no-missing wording on
+     * `missing_count == 0`, not `missing_devids.is_empty()`. Hot-unplugged
+     * mapper-present devices can yield `missing_count > 0` while btrfs has
+     * not emitted a `MISSING` sentinel devid.
+     * Scenario: 2-device pool where btrfs still lists both mapper paths, but
+     * `cryptsetup status braid-disk2` reports `device: (null)`. Operator tries
+     * `braid remove-missing --missing-id 2 --dry-run`.
+     */
+    #[test]
+    fn plan_remove_missing_null_underlying_empty_missing_devids_not_no_missing() {
+        let (_state_tmp, state_paths) = test_paths(&[
+            ("disk1", "/dev/disk/by-id/virtio-disk1", Some(1)),
+            ("disk2", "/dev/disk/by-id/virtio-disk2", Some(2)),
+        ]);
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.json");
+        let config_json = serde_json::json!({ "mount_point": "/mnt/storage" });
+        std::fs::write(&config_path, serde_json::to_vec(&config_json).unwrap()).unwrap();
+
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let report = plan_remove_missing(
+            &NullUnderlyingPoolRunner,
+            &MockFs,
+            &RemoveMissingParams {
+                config_path: &config_path,
+                missing_id: 2,
+                dry_run: true,
+                yes: true,
+                progress: crate::progress::ProgressOutput::Off,
+                paths: &state_paths,
+                sleep_inhibitor: &inhibitor,
+                sleeper: &crate::progress::NoopSleeper,
+            },
+        );
+
+        match &report.result {
+            Err(RemoveMissingError::Validation(msg)) => {
+                assert!(
+                    !msg.contains("no missing devices detected"),
+                    "null-underlying pool must not use no-missing wording: {msg}"
+                );
+                assert_eq!(
+                    msg,
+                    "devid 2 is not a device in this pool. Use 'braid status' to see device IDs.",
+                );
+            }
+            Err(other) => panic!("expected Validation, got: {other:?}"),
+            Ok(_) => panic!("expected Err(Validation), got Ok(_)"),
+        }
     }
 }
