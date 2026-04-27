@@ -49,6 +49,40 @@ pub struct CheckResult {
     pub message: String,
 }
 
+impl CheckResult {
+    fn ok(name: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            status: CheckStatus::Ok,
+            message: message.into(),
+        }
+    }
+
+    fn warn(name: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            status: CheckStatus::Warn,
+            message: message.into(),
+        }
+    }
+
+    fn fail(name: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            status: CheckStatus::Fail,
+            message: message.into(),
+        }
+    }
+
+    fn skip(name: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            status: CheckStatus::Skip,
+            message: message.into(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DoctorReport {
     pub status: CheckStatus,
@@ -101,28 +135,22 @@ fn check_config_file<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> CheckR
     let raw = match std::fs::read_to_string(path) {
         Ok(r) => r,
         Err(e) => {
-            return CheckResult {
-                name: "config_file".into(),
-                status: CheckStatus::Fail,
-                message: format!("{}: {e}", path.display()),
-            };
+            return CheckResult::fail("config_file", format!("{}: {e}", path.display()));
         }
     };
 
     match serde_json::from_str::<serde_json::Value>(&raw) {
         Ok(v) => {
             ctx.config_value = Some(v);
-            CheckResult {
-                name: "config_file".into(),
-                status: CheckStatus::Ok,
-                message: format!("{} exists and is valid JSON", path.display()),
-            }
+            CheckResult::ok(
+                "config_file",
+                format!("{} exists and is valid JSON", path.display()),
+            )
         }
-        Err(e) => CheckResult {
-            name: "config_file".into(),
-            status: CheckStatus::Fail,
-            message: format!("{}: invalid JSON: {e}", path.display()),
-        },
+        Err(e) => CheckResult::fail(
+            "config_file",
+            format!("{}: invalid JSON: {e}", path.display()),
+        ),
     }
 }
 
@@ -130,48 +158,31 @@ fn check_config_schema<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> Chec
     let value = match &ctx.config_value {
         Some(v) => v.clone(),
         None => {
-            return CheckResult {
-                name: "config_schema".into(),
-                status: CheckStatus::Skip,
-                message: "skipped (config file not available)".into(),
-            };
+            return CheckResult::skip("config_schema", "skipped (config file not available)");
         }
     };
 
     let cfg: Config = match serde_json::from_value(value) {
         Ok(c) => c,
         Err(e) => {
-            return CheckResult {
-                name: "config_schema".into(),
-                status: CheckStatus::Fail,
-                message: format!("failed to deserialize config: {e}"),
-            };
+            return CheckResult::fail(
+                "config_schema",
+                format!("failed to deserialize config: {e}"),
+            );
         }
     };
 
     ctx.config = Some(cfg);
-    CheckResult {
-        name: "config_schema".into(),
-        status: CheckStatus::Ok,
-        message: "required fields present and valid".into(),
-    }
+    CheckResult::ok("config_schema", "required fields present and valid")
 }
 
 fn check_config_permissions<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> CheckResult {
     if ctx.config_value.is_none() {
-        return CheckResult {
-            name: "config_permissions".into(),
-            status: CheckStatus::Skip,
-            message: "skipped (config file not available)".into(),
-        };
+        return CheckResult::skip("config_permissions", "skipped (config file not available)");
     }
 
     if ctx.config_path.as_os_str() != std::ffi::OsStr::new(DEFAULT_CONFIG_PATH) {
-        return CheckResult {
-            name: "config_permissions".into(),
-            status: CheckStatus::Skip,
-            message: "skipped (custom config path)".into(),
-        };
+        return CheckResult::skip("config_permissions", "skipped (custom config path)");
     }
 
     check_config_permissions_for_path(&ctx.config_path)
@@ -181,11 +192,10 @@ fn check_config_permissions_for_path(path: &Path) -> CheckResult {
     let meta = match std::fs::metadata(path) {
         Ok(m) => m,
         Err(e) => {
-            return CheckResult {
-                name: "config_permissions".into(),
-                status: CheckStatus::Warn,
-                message: format!("could not stat {}: {e}", path.display()),
-            };
+            return CheckResult::warn(
+                "config_permissions",
+                format!("could not stat {}: {e}", path.display()),
+            );
         }
     };
 
@@ -207,17 +217,15 @@ fn check_config_permissions_for_path(path: &Path) -> CheckResult {
     }
 
     if warnings.is_empty() {
-        CheckResult {
-            name: "config_permissions".into(),
-            status: CheckStatus::Ok,
-            message: format!("{} permissions ok", path.display()),
-        }
+        CheckResult::ok(
+            "config_permissions",
+            format!("{} permissions ok", path.display()),
+        )
     } else {
-        CheckResult {
-            name: "config_permissions".into(),
-            status: CheckStatus::Warn,
-            message: format!("{}: {}", path.display(), warnings.join(", ")),
-        }
+        CheckResult::warn(
+            "config_permissions",
+            format!("{}: {}", path.display(), warnings.join(", ")),
+        )
     }
 }
 
@@ -323,11 +331,10 @@ fn summarize_declared_disks(classifications: &[(String, String, DiskState)]) -> 
         + header_damaged.len();
 
     if problem_count == 0 {
-        return CheckResult {
-            name: "declared_disks".into(),
-            status: CheckStatus::Ok,
-            message: format!("all {total} declared disk(s) present"),
-        };
+        return CheckResult::ok(
+            "declared_disks",
+            format!("all {total} declared disk(s) present"),
+        );
     }
 
     let mut parts: Vec<String> = Vec::new();
@@ -367,34 +374,28 @@ fn summarize_declared_disks(classifications: &[(String, String, DiskState)]) -> 
         ));
     }
 
-    CheckResult {
-        name: "declared_disks".into(),
-        status: CheckStatus::Warn,
-        message: format!(
+    CheckResult::warn(
+        "declared_disks",
+        format!(
             "{}/{} disk(s) have problems: {}",
             problem_count,
             total,
             parts.join("; ")
         ),
-    }
+    )
 }
 
 fn check_declared_disks<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> CheckResult {
     let pool_membership = match membership::load_membership(ctx.paths) {
         Ok(m) => m,
         Err(membership::MembershipError::NotFound(_)) => {
-            return CheckResult {
-                name: "declared_disks".into(),
-                status: CheckStatus::Skip,
-                message: "skipped (no pool membership file)".into(),
-            };
+            return CheckResult::skip("declared_disks", "skipped (no pool membership file)");
         }
         Err(e) => {
-            return CheckResult {
-                name: "declared_disks".into(),
-                status: CheckStatus::Warn,
-                message: format!("could not load pool membership: {e}"),
-            };
+            return CheckResult::warn(
+                "declared_disks",
+                format!("could not load pool membership: {e}"),
+            );
         }
     };
 
@@ -478,11 +479,7 @@ fn check_profile_mismatch<R: CommandRunner>(
     type_label: &str,
 ) -> CheckResult {
     if ctx.config.is_none() {
-        return CheckResult {
-            name: check_name.into(),
-            status: CheckStatus::Skip,
-            message: "skipped (config not available)".into(),
-        };
+        return CheckResult::skip(check_name, "skipped (config not available)");
     }
 
     ensure_df_snapshot(ctx);
@@ -494,16 +491,11 @@ fn check_profile_mismatch<R: CommandRunner>(
         .expect("ensure_df_snapshot sets df_snapshot when config is present");
 
     match df_snapshot {
-        DfSnapshot::NotMounted => CheckResult {
-            name: check_name.into(),
-            status: CheckStatus::Skip,
-            message: "skipped (pool not mounted)".into(),
-        },
-        DfSnapshot::Error(e) => CheckResult {
-            name: check_name.into(),
-            status: CheckStatus::Warn,
-            message: format!("could not inspect {type_label} profiles: {e}"),
-        },
+        DfSnapshot::NotMounted => CheckResult::skip(check_name, "skipped (pool not mounted)"),
+        DfSnapshot::Error(e) => CheckResult::warn(
+            check_name,
+            format!("could not inspect {type_label} profiles: {e}"),
+        ),
         DfSnapshot::Ok(df) => {
             let entries: Vec<_> = df.entries.iter().filter(|e| e.bg_type == bg_type).collect();
 
@@ -516,11 +508,7 @@ fn check_profile_mismatch<R: CommandRunner>(
                     .next()
                     .map(|p| p.to_string())
                     .unwrap_or_else(|| "unknown".into());
-                CheckResult {
-                    name: check_name.into(),
-                    status: CheckStatus::Ok,
-                    message: format!("{type_label} profile: {profile_name}"),
-                }
+                CheckResult::ok(check_name, format!("{type_label} profile: {profile_name}"))
             } else {
                 let mut parts: Vec<String> = Vec::new();
                 for entry in &entries {
@@ -531,14 +519,13 @@ fn check_profile_mismatch<R: CommandRunner>(
                         format_bytes(entry.bg_total),
                     ));
                 }
-                CheckResult {
-                    name: check_name.into(),
-                    status: CheckStatus::Warn,
-                    message: format!(
+                CheckResult::warn(
+                    check_name,
+                    format!(
                         "mixed {type_label} profiles ({}); run: btrfs balance start -dconvert=raid1,soft -mconvert=raid1,soft {mount_point}",
                         parts.join(", "),
                     ),
-                }
+                )
             }
         }
     }
@@ -546,48 +533,36 @@ fn check_profile_mismatch<R: CommandRunner>(
 
 fn check_pool_missing_devices<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> CheckResult {
     if ctx.config.is_none() {
-        return CheckResult {
-            name: "pool_missing_devices".into(),
-            status: CheckStatus::Skip,
-            message: "skipped (config not available)".into(),
-        };
+        return CheckResult::skip("pool_missing_devices", "skipped (config not available)");
     }
 
     if ensure_mountpoint_is_mounted(ctx) != Some(true) {
-        return CheckResult {
-            name: "pool_missing_devices".into(),
-            status: CheckStatus::Skip,
-            message: "skipped (pool not mounted)".into(),
-        };
+        return CheckResult::skip("pool_missing_devices", "skipped (pool not mounted)");
     }
 
     let mount_point = ctx.config.as_ref().unwrap().mount_point().clone();
 
     match preflight::probe_missing_devids(ctx.runner, &mount_point) {
-        Ok(missing) if missing.is_empty() => CheckResult {
-            name: "pool_missing_devices".into(),
-            status: CheckStatus::Ok,
-            message: "no missing devices".into(),
-        },
+        Ok(missing) if missing.is_empty() => {
+            CheckResult::ok("pool_missing_devices", "no missing devices")
+        }
         Ok(missing) => {
             let devids: Vec<String> = missing.iter().map(|d| d.to_string()).collect();
-            CheckResult {
-                name: "pool_missing_devices".into(),
-                status: CheckStatus::Warn,
-                message: format!(
+            CheckResult::warn(
+                "pool_missing_devices",
+                format!(
                     "pool has {} missing device{} (devid{}: {}); replace with: braid replace --old <disk> --new <disk> --missing-id <devid>",
                     missing.len(),
                     if missing.len() == 1 { "" } else { "s" },
                     if missing.len() == 1 { "" } else { "s" },
                     devids.join(", "),
                 ),
-            }
+            )
         }
-        Err(e) => CheckResult {
-            name: "pool_missing_devices".into(),
-            status: CheckStatus::Warn,
-            message: format!("could not probe for missing devices: {e}"),
-        },
+        Err(e) => CheckResult::warn(
+            "pool_missing_devices",
+            format!("could not probe for missing devices: {e}"),
+        ),
     }
 }
 
@@ -648,22 +623,14 @@ fn check_beep_path<R: CommandRunner>(
 /// when config is unavailable; otherwise skips when UPS is not configured or
 /// disabled.
 fn check_ups_daemon_up<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> CheckResult {
-    let name = "ups_daemon".to_string();
+    let name = "ups_daemon";
     let Some(config) = ctx.config.as_ref() else {
-        return CheckResult {
-            name,
-            status: CheckStatus::Skip,
-            message: "skipped (config not available)".into(),
-        };
+        return CheckResult::skip(name, "skipped (config not available)");
     };
     let ups_cfg = match config.ups() {
         Some(u) if u.enable => u,
         _ => {
-            return CheckResult {
-                name,
-                status: CheckStatus::Skip,
-                message: "skipped (braid.ups not enabled)".into(),
-            };
+            return CheckResult::skip(name, "skipped (braid.ups not enabled)");
         }
     };
     let raw = match ctx.runner.run(&CmdRequest::UpscQuery {
@@ -671,40 +638,33 @@ fn check_ups_daemon_up<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> Chec
     }) {
         Ok(r) => r,
         Err(e) => {
-            return CheckResult {
+            return CheckResult::fail(
                 name,
-                status: CheckStatus::Fail,
-                message: format!("upsc failed to spawn: {e} -- is pkgs.nut on PATH?"),
-            };
+                format!("upsc failed to spawn: {e} -- is pkgs.nut on PATH?"),
+            );
         }
     };
     match crate::parse::parse_upsc(&raw) {
         Ok(out) => {
             if out.status_flags.is_empty() {
-                CheckResult {
+                CheckResult::warn(
                     name,
-                    status: CheckStatus::Warn,
-                    message: format!(
+                    format!(
                         "upsc {} responded but ups.status is empty -- driver may still be starting",
                         ups_cfg.name
                     ),
-                }
+                )
             } else {
-                CheckResult {
-                    name,
-                    status: CheckStatus::Ok,
-                    message: format!("upsc {} reachable", ups_cfg.name),
-                }
+                CheckResult::ok(name, format!("upsc {} reachable", ups_cfg.name))
             }
         }
-        Err(_) => CheckResult {
+        Err(_) => CheckResult::warn(
             name,
-            status: CheckStatus::Warn,
-            message: format!(
+            format!(
                 "upsc {} unreachable -- check 'systemctl status upsd.service'",
                 ups_cfg.name
             ),
-        },
+        ),
     }
 }
 
@@ -742,64 +702,41 @@ fn read_braid_online_active_state<R: CommandRunner>(
 fn check_braid_online_active_when_mounted<R: CommandRunner>(
     ctx: &mut DoctorContext<'_, R>,
 ) -> CheckResult {
-    let fail_result = |name: String, state: &str| CheckResult {
-        name,
-        status: CheckStatus::Fail,
-        message: format!(
-            "braid-online.service is {state} -- UPS shutdown will not unmount the pool. \
-             Run `systemctl start braid-online.service` or re-run `braid unlock`."
-        ),
-    };
-    let warn_result = |name: String| {
-        CheckResult {
-            name,
-            status: CheckStatus::Warn,
-            message: "braid-online.service is activating -- UPS shutdown hook is not confirmed yet; re-run braid doctor shortly"
-                .into(),
-        }
-    };
-
-    let name = "braid_online_active".to_string();
+    let name = "braid_online_active";
     let Some(config) = ctx.config.as_ref() else {
-        return CheckResult {
-            name,
-            status: CheckStatus::Skip,
-            message: "skipped (config not available)".into(),
-        };
+        return CheckResult::skip(name, "skipped (config not available)");
     };
     if !config.ups().is_some_and(|u| u.enable) {
-        return CheckResult {
-            name,
-            status: CheckStatus::Skip,
-            message: "skipped (braid.ups not enabled)".into(),
-        };
+        return CheckResult::skip(name, "skipped (braid.ups not enabled)");
     }
     let mount_point = config.mount_point().clone();
     if !probe_mountpoint_is_mounted(ctx.runner, &mount_point) {
-        return CheckResult {
+        return CheckResult::skip(
             name,
-            status: CheckStatus::Skip,
-            message: "skipped (pool not mounted -- braid-online only matters while online)".into(),
-        };
+            "skipped (pool not mounted -- braid-online only matters while online)",
+        );
     }
     let state = match read_braid_online_active_state(ctx.runner) {
         Ok(state) => state,
         Err(e) => {
-            return CheckResult {
-                name,
-                status: CheckStatus::Fail,
-                message: format!("systemctl spawn failed: {e}"),
-            };
+            return CheckResult::fail(name, format!("systemctl spawn failed: {e}"));
         }
     };
     match classify_braid_online_active_state(&state) {
-        BraidOnlineActiveState::OkSettled => CheckResult {
+        BraidOnlineActiveState::OkSettled => {
+            CheckResult::ok(name, format!("braid-online.service is {state}"))
+        }
+        BraidOnlineActiveState::Activating => CheckResult::warn(
             name,
-            status: CheckStatus::Ok,
-            message: format!("braid-online.service is {state}"),
-        },
-        BraidOnlineActiveState::Activating => warn_result(name),
-        BraidOnlineActiveState::Fail => fail_result(name, &state),
+            "braid-online.service is activating -- UPS shutdown hook is not confirmed yet; re-run braid doctor shortly",
+        ),
+        BraidOnlineActiveState::Fail => CheckResult::fail(
+            name,
+            format!(
+                "braid-online.service is {state} -- UPS shutdown will not unmount the pool. \
+                 Run `systemctl start braid-online.service` or re-run `braid unlock`."
+            ),
+        ),
     }
 }
 
@@ -808,18 +745,14 @@ fn check_beep_path_inner<R: CommandRunner>(
     notifier_path: &Path,
     options: BeepCheckOptions,
 ) -> CheckResult {
-    let name = "beep_path".to_string();
+    let name = "beep_path";
 
     // 1. Read the notifier config the NixOS module wrote. Absent -> Skip.
     //    A bare `braid` install (no monitor module imported) won't have it.
     let raw = match std::fs::read_to_string(notifier_path) {
         Ok(s) => s,
         Err(_) => {
-            return CheckResult {
-                name,
-                status: CheckStatus::Skip,
-                message: "skipped (braid monitor not configured)".into(),
-            };
+            return CheckResult::skip(name, "skipped (braid monitor not configured)");
         }
     };
 
@@ -827,11 +760,7 @@ fn check_beep_path_inner<R: CommandRunner>(
     let cfg: NotifierConfig = match serde_json::from_str(&raw) {
         Ok(c) => c,
         Err(e) => {
-            return CheckResult {
-                name,
-                status: CheckStatus::Fail,
-                message: format!("{}: malformed: {e}", notifier_path.display()),
-            };
+            return CheckResult::fail(name, format!("{}: malformed: {e}", notifier_path.display()));
         }
     };
 
@@ -839,11 +768,7 @@ fn check_beep_path_inner<R: CommandRunner>(
     let probe_path = match cfg.beep_probe_path {
         Some(p) => p,
         None => {
-            return CheckResult {
-                name,
-                status: CheckStatus::Skip,
-                message: "skipped (beep monitoring disabled)".into(),
-            };
+            return CheckResult::skip(name, "skipped (beep monitoring disabled)");
         }
     };
 
@@ -856,11 +781,7 @@ fn check_beep_path_inner<R: CommandRunner>(
     //    output mode. The is_root flag is computed by the public wrapper
     //    above so unit tests can deterministically exercise both branches.
     if !options.is_root {
-        return CheckResult {
-            name,
-            status: CheckStatus::Skip,
-            message: "skipped (requires root to play the alert test beep)".into(),
-        };
+        return CheckResult::skip(name, "skipped (requires root to play the alert test beep)");
     }
 
     // 5. JSON mode is for programmatic consumption -- emitting an audible
@@ -868,22 +789,19 @@ fn check_beep_path_inner<R: CommandRunner>(
     //    appears in the report (as Skip) so scripts auditing doctor output
     //    can see it; the wrapper is simply never invoked.
     if options.json_output {
-        return CheckResult {
+        return CheckResult::skip(
             name,
-            status: CheckStatus::Skip,
-            message: "skipped in --json mode -- rerun with --beep without --json to play the alert test beep"
-                .into(),
-        };
+            "skipped in --json mode -- rerun with --beep without --json to play the alert test beep",
+        );
     }
 
     // 6. Plain doctor confirms beep monitoring is configured without playing
     //    sound. The runner is only invoked for explicit --beep.
     if !options.play_beep {
-        return CheckResult {
+        return CheckResult::skip(
             name,
-            status: CheckStatus::Skip,
-            message: "skipped (pass --beep to play the audible alert test beep)".into(),
-        };
+            "skipped (pass --beep to play the audible alert test beep)",
+        );
     }
 
     // 7. Run the canonical wrapper. This PLAYS the real short alert beep
@@ -894,30 +812,24 @@ fn check_beep_path_inner<R: CommandRunner>(
         .runner
         .run(&CmdRequest::BraidBeepProbe { path: probe_path })
     {
-        Ok(out) if out.exit_status == 0 => CheckResult {
+        Ok(out) if out.exit_status == 0 => CheckResult::ok(
             name,
-            status: CheckStatus::Ok,
-            message: "alert test beep command succeeded -- you should have heard a 1 kHz, 500 ms disk-alert beep"
-                .into(),
-        },
-        Ok(out) => CheckResult {
+            "alert test beep command succeeded -- you should have heard a 1 kHz, 500 ms disk-alert beep",
+        ),
+        Ok(out) => CheckResult::fail(
             name,
-            status: CheckStatus::Fail,
-            message: format!(
+            format!(
                 "could not play alert test beep (braid-beep-probe exited {}) \
                  -- speaker likely broken: missing pcspkr device, evdev \
                  permissions wrong, or kmod blacklist still active: {}",
                 out.exit_status,
                 out.stderr.trim()
             ),
-        },
-        Err(e) => CheckResult {
+        ),
+        Err(e) => CheckResult::fail(
             name,
-            status: CheckStatus::Fail,
-            message: format!(
-                "could not play alert test beep (braid-beep-probe failed to spawn): {e}"
-            ),
-        },
+            format!("could not play alert test beep (braid-beep-probe failed to spawn): {e}"),
+        ),
     }
 }
 
