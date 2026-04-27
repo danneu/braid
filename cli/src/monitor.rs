@@ -47,13 +47,30 @@ pub fn cmd_monitor<R: CommandRunner>(
     mount_point: &MountPoint,
     paths: &StatePaths,
 ) -> MonitorResult {
-    // 1. Check if pool is mounted
+    // 1. Check if pool is mounted.
+    //
+    // Exhaustive over every ProbeError variant on purpose: a future variant
+    // must produce a "non-exhaustive patterns" compile error here so the
+    // reviewer is forced to classify it as either offline or fail-closed
+    // alert. monitor is the headless surface, so the wrong default would
+    // propagate silently into operator-visible behavior.
     let pool = match probe_pool(runner, mount_point) {
         Ok(p) => p,
-        Err(ProbeError::NotBtrfs { .. }) => {
-            return MonitorResult::PoolOffline;
-        }
-        Err(e) => return latch_computation_error(e.to_string(), paths),
+        // Mount target holds a non-btrfs filesystem -- our pool is not here.
+        // Treat as offline; no fail-closed beep needed.
+        Err(ProbeError::NotBtrfs { .. }) => return MonitorResult::PoolOffline,
+        // All remaining variants describe indeterminate pool state -- tooling
+        // breakage (Cmd/Parse), pool show internally inconsistent (PoolDevice),
+        // or LUKS-side mismatch (UnsupportedLuksVersion / MapperConflict, both
+        // unreachable from probe_pool today but listed for the gate). Fail
+        // closed per ADR 014: latch ComputationError so the wrapper beeps.
+        Err(
+            e @ (ProbeError::Cmd(_)
+            | ProbeError::Parse(_)
+            | ProbeError::PoolDevice { .. }
+            | ProbeError::UnsupportedLuksVersion { .. }
+            | ProbeError::MapperConflict { .. }),
+        ) => return latch_computation_error(e.to_string(), paths),
     };
 
     if !pool.mounted {
@@ -232,7 +249,8 @@ mod tests {
     /// Override response for one CmdRequest variant; everything else uses the
     /// healthy-2disk default. Each entry is matched by variant + key fields.
     enum Override {
-        FindmntErr(CmdError),
+        FindmntResult(Result<RawCommandOutput, CmdError>),
+        BtrfsShowPayload(String),
         StatsResult(Result<RawCommandOutput, CmdError>),
     }
 
@@ -260,11 +278,21 @@ mod tests {
         // Take the override only if it matches the given request shape.
         // Avoids consuming a StatsResult override on an earlier FindmntJson call
         // (or vice versa).
-        fn take_findmnt_err(&self) -> Option<CmdError> {
+        fn take_findmnt_result(&self) -> Option<Result<RawCommandOutput, CmdError>> {
             let mut guard = self.override_op.lock().unwrap();
-            if matches!(*guard, Some(Override::FindmntErr(_))) {
-                if let Some(Override::FindmntErr(e)) = guard.take() {
-                    return Some(e);
+            if matches!(*guard, Some(Override::FindmntResult(_))) {
+                if let Some(Override::FindmntResult(r)) = guard.take() {
+                    return Some(r);
+                }
+            }
+            None
+        }
+
+        fn take_btrfs_show_payload(&self) -> Option<String> {
+            let mut guard = self.override_op.lock().unwrap();
+            if matches!(*guard, Some(Override::BtrfsShowPayload(_))) {
+                if let Some(Override::BtrfsShowPayload(s)) = guard.take() {
+                    return Some(s);
                 }
             }
             None
@@ -285,12 +313,17 @@ mod tests {
         fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
             match request {
                 CmdRequest::FindmntJson { .. } => {
-                    if let Some(e) = self.take_findmnt_err() {
-                        return Err(e);
+                    if let Some(r) = self.take_findmnt_result() {
+                        return r;
                     }
                     Ok(ok_output(FINDMNT_BTRFS))
                 }
-                CmdRequest::BtrfsFilesystemShow { .. } => Ok(ok_output(BTRFS_SHOW_2DISK)),
+                CmdRequest::BtrfsFilesystemShow { .. } => {
+                    if let Some(payload) = self.take_btrfs_show_payload() {
+                        return Ok(ok_output(&payload));
+                    }
+                    Ok(ok_output(BTRFS_SHOW_2DISK))
+                }
                 CmdRequest::CryptsetupStatus { mapper } => match mapper.as_str() {
                     "braid-vdb" => Ok(ok_output(CRYPTSETUP_STATUS_VDB)),
                     "braid-vdc" => Ok(ok_output(CRYPTSETUP_STATUS_VDC)),
@@ -410,8 +443,8 @@ mod tests {
     #[test]
     fn probe_error_returns_alert_with_latched_computation_error() {
         let (_dir, paths) = fresh_paths();
-        let runner = MonitorTestRunner::with_override(Override::FindmntErr(CmdError::Failed(
-            "findmnt: spawn failed".into(),
+        let runner = MonitorTestRunner::with_override(Override::FindmntResult(Err(
+            CmdError::Failed("findmnt: spawn failed".into()),
         )));
 
         let result = cmd_monitor(&runner, &mp(), &paths);
@@ -470,5 +503,118 @@ mod tests {
                 "{label}: alert latch must be written"
             );
         }
+    }
+
+    /*
+     * Intent: When findmnt reports the mount target is held by a non-btrfs
+     * filesystem, cmd_monitor must return MonitorResult::PoolOffline and
+     * leave no alert latch behind.
+     *
+     * Why it exists: pins the only non-fail-closed arm of the exhaustive
+     * ProbeError match. If a future refactor silently flips NotBtrfs to the
+     * fail-closed branch, monitor would start beeping every time a non-btrfs
+     * filesystem (e.g. a stale ext4 partition) is mounted at the configured
+     * mount point -- a false-alarm regression for the headless surface.
+     *
+     * Scenario: the operator's mount target /mnt/storage is currently held
+     * by an ext4 filesystem (perhaps left over from an OS reinstall, or
+     * because someone mounted the wrong thing). probe_pool returns
+     * ProbeError::NotBtrfs.
+     */
+    #[test]
+    fn monitor_classifies_non_btrfs_mount_as_offline() {
+        let (_dir, paths) = fresh_paths();
+        let findmnt_ext4 = r#"{
+           "filesystems": [
+              {"target": "/mnt/storage", "source": "/dev/sda1", "fstype": "ext4"}
+           ]
+        }"#;
+        let runner =
+            MonitorTestRunner::with_override(Override::FindmntResult(Ok(ok_output(findmnt_ext4))));
+
+        let result = cmd_monitor(&runner, &mp(), &paths);
+
+        assert_eq!(result, MonitorResult::PoolOffline);
+        assert!(
+            !paths.alert_latch_json().exists(),
+            "PoolOffline must not write an alert latch"
+        );
+    }
+
+    /*
+     * Intent: When findmnt exits non-zero with non-empty stderr,
+     * parse_findmnt_json maps that to ParseError::CommandFailed,
+     * probe_pool wraps it as ProbeError::Parse, and cmd_monitor must
+     * latch a ComputationError and return MonitorResult::Alert.
+     *
+     * Why it exists: the existing probe_error_returns_alert_... test
+     * covers ProbeError::Cmd (spawn/signal failure -- Err(CmdError) at
+     * the runner boundary). This test covers the second reachable arm of
+     * the catch-all, ProbeError::Parse, which is wired through a
+     * RawCommandOutput-shaped failure (non-zero exit + stderr) rather
+     * than a CmdError. Both arms must be pinned to fail-closed.
+     *
+     * Scenario: findmnt exits 1 with a stderr message (e.g. mount table
+     * inaccessible). The runner returns Ok(RawCommandOutput { exit_status:
+     * 1, stderr: "<msg>", ... }), parse_findmnt_json sees non-zero exit +
+     * non-empty stderr (cli/src/parse/findmnt.rs:30-42) and returns
+     * ParseError::CommandFailed.
+     */
+    #[test]
+    fn probe_parse_failure_returns_alert_with_latched_computation_error() {
+        let (_dir, paths) = fresh_paths();
+        let findmnt_failure = RawCommandOutput {
+            cmd: "findmnt".to_owned(),
+            stdout: String::new(),
+            stderr: "findmnt: kernel mount table inaccessible\n".to_owned(),
+            exit_status: 1,
+        };
+        let runner = MonitorTestRunner::with_override(Override::FindmntResult(Ok(findmnt_failure)));
+
+        let result = cmd_monitor(&runner, &mp(), &paths);
+        assert_single_computation_error(&result);
+
+        assert!(
+            paths.alert_latch_json().exists(),
+            "alert latch must be written on ProbeError::Parse"
+        );
+    }
+
+    /*
+     * Intent: When btrfs filesystem show reports a device path that is
+     * not /dev/mapper/-prefixed, probe_pool returns ProbeError::PoolDevice;
+     * cmd_monitor must latch a ComputationError and return
+     * MonitorResult::Alert.
+     *
+     * Why it exists: PoolDevice is the third reachable variant from
+     * probe_pool (alongside Cmd and Parse). Without this test, a future
+     * edit that wrongly maps PoolDevice to PoolOffline would still compile
+     * (the match remains exhaustive) and no other test would catch the
+     * regression -- breaking the fail-closed contract for the
+     * non-/dev/mapper path / no-FSID / inactive-mapper class of pool-show
+     * inconsistencies (cli/src/probe.rs:259, :270, :287).
+     *
+     * Scenario: btrfs filesystem show reports a single-disk pool whose
+     * device path is /dev/sda1 (raw block device, no LUKS mapper).
+     * probe_pool's invariant -- every pool device must live under
+     * /dev/mapper/ -- fails at probe.rs:270.
+     */
+    #[test]
+    fn probe_pool_device_failure_returns_alert_with_latched_computation_error() {
+        let (_dir, paths) = fresh_paths();
+        let btrfs_show_non_mapper = "Label: none  uuid: de2b8517-f972-45fc-b121-3e160c8ea432\n\
+            \tTotal devices 1 FS bytes used 16.17MiB\n\
+            \tdevid    1 size 1008.00MiB used 209.50MiB path /dev/sda1\n";
+        let runner = MonitorTestRunner::with_override(Override::BtrfsShowPayload(
+            btrfs_show_non_mapper.to_owned(),
+        ));
+
+        let result = cmd_monitor(&runner, &mp(), &paths);
+        assert_single_computation_error(&result);
+
+        assert!(
+            paths.alert_latch_json().exists(),
+            "alert latch must be written on ProbeError::PoolDevice"
+        );
     }
 }
