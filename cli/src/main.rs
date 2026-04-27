@@ -49,7 +49,7 @@ enum Commands {
     /// no-op for `Never`/`Completed`. Hidden from `braid --help`.
     #[command(hide = true)]
     ScrubCancel(ScrubCancelArgs),
-    /// Check disk health: exit 0 = ok/offline, exit 1 = alert, exit 2 = error
+    /// Check disk health: exit 0 = ok/offline, exit 1 = alert (incl. probe/compute failure latched as ComputationError), exit 2 = setup error (config)
     Monitor,
     /// Acknowledge current alerts and silence notifications
     Ack,
@@ -588,18 +588,14 @@ fn main() {
             };
             let runner = RealRunner;
             match braid_cli::monitor::cmd_monitor(&runner, config.mount_point(), &paths) {
-                Ok(braid_cli::monitor::MonitorResult::PoolOffline) => {
+                braid_cli::monitor::MonitorResult::PoolOffline => {
                     std::process::exit(0);
                 }
-                Ok(braid_cli::monitor::MonitorResult::Ok) => {
+                braid_cli::monitor::MonitorResult::Ok => {
                     std::process::exit(0);
                 }
-                Ok(braid_cli::monitor::MonitorResult::Alert(_)) => {
+                braid_cli::monitor::MonitorResult::Alert(_) => {
                     std::process::exit(1);
-                }
-                Err(e) => {
-                    print_cli_error(&e.to_string());
-                    std::process::exit(2);
                 }
             }
         }

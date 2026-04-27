@@ -55,9 +55,11 @@ On a new machine, acked state doesn't exist — everything evaluates fresh.
 Checks state and returns an exit code. Does not start/stop services. The systemd wrapper starts the beeper on exit 1.
 
 Exit codes:
-- **0** — ok or pool offline with no active alerts
-- **1** — alert active (disk health issue detected)
-- **2** — monitor execution error (config, probe, parse, or unmapped device)
+- **0** -- ok or pool offline with no active alerts
+- **1** -- alert active (disk health issue OR indeterminate state latched as `ComputationError` -- e.g. probe failure, parse failure, unmapped device)
+- **2** -- pre-monitor setup failure (config unreadable). Reserved for "could not even attempt to detect"; never emitted by `cmd_monitor` itself.
+
+Fail closed: any failure inside `cmd_monitor` that leaves pool state indeterminate latches a `ComputationError` cause and reports exit 1, so the systemd wrapper starts the beeper. Exit 2 means the monitor never ran -- a beep would be meaningless because there is no `AlertState` to report.
 
 Self-heals stale ack state (resets `missing_acked` for now-present devids after drive replacement).
 
