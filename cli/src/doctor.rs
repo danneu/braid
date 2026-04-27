@@ -926,18 +926,14 @@ fn check_beep_path_inner<R: CommandRunner>(
 // ---------------------------------------------------------------------------
 
 fn overall_status(checks: &[CheckResult]) -> CheckStatus {
-    let mut worst = CheckStatus::Ok;
-    for c in checks {
-        worst = match (worst, c.status) {
-            (_, CheckStatus::Skip) => worst,
-            (CheckStatus::Fail, _) => CheckStatus::Fail,
-            (_, CheckStatus::Fail) => CheckStatus::Fail,
-            (CheckStatus::Warn, _) => CheckStatus::Warn,
-            (_, CheckStatus::Warn) => CheckStatus::Warn,
-            _ => worst,
-        };
+    let has = |s: CheckStatus| checks.iter().any(|c| c.status == s);
+    if has(CheckStatus::Fail) {
+        CheckStatus::Fail
+    } else if has(CheckStatus::Warn) {
+        CheckStatus::Warn
+    } else {
+        CheckStatus::Ok
     }
-    worst
 }
 
 pub fn run_doctor<R: CommandRunner>(
@@ -1311,6 +1307,20 @@ mod tests {
             CheckResult {
                 name: "a".into(),
                 status: CheckStatus::Ok,
+                message: "".into(),
+            },
+            CheckResult {
+                name: "b".into(),
+                status: CheckStatus::Skip,
+                message: "".into(),
+            },
+        ];
+        assert_eq!(overall_status(&checks), CheckStatus::Ok);
+
+        let checks = vec![
+            CheckResult {
+                name: "a".into(),
+                status: CheckStatus::Skip,
                 message: "".into(),
             },
             CheckResult {
