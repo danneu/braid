@@ -42,7 +42,7 @@ All mutating commands validate, write `pending-op.json` with pre/target membersh
 
 `pool.json` reflects committed btrfs membership, not necessarily completion of follow-up maintenance such as RAID1 rebalance or resize. While `pending-op.json` exists, `braid recover` is responsible for replaying or completing any owed post-mutation work before clearing the journal.
 
-For `add`, membership commits when `btrfs device add` returns success; the post-add RAID1 balance is follow-up maintenance. For `remove`, membership commits when `btrfs device remove` returns success; writing `pool.json` before that would be wrong because btrfs still owns the device.
+For `add`, membership commits when `btrfs device add` returns success; the post-add RAID1 balance is follow-up maintenance. For `remove`, membership commits when `btrfs device remove` returns success; writing `pool.json` before that would be wrong because btrfs still owns the device. For `remove-missing`, membership commits when `btrfs device remove <devid>` against the missing devid returns success; the post-remove soft balance that restores RAID1 redundancy for chunks created during degraded operation is follow-up maintenance. For `replace`, membership commits when `btrfs replace start -B` completes; the post-replace resize, and (for missing-path replacements that clear the last missing device) the soft balance, are follow-up maintenance.
 
 The journal provides crash safety: if braid crashes mid-operation, the journal triggers recovery mode on next invocation.
 

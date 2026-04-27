@@ -197,6 +197,13 @@ impl RemoveMissingPlan {
             &progress::StderrSink,
         )?;
 
+        // Membership committed by btrfs device remove. Persist before the
+        // post-remove soft balance; the journal still covers maintenance,
+        // so recovery can replay it if we crash before clear_journal.
+        membership::save_membership(&target_membership, params.paths).map_err(|e| {
+            RemoveMissingError::Validation(format!("failed to persist pool membership: {e}"))
+        })?;
+
         crate::pool::maybe_restore_raid1(
             runner,
             &self.mount_point,
@@ -205,10 +212,7 @@ impl RemoveMissingPlan {
         )
         .map_err(RemoveMissingError::Pool)?;
 
-        // Post-commit: write pool.json and clear journal only after the full operation succeeds.
-        membership::save_membership(&target_membership, params.paths).map_err(|e| {
-            RemoveMissingError::Validation(format!("failed to persist pool membership: {e}"))
-        })?;
+        // Maintenance complete -- safe to clear the journal.
         journal::clear_journal(params.paths)
             .map_err(|e| RemoveMissingError::Validation(e.to_string()))?;
 
@@ -1608,12 +1612,13 @@ mod tests {
 
     /*
      * Intent: pending-op.json survives when the btrfs device-remove phase
-     * fails before the post-remove soft balance can run.
+     * fails before save_membership can run.
      *
-     * Why it exists: remove-missing must not persist the target pool.json until
-     * the full mutation succeeds. If save_membership moved before
-     * pool_remove_device_using, this failure would leave pool.json reconciled
-     * without the btrfs operation having completed.
+     * Why it exists: remove-missing must not persist the target pool.json
+     * until `btrfs device remove <devid>` succeeds. If save_membership ran
+     * before pool_remove_device_using, this device-remove failure would
+     * leave pool.json reconciled without the btrfs operation having
+     * committed.
      *
      * Scenario: 3-disk NAS, one drive dies. Operator runs remove-missing, but
      * `btrfs device remove <devid>` fails mid-relocation with ENOSPC. The
@@ -1720,6 +1725,23 @@ mod tests {
         assert!(
             journal::load_journal(&state_paths).unwrap().is_some(),
             "pending-op.json must survive error exit so braid recover can reconcile"
+        );
+        // Membership commits at btrfs device remove; pool.json must reflect
+        // the removed missing disk even when the post-remove soft balance
+        // fails. Reverting save_membership back to its old position (after
+        // maybe_restore_raid1) makes these assertions fail.
+        let saved = membership::load_membership(&state_paths)
+            .expect("pool.json must exist after the membership commit");
+        assert!(
+            !saved.disks.contains_key("disk3"),
+            "removed missing disk must be gone from pool.json even when the \
+             post-remove soft balance fails (saved: {:?})",
+            saved.disks.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            saved.disks.contains_key("disk1") && saved.disks.contains_key("disk2"),
+            "surviving disks must remain in pool.json (saved: {:?})",
+            saved.disks.keys().collect::<Vec<_>>()
         );
         // The journal exists, which proves we got past journal::write_journal,
         // which proves the inhibitor was acquired exactly once on the way in.

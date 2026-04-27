@@ -179,16 +179,16 @@ pub fn parse_disk_spec(spec: &str) -> Result<(String, ByIdPath), MembershipError
     Ok((name.to_owned(), ByIdPath(by_id.to_owned())))
 }
 
-/// Enrich pool.json with metadata from the live pool state.
-/// Best-effort: logs warning on failure, never fails the caller.
-pub fn refresh_pool_metadata(pool: &PoolState, paths: &StatePaths) {
-    let mut membership = match load_membership(paths) {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!("Warning: failed to load membership for metadata refresh: {e}");
-            return;
-        }
-    };
+/// Populate `membership` entries with `luks_uuid`, `devid`, and `added_at`
+/// drawn from a freshly probed `PoolState`. Pure data transformation -- the
+/// caller owns the probe and the persistence so this module stays free of
+/// `CommandRunner` / `probe_pool` coupling.
+///
+/// Used by mutating commands (`add`, `replace`) immediately after the btrfs
+/// membership change commits, so `pool.json` records the new disk's
+/// kernel-assigned `devid` and observed `luks_uuid` before any post-mutation
+/// maintenance runs.
+pub(crate) fn enrich_from_pool_state(pool: &PoolState, membership: &mut PoolMembership) {
     for dev in &pool.devices {
         let Some(name) = config::name_from_mapper(&dev.mapper.0) else {
             continue;
@@ -201,6 +201,19 @@ pub fn refresh_pool_metadata(pool: &PoolState, paths: &StatePaths) {
             }
         }
     }
+}
+
+/// Enrich pool.json with metadata from the live pool state.
+/// Best-effort: logs warning on failure, never fails the caller.
+pub fn refresh_pool_metadata(pool: &PoolState, paths: &StatePaths) {
+    let mut membership = match load_membership(paths) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("Warning: failed to load membership for metadata refresh: {e}");
+            return;
+        }
+    };
+    enrich_from_pool_state(pool, &mut membership);
     if let Err(e) = save_membership(&membership, paths) {
         eprintln!("Warning: failed to save enriched membership: {e}");
     }

@@ -366,6 +366,19 @@ impl ReplacePlan {
         )?;
         eprintln!("Replace complete.");
 
+        // Membership committed by btrfs replace. Enrich with kernel-assigned
+        // devid + observed luks_uuid from a fresh probe, then persist before
+        // the post-replace cleanup, resize, and (missing-path) soft balance.
+        // The journal still covers maintenance, so recovery can replay it if
+        // we crash before clear_journal.
+        let mut target_membership = target_membership;
+        if let Ok(pool_after) = probe_pool(runner, config.mount_point()) {
+            membership::enrich_from_pool_state(&pool_after, &mut target_membership);
+        }
+        membership::save_membership(&target_membership, params.paths).map_err(|e| {
+            ReplaceError::Validation(format!("failed to persist pool membership: {e}"))
+        })?;
+
         // Live-only: best-effort close of old mapper. Runs BEFORE the resize
         // so a resize failure does not `?` out and strand the old dm slot
         // bound to the backing disk until `braid lock` or reboot. Missing has
@@ -403,25 +416,7 @@ impl ReplacePlan {
             .map_err(ReplaceError::Pool)?;
         }
 
-        // Post-commit: write pool.json with enriched metadata and clear journal.
-        let mut target_membership = target_membership;
-        if let Ok(pool_after) = probe_pool(runner, config.mount_point()) {
-            for dev in &pool_after.devices {
-                let Some(name) = crate::config::name_from_mapper(&dev.mapper.0) else {
-                    continue;
-                };
-                if let Some(member) = target_membership.disks.get_mut(name) {
-                    member.luks_uuid = Some(dev.luks_uuid.clone());
-                    member.devid = Some(dev.devid);
-                    if member.added_at.is_none() {
-                        member.added_at = Some(crate::util::now_iso());
-                    }
-                }
-            }
-        }
-        membership::save_membership(&target_membership, params.paths).map_err(|e| {
-            ReplaceError::Validation(format!("failed to persist pool membership: {e}"))
-        })?;
+        // Maintenance complete -- safe to clear the journal.
         journal::clear_journal(params.paths)
             .map_err(|e| ReplaceError::Validation(e.to_string()))?;
 
@@ -2236,6 +2231,12 @@ mod tests {
     /// bug where a resize `?` would skip the close).
     struct ResizeFailingLoggingRunner {
         log: std::sync::Arc<std::sync::Mutex<Vec<CmdRequest>>>,
+        // Flips when BtrfsReplaceStart returns success so subsequent
+        // BtrfsFilesystemShow probes report the post-replace topology.
+        // The post-replace early `save_membership` call probes here
+        // before persisting, and the test asserts the new disk is
+        // enriched -- which requires the probe to see disk3, not disk2.
+        replace_done: std::sync::Arc<std::sync::atomic::AtomicBool>,
     }
 
     impl CmdRunner2 for ResizeFailingLoggingRunner {
@@ -2246,10 +2247,19 @@ mod tests {
                     &format!("findmnt --json --mountpoint {mount_point}"),
                     r#"{"filesystems":[{"target":"/mnt/storage","source":"/dev/mapper/braid-disk1","fstype":"btrfs"}]}"#,
                 )),
-                CmdRequest::BtrfsFilesystemShow { mount_point } => Ok(mock_ok(
-                    &format!("btrfs filesystem show {mount_point}"),
-                    "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\tTotal devices 2 FS bytes used 16.17MiB\n\tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk2\n",
-                )),
+                CmdRequest::BtrfsFilesystemShow { mount_point } => {
+                    let show = if self.replace_done.load(std::sync::atomic::Ordering::Relaxed) {
+                        // post-replace: disk1 + disk3 (devid 2 reassigned to disk3)
+                        "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\tTotal devices 2 FS bytes used 16.17MiB\n\tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk3\n"
+                    } else {
+                        // pre-replace: disk1 + disk2
+                        "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\tTotal devices 2 FS bytes used 16.17MiB\n\tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk2\n"
+                    };
+                    Ok(mock_ok(
+                        &format!("btrfs filesystem show {mount_point}"),
+                        show,
+                    ))
+                }
                 CmdRequest::CryptsetupStatus { mapper } => {
                     let dev = match mapper.as_str() {
                         "braid-disk1" => "/dev/vdb",
@@ -2293,7 +2303,11 @@ mod tests {
                 CmdRequest::BtrfsDeviceStatsJson { .. } => {
                     Ok(mock_ok("btrfs device stats", r#"{"device-stats": []}"#))
                 }
-                CmdRequest::BtrfsReplaceStart { .. } => Ok(mock_ok("btrfs replace start", "")),
+                CmdRequest::BtrfsReplaceStart { .. } => {
+                    self.replace_done
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                    Ok(mock_ok("btrfs replace start", ""))
+                }
                 CmdRequest::CryptsetupClose { .. } => Ok(mock_ok("cryptsetup close", "")),
                 CmdRequest::BtrfsFilesystemResize { .. } => Ok(RawCommandOutput {
                     cmd: "btrfs filesystem resize".into(),
@@ -2359,7 +2373,11 @@ mod tests {
         ]);
 
         let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let runner = ResizeFailingLoggingRunner { log: log.clone() };
+        let replace_done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let runner = ResizeFailingLoggingRunner {
+            log: log.clone(),
+            replace_done: replace_done.clone(),
+        };
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
         let result = cmd_replace(
             &runner,
@@ -2415,6 +2433,28 @@ mod tests {
         assert!(
             journal::load_journal(&paths).unwrap().is_some(),
             "pending-op.json must survive error exit so braid recover can reconcile"
+        );
+
+        // Membership commits at btrfs replace start; pool.json must reflect
+        // the new topology even when the post-replace resize fails.
+        let saved = membership::load_membership(&paths)
+            .expect("pool.json must exist after the membership commit");
+        assert!(
+            !saved.disks.contains_key("disk2"),
+            "old disk must be gone from pool.json once btrfs replace succeeds, \
+             even when the post-replace resize fails (saved: {:?})",
+            saved.disks.keys().collect::<Vec<_>>()
+        );
+        let disk3 = saved.disks.get("disk3").unwrap_or_else(|| {
+            panic!(
+                "new disk must be in pool.json once btrfs replace succeeds (saved: {:?})",
+                saved.disks.keys().collect::<Vec<_>>()
+            )
+        });
+        assert!(
+            disk3.luks_uuid.is_some() && disk3.devid.is_some() && disk3.added_at.is_some(),
+            "new disk must carry enriched metadata (luks_uuid, devid, added_at) \
+             from the post-replace probe: {disk3:?}"
         );
     }
 
@@ -3291,6 +3331,230 @@ mod tests {
         assert_eq!(
             close_calls, 0,
             "missing path has no old LUKS mapper to close -- CryptsetupClose must not be issued"
+        );
+    }
+
+    /// Runner mirror of `MissingPathSuccessRunner` that succeeds through
+    /// `btrfs replace start` and `btrfs filesystem resize` but fails the
+    /// post-replace `btrfs balance start -dconvert=raid1,soft`. Lets the
+    /// regression test pin that `pool.json` was already persisted before
+    /// the soft-balance step ran.
+    struct MissingPathBalanceFailingRunner {
+        log: std::sync::Arc<std::sync::Mutex<Vec<CmdRequest>>>,
+        replace_done: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl CmdRunner2 for MissingPathBalanceFailingRunner {
+        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
+            self.log.lock().unwrap().push(request.clone());
+            match request {
+                CmdRequest::FindmntJson { mount_point } => Ok(mock_ok(
+                    &format!("findmnt --json --mountpoint {mount_point}"),
+                    r#"{"filesystems":[{"target":"/mnt/storage","source":"/dev/mapper/braid-disk1","fstype":"btrfs","options":"rw,relatime"}]}"#,
+                )),
+                CmdRequest::BtrfsFilesystemShow { mount_point } => {
+                    let show = if self.replace_done.load(std::sync::atomic::Ordering::Relaxed) {
+                        "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\
+                         \tTotal devices 2 FS bytes used 16.17MiB\n\
+                         \tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\
+                         \tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk3\n"
+                    } else {
+                        "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\
+                         \tTotal devices 2 FS bytes used 16.17MiB\n\
+                         \tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\
+                         \t*** Some devices missing\n"
+                    };
+                    Ok(mock_ok(
+                        &format!("btrfs filesystem show {mount_point}"),
+                        show,
+                    ))
+                }
+                CmdRequest::CryptsetupStatus { mapper } => {
+                    let dev = match mapper.as_str() {
+                        "braid-disk1" => "/dev/vdb",
+                        "braid-disk3" => "/dev/vdd",
+                        _ => return Err(CmdError::MissingMock),
+                    };
+                    Ok(mock_ok(
+                        &format!("cryptsetup status {mapper}"),
+                        &format!(
+                            "{mapper} is active and is in use.\n  type:    LUKS2\n  device:  {dev}\n  mode:    read/write\n"
+                        ),
+                    ))
+                }
+                CmdRequest::CryptsetupLuksUuid { device } => {
+                    let uuid = match device.as_str() {
+                        "/dev/vdb" | "/dev/disk/by-id/virtio-disk1" => {
+                            "11111111-1111-1111-1111-111111111111"
+                        }
+                        "/dev/vdd" | "/dev/disk/by-id/virtio-disk3" => {
+                            "33333333-3333-3333-3333-333333333333"
+                        }
+                        _ => return Err(CmdError::MissingMock),
+                    };
+                    Ok(mock_ok(
+                        &format!("cryptsetup luksUUID {device}"),
+                        &format!("{uuid}\n"),
+                    ))
+                }
+                CmdRequest::CryptsetupLuksDumpText { device } => Ok(mock_ok(
+                    &format!("cryptsetup luksDump {device}"),
+                    "LUKS header information\nVersion:       \t2\n",
+                )),
+                CmdRequest::BtrfsBalanceStatus { .. } => Ok(mock_ok(
+                    "btrfs balance status",
+                    "No balance found on '/mnt/storage'\n",
+                )),
+                CmdRequest::BtrfsDeviceUsageRaw { .. } => Ok(mock_ok(
+                    "btrfs device usage --raw",
+                    "/dev/mapper/braid-disk1, ID: 1\n\
+                     \tDevice size:           520093696\n\
+                     \tDevice slack:                  0\n\
+                     \tData,RAID1:            469762048\n\
+                     \tUnallocated:            50331648\n\n\
+                     <missing disk>, ID: 2\n\
+                     \tDevice size:                  0\n\
+                     \tDevice slack:                  0\n\
+                     \tData,RAID1:            469762048\n\
+                     \tUnallocated:                  0\n\n",
+                )),
+                CmdRequest::BtrfsReplaceStart { .. } => {
+                    self.replace_done
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                    Ok(mock_ok("btrfs replace start", ""))
+                }
+                CmdRequest::BtrfsFilesystemResize { .. } => {
+                    Ok(mock_ok("btrfs filesystem resize", ""))
+                }
+                CmdRequest::BtrfsBalanceRaid1Soft { .. } => Ok(RawCommandOutput {
+                    cmd: "btrfs balance raid1 soft".into(),
+                    stdout: String::new(),
+                    stderr: "ERROR: error during balancing".into(),
+                    exit_status: 1,
+                }),
+                _ => Err(CmdError::MissingMock),
+            }
+        }
+
+        fn run_with_stdin(
+            &self,
+            request: &CmdRequest,
+            _stdin: &[u8],
+        ) -> Result<RawCommandOutput, CmdError> {
+            self.run(request)
+        }
+    }
+
+    /*
+     * Intent: on the missing path, `pool.json` already reflects the new
+     * membership (disk2 gone, disk3 enriched) when the post-replace soft
+     * balance fails, and `pending-op.json` survives so `braid recover`
+     * can drive replay.
+     *
+     * Why it exists: replace previously persisted `pool.json` only after
+     * the entire post-mutation maintenance chain (resize + soft balance)
+     * succeeded. A soft-balance failure therefore left `pool.json`
+     * naming the now-replaced missing disk while the live btrfs pool
+     * already had disk3 in its place -- forcing the operator into
+     * recovery just to reconcile bookkeeping. The fix moves the
+     * `save_membership` call to immediately after `btrfs replace start`,
+     * which is the membership commit point. This test pins that
+     * ordering: revert the early save and the assertions on
+     * `pool.json`'s contents fail because the FailingSoftBalance branch
+     * returns before the late-save would have run.
+     *
+     * Scenario: pool has disk1 live + devid 2 missing (disk2 row).
+     * Operator runs `braid replace --old disk2 --missing-id 2 --new
+     * disk3=...`. `btrfs replace start` and `btrfs filesystem resize`
+     * succeed; the post-replace `btrfs balance start -dconvert=raid1,soft`
+     * fails (e.g. ENOSPC, kernel I/O error). The command exits non-zero
+     * but `pool.json` already has disk3 enriched and `pending-op.json`
+     * is still on disk for recovery.
+     */
+    #[test]
+    fn pool_json_persisted_when_missing_path_soft_balance_fails() {
+        let state_tmp = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(state_tmp.path().into());
+        let mut m = PoolMembership::empty();
+        m.disks.insert(
+            "disk1".into(),
+            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
+        );
+        let mut disk2 = DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk2".into()));
+        disk2.devid = Some(2);
+        m.disks.insert("disk2".into(), disk2);
+        membership::save_membership(&m, &paths).unwrap();
+
+        let config_tmp = tempfile::tempdir().unwrap();
+        let config_path = config_tmp.path().join("config.json");
+        std::fs::write(
+            &config_path,
+            serde_json::to_vec(&serde_json::json!({ "mount_point": "/mnt/storage" })).unwrap(),
+        )
+        .unwrap();
+
+        let pass_path = config_tmp.path().join("passphrase");
+        std::fs::write(&pass_path, b"test-passphrase\n").unwrap();
+
+        let fs = ReplaceMockFs(vec![
+            "/dev/disk/by-id/virtio-disk3".into(),
+            "/dev/mapper/braid-disk3".into(),
+        ]);
+
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let replace_done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let runner = MissingPathBalanceFailingRunner {
+            log: log.clone(),
+            replace_done: replace_done.clone(),
+        };
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let result = cmd_replace(
+            &runner,
+            &fs,
+            &ReplaceParams {
+                config_path: &config_path,
+                old_name: "disk2",
+                new_name: "disk3=/dev/disk/by-id/virtio-disk3",
+                missing_id: Some(2),
+                dry_run: false,
+                yes: true,
+                passphrase_stdin: false,
+                passphrase_file: Some(pass_path.as_path()),
+                enroll_key_file: None,
+                progress: crate::progress::ProgressOutput::Off,
+                paths: &paths,
+                sleep_inhibitor: &inhibitor,
+            },
+        );
+
+        match &result {
+            Err(ReplaceError::Pool(_)) => {}
+            other => panic!("expected Err(ReplaceError::Pool(..)), got: {other:?}"),
+        }
+
+        assert!(
+            journal::load_journal(&paths).unwrap().is_some(),
+            "pending-op.json must survive error exit so braid recover can reconcile"
+        );
+
+        let saved = membership::load_membership(&paths)
+            .expect("pool.json must exist after the membership commit");
+        assert!(
+            !saved.disks.contains_key("disk2"),
+            "old missing disk must be gone from pool.json once btrfs replace succeeds, \
+             even when the post-replace soft balance fails (saved: {:?})",
+            saved.disks.keys().collect::<Vec<_>>()
+        );
+        let disk3 = saved.disks.get("disk3").unwrap_or_else(|| {
+            panic!(
+                "new disk must be in pool.json once btrfs replace succeeds (saved: {:?})",
+                saved.disks.keys().collect::<Vec<_>>()
+            )
+        });
+        assert!(
+            disk3.luks_uuid.is_some() && disk3.devid.is_some() && disk3.added_at.is_some(),
+            "new disk must carry enriched metadata (luks_uuid, devid, added_at) \
+             from the post-replace probe: {disk3:?}"
         );
     }
 

@@ -283,29 +283,6 @@ fn add_label(names: &[String]) -> String {
     }
 }
 
-fn enrich_from_live_pool<R: CommandRunner>(
-    runner: &R,
-    mount_point: &MountPoint,
-    membership: &mut PoolMembership,
-) {
-    // Silent on probe failure: luks_uuid, devid, and added_at are best-effort
-    // metadata, and recovery can re-derive them from the live pool if missing.
-    if let Ok(pool_after) = probe_pool(runner, mount_point) {
-        for dev in &pool_after.devices {
-            let Some(name) = name_from_mapper(&dev.mapper.0) else {
-                continue;
-            };
-            if let Some(member) = membership.disks.get_mut(name) {
-                member.luks_uuid = Some(dev.luks_uuid.clone());
-                member.devid = Some(dev.devid);
-                if member.added_at.is_none() {
-                    member.added_at = Some(crate::util::now_iso());
-                }
-            }
-        }
-    }
-}
-
 /// Dry-run preview source of truth for `braid add` plus the execute
 /// inputs pre-computed during planning. `notes` + `steps` are both
 /// rendered by `preview()`; `execute()` renders the accumulated notes
@@ -598,7 +575,9 @@ impl AddPlan {
             // Bootstrap post-commit persist: write pool.json after mkfs + mount.
             // Enrich with live metadata (luks_uuid, devid) from pool probe.
             let mut final_membership = journal.target_membership.clone();
-            enrich_from_live_pool(runner, mount_point, &mut final_membership);
+            if let Ok(pool_after) = probe_pool(runner, mount_point) {
+                membership::enrich_from_pool_state(&pool_after, &mut final_membership);
+            }
             membership::save_membership(&final_membership, params.paths)?;
             // Order matters: save_membership before clear_journal. If
             // save_membership fails, the journal survives and recover can
@@ -616,7 +595,9 @@ impl AddPlan {
             // the long post-add balance while leaving the journal in place so
             // recovery still knows the balance is owed if interrupted.
             let mut final_membership = journal.target_membership.clone();
-            enrich_from_live_pool(runner, mount_point, &mut final_membership);
+            if let Ok(pool_after) = probe_pool(runner, mount_point) {
+                membership::enrich_from_pool_state(&pool_after, &mut final_membership);
+            }
             membership::save_membership(&final_membership, params.paths)?;
 
             // Balance to RAID1 if total >= 2
