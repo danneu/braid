@@ -84,6 +84,13 @@ struct BeepCheckOptions {
     play_beep: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BraidOnlineActiveState {
+    OkSettled,
+    Activating,
+    Fail,
+}
+
 // ---------------------------------------------------------------------------
 // Checks
 // ---------------------------------------------------------------------------
@@ -690,15 +697,33 @@ fn check_ups_daemon_up<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> Chec
     }
 }
 
-/// UPS doctor check: fail when the pool is mounted under UPS but
-/// `braid-online.service` is not `active`.
+fn classify_braid_online_active_state(state: &str) -> BraidOnlineActiveState {
+    match state {
+        "active" | "reloading" | "refreshing" => BraidOnlineActiveState::OkSettled,
+        "activating" => BraidOnlineActiveState::Activating,
+        _ => BraidOnlineActiveState::Fail,
+    }
+}
+
+fn read_braid_online_active_state<R: CommandRunner>(
+    runner: &R,
+) -> Result<String, crate::cmd::CmdError> {
+    let raw = runner.run(&CmdRequest::SystemctlIsActive {
+        unit: "braid-online.service".into(),
+    })?;
+    Ok(raw.stdout.trim().to_owned())
+}
+
+/// UPS doctor check: report braid-online.service state while the pool is
+/// mounted under UPS.
 ///
 /// This is the critical configuration fault in `docs/decisions/020-
 /// ups-integration.md`'s "braid-online becomes safety-critical"
-/// section: without `braid-online.service` active, the `SHUTDOWNCMD =
-/// systemctl poweroff` path does NOT unwind `braid lock`'s ExecStop,
-/// and the Plan 1 safety guarantee silently breaks on LB. Operators
-/// need loud, high-severity feedback here.
+/// section: without `braid-online.service` active, reloading, or
+/// refreshing, the `SHUTDOWNCMD = systemctl poweroff` path does NOT
+/// unwind `braid lock`'s ExecStop. `activating` is only a Warn because it is
+/// plausibly transient, but every other non-success state is a high-severity
+/// fault.
 ///
 /// Skips with a distinct reason when config is unavailable. Otherwise skips
 /// when UPS is disabled OR when the pool is not mounted (no safety implication
@@ -706,6 +731,23 @@ fn check_ups_daemon_up<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> Chec
 fn check_braid_online_active_when_mounted<R: CommandRunner>(
     ctx: &mut DoctorContext<'_, R>,
 ) -> CheckResult {
+    let fail_result = |name: String, state: &str| CheckResult {
+        name,
+        status: CheckStatus::Fail,
+        message: format!(
+            "braid-online.service is {state} -- UPS shutdown will not unmount the pool. \
+             Run `systemctl start braid-online.service` or re-run `braid unlock`."
+        ),
+    };
+    let warn_result = |name: String| {
+        CheckResult {
+            name,
+            status: CheckStatus::Warn,
+            message: "braid-online.service is activating -- UPS shutdown hook is not confirmed yet; re-run braid doctor shortly"
+                .into(),
+        }
+    };
+
     let name = "braid_online_active".to_string();
     let Some(config) = ctx.config.as_ref() else {
         return CheckResult {
@@ -735,10 +777,8 @@ fn check_braid_online_active_when_mounted<R: CommandRunner>(
             };
         }
     }
-    let raw = match ctx.runner.run(&CmdRequest::SystemctlIsActive {
-        unit: "braid-online.service".into(),
-    }) {
-        Ok(r) => r,
+    let state = match read_braid_online_active_state(ctx.runner) {
+        Ok(state) => state,
         Err(e) => {
             return CheckResult {
                 name,
@@ -747,21 +787,14 @@ fn check_braid_online_active_when_mounted<R: CommandRunner>(
             };
         }
     };
-    let state = raw.stdout.trim();
-    match state {
-        "active" | "activating" | "reloading" => CheckResult {
+    match classify_braid_online_active_state(&state) {
+        BraidOnlineActiveState::OkSettled => CheckResult {
             name,
             status: CheckStatus::Ok,
             message: format!("braid-online.service is {state}"),
         },
-        other => CheckResult {
-            name,
-            status: CheckStatus::Fail,
-            message: format!(
-                "braid-online.service is {other} -- UPS shutdown will not unmount the pool. \
-                 Run `systemctl start braid-online.service` or re-run `braid unlock`."
-            ),
-        },
+        BraidOnlineActiveState::Activating => warn_result(name),
+        BraidOnlineActiveState::Fail => fail_result(name, &state),
     }
 }
 
@@ -2519,6 +2552,22 @@ mod tests {
         r#"{"mount_point":"/mnt/storage","ups":{"enable":false,"name":"ups"}}"#
     }
 
+    fn systemctl_is_active_output(state: &str) -> RawCommandOutput {
+        RawCommandOutput {
+            cmd: "systemctl is-active braid-online.service".into(),
+            stdout: if state.is_empty() {
+                String::new()
+            } else {
+                format!("{state}\n")
+            },
+            stderr: String::new(),
+            exit_status: match state {
+                "active" | "reloading" | "refreshing" => 0,
+                _ => 3,
+            },
+        }
+    }
+
     // Intent: check_ups_daemon_up reports Ok when upsc returns a healthy
     // OL status.
     // Why: baseline happy path; confirms a live upsd does not trigger a
@@ -2631,12 +2680,7 @@ mod tests {
                 CmdRequest::SystemctlIsActive {
                     unit: "braid-online.service".into(),
                 },
-                RawCommandOutput {
-                    cmd: "systemctl is-active braid-online.service".into(),
-                    stdout: "inactive\n".into(),
-                    stderr: String::new(),
-                    exit_status: 3,
-                },
+                systemctl_is_active_output("inactive"),
             );
         let (_dir, paths) = isolated_paths();
         let mut ctx = ups_ctx(&runner, &paths, config_with_ups_enabled());
@@ -2669,12 +2713,7 @@ mod tests {
                 CmdRequest::SystemctlIsActive {
                     unit: "braid-online.service".into(),
                 },
-                RawCommandOutput {
-                    cmd: "systemctl is-active braid-online.service".into(),
-                    stdout: "active\n".into(),
-                    stderr: String::new(),
-                    exit_status: 0,
-                },
+                systemctl_is_active_output("active"),
             );
         let (_dir, paths) = isolated_paths();
         let mut ctx = ups_ctx(&runner, &paths, config_with_ups_enabled());
@@ -2682,17 +2721,16 @@ mod tests {
         assert_eq!(r.status, CheckStatus::Ok);
     }
 
-    /* Intent: check_braid_online_active_when_mounted treats safe
-     * systemctl transient states as Ok while the pool is mounted.
-     * Why it exists: systemctl is-active can briefly report activating
-     * or reloading; those states should not trigger the alarmist UPS
-     * shutdown failure copy.
-     * Scenario: operator manually starts braid-online.service and runs
-     * `braid doctor` before systemd has fully settled the unit.
+    /* Intent: check_braid_online_active_when_mounted treats systemd's
+     * is-active success states as Ok while the pool is mounted.
+     * Why it exists: these states indicate braid-online.service has reached
+     * the state where systemd can run its stop hook.
+     * Scenario: operator runs `braid doctor` while systemd reports an active,
+     * reloading, or refreshing braid-online.service.
      */
     #[test]
-    fn braid_online_check_ok_when_transiently_starting_or_reloading() {
-        for status in ["activating", "reloading"] {
+    fn braid_online_check_ok_when_settled_success_state() {
+        for status in ["active", "reloading", "refreshing"] {
             let runner = MockRunner::default()
                 .with_output(
                     CmdRequest::MountpointCheck {
@@ -2709,18 +2747,101 @@ mod tests {
                     CmdRequest::SystemctlIsActive {
                         unit: "braid-online.service".into(),
                     },
-                    RawCommandOutput {
-                        cmd: "systemctl is-active braid-online.service".into(),
-                        stdout: format!("{status}\n"),
-                        stderr: String::new(),
-                        exit_status: 0,
-                    },
+                    systemctl_is_active_output(status),
                 );
             let (_dir, paths) = isolated_paths();
             let mut ctx = ups_ctx(&runner, &paths, config_with_ups_enabled());
             let r = check_braid_online_active_when_mounted(&mut ctx);
             assert_eq!(r.status, CheckStatus::Ok, "status={status}");
             assert!(r.message.contains(status), "message={}", r.message);
+        }
+    }
+
+    /* Intent: check_braid_online_active_when_mounted warns when
+     * braid-online.service is still activating.
+     * Why it exists: activating is not safe enough for Ok because systemd
+     * has not yet guaranteed ExecStop, but it is plausibly transient and
+     * should not be escalated to Fail.
+     * Scenario: the wrapper has just started braid-online.service and
+     * `braid doctor` runs before systemd has finished the transition.
+     */
+    #[test]
+    fn braid_online_check_warns_when_activating() {
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::MountpointCheck {
+                    path: MountPoint("/mnt/storage".into()),
+                },
+                RawCommandOutput {
+                    cmd: "mountpoint".into(),
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                },
+            )
+            .with_output(
+                CmdRequest::SystemctlIsActive {
+                    unit: "braid-online.service".into(),
+                },
+                systemctl_is_active_output("activating"),
+            );
+        let (_dir, paths) = isolated_paths();
+        let mut ctx = ups_ctx(&runner, &paths, config_with_ups_enabled());
+
+        let r = check_braid_online_active_when_mounted(&mut ctx);
+
+        assert_eq!(r.status, CheckStatus::Warn, "got: {r:?}");
+        assert!(r.message.contains("activating"), "{}", r.message);
+        assert_eq!(
+            r.message,
+            "braid-online.service is activating -- UPS shutdown hook is not confirmed yet; re-run braid doctor shortly"
+        );
+    }
+
+    /* Intent: check_braid_online_active_when_mounted rejects every unsafe
+     * systemctl boundary state while the pool is mounted under UPS.
+     * Why it exists: only settled success states can prove the
+     * braid-online.service shutdown hook is available.
+     * Scenario: systemd reports a failed, stopping, unknown, empty, or
+     * otherwise unrecognized unit state.
+     */
+    #[test]
+    fn braid_online_check_fails_for_unsafe_systemctl_states() {
+        for status in ["deactivating", "failed", "unknown", "", "bogus"] {
+            let runner = MockRunner::default()
+                .with_output(
+                    CmdRequest::MountpointCheck {
+                        path: MountPoint("/mnt/storage".into()),
+                    },
+                    RawCommandOutput {
+                        cmd: "mountpoint".into(),
+                        stdout: String::new(),
+                        stderr: String::new(),
+                        exit_status: 0,
+                    },
+                )
+                .with_output(
+                    CmdRequest::SystemctlIsActive {
+                        unit: "braid-online.service".into(),
+                    },
+                    systemctl_is_active_output(status),
+                );
+            let (_dir, paths) = isolated_paths();
+            let mut ctx = ups_ctx(&runner, &paths, config_with_ups_enabled());
+
+            let r = check_braid_online_active_when_mounted(&mut ctx);
+
+            assert_eq!(r.status, CheckStatus::Fail, "status={status}, got: {r:?}");
+            if !status.is_empty() {
+                assert!(r.message.contains(status), "{}", r.message);
+            }
+            assert!(r.message.contains("UPS shutdown"), "{}", r.message);
+            assert!(
+                r.message.contains("systemctl start braid-online.service"),
+                "{}",
+                r.message
+            );
+            assert!(r.message.contains("braid unlock"), "{}", r.message);
         }
     }
 
