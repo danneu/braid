@@ -485,29 +485,28 @@ fn check_profile_mismatch<R: CommandRunner>(
     ensure_df_snapshot(ctx);
 
     let mount_point = ctx.config.as_ref().unwrap().mount_point().to_owned();
+    let df_snapshot = ctx
+        .df_snapshot
+        .as_ref()
+        .expect("ensure_df_snapshot sets df_snapshot when config is present");
 
-    match &ctx.df_snapshot {
-        None => CheckResult {
-            name: check_name.into(),
-            status: CheckStatus::Skip,
-            message: "skipped (config not available)".into(),
-        },
-        Some(DfSnapshot::NotMounted) => CheckResult {
+    match df_snapshot {
+        DfSnapshot::NotMounted => CheckResult {
             name: check_name.into(),
             status: CheckStatus::Skip,
             message: "skipped (pool not mounted)".into(),
         },
-        Some(DfSnapshot::QueryFailed(e)) => CheckResult {
+        DfSnapshot::QueryFailed(e) => CheckResult {
             name: check_name.into(),
             status: CheckStatus::Warn,
             message: format!("could not query {type_label} profiles: {e}"),
         },
-        Some(DfSnapshot::ParseFailed(e)) => CheckResult {
+        DfSnapshot::ParseFailed(e) => CheckResult {
             name: check_name.into(),
             status: CheckStatus::Warn,
             message: format!("could not parse {type_label} profiles: {e}"),
         },
-        Some(DfSnapshot::Ok(df)) => {
+        DfSnapshot::Ok(df) => {
             let entries: Vec<_> = df.entries.iter().filter(|e| e.bg_type == bg_type).collect();
 
             let profiles: std::collections::BTreeSet<&BtrfsProfile> =
@@ -1810,6 +1809,32 @@ mod tests {
         )
     }
 
+    struct DfQueryFailureRunner;
+
+    impl CommandRunner for DfQueryFailureRunner {
+        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
+            match request {
+                CmdRequest::MountpointCheck { path } if path.0 == "/mnt/storage" => {
+                    Ok(mountpoint_ok().1)
+                }
+                CmdRequest::BtrfsFilesystemDfJson { mount_point }
+                    if mount_point.0 == "/mnt/storage" =>
+                {
+                    Err(CmdError::Failed("df query failed".into()))
+                }
+                _ => Err(CmdError::MissingMock),
+            }
+        }
+
+        fn run_with_stdin(
+            &self,
+            _request: &CmdRequest,
+            _stdin: &[u8],
+        ) -> Result<RawCommandOutput, CmdError> {
+            Err(CmdError::MissingMock)
+        }
+    }
+
     const DF_RAID1_CLEAN: &str = r#"{
         "filesystem-df": [
             { "bg-type": "Data", "bg-profile": "RAID1", "total": 67108864, "used": 16777216 },
@@ -1936,6 +1961,38 @@ mod tests {
         );
     }
 
+    /* Intent: both profile checks report a df runner error as a query warning.
+     * Why it exists: `ensure_df_snapshot` caches df command errors for both
+     * consumers, so the second profile check must not reinterpret the shared
+     * snapshot as unavailable config or a parse failure.
+     * Scenario: `btrfs filesystem df --format json` cannot be spawned or
+     * queried while the pool mountpoint itself is still present.
+     */
+    #[test]
+    fn profile_checks_warn_when_df_query_errors() {
+        let runner = DfQueryFailureRunner;
+        let f = write_temp(valid_config_json());
+        let report = run_doctor(f.path(), &runner, &isolated_paths().1, human_options());
+
+        let data = find_check(&report, "data_profile_mismatch");
+        assert_eq!(data.status, CheckStatus::Warn);
+        assert!(
+            data.message.contains("could not query data profiles"),
+            "expected data query warning: {}",
+            data.message
+        );
+
+        let metadata = find_check(&report, "metadata_profile_mismatch");
+        assert_eq!(metadata.status, CheckStatus::Warn);
+        assert!(
+            metadata
+                .message
+                .contains("could not query metadata profiles"),
+            "expected metadata query warning: {}",
+            metadata.message
+        );
+    }
+
     /* Intent: data_profile_mismatch reports malformed df JSON as a parse warning.
      * Why it exists: the shared df snapshot must preserve parser errors distinctly
      * from an unmounted pool or unavailable config.
@@ -1957,6 +2014,41 @@ mod tests {
             check.message.contains("could not parse data profiles"),
             "expected parse warning: {}",
             check.message
+        );
+    }
+
+    /* Intent: both profile checks report malformed df JSON as a parse warning.
+     * Why it exists: `ensure_df_snapshot` stores a shared parse failure, and each
+     * profile check must label that same failure with its own profile type.
+     * Scenario: btrfs exits 0, but an upstream JSON schema change makes the df
+     * output unreadable to braid's parser.
+     */
+    #[test]
+    fn profile_checks_warn_when_df_json_malformed() {
+        let (mp_req, mp_out) = mountpoint_ok();
+        let (df_req, df_out) = df_json("{not json");
+        let runner = mock()
+            .with_output(mp_req, mp_out)
+            .with_output(df_req, df_out);
+        let f = write_temp(valid_config_json());
+        let report = run_doctor(f.path(), &runner, &isolated_paths().1, human_options());
+
+        let data = find_check(&report, "data_profile_mismatch");
+        assert_eq!(data.status, CheckStatus::Warn);
+        assert!(
+            data.message.contains("could not parse data profiles"),
+            "expected data parse warning: {}",
+            data.message
+        );
+
+        let metadata = find_check(&report, "metadata_profile_mismatch");
+        assert_eq!(metadata.status, CheckStatus::Warn);
+        assert!(
+            metadata
+                .message
+                .contains("could not parse metadata profiles"),
+            "expected metadata parse warning: {}",
+            metadata.message
         );
     }
 
