@@ -327,6 +327,11 @@
               braid = linuxCrane.braid-cli-unwrapped;
             }
           );
+          braid-module-add-locked-pool = pkgs.testers.nixosTest (
+            import ./tests/module/add-locked-pool.nix {
+              braid = linuxCrane.braid-cli-unwrapped;
+            }
+          );
           braid-module-single-disk = pkgs.testers.nixosTest (
             import ./tests/module/single-disk.nix {
               braid = linuxCrane.braid-cli-unwrapped;

@@ -743,6 +743,13 @@ pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         Err(e) => return err_empty(AddError::Probe(e)),
     };
 
+    // Refuse if pool.json lists members but pool isn't unlocked. Catches the
+    // silent-bootstrap case where a fresh disk + locked pool would otherwise
+    // overwrite pool.json and orphan the existing locked members.
+    if let Err(msg) = preflight::check_pool_unlocked_if_membership_exists(&pool_membership, &pool) {
+        return err_empty(AddError::Validation(msg));
+    }
+
     if pool.mounted {
         let fsid = pool.fsid.as_deref().expect("mounted pool must have FSID");
         match preflight::require_mutation_preflight(runner, fs, fsid, config.mount_point()) {
@@ -2384,6 +2391,13 @@ mod tests {
     //   existing encrypted disk.
     fn bootstrap_rejects_braid_labeled_luks_disk() {
         let (_state_tmp, paths, _tmp, config_path, pass_path) = add_test_setup();
+        // The named contract here is the braid-labeled-LUKS bootstrap guard,
+        // which only fires inside compile_add_steps_multi. Clear the
+        // pre-seeded pool.json so the earlier locked-pool-with-membership
+        // refusal (check_pool_unlocked_if_membership_exists) doesn't preempt
+        // it; that earlier refusal has its own dedicated test
+        // (cmd_add_refuses_when_pool_locked_with_membership).
+        membership::save_membership(&membership::PoolMembership::empty(), &paths).unwrap();
         let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
         let runner = MockRunner::default()
             .with_output(
@@ -2888,31 +2902,34 @@ mod tests {
     }
 
     /*
-     * Intent: `braid add` for a fresh disk when `pool_membership.disks`
-     *   is non-empty but no live verify target exists (pool not
-     *   currently assembled) STILL confirms -- two reads, then format.
+     * Intent: cmd_add refuses BEFORE luksFormat / inhibitor / journal
+     *   when pool.json lists members and the pool is not mounted (locked).
      *
-     * Why it exists: guards against the rejected
-     *   `pool_membership.disks.is_empty()` gate that would have missed
-     *   this cell. The good gate reads
-     *   `any_needs_format && pool.devices.first().is_none()`; when
-     *   membership has a prior disk but the pool is locked/unmounted,
-     *   the verify block is skipped yet we are still about to
-     *   `luks_format` -- so confirmation is still required.
+     * Why it exists: this is the cmd_add-level regression for the
+     *   silent-bootstrap bug. Previously, a fresh-disk add against a
+     *   locked-but-populated pool fell through to the bootstrap branch
+     *   (mkfs.btrfs single + mount), overwriting pool.json and orphaning
+     *   the locked members. The refusal must be a validation failure
+     *   that fires before any destructive step or environment-side
+     *   resource acquisition. A unit-level test on the helper alone
+     *   would not catch a wiring bug in plan_add, and a test asserting
+     *   only the error message would not catch a regression that lets
+     *   format run anyway.
      *
-     * Scenario: user has a pool with disk1 recorded in membership but
-     *   currently locked (post-boot, pre-unlock). They add a new fresh
-     *   disk2 without first unlocking. Typo protection still applies.
+     * Scenario: 1-disk pool recorded in pool.json (disk1), pool locked
+     *   (post-boot, pre-unlock). Operator forgets `braid unlock` and
+     *   runs `braid add disk2=...`. The command must refuse, and no
+     *   LUKS header must be written to disk2.
      */
     #[test]
-    fn cmd_add_existing_membership_no_live_target_confirms() {
+    fn cmd_add_refuses_when_pool_locked_with_membership() {
         let (_state_tmp, paths, _tmp, config_path, _pass_path) = add_test_setup();
         let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
         let runner = AddRecordingRunner::new(false);
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
-        let tty = ScriptedPassphraseReader::new(["pw", "pw", "SENTINEL"]);
+        let tty = ScriptedPassphraseReader::new(["SENTINEL"]);
 
-        let _ = cmd_add(
+        let result = cmd_add(
             &runner,
             &fs,
             &AddParams {
@@ -2930,16 +2947,32 @@ mod tests {
             },
         );
 
-        assert!(runner.saw_format(), "luks_format must have run");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("not unlocked"),
+            "expected locked-pool refusal, got: {err}"
+        );
+        assert!(
+            err.contains("disk1"),
+            "error must name the locked member, got: {err}"
+        );
+        assert!(
+            !runner.saw_format(),
+            "luks_format must NOT run when refused for locked pool"
+        );
         assert_eq!(
-            runner.format_stdin().as_deref(),
-            Some(b"pw".as_ref()),
-            "luks_format must receive the confirmed passphrase"
+            inhibitor.acquire_count(),
+            0,
+            "validation failure must NOT acquire the sleep inhibitor"
+        );
+        assert!(
+            journal::load_journal(&paths).unwrap().is_none(),
+            "no journal should exist after validation failure"
         );
         assert_eq!(
             tty.remaining(),
             1,
-            "exactly two prompts must have been read (SENTINEL remains)"
+            "no prompts read; refusal happens before passphrase read"
         );
     }
 
@@ -3946,6 +3979,57 @@ mod tests {
             ),
             "notes[0]={:?}",
             report.notes[0],
+        );
+    }
+
+    /* Intent: when both pending-op.json and a locked pool with non-empty
+     *   membership are present, plan_add returns the pending-op error,
+     *   not the locked-pool error.
+     *
+     * Why it exists: pins the ordering claim that
+     *   `check_no_pending_operation` runs before
+     *   `check_pool_unlocked_if_membership_exists` in plan_add. Without
+     *   this test, a future refactor could swap the order and hide the
+     *   more-urgent pending-op signal behind the locked-pool refusal --
+     *   the operator would see "run `braid unlock`" when the real issue
+     *   is an interrupted operation that needs `braid recover`. The test
+     *   distinguishes the two plausible orderings at the seam.
+     *
+     * Scenario: a previous add was interrupted (pending-op.json exists)
+     *   and the pool is locked with disk1 in membership. Operator runs
+     *   `braid add disk2=...`. The pending-op error must surface.
+     */
+    #[test]
+    fn plan_add_pending_op_wins_over_locked_pool_refusal() {
+        let fixture = plan_add_fixture();
+
+        // Seed pending-op.json. add_test_setup pre-seeded pool.json with
+        // disk1, so both the pending-op condition and the locked-pool
+        // condition are simultaneously true.
+        std::fs::write(
+            fixture.paths.pending_op_json(),
+            r#"{"started_at":"2024-01-01T00:00:00Z","op":{"op":"Add","disks":{}},"pre_membership":{"disks":{}},"target_membership":{"disks":{}}}"#,
+        )
+        .unwrap();
+
+        // Runner is unused: pending-op short-circuits at the top of
+        // plan_add, before any disk probe or pool probe.
+        let runner = MockRunner::default();
+        let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
+
+        let disk_specs = ["disk2=/dev/disk/by-id/virtio-disk2".to_string()];
+        let report = plan_add(&runner, &fs, &fixture.params(&disk_specs, true));
+        let err = match report.result {
+            Ok(_) => panic!("plan_add must fail when pending-op.json is present"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            err.contains("interrupted operation detected"),
+            "pending-op error must win over locked-pool refusal, got: {err}"
+        );
+        assert!(
+            !err.contains("not unlocked"),
+            "locked-pool error must NOT preempt the pending-op error, got: {err}"
         );
     }
 }
