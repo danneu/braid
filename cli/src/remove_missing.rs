@@ -31,17 +31,9 @@ pub enum RemoveMissingError {
 /// Resolve the missing-device removal target to a (devid, membership-name) pair.
 /// Returns Err if the missing device's identity can't be mapped to a pool.json entry.
 fn resolve_removal_target(
-    target_devid: Option<u64>,
+    devid: u64,
     membership: &membership::PoolMembership,
 ) -> Result<(u64, String), RemoveMissingError> {
-    let devid = target_devid.ok_or_else(|| {
-        RemoveMissingError::Validation(
-            "cannot determine which device to remove: btrfs did not report \
-             the missing device's ID. Pass --missing-id <devid> explicitly."
-                .into(),
-        )
-    })?;
-
     let name = membership
         .disks
         .iter()
@@ -141,7 +133,7 @@ impl RemoveMissingPlan {
             RemoveMissingError::Validation(format!("failed to load pool membership: {e}"))
         })?;
         let (resolved_devid, name_to_remove) =
-            resolve_removal_target(Some(self.missing_id), &pre_membership)?;
+            resolve_removal_target(self.missing_id, &pre_membership)?;
 
         // Confirm
         if !params.yes {
@@ -1542,26 +1534,6 @@ mod tests {
     // --- resolve_removal_target tests ---
 
     #[test]
-    // Intent: resolve_removal_target fails when no devid is available.
-    //
-    // Why it exists: When btrfs only prints the "*** Some devices missing"
-    //   sentinel (no explicit devid line), target_devid is None. Previously
-    //   the code silently skipped membership removal, leaving pool.json
-    //   with the dead disk still listed.
-    //
-    // Scenario: Single missing device on an older kernel that doesn't emit
-    //   per-device MISSING lines. User runs remove-missing without --missing-id.
-    fn resolve_target_fails_when_devid_unavailable() {
-        let m = PoolMembership::empty();
-        let err = resolve_removal_target(None, &m).unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("missing device's ID"),
-            "expected hint about missing device ID; got: {msg}"
-        );
-    }
-
-    #[test]
     // Intent: resolve_removal_target fails when devid is known but no
     //   pool.json member has that devid enriched.
     //
@@ -1578,7 +1550,7 @@ mod tests {
             "disk1".to_string(),
             DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".to_string())),
         );
-        let err = resolve_removal_target(Some(99), &m).unwrap_err();
+        let err = resolve_removal_target(99, &m).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("not found in pool.json"),
