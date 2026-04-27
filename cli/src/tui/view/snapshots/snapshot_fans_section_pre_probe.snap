@@ -16,6 +16,6 @@ Data  Scrub  Sharing
    2 ironwolf sata warning -    3 err 25%  1.4 / 5.5 TiB
    3 wdc      usb  -       -    0 err 21%  0.8 / 3.6 TiB
  Fans -- daemon: unknown ───────────────────────────────────────────────
-    PWM           RPM    Driving          Curve
- 1  -/-           -      -                30-40° -> 20-100%
+    PWM           RPM    Driving        Curve
+ 1  -/-           -      -              30-40° -> 20-100%
 Quit: q │ Help: ? │ Reset temp hi/lo: R │ Reload: r

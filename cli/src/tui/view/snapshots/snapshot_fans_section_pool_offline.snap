@@ -11,6 +11,6 @@ Data  Scrub  Sharing
    2 ironwolf --
    3 wdc      --
  Fans -- daemon: active ────────────────────────────────────────────────
-    PWM           RPM    Driving          Curve
- 1  215/255 84%   1240   ironwolf 38°     30-40° -> 20-100%
+    PWM           RPM    Driving        Curve
+ 1  215/255 84%   1240   38° ironwolf   30-40° -> 20-100%
 Quit: q │ Help: ? │ Reset temp hi/lo: R │ Reload: r

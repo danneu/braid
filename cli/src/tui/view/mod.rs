@@ -134,7 +134,7 @@ fn format_rpm(reading: &Option<FanReading>) -> String {
 
 fn format_driving(d: &Option<DrivingDrive>) -> String {
     match d {
-        Some(d) => format!("{} {}°", d.label, d.celsius),
+        Some(d) => format!("{}° {}", d.celsius, d.label),
         None => "-".to_owned(),
     }
 }
@@ -195,11 +195,20 @@ fn fan_section(model: &Model) -> Table<'_> {
         Cell::from(format_curve(fc)),
     ]);
 
+    // Driving cell renders as "{celsius}° {label}". Budget the column at
+    // (longest disk label) + 6 -- five for "999° " (3-digit temp + degree
+    // + space) plus one of slack -- with a floor of 7 so the "Driving"
+    // header doesn't clip on a system with very short or no disk names.
+    let max_disk_name_len = model.disk_names.iter().map(|n| n.len()).max().unwrap_or(0);
+    let driving_col_width = u16::try_from(max_disk_name_len + 6)
+        .unwrap_or(u16::MAX)
+        .max(7);
+
     let widths = [
         Constraint::Length(2),
         Constraint::Length(13),
         Constraint::Length(6),
-        Constraint::Length(16),
+        Constraint::Length(driving_col_width),
         Constraint::Min(20),
     ];
     Table::new(vec![row], widths).header(header)
@@ -1916,6 +1925,51 @@ pub(crate) mod tests {
         model.fan = Some(sample_fan_snapshot_active());
         let terminal = render(&model, 72, 28);
         snap!(buffer_to_string(&terminal));
+    }
+
+    /*
+     * Intent: a 16-character drive label renders with both temperature
+     *         and label visible in the Driving cell, not clipped.
+     * Why it exists: prior to this fix the cell formatted as
+     *         "{label} {celsius}°" inside a 16-col column, so a label
+     *         like "toshiba-pro-02af" (exactly 16 chars) filled the
+     *         column and the temperature was clipped. The user could
+     *         not see the temperature of the hottest drive. The other
+     *         snapshot fixtures all use the short label "ironwolf" (8
+     *         chars), so they did not expose the bug. This test pins
+     *         both the temp-leading format and the disk-name-driven
+     *         column width jointly: reverting either one drops the
+     *         asserted substring out of the rendered buffer.
+     * Scenario: Toshiba N300 drives whose drivetemp labels are 16
+     *         chars long.
+     */
+    #[test]
+    fn fan_section_renders_long_label_with_temperature() {
+        let disk_names = vec![
+            "toshiba-pro-02af".to_owned(),
+            "ironwolf".to_owned(),
+            "wdc".to_owned(),
+        ];
+        let mut model = Model::new_demo(disk_names, PoolStatus::NotMounted);
+        model.fan_control = Some(sample_fan_control());
+        model.fan = Some(FanSnapshot {
+            fan: Some(FanReading {
+                pwm_raw: 215,
+                rpm: 1240,
+            }),
+            driving: Some(DrivingDrive {
+                label: "toshiba-pro-02af".to_owned(),
+                celsius: 35,
+            }),
+            daemon: DaemonStatus::Active,
+            probed_at: Instant::now(),
+        });
+        let terminal = render(&model, 72, 28);
+        let buf = buffer_to_string(&terminal);
+        assert!(
+            buf.contains("35° toshiba-pro-02af"),
+            "expected '35° toshiba-pro-02af' in fans row, got:\n{buf}"
+        );
     }
 
     // Intent: fan section still renders when the pool is NotMounted.
