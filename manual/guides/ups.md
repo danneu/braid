@@ -143,8 +143,11 @@ lit.
 
 `braid doctor` adds two UPS-adjacent checks when `braid.ups.enable = true`:
 
-- **ups daemon** -- warns if `upsc` cannot reach the daemon. Fix with
-  `systemctl status upsd.service`.
+- **ups daemon** -- fails if `upsc` is missing or cannot be spawned,
+  because braid cannot verify the enabled UPS shutdown path. It warns
+  if `upsc` runs but cannot reach the daemon or exits non-zero. Fix
+  missing `upsc` by checking the braid wrapper/NUT package path; fix
+  daemon reachability with `systemctl status upsd.service`.
 - **braid-online** -- fails (high severity) if the pool is mounted but
   `braid-online.service` is not active. Without that service active,
   the UPS shutdown path does not unmount the pool, and the safety

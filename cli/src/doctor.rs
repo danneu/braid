@@ -629,13 +629,15 @@ fn check_beep_path<R: CommandRunner>(
     )
 }
 
-/// UPS doctor check: warn when `braid.ups.enable = true` but the
-/// `upsc` probe fails.
+/// UPS doctor check for `braid.ups.enable = true`.
 ///
-/// Severity is `Warn`, not `Fail`: the operator can fix daemon state
-/// directly (e.g. `systemctl start upsd`); braid does not intervene in
-/// NUT lifecycle. Skips with a distinct reason when config is unavailable;
-/// otherwise skips when UPS is not configured or disabled.
+/// A spawn failure or missing `upsc` is `Fail` because the enabled UPS
+/// configuration cannot verify its load-bearing shutdown path. `upsc`
+/// non-zero output, including an unreachable upsd daemon, stays `Warn`:
+/// the operator can fix daemon state directly (e.g. `systemctl start upsd`),
+/// and braid does not intervene in NUT lifecycle. Skips with a distinct reason
+/// when config is unavailable; otherwise skips when UPS is not configured or
+/// disabled.
 fn check_ups_daemon_up<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> CheckResult {
     let name = "ups_daemon".to_string();
     let Some(config) = ctx.config.as_ref() else {
@@ -662,7 +664,7 @@ fn check_ups_daemon_up<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> Chec
         Err(e) => {
             return CheckResult {
                 name,
-                status: CheckStatus::Warn,
+                status: CheckStatus::Fail,
                 message: format!("upsc failed to spawn: {e} -- is pkgs.nut on PATH?"),
             };
         }
@@ -2568,6 +2570,27 @@ mod tests {
         }
     }
 
+    struct UpscSpawnFailureRunner;
+
+    impl CommandRunner for UpscSpawnFailureRunner {
+        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
+            match request {
+                CmdRequest::UpscQuery { name } => Err(CmdError::Failed(format!(
+                    "upsc {name}: No such file or directory"
+                ))),
+                _ => Err(CmdError::MissingMock),
+            }
+        }
+
+        fn run_with_stdin(
+            &self,
+            _request: &CmdRequest,
+            _stdin: &[u8],
+        ) -> Result<RawCommandOutput, CmdError> {
+            Err(CmdError::MissingMock)
+        }
+    }
+
     // Intent: check_ups_daemon_up reports Ok when upsc returns a healthy
     // OL status.
     // Why: baseline happy path; confirms a live upsd does not trigger a
@@ -2614,6 +2637,26 @@ mod tests {
         let r = check_ups_daemon_up(&mut ctx);
         assert_eq!(r.status, CheckStatus::Warn, "got: {r:?}");
         assert!(r.message.contains("unreachable"));
+    }
+
+    // Intent: check_ups_daemon_up fails when `upsc` cannot be spawned.
+    // Why: an enabled UPS configuration whose client binary is missing
+    // cannot verify the load-bearing shutdown safety path; unlike a
+    // temporarily unreachable daemon, this is a packaging/wrapper fault.
+    // Scenario: `braid.ups.enable = true` but the braid wrapper does not
+    // place NUT's `upsc` binary on PATH.
+    #[test]
+    fn ups_daemon_check_fails_when_upsc_spawn_fails() {
+        let runner = UpscSpawnFailureRunner;
+        let (_dir, paths) = isolated_paths();
+        let mut ctx = ups_ctx(&runner, &paths, config_with_ups_enabled());
+        let r = check_ups_daemon_up(&mut ctx);
+        assert_eq!(r.status, CheckStatus::Fail, "got: {r:?}");
+        assert!(
+            r.message.contains("upsc failed to spawn"),
+            "unexpected message: {}",
+            r.message
+        );
     }
 
     // Intent: check_ups_daemon_up skips when braid.ups block is absent.

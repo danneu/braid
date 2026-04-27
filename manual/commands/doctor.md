@@ -57,6 +57,8 @@ Note: `--json` mode skips the alert beep test even when combined with `--beep` (
 | `data_profile_mismatch` | Data block groups all use the same RAID profile |
 | `metadata_profile_mismatch` | Metadata block groups all use the same RAID profile |
 | `beep_path` | PC speaker alert beep is configured; with `--beep`, the alert beep command succeeds |
+| `ups_daemon` | With UPS enabled, `upsc` is available and can query the UPS daemon; missing or spawn-failed `upsc` is a failure, daemon unreachable/non-zero `upsc` is a warning |
+| `braid_online_active` | With UPS enabled and the pool mounted, `braid-online.service` is active so shutdown unmounts the pool |
 
 ## Flags
 
@@ -77,7 +79,8 @@ Note: `--json` mode skips the alert beep test even when combined with `--beep` (
 3. If the pool is mounted, queries `btrfs filesystem df` to check RAID profile consistency and probes for missing devices.
 4. If the braid monitor NixOS module is configured, reports the alert beep check as skipped by default.
 5. With `--beep` and without `--json`, plays a short test beep through the canonical beep wrapper.
-6. Aggregates results and prints a summary.
+6. If UPS support is enabled, checks `upsc` and the mounted-pool `braid-online.service` shutdown hook.
+7. Aggregates results and prints a summary.
 
 ## Related commands
 
