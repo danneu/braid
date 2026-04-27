@@ -12,21 +12,29 @@ pub fn cmd_ack<R: CommandRunner>(
     mount_point: &MountPoint,
     paths: &StatePaths,
 ) -> Result<(), AckError> {
-    // 1. Read latch for count (authoritative alert state)
-    let latch = alert::load_alert_latch(paths);
-    let latch_count = latch.as_ref().map_or(0, |s| s.causes.len());
+    // 1. Read latch for count (authoritative alert state). An unreadable
+    //    latch counts as an active alert for gating so the user can clear
+    //    a corrupt file even with the pool offline.
+    let (latch_count, latch_corrupt) = match alert::load_alert_latch(paths) {
+        Ok(Some(s)) => (s.causes.len(), false),
+        Ok(None) => (0, false),
+        Err(e) => {
+            eprintln!("warning: alert latch unreadable -- acknowledging anyway: {e}");
+            (0, true)
+        }
+    };
 
     // 2. Check if pool is mounted
     let pool = match probe_pool(runner, mount_point) {
         Ok(p) => p,
         Err(ProbeError::NotBtrfs { .. }) => {
-            return ack_offline(latch_count, paths);
+            return ack_offline(latch_count, latch_corrupt, paths);
         }
         Err(e) => return Err(AckError::Probe(e)),
     };
 
     if !pool.mounted {
-        return ack_offline(latch_count, paths);
+        return ack_offline(latch_count, latch_corrupt, paths);
     }
 
     // 3. Run btrfs device stats
@@ -61,9 +69,10 @@ pub fn cmd_ack<R: CommandRunner>(
     let new_acked = snapshot_current(&device_stats, &alert_missing_devids, &path_to_devid)?;
     save_acked_stats(&new_acked, paths)?;
 
-    // 7. Remove smartd alert flag + alert latch
+    // 7. Remove smartd alert flag + alert latch (+ any corrupt sidecar)
     alert::remove_smartd_alert_flag(paths)?;
     alert::remove_alert_latch(paths)?;
+    alert::remove_alert_latch_corrupt(paths)?;
 
     // 8. Stop beeper (best-effort)
     stop_beeper();
@@ -78,15 +87,20 @@ pub fn cmd_ack<R: CommandRunner>(
     Ok(())
 }
 
-fn ack_offline(latch_count: usize, paths: &StatePaths) -> Result<(), AckError> {
+fn ack_offline(
+    latch_count: usize,
+    latch_corrupt: bool,
+    paths: &StatePaths,
+) -> Result<(), AckError> {
     let smartd_active = alert::smartd_alert_active(paths);
 
-    let has_alert = latch_count > 0 || smartd_active;
+    let has_alert = latch_count > 0 || smartd_active || latch_corrupt;
     if !has_alert {
         return Err(AckError::PoolNotMounted);
     }
 
     alert::remove_alert_latch(paths)?;
+    alert::remove_alert_latch_corrupt(paths)?;
     alert::remove_smartd_alert_flag(paths)?;
     stop_beeper();
     println!("acknowledged current alerts");

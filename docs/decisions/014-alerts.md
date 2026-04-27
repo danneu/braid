@@ -84,6 +84,16 @@ effects.
 
 The alert latch is an append/refresh log of all unacked causes from all sources. Each monitor cycle loads the existing latch, computes new causes, and merges. Previously-latched causes that aren't re-detected are carried forward. Newly-detected causes replace their latched counterpart (same key = fresher evidence). This ensures all cause types persist until `braid ack`, even if the triggering condition resolves — fixing the invariant for all sources, not just journal.
 
+### Corrupt latch recovery
+
+`load_alert_latch` returns `Result<Option<AlertState>, LatchLoadError>` so callers can distinguish three outcomes: file absent (`Ok(None)`, normal -- no active alerts), I/O failure (`Err(Read)`), and unparseable on-disk content (`Err(Parse)`). Each caller picks its own fail-closed policy:
+
+- `cmd_monitor` is the only path that mutates the latch. On read/parse failure it quarantines the bad bytes by renaming `alert-latch.json` to `alert-latch.json.corrupt`, then writes a fresh latch containing a loud `ComputationError` cause whose `detail` names the failure. The corruption signal is folded into a single `ComputationError` (not appended as a second cause), because `merge_into_latch` collapses every `ComputationError` into one slot via `same_cause_key` — appending two would silently drop one.
+- `cmd_status` is the read-only surface: `resolve_alert_state` surfaces a corrupt latch as a `ComputationError` cause but never moves the file (status must not mutate state).
+- `cmd_ack` treats a corrupt latch as an active alert for gating purposes — otherwise `ack_offline` would refuse with `PoolNotMounted` and the user would have no way to clear a corrupt file with the pool offline. ack always cleans up both `alert-latch.json` and the `.corrupt` sidecar.
+
+This preserves "latched until ack" even when the on-disk state is unreadable: the operator sees a loud `ComputationError`, the bad bytes are preserved for forensics, and ack always succeeds.
+
 ## Rejected alternatives
 
 - **Daemon-based monitoring**: more complex lifecycle management for no benefit over a timer + oneshot

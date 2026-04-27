@@ -240,9 +240,45 @@ pub fn remove_smartd_alert_flag(paths: &StatePaths) -> Result<(), std::io::Error
 // Alert latch file
 // ---------------------------------------------------------------------------
 
-pub fn load_alert_latch(paths: &StatePaths) -> Option<AlertState> {
-    let contents = std::fs::read_to_string(paths.alert_latch_json()).ok()?;
-    serde_json::from_str(&contents).ok()
+#[derive(Debug, thiserror::Error)]
+pub enum LatchLoadError {
+    #[error("read alert latch: {0}")]
+    Read(#[from] std::io::Error),
+    #[error("parse alert latch: {0}")]
+    Parse(#[from] serde_json::Error),
+}
+
+pub fn load_alert_latch(paths: &StatePaths) -> Result<Option<AlertState>, LatchLoadError> {
+    load_alert_latch_at(&paths.alert_latch_json())
+}
+
+pub fn load_alert_latch_at(path: &Path) -> Result<Option<AlertState>, LatchLoadError> {
+    // Read bytes (not String) so invalid UTF-8 surfaces as a Parse error via
+    // serde_json, not as an io::Error::InvalidData wrapped in Read. Read/Parse
+    // splits "filesystem failed" from "on-disk content is wrong"; non-UTF-8
+    // bytes are the latter.
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(LatchLoadError::Read(e)),
+    };
+    Ok(Some(serde_json::from_slice(&bytes)?))
+}
+
+/// Mutation-path variant: on read/parse failure, move the bad file aside to
+/// `alert-latch.json.corrupt` (best effort) and return a detail string so the
+/// caller can plant a `ComputationError` cause. On success, behaves like
+/// `load_alert_latch`.
+pub fn load_alert_latch_or_quarantine(paths: &StatePaths) -> (Option<AlertState>, Option<String>) {
+    match load_alert_latch(paths) {
+        Ok(opt) => (opt, None),
+        Err(e) => {
+            let detail = e.to_string();
+            eprintln!("warning: alert latch unreadable -- quarantining: {detail}");
+            let _ = std::fs::rename(paths.alert_latch_json(), paths.alert_latch_corrupt());
+            (None, Some(detail))
+        }
+    }
 }
 
 pub fn save_alert_latch(state: &AlertState, paths: &StatePaths) -> Result<(), std::io::Error> {
@@ -252,6 +288,14 @@ pub fn save_alert_latch(state: &AlertState, paths: &StatePaths) -> Result<(), st
 
 pub fn remove_alert_latch(paths: &StatePaths) -> Result<(), std::io::Error> {
     match std::fs::remove_file(paths.alert_latch_json()) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+pub fn remove_alert_latch_corrupt(paths: &StatePaths) -> Result<(), std::io::Error> {
+    match std::fs::remove_file(paths.alert_latch_corrupt()) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e),
@@ -387,6 +431,119 @@ mod tests {
         std::fs::write(&path, "not json").unwrap();
         let stats = load_acked_stats_at(&path);
         assert!(stats.0.is_empty());
+    }
+
+    /*
+     * Intent: load_alert_latch returns Ok(None) when the latch file does not
+     * exist, distinguishing "no alert state on disk" from "file exists but
+     * unreadable / unparseable".
+     *
+     * Why it exists: the prior load_alert_latch returned Option<AlertState>
+     * with .ok()? on both read and parse, conflating absent-file with corrupt-
+     * file. Pinning the typed split prevents regressing back to that shape,
+     * which silently dropped latched causes when a corrupt file was rebuilt.
+     *
+     * Scenario: fresh /var/lib/braid with no prior monitor run -- the latch
+     * file simply does not exist yet. monitor must treat this as "empty
+     * latch", not as an error.
+     */
+    #[test]
+    fn load_alert_latch_absent_returns_ok_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nonexistent.json");
+        let result = load_alert_latch_at(&path);
+        assert!(matches!(result, Ok(None)), "got {result:?}");
+    }
+
+    /*
+     * Intent: load_alert_latch returns Err(LatchLoadError::Parse) when the
+     * latch file exists but does not contain valid AlertState JSON.
+     *
+     * Why it exists: this is the regression gate for the silent-drop bug.
+     * The original .ok()? code returned None on parse failure, causing
+     * cmd_monitor to merge live causes onto an empty slate and overwrite
+     * the corrupt file -- silently violating "latched until ack". The
+     * typed Parse variant lets each caller (monitor, status, ack) pick its
+     * own fail-closed policy. Asserting the typed variant (not message
+     * substrings) follows the project's typed-error convention.
+     *
+     * Scenario: /var/lib/braid/alert-latch.json contains garbage bytes
+     * (manual edit, external tampering, or a future refactor that drops
+     * atomic_write). Next monitor invocation must NOT pretend the file
+     * is fine.
+     */
+    #[test]
+    fn load_alert_latch_corrupt_returns_parse_err() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad.json");
+        std::fs::write(&path, b"not json").unwrap();
+        let result = load_alert_latch_at(&path);
+        assert!(
+            matches!(result, Err(LatchLoadError::Parse(_))),
+            "got {result:?}"
+        );
+    }
+
+    /*
+     * Intent: load_alert_latch round-trips a previously-saved AlertState
+     * from disk, returning Ok(Some(state)).
+     *
+     * Why it exists: lock the happy path so the typed-error refactor
+     * cannot regress the common case (a valid latch on disk being read
+     * back). Also documents the contract that what save_alert_latch
+     * writes, load_alert_latch reads back unchanged.
+     *
+     * Scenario: monitor wrote a latch on a prior cycle; the next ack/status
+     * invocation must see the same AlertState.
+     */
+    #[test]
+    fn load_alert_latch_valid_returns_ok_some() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("good.json");
+        let original = AlertState {
+            active: true,
+            causes: vec![AlertCause::MissingDevice { devid: 7 }],
+        };
+        std::fs::write(&path, serde_json::to_string(&original).unwrap()).unwrap();
+        let result = load_alert_latch_at(&path).unwrap();
+        assert_eq!(result, Some(original));
+    }
+
+    /*
+     * Intent: load_alert_latch_or_quarantine moves a corrupt latch file
+     * aside to alert-latch.json.corrupt and returns (None, Some(detail))
+     * so the caller can plant a loud ComputationError cause.
+     *
+     * Why it exists: this is the recovery primitive for cmd_monitor's
+     * mutation paths. Without quarantine, the next save_alert_latch call
+     * would overwrite the corrupt file and destroy forensic evidence.
+     * The detail string is what gets folded into the new latch's
+     * ComputationError so status surfaces the corruption instead of
+     * silently rebuilding.
+     *
+     * Scenario: cmd_monitor finds the latch on disk is unparseable. It
+     * must (a) preserve the bad bytes for later inspection, (b) report
+     * the failure detail to the caller for surfacing.
+     */
+    #[test]
+    fn quarantine_moves_corrupt_file_aside_and_reports_detail() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(dir.path().to_path_buf());
+        let garbage = b"not json".to_vec();
+        std::fs::write(paths.alert_latch_json(), &garbage).unwrap();
+
+        let (state, detail) = load_alert_latch_or_quarantine(&paths);
+
+        assert!(state.is_none());
+        let detail = detail.expect("quarantine reports a detail string");
+        assert!(!detail.is_empty(), "detail must be non-empty");
+        assert!(
+            !paths.alert_latch_json().exists(),
+            "live latch path must be moved aside"
+        );
+        let preserved = std::fs::read(paths.alert_latch_corrupt())
+            .expect("corrupt sidecar must exist after quarantine");
+        assert_eq!(preserved, garbage, "sidecar must contain original bytes");
     }
 
     #[test]

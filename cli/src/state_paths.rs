@@ -36,6 +36,10 @@ impl StatePaths {
         self.root.join("alert-latch.json")
     }
 
+    pub fn alert_latch_corrupt(&self) -> PathBuf {
+        self.root.join("alert-latch.json.corrupt")
+    }
+
     pub fn luks_headers_dir(&self) -> PathBuf {
         self.root.join("luks-headers")
     }
@@ -62,6 +66,10 @@ mod tests {
             PathBuf::from("/var/lib/braid/alert-latch.json")
         );
         assert_eq!(
+            p.alert_latch_corrupt(),
+            PathBuf::from("/var/lib/braid/alert-latch.json.corrupt")
+        );
+        assert_eq!(
             p.luks_headers_dir(),
             PathBuf::from("/var/lib/braid/luks-headers")
         );
@@ -71,6 +79,10 @@ mod tests {
     fn custom_resolves_under_given_root() {
         let p = StatePaths::custom(PathBuf::from("/tmp/test-braid"));
         assert_eq!(p.pool_json(), PathBuf::from("/tmp/test-braid/pool.json"));
+        assert_eq!(
+            p.alert_latch_corrupt(),
+            PathBuf::from("/tmp/test-braid/alert-latch.json.corrupt")
+        );
         assert_eq!(
             p.luks_headers_dir(),
             PathBuf::from("/tmp/test-braid/luks-headers")

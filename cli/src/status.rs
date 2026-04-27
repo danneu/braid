@@ -527,8 +527,26 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
 /// resolves, contradicting the "latched until ack" model. The smartd flag is
 /// checked as a bridge for between-cycle fires.
 pub(crate) fn resolve_alert_state(paths: &StatePaths) -> AlertState {
-    let latch = alert::load_alert_latch(paths);
     let smartd_active = alert::smartd_alert_active(paths);
+
+    let latch = match alert::load_alert_latch(paths) {
+        Ok(opt) => opt,
+        Err(e) => {
+            // Fail loud: don't pretend "no alert" when we can't read the
+            // latch. Status is read-only -- never quarantine here; that is
+            // monitor's job.
+            let mut causes = vec![AlertCause::ComputationError {
+                detail: format!("alert latch unreadable -- {e}"),
+            }];
+            if smartd_active {
+                causes.push(AlertCause::SmartdAlert);
+            }
+            return AlertState {
+                active: true,
+                causes,
+            };
+        }
+    };
 
     match latch {
         Some(mut state) if state.active => {
@@ -3999,5 +4017,43 @@ mod tests {
             }
             other => panic!("expected StatusError::Probe(MapperConflict), got: {other:?}"),
         }
+    }
+
+    /*
+     * Intent: resolve_alert_state surfaces a corrupt alert latch as an
+     * active AlertState containing a single ComputationError cause, rather
+     * than silently reporting "no alert".
+     *
+     * Why it exists: when the latch on disk is unparseable, the prior
+     * implementation returned None and resolve_alert_state degraded to
+     * "no alert", hiding the latched-until-ack invariant violation from
+     * the user. status is the read-only surface for the latch -- it must
+     * fail loud here even though it deliberately does NOT quarantine
+     * (that's monitor's job). Asserting on the typed AlertCause variant
+     * (not message substrings) follows the project's typed-error
+     * convention.
+     *
+     * Scenario: external tampering or filesystem damage corrupts
+     * /var/lib/braid/alert-latch.json between monitor cycles. Operator
+     * runs `braid status`; they must see a clear corruption signal, not
+     * an "all clear".
+     */
+    #[test]
+    fn resolve_alert_state_surfaces_corrupt_latch_as_computation_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(dir.path().to_path_buf());
+        std::fs::write(paths.alert_latch_json(), b"not json").unwrap();
+
+        let state = resolve_alert_state(&paths);
+
+        assert!(state.active, "corrupt latch must surface as active alert");
+        assert!(
+            matches!(
+                state.causes.as_slice(),
+                [AlertCause::ComputationError { .. }]
+            ),
+            "expected exactly one ComputationError cause, got {:?}",
+            state.causes
+        );
     }
 }

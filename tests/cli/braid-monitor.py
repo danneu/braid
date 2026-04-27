@@ -90,6 +90,44 @@ with subtest("After ack: status has no ALERT"):
 with subtest("After ack: monitor exits 0"):
     machine.succeed("braid monitor")
 
+# Intent: A corrupt /var/lib/braid/alert-latch.json must surface as a loud
+#   alert rather than silently rebuilding into an empty latch.
+# Why it exists: The prior load_alert_latch returned None on parse failure,
+#   conflating "absent" with "corrupt". cmd_monitor would then merge live
+#   causes onto an empty slate and overwrite the corrupt file -- silently
+#   dropping previously-latched-but-now-cleared causes and violating the
+#   "latched until ack" invariant. status would also report "no alert" so
+#   the operator never noticed.
+# Scenario: external tampering or filesystem damage corrupts the latch
+#   while the pool is mounted and healthy. monitor must exit 1 (not 0,
+#   not 2), the corrupt bytes must be preserved in the .corrupt sidecar,
+#   status must surface the corruption, and ack must clear both files.
+with subtest("Corrupt latch (mounted): monitor surfaces and quarantines"):
+    # Pool is currently mounted and healthy; no real alert exists.
+    machine.succeed("printf 'not json' > /var/lib/braid/alert-latch.json")
+    rc = machine.succeed("set +e; braid monitor; echo $?").strip().splitlines()[-1]
+    assert rc == "1", f"Expected monitor exit 1 on corrupt latch, got {rc}"
+    # Corrupt bytes preserved in sidecar
+    machine.succeed("test -f /var/lib/braid/alert-latch.json.corrupt")
+    sidecar = machine.succeed("cat /var/lib/braid/alert-latch.json.corrupt")
+    assert sidecar == "not json", f"Expected sidecar to hold original bytes, got: {sidecar!r}"
+    # status exits 0 (status never returns non-zero on alerts) but surfaces it
+    json_output = machine.succeed("braid status --json")
+    report = json.loads(json_output)
+    assert report["alert_active"] == True, f"Expected alert_active=true, got: {report}"
+    cause_types = [c["type"] for c in report["alert_causes"]]
+    assert "computation_error" in cause_types, (
+        f"Expected computation_error cause, got: {cause_types}"
+    )
+    ce_details = [c.get("detail", "") for c in report["alert_causes"] if c["type"] == "computation_error"]
+    assert any("alert latch" in d for d in ce_details), (
+        f"Expected ComputationError detail to mention 'alert latch', got: {ce_details}"
+    )
+    # ack clears both the live latch and the .corrupt sidecar
+    machine.succeed("braid ack")
+    machine.fail("test -f /var/lib/braid/alert-latch.json")
+    machine.fail("test -f /var/lib/braid/alert-latch.json.corrupt")
+
 with subtest("Btrfs alert latched after pool offline"):
     # Pool is still degraded. Remove acked state to re-trigger alert.
     machine.succeed("rm -f /var/lib/braid/acked-stats.json")
@@ -106,5 +144,25 @@ with subtest("Btrfs alert latched after pool offline"):
     # Offline ack should succeed
     machine.succeed("braid ack")
     machine.fail("test -f /var/lib/braid/alert-latch.json")
+
+# Intent: A corrupt latch must be ack-able even with the pool offline.
+# Why it exists: If `latch_count = 0` is set on parse failure (the naive
+#   fix) and smartd is inactive, ack_offline gates on
+#   `has_alert = latch_count > 0 || smartd_active` and returns
+#   PoolNotMounted, leaving the corrupt file on disk forever. The user
+#   would have no way to clear it without remounting.
+# Scenario: pool is offline (already the case at this point in the
+#   script), and the latch on disk is unparseable. `braid ack` must
+#   succeed and remove both the live latch and the .corrupt sidecar.
+with subtest("Corrupt latch (offline): ack clears it without PoolNotMounted"):
+    # Pool is currently offline (cryptsetup close was called above).
+    # Both alert-latch.json and alert-latch.json.corrupt should be absent
+    # at this point; create just the live (corrupt) file.
+    machine.fail("test -f /var/lib/braid/alert-latch.json")
+    machine.succeed("printf 'not json' > /var/lib/braid/alert-latch.json")
+    rc = machine.succeed("set +e; braid ack; echo $?").strip().splitlines()[-1]
+    assert rc == "0", f"Expected ack exit 0 on offline corrupt latch, got {rc}"
+    machine.fail("test -f /var/lib/braid/alert-latch.json")
+    machine.fail("test -f /var/lib/braid/alert-latch.json.corrupt")
 
 machine.shutdown()

@@ -22,8 +22,19 @@ pub enum MonitorResult {
 // wrapper starts the beeper. See docs/decisions/014-alerts.md.
 fn latch_computation_error(detail: String, paths: &StatePaths) -> MonitorResult {
     eprintln!("error: {detail}");
-    let causes = vec![AlertCause::ComputationError { detail }];
-    let existing = alert::load_alert_latch(paths);
+    let (existing, latch_corrupt_detail) = alert::load_alert_latch_or_quarantine(paths);
+    // merge_into_latch's same_cause_key collapses every ComputationError into
+    // one slot, so two distinct ComputationError entries would lose one. Fold
+    // the latch-corruption detail into the same cause string instead.
+    let combined_detail = match latch_corrupt_detail {
+        Some(latch_detail) => format!(
+            "{detail}; additionally, previous alert latch was unreadable -- quarantined; {latch_detail}"
+        ),
+        None => detail,
+    };
+    let causes = vec![AlertCause::ComputationError {
+        detail: combined_detail,
+    }];
     let merged = merge_into_latch(existing.as_ref(), &causes);
     if let Err(e) = alert::save_alert_latch(&merged, paths) {
         eprintln!("Warning: failed to write alert latch: {e}");
@@ -118,8 +129,20 @@ pub fn cmd_monitor<R: CommandRunner>(
         Err(e) => return latch_computation_error(e.to_string(), paths),
     };
 
-    // 9. Load existing latch
-    let existing_latch = alert::load_alert_latch(paths);
+    // 9. Load existing latch (quarantine corrupt file if needed)
+    let (existing_latch, latch_corrupt_detail) = alert::load_alert_latch_or_quarantine(paths);
+
+    // 9b. If the prior latch was unreadable, surface that as a loud
+    // ComputationError cause so status sees it instead of silently rebuilding.
+    let mut live_causes = live_causes;
+    if let Some(detail) = latch_corrupt_detail {
+        live_causes.insert(
+            0,
+            AlertCause::ComputationError {
+                detail: format!("previous alert latch was unreadable -- quarantined; {detail}"),
+            },
+        );
+    }
 
     // 10. Merge: existing latch + live causes
     let merged = merge_into_latch(existing_latch.as_ref(), &live_causes);
@@ -357,7 +380,9 @@ mod tests {
             latch_path.exists(),
             "alert latch must be written on UnmappedDeviceError"
         );
-        let latched = alert::load_alert_latch(&paths).expect("latch present on disk");
+        let latched = alert::load_alert_latch(&paths)
+            .expect("latch parses")
+            .expect("latch present on disk");
         assert!(latched.active);
         assert!(matches!(
             latched.causes.as_slice(),
