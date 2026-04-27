@@ -27,6 +27,7 @@ use crate::preflight;
 use crate::state_paths::StatePaths;
 use crate::status::format_bytes;
 use crate::status_tag::{StatusTag, color_enabled_for_stdout, status_line};
+use crate::types::MountPoint;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -411,6 +412,15 @@ fn check_declared_disks<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> Che
     summarize_declared_disks(&classifications)
 }
 
+fn probe_mountpoint_is_mounted<R: CommandRunner>(runner: &R, mount_point: &MountPoint) -> bool {
+    matches!(
+        runner.run(&CmdRequest::MountpointCheck {
+            path: mount_point.clone(),
+        }),
+        Ok(out) if out.exit_status == 0
+    )
+}
+
 fn ensure_mountpoint_is_mounted<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> Option<bool> {
     let config = match &ctx.config {
         Some(c) => c,
@@ -422,13 +432,7 @@ fn ensure_mountpoint_is_mounted<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>
     }
 
     let mount_point = config.mount_point().to_owned();
-
-    let is_mounted = matches!(
-        ctx.runner.run(&CmdRequest::MountpointCheck {
-            path: mount_point,
-        }),
-        Ok(out) if out.exit_status == 0
-    );
+    let is_mounted = probe_mountpoint_is_mounted(ctx.runner, &mount_point);
     ctx.mountpoint_is_mounted = Some(is_mounted);
     Some(is_mounted)
 }
@@ -777,18 +781,12 @@ fn check_braid_online_active_when_mounted<R: CommandRunner>(
         };
     }
     let mount_point = config.mount_point().clone();
-    match ctx.runner.run(&CmdRequest::MountpointCheck {
-        path: mount_point.clone(),
-    }) {
-        Ok(out) if out.exit_status == 0 => {}
-        _ => {
-            return CheckResult {
-                name,
-                status: CheckStatus::Skip,
-                message: "skipped (pool not mounted -- braid-online only matters while online)"
-                    .into(),
-            };
-        }
+    if !probe_mountpoint_is_mounted(ctx.runner, &mount_point) {
+        return CheckResult {
+            name,
+            status: CheckStatus::Skip,
+            message: "skipped (pool not mounted -- braid-online only matters while online)".into(),
+        };
     }
     let state = match read_braid_online_active_state(ctx.runner) {
         Ok(state) => state,
@@ -2885,6 +2883,47 @@ mod tests {
         assert_eq!(r.status, CheckStatus::Fail);
         assert!(r.message.contains("inactive"));
         assert!(r.message.contains("UPS shutdown"));
+    }
+
+    /* Intent: check_braid_online_active_when_mounted does NOT trust
+     * ctx.mountpoint_is_mounted; it re-probes mount state every call.
+     * Why it exists: per ADR 020, "pool mounted but braid-online inactive"
+     * is the highest-severity doctor finding -- the UPS shutdown safety
+     * guarantee fails silently if we miss it. Earlier checks in run_doctor
+     * may have cached `Some(false)` while the pool was still locking; if
+     * the pool then comes online before the UPS check runs, a cache-trusting
+     * implementation would skip with "(pool not mounted)" instead of failing.
+     * Scenario: a stale cache from a previous check says unmounted; the live
+     * mount probe says mounted; braid-online.service is inactive.
+     */
+    #[test]
+    fn braid_online_check_reprobes_when_cache_is_stale() {
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::MountpointCheck {
+                    path: MountPoint("/mnt/storage".into()),
+                },
+                RawCommandOutput {
+                    cmd: "mountpoint".into(),
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                },
+            )
+            .with_output(
+                CmdRequest::SystemctlIsActive {
+                    unit: "braid-online.service".into(),
+                },
+                systemctl_is_active_output("inactive"),
+            );
+        let (_dir, paths) = isolated_paths();
+        let mut ctx = ups_ctx(&runner, &paths, config_with_ups_enabled());
+        ctx.mountpoint_is_mounted = Some(false); // stale cache from earlier check
+
+        let r = check_braid_online_active_when_mounted(&mut ctx);
+
+        assert_eq!(r.status, CheckStatus::Fail, "got: {r:?}");
+        assert!(r.message.contains("UPS shutdown"), "{}", r.message);
     }
 
     // Intent: check_braid_online_active_when_mounted returns Ok when
