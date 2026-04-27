@@ -1441,6 +1441,147 @@ mod tests {
         }
     }
 
+    /// Runner for 3-device pool where btrfs device remove itself fails.
+    struct FailingRemoveRunner {
+        log: Arc<Mutex<Vec<CmdRequest>>>,
+    }
+
+    impl FailingRemoveRunner {
+        fn new(log: Arc<Mutex<Vec<CmdRequest>>>) -> Self {
+            Self { log }
+        }
+    }
+
+    impl CommandRunner for FailingRemoveRunner {
+        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
+            self.log.lock().unwrap().push(request.clone());
+
+            match request {
+                CmdRequest::FindmntJson { mount_point } => Ok(mock_out(
+                    &format!("findmnt --json --mountpoint {mount_point}"),
+                    r#"{"filesystems":[{"target":"/mnt/storage","source":"/dev/mapper/braid-disk1","fstype":"btrfs"}]}"#,
+                    0,
+                )),
+                CmdRequest::BtrfsFilesystemShow { mount_point } => Ok(mock_out(
+                    &format!("btrfs filesystem show {mount_point}"),
+                    "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\tTotal devices 3 FS bytes used 16.17MiB\n\tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk2\n\tdevid    3 size 0 used 0 path MISSING\n",
+                    0,
+                )),
+                CmdRequest::CryptsetupStatus { mapper } => Ok(mock_out(
+                    &format!("cryptsetup status {mapper}"),
+                    &format!(
+                        "{mapper} is active and is in use.\n  type:    LUKS2\n  device:  /dev/vdb\n  mode:    read/write\n"
+                    ),
+                    0,
+                )),
+                CmdRequest::CryptsetupLuksUuid { .. } => Ok(mock_out(
+                    "cryptsetup luksUUID",
+                    "11111111-1111-1111-1111-111111111111\n",
+                    0,
+                )),
+                CmdRequest::BtrfsBalanceStatus { .. } => Ok(mock_out(
+                    "btrfs balance status",
+                    "No balance found on '/mnt/storage'\n",
+                    0,
+                )),
+                CmdRequest::BtrfsDeviceUsageRaw { .. } => Ok(mock_out(
+                    "btrfs device usage --raw",
+                    "/dev/mapper/braid-disk1, ID: 1\n   Device size:           520093696\n   Device slack:                  0\n   Data,RAID1:            67108864\n   Unallocated:           452984832\n\n/dev/mapper/braid-disk2, ID: 2\n   Device size:           520093696\n   Device slack:                  0\n   Data,RAID1:            67108864\n   Unallocated:           452984832\n\n<missing disk>, ID: 3\n   Device size:                  0\n   Device slack:                  0\n   Data,RAID1:            67108864\n   Unallocated:                  0\n\n",
+                    0,
+                )),
+                CmdRequest::BtrfsDeviceRemove { .. } => Ok(RawCommandOutput {
+                    cmd: "btrfs device remove 3 /mnt/storage".into(),
+                    stdout: String::new(),
+                    stderr: "ERROR: error removing device: No space left on device".into(),
+                    exit_status: 1,
+                }),
+                _ => Err(CmdError::MissingMock),
+            }
+        }
+
+        fn run_with_stdin(
+            &self,
+            request: &CmdRequest,
+            _stdin: &[u8],
+        ) -> Result<RawCommandOutput, CmdError> {
+            self.run(request)
+        }
+    }
+
+    /*
+     * Intent: pending-op.json survives when the btrfs device-remove phase
+     * fails before the post-remove soft balance can run.
+     *
+     * Why it exists: remove-missing must not persist the target pool.json until
+     * the full mutation succeeds. If save_membership moved before
+     * pool_remove_device_using, this failure would leave pool.json reconciled
+     * without the btrfs operation having completed.
+     *
+     * Scenario: 3-disk NAS, one drive dies. Operator runs remove-missing, but
+     * `btrfs device remove <devid>` fails mid-relocation with ENOSPC. The
+     * journal must persist and pool.json must still contain the target disk so
+     * `braid recover` can reconcile.
+     */
+    #[test]
+    fn journal_survives_device_remove_failure() {
+        let (_tmp, config_path, _state_tmp, state_paths) = three_device_config();
+
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let runner = FailingRemoveRunner::new(log.clone());
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let result = cmd_remove_missing(
+            &runner,
+            &MockFs,
+            &RemoveMissingParams {
+                config_path: &config_path,
+                missing_id: 3,
+                dry_run: false,
+                yes: true,
+                progress: crate::progress::ProgressOutput::Off,
+                paths: &state_paths,
+                sleep_inhibitor: &inhibitor,
+                sleeper: &crate::progress::NoopSleeper,
+            },
+        );
+
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("btrfs device remove failed (exit 1)"),
+            "remove-missing should fail from the device-remove step: {err}"
+        );
+        assert!(
+            journal::load_journal(&state_paths).unwrap().is_some(),
+            "pending-op.json must survive error exit so braid recover can reconcile"
+        );
+        assert!(
+            membership::load_membership(&state_paths)
+                .unwrap()
+                .disks
+                .contains_key("disk3"),
+            "pool.json must still contain the target disk when device remove fails"
+        );
+        let calls = log.lock().unwrap();
+        assert!(
+            calls
+                .iter()
+                .any(|c| matches!(c, CmdRequest::BtrfsDeviceRemove { .. })),
+            "expected BtrfsDeviceRemove; calls: {calls:?}"
+        );
+        assert!(
+            !calls
+                .iter()
+                .any(|c| matches!(c, CmdRequest::BtrfsBalanceRaid1Soft { .. })),
+            "soft balance must not run after device remove fails; calls: {calls:?}"
+        );
+        // The journal exists, which proves we got past journal::write_journal,
+        // which proves the inhibitor was acquired exactly once on the way in.
+        assert_eq!(
+            inhibitor.acquire_count(),
+            1,
+            "sleep inhibitor must be acquired exactly once on the path through journal::write_journal"
+        );
+    }
+
     #[test]
     // Intent: pending-op.json survives when soft balance fails after a successful
     //   device removal.
