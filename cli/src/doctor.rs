@@ -67,6 +67,7 @@ struct DoctorContext<'a, R: CommandRunner> {
     config: Option<Config>,
     runner: &'a R,
     paths: &'a StatePaths,
+    mountpoint_is_mounted: Option<bool>,
     df_snapshot: Option<DfSnapshot>,
 }
 
@@ -391,6 +392,28 @@ fn check_declared_disks<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> Che
     summarize_declared_disks(&classifications)
 }
 
+fn ensure_mountpoint_is_mounted<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> Option<bool> {
+    let config = match &ctx.config {
+        Some(c) => c,
+        None => return None,
+    };
+
+    if let Some(is_mounted) = ctx.mountpoint_is_mounted {
+        return Some(is_mounted);
+    }
+
+    let mount_point = config.mount_point().to_owned();
+
+    let is_mounted = matches!(
+        ctx.runner.run(&CmdRequest::MountpointCheck {
+            path: mount_point,
+        }),
+        Ok(out) if out.exit_status == 0
+    );
+    ctx.mountpoint_is_mounted = Some(is_mounted);
+    Some(is_mounted)
+}
+
 fn ensure_df_snapshot<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) {
     if ctx.df_snapshot.is_some() {
         return;
@@ -403,21 +426,16 @@ fn ensure_df_snapshot<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) {
 
     let mount_point = config.mount_point().to_owned();
 
-    // Check if pool is mounted
-    match ctx.runner.run(&CmdRequest::MountpointCheck {
-        path: mount_point.clone(),
-    }) {
-        Ok(out) if out.exit_status == 0 => {}
-        _ => {
-            ctx.df_snapshot = Some(DfSnapshot::NotMounted);
-            return;
-        }
+    if ensure_mountpoint_is_mounted(ctx) != Some(true) {
+        ctx.df_snapshot = Some(DfSnapshot::NotMounted);
+        return;
     }
 
     // Query btrfs filesystem df
-    let raw = match ctx.runner.run(&CmdRequest::BtrfsFilesystemDfJson {
-        mount_point: mount_point.clone(),
-    }) {
+    let raw = match ctx
+        .runner
+        .run(&CmdRequest::BtrfsFilesystemDfJson { mount_point })
+    {
         Ok(raw) => raw,
         Err(e) => {
             ctx.df_snapshot = Some(DfSnapshot::QueryFailed(e.to_string()));
@@ -519,17 +537,12 @@ fn check_pool_missing_devices<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) 
         };
     }
 
-    ensure_df_snapshot(ctx);
-
-    match &ctx.df_snapshot {
-        None | Some(DfSnapshot::NotMounted) => {
-            return CheckResult {
-                name: "pool_missing_devices".into(),
-                status: CheckStatus::Skip,
-                message: "skipped (pool not mounted)".into(),
-            };
-        }
-        _ => {}
+    if ensure_mountpoint_is_mounted(ctx) != Some(true) {
+        return CheckResult {
+            name: "pool_missing_devices".into(),
+            status: CheckStatus::Skip,
+            message: "skipped (pool not mounted)".into(),
+        };
     }
 
     let mount_point = ctx.config.as_ref().unwrap().mount_point().clone();
@@ -901,6 +914,7 @@ pub fn run_doctor<R: CommandRunner>(
         config: None,
         runner,
         paths,
+        mountpoint_is_mounted: None,
         df_snapshot: None,
     };
 
@@ -1010,10 +1024,11 @@ pub fn cmd_doctor(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cmd::{MockRunner, RawCommandOutput};
+    use crate::cmd::{CmdError, MockRunner, RawCommandOutput};
     use crate::state_paths::StatePaths;
     use crate::types::MountPoint;
     use std::io::Write;
+    use std::sync::Mutex;
     use tempfile::{NamedTempFile, TempDir};
 
     fn isolated_paths() -> (TempDir, StatePaths) {
@@ -1824,6 +1839,30 @@ mod tests {
         );
     }
 
+    /* Intent: data_profile_mismatch reports malformed df JSON as a parse warning.
+     * Why it exists: the shared df snapshot must preserve parser errors distinctly
+     * from an unmounted pool or unavailable config.
+     * Scenario: btrfs exits successfully but emits output that no longer matches
+     * braid's expected `filesystem df --format json` schema.
+     */
+    #[test]
+    fn data_profile_warn_when_df_json_malformed() {
+        let (mp_req, mp_out) = mountpoint_ok();
+        let (df_req, df_out) = df_json("{not json");
+        let runner = mock()
+            .with_output(mp_req, mp_out)
+            .with_output(df_req, df_out);
+        let f = write_temp(valid_config_json());
+        let report = run_doctor(f.path(), &runner, &isolated_paths().1, human_options());
+        let check = find_check(&report, "data_profile_mismatch");
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert!(
+            check.message.contains("could not parse data profiles"),
+            "expected parse warning: {}",
+            check.message
+        );
+    }
+
     // --- metadata_profile_mismatch tests ---
 
     const DF_MIXED_METADATA: &str = r#"{
@@ -1991,6 +2030,58 @@ mod tests {
         )
     }
 
+    #[derive(Default)]
+    struct PoolMissingDevicesRunner {
+        calls: Mutex<Vec<CmdRequest>>,
+    }
+
+    impl CommandRunner for PoolMissingDevicesRunner {
+        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
+            self.calls.lock().unwrap().push(request.clone());
+
+            match request {
+                CmdRequest::MountpointCheck { path } if path.0 == "/mnt/storage" => {
+                    Ok(mountpoint_ok().1)
+                }
+                CmdRequest::BtrfsDeviceUsageRaw { mount_point }
+                    if mount_point.0 == "/mnt/storage" =>
+                {
+                    Ok(device_usage_healthy().1)
+                }
+                CmdRequest::BtrfsFilesystemDfJson { .. } => {
+                    panic!("pool_missing_devices must not query filesystem df")
+                }
+                _ => Err(CmdError::MissingMock),
+            }
+        }
+
+        fn run_with_stdin(
+            &self,
+            _request: &CmdRequest,
+            _stdin: &[u8],
+        ) -> Result<RawCommandOutput, CmdError> {
+            Err(CmdError::MissingMock)
+        }
+    }
+
+    fn parsed_doctor_ctx<'a, R: CommandRunner>(
+        runner: &'a R,
+        paths: &'a StatePaths,
+    ) -> DoctorContext<'a, R> {
+        let value: serde_json::Value =
+            serde_json::from_str(valid_config_json()).expect("test config JSON parses");
+        let config: Config = serde_json::from_value(value.clone()).expect("test config parses");
+        DoctorContext {
+            config_path: PathBuf::new(),
+            config_value: Some(value),
+            config: Some(config),
+            runner,
+            paths,
+            mountpoint_is_mounted: None,
+            df_snapshot: None,
+        }
+    }
+
     // Intent: pool_missing_devices reports Ok when no devices are missing.
     // Why: ensures the check doesn't false-positive on a healthy pool.
     // Scenario: healthy 1-disk pool, all present.
@@ -2008,6 +2099,45 @@ mod tests {
         let check = find_check(&report, "pool_missing_devices");
         assert_eq!(check.status, CheckStatus::Ok);
         assert!(check.message.contains("no missing"), "{}", check.message);
+    }
+
+    /* Intent: pool_missing_devices can run without querying `btrfs filesystem df`.
+     * Why it exists: missing-device detection only needs the mountpoint state and
+     * `btrfs device usage`; tying it to df makes an unrelated parser or command
+     * failure hide the more specific device probe.
+     * Scenario: the pool is mounted and healthy, while the df command would fail
+     * if this check accidentally requested it.
+     */
+    #[test]
+    fn pool_missing_devices_does_not_require_filesystem_df() {
+        let runner = PoolMissingDevicesRunner::default();
+        let (_dir, paths) = isolated_paths();
+        let mut ctx = parsed_doctor_ctx(&runner, &paths);
+
+        let check = check_pool_missing_devices(&mut ctx);
+
+        assert_eq!(check.status, CheckStatus::Ok);
+        assert_eq!(check.message, "no missing devices");
+
+        let calls = runner.calls.lock().unwrap();
+        assert!(
+            calls
+                .iter()
+                .any(|c| matches!(c, CmdRequest::MountpointCheck { .. })),
+            "expected mountpoint probe, got: {calls:?}"
+        );
+        assert!(
+            calls
+                .iter()
+                .any(|c| matches!(c, CmdRequest::BtrfsDeviceUsageRaw { .. })),
+            "expected device usage probe, got: {calls:?}"
+        );
+        assert!(
+            !calls
+                .iter()
+                .any(|c| matches!(c, CmdRequest::BtrfsFilesystemDfJson { .. })),
+            "missing-device check must not request df, got: {calls:?}"
+        );
     }
 
     // Intent: pool_missing_devices warns when devices are missing and recommends replace.
@@ -2102,6 +2232,7 @@ mod tests {
             config: None,
             runner,
             paths,
+            mountpoint_is_mounted: None,
             df_snapshot: None,
         }
     }
@@ -2371,6 +2502,7 @@ mod tests {
             config,
             runner,
             paths,
+            mountpoint_is_mounted: None,
             df_snapshot: None,
         }
     }
