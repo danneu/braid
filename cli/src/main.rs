@@ -3,7 +3,7 @@ use clap_complete::engine::{ArgValueCandidates, CompletionCandidate};
 use std::path::Path;
 
 use braid_cli::cmd::RealRunner;
-use braid_cli::config::config_read;
+use braid_cli::config::{DEFAULT_CONFIG_PATH, config_read};
 use braid_cli::doctor::{DoctorOptions, cmd_doctor};
 use braid_cli::probe::RealFilesystem;
 use braid_cli::progress::{ProgressMode, resolve_progress_output};
@@ -13,7 +13,7 @@ use braid_cli::state_paths::StatePaths;
 #[command(name = "braid", version)]
 #[command(about = "braid -- encrypted NAS storage", long_about = None)]
 struct Cli {
-    #[arg(long, global = true, default_value = "/etc/braid/config.json")]
+    #[arg(long, global = true, default_value = DEFAULT_CONFIG_PATH)]
     config: String,
 
     #[command(subcommand)]

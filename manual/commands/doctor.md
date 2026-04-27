@@ -51,7 +51,7 @@ Note: `--json` mode skips the alert beep test even when combined with `--beep` (
 | --- | --- |
 | `config_file` | Config exists and is valid JSON |
 | `config_schema` | Required fields present and deserializable |
-| `config_permissions` | Not world-writable, owned by root |
+| `config_permissions` | Canonical `/etc/braid/config.json` is not world-writable and is owned by root; custom `--config` paths skip this check |
 | `declared_disks` | Every disk in pool.json is present and has a readable LUKS header |
 | `pool_missing_devices` | No btrfs missing devices in the live pool |
 | `data_profile_mismatch` | Data block groups all use the same RAID profile |

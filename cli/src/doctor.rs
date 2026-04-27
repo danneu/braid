@@ -18,7 +18,7 @@ struct NotifierConfig {
 }
 
 use crate::cmd::{CmdRequest, CommandRunner, RealRunner};
-use crate::config::Config;
+use crate::config::{Config, DEFAULT_CONFIG_PATH};
 use crate::luks;
 use crate::membership;
 use crate::parse::parse_btrfs_df_json;
@@ -166,13 +166,25 @@ fn check_config_permissions<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) ->
         };
     }
 
-    let meta = match std::fs::metadata(&ctx.config_path) {
+    if ctx.config_path.as_os_str() != std::ffi::OsStr::new(DEFAULT_CONFIG_PATH) {
+        return CheckResult {
+            name: "config_permissions".into(),
+            status: CheckStatus::Skip,
+            message: "skipped (custom config path)".into(),
+        };
+    }
+
+    check_config_permissions_for_path(&ctx.config_path)
+}
+
+fn check_config_permissions_for_path(path: &Path) -> CheckResult {
+    let meta = match std::fs::metadata(path) {
         Ok(m) => m,
         Err(e) => {
             return CheckResult {
                 name: "config_permissions".into(),
                 status: CheckStatus::Warn,
-                message: format!("could not stat {}: {e}", ctx.config_path.display()),
+                message: format!("could not stat {}: {e}", path.display()),
             };
         }
     };
@@ -198,13 +210,13 @@ fn check_config_permissions<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) ->
         CheckResult {
             name: "config_permissions".into(),
             status: CheckStatus::Ok,
-            message: format!("{} permissions ok", ctx.config_path.display()),
+            message: format!("{} permissions ok", path.display()),
         }
     } else {
         CheckResult {
             name: "config_permissions".into(),
             status: CheckStatus::Warn,
-            message: format!("{}: {}", ctx.config_path.display(), warnings.join(", ")),
+            message: format!("{}: {}", path.display(), warnings.join(", ")),
         }
     }
 }
@@ -1128,6 +1140,46 @@ mod tests {
         // Deterministic coverage lives in the check_beep_path_inner tests.
     }
 
+    /* Intent: valid custom config files skip canonical permission enforcement.
+     * Why it exists: `braid doctor --config /tmp/...` is commonly used for
+     * diagnostics and should still validate file presence and schema without
+     * warning about debug-file ownership or mode bits.
+     * Scenario: an operator runs doctor against a temporary copy of the
+     * generated config while investigating an unrelated issue.
+     */
+    #[test]
+    fn valid_custom_config_skips_permissions() {
+        let f = write_temp(valid_config_json());
+        let (_dir, paths) = isolated_paths();
+        let report = run_doctor(f.path(), &mock(), &paths, human_options());
+
+        assert_eq!(find_check(&report, "config_file").status, CheckStatus::Ok);
+        assert_eq!(find_check(&report, "config_schema").status, CheckStatus::Ok);
+        let perm = find_check(&report, "config_permissions");
+        assert_eq!(perm.status, CheckStatus::Skip);
+        assert_eq!(perm.message, "skipped (custom config path)");
+    }
+
+    /* Intent: canonical permission enforcement uses exact path text.
+     * Why it exists: `Path` equality can treat a dotted path as equivalent to
+     * the default path, but the product rule intentionally skips anything that
+     * is not exactly `/etc/braid/config.json`.
+     * Scenario: an operator passes `--config /etc/braid/./config.json` while
+     * debugging and expects it to behave like any other custom path.
+     */
+    #[test]
+    fn dotted_default_path_skips_permissions_lexically() {
+        let runner = mock();
+        let (_dir, paths) = isolated_paths();
+        let mut ctx = parsed_doctor_ctx(&runner, &paths);
+        ctx.config_path = PathBuf::from("/etc/braid/./config.json");
+
+        let perm = check_config_permissions(&mut ctx);
+
+        assert_eq!(perm.status, CheckStatus::Skip);
+        assert_eq!(perm.message, "skipped (custom config path)");
+    }
+
     #[test]
     fn missing_file_fail_skip() {
         let report = run_doctor(
@@ -1369,25 +1421,35 @@ mod tests {
         assert_eq!(human, expected);
     }
 
+    /* Intent: raw canonical permission inspection reports unsafe write bits.
+     * Why it exists: custom-path gating in run_doctor must not remove coverage
+     * for the mode checks that still protect /etc/braid/config.json.
+     * Scenario: the canonical config is accidentally made writable by group
+     * or other users on a deployed NAS.
+     */
     #[test]
     fn permissions_world_writable_warns() {
         use std::os::unix::fs::PermissionsExt;
         let f = write_temp(valid_config_json());
         std::fs::set_permissions(f.path(), std::fs::Permissions::from_mode(0o666)).unwrap();
-        let report = run_doctor(f.path(), &mock(), &isolated_paths().1, human_options());
-        let perm = find_check(&report, "config_permissions");
+        let perm = check_config_permissions_for_path(f.path());
         assert_eq!(perm.status, CheckStatus::Warn);
         assert!(perm.message.contains("world-writable"), "{}", perm.message);
         assert!(perm.message.contains("group-writable"), "{}", perm.message);
     }
 
+    /* Intent: raw canonical permission inspection accepts restrictive modes.
+     * Why it exists: the helper should report only actual write-bit problems,
+     * with uid ownership checked independently by the host running the test.
+     * Scenario: the canonical config is a root-owned, non-writable-by-others
+     * file generated by the NixOS module.
+     */
     #[test]
     fn permissions_restrictive_ok() {
         use std::os::unix::fs::PermissionsExt;
         let f = write_temp(valid_config_json());
         std::fs::set_permissions(f.path(), std::fs::Permissions::from_mode(0o600)).unwrap();
-        let report = run_doctor(f.path(), &mock(), &isolated_paths().1, human_options());
-        let perm = find_check(&report, "config_permissions");
+        let perm = check_config_permissions_for_path(f.path());
         // May still warn about uid (tests don't run as root), but should not
         // warn about world/group bits.
         assert!(

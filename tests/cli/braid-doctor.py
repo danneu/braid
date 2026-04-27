@@ -1,8 +1,8 @@
 # Test: braid doctor
 #
 # What: End-to-end tests for braid doctor against real config files — valid,
-# missing, malformed JSON, bad schema, missing disks, and world-writable
-# permissions — in both human and --json modes.
+# missing, malformed JSON, bad schema, missing disks, canonical config
+# permissions, and custom config skips in both human and --json modes.
 #
 # Why: Ensures doctor correctly categorizes config problems and produces
 # structured output that operators and scripts can rely on.
@@ -42,6 +42,68 @@ with subtest("Valid config — JSON output"):
     assert checks["beep_path"]["status"] == "skip", f"beep_path: {checks['beep_path']}"
     assert "monitor not configured" in checks["beep_path"]["message"], (
         f"beep_path message: {checks['beep_path']['message']}"
+    )
+
+# --- Permissions checks ---
+
+# Intent: custom config paths skip config_permissions after JSON and schema pass.
+# Why it exists: debug configs outside /etc/braid/config.json should not warn
+# about ownership or mode bits that are irrelevant to the generated canonical file.
+# Scenario: an operator copies the real config to /tmp, loosens permissions while
+# editing, and runs `braid doctor --config` against that temporary file.
+with subtest("Custom config -- permissions skipped"):
+    machine.succeed("cp /etc/braid/config.json /tmp/world-writable.json")
+    machine.succeed("chmod 666 /tmp/world-writable.json")
+    raw = machine.succeed("braid doctor --json --config /tmp/world-writable.json")
+    print(f"Custom world-writable JSON:\n{raw}")
+    report = json.loads(raw)
+    assert report["status"] == "ok", f"Expected overall ok: {report['status']}"
+    checks = {c["name"]: c for c in report["checks"]}
+    assert checks["config_file"]["status"] == "ok", f"config_file: {checks['config_file']}"
+    assert checks["config_schema"]["status"] == "ok", f"config_schema: {checks['config_schema']}"
+    assert checks["config_permissions"]["status"] == "skip", f"config_permissions: {checks['config_permissions']}"
+    assert "custom config path" in checks["config_permissions"]["message"], (
+        f"Expected custom path skip: {checks['config_permissions']['message']}"
+    )
+
+# Intent: the canonical default config still reports unsafe write permissions.
+# Why it exists: custom-path skipping must not remove the guardrail for the real
+# generated config file that commands read by default.
+# Scenario: /etc/braid/config.json is accidentally replaced with a writable
+# regular file on a deployed machine.
+with subtest("Canonical config -- unsafe permissions warn"):
+    machine.succeed("cp /etc/braid/config.json /tmp/braid-config.json.saved")
+    try:
+        machine.succeed("rm -f /etc/braid/config.json")
+        machine.succeed("install -m 0666 /tmp/braid-config.json.saved /etc/braid/config.json")
+        raw = machine.succeed("braid doctor --json")
+        print(f"Canonical world-writable JSON:\n{raw}")
+        report = json.loads(raw)
+        assert report["status"] == "warn", f"Expected overall warn: {report['status']}"
+        checks = {c["name"]: c for c in report["checks"]}
+        assert checks["config_permissions"]["status"] == "warn", (
+            f"config_permissions: {checks['config_permissions']}"
+        )
+        assert "world-writable" in checks["config_permissions"]["message"], (
+            f"Expected 'world-writable' in message: {checks['config_permissions']['message']}"
+        )
+    finally:
+        machine.succeed("install -m 0644 /tmp/braid-config.json.saved /etc/braid/config.json")
+
+# Intent: the custom-path decision is lexical, not filesystem-canonicalized.
+# Why it exists: the product rule is intentionally simple: only the exact normal
+# path gets config_permissions enforcement.
+# Scenario: an operator passes /etc/braid/./config.json, which reaches the same
+# file but is not the canonical CLI default string.
+with subtest("Lexical custom config path -- permissions skipped"):
+    raw = machine.succeed("braid doctor --json --config /etc/braid/./config.json")
+    print(f"Lexical custom JSON:\n{raw}")
+    report = json.loads(raw)
+    checks = {c["name"]: c for c in report["checks"]}
+    assert checks["config_file"]["status"] == "ok", f"config_file: {checks['config_file']}"
+    assert checks["config_permissions"]["status"] == "skip", f"config_permissions: {checks['config_permissions']}"
+    assert "custom config path" in checks["config_permissions"]["message"], (
+        f"Expected custom path skip: {checks['config_permissions']['message']}"
     )
 
 # --- Missing config ---
@@ -86,22 +148,6 @@ with subtest("Bad schema — config_file ok, config_schema fail"):
     checks = {c["name"]: c for c in report["checks"]}
     assert checks["config_file"]["status"] == "ok", f"config_file: {checks['config_file']}"
     assert checks["config_schema"]["status"] == "fail", f"config_schema: {checks['config_schema']}"
-
-# --- Permissions warnings ---
-
-with subtest("World-writable config warns"):
-    machine.succeed("cp /etc/braid/config.json /tmp/world-writable.json")
-    machine.succeed("chmod 666 /tmp/world-writable.json")
-    raw = machine.succeed("braid doctor --json --config /tmp/world-writable.json")
-    print(f"World-writable JSON:\n{raw}")
-    report = json.loads(raw)
-    # warn does not cause failure — overall should be ok or warn, not fail
-    assert report["status"] == "warn", f"Expected overall warn: {report['status']}"
-    checks = {c["name"]: c for c in report["checks"]}
-    assert checks["config_permissions"]["status"] == "warn", f"config_permissions: {checks['config_permissions']}"
-    assert "world-writable" in checks["config_permissions"]["message"], (
-        f"Expected 'world-writable' in message: {checks['config_permissions']['message']}"
-    )
 
 # --- Data profile mismatch (pool-based checks) ---
 

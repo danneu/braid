@@ -4,6 +4,8 @@ use std::fs;
 use std::path::Path;
 use thiserror::Error;
 
+pub const DEFAULT_CONFIG_PATH: &str = "/etc/braid/config.json";
+
 #[derive(Debug, Error)]
 pub enum ConfigBuildError {
     #[error("mount_point must not be empty")]
