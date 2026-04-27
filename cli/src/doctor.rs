@@ -589,10 +589,18 @@ fn check_beep_path<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>, json: bool)
 ///
 /// Severity is `Warn`, not `Fail`: the operator can fix daemon state
 /// directly (e.g. `systemctl start upsd`); braid does not intervene in
-/// NUT lifecycle. Skips when UPS is not configured or disabled.
+/// NUT lifecycle. Skips with a distinct reason when config is unavailable;
+/// otherwise skips when UPS is not configured or disabled.
 fn check_ups_daemon_up<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> CheckResult {
     let name = "ups_daemon".to_string();
-    let ups_cfg = match ctx.config.as_ref().and_then(|c| c.ups()) {
+    let Some(config) = ctx.config.as_ref() else {
+        return CheckResult {
+            name,
+            status: CheckStatus::Skip,
+            message: "skipped (config not available)".into(),
+        };
+    };
+    let ups_cfg = match config.ups() {
         Some(u) if u.enable => u,
         _ => {
             return CheckResult {
@@ -654,34 +662,28 @@ fn check_ups_daemon_up<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> Chec
 /// and the Plan 1 safety guarantee silently breaks on LB. Operators
 /// need loud, high-severity feedback here.
 ///
-/// Skips when UPS is disabled OR when the pool is not mounted (no
-/// safety implication then).
+/// Skips with a distinct reason when config is unavailable. Otherwise skips
+/// when UPS is disabled OR when the pool is not mounted (no safety implication
+/// then).
 fn check_braid_online_active_when_mounted<R: CommandRunner>(
     ctx: &mut DoctorContext<'_, R>,
 ) -> CheckResult {
     let name = "braid_online_active".to_string();
-    let enabled = ctx
-        .config
-        .as_ref()
-        .and_then(|c| c.ups())
-        .is_some_and(|u| u.enable);
-    if !enabled {
+    let Some(config) = ctx.config.as_ref() else {
+        return CheckResult {
+            name,
+            status: CheckStatus::Skip,
+            message: "skipped (config not available)".into(),
+        };
+    };
+    if !config.ups().is_some_and(|u| u.enable) {
         return CheckResult {
             name,
             status: CheckStatus::Skip,
             message: "skipped (braid.ups not enabled)".into(),
         };
     }
-    let mount_point = match ctx.config.as_ref() {
-        Some(c) => c.mount_point().clone(),
-        None => {
-            return CheckResult {
-                name,
-                status: CheckStatus::Skip,
-                message: "skipped (config not available)".into(),
-            };
-        }
-    };
+    let mount_point = config.mount_point().clone();
     match ctx.runner.run(&CmdRequest::MountpointCheck {
         path: mount_point.clone(),
     }) {
@@ -1081,6 +1083,50 @@ mod tests {
             schema.message.contains("mount_point must not be empty"),
             "unexpected message: {}",
             schema.message
+        );
+    }
+
+    /* Intent: run_doctor distinguishes schema-invalid config from UPS disabled.
+     * Why it exists: `check_config_schema` only populates ctx.config after full
+     * deserialization succeeds; later UPS checks must report that the config is
+     * unavailable instead of implying `braid.ups` is absent or disabled.
+     * Scenario: hand-edited config JSON sets `ups.enable = true` but leaves
+     * `mount_point` empty, so JSON parsing succeeds and schema validation fails.
+     */
+    #[test]
+    fn valid_json_bad_schema_skips_ups_as_config_unavailable() {
+        let f = write_temp(
+            r#"{
+                "mount_point": "",
+                "ups": { "enable": true, "name": "ups" }
+            }"#,
+        );
+        let report = run_doctor(f.path(), &mock(), &isolated_paths().1, false);
+
+        assert_eq!(find_check(&report, "config_file").status, CheckStatus::Ok);
+
+        let schema = find_check(&report, "config_schema");
+        assert_eq!(schema.status, CheckStatus::Fail);
+        assert!(
+            schema.message.contains("mount_point must not be empty"),
+            "unexpected message: {}",
+            schema.message
+        );
+
+        let ups_daemon = find_check(&report, "ups_daemon");
+        assert_eq!(ups_daemon.status, CheckStatus::Skip);
+        assert!(
+            ups_daemon.message.contains("config not available"),
+            "unexpected message: {}",
+            ups_daemon.message
+        );
+
+        let braid_online = find_check(&report, "braid_online_active");
+        assert_eq!(braid_online.status, CheckStatus::Skip);
+        assert!(
+            braid_online.message.contains("config not available"),
+            "unexpected message: {}",
+            braid_online.message
         );
     }
 
@@ -2325,6 +2371,11 @@ mod tests {
         let mut ctx = ups_ctx(&runner, &paths, config_without_ups());
         let r = check_ups_daemon_up(&mut ctx);
         assert_eq!(r.status, CheckStatus::Skip);
+        assert!(
+            r.message.contains("braid.ups not enabled"),
+            "unexpected message: {}",
+            r.message
+        );
     }
 
     // Intent: check_ups_daemon_up skips when braid.ups.enable = false.
@@ -2338,6 +2389,11 @@ mod tests {
         let mut ctx = ups_ctx(&runner, &paths, config_with_ups_disabled());
         let r = check_ups_daemon_up(&mut ctx);
         assert_eq!(r.status, CheckStatus::Skip);
+        assert!(
+            r.message.contains("braid.ups not enabled"),
+            "unexpected message: {}",
+            r.message
+        );
     }
 
     // Intent: check_braid_online_active_when_mounted fails (high
@@ -2485,6 +2541,26 @@ mod tests {
         assert_eq!(r.status, CheckStatus::Skip);
     }
 
+    // Intent: check_braid_online_active_when_mounted skips when the
+    // braid.ups block is absent.
+    // Why: a deployment with no UPS configured must not see
+    // braid-online/UPS safety warnings.
+    // Scenario: non-UPS host runs `braid doctor` while the pool state is
+    // irrelevant to UPS shutdown safety.
+    #[test]
+    fn braid_online_check_skips_when_ups_absent() {
+        let runner = MockRunner::default();
+        let (_dir, paths) = isolated_paths();
+        let mut ctx = ups_ctx(&runner, &paths, config_without_ups());
+        let r = check_braid_online_active_when_mounted(&mut ctx);
+        assert_eq!(r.status, CheckStatus::Skip);
+        assert!(
+            r.message.contains("braid.ups not enabled"),
+            "unexpected message: {}",
+            r.message
+        );
+    }
+
     // Intent: check_braid_online_active_when_mounted skips when UPS
     // is disabled.
     // Why: without UPS, braid-online is not the same safety
@@ -2497,5 +2573,10 @@ mod tests {
         let mut ctx = ups_ctx(&runner, &paths, config_with_ups_disabled());
         let r = check_braid_online_active_when_mounted(&mut ctx);
         assert_eq!(r.status, CheckStatus::Skip);
+        assert!(
+            r.message.contains("braid.ups not enabled"),
+            "unexpected message: {}",
+            r.message
+        );
     }
 }
