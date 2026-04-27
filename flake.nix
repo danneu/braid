@@ -548,6 +548,16 @@
               braid = linuxCrane.braid-cli-unwrapped;
             }
           );
+          wrapper-pool-lock-released-after-sigkill = pkgs.testers.nixosTest (
+            import ./tests/module/wrapper-pool-lock-released-after-sigkill.nix {
+              braid = linuxCrane.braid-cli-unwrapped;
+            }
+          );
+          wrapper-pool-lock-not-inherited = pkgs.testers.nixosTest (
+            import ./tests/module/wrapper-pool-lock-not-inherited.nix {
+              braid = linuxCrane.braid-cli-unwrapped;
+            }
+          );
           ups-preflight-on-battery = pkgs.testers.nixosTest (
             import ./tests/module/ups-preflight-on-battery.nix {
               braid = linuxCrane.braid-cli-unwrapped;

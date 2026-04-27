@@ -61,7 +61,14 @@ case "$subcmd" in
     ;;
 esac
 
-@braidBin@ "$@"
+# 9>&-: drop the pool-lock fd in the forked child before exec, so braid
+# (and any descendant it spawns -- notably the long-lived systemd-inhibit
+# subprocess in cli/src/inhibit.rs, which is in its own pgroup and can
+# survive a SIGKILL/OOM/default-signal-termination of braid) does not
+# inherit fd 9. The wrapper bash itself keeps fd 9 open, so the flock is
+# held for the entire operation and released by the kernel when this
+# wrapper exits (whether braid succeeded, failed, or was killed).
+@braidBin@ "$@" 9>&-
 ret=$?
 
 if [ "$ret" -eq 0 ] && ! $skip_fixup; then
