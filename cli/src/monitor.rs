@@ -1,8 +1,9 @@
-use std::collections::{BTreeMap, BTreeSet};
+#[cfg(test)]
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 use crate::alert::{
-    self, AlertCause, compute_alert_state_with_devid_map, load_acked_stats, merge_into_latch,
-    save_acked_stats,
+    self, AlertCause, compute_alert_state, load_acked_stats, merge_into_latch, save_acked_stats,
 };
 use crate::cmd::{CmdRequest, CommandRunner};
 use crate::parse::parse_btrfs_device_stats;
@@ -105,19 +106,7 @@ pub fn cmd_monitor<R: CommandRunner>(
     // 5. Check smartd alert flag
     let smartd_active = alert::smartd_alert_active(paths);
 
-    // 6. Build devid map from pool devices + null-underlying devices
-    let path_to_devid: BTreeMap<String, u64> = pool
-        .devices
-        .iter()
-        .map(|d| (format!("/dev/mapper/{}", d.mapper.0), d.devid))
-        .chain(
-            pool.null_underlying
-                .iter()
-                .map(|d| (format!("/dev/mapper/{}", d.mapper.0), d.devid)),
-        )
-        .collect();
-
-    // 7. Reconcile stale ack state: prune orphan devids and self-heal
+    // 6. Reconcile stale ack state: prune orphan devids and self-heal
     //    missing_acked for devices that are present again.
     let present_devids: BTreeSet<u64> = pool.devices.iter().map(|d| d.devid).collect();
     let still_relevant_devids: BTreeSet<u64> = present_devids
@@ -132,17 +121,10 @@ pub fn cmd_monitor<R: CommandRunner>(
         eprintln!("Warning: failed to update acked stats: {e}");
     }
 
-    // 8. Compute live alert state
-    let live_causes = match compute_alert_state_with_devid_map(
-        &device_stats,
-        &acked,
-        &alert_missing_devids,
-        smartd_active,
-        &path_to_devid,
-    ) {
-        Ok(state) => state.causes,
-        Err(e) => return latch_computation_error(e.to_string(), paths),
-    };
+    // 7. Compute live alert state. Identity is the devid carried on each
+    //    stats row by btrfs -- no path-to-devid map needed.
+    let live_causes =
+        compute_alert_state(&device_stats, &acked, &alert_missing_devids, smartd_active).causes;
 
     // 9. Load existing latch (quarantine corrupt file if needed)
     let (existing_latch, latch_corrupt_detail) = alert::load_alert_latch_or_quarantine(paths);
@@ -485,48 +467,39 @@ mod tests {
     }
 
     /*
-     * Intent: When compute_alert_state_with_devid_map returns
-     * UnmappedDeviceError, cmd_monitor must latch a ComputationError and
-     * return MonitorResult::Alert (NOT an Err). This is the gate for the
-     * "exit 2 means the wrapper never starts the beeper" regression.
+     * Intent: a stats row whose path doesn't match any pool member and
+     * whose devid is unknown to the pool no longer trips the fail-closed
+     * latch when it carries zero counters. cmd_monitor returns
+     * MonitorResult::Ok and writes no alert latch.
      *
-     * Why it exists: monitor.rs previously latched the ComputationError but
-     * then returned Err(MonitorError::UnmappedDevice), which main.rs mapped
-     * to exit 2. The systemd wrapper only starts braid-alert.service on
-     * exit 1, so the operator's NAS stayed silent on a real
-     * lost-mapping condition. The bug is strictly worse than the
-     * structurally-similar hot-unplug case fixed in plans/wip/structured-splashing-fern.md.
+     * Why it exists: previously, btrfs reporting a mapper path that wasn't
+     * in monitor's path-to-devid map produced an UnmappedDeviceError, which
+     * cmd_monitor latched as a ComputationError and surfaced as
+     * MonitorResult::Alert. With dev.devid as the canonical identity, an
+     * unknown-path row is just a row with no acked baseline -- benign when
+     * counters are zero. This test pins the regression: a stale row in
+     * stats output must not fire a fail-closed beep.
      *
-     * Scenario: btrfs device stats reports a mapper path the devid map
-     * does not contain (e.g. /dev/mapper/braid-stale lingering from a
-     * previous configuration). The probe succeeds and the pool is
-     * mounted; only the alert-state computation observes the orphan.
+     * Scenario: btrfs device stats reports a row for /dev/mapper/braid-stale
+     * with devid 99 (lingering from a prior configuration), zero counters.
+     * Probe succeeds, pool is mounted, no real device errors.
      */
     #[test]
-    fn unmapped_device_returns_alert_with_latched_computation_error() {
+    fn stale_mapper_row_no_longer_latches_computation_error() {
         let (_dir, paths) = fresh_paths();
         let runner = MonitorTestRunner::with_unmapped_stats();
 
         let result = cmd_monitor(&runner, &mp(), &paths);
-        let detail = assert_single_computation_error(&result);
-        assert!(
-            detail.contains("braid-stale"),
-            "ComputationError detail must reference the orphan path: {detail}"
-        );
 
-        let latch_path = paths.alert_latch_json();
-        assert!(
-            latch_path.exists(),
-            "alert latch must be written on UnmappedDeviceError"
+        assert_eq!(
+            result,
+            MonitorResult::Ok,
+            "stale-mapper row with zero counters must not trigger an alert"
         );
-        let latched = alert::load_alert_latch(&paths)
-            .expect("latch parses")
-            .expect("latch present on disk");
-        assert!(latched.active);
-        assert!(matches!(
-            latched.causes.as_slice(),
-            [AlertCause::ComputationError { .. }]
-        ));
+        assert!(
+            !paths.alert_latch_json().exists(),
+            "no alert latch must be written for a benign stale row"
+        );
     }
 
     /*

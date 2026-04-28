@@ -67,16 +67,15 @@ pub struct PoolState {
     /// only devices that btrfs has confirmed as MISSING belong here.
     pub missing_devids: Vec<u64>,
     /// Devices whose LUKS mapper is open but underlying block device is gone
-    /// (hot-unplugged). Kept separate from `missing_devids` because:
-    ///
-    /// - `missing_devids` is used by `remove-missing` to pick destructive
-    ///   removal targets — a transient hot-unplug must not look removable.
-    /// - `null_underlying` devices still have a mapper path that btrfs reports
-    ///   in `device stats`, so monitor/ack need them in the devid map to avoid
-    ///   `UnmappedDeviceError`.
+    /// (hot-unplugged). Kept separate from `missing_devids` because
+    /// `missing_devids` is used by `remove-missing` to pick destructive
+    /// removal targets -- a transient hot-unplug must not look removable.
     ///
     /// Monitor and ack compute an alert-local union (`missing_devids ∪
     /// null_underlying devids`) to fire `MissingDevice` alerts for both cases.
+    /// btrfs device stats keeps reporting these devices' mapper paths along
+    /// with their devids, so the alert pipeline pairs rows by devid directly
+    /// from the parsed stats output -- no path-to-devid map required.
     pub null_underlying: Vec<NullUnderlyingDevice>,
 }
 

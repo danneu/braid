@@ -828,12 +828,13 @@ fn build_disk_reports<R: CommandRunner>(
         let model = get_lsblk_field(runner, &by_id, LsblkFieldKind::Model);
         let serial = get_lsblk_field(runner, &by_id, LsblkFieldKind::Serial);
 
-        // Error stats
-        let dev_path = format!("/dev/mapper/{}", pd.mapper.0);
+        // Error stats. Pair by devid (canonical identity) -- the stats row's
+        // path can differ from the canonical mapper path without changing
+        // which physical device it describes.
         let errors = device_stats
             .devices
             .iter()
-            .find(|d| d.target.as_path() == Some(dev_path.as_str()))
+            .find(|d| d.devid == pd.devid)
             .map(|d| DiskErrors {
                 read: d.read_io_errs,
                 write: d.write_io_errs,
@@ -4017,6 +4018,79 @@ mod tests {
             }
             other => panic!("expected StatusError::Probe(MapperConflict), got: {other:?}"),
         }
+    }
+
+    /*
+     * Intent: build_disk_reports pairs btrfs device-stats rows to DiskReport
+     * by devid, not by mapper-path string. A stats row whose path differs
+     * from the canonical /dev/mapper/braid-X but whose devid matches a pool
+     * member must still populate DiskReport.errors.
+     *
+     * Why it exists: the previous `target.as_path() == Some(dev_path)`
+     * comparison silently dropped error stats whenever btrfs reported a
+     * row by an alternate path spelling (e.g. /dev/dm-N) -- the same
+     * identity weakness that the alert pipeline used to suffer via
+     * UnmappedDeviceError. This test pins the devid-based pairing so a
+     * future revert to path matching cannot land silently.
+     *
+     * Scenario: pool device with mapper "braid-disk1" / devid 1; stats row
+     * for devid 1 carries path "/dev/dm-0" (not "/dev/mapper/braid-disk1")
+     * and read_io_errs = 5. The disk1 DiskReport must surface those 5
+     * errors despite the path mismatch.
+     */
+    #[test]
+    fn disk_report_pairs_stats_by_devid_when_path_differs() {
+        use crate::parse::types::{BtrfsDeviceStatsOutput, DeviceErrorStats, DeviceStatsTarget};
+        use crate::types::{LuksUuid, MapperName, PoolDevice};
+
+        let pool = PoolState {
+            mounted: true,
+            devices: vec![PoolDevice {
+                mapper: MapperName("braid-disk1".to_owned()),
+                luks_uuid: LuksUuid("11111111-1111-1111-1111-111111111111".to_owned()),
+                devid: 1,
+                underlying: "/dev/vda".to_owned(),
+            }],
+            missing_count: 0,
+            missing_devids: vec![],
+            total_devices: 1,
+            fsid: None,
+            null_underlying: vec![],
+        };
+        let config_disks = vec![ConfigDisk {
+            name: "disk1".to_owned(),
+            by_id_path: ByIdPath("/dev/disk/by-id/disk1".to_owned()),
+            state: ConfigDiskState::PresentLuks {
+                uuid: LuksUuid("11111111-1111-1111-1111-111111111111".to_owned()),
+                mapper_open: true,
+            },
+        }];
+        // Stats row for devid 1 reports "/dev/dm-0", NOT "/dev/mapper/braid-disk1".
+        // Old path-match code would have dropped this row.
+        let stats = BtrfsDeviceStatsOutput {
+            devices: vec![DeviceErrorStats {
+                devid: 1,
+                target: DeviceStatsTarget::Path("/dev/dm-0".to_owned()),
+                read_io_errs: 5,
+                write_io_errs: 0,
+                flush_io_errs: 0,
+                corruption_errs: 0,
+                generation_errs: 0,
+            }],
+        };
+        let runner = MockRunner::default();
+
+        let ctx = build_disk_reports(&runner, &config_disks, &pool, &stats);
+
+        assert_eq!(ctx.disks.len(), 1);
+        let errors = ctx.disks[0]
+            .errors
+            .as_ref()
+            .expect("disk1 errors must be present despite mismatched stats path");
+        assert_eq!(
+            errors.read, 5,
+            "stats row paired by devid must surface its read_io_errs"
+        );
     }
 
     /*

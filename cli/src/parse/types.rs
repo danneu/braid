@@ -325,8 +325,14 @@ impl std::fmt::Display for DeviceStatsTarget {
 }
 
 /// btrfs device stats
+///
+/// `devid` is the canonical identity for a stats row -- always present in the
+/// btrfs JSON schema and stable across mapper-path changes. All identity
+/// logic (alert pairing, snapshot keys, status/replace/TUI lookups) keys
+/// off `devid`. `target` is retained for direct display strings only.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceErrorStats {
+    pub devid: u64,
     pub target: DeviceStatsTarget,
     pub read_io_errs: u64,
     pub write_io_errs: u64,

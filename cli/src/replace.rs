@@ -314,29 +314,19 @@ impl ReplacePlan {
 
         // Step 2+: Execute replacement -- both paths use btrfs replace start.
         // Live-only: warn if the source device has accumulated I/O errors.
-        if let ReplaceSource::Live { mapper, devid } = &replace_source {
+        if let ReplaceSource::Live { mapper: _, devid } = &replace_source {
             let stats_raw = runner.run(&CmdRequest::BtrfsDeviceStatsJson {
                 mount_point: config.mount_point().clone(),
             });
             if let Ok(ref raw) = stats_raw
                 && let Ok(stats) = parse_btrfs_device_stats(raw)
+                && source_has_io_errors(&stats, *devid)
             {
-                let expected_path = format!("/dev/mapper/{}", mapper.0);
-                let has_errs = stats.devices.iter().any(|d| {
-                    d.target.as_path() == Some(expected_path.as_str())
-                        && (d.read_io_errs > 0
-                            || d.write_io_errs > 0
-                            || d.flush_io_errs > 0
-                            || d.corruption_errs > 0
-                            || d.generation_errs > 0)
-                });
-                if has_errs {
-                    eprintln!(
-                        "Warning: source device (devid {devid}) has I/O errors. \
-                         btrfs replace will read from mirrors where possible, \
-                         but may fail if any data lacks a healthy mirror copy."
-                    );
-                }
+                eprintln!(
+                    "Warning: source device (devid {devid}) has I/O errors. \
+                     btrfs replace will read from mirrors where possible, \
+                     but may fail if any data lacks a healthy mirror copy."
+                );
             }
         }
 
@@ -423,6 +413,21 @@ impl ReplacePlan {
         eprintln!("Done. Replaced {} with {}.", params.old_name, new_name);
         Ok(())
     }
+}
+
+/// True iff the stats row identified by `devid` has any non-zero error
+/// counter. Pairing is by devid (canonical identity from btrfs), not by
+/// mapper path -- the row's path string can differ from the canonical
+/// /dev/mapper/braid-X without changing which physical device it describes.
+fn source_has_io_errors(stats: &crate::parse::types::BtrfsDeviceStatsOutput, devid: u64) -> bool {
+    stats.devices.iter().any(|d| {
+        d.devid == devid
+            && (d.read_io_errs > 0
+                || d.write_io_errs > 0
+                || d.flush_io_errs > 0
+                || d.corruption_errs > 0
+                || d.generation_errs > 0)
+    })
 }
 
 fn emit_replace_notes_to_stderr(notes: &[PreviewNote]) {
@@ -1098,6 +1103,52 @@ mod tests {
 
     fn mp() -> MountPoint {
         MountPoint("/mnt/storage".into())
+    }
+
+    /*
+     * Intent: source_has_io_errors pairs a stats row to the live source
+     * by devid, even when the row's path differs from the canonical
+     * /dev/mapper/braid-<name>. With non-zero counters on the matched
+     * row, returns true; with zero counters or no devid match, false.
+     *
+     * Why it exists: the live-replace warning previously matched on
+     * `target.as_path() == /dev/mapper/<mapper>`, which silently dropped
+     * the warning whenever btrfs reported the row by an alternate path
+     * (e.g. /dev/dm-N). Pairing by devid removes that identity weakness.
+     * This test pins the new behavior so a future revert to path
+     * matching cannot land silently.
+     *
+     * Scenario: stats row for devid 1 carries path "/dev/dm-1" (not
+     * "/dev/mapper/disk1") and read_io_errs = 5; replace must still
+     * recognize the I/O errors on the live source.
+     */
+    #[test]
+    fn live_replace_detects_io_errors_when_stats_path_differs() {
+        use crate::cmd::RawCommandOutput;
+        let stats_raw = RawCommandOutput {
+            cmd: "btrfs device stats".into(),
+            stdout: r#"{"device-stats": [
+                {"device": "/dev/dm-1", "devid": 1, "write_io_errs": 0, "read_io_errs": 5, "flush_io_errs": 0, "corruption_errs": 0, "generation_errs": 0},
+                {"device": "/dev/dm-2", "devid": 2, "write_io_errs": 0, "read_io_errs": 0, "flush_io_errs": 0, "corruption_errs": 0, "generation_errs": 0}
+            ]}"#
+            .into(),
+            stderr: String::new(),
+            exit_status: 0,
+        };
+        let stats = parse_btrfs_device_stats(&stats_raw).expect("parses");
+
+        assert!(
+            source_has_io_errors(&stats, 1),
+            "devid 1 has read_io_errs=5; mismatched path must not hide it"
+        );
+        assert!(
+            !source_has_io_errors(&stats, 2),
+            "devid 2 has zero counters; must not report errors"
+        );
+        assert!(
+            !source_has_io_errors(&stats, 99),
+            "no row for devid 99; must not report errors"
+        );
     }
 
     /* Intent: replace's stderr-note wrapper colors only bracketed

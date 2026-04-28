@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use crate::alert::{self, save_acked_stats, snapshot_current};
 use crate::cmd::{CmdRequest, CommandRunner};
@@ -53,31 +53,20 @@ pub fn cmd_ack<R: CommandRunner>(
         .into_iter()
         .collect();
 
-    // 5. Build devid map from pool devices + null-underlying devices
-    let path_to_devid: BTreeMap<String, u64> = pool
-        .devices
-        .iter()
-        .map(|d| (format!("/dev/mapper/{}", d.mapper.0), d.devid))
-        .chain(
-            pool.null_underlying
-                .iter()
-                .map(|d| (format!("/dev/mapper/{}", d.mapper.0), d.devid)),
-        )
-        .collect();
-
-    // 6. Snapshot current state
-    let new_acked = snapshot_current(&device_stats, &alert_missing_devids, &path_to_devid)?;
+    // 5. Snapshot current state. Identity is the devid carried on each
+    //    stats row by btrfs -- no path-to-devid map needed.
+    let new_acked = snapshot_current(&device_stats, &alert_missing_devids);
     save_acked_stats(&new_acked, paths)?;
 
-    // 7. Remove smartd alert flag + alert latch (+ any corrupt sidecar)
+    // 6. Remove smartd alert flag + alert latch (+ any corrupt sidecar)
     alert::remove_smartd_alert_flag(paths)?;
     alert::remove_alert_latch(paths)?;
     alert::remove_alert_latch_corrupt(paths)?;
 
-    // 8. Stop beeper (best-effort)
+    // 7. Stop beeper (best-effort)
     stop_beeper();
 
-    // 9. Print confirmation using latch count
+    // 8. Print confirmation using latch count
     if latch_count > 0 {
         println!("acknowledged {latch_count} alert(s)");
     } else {
@@ -128,6 +117,4 @@ pub enum AckError {
     Parse(#[from] crate::parse::ParseError),
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
-    #[error("unmapped device: {0}")]
-    UnmappedDevice(#[from] crate::alert::UnmappedDeviceError),
 }

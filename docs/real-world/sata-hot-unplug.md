@@ -86,9 +86,8 @@ This is correct behavior — braid uses by-id paths for LUKS open, so a reboot a
 
 Changes to these should prompt re-verification of this document:
 
-- `cli/src/probe.rs` — `probe_pool()` null-underlying detection (lines 190-206)
-- `cli/src/monitor.rs` — devid map construction including null-underlying (lines 61-70)
-- `cli/src/monitor.rs` — alert-local missing devids union (lines 48-55)
-- `cli/src/alert.rs` — `compute_alert_state_with_devid_map()` path lookup
-- `cli/src/parse/btrfs_filesystem_show.rs` — MISSING device filtering (line 116)
-- `cli/src/parse/btrfs_device_stats.rs` — `<missing disk>` sentinel handling (line 54)
+- `cli/src/probe.rs` -- `probe_pool()` null-underlying detection (lines 190-206)
+- `cli/src/monitor.rs` -- alert-local missing devids union (`missing_devids ∪ null_underlying` devids)
+- `cli/src/alert.rs` -- `compute_alert_state` / `snapshot_current` (devid-keyed; no path-to-devid map)
+- `cli/src/parse/btrfs_filesystem_show.rs` -- MISSING device filtering (line 116)
+- `cli/src/parse/btrfs_device_stats.rs` -- `devid` propagation and `<missing disk>` / `devid:<n>` sentinel handling

@@ -50,10 +50,19 @@ pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
     // Map devid → disk name via probe_pool's devices (from btrfs filesystem show,
     // which reports stable /dev/mapper/braid-* paths). btrfs device usage may
     // report raw /dev/dm-N paths that don't match config disk names.
+    //
+    // Include null_underlying devices so device_errors still surfaces
+    // hot-unplugged drives (btrfs device stats keeps reporting their mapper
+    // path). NullUnderlyingDevice carries `mapper` and `devid` -- enough for
+    // this map; LUKS UUIDs are absent there, which is why name_to_luks_uuid
+    // below stays scoped to domain.devices.
     let devid_to_name: HashMap<u64, &str> = domain
         .devices
         .iter()
         .filter_map(|d| crate::config::name_from_mapper(&d.mapper.0).map(|name| (d.devid, name)))
+        .chain(domain.null_underlying.iter().filter_map(|d| {
+            crate::config::name_from_mapper(&d.mapper.0).map(|name| (d.devid, name))
+        }))
         .collect();
 
     // Map disk name -> LuksUuid for physical-identity keying of the TUI's
@@ -162,22 +171,21 @@ pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
         .and_then(|raw| parse_btrfs_device_stats(raw).ok());
     if let Some(ref stats) = device_stats {
         for dev in &stats.devices {
-            if let Some(name) = dev
-                .target
-                .as_path()
-                .and_then(|p| p.strip_prefix("/dev/mapper/braid-"))
-            {
-                device_errors.insert(
-                    name.to_owned(),
-                    DiskErrors {
-                        read: dev.read_io_errs,
-                        write: dev.write_io_errs,
-                        flush: dev.flush_io_errs,
-                        corruption: dev.corruption_errs,
-                        generation: dev.generation_errs,
-                    },
-                );
-            }
+            // Pair by devid (canonical identity from btrfs). Unknown devids
+            // are silently skipped, same pattern as the disk_usage loop above.
+            let Some(name) = devid_to_name.get(&dev.devid) else {
+                continue;
+            };
+            device_errors.insert(
+                (*name).to_owned(),
+                DiskErrors {
+                    read: dev.read_io_errs,
+                    write: dev.write_io_errs,
+                    flush: dev.flush_io_errs,
+                    corruption: dev.corruption_errs,
+                    generation: dev.generation_errs,
+                },
+            );
         }
     }
 
@@ -874,6 +882,126 @@ mod tests {
         // Logical used = sum of non-GlobalReserve bg_used from the df
         // mock: 16777216 (Data) + 16384 (System) + 65536 (Metadata).
         assert_eq!(pool.capacity_used_bytes, 16777216 + 16384 + 65536);
+    }
+
+    /// Intent: TUI device_errors is keyed by disk name resolved via devid,
+    /// not by the `/dev/mapper/braid-X` prefix on the stats row's path.
+    /// A stats row whose path doesn't strip cleanly (e.g. /dev/dm-N) but
+    /// whose devid matches a pool member must still populate device_errors.
+    ///
+    /// Why it exists: the previous code stripped "/dev/mapper/braid-" off
+    /// the row's target path to derive the disk name, which silently
+    /// dropped any row whose path didn't match that prefix -- the same
+    /// path-identity weakness the alert pipeline used to suffer. This
+    /// test pins the devid-keyed lookup so a future revert to
+    /// strip-prefix cannot land silently.
+    ///
+    /// Scenario: btrfs device stats reports devid 1 with path "/dev/dm-0"
+    /// (instead of "/dev/mapper/braid-toshiba") and read_io_errs = 7.
+    /// device_errors must surface those 7 errors keyed by "toshiba".
+    #[test]
+    fn device_errors_keyed_by_devid_not_path() {
+        let mp = MountPoint("/mnt/storage".to_owned());
+
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::FindmntJson { mount_point: mp.clone() },
+                ok_raw(
+                    "findmnt",
+                    r#"{"filesystems": [{"target":"/mnt/storage","source":"/dev/mapper/braid-toshiba","fstype":"btrfs"}]}"#,
+                ),
+            )
+            .with_output(
+                CmdRequest::BtrfsFilesystemShow { mount_point: mp.clone() },
+                ok_raw(
+                    "btrfs filesystem show",
+                    "Label: none  uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
+                     \tTotal devices 1 FS bytes used 1.00GiB\n\
+                     \tdevid    1 size 10.00GiB used 2.00GiB path /dev/mapper/braid-toshiba\n",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus { mapper: "braid-toshiba".into() },
+                ok_raw(
+                    "cryptsetup status",
+                    "/dev/mapper/braid-toshiba is active.\n\tdevice:  /dev/vda\n",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid { device: "/dev/vda".into() },
+                ok_raw("cryptsetup luksUUID", "11111111-1111-1111-1111-111111111111\n"),
+            )
+            .with_output(
+                CmdRequest::BtrfsFilesystemDfJson { mount_point: mp.clone() },
+                ok_raw(
+                    "btrfs filesystem df",
+                    r#"{"filesystem-df": [
+                        {"bg-type": "Data", "bg-profile": "single", "total": 67108864, "used": 16777216}
+                    ]}"#,
+                ),
+            )
+            .with_output(
+                CmdRequest::BtrfsFilesystemUsageRaw { mount_point: mp.clone() },
+                ok_raw(
+                    "btrfs filesystem usage",
+                    "Overall:\n\
+                     \tDevice size:\t\t\t1073741824\n\
+                     \tDevice allocated:\t\t67108864\n\
+                     \tDevice unallocated:\t\t1006632960\n\
+                     \tUsed:\t\t\t\t16777216\n\
+                     \tFree (estimated):\t\t1006632960\t(min: 1006632960)\n\
+                     \tData ratio:\t\t\t1.00\n",
+                ),
+            )
+            .with_output(
+                CmdRequest::BtrfsDeviceUsageRaw { mount_point: mp.clone() },
+                ok_raw(
+                    "btrfs device usage",
+                    "/dev/dm-0, ID: 1\n\
+                     \x20  Device size:          1073741824\n\
+                     \x20  Device slack:              0\n\
+                     \x20  Data,single:          67108864\n\
+                     \x20  Unallocated:          1006632960\n",
+                ),
+            )
+            .with_output(
+                CmdRequest::BtrfsBalanceStatus { mount_point: mp.clone() },
+                ok_raw(
+                    "btrfs balance status",
+                    "No balance found on '/mnt/storage'\n",
+                ),
+            )
+            // The key part of this test: stats row reports "/dev/dm-0",
+            // not "/dev/mapper/braid-toshiba". The old strip-prefix code
+            // would silently drop this row. devid-keyed lookup must keep it.
+            .with_output(
+                CmdRequest::BtrfsDeviceStatsJson { mount_point: mp.clone() },
+                ok_raw(
+                    "btrfs device stats",
+                    r#"{"device-stats": [
+                        {"device": "/dev/dm-0", "devid": 1, "write_io_errs": 0, "read_io_errs": 7, "flush_io_errs": 0, "corruption_errs": 0, "generation_errs": 0}
+                    ]}"#,
+                ),
+            );
+
+        let result = probe_pool_for_tui(
+            &runner,
+            &StubFs::empty(),
+            &MountPoint("/mnt/storage".into()),
+            &HashMap::new(),
+            &test_paths().1,
+        )
+        .unwrap();
+        let pool = result.expect("pool should be Some");
+
+        let errors = pool
+            .device_errors
+            .get("toshiba")
+            .expect("device_errors must be keyed by disk name (toshiba) via devid lookup");
+        assert_eq!(
+            errors.read, 7,
+            "stats row paired by devid must surface its read_io_errs"
+        );
     }
 
     /// Intent: capacity_used_bytes and capacity_total_bytes must be

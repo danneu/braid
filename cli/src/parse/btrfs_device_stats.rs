@@ -20,7 +20,6 @@ struct RawDeviceStatsOutput {
 #[derive(Deserialize)]
 struct RawDeviceStatsEntry {
     device: String,
-    #[allow(dead_code)]
     devid: u64,
     write_io_errs: u64,
     read_io_errs: u64,
@@ -70,6 +69,7 @@ pub fn parse_btrfs_device_stats(
                 DeviceStatsTarget::Path(e.device)
             };
             DeviceErrorStats {
+                devid: e.devid,
                 target,
                 read_io_errs: e.read_io_errs,
                 write_io_errs: e.write_io_errs,
@@ -116,12 +116,14 @@ mod tests {
             "device 0 path should be dm or mapper, got: {:?}",
             out.devices[0].target
         );
+        assert_eq!(out.devices[0].devid, 1);
         assert_eq!(out.devices[0].read_io_errs, 0);
         assert!(
             is_dm_or_mapper_path(out.devices[1].target.as_path().unwrap()),
             "device 1 path should be dm or mapper, got: {:?}",
             out.devices[1].target
         );
+        assert_eq!(out.devices[1].devid, 2);
     }
 
     // --- Synthetic tests (inline) ---
@@ -231,7 +233,10 @@ mod tests {
             out.devices[0].target,
             DeviceStatsTarget::Path("/dev/mapper/braid-vda".to_owned())
         );
+        assert_eq!(out.devices[0].devid, 1);
         assert_eq!(out.devices[1].target, DeviceStatsTarget::MissingDisk);
+        // devid is preserved even for the <missing disk> sentinel row.
+        assert_eq!(out.devices[1].devid, 2);
     }
 
     /// Separate upstream fallback case: in btrfs-progs v6.19-5-g10717dd7,

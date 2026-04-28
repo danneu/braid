@@ -11,12 +11,12 @@ This mapping is not derivable from reading braid's code or btrfs docs alone — 
 
 ## State Table
 
-| State                 | `btrfs filesystem show`      | `btrfs device stats`   | `cryptsetup status` | braid maps to                              |
-| --------------------- | ---------------------------- | ---------------------- | ------------------- | ------------------------------------------ |
-| **Healthy**           | `path /dev/mapper/X`         | `[/dev/mapper/X]`      | `device: /dev/sdY`  | `pool.devices`                             |
-| **Null-underlying**   | `path /dev/mapper/X`         | `[/dev/mapper/X]`      | `device: (null)`    | `pool.null_underlying`                     |
-| **MISSING with path** | `path /dev/mapper/X MISSING` | `[/dev/mapper/X]` (??) | not queried         | `missing_devids` only — **gap, see below** |
-| **Fully gone**        | `path MISSING`               | `[<missing disk>]`     | not queried         | `missing_devids`                           |
+| State                 | `btrfs filesystem show`      | `btrfs device stats`   | `cryptsetup status` | braid maps to          |
+| --------------------- | ---------------------------- | ---------------------- | ------------------- | ---------------------- |
+| **Healthy**           | `path /dev/mapper/X`         | `[/dev/mapper/X]`      | `device: /dev/sdY`  | `pool.devices`         |
+| **Null-underlying**   | `path /dev/mapper/X`         | `[/dev/mapper/X]`      | `device: (null)`    | `pool.null_underlying` |
+| **MISSING with path** | `path /dev/mapper/X MISSING` | `[/dev/mapper/X]` (??) | not queried         | `missing_devids` only  |
+| **Fully gone**        | `path MISSING`               | `[<missing disk>]`     | not queried         | `missing_devids`       |
 
 **Empirical note**: SATA hot-unplug on real hardware enters Null-underlying immediately and stays there for at least 5 minutes without I/O pressure. We have not yet observed the MISSING-with-path state in practice. See [`real-world/sata-hot-unplug.md`](../real-world/sata-hot-unplug.md) for full test results.
 
@@ -28,15 +28,15 @@ Normal operation. Physical drive is present, LUKS mapper is open and points to t
 
 Hot-unplug while mounted. The LUKS mapper (`/dev/mapper/braid-X`) is still open in device-mapper, but the backing block device has vanished. `cryptsetup status` reports `device: (null)`. btrfs still sees the mapper path — it doesn't know the physical drive is gone until I/O fails.
 
-braid handles this correctly: `probe_pool` detects the `(null)` device, records it in `pool.null_underlying`, and `monitor` includes it in both the devid map and `alert_missing_devids`.
+braid handles this correctly: `probe_pool` detects the `(null)` device, records it in `pool.null_underlying`, and `monitor` includes its devid in `alert_missing_devids`. The stats row reports both the mapper path and the devid; the alert pipeline pairs by devid directly.
 
 ### MISSING with path
 
 btrfs has registered the device as missing, but still remembers which mapper path it had. `btrfs filesystem show` appends `MISSING` to the path. The parser puts the devid into `missing_devids` but discards the path. `probe_pool` never processes this device (it only iterates `show.devices`), so it doesn't appear in `pool.devices` or `pool.null_underlying`.
 
-**Gap:** If `btrfs device stats` still reports the device by its mapper path (not `<missing disk>`), the path won't be in the devid map, causing `UnmappedDeviceError` → `ComputationError` instead of a clean `MissingDevice` alert.
+**Handling:** `btrfs device stats` rows always carry a mandatory `devid` field, so the alert pipeline identifies the row by devid regardless of which path string btrfs reports (`[/dev/mapper/X]` or `[<missing disk>]`). The `MissingDevice` alert is generated independently from `missing_devids`, and any matching stats row contributes its counters via the same devid key.
 
-**Uncertainty:** We haven't empirically confirmed what `btrfs device stats` reports for a device in this state. It might report `[/dev/mapper/X]` or `[<missing disk>]`. The `??` in the table marks this. Verifying this on real hardware would close the question.
+**Uncertainty:** We haven't empirically confirmed which path string `btrfs device stats` reports for a device in this state -- the `??` in the table marks this. The answer no longer affects correctness (devid drives the lookup), but it would still be useful empirical data.
 
 ### Fully gone
 
@@ -56,8 +56,7 @@ The transition from Null-underlying to MISSING with path is the least understood
 
 ## Code Pointers
 
-- `probe_pool`: `cli/src/probe.rs` — builds `pool.devices`, `pool.null_underlying`, `pool.missing_devids`
-- `btrfs filesystem show` parser: `cli/src/parse/btrfs_filesystem_show.rs` — filters MISSING devices from `devices` list
-- `btrfs device stats` parser: `cli/src/parse/btrfs_device_stats.rs` — converts `<missing disk>` to `MissingDisk` sentinel
-- monitor devid map: `cli/src/monitor.rs:61-70` — built from `pool.devices ∪ pool.null_underlying`
-- alert computation: `cli/src/alert.rs:95-138` — `UnmappedDeviceError` when path not in devid map
+- `probe_pool`: `cli/src/probe.rs` -- builds `pool.devices`, `pool.null_underlying`, `pool.missing_devids`
+- `btrfs filesystem show` parser: `cli/src/parse/btrfs_filesystem_show.rs` -- filters MISSING devices from `devices` list
+- `btrfs device stats` parser: `cli/src/parse/btrfs_device_stats.rs` -- propagates `devid` (canonical identity) and converts `<missing disk>` / `devid:<n>` to the `MissingDisk` sentinel for `target`
+- alert computation: `cli/src/alert.rs` -- `compute_alert_state` and `snapshot_current` key by `dev.devid` from the parsed stats row; no path-to-devid map
