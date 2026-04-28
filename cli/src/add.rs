@@ -2214,6 +2214,621 @@ mod tests {
         (state_tmp, paths, tmp, config_path, pass_path)
     }
 
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    fn fresh_add_setup() -> (
+        tempfile::TempDir,
+        StatePaths,
+        tempfile::TempDir,
+        std::path::PathBuf,
+        std::path::PathBuf,
+    ) {
+        let state_tmp = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(state_tmp.path().into());
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.json");
+        std::fs::write(
+            &config_path,
+            serde_json::to_vec(&serde_json::json!({ "mount_point": "/mnt/storage" })).unwrap(),
+        )
+        .unwrap();
+        let pass_path = tmp.path().join("passphrase");
+        std::fs::write(&pass_path, b"test-passphrase\n").unwrap();
+
+        (state_tmp, paths, tmp, config_path, pass_path)
+    }
+
+    fn test_acked_disk(missing_acked: bool, read_io_errs: u64) -> alert::AckedDisk {
+        alert::AckedDisk {
+            missing_acked,
+            device_stats: alert::AckedDeviceCounters {
+                read_io_errs,
+                ..Default::default()
+            },
+        }
+    }
+
+    fn save_test_acked(
+        paths: &StatePaths,
+        entries: &[(&str, alert::AckedDisk)],
+    ) -> std::collections::BTreeMap<String, alert::AckedDisk> {
+        let map: std::collections::BTreeMap<String, alert::AckedDisk> = entries
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), value.clone()))
+            .collect();
+        alert::save_acked_stats(&alert::AckedStats(map.clone()), paths).unwrap();
+        map
+    }
+
+    /// Stateful runner for full-path `cmd_add` acked-stats regression tests.
+    /// It models a mounted one-disk pool for live adds, or an unmounted host
+    /// for bootstrap, then changes `btrfs filesystem show` output after
+    /// mount/device-add commits so command-level cleanup is exercised against
+    /// the same post-commit probe shape production uses.
+    struct AddFullPathRunner {
+        mounted: AtomicBool,
+        added: Mutex<Vec<String>>,
+        fail_bootstrap_post_mount_probe: bool,
+        fail_second_add: bool,
+        fail_post_add_probe: bool,
+        omit_new_mapper_from_probe: bool,
+        disk2_devid: u64,
+    }
+
+    impl AddFullPathRunner {
+        fn live() -> Self {
+            Self {
+                mounted: AtomicBool::new(true),
+                added: Mutex::new(Vec::new()),
+                fail_bootstrap_post_mount_probe: false,
+                fail_second_add: false,
+                fail_post_add_probe: false,
+                omit_new_mapper_from_probe: false,
+                disk2_devid: 2,
+            }
+        }
+
+        fn bootstrap() -> Self {
+            Self {
+                mounted: AtomicBool::new(false),
+                ..Self::live()
+            }
+        }
+
+        fn with_bootstrap_post_mount_probe_failure(mut self) -> Self {
+            self.fail_bootstrap_post_mount_probe = true;
+            self
+        }
+
+        fn with_second_add_failure(mut self) -> Self {
+            self.fail_second_add = true;
+            self
+        }
+
+        fn with_post_add_probe_failure(mut self) -> Self {
+            self.fail_post_add_probe = true;
+            self
+        }
+
+        fn with_new_mapper_omitted_from_probe(mut self) -> Self {
+            self.omit_new_mapper_from_probe = true;
+            self
+        }
+
+        fn with_disk2_devid(mut self, devid: u64) -> Self {
+            self.disk2_devid = devid;
+            self
+        }
+
+        fn added_mappers(&self) -> Vec<String> {
+            self.added.lock().unwrap().clone()
+        }
+
+        fn mapper_devid(&self, mapper: &str) -> u64 {
+            match mapper {
+                "braid-disk1" => 1,
+                "braid-disk2" => self.disk2_devid,
+                "braid-disk3" => 3,
+                other => panic!("unexpected mapper for devid mapping: {other}"),
+            }
+        }
+
+        fn mapper_underlying(mapper: &str) -> &'static str {
+            match mapper {
+                "braid-disk1" => "/dev/vdb",
+                "braid-disk2" => "/dev/vdc",
+                "braid-disk3" => "/dev/vdd",
+                other => panic!("unexpected mapper for underlying mapping: {other}"),
+            }
+        }
+
+        fn luks_uuid_for_underlying(device: &str) -> Option<&'static str> {
+            match device {
+                "/dev/vdb" => Some("11111111-1111-1111-1111-111111111111"),
+                "/dev/vdc" => Some("22222222-2222-2222-2222-222222222222"),
+                "/dev/vdd" => Some("33333333-3333-3333-3333-333333333333"),
+                _ => None,
+            }
+        }
+
+        fn pool_show(&self) -> String {
+            let mut mappers = vec!["braid-disk1".to_owned()];
+            if !self.omit_new_mapper_from_probe {
+                mappers.extend(self.added.lock().unwrap().iter().cloned());
+            }
+            let mut out = format!(
+                "Label: none  uuid: {POOL_FSID}\n\
+                 \tTotal devices {} FS bytes used 16.17MiB\n",
+                mappers.len()
+            );
+            for mapper in mappers {
+                let devid = self.mapper_devid(&mapper);
+                out.push_str(&format!(
+                    "\tdevid    {devid} size 496.00MiB used 121.56MiB path /dev/mapper/{mapper}\n"
+                ));
+            }
+            out
+        }
+    }
+
+    impl CommandRunner for AddFullPathRunner {
+        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
+            match request {
+                CmdRequest::FindmntJson { mount_point } => {
+                    if self.mounted.load(Ordering::SeqCst) {
+                        Ok(mock_ok(
+                            &format!("findmnt --json --mountpoint {mount_point}"),
+                            r#"{"filesystems":[{"target":"/mnt/storage","source":"/dev/mapper/braid-disk1","fstype":"btrfs"}]}"#,
+                        ))
+                    } else {
+                        Ok(RawCommandOutput {
+                            cmd: format!("findmnt --json --mountpoint {mount_point}"),
+                            stdout: String::new(),
+                            stderr: String::new(),
+                            exit_status: 1,
+                        })
+                    }
+                }
+                CmdRequest::BtrfsFilesystemShow { mount_point } => {
+                    let has_added = !self.added.lock().unwrap().is_empty();
+                    if self.fail_post_add_probe && has_added {
+                        return Err(CmdError::Failed("post-add probe failed".into()));
+                    }
+                    if self.fail_bootstrap_post_mount_probe && self.mounted.load(Ordering::SeqCst) {
+                        return Err(CmdError::Failed("post-mount probe failed".into()));
+                    }
+                    Ok(mock_ok(
+                        &format!("btrfs filesystem show {mount_point}"),
+                        &self.pool_show(),
+                    ))
+                }
+                CmdRequest::CryptsetupStatus { mapper } => Ok(mock_ok(
+                    &format!("cryptsetup status {mapper}"),
+                    &format!(
+                        "{mapper} is active and is in use.\n  type:    LUKS2\n  device:  {}\n  mode:    read/write\n",
+                        Self::mapper_underlying(mapper)
+                    ),
+                )),
+                CmdRequest::CryptsetupLuksUuid { device } => {
+                    if let Some(uuid) = Self::luks_uuid_for_underlying(device) {
+                        Ok(mock_ok(
+                            &format!("cryptsetup luksUUID {device}"),
+                            &format!("{uuid}\n"),
+                        ))
+                    } else {
+                        Ok(RawCommandOutput {
+                            cmd: format!("cryptsetup luksUUID {device}"),
+                            stdout: String::new(),
+                            stderr: "Device is not a valid LUKS device.\n".into(),
+                            exit_status: 1,
+                        })
+                    }
+                }
+                CmdRequest::CryptsetupTestPassphrase { device } => Ok(mock_ok(
+                    &format!("cryptsetup open --test-passphrase {device}"),
+                    "",
+                )),
+                CmdRequest::CryptsetupLuksFormat { device, .. } => {
+                    Ok(mock_ok(&format!("cryptsetup luksFormat {device}"), ""))
+                }
+                CmdRequest::CryptsetupLuksHeaderBackup {
+                    device,
+                    backup_path,
+                } => {
+                    std::fs::write(backup_path, b"mock luks header").unwrap();
+                    Ok(mock_ok(
+                        &format!("cryptsetup luksHeaderBackup {device}"),
+                        "",
+                    ))
+                }
+                CmdRequest::CryptsetupLuksOpen { device, mapper } => Ok(mock_ok(
+                    &format!("cryptsetup open --type luks {device} {mapper}"),
+                    "",
+                )),
+                CmdRequest::BtrfsDeviceScan { device } => Ok(RawCommandOutput {
+                    cmd: format!("btrfs device scan {device}"),
+                    stdout: String::new(),
+                    stderr: "ERROR: not a btrfs filesystem".into(),
+                    exit_status: 1,
+                }),
+                CmdRequest::MkfsBtrfs { device } => {
+                    Ok(mock_ok(&format!("mkfs.btrfs {device}"), ""))
+                }
+                CmdRequest::MkfsBtrfsRaid1 { devices } => {
+                    Ok(mock_ok(&format!("mkfs.btrfs {}", devices.join(" ")), ""))
+                }
+                CmdRequest::Mount { device, .. } => {
+                    self.mounted.store(true, Ordering::SeqCst);
+                    Ok(mock_ok(&format!("mount {device}"), ""))
+                }
+                CmdRequest::BtrfsDeviceAdd { device, .. } => {
+                    let mapper = device
+                        .strip_prefix("/dev/mapper/")
+                        .expect("test device-add path must be mapper")
+                        .to_owned();
+                    let mut added = self.added.lock().unwrap();
+                    if self.fail_second_add && !added.is_empty() {
+                        return Ok(RawCommandOutput {
+                            cmd: format!("btrfs device add {device}"),
+                            stdout: String::new(),
+                            stderr: "ERROR: unable to add second device".into(),
+                            exit_status: 1,
+                        });
+                    }
+                    added.push(mapper);
+                    Ok(mock_ok(&format!("btrfs device add {device}"), ""))
+                }
+                CmdRequest::BtrfsBalanceRaid1 { .. } => Ok(mock_ok("btrfs balance start", "")),
+                CmdRequest::BtrfsBalanceStatus { .. } => Ok(mock_ok(
+                    "btrfs balance status",
+                    "No balance found on '/mnt/storage'\n",
+                )),
+                _ => Err(CmdError::MissingMock),
+            }
+        }
+
+        fn run_with_stdin(
+            &self,
+            request: &CmdRequest,
+            _stdin: &[u8],
+        ) -> Result<RawCommandOutput, CmdError> {
+            self.run(request)
+        }
+    }
+
+    /*
+     * Intent: a live-pool `cmd_add` removes an acked-stats ghost entry for
+     * the actual devid btrfs assigns to the newly added mapper, while leaving
+     * an unrelated control entry unchanged.
+     *
+     * Why it exists: the safety boundary is the command callsite after
+     * `btrfs device add` and post-add probe, not just the helper. A future
+     * edit that skips the live-add cleanup would let a reused devid inherit
+     * stale acknowledged baselines.
+     *
+     * Scenario: disk2 is formatted, opened, added to a mounted one-disk pool,
+     * and btrfs reports it as devid 7. A stale ack for actual assigned devid
+     * 7 must disappear, while the name-derived/index-like key 2 must survive
+     * byte-for-byte at the value layer.
+     */
+    #[test]
+    fn cmd_add_live_pool_drops_ghost_for_assigned_devid() {
+        let (_state_tmp, paths, _tmp, config_path, pass_path) = add_test_setup();
+        let name_derived_control = test_acked_disk(false, 22);
+        let ghost = test_acked_disk(true, 5);
+        save_test_acked(&paths, &[("2", name_derived_control.clone()), ("7", ghost)]);
+        let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
+        let runner = AddFullPathRunner::live().with_disk2_devid(7);
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+
+        cmd_add(
+            &runner,
+            &fs,
+            &AddParams {
+                config_path: &config_path,
+                disk_specs: &["disk2=/dev/disk/by-id/virtio-disk2".into()],
+                dry_run: false,
+                yes: true,
+                passphrase_stdin: false,
+                passphrase_file: Some(pass_path.as_path()),
+                enroll_key_file: None,
+                progress: ProgressOutput::Off,
+                paths: &paths,
+                sleep_inhibitor: &inhibitor,
+                passphrase_reader: &RealTty,
+            },
+        )
+        .expect("live add should succeed");
+
+        assert_eq!(runner.added_mappers(), vec!["braid-disk2"]);
+        let reloaded = alert::load_acked_stats(&paths);
+        assert_eq!(
+            reloaded.0.get("2"),
+            Some(&name_derived_control),
+            "cleanup must not derive the key from disk name or add index"
+        );
+        assert!(
+            !reloaded.0.contains_key("7"),
+            "newly assigned devid must not inherit a ghost ack"
+        );
+    }
+
+    /*
+     * Intent: bootstrap `cmd_add` deletes all pre-existing acked-stats before
+     * the best-effort post-bootstrap probe/enrichment step, and still succeeds
+     * when that probe fails.
+     *
+     * Why it exists: a fresh filesystem identity invalidates every old acked
+     * baseline. The deletion must be wired into the bootstrap command path and
+     * must not be delayed until the optional enrichment probe succeeds.
+     *
+     * Scenario: an old acked-stats.json exists before a first-disk bootstrap.
+     * mkfs and mount commit, cleanup deletes the file, then the post-mount
+     * probe fails. The command still persists membership and returns success.
+     */
+    #[test]
+    fn cmd_add_bootstrap_clears_acked_stats_before_probe_enrich() {
+        let (_state_tmp, paths, _tmp, config_path, pass_path) = fresh_add_setup();
+        save_test_acked(
+            &paths,
+            &[
+                ("1", test_acked_disk(true, 1)),
+                ("2", test_acked_disk(true, 2)),
+                ("7", test_acked_disk(false, 7)),
+            ],
+        );
+        let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk1".into()]);
+        let runner = AddFullPathRunner::bootstrap().with_bootstrap_post_mount_probe_failure();
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+
+        cmd_add(
+            &runner,
+            &fs,
+            &AddParams {
+                config_path: &config_path,
+                disk_specs: &["disk1=/dev/disk/by-id/virtio-disk1".into()],
+                dry_run: false,
+                yes: true,
+                passphrase_stdin: false,
+                passphrase_file: Some(pass_path.as_path()),
+                enroll_key_file: None,
+                progress: ProgressOutput::Off,
+                paths: &paths,
+                sleep_inhibitor: &inhibitor,
+                passphrase_reader: &RealTty,
+            },
+        )
+        .expect("bootstrap should succeed even when post-mount enrichment probe fails");
+
+        assert!(
+            !paths.acked_stats_json().exists(),
+            "bootstrap cleanup must delete every stale acked baseline before enrichment"
+        );
+    }
+
+    /*
+     * Intent: a partial multi-add cleans the acked-stats ghost for each disk
+     * whose `btrfs device add` already succeeded before a later add fails.
+     *
+     * Why it exists: the cleanup boundary is per committed device-add. A
+     * future refactor that batches cleanup after all adds would leave disk2's
+     * reused devid stale if disk3 fails before the batch runs.
+     *
+     * Scenario: disk2 and disk3 are both formatted and opened. Adding disk2
+     * succeeds and btrfs assigns devid 2; adding disk3 then fails. The devid 2
+     * ghost is gone, while disk3's uncommitted devid 3 ghost remains.
+     */
+    #[test]
+    fn cmd_add_partial_multi_add_cleans_succeeded_disk_before_later_failure() {
+        let (_state_tmp, paths, _tmp, config_path, pass_path) = add_test_setup();
+        let ghost2 = test_acked_disk(true, 22);
+        let ghost3 = test_acked_disk(true, 33);
+        save_test_acked(&paths, &[("2", ghost2), ("3", ghost3.clone())]);
+        let fs = AddMockFs(vec![
+            "/dev/disk/by-id/virtio-disk2".into(),
+            "/dev/disk/by-id/virtio-disk3".into(),
+        ]);
+        let runner = AddFullPathRunner::live().with_second_add_failure();
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+
+        let result = cmd_add(
+            &runner,
+            &fs,
+            &AddParams {
+                config_path: &config_path,
+                disk_specs: &[
+                    "disk2=/dev/disk/by-id/virtio-disk2".into(),
+                    "disk3=/dev/disk/by-id/virtio-disk3".into(),
+                ],
+                dry_run: false,
+                yes: true,
+                passphrase_stdin: false,
+                passphrase_file: Some(pass_path.as_path()),
+                enroll_key_file: None,
+                progress: ProgressOutput::Off,
+                paths: &paths,
+                sleep_inhibitor: &inhibitor,
+                passphrase_reader: &RealTty,
+            },
+        );
+
+        assert!(result.is_err(), "second device add should fail");
+        assert_eq!(runner.added_mappers(), vec!["braid-disk2"]);
+        let reloaded = alert::load_acked_stats(&paths);
+        assert!(
+            !reloaded.0.contains_key("2"),
+            "first committed add must clean its assigned devid"
+        );
+        assert_eq!(
+            reloaded.0.get("3"),
+            Some(&ghost3),
+            "uncommitted later add must not drop its ghost entry"
+        );
+    }
+
+    /*
+     * Intent: a live-pool cleanup read/parse failure after `btrfs device add`
+     * is fatal with the typed `AckCleanupFailed` stage `live-pool add`.
+     *
+     * Why it exists: mutation paths must fail closed when stale ack state may
+     * exist but cannot be parsed. Asserting the typed error keeps the command
+     * boundary pinned without relying on display-message wording.
+     *
+     * Scenario: disk2 is successfully added and post-add probe resolves devid
+     * 2, but acked-stats.json contains invalid JSON. The command must return
+     * `AddError::AckCleanupFailed` instead of silently proceeding.
+     */
+    #[test]
+    fn cmd_add_live_pool_acked_cleanup_parse_failure_is_fatal() {
+        let (_state_tmp, paths, _tmp, config_path, pass_path) = add_test_setup();
+        std::fs::write(paths.acked_stats_json(), "not json").unwrap();
+        let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
+        let runner = AddFullPathRunner::live();
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+
+        let result = cmd_add(
+            &runner,
+            &fs,
+            &AddParams {
+                config_path: &config_path,
+                disk_specs: &["disk2=/dev/disk/by-id/virtio-disk2".into()],
+                dry_run: false,
+                yes: true,
+                passphrase_stdin: false,
+                passphrase_file: Some(pass_path.as_path()),
+                enroll_key_file: None,
+                progress: ProgressOutput::Off,
+                paths: &paths,
+                sleep_inhibitor: &inhibitor,
+                passphrase_reader: &RealTty,
+            },
+        );
+
+        match result {
+            Err(AddError::AckCleanupFailed { stage, .. }) => {
+                assert_eq!(stage, "live-pool add");
+            }
+            other => panic!("expected live-pool AckCleanupFailed, got {other:?}"),
+        }
+        assert_eq!(
+            runner.added_mappers(),
+            vec!["braid-disk2"],
+            "failure must occur after the irreversible device add"
+        );
+    }
+
+    /*
+     * Intent: bootstrap cleanup failure is fatal with the typed
+     * `AckCleanupFailed` stage `bootstrap` after mkfs/mount have committed.
+     *
+     * Why it exists: bootstrap creates a new pool identity. If braid cannot
+     * delete the old acked-stats artifact, it must stop loudly rather than
+     * leave stale baselines alongside the fresh filesystem.
+     *
+     * Scenario: acked-stats.json is a directory, so `remove_file` fails after
+     * the bootstrap mount succeeds. The returned error must identify the
+     * bootstrap cleanup boundary.
+     */
+    #[test]
+    fn cmd_add_bootstrap_acked_cleanup_failure_is_fatal() {
+        let (_state_tmp, paths, _tmp, config_path, pass_path) = fresh_add_setup();
+        std::fs::create_dir_all(paths.acked_stats_json()).unwrap();
+        let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk1".into()]);
+        let runner = AddFullPathRunner::bootstrap();
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+
+        let result = cmd_add(
+            &runner,
+            &fs,
+            &AddParams {
+                config_path: &config_path,
+                disk_specs: &["disk1=/dev/disk/by-id/virtio-disk1".into()],
+                dry_run: false,
+                yes: true,
+                passphrase_stdin: false,
+                passphrase_file: Some(pass_path.as_path()),
+                enroll_key_file: None,
+                progress: ProgressOutput::Off,
+                paths: &paths,
+                sleep_inhibitor: &inhibitor,
+                passphrase_reader: &RealTty,
+            },
+        );
+
+        match result {
+            Err(AddError::AckCleanupFailed { stage, .. }) => {
+                assert_eq!(stage, "bootstrap");
+            }
+            other => panic!("expected bootstrap AckCleanupFailed, got {other:?}"),
+        }
+        assert!(
+            runner.mounted.load(Ordering::SeqCst),
+            "cleanup failure should happen after bootstrap mount"
+        );
+    }
+
+    /*
+     * Intent: post-add probe failures are fatal with the typed
+     * `AckCleanupFailed` stage `post-add probe`, both when the probe command
+     * itself fails and when the freshly added mapper is absent from the
+     * successful probe result.
+     *
+     * Why it exists: live-add cleanup needs the assigned btrfs devid. If braid
+     * cannot prove which devid was assigned, it must fail closed instead of
+     * guessing or skipping cleanup.
+     *
+     * Scenario: disk2's `btrfs device add` succeeds. In one case the
+     * following pool probe fails; in the other it succeeds but omits
+     * /dev/mapper/braid-disk2. Both must stop at the post-add probe boundary.
+     */
+    #[test]
+    fn cmd_add_post_add_probe_uncertainty_is_fatal() {
+        for (label, runner) in [
+            (
+                "probe failure",
+                AddFullPathRunner::live().with_post_add_probe_failure(),
+            ),
+            (
+                "mapper omitted",
+                AddFullPathRunner::live().with_new_mapper_omitted_from_probe(),
+            ),
+        ] {
+            let (_state_tmp, paths, _tmp, config_path, pass_path) = add_test_setup();
+            let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
+            let inhibitor = crate::inhibit::RecordingInhibitor::new();
+
+            let result = cmd_add(
+                &runner,
+                &fs,
+                &AddParams {
+                    config_path: &config_path,
+                    disk_specs: &["disk2=/dev/disk/by-id/virtio-disk2".into()],
+                    dry_run: false,
+                    yes: true,
+                    passphrase_stdin: false,
+                    passphrase_file: Some(pass_path.as_path()),
+                    enroll_key_file: None,
+                    progress: ProgressOutput::Off,
+                    paths: &paths,
+                    sleep_inhibitor: &inhibitor,
+                    passphrase_reader: &RealTty,
+                },
+            );
+
+            match result {
+                Err(AddError::AckCleanupFailed { stage, .. }) => {
+                    assert_eq!(stage, "post-add probe", "{label}");
+                }
+                other => panic!("{label}: expected post-add AckCleanupFailed, got {other:?}"),
+            }
+            assert_eq!(
+                runner.added_mappers(),
+                vec!["braid-disk2"],
+                "{label}: failure must happen after device add commits"
+            );
+        }
+    }
+
     #[test]
     // Intent: no journal is written when all disks are already in pool (no-op).
     //

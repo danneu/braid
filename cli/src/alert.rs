@@ -1040,6 +1040,71 @@ mod tests {
     }
 
     /*
+     * Intent: drop_ghost_acked_for_devids returns Ok(false) for a non-empty
+     * devid list when acked-stats.json does not exist, and does not create
+     * the file.
+     *
+     * Why it exists: command cleanup paths may run before any operator has
+     * acknowledged alerts. Missing ack state is the empty state; cleanup must
+     * not materialize a new on-disk file just because a boundary was checked.
+     *
+     * Scenario: `braid add` learns btrfs assigned devid 2 to a fresh disk on
+     * a system that has never written acked-stats.json. The helper should be
+     * a clean no-op.
+     */
+    #[test]
+    fn drop_ghost_acked_for_devids_missing_file_is_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(dir.path().into());
+
+        let changed = drop_ghost_acked_for_devids(&paths, &[2]).unwrap();
+
+        assert!(!changed, "missing file means no ack entry was dropped");
+        assert!(
+            !paths.acked_stats_json().exists(),
+            "no-op cleanup must not create acked-stats.json"
+        );
+    }
+
+    /*
+     * Intent: drop_ghost_acked_for_devids returns Ok(false) and leaves the
+     * file byte-identical when none of the requested devids are present.
+     *
+     * Why it exists: command cleanup must be narrowly scoped to the device IDs
+     * whose ownership changed. A no-match cleanup should not rewrite the file,
+     * reorder keys, reformat JSON, or otherwise disturb unrelated acks.
+     *
+     * Scenario: `braid remove` asks to drop devid 9, but the ack file only
+     * contains devid 2 from an unrelated earlier acknowledgment.
+     */
+    #[test]
+    fn drop_ghost_acked_for_devids_no_match_preserves_file_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(dir.path().into());
+        let original = br#"{
+  "2": {
+    "missing_acked": true,
+    "device_stats": {
+      "read_io_errs": 7,
+      "write_io_errs": 0,
+      "flush_io_errs": 0,
+      "corruption_errs": 0,
+      "generation_errs": 0
+    }
+  }
+}
+"#
+        .to_vec();
+        std::fs::write(paths.acked_stats_json(), &original).unwrap();
+
+        let changed = drop_ghost_acked_for_devids(&paths, &[9]).unwrap();
+
+        assert!(!changed, "no matching key means no persisted change");
+        let after = std::fs::read(paths.acked_stats_json()).unwrap();
+        assert_eq!(after, original, "no-match cleanup must not rewrite JSON");
+    }
+
+    /*
      * Intent: drop_ghost_acked_for_devids propagates corrupt acked-stats JSON
      * instead of treating it as empty state.
      *

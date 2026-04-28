@@ -732,6 +732,16 @@ mod tests {
         }
     }
 
+    fn acked_disk(missing_acked: bool, read_io_errs: u64) -> alert::AckedDisk {
+        alert::AckedDisk {
+            missing_acked,
+            device_stats: alert::AckedDeviceCounters {
+                read_io_errs,
+                ..Default::default()
+            },
+        }
+    }
+
     #[derive(Clone)]
     struct RecordingRunner {
         log: Arc<Mutex<Vec<CmdRequest>>>,
@@ -944,6 +954,78 @@ mod tests {
             inhibitor.acquire_count(),
             1,
             "sleep inhibitor must be acquired exactly once on the path through journal::write_journal"
+        );
+    }
+
+    /*
+     * Intent: a successful command-level `braid remove` prunes the acked-stats
+     * entry for the removed target devid while preserving unrelated ack state.
+     *
+     * Why it exists: the cleanup callsite lives after the irreversible remove,
+     * membership save, and journal clear. Helper-level tests cannot catch a
+     * future edit that removes or moves that command wiring.
+     *
+     * Scenario: a healthy two-disk pool removes disk2 (devid 2). An old ghost
+     * ack for devid 2 must disappear; the surviving disk1 ack must stay
+     * byte-equivalent at the value layer.
+     */
+    #[test]
+    fn cmd_remove_prunes_acked_stats_for_removed_devid() {
+        let (_state_dir, paths) = setup_membership(&[
+            ("disk1", "/dev/disk/by-id/virtio-disk1"),
+            ("disk2", "/dev/disk/by-id/virtio-disk2"),
+        ]);
+        let control = acked_disk(false, 11);
+        let target = acked_disk(true, 22);
+        let mut acked = BTreeMap::new();
+        acked.insert("1".to_owned(), control.clone());
+        acked.insert("2".to_owned(), target);
+        alert::save_acked_stats(&alert::AckedStats(acked), &paths).unwrap();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.json");
+        let mut disks = BTreeMap::new();
+        disks.insert(
+            "disk1".to_owned(),
+            serde_json::json!({ "by_id": "/dev/disk/by-id/virtio-disk1" }),
+        );
+        disks.insert(
+            "disk2".to_owned(),
+            serde_json::json!({ "by_id": "/dev/disk/by-id/virtio-disk2" }),
+        );
+        let config_json = serde_json::json!({
+            "disks": disks,
+            "mount_point": "/mnt/storage"
+        });
+        std::fs::write(&config_path, serde_json::to_vec(&config_json).unwrap()).unwrap();
+
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let runner = RecordingRunner::new(log);
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        cmd_remove(
+            &runner,
+            &MockFs,
+            &RemoveParams {
+                config_path: Path::new(&config_path),
+                name: "disk2",
+                dry_run: false,
+                yes: true,
+                progress: ProgressOutput::Off,
+                paths: &paths,
+                sleep_inhibitor: &inhibitor,
+            },
+        )
+        .expect("remove should succeed");
+
+        let reloaded = alert::load_acked_stats(&paths);
+        assert_eq!(
+            reloaded.0.get("1"),
+            Some(&control),
+            "unrelated acked entry must be preserved"
+        );
+        assert!(
+            !reloaded.0.contains_key("2"),
+            "removed target devid must be pruned"
         );
     }
 

@@ -636,6 +636,16 @@ mod tests {
         }
     }
 
+    fn acked_disk(missing_acked: bool, read_io_errs: u64) -> alert::AckedDisk {
+        alert::AckedDisk {
+            missing_acked,
+            device_stats: alert::AckedDeviceCounters {
+                read_io_errs,
+                ..Default::default()
+            },
+        }
+    }
+
     struct HealthyPoolRunner;
 
     impl CommandRunner for HealthyPoolRunner {
@@ -1193,6 +1203,65 @@ mod tests {
             ("disk3", "/dev/disk/by-id/virtio-disk3", Some(3)),
         ]);
         (tmp, config_path, state_tmp, state_paths)
+    }
+
+    /*
+     * Intent: a successful command-level `braid remove-missing` prunes the
+     * acked-stats entry for the removed missing devid while preserving an
+     * unrelated control entry.
+     *
+     * Why it exists: the cleanup callsite is after targeted btrfs device
+     * remove, membership persist, optional soft balance, and journal clear.
+     * Helper-level tests cannot catch a future command refactor that drops the
+     * post-commit pruning.
+     *
+     * Scenario: the existing 3-device fixture has devid 3 reported as
+     * MISSING. Removing that missing device must delete an old ghost ack for
+     * key "3" and leave the present devid 1 ack unchanged.
+     */
+    #[test]
+    fn cmd_remove_missing_prunes_acked_stats_for_removed_devid() {
+        let (_tmp, config_path, _state_tmp, state_paths) = three_device_config();
+        let control = acked_disk(false, 11);
+        let target = acked_disk(true, 33);
+        alert::save_acked_stats(
+            &alert::AckedStats(std::collections::BTreeMap::from([
+                ("1".to_owned(), control.clone()),
+                ("3".to_owned(), target),
+            ])),
+            &state_paths,
+        )
+        .unwrap();
+
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let runner = ThreeDeviceRunner::new(log, false);
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        cmd_remove_missing(
+            &runner,
+            &MockFs,
+            &RemoveMissingParams {
+                config_path: &config_path,
+                missing_id: 3,
+                dry_run: false,
+                yes: true,
+                progress: crate::progress::ProgressOutput::Off,
+                paths: &state_paths,
+                sleep_inhibitor: &inhibitor,
+                sleeper: &crate::progress::NoopSleeper,
+            },
+        )
+        .expect("remove-missing should succeed");
+
+        let reloaded = alert::load_acked_stats(&state_paths);
+        assert_eq!(
+            reloaded.0.get("1"),
+            Some(&control),
+            "unrelated acked entry must be preserved"
+        );
+        assert!(
+            !reloaded.0.contains_key("3"),
+            "removed missing target devid must be pruned"
+        );
     }
 
     /*

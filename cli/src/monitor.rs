@@ -235,6 +235,23 @@ mod tests {
         ]
     }"#;
 
+    const BTRFS_SHOW_PRESENT_NULL_MISSING: &str = "Label: none  uuid: de2b8517-f972-45fc-b121-3e160c8ea432\n\
+        \tTotal devices 3 FS bytes used 16.17MiB\n\
+        \tdevid    1 size 1008.00MiB used 209.50MiB path /dev/mapper/braid-vdb\n\
+        \tdevid    2 size 1008.00MiB used 209.50MiB path /dev/mapper/braid-vdc\n\
+        \tdevid    3 size 0 used 0 path MISSING\n";
+
+    const CRYPTSETUP_STATUS_VDC_NULL: &str = "/dev/mapper/braid-vdc is active and is in use.\n\
+          type:    LUKS2\n\
+          cipher:  aes-xts-plain64\n\
+          keysize: 512 [bits]\n\
+          key location: keyring\n\
+          device:  (null)\n\
+          sector size:  512 [bytes]\n\
+          offset:  32768 [512-byte units] (16777216 [bytes])\n\
+          size:    2064384 [512-byte units] (1056964608 [bytes])\n\
+          mode:    read/write\n";
+
     fn ok_output(stdout: &str) -> RawCommandOutput {
         RawCommandOutput {
             cmd: "test".to_owned(),
@@ -347,6 +364,35 @@ mod tests {
         }
     }
 
+    struct MonitorReconcileRunner;
+
+    impl CommandRunner for MonitorReconcileRunner {
+        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
+            match request {
+                CmdRequest::FindmntJson { .. } => Ok(ok_output(FINDMNT_BTRFS)),
+                CmdRequest::BtrfsFilesystemShow { .. } => {
+                    Ok(ok_output(BTRFS_SHOW_PRESENT_NULL_MISSING))
+                }
+                CmdRequest::CryptsetupStatus { mapper } => match mapper.as_str() {
+                    "braid-vdb" => Ok(ok_output(CRYPTSETUP_STATUS_VDB)),
+                    "braid-vdc" => Ok(ok_output(CRYPTSETUP_STATUS_VDC_NULL)),
+                    other => panic!("unexpected CryptsetupStatus mapper: {other}"),
+                },
+                CmdRequest::CryptsetupLuksUuid { .. } => Ok(ok_output(LUKS_UUID)),
+                CmdRequest::BtrfsDeviceStatsJson { .. } => Ok(ok_output(STATS_2DISK_HEALTHY)),
+                other => panic!("unexpected CmdRequest in monitor reconcile test: {other:?}"),
+            }
+        }
+
+        fn run_with_stdin(
+            &self,
+            request: &CmdRequest,
+            _stdin: &[u8],
+        ) -> Result<RawCommandOutput, CmdError> {
+            self.run(request)
+        }
+    }
+
     fn mp() -> MountPoint {
         MountPoint("/mnt/storage".to_owned())
     }
@@ -355,6 +401,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let paths = StatePaths::custom(dir.path().into());
         (dir, paths)
+    }
+
+    fn acked_disk(missing_acked: bool, read_io_errs: u64) -> alert::AckedDisk {
+        alert::AckedDisk {
+            missing_acked,
+            device_stats: alert::AckedDeviceCounters {
+                read_io_errs,
+                ..Default::default()
+            },
+        }
     }
 
     fn assert_single_computation_error(result: &MonitorResult) -> &str {
@@ -374,6 +430,58 @@ mod tests {
             }
             other => panic!("expected MonitorResult::Alert, got {other:?}"),
         }
+    }
+
+    /*
+     * Intent: cmd_monitor reconciles acked-stats at the command boundary:
+     * present devices self-heal missing_acked, still-relevant missing axes are
+     * preserved, and true orphan devids are pruned from disk.
+     *
+     * Why it exists: monitor is the defense-in-depth cleanup layer. Helper
+     * tests cannot catch a future edit that stops passing the correct
+     * present/null-underlying/MISSING sets from the live pool probe into the
+     * reconciler.
+     *
+     * Scenario: probe sees present devid 1, null-underlying mapper devid 2,
+     * btrfs MISSING devid 3, and the ack file also contains orphan devid 99.
+     * After monitor, keys are exactly 1, 2, 3; devid 1 is no longer marked
+     * missing, while devids 2 and 3 keep their acknowledged missing state.
+     */
+    #[test]
+    fn cmd_monitor_reconciles_acked_stats_across_pool_axes() {
+        let (_dir, paths) = fresh_paths();
+        let disk1 = acked_disk(true, 1);
+        let disk2 = acked_disk(true, 2);
+        let disk3 = acked_disk(true, 3);
+        let orphan = acked_disk(false, 99);
+        save_acked_stats(
+            &alert::AckedStats(BTreeMap::from([
+                ("1".to_owned(), disk1),
+                ("2".to_owned(), disk2.clone()),
+                ("3".to_owned(), disk3.clone()),
+                ("99".to_owned(), orphan),
+            ])),
+            &paths,
+        )
+        .unwrap();
+
+        let result = cmd_monitor(&MonitorReconcileRunner, &mp(), &paths);
+
+        assert_eq!(result, MonitorResult::Ok);
+        let reloaded = alert::load_acked_stats(&paths);
+        let keys: Vec<&str> = reloaded.0.keys().map(String::as_str).collect();
+        assert_eq!(keys, vec!["1", "2", "3"]);
+        assert_eq!(reloaded.0.get("1"), Some(&acked_disk(false, 1)));
+        assert_eq!(
+            reloaded.0.get("2"),
+            Some(&disk2),
+            "null-underlying missing ack must be preserved"
+        );
+        assert_eq!(
+            reloaded.0.get("3"),
+            Some(&disk3),
+            "btrfs MISSING ack must be preserved"
+        );
     }
 
     /*
