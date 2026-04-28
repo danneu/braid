@@ -94,6 +94,18 @@ The alert latch is an append/refresh log of all unacked causes from all sources.
 
 This preserves "latched until ack" even when the on-disk state is unreadable: the operator sees a loud `ComputationError`, the bad bytes are preserved for forensics, and ack always succeeds.
 
+### Acked-stats hygiene across pool membership changes
+
+btrfs allocates new devids as `last_devid + 1` (kernel: `fs/btrfs/volumes.c`, `find_next_devid`), so a `remove`-then-`add` sequence reuses the removed devid only when that devid was the current maximum at remove time. Removing a non-max devid leaves a permanent gap. A stale acked-stats entry for a reused devid would otherwise carry the previous holder's `device_stats` baseline (suppressing health alerts until counters exceed the ghost) or its `missing_acked = true` flag (suppressing missing-device alerts) onto the fresh disk.
+
+Invariant: a reused devid must never inherit the previous holder's ack baseline.
+
+Three layers enforce it:
+
+1. **Add-time guard (correctness boundary):** `cmd_add` clears acked-stats unconditionally on bootstrap (every existing entry is stale because the pool's identity is new) and drops the assigned devid's entry per-disk inside the live-pool add loop (so partial multi-add still cleans up the disks that were introduced before a later failure). Cleanup failure here is command-fatal: returning success with a known stale baseline would let the user trust health monitoring on a pool the alert layer cannot reason about. The error names the stage and instructs the user to delete the file before relying on alerts.
+2. **Remove-time prune (hygiene):** `cmd_remove` and `cmd_remove_missing` drop the affected devid's acked-stats entry on success. Cleanup failure here is non-fatal (warning) -- the next `add` for that devid will catch it via layer 1.
+3. **Monitor reconcile (defense-in-depth):** `cmd_monitor` prunes orphan entries (devid no longer in `pool.devices`, `pool.null_underlying`, or `pool.missing_devids`) every cycle. This catches crash recovery and manual btrfs operations performed outside braid. It cannot detect ghost data once a devid is reused, so the add-time layer is the boundary for that case.
+
 ## Rejected alternatives
 
 - **Daemon-based monitoring**: more complex lifecycle management for no benefit over a timer + oneshot

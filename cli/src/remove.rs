@@ -1,3 +1,4 @@
+use crate::alert;
 use crate::cmd::{CmdRequest, CommandRunner, Step};
 use crate::config::{config_read, mapper_name};
 use crate::confirm;
@@ -198,6 +199,9 @@ impl RemovePlan {
         membership::save_membership(&target_membership, params.paths)
             .map_err(map_membership_persist_failure)?;
         journal::clear_journal(params.paths).map_err(map_journal_clear_failure)?;
+        if let Err(e) = alert::drop_ghost_acked_for_devids(params.paths, &[self.target_devid]) {
+            eprintln!("Warning: failed to update acked stats: {e}");
+        }
 
         eprintln!("Done. Disk '{}' removed from pool.", self.name);
         Ok(())

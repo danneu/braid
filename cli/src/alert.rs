@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -220,6 +220,82 @@ pub fn snapshot_current(
     }
 
     Ok(AckedStats(map))
+}
+
+/// Drop the acked entry for `devid`. Returns true if an entry was removed.
+pub fn drop_acked_devid(acked: &mut AckedStats, devid: u64) -> bool {
+    acked.0.remove(&devid.to_string()).is_some()
+}
+
+fn load_acked_stats_fallible(paths: &StatePaths) -> Result<AckedStats, std::io::Error> {
+    let path = paths.acked_stats_json();
+    let contents = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(AckedStats::default());
+        }
+        Err(e) => return Err(e),
+    };
+    serde_json::from_str(&contents).map_err(std::io::Error::other)
+}
+
+/// Load acked-stats, drop entries for each devid, and persist on change.
+///
+/// Read and parse errors are propagated so mutation paths can fail closed
+/// when ack state may be stale.
+pub fn drop_ghost_acked_for_devids(
+    paths: &StatePaths,
+    devids: &[u64],
+) -> Result<bool, std::io::Error> {
+    if devids.is_empty() {
+        return Ok(false);
+    }
+
+    let mut acked = load_acked_stats_fallible(paths)?;
+    let mut changed = false;
+    for &devid in devids {
+        changed |= drop_acked_devid(&mut acked, devid);
+    }
+    if changed {
+        save_acked_stats(&acked, paths)?;
+    }
+    Ok(changed)
+}
+
+/// Delete acked-stats outright. Absence is already the empty state.
+pub fn remove_acked_stats(paths: &StatePaths) -> Result<(), std::io::Error> {
+    match std::fs::remove_file(paths.acked_stats_json()) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Reconcile acked-stats with current pool membership.
+///
+/// Unknown keys are kept: if braid cannot parse a key, it should not delete
+/// operator data silently.
+pub fn reconcile_acked_stats(
+    acked: &mut AckedStats,
+    still_relevant: &BTreeSet<u64>,
+    present: &BTreeSet<u64>,
+) -> bool {
+    let mut changed = false;
+    acked.0.retain(|key, disk| {
+        let Ok(devid) = key.parse::<u64>() else {
+            return true;
+        };
+        if !still_relevant.contains(&devid) {
+            changed = true;
+            return false;
+        }
+        if disk.missing_acked && present.contains(&devid) {
+            disk.missing_acked = false;
+            changed = true;
+        }
+        true
+    });
+    changed
 }
 
 /// Check if the smartd alert flag file exists.
@@ -887,6 +963,163 @@ mod tests {
         save_acked_stats(&stats, &paths).unwrap();
         let reloaded = load_acked_stats(&paths);
         assert_eq!(reloaded, stats);
+    }
+
+    fn acked_disk(missing_acked: bool, read_io_errs: u64) -> AckedDisk {
+        AckedDisk {
+            missing_acked,
+            device_stats: AckedDeviceCounters {
+                read_io_errs,
+                ..Default::default()
+            },
+        }
+    }
+
+    /*
+     * Intent: drop_ghost_acked_for_devids removes only the requested devid
+     * entries and persists the rewritten acked-stats file.
+     *
+     * Why it exists: add/remove cleanup must not rebuild ack state from live
+     * counters or disturb unrelated acknowledgments. It only invalidates
+     * baselines for devids whose pool ownership just changed.
+     *
+     * Scenario: a pool has acked baselines for devid 2 and 3, then `braid add`
+     * learns btrfs assigned devid 2 to a fresh disk. The stale devid 2 entry
+     * is deleted, while devid 3 stays acknowledged.
+     */
+    #[test]
+    fn drop_ghost_acked_for_devids_removes_targets_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(dir.path().into());
+        let mut map = BTreeMap::new();
+        map.insert("2".to_owned(), acked_disk(true, 7));
+        map.insert("3".to_owned(), acked_disk(false, 11));
+        save_acked_stats(&AckedStats(map), &paths).unwrap();
+
+        let changed = drop_ghost_acked_for_devids(&paths, &[2]).unwrap();
+
+        assert!(changed, "targeted cleanup must report a change");
+        let reloaded = load_acked_stats(&paths);
+        assert!(
+            !reloaded.0.contains_key("2"),
+            "stale target devid must be removed"
+        );
+        assert_eq!(
+            reloaded.0.get("3"),
+            Some(&acked_disk(false, 11)),
+            "unrelated acked entry must survive"
+        );
+    }
+
+    /*
+     * Intent: drop_ghost_acked_for_devids returns Ok(false) without reading
+     * the file when called with an empty devid list.
+     *
+     * Why it exists: command paths may have no newly assigned devids in edge
+     * cases. The helper should be a cheap no-op and, importantly, must not
+     * turn an unrelated corrupt file into a command failure when no cleanup
+     * was requested.
+     *
+     * Scenario: a future caller passes an empty list while acked-stats.json
+     * happens to contain invalid JSON. Since no devid boundary was crossed,
+     * the helper does nothing.
+     */
+    #[test]
+    fn drop_ghost_acked_for_empty_devid_list_does_not_read_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(dir.path().into());
+        std::fs::write(paths.acked_stats_json(), "not json").unwrap();
+
+        let changed = drop_ghost_acked_for_devids(&paths, &[]).unwrap();
+
+        assert!(!changed);
+        assert_eq!(
+            std::fs::read_to_string(paths.acked_stats_json()).unwrap(),
+            "not json"
+        );
+    }
+
+    /*
+     * Intent: drop_ghost_acked_for_devids propagates corrupt acked-stats JSON
+     * instead of treating it as empty state.
+     *
+     * Why it exists: `load_acked_stats` intentionally swallows corrupt files
+     * for detector paths, but the add-time correctness boundary must either
+     * prove a stale baseline was absent or fail loudly. Silent empty-state
+     * fallback would let a ghost baseline suppress future alerts.
+     *
+     * Scenario: an old or manually edited acked-stats.json is invalid, then
+     * `braid add` assigns a fresh disk to a possibly reused devid. Cleanup
+     * must fail the command.
+     */
+    #[test]
+    fn drop_ghost_acked_for_devids_rejects_corrupt_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(dir.path().into());
+        std::fs::write(paths.acked_stats_json(), "not json").unwrap();
+
+        let err = drop_ghost_acked_for_devids(&paths, &[2]).unwrap_err();
+
+        assert_eq!(err.kind(), std::io::ErrorKind::Other);
+    }
+
+    /*
+     * Intent: remove_acked_stats deletes acked-stats.json and treats a missing
+     * file as success.
+     *
+     * Why it exists: bootstrap creates a new pool identity, making every
+     * pre-existing acked baseline stale. The cleanup primitive must support
+     * both upgrades from old state and fresh state directories.
+     *
+     * Scenario: `braid add` bootstraps a new pool once with an old
+     * acked-stats.json present, and later on a system where the file was never
+     * created. Both paths should continue after cleanup.
+     */
+    #[test]
+    fn remove_acked_stats_deletes_file_and_allows_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(dir.path().into());
+        std::fs::write(paths.acked_stats_json(), "{}").unwrap();
+
+        remove_acked_stats(&paths).unwrap();
+        assert!(!paths.acked_stats_json().exists());
+
+        remove_acked_stats(&paths).unwrap();
+    }
+
+    /*
+     * Intent: reconcile_acked_stats prunes orphan devid entries, clears
+     * missing_acked for present devices, and preserves unparsable keys.
+     *
+     * Why it exists: monitor is the defense-in-depth cleanup layer. It should
+     * repair true orphans from crash/manual operations without deleting data
+     * whose key format it does not understand.
+     *
+     * Scenario: monitor sees devid 1 present, devid 2 still missing, and no
+     * devid 3 in the pool at all. It clears devid 1's old missing ack, keeps
+     * devid 2, drops devid 3, and leaves a non-numeric key untouched.
+     */
+    #[test]
+    fn reconcile_acked_stats_prunes_orphans_and_self_heals_present() {
+        let mut map = BTreeMap::new();
+        map.insert("1".to_owned(), acked_disk(true, 1));
+        map.insert("2".to_owned(), acked_disk(true, 2));
+        map.insert("3".to_owned(), acked_disk(false, 3));
+        map.insert("legacy".to_owned(), acked_disk(true, 4));
+        let mut acked = AckedStats(map);
+        let still_relevant = BTreeSet::from([1, 2]);
+        let present = BTreeSet::from([1]);
+
+        let changed = reconcile_acked_stats(&mut acked, &still_relevant, &present);
+
+        assert!(changed, "reconcile must report map mutation");
+        assert_eq!(acked.0.get("1"), Some(&acked_disk(false, 1)));
+        assert_eq!(acked.0.get("2"), Some(&acked_disk(true, 2)));
+        assert!(!acked.0.contains_key("3"), "orphan devid must be pruned");
+        assert!(
+            acked.0.contains_key("legacy"),
+            "unparsable keys must be preserved"
+        );
     }
 
     /// Null-underlying device: btrfs device stats reports the mapper path

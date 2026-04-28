@@ -1,3 +1,4 @@
+use crate::alert;
 use crate::cmd::{CmdRequest, CommandRunner, Step};
 use crate::config::config_read;
 use crate::confirm;
@@ -215,6 +216,9 @@ impl RemoveMissingPlan {
         // Maintenance complete -- safe to clear the journal.
         journal::clear_journal(params.paths)
             .map_err(|e| RemoveMissingError::Validation(e.to_string()))?;
+        if let Err(e) = alert::drop_ghost_acked_for_devids(params.paths, &[resolved_devid]) {
+            eprintln!("Warning: failed to update acked stats: {e}");
+        }
 
         eprintln!("Done. Missing device removed from pool.");
         Ok(())

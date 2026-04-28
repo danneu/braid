@@ -117,19 +117,17 @@ pub fn cmd_monitor<R: CommandRunner>(
         )
         .collect();
 
-    // 7. Self-heal stale ack state: if a devid was missing_acked but is now
-    //    present, reset missing_acked to false
-    let mut ack_changed = false;
-    let present_devids: Vec<u64> = pool.devices.iter().map(|d| d.devid).collect();
-    for (key, disk) in acked.0.iter_mut() {
-        if disk.missing_acked
-            && let Ok(devid) = key.parse::<u64>()
-            && present_devids.contains(&devid)
-        {
-            disk.missing_acked = false;
-            ack_changed = true;
-        }
-    }
+    // 7. Reconcile stale ack state: prune orphan devids and self-heal
+    //    missing_acked for devices that are present again.
+    let present_devids: BTreeSet<u64> = pool.devices.iter().map(|d| d.devid).collect();
+    let still_relevant_devids: BTreeSet<u64> = present_devids
+        .iter()
+        .copied()
+        .chain(pool.null_underlying.iter().map(|d| d.devid))
+        .chain(pool.missing_devids.iter().copied())
+        .collect();
+    let ack_changed =
+        alert::reconcile_acked_stats(&mut acked, &still_relevant_devids, &present_devids);
     if ack_changed && let Err(e) = save_acked_stats(&acked, paths) {
         eprintln!("Warning: failed to update acked stats: {e}");
     }

@@ -1,3 +1,4 @@
+use crate::alert;
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, Step};
 use crate::config::{Config, config_read, mapper_name, name_from_mapper};
 use crate::confirm;
@@ -27,6 +28,12 @@ use std::path::Path;
 pub enum AddError {
     #[error("{0}")]
     Validation(String),
+    #[error(
+        "pool was modified, but acked-stats cleanup failed at {stage}: {detail}\n\
+         health alert baselines may be stale -- run `rm /var/lib/braid/acked-stats.json` \
+         before trusting `braid monitor`."
+    )]
+    AckCleanupFailed { stage: &'static str, detail: String },
     #[error("probe error: {0}")]
     Probe(#[from] ProbeError),
     #[error("luks error: {0}")]
@@ -281,6 +288,16 @@ fn add_label(names: &[String]) -> String {
     } else {
         names.join(", ")
     }
+}
+
+fn devid_for_mapper_path(pool: &PoolState, mapper_path: &str) -> Option<u64> {
+    let mapper = mapper_path
+        .strip_prefix("/dev/mapper/")
+        .unwrap_or(mapper_path);
+    pool.devices
+        .iter()
+        .find(|device| device.mapper.0 == mapper)
+        .map(|device| device.devid)
 }
 
 /// Dry-run preview source of truth for `braid add` plus the execute
@@ -572,6 +589,12 @@ impl AddPlan {
                 eprintln!("Pool created and mounted at {}", mount_point);
             }
 
+            // Fresh pool identity: every previous acked baseline is stale.
+            alert::remove_acked_stats(params.paths).map_err(|e| AddError::AckCleanupFailed {
+                stage: "bootstrap",
+                detail: e.to_string(),
+            })?;
+
             // Bootstrap post-commit persist: write pool.json after mkfs + mount.
             // Enrich with live metadata (luks_uuid, devid) from pool probe.
             let mut final_membership = journal.target_membership.clone();
@@ -589,6 +612,23 @@ impl AddPlan {
             for mp in &mapper_paths {
                 pool_add_device(runner, mp, mount_point)?;
                 eprintln!("Device added to pool: {}", mp);
+                let pool_after =
+                    probe_pool(runner, mount_point).map_err(|e| AddError::AckCleanupFailed {
+                        stage: "post-add probe",
+                        detail: format!("{mp}: {e}"),
+                    })?;
+                let devid = devid_for_mapper_path(&pool_after, mp).ok_or_else(|| {
+                    AddError::AckCleanupFailed {
+                        stage: "post-add probe",
+                        detail: format!("{mp}: not found in pool after add"),
+                    }
+                })?;
+                alert::drop_ghost_acked_for_devids(params.paths, &[devid]).map_err(|e| {
+                    AddError::AckCleanupFailed {
+                        stage: "live-pool add",
+                        detail: format!("devid {devid}: {e}"),
+                    }
+                })?;
             }
 
             // Membership is committed by btrfs device add. Persist it before
@@ -1516,6 +1556,41 @@ mod tests {
             err.contains("no UUID"),
             "expected error about missing UUID, got: {err}"
         );
+    }
+
+    /*
+     * Intent: devid_for_mapper_path resolves the btrfs devid assigned to a
+     * mapper path returned from the add loop.
+     *
+     * Why it exists: live-pool add cleanup must delete the acked-stats entry
+     * for the freshly assigned devid, not for the disk's config name or
+     * by-id path. This helper is the narrow translation boundary.
+     *
+     * Scenario: `braid add` has just added /dev/mapper/braid-disk2, then
+     * probes the pool and must find devid 4 for the cleanup call.
+     */
+    #[test]
+    fn devid_for_mapper_path_matches_mapper_name() {
+        let pool = PoolState {
+            mounted: true,
+            devices: vec![PoolDevice {
+                mapper: MapperName("braid-disk2".into()),
+                luks_uuid: LuksUuid("22222222-2222-2222-2222-222222222222".into()),
+                devid: 4,
+                underlying: "/dev/vdc".into(),
+            }],
+            missing_count: 0,
+            total_devices: 1,
+            fsid: Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into()),
+            missing_devids: vec![],
+            null_underlying: vec![],
+        };
+
+        assert_eq!(
+            devid_for_mapper_path(&pool, "/dev/mapper/braid-disk2"),
+            Some(4)
+        );
+        assert_eq!(devid_for_mapper_path(&pool, "/dev/mapper/missing"), None);
     }
 
     // --- compile_add_steps_multi identity tests ---
