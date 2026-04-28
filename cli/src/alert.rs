@@ -11,7 +11,7 @@ use crate::state_paths::StatePaths;
 // Alert model
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct AlertState {
     pub active: bool,
     pub causes: Vec<AlertCause>,

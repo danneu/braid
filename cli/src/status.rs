@@ -548,27 +548,17 @@ pub(crate) fn resolve_alert_state(paths: &StatePaths) -> AlertState {
         }
     };
 
-    match latch {
-        Some(mut state) if state.active => {
-            if smartd_active
-                && !state
-                    .causes
-                    .iter()
-                    .any(|c| matches!(c, AlertCause::SmartdAlert))
-            {
-                state.causes.push(AlertCause::SmartdAlert);
-            }
-            state
-        }
-        _ if smartd_active => AlertState {
-            active: true,
-            causes: vec![AlertCause::SmartdAlert],
-        },
-        _ => AlertState {
-            active: false,
-            causes: vec![],
-        },
+    let mut state = latch.unwrap_or_default();
+    if smartd_active
+        && !state
+            .causes
+            .iter()
+            .any(|c| matches!(c, AlertCause::SmartdAlert))
+    {
+        state.causes.push(AlertCause::SmartdAlert);
     }
+    state.active = !state.causes.is_empty();
+    state
 }
 
 // ---------------------------------------------------------------------------
