@@ -1,5 +1,3 @@
-use std::collections::BTreeSet;
-
 use crate::alert::{self, save_acked_stats, snapshot_current};
 use crate::cmd::{CmdRequest, CommandRunner};
 use crate::parse::parse_btrfs_device_stats;
@@ -44,14 +42,7 @@ pub fn cmd_ack<R: CommandRunner>(
     let device_stats = parse_btrfs_device_stats(&stats_raw)?;
 
     // 4. Compute alert-local missing devids: btrfs MISSING ∪ null-underlying
-    let alert_missing_devids: Vec<u64> = pool
-        .missing_devids
-        .iter()
-        .copied()
-        .chain(pool.null_underlying.iter().map(|d| d.devid))
-        .collect::<BTreeSet<u64>>()
-        .into_iter()
-        .collect();
+    let alert_missing_devids = pool.alert_missing_devids();
 
     // 5. Snapshot current state. Identity is the devid carried on each
     //    stats row by btrfs -- no path-to-devid map needed.

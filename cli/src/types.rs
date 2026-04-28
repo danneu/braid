@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -77,6 +78,24 @@ pub struct PoolState {
     /// with their devids, so the alert pipeline pairs rows by devid directly
     /// from the parsed stats output -- no path-to-devid map required.
     pub null_underlying: Vec<NullUnderlyingDevice>,
+}
+
+impl PoolState {
+    /// Devids that must fire `MissingDevice` alert causes: the btrfs-
+    /// authoritative MISSING set unioned with null-underlying devids,
+    /// deduplicated and sorted. Dedup matters when btrfs has promoted a
+    /// hot-unplugged device to MISSING while its LUKS mapper still reports
+    /// `(null)` -- without it, the same devid would produce two
+    /// `MissingDevice` causes.
+    pub fn alert_missing_devids(&self) -> Vec<u64> {
+        self.missing_devids
+            .iter()
+            .copied()
+            .chain(self.null_underlying.iter().map(|d| d.devid))
+            .collect::<BTreeSet<u64>>()
+            .into_iter()
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

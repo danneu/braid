@@ -94,14 +94,7 @@ pub fn cmd_monitor<R: CommandRunner>(
     let mut acked = load_acked_stats(paths);
 
     // 4. Compute alert-local missing devids: btrfs MISSING ∪ null-underlying
-    let alert_missing_devids: Vec<u64> = pool
-        .missing_devids
-        .iter()
-        .copied()
-        .chain(pool.null_underlying.iter().map(|d| d.devid))
-        .collect::<BTreeSet<u64>>()
-        .into_iter()
-        .collect();
+    let alert_missing_devids = pool.alert_missing_devids();
 
     // 5. Check smartd alert flag
     let smartd_active = alert::smartd_alert_active(paths);
