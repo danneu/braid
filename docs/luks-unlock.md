@@ -83,6 +83,26 @@ If the USB stick is not plugged in, the automount times out, the
 auto-unlock service sees no key file, logs an informational message, and
 exits 0. Boot continues normally; the pool stays locked for manual unlock.
 
+## Header backup workflow and messaging
+
+LUKS header backups protect against on-disk header corruption. braid's `add`, `replace`, and `enroll_key_file` create local `.luksheader` files at `/var/lib/braid/luks-headers/<disk>.luksheader` as a transient byproduct -- they are **not** the intended backup target. The product workflow is:
+
+1. braid writes a local `.luksheader` during a header-mutating operation.
+2. The user exports the header off-system (USB, second machine, cloud key storage, etc.).
+3. The user removes the local copy. `braid status` and the TUI warn while a local copy persists, because its continued presence on the same machine defeats the off-system backup model.
+
+### Messaging invariant
+
+User-facing recovery, restoration, and backup-status messages -- in `doctor`, `status`, `unlock` errors, the TUI, or any new command -- must NOT reference local `/var/lib/braid/luks-headers/*.luksheader` files. Recovery guidance is generic: "restore from your off-system LUKS header backup if you have one." Specifically:
+
+- Never branch on whether a local `.luksheader` file exists.
+- Never call `Path::exists` on `paths.luks_headers_dir().join(...)` to change user-visible advice.
+- Never tell users to run `cryptsetup luksHeaderRestore --header-backup-file /var/lib/braid/...`.
+
+If `doctor` pointed users at the local files, the product would be internally inconsistent: `status` and the TUI warn about the same artifact `doctor` would tell users to depend on. Generic guidance is the right answer even if the local backup happens to be present and would technically work.
+
+Red flags when reviewing recovery messaging: `/var/lib/braid/luks-headers/`, `.luksheader`, `luks_headers_dir()`, and any `Path::exists` against a backup path.
+
 ## Mount point permissions
 
 Standard guidance for directories containing LUKS key material: the

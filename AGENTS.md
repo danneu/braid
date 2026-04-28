@@ -122,6 +122,8 @@ Use `--` (double hyphen), not `—` (em-dash), in all user-facing CLI output -- 
 
 Example: `pool is not mounted -- nothing to acknowledge`
 
+For the LUKS header backup workflow and the messaging invariant for `doctor`/`status`/`unlock` recovery hints, see [`docs/luks-unlock.md`](docs/luks-unlock.md#header-backup-workflow-and-messaging).
+
 ## Commands
 
 - `just test-vm` — Run NixOS VM tests (excludes repro tests).
@@ -131,7 +133,7 @@ Example: `pool is not mounted -- nothing to acknowledge`
 - `just test-repro` — Run repro tests only (same flags as `test-vm`).
 - `just test-all` — Run all tests including repro.
 - `just test-parsers` — Run parser compatibility canary (CLI parsers against live VM tool output).
-- `just test-rust` — Run Rust unit tests (`cargo test`).
+- `just test-rust` — Run Rust unit tests (`cargo test`). The CLI crate's package name is `braid-cli` (not `braid`); prefer `just test-rust` over `cargo test -p <name>` so you don't have to remember.
 - `just test-all-unstable` — Run all VM tests (including repro) against nixos-unstable.
 - `just capture-all-fixtures` — Capture all stable fixtures (base + progress).
 - `just capture-all-fixtures-unstable` — Capture all unstable fixtures (base + progress).
@@ -143,11 +145,13 @@ Example: `pool is not mounted -- nothing to acknowledge`
 
 ## Test Conventions
 
-Every individual test must start with a block comment explaining this:
+Every individual test starts with a `/* ... */` block comment with three labeled sections:
 
 1. **Intent** — what behavior this test verifies (or tries to verify)
 2. **Why it exists** — what risk/regression this protects against
 3. **Scenario** — the real-world user/system story this models, especially the concrete bug or incident that inspired the test
+
+For the literal block-comment form, the flake.nix `checks` registration rule for new VM tests, and NixOS VM test framework gotchas, see [`docs/testing.md`](docs/testing.md).
 
 ## Development Approach: TDD with NixOS VM Tests
 

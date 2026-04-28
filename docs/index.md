@@ -20,8 +20,9 @@ intent: Map device-disappearance states to btrfs, cryptsetup, and kernel output 
 - [btrfs-balance-soft.md](btrfs-balance-soft.md) — The `--soft` flag optimization for resuming interrupted profile conversions without rewriting already-converted chunks.
 - [btrfs-luks-sector-size.md](btrfs-luks-sector-size.md) — Why LUKS 4096-byte sector size is unnecessary — btrfs always writes 4096-byte blocks regardless.
 - [claude-enospc-vs-hang.md](claude-enospc-vs-hang.md) — Two failure modes of `btrfs device remove missing` (ENOSPC vs hang) and VM reproduction techniques.
-- [luks-unlock.md](luks-unlock.md) — LUKS unlock mechanisms: device naming stability and passphrase vs keyfile design considerations.
+- [luks-unlock.md](luks-unlock.md) — LUKS unlock mechanisms: device naming stability, passphrase vs keyfile design, header backup workflow and messaging invariant.
 - [notes-calculating-used-free-total-pool-space.txt](notes-calculating-used-free-total-pool-space.txt) — How total_bytes uses device size and RAID profile ratio; gaps with mixed-size RAID1 accounting.
+- [testing.md](testing.md) — Test conventions (literal `/* */` preamble, flake.nix `checks` registration) and NixOS VM test framework gotchas (`set -euo pipefail` wrapping, f-string lint, `repro-` prefix, eval-time isolation).
 - [tui-insta-guide.md](tui-insta-guide.md) — Ratatui + Insta snapshot testing workflow for TUI rendering; review cycle for snapshot changes.
 
 ## decisions/

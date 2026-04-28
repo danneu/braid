@@ -1,3 +1,12 @@
+//! Pool membership persistence and pure data helpers.
+//!
+//! This module owns `pool.json` I/O and pure transformations over `PoolState` /
+//! `PoolMembership`. Helpers here take already-probed data; they must NOT
+//! import `CommandRunner` or call `probe_pool` internally. Each caller (e.g.
+//! `add.rs`, `replace.rs`) keeps the best-effort `probe_pool` call local and
+//! passes the resulting `PoolState` into membership helpers. This separation
+//! keeps persistence decoupled from command execution.
+
 use crate::config;
 use crate::state_io;
 use crate::state_paths::StatePaths;

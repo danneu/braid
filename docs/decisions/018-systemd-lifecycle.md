@@ -134,6 +134,32 @@ The wrapper (`braid-wrapper.sh`) bridges CLI operations and systemd state. This 
 
 Pool-mutating commands (`unlock`, `add`, `recover`) acquire an exclusive **non-blocking** `flock` on `/run/braid-pool.lock` in the wrapper before invoking the CLI. **braid does not queue pool operations** — if the lock is already held by another braid process, the wrapper exits 1 immediately with `braid: another braid operation is already in progress` and the user must retry once the active operation completes. The lock is held through post-processing (permissions, `braid-online` activation). Under the held lock, `unlock` re-checks whether the pool is already mounted and exits cleanly if a prior winner mounted it sequentially — `add` and `recover` do not fast-exit because they operate on mounted pools. See [Principle 12](../principles.md#12-one-pool-operation-at-a-time).
 
+### Lock acquisition site
+
+For non-dry-run pool mutators, the operation lock (`PoolLockGuard`) must be acquired in top-level dispatch in `cli/src/main.rs` **before** any mutable pool-state I/O: config load, `pool.json` load, journal read, identity probes, interactive prompts. Either move those loads under the guard or move the loads into the locked `cmd_*` function.
+
+A command started during another mutator could otherwise read a stale `pool.json`, then acquire the lock after the first command finishes and act on old state. Late acquisition also regresses the fail-fast UX -- users see prompts and probes complete before being told the operation is contended.
+
+The pool lock is the first real execution boundary. Do not model it after the sleep inhibitor's late-acquisition pattern: the inhibitor protects against suspend mid-operation and can wait until the irreversible window; the pool lock protects against state-staleness and must precede any read of pool state.
+
+### ExecStop bounded-wait pattern
+
+When a unit's `ExecStop=` invokes a CLI that needs a contended resource (e.g. `braid-online.service ExecStop=braid lock` colliding with an in-flight mutator that holds the pool lock), the ExecStop path gets a distinct bounded-wait variant -- not a fail-fast call. "ExecStop fails fast; in-flight work finishes and a later stop attempt succeeds" is **not** a valid design: during shutdown there is no later stop attempt. `systemctl poweroff` can leave the resource (mounted btrfs / open LUKS) in an inconsistent state, and the "in-flight mutator finishes before TimeoutStopSec" claim is not guaranteed.
+
+Pattern: give the ExecStop path its own internal entry point with a deadline below `TimeoutStopSec` (e.g. a hidden `braid lock --systemd-stop` flag that waits on the lock up to a deadline, then performs the lock work). Regular `braid lock` stays fail-fast for user invocations; the bounded-wait path is documented and tested as a distinct mode.
+
+### `systemctl start/stop` inside held-resource windows
+
+`systemctl start <unit>` on an already-active oneshot+RemainAfterExit unit is a no-op at the work level, but it still queues a job. If a *stop* job for the same unit is already in flight (because someone else invoked `systemctl stop`), the start queues *behind* the stop. If that stop's `ExecStop=` is itself blocked on a resource the caller holds, the result is a deadlock.
+
+This is load-bearing for any CLI that both holds a resource and uses `systemctl start/stop` on a unit whose `ExecStart=`/`ExecStop=` touches that resource (e.g. the wrapper holding `pool.lock` while activating `braid-online.service` whose `ExecStop` calls `braid lock`).
+
+Rules:
+
+1. **Snapshot full unit state at the start of the held-resource window** with `systemctl show -P ActiveState <unit>`. **Do NOT use `systemctl is-active`** -- it returns "active" only for `active`, classifying `activating` and `deactivating` as not-active. A `deactivating` unit (its ExecStop is already running and waiting on the held resource) snapshotted as "not active" leads the caller to issue a `start` that queues behind the in-flight stop -- the exact deadlock the snapshot was supposed to prevent.
+2. Only emit `systemctl start <unit>` at the end of the window if the snapshot was `inactive` or `failed`. Skip when `active`, `activating`, or `deactivating`.
+3. Only emit `systemctl stop <unit>` at the end of the window if the snapshot was `active` or `activating`. Skip when `inactive`, `failed`, or `deactivating`.
+
 ## Consumer dependency contracts
 
 Services that depend on the pool being mounted use one of three patterns:
