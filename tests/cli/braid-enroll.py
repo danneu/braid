@@ -388,4 +388,103 @@ with subtest("Test 5: preflight detects slot-1 conflict before any mutation"):
         "cryptsetup open --test-passphrase --key-file /tmp/braid.key /dev/disk/by-id/virtio-disk1"
     )
 
+# --- Test 5b: Preflight detects divergent passphrase before any enrollment ---
+#
+# Intent: When a disk's passphrase has been changed out-of-band so that
+# pool members no longer share a single passphrase, `braid enroll` fails
+# during planning -- before any disk is mutated.
+#
+# Why it exists: The two-phase enroll refactor's stated guarantee is "no
+# partial mutation on preflight failure". Test 5 covers the slot-1
+# conflict path. Before this test was added, the planner verified the
+# passphrase only against the first candidate, so a divergent passphrase
+# on disk2 would pass planning, disk1 would be enrolled, and then the
+# apply phase would fail on disk2's `luksAddKey` -- leaving exactly the
+# partial-mutation state the refactor exists to prevent. This pins the
+# per-disk passphrase verify in the planner against real cryptsetup.
+#
+# Scenario: A user (or a misbehaving script) ran `cryptsetup
+# luksChangeKey` against one disk in the pool. The next `braid enroll`
+# must reject the divergence and leave the pool untouched.
+
+with subtest("Test 5b: preflight detects divergent passphrase before any mutation"):
+    close_all()
+
+    # Slot-1 cleanup must be idempotent: Test 5 left disk2 slot 1
+    # occupied by /tmp/conflict.key but disk1 slot 1 already empty.
+    # `cryptsetup luksKillSlot` rejects an inactive slot, so the kill
+    # must be tolerant.
+    for dev in ["virtio-disk1", "virtio-disk2"]:
+        machine.execute(
+            f"cryptsetup luksKillSlot --batch-mode /dev/disk/by-id/{dev} 1 "
+            "2>/dev/null || true"
+        )
+
+    pq = shlex.quote(passphrase)
+
+    # Confirm starting state: both disks accept the original passphrase
+    # (slot 0 holds it on both), and slot 1 is empty on both.
+    for dev in ["virtio-disk1", "virtio-disk2"]:
+        machine.succeed(
+            f"printf '%s\\n' {pq} | "
+            f"cryptsetup open --test-passphrase /dev/disk/by-id/{dev}"
+        )
+
+    # Diverge disk2's passphrase. `--key-slot 0` is required: without it,
+    # `luksChangeKey` may allocate a free slot (slot 1 is empty on this
+    # VM) for the new key and leave the old one in slot 0, silently
+    # turning this into a slot-conflict test rather than a divergent-
+    # passphrase test.
+    new_pass = "differentpassphrase"
+    npq = shlex.quote(new_pass)
+    machine.succeed(
+        f"printf '%s\\n%s\\n' {pq} {npq} "
+        "| cryptsetup luksChangeKey --key-slot 0 --batch-mode "
+        "/dev/disk/by-id/virtio-disk2"
+    )
+
+    # Verify the divergence is real: disk1 still accepts the original
+    # passphrase, disk2 does not. Guards against `luksChangeKey` having
+    # silently no-opped or operated on a different slot.
+    machine.succeed(
+        f"printf '%s\\n' {pq} | "
+        "cryptsetup open --test-passphrase /dev/disk/by-id/virtio-disk1"
+    )
+    machine.fail(
+        f"printf '%s\\n' {pq} | "
+        "cryptsetup open --test-passphrase /dev/disk/by-id/virtio-disk2"
+    )
+
+    # Run braid enroll. Use `machine.execute` (not `succeed`/`fail`) so
+    # we can capture combined stdout+stderr regardless of exit status.
+    status, output = machine.execute(
+        f"printf '%s\\n' {pq} | braid enroll /tmp --passphrase-stdin 2>&1"
+    )
+    assert status != 0, (
+        "expected nonzero exit on divergent passphrase; got "
+        f"status={status}, output={output!r}"
+    )
+    assert "wrong passphrase" in output, (
+        f"expected 'wrong passphrase' in output, got: {output!r}"
+    )
+    assert "disk2" in output, (
+        f"expected 'disk2' to be named in error, got: {output!r}"
+    )
+
+    # Disk1 slot 1 must still be empty -- planning aborted before any
+    # mutation. If the per-disk passphrase verify regressed, disk1 would
+    # have been enrolled before disk2's apply-time failure.
+    machine.fail(
+        "cryptsetup open --test-passphrase --key-file /tmp/braid.key "
+        "/dev/disk/by-id/virtio-disk1"
+    )
+
+    # Revert disk2's slot 0 to the original passphrase so the per-VM
+    # state stays consistent if any future test is appended after 5b.
+    machine.succeed(
+        f"printf '%s\\n%s\\n' {npq} {pq} "
+        "| cryptsetup luksChangeKey --key-slot 0 --batch-mode "
+        "/dev/disk/by-id/virtio-disk2"
+    )
+
 machine.shutdown()

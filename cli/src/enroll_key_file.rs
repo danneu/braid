@@ -175,7 +175,7 @@ fn plan_enrollment<R: CommandRunner>(
     verify_first_candidate_passphrase(runner, candidates, passphrase)?;
 
     let mut plan = Vec::new();
-    for (name, by_id) in candidates {
+    for (i, (name, by_id)) in candidates.iter().enumerate() {
         if let EnrollmentPlanMode::ExistingKeyfile = mode {
             // Check if keyfile already works (idempotent). Only `Authenticated`
             // means the keyfile is already installed in a slot -- `Rejected` is
@@ -195,6 +195,28 @@ fn plan_enrollment<R: CommandRunner>(
                     continue;
                 }
                 VerifyOutcome::Rejected => {}
+            }
+        }
+
+        // Per-disk passphrase verify: every disk that will be mutated has its
+        // passphrase verified during planning. Without this, a divergent
+        // passphrase on a non-first disk (e.g. user ran `cryptsetup
+        // luksChangeKey` on disk2 out-of-band) would not surface until the
+        // apply phase, which leaves the pool partially mutated. The first
+        // candidate is already covered by `verify_first_candidate_passphrase`
+        // above, which also handles the all-`AlreadyEnrolled` case where
+        // this loop never reaches the verify (every iter takes the `continue`
+        // above).
+        if i > 0 {
+            emit_credential_wait_line(CredentialKind::Passphrase, color_enabled_for_stderr(), name);
+            match luks::verify_passphrase(runner, &by_id.0, passphrase)? {
+                VerifyOutcome::Authenticated => {}
+                VerifyOutcome::Rejected => {
+                    return Err(EnrollKeyFileError::Validation(format!(
+                        "wrong passphrase on {}",
+                        name
+                    )));
+                }
             }
         }
 
@@ -1038,14 +1060,16 @@ mod tests {
         let kf = "/tmp/braid.key";
         let pass = "testpass";
 
-        let (tp_req, tp_stdin, tp_out) = test_passphrase_ok(d1, pass);
+        let (tp1_req, tp1_stdin, tp1_out) = test_passphrase_ok(d1, pass);
+        let (tp2_req, tp2_stdin, tp2_out) = test_passphrase_ok(d2, pass);
         let (tkf1_req, tkf1_out) = test_keyfile_fail(d1, kf);
         let (tkf2_req, tkf2_out) = test_keyfile_fail(d2, kf);
         let (ld1_req, ld1_out) = luks_dump_slot1_empty(d1);
         let (ld2_req, ld2_out) = luks_dump_slot1_empty(d2);
 
         let runner = MockRunner::default()
-            .with_output_stdin(tp_req, tp_stdin, tp_out)
+            .with_output_stdin(tp1_req, tp1_stdin, tp1_out)
+            .with_output_stdin(tp2_req, tp2_stdin, tp2_out)
             .with_output(tkf1_req, tkf1_out)
             .with_output(tkf2_req, tkf2_out)
             .with_output(ld1_req, ld1_out)
@@ -1136,13 +1160,15 @@ mod tests {
         let kf = "/tmp/braid.key";
         let pass = "testpass";
 
-        let (tp_req, tp_stdin, tp_out) = test_passphrase_ok(d1, pass);
+        let (tp1_req, tp1_stdin, tp1_out) = test_passphrase_ok(d1, pass);
+        let (tp2_req, tp2_stdin, tp2_out) = test_passphrase_ok(d2, pass);
         let (tkf1_req, tkf1_out) = test_keyfile_ok(d1, kf);
         let (tkf2_req, tkf2_out) = test_keyfile_fail(d2, kf);
         let (ld2_req, ld2_out) = luks_dump_slot1_empty(d2);
 
         let runner = MockRunner::default()
-            .with_output_stdin(tp_req, tp_stdin, tp_out)
+            .with_output_stdin(tp1_req, tp1_stdin, tp1_out)
+            .with_output_stdin(tp2_req, tp2_stdin, tp2_out)
             .with_output(tkf1_req, tkf1_out)
             .with_output(tkf2_req, tkf2_out)
             .with_output(ld2_req, ld2_out);
@@ -1214,14 +1240,16 @@ mod tests {
         let kf = "/tmp/braid.key";
         let pass = "testpass";
 
-        let (tp_req, tp_stdin, tp_out) = test_passphrase_ok(d1, pass);
+        let (tp1_req, tp1_stdin, tp1_out) = test_passphrase_ok(d1, pass);
+        let (tp2_req, tp2_stdin, tp2_out) = test_passphrase_ok(d2, pass);
         let (tkf1_req, tkf1_out) = test_keyfile_fail(d1, kf);
         let (tkf2_req, tkf2_out) = test_keyfile_fail(d2, kf);
         let (ld1_req, ld1_out) = luks_dump_slot1_empty(d1);
         let (ld2_req, ld2_out) = luks_dump_slot1_occupied(d2);
 
         let runner = MockRunner::default()
-            .with_output_stdin(tp_req, tp_stdin, tp_out)
+            .with_output_stdin(tp1_req, tp1_stdin, tp1_out)
+            .with_output_stdin(tp2_req, tp2_stdin, tp2_out)
             .with_output(tkf1_req, tkf1_out)
             .with_output(tkf2_req, tkf2_out)
             .with_output(ld1_req, ld1_out)
@@ -1339,7 +1367,8 @@ mod tests {
         let kf = "/mnt/usb/braid.key";
         let pass = "testpass";
 
-        let (tp_req, tp_stdin, tp_out) = test_passphrase_ok(d1, pass);
+        let (tp1_req, tp1_stdin, tp1_out) = test_passphrase_ok(d1, pass);
+        let (tp2_req, tp2_stdin, tp2_out) = test_passphrase_ok(d2, pass);
         let (ld1_req, ld1_out) = luks_dump_slot1_empty(d1);
         let (ld2_req, ld2_out) = luks_dump_slot1_empty(d2);
 
@@ -1347,7 +1376,8 @@ mod tests {
         // mode regresses and calls `verify_key_file`, MockRunner returns
         // MissingMock and this test fails.
         let runner = MockRunner::default()
-            .with_output_stdin(tp_req, tp_stdin, tp_out)
+            .with_output_stdin(tp1_req, tp1_stdin, tp1_out)
+            .with_output_stdin(tp2_req, tp2_stdin, tp2_out)
             .with_output(ld1_req, ld1_out)
             .with_output(ld2_req, ld2_out);
 
@@ -1399,12 +1429,14 @@ mod tests {
         let kf = "/mnt/usb/braid.key";
         let pass = "testpass";
 
-        let (tp_req, tp_stdin, tp_out) = test_passphrase_ok(d1, pass);
+        let (tp1_req, tp1_stdin, tp1_out) = test_passphrase_ok(d1, pass);
+        let (tp2_req, tp2_stdin, tp2_out) = test_passphrase_ok(d2, pass);
         let (ld1_req, ld1_out) = luks_dump_slot1_empty(d1);
         let (ld2_req, ld2_out) = luks_dump_slot1_occupied(d2);
 
         let runner = MockRunner::default()
-            .with_output_stdin(tp_req, tp_stdin, tp_out)
+            .with_output_stdin(tp1_req, tp1_stdin, tp1_out)
+            .with_output_stdin(tp2_req, tp2_stdin, tp2_out)
             .with_output(ld1_req, ld1_out)
             .with_output(ld2_req, ld2_out);
 
@@ -1428,6 +1460,135 @@ mod tests {
         assert!(
             err.to_string().contains("occupied by an unknown key"),
             "unexpected error: {err}"
+        );
+    }
+
+    /*
+     * Intent: in `ExistingKeyfile` mode, a divergent passphrase on disk2
+     *   (the user ran `cryptsetup luksChangeKey` on disk2 out-of-band) is
+     *   rejected during planning, before any disk is mutated.
+     * Why it exists: the two-phase enroll refactor's stated guarantee is
+     *   "no partial mutation on preflight failure". This holds for slot-1
+     *   conflicts because `check_key_slot` runs per disk, and held for
+     *   wrong-passphrase only against the first candidate. A divergent
+     *   passphrase on disk2 would pass planning and partial-mutate at
+     *   apply time. This test pins the per-disk passphrase verify in
+     *   the planner. No `CryptsetupLuksDump` mock is seeded for disk2 --
+     *   if the planner regresses and reaches disk2's slot-1 check after
+     *   skipping the per-disk passphrase verify, MockRunner returns
+     *   MissingMock and this test fails loudly rather than passing
+     *   silently.
+     * Scenario: 2-disk pool. Both disks have empty slot 1 (need enroll),
+     *   but disk2's slot 0 holds a different passphrase from disk1 due
+     *   to a previous out-of-band `cryptsetup luksChangeKey`.
+     */
+    #[test]
+    fn plan_divergent_passphrase_existing_keyfile_errors_on_disk2() {
+        let d1 = "/dev/disk/by-id/d1";
+        let d2 = "/dev/disk/by-id/d2";
+        let kf = "/tmp/braid.key";
+        let pass = "testpass";
+
+        let (tp1_req, tp1_stdin, tp1_out) = test_passphrase_ok(d1, pass);
+        let (tkf1_req, tkf1_out) = test_keyfile_fail(d1, kf);
+        let (ld1_req, ld1_out) = luks_dump_slot1_empty(d1);
+        let (tkf2_req, tkf2_out) = test_keyfile_fail(d2, kf);
+        let (tp2_req, tp2_stdin, tp2_out) = test_passphrase_fail(d2, pass);
+
+        // Deliberately NO `CryptsetupLuksDump` mock for d2. If the planner
+        // regresses (e.g. skips the per-disk passphrase verify on the
+        // second candidate), it will reach `check_slot_one_available` on
+        // d2 and MockRunner will fail with MissingMock. That signals the
+        // regression — the test must NOT pass silently in that case.
+        let runner = MockRunner::default()
+            .with_output_stdin(tp1_req, tp1_stdin, tp1_out)
+            .with_output(tkf1_req, tkf1_out)
+            .with_output(ld1_req, ld1_out)
+            .with_output(tkf2_req, tkf2_out)
+            .with_output_stdin(tp2_req, tp2_stdin, tp2_out);
+
+        let candidates = vec![
+            ("disk1".to_owned(), by_id(d1)),
+            ("disk2".to_owned(), by_id(d2)),
+        ];
+
+        let err = plan_enrollment(
+            &runner,
+            &candidates,
+            Path::new(kf),
+            pass,
+            EnrollmentPlanMode::ExistingKeyfile,
+        )
+        .expect_err("expected divergent passphrase on disk2 to abort planning");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("wrong passphrase"),
+            "expected 'wrong passphrase' in error: {msg}"
+        );
+        assert!(
+            msg.contains("disk2"),
+            "expected 'disk2' to be named in error: {msg}"
+        );
+    }
+
+    /*
+     * Intent: in `GenerateNew` mode, a divergent passphrase on disk2 is
+     *   rejected during planning, before the keyfile is generated or any
+     *   disk is mutated.
+     * Why it exists: same partial-mutation contract as the
+     *   `ExistingKeyfile` divergent test, but exercising the
+     *   `GenerateNew` code path (which skips the keyfile probe). The
+     *   regression mode is the same: planner verifies passphrase only
+     *   against disk1, divergent passphrase on disk2 surfaces at apply
+     *   time. No `CryptsetupLuksDump` mock for d2 -- a regression to
+     *   "verify only first candidate" trips MissingMock at d2's slot-1
+     *   check.
+     * Scenario: user runs `braid enroll DIR --generate` on a 2-disk pool
+     *   where disk2's passphrase was changed out-of-band.
+     */
+    #[test]
+    fn plan_divergent_passphrase_generate_new_errors_on_disk2() {
+        let d1 = "/dev/disk/by-id/d1";
+        let d2 = "/dev/disk/by-id/d2";
+        let kf = "/mnt/usb/braid.key";
+        let pass = "testpass";
+
+        let (tp1_req, tp1_stdin, tp1_out) = test_passphrase_ok(d1, pass);
+        let (ld1_req, ld1_out) = luks_dump_slot1_empty(d1);
+        let (tp2_req, tp2_stdin, tp2_out) = test_passphrase_fail(d2, pass);
+
+        // No keyfile-probe mocks (GenerateNew skips that branch). No
+        // `CryptsetupLuksDump` mock for d2 -- if the planner reaches
+        // d2's slot-1 check, the per-disk passphrase verify regressed
+        // and the test must fail loudly via MissingMock.
+        let runner = MockRunner::default()
+            .with_output_stdin(tp1_req, tp1_stdin, tp1_out)
+            .with_output(ld1_req, ld1_out)
+            .with_output_stdin(tp2_req, tp2_stdin, tp2_out);
+
+        let candidates = vec![
+            ("disk1".to_owned(), by_id(d1)),
+            ("disk2".to_owned(), by_id(d2)),
+        ];
+
+        let err = plan_enrollment(
+            &runner,
+            &candidates,
+            Path::new(kf),
+            pass,
+            EnrollmentPlanMode::GenerateNew,
+        )
+        .expect_err("expected divergent passphrase on disk2 to abort planning");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("wrong passphrase"),
+            "expected 'wrong passphrase' in error: {msg}"
+        );
+        assert!(
+            msg.contains("disk2"),
+            "expected 'disk2' to be named in error: {msg}"
         );
     }
 
