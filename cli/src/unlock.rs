@@ -127,7 +127,7 @@ impl UnlockPlan {
         // no-ops. That is acceptable: correctness never depends on this write
         // (see contract above). Pinned by
         // unlock_tolerates_post_mount_probe_mounted_false.
-        if let Ok(pool_after) = probe::probe_pool(runner, mount_point) {
+        if let Ok(pool_after) = probe::probe_pool(runner, fs, mount_point) {
             membership::refresh_pool_metadata(&pool_after, params.paths);
         }
 
@@ -248,14 +248,25 @@ mod tests {
         (tmp, paths)
     }
 
+    const MOUNTINFO_BTRFS: &str =
+        "36 35 0:32 / /mnt/storage rw shared:1 - btrfs /dev/mapper/braid-disk1 rw\n";
+    const MOUNTINFO_WITHOUT_TARGET: &str =
+        "26 25 0:23 / / rw shared:1 - ext4 /dev/sda1 rw\n";
+
     struct MockFs {
         paths: Vec<String>,
+        mountinfo: String,
     }
 
     impl MockFs {
         fn new(paths: &[&str]) -> Self {
+            Self::with_mountinfo(paths, MOUNTINFO_BTRFS)
+        }
+
+        fn with_mountinfo(paths: &[&str], mountinfo: &str) -> Self {
             Self {
                 paths: paths.iter().map(|s| s.to_string()).collect(),
+                mountinfo: mountinfo.to_owned(),
             }
         }
     }
@@ -269,7 +280,10 @@ mod tests {
             false
         }
 
-        fn read_to_string(&self, _path: &str) -> Result<String, std::io::Error> {
+        fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
+            if path == "/proc/self/mountinfo" {
+                return Ok(self.mountinfo.clone());
+            }
             Err(std::io::Error::new(std::io::ErrorKind::NotFound, "mock"))
         }
 
@@ -1222,17 +1236,17 @@ mod tests {
     /// without enriching pool.json and without failing.
     ///
     /// Why it exists: the post-mount enrichment at `cli/src/unlock.rs:94`
-    /// is best-effort. If `findmnt` races the mount (exit 1, empty stderr)
-    /// `probe_pool` returns `Ok(mounted=false)` instead of an error, which
-    /// still enters the `if let Ok(...)` arm. Without a pinning test,
+    /// is best-effort. If the mount probe observes readable mountinfo without
+    /// the target, `probe_pool` returns `Ok(mounted=false)`, which still
+    /// enters the `if let Ok(...)` arm. Without a pinning test,
     /// nothing prevents a future refactor from propagating that `Ok` as a
     /// hard failure or from silently enriching with stale data.
     ///
-    /// Scenario: 3-disk pool, clean mount. The post-mount `findmnt` call
-    /// happens to exit 1 with empty stderr (benign miss). pool.json was
+    /// Scenario: 3-disk pool, clean mount. The best-effort post-mount probe
+    /// sees well-formed mountinfo with no `/mnt/storage` entry. pool.json was
     /// seeded with `luks_uuid=None`/`devid=None`; those fields must remain
     /// `None` after `cmd_unlock` returns `Ok(())`, proving no enrichment
-    /// occurred.
+    /// occurred and no hard error escaped.
     #[test]
     fn unlock_tolerates_post_mount_probe_mounted_false() {
         let (_state_dir, sp) = test_paths();
@@ -1242,11 +1256,14 @@ mod tests {
         membership::save_membership(&membership, &sp)
             .expect("seed pool.json for assertion baseline");
 
-        let fs = MockFs::new(&[
-            "/dev/disk/by-id/virtio-disk1",
-            "/dev/disk/by-id/virtio-disk2",
-            "/dev/disk/by-id/virtio-disk3",
-        ]);
+        let fs = MockFs::with_mountinfo(
+            &[
+                "/dev/disk/by-id/virtio-disk1",
+                "/dev/disk/by-id/virtio-disk2",
+                "/dev/disk/by-id/virtio-disk3",
+            ],
+            MOUNTINFO_WITHOUT_TARGET,
+        );
 
         let runner = MockRunner::default()
             // mountpoint check -> not mounted
@@ -1332,16 +1349,6 @@ mod tests {
                     mount_point: MountPoint("/mnt/storage".to_owned()),
                 },
                 ok_raw("mount -o noatime,skip_balance"),
-            )
-            // post-mount probe_pool: findmnt returns exit 1 + empty stderr.
-            // Per parse_findmnt_json, that yields FindmntOutput with no
-            // filesystems, which probe_pool converts to
-            // Ok(PoolState { mounted: false, devices: vec![], ... }).
-            .with_output(
-                CmdRequest::FindmntJson {
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
-                },
-                err_raw("findmnt", 1, ""),
             )
             // balance status -> no balance (post-enrichment warn step)
             .with_output(
@@ -1435,14 +1442,17 @@ mod tests {
         let membership = three_disk_membership();
 
         // All three by-id devices AND all three mapper paths exist.
-        let fs = MockFs::new(&[
-            "/dev/disk/by-id/virtio-disk1",
-            "/dev/disk/by-id/virtio-disk2",
-            "/dev/disk/by-id/virtio-disk3",
-            "/dev/mapper/braid-disk1",
-            "/dev/mapper/braid-disk2",
-            "/dev/mapper/braid-disk3",
-        ]);
+        let fs = MockFs::with_mountinfo(
+            &[
+                "/dev/disk/by-id/virtio-disk1",
+                "/dev/disk/by-id/virtio-disk2",
+                "/dev/disk/by-id/virtio-disk3",
+                "/dev/mapper/braid-disk1",
+                "/dev/mapper/braid-disk2",
+                "/dev/mapper/braid-disk3",
+            ],
+            MOUNTINFO_WITHOUT_TARGET,
+        );
 
         let runner = MockRunner::default()
             // Pool not mounted yet.
@@ -1517,13 +1527,6 @@ mod tests {
                     mount_point: MountPoint("/mnt/storage".to_owned()),
                 },
                 ok_raw("mount"),
-            )
-            // post-mount probe_pool: benign miss, keeps test focused.
-            .with_output(
-                CmdRequest::FindmntJson {
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
-                },
-                err_raw("findmnt", 1, ""),
             )
             // balance status post-mount
             .with_output(

@@ -111,9 +111,10 @@ impl RemoveMissingPlan {
         }
     }
 
-    pub fn execute<R: CommandRunner + Sync>(
+    pub fn execute<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         self,
         runner: &R,
+        fs: &F,
         params: &RemoveMissingParams<'_>,
     ) -> Result<(), RemoveMissingError> {
         // Render accumulated notes to stderr via the shared helper
@@ -207,6 +208,7 @@ impl RemoveMissingPlan {
 
         crate::pool::maybe_restore_raid1(
             runner,
+            fs,
             &self.mount_point,
             self.missing_count,
             params.progress,
@@ -259,7 +261,7 @@ pub fn plan_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         Err(e) => return err_empty(e.into()),
     };
 
-    let pool = match probe_pool(runner, config.mount_point()) {
+    let pool = match probe_pool(runner, fs, config.mount_point()) {
         Ok(p) => p,
         Err(ProbeError::NotBtrfs { .. }) => {
             return err_empty(RemoveMissingError::Validation(
@@ -399,7 +401,7 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         return Ok(());
     }
 
-    plan.execute(runner, params)
+    plan.execute(runner, fs, params)
 }
 
 /// Outcome of the relocation-space preflight. `Proceed` means either
@@ -559,7 +561,12 @@ mod tests {
             false
         }
         fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
-            if path.ends_with("/exclusive_operation") {
+            if path == "/proc/self/mountinfo" {
+                Ok(
+                    "36 35 0:32 / /mnt/storage rw shared:1 - btrfs /dev/mapper/braid-disk1 rw\n"
+                        .to_owned(),
+                )
+            } else if path.ends_with("/exclusive_operation") {
                 Ok("none\n".to_owned())
             } else {
                 Err(std::io::Error::new(std::io::ErrorKind::NotFound, "mock"))
@@ -2241,7 +2248,12 @@ mod tests {
             false
         }
         fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
-            if path.ends_with("/exclusive_operation") {
+            if path == "/proc/self/mountinfo" {
+                Ok(
+                    "36 35 0:32 / /mnt/storage rw shared:1 - btrfs /dev/mapper/braid-disk1 rw\n"
+                        .to_owned(),
+                )
+            } else if path.ends_with("/exclusive_operation") {
                 Ok(format!("{}\n", self.0))
             } else {
                 Err(std::io::Error::new(std::io::ErrorKind::NotFound, "mock"))

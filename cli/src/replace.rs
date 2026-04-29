@@ -362,7 +362,7 @@ impl ReplacePlan {
         // The journal still covers maintenance, so recovery can replay it if
         // we crash before clear_journal.
         let mut target_membership = target_membership;
-        if let Ok(pool_after) = probe_pool(runner, config.mount_point()) {
+        if let Ok(pool_after) = probe_pool(runner, fs, config.mount_point()) {
             membership::enrich_from_pool_state(&pool_after, &mut target_membership);
         }
         membership::save_membership(&target_membership, params.paths).map_err(|e| {
@@ -399,6 +399,7 @@ impl ReplacePlan {
         if matches!(&replace_source, ReplaceSource::Missing { .. }) {
             crate::pool::maybe_restore_raid1(
                 runner,
+                fs,
                 config.mount_point(),
                 pool.missing_count,
                 params.progress,
@@ -534,7 +535,7 @@ pub fn plan_replace<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     };
     let new_name = new_name_parsed.as_str();
 
-    let pool = match probe_pool(runner, config.mount_point()) {
+    let pool = match probe_pool(runner, fs, config.mount_point()) {
         Ok(p) => p,
         Err(ProbeError::NotBtrfs { .. }) => {
             return err_empty(ReplaceError::Validation(
@@ -1937,7 +1938,12 @@ mod tests {
             false
         }
         fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
-            if path.ends_with("/exclusive_operation") {
+            if path == "/proc/self/mountinfo" {
+                Ok(
+                    "36 35 0:32 / /mnt/storage rw shared:1 - btrfs /dev/mapper/braid-disk1 rw\n"
+                        .to_owned(),
+                )
+            } else if path.ends_with("/exclusive_operation") {
                 Ok("none\n".to_owned())
             } else {
                 Err(std::io::Error::new(std::io::ErrorKind::NotFound, "mock"))
@@ -3859,7 +3865,12 @@ mod tests {
             self.inner.is_block_device(path)
         }
         fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
-            if path.ends_with("/exclusive_operation") {
+            if path == "/proc/self/mountinfo" {
+                Ok(
+                    "36 35 0:32 / /mnt/storage rw shared:1 - btrfs /dev/mapper/braid-disk1 rw\n"
+                        .to_owned(),
+                )
+            } else if path.ends_with("/exclusive_operation") {
                 Ok(self.sysfs_body.clone())
             } else {
                 self.inner.read_to_string(path)

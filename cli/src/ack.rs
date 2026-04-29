@@ -1,12 +1,13 @@
 use crate::alert::{self, save_acked_stats, snapshot_current};
 use crate::cmd::{CmdRequest, CommandRunner};
 use crate::parse::parse_btrfs_device_stats;
-use crate::probe::{ProbeError, probe_pool};
+use crate::probe::{Filesystem, ProbeError, probe_pool};
 use crate::state_paths::StatePaths;
 use crate::types::MountPoint;
 
-pub fn cmd_ack<R: CommandRunner>(
+pub fn cmd_ack<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
+    fs: &F,
     mount_point: &MountPoint,
     paths: &StatePaths,
 ) -> Result<(), AckError> {
@@ -23,7 +24,7 @@ pub fn cmd_ack<R: CommandRunner>(
     };
 
     // 2. Check if pool is mounted
-    let pool = match probe_pool(runner, mount_point) {
+    let pool = match probe_pool(runner, fs, mount_point) {
         Ok(p) => p,
         Err(ProbeError::NotBtrfs { .. }) => {
             return ack_offline(latch_count, latch_corrupt, paths);

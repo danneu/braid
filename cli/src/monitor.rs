@@ -7,7 +7,7 @@ use crate::alert::{
 };
 use crate::cmd::{CmdRequest, CommandRunner};
 use crate::parse::parse_btrfs_device_stats;
-use crate::probe::{ProbeError, probe_pool};
+use crate::probe::{Filesystem, ProbeError, probe_pool};
 use crate::state_paths::StatePaths;
 use crate::types::MountPoint;
 
@@ -43,8 +43,9 @@ fn latch_computation_error(detail: String, paths: &StatePaths) -> MonitorResult 
     MonitorResult::Alert(merged)
 }
 
-pub fn cmd_monitor<R: CommandRunner>(
+pub fn cmd_monitor<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
+    fs: &F,
     mount_point: &MountPoint,
     paths: &StatePaths,
 ) -> MonitorResult {
@@ -55,7 +56,7 @@ pub fn cmd_monitor<R: CommandRunner>(
     // reviewer is forced to classify it as either offline or fail-closed
     // alert. monitor is the headless surface, so the wrong default would
     // propagate silently into operator-visible behavior.
-    let pool = match probe_pool(runner, mount_point) {
+    let pool = match probe_pool(runner, fs, mount_point) {
         Ok(p) => p,
         // Mount target holds a non-btrfs filesystem -- our pool is not here.
         // Treat as offline; no fail-closed beep needed.
@@ -70,7 +71,8 @@ pub fn cmd_monitor<R: CommandRunner>(
             | ProbeError::Parse(_)
             | ProbeError::PoolDevice { .. }
             | ProbeError::UnsupportedLuksVersion { .. }
-            | ProbeError::MapperConflict { .. }),
+            | ProbeError::MapperConflict { .. }
+            | ProbeError::MountInfo(_)),
         ) => return latch_computation_error(e.to_string(), paths),
     };
 
@@ -164,6 +166,11 @@ mod tests {
        ]
     }"#;
 
+    const MOUNTINFO_BTRFS: &str =
+        "36 35 0:32 / /mnt/storage rw,noatime shared:1 - btrfs /dev/mapper/braid-vdb rw\n";
+    const MOUNTINFO_EXT4: &str =
+        "36 35 0:32 / /mnt/storage rw,noatime shared:1 - ext4 /dev/sda1 rw\n";
+
     const BTRFS_SHOW_2DISK: &str = "Label: none  uuid: de2b8517-f972-45fc-b121-3e160c8ea432\n\
         \tTotal devices 2 FS bytes used 16.17MiB\n\
         \tdevid    1 size 1008.00MiB used 209.50MiB path /dev/mapper/braid-vdb\n\
@@ -240,6 +247,7 @@ mod tests {
     /// healthy-2disk default. Each entry is matched by variant + key fields.
     enum Override {
         FindmntResult(Result<RawCommandOutput, CmdError>),
+        BtrfsShowResult(Result<RawCommandOutput, CmdError>),
         BtrfsShowPayload(String),
         StatsResult(Result<RawCommandOutput, CmdError>),
     }
@@ -288,6 +296,16 @@ mod tests {
             None
         }
 
+        fn take_btrfs_show_result(&self) -> Option<Result<RawCommandOutput, CmdError>> {
+            let mut guard = self.override_op.lock().unwrap();
+            if matches!(*guard, Some(Override::BtrfsShowResult(_))) {
+                if let Some(Override::BtrfsShowResult(r)) = guard.take() {
+                    return Some(r);
+                }
+            }
+            None
+        }
+
         fn take_stats_result(&self) -> Option<Result<RawCommandOutput, CmdError>> {
             let mut guard = self.override_op.lock().unwrap();
             if matches!(*guard, Some(Override::StatsResult(_))) {
@@ -309,6 +327,9 @@ mod tests {
                     Ok(ok_output(FINDMNT_BTRFS))
                 }
                 CmdRequest::BtrfsFilesystemShow { .. } => {
+                    if let Some(r) = self.take_btrfs_show_result() {
+                        return r;
+                    }
                     if let Some(payload) = self.take_btrfs_show_payload() {
                         return Ok(ok_output(&payload));
                     }
@@ -365,6 +386,52 @@ mod tests {
             _stdin: &[u8],
         ) -> Result<RawCommandOutput, CmdError> {
             self.run(request)
+        }
+    }
+
+    struct MonitorFs {
+        mountinfo: Result<String, std::io::ErrorKind>,
+    }
+
+    impl MonitorFs {
+        fn btrfs() -> Self {
+            Self {
+                mountinfo: Ok(MOUNTINFO_BTRFS.to_string()),
+            }
+        }
+
+        fn ext4() -> Self {
+            Self {
+                mountinfo: Ok(MOUNTINFO_EXT4.to_string()),
+            }
+        }
+
+        fn read_error(kind: std::io::ErrorKind) -> Self {
+            Self {
+                mountinfo: Err(kind),
+            }
+        }
+    }
+
+    impl Filesystem for MonitorFs {
+        fn exists(&self, _path: &str) -> bool {
+            false
+        }
+
+        fn is_block_device(&self, _path: &str) -> bool {
+            false
+        }
+
+        fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
+            assert_eq!(path, "/proc/self/mountinfo");
+            self.mountinfo
+                .as_ref()
+                .map(|body| body.clone())
+                .map_err(|kind| std::io::Error::new(*kind, "mock mountinfo error"))
+        }
+
+        fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
+            Ok(vec![])
         }
     }
 
@@ -440,7 +507,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = cmd_monitor(&MonitorReconcileRunner, &mp(), &paths);
+        let result = cmd_monitor(&MonitorReconcileRunner, &MonitorFs::btrfs(), &mp(), &paths);
 
         assert_eq!(result, MonitorResult::Ok);
         let reloaded = alert::load_acked_stats(&paths);
@@ -482,7 +549,7 @@ mod tests {
         let (_dir, paths) = fresh_paths();
         let runner = MonitorTestRunner::with_unmapped_stats();
 
-        let result = cmd_monitor(&runner, &mp(), &paths);
+        let result = cmd_monitor(&runner, &MonitorFs::btrfs(), &mp(), &paths);
 
         assert_eq!(
             result,
@@ -507,25 +574,64 @@ mod tests {
      * MonitorError::Probe -> exit 2 with no fail-closed signal. ADR 014
      * requires fail-closed: indeterminate pool state must beep.
      *
-     * Scenario: the very first probe command (FindmntJson) fails -- e.g.
-     * findmnt was killed, the spawn failed, or mount-table I/O hit an
-     * error. probe_pool returns ProbeError::Cmd before any pool data is
-     * available.
+     * Scenario: mountinfo says the pool is mounted, but the btrfs filesystem
+     * show command fails to spawn. probe_pool returns ProbeError::Cmd before
+     * any pool device data is available.
      */
     #[test]
     fn probe_error_returns_alert_with_latched_computation_error() {
         let (_dir, paths) = fresh_paths();
-        let runner = MonitorTestRunner::with_override(Override::FindmntResult(Err(
-            CmdError::Failed("findmnt: spawn failed".into()),
+        let runner = MonitorTestRunner::with_override(Override::BtrfsShowResult(Err(
+            CmdError::Failed("btrfs filesystem show: spawn failed".into()),
         )));
 
-        let result = cmd_monitor(&runner, &mp(), &paths);
+        let result = cmd_monitor(&runner, &MonitorFs::btrfs(), &mp(), &paths);
         assert_single_computation_error(&result);
 
         let latch_path = paths.alert_latch_json();
         assert!(
             latch_path.exists(),
             "alert latch must be written on ProbeError"
+        );
+    }
+
+    /*
+     * Intent: a mountinfo IO failure latches ComputationError and returns
+     * MonitorResult::Alert instead of reporting PoolOffline.
+     *
+     * Why it exists: this pins the bug fix at the safety-critical callsite.
+     * The stale findmnt fixture has the old non-zero/empty-stderr shape that
+     * previously parsed as "not mounted" and silenced alerting.
+     *
+     * Scenario: `/proc/self/mountinfo` is unreadable while the old findmnt
+     * fallback would have returned exit 1 with empty stderr.
+     */
+    #[test]
+    fn cmd_monitor_latches_computation_error_on_mountinfo_io_failure() {
+        let (_dir, paths) = fresh_paths();
+        let runner =
+            MonitorTestRunner::with_override(Override::FindmntResult(Ok(RawCommandOutput {
+                cmd: "findmnt".to_owned(),
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_status: 1,
+            })));
+
+        let result = cmd_monitor(
+            &runner,
+            &MonitorFs::read_error(std::io::ErrorKind::PermissionDenied),
+            &mp(),
+            &paths,
+        );
+        let detail = assert_single_computation_error(&result);
+        assert!(
+            detail.contains("mountinfo error"),
+            "detail should name mountinfo failure, got {detail}"
+        );
+
+        assert!(
+            paths.alert_latch_json().exists(),
+            "alert latch must be written on mountinfo IO failure"
         );
     }
 
@@ -567,7 +673,7 @@ mod tests {
             let (_dir, paths) = fresh_paths();
             let runner = MonitorTestRunner::with_override(Override::StatsResult(stats_result));
 
-            let result = cmd_monitor(&runner, &mp(), &paths);
+            let result = cmd_monitor(&runner, &MonitorFs::btrfs(), &mp(), &paths);
             assert_single_computation_error(&result);
 
             assert!(
@@ -578,7 +684,7 @@ mod tests {
     }
 
     /*
-     * Intent: When findmnt reports the mount target is held by a non-btrfs
+     * Intent: When mountinfo reports the mount target is held by a non-btrfs
      * filesystem, cmd_monitor must return MonitorResult::PoolOffline and
      * leave no alert latch behind.
      *
@@ -596,15 +702,10 @@ mod tests {
     #[test]
     fn monitor_classifies_non_btrfs_mount_as_offline() {
         let (_dir, paths) = fresh_paths();
-        let findmnt_ext4 = r#"{
-           "filesystems": [
-              {"target": "/mnt/storage", "source": "/dev/sda1", "fstype": "ext4"}
-           ]
-        }"#;
         let runner =
-            MonitorTestRunner::with_override(Override::FindmntResult(Ok(ok_output(findmnt_ext4))));
+            MonitorTestRunner::with_override(Override::FindmntResult(Ok(ok_output(FINDMNT_BTRFS))));
 
-        let result = cmd_monitor(&runner, &mp(), &paths);
+        let result = cmd_monitor(&runner, &MonitorFs::ext4(), &mp(), &paths);
 
         assert_eq!(result, MonitorResult::PoolOffline);
         assert!(
@@ -614,8 +715,9 @@ mod tests {
     }
 
     /*
-     * Intent: When findmnt exits non-zero with non-empty stderr,
-     * parse_findmnt_json maps that to ParseError::CommandFailed,
+     * Intent: When btrfs filesystem show exits non-zero with non-empty
+     * stderr, parse_btrfs_filesystem_show maps that to
+     * ParseError::CommandFailed,
      * probe_pool wraps it as ProbeError::Parse, and cmd_monitor must
      * latch a ComputationError and return MonitorResult::Alert.
      *
@@ -626,24 +728,22 @@ mod tests {
      * RawCommandOutput-shaped failure (non-zero exit + stderr) rather
      * than a CmdError. Both arms must be pinned to fail-closed.
      *
-     * Scenario: findmnt exits 1 with a stderr message (e.g. mount table
-     * inaccessible). The runner returns Ok(RawCommandOutput { exit_status:
-     * 1, stderr: "<msg>", ... }), parse_findmnt_json sees non-zero exit +
-     * non-empty stderr (cli/src/parse/findmnt.rs:30-42) and returns
-     * ParseError::CommandFailed.
+     * Scenario: btrfs filesystem show exits 1 with a stderr message. The
+     * runner returns Ok(RawCommandOutput { exit_status: 1, stderr: "<msg>",
+     * ... }), and the btrfs-show parser returns ParseError::CommandFailed.
      */
     #[test]
     fn probe_parse_failure_returns_alert_with_latched_computation_error() {
         let (_dir, paths) = fresh_paths();
-        let findmnt_failure = RawCommandOutput {
-            cmd: "findmnt".to_owned(),
+        let show_failure = RawCommandOutput {
+            cmd: "btrfs filesystem show /mnt/storage".to_owned(),
             stdout: String::new(),
-            stderr: "findmnt: kernel mount table inaccessible\n".to_owned(),
+            stderr: "ERROR: cannot read filesystem info\n".to_owned(),
             exit_status: 1,
         };
-        let runner = MonitorTestRunner::with_override(Override::FindmntResult(Ok(findmnt_failure)));
+        let runner = MonitorTestRunner::with_override(Override::BtrfsShowResult(Ok(show_failure)));
 
-        let result = cmd_monitor(&runner, &mp(), &paths);
+        let result = cmd_monitor(&runner, &MonitorFs::btrfs(), &mp(), &paths);
         assert_single_computation_error(&result);
 
         assert!(
@@ -681,7 +781,7 @@ mod tests {
             btrfs_show_non_mapper.to_owned(),
         ));
 
-        let result = cmd_monitor(&runner, &mp(), &paths);
+        let result = cmd_monitor(&runner, &MonitorFs::btrfs(), &mp(), &paths);
         assert_single_computation_error(&result);
 
         assert!(

@@ -27,7 +27,7 @@ pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
     disk_by_id: &HashMap<String, String>,
     paths: &StatePaths,
 ) -> Result<Option<PoolState>, String> {
-    let domain = probe_pool(runner, mount_point).map_err(|e| e.to_string())?;
+    let domain = probe_pool(runner, fs, mount_point).map_err(|e| e.to_string())?;
 
     if !domain.mounted {
         return Ok(None);
@@ -689,7 +689,13 @@ mod tests {
             Ok(vec![])
         }
 
-        fn read_to_string(&self, _path: &str) -> Result<String, std::io::Error> {
+        fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
+            if path == "/proc/self/mountinfo" {
+                return Ok(
+                    "36 35 0:32 / /mnt/storage rw shared:1 - btrfs /dev/mapper/braid-disk1 rw\n"
+                        .to_owned(),
+                );
+            }
             Err(std::io::Error::new(std::io::ErrorKind::NotFound, "stub"))
         }
     }

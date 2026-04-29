@@ -82,6 +82,8 @@ pub enum ProbeError {
         expected: LuksUuid,
         found: Option<LuksUuid>,
     },
+    #[error("mountinfo error: {0}")]
+    MountInfo(#[from] crate::mount_check::MountInfoError),
 }
 
 fn found_display(found: &Option<LuksUuid>) -> String {
@@ -211,22 +213,12 @@ fn probe_mapper_open<R: CommandRunner>(
 // probe_pool
 // ---------------------------------------------------------------------------
 
-pub fn probe_pool<R: CommandRunner>(
+pub fn probe_pool<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
+    fs: &F,
     mount_point: &MountPoint,
 ) -> Result<PoolState, ProbeError> {
-    let findmnt_raw = runner.run(&CmdRequest::FindmntJson {
-        mount_point: mount_point.clone(),
-    })?;
-    let findmnt = crate::parse::parse_findmnt_json(&findmnt_raw)?;
-
-    // Defensive: only consider entries whose target exactly matches mount_point.
-    let exact = findmnt
-        .filesystems
-        .iter()
-        .find(|e| e.target == mount_point.as_str());
-
-    let entry = match exact {
+    match crate::mount_check::fstype_at_mount_via_fs(fs, mount_point.as_str())? {
         None => {
             return Ok(PoolState {
                 mounted: false,
@@ -238,14 +230,13 @@ pub fn probe_pool<R: CommandRunner>(
                 null_underlying: vec![],
             });
         }
-        Some(e) => e,
-    };
-
-    if entry.fstype != "btrfs" {
-        return Err(ProbeError::NotBtrfs {
-            mount_point: mount_point.0.clone(),
-            fstype: entry.fstype.clone(),
-        });
+        Some(fstype) if fstype != "btrfs" => {
+            return Err(ProbeError::NotBtrfs {
+                mount_point: mount_point.0.clone(),
+                fstype,
+            });
+        }
+        Some(_) => {}
     }
 
     let show_raw = runner.run(&CmdRequest::BtrfsFilesystemShow {
@@ -398,6 +389,7 @@ mod tests {
     struct MockFs {
         paths: Vec<String>,
         block_devices: Vec<String>,
+        mountinfo: Option<Result<String, std::io::ErrorKind>>,
     }
 
     impl MockFs {
@@ -405,6 +397,23 @@ mod tests {
             Self {
                 paths: paths.iter().map(|s| s.to_string()).collect(),
                 block_devices: vec![],
+                mountinfo: None,
+            }
+        }
+
+        fn with_mountinfo(body: &str) -> Self {
+            Self {
+                paths: vec![],
+                block_devices: vec![],
+                mountinfo: Some(Ok(body.to_string())),
+            }
+        }
+
+        fn with_mountinfo_error(kind: std::io::ErrorKind) -> Self {
+            Self {
+                paths: vec![],
+                block_devices: vec![],
+                mountinfo: Some(Err(kind)),
             }
         }
     }
@@ -418,7 +427,17 @@ mod tests {
             self.block_devices.contains(&path.to_string())
         }
 
-        fn read_to_string(&self, _path: &str) -> Result<String, std::io::Error> {
+        fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
+            if path == "/proc/self/mountinfo" {
+                return match &self.mountinfo {
+                    Some(Ok(body)) => Ok(body.clone()),
+                    Some(Err(kind)) => Err(std::io::Error::new(*kind, "mock mountinfo error")),
+                    None => Err(std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        "mock mountinfo not seeded",
+                    )),
+                };
+            }
             Err(std::io::Error::new(std::io::ErrorKind::NotFound, "mock"))
         }
 
@@ -974,6 +993,27 @@ mod tests {
         )
     }
 
+    fn mountinfo_without_target() -> String {
+        "26 25 0:23 / / rw,noatime shared:1 - ext4 /dev/sda1 rw\n".to_string()
+    }
+
+    fn mountinfo_unrelated_target() -> String {
+        "36 35 0:32 / /mnt/other rw,noatime shared:1 - ext4 /dev/sda1 rw\n".to_string()
+    }
+
+    fn mountinfo_btrfs() -> String {
+        "36 35 0:32 / /mnt/storage rw,noatime shared:1 - btrfs /dev/mapper/braid-toshiba rw\n"
+            .to_string()
+    }
+
+    fn mountinfo_ext4() -> String {
+        "36 35 0:32 / /mnt/storage rw,noatime shared:1 - ext4 /dev/sda1 rw\n".to_string()
+    }
+
+    fn malformed_mountinfo_for_target() -> String {
+        "36 35 0:32 / /mnt/storage rw,noatime shared:1 no_dash_separator\n".to_string()
+    }
+
     fn btrfs_show_2disk() -> RawCommandOutput {
         ok_raw(
             "btrfs filesystem show /mnt/storage",
@@ -1017,14 +1057,10 @@ mod tests {
 
     #[test]
     fn probe_pool_unmounted() {
-        let runner = MockRunner::default().with_output(
-            CmdRequest::FindmntJson {
-                mount_point: MountPoint("/mnt/storage".to_owned()),
-            },
-            findmnt_empty(),
-        );
+        let fs = MockFs::with_mountinfo(&mountinfo_without_target());
+        let runner = MockRunner::default();
 
-        let result = probe_pool(&runner, &mp()).unwrap();
+        let result = probe_pool(&runner, &fs, &mp()).unwrap();
         assert!(!result.mounted);
         assert!(result.devices.is_empty());
         assert_eq!(result.missing_count, 0);
@@ -1032,17 +1068,10 @@ mod tests {
 
     #[test]
     fn probe_pool_unmounted_target_mismatch() {
-        let runner = MockRunner::default().with_output(
-            CmdRequest::FindmntJson {
-                mount_point: MountPoint("/mnt/storage".to_owned()),
-            },
-            ok_raw(
-                "findmnt --json --output TARGET,SOURCE,FSTYPE --mountpoint /mnt/storage",
-                r#"{"filesystems": [{"target":"/","source":"/dev/sda1","fstype":"ext4"}]}"#,
-            ),
-        );
+        let fs = MockFs::with_mountinfo(&mountinfo_unrelated_target());
+        let runner = MockRunner::default();
 
-        let result = probe_pool(&runner, &mp()).unwrap();
+        let result = probe_pool(&runner, &fs, &mp()).unwrap();
         assert!(!result.mounted);
         assert!(result.devices.is_empty());
         assert_eq!(result.missing_count, 0);
@@ -1050,14 +1079,10 @@ mod tests {
 
     #[test]
     fn probe_pool_mounted_not_btrfs() {
-        let runner = MockRunner::default().with_output(
-            CmdRequest::FindmntJson {
-                mount_point: MountPoint("/mnt/storage".to_owned()),
-            },
-            findmnt_ext4(),
-        );
+        let fs = MockFs::with_mountinfo(&mountinfo_ext4());
+        let runner = MockRunner::default();
 
-        let result = probe_pool(&runner, &mp());
+        let result = probe_pool(&runner, &fs, &mp());
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
@@ -1068,13 +1093,8 @@ mod tests {
 
     #[test]
     fn probe_pool_mounted_2disk() {
+        let fs = MockFs::with_mountinfo(&mountinfo_btrfs());
         let runner = MockRunner::default()
-            .with_output(
-                CmdRequest::FindmntJson {
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
-                },
-                findmnt_btrfs(),
-            )
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
                     mount_point: MountPoint("/mnt/storage".to_owned()),
@@ -1106,7 +1126,7 @@ mod tests {
                 cryptsetup_uuid_ok("/dev/vdb", "22222222-2222-2222-2222-222222222222"),
             );
 
-        let result = probe_pool(&runner, &mp()).unwrap();
+        let result = probe_pool(&runner, &fs, &mp()).unwrap();
         assert!(result.mounted);
         assert_eq!(result.devices.len(), 2);
         assert_eq!(result.missing_count, 0);
@@ -1130,13 +1150,8 @@ mod tests {
 
     #[test]
     fn probe_pool_mounted_with_missing() {
+        let fs = MockFs::with_mountinfo(&mountinfo_btrfs());
         let runner = MockRunner::default()
-            .with_output(
-                CmdRequest::FindmntJson {
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
-                },
-                findmnt_btrfs(),
-            )
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
                     mount_point: MountPoint("/mnt/storage".to_owned()),
@@ -1168,7 +1183,7 @@ mod tests {
                 cryptsetup_uuid_ok("/dev/vdb", "22222222-2222-2222-2222-222222222222"),
             );
 
-        let result = probe_pool(&runner, &mp()).unwrap();
+        let result = probe_pool(&runner, &fs, &mp()).unwrap();
         assert!(result.mounted);
         assert_eq!(result.devices.len(), 2);
         assert_eq!(result.missing_count, 1);
@@ -1177,13 +1192,8 @@ mod tests {
 
     #[test]
     fn probe_pool_degraded_missing_sentinel() {
+        let fs = MockFs::with_mountinfo(&mountinfo_btrfs());
         let runner = MockRunner::default()
-            .with_output(
-                CmdRequest::FindmntJson {
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
-                },
-                findmnt_btrfs(),
-            )
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
                     mount_point: MountPoint("/mnt/storage".to_owned()),
@@ -1210,7 +1220,7 @@ mod tests {
                 cryptsetup_uuid_ok("/dev/vda", "11111111-1111-1111-1111-111111111111"),
             );
 
-        let result = probe_pool(&runner, &mp()).unwrap();
+        let result = probe_pool(&runner, &fs, &mp()).unwrap();
         assert!(result.mounted);
         assert_eq!(result.devices.len(), 1, "MISSING device must be excluded");
         assert_eq!(result.missing_count, 1);
@@ -1220,13 +1230,8 @@ mod tests {
 
     #[test]
     fn probe_pool_mapper_not_active() {
+        let fs = MockFs::with_mountinfo(&mountinfo_btrfs());
         let runner = MockRunner::default()
-            .with_output(
-                CmdRequest::FindmntJson {
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
-                },
-                findmnt_btrfs(),
-            )
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
                     mount_point: MountPoint("/mnt/storage".to_owned()),
@@ -1249,7 +1254,7 @@ mod tests {
                 ),
             );
 
-        let result = probe_pool(&runner, &mp());
+        let result = probe_pool(&runner, &fs, &mp());
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
@@ -1260,13 +1265,8 @@ mod tests {
 
     #[test]
     fn probe_pool_non_mapper_device() {
+        let fs = MockFs::with_mountinfo(&mountinfo_btrfs());
         let runner = MockRunner::default()
-            .with_output(
-                CmdRequest::FindmntJson {
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
-                },
-                findmnt_btrfs(),
-            )
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
                     mount_point: MountPoint("/mnt/storage".to_owned()),
@@ -1279,7 +1279,7 @@ mod tests {
                 ),
             );
 
-        let result = probe_pool(&runner, &mp());
+        let result = probe_pool(&runner, &fs, &mp());
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
@@ -1295,13 +1295,8 @@ mod tests {
     /// crashing on `cryptsetup luksUUID (null)`.
     #[test]
     fn probe_pool_device_null_underlying() {
+        let fs = MockFs::with_mountinfo(&mountinfo_btrfs());
         let runner = MockRunner::default()
-            .with_output(
-                CmdRequest::FindmntJson {
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
-                },
-                findmnt_btrfs(),
-            )
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
                     mount_point: MountPoint("/mnt/storage".to_owned()),
@@ -1341,7 +1336,7 @@ mod tests {
                 ),
             );
 
-        let result = probe_pool(&runner, &mp()).unwrap();
+        let result = probe_pool(&runner, &fs, &mp()).unwrap();
         assert!(result.mounted);
         assert_eq!(
             result.devices.len(),
@@ -1367,13 +1362,8 @@ mod tests {
 
     #[test]
     fn probe_pool_missing_count_saturates() {
+        let fs = MockFs::with_mountinfo(&mountinfo_btrfs());
         let runner = MockRunner::default()
-            .with_output(
-                CmdRequest::FindmntJson {
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
-                },
-                findmnt_btrfs(),
-            )
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
                     mount_point: MountPoint("/mnt/storage".to_owned()),
@@ -1398,7 +1388,7 @@ mod tests {
                 cryptsetup_uuid_ok("/dev/vda", "11111111-1111-1111-1111-111111111111"),
             );
 
-        let result = probe_pool(&runner, &mp()).unwrap();
+        let result = probe_pool(&runner, &fs, &mp()).unwrap();
         assert_eq!(
             result.missing_count, 0,
             "saturating_sub should prevent underflow"
@@ -1411,13 +1401,8 @@ mod tests {
     // consumers silently skip FSID-based safety guards.
     #[test]
     fn probe_pool_errors_on_missing_fsid() {
+        let fs = MockFs::with_mountinfo(&mountinfo_btrfs());
         let runner = MockRunner::default()
-            .with_output(
-                CmdRequest::FindmntJson {
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
-                },
-                findmnt_btrfs(),
-            )
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
                     mount_point: MountPoint("/mnt/storage".to_owned()),
@@ -1429,7 +1414,7 @@ mod tests {
                 ),
             );
 
-        let result = probe_pool(&runner, &mp());
+        let result = probe_pool(&runner, &fs, &mp());
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
@@ -1437,6 +1422,57 @@ mod tests {
                 if detail.contains("no FSID")),
             "expected ProbeError::PoolDevice about missing FSID, got: {err:?}"
         );
+    }
+
+    /* Intent: probe_pool propagates an IO error while reading mountinfo
+     *   instead of treating the pool as offline.
+     * Why: regression guard for the old fail-open path where findmnt exit 1
+     *   with empty stderr parsed as an empty filesystem list.
+     * Scenario: mountinfo cannot be read, while a stale findmnt mock has the
+     *   exact non-zero/empty-stderr shape that used to silence alerting.
+     */
+    #[test]
+    fn probe_pool_propagates_mountinfo_io_error() {
+        let fs = MockFs::with_mountinfo_error(std::io::ErrorKind::PermissionDenied);
+        let runner = MockRunner::default().with_output(
+            CmdRequest::FindmntJson {
+                mount_point: MountPoint("/mnt/storage".to_owned()),
+            },
+            findmnt_empty(),
+        );
+
+        let result = probe_pool(&runner, &fs, &mp());
+        assert!(matches!(
+            result,
+            Err(ProbeError::MountInfo(
+                crate::mount_check::MountInfoError::Io(_)
+            ))
+        ));
+    }
+
+    /* Intent: probe_pool propagates malformed mountinfo as a MountInfo
+     *   error instead of treating the pool as offline.
+     * Why: parser uncertainty must fail closed in the safety-critical probe.
+     * Scenario: the target line is malformed, while a stale findmnt mock has
+     *   the old lenient non-zero/empty-stderr fixture.
+     */
+    #[test]
+    fn probe_pool_propagates_mountinfo_malformed_line() {
+        let fs = MockFs::with_mountinfo(&malformed_mountinfo_for_target());
+        let runner = MockRunner::default().with_output(
+            CmdRequest::FindmntJson {
+                mount_point: MountPoint("/mnt/storage".to_owned()),
+            },
+            findmnt_empty(),
+        );
+
+        let result = probe_pool(&runner, &fs, &mp());
+        assert!(matches!(
+            result,
+            Err(ProbeError::MountInfo(
+                crate::mount_check::MountInfoError::Malformed { .. }
+            ))
+        ));
     }
 
     // -- probe_fsid tests --

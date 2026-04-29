@@ -1,5 +1,5 @@
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, RawCommandOutput};
-use crate::probe::probe_pool;
+use crate::probe::{Filesystem, probe_pool};
 use crate::progress::{
     self, ProgressOutput, run_device_remove_with_progress, run_replace_with_progress,
     run_with_progress,
@@ -158,8 +158,9 @@ pub fn pool_balance_resume<R: CommandRunner + Sync>(
 /// Callers: `remove-missing` and `replace` (missing path), after the primary
 /// btrfs op completes and before the pool.json membership write + journal clear.
 /// `pre_op_missing_count` must be the missing count from the pre-op pool probe.
-pub fn maybe_restore_raid1<R: CommandRunner + Sync>(
+pub fn maybe_restore_raid1<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     runner: &R,
+    fs: &F,
     mount_point: &MountPoint,
     pre_op_missing_count: u64,
     progress: ProgressOutput,
@@ -167,7 +168,7 @@ pub fn maybe_restore_raid1<R: CommandRunner + Sync>(
     if pre_op_missing_count == 0 {
         return Ok(()); // Pool wasn't degraded — nothing to restore
     }
-    let pool_after = probe_pool(runner, mount_point)
+    let pool_after = probe_pool(runner, fs, mount_point)
         .map_err(|e| PoolError::Failed(format!("post-operation pool probe failed: {e}")))?;
     if pool_after.missing_count == 0 && pool_after.devices.len() >= 2 {
         eprintln!("Restoring RAID1 redundancy (soft balance)...");
@@ -291,13 +292,14 @@ pub fn pool_resize_device<R: CommandRunner + Sync>(
 ///
 /// Returns `Ok(())` as a no-op if the target mapper is not present in the pool.
 #[allow(clippy::doc_overindented_list_items)]
-pub fn evict_present_device<R: CommandRunner + Sync>(
+pub fn evict_present_device<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     runner: &R,
+    fs: &F,
     mapper: &str,
     mount_point: &MountPoint,
     progress: ProgressOutput,
 ) -> Result<(), PoolError> {
-    let pool = probe_pool(runner, mount_point).map_err(|e| PoolError::Failed(e.to_string()))?;
+    let pool = probe_pool(runner, fs, mount_point).map_err(|e| PoolError::Failed(e.to_string()))?;
 
     let device_path = format!("/dev/mapper/{mapper}");
     let in_pool = pool.devices.iter().any(|d| d.mapper.0 == mapper);
@@ -658,6 +660,11 @@ mod tests {
                     })
                 }
                 CmdRequest::BtrfsFilesystemShow { .. } => {
+                    if self.probe_fails {
+                        return Err(CmdError::Failed(
+                            "btrfs filesystem show: mock failure".to_owned(),
+                        ));
+                    }
                     let mut lines =
                         String::from("Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n");
                     let total = self.post_present_count as u64 + self.post_missing_count;
@@ -712,6 +719,32 @@ mod tests {
         }
     }
 
+    struct RestoreFs;
+
+    impl Filesystem for RestoreFs {
+        fn exists(&self, _path: &str) -> bool {
+            false
+        }
+
+        fn is_block_device(&self, _path: &str) -> bool {
+            false
+        }
+
+        fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
+            if path == "/proc/self/mountinfo" {
+                return Ok(
+                    "36 35 0:32 / /mnt/storage rw shared:1 - btrfs /dev/mapper/braid-disk1 rw\n"
+                        .to_string(),
+                );
+            }
+            Err(std::io::Error::new(std::io::ErrorKind::NotFound, "mock"))
+        }
+
+        fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
+            Ok(vec![])
+        }
+    }
+
     #[test]
     // Intent: maybe_restore_raid1 is a no-op when pre_op_missing_count == 0.
     // Why: if the pool wasn't degraded before the operation, there are no
@@ -720,7 +753,7 @@ mod tests {
     // (e.g., already cleaned up).
     fn maybe_restore_raid1_noop_when_not_degraded() {
         let runner = RestoreRunner::failing_probe(); // should never be called
-        let result = maybe_restore_raid1(&runner, &mp(), 0, ProgressOutput::Off);
+        let result = maybe_restore_raid1(&runner, &RestoreFs, &mp(), 0, ProgressOutput::Off);
         assert!(result.is_ok(), "should be no-op: {result:?}");
         assert!(
             runner.calls().is_empty(),
@@ -736,7 +769,7 @@ mod tests {
     // Scenario: 3-disk pool had 1 missing, remove-missing clears it, 2 remain.
     fn maybe_restore_raid1_runs_soft_balance() {
         let runner = RestoreRunner::new(0, 2); // post-op: 0 missing, 2 present
-        let result = maybe_restore_raid1(&runner, &mp(), 1, ProgressOutput::Off);
+        let result = maybe_restore_raid1(&runner, &RestoreFs, &mp(), 1, ProgressOutput::Off);
         assert!(result.is_ok(), "should succeed: {result:?}");
         assert!(
             runner
@@ -756,7 +789,7 @@ mod tests {
     // Scenario: 4-disk pool had 2 missing, operator removes 1, 1 still missing.
     fn maybe_restore_raid1_skips_when_still_degraded() {
         let runner = RestoreRunner::new(1, 2); // post-op: 1 still missing
-        let result = maybe_restore_raid1(&runner, &mp(), 2, ProgressOutput::Off);
+        let result = maybe_restore_raid1(&runner, &RestoreFs, &mp(), 2, ProgressOutput::Off);
         assert!(result.is_ok(), "should succeed: {result:?}");
         assert!(
             !runner
@@ -773,7 +806,7 @@ mod tests {
     // Scenario: 2-disk pool, 1 missing, remove-missing leaves 1 survivor.
     fn maybe_restore_raid1_skips_single_device() {
         let runner = RestoreRunner::new(0, 1); // post-op: 0 missing, 1 present
-        let result = maybe_restore_raid1(&runner, &mp(), 1, ProgressOutput::Off);
+        let result = maybe_restore_raid1(&runner, &RestoreFs, &mp(), 1, ProgressOutput::Off);
         assert!(result.is_ok(), "should succeed: {result:?}");
         assert!(
             !runner
@@ -791,7 +824,7 @@ mod tests {
     // Scenario: btrfs filesystem show fails after remove-missing.
     fn maybe_restore_raid1_propagates_probe_failure() {
         let runner = RestoreRunner::failing_probe();
-        let result = maybe_restore_raid1(&runner, &mp(), 1, ProgressOutput::Off);
+        let result = maybe_restore_raid1(&runner, &RestoreFs, &mp(), 1, ProgressOutput::Off);
         assert!(result.is_err(), "should propagate probe failure");
         let err = result.unwrap_err().to_string();
         assert!(

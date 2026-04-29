@@ -345,7 +345,7 @@ impl RecoverPlan {
 
         // 3. Probe live pool state
         let mount_point = params.config.mount_point();
-        let pool = probe::probe_pool(runner, mount_point)?;
+        let pool = probe::probe_pool(runner, fs, mount_point)?;
 
         // 4. Build new membership from live pool state
         let mut recovered = PoolMembership::empty();
@@ -487,7 +487,7 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         // this check because it happens implicitly downstream in
         // `execute()` when it walks the probed pool devices.
         let mount_point = params.config.mount_point();
-        let pool = match probe::probe_pool(runner, mount_point) {
+        let pool = match probe::probe_pool(runner, fs, mount_point) {
             Ok(p) => p,
             Err(e) => {
                 return RecoverPlanReport {
@@ -966,7 +966,13 @@ mod tests {
             false
         }
 
-        fn read_to_string(&self, _path: &str) -> Result<String, std::io::Error> {
+        fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
+            if path == "/proc/self/mountinfo" {
+                return Ok(
+                    "36 35 0:32 / /mnt/storage rw shared:1 - btrfs /dev/mapper/braid-disk1 rw\n"
+                        .to_owned(),
+                );
+            }
             Err(std::io::Error::new(std::io::ErrorKind::NotFound, "mock"))
         }
 
@@ -1011,7 +1017,13 @@ mod tests {
             false
         }
 
-        fn read_to_string(&self, _path: &str) -> Result<String, std::io::Error> {
+        fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
+            if path == "/proc/self/mountinfo" {
+                return Ok(
+                    "36 35 0:32 / /mnt/storage rw shared:1 - btrfs /dev/mapper/braid-disk1 rw\n"
+                        .to_owned(),
+                );
+            }
             Err(std::io::Error::new(std::io::ErrorKind::NotFound, "mock"))
         }
 

@@ -299,7 +299,7 @@ pub fn build_status_report<R: CommandRunner, F: Filesystem>(
 ) -> Result<StatusReport, StatusError> {
     let advisories = luks::header_backup_advisories(paths);
 
-    let pool = match probe_pool(runner, config.mount_point()) {
+    let pool = match probe_pool(runner, fs, config.mount_point()) {
         Ok(p) => p,
         Err(ProbeError::NotBtrfs { .. }) => {
             let code = StatusCode::NotMounted;
@@ -399,7 +399,7 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
     let advisories = luks::header_backup_advisories(paths);
 
     // 1. Probe pool, mapping NotBtrfs to not-mounted
-    let pool = match probe_pool(runner, config.mount_point()) {
+    let pool = match probe_pool(runner, fs, config.mount_point()) {
         Ok(p) => p,
         Err(ProbeError::NotBtrfs { .. }) => PoolState {
             mounted: false,
@@ -1194,6 +1194,7 @@ mod tests {
     struct MockFs {
         paths: Vec<String>,
         block_devices: Vec<String>,
+        mountinfo: String,
     }
 
     impl MockFs {
@@ -1201,6 +1202,25 @@ mod tests {
             Self {
                 paths: paths.iter().map(|s| s.to_string()).collect(),
                 block_devices: vec![],
+                mountinfo: "36 35 0:32 / /mnt/storage rw shared:1 - btrfs /dev/mapper/disk1 rw\n"
+                    .to_string(),
+            }
+        }
+
+        fn not_mounted(paths: &[&str]) -> Self {
+            Self {
+                paths: paths.iter().map(|s| s.to_string()).collect(),
+                block_devices: vec![],
+                mountinfo: "26 25 0:23 / / rw shared:1 - ext4 /dev/sda1 rw\n".to_string(),
+            }
+        }
+
+        fn ext4(paths: &[&str]) -> Self {
+            Self {
+                paths: paths.iter().map(|s| s.to_string()).collect(),
+                block_devices: vec![],
+                mountinfo: "36 35 0:32 / /mnt/storage rw shared:1 - ext4 /dev/sda1 rw\n"
+                    .to_string(),
             }
         }
     }
@@ -1214,7 +1234,10 @@ mod tests {
             self.block_devices.contains(&path.to_string())
         }
 
-        fn read_to_string(&self, _path: &str) -> Result<String, std::io::Error> {
+        fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
+            if path == "/proc/self/mountinfo" {
+                return Ok(self.mountinfo.clone());
+            }
             Err(std::io::Error::new(std::io::ErrorKind::NotFound, "mock"))
         }
 
@@ -1662,7 +1685,7 @@ mod tests {
             },
             findmnt_not_mounted(),
         );
-        let fs = MockFs::new(&[]);
+        let fs = MockFs::not_mounted(&[]);
         let config = config_3disk();
 
         let code = StatusCode::NotMounted;
@@ -3106,7 +3129,7 @@ mod tests {
             },
             findmnt_ext4(),
         );
-        let fs = MockFs::new(&[]);
+        let fs = MockFs::ext4(&[]);
         let config = config_3disk();
 
         // cmd_status should succeed (not error), treating it as not-mounted
@@ -3131,7 +3154,7 @@ mod tests {
             },
             findmnt_not_mounted(),
         );
-        let fs = MockFs::new(&[]);
+        let fs = MockFs::not_mounted(&[]);
         let config = config_3disk();
 
         let (_tmp, paths) = test_paths();

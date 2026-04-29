@@ -598,7 +598,7 @@ impl AddPlan {
             // Bootstrap post-commit persist: write pool.json after mkfs + mount.
             // Enrich with live metadata (luks_uuid, devid) from pool probe.
             let mut final_membership = journal.target_membership.clone();
-            if let Ok(pool_after) = probe_pool(runner, mount_point) {
+            if let Ok(pool_after) = probe_pool(runner, fs, mount_point) {
                 membership::enrich_from_pool_state(&pool_after, &mut final_membership);
             }
             membership::save_membership(&final_membership, params.paths)?;
@@ -612,11 +612,12 @@ impl AddPlan {
             for mp in &mapper_paths {
                 pool_add_device(runner, mp, mount_point)?;
                 eprintln!("Device added to pool: {}", mp);
-                let pool_after =
-                    probe_pool(runner, mount_point).map_err(|e| AddError::AckCleanupFailed {
+                let pool_after = probe_pool(runner, fs, mount_point).map_err(|e| {
+                    AddError::AckCleanupFailed {
                         stage: "post-add probe",
                         detail: format!("{mp}: {e}"),
-                    })?;
+                    }
+                })?;
                 let devid = devid_for_mapper_path(&pool_after, mp).ok_or_else(|| {
                     AddError::AckCleanupFailed {
                         stage: "post-add probe",
@@ -635,7 +636,7 @@ impl AddPlan {
             // the long post-add balance while leaving the journal in place so
             // recovery still knows the balance is owed if interrupted.
             let mut final_membership = journal.target_membership.clone();
-            if let Ok(pool_after) = probe_pool(runner, mount_point) {
+            if let Ok(pool_after) = probe_pool(runner, fs, mount_point) {
                 membership::enrich_from_pool_state(&pool_after, &mut final_membership);
             }
             membership::save_membership(&final_membership, params.paths)?;
@@ -775,7 +776,7 @@ pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     }
 
     // Probe pool + preflight (once)
-    let pool = match probe_pool(runner, config.mount_point()) {
+    let pool = match probe_pool(runner, fs, config.mount_point()) {
         Ok(p) => p,
         Err(ProbeError::NotBtrfs { fstype, .. }) => {
             return err_empty(AddError::Validation(format!(
@@ -2061,7 +2062,34 @@ mod tests {
             false
         }
         fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
-            if path.ends_with("/exclusive_operation") {
+            if path == "/proc/self/mountinfo" {
+                Ok(
+                    "36 35 0:32 / /mnt/storage rw shared:1 - btrfs /dev/mapper/braid-disk1 rw\n"
+                        .to_owned(),
+                )
+            } else if path.ends_with("/exclusive_operation") {
+                Ok("none\n".to_owned())
+            } else {
+                Err(std::io::Error::new(std::io::ErrorKind::NotFound, "mock"))
+            }
+        }
+        fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
+            Ok(vec![])
+        }
+    }
+
+    struct AddOfflineMockFs(Vec<String>);
+    impl crate::probe::Filesystem for AddOfflineMockFs {
+        fn exists(&self, path: &str) -> bool {
+            self.0.iter().any(|p| p == path)
+        }
+        fn is_block_device(&self, _path: &str) -> bool {
+            false
+        }
+        fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
+            if path == "/proc/self/mountinfo" {
+                Ok("26 25 0:23 / / rw shared:1 - ext4 /dev/sda1 rw\n".to_owned())
+            } else if path.ends_with("/exclusive_operation") {
                 Ok("none\n".to_owned())
             } else {
                 Err(std::io::Error::new(std::io::ErrorKind::NotFound, "mock"))
@@ -2577,7 +2605,7 @@ mod tests {
                 ("7", test_acked_disk(false, 7)),
             ],
         );
-        let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk1".into()]);
+        let fs = AddOfflineMockFs(vec!["/dev/disk/by-id/virtio-disk1".into()]);
         let runner = AddFullPathRunner::bootstrap().with_bootstrap_post_mount_probe_failure();
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
 
@@ -2733,7 +2761,7 @@ mod tests {
     fn cmd_add_bootstrap_acked_cleanup_failure_is_fatal() {
         let (_state_tmp, paths, _tmp, config_path, pass_path) = fresh_add_setup();
         std::fs::create_dir_all(paths.acked_stats_json()).unwrap();
-        let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk1".into()]);
+        let fs = AddOfflineMockFs(vec!["/dev/disk/by-id/virtio-disk1".into()]);
         let runner = AddFullPathRunner::bootstrap();
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
 
@@ -3091,7 +3119,7 @@ mod tests {
         // it; that earlier refusal has its own dedicated test
         // (cmd_add_refuses_when_pool_locked_with_membership).
         membership::save_membership(&membership::PoolMembership::empty(), &paths).unwrap();
-        let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
+        let fs = AddOfflineMockFs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::CryptsetupLuksUuid {
@@ -3491,7 +3519,7 @@ mod tests {
     #[test]
     fn cmd_add_bootstrap_aborts_on_passphrase_mismatch() {
         let (_state_tmp, paths, _tmp, config_path) = confirm_test_setup();
-        let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk1".into()]);
+        let fs = AddOfflineMockFs(vec!["/dev/disk/by-id/virtio-disk1".into()]);
         let runner = AddRecordingRunner::new(false);
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
         let tty = ScriptedPassphraseReader::new(["typo-one", "typo-two"]);
@@ -3558,7 +3586,7 @@ mod tests {
     #[test]
     fn cmd_add_bootstrap_proceeds_on_passphrase_match() {
         let (_state_tmp, paths, _tmp, config_path) = confirm_test_setup();
-        let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk1".into()]);
+        let fs = AddOfflineMockFs(vec!["/dev/disk/by-id/virtio-disk1".into()]);
         let runner = AddRecordingRunner::new(false);
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
         let tty = ScriptedPassphraseReader::new(["ok", "ok"]);
@@ -3617,7 +3645,7 @@ mod tests {
     #[test]
     fn cmd_add_refuses_when_pool_locked_with_membership() {
         let (_state_tmp, paths, _tmp, config_path, _pass_path) = add_test_setup();
-        let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
+        let fs = AddOfflineMockFs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
         let runner = AddRecordingRunner::new(false);
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
         let tty = ScriptedPassphraseReader::new(["SENTINEL"]);
@@ -4286,7 +4314,7 @@ mod tests {
         )
         .unwrap();
 
-        let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk1".into()]);
+        let fs = AddOfflineMockFs(vec!["/dev/disk/by-id/virtio-disk1".into()]);
         // AddRecordingRunner with pool_mounted=false drives plan_add's
         // unmounted-pool branch and simulates disk1 as PresentNotLuks.
         let runner = AddRecordingRunner::new(false);

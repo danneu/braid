@@ -135,6 +135,16 @@ pub fn is_btrfs_mounted<F: Filesystem + ?Sized>(
     Ok(fstype_at_mount(&content, target)?.as_deref() == Some("btrfs"))
 }
 
+/// IO-shimmed variant of `fstype_at_mount` that reads
+/// `/proc/self/mountinfo` through the existing `Filesystem` trait.
+pub fn fstype_at_mount_via_fs<F: Filesystem + ?Sized>(
+    fs: &F,
+    target: &str,
+) -> Result<Option<String>, MountInfoError> {
+    let content = fs.read_to_string(MOUNTINFO_PATH)?;
+    fstype_at_mount(&content, target)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -385,6 +395,75 @@ mod tests {
             fstype_at_mount(&body, TARGET).unwrap(),
             Some("tmpfs".to_string())
         );
+    }
+
+    struct MockMountInfoFs {
+        mountinfo: Result<String, std::io::ErrorKind>,
+    }
+
+    impl Filesystem for MockMountInfoFs {
+        fn exists(&self, _: &str) -> bool {
+            false
+        }
+        fn is_block_device(&self, _: &str) -> bool {
+            false
+        }
+        fn list_dir(&self, _: &str) -> Result<Vec<String>, std::io::Error> {
+            Ok(vec![])
+        }
+        fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
+            assert_eq!(path, "/proc/self/mountinfo");
+            self.mountinfo
+                .as_ref()
+                .map(|body| body.clone())
+                .map_err(|kind| std::io::Error::new(*kind, "mock mountinfo read failed"))
+        }
+    }
+
+    /* Intent: the IO-shimmed helper returns the target fstype when
+     *   mountinfo contains the configured mount point.
+     * Why: pins the behavior added by the Filesystem wrapper without
+     *   duplicating the lower-level parser matrix.
+     * Scenario: probe_pool reads a mounted btrfs pool through MockFs.
+     */
+    #[test]
+    fn fstype_at_mount_via_fs_returns_btrfs_when_mounted() {
+        let fs = MockMountInfoFs {
+            mountinfo: Ok(format!("{ROOT_LINE}{}", target_btrfs_line())),
+        };
+        assert_eq!(
+            fstype_at_mount_via_fs(&fs, TARGET).unwrap(),
+            Some("btrfs".to_string())
+        );
+    }
+
+    /* Intent: the IO-shimmed helper returns Ok(None) when mountinfo is
+     *   well-formed but lacks the configured target.
+     * Why: preserves the "absent target is legitimate offline" distinction.
+     * Scenario: NAS booted, pool still locked, mountinfo readable.
+     */
+    #[test]
+    fn fstype_at_mount_via_fs_returns_none_when_target_absent() {
+        let fs = MockMountInfoFs {
+            mountinfo: Ok(ROOT_LINE.to_string()),
+        };
+        assert_eq!(fstype_at_mount_via_fs(&fs, TARGET).unwrap(), None);
+    }
+
+    /* Intent: a Filesystem read failure surfaces as MountInfoError::Io.
+     * Why: the safety-critical caller must treat "cannot read mountinfo" as
+     *   indeterminate, not as an offline pool.
+     * Scenario: `/proc/self/mountinfo` is unreadable.
+     */
+    #[test]
+    fn fstype_at_mount_via_fs_propagates_io_failure() {
+        let fs = MockMountInfoFs {
+            mountinfo: Err(std::io::ErrorKind::PermissionDenied),
+        };
+        assert!(matches!(
+            fstype_at_mount_via_fs(&fs, TARGET),
+            Err(MountInfoError::Io(_))
+        ));
     }
 
     /* Intent: when the underlying Filesystem read fails, is_btrfs_mounted

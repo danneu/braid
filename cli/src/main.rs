@@ -588,7 +588,8 @@ fn main() {
                 }
             };
             let runner = RealRunner;
-            match braid_cli::monitor::cmd_monitor(&runner, config.mount_point(), &paths) {
+            let fs = RealFilesystem;
+            match braid_cli::monitor::cmd_monitor(&runner, &fs, config.mount_point(), &paths) {
                 braid_cli::monitor::MonitorResult::PoolOffline => {
                     std::process::exit(0);
                 }
@@ -609,7 +610,8 @@ fn main() {
                 }
             };
             let runner = RealRunner;
-            if let Err(e) = braid_cli::ack::cmd_ack(&runner, config.mount_point(), &paths) {
+            let fs = RealFilesystem;
+            if let Err(e) = braid_cli::ack::cmd_ack(&runner, &fs, config.mount_point(), &paths) {
                 print_cli_error(&e.to_string());
                 std::process::exit(1);
             }
