@@ -15,10 +15,16 @@ Check if the pool has any active operations. Designed for autosuspend integratio
 sudo braid idle
 ```
 
-Output:
+Output when the pool is mounted and idle:
 
 ```
 idle: pool is idle
+```
+
+Output when the pool is not mounted (still exit 0 -- nothing to protect):
+
+```
+idle: pool is offline
 ```
 
 ## Exit codes
