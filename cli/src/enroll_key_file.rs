@@ -238,22 +238,7 @@ fn apply_enrollment<R: CommandRunner>(
     key_file_path: &Path,
     paths: &StatePaths,
 ) -> Result<(), EnrollKeyFileError> {
-    apply_enrollment_with_backup_dir(
-        runner,
-        plan,
-        passphrase,
-        key_file_path,
-        &paths.luks_headers_dir(),
-    )
-}
-
-fn apply_enrollment_with_backup_dir<R: CommandRunner>(
-    runner: &R,
-    plan: &[DiskEnrollAction],
-    passphrase: &str,
-    key_file_path: &Path,
-    backup_dir: &Path,
-) -> Result<(), EnrollKeyFileError> {
+    let backup_dir = paths.luks_headers_dir();
     let mut enrolled = 0u32;
     let mut already = 0u32;
 
@@ -267,7 +252,8 @@ fn apply_enrollment_with_backup_dir<R: CommandRunner>(
                 eprintln!("ok: {} -- keyfile enrolled in slot 1", name);
 
                 let mn = mapper_name(name);
-                let backup_path = luks::backup_luks_header_to(runner, &by_id.0, &mn.0, backup_dir)?;
+                let backup_path =
+                    luks::backup_luks_header_to(runner, &by_id.0, &mn.0, &backup_dir)?;
                 eprintln!("LUKS header backed up: {}", backup_path.display());
 
                 enrolled += 1;
@@ -1603,7 +1589,7 @@ mod tests {
         let d2 = "/dev/disk/by-id/d2";
         let kf = "/tmp/braid.key";
         let pass = "testpass";
-        let backup_dir = tempfile::tempdir().unwrap();
+        let (_state_dir, paths) = test_paths();
 
         let (e1_req, e1_stdin, e1_out) = enroll_ok(d1, kf, pass);
         let (e2_req, e2_stdin, e2_out) = enroll_ok(d2, kf, pass);
@@ -1614,8 +1600,8 @@ mod tests {
             .with_output(
                 CmdRequest::CryptsetupLuksHeaderBackup {
                     device: d1.to_owned(),
-                    backup_path: backup_dir
-                        .path()
+                    backup_path: paths
+                        .luks_headers_dir()
                         .join("braid-disk1.luksheader.tmp")
                         .display()
                         .to_string(),
@@ -1625,8 +1611,8 @@ mod tests {
             .with_output(
                 CmdRequest::CryptsetupLuksHeaderBackup {
                     device: d2.to_owned(),
-                    backup_path: backup_dir
-                        .path()
+                    backup_path: paths
+                        .luks_headers_dir()
                         .join("braid-disk2.luksheader.tmp")
                         .display()
                         .to_string(),
@@ -1645,8 +1631,20 @@ mod tests {
             },
         ];
 
-        apply_enrollment_with_backup_dir(&runner, &plan, pass, Path::new(kf), backup_dir.path())
-            .unwrap();
+        apply_enrollment(&runner, &plan, pass, Path::new(kf), &paths).unwrap();
+
+        assert!(
+            paths
+                .luks_headers_dir()
+                .join("braid-disk1.luksheader")
+                .exists()
+        );
+        assert!(
+            paths
+                .luks_headers_dir()
+                .join("braid-disk2.luksheader")
+                .exists()
+        );
     }
 
     /*
@@ -1684,7 +1682,7 @@ mod tests {
         let d2 = "/dev/disk/by-id/d2";
         let kf = "/tmp/braid.key";
         let pass = "testpass";
-        let backup_dir = tempfile::tempdir().unwrap();
+        let (_state_dir, paths) = test_paths();
 
         // Only d2 should have enroll called — d1 is AlreadyEnrolled
         let (e2_req, e2_stdin, e2_out) = enroll_ok(d2, kf, pass);
@@ -1693,8 +1691,8 @@ mod tests {
             .with_output(
                 CmdRequest::CryptsetupLuksHeaderBackup {
                     device: d2.to_owned(),
-                    backup_path: backup_dir
-                        .path()
+                    backup_path: paths
+                        .luks_headers_dir()
                         .join("braid-disk2.luksheader.tmp")
                         .display()
                         .to_string(),
@@ -1713,8 +1711,20 @@ mod tests {
             },
         ];
 
-        apply_enrollment_with_backup_dir(&runner, &plan, pass, Path::new(kf), backup_dir.path())
-            .unwrap();
+        apply_enrollment(&runner, &plan, pass, Path::new(kf), &paths).unwrap();
+
+        assert!(
+            !paths
+                .luks_headers_dir()
+                .join("braid-disk1.luksheader")
+                .exists()
+        );
+        assert!(
+            paths
+                .luks_headers_dir()
+                .join("braid-disk2.luksheader")
+                .exists()
+        );
     }
 
     // ---- generate_key_file tests ----
