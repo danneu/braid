@@ -60,11 +60,20 @@ braid idle is designed to be used as an [autosuspend](https://autosuspend.readth
 
 ```ini
 [check.BraidIdle]
-class = CommandMixin
-command = braid idle
+enabled = true
+class = ExternalCommand
+command = ! timeout -k 2 10 braid idle
 ```
 
-The fail-closed design means that if the check itself errors (exit 2), autosuspend treats it as "activity detected" and blocks suspend. This is the safe default: if we cannot determine whether an operation is running, we must not allow suspend.
+Each piece of the block is load-bearing:
+
+- `enabled = true` is required. autosuspend's raw-INI parser defaults `enabled` to `false` and silently skips the section otherwise. (The NixOS module submodule defaults this to true, which is why the in-tree module form omits it.)
+- `class = ExternalCommand` is the exported activity-check class in autosuspend's plugin registry. It runs `command` via the shell and treats exit 0 as "activity detected" (block suspend), non-zero as "no activity" (allow suspend).
+- The leading `!` inverts `braid idle`'s exit codes so autosuspend sees what it expects:
+  - `braid idle` exits 0 (idle)  -> `!` -> 1 -> autosuspend allows suspend
+  - `braid idle` exits 1 (busy)  -> `!` -> 0 -> autosuspend blocks suspend
+  - `braid idle` exits 2 (error) -> `!` -> 0 -> autosuspend blocks suspend (fail-closed)
+- The inner `timeout -k 2 10` bounds signal-killable overruns -- e.g. a parser regression, a slow userspace probe, or network-FS latency -- by sending `TERM` after 10s and escalating to `KILL` two seconds later for processes that ignore or delay `TERM`. It must be *inside* the `!`-inverted command, not outside it: an overrun produces a non-zero exit which `!` then flips to 0, preserving the fail-closed invariant. An outer timeout would fail open because the shell gets killed before `!` runs. Uninterruptible kernel waits (a process stuck in `D` state) are out of scope for `timeout(1)`; autosuspend stalls until the syscall returns and the system stays awake by virtue of not deciding.
 
 ## What happens under the hood
 
