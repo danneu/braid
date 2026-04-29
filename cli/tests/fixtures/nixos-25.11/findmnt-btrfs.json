@@ -1,9 +1,0 @@
-{
-   "filesystems": [
-      {
-         "target": "/mnt/storage",
-         "source": "/dev/mapper/braid-vdb",
-         "fstype": "btrfs"
-      }
-   ]
-}

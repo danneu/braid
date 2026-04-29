@@ -641,24 +641,6 @@ mod tests {
             self.log.lock().unwrap().push(request.clone());
 
             match request {
-                CmdRequest::FindmntJson { mount_point } => {
-                    if self.probe_fails {
-                        return Ok(RawCommandOutput {
-                            cmd: String::new(),
-                            stdout: "{}".to_owned(),
-                            stderr: "not found".to_owned(),
-                            exit_status: 1,
-                        });
-                    }
-                    Ok(RawCommandOutput {
-                        cmd: String::new(),
-                        stdout: format!(
-                            r#"{{"filesystems":[{{"target":"{mount_point}","source":"/dev/mapper/braid-disk1","fstype":"btrfs"}}]}}"#
-                        ),
-                        stderr: String::new(),
-                        exit_status: 0,
-                    })
-                }
                 CmdRequest::BtrfsFilesystemShow { .. } => {
                     if self.probe_fails {
                         return Err(CmdError::Failed(

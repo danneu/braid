@@ -3,9 +3,10 @@ use std::fmt;
 use crate::cmd::{CmdRequest, CommandRunner};
 use crate::journal;
 use crate::membership::PoolMembership;
+use crate::mount_check::mount_entry_at_via_fs;
+use crate::parse::parse_btrfs_device_usage;
 use crate::parse::parse_upsc;
 use crate::parse::types::{BtrfsBgType, BtrfsDeviceUsageEntry, BtrfsDfOutput};
-use crate::parse::{parse_btrfs_device_usage, parse_findmnt_json};
 use crate::preview::PreviewNote;
 use crate::probe::Filesystem;
 use crate::state_paths::StatePaths;
@@ -248,46 +249,38 @@ pub(crate) fn check_any_btrfs_exclusive_op<F: Filesystem + ?Sized>(
 }
 
 /// Refuse if the pool is mounted read-only.
-/// Runs its own findmnt probe — avoids adding mount_options to PoolState
-/// and touching all 7+ PoolState construction sites.
+/// Reads mountinfo directly so the check sees both VFS mount flags and
+/// filesystem/superblock flags without spawning a subprocess.
 ///
 /// `Ok(None)` = writable mount. `Ok(Some(body))` = the probe itself
-/// failed (spawn error or unparseable JSON); the caller wraps `body` in
-/// a `PreviewNote::Warn` so operators know the ro guard did not run.
+/// failed; the caller wraps `body` in a `PreviewNote::Warn` so operators
+/// know the ro guard did not run.
 /// `Err(msg)` = pool is mounted read-only.
-fn check_not_read_only<R: CommandRunner>(
-    runner: &R,
+fn check_not_read_only<F: Filesystem + ?Sized>(
+    fs: &F,
     mount_point: &MountPoint,
 ) -> Result<Option<String>, String> {
-    let raw = match runner.run(&CmdRequest::FindmntJson {
-        mount_point: mount_point.clone(),
-    }) {
-        Ok(r) => r,
-        Err(e) => {
-            return Ok(Some(e.to_string()));
+    let entry = match mount_entry_at_via_fs(fs, mount_point.as_str()) {
+        Ok(Some(entry)) => entry,
+        Ok(None) => {
+            return Ok(Some(
+                "mount point not present in /proc/self/mountinfo".to_string(),
+            ));
         }
+        Err(e) => return Ok(Some(format!("read /proc/self/mountinfo: {e}"))),
     };
 
-    let findmnt = match parse_findmnt_json(&raw) {
-        Ok(f) => f,
-        Err(e) => {
-            return Ok(Some(e.to_string()));
-        }
-    };
-
-    let entry = findmnt
-        .filesystems
-        .iter()
-        .find(|e| e.target == mount_point.as_str());
-    if let Some(entry) = entry
-        && entry.options.split(',').any(|opt| opt.trim() == "ro")
-    {
+    if has_ro(&entry.vfs_options) || has_ro(&entry.fs_options) {
         return Err(format!(
             "pool is mounted read-only. Remount read-write first:\n  \
                  mount -o remount,rw {mount_point}"
         ));
     }
     Ok(None)
+}
+
+fn has_ro(opts: &str) -> bool {
+    opts.split(',').any(|opt| opt.trim() == "ro")
 }
 
 /// Refuse if the pool has missing devices.
@@ -506,7 +499,7 @@ pub fn check_ups_not_on_battery<R: CommandRunner>(
 /// `Info` (busy-op enqueued) and/or one `Warn` (read-only probe
 /// degraded), in that insertion order.
 pub fn require_mutation_preflight<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
-    runner: &R,
+    _runner: &R,
     fs: &F,
     fsid: &str,
     mount_point: &MountPoint,
@@ -519,7 +512,7 @@ pub fn require_mutation_preflight<R: CommandRunner + Sync, F: Filesystem + ?Size
             "waiting for in-flight {op} to finish..."
         )));
     }
-    if let Some(probe_err) = check_not_read_only(runner, mount_point)? {
+    if let Some(probe_err) = check_not_read_only(fs, mount_point)? {
         notes.push(PreviewNote::Warn(format!(
             "read-only pre-flight failed: {probe_err}; proceeding anyway"
         )));
@@ -545,6 +538,7 @@ mod tests {
 
     struct MockFs {
         files: std::collections::HashMap<String, String>,
+        mountinfo: Option<Result<String, std::io::ErrorKind>>,
     }
 
     impl MockFs {
@@ -554,13 +548,27 @@ mod tests {
                 format!("/sys/fs/btrfs/{fsid}/exclusive_operation"),
                 content.to_owned(),
             );
-            Self { files }
+            Self {
+                files,
+                mountinfo: None,
+            }
         }
 
         fn empty() -> Self {
             Self {
                 files: std::collections::HashMap::new(),
+                mountinfo: None,
             }
+        }
+
+        fn with_mountinfo(mut self, body: &str) -> Self {
+            self.mountinfo = Some(Ok(body.to_owned()));
+            self
+        }
+
+        fn with_mountinfo_error(mut self, kind: std::io::ErrorKind) -> Self {
+            self.mountinfo = Some(Err(kind));
+            self
         }
     }
 
@@ -572,6 +580,16 @@ mod tests {
             false
         }
         fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
+            if path == "/proc/self/mountinfo" {
+                return match &self.mountinfo {
+                    Some(Ok(body)) => Ok(body.clone()),
+                    Some(Err(kind)) => Err(std::io::Error::new(*kind, "mock mountinfo error")),
+                    None => Err(std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        "mock mountinfo not seeded",
+                    )),
+                };
+            }
             self.files
                 .get(path)
                 .cloned()
@@ -714,47 +732,47 @@ mod tests {
         }
     }
 
-    /// MockRunner pre-populated with a `FindmntJson` response reporting
-    /// a writable (`rw,...`) mount. Mirrors the mock shape used by
-    /// `read_only_passes_when_rw`; used for every preflight test that
-    /// expects the findmnt probe to succeed.
-    fn rw_runner() -> MockRunner {
-        MockRunner::default().with_output(
-            CmdRequest::FindmntJson { mount_point: mp() },
-            RawCommandOutput {
-                cmd: "findmnt --json --output TARGET,SOURCE,FSTYPE,OPTIONS --mountpoint /mnt/storage".into(),
-                stdout: r#"{"filesystems":[{"target":"/mnt/storage","source":"/dev/mapper/braid-vdb","fstype":"btrfs","options":"rw,relatime,ssd,space_cache=v2,subvolid=5,subvol=/"}]}"#.into(),
-                stderr: String::new(),
-                exit_status: 0,
-            },
+    fn mountinfo_for_target(vfs_options: &str, fs_options: &str) -> String {
+        format!(
+            "36 35 0:32 / /mnt/storage {vfs_options} shared:1 - btrfs /dev/mapper/braid-vdb {fs_options}\n"
         )
     }
 
+    fn mountinfo_rw() -> String {
+        mountinfo_for_target("rw,relatime", "rw,space_cache=v2")
+    }
+
+    fn mountinfo_without_target() -> String {
+        "26 25 0:23 / / rw,noatime shared:1 - ext4 /dev/sda1 rw\n".to_string()
+    }
+
+    fn malformed_mountinfo() -> String {
+        "36 35 0:32 / /mnt/storage rw,relatime shared:1 no_dash_separator\n".to_string()
+    }
+
+    fn duplicate_mountinfo() -> String {
+        format!("{}{}", mountinfo_rw(), mountinfo_rw())
+    }
+
     #[test]
-    // Intent: check_not_read_only returns Ok(None) when pool is rw.
-    // Why: Confirms rw mounts are not falsely rejected.
-    // Scenario: Normal pool mount with default options.
-    fn read_only_passes_when_rw() {
-        let runner = rw_runner();
-        let out = check_not_read_only(&runner, &mp()).unwrap();
+    // Intent: check_not_read_only returns Ok(None) when both mountinfo option
+    //   fields are rw.
+    // Why: Confirms writable mounts are not falsely rejected.
+    // Scenario: Normal pool mount with rw VFS and rw filesystem state.
+    fn read_only_passes_when_both_vfs_and_fs_options_are_rw() {
+        let fs = MockFs::empty().with_mountinfo(&mountinfo_rw());
+        let out = check_not_read_only(&fs, &mp()).unwrap();
         assert!(out.is_none(), "expected Ok(None) on rw mount, got {out:?}");
     }
 
     #[test]
-    // Intent: check_not_read_only refuses when pool is ro.
-    // Why: After a crash, btrfs remounts ro; writes fail with cryptic errors.
-    // Scenario: Pool crashed, operator tries `braid remove` on the ro mount.
-    fn read_only_refuses_when_ro() {
-        let runner = MockRunner::default().with_output(
-            CmdRequest::FindmntJson { mount_point: mp() },
-            RawCommandOutput {
-                cmd: "findmnt --json --output TARGET,SOURCE,FSTYPE,OPTIONS --mountpoint /mnt/storage".into(),
-                stdout: r#"{"filesystems":[{"target":"/mnt/storage","source":"/dev/mapper/braid-vdb","fstype":"btrfs","options":"ro,relatime,ssd,space_cache=v2,subvolid=5,subvol=/"}]}"#.into(),
-                stderr: String::new(),
-                exit_status: 0,
-            },
-        );
-        let err = check_not_read_only(&runner, &mp()).unwrap_err();
+    // Intent: check_not_read_only refuses when the VFS mount options contain ro.
+    // Why: operator-issued `mount -o remount,ro` lands in mountinfo field 6.
+    // Scenario: pool is remounted read-only at the VFS layer.
+    fn read_only_refuses_when_vfs_options_ro() {
+        let fs = MockFs::empty()
+            .with_mountinfo(&mountinfo_for_target("ro,relatime", "rw,space_cache=v2"));
+        let err = check_not_read_only(&fs, &mp()).unwrap_err();
         assert!(err.contains("read-only"), "expected 'read-only' in: {err}");
         assert!(
             err.contains("remount"),
@@ -763,17 +781,105 @@ mod tests {
     }
 
     #[test]
-    // Intent: check_not_read_only surfaces probe-failure body via Ok(Some(_)).
-    // Why: A bug in the safety check shouldn't block valid operations, but the
-    //   caller must still surface a Warn note so operators know the guard did
-    //   not run.
-    // Scenario: findmnt not found or permissions issue.
-    fn read_only_returns_probe_error_body() {
-        let runner = MockRunner::default(); // no mock → MissingMock
-        let body = check_not_read_only(&runner, &mp())
+    // Intent: check_not_read_only refuses when filesystem options contain ro.
+    // Why: btrfs can auto-remount the superblock read-only after I/O errors;
+    //   that state lands in mountinfo field 11, not necessarily field 6.
+    // Scenario: pool degraded to filesystem-level read-only after errors.
+    fn read_only_refuses_when_fs_options_ro() {
+        let fs = MockFs::empty()
+            .with_mountinfo(&mountinfo_for_target("rw,relatime", "ro,space_cache=v2"));
+        let err = check_not_read_only(&fs, &mp()).unwrap_err();
+        assert!(err.contains("read-only"), "expected 'read-only' in: {err}");
+        assert!(
+            err.contains("remount"),
+            "expected remount guidance in: {err}"
+        );
+    }
+
+    #[test]
+    // Intent: check_not_read_only refuses when both option fields contain ro.
+    // Why: the two-field check should be symmetric.
+    // Scenario: both VFS and filesystem state are read-only.
+    fn read_only_refuses_when_both_fields_ro() {
+        let fs = MockFs::empty()
+            .with_mountinfo(&mountinfo_for_target("ro,relatime", "ro,space_cache=v2"));
+        let err = check_not_read_only(&fs, &mp()).unwrap_err();
+        assert!(err.contains("read-only"), "expected 'read-only' in: {err}");
+    }
+
+    #[test]
+    // Intent: check_not_read_only surfaces mountinfo IO failures via Ok(Some(_)).
+    // Why: caller must emit a Warn note when the best-effort ro probe cannot run.
+    // Scenario: /proc/self/mountinfo cannot be read.
+    fn read_only_returns_probe_error_body_on_io_failure() {
+        let fs = MockFs::empty().with_mountinfo_error(std::io::ErrorKind::PermissionDenied);
+        let body = check_not_read_only(&fs, &mp())
             .unwrap()
             .expect("expected Ok(Some(_)) with probe-failure body");
         assert!(!body.is_empty(), "probe-failure body must not be empty");
+    }
+
+    #[test]
+    // Intent: check_not_read_only surfaces malformed mountinfo via Ok(Some(_)).
+    // Why: malformed mountinfo means the ro guard could not make a safe call.
+    // Scenario: target line is missing the dash separator.
+    fn read_only_returns_probe_error_body_on_malformed_line() {
+        let fs = MockFs::empty().with_mountinfo(&malformed_mountinfo());
+        let body = check_not_read_only(&fs, &mp())
+            .unwrap()
+            .expect("expected Ok(Some(_)) with probe-failure body");
+        assert!(!body.is_empty(), "probe-failure body must not be empty");
+    }
+
+    #[test]
+    // Intent: check_not_read_only surfaces duplicate target entries via Ok(Some(_)).
+    // Why: overmount ambiguity must not be silently treated as writable.
+    // Scenario: two mountinfo entries report the configured mount point.
+    fn read_only_returns_probe_error_body_on_duplicate_target() {
+        let fs = MockFs::empty().with_mountinfo(&duplicate_mountinfo());
+        let body = check_not_read_only(&fs, &mp())
+            .unwrap()
+            .expect("expected Ok(Some(_)) with probe-failure body");
+        assert!(!body.is_empty(), "probe-failure body must not be empty");
+    }
+
+    #[test]
+    // Intent: check_not_read_only surfaces an absent target via Ok(Some(_)).
+    // Why: after mounted-pool preflight passes, a missing mountinfo entry is
+    //   a race or anomaly worth warning about, not proof of writability.
+    // Scenario: mountinfo is well-formed but lacks /mnt/storage.
+    fn read_only_returns_probe_error_body_when_target_absent() {
+        let fs = MockFs::empty().with_mountinfo(&mountinfo_without_target());
+        let body = check_not_read_only(&fs, &mp())
+            .unwrap()
+            .expect("expected Ok(Some(_)) with probe-failure body");
+        assert!(
+            body.contains("not present"),
+            "expected missing-target body, got: {body}"
+        );
+    }
+
+    #[test]
+    // Intent: a field containing exactly the single ro token is refused.
+    // Why: exact-token matching must handle one-token option strings too.
+    // Scenario: mountinfo field is simply "ro".
+    fn read_only_options_with_only_ro_token_is_refused() {
+        let fs = MockFs::empty().with_mountinfo(&mountinfo_for_target("rw,relatime", "ro"));
+        let err = check_not_read_only(&fs, &mp()).unwrap_err();
+        assert!(err.contains("read-only"), "expected 'read-only' in: {err}");
+    }
+
+    #[test]
+    // Intent: ro substrings inside other option values do not match.
+    // Why: exact-token matching avoids false positives like errors=remount-ro.
+    // Scenario: VFS options mention remount-ro but include no standalone ro.
+    fn read_only_options_containing_ro_substring_does_not_match() {
+        let fs = MockFs::empty().with_mountinfo(&mountinfo_for_target(
+            "errors=remount-ro,rw",
+            "rw,space_cache=v2",
+        ));
+        let out = check_not_read_only(&fs, &mp()).unwrap();
+        assert!(out.is_none(), "expected Ok(None), got {out:?}");
     }
 
     #[test]
@@ -1246,10 +1352,10 @@ mod tests {
     //   clean path (no busy op, rw probe).
     // Why: Baseline happy path -- mutating commands should proceed on a healthy
     //   pool without emitting any PreviewNote.
-    // Scenario: sysfs says "none", findmnt reports rw.
+    // Scenario: sysfs says "none", mountinfo reports rw.
     fn mutation_preflight_passes_when_none() {
-        let fs = MockFs::with_sysfs(FSID, "none\n");
-        let runner = rw_runner();
+        let fs = MockFs::with_sysfs(FSID, "none\n").with_mountinfo(&mountinfo_rw());
+        let runner = MockRunner::default();
         let notes = require_mutation_preflight(&runner, &fs, FSID, &mp()).unwrap();
         assert!(notes.is_empty(), "expected empty notes, got {notes:?}");
     }
@@ -1261,7 +1367,7 @@ mod tests {
     // Scenario: sysfs says "balance paused".
     fn mutation_preflight_rejects_balance_paused() {
         let fs = MockFs::with_sysfs(FSID, "balance paused\n");
-        let runner = rw_runner();
+        let runner = MockRunner::default();
         let err = require_mutation_preflight(&runner, &fs, FSID, &mp()).unwrap_err();
         assert!(
             err.contains("balance is paused"),
@@ -1275,10 +1381,10 @@ mod tests {
     // Why: The kernel serializes exclusive ops, so waiting is safe; the
     //   operator still needs to know the mutation is about to enqueue behind
     //   the in-flight op.
-    // Scenario: sysfs says "device add", findmnt reports rw.
+    // Scenario: sysfs says "device add", mountinfo reports rw.
     fn mutation_preflight_busy_op_returns_info_note() {
-        let fs = MockFs::with_sysfs(FSID, "device add\n");
-        let runner = rw_runner();
+        let fs = MockFs::with_sysfs(FSID, "device add\n").with_mountinfo(&mountinfo_rw());
+        let runner = MockRunner::default();
         let notes = require_mutation_preflight(&runner, &fs, FSID, &mp()).unwrap();
         assert_eq!(notes.len(), 1, "expected one Info note, got {notes:?}");
         match &notes[0] {
@@ -1291,15 +1397,15 @@ mod tests {
     }
 
     #[test]
-    // Intent: require_mutation_preflight surfaces a findmnt probe failure as
+    // Intent: require_mutation_preflight surfaces a mountinfo probe failure as
     //   a single Warn note.
     // Why: The read-only guard is a best-effort safety net; if the probe
     //   itself fails, the caller must not silently proceed -- operators
     //   should know the ro mount guard did not run.
-    // Scenario: sysfs says "none"; the runner has no FindmntJson mock, so the
-    //   probe returns MissingMock.
+    // Scenario: sysfs says "none"; mountinfo read fails.
     fn mutation_preflight_readonly_probe_failure_returns_warn_note() {
-        let fs = MockFs::with_sysfs(FSID, "none\n");
+        let fs = MockFs::with_sysfs(FSID, "none\n")
+            .with_mountinfo_error(std::io::ErrorKind::PermissionDenied);
         let runner = MockRunner::default();
         let notes = require_mutation_preflight(&runner, &fs, FSID, &mp()).unwrap();
         assert_eq!(notes.len(), 1, "expected one Warn note, got {notes:?}");
@@ -1321,9 +1427,10 @@ mod tests {
     // Why: insertion order is load-bearing for the renderer (busy-op Info
     //   before probe-failure Warn) so dry-run stdout and failure-path stderr
     //   agree on how the two diagnostics present.
-    // Scenario: sysfs says "device add", runner has no FindmntJson mock.
+    // Scenario: sysfs says "device add"; mountinfo read fails.
     fn mutation_preflight_busy_and_probe_failure_returns_info_then_warn() {
-        let fs = MockFs::with_sysfs(FSID, "device add\n");
+        let fs = MockFs::with_sysfs(FSID, "device add\n")
+            .with_mountinfo_error(std::io::ErrorKind::PermissionDenied);
         let runner = MockRunner::default();
         let notes = require_mutation_preflight(&runner, &fs, FSID, &mp()).unwrap();
         assert_eq!(notes.len(), 2, "expected two notes, got {notes:?}");
@@ -1485,21 +1592,11 @@ mod tests {
     // Intent: require_mutation_preflight rejects when the pool is mounted read-only.
     // Why: Mutating commands will fail at the filesystem layer; better to fail
     //   early with a clear message.
-    // Scenario: sysfs says "none", findmnt returns ro mount option.
+    // Scenario: sysfs says "none", mountinfo reports ro.
     fn mutation_preflight_rejects_read_only() {
-        let fs = MockFs::with_sysfs(FSID, "none\n");
-        let runner = MockRunner::default().with_output(
-            CmdRequest::FindmntJson { mount_point: mp() },
-            RawCommandOutput {
-                cmd: "findmnt".into(),
-                stdout: format!(
-                    r#"{{"filesystems": [{{"target": "{mount}", "source": "/dev/mapper/braid-a", "fstype": "btrfs", "options": "ro,space_cache=v2"}}]}}"#,
-                    mount = mp(),
-                ),
-                stderr: String::new(),
-                exit_status: 0,
-            },
-        );
+        let fs = MockFs::with_sysfs(FSID, "none\n")
+            .with_mountinfo(&mountinfo_for_target("ro,relatime", "rw,space_cache=v2"));
+        let runner = MockRunner::default();
         let err = require_mutation_preflight(&runner, &fs, FSID, &mp()).unwrap_err();
         assert!(err.contains("read-only"), "expected 'read-only' in: {err}");
     }

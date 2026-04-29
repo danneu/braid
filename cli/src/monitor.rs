@@ -160,12 +160,6 @@ mod tests {
     use crate::cmd::{CmdError, RawCommandOutput};
     use std::sync::Mutex;
 
-    const FINDMNT_BTRFS: &str = r#"{
-       "filesystems": [
-          {"target": "/mnt/storage", "source": "/dev/mapper/braid-vdb", "fstype": "btrfs"}
-       ]
-    }"#;
-
     const MOUNTINFO_BTRFS: &str =
         "36 35 0:32 / /mnt/storage rw,noatime shared:1 - btrfs /dev/mapper/braid-vdb rw\n";
     const MOUNTINFO_EXT4: &str =
@@ -246,7 +240,6 @@ mod tests {
     /// Override response for one CmdRequest variant; everything else uses the
     /// healthy-2disk default. Each entry is matched by variant + key fields.
     enum Override {
-        FindmntResult(Result<RawCommandOutput, CmdError>),
         BtrfsShowResult(Result<RawCommandOutput, CmdError>),
         BtrfsShowPayload(String),
         StatsResult(Result<RawCommandOutput, CmdError>),
@@ -271,19 +264,6 @@ mod tests {
                 stats_payload: STATS_2DISK_HEALTHY.to_owned(),
                 override_op: Mutex::new(Some(o)),
             }
-        }
-
-        // Take the override only if it matches the given request shape.
-        // Avoids consuming a StatsResult override on an earlier FindmntJson call
-        // (or vice versa).
-        fn take_findmnt_result(&self) -> Option<Result<RawCommandOutput, CmdError>> {
-            let mut guard = self.override_op.lock().unwrap();
-            if matches!(*guard, Some(Override::FindmntResult(_))) {
-                if let Some(Override::FindmntResult(r)) = guard.take() {
-                    return Some(r);
-                }
-            }
-            None
         }
 
         fn take_btrfs_show_payload(&self) -> Option<String> {
@@ -320,12 +300,6 @@ mod tests {
     impl CommandRunner for MonitorTestRunner {
         fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
             match request {
-                CmdRequest::FindmntJson { .. } => {
-                    if let Some(r) = self.take_findmnt_result() {
-                        return r;
-                    }
-                    Ok(ok_output(FINDMNT_BTRFS))
-                }
                 CmdRequest::BtrfsFilesystemShow { .. } => {
                     if let Some(r) = self.take_btrfs_show_result() {
                         return r;
@@ -365,7 +339,6 @@ mod tests {
     impl CommandRunner for MonitorReconcileRunner {
         fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
             match request {
-                CmdRequest::FindmntJson { .. } => Ok(ok_output(FINDMNT_BTRFS)),
                 CmdRequest::BtrfsFilesystemShow { .. } => {
                     Ok(ok_output(BTRFS_SHOW_PRESENT_NULL_MISSING))
                 }
@@ -600,22 +573,12 @@ mod tests {
      * MonitorResult::Alert instead of reporting PoolOffline.
      *
      * Why it exists: this pins the bug fix at the safety-critical callsite.
-     * The stale findmnt fixture has the old non-zero/empty-stderr shape that
-     * previously parsed as "not mounted" and silenced alerting.
-     *
-     * Scenario: `/proc/self/mountinfo` is unreadable while the old findmnt
-     * fallback would have returned exit 1 with empty stderr.
+     * Scenario: `/proc/self/mountinfo` is unreadable.
      */
     #[test]
     fn cmd_monitor_latches_computation_error_on_mountinfo_io_failure() {
         let (_dir, paths) = fresh_paths();
-        let runner =
-            MonitorTestRunner::with_override(Override::FindmntResult(Ok(RawCommandOutput {
-                cmd: "findmnt".to_owned(),
-                stdout: String::new(),
-                stderr: String::new(),
-                exit_status: 1,
-            })));
+        let runner = MonitorTestRunner::with_unmapped_stats();
 
         let result = cmd_monitor(
             &runner,
@@ -702,8 +665,7 @@ mod tests {
     #[test]
     fn monitor_classifies_non_btrfs_mount_as_offline() {
         let (_dir, paths) = fresh_paths();
-        let runner =
-            MonitorTestRunner::with_override(Override::FindmntResult(Ok(ok_output(FINDMNT_BTRFS))));
+        let runner = MonitorTestRunner::with_unmapped_stats();
 
         let result = cmd_monitor(&runner, &MonitorFs::ext4(), &mp(), &paths);
 

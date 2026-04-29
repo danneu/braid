@@ -20,9 +20,6 @@ pub enum LsblkFieldKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CmdRequest {
     LsblkJson,
-    FindmntJson {
-        mount_point: MountPoint,
-    },
     BtrfsFilesystemDfJson {
         mount_point: MountPoint,
     },
@@ -310,16 +307,6 @@ impl CmdRequest {
                     "--bytes".into(),
                     "--output".into(),
                     "NAME,TYPE,SIZE,MODEL,SERIAL,UUID,ROTA,TRAN".into(),
-                ],
-            },
-            CmdRequest::FindmntJson { mount_point } => CmdArgs {
-                program: "findmnt".to_owned(),
-                args: vec![
-                    "--json".into(),
-                    "--output".into(),
-                    "TARGET,SOURCE,FSTYPE,OPTIONS".into(),
-                    "--mountpoint".into(),
-                    mount_point.0.clone(),
                 ],
             },
             CmdRequest::BtrfsFilesystemShow { mount_point } => CmdArgs {

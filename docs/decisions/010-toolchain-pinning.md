@@ -33,7 +33,7 @@ New runtime dependencies must be classified into one of these two groups when ad
 |------|-------------------|---------------|--------|
 | btrfs-progs | Yes | Yes (`braid.packages.btrfsProgs`) | Output parsed by nom combinators and serde JSON |
 | cryptsetup | Yes | Yes (`braid.packages.cryptsetup`) | Output parsed by nom combinators |
-| util-linux (findmnt, lsblk) | Yes | Yes (`braid.packages.utilLinux`) | JSON output parsed by serde |
+| util-linux (lsblk) | Yes | Yes (`braid.packages.utilLinux`) | `lsblk` JSON output parsed by serde |
 | NUT (`upsc`) | Yes | Yes (`braid.packages.nut`) | `upsc` key: value output parsed by `parse_upsc` for preflight safety and operator visibility |
 | coreutils | No — system `pkgs` | No option | chown/chmod/realpath/stat — output not parsed |
 | systemd | No — system `pkgs` | No option | systemctl/ask-password — commodity behavior |

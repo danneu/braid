@@ -781,11 +781,6 @@ mod tests {
             self.log.lock().unwrap().push(request.clone());
 
             match request {
-                CmdRequest::FindmntJson { mount_point } => Ok(mock_out(
-                    &format!("findmnt --json --mountpoint {mount_point}"),
-                    r#"{"filesystems":[{"target":"/mnt/storage","source":"/dev/mapper/braid-disk1","fstype":"btrfs"}]}"#,
-                    0,
-                )),
                 CmdRequest::BtrfsFilesystemShow { mount_point } => Ok(mock_out(
                     &format!("btrfs filesystem show {mount_point}"),
                     "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\tTotal devices 2 FS bytes used 16.17MiB\n\tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk2\n",
@@ -1999,11 +1994,6 @@ mod tests {
         fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
             self.log.lock().unwrap().push(request.clone());
             match request {
-                CmdRequest::FindmntJson { mount_point } => Ok(mock_out(
-                    &format!("findmnt --json --mountpoint {mount_point}"),
-                    r#"{"filesystems":[{"target":"/mnt/storage","source":"/dev/mapper/braid-disk1","fstype":"btrfs"}]}"#,
-                    0,
-                )),
                 CmdRequest::BtrfsFilesystemShow { mount_point } => Ok(mock_out(
                     &format!("btrfs filesystem show {mount_point}"),
                     "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\tTotal devices 3 FS bytes used 16.17MiB\n\tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk2\n\tdevid    3 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk3\n",

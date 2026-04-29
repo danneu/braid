@@ -342,29 +342,25 @@ pub fn probe_pool<R: CommandRunner, F: Filesystem + ?Sized>(
 ///
 /// Caller must have already confirmed the mount point is active (e.g.
 /// via `CmdRequest::MountpointCheck`).
-pub fn probe_fsid<R: CommandRunner>(
+pub fn probe_fsid<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
+    fs: &F,
     mount_point: &MountPoint,
 ) -> Result<String, ProbeError> {
-    let findmnt_raw = runner.run(&CmdRequest::FindmntJson {
-        mount_point: mount_point.clone(),
-    })?;
-    let findmnt = crate::parse::parse_findmnt_json(&findmnt_raw)?;
-
-    let entry = findmnt
-        .filesystems
-        .iter()
-        .find(|e| e.target == mount_point.as_str())
-        .ok_or_else(|| ProbeError::PoolDevice {
-            mapper: mount_point.0.clone(),
-            detail: "mount point not present in findmnt output".into(),
-        })?;
-
-    if entry.fstype != "btrfs" {
-        return Err(ProbeError::NotBtrfs {
-            mount_point: mount_point.0.clone(),
-            fstype: entry.fstype.clone(),
-        });
+    match crate::mount_check::fstype_at_mount_via_fs(fs, mount_point.as_str())? {
+        None => {
+            return Err(ProbeError::PoolDevice {
+                mapper: mount_point.0.clone(),
+                detail: "mount point not present in mountinfo".into(),
+            });
+        }
+        Some(fstype) if fstype != "btrfs" => {
+            return Err(ProbeError::NotBtrfs {
+                mount_point: mount_point.0.clone(),
+                fstype,
+            });
+        }
+        Some(_) => {}
     }
 
     let show_raw = runner.run(&CmdRequest::BtrfsFilesystemShow {
@@ -971,28 +967,6 @@ mod tests {
 
     // -- probe_pool tests --
 
-    fn findmnt_empty() -> RawCommandOutput {
-        err_raw(
-            "findmnt --json --output TARGET,SOURCE,FSTYPE -T /mnt/storage",
-            1,
-            "",
-        )
-    }
-
-    fn findmnt_btrfs() -> RawCommandOutput {
-        ok_raw(
-            "findmnt --json --output TARGET,SOURCE,FSTYPE -T /mnt/storage",
-            r#"{"filesystems": [{"target":"/mnt/storage","source":"/dev/mapper/braid-toshiba","fstype":"btrfs"}]}"#,
-        )
-    }
-
-    fn findmnt_ext4() -> RawCommandOutput {
-        ok_raw(
-            "findmnt --json --output TARGET,SOURCE,FSTYPE -T /mnt/storage",
-            r#"{"filesystems": [{"target":"/mnt/storage","source":"/dev/sda1","fstype":"ext4"}]}"#,
-        )
-    }
-
     fn mountinfo_without_target() -> String {
         "26 25 0:23 / / rw,noatime shared:1 - ext4 /dev/sda1 rw\n".to_string()
     }
@@ -1012,6 +986,10 @@ mod tests {
 
     fn malformed_mountinfo_for_target() -> String {
         "36 35 0:32 / /mnt/storage rw,noatime shared:1 no_dash_separator\n".to_string()
+    }
+
+    fn duplicate_mountinfo_for_target() -> String {
+        format!("{}{}", mountinfo_btrfs(), mountinfo_btrfs())
     }
 
     fn btrfs_show_2disk() -> RawCommandOutput {
@@ -1424,20 +1402,14 @@ mod tests {
 
     /* Intent: probe_pool propagates an IO error while reading mountinfo
      *   instead of treating the pool as offline.
-     * Why: regression guard for the old fail-open path where findmnt exit 1
-     *   with empty stderr parsed as an empty filesystem list.
-     * Scenario: mountinfo cannot be read, while a stale findmnt mock has the
-     *   exact non-zero/empty-stderr shape that used to silence alerting.
+     * Why: regression guard for the old fail-open path where mount-probe
+     *   uncertainty could be mistaken for an offline pool.
+     * Scenario: mountinfo cannot be read.
      */
     #[test]
     fn probe_pool_propagates_mountinfo_io_error() {
         let fs = MockFs::with_mountinfo_error(std::io::ErrorKind::PermissionDenied);
-        let runner = MockRunner::default().with_output(
-            CmdRequest::FindmntJson {
-                mount_point: MountPoint("/mnt/storage".to_owned()),
-            },
-            findmnt_empty(),
-        );
+        let runner = MockRunner::default();
 
         let result = probe_pool(&runner, &fs, &mp());
         assert!(matches!(
@@ -1451,18 +1423,12 @@ mod tests {
     /* Intent: probe_pool propagates malformed mountinfo as a MountInfo
      *   error instead of treating the pool as offline.
      * Why: parser uncertainty must fail closed in the safety-critical probe.
-     * Scenario: the target line is malformed, while a stale findmnt mock has
-     *   the old lenient non-zero/empty-stderr fixture.
+     * Scenario: the target line is malformed.
      */
     #[test]
     fn probe_pool_propagates_mountinfo_malformed_line() {
         let fs = MockFs::with_mountinfo(&malformed_mountinfo_for_target());
-        let runner = MockRunner::default().with_output(
-            CmdRequest::FindmntJson {
-                mount_point: MountPoint("/mnt/storage".to_owned()),
-            },
-            findmnt_empty(),
-        );
+        let runner = MockRunner::default();
 
         let result = probe_pool(&runner, &fs, &mp());
         assert!(matches!(
@@ -1475,33 +1441,27 @@ mod tests {
 
     // -- probe_fsid tests --
 
-    // Intent: probe_fsid returns the FSID using exactly two subprocesses
-    //   (findmnt + btrfs filesystem show).
+    // Intent: probe_fsid returns the FSID using mountinfo plus exactly one
+    //   subprocess (btrfs filesystem show).
     // Why: cmd_lock's preflight only needs the FSID. If probe_fsid
     //   silently starts issuing per-device cryptsetup calls it would
     //   regress the point of the refactor (fewer subprocesses, smaller
     //   failure surface). MockRunner panics on any CmdRequest without a
-    //   registered mock, so only FindmntJson + BtrfsFilesystemShow being
-    //   registered mechanically proves the helper stays narrow.
+    //   registered mock, so registering only BtrfsFilesystemShow
+    //   mechanically proves the helper stays narrow.
     // Scenario: a mounted btrfs pool; probe_fsid extracts the uuid from
     //   btrfs-show output without touching cryptsetup.
     #[test]
     fn probe_fsid_happy() {
-        let runner = MockRunner::default()
-            .with_output(
-                CmdRequest::FindmntJson {
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
-                },
-                findmnt_btrfs(),
-            )
-            .with_output(
-                CmdRequest::BtrfsFilesystemShow {
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
-                },
-                btrfs_show_2disk(),
-            );
+        let fs = MockFs::with_mountinfo(&mountinfo_btrfs());
+        let runner = MockRunner::default().with_output(
+            CmdRequest::BtrfsFilesystemShow {
+                mount_point: MountPoint("/mnt/storage".to_owned()),
+            },
+            btrfs_show_2disk(),
+        );
 
-        let fsid = probe_fsid(&runner, &mp()).unwrap();
+        let fsid = probe_fsid(&runner, &fs, &mp()).unwrap();
         assert_eq!(fsid, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
     }
 
@@ -1510,48 +1470,84 @@ mod tests {
     //   not ours" rather than a generic btrfs-show parse failure.
     //   Downgrading NotBtrfs to a plain command failure would degrade
     //   the user-facing message on a mis-configured mount.
-    // Scenario: findmnt reports the mount point is ext4. probe_fsid must
+    // Scenario: mountinfo reports the mount point is ext4. probe_fsid must
     //   reject with ProbeError::NotBtrfs{fstype:"ext4"} before running
     //   btrfs filesystem show.
     #[test]
     fn probe_fsid_rejects_non_btrfs() {
-        let runner = MockRunner::default().with_output(
-            CmdRequest::FindmntJson {
-                mount_point: MountPoint("/mnt/storage".to_owned()),
-            },
-            findmnt_ext4(),
-        );
+        let fs = MockFs::with_mountinfo(&mountinfo_ext4());
+        let runner = MockRunner::default();
 
-        let err = probe_fsid(&runner, &mp()).unwrap_err();
+        let err = probe_fsid(&runner, &fs, &mp()).unwrap_err();
         assert!(
             matches!(err, ProbeError::NotBtrfs { ref fstype, .. } if fstype == "ext4"),
             "expected ProbeError::NotBtrfs, got: {err:?}"
         );
     }
 
-    // Intent: probe_fsid errors when findmnt returns no entry for the
+    // Intent: probe_fsid errors when mountinfo has no entry for the
     //   mount point (e.g. the mount raced to unmount between
     //   MountpointCheck and probe_fsid).
     // Why: silently returning "no FSID" or some default would let
     //   cmd_lock dereference a non-existent sysfs path and either
     //   succeed vacuously or yield a confusing I/O error. A typed
     //   PoolDevice error surfaces the state clearly.
-    // Scenario: findmnt returns exit 1 with empty stdout (no
-    //   filesystems found for mount point).
+    // Scenario: mountinfo is readable but has no /mnt/storage entry.
     #[test]
-    fn probe_fsid_mount_not_in_findmnt() {
-        let runner = MockRunner::default().with_output(
-            CmdRequest::FindmntJson {
-                mount_point: MountPoint("/mnt/storage".to_owned()),
-            },
-            findmnt_empty(),
-        );
+    fn probe_fsid_target_absent_in_mountinfo() {
+        let fs = MockFs::with_mountinfo(&mountinfo_without_target());
+        let runner = MockRunner::default();
 
-        let err = probe_fsid(&runner, &mp()).unwrap_err();
+        let err = probe_fsid(&runner, &fs, &mp()).unwrap_err();
         assert!(
             matches!(err, ProbeError::PoolDevice { ref detail, .. }
-                if detail.contains("not present in findmnt")),
-            "expected ProbeError::PoolDevice (mount not in findmnt), got: {err:?}"
+                if detail.contains("not present in mountinfo")),
+            "expected ProbeError::PoolDevice (mount not in mountinfo), got: {err:?}"
         );
+    }
+
+    // Intent: probe_fsid propagates mountinfo IO errors.
+    // Why: lock preflight must not proceed from indeterminate mount state.
+    // Scenario: /proc/self/mountinfo cannot be read.
+    #[test]
+    fn probe_fsid_propagates_mountinfo_io_error() {
+        let fs = MockFs::with_mountinfo_error(std::io::ErrorKind::PermissionDenied);
+        let runner = MockRunner::default();
+
+        let err = probe_fsid(&runner, &fs, &mp()).unwrap_err();
+        assert!(matches!(
+            err,
+            ProbeError::MountInfo(crate::mount_check::MountInfoError::Io(_))
+        ));
+    }
+
+    // Intent: probe_fsid propagates malformed mountinfo.
+    // Why: malformed mountinfo must not be coerced into "not mounted".
+    // Scenario: target line is missing the dash separator.
+    #[test]
+    fn probe_fsid_propagates_malformed_mountinfo() {
+        let fs = MockFs::with_mountinfo(&malformed_mountinfo_for_target());
+        let runner = MockRunner::default();
+
+        let err = probe_fsid(&runner, &fs, &mp()).unwrap_err();
+        assert!(matches!(
+            err,
+            ProbeError::MountInfo(crate::mount_check::MountInfoError::Malformed { .. })
+        ));
+    }
+
+    // Intent: probe_fsid propagates duplicate target entries.
+    // Why: overmount ambiguity must fail closed before lock preflight.
+    // Scenario: two mountinfo entries report the configured mount point.
+    #[test]
+    fn probe_fsid_propagates_duplicate_target() {
+        let fs = MockFs::with_mountinfo(&duplicate_mountinfo_for_target());
+        let runner = MockRunner::default();
+
+        let err = probe_fsid(&runner, &fs, &mp()).unwrap_err();
+        assert!(matches!(
+            err,
+            ProbeError::MountInfo(crate::mount_check::MountInfoError::DuplicateTarget { .. })
+        ));
     }
 }

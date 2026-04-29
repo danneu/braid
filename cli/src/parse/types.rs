@@ -25,20 +25,6 @@ pub struct LsblkOutput {
     pub blockdevices: Vec<LsblkDevice>,
 }
 
-/// findmnt --json
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FindmntEntry {
-    pub target: String,
-    pub source: String,
-    pub fstype: String,
-    pub options: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FindmntOutput {
-    pub filesystems: Vec<FindmntEntry>,
-}
-
 /// btrfs --format json filesystem df
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum BtrfsBgType {

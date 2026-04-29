@@ -14,13 +14,41 @@ pub enum MountInfoError {
     DuplicateTarget { target: String },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MountEntry {
+    pub fstype: String,
+    pub vfs_options: String,
+    pub fs_options: String,
+}
+
 /// Returns the fstype mounted at `target`, or Ok(None) if the well-formed
 /// mountinfo content has no entry for `target`. Returns Err for any malformed
 /// non-empty line (related or not) and for any case where multiple entries
 /// match `target` -- both are anomalies the safety-critical caller must treat
 /// as suspend-blocking.
 pub fn fstype_at_mount(content: &str, target: &str) -> Result<Option<String>, MountInfoError> {
-    let mut hit: Option<String> = None;
+    Ok(find_unique_target_entry(content, target)?.map(|entry| entry.fstype))
+}
+
+/// Returns the mounted entry at `target`, including both mountinfo option
+/// fields. Field 6 (`vfs_options`) carries per-mount VFS flags such as
+/// `rw`/`ro`; field 11 (`fs_options`) carries filesystem/superblock options,
+/// including the filesystem-level `rw`/`ro` state.
+pub fn mount_entry_at(content: &str, target: &str) -> Result<Option<MountEntry>, MountInfoError> {
+    Ok(
+        find_unique_target_entry(content, target)?.map(|entry| MountEntry {
+            fstype: entry.fstype,
+            vfs_options: entry.vfs_options,
+            fs_options: entry.fs_options,
+        }),
+    )
+}
+
+fn find_unique_target_entry(
+    content: &str,
+    target: &str,
+) -> Result<Option<ParsedLine>, MountInfoError> {
+    let mut hit: Option<ParsedLine> = None;
     for line in content.lines() {
         if line.is_empty() {
             continue;
@@ -34,7 +62,7 @@ pub fn fstype_at_mount(content: &str, target: &str) -> Result<Option<String>, Mo
                     target: target.to_string(),
                 });
             }
-            hit = Some(parsed.fstype);
+            hit = Some(parsed);
         }
     }
     Ok(hit)
@@ -43,6 +71,8 @@ pub fn fstype_at_mount(content: &str, target: &str) -> Result<Option<String>, Mo
 struct ParsedLine {
     mount_point: String,
     fstype: String,
+    vfs_options: String,
+    fs_options: String,
 }
 
 fn parse_line(line: &str) -> Option<ParsedLine> {
@@ -55,7 +85,7 @@ fn parse_line(line: &str) -> Option<ParsedLine> {
         fields.next()?;
     }
     let mount_point = decode_octal_escapes(fields.next()?);
-    fields.next()?; // mount_options
+    let vfs_options = fields.next()?.to_string();
     let mut saw_dash = false;
     for f in fields.by_ref() {
         if f == "-" {
@@ -68,13 +98,15 @@ fn parse_line(line: &str) -> Option<ParsedLine> {
     }
     let fstype = fields.next()?.to_string();
     fields.next()?; // source (may be empty for some pseudo-fs entries)
-    fields.next()?; // super_options
+    let fs_options = fields.next()?.to_string();
     if fields.next().is_some() {
         return None;
     }
     Some(ParsedLine {
         mount_point,
         fstype,
+        vfs_options,
+        fs_options,
     })
 }
 
@@ -143,6 +175,16 @@ pub fn fstype_at_mount_via_fs<F: Filesystem + ?Sized>(
 ) -> Result<Option<String>, MountInfoError> {
     let content = fs.read_to_string(MOUNTINFO_PATH)?;
     fstype_at_mount(&content, target)
+}
+
+/// IO-shimmed variant of `mount_entry_at` that reads
+/// `/proc/self/mountinfo` through the existing `Filesystem` trait.
+pub fn mount_entry_at_via_fs<F: Filesystem + ?Sized>(
+    fs: &F,
+    target: &str,
+) -> Result<Option<MountEntry>, MountInfoError> {
+    let content = fs.read_to_string(MOUNTINFO_PATH)?;
+    mount_entry_at(&content, target)
 }
 
 #[cfg(test)]
@@ -397,6 +439,110 @@ mod tests {
         );
     }
 
+    /* Intent: mount_entry_at returns the fstype plus both mountinfo option
+     *   fields for the configured target.
+     * Why: the read-only preflight must inspect both the VFS mount flags and
+     *   the filesystem/superblock flags.
+     * Scenario: btrfs is mounted rw at /mnt/storage with space_cache enabled.
+     */
+    #[test]
+    fn mount_entry_at_returns_fstype_and_both_option_fields_for_target() {
+        let body = format!(
+            "36 35 0:32 / {TARGET} rw,relatime shared:1 - btrfs /dev/mapper/braid-vdb rw,space_cache=v2\n"
+        );
+        assert_eq!(
+            mount_entry_at(&body, TARGET).unwrap(),
+            Some(MountEntry {
+                fstype: "btrfs".to_string(),
+                vfs_options: "rw,relatime".to_string(),
+                fs_options: "rw,space_cache=v2".to_string(),
+            })
+        );
+    }
+
+    /* Intent: mount_entry_at returns Ok(None) when mountinfo lacks the target.
+     * Why: callers need to distinguish a readable table with no entry from a
+     *   malformed or unreadable table.
+     * Scenario: NAS booted with the pool still locked.
+     */
+    #[test]
+    fn mount_entry_at_returns_none_when_target_absent() {
+        assert_eq!(mount_entry_at(ROOT_LINE, TARGET).unwrap(), None);
+    }
+
+    /* Intent: mount_entry_at errors when the target line is malformed.
+     * Why: a truncated target line must not be interpreted as "target absent".
+     * Scenario: mountinfo line for the pool is missing the dash separator.
+     */
+    #[test]
+    fn mount_entry_at_errors_on_malformed_target_line() {
+        let body = format!("36 35 0:32 / {TARGET} rw,noatime shared:1 garbage_no_dash_separator\n");
+        assert!(matches!(
+            mount_entry_at(&body, TARGET),
+            Err(MountInfoError::Malformed { .. })
+        ));
+    }
+
+    /* Intent: mount_entry_at errors on malformed unrelated lines too.
+     * Why: the strict-on-every-line policy prevents safety checks from using
+     *   partial mountinfo.
+     * Scenario: target is present, but another line in mountinfo is corrupt.
+     */
+    #[test]
+    fn mount_entry_at_errors_on_malformed_unrelated_line() {
+        let body = format!(
+            "{}\
+             this is not a mountinfo line\n",
+            target_btrfs_line()
+        );
+        assert!(matches!(
+            mount_entry_at(&body, TARGET),
+            Err(MountInfoError::Malformed { .. })
+        ));
+    }
+
+    /* Intent: duplicate target entries are rejected.
+     * Why: overmounts make "pick one" unsafe for preflight decisions.
+     * Scenario: two mountinfo entries claim /mnt/storage.
+     */
+    #[test]
+    fn mount_entry_at_errors_on_duplicate_target_entries() {
+        let body = format!("{}{}", target_btrfs_line(), target_btrfs_line());
+        assert!(matches!(
+            mount_entry_at(&body, TARGET),
+            Err(MountInfoError::DuplicateTarget { .. })
+        ));
+    }
+
+    /* Intent: optional fields before the dash do not shift option parsing.
+     * Why: mountinfo optional_fields is variable length.
+     * Scenario: a shared mount includes a master:N optional field.
+     */
+    #[test]
+    fn mount_entry_at_handles_optional_fields() {
+        let body = format!(
+            "36 35 0:32 / {TARGET} rw,noatime shared:1 master:7 - btrfs /dev/mapper/braid-disk1 rw,space_cache=v2\n"
+        );
+        let entry = mount_entry_at(&body, TARGET).unwrap().unwrap();
+        assert_eq!(entry.fstype, "btrfs");
+        assert_eq!(entry.vfs_options, "rw,noatime");
+        assert_eq!(entry.fs_options, "rw,space_cache=v2");
+    }
+
+    /* Intent: empty source fields still parse.
+     * Why: split(' ') must be preserved; split_whitespace would collapse the
+     *   empty source field and shift super_options.
+     * Scenario: pseudo-fs entry with an empty source field.
+     */
+    #[test]
+    fn mount_entry_at_accepts_empty_source_field() {
+        let body = format!("36 35 0:32 / {TARGET} rw shared:1 - tmpfs  rw,size=1G\n");
+        let entry = mount_entry_at(&body, TARGET).unwrap().unwrap();
+        assert_eq!(entry.fstype, "tmpfs");
+        assert_eq!(entry.vfs_options, "rw");
+        assert_eq!(entry.fs_options, "rw,size=1G");
+    }
+
     struct MockMountInfoFs {
         mountinfo: Result<String, std::io::ErrorKind>,
     }
@@ -464,6 +610,42 @@ mod tests {
             fstype_at_mount_via_fs(&fs, TARGET),
             Err(MountInfoError::Io(_))
         ));
+    }
+
+    /* Intent: mount_entry_at_via_fs propagates mountinfo read failures.
+     * Why: callers must surface indeterminate mount state instead of assuming
+     *   writable or absent.
+     * Scenario: `/proc/self/mountinfo` cannot be read.
+     */
+    #[test]
+    fn mount_entry_at_via_fs_propagates_io_failure() {
+        let fs = MockMountInfoFs {
+            mountinfo: Err(std::io::ErrorKind::PermissionDenied),
+        };
+        assert!(matches!(
+            mount_entry_at_via_fs(&fs, TARGET),
+            Err(MountInfoError::Io(_))
+        ));
+    }
+
+    /* Intent: mount_entry_at_via_fs decodes kernel octal escapes in targets.
+     * Why: paths containing spaces must match the configured mount point.
+     * Scenario: braid.mountPoint = "/mnt/storage pool".
+     */
+    #[test]
+    fn mount_entry_at_via_fs_decodes_octal_escaped_path() {
+        let fs = MockMountInfoFs {
+            mountinfo: Ok(
+                "36 35 0:32 / /mnt/storage\\040pool rw shared:1 - btrfs /dev/mapper/braid-disk1 rw\n"
+                    .to_string(),
+            ),
+        };
+        let entry = mount_entry_at_via_fs(&fs, "/mnt/storage pool")
+            .unwrap()
+            .unwrap();
+        assert_eq!(entry.fstype, "btrfs");
+        assert_eq!(entry.vfs_options, "rw");
+        assert_eq!(entry.fs_options, "rw");
     }
 
     /* Intent: when the underlying Filesystem read fails, is_btrfs_mounted

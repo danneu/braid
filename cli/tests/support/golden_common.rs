@@ -82,18 +82,6 @@ golden_test!(
 );
 
 golden_test!(
-    golden_findmnt_json,
-    "findmnt-btrfs.json",
-    "findmnt",
-    parse::findmnt::parse_findmnt_json,
-    |out: parse::types::FindmntOutput| {
-        assert_eq!(out.filesystems.len(), 1, "expected 1 filesystem");
-        assert_eq!(out.filesystems[0].target, "/mnt/storage");
-        assert_eq!(out.filesystems[0].fstype, "btrfs");
-    }
-);
-
-golden_test!(
     golden_btrfs_df_json,
     "btrfs-df-raid1.json",
     "btrfs filesystem df",

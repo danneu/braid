@@ -7,7 +7,7 @@
 # Why: Golden-file fixtures lock parser contracts to the pinned toolchain version.
 # Run this once after pinning to a new NixOS release to regenerate fixtures.
 #
-# Dependencies: LUKS, btrfs, cryptsetup, findmnt must all work.
+# Dependencies: LUKS, btrfs, cryptsetup, btrfs-progs, and util-linux/lsblk must all work.
 {
   name = "capture-tool-fixtures";
 

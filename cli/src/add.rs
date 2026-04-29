@@ -2116,10 +2116,6 @@ mod tests {
     impl CommandRunner for AddTestRunner {
         fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
             match request {
-                CmdRequest::FindmntJson { mount_point } => Ok(mock_ok(
-                    &format!("findmnt --json --mountpoint {mount_point}"),
-                    r#"{"filesystems":[{"target":"/mnt/storage","source":"/dev/mapper/braid-disk1","fstype":"btrfs"}]}"#,
-                )),
                 CmdRequest::BtrfsFilesystemShow { mount_point } => {
                     let disk2_line = if self.disk_in_pool {
                         "\tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk2\n"
@@ -2242,6 +2238,7 @@ mod tests {
         (state_tmp, paths, tmp, config_path, pass_path)
     }
 
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     fn fresh_add_setup() -> (
@@ -2294,7 +2291,7 @@ mod tests {
     /// mount/device-add commits so command-level cleanup is exercised against
     /// the same post-commit probe shape production uses.
     struct AddFullPathRunner {
-        mounted: AtomicBool,
+        mounted: Arc<AtomicBool>,
         added: Mutex<Vec<String>>,
         fail_bootstrap_post_mount_probe: bool,
         fail_second_add: bool,
@@ -2306,7 +2303,7 @@ mod tests {
     impl AddFullPathRunner {
         fn live() -> Self {
             Self {
-                mounted: AtomicBool::new(true),
+                mounted: Arc::new(AtomicBool::new(true)),
                 added: Mutex::new(Vec::new()),
                 fail_bootstrap_post_mount_probe: false,
                 fail_second_add: false,
@@ -2317,10 +2314,9 @@ mod tests {
         }
 
         fn bootstrap() -> Self {
-            Self {
-                mounted: AtomicBool::new(false),
-                ..Self::live()
-            }
+            let runner = Self::live();
+            runner.mounted.store(false, Ordering::SeqCst);
+            runner
         }
 
         fn with_bootstrap_post_mount_probe_failure(mut self) -> Self {
@@ -2346,6 +2342,13 @@ mod tests {
         fn with_disk2_devid(mut self, devid: u64) -> Self {
             self.disk2_devid = devid;
             self
+        }
+
+        fn fs(&self, paths: Vec<String>) -> AddFullPathFs {
+            AddFullPathFs {
+                paths,
+                mounted: Arc::clone(&self.mounted),
+            }
         }
 
         fn added_mappers(&self) -> Vec<String> {
@@ -2399,24 +2402,43 @@ mod tests {
         }
     }
 
+    struct AddFullPathFs {
+        paths: Vec<String>,
+        mounted: Arc<AtomicBool>,
+    }
+
+    impl crate::probe::Filesystem for AddFullPathFs {
+        fn exists(&self, path: &str) -> bool {
+            self.paths.iter().any(|p| p == path)
+        }
+
+        fn is_block_device(&self, _path: &str) -> bool {
+            false
+        }
+
+        fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
+            if path == "/proc/self/mountinfo" {
+                if self.mounted.load(Ordering::SeqCst) {
+                    Ok("36 35 0:32 / /mnt/storage rw shared:1 - btrfs /dev/mapper/braid-disk1 rw\n"
+                        .to_owned())
+                } else {
+                    Ok("26 25 0:23 / / rw shared:1 - ext4 /dev/sda1 rw\n".to_owned())
+                }
+            } else if path.ends_with("/exclusive_operation") {
+                Ok("none\n".to_owned())
+            } else {
+                Err(std::io::Error::new(std::io::ErrorKind::NotFound, "mock"))
+            }
+        }
+
+        fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
+            Ok(vec![])
+        }
+    }
+
     impl CommandRunner for AddFullPathRunner {
         fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
             match request {
-                CmdRequest::FindmntJson { mount_point } => {
-                    if self.mounted.load(Ordering::SeqCst) {
-                        Ok(mock_ok(
-                            &format!("findmnt --json --mountpoint {mount_point}"),
-                            r#"{"filesystems":[{"target":"/mnt/storage","source":"/dev/mapper/braid-disk1","fstype":"btrfs"}]}"#,
-                        ))
-                    } else {
-                        Ok(RawCommandOutput {
-                            cmd: format!("findmnt --json --mountpoint {mount_point}"),
-                            stdout: String::new(),
-                            stderr: String::new(),
-                            exit_status: 1,
-                        })
-                    }
-                }
                 CmdRequest::BtrfsFilesystemShow { mount_point } => {
                     let has_added = !self.added.lock().unwrap().is_empty();
                     if self.fail_post_add_probe && has_added {
@@ -2605,8 +2627,8 @@ mod tests {
                 ("7", test_acked_disk(false, 7)),
             ],
         );
-        let fs = AddOfflineMockFs(vec!["/dev/disk/by-id/virtio-disk1".into()]);
         let runner = AddFullPathRunner::bootstrap().with_bootstrap_post_mount_probe_failure();
+        let fs = runner.fs(vec!["/dev/disk/by-id/virtio-disk1".into()]);
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
 
         cmd_add(
@@ -2761,8 +2783,8 @@ mod tests {
     fn cmd_add_bootstrap_acked_cleanup_failure_is_fatal() {
         let (_state_tmp, paths, _tmp, config_path, pass_path) = fresh_add_setup();
         std::fs::create_dir_all(paths.acked_stats_json()).unwrap();
-        let fs = AddOfflineMockFs(vec!["/dev/disk/by-id/virtio-disk1".into()]);
         let runner = AddFullPathRunner::bootstrap();
+        let fs = runner.fs(vec!["/dev/disk/by-id/virtio-disk1".into()]);
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
 
         let result = cmd_add(
@@ -3143,18 +3165,7 @@ mod tests {
                     exit_status: 0,
                 },
             )
-            .with_mapper_closed("braid-disk2")
-            .with_output(
-                CmdRequest::FindmntJson {
-                    mount_point: MountPoint("/mnt/storage".into()),
-                },
-                RawCommandOutput {
-                    cmd: "findmnt --json --mountpoint /mnt/storage".into(),
-                    stdout: String::new(),
-                    stderr: String::new(),
-                    exit_status: 1,
-                },
-            );
+            .with_mapper_closed("braid-disk2");
 
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
         let result = cmd_add(
@@ -3312,8 +3323,6 @@ mod tests {
     // The no-format cell is covered at helper level
     // (`read_passphrase_with_readers_tty_no_confirm_single_read`).
 
-    use std::sync::Arc;
-
     /// Recording runner for cmd_add regression tests. Stubs just enough to
     /// reach the passphrase read and the first few format/backup commands,
     /// and logs every call so tests can assert on what ran.
@@ -3328,15 +3337,13 @@ mod tests {
     struct AddRecordingRunner {
         log: CmdLog,
         stdin_log: StdinLog,
-        pool_mounted: bool,
     }
 
     impl AddRecordingRunner {
-        fn new(pool_mounted: bool) -> Self {
+        fn new(_pool_mounted: bool) -> Self {
             Self {
                 log: Arc::new(Mutex::new(Vec::new())),
                 stdin_log: Arc::new(Mutex::new(Vec::new())),
-                pool_mounted,
             }
         }
         fn log(&self) -> std::sync::MutexGuard<'_, Vec<CmdRequest>> {
@@ -3370,25 +3377,6 @@ mod tests {
         fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
             self.log.lock().unwrap().push(request.clone());
             match request {
-                CmdRequest::FindmntJson { mount_point } => {
-                    if self.pool_mounted {
-                        Ok(RawCommandOutput {
-                            cmd: format!("findmnt --json --mountpoint {mount_point}"),
-                            stdout: r#"{"filesystems":[{"target":"/mnt/storage","source":"/dev/mapper/braid-disk1","fstype":"btrfs","options":"rw,relatime"}]}"#.into(),
-                            stderr: String::new(),
-                            exit_status: 0,
-                        })
-                    } else {
-                        // Unmounted: findmnt exits 1 with empty stderr ->
-                        // parse_findmnt_json treats as empty filesystems list.
-                        Ok(RawCommandOutput {
-                            cmd: format!("findmnt --json --mountpoint {mount_point}"),
-                            stdout: String::new(),
-                            stderr: String::new(),
-                            exit_status: 1,
-                        })
-                    }
-                }
                 CmdRequest::BtrfsFilesystemShow { mount_point } => Ok(RawCommandOutput {
                     cmd: format!("btrfs filesystem show {mount_point}"),
                     stdout: format!(
@@ -3827,10 +3815,6 @@ mod tests {
     impl CommandRunner for AddPlanTestRunner {
         fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
             match request {
-                CmdRequest::FindmntJson { mount_point } => Ok(mock_ok(
-                    &format!("findmnt --json --mountpoint {mount_point}"),
-                    r#"{"filesystems":[{"target":"/mnt/storage","source":"/dev/mapper/braid-disk1","fstype":"btrfs"}]}"#,
-                )),
                 CmdRequest::BtrfsFilesystemShow { mount_point } => {
                     // total = real devices + missing_count placeholders.
                     let real_devices = self.keyfile_probes.len() as u64;

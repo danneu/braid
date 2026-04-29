@@ -1205,13 +1205,6 @@ mod tests {
         )
     }
 
-    fn findmnt_btrfs() -> RawCommandOutput {
-        ok_raw(
-            "findmnt --json --output TARGET,SOURCE,FSTYPE -T /mnt/storage",
-            r#"{"filesystems": [{"target":"/mnt/storage","source":"/dev/mapper/braid-toshiba","fstype":"btrfs"}]}"#,
-        )
-    }
-
     fn btrfs_show_toshiba_and_mystery() -> RawCommandOutput {
         ok_raw(
             "btrfs filesystem show /mnt/storage",
@@ -1330,12 +1323,6 @@ mod tests {
         let (mp_req, mp_out) = mountpoint_ok();
         let runner = MockRunner::default()
             .with_output(mp_req, mp_out)
-            .with_output(
-                CmdRequest::FindmntJson {
-                    mount_point: MountPoint("/mnt/storage".into()),
-                },
-                findmnt_btrfs(),
-            )
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
                     mount_point: MountPoint("/mnt/storage".into()),
@@ -1528,16 +1515,6 @@ mod tests {
             )
             // remount cycle: re-mount via the same MountWithOptions mock above
             // (MockRunner serves the same response for repeated requests)
-            // probe_pool: findmnt
-            .with_output(
-                CmdRequest::FindmntJson {
-                    mount_point: MountPoint("/mnt/storage".into()),
-                },
-                ok_raw(
-                    "findmnt",
-                    r#"{"filesystems": [{"target":"/mnt/storage","source":"/dev/mapper/braid-disk1","fstype":"btrfs"}]}"#,
-                ),
-            )
             // probe_pool: btrfs filesystem show
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
@@ -1788,16 +1765,7 @@ mod tests {
                 b"testpass".to_vec(),
                 ok_raw_empty("cryptsetup open"),
             )
-            // ── probe_pool after the cycle ──────────────────────────────
-            .with_output(
-                CmdRequest::FindmntJson {
-                    mount_point: MountPoint("/mnt/storage".into()),
-                },
-                ok_raw(
-                    "findmnt",
-                    r#"{"filesystems": [{"target":"/mnt/storage","source":"/dev/mapper/braid-disk1","fstype":"btrfs"}]}"#,
-                ),
-            )
+            // probe_pool after the cycle
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
                     mount_point: MountPoint("/mnt/storage".into()),
@@ -2176,16 +2144,6 @@ mod tests {
         let runner = MockRunner::default()
             // mount helper: mountpoint check → already mounted
             .with_output(mp_req, mp_out)
-            // probe_pool: findmnt
-            .with_output(
-                CmdRequest::FindmntJson {
-                    mount_point: MountPoint("/mnt/storage".into()),
-                },
-                ok_raw(
-                    "findmnt",
-                    r#"{"filesystems": [{"target":"/mnt/storage","source":"/dev/mapper/braid-disk1","fstype":"btrfs"}]}"#,
-                ),
-            )
             // probe_pool: btrfs filesystem show
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
@@ -2731,15 +2689,6 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(mp_req, mp_out)
             .with_output(
-                CmdRequest::FindmntJson {
-                    mount_point: MountPoint("/mnt/storage".into()),
-                },
-                ok_raw(
-                    "findmnt",
-                    r#"{"filesystems": [{"target":"/mnt/storage","source":"/dev/mapper/braid-disk1","fstype":"btrfs"}]}"#,
-                ),
-            )
-            .with_output(
                 CmdRequest::BtrfsFilesystemShow {
                     mount_point: MountPoint("/mnt/storage".into()),
                 },
@@ -2851,15 +2800,6 @@ mod tests {
         let (mp_req, mp_out) = mountpoint_ok();
         let runner = MockRunner::default()
             .with_output(mp_req, mp_out)
-            .with_output(
-                CmdRequest::FindmntJson {
-                    mount_point: MountPoint("/mnt/storage".into()),
-                },
-                ok_raw(
-                    "findmnt",
-                    r#"{"filesystems": [{"target":"/mnt/storage","source":"/dev/mapper/braid-disk1","fstype":"btrfs"}]}"#,
-                ),
-            )
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
                     mount_point: MountPoint("/mnt/storage".into()),
@@ -3220,16 +3160,6 @@ mod tests {
         let runner = MockRunner::default()
             // mountpoint check -> already mounted (skips the mount cycle)
             .with_output(mp_req, mp_out)
-            // probe_pool: findmnt
-            .with_output(
-                CmdRequest::FindmntJson {
-                    mount_point: MountPoint("/mnt/storage".into()),
-                },
-                ok_raw(
-                    "findmnt",
-                    r#"{"filesystems": [{"target":"/mnt/storage","source":"/dev/mapper/braid-disk1","fstype":"btrfs"}]}"#,
-                ),
-            )
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
                     mount_point: MountPoint("/mnt/storage".into()),
@@ -3356,15 +3286,6 @@ mod tests {
             // mountpoint check -> already mounted
             .with_output(mp_req, mp_out)
             // probe_pool path
-            .with_output(
-                CmdRequest::FindmntJson {
-                    mount_point: MountPoint("/mnt/storage".into()),
-                },
-                ok_raw(
-                    "findmnt",
-                    r#"{"filesystems": [{"target":"/mnt/storage","source":"/dev/mapper/braid-disk1","fstype":"btrfs"}]}"#,
-                ),
-            )
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
                     mount_point: MountPoint("/mnt/storage".into()),
@@ -3534,15 +3455,6 @@ mod tests {
             // probe_pool path -- live pool still has both disks because the
             // pre-remove balance was in flight when shutdown hit; the device
             // was never removed.
-            .with_output(
-                CmdRequest::FindmntJson {
-                    mount_point: MountPoint("/mnt/storage".into()),
-                },
-                ok_raw(
-                    "findmnt",
-                    r#"{"filesystems": [{"target":"/mnt/storage","source":"/dev/mapper/braid-disk1","fstype":"btrfs"}]}"#,
-                ),
-            )
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
                     mount_point: MountPoint("/mnt/storage".into()),
@@ -3763,15 +3675,6 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(mp_req, mp_out)
             // probe_pool (dry-run reconciliation) -- live pool has both disks.
-            .with_output(
-                CmdRequest::FindmntJson {
-                    mount_point: MountPoint("/mnt/storage".into()),
-                },
-                ok_raw(
-                    "findmnt",
-                    r#"{"filesystems": [{"target":"/mnt/storage","source":"/dev/mapper/braid-disk1","fstype":"btrfs"}]}"#,
-                ),
-            )
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
                     mount_point: MountPoint("/mnt/storage".into()),

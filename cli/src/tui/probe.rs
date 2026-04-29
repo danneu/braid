@@ -724,14 +724,6 @@ mod tests {
         let mp = MountPoint("/mnt/storage".to_owned());
 
         let runner = MockRunner::default()
-            // probe_pool: findmnt
-            .with_output(
-                CmdRequest::FindmntJson { mount_point: mp.clone() },
-                ok_raw(
-                    "findmnt",
-                    r#"{"filesystems": [{"target":"/mnt/storage","source":"/dev/mapper/braid-toshiba","fstype":"btrfs"}]}"#,
-                ),
-            )
             // probe_pool: btrfs filesystem show
             .with_output(
                 CmdRequest::BtrfsFilesystemShow { mount_point: mp.clone() },
@@ -911,13 +903,6 @@ mod tests {
 
         let runner = MockRunner::default()
             .with_output(
-                CmdRequest::FindmntJson { mount_point: mp.clone() },
-                ok_raw(
-                    "findmnt",
-                    r#"{"filesystems": [{"target":"/mnt/storage","source":"/dev/mapper/braid-toshiba","fstype":"btrfs"}]}"#,
-                ),
-            )
-            .with_output(
                 CmdRequest::BtrfsFilesystemShow { mount_point: mp.clone() },
                 ok_raw(
                     "btrfs filesystem show",
@@ -1032,13 +1017,6 @@ mod tests {
         let mp = MountPoint("/mnt/storage".to_owned());
 
         let runner = MockRunner::default()
-            .with_output(
-                CmdRequest::FindmntJson { mount_point: mp.clone() },
-                ok_raw(
-                    "findmnt",
-                    r#"{"filesystems": [{"target":"/mnt/storage","source":"/dev/mapper/braid-toshiba","fstype":"btrfs"}]}"#,
-                ),
-            )
             .with_output(
                 CmdRequest::BtrfsFilesystemShow { mount_point: mp.clone() },
                 ok_raw(
@@ -1164,15 +1142,6 @@ mod tests {
     fn one_disk_mounted_pool_runner() -> MockRunner {
         let mp = MountPoint("/mnt/storage".to_owned());
         MockRunner::default()
-            .with_output(
-                CmdRequest::FindmntJson {
-                    mount_point: mp.clone(),
-                },
-                ok_raw(
-                    "findmnt",
-                    r#"{"filesystems": [{"target":"/mnt/storage","source":"/dev/mapper/braid-toshiba","fstype":"btrfs"}]}"#,
-                ),
-            )
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
                     mount_point: mp.clone(),

@@ -481,7 +481,7 @@ mod tests {
     }
 
     // Intent: `cmd_idle` must NOT call `BtrfsBalanceStatus`,
-    //   `BtrfsReplaceStatus`, `BtrfsFilesystemShow`, or `FindmntJson`.
+    //   `BtrfsReplaceStatus`, or `BtrfsFilesystemShow`.
     //   Those subprocess probes were removed in favor of the sysfs scan.
     // Why: Pins the contract that the refactor preserves -- a
     //   `MockRunner` with only `BtrfsScrubStatus` seeded must still let

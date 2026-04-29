@@ -446,7 +446,7 @@ where
 
     // Preflight
     if pool_was_mounted {
-        let fsid = probe_fsid(runner, &mount_point)
+        let fsid = probe_fsid(runner, fs, &mount_point)
             .map_err(|e| LockError::Failed(format!("cannot probe pool: {e}")))?;
         preflight::require_lock_preflight(fs, &fsid).map_err(LockError::Failed)?;
     }
@@ -592,6 +592,7 @@ mod tests {
     struct MockFs {
         paths: Vec<String>,
         exclop: String,
+        mountinfo: String,
     }
 
     impl MockFs {
@@ -599,11 +600,19 @@ mod tests {
             Self {
                 paths: paths.iter().map(|s| s.to_string()).collect(),
                 exclop: "none\n".to_owned(),
+                mountinfo:
+                    "36 35 0:32 / /mnt/storage rw,noatime shared:1 - btrfs /dev/mapper/braid-aaa rw\n"
+                        .to_owned(),
             }
         }
 
         fn with_exclop(mut self, exclop: &str) -> Self {
             self.exclop = format!("{exclop}\n");
+            self
+        }
+
+        fn with_mountinfo(mut self, body: &str) -> Self {
+            self.mountinfo = body.to_owned();
             self
         }
     }
@@ -620,6 +629,8 @@ mod tests {
         fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
             if path.ends_with("/exclusive_operation") {
                 Ok(self.exclop.clone())
+            } else if path == "/proc/self/mountinfo" {
+                Ok(self.mountinfo.clone())
             } else {
                 Err(std::io::Error::new(std::io::ErrorKind::NotFound, "mock"))
             }
@@ -667,38 +678,25 @@ mod tests {
         }
     }
 
-    /// Add the minimal `probe_fsid` preflight mocks to a runner
-    /// (FindmntJson + BtrfsFilesystemShow). Used by tests that build
-    /// their mock runner from scratch and still need to land in the
+    /// Add the minimal `probe_fsid` preflight mock to a runner. Used by tests
+    /// that build their mock runner from scratch and still need to land in the
     /// "mounted, btrfs, fsid=aaaa..." preflight path.
     fn with_fsid_probe_mocks(runner: MockRunner) -> MockRunner {
-        runner
-            .with_output(
-                CmdRequest::FindmntJson {
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
-                },
-                RawCommandOutput {
-                    cmd: "findmnt --json".into(),
-                    stdout: r#"{"filesystems":[{"target":"/mnt/storage","source":"/dev/mapper/braid-aaa","fstype":"btrfs","options":"rw"}]}"#.into(),
-                    stderr: String::new(),
-                    exit_status: 0,
-                },
-            )
-            .with_output(
-                CmdRequest::BtrfsFilesystemShow {
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
-                },
-                RawCommandOutput {
-                    cmd: "btrfs filesystem show /mnt/storage".into(),
-                    stdout: "Label: none  uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
+        runner.with_output(
+            CmdRequest::BtrfsFilesystemShow {
+                mount_point: MountPoint("/mnt/storage".to_owned()),
+            },
+            RawCommandOutput {
+                cmd: "btrfs filesystem show /mnt/storage".into(),
+                stdout: "Label: none  uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
                              \tTotal devices 2 FS bytes used 16.00MiB\n\
                              \tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-aaa\n\
                              \tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-bbb\n"
-                        .into(),
-                    stderr: String::new(),
-                    exit_status: 0,
-                },
-            )
+                    .into(),
+                stderr: String::new(),
+                exit_status: 0,
+            },
+        )
     }
 
     fn test_config() -> Config {
@@ -722,11 +720,11 @@ mod tests {
     /// cmd_lock actually issues (mountpoint check = mounted,
     /// probe_fsid mocks, umount = ok, forget = ok).
     ///
-    /// Only FindmntJson + BtrfsFilesystemShow are registered for the
-    /// preflight path. Per-device CryptsetupStatus / CryptsetupLuksUuid
-    /// are intentionally absent: MockRunner panics on any unregistered
-    /// CmdRequest, so lock tests passing without those mocks is the
-    /// mechanical regression guard that cmd_lock no longer issues them.
+    /// Only BtrfsFilesystemShow is registered for the preflight path.
+    /// Per-device CryptsetupStatus / CryptsetupLuksUuid are intentionally
+    /// absent: MockRunner panics on any unregistered CmdRequest, so lock tests
+    /// passing without those mocks is the mechanical regression guard that
+    /// cmd_lock no longer issues them.
     fn mounted_runner() -> MockRunner {
         with_fsid_probe_mocks(MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
@@ -1053,7 +1051,12 @@ mod tests {
                 false
             }
             fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
-                if path.ends_with("/exclusive_operation") {
+                if path == "/proc/self/mountinfo" {
+                    Ok(
+                        "36 35 0:32 / /mnt/storage rw,noatime shared:1 - btrfs /dev/mapper/braid-aaa rw\n"
+                            .to_owned(),
+                    )
+                } else if path.ends_with("/exclusive_operation") {
                     Ok("none\n".to_owned())
                 } else {
                     Err(std::io::Error::new(std::io::ErrorKind::NotFound, "mock"))
@@ -1863,30 +1866,19 @@ mod tests {
     //   check. Without this guard, an ext4-mounted /mnt/storage would
     //   fall through to `btrfs filesystem show`, fail with a confusing
     //   parse error, and mask the real mount-configuration issue.
-    // Scenario: MountpointCheck succeeds, findmnt reports the mount
+    // Scenario: MountpointCheck succeeds, mountinfo reports the mount
     //   point's fstype as ext4. cmd_lock must refuse with a
     //   LockError::Failed whose message mentions "not btrfs".
     #[test]
     fn lock_rejects_mounted_but_not_btrfs() {
-        let runner = MockRunner::default()
-            .with_output(
-                CmdRequest::MountpointCheck {
-                    path: MountPoint("/mnt/storage".to_owned()),
-                },
-                ok_raw("mountpoint -q /mnt/storage"),
-            )
-            .with_output(
-                CmdRequest::FindmntJson {
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
-                },
-                RawCommandOutput {
-                    cmd: "findmnt --json".into(),
-                    stdout: r#"{"filesystems":[{"target":"/mnt/storage","source":"/dev/sda1","fstype":"ext4","options":"rw"}]}"#.into(),
-                    stderr: String::new(),
-                    exit_status: 0,
-                },
-            );
-        let fs = MockFs::new(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]);
+        let runner = MockRunner::default().with_output(
+            CmdRequest::MountpointCheck {
+                path: MountPoint("/mnt/storage".to_owned()),
+            },
+            ok_raw("mountpoint -q /mnt/storage"),
+        );
+        let fs = MockFs::new(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"])
+            .with_mountinfo("36 35 0:32 / /mnt/storage rw,noatime shared:1 - ext4 /dev/sda1 rw\n");
         let config = test_config();
         let membership = test_membership();
 

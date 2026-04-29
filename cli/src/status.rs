@@ -1270,24 +1270,6 @@ mod tests {
 
     // --- Mock data builders ---
 
-    fn findmnt_not_mounted() -> RawCommandOutput {
-        err_raw("findmnt", 1, "")
-    }
-
-    fn findmnt_btrfs() -> RawCommandOutput {
-        ok_raw(
-            "findmnt",
-            r#"{"filesystems": [{"target":"/mnt/storage","source":"/dev/mapper/disk1","fstype":"btrfs"}]}"#,
-        )
-    }
-
-    fn findmnt_ext4() -> RawCommandOutput {
-        ok_raw(
-            "findmnt",
-            r#"{"filesystems": [{"target":"/mnt/storage","source":"/dev/sda1","fstype":"ext4"}]}"#,
-        )
-    }
-
     fn btrfs_show_1disk() -> RawCommandOutput {
         ok_raw(
             "btrfs filesystem show",
@@ -1496,12 +1478,6 @@ mod tests {
     fn runner_healthy_3disk_base() -> MockRunner {
         MockRunner::default()
             .with_output(
-                CmdRequest::FindmntJson {
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
-                },
-                findmnt_btrfs(),
-            )
-            .with_output(
                 CmdRequest::BtrfsFilesystemShow {
                     mount_point: MountPoint("/mnt/storage".to_owned()),
                 },
@@ -1679,12 +1655,7 @@ mod tests {
 
     #[test]
     fn status_json_not_mounted() {
-        let runner = MockRunner::default().with_output(
-            CmdRequest::FindmntJson {
-                mount_point: MountPoint("/mnt/storage".to_owned()),
-            },
-            findmnt_not_mounted(),
-        );
+        let runner = MockRunner::default();
         let fs = MockFs::not_mounted(&[]);
         let config = config_3disk();
 
@@ -3123,12 +3094,7 @@ mod tests {
 
     #[test]
     fn status_not_btrfs_maps_to_not_mounted() {
-        let runner = MockRunner::default().with_output(
-            CmdRequest::FindmntJson {
-                mount_point: MountPoint("/mnt/storage".to_owned()),
-            },
-            findmnt_ext4(),
-        );
+        let runner = MockRunner::default();
         let fs = MockFs::ext4(&[]);
         let config = config_3disk();
 
@@ -3148,12 +3114,7 @@ mod tests {
 
     #[test]
     fn cmd_status_not_mounted_ok() {
-        let runner = MockRunner::default().with_output(
-            CmdRequest::FindmntJson {
-                mount_point: MountPoint("/mnt/storage".to_owned()),
-            },
-            findmnt_not_mounted(),
-        );
+        let runner = MockRunner::default();
         let fs = MockFs::not_mounted(&[]);
         let config = config_3disk();
 
@@ -3187,12 +3148,6 @@ mod tests {
     #[test]
     fn cmd_status_degraded_ok() {
         let runner = MockRunner::default()
-            .with_output(
-                CmdRequest::FindmntJson {
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
-                },
-                findmnt_btrfs(),
-            )
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
                     mount_point: MountPoint("/mnt/storage".to_owned()),
@@ -3286,12 +3241,6 @@ mod tests {
     #[test]
     fn cmd_status_single_disk_ok() {
         let runner = MockRunner::default()
-            .with_output(
-                CmdRequest::FindmntJson {
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
-                },
-                findmnt_btrfs(),
-            )
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
                     mount_point: MountPoint("/mnt/storage".to_owned()),
@@ -3917,12 +3866,6 @@ mod tests {
         // pool-side mapper "disk1" is distinct from the config-side mapper
         // "braid-disk1" and does not collide.
         let runner = MockRunner::default()
-            .with_output(
-                CmdRequest::FindmntJson {
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
-                },
-                findmnt_btrfs(),
-            )
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
                     mount_point: MountPoint("/mnt/storage".to_owned()),

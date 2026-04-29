@@ -102,12 +102,6 @@ machine.succeed(
     f" > {FIXTURE_DIR}/cryptsetup-luks-dump.txt"
 )
 
-# 9. findmnt (JSON)
-machine.succeed(
-    f"findmnt --json --output TARGET,SOURCE,FSTYPE --mountpoint {MOUNT}"
-    f" > {FIXTURE_DIR}/findmnt-btrfs.json"
-)
-
 # 10. Run a scrub, then capture completed status
 machine.succeed(f"btrfs scrub start -B {MOUNT}")
 machine.succeed(
