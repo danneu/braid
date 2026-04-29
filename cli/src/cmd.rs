@@ -44,6 +44,12 @@ pub enum CmdRequest {
     BtrfsScrubStatus {
         mount_point: MountPoint,
     },
+    BtrfsScrubResume {
+        mount_point: MountPoint,
+    },
+    BtrfsScrubStart {
+        mount_point: MountPoint,
+    },
     BtrfsScrubCancel {
         mount_point: MountPoint,
     },
@@ -350,6 +356,24 @@ impl CmdRequest {
                     "scrub".into(),
                     "status".into(),
                     "--raw".into(),
+                    mount_point.0.clone(),
+                ],
+            },
+            CmdRequest::BtrfsScrubResume { mount_point } => CmdArgs {
+                program: "btrfs".to_owned(),
+                args: vec![
+                    "scrub".into(),
+                    "resume".into(),
+                    "-B".into(),
+                    mount_point.0.clone(),
+                ],
+            },
+            CmdRequest::BtrfsScrubStart { mount_point } => CmdArgs {
+                program: "btrfs".to_owned(),
+                args: vec![
+                    "scrub".into(),
+                    "start".into(),
+                    "-B".into(),
                     mount_point.0.clone(),
                 ],
             },

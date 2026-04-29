@@ -8,7 +8,7 @@ pub enum ScrubCancelResult {
     Cancelled,
     /// Status said Running but cancel raced with completion ("not running"). Benign.
     RacedCompletion,
-    /// No scrub running (Never / Completed). Nothing to do.
+    /// No scrub running (Never / Finished). Nothing to do.
     NotRunning,
 }
 
@@ -34,11 +34,11 @@ pub enum ScrubCancelError {
 /// every non-`finished` state and turned the benign "not running" cancel
 /// failure into an ExecStop failure.
 ///
-/// - `Running`  → invoke `btrfs scrub cancel`. Success → `Cancelled`.
-/// - `Running` → cancel exits with stderr containing `"not running"` →
+/// - `Running` -> invoke `btrfs scrub cancel`. Success -> `Cancelled`.
+/// - `Running` -> cancel exits with stderr containing `"not running"` ->
 ///   `RacedCompletion` (the scrub completed between probe and cancel).
-/// - `Never` / `Completed` → `NotRunning` (silent no-op success).
-/// - `Unknown` → `StatusUnknown` error. Unknown is the parser's "couldn't
+/// - `Never` / terminal non-running states -> `NotRunning` (silent no-op success).
+/// - `Unknown` -> `StatusUnknown` error. Unknown is the parser's "couldn't
 ///   classify" bucket — silently succeeding here would mask parser drift
 ///   and leave a busy mount uncancelled. Fail loud instead.
 pub fn cmd_scrub_cancel<R: CommandRunner>(
@@ -66,7 +66,10 @@ pub fn cmd_scrub_cancel<R: CommandRunner>(
                 })
             }
         }
-        ScrubState::Never | ScrubState::Completed { .. } => Ok(ScrubCancelResult::NotRunning),
+        ScrubState::Never
+        | ScrubState::Finished { .. }
+        | ScrubState::Aborted { .. }
+        | ScrubState::Interrupted { .. } => Ok(ScrubCancelResult::NotRunning),
         ScrubState::Unknown => {
             // Unknown is the parser's "couldn't classify" bucket — NOT evidence
             // that no scrub is running. Failing loud here surfaces parser drift
@@ -119,7 +122,7 @@ mod tests {
         )
     }
 
-    fn scrub_status_completed() -> (CmdRequest, RawCommandOutput) {
+    fn scrub_status_finished() -> (CmdRequest, RawCommandOutput) {
         (
             CmdRequest::BtrfsScrubStatus { mount_point: mp() },
             RawCommandOutput {
@@ -127,6 +130,44 @@ mod tests {
                 stdout: "UUID:             12345678-1234-1234-1234-123456789abc\n\
                          Scrub started:    Mon Jan  1 00:00:00 2024\n\
                          Status:           finished\n\
+                         Duration:         0:00:01\n\
+                         Total to scrub:   1073741824\n\
+                         Rate:             1073741824/s\n\
+                         Error summary:    no errors found\n"
+                    .into(),
+                stderr: String::new(),
+                exit_status: 0,
+            },
+        )
+    }
+
+    fn scrub_status_aborted() -> (CmdRequest, RawCommandOutput) {
+        (
+            CmdRequest::BtrfsScrubStatus { mount_point: mp() },
+            RawCommandOutput {
+                cmd: "btrfs scrub status --raw /mnt/storage".into(),
+                stdout: "UUID:             12345678-1234-1234-1234-123456789abc\n\
+                         Scrub started:    Mon Jan  1 00:00:00 2024\n\
+                         Status:           aborted\n\
+                         Duration:         0:00:01\n\
+                         Total to scrub:   1073741824\n\
+                         Rate:             1073741824/s\n\
+                         Error summary:    no errors found\n"
+                    .into(),
+                stderr: String::new(),
+                exit_status: 0,
+            },
+        )
+    }
+
+    fn scrub_status_interrupted() -> (CmdRequest, RawCommandOutput) {
+        (
+            CmdRequest::BtrfsScrubStatus { mount_point: mp() },
+            RawCommandOutput {
+                cmd: "btrfs scrub status --raw /mnt/storage".into(),
+                stdout: "UUID:             12345678-1234-1234-1234-123456789abc\n\
+                         Scrub started:    Mon Jan  1 00:00:00 2024\n\
+                         Status:           interrupted\n\
                          Duration:         0:00:01\n\
                          Total to scrub:   1073741824\n\
                          Rate:             1073741824/s\n\
@@ -224,13 +265,41 @@ mod tests {
     }
 
     #[test]
-    // Intent: status==Completed → no cancel issued, returns NotRunning.
-    // Why it exists: Same shape as the Never case — Completed must also not
+    // Intent: status==Finished -> no cancel issued, returns NotRunning.
+    // Why it exists: Same shape as the Never case -- Finished must also not
     //   invoke cancel (cancel would exit "not running" and fail ExecStop).
     // Scenario: braid-scrub.service is stopped after the scrub has finished
     //   normally; the unit lingers in "active (exited)" until the next stop.
-    fn completed_does_not_invoke_cancel() {
-        let (status_req, status_out) = scrub_status_completed();
+    fn finished_does_not_invoke_cancel() {
+        let (status_req, status_out) = scrub_status_finished();
+        let runner = MockRunner::default().with_output(status_req, status_out);
+
+        let result = cmd_scrub_cancel(&runner, &mp()).unwrap();
+        assert_eq!(result, ScrubCancelResult::NotRunning);
+    }
+
+    #[test]
+    // Intent: status==Aborted -> no cancel issued, returns NotRunning.
+    // Why it exists: Aborted is the expected post-cancel state and should not
+    //   cause a second cancel during a later unit stop. No cancel mock is
+    //   seeded; if cmd_scrub_cancel calls cancel, MockRunner returns MissingMock.
+    // Scenario: braid-scrub.service is stopped after seeing a persisted
+    //   cancelled scrub record but before it starts/resumes work.
+    fn aborted_does_not_invoke_cancel() {
+        let (status_req, status_out) = scrub_status_aborted();
+        let runner = MockRunner::default().with_output(status_req, status_out);
+
+        let result = cmd_scrub_cancel(&runner, &mp()).unwrap();
+        assert_eq!(result, ScrubCancelResult::NotRunning);
+    }
+
+    #[test]
+    // Intent: status==Interrupted -> no cancel issued, returns NotRunning.
+    // Why it exists: Interrupted is terminal from btrfs status' perspective;
+    //   it is resumable by `btrfs scrub resume`, not cancellable.
+    // Scenario: userspace scrub process died, then systemd stops the service.
+    fn interrupted_does_not_invoke_cancel() {
+        let (status_req, status_out) = scrub_status_interrupted();
         let runner = MockRunner::default().with_output(status_req, status_out);
 
         let result = cmd_scrub_cancel(&runner, &mp()).unwrap();

@@ -46,9 +46,17 @@ enum Commands {
     /// Internal: invoked by `braid-scrub.service` ExecStop during lock/shutdown
     /// to cancel an in-flight scrub. Probes scrub state via the typed parser
     /// and only issues `btrfs scrub cancel` when state is `Running`; silent
-    /// no-op for `Never`/`Completed`. Hidden from `braid --help`.
+    /// no-op for terminal non-running states. Hidden from `braid --help`.
     #[command(hide = true)]
     ScrubCancel(ScrubCancelArgs),
+    /// Internal: invoked by `braid-scrub-resume-trigger.service` to decide
+    /// whether pool-online activation should start the shared scrub service.
+    #[command(hide = true)]
+    ScrubNeedsResume(ScrubMountArgs),
+    /// Internal: invoked by `braid-scrub.service` for timer/manual scrubs to
+    /// resume saved work or start a fresh scrub when nothing is resumable.
+    #[command(hide = true)]
+    ScrubResumeOrStart(ScrubMountArgs),
     /// Check disk health: exit 0 = ok/offline, exit 1 = alert (incl. probe/compute failure latched as ComputationError), exit 2 = setup error (config)
     Monitor,
     /// Acknowledge current alerts and silence notifications
@@ -264,6 +272,13 @@ struct DiscoverArgs {
 #[derive(Debug, Args)]
 struct ScrubCancelArgs {
     /// Mount point of the braid pool to check
+    #[arg(long)]
+    mount: String,
+}
+
+#[derive(Debug, Args)]
+struct ScrubMountArgs {
+    /// Mount point of the braid pool to scrub
     #[arg(long)]
     mount: String,
 }
@@ -569,6 +584,45 @@ fn main() {
             let mount_point = braid_cli::types::MountPoint(args.mount.clone());
             match braid_cli::scrub_cancel::cmd_scrub_cancel(&runner, &mount_point) {
                 Ok(_) => std::process::exit(0),
+                Err(e) => {
+                    print_cli_error(&e.to_string());
+                    std::process::exit(1);
+                }
+            }
+        }
+        Commands::ScrubNeedsResume(args) => {
+            let runner = RealRunner;
+            let mount_point = braid_cli::types::MountPoint(args.mount.clone());
+            match braid_cli::scrub_needs_resume::cmd_scrub_needs_resume(&runner, &mount_point) {
+                Ok(braid_cli::scrub_needs_resume::ScrubNeedsResumeResult::Yes) => {
+                    std::process::exit(0)
+                }
+                Ok(braid_cli::scrub_needs_resume::ScrubNeedsResumeResult::No) => {
+                    std::process::exit(1)
+                }
+                Err(e) => {
+                    print_cli_error(&e.to_string());
+                    std::process::exit(2);
+                }
+            }
+        }
+        Commands::ScrubResumeOrStart(args) => {
+            let runner = RealRunner;
+            let mount_point = braid_cli::types::MountPoint(args.mount.clone());
+            match braid_cli::scrub_resume_or_start::cmd_scrub_resume_or_start(&runner, &mount_point)
+            {
+                Ok(braid_cli::scrub_resume_or_start::ScrubResumeOrStartResult::Resumed {
+                    uncorrectable_errors: false,
+                })
+                | Ok(braid_cli::scrub_resume_or_start::ScrubResumeOrStartResult::Started {
+                    uncorrectable_errors: false,
+                }) => std::process::exit(0),
+                Ok(braid_cli::scrub_resume_or_start::ScrubResumeOrStartResult::Resumed {
+                    uncorrectable_errors: true,
+                })
+                | Ok(braid_cli::scrub_resume_or_start::ScrubResumeOrStartResult::Started {
+                    uncorrectable_errors: true,
+                }) => std::process::exit(3),
                 Err(e) => {
                     print_cli_error(&e.to_string());
                     std::process::exit(1);

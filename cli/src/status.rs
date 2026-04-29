@@ -140,7 +140,15 @@ pub enum ScrubReport {
         #[serde(skip_serializing_if = "Option::is_none")]
         pct: Option<u8>,
     },
-    Completed {
+    Finished {
+        started_at: String,
+        error_count: u64,
+    },
+    Aborted {
+        started_at: String,
+        error_count: u64,
+    },
+    Interrupted {
         started_at: String,
         error_count: u64,
     },
@@ -600,28 +608,42 @@ fn get_scrub_report<R: CommandRunner>(runner: &R, mount_point: &MountPoint) -> S
                 };
                 ScrubReport::Running { pct }
             }
-            ScrubState::Completed {
+            ScrubState::Finished {
                 started_at,
                 error_count,
                 ..
-            } => {
-                use time::macros::format_description;
-                let fmt = format_description!(
-                    "[weekday repr:short] [month repr:short] [day padding:space] [hour]:[minute]:[second] [year]"
-                );
-                let ts = started_at
-                    .0
-                    .format(&fmt)
-                    .unwrap_or_else(|_| "unknown".to_owned());
-                ScrubReport::Completed {
-                    started_at: ts,
-                    error_count,
-                }
-            }
+            } => ScrubReport::Finished {
+                started_at: format_scrub_timestamp(&started_at),
+                error_count,
+            },
+            ScrubState::Aborted {
+                started_at,
+                error_count,
+                ..
+            } => ScrubReport::Aborted {
+                started_at: format_scrub_timestamp(&started_at),
+                error_count,
+            },
+            ScrubState::Interrupted {
+                started_at,
+                error_count,
+                ..
+            } => ScrubReport::Interrupted {
+                started_at: format_scrub_timestamp(&started_at),
+                error_count,
+            },
             ScrubState::Unknown => ScrubReport::Unknown,
         },
         Err(_) => ScrubReport::Unknown,
     }
+}
+
+fn format_scrub_timestamp(ts: &crate::parse::types::ScrubTimestamp) -> String {
+    use time::macros::format_description;
+    let fmt = format_description!(
+        "[weekday repr:short] [month repr:short] [day padding:space] [hour]:[minute]:[second] [year]"
+    );
+    ts.0.format(&fmt).unwrap_or_else(|_| "unknown".to_owned())
 }
 
 pub(crate) fn get_balance_report<R: CommandRunner>(
@@ -978,7 +1000,7 @@ fn format_status_human(
                 Some(p) => format!("running ({p}%)"),
                 None => "running".to_owned(),
             },
-            ScrubReport::Completed {
+            ScrubReport::Finished {
                 started_at,
                 error_count,
             } => {
@@ -987,6 +1009,12 @@ fn format_status_human(
                 } else {
                     format!("{started_at} ({error_count} errors)")
                 }
+            }
+            ScrubReport::Aborted { started_at, .. } => {
+                format!("{started_at} cancelled (will resume)")
+            }
+            ScrubReport::Interrupted { started_at, .. } => {
+                format!("{started_at} interrupted")
             }
             ScrubReport::Unknown => "unknown".to_owned(),
         };
@@ -1180,6 +1208,26 @@ mod tests {
         MountPoint("/mnt/storage".into())
     }
 
+    fn report_with_scrub(last_scrub: ScrubReport) -> StatusReport {
+        StatusReport {
+            mount_point: MountPoint("/mnt/storage".to_owned()),
+            status: StatusCode::Intact,
+            total_devices: Some(3),
+            present_count: Some(3),
+            missing_count: Some(0),
+            profile: Some("RAID1".to_owned()),
+            capacity: None,
+            last_scrub: Some(last_scrub),
+            balance: None,
+            allocation: None,
+            disks: vec![],
+            advisories: vec![],
+            alert_active: false,
+            alert_causes: vec![],
+            missing_devids: vec![],
+        }
+    }
+
     // --- Mock data builders ---
 
     fn btrfs_show_1disk() -> RawCommandOutput {
@@ -1334,7 +1382,7 @@ mod tests {
         )
     }
 
-    fn btrfs_scrub_completed() -> RawCommandOutput {
+    fn btrfs_scrub_finished() -> RawCommandOutput {
         ok_raw(
             "btrfs scrub status --raw",
             "UUID:             aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
@@ -1347,7 +1395,7 @@ mod tests {
         )
     }
 
-    fn btrfs_scrub_completed_with_errors() -> RawCommandOutput {
+    fn btrfs_scrub_finished_with_errors() -> RawCommandOutput {
         ok_raw(
             "btrfs scrub status --raw",
             "UUID:             aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
@@ -1357,6 +1405,32 @@ mod tests {
              Total to scrub:   1073741824\n\
              Rate:             1073741824/s\n\
              Error summary:    csum=50\n",
+        )
+    }
+
+    fn btrfs_scrub_aborted() -> RawCommandOutput {
+        ok_raw(
+            "btrfs scrub status --raw",
+            "UUID:             aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
+             Scrub started:    Mon Feb 23 10:00:00 2026\n\
+             Status:           aborted\n\
+             Duration:         0:00:01\n\
+             Total to scrub:   1073741824\n\
+             Rate:             1073741824/s\n\
+             Error summary:    no errors found\n",
+        )
+    }
+
+    fn btrfs_scrub_interrupted() -> RawCommandOutput {
+        ok_raw(
+            "btrfs scrub status --raw",
+            "UUID:             aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
+             Scrub started:    Mon Feb 23 10:00:00 2026\n\
+             Status:           interrupted\n\
+             Duration:         0:00:01\n\
+             Total to scrub:   1073741824\n\
+             Rate:             1073741824/s\n\
+             Error summary:    no errors found\n",
         )
     }
 
@@ -2495,28 +2569,28 @@ mod tests {
     // =======================================================================
 
     #[test]
-    fn status_scrub_completed() {
+    fn status_scrub_finished() {
         let runner = MockRunner::default().with_output(
             CmdRequest::BtrfsScrubStatus {
                 mount_point: MountPoint("/mnt/storage".to_owned()),
             },
-            btrfs_scrub_completed(),
+            btrfs_scrub_finished(),
         );
         let result = get_scrub_report(&runner, &mp());
         match result {
-            ScrubReport::Completed {
+            ScrubReport::Finished {
                 started_at,
                 error_count,
             } => {
                 assert!(started_at.contains("Mon Feb 23"), "got: {started_at}");
                 assert_eq!(error_count, 0);
             }
-            other => panic!("expected Completed, got: {other:?}"),
+            other => panic!("expected Finished, got: {other:?}"),
         }
     }
 
     #[test]
-    fn status_scrub_completed_with_errors() {
+    fn status_scrub_finished_with_errors() {
         // Intent: verify that scrub error counts survive the get_scrub_report path.
         // Why it exists: get_scrub_string previously discarded error_count via `..`,
         // making a scrub with 50 errors look identical to a clean scrub.
@@ -2525,18 +2599,66 @@ mod tests {
             CmdRequest::BtrfsScrubStatus {
                 mount_point: MountPoint("/mnt/storage".to_owned()),
             },
-            btrfs_scrub_completed_with_errors(),
+            btrfs_scrub_finished_with_errors(),
         );
         let result = get_scrub_report(&runner, &mp());
         match result {
-            ScrubReport::Completed {
+            ScrubReport::Finished {
                 started_at,
                 error_count,
             } => {
                 assert!(started_at.contains("Mon Feb 23"), "got: {started_at}");
                 assert_eq!(error_count, 50);
             }
-            other => panic!("expected Completed, got: {other:?}"),
+            other => panic!("expected Finished, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn status_scrub_aborted() {
+        // Intent: verify cancelled scrub status is reported as resumable, not finished.
+        // Why it exists: cancelled btrfs scrub state is normal after lock/shutdown.
+        // Scenario: braid status runs after a scrub was cancelled during lock.
+        let runner = MockRunner::default().with_output(
+            CmdRequest::BtrfsScrubStatus {
+                mount_point: MountPoint("/mnt/storage".to_owned()),
+            },
+            btrfs_scrub_aborted(),
+        );
+        let result = get_scrub_report(&runner, &mp());
+        match result {
+            ScrubReport::Aborted {
+                started_at,
+                error_count,
+            } => {
+                assert!(started_at.contains("Mon Feb 23"), "got: {started_at}");
+                assert_eq!(error_count, 0);
+            }
+            other => panic!("expected Aborted, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn status_scrub_interrupted() {
+        // Intent: verify interrupted scrub status is reported distinctly.
+        // Why it exists: process death is different from clean completion.
+        // Scenario: braid status runs after a scrub userspace process was killed.
+        let runner = MockRunner::default().with_output(
+            CmdRequest::BtrfsScrubStatus {
+                mount_point: MountPoint("/mnt/storage".to_owned()),
+            },
+            btrfs_scrub_interrupted(),
+        );
+        let result = get_scrub_report(&runner, &mp());
+        match result {
+            ScrubReport::Interrupted {
+                started_at,
+                error_count,
+            } => {
+                assert!(started_at.contains("Mon Feb 23"), "got: {started_at}");
+                assert_eq!(error_count, 0);
+            }
+            other => panic!("expected Interrupted, got: {other:?}"),
         }
     }
 
@@ -2553,19 +2675,50 @@ mod tests {
     }
 
     #[test]
-    fn scrub_report_json_completed() {
-        // Intent: verify the JSON shape of ScrubReport::Completed.
+    fn scrub_report_json_finished() {
+        // Intent: verify the JSON shape of ScrubReport::Finished.
         // Why it exists: the old last_scrub was a flat string — we need to ensure
         // the new tagged enum serializes to the expected object shape.
         // Scenario: JSON consumers (scripts, monitoring) parse the last_scrub field.
-        let report = ScrubReport::Completed {
+        let report = ScrubReport::Finished {
             started_at: "Mon Feb 23 10:00:00 2026".to_owned(),
             error_count: 3,
         };
         let json: serde_json::Value = serde_json::to_value(&report).unwrap();
-        assert_eq!(json["state"], "completed");
+        assert_eq!(json["state"], "finished");
         assert_eq!(json["started_at"], "Mon Feb 23 10:00:00 2026");
         assert_eq!(json["error_count"], 3);
+    }
+
+    #[test]
+    fn scrub_report_json_aborted() {
+        // Intent: verify JSON shape of ScrubReport::Aborted.
+        // Why it exists: JSON consumers must be able to distinguish resumable
+        // cancellation from clean completion.
+        // Scenario: monitoring reads last_scrub after lock cancelled a scrub.
+        let report = ScrubReport::Aborted {
+            started_at: "Mon Feb 23 10:00:00 2026".to_owned(),
+            error_count: 0,
+        };
+        let json: serde_json::Value = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["state"], "aborted");
+        assert_eq!(json["started_at"], "Mon Feb 23 10:00:00 2026");
+        assert_eq!(json["error_count"], 0);
+    }
+
+    #[test]
+    fn scrub_report_json_interrupted() {
+        // Intent: verify JSON shape of ScrubReport::Interrupted.
+        // Why it exists: JSON consumers must not mistake interrupted for finished.
+        // Scenario: monitoring reads last_scrub after a power loss mid-scrub.
+        let report = ScrubReport::Interrupted {
+            started_at: "Mon Feb 23 10:00:00 2026".to_owned(),
+            error_count: 0,
+        };
+        let json: serde_json::Value = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["state"], "interrupted");
+        assert_eq!(json["started_at"], "Mon Feb 23 10:00:00 2026");
+        assert_eq!(json["error_count"], 0);
     }
 
     #[test]
@@ -2607,30 +2760,14 @@ mod tests {
         // Intent: verify human output includes "(no errors)" for clean scrub.
         // Why it exists: the old code showed only the timestamp with no error info.
         // Scenario: user runs `braid status` after a clean scrub.
-        let report = StatusReport {
-            mount_point: MountPoint("/mnt/storage".to_owned()),
-            status: StatusCode::Intact,
-            total_devices: Some(3),
-            present_count: Some(3),
-            missing_count: Some(0),
-            profile: Some("RAID1".to_owned()),
-            capacity: None,
-            last_scrub: Some(ScrubReport::Completed {
-                started_at: "Mon Feb 23 10:00:00 2026".to_owned(),
-                error_count: 0,
-            }),
-            balance: None,
-            allocation: None,
-            disks: vec![],
-            advisories: vec![],
-            alert_active: false,
-            alert_causes: vec![],
-            missing_devids: vec![],
-        };
+        let report = report_with_scrub(ScrubReport::Finished {
+            started_at: "Mon Feb 23 10:00:00 2026".to_owned(),
+            error_count: 0,
+        });
         let human = format_status_human(&report, None, None);
         assert!(
-            human.contains("(no errors)"),
-            "expected '(no errors)' in output, got:\n{human}"
+            human.contains("\nLast scrub: Mon Feb 23 10:00:00 2026 (no errors)\n"),
+            "expected exact last-scrub line, got:\n{human}"
         );
     }
 
@@ -2639,30 +2776,46 @@ mod tests {
         // Intent: verify human output includes error count for failed scrub.
         // Why it exists: the old code showed only the timestamp — errors were invisible.
         // Scenario: user runs `braid status` after a scrub found 3 errors.
-        let report = StatusReport {
-            mount_point: MountPoint("/mnt/storage".to_owned()),
-            status: StatusCode::Intact,
-            total_devices: Some(3),
-            present_count: Some(3),
-            missing_count: Some(0),
-            profile: Some("RAID1".to_owned()),
-            capacity: None,
-            last_scrub: Some(ScrubReport::Completed {
-                started_at: "Mon Feb 23 10:00:00 2026".to_owned(),
-                error_count: 3,
-            }),
-            balance: None,
-            allocation: None,
-            disks: vec![],
-            advisories: vec![],
-            alert_active: false,
-            alert_causes: vec![],
-            missing_devids: vec![],
-        };
+        let report = report_with_scrub(ScrubReport::Finished {
+            started_at: "Mon Feb 23 10:00:00 2026".to_owned(),
+            error_count: 3,
+        });
         let human = format_status_human(&report, None, None);
         assert!(
-            human.contains("(3 errors)"),
-            "expected '(3 errors)' in output, got:\n{human}"
+            human.contains("\nLast scrub: Mon Feb 23 10:00:00 2026 (3 errors)\n"),
+            "expected exact last-scrub line, got:\n{human}"
+        );
+    }
+
+    #[test]
+    fn human_scrub_shows_aborted() {
+        // Intent: verify human output marks cancelled scrub as resumable.
+        // Why it exists: the status renderer must not show cancelled as clean.
+        // Scenario: user runs `braid status` after lock cancelled a scrub.
+        let report = report_with_scrub(ScrubReport::Aborted {
+            started_at: "Mon Feb 23 10:00:00 2026".to_owned(),
+            error_count: 0,
+        });
+        let human = format_status_human(&report, None, None);
+        assert!(
+            human.contains("\nLast scrub: Mon Feb 23 10:00:00 2026 cancelled (will resume)\n"),
+            "expected exact cancelled last-scrub line, got:\n{human}"
+        );
+    }
+
+    #[test]
+    fn human_scrub_shows_interrupted() {
+        // Intent: verify human output marks interrupted scrub distinctly.
+        // Why it exists: interrupted scrub status must not render as clean.
+        // Scenario: user runs `braid status` after shutdown interrupted a scrub.
+        let report = report_with_scrub(ScrubReport::Interrupted {
+            started_at: "Mon Feb 23 10:00:00 2026".to_owned(),
+            error_count: 0,
+        });
+        let human = format_status_human(&report, None, None);
+        assert!(
+            human.contains("\nLast scrub: Mon Feb 23 10:00:00 2026 interrupted\n"),
+            "expected exact interrupted last-scrub line, got:\n{human}"
         );
     }
 

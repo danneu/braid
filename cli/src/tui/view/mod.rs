@@ -447,6 +447,47 @@ fn format_duration_secs(secs: u64) -> String {
     }
 }
 
+fn scrub_terminal_rows(
+    status: Option<&str>,
+    started_at: &crate::parse::types::ScrubTimestamp,
+    error_count: u64,
+    duration_secs: Option<u64>,
+    total_bytes: Option<u64>,
+    rate_bytes_per_sec: Option<u64>,
+    now: PrimitiveDateTime,
+) -> Vec<Row<'static>> {
+    let display = match timeago(&started_at.0, now) {
+        Some(ago) => format!("{} ({})", format_timestamp(&started_at.0), ago),
+        None => format_timestamp(&started_at.0),
+    };
+    let mut rows = vec![Row::new(["Last run".to_owned(), display])];
+    if let Some(status) = status {
+        rows.push(Row::new(["Status".to_owned(), status.to_owned()]));
+    }
+    rows.push(Row::new(["Errors".to_owned(), error_count.to_string()]));
+    if let Some(t) = total_bytes {
+        let u = ByteUnit::friendliest(t);
+        rows.push(Row::new([
+            "Total".to_owned(),
+            format!("{} {}", u.format(t), u.suffix()),
+        ]));
+    }
+    if let Some(r) = rate_bytes_per_sec {
+        let u = ByteUnit::friendliest(r);
+        rows.push(Row::new([
+            "Rate".to_owned(),
+            format!("{} {}/s", u.format(r), u.suffix()),
+        ]));
+    }
+    if let Some(secs) = duration_secs {
+        rows.push(Row::new([
+            "Duration".to_owned(),
+            format_duration_secs(secs),
+        ]));
+    }
+    rows
+}
+
 fn scrub_table(scrub: &ScrubState, now: PrimitiveDateTime) -> Table<'_> {
     let (rows, style) = match scrub {
         ScrubState::Never => (
@@ -510,43 +551,60 @@ fn scrub_table(scrub: &ScrubState, now: PrimitiveDateTime) -> Table<'_> {
             rows.push(Row::new(["Errors".to_owned(), error_count.to_string()]));
             (rows, None)
         }
-        ScrubState::Completed {
+        ScrubState::Finished {
             started_at,
             error_count,
             duration_secs,
             total_bytes,
             rate_bytes_per_sec,
-        } => {
-            let display = match timeago(&started_at.0, now) {
-                Some(ago) => format!("{} ({})", format_timestamp(&started_at.0), ago),
-                None => format_timestamp(&started_at.0),
-            };
-            let mut rows = vec![
-                Row::new(["Last run".to_owned(), display]),
-                Row::new(["Errors".to_owned(), error_count.to_string()]),
-            ];
-            if let Some(t) = total_bytes {
-                let u = ByteUnit::friendliest(*t);
-                rows.push(Row::new([
-                    "Total".to_owned(),
-                    format!("{} {}", u.format(*t), u.suffix()),
-                ]));
-            }
-            if let Some(r) = rate_bytes_per_sec {
-                let u = ByteUnit::friendliest(*r);
-                rows.push(Row::new([
-                    "Rate".to_owned(),
-                    format!("{} {}/s", u.format(*r), u.suffix()),
-                ]));
-            }
-            if let Some(secs) = duration_secs {
-                rows.push(Row::new([
-                    "Duration".to_owned(),
-                    format_duration_secs(*secs),
-                ]));
-            }
-            (rows, None)
-        }
+        } => (
+            scrub_terminal_rows(
+                None,
+                started_at,
+                *error_count,
+                *duration_secs,
+                *total_bytes,
+                *rate_bytes_per_sec,
+                now,
+            ),
+            None,
+        ),
+        ScrubState::Aborted {
+            started_at,
+            error_count,
+            duration_secs,
+            total_bytes,
+            rate_bytes_per_sec,
+        } => (
+            scrub_terminal_rows(
+                Some("cancelled (will resume)"),
+                started_at,
+                *error_count,
+                *duration_secs,
+                *total_bytes,
+                *rate_bytes_per_sec,
+                now,
+            ),
+            None,
+        ),
+        ScrubState::Interrupted {
+            started_at,
+            error_count,
+            duration_secs,
+            total_bytes,
+            rate_bytes_per_sec,
+        } => (
+            scrub_terminal_rows(
+                Some("interrupted"),
+                started_at,
+                *error_count,
+                *duration_secs,
+                *total_bytes,
+                *rate_bytes_per_sec,
+                now,
+            ),
+            None,
+        ),
         ScrubState::Unknown => (
             vec![Row::new(["Last run".to_owned(), "unknown".to_owned()])],
             Some(Style::default().fg(Color::DarkGray)),
@@ -575,13 +633,29 @@ fn scrub_lines(scrub: &ScrubState) -> u16 {
                 + time_left_secs.is_some() as u16
                 + eta.is_some() as u16
         }
-        ScrubState::Completed {
+        ScrubState::Finished {
             total_bytes,
             rate_bytes_per_sec,
             duration_secs,
             ..
         } => {
             2 + total_bytes.is_some() as u16
+                + rate_bytes_per_sec.is_some() as u16
+                + duration_secs.is_some() as u16
+        }
+        ScrubState::Aborted {
+            total_bytes,
+            rate_bytes_per_sec,
+            duration_secs,
+            ..
+        }
+        | ScrubState::Interrupted {
+            total_bytes,
+            rate_bytes_per_sec,
+            duration_secs,
+            ..
+        } => {
+            3 + total_bytes.is_some() as u16
                 + rate_bytes_per_sec.is_some() as u16
                 + duration_secs.is_some() as u16
         }
@@ -1559,7 +1633,7 @@ pub(crate) mod tests {
                 active: false,
                 causes: vec![],
             },
-            scrub: ScrubState::Completed {
+            scrub: ScrubState::Finished {
                 started_at: ScrubTimestamp(time::macros::datetime!(2026-02-24 02:00:07)),
                 error_count: 0,
                 duration_secs: Some(0),

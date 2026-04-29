@@ -150,7 +150,7 @@ fn parse_error_continuation(input: &str) -> IResult<&str, u64> {
 
 struct PartialScrub {
     started_at: Option<ScrubTimestamp>,
-    is_running: bool,
+    status: Option<String>,
     error_count: u64,
     bytes_scrubbed: Option<u64>,
     duration_secs: Option<u64>,
@@ -164,7 +164,7 @@ impl PartialScrub {
     fn new() -> Self {
         Self {
             started_at: None,
-            is_running: false,
+            status: None,
             error_count: 0,
             bytes_scrubbed: None,
             duration_secs: None,
@@ -208,7 +208,7 @@ pub fn parse_btrfs_scrub_status(
                 acc.started_at = parse_ctime(ts).map(ScrubTimestamp);
             }
         } else if let Ok((_, status)) = parse_status_line(line) {
-            acc.is_running = status == "running";
+            acc.status = Some(status.to_owned());
         } else if let Ok((_, secs)) = parse_duration_line(line) {
             acc.duration_secs = Some(secs);
         } else if let Ok((_, secs)) = parse_time_left_line(line) {
@@ -228,7 +228,7 @@ pub fn parse_btrfs_scrub_status(
         }
     }
 
-    if acc.is_running {
+    if acc.status.as_deref() == Some("running") {
         return Ok(BtrfsScrubStatusOutput {
             state: ScrubState::Running {
                 started_at: acc.started_at,
@@ -244,15 +244,31 @@ pub fn parse_btrfs_scrub_status(
     }
 
     if let Some(started_at) = acc.started_at {
-        return Ok(BtrfsScrubStatusOutput {
-            state: ScrubState::Completed {
+        let state = match acc.status.as_deref() {
+            Some("finished") => ScrubState::Finished {
                 started_at,
                 error_count: acc.error_count,
                 duration_secs: acc.duration_secs,
                 total_bytes: acc.total_bytes,
                 rate_bytes_per_sec: acc.rate_bytes_per_sec,
             },
-        });
+            Some("aborted") => ScrubState::Aborted {
+                started_at,
+                error_count: acc.error_count,
+                duration_secs: acc.duration_secs,
+                total_bytes: acc.total_bytes,
+                rate_bytes_per_sec: acc.rate_bytes_per_sec,
+            },
+            Some("interrupted") => ScrubState::Interrupted {
+                started_at,
+                error_count: acc.error_count,
+                duration_secs: acc.duration_secs,
+                total_bytes: acc.total_bytes,
+                rate_bytes_per_sec: acc.rate_bytes_per_sec,
+            },
+            _ => ScrubState::Unknown,
+        };
+        return Ok(BtrfsScrubStatusOutput { state });
     }
 
     Ok(BtrfsScrubStatusOutput {
@@ -310,7 +326,7 @@ mod tests {
             .trim();
         let expected_dt = parse_ctime(expected_ts).unwrap();
         match &out.state {
-            ScrubState::Completed {
+            ScrubState::Finished {
                 started_at,
                 error_count,
                 total_bytes,
@@ -322,7 +338,7 @@ mod tests {
                 assert_eq!(*total_bytes, Some(33_931_264));
                 assert_eq!(*rate_bytes_per_sec, Some(33_914_880));
             }
-            other => panic!("expected Completed, got {other:?}"),
+            other => panic!("expected Finished, got {other:?}"),
         }
     }
 
@@ -455,11 +471,11 @@ Error summary:    no errors found
         }
     }
 
-    /// Intent: Completed scrub with read + csum errors sums correctly.
+    /// Intent: Finished scrub with read + csum errors sums correctly.
     /// Why: Error summary key=val pairs must all be summed into error_count.
     /// Scenario: Scrub found data corruption on a degraded pool.
     #[test]
-    fn scrub_completed_with_errors_inline() {
+    fn scrub_finished_with_errors_inline() {
         let raw = RawCommandOutput {
             cmd: "btrfs scrub status --raw".into(),
             stdout: "\
@@ -480,7 +496,7 @@ Error summary:    read=1 csum=2
         };
         let out = parse_btrfs_scrub_status(&raw).unwrap();
         match &out.state {
-            ScrubState::Completed {
+            ScrubState::Finished {
                 started_at,
                 error_count,
                 duration_secs,
@@ -497,8 +513,116 @@ Error summary:    read=1 csum=2
                 assert_eq!(*total_bytes, Some(1_073_741_824));
                 assert_eq!(*rate_bytes_per_sec, Some(104_857_600));
             }
-            other => panic!("expected Completed, got {other:?}"),
+            other => panic!("expected Finished, got {other:?}"),
         }
+    }
+
+    /// Intent: Aborted scrub status gets a distinct terminal state.
+    /// Why: Cancelled scrubs are resumable and must not be rendered as finished.
+    /// Scenario: braid lock cancels an in-flight scrub before unmounting.
+    #[test]
+    fn scrub_status_aborted_inline() {
+        let raw = RawCommandOutput {
+            cmd: "btrfs scrub status --raw".into(),
+            stdout: "\
+UUID:             cc86845b-aec3-408e-bef5-553affc1f2b1
+Scrub started:    Tue Feb 25 10:00:00 2026
+Status:           aborted
+Duration:         0:00:10
+Total to scrub:   1073741824
+Rate:             104857600/s
+Error summary:    csum=2
+"
+            .into(),
+            stderr: String::new(),
+            exit_status: 0,
+        };
+        let out = parse_btrfs_scrub_status(&raw).unwrap();
+        match &out.state {
+            ScrubState::Aborted {
+                started_at,
+                error_count,
+                duration_secs,
+                total_bytes,
+                rate_bytes_per_sec,
+            } => {
+                assert_eq!(
+                    started_at.0,
+                    parse_ctime("Tue Feb 25 10:00:00 2026").unwrap()
+                );
+                assert_eq!(*error_count, 2);
+                assert_eq!(*duration_secs, Some(10));
+                assert_eq!(*total_bytes, Some(1_073_741_824));
+                assert_eq!(*rate_bytes_per_sec, Some(104_857_600));
+            }
+            other => panic!("expected Aborted, got {other:?}"),
+        }
+    }
+
+    /// Intent: Interrupted scrub status gets a distinct terminal state.
+    /// Why: A scrub killed without a cancel ioctl is not clean completion and
+    /// must not be displayed as finished.
+    /// Scenario: host loses power while a scrub userspace process is active.
+    #[test]
+    fn scrub_status_interrupted_inline() {
+        let raw = RawCommandOutput {
+            cmd: "btrfs scrub status --raw".into(),
+            stdout: "\
+UUID:             cc86845b-aec3-408e-bef5-553affc1f2b1
+Scrub started:    Tue Feb 25 10:00:00 2026
+Status:           interrupted
+Duration:         0:00:10
+Total to scrub:   1073741824
+Rate:             104857600/s
+Error summary:    no errors found
+"
+            .into(),
+            stderr: String::new(),
+            exit_status: 0,
+        };
+        let out = parse_btrfs_scrub_status(&raw).unwrap();
+        match &out.state {
+            ScrubState::Interrupted {
+                started_at,
+                error_count,
+                duration_secs,
+                total_bytes,
+                rate_bytes_per_sec,
+            } => {
+                assert_eq!(
+                    started_at.0,
+                    parse_ctime("Tue Feb 25 10:00:00 2026").unwrap()
+                );
+                assert_eq!(*error_count, 0);
+                assert_eq!(*duration_secs, Some(10));
+                assert_eq!(*total_bytes, Some(1_073_741_824));
+                assert_eq!(*rate_bytes_per_sec, Some(104_857_600));
+            }
+            other => panic!("expected Interrupted, got {other:?}"),
+        }
+    }
+
+    /// Intent: Unknown terminal status words remain Unknown.
+    /// Why: New btrfs status strings must not be silently bucketed into a
+    /// known terminal state with different semantics.
+    /// Scenario: a future btrfs-progs release adds a scrub status value.
+    #[test]
+    fn scrub_status_unknown_status_word_is_unknown() {
+        let raw = RawCommandOutput {
+            cmd: "btrfs scrub status --raw".into(),
+            stdout: "\
+UUID:             cc86845b-aec3-408e-bef5-553affc1f2b1
+Scrub started:    Tue Feb 25 10:00:00 2026
+Status:           weird
+Duration:         0:00:10
+Error summary:    no errors found
+"
+            .into(),
+            stderr: String::new(),
+            exit_status: 0,
+        };
+        let out = parse_btrfs_scrub_status(&raw).unwrap();
+        assert_eq!(out.state, ScrubState::Unknown);
     }
 
     /// Intent: Rate line with a scrub limit suffix must still parse correctly.
@@ -507,7 +631,7 @@ Error summary:    read=1 csum=2
     /// rate number before the first `/`.
     /// Scenario: User has configured a per-device scrub rate limit.
     #[test]
-    fn scrub_completed_with_rate_limit() {
+    fn scrub_finished_with_rate_limit() {
         let raw = RawCommandOutput {
             cmd: "btrfs scrub status --raw".into(),
             stdout: "\
@@ -525,12 +649,12 @@ Error summary:    no errors found
         };
         let out = parse_btrfs_scrub_status(&raw).unwrap();
         match &out.state {
-            ScrubState::Completed {
+            ScrubState::Finished {
                 rate_bytes_per_sec, ..
             } => {
                 assert_eq!(*rate_bytes_per_sec, Some(104_857_600));
             }
-            other => panic!("expected Completed, got {other:?}"),
+            other => panic!("expected Finished, got {other:?}"),
         }
     }
 
@@ -564,11 +688,11 @@ Error summary:
         };
         let out = parse_btrfs_scrub_status(&raw).unwrap();
         match &out.state {
-            ScrubState::Completed { error_count, .. } => {
+            ScrubState::Finished { error_count, .. } => {
                 // Corrected=5 + Uncorrectable=2 + Unverified=0
                 assert_eq!(*error_count, 7);
             }
-            other => panic!("expected Completed, got {other:?}"),
+            other => panic!("expected Finished, got {other:?}"),
         }
     }
 
@@ -595,13 +719,13 @@ Error summary:    no errors found
         };
         let out = parse_btrfs_scrub_status(&raw).unwrap();
         match &out.state {
-            ScrubState::Completed { started_at, .. } => {
+            ScrubState::Finished { started_at, .. } => {
                 assert_eq!(
                     started_at.0,
                     parse_ctime("Tue Feb 25 12:00:00 2026").unwrap()
                 );
             }
-            other => panic!("expected Completed, got {other:?}"),
+            other => panic!("expected Finished, got {other:?}"),
         }
     }
 

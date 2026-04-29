@@ -107,6 +107,8 @@ Balance:  paused, 5/12 chunks (58% complete)
 
 ```
 Last scrub: Mon Jan  1 00:00:00 2024 (no errors)
+Last scrub: Mon Jan  1 00:00:00 2024 cancelled (will resume)
+Last scrub: Mon Jan  1 00:00:00 2024 interrupted
 Last scrub: never
 Last scrub: running (45%)
 ```
@@ -159,7 +161,8 @@ Warnings appear when LUKS header backups are missing for one or more disks.
 - `capacity`: `total_bytes`, `used_bytes`, `free_bytes`
 - `allocation`: array of block group type entries
 - `balance`: state object (`idle`, `running`, `paused`, `unknown`)
-- `last_scrub`: state object (`never`, `running`, `completed`, `unknown`)
+- `last_scrub`: state object (`never`, `running`, `finished`, `aborted`,
+  `interrupted`, `unknown`)
 
 ## Related commands
 

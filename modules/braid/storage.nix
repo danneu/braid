@@ -10,6 +10,24 @@ let
   cryptsetup = cfg.packages.cryptsetup;
   btrfsProgs = cfg.packages.btrfsProgs;
   utilLinux = cfg.packages.utilLinux;
+  scrubCancelScript = pkgs.writeShellScript "braid-scrub-maybe-cancel" ''
+    # If pool is already unmounted during shutdown race, nothing remains to cancel.
+    ${utilLinux}/bin/mountpoint -q ${cfg.mountPoint} || exit 0
+
+    # Use the typed scrub-status parser instead of grep -- see
+    # cli/src/scrub_cancel.rs. Only cancels if status is Running; clean
+    # no-op for terminal non-running states; hard-fails on Unknown so
+    # parser drift surfaces instead of silently masking a busy mount.
+    # Mount is passed explicitly -- ExecStop has no config-file dependency.
+    ${braidWrapped}/bin/braid scrub-cancel --mount ${cfg.mountPoint}
+    ret=$?
+    # Give the foreground `btrfs scrub start/resume -B` process a chance to
+    # rewrite scrub.status.<fsid> with canceled=1 before systemd kills it.
+    if [ "$ret" -eq 0 ]; then
+      ${pkgs.coreutils}/bin/sleep 2
+    fi
+    exit "$ret"
+  '';
 in
 {
   config = lib.mkIf cfg.enable {
@@ -61,20 +79,37 @@ in
         Type = "simple";
         Nice = 19;
         IOSchedulingClass = "idle";
-        ExecStart = "${btrfsProgs}/bin/btrfs scrub start -B ${cfg.mountPoint}";
+        # Scheduled/manual scrub: resume saved progress first; start fresh
+        # only when btrfs reports nothing resumable.
+        ExecStart = "${braidWrapped}/bin/braid scrub-resume-or-start --mount ${cfg.mountPoint}";
         # If the service is stopped before scrub finishes, cancel it.
-        ExecStop = pkgs.writeShellScript "braid-scrub-maybe-cancel" ''
-          # If pool is already unmounted during shutdown race, nothing remains to cancel.
-          ${utilLinux}/bin/mountpoint -q ${cfg.mountPoint} || exit 0
-
-          # Use the typed scrub-status parser instead of grep — see
-          # cli/src/scrub_cancel.rs. Only cancels if status is Running; clean
-          # no-op for Never/Completed; hard-fails on Unknown so parser drift
-          # surfaces instead of silently masking a busy mount. Mount is passed
-          # explicitly — ExecStop has no config-file dependency.
-          exec ${braidWrapped}/bin/braid scrub-cancel --mount ${cfg.mountPoint}
-        '';
+        ExecStop = scrubCancelScript;
       };
+    };
+
+    systemd.services.braid-scrub-resume-trigger = lib.mkIf cfg.autoScrub.enable {
+      description = "Pool-online resume trigger for braid scrub";
+      documentation = [ "man:btrfs-scrub(8)" ];
+      wantedBy = [ "braid-online.service" ];
+      bindsTo = [ "braid-online.service" ];
+      after = [ "braid-online.service" ];
+      conflicts = [ "sleep.target" ];
+      before = [ "sleep.target" ];
+      unitConfig.ConditionPathIsMountPoint = cfg.mountPoint;
+      serviceConfig.Type = "oneshot";
+      path = [
+        braidWrapped
+        pkgs.systemd
+      ];
+      script = ''
+        ret=0
+        braid scrub-needs-resume --mount ${cfg.mountPoint} || ret=$?
+        case "$ret" in
+          0) systemctl start --no-block braid-scrub.service ;;
+          1) ;;            # no resume needed -- clean no-op
+          *) exit "$ret" ;; # parser/command error -- surface as Result=failed
+        esac
+      '';
     };
 
     # Lifecycle owner: "pool is online."

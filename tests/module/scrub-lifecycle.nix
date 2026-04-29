@@ -1,20 +1,24 @@
 # Test: scrub-lifecycle
 #
-# What: Verifies the two key behaviors of lifecycle-bound scrub: (1) Persistent
-# catch-up fires immediately after pool unlock when the timer stamp is overdue,
-# and (2) braid lock succeeds while the scrub service is actively holding the
-# mount busy, because the wrapper stops the timer and service before unmounting.
+# What: Verifies lifecycle-bound scrub catch-up, lock-time cancellation,
+# pool-online resume, and coalescing when an overdue timer fire and resumable
+# pool-online state both target braid-scrub.service.
 #
 # Why: Config tests verify unit properties (BindsTo, Persistent, etc.) but only
-# a behavioral test proves the catch-up actually fires and the cancellation path
-# works end-to-end. These are the two behaviors that justify owning the scrub
-# timer instead of delegating to services.btrfs.autoScrub.
+# a behavioral test proves the catch-up actually fires, the cancellation path
+# works end-to-end, the resume trigger engages, and the single-runner topology
+# prevents duplicate btrfs scrub processes.
 #
-# Scenario: Two nodes, each with a 2-disk RAID1 pool (initrd fixture).
-#   catchup: real scrub service, seeded overdue stamp → Persistent triggers
-#            immediate scrub on unlock.
-#   cancel:  fake long-running scrub (holds mount busy via open FD), lock
-#            while scrub runs → wrapper stops timer+service, CLI unmounts.
+# Scenario: Four nodes with 2-disk RAID1 pools.
+#   catchup:     real scrub service, seeded overdue stamp -> Persistent triggers
+#                immediate scrub on unlock.
+#   cancel:      fake long-running scrub (holds mount busy via open FD), lock
+#                while scrub runs -> wrapper stops timer+service, CLI unmounts.
+#   resume:      real scrub service on dm-delay-backed disks, cancel mid-scrub,
+#                unlock with trigger masked, then resume via the pool-online trigger.
+#   concurrency: dm-delay-backed pool with saved scrub progress + overdue timer
+#                stamp; on unlock, both activation paths target braid-scrub.service.
+#                Proves systemd coalesces the starts into one resumed scrub run.
 { braid }:
 { pkgs, lib, ... }:
 let
@@ -71,6 +75,46 @@ let
         pkgs.cryptsetup
       ];
     };
+
+  resumeNode =
+    { pkgs, lib, ... }:
+    {
+      imports = [
+        ../../modules/braid
+      ];
+
+      braid = {
+        enable = true;
+        package = braid;
+      };
+
+      systemd.tmpfiles.rules = [
+        "d /var/lib/braid 0755 root root -"
+        ''f /var/lib/braid/pool.json 0644 root root - {"disks":{"disk1":{"by_id":"/dev/mapper/disk1-delay"},"disk2":{"by_id":"/dev/mapper/disk2-delay"}}}''
+      ];
+
+      systemd.services.braid-unlock.script = lib.mkForce ''
+        printf '%s\n' '${passphrase}' | braid unlock --passphrase-stdin
+      '';
+
+      virtualisation.emptyDiskImages = [
+        {
+          size = 1024;
+          driveConfig.deviceExtraOpts.serial = "disk1";
+        }
+        {
+          size = 1024;
+          driveConfig.deviceExtraOpts.serial = "disk2";
+        }
+      ];
+      virtualisation.memorySize = 2048;
+
+      environment.systemPackages = [
+        pkgs.btrfs-progs
+        pkgs.cryptsetup
+        pkgs.lvm2
+      ];
+    };
 in
 {
   name = "scrub-lifecycle";
@@ -95,6 +139,12 @@ in
         )
       );
     };
+
+  nodes.resume = resumeNode;
+
+  # Same dm-delay-backed setup as `resume`; the concurrency subtest needs slow
+  # I/O so any accidental second scrub has time to become visible.
+  nodes.concurrency = resumeNode;
 
   testScript = builtins.readFile ./scrub-lifecycle.py;
 }

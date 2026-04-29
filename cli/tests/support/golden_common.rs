@@ -159,8 +159,8 @@ golden_test!(
     parse::btrfs_scrub_status::parse_btrfs_scrub_status,
     |out: parse::types::BtrfsScrubStatusOutput| {
         assert!(
-            matches!(out.state, parse::types::ScrubState::Completed { .. }),
-            "expected Completed state after scrub"
+            matches!(out.state, parse::types::ScrubState::Finished { .. }),
+            "expected Finished state after scrub"
         );
     }
 );

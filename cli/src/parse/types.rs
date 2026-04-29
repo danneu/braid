@@ -221,7 +221,21 @@ pub enum ScrubState {
         rate_bytes_per_sec: Option<u64>,
         error_count: u64,
     },
-    Completed {
+    Finished {
+        started_at: ScrubTimestamp,
+        error_count: u64,
+        duration_secs: Option<u64>,
+        total_bytes: Option<u64>,
+        rate_bytes_per_sec: Option<u64>,
+    },
+    Aborted {
+        started_at: ScrubTimestamp,
+        error_count: u64,
+        duration_secs: Option<u64>,
+        total_bytes: Option<u64>,
+        rate_bytes_per_sec: Option<u64>,
+    },
+    Interrupted {
         started_at: ScrubTimestamp,
         error_count: u64,
         duration_secs: Option<u64>,
@@ -242,6 +256,7 @@ pub enum DeviceScrubState {
     Running,
     Finished,
     Aborted,
+    Interrupted,
     Unknown(String),
 }
 

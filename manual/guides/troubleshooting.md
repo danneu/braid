@@ -148,6 +148,8 @@ ps aux | grep braid
 **Symptom:** `systemctl status braid-scrub.timer` shows the timer is inactive.
 
 The scrub timer is lifecycle-bound to `braid-online.service`. It only runs while the pool is unlocked and mounted.
+If a scrub was cancelled by lock or shutdown, braid resumes the partial scrub
+the next time the pool comes online.
 
 ```sh
 # Check pool state

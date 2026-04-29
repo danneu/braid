@@ -120,7 +120,7 @@ The configured `name` is also written to `/etc/braid/config.json` so that `braid
 - pre-shutdown grace window with `braid ups abort-shutdown`
 - battery-age reminders driven by `battery.mfr.date` + the `RB` status flag
 - multi-UPS per host
-- UPS-triggered automatic pause of running scrub/balance (they resume on remount; acceptable as v1 behavior)
+- UPS-triggered automatic pause of running balance (scrub is cancelled on shutdown and resumed on next pool activation; balance still relies on remount/recover behavior)
 
 ## Resolved questions
 

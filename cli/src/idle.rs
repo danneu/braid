@@ -291,7 +291,7 @@ mod tests {
         }
     }
 
-    fn scrub_completed() -> (CmdRequest, RawCommandOutput) {
+    fn scrub_finished() -> (CmdRequest, RawCommandOutput) {
         (
             CmdRequest::BtrfsScrubStatus { mount_point: mp() },
             RawCommandOutput {
@@ -333,8 +333,8 @@ mod tests {
         )
     }
 
-    fn runner_with_scrub_completed() -> MockRunner {
-        let (req, out) = scrub_completed();
+    fn runner_with_scrub_finished() -> MockRunner {
+        let (req, out) = scrub_finished();
         MockRunner::default().with_output(req, out)
     }
 
@@ -361,7 +361,7 @@ mod tests {
     // Scenario: NAS pool is online but no user activity or maintenance in progress.
     #[test]
     fn idle_when_all_ops_quiet() {
-        let runner = runner_with_scrub_completed();
+        let runner = runner_with_scrub_finished();
         let fs = MockFs::with_exclop("none");
 
         let result = cmd_idle(&runner, &fs, &mp());
@@ -391,7 +391,7 @@ mod tests {
     /// Build a runner+fs ready to drive cmd_idle to the sysfs scan step
     /// (mount + scrub-clean already seeded; one fsid dir with `exclop`).
     fn ready_for_sysfs_check(exclop: &str) -> (MockRunner, MockFs) {
-        (runner_with_scrub_completed(), MockFs::with_exclop(exclop))
+        (runner_with_scrub_finished(), MockFs::with_exclop(exclop))
     }
 
     // Intent: Each kernel exclop string maps to the matching BusyReason.
@@ -473,7 +473,7 @@ mod tests {
     //   the fsid dir present but inaccessible.
     #[test]
     fn busy_unknown_on_sysfs_read_failure() {
-        let runner = runner_with_scrub_completed();
+        let runner = runner_with_scrub_finished();
         let fs = MockFs::with_read_error();
 
         let result = cmd_idle(&runner, &fs, &mp());
@@ -565,7 +565,7 @@ mod tests {
      */
     #[test]
     fn idle_skips_features_and_debug_pseudo_dirs() {
-        let runner = runner_with_scrub_completed();
+        let runner = runner_with_scrub_finished();
         // Deliberately do NOT seed `features` or `debug` exclop reads.
         // If the helper ever stopped skipping them by name, MockFs's
         // unseeded-path fallback would return NotFound, which under the
@@ -596,7 +596,7 @@ mod tests {
      */
     #[test]
     fn idle_unknown_entry_notfound_is_fail_closed() {
-        let runner = runner_with_scrub_completed();
+        let runner = runner_with_scrub_finished();
         let fs = MockFs::empty()
             .seed_mountinfo(MOUNTINFO_WITH_BTRFS_TARGET)
             .seed_btrfs_listing(&[FSID, FSID_OTHER])
@@ -618,7 +618,7 @@ mod tests {
      */
     #[test]
     fn idle_any_busy_blocks_suspend_multi_btrfs() {
-        let runner = runner_with_scrub_completed();
+        let runner = runner_with_scrub_finished();
         // First entry is `none`, second is `balance`. The helper iterates
         // entries in returned order, so the loop must continue past the
         // first and report Busy on the second.
@@ -643,7 +643,7 @@ mod tests {
      */
     #[test]
     fn idle_zero_fsid_dirs_after_mount_check_is_busy_unknown() {
-        let runner = runner_with_scrub_completed();
+        let runner = runner_with_scrub_finished();
         let fs = MockFs::empty()
             .seed_mountinfo(MOUNTINFO_WITH_BTRFS_TARGET)
             .seed_btrfs_listing(&[]);
@@ -666,7 +666,7 @@ mod tests {
      */
     #[test]
     fn idle_list_dir_io_error_is_fail_closed() {
-        let runner = runner_with_scrub_completed();
+        let runner = runner_with_scrub_finished();
         let fs = MockFs::empty()
             .seed_mountinfo(MOUNTINFO_WITH_BTRFS_TARGET)
             .seed_btrfs_listing_error(ErrorKind::PermissionDenied);

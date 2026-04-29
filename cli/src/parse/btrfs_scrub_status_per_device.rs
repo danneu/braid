@@ -56,6 +56,7 @@ fn map_status(s: &str) -> DeviceScrubState {
         "running" => DeviceScrubState::Running,
         "finished" => DeviceScrubState::Finished,
         "aborted" => DeviceScrubState::Aborted,
+        "interrupted" => DeviceScrubState::Interrupted,
         other => DeviceScrubState::Unknown(other.to_owned()),
     }
 }
@@ -331,6 +332,38 @@ Duration:         0:01:00
         assert_eq!(out.devices[0].tree_bytes_scrubbed, 200);
         assert_eq!(out.devices[0].last_physical, 5000);
         assert_eq!(out.devices[0].total_errors(), 0);
+    }
+
+    /// Intent: interrupted per-device status maps to a typed state.
+    /// Why: Keeps the TUI per-device path aligned with aggregate scrub status.
+    /// Scenario: scrub userspace process exits before the kernel reports finish.
+    #[test]
+    fn single_device_interrupted() {
+        let raw = RawCommandOutput {
+            cmd: CMD.into(),
+            stdout: "\
+UUID:             aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
+
+Scrub device /dev/sda (id 1) history
+Scrub started:    Wed Feb 25 10:00:00 2026
+Status:           interrupted
+Duration:         0:01:00
+    data_bytes_scrubbed: 1000
+    tree_bytes_scrubbed: 200
+    read_errors: 0
+    csum_errors: 0
+    verify_errors: 0
+    uncorrectable_errors: 0
+    corrected_errors: 0
+    super_errors: 0
+    last_physical: 5000
+"
+            .into(),
+            stderr: String::new(),
+            exit_status: 0,
+        };
+        let out = parse_btrfs_scrub_status_per_device(&raw).unwrap();
+        assert_eq!(out.devices[0].state, DeviceScrubState::Interrupted);
     }
 
     /// Intent: verify total_errors() sums correctly when errors are present.

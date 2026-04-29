@@ -46,16 +46,18 @@ case "$subcmd" in
     ;;
 esac
 
-# Stop scrub timer and service before CLI lock attempts unmount.
-# Timer must stop first — otherwise it can re-trigger the service between
-# service stop and unmount. braid-scrub.service holds the mount busy while
-# running (-B flag); without this, umount would fail with EBUSY.
-# Harmless no-op when autoScrub is disabled (units don't exist) or scrub
-# isn't running.
+# Stop scrub timer, resume trigger, and service before CLI lock attempts unmount.
+# Timer must stop first -- otherwise it can re-trigger the service between
+# service stop and unmount. The trigger stops before the service so a freshly
+# fired trigger cannot queue a new service start after we stop it.
+# braid-scrub.service holds the mount busy while running (-B flag); without
+# this, umount would fail with EBUSY. Harmless no-op when autoScrub is disabled
+# (units don't exist) or scrub isn't running.
 case "$subcmd" in
   lock)
     if ! $skip_fixup; then
       @systemctlBin@ stop braid-scrub.timer 2>/dev/null || true
+      @systemctlBin@ stop braid-scrub-resume-trigger.service 2>/dev/null || true
       @systemctlBin@ stop braid-scrub.service 2>/dev/null || true
     fi
     ;;

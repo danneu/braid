@@ -30,6 +30,8 @@ pub mod remove;
 pub mod remove_missing;
 pub mod replace;
 pub mod scrub_cancel;
+pub mod scrub_needs_resume;
+pub mod scrub_resume_or_start;
 pub mod state_io;
 pub mod state_paths;
 pub mod status;

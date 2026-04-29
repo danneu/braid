@@ -12,10 +12,13 @@
 # Scenario: Three nodes — defaults (enabled, monthly, /mnt/storage),
 #   disabled (no scrub units), and weekly (custom interval).
 
+import shlex
+
 start_all()
 
 TIMER = "braid-scrub.timer"
 SERVICE = "braid-scrub.service"
+TRIGGER_SERVICE = "braid-scrub-resume-trigger.service"
 
 
 def show(node, unit, prop):
@@ -26,6 +29,24 @@ def show(node, unit, prop):
 
 def unit_content(node, unit):
     return node.succeed("systemctl cat {}".format(unit))
+
+
+def exec_path(node, unit, prop):
+    raw = show(node, unit, prop)
+    marker = "path="
+    start = raw.find(marker)
+    assert start != -1, "Expected path= in {} for {}, got: {}".format(prop, unit, raw)
+    start += len(marker)
+    end = raw.find(" ", start)
+    semi = raw.find(";", start)
+    if end == -1 or (semi != -1 and semi < end):
+        end = semi
+    assert end != -1, "Could not parse command path from {}".format(raw)
+    return raw[start:end]
+
+
+def exec_script_content(node, unit, prop):
+    return node.succeed("cat {}".format(shlex.quote(exec_path(node, unit, prop))))
 
 
 # === defaults node ===
@@ -57,11 +78,15 @@ with subtest("defaults: timer fires monthly with Persistent=true"):
 
 with subtest("defaults: scrub service targets pool mount point"):
     exec_start = show(defaults, SERVICE, "ExecStart")
-    assert "btrfs scrub start -B" in exec_start, (
-        "Expected 'btrfs scrub start -B' in ExecStart, got: " + exec_start
+    assert "scrub-resume-or-start" in exec_start, (
+        "Expected 'scrub-resume-or-start' in ExecStart, got: " + exec_start
     )
     assert "/mnt/storage" in exec_start, (
         "Expected /mnt/storage in ExecStart, got: " + exec_start
+    )
+    exec_stop = exec_script_content(defaults, SERVICE, "ExecStop")
+    assert "scrub-cancel" in exec_stop, (
+        "Expected 'scrub-cancel' in ExecStop script, got: " + exec_stop
     )
 
 with subtest("defaults: scrub service has correct scheduling priority"):
@@ -108,6 +133,47 @@ with subtest("defaults: scrub service is bound to braid-online"):
         "Expected braid-online.service in After, got: " + after
     )
 
+with subtest("defaults: old long-running resume service does not exist"):
+    defaults.fail("systemctl cat braid-scrub-resume.service")
+
+with subtest("defaults: scrub resume trigger is loaded and lifecycle-bound"):
+    trigger_content = unit_content(defaults, TRIGGER_SERVICE)
+    trigger_type = show(defaults, TRIGGER_SERVICE, "Type")
+    assert trigger_type == "oneshot", (
+        "Expected Type=oneshot for resume trigger, got: " + trigger_type
+    )
+    exec_start = exec_script_content(defaults, TRIGGER_SERVICE, "ExecStart")
+    assert "scrub-needs-resume --mount /mnt/storage" in exec_start, (
+        "Expected scrub-needs-resume predicate in ExecStart script, got: " + exec_start
+    )
+    assert "systemctl start --no-block braid-scrub.service" in exec_start, (
+        "Expected no-block scrub service start in ExecStart script, got: " + exec_start
+    )
+    binds_to = show(defaults, TRIGGER_SERVICE, "BindsTo")
+    assert "braid-online.service" in binds_to, (
+        "Expected braid-online.service in BindsTo, got: " + binds_to
+    )
+    after = show(defaults, TRIGGER_SERVICE, "After")
+    assert "braid-online.service" in after, (
+        "Expected braid-online.service in After, got: " + after
+    )
+    assert "WantedBy=braid-online.service" in trigger_content, (
+        "Expected WantedBy=braid-online.service in trigger unit, got:\n"
+        + trigger_content
+    )
+    assert "ConditionPathIsMountPoint=/mnt/storage" in trigger_content, (
+        "Expected ConditionPathIsMountPoint=/mnt/storage in trigger unit, got:\n"
+        + trigger_content
+    )
+    conflicts = show(defaults, TRIGGER_SERVICE, "Conflicts")
+    assert "sleep.target" in conflicts, (
+        "Expected sleep.target in Conflicts, got: " + conflicts
+    )
+    before = show(defaults, TRIGGER_SERVICE, "Before")
+    assert "sleep.target" in before, (
+        "Expected sleep.target in Before, got: " + before
+    )
+
 with subtest("defaults: nixpkgs scrub timer does not exist"):
     defaults.fail("systemctl cat btrfs-scrub-mnt-storage.timer")
 
@@ -116,6 +182,12 @@ with subtest("defaults: nixpkgs scrub timer does not exist"):
 with subtest("disabled: braid-scrub.timer does not exist"):
     disabled.wait_for_unit("multi-user.target")
     disabled.fail("systemctl cat {}".format(TIMER))
+
+with subtest("disabled: braid-scrub-resume.service does not exist"):
+    disabled.fail("systemctl cat braid-scrub-resume.service")
+
+with subtest("disabled: braid-scrub-resume-trigger.service does not exist"):
+    disabled.fail("systemctl cat {}".format(TRIGGER_SERVICE))
 
 # === weekly node ===
 

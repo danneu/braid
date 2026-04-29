@@ -247,7 +247,7 @@ pub fn run_demo() -> io::Result<()> {
             active: false,
             causes: vec![],
         },
-        scrub: ScrubState::Completed {
+        scrub: ScrubState::Finished {
             started_at: ScrubTimestamp(time::macros::datetime!(2026-02-24 02:00:07)),
             error_count: 0,
             duration_secs: Some(0),

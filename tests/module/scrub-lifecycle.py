@@ -1,19 +1,28 @@
 # Test: scrub-lifecycle
 #
-# Intent: Verify the two key behaviors of lifecycle-bound scrub: (1) Persistent
+# Intent: Verify the key behaviors of lifecycle-bound scrub: (1) Persistent
 #   catch-up fires immediately after pool unlock when the timer stamp is overdue,
-#   and (2) braid lock succeeds while the scrub service is actively holding the
-#   mount busy, because the wrapper stops the timer and service first.
+#   (2) braid lock succeeds while the scrub service is actively holding the
+#   mount busy, because the wrapper stops the timer and service first, (3) the
+#   pool-online trigger resumes a previously cancelled scrub, and (4) an
+#   overdue timer fire and a resumable pool-online state both target
+#   braid-scrub.service. systemd coalesces overlapping start jobs into one run;
+#   the run resumes the saved scrub and satisfies the overdue timer fire without
+#   producing a second scrub or a "Scrub is already running" error.
 #
 # Why it exists: Config tests verify unit properties (BindsTo, Persistent, etc.)
-#   but only a behavioral test proves the catch-up actually fires and the
-#   cancellation path works end-to-end. These are the two behaviors that justify
-#   owning the scrub timer instead of delegating to services.btrfs.autoScrub.
+#   but only a behavioral test proves the catch-up actually fires, the
+#   cancellation path works end-to-end, the resume trigger engages, and the
+#   single-runner topology prevents duplicate btrfs scrub processes.
 #
-# Scenario: Two nodes, each with a 2-disk RAID1 pool (initrd fixture).
-#   catchup: real scrub service, seeded overdue stamp, unlock triggers catch-up.
-#   cancel:  fake long-running scrub (holds mount busy), lock succeeds because
-#            wrapper stops timer+service before CLI unmounts.
+# Scenario: Four nodes, each with a 2-disk RAID1 pool.
+#   catchup:     real scrub service, seeded overdue stamp, unlock triggers catch-up.
+#   cancel:      fake long-running scrub (holds mount busy), lock succeeds because
+#                wrapper stops timer+service before CLI unmounts.
+#   resume:      real scrub on dm-delay-backed disks, cancel mid-scrub, then
+#                resume via the pool-online trigger on next unlock.
+#   concurrency: dm-delay-backed pool with saved scrub progress + overdue timer
+#                stamp; on unlock, both activation paths target braid-scrub.service.
 
 import shlex
 
@@ -24,13 +33,104 @@ pq = shlex.quote(passphrase)
 
 TIMER = "braid-scrub.timer"
 SERVICE = "braid-scrub.service"
+TRIGGER_SERVICE = "braid-scrub-resume-trigger.service"
 STAMP = "/var/lib/systemd/timers/stamp-braid-scrub.timer"
+# TODO: Play with these values to speed up test. This test is really slow.
+SCRUB_PAYLOAD_MIB = 32
+SCRUB_READ_DELAY_MS = 500
 
 
 def show(node, unit, prop):
     return node.succeed(
         "systemctl show {} -p {} --value".format(unit, prop)
     ).strip()
+
+
+def dm_delay_table(node, name, read_delay_ms=0, write_delay_ms=0):
+    raw = "/dev/disk/by-id/virtio-{}".format(name)
+    sectors = node.succeed("blockdev --getsz {}".format(raw)).strip()
+    return "0 {} delay {} 0 {} {} 0 {}".format(
+        sectors, raw, read_delay_ms, raw, write_delay_ms
+    )
+
+
+def dm_delay_create(node, name):
+    node.succeed("modprobe dm-delay")
+    node.succeed(
+        "dmsetup create {}-delay --table {}".format(
+            name, shlex.quote(dm_delay_table(node, name))
+        )
+    )
+
+
+def dm_delay_activate(node, read_delay_ms=0, write_delay_ms=0):
+    for name in ["disk1", "disk2"]:
+        node.succeed("dmsetup suspend {}-delay".format(name))
+        node.succeed(
+            "dmsetup reload {}-delay --table {}".format(
+                name, shlex.quote(dm_delay_table(node, name, read_delay_ms, write_delay_ms))
+            )
+        )
+        node.succeed("dmsetup resume {}-delay".format(name))
+
+
+def setup_resume_pool(node):
+    for name in ["disk1", "disk2"]:
+        dm_delay_create(node, name)
+        node.succeed(
+            "printf '%s' {} | cryptsetup luksFormat --batch-mode --key-file=- "
+            "--pbkdf pbkdf2 --pbkdf-force-iterations 1000 /dev/mapper/{}-delay".format(
+                pq, name
+            )
+        )
+        node.succeed(
+            "printf '%s' {} | cryptsetup open --key-file=- /dev/mapper/{}-delay braid-{}".format(
+                pq, name, name
+            )
+        )
+
+    node.succeed(
+        "mkfs.btrfs -f -d raid1 -m raid1 "
+        "/dev/mapper/braid-disk1 /dev/mapper/braid-disk2"
+    )
+    node.succeed("cryptsetup close braid-disk1")
+    node.succeed("cryptsetup close braid-disk2")
+
+
+def unlock(node):
+    node.succeed("printf '%s\\n' {} | braid unlock --passphrase-stdin".format(pq))
+
+
+def wait_unit_success_after(node, unit, old_ts, timeout=120):
+    node.wait_until_succeeds(
+        "test \"$(systemctl show {} -p ExecMainStartTimestampMonotonic --value)\" != '{}'"
+        " && test \"$(systemctl show {} -p ExecMainStartTimestampMonotonic --value)\" != '0'"
+        " && test \"$(systemctl show {} -p Result --value)\" = success"
+        " && ! systemctl is-active --quiet {}".format(unit, old_ts, unit, unit, unit),
+        timeout=timeout,
+    )
+
+
+def wait_online_stop_settled(node):
+    node.wait_until_succeeds(
+        "! systemctl is-active --quiet braid-online.service "
+        "&& ! systemctl is-active --quiet {}".format(SERVICE),
+        timeout=30,
+    )
+
+
+def disable_trigger_hook(node):
+    node.succeed("mkdir -p /run/systemd/system/{}.d".format(TRIGGER_SERVICE))
+    node.succeed(
+        "printf '%s\\n' '[Unit]' 'ConditionPathExists=/run/braid-enable-scrub-resume' "
+        "> /run/systemd/system/{}.d/skip.conf".format(TRIGGER_SERVICE)
+    )
+    node.succeed("systemctl daemon-reload")
+
+
+def enable_trigger_hook(node):
+    node.succeed("rm -f /run/systemd/system/{}.d/skip.conf".format(TRIGGER_SERVICE))
+    node.succeed("systemctl daemon-reload")
 
 
 # === catchup node: Persistent catch-up ===
@@ -125,3 +225,185 @@ with subtest("cancel: ExecStop succeeded (no false-fail in Never state)"):
     assert result == "success", f"braid-scrub.service ExecStop failed: Result={result}"
 
 cancel.shutdown()
+
+# === resume node: cancel and resume real btrfs scrub ===
+
+with subtest("resume: prepare dm-delay backed pool"):
+    resume.wait_for_unit("multi-user.target", timeout=120)
+    setup_resume_pool(resume)
+    unlock(resume)
+    resume.succeed(
+        "dd if=/dev/urandom of=/mnt/storage/scrub-payload bs=1M count={} status=none".format(
+            SCRUB_PAYLOAD_MIB
+        )
+    )
+    resume.succeed("sync")
+    dm_delay_activate(resume, read_delay_ms=SCRUB_READ_DELAY_MS)
+
+with subtest("resume: cancel preserves Aborted state across lock/unlock"):
+    resume.succeed("systemctl start {}".format(SERVICE))
+    resume.succeed(
+        "for i in $(seq 1 400); do "
+        "out=\"$(btrfs scrub status --raw /mnt/storage 2>&1 || true)\"; "
+        "if printf '%s\\n' \"$out\" | grep -Eq 'Status:[[:space:]]+running'; "
+        "then exit 0; fi; sleep 0.05; done; "
+        "printf '%s\\n' \"$out\"; exit 1"
+    )
+
+    disable_trigger_hook(resume)
+    resume.succeed("braid lock")
+    dm_delay_activate(resume)
+    unlock(resume)
+    resume.wait_until_succeeds(
+        "btrfs scrub status --raw /mnt/storage | grep -Eq 'Status:[[:space:]]+aborted'",
+        timeout=30,
+    )
+
+with subtest("resume: pool-online hook resumes a cancelled scrub"):
+    enable_trigger_hook(resume)
+    old_trigger_ts = show(resume, TRIGGER_SERVICE, "ExecMainStartTimestampMonotonic")
+    old_scrub_ts = show(resume, SERVICE, "ExecMainStartTimestampMonotonic")
+    resume.succeed("systemctl start {}".format(TRIGGER_SERVICE))
+    wait_unit_success_after(resume, TRIGGER_SERVICE, old_trigger_ts, timeout=30)
+    wait_unit_success_after(resume, SERVICE, old_scrub_ts, timeout=180)
+    status = resume.succeed("btrfs scrub status --raw /mnt/storage")
+    assert "Scrub resumed:" in status, status
+
+with subtest("resume: pool-online hook no-ops when nothing to resume"):
+    old_trigger_ts = show(resume, TRIGGER_SERVICE, "ExecMainStartTimestampMonotonic")
+    old_scrub_ts = show(resume, SERVICE, "ExecMainStartTimestampMonotonic")
+    resume.succeed("systemctl start {}".format(TRIGGER_SERVICE))
+    wait_unit_success_after(resume, TRIGGER_SERVICE, old_trigger_ts, timeout=30)
+    new_scrub_ts = show(resume, SERVICE, "ExecMainStartTimestampMonotonic")
+    assert new_scrub_ts == old_scrub_ts, (
+        "no resumable state should not start scrub service; old={}, new={}".format(
+            old_scrub_ts, new_scrub_ts
+        )
+    )
+    resume.fail("systemctl is-active {}".format(SERVICE))
+
+with subtest("resume: lock/unlock with fresh timer stamp does not start a new scrub"):
+    enable_trigger_hook(resume)
+    resume.succeed("mkdir -p /var/lib/systemd/timers")
+    resume.succeed("touch {}".format(STAMP))
+
+    resume.succeed("braid lock")
+    wait_online_stop_settled(resume)
+    old_trigger_ts = show(resume, TRIGGER_SERVICE, "ExecMainStartTimestampMonotonic")
+    old_scrub_ts = show(resume, SERVICE, "ExecMainStartTimestampMonotonic")
+    unlock(resume)
+    wait_unit_success_after(resume, TRIGGER_SERVICE, old_trigger_ts, timeout=30)
+    new_scrub_ts = show(resume, SERVICE, "ExecMainStartTimestampMonotonic")
+    assert new_scrub_ts in [old_scrub_ts, "0"], (
+        "fresh timer stamp should not start a new scrub; old={}, new={}".format(
+            old_scrub_ts, new_scrub_ts
+        )
+    )
+    resume.fail("systemctl is-active {}".format(SERVICE))
+
+with subtest("resume: lock/unlock with aged timer stamp fires scheduled scrub"):
+    dm_delay_activate(resume)
+    resume.succeed("braid lock")
+    wait_online_stop_settled(resume)
+    resume.succeed("touch -t 202501010000 {}".format(STAMP))
+    old_trigger_ts = show(resume, TRIGGER_SERVICE, "ExecMainStartTimestampMonotonic")
+    old_scrub_ts = show(resume, SERVICE, "ExecMainStartTimestampMonotonic")
+    unlock(resume)
+    wait_unit_success_after(resume, TRIGGER_SERVICE, old_trigger_ts, timeout=30)
+    wait_unit_success_after(resume, SERVICE, old_scrub_ts, timeout=120)
+
+resume.shutdown()
+
+# === concurrency node: timer and trigger coalesce on one scrub service ===
+
+# Intent: an overdue timer fire and a resumable pool-online state both target
+#   braid-scrub.service. systemd coalesces overlapping start jobs into one run;
+#   the run resumes the saved scrub and satisfies the overdue timer fire without
+#   producing a second scrub or a "Scrub is already running" error.
+# Why it exists: before the single-runner topology, two foreground btrfs scrub
+#   units could race unless an external flock serialized them.
+# Scenario: user unlocks a pool that has saved scrub progress AND is overdue
+#   for its scheduled monthly scrub. One shared scrub service run should resume
+#   progress, finish cleanly, and absorb both activation paths.
+
+with subtest("concurrency: prepare dm-delay backed pool with saved scrub progress"):
+    concurrency.wait_for_unit("multi-user.target", timeout=120)
+    setup_resume_pool(concurrency)
+    unlock(concurrency)
+    concurrency.succeed(
+        "dd if=/dev/urandom of=/mnt/storage/scrub-payload bs=1M count={} status=none".format(
+            SCRUB_PAYLOAD_MIB
+        )
+    )
+    concurrency.succeed("sync")
+
+    # Slow I/O so the in-flight scrub stays running long enough to cancel.
+    dm_delay_activate(concurrency, read_delay_ms=SCRUB_READ_DELAY_MS)
+    concurrency.succeed("systemctl start {}".format(SERVICE))
+    concurrency.succeed(
+        "for i in $(seq 1 400); do "
+        "out=\"$(btrfs scrub status --raw /mnt/storage 2>&1 || true)\"; "
+        "if printf '%s\\n' \"$out\" | grep -Eq 'Status:[[:space:]]+running'; "
+        "then exit 0; fi; sleep 0.05; done; "
+        "printf '%s\\n' \"$out\"; exit 1"
+    )
+
+    # Mask the resume trigger so `braid lock` -> next `braid unlock` does not
+    # auto-trigger resume before we have aged the timer stamp and snapshotted
+    # the pre-race timestamps.
+    disable_trigger_hook(concurrency)
+    concurrency.succeed("braid lock")
+    wait_online_stop_settled(concurrency)
+    # Reset dm-delay after cancel so the offline setup work is fast; we re-arm
+    # the delay before the actual race trigger below.
+    dm_delay_activate(concurrency)
+    concurrency.wait_until_succeeds(
+        "btrfs scrub status --raw /mnt/storage 2>/dev/null "
+        "| grep -Eq 'Status:[[:space:]]+aborted' "
+        "|| ! mountpoint -q /mnt/storage",
+        timeout=30,
+    )
+
+with subtest("concurrency: overdue timer + resumable state coalesce into one scrub"):
+    # Age the timer stamp so Persistent=true fires immediately on next unlock.
+    concurrency.succeed("mkdir -p /var/lib/systemd/timers")
+    concurrency.succeed("touch -t 202501010000 {}".format(STAMP))
+    enable_trigger_hook(concurrency)
+
+    # Re-arm dm-delay so any accidental second scrub has time to become visible
+    # through a changed ExecMainStartTimestampMonotonic.
+    dm_delay_activate(concurrency, read_delay_ms=SCRUB_READ_DELAY_MS)
+
+    old_trigger_ts = show(concurrency, TRIGGER_SERVICE, "ExecMainStartTimestampMonotonic")
+    old_scrub_ts = show(concurrency, SERVICE, "ExecMainStartTimestampMonotonic")
+
+    # Trigger the race: braid-online activates the resume trigger via WantedBy
+    # AND starts braid-scrub.timer; the timer fires immediately because
+    # Persistent=true sees the aged stamp.
+    unlock(concurrency)
+
+    wait_unit_success_after(concurrency, TRIGGER_SERVICE, old_trigger_ts, timeout=30)
+    wait_unit_success_after(concurrency, SERVICE, old_scrub_ts, timeout=300)
+
+    completed_scrub_ts = show(concurrency, SERVICE, "ExecMainStartTimestampMonotonic")
+    concurrency.succeed("sleep 5")
+    later_scrub_ts = show(concurrency, SERVICE, "ExecMainStartTimestampMonotonic")
+    assert later_scrub_ts == completed_scrub_ts, (
+        "timer and trigger should coalesce into one scrub run; completed={}, later={}".format(
+            completed_scrub_ts, later_scrub_ts
+        )
+    )
+    status = concurrency.succeed("btrfs scrub status --raw /mnt/storage")
+    assert "Scrub resumed:" in status, status
+
+with subtest("concurrency: no 'Scrub is already running' in the journal"):
+    # The race-loser's btrfs invocation would emit "Scrub is already running"
+    # (reference/btrfs-progs/cmds/scrub.c:1392-1398) on contention. The single
+    # scrub service topology prevents that; assert it never appeared.
+    concurrency.fail(
+        "journalctl -u {} -u {} --no-pager | grep -F 'Scrub is already running'".format(
+            SERVICE, TRIGGER_SERVICE
+        )
+    )
+
+concurrency.shutdown()
