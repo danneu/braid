@@ -500,7 +500,7 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
         missing_devids: pool.missing_devids.clone(),
     };
 
-    // 9. Output
+    // 10. Output
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
@@ -873,16 +873,21 @@ fn build_disk_reports<R: CommandRunner>(
             ConfigDiskState::PresentLuks { .. } => DiskStatus::Unknown,
             ConfigDiskState::PresentNotLuks => {
                 // luksUuid failed during the initial probe. Refine here for
-                // diagnostic reporting only — do NOT propagate this back into
+                // diagnostic reporting only -- do NOT propagate this back into
                 // ConfigDiskState (mutating commands like add/replace must keep
                 // seeing the coarse PresentNotLuks state to preserve their
                 // destructive-format guards).
                 match luks::probe_luks_header(runner, &cd.by_id_path.0) {
                     luks::LuksHeaderState::Unreadable => DiskStatus::LuksHeaderUnreadable,
                     luks::LuksHeaderState::Damaged => DiskStatus::LuksHeaderDamaged,
-                    // luksUuid failed but isLuks + luksDump succeeded — treat
-                    // as Damaged (the less destructive recovery suggestion).
-                    luks::LuksHeaderState::Ok => DiskStatus::LuksHeaderDamaged,
+                    // luksUuid failed but isLuks + luksDump succeeded -- the
+                    // re-probe contradicts the original failure, so the most
+                    // likely cause is a transient blip (udev settling,
+                    // momentary I/O error). Surface Unknown rather than
+                    // overclaiming Damaged: nothing in the re-probe
+                    // demonstrates damage, and braid doctor would classify
+                    // the same header as healthy via the same probe path.
+                    luks::LuksHeaderState::Ok => DiskStatus::Unknown,
                     // Probe itself could not run; collapse to the generic
                     // Unknown bucket rather than guessing at Unreadable vs
                     // Damaged.
@@ -3442,20 +3447,23 @@ mod tests {
         assert_eq!(ctx.disks[0].status, DiskStatus::LuksHeaderDamaged);
     }
 
-    /// Intent: when probe_luks_header reports Ok (luksUuid failed but both
-    /// isLuks and luksDump succeeded — an inconsistent state),
-    /// build_disk_reports must classify the disk as LuksHeaderDamaged
-    /// rather than guess.
-    ///
-    /// Why: luksUuid reads the same header blocks as luksDump, so the
-    /// observed luksUuid failure is a real signal that something is wrong.
-    /// Damaged is the less destructive recovery story (`cryptsetup repair`),
-    /// so we prefer it over the more aggressive Unreadable.
-    ///
-    /// Scenario: PresentNotLuks config disk where isLuks succeeds, luksDump
-    /// also succeeds, but the original luksUuid call failed during probe.
+    /*
+     * Intent: when probe_luks_header reports Ok after probe_config_disk saw
+     * PresentNotLuks, build_disk_reports must classify the disk as Unknown
+     * rather than LuksHeaderDamaged.
+     *
+     * Why it exists: a clean isLuks + luksDump re-probe contradicts the
+     * original luksUuid failure; the most likely cause is a transient blip, not
+     * a damaged header. braid doctor shares the same probe and would classify
+     * the disk as healthy, so labelling it Damaged produces a
+     * self-contradicting recovery flow and overclaims damage that the tools
+     * have not demonstrated.
+     *
+     * Scenario: PresentNotLuks config disk where isLuks succeeds, luksDump also
+     * succeeds, and the original luksUuid exit-non-zero was a transient failure.
+     */
     #[test]
-    fn build_disk_reports_present_not_luks_inconsistent_falls_back_to_damaged() {
+    fn build_disk_reports_present_not_luks_inconsistent_falls_back_to_unknown() {
         let config_disks = cfg_present_not_luks("disk1", "/dev/disk/by-id/disk1");
         let runner = MockRunner::default()
             .with_output(
@@ -3479,7 +3487,7 @@ mod tests {
 
         let ctx = build_disk_reports(&runner, &config_disks, &pool_empty(), &stats);
         assert_eq!(ctx.disks.len(), 1);
-        assert_eq!(ctx.disks[0].status, DiskStatus::LuksHeaderDamaged);
+        assert_eq!(ctx.disks[0].status, DiskStatus::Unknown);
     }
 
     // =======================================================================
@@ -3584,6 +3592,17 @@ mod tests {
         assert!(!human.contains("Errors:"), "got:\n{human}");
     }
 
+    /*
+     * Intent: Unknown remains a non-alarming, non-prescriptive bucket in the
+     * verbose human output.
+     *
+     * Why it exists: callers rely on Unknown meaning braid could not reconcile
+     * available metadata, not that recovery should assume header damage.
+     *
+     * Scenario: verbose status renders a config disk with no resolved metadata
+     * as UNKNOWN, with metadata unavailable, and without damage or doctor
+     * guidance.
+     */
     #[test]
     fn status_verbose_unknown_disk() {
         let human_disks = vec![HumanDisk {
@@ -3623,6 +3642,18 @@ mod tests {
         let human = format_status_human(&report, None, Some(&human_disks));
         assert!(human.contains("UNKNOWN"), "got:\n{human}");
         assert!(human.contains("metadata unavailable"), "got:\n{human}");
+        assert!(
+            !human.contains("LUKS HEADER DAMAGED"),
+            "Unknown must not surface a damaged-header label; got:\n{human}"
+        );
+        assert!(
+            !human.contains("LUKS HEADER UNREADABLE"),
+            "Unknown must not surface an unreadable-header label; got:\n{human}"
+        );
+        assert!(
+            !human.contains("braid doctor"),
+            "Unknown must not push users toward doctor recovery; got:\n{human}"
+        );
     }
 
     // =======================================================================
