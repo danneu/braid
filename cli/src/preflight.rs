@@ -187,6 +187,66 @@ pub(crate) fn check_no_exclusive_op<F: Filesystem + ?Sized>(
     }
 }
 
+/// Names of `/sys/fs/btrfs/` entries that are not per-filesystem fsid dirs
+/// and therefore do not expose `exclusive_operation`. Source:
+/// `reference/linux/fs/btrfs/sysfs.c:29-47`.
+///
+/// Allowlist (rather than "skip any NotFound") so a real fsid dir whose
+/// `exclusive_operation` disappears mid-scan -- e.g. concurrent unmount --
+/// surfaces as `ExclusiveOpError::Read` instead of being silently treated
+/// as a pseudo-dir. The fail-closed contract requires that every listed
+/// fsid is actually checked.
+const BTRFS_SYSFS_NON_FSID_ENTRIES: &[&str] = &["features", "debug"];
+
+/// Check `/sys/fs/btrfs/*/exclusive_operation` across every btrfs filesystem
+/// the kernel exposes, returning busy as soon as any one reports a non-`none`
+/// state.
+///
+/// Used by `braid idle` to avoid an extra `findmnt` + `btrfs filesystem show`
+/// round trip just to discover the pool's UUID. Semantics: any in-flight
+/// exclusive op on any btrfs fs on the host counts as busy. On a typical
+/// braid host (one btrfs filesystem, the pool) this is identical to a
+/// fsid-scoped check; on a host with btrfs root alongside the pool the
+/// reported `BusyReason` may name an op on the non-pool fs, but the suspend
+/// decision is still correct -- autosuspend's job is to err conservative.
+///
+/// Skips known non-fsid entries (`features`, `debug`) by name before any
+/// read; see `BTRFS_SYSFS_NON_FSID_ENTRIES`. Every other listed entry is
+/// treated as a fsid dir, and any read failure on it -- including
+/// `NotFound` from a concurrent unmount race -- is `ExclusiveOpError::Read`.
+///
+/// Fail-closed: list_dir IO errors, any read error on a fsid dir,
+/// unrecognized parser values, and an empty `/sys/fs/btrfs/` after the
+/// caller has already confirmed a btrfs mount all return `Err`.
+pub(crate) fn check_any_btrfs_exclusive_op<F: Filesystem + ?Sized>(
+    fs: &F,
+) -> Result<(), ExclusiveOpError> {
+    let entries = fs
+        .list_dir("/sys/fs/btrfs")
+        .map_err(ExclusiveOpError::Read)?;
+    let mut found_fsid_dir = false;
+    for entry in entries {
+        if BTRFS_SYSFS_NON_FSID_ENTRIES.contains(&entry.as_str()) {
+            continue;
+        }
+        let path = format!("/sys/fs/btrfs/{entry}/exclusive_operation");
+        let contents = fs.read_to_string(&path).map_err(ExclusiveOpError::Read)?;
+        found_fsid_dir = true;
+        let op = ExclusiveOp::parse(contents.trim())
+            .ok_or_else(|| ExclusiveOpError::Unrecognized(contents.trim().to_owned()))?;
+        if op != ExclusiveOp::None {
+            return Err(ExclusiveOpError::Busy(op));
+        }
+    }
+    if !found_fsid_dir {
+        return Err(ExclusiveOpError::Read(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "no btrfs filesystem found in /sys/fs/btrfs",
+        )));
+    }
+    Ok(())
+}
+
 /// Refuse if the pool is mounted read-only.
 /// Runs its own findmnt probe — avoids adding mount_options to PoolState
 /// and touching all 7+ PoolState construction sites.

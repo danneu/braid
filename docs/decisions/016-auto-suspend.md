@@ -48,7 +48,17 @@ Octal-escaped mount-point fields (`\040`, `\011`, `\012`, `\134`) are decoded be
 
 IO errors (file unreadable, EIO), malformed mountinfo lines, and ambiguous duplicate target entries all propagate as `IdleError::MountInfo`, surface as exit 2, and block suspend. "Don't know" never becomes "allow suspend".
 
-Note: `cmd_idle` continues to call `probe_fsid` after the mount check, and `probe_fsid` still uses `findmnt` internally. That call is fail-closed at its own callsite (`probe_fsid` returns `ProbeError::PoolDevice` when the target is absent, which becomes `IdleError::Probe` and exit 2). Hardening `probe_fsid` and other findmnt callers is tracked separately.
+### Exclusive-op probe scans `/sys/fs/btrfs/*` directly
+
+After the mount check passes, `cmd_idle` reads `exclusive_operation` from every entry under `/sys/fs/btrfs/` via `preflight::check_any_btrfs_exclusive_op` and returns busy as soon as any one is non-`none`. No `findmnt` or `btrfs filesystem show` subprocesses are invoked on this path; only the scrub probe (`btrfs scrub status`) remains, because scrub is not part of the kernel's `exclop_def[]` set (`reference/btrfs-progs/common/utils.c:1186-1194`).
+
+Semantics: any in-flight exclusive op on any btrfs filesystem on the host counts as busy. On a typical braid host (one btrfs filesystem, the pool) this is identical to a fsid-scoped check. On a host with btrfs root alongside the pool the reported `BusyReason` may name an op on the non-pool fs, but the suspend decision is still correct -- autosuspend's job is to err conservative, and "do not suspend while any btrfs is mid-balance/replace/etc." is the right answer regardless of which fs is busy.
+
+Pseudo-dir skip is by name allowlist (`features`, `debug`), not by "absorb any NotFound on read." The kernel only creates `exclusive_operation` under per-fsid `<uuid>/` dirs (`reference/linux/fs/btrfs/sysfs.c:29-47`), but treating a missing attribute on any other listed entry as "must have been a pseudo-dir" would silently swallow a real failure mode: a fsid dir whose attribute disappears mid-scan during a concurrent unmount race. Under the allowlist, that race surfaces as `ExclusiveOpError::Read` and blocks suspend.
+
+Fail-closed branches: `list_dir("/sys/fs/btrfs")` IO errors, any read error on a non-allowlisted entry's `exclusive_operation` (including `NotFound`), unrecognized parser values, and an empty `/sys/fs/btrfs/` after the mount check passed all surface as `IdleError::Exclop` and exit 2.
+
+`probe::probe_fsid` is no longer reached from `cmd_idle`. It remains in use by non-idle callers (`lock.rs` and the preflight pipelines that need a UUID for other purposes), and is out of scope for this gate.
 
 ### SSH always on, SMB/NFS auto-detected
 

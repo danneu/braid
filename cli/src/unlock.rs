@@ -250,8 +250,7 @@ mod tests {
 
     const MOUNTINFO_BTRFS: &str =
         "36 35 0:32 / /mnt/storage rw shared:1 - btrfs /dev/mapper/braid-disk1 rw\n";
-    const MOUNTINFO_WITHOUT_TARGET: &str =
-        "26 25 0:23 / / rw shared:1 - ext4 /dev/sda1 rw\n";
+    const MOUNTINFO_WITHOUT_TARGET: &str = "26 25 0:23 / / rw shared:1 - ext4 /dev/sda1 rw\n";
 
     struct MockFs {
         paths: Vec<String>,

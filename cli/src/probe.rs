@@ -1266,18 +1266,17 @@ mod tests {
     #[test]
     fn probe_pool_non_mapper_device() {
         let fs = MockFs::with_mountinfo(&mountinfo_btrfs());
-        let runner = MockRunner::default()
-            .with_output(
-                CmdRequest::BtrfsFilesystemShow {
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
-                },
-                ok_raw(
-                    "btrfs filesystem show /mnt/storage",
-                    "Label: none  uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
+        let runner = MockRunner::default().with_output(
+            CmdRequest::BtrfsFilesystemShow {
+                mount_point: MountPoint("/mnt/storage".to_owned()),
+            },
+            ok_raw(
+                "btrfs filesystem show /mnt/storage",
+                "Label: none  uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
                      \tTotal devices 1 FS bytes used 1.00GiB\n\
                      \tdevid    1 size 10.00GiB used 2.00GiB path /dev/sda1\n",
-                ),
-            );
+            ),
+        );
 
         let result = probe_pool(&runner, &fs, &mp());
         assert!(result.is_err());
@@ -1402,17 +1401,16 @@ mod tests {
     #[test]
     fn probe_pool_errors_on_missing_fsid() {
         let fs = MockFs::with_mountinfo(&mountinfo_btrfs());
-        let runner = MockRunner::default()
-            .with_output(
-                CmdRequest::BtrfsFilesystemShow {
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
-                },
-                ok_raw(
-                    "btrfs filesystem show /mnt/storage",
-                    "\tTotal devices 1 FS bytes used 1.00GiB\n\
+        let runner = MockRunner::default().with_output(
+            CmdRequest::BtrfsFilesystemShow {
+                mount_point: MountPoint("/mnt/storage".to_owned()),
+            },
+            ok_raw(
+                "btrfs filesystem show /mnt/storage",
+                "\tTotal devices 1 FS bytes used 1.00GiB\n\
                      \tdevid    1 size 10.00GiB used 2.00GiB path /dev/mapper/braid-toshiba\n",
-                ),
-            );
+            ),
+        );
 
         let result = probe_pool(&runner, &fs, &mp());
         assert!(result.is_err());
