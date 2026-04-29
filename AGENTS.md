@@ -36,7 +36,7 @@ Unlock:
 - `tests/` — NixOS VM tests (`.py` scripts, `module/` NixOS configs, `hw/` hardware canary tests)
 - `docs/decisions/` — architecture decision records
 - `scripts/` — helper scripts (fetch references, destroy pool)
-- `reference/` — upstream source checkouts (`btrfs-progs`, `systemd`, `autosuspend`, `cryptsetup`, `util-linux`, `smartmontools`) for reading, not shipped. Refresh with `just fetch-references`.
+- `reference/` — upstream source checkouts for reading, not shipped. See [Reference source](#reference-source) below for the full inventory. Refresh with `just fetch-references`.
 
 ## Systemd Lifecycle
 
@@ -96,6 +96,10 @@ Before searching the web for tool behavior, consult local resources first. `refe
 - **linux** — [torvalds/linux](https://github.com/torvalds/linux)
   - **Source:** [`reference/linux/`](reference/linux/) — kernel source at the exact version pinned in nixpkgs. Look in `fs/btrfs/` for btrfs-specific I/O scheduling, raid handling, and read balancing logic. `drivers/md/` for raid and block layer behavior.
   - **Use for:** Understanding kernel-level I/O behavior, raid1 read balancing, mount semantics, block device management.
+- **coreutils** — [coreutils/coreutils](https://github.com/coreutils/coreutils) (GitHub mirror of GNU Coreutils)
+  - **Source:** [`reference/coreutils/src/`](reference/coreutils/src/) — one C file per utility (e.g. `src/timeout.c`, `src/realpath.c`, `src/stat.c`, `src/chmod.c`, `src/chown.c`, `src/head.c`, `src/base64.c`). Read these to confirm what each helper actually guarantees -- e.g. `timeout(1)` exit-code semantics and signal forwarding live in `src/timeout.c`, not in any manpage.
+  - **Docs:** [`reference/coreutils/doc/coreutils.texi`](reference/coreutils/doc/coreutils.texi) — the canonical reference manual (per-utility sections inside one big Texinfo file). Per-utility manpage stubs live in [`reference/coreutils/man/`](reference/coreutils/man/) as `*.x` (e.g. `man/timeout.x`); these are short prologues that get merged with `--help` output by `help2man` at build time, so the full prose is in `coreutils.texi`.
+  - **Use for:** Any time braid code or a plan reasons about a Coreutils helper's behavior beyond the obvious — exit codes, signal handling, race windows, `--help` text, edge cases. Especially `timeout(1)`: `timeout` cannot bound an uninterruptible kernel wait, and the proof is in `src/timeout.c`'s use of `kill()` against a userspace child.
 
 ### btrfs docs
 
