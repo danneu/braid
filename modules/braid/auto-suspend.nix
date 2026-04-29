@@ -2,7 +2,11 @@
 #
 # Uses autosuspend (Python daemon from nixpkgs) for the idle countdown and
 # suspend/wake lifecycle. braid provides `braid idle` as an ExternalCommand
-# check for btrfs-specific activity (scrub, balance, replace).
+# check for btrfs-specific activity: a running scrub plus any kernel
+# exclusive operation (balance, device add, device remove, device replace,
+# resize, swap activate). The exclop states are read from
+# /sys/fs/btrfs/<fsid>/exclusive_operation; scrub is checked separately
+# because it is not in the kernel exclop set.
 #
 # SSH and local-session checks are always on. SMB and NFS checks are
 # auto-detected from whether those services are enabled.
@@ -66,8 +70,9 @@ in
 
       checks = lib.mkMerge [
         {
-          # btrfs exclusive ops (scrub, balance, replace).
-          # Fully qualified paths — autosuspend runs this outside braid's wrapper,
+          # btrfs activity: scrub plus any kernel exclusive operation
+          # (balance, device add/remove/replace, resize, swap activate).
+          # Fully qualified paths -- autosuspend runs this outside braid's wrapper,
           # so PATH is not guaranteed to include coreutils or a shell.
           BraidPool = {
             class = "ExternalCommand";

@@ -63,7 +63,7 @@ pub fn check_no_pending_operation(paths: &StatePaths) -> Result<(), String> {
 /// String values follow `exclop_def[]` in btrfs-progs
 /// `common/utils.c:1186-1194` (vendored in `reference/btrfs-progs/`).
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum ExclusiveOp {
+pub(crate) enum ExclusiveOp {
     None,
     Balance,
     BalancePaused,
@@ -109,7 +109,7 @@ impl fmt::Display for ExclusiveOp {
 }
 
 #[derive(Debug, thiserror::Error)]
-enum ExclusiveOpError {
+pub(crate) enum ExclusiveOpError {
     #[error("an exclusive operation is already running: {0}")]
     Busy(ExclusiveOp),
     #[error("cannot read exclusive operation status: {0}")]
@@ -173,7 +173,7 @@ fn check_exclusive_op_with_policy<F: Filesystem + ?Sized>(
 /// Returns `Ok(())` if the sysfs file reads `"none"`.
 /// Returns `Err(Busy(op))` for any other recognized state.
 /// Fail-closed: unrecognized values and read errors are errors.
-fn check_no_exclusive_op<F: Filesystem + ?Sized>(
+pub(crate) fn check_no_exclusive_op<F: Filesystem + ?Sized>(
     fs: &F,
     fsid: &str,
 ) -> Result<(), ExclusiveOpError> {

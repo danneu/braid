@@ -1341,10 +1341,12 @@ mod tests {
     // Intent: Lock the `-1` flag into BtrfsReplaceStatus's argv so the cmd
     // helper always asks btrfs for a single status snapshot.
     // Why: Without `-1`, btrfs replace status loops with sleep(1) on the
-    // STARTED state until the kernel reports FINISHED — see
-    // reference/btrfs-progs/cmds/replace.c:451-505. Every braid caller
-    // (idle, progress, recover) blocks for the entire duration of an
-    // in-flight replace, breaking the autosuspend integration in idle.rs.
+    // STARTED state until the kernel reports FINISHED -- see
+    // reference/btrfs-progs/cmds/replace.c:451-505. The remaining braid
+    // callers (progress, recover) would block for the entire duration of
+    // an in-flight replace. `braid idle` used to be one of those callers;
+    // it now reads /sys/fs/btrfs/<fsid>/exclusive_operation instead, but
+    // this contract still matters for the rest.
     // Scenario: a future refactor strips `-1` from the args (e.g. while
     // adding a continuous-poll variant). This test fails immediately.
     fn btrfs_replace_status_includes_minus_one() {

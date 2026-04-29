@@ -117,41 +117,42 @@ with subtest("Start replace and wait for in-flight progress"):
         "inhibitor is held during the replace. Last status:\n" + last_status
     )
 
-# --- Phase 3a: braid idle must return promptly + report replace running ---
+# --- Phase 3a: braid idle must return promptly + detect the replace via sysfs ---
 #
-# Intent: Pin that BtrfsReplaceStatus uses `-1`. Without it, btrfs replace
-# status loops with sleep(1) on the STARTED state until the kernel reports
-# FINISHED — see reference/btrfs-progs/cmds/replace.c:451-505. Every braid
-# caller of BtrfsReplaceStatus (idle, progress, recover) inherits that
-# blocking behavior; this assertion catches it via the autosuspend
-# integration point, which is the production-facing regression.
+# Intent: End-to-end check that `braid idle` detects an in-flight replace
+# via /sys/fs/btrfs/<fsid>/exclusive_operation and returns busy. The 5 s
+# timeout is a promptness check on the sysfs read path -- a regression
+# that re-introduces a blocking subprocess probe (e.g. dropping `-1` from
+# BtrfsReplaceStatus and calling it from idle again) would surface here.
 #
-# Why it exists: cli/src/cmd.rs was missing the `-1` flag in
-# CmdRequest::BtrfsReplaceStatus, so `braid idle` blocked indefinitely
-# when a replace was in flight, preventing the autosuspend integration
-# from making any decision at all. The cmd-helper unit test
-# btrfs_replace_status_includes_minus_one guards the args directly; this
-# subtest is the end-to-end pair, exercising the cmd helper + parser +
-# idle wiring against live tool output.
+# Why it exists: idle.rs used to drive BtrfsReplaceStatus directly, and
+# cli/src/cmd.rs was missing the `-1` flag, so `braid idle` blocked
+# indefinitely when a replace was in flight. The fix moved idle.rs to
+# read sysfs (which never blocks), but the regression risk remains for
+# the other callers of BtrfsReplaceStatus (progress, recover); the
+# `-1` contract is now pinned in the cmd-helper unit test
+# btrfs_replace_status_includes_minus_one. This subtest is the
+# end-to-end pair for the new sysfs path: cmd helper (probe_fsid) +
+# Filesystem read + idle wiring against live tool output.
 #
 # Scenario: replace is mid-flight (verified above). Operator's autosuspend
 # daemon polls `braid idle`. The call must return within seconds and
-# report `busy: replace running (X.Y%)`.
-with subtest("braid idle returns promptly and reports replace running"):
+# report a device-replace busy reason.
+with subtest("braid idle returns promptly and detects in-flight replace via sysfs"):
     idle_exit, idle_out = machine.execute("timeout 5 braid idle 2>&1")
     print(f"=== braid idle during replace (exit {idle_exit}) ===")
     print(idle_out)
     assert idle_exit != 124, (
         "braid idle did not return within 5 s while a replace was in "
-        "flight — BtrfsReplaceStatus is blocking. Check that "
-        "cli/src/cmd.rs builds the command with the `-1` flag."
+        "flight -- a blocking subprocess probe was likely re-introduced. "
+        "Check cli/src/idle.rs and cli/src/cmd.rs."
     )
     assert idle_exit == 1, (
         f"braid idle should report busy (exit 1) during a replace, "
         f"got exit {idle_exit}: {idle_out}"
     )
-    assert "replace running" in idle_out.lower(), (
-        f"braid idle did not report replace as the busy reason: {idle_out}"
+    assert "device replace" in idle_out.lower(), (
+        f"braid idle did not report device replace as the busy reason: {idle_out}"
     )
 
 # --- Phase 4: Assert the inhibitor is held while the replace is in flight ---

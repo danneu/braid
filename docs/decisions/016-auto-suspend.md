@@ -20,12 +20,12 @@ braid configures autosuspend via the existing NixOS module (`services.autosuspen
 
 ### `braid idle` as the btrfs check
 
-A separate CLI command (`braid idle`) checks for btrfs exclusive operations (scrub, balance, replace). autosuspend calls it via `ExternalCommand` check.
+A separate CLI command (`braid idle`) checks for an in-flight scrub plus any kernel exclusive operation (`balance`, `balance paused`, `device add`, `device remove`, `device replace`, `resize`, `swap activate`). The exclusive-operation states are read from `/sys/fs/btrfs/<fsid>/exclusive_operation` -- the same source `preflight.rs` uses for mutating commands -- so the two code paths cannot disagree about what counts as busy. Scrub is read separately via `btrfs scrub status` because scrub is not in the kernel's exclusive-operation set (see `reference/btrfs-progs/common/utils.c:1188-1197`). autosuspend calls `braid idle` via `ExternalCommand` check.
 
 Why a separate command rather than inline shell in autosuspend config:
-- braid already has robust parsers for all btrfs status commands
-- Fail-closed behavior (exit 2 on any probe error → block suspend) is easier to get right in Rust than in shell
-- Testable with unit tests via MockRunner
+- braid already has the parser for `btrfs scrub status` and the sysfs read helper
+- Fail-closed behavior (exit 2 on any probe error -> block suspend) is easier to get right in Rust than in shell
+- Testable with unit tests via MockRunner + a `Filesystem` mock
 
 ### Exit code inversion
 

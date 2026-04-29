@@ -128,7 +128,7 @@ Requires a wired ethernet interface -- WiFi interfaces are rejected at evaluatio
 
 Activity checks that block suspend:
 
-- `braid idle` -- scrub, balance, or replace in progress
+- `braid idle` -- scrub or any btrfs kernel exclusive operation (balance, device add/remove/replace, resize, swap activate)
 - Active SSH sessions
 - Active local sessions (TTY/X11/Wayland)
 - SMB connections (auto-detected if `services.samba` is enabled)

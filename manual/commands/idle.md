@@ -6,7 +6,7 @@ Check if the pool has any active operations. Designed for autosuspend integratio
 
 ## When to use it
 
-- As an autosuspend check to prevent the system from sleeping during scrub, balance, or replace operations
+- As an autosuspend check to prevent the system from sleeping during a scrub or any btrfs exclusive operation (balance, device add, device remove, device replace, resize, swap activate)
 - In scripts that need to wait for the pool to be idle before proceeding
 
 ## Basic example
@@ -26,17 +26,25 @@ idle: pool is idle
 | Exit code | Meaning |
 |---|---|
 | **0** | Pool is idle (no operations running), OR pool is offline |
-| **1** | Pool is busy (scrub, balance, or replace is running) |
+| **1** | Pool is busy (a scrub or btrfs exclusive operation is running) |
 | **2** | Error (could not determine pool state) |
 
 The busy reason is printed to stdout:
 
 ```
 busy: scrub running (45%)
-busy: balance running (70% left)
-busy: balance paused (58% left)
-busy: replace running (45.3%)
+busy: balance running
+busy: balance paused
+busy: device add in progress
+busy: device remove in progress
+busy: device replace in progress
+busy: resize in progress
+busy: swap activate in progress
 ```
+
+Only the scrub line carries a percentage. The other states come from
+`/sys/fs/btrfs/<fsid>/exclusive_operation`, which reports the active
+operation but not its progress.
 
 When the pool is offline (not mounted), exit code is 0 -- there is nothing to protect, so suspend is safe.
 
@@ -56,10 +64,9 @@ The fail-closed design means that if the check itself errors (exit 2), autosuspe
 
 1. Checks if the pool is mounted (via `findmnt`)
 2. If not mounted: returns idle (exit 0)
-3. Checks scrub status (`btrfs scrub status`)
-4. Checks balance status (`btrfs balance status`)
-5. Checks replace status (`btrfs replace status`)
-6. Returns busy on the first active operation found (short-circuits -- does not check remaining operations)
+3. Checks scrub status via `btrfs scrub status` (scrub is not in the kernel exclusive-operation set, so sysfs cannot detect it)
+4. Reads `/sys/fs/btrfs/<fsid>/exclusive_operation` for any other active exclusive operation: `balance`, `balance paused`, `device add`, `device remove`, `device replace`, `resize`, `swap activate`
+5. Returns busy on the first active operation found (short-circuits -- the scrub probe runs first so the common scrub-in-progress case skips the sysfs read)
 
 ## Related commands
 

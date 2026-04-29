@@ -18,7 +18,7 @@ The NAS stays awake while any of these are true:
 
 | Check | What it detects |
 | --- | --- |
-| **braid idle** | btrfs exclusive operations: scrub, balance, replace |
+| **braid idle** | scrub plus any btrfs kernel exclusive operation (balance, device add/remove/replace, resize, swap activate) -- the latter via `/sys/fs/btrfs/<fsid>/exclusive_operation` |
 | **SSH** | Active SSH connections (port 22) |
 | **Local sessions** | TTY, X11, or Wayland sessions (via logind) |
 | **Samba** | Active SMB clients (auto-detected, only if Samba is enabled) |
