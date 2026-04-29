@@ -24,7 +24,7 @@ A separate CLI command (`braid idle`) checks for an in-flight scrub plus any ker
 
 Why a separate command rather than inline shell in autosuspend config:
 - braid already has the parser for `btrfs scrub status` and the sysfs read helper
-- Fail-closed behavior (exit 2 on any probe error -> block suspend) is easier to get right in Rust than in shell
+- Fail-closed behavior (probe failures map to `Busy(Unknown)` -> exit 1 -> block suspend; setup/config errors stay at exit 2 and also block via `!`) is easier to get right in Rust than in shell
 - Testable with unit tests via MockRunner + a `Filesystem` mock
 
 ### Exit code inversion
@@ -32,8 +32,8 @@ Why a separate command rather than inline shell in autosuspend config:
 `braid idle` follows natural Unix convention (exit 0 = success = "yes, idle"). autosuspend's ExternalCommand convention is inverted (exit 0 = activity detected). The NixOS module bridges this with `bash -c '! braid idle'`:
 
 - braid exit 0 (idle) -> `!` -> exit 1 -> autosuspend: allow suspend
-- braid exit 1 (busy) -> `!` -> exit 0 -> autosuspend: block suspend
-- braid exit 2 (error) -> `!` -> exit 0 -> autosuspend: block suspend (fail-closed)
+- braid exit 1 (busy or probe failure) -> `!` -> exit 0 -> autosuspend: block suspend (fail-closed)
+- braid exit 2 (setup error) -> `!` -> exit 0 -> autosuspend: block suspend (fail-closed)
 - braid idle signal-killable overrun >10s -> `timeout -k 2 10` (inside bash) returns non-zero -> `!` -> exit 0 -> autosuspend: block suspend (fail-closed)
 
 `timeout` must be **inside** `bash -c` so its non-zero overrun result is inverted by `!`. An outer `timeout` (`timeout -k 2 10 bash -c '! braid idle'`) would fail open: bash gets killed before `!` runs, autosuspend sees the non-zero timeout result and treats it as no activity. Coreutils' `timeout` sends TERM at the main deadline and `-k 2` escalates to KILL two seconds later for processes that ignore or delay TERM (see `reference/coreutils/src/timeout.c`).
@@ -46,7 +46,7 @@ Scope of the timeout invariant: this covers signal-killable command overruns (pa
 
 Octal-escaped mount-point fields (`\040`, `\011`, `\012`, `\134`) are decoded before comparison so configured mount paths containing whitespace match correctly.
 
-IO errors (file unreadable, EIO), malformed mountinfo lines, and ambiguous duplicate target entries all propagate as `IdleError::MountInfo`, surface as exit 2, and block suspend. "Don't know" never becomes "allow suspend".
+IO errors (file unreadable, EIO), malformed mountinfo lines, and ambiguous duplicate target entries surface as `Busy(BusyReason::Unknown)`, exit 1, and block suspend. "Don't know" never becomes "allow suspend".
 
 ### Exclusive-op probe scans `/sys/fs/btrfs/*` directly
 
@@ -56,7 +56,7 @@ Semantics: any in-flight exclusive op on any btrfs filesystem on the host counts
 
 Pseudo-dir skip is by name allowlist (`features`, `debug`), not by "absorb any NotFound on read." The kernel only creates `exclusive_operation` under per-fsid `<uuid>/` dirs (`reference/linux/fs/btrfs/sysfs.c:29-47`), but treating a missing attribute on any other listed entry as "must have been a pseudo-dir" would silently swallow a real failure mode: a fsid dir whose attribute disappears mid-scan during a concurrent unmount race. Under the allowlist, that race surfaces as `ExclusiveOpError::Read` and blocks suspend.
 
-Fail-closed branches: `list_dir("/sys/fs/btrfs")` IO errors, any read error on a non-allowlisted entry's `exclusive_operation` (including `NotFound`), unrecognized parser values, and an empty `/sys/fs/btrfs/` after the mount check passed all surface as `IdleError::Exclop` and exit 2.
+Fail-closed branches: `list_dir("/sys/fs/btrfs")` IO errors, any read error on a non-allowlisted entry's `exclusive_operation` (including `NotFound`), unrecognized parser values, and an empty `/sys/fs/btrfs/` after the mount check passed all surface as `Busy(BusyReason::Unknown)` and exit 1.
 
 `probe::probe_fsid` is no longer reached from `cmd_idle`. It remains in use by non-idle callers (`lock.rs` and the preflight pipelines that need a UUID for other purposes), and is out of scope for this gate.
 

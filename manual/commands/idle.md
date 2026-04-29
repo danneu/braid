@@ -31,9 +31,9 @@ idle: pool is offline
 
 | Exit code | Meaning |
 |---|---|
-| **0** | Pool is idle (no operations running), OR pool is offline |
-| **1** | Pool is busy (a scrub or btrfs exclusive operation is running) |
-| **2** | Error (could not determine pool state) |
+| **0** | Pool is idle, or pool is offline |
+| **1** | Pool is busy (running op) or pool state could not be determined |
+| **2** | Setup error -- config could not be read |
 
 The busy reason is printed to stdout:
 
@@ -46,11 +46,16 @@ busy: device remove in progress
 busy: device replace in progress
 busy: resize in progress
 busy: swap activate in progress
+busy: unknown (<error>)
 ```
 
-Only the scrub line carries a percentage. The other states come from
-`/sys/fs/btrfs/<fsid>/exclusive_operation`, which reports the active
-operation but not its progress.
+Only the scrub line carries a percentage. The named btrfs operation states
+come from scanning `/sys/fs/btrfs/*/exclusive_operation`, which reports the
+active operation but not its progress.
+
+`busy: unknown (<error>)` is printed when a probe failed (mountinfo,
+scrub command/parser, sysfs scan, etc). The parenthesized message is the
+underlying error.
 
 When the pool is offline (not mounted), exit code is 0 -- there is nothing to protect, so suspend is safe.
 
@@ -70,17 +75,17 @@ Each piece of the block is load-bearing:
 - `enabled = true` is required. autosuspend's raw-INI parser defaults `enabled` to `false` and silently skips the section otherwise. (The NixOS module submodule defaults this to true, which is why the in-tree module form omits it.)
 - `class = ExternalCommand` is the exported activity-check class in autosuspend's plugin registry. It runs `command` via the shell and treats exit 0 as "activity detected" (block suspend), non-zero as "no activity" (allow suspend).
 - The leading `!` inverts `braid idle`'s exit codes so autosuspend sees what it expects:
-  - `braid idle` exits 0 (idle)  -> `!` -> 1 -> autosuspend allows suspend
-  - `braid idle` exits 1 (busy)  -> `!` -> 0 -> autosuspend blocks suspend
-  - `braid idle` exits 2 (error) -> `!` -> 0 -> autosuspend blocks suspend (fail-closed)
+  - `braid idle` exits 0 (idle) -> `!` -> 1 -> autosuspend allows suspend
+  - `braid idle` exits 1 (busy or probe failure) -> `!` -> 0 -> autosuspend blocks suspend
+  - `braid idle` exits 2 (setup error) -> `!` -> 0 -> autosuspend blocks suspend (fail-closed)
 - The inner `timeout -k 2 10` bounds signal-killable overruns -- e.g. a parser regression, a slow userspace probe, or network-FS latency -- by sending `TERM` after 10s and escalating to `KILL` two seconds later for processes that ignore or delay `TERM`. It must be *inside* the `!`-inverted command, not outside it: an overrun produces a non-zero exit which `!` then flips to 0, preserving the fail-closed invariant. An outer timeout would fail open because the shell gets killed before `!` runs. Uninterruptible kernel waits (a process stuck in `D` state) are out of scope for `timeout(1)`; autosuspend stalls until the syscall returns and the system stays awake by virtue of not deciding.
 
 ## What happens under the hood
 
-1. Checks if the pool is mounted (via `findmnt`)
+1. Checks if the pool is mounted (via `/proc/self/mountinfo`)
 2. If not mounted: returns idle (exit 0)
 3. Checks scrub status via `btrfs scrub status` (scrub is not in the kernel exclusive-operation set, so sysfs cannot detect it)
-4. Reads `/sys/fs/btrfs/<fsid>/exclusive_operation` for any other active exclusive operation: `balance`, `balance paused`, `device add`, `device remove`, `device replace`, `resize`, `swap activate`
+4. Reads `/sys/fs/btrfs/*/exclusive_operation` for any active exclusive operation on any btrfs filesystem: `balance`, `balance paused`, `device add`, `device remove`, `device replace`, `resize`, `swap activate`
 5. Returns busy on the first active operation found (short-circuits -- the scrub probe runs first so the common scrub-in-progress case skips the sysfs read)
 
 ## Related commands

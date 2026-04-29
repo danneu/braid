@@ -41,7 +41,7 @@ enum Commands {
     /// Enroll a binary keyfile into LUKS slot 1 on all pool disks
     #[command(name = "enroll")]
     EnrollKeyFile(EnrollKeyFileArgs),
-    /// Check if pool is idle (no scrub or btrfs exclusive operation): exit 0 = idle, exit 1 = busy, exit 2 = error
+    /// Check if pool is idle (no scrub or btrfs exclusive operation): exit 0 = idle, exit 1 = busy or probe failure, exit 2 = setup error
     Idle,
     /// Internal: invoked by `braid-scrub.service` ExecStop during lock/shutdown
     /// to cancel an in-flight scrub. Probes scrub state via the typed parser
@@ -547,21 +547,17 @@ fn main() {
             let runner = RealRunner;
             let fs = braid_cli::probe::RealFilesystem;
             match braid_cli::idle::cmd_idle(&runner, &fs, config.mount_point()) {
-                Ok(braid_cli::idle::IdleResult::PoolOffline) => {
+                braid_cli::idle::IdleResult::PoolOffline => {
                     println!("idle: pool is offline");
                     std::process::exit(0);
                 }
-                Ok(braid_cli::idle::IdleResult::Idle) => {
+                braid_cli::idle::IdleResult::Idle => {
                     println!("idle: pool is idle");
                     std::process::exit(0);
                 }
-                Ok(braid_cli::idle::IdleResult::Busy(reason)) => {
+                braid_cli::idle::IdleResult::Busy(reason) => {
                     println!("busy: {reason}");
                     std::process::exit(1);
-                }
-                Err(e) => {
-                    print_cli_error(&e.to_string());
-                    std::process::exit(2);
                 }
             }
         }
