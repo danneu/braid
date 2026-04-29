@@ -75,7 +75,6 @@ with subtest("Healthy RAID1 summary"):
     assert "Free:" in output, f"Expected 'Free:':\n{output}"
     assert "scrub" in output.lower(), f"Expected 'scrub':\n{output}"
     assert "missing" not in output.lower(), f"Unexpected 'missing':\n{output}"
-    assert "new" not in output.lower(), f"Unexpected 'new':\n{output}"
     # Per-disk detail (always shown)
     lines = output.splitlines()
     for disk in ["disk1", "disk2", "disk3"]:

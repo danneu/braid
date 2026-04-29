@@ -155,7 +155,6 @@ pub enum DiskStatus {
     LuksHeaderUnreadable,
     LuksHeaderDamaged,
     Unknown,
-    New,
 }
 
 impl std::fmt::Display for DiskStatus {
@@ -166,7 +165,6 @@ impl std::fmt::Display for DiskStatus {
             Self::LuksHeaderUnreadable => f.write_str("luks-header-unreadable"),
             Self::LuksHeaderDamaged => f.write_str("luks-header-damaged"),
             Self::Unknown => f.write_str("unknown"),
-            Self::New => f.write_str("new"),
         }
     }
 }
@@ -1031,9 +1029,6 @@ fn format_status_human(
             match d.status {
                 DiskStatus::Missing => {
                     out.push_str(&format!("  {:<18}MISSING\n", d.name));
-                }
-                DiskStatus::New => {
-                    out.push_str(&format!("  {:<18}NEW\n", d.name));
                 }
                 DiskStatus::Unknown => {
                     out.push_str(&format!("  {:<18}UNKNOWN\n", d.name));
@@ -3507,41 +3502,6 @@ mod tests {
     // =======================================================================
 
     #[test]
-    fn status_compact_new_disk() {
-        let compact = vec![CompactDrive {
-            name: "disk2".to_owned(),
-            device_short: "-".to_owned(),
-            devid: None,
-            status: DiskStatus::New,
-        }];
-        let code = StatusCode::Intact;
-        let report = StatusReport {
-            mount_point: MountPoint("/mnt/storage".to_owned()),
-            status: code,
-            total_devices: Some(1),
-            present_count: Some(1),
-            missing_count: Some(0),
-            profile: Some("single".to_owned()),
-            capacity: Some(CapacityReport {
-                total_bytes: Some(1073741824),
-                used_bytes: 536870912,
-                free_bytes: 536870912,
-            }),
-            last_scrub: Some(ScrubReport::Never),
-            balance: None,
-            allocation: None,
-            disks: vec![],
-            advisories: vec![],
-            alert_active: false,
-            alert_causes: vec![],
-            missing_devids: vec![],
-        };
-        let human = format_status_human(&report, Some(&compact), None);
-        assert!(human.contains("new"), "got:\n{human}");
-        assert!(!human.contains("missing"), "got:\n{human}");
-    }
-
-    #[test]
     fn status_compact_missing_disk() {
         let pool = PoolState {
             mounted: true,
@@ -3559,50 +3519,8 @@ mod tests {
     }
 
     // =======================================================================
-    // Verbose new/unknown tests
+    // Verbose unknown tests
     // =======================================================================
-
-    #[test]
-    fn status_verbose_new_disk() {
-        let human_disks = vec![HumanDisk {
-            name: "disk2".to_owned(),
-            by_id: "/dev/disk/by-id/disk2".to_owned(),
-            luks_uuid: String::new(),
-            devid: None,
-            status: DiskStatus::New,
-            model: None,
-            serial: None,
-            errors: None,
-        }];
-
-        let code = StatusCode::Intact;
-        let report = StatusReport {
-            mount_point: MountPoint("/mnt/storage".to_owned()),
-            status: code,
-            total_devices: Some(1),
-            present_count: Some(1),
-            missing_count: Some(0),
-            profile: Some("single".to_owned()),
-            capacity: Some(CapacityReport {
-                total_bytes: Some(1073741824),
-                used_bytes: 536870912,
-                free_bytes: 536870912,
-            }),
-            last_scrub: Some(ScrubReport::Never),
-            balance: None,
-            allocation: None,
-            disks: vec![],
-            advisories: vec![],
-            alert_active: false,
-            alert_causes: vec![],
-            missing_devids: vec![],
-        };
-
-        let human = format_status_human(&report, None, Some(&human_disks));
-        assert!(human.contains("NEW"), "got:\n{human}");
-        assert!(!human.contains("(not found)"), "got:\n{human}");
-        assert!(!human.contains("Errors:"), "got:\n{human}");
-    }
 
     /*
      * Intent: Unknown remains a non-alarming, non-prescriptive bucket in the
@@ -3666,58 +3584,6 @@ mod tests {
             !human.contains("braid doctor"),
             "Unknown must not push users toward doctor recovery; got:\n{human}"
         );
-    }
-
-    // =======================================================================
-    // Healthy tests assert no "new"
-    // =======================================================================
-
-    #[test]
-    fn status_human_healthy_no_new() {
-        let code = StatusCode::Intact;
-        let report = StatusReport {
-            mount_point: MountPoint("/mnt/storage".to_owned()),
-            status: code,
-            total_devices: Some(3),
-            present_count: Some(3),
-            missing_count: Some(0),
-            profile: Some("RAID1".to_owned()),
-            capacity: Some(CapacityReport {
-                total_bytes: Some(1040187392),
-                used_bytes: 33914880,
-                free_bytes: 442957824,
-            }),
-            last_scrub: Some(ScrubReport::Never),
-            balance: None,
-            allocation: None,
-            disks: vec![],
-            advisories: vec![],
-            alert_active: false,
-            alert_causes: vec![],
-            missing_devids: vec![],
-        };
-        let compact = vec![
-            CompactDrive {
-                name: "disk1".into(),
-                device_short: "vda".into(),
-                devid: Some(1),
-                status: DiskStatus::Present,
-            },
-            CompactDrive {
-                name: "disk2".into(),
-                device_short: "vdb".into(),
-                devid: Some(2),
-                status: DiskStatus::Present,
-            },
-            CompactDrive {
-                name: "disk3".into(),
-                device_short: "vdc".into(),
-                devid: Some(3),
-                status: DiskStatus::Present,
-            },
-        ];
-        let human = format_status_human(&report, Some(&compact), None);
-        assert!(!human.contains("new"), "got:\n{human}");
     }
 
     // =======================================================================

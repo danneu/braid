@@ -138,7 +138,6 @@ Disk states in the detail view:
 | **LUKS HEADER UNREADABLE** | Device present but LUKS header cannot be read |
 | **LUKS HEADER DAMAGED** | Device present but LUKS header is damaged |
 | **UNKNOWN** | State could not be determined |
-| **NEW** | Disk detected but not yet part of the pool |
 
 ### Advisories
 
