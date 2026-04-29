@@ -304,6 +304,30 @@ struct MountedExtras {
     human_details: Vec<HumanDisk>,
 }
 
+fn not_mounted_status(config: &Config, paths: &StatePaths, advisories: Vec<String>) -> BuiltStatus {
+    let alert_state = resolve_alert_state(paths);
+    BuiltStatus {
+        report: StatusReport {
+            mount_point: config.mount_point().clone(),
+            status: StatusCode::NotMounted,
+            total_devices: None,
+            present_count: None,
+            missing_count: None,
+            profile: None,
+            capacity: None,
+            last_scrub: None,
+            balance: None,
+            allocation: None,
+            disks: vec![],
+            advisories,
+            alert_active: alert_state.active,
+            alert_causes: alert_state.causes,
+            missing_devids: vec![],
+        },
+        mounted_extras: None,
+    }
+}
+
 fn build_status<R: CommandRunner, F: Filesystem>(
     runner: &R,
     fs: &F,
@@ -315,55 +339,13 @@ fn build_status<R: CommandRunner, F: Filesystem>(
     let pool = match probe_pool(runner, fs, config.mount_point()) {
         Ok(p) => p,
         Err(ProbeError::NotBtrfs { .. }) => {
-            let code = StatusCode::NotMounted;
-            let alert_state = resolve_alert_state(paths);
-            return Ok(BuiltStatus {
-                report: StatusReport {
-                    mount_point: config.mount_point().clone(),
-                    status: code,
-                    total_devices: None,
-                    present_count: None,
-                    missing_count: None,
-                    profile: None,
-                    capacity: None,
-                    last_scrub: None,
-                    balance: None,
-                    allocation: None,
-                    disks: vec![],
-                    advisories,
-                    alert_active: alert_state.active,
-                    alert_causes: alert_state.causes,
-                    missing_devids: vec![],
-                },
-                mounted_extras: None,
-            });
+            return Ok(not_mounted_status(config, paths, advisories));
         }
         Err(e) => return Err(e.into()),
     };
 
     if !pool.mounted {
-        let code = StatusCode::NotMounted;
-        let alert_state = resolve_alert_state(paths);
-        return Ok(BuiltStatus {
-            report: StatusReport {
-                mount_point: config.mount_point().clone(),
-                status: code,
-                total_devices: None,
-                present_count: None,
-                missing_count: None,
-                profile: None,
-                capacity: None,
-                last_scrub: None,
-                balance: None,
-                allocation: None,
-                disks: vec![],
-                advisories,
-                alert_active: alert_state.active,
-                alert_causes: alert_state.causes,
-                missing_devids: vec![],
-            },
-            mounted_extras: None,
-        });
+        return Ok(not_mounted_status(config, paths, advisories));
     }
 
     let membership = match membership::load_membership(paths) {
@@ -1646,6 +1628,42 @@ mod tests {
         // Also verify cmd_status doesn't error
         let (_tmp, paths) = test_paths();
         let _ = cmd_status(&runner, &fs, &config, false, &paths);
+    }
+
+    /*
+     * Intent: not_mounted_status produces the canonical minimal JSON envelope
+     *   for offline `braid status` -- exactly four keys, no leakage of
+     *   mounted-only fields. Any drift (e.g. accidentally setting an Option
+     *   to Some(default), or adding a field that should be skipped) trips
+     *   this test.
+     * Why it exists: status_json_not_mounted hand-builds a StatusReport and
+     *   does not exercise the helper; the helper is the production source
+     *   of truth for the offline envelope and needs its own pin.
+     * Scenario: pool offline (no btrfs at the mount point), no advisories.
+     *   `braid status --json` must serialize to { mount_point, status,
+     *   disks, alert_active } and nothing else.
+     */
+    #[test]
+    fn not_mounted_status_envelope_is_minimal() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(tmpdir.path().to_path_buf());
+        let config = config_3disk();
+
+        let built = not_mounted_status(&config, &paths, vec![]);
+        let v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&built.report).unwrap()).unwrap();
+        let obj = v.as_object().unwrap();
+
+        assert_eq!(
+            obj.len(),
+            4,
+            "envelope should have exactly 4 keys, got: {obj:?}"
+        );
+        assert_eq!(obj["mount_point"], "/mnt/storage");
+        assert_eq!(obj["status"], "not_mounted");
+        assert_eq!(obj["disks"], serde_json::json!([]));
+        assert_eq!(obj["alert_active"], false);
+        assert!(built.mounted_extras.is_none());
     }
 
     #[test]
