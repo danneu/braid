@@ -12,6 +12,9 @@
 #   Read the generated autosuspend config file and verify all expected
 #   sections and values are present.
 
+import re
+import time
+
 start_all()
 machine.wait_for_unit("multi-user.target")
 
@@ -58,6 +61,10 @@ with subtest("BraidPool command uses fully qualified store paths"):
     )
     # Specifically: timeout and bash must be store paths
     assert "bin/timeout" in command_line, "Missing timeout in command: " + command_line
+    assert "bin/timeout -k 2 10" in command_line, (
+        "BraidPool command must escalate TERM to KILL after the 10s timeout, got: "
+        + command_line
+    )
     assert "bin/bash" in command_line, "Missing bash in command: " + command_line
 
 with subtest("SSH check exists (always on)"):
@@ -74,6 +81,48 @@ with subtest("BtrfsScrub wakeup exists"):
 with subtest("General settings"):
     assert "idle_time=900" in config, "Missing idle_time=900 in config"
     assert "interval=60" in config, "Missing interval=60 in config"
+
+with subtest("BraidPool command fail-closes when braid idle overruns the inner timeout"):
+    # Intent: Pin that a signal-killable overrun of `braid idle` past the
+    #   inner `timeout -k 2 10` produces autosuspend exit 0 (block suspend),
+    #   not a non-zero timeout status.
+    # Why it exists: The check used to wrap `bash -c '! braid idle'` with an
+    #   outer `timeout`. On overrun the outer `timeout` killed bash, exited
+    #   124, and the `!` never inverted -- autosuspend treated it as no
+    #   activity and allowed suspend. That broke the fail-closed invariant
+    #   in docs/decisions/016-auto-suspend.md.
+    # Scenario: substitute a hanging stub for `braid idle` in the configured
+    #   command, run it, and verify the inner `timeout` fires and `!` inverts
+    #   to 0 before the outer watchdog fires.
+    assert command_line is not None, "BraidPool command not extracted"
+    command_value = command_line.split("=", 1)[1].strip()
+
+    machine.succeed(
+        "printf '%s\\n%s\\n%s\\n' '#!/bin/sh' 'trap \"\" TERM' 'exec sleep 60' "
+        "> /tmp/braid-hang-stub "
+        "&& chmod +x /tmp/braid-hang-stub"
+    )
+
+    pattern = r"/nix/store/[^ ]+/bin/braid idle"
+    modified, n = re.subn(pattern, "/tmp/braid-hang-stub", command_value)
+    assert n == 1, (
+        "Expected exactly one /nix/store/.../bin/braid idle match in BraidPool "
+        f"command, got {n}. command_value={command_value!r}"
+    )
+
+    start = time.monotonic()
+    rc, out = machine.execute("timeout -k 2 18 " + modified)
+    elapsed = time.monotonic() - start
+
+    assert rc == 0, (
+        f"Expected exit 0 (! inverts inner timeout's non-zero result) but got {rc}. "
+        f"output={out!r}"
+    )
+    assert elapsed < 15, (
+        f"Expected wall time <15s (inner `timeout -k 2 10` should fire), got "
+        f"{elapsed:.1f}s. The outer watchdog likely tripped, meaning the "
+        f"inner timeout did not bound the stub."
+    )
 
 with subtest("WoL link file exists for configured interface"):
     # The NixOS networking module creates a systemd .link file that sets

@@ -76,7 +76,14 @@ in
           # so PATH is not guaranteed to include coreutils or a shell.
           BraidPool = {
             class = "ExternalCommand";
-            command = "${pkgs.coreutils}/bin/timeout 10 ${pkgs.bash}/bin/bash -c '! ${braidWrapped}/bin/braid idle'";
+            # `timeout` lives inside the bash invocation so its non-zero
+            # overrun result is inverted by `!` to 0 -- which autosuspend
+            # treats as activity (block suspend), preserving the fail-closed
+            # invariant in `docs/decisions/016-auto-suspend.md`. `-k 2`
+            # escalates TERM to KILL after two more seconds for processes
+            # that ignore or delay TERM. An outer `timeout` would fail open:
+            # bash gets killed before `!` runs.
+            command = "${pkgs.bash}/bin/bash -c '! ${pkgs.coreutils}/bin/timeout -k 2 10 ${braidWrapped}/bin/braid idle'";
           };
           # SSH sessions always block suspend — braid requires SSH for unlock,
           # and an active session means someone is working on the machine.

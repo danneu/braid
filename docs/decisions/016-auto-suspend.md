@@ -31,9 +31,14 @@ Why a separate command rather than inline shell in autosuspend config:
 
 `braid idle` follows natural Unix convention (exit 0 = success = "yes, idle"). autosuspend's ExternalCommand convention is inverted (exit 0 = activity detected). The NixOS module bridges this with `bash -c '! braid idle'`:
 
-- braid exit 0 (idle) → `!` → exit 1 → autosuspend: allow suspend
-- braid exit 1 (busy) → `!` → exit 0 → autosuspend: block suspend
-- braid exit 2 (error) → `!` → exit 0 → autosuspend: block suspend (fail-closed)
+- braid exit 0 (idle) -> `!` -> exit 1 -> autosuspend: allow suspend
+- braid exit 1 (busy) -> `!` -> exit 0 -> autosuspend: block suspend
+- braid exit 2 (error) -> `!` -> exit 0 -> autosuspend: block suspend (fail-closed)
+- braid idle signal-killable overrun >10s -> `timeout -k 2 10` (inside bash) returns non-zero -> `!` -> exit 0 -> autosuspend: block suspend (fail-closed)
+
+`timeout` must be **inside** `bash -c` so its non-zero overrun result is inverted by `!`. An outer `timeout` (`timeout -k 2 10 bash -c '! braid idle'`) would fail open: bash gets killed before `!` runs, autosuspend sees the non-zero timeout result and treats it as no activity. Coreutils' `timeout` sends TERM at the main deadline and `-k 2` escalates to KILL two seconds later for processes that ignore or delay TERM (see `reference/coreutils/src/timeout.c`).
+
+Scope of the timeout invariant: this covers signal-killable command overruns (parser regression, slow userspace probe, network-FS latency). Uninterruptible kernel waits (process in `D` state on a wedged ioctl) are not bounded by `timeout(1)` and remain a separate failure mode; under that condition the autosuspend tick itself stalls until the syscall returns, so the system stays awake by virtue of not deciding.
 
 ### SSH always on, SMB/NFS auto-detected
 
