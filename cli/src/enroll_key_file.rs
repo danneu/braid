@@ -20,8 +20,6 @@ pub enum EnrollKeyFileError {
     Luks(#[from] LuksError),
     #[error("probe error: {0}")]
     Probe(#[from] crate::probe::ProbeError),
-    #[error("command error: {0}")]
-    Cmd(#[from] crate::cmd::CmdError),
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 }
