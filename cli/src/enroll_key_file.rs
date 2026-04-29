@@ -278,6 +278,17 @@ fn generate_key_file(path: &Path) -> Result<(), std::io::Error> {
         .open(path)?;
     f.write_all(&buf)?;
     f.sync_all()?;
+
+    // LUKS slots are mutated after this returns, so make the new directory
+    // entry durable too; f.sync_all() alone does not guarantee the keyfile name
+    // survives a pulled USB stick on filesystems without journaled metadata.
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "keyfile path has no parent directory",
+        )
+    })?;
+    crate::state_io::sync_dir(parent)?;
     Ok(())
 }
 
