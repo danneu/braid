@@ -413,7 +413,17 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
         Err(e) => return Err(e.into()),
     };
 
-    // 2. Not mounted → minimal report
+    // 2. Membership load — NotFound is expected (no pool yet), but Corrupt must
+    //    surface. Runs before the not-mounted early return so corruption is
+    //    diagnosed by `status` (the first command users run after a failed boot)
+    //    rather than only at `unlock` dispatch.
+    let membership = match membership::load_membership(paths) {
+        Ok(m) => m,
+        Err(membership::MembershipError::NotFound(_)) => PoolMembership::empty(),
+        Err(e) => return Err(e.into()),
+    };
+
+    // 3. Not mounted → minimal report
     if !pool.mounted {
         let code = StatusCode::NotMounted;
         let alert_state = resolve_alert_state(paths);
@@ -441,13 +451,6 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
         }
         return Ok(());
     }
-
-    // 3. Membership load — NotFound is expected (no pool yet), but Corrupt must surface
-    let membership = match membership::load_membership(paths) {
-        Ok(m) => m,
-        Err(membership::MembershipError::NotFound(_)) => PoolMembership::empty(),
-        Err(e) => return Err(e.into()),
-    };
 
     // 4. Strict data gathering
     let df = fetch_df(runner, config.mount_point())?;
@@ -3860,6 +3863,42 @@ mod tests {
                 StatusError::Membership(membership::MembershipError::Corrupt(_, _))
             ),
             "expected StatusError::Membership(Corrupt(..))"
+        );
+    }
+
+    /*
+     * Intent: a corrupt pool.json must surface from `braid status` even when
+     *   the pool is offline.
+     * Why it exists: `status` is the first command users run after a failed
+     *   boot. Before this fix, the `!pool.mounted` early return ran ahead of
+     *   load_membership, so corruption was invisible to `status` and only
+     *   surfaced later at `unlock` dispatch -- by which point the user had
+     *   already concluded from `status` that the system looked fine. The
+     *   mounted-path twin is `cmd_status_corrupt_membership_returns_error`;
+     *   this test locks the unmounted half of the contract.
+     * Scenario: pool is offline (LUKS not unlocked, no btrfs at the mount
+     *   point) and pool.json contains garbage. `braid status` must return
+     *   StatusError::Membership(Corrupt(..)), not Ok with a NotMounted report.
+     */
+    #[test]
+    fn cmd_status_unmounted_corrupt_membership_returns_error() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(tmpdir.path().to_path_buf());
+        std::fs::write(paths.pool_json(), "not valid json {{{").unwrap();
+
+        let runner = MockRunner::default();
+        let fs = MockFs::not_mounted(&[]);
+        let config = config_3disk();
+
+        let result = cmd_status(&runner, &fs, &config, false, &paths);
+        assert!(
+            matches!(
+                result,
+                Err(StatusError::Membership(
+                    membership::MembershipError::Corrupt(_, _)
+                ))
+            ),
+            "expected StatusError::Membership(Corrupt(..)) on unmounted pool with corrupt pool.json"
         );
     }
 
