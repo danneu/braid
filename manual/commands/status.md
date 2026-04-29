@@ -152,7 +152,11 @@ Warnings appear when LUKS header backups are missing for one or more disks.
 - `disks`: array of disk reports with `name`, `status`, `devid`, `errors`, etc.
 - `alert_active`: boolean
 - `alert_causes`: array of alert cause objects
-- `missing_devids`: array of missing btrfs device IDs
+- `missing_devids`: array of every devid counted in `missing_count`
+  (btrfs-MISSING devices and null-underlying mappers whose backing device has
+  disappeared). For destructive `remove-missing` / `replace --missing-id`
+  workflows, see those commands' notes -- a null-underlying devid here will be
+  rejected by those commands until btrfs promotes it to MISSING.
 - `capacity`: `total_bytes`, `used_bytes`, `free_bytes`
 - `allocation`: array of block group type entries
 - `balance`: state object (`idle`, `running`, `paused`, `unknown`)
@@ -162,5 +166,7 @@ Warnings appear when LUKS header backups are missing for one or more disks.
 
 - [braid unlock](unlock.md) -- bring the pool online
 - [braid replace](replace.md) -- repair a degraded pool
-- [braid remove-missing](remove-missing.md) -- forget a dead device (uses devids from status)
+- [braid remove-missing](remove-missing.md) -- forget a dead device
+  (operates only on btrfs-authoritative MISSING devids; see that command's note
+  on transient null-underlying state)
 - [braid idle](idle.md) -- machine-friendly idle/busy check for autosuspend

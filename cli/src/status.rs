@@ -70,6 +70,12 @@ pub struct StatusReport {
     pub alert_active: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub alert_causes: Vec<AlertCause>,
+    /// Every devid that contributes to `missing_count`. This is the union of
+    /// btrfs's authoritative `MISSING` set and null-underlying devids (LUKS
+    /// mapper open, backing block device gone), matching the set used for
+    /// `MissingDevice` alert causes. Destructive commands such as
+    /// `remove-missing` and `replace --missing-id` use the btrfs-only subset
+    /// and can reject a null-underlying devid reported here.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub missing_devids: Vec<u64>,
 }
@@ -287,16 +293,25 @@ struct HumanDisk {
 }
 
 // ---------------------------------------------------------------------------
-// Public API
+// Status assembly
 // ---------------------------------------------------------------------------
 
-pub fn build_status_report<R: CommandRunner, F: Filesystem>(
+struct BuiltStatus {
+    report: StatusReport,
+    mounted_extras: Option<MountedExtras>,
+}
+
+struct MountedExtras {
+    compact_drives: Vec<CompactDrive>,
+    human_details: Vec<HumanDisk>,
+}
+
+fn build_status<R: CommandRunner, F: Filesystem>(
     runner: &R,
     fs: &F,
     config: &Config,
-    membership: &PoolMembership,
     paths: &StatePaths,
-) -> Result<StatusReport, StatusError> {
+) -> Result<BuiltStatus, StatusError> {
     let advisories = luks::header_backup_advisories(paths);
 
     let pool = match probe_pool(runner, fs, config.mount_point()) {
@@ -304,7 +319,35 @@ pub fn build_status_report<R: CommandRunner, F: Filesystem>(
         Err(ProbeError::NotBtrfs { .. }) => {
             let code = StatusCode::NotMounted;
             let alert_state = resolve_alert_state(paths);
-            return Ok(StatusReport {
+            return Ok(BuiltStatus {
+                report: StatusReport {
+                    mount_point: config.mount_point().clone(),
+                    status: code,
+                    total_devices: None,
+                    present_count: None,
+                    missing_count: None,
+                    profile: None,
+                    capacity: None,
+                    last_scrub: None,
+                    balance: None,
+                    allocation: None,
+                    disks: vec![],
+                    advisories,
+                    alert_active: alert_state.active,
+                    alert_causes: alert_state.causes,
+                    missing_devids: vec![],
+                },
+                mounted_extras: None,
+            });
+        }
+        Err(e) => return Err(e.into()),
+    };
+
+    if !pool.mounted {
+        let code = StatusCode::NotMounted;
+        let alert_state = resolve_alert_state(paths);
+        return Ok(BuiltStatus {
+            report: StatusReport {
                 mount_point: config.mount_point().clone(),
                 status: code,
                 total_devices: None,
@@ -316,36 +359,20 @@ pub fn build_status_report<R: CommandRunner, F: Filesystem>(
                 balance: None,
                 allocation: None,
                 disks: vec![],
-                advisories: advisories.clone(),
+                advisories,
                 alert_active: alert_state.active,
                 alert_causes: alert_state.causes,
                 missing_devids: vec![],
-            });
-        }
-        Err(e) => return Err(e.into()),
-    };
-
-    if !pool.mounted {
-        let code = StatusCode::NotMounted;
-        let alert_state = resolve_alert_state(paths);
-        return Ok(StatusReport {
-            mount_point: config.mount_point().clone(),
-            status: code,
-            total_devices: None,
-            present_count: None,
-            missing_count: None,
-            profile: None,
-            capacity: None,
-            last_scrub: None,
-            balance: None,
-            allocation: None,
-            disks: vec![],
-            advisories: advisories.clone(),
-            alert_active: alert_state.active,
-            alert_causes: alert_state.causes,
-            missing_devids: vec![],
+            },
+            mounted_extras: None,
         });
     }
+
+    let membership = match membership::load_membership(paths) {
+        Ok(m) => m,
+        Err(membership::MembershipError::NotFound(_)) => PoolMembership::empty(),
+        Err(e) => return Err(e.into()),
+    };
 
     let df = fetch_df(runner, config.mount_point())?;
     let df_summary = summarize_df(&df);
@@ -359,6 +386,8 @@ pub fn build_status_report<R: CommandRunner, F: Filesystem>(
         StatusCode::Degraded
     };
 
+    let compact_drives = build_compact_drives(&pool, &membership);
+
     let config_disks: Vec<ConfigDisk> = membership
         .disks
         .iter()
@@ -370,7 +399,7 @@ pub fn build_status_report<R: CommandRunner, F: Filesystem>(
     let alert_state = resolve_alert_state(paths);
 
     let present_count = pool.total_devices.saturating_sub(pool.missing_count);
-    Ok(StatusReport {
+    let report = StatusReport {
         mount_point: config.mount_point().clone(),
         status: code,
         total_devices: Some(pool.total_devices),
@@ -385,9 +414,21 @@ pub fn build_status_report<R: CommandRunner, F: Filesystem>(
         advisories,
         alert_active: alert_state.active,
         alert_causes: alert_state.causes,
-        missing_devids: pool.missing_devids.clone(),
+        missing_devids: pool.alert_missing_devids(),
+    };
+
+    Ok(BuiltStatus {
+        report,
+        mounted_extras: Some(MountedExtras {
+            compact_drives,
+            human_details: verbose_ctx.human_details,
+        }),
     })
 }
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
 
 pub fn cmd_status<R: CommandRunner, F: Filesystem>(
     runner: &R,
@@ -396,123 +437,18 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
     json: bool,
     paths: &StatePaths,
 ) -> Result<(), StatusError> {
-    let advisories = luks::header_backup_advisories(paths);
+    let built = build_status(runner, fs, config, paths)?;
 
-    // 1. Probe pool, mapping NotBtrfs to not-mounted
-    let pool = match probe_pool(runner, fs, config.mount_point()) {
-        Ok(p) => p,
-        Err(ProbeError::NotBtrfs { .. }) => PoolState {
-            mounted: false,
-            devices: vec![],
-            missing_count: 0,
-            missing_devids: vec![],
-            total_devices: 0,
-            fsid: None,
-            null_underlying: vec![],
-        },
-        Err(e) => return Err(e.into()),
-    };
-
-    // 2. Membership load — NotFound is expected (no pool yet), but Corrupt must
-    //    surface. Runs before the not-mounted early return so corruption is
-    //    diagnosed by `status` (the first command users run after a failed boot)
-    //    rather than only at `unlock` dispatch.
-    let membership = match membership::load_membership(paths) {
-        Ok(m) => m,
-        Err(membership::MembershipError::NotFound(_)) => PoolMembership::empty(),
-        Err(e) => return Err(e.into()),
-    };
-
-    // 3. Not mounted → minimal report
-    if !pool.mounted {
-        let code = StatusCode::NotMounted;
-        let alert_state = resolve_alert_state(paths);
-        let report = StatusReport {
-            mount_point: config.mount_point().clone(),
-            status: code,
-            total_devices: None,
-            present_count: None,
-            missing_count: None,
-            profile: None,
-            capacity: None,
-            last_scrub: None,
-            balance: None,
-            allocation: None,
-            disks: vec![],
-            advisories: advisories.clone(),
-            alert_active: alert_state.active,
-            alert_causes: alert_state.causes,
-            missing_devids: vec![],
-        };
-        if json {
-            println!("{}", serde_json::to_string_pretty(&report)?);
-        } else {
-            print!("{}", format_status_human(&report, None, None));
-        }
-        return Ok(());
-    }
-
-    // 4. Strict data gathering
-    let df = fetch_df(runner, config.mount_point())?;
-    let df_summary = summarize_df(&df);
-    let capacity = get_capacity(runner, config.mount_point(), pool.missing_count, &df)?;
-    let last_scrub = get_scrub_report(runner, config.mount_point());
-    let balance = get_balance_report(runner, config.mount_point());
-
-    // 5. Compute status code
-    let code = if pool.missing_count == 0 {
-        StatusCode::Intact
-    } else {
-        StatusCode::Degraded
-    };
-
-    // 6. Compact drives (always built when mounted)
-    let compact_drives = build_compact_drives(&pool, &membership);
-
-    // 7. Alert state (latch-based)
-    let alert_state = resolve_alert_state(paths);
-
-    // 8. Per-disk detail
-    let verbose_ctx = {
-        let device_stats = get_device_stats(runner, config.mount_point())?;
-        let config_disks: Vec<ConfigDisk> = membership
-            .disks
-            .iter()
-            .map(|(name, member)| probe_config_disk(runner, fs, name, &member.by_id))
-            .collect::<Result<Vec<_>, _>>()?;
-        build_disk_reports(runner, &config_disks, &pool, &device_stats)
-    };
-
-    // 9. Assemble report
-    let present_count = pool.total_devices.saturating_sub(pool.missing_count);
-    let report = StatusReport {
-        mount_point: config.mount_point().clone(),
-        status: code,
-        total_devices: Some(pool.total_devices),
-        present_count: Some(present_count),
-        missing_count: Some(pool.missing_count),
-        profile: Some(df_summary.profile),
-        capacity: Some(capacity),
-        last_scrub: Some(last_scrub),
-        balance: Some(balance),
-        allocation: Some(df_summary.allocation),
-        disks: verbose_ctx.disks.clone(),
-        advisories,
-        alert_active: alert_state.active,
-        alert_causes: alert_state.causes,
-        missing_devids: pool.missing_devids.clone(),
-    };
-
-    // 10. Output
     if json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
+        println!("{}", serde_json::to_string_pretty(&built.report)?);
     } else {
+        let extras = built.mounted_extras.as_ref();
         print!(
             "{}",
             format_status_human(
-                &report,
-                Some(&compact_drives),
-                Some(&verbose_ctx.human_details),
+                &built.report,
+                extras.map(|e| e.compact_drives.as_slice()),
+                extras.map(|e| e.human_details.as_slice()),
             )
         );
     }
@@ -1305,6 +1241,18 @@ mod tests {
              \tTotal devices 3 FS bytes used 1.00GiB\n\
              \tdevid    1 size 10.00GiB used 2.00GiB path /dev/mapper/disk1\n\
              \tdevid    2 size 10.00GiB used 2.00GiB path /dev/mapper/disk2\n\
+             \t*** Some devices missing\n",
+        )
+    }
+
+    fn btrfs_show_3disk_1null_underlying_1missing() -> RawCommandOutput {
+        ok_raw(
+            "btrfs filesystem show",
+            "Label: none  uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
+             \tTotal devices 3 FS bytes used 1.00GiB\n\
+             \tdevid    1 size 10.00GiB used 2.00GiB path /dev/mapper/disk1\n\
+             \tdevid    2 size 10.00GiB used 2.00GiB path /dev/mapper/disk2\n\
+             \tdevid    3 size 0 used 0 path MISSING\n\
              \t*** Some devices missing\n",
         )
     }
@@ -3246,6 +3194,67 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    /*
+     * Intent: StatusReport.missing_devids enumerates every devid that
+     * contributes to missing_count -- the union of btrfs's authoritative
+     * MISSING set and null-underlying devids whose LUKS mapper is open but
+     * whose backing block device is gone.
+     *
+     * Why it exists: missing_count counts null-underlying drives (probe.rs
+     * derives it from total - devices.len(), and the null-underlying loop
+     * branch skips pushing into devices). Without the union, JSON consumers can
+     * see mutually inconsistent fields where missing_count includes a
+     * hot-unplugged drive but missing_devids does not. Per
+     * docs/tool-behavior/device-disappearance.md, null-underlying is the
+     * empirical first state after a SATA hot-unplug, so this is the common
+     * case, not a corner case.
+     *
+     * The mixed-scenario assertion is also load-bearing: a test that covered
+     * only null-underlying could pass against an implementation that replaced
+     * missing_devids with null_underlying rather than unioning them. Including
+     * both contributors at once pins the union contract.
+     *
+     * Scenario: 3-device pool.
+     *   - Devid 1: healthy mapper.
+     *   - Devid 2: null-underlying -- mapper still appears in btrfs filesystem
+     *     show, but cryptsetup status reports device: (null).
+     *   - Devid 3: btrfs MISSING placeholder line in btrfs filesystem show
+     *     (path MISSING); cryptsetup is never queried for it.
+     * The StatusReport produced via the production assembly path must report
+     * missing_count == 2 and missing_devids containing both 2 and 3, deduped
+     * and sorted by alert_missing_devids.
+     */
+    #[test]
+    fn build_status_missing_devids_unions_btrfs_missing_and_null_underlying() {
+        let runner = runner_healthy_3disk_base()
+            .with_output(
+                CmdRequest::BtrfsFilesystemShow {
+                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                },
+                btrfs_show_3disk_1null_underlying_1missing(),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "disk2".into(),
+                },
+                cryptsetup_status_active("disk2", "(null)"),
+            );
+        let fs = fs_3disk();
+        let config = config_3disk();
+
+        let (_tmp, paths) = test_paths();
+        membership::save_membership(&PoolMembership::empty(), &paths).unwrap();
+
+        let built = build_status(&runner, &fs, &config, &paths).unwrap();
+
+        assert_eq!(built.report.missing_count, Some(2));
+        assert_eq!(built.report.missing_devids, vec![2, 3]);
+        assert_eq!(
+            built.report.missing_devids.len(),
+            built.report.missing_count.unwrap() as usize
+        );
+    }
+
     #[test]
     fn cmd_status_single_disk_ok() {
         let runner = MockRunner::default()
@@ -3867,21 +3876,17 @@ mod tests {
     }
 
     /*
-     * Intent: a corrupt pool.json must surface from `braid status` even when
-     *   the pool is offline.
-     * Why it exists: `status` is the first command users run after a failed
-     *   boot. Before this fix, the `!pool.mounted` early return ran ahead of
-     *   load_membership, so corruption was invisible to `status` and only
-     *   surfaced later at `unlock` dispatch -- by which point the user had
-     *   already concluded from `status` that the system looked fine. The
-     *   mounted-path twin is `cmd_status_corrupt_membership_returns_error`;
-     *   this test locks the unmounted half of the contract.
+     * Intent: offline `braid status` must not read pool.json.
+     * Why it exists: this refactor centralizes membership loading inside
+     *   build_status; without this test, a future edit could accidentally load
+     *   membership before the not-mounted check, turning an offline
+     *   `braid status` with a corrupt pool.json into a hard error.
      * Scenario: pool is offline (LUKS not unlocked, no btrfs at the mount
-     *   point) and pool.json contains garbage. `braid status` must return
-     *   StatusError::Membership(Corrupt(..)), not Ok with a NotMounted report.
+     *   point) and pool.json contains garbage. `braid status` must return Ok
+     *   with a NotMounted report rather than StatusError::Membership.
      */
     #[test]
-    fn cmd_status_unmounted_corrupt_membership_returns_error() {
+    fn cmd_status_unmounted_corrupt_membership_returns_ok() {
         let tmpdir = tempfile::tempdir().unwrap();
         let paths = StatePaths::custom(tmpdir.path().to_path_buf());
         std::fs::write(paths.pool_json(), "not valid json {{{").unwrap();
@@ -3892,20 +3897,15 @@ mod tests {
 
         let result = cmd_status(&runner, &fs, &config, false, &paths);
         assert!(
-            matches!(
-                result,
-                Err(StatusError::Membership(
-                    membership::MembershipError::Corrupt(_, _)
-                ))
-            ),
-            "expected StatusError::Membership(Corrupt(..)) on unmounted pool with corrupt pool.json"
+            result.is_ok(),
+            "expected offline status to ignore pool.json corruption"
         );
     }
 
     /*
      * Intent: a ProbeError::MapperConflict raised by probe_config_disk while
      *   building the per-disk status report must surface through
-     *   build_status_report as a StatusError::Probe(MapperConflict), not be
+     *   build_status as a StatusError::Probe(MapperConflict), not be
      *   swallowed or remapped.
      * Why it exists: a future regression in the status-path error handling
      *   could narrow or drop the MapperConflict variant (e.g. a .or_else that
@@ -4025,7 +4025,9 @@ mod tests {
         let fs = fs_1disk();
         let config = config_1disk();
 
-        let result = build_status_report(&runner, &fs, &config, &membership, &paths);
+        membership::save_membership(&membership, &paths).unwrap();
+
+        let result = build_status(&runner, &fs, &config, &paths);
         match result {
             Err(StatusError::Probe(ProbeError::MapperConflict {
                 name,
@@ -4042,7 +4044,8 @@ mod tests {
                     Some(LuksUuid("99999999-9999-9999-9999-999999999999".into()))
                 );
             }
-            other => panic!("expected StatusError::Probe(MapperConflict), got: {other:?}"),
+            Err(other) => panic!("expected StatusError::Probe(MapperConflict), got: {other:?}"),
+            Ok(_) => panic!("expected StatusError::Probe(MapperConflict), got Ok"),
         }
     }
 

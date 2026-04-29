@@ -13,6 +13,18 @@ This is a destructive choice: any data that only existed on the missing disk is 
 
 ## Basic example
 
+Note: `braid status` lists every devid that contributes to `missing_count`,
+including drives whose LUKS mapper is still open but whose physical device just
+disappeared (null-underlying). btrfs has not yet promoted those devids to its
+authoritative `MISSING` state, and `remove-missing` operates only on that
+authoritative set. If `remove-missing --missing-id N` reports that devid `N` is
+not a device in this pool for a devid that `status` reports as missing, that
+error itself is the signal -- btrfs has not promoted the devid yet. To make
+progress, follow the missing-disk recovery workflow in
+[`recovery-scenarios.md`](../guides/recovery-scenarios.md). Typically:
+confirm the disk is truly gone, remount the pool degraded if it is not already,
+then retry once btrfs reports an authoritative missing device.
+
 First, find the missing device's ID:
 
 ```
