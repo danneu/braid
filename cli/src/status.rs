@@ -697,6 +697,7 @@ fn build_disk_reports<R: CommandRunner>(
     device_stats: &BtrfsDeviceStatsOutput,
 ) -> VerboseContext {
     let pool_uuid_set: HashSet<&LuksUuid> = pool.devices.iter().map(|d| &d.luks_uuid).collect();
+    let pool_mapper_set: HashSet<&str> = pool.devices.iter().map(|d| d.mapper.0.as_str()).collect();
 
     let mut disk_reports = Vec::new();
     let mut human_details = Vec::new();
@@ -768,7 +769,9 @@ fn build_disk_reports<R: CommandRunner>(
         let is_unpooled = match &cd.state {
             ConfigDiskState::Absent => true,
             ConfigDiskState::PresentLuks { uuid, .. } => !pool_uuid_set.contains(uuid),
-            ConfigDiskState::PresentNotLuks => true,
+            ConfigDiskState::PresentNotLuks => {
+                !pool_mapper_set.contains(mapper_name(&cd.name).0.as_str())
+            }
         };
 
         if !is_unpooled {
@@ -3462,6 +3465,82 @@ mod tests {
         let ctx = build_disk_reports(&runner, &config_disks, &pool_empty(), &stats);
         assert_eq!(ctx.disks.len(), 1);
         assert_eq!(ctx.disks[0].status, DiskStatus::Unknown);
+    }
+
+    /*
+     * Intent: when a config disk's by_id LUKS header probe failed
+     * (PresentNotLuks) but the mapper is already open and in the pool,
+     * build_disk_reports must emit exactly one Present row for that disk in
+     * both the JSON disks array and the verbose human output, not a duplicate
+     * Unknown/LuksHeader* row from the unpooled fall-through.
+     *
+     * Why it exists: the unpooled loop keys on LUKS UUID, but a
+     * PresentNotLuks config disk has no UUID to match, so the dedup misses
+     * without an explicit mapper-name guard. Pinning both JSON and human
+     * output prevents drift between disks and human_details.
+     *
+     * Scenario: pool device "braid-disk1" / uuid U1 / devid 1; config disk
+     * "disk1" with state PresentNotLuks. No CryptsetupIsLuks/LuksDumpText
+     * mocks exist, so probe_luks_header would return ProbeFailed if it ran.
+     */
+    #[test]
+    fn build_disk_reports_skips_unpooled_row_when_mapper_in_pool_for_present_not_luks() {
+        let pool = PoolState {
+            mounted: true,
+            devices: vec![PoolDevice {
+                mapper: MapperName("braid-disk1".to_owned()),
+                luks_uuid: LuksUuid("11111111-1111-1111-1111-111111111111".to_owned()),
+                devid: 1,
+                underlying: "/dev/vda".to_owned(),
+            }],
+            missing_count: 0,
+            missing_devids: vec![],
+            total_devices: 1,
+            fsid: None,
+            null_underlying: vec![],
+        };
+        let config_disks = cfg_present_not_luks("disk1", "/dev/disk/by-id/disk1");
+        let runner = MockRunner::default();
+        let stats = BtrfsDeviceStatsOutput { devices: vec![] };
+
+        let ctx = build_disk_reports(&runner, &config_disks, &pool, &stats);
+
+        assert_eq!(ctx.disks.len(), 1, "disks: {:?}", ctx.disks);
+        assert_eq!(ctx.disks[0].status, DiskStatus::Present);
+        assert_eq!(ctx.disks[0].name, "disk1");
+        assert_eq!(ctx.human_details.len(), 1);
+        assert_eq!(ctx.human_details[0].name, "disk1");
+
+        let report = StatusReport {
+            mount_point: MountPoint("/mnt/storage".to_owned()),
+            status: StatusCode::Intact,
+            total_devices: Some(1),
+            present_count: Some(1),
+            missing_count: Some(0),
+            profile: Some("single".to_owned()),
+            capacity: Some(CapacityReport {
+                total_bytes: Some(1073741824),
+                used_bytes: 0,
+                free_bytes: 1073741824,
+            }),
+            last_scrub: Some(ScrubReport::Never),
+            balance: None,
+            allocation: None,
+            disks: ctx.disks.clone(),
+            advisories: vec![],
+            alert_active: false,
+            alert_causes: vec![],
+            missing_devids: vec![],
+        };
+        let human = format_status_human(&report, None, Some(&ctx.human_details));
+
+        assert!(human.contains("disk1"), "got:\n{human}");
+        assert!(
+            !human.contains("UNKNOWN"),
+            "duplicate Unknown row leaked; got:\n{human}"
+        );
+        assert!(!human.contains("LUKS HEADER UNREADABLE"), "got:\n{human}");
+        assert!(!human.contains("LUKS HEADER DAMAGED"), "got:\n{human}");
     }
 
     // =======================================================================
