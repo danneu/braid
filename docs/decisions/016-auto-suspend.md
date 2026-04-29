@@ -40,6 +40,16 @@ Why a separate command rather than inline shell in autosuspend config:
 
 Scope of the timeout invariant: this covers signal-killable command overruns (parser regression, slow userspace probe, network-FS latency). Uninterruptible kernel waits (process in `D` state on a wedged ioctl) are not bounded by `timeout(1)` and remain a separate failure mode; under that condition the autosuspend tick itself stalls until the syscall returns, so the system stays awake by virtue of not deciding.
 
+### Mount probe reads `/proc/self/mountinfo` directly
+
+`braid idle`'s initial mount-presence check (`is_btrfs_mounted`) reads `/proc/self/mountinfo` via the existing `Filesystem` abstraction rather than shelling out to `findmnt`. Rationale: the mount probe is a fail-closed safety gate; any subprocess fallback path that maps "non-zero exit + empty stderr" to "no mount" reintroduces the fail-open seam this gate exists to prevent. The kernel-maintained mountinfo file gives a direct answer in one syscall, with no fork/exec.
+
+Octal-escaped mount-point fields (`\040`, `\011`, `\012`, `\134`) are decoded before comparison so configured mount paths containing whitespace match correctly.
+
+IO errors (file unreadable, EIO), malformed mountinfo lines, and ambiguous duplicate target entries all propagate as `IdleError::MountInfo`, surface as exit 2, and block suspend. "Don't know" never becomes "allow suspend".
+
+Note: `cmd_idle` continues to call `probe_fsid` after the mount check, and `probe_fsid` still uses `findmnt` internally. That call is fail-closed at its own callsite (`probe_fsid` returns `ProbeError::PoolDevice` when the target is absent, which becomes `IdleError::Probe` and exit 2). Hardening `probe_fsid` and other findmnt callers is tracked separately.
+
 ### SSH always on, SMB/NFS auto-detected
 
 SSH check is unconditional — braid requires SSH for unlock, and an active SSH session means someone is working. SMB and NFS checks are auto-detected from `config.services.samba.enable` and `config.services.nfs.server.enable` to avoid false positives on systems that don't run those services.

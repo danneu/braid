@@ -1,5 +1,6 @@
 use crate::cmd::{CmdError, CmdRequest, CommandRunner};
-use crate::parse::{ParseError, ScrubState, parse_btrfs_scrub_status, parse_findmnt_json};
+use crate::mount_check::MountInfoError;
+use crate::parse::{ParseError, ScrubState, parse_btrfs_scrub_status};
 use crate::preflight::{ExclusiveOp, ExclusiveOpError, check_no_exclusive_op};
 use crate::probe::{Filesystem, ProbeError, probe_fsid};
 use crate::progress::pct_from_bytes;
@@ -61,6 +62,8 @@ pub enum IdleError {
     /// success signal for a running exclusive op and never reaches here.
     #[error("exclusive-op check error: {0}")]
     Exclop(String),
+    #[error("mount probe error: {0}")]
+    MountInfo(#[from] MountInfoError),
 }
 
 pub fn cmd_idle<R: CommandRunner, F: Filesystem + ?Sized>(
@@ -69,7 +72,7 @@ pub fn cmd_idle<R: CommandRunner, F: Filesystem + ?Sized>(
     mount_point: &MountPoint,
 ) -> Result<IdleResult, IdleError> {
     // 1. Pool offline -- nothing to protect.
-    if !is_btrfs_mounted(runner, mount_point)? {
+    if !is_btrfs_mounted(fs, mount_point)? {
         return Ok(IdleResult::PoolOffline);
     }
 
@@ -121,24 +124,24 @@ fn busy_from_exclop(op: ExclusiveOp) -> BusyReason {
     }
 }
 
-/// Check whether the mount point is a mounted btrfs filesystem.
-/// Returns false if not mounted or not btrfs.
-fn is_btrfs_mounted<R: CommandRunner>(
-    runner: &R,
+/// Check whether `mount_point` is a mounted btrfs filesystem.
+///
+/// Reads `/proc/self/mountinfo` directly via the `Filesystem` abstraction
+/// rather than shelling out to `findmnt`. The mount probe is a fail-closed
+/// safety gate (autosuspend uses the exit code to decide whether to suspend);
+/// any subprocess fallback path that maps "non-zero exit + empty stderr" to
+/// "no mount" reintroduces a fail-open seam. IO errors, malformed mountinfo
+/// lines, and ambiguous duplicate target entries all surface as
+/// `IdleError::MountInfo`, which `main.rs` maps to exit 2 and autosuspend
+/// then treats as activity. See docs/decisions/016-auto-suspend.md.
+fn is_btrfs_mounted<F: Filesystem + ?Sized>(
+    fs: &F,
     mount_point: &MountPoint,
 ) -> Result<bool, IdleError> {
-    let findmnt_raw = runner.run(&CmdRequest::FindmntJson {
-        mount_point: mount_point.clone(),
-    })?;
-    let findmnt = parse_findmnt_json(&findmnt_raw)?;
-    let entry = findmnt
-        .filesystems
-        .iter()
-        .find(|e| e.target == mount_point.as_str());
-    match entry {
-        None => Ok(false),
-        Some(e) => Ok(e.fstype == "btrfs"),
-    }
+    Ok(crate::mount_check::is_btrfs_mounted(
+        fs,
+        mount_point.as_str(),
+    )?)
 }
 
 #[cfg(test)]
@@ -156,13 +159,19 @@ mod tests {
         format!("/sys/fs/btrfs/{FSID}/exclusive_operation")
     }
 
-    /// MockFs that serves *only* the exact exclop path derived from the
-    /// seeded fsid. Any other read returns NotFound, so a test fails if
-    /// `cmd_idle` reads the wrong fsid or the wrong file -- the whole
-    /// point of this refactor.
+    const MOUNTINFO_WITH_BTRFS_TARGET: &str =
+        "36 35 0:32 / /mnt/storage rw,noatime shared:1 - btrfs /dev/mapper/braid-disk1 rw\n";
+    const MOUNTINFO_WITHOUT_TARGET: &str =
+        "26 25 0:23 / / rw,noatime shared:1 - ext4 /dev/sda1 rw\n";
+
+    /// MockFs that serves the exact exclop path derived from the seeded
+    /// fsid plus `/proc/self/mountinfo`. Any other read returns NotFound,
+    /// so a test fails if `cmd_idle` reads the wrong fsid or the wrong
+    /// file -- the whole point of this refactor.
     struct MockFs {
         expected_path: String,
         body: Option<String>,
+        mountinfo: Option<String>,
     }
 
     impl MockFs {
@@ -170,6 +179,7 @@ mod tests {
             Self {
                 expected_path: exclop_path(),
                 body: Some(format!("{body}\n")),
+                mountinfo: Some(MOUNTINFO_WITH_BTRFS_TARGET.to_string()),
             }
         }
 
@@ -179,6 +189,37 @@ mod tests {
             Self {
                 expected_path: exclop_path(),
                 body: None,
+                mountinfo: Some(MOUNTINFO_WITH_BTRFS_TARGET.to_string()),
+            }
+        }
+
+        /// Mountinfo body lacks the configured target -- pool reads as
+        /// offline without touching the runner mock layer.
+        fn with_offline_mountinfo() -> Self {
+            Self {
+                expected_path: exclop_path(),
+                body: Some("none\n".to_string()),
+                mountinfo: Some(MOUNTINFO_WITHOUT_TARGET.to_string()),
+            }
+        }
+
+        /// `/proc/self/mountinfo` read fails -- exercises the IO path of
+        /// MountInfoError.
+        fn with_no_mountinfo() -> Self {
+            Self {
+                expected_path: exclop_path(),
+                body: Some("none\n".to_string()),
+                mountinfo: None,
+            }
+        }
+
+        /// Custom mountinfo content -- exercises the parser path of
+        /// MountInfoError.
+        fn with_mountinfo(content: &str) -> Self {
+            Self {
+                expected_path: exclop_path(),
+                body: Some("none\n".to_string()),
+                mountinfo: Some(content.to_string()),
             }
         }
     }
@@ -193,6 +234,11 @@ mod tests {
         }
 
         fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
+            if path == "/proc/self/mountinfo" {
+                return self.mountinfo.clone().ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::NotFound, "mock: no mountinfo seeded")
+                });
+            }
             if path == self.expected_path {
                 match &self.body {
                     Some(b) => Ok(b.clone()),
@@ -233,13 +279,6 @@ mod tests {
         (
             CmdRequest::FindmntJson { mount_point: mp() },
             findmnt_json(true),
-        )
-    }
-
-    fn findmnt_not_mounted() -> (CmdRequest, RawCommandOutput) {
-        (
-            CmdRequest::FindmntJson { mount_point: mp() },
-            findmnt_json(false),
         )
     }
 
@@ -318,9 +357,8 @@ mod tests {
     // Scenario: NAS has not been unlocked yet; autosuspend checks idle state.
     #[test]
     fn idle_when_pool_offline() {
-        let (req, out) = findmnt_not_mounted();
-        let runner = MockRunner::default().with_output(req, out);
-        let fs = MockFs::with_exclop("none");
+        let runner = MockRunner::default();
+        let fs = MockFs::with_offline_mountinfo();
         let result = cmd_idle(&runner, &fs, &mp()).unwrap();
         assert_eq!(result, IdleResult::PoolOffline);
     }
@@ -492,12 +530,56 @@ mod tests {
     //   permissions.
     #[test]
     fn error_on_scrub_probe_failure() {
-        let (fmnt_req, fmnt_out) = findmnt_mounted();
-        // No scrub mock -> MissingMock when scrub is queried
-        let runner = MockRunner::default().with_output(fmnt_req, fmnt_out);
+        // No scrub mock -> MissingMock when scrub is queried.
+        let runner = MockRunner::default();
         let fs = MockFs::with_exclop("none");
 
         let result = cmd_idle(&runner, &fs, &mp());
         assert!(result.is_err());
+    }
+
+    /* Intent: a `/proc/self/mountinfo` IO failure must propagate as
+     *   IdleError::MountInfo, not silently become PoolOffline.
+     * Why: the original bug shape was "lenient parser branch returned no
+     *   entry on a non-zero+empty-stderr findmnt exit -> cmd_idle
+     *   concluded PoolOffline -> autosuspend allowed suspend". The
+     *   replacement reads /proc/self/mountinfo via the Filesystem
+     *   abstraction; the equivalent failure mode is the file being
+     *   unreadable and must surface as Err for the fail-closed contract
+     *   to hold.
+     * Scenario: MockFs.read_to_string("/proc/self/mountinfo") returns
+     *   NotFound.
+     */
+    #[test]
+    fn mountinfo_read_failure_is_not_pool_offline() {
+        let runner = MockRunner::default();
+        let fs = MockFs::with_no_mountinfo();
+        let result = cmd_idle(&runner, &fs, &mp());
+        assert!(
+            matches!(result, Err(IdleError::MountInfo(_))),
+            "got {result:?}"
+        );
+    }
+
+    /* Intent: malformed mountinfo content for the target line must
+     *   propagate as IdleError::MountInfo, not silently become
+     *   PoolOffline.
+     * Why: same fail-closed contract as above. A lenient parser branch
+     *   that swallows malformed content reintroduces the "we don't know
+     *   -> allow suspend" gap this fix exists to close.
+     * Scenario: mountinfo body well-formed except the target line is
+     *   missing the "- fstype" tail.
+     */
+    #[test]
+    fn mountinfo_malformed_target_line_is_not_pool_offline() {
+        let runner = MockRunner::default();
+        let fs = MockFs::with_mountinfo(
+            "36 35 0:32 / /mnt/storage rw,noatime shared:1 garbage_no_dash_separator\n",
+        );
+        let result = cmd_idle(&runner, &fs, &mp());
+        assert!(
+            matches!(result, Err(IdleError::MountInfo(_))),
+            "got {result:?}"
+        );
     }
 }
