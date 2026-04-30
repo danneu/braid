@@ -35,7 +35,28 @@ def add_cmd(key):
 # --- Phase 1: First disk (no pool) ---
 
 with subtest("First disk creates single-drive pool"):
-    machine.succeed(add_cmd("disk1"))
+    machine.succeed(
+        f"{add_cmd('disk1')} >/tmp/add1.out 2>/tmp/add1.err"
+    )
+    add1_err = machine.succeed("cat /tmp/add1.err")
+
+    # Principle 13: [wait] before each blocking cryptsetup Argon2 step.
+    fmt_wait = "[wait] disk disk1: formatting LUKS..."
+    fmt_ok = "[ok]   disk disk1: LUKS formatted"
+    assert fmt_wait in add1_err and fmt_ok in add1_err, (
+        f"expected LUKS format wait/ok pair, got: {add1_err!r}"
+    )
+    assert add1_err.find(fmt_wait) < add1_err.find(fmt_ok), (
+        f"format wait must precede format ok, got: {add1_err!r}"
+    )
+    open_wait = "[wait] disk disk1: unlocking..."
+    open_ok = "[ok]   disk disk1: unlocked"
+    assert open_wait in add1_err and open_ok in add1_err, (
+        f"expected LUKS open wait/ok pair, got: {add1_err!r}"
+    )
+    assert add1_err.find(open_wait) < add1_err.find(open_ok), (
+        f"open wait must precede open ok, got: {add1_err!r}"
+    )
 
     # Pool is mounted
     machine.succeed("mountpoint -q /mnt/storage")
@@ -55,7 +76,19 @@ with subtest("First disk creates single-drive pool"):
 # --- Phase 2: Second disk (convert to RAID1) ---
 
 with subtest("Second disk converts pool to RAID1"):
-    machine.succeed(add_cmd("disk2"))
+    machine.succeed(
+        f"{add_cmd('disk2')} >/tmp/add2.out 2>/tmp/add2.err"
+    )
+    add2_err = machine.succeed("cat /tmp/add2.err")
+    # Adding a second disk to a 1-disk pool triggers pool_balance_raid1.
+    bal_wait = "[wait] pool: balancing to RAID1..."
+    bal_ok = "[ok]   pool: RAID1 balance complete"
+    assert bal_wait in add2_err and bal_ok in add2_err, (
+        f"expected RAID1 balance wait/ok pair, got: {add2_err!r}"
+    )
+    assert add2_err.find(bal_wait) < add2_err.find(bal_ok), (
+        f"balance wait must precede balance ok, got: {add2_err!r}"
+    )
 
     df_output = machine.succeed("btrfs fi df /mnt/storage")
     assert "Data, RAID1" in df_output, f"Expected RAID1:\n{df_output}"

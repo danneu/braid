@@ -23,7 +23,7 @@ use crate::preview::{self, PerDiskStyle, Preview, PreviewCompleteness, PreviewNo
 use crate::probe::{Filesystem, ProbeError, probe_config_disk, probe_pool};
 use crate::progress::ProgressOutput;
 use crate::state_paths::StatePaths;
-use crate::status_tag::color_enabled_for_stderr;
+use crate::status_tag::{StatusTag, color_enabled_for_stderr, emit_status, status_line};
 use crate::types::*;
 use std::path::Path;
 
@@ -218,23 +218,45 @@ impl<R: CommandRunner> Drop for LuksCleanupGuard<'_, R> {
         if !self.armed {
             return;
         }
+        let color_enabled = color_enabled_for_stderr();
         for mapper in self.mappers.iter().rev() {
+            let label = mapper.strip_prefix("braid-").unwrap_or(mapper);
+            emit_status(&status_line(
+                StatusTag::Wait,
+                color_enabled,
+                &format!("disk {label}: locking (cleanup)..."),
+            ));
             match self.runner.run(&CmdRequest::CryptsetupClose {
                 mapper: mapper.clone(),
             }) {
                 Ok(r) if r.exit_status == 0 => {
-                    eprintln!("cleanup: closed LUKS mapper {}", mapper);
+                    emit_status(&status_line(
+                        StatusTag::Ok,
+                        color_enabled,
+                        &format!("disk {label}: locked (cleanup)"),
+                    ));
                 }
                 Ok(r) => {
-                    eprintln!(
-                        "cleanup: failed to close LUKS mapper {} (exit {}): {}",
-                        mapper,
-                        r.exit_status,
-                        r.stderr.trim()
-                    );
+                    let detail = r.stderr.trim();
+                    let body = if detail.is_empty() {
+                        format!(
+                            "disk {label}: lock failed (cleanup, exit {})",
+                            r.exit_status
+                        )
+                    } else {
+                        format!(
+                            "disk {label}: lock failed (cleanup, exit {}: {detail})",
+                            r.exit_status
+                        )
+                    };
+                    emit_status(&status_line(StatusTag::Warn, color_enabled, &body));
                 }
                 Err(e) => {
-                    eprintln!("cleanup: failed to close LUKS mapper {}: {}", mapper, e);
+                    emit_status(&status_line(
+                        StatusTag::Warn,
+                        color_enabled,
+                        &format!("disk {label}: lock failed (cleanup, {e})"),
+                    ));
                 }
             }
         }
@@ -353,6 +375,7 @@ impl AddPlan {
         fs: &F,
         params: &AddParams<'_>,
     ) -> Result<(), AddError> {
+        let color_enabled = color_enabled_for_stderr();
         // Render accumulated notes to stderr BEFORE any mutation via
         // the shared renderer. Warn notes emit as the canonical
         // `[warn] <body>` (same as dry-run stdout); the no-op Info
@@ -362,11 +385,7 @@ impl AddPlan {
         // stdout share one render contract for these notes.
         eprint!(
             "{}",
-            preview::render_notes_for_stderr_with(
-                &self.notes,
-                Self::STDERR_STYLE,
-                crate::status_tag::color_enabled_for_stderr(),
-            ),
+            preview::render_notes_for_stderr_with(&self.notes, Self::STDERR_STYLE, color_enabled,),
         );
 
         // No-op early-return: if the plan has zero steps, the Info
@@ -445,7 +464,7 @@ impl AddPlan {
                 runner,
                 &credential_targets,
                 Credential::Passphrase(&passphrase),
-                color_enabled_for_stderr(),
+                color_enabled,
                 |line| eprint!("{line}"),
             ) {
                 Ok(()) => {}
@@ -490,9 +509,18 @@ impl AddPlan {
 
             // Open mapper if closed (now we know it's braid-labeled + pool is up)
             if !mapper_open {
+                emit_status(&status_line(
+                    StatusTag::Wait,
+                    color_enabled,
+                    &format!("disk {name}: unlocking..."),
+                ));
                 ensure_luks_open(runner, fs, name, by_id, &passphrase)?;
                 luks_guard.track(mn.0.clone());
-                eprintln!("LUKS opened: {} → {}", by_id, mn);
+                emit_status(&status_line(
+                    StatusTag::Ok,
+                    color_enabled,
+                    &format!("disk {name}: unlocked"),
+                ));
             }
 
             let identity = classify_braid_disk_fsid(runner, name, &mn, &self.pool)?;
@@ -581,20 +609,65 @@ impl AddPlan {
             let mut luks_opts = luks_opts_from_env();
             luks_opts.push("--label".into());
             luks_opts.push(format!("braid-{name}"));
+            eprint!(
+                "{}",
+                status_line(
+                    StatusTag::Wait,
+                    color_enabled,
+                    &format!("disk {name}: formatting LUKS..."),
+                )
+            );
             luks_format(runner, &by_id.0, &passphrase, &luks_opts)?;
-            eprintln!("LUKS formatted: {}", by_id);
+            eprint!(
+                "{}",
+                status_line(
+                    StatusTag::Ok,
+                    color_enabled,
+                    &format!("disk {name}: LUKS formatted"),
+                )
+            );
 
             if let Some(kf) = params.enroll_key_file {
+                eprint!(
+                    "{}",
+                    status_line(
+                        StatusTag::Wait,
+                        color_enabled,
+                        &format!("disk {name}: enrolling keyfile in slot 1..."),
+                    )
+                );
                 crate::luks::enroll_key_file(runner, &by_id.0, &passphrase, kf)?;
-                eprintln!("Keyfile enrolled in slot 1: {}", by_id);
+                eprint!(
+                    "{}",
+                    status_line(
+                        StatusTag::Ok,
+                        color_enabled,
+                        &format!("disk {name}: keyfile enrolled in slot 1"),
+                    )
+                );
             }
 
             let backup_path = backup_luks_header(runner, &by_id.0, &mn.0, params.paths)?;
             eprintln!("LUKS header backed up: {}", backup_path.display());
 
+            eprint!(
+                "{}",
+                status_line(
+                    StatusTag::Wait,
+                    color_enabled,
+                    &format!("disk {name}: unlocking..."),
+                )
+            );
             ensure_luks_open(runner, fs, name, by_id, &passphrase)?;
             luks_guard.track(mn.0.clone());
-            eprintln!("LUKS opened: {} → {}", by_id, mn);
+            eprint!(
+                "{}",
+                status_line(
+                    StatusTag::Ok,
+                    color_enabled,
+                    &format!("disk {name}: unlocked"),
+                )
+            );
 
             needs_pool_add.push(i);
         }
@@ -676,9 +749,19 @@ impl AddPlan {
             // Balance to RAID1 if total >= 2
             let total_after = self.pool.devices.len() + mapper_paths.len();
             if total_after >= 2 {
-                eprintln!("Balancing to RAID1...");
+                eprint!(
+                    "{}",
+                    status_line(
+                        StatusTag::Wait,
+                        color_enabled,
+                        "pool: balancing to RAID1...",
+                    )
+                );
                 pool_balance_raid1(runner, mount_point, params.progress)?;
-                eprintln!("Balance complete.");
+                eprint!(
+                    "{}",
+                    status_line(StatusTag::Ok, color_enabled, "pool: RAID1 balance complete",)
+                );
             }
 
             // Leave the journal until the balance completes; interruption
@@ -1971,6 +2054,7 @@ mod tests {
     struct SpyRunner {
         inner: MockRunner,
         closed: Mutex<Vec<String>>,
+        close_output: RawCommandOutput,
     }
 
     impl SpyRunner {
@@ -1978,7 +2062,18 @@ mod tests {
             Self {
                 inner,
                 closed: Mutex::new(Vec::new()),
+                close_output: RawCommandOutput {
+                    cmd: "cryptsetup close".into(),
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                },
             }
+        }
+
+        fn with_close_output(mut self, close_output: RawCommandOutput) -> Self {
+            self.close_output = close_output;
+            self
         }
     }
 
@@ -1986,12 +2081,9 @@ mod tests {
         fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
             if let CmdRequest::CryptsetupClose { mapper } = request {
                 self.closed.lock().unwrap().push(mapper.clone());
-                return Ok(RawCommandOutput {
-                    cmd: format!("cryptsetup close {mapper}"),
-                    stdout: String::new(),
-                    stderr: String::new(),
-                    exit_status: 0,
-                });
+                let mut output = self.close_output.clone();
+                output.cmd = format!("cryptsetup close {mapper}");
+                return Ok(output);
             }
             self.inner.run(request)
         }
@@ -2012,17 +2104,59 @@ mod tests {
         // Scenario: cmd_add opens a mapper, a later step in the LUKS phase
         // fails, the guard fires on unwind and closes the mapper.
         let runner = SpyRunner::new(MockRunner::default());
-        {
+        let captured = crate::status_tag::testing::capture_with_color(false, || {
             let mut guard = LuksCleanupGuard::new(&runner);
             guard.track("braid-aaa".into());
             guard.track("braid-bbb".into());
             // guard drops here while still armed
-        }
+        });
         let closed = runner.closed.lock().unwrap();
         assert_eq!(
             *closed,
             vec!["braid-bbb", "braid-aaa"],
             "should close tracked mappers in reverse order"
+        );
+        assert!(
+            captured.contains("[wait] disk bbb: locking (cleanup)...\n"),
+            "expected cleanup wait row for bbb, got: {captured:?}"
+        );
+        assert!(
+            captured.contains("[ok]   disk bbb: locked (cleanup)\n"),
+            "expected cleanup ok row for bbb, got: {captured:?}"
+        );
+        assert!(
+            captured.find("[wait] disk bbb: locking (cleanup)...")
+                < captured.find("[ok]   disk bbb: locked (cleanup)"),
+            "cleanup wait must precede ok, got: {captured:?}"
+        );
+    }
+
+    #[test]
+    fn guard_close_failure_emits_cleanup_warn_row() {
+        // Intent: rollback close failures close their [wait] row with [warn].
+        // Why it exists: add rollback is best-effort, so the command can
+        // continue unwinding after a failed close without leaving a dangling
+        // blocking-work row.
+        // Scenario: cryptsetup close returns non-zero while the cleanup guard
+        // is closing a mapper after a later add step failed.
+        let runner = SpyRunner::new(MockRunner::default()).with_close_output(RawCommandOutput {
+            cmd: "cryptsetup close".into(),
+            stdout: String::new(),
+            stderr: "device is busy".into(),
+            exit_status: 5,
+        });
+        let captured = crate::status_tag::testing::capture_with_color(false, || {
+            let mut guard = LuksCleanupGuard::new(&runner);
+            guard.track("braid-aaa".into());
+            // guard drops here while still armed
+        });
+        let wait = "[wait] disk aaa: locking (cleanup)...";
+        let warn = "[warn] disk aaa: lock failed (cleanup, exit 5: device is busy)";
+        assert!(captured.contains(wait), "missing wait row: {captured:?}");
+        assert!(captured.contains(warn), "missing warn row: {captured:?}");
+        assert!(
+            captured.find(wait) < captured.find(warn),
+            "cleanup wait must precede warn, got: {captured:?}"
         );
     }
 
@@ -2066,6 +2200,144 @@ mod tests {
         assert!(
             !closed.contains(&"braid-existing".to_string()),
             "must not close a mapper we didn't open"
+        );
+    }
+
+    /// Wraps `AddTestRunner` to also satisfy `CryptsetupLuksOpen` (run via
+    /// stdin) for the Pass-1 recoverable unlock test. The base runner is
+    /// scoped to scenarios where every PresentLuks mapper is already open,
+    /// so it has no built-in answer for the open-from-closed branch.
+    struct UnlockingAddRunner {
+        inner: AddTestRunner,
+    }
+    impl CommandRunner for UnlockingAddRunner {
+        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
+            match request {
+                CmdRequest::CryptsetupLuksOpen { .. } => Ok(mock_ok("cryptsetup luksOpen", "")),
+                CmdRequest::BtrfsBalanceRaid1 { .. } => Ok(mock_ok("btrfs balance", "")),
+                _ => self.inner.run(request),
+            }
+        }
+        fn run_with_stdin(
+            &self,
+            request: &CmdRequest,
+            stdin: &[u8],
+        ) -> Result<RawCommandOutput, CmdError> {
+            if let CmdRequest::CryptsetupLuksOpen { .. } = request {
+                return Ok(mock_ok("cryptsetup luksOpen", ""));
+            }
+            self.inner.run_with_stdin(request, stdin)
+        }
+    }
+
+    /* Intent: add Pass-1's closed PresentLuks recoverable branch announces the
+     * cryptsetup luksOpen with the canonical [wait]/[ok] rows.
+     * Why it exists: Principle 13 requires every cryptsetup Argon2 wait window
+     * to be announced; the BraidLabeledRecoverable + closed-mapper state
+     * cannot be composed from existing braid commands without unverified
+     * btrfs assumptions, so the row pin moves to the unit-test layer.
+     * Scenario: a 2-disk add where disk1 is already in the pool and disk2 is
+     * a recoverable braid-labeled disk whose mapper is closed -- Pass 1's
+     * `if !mapper_open` block opens the mapper and emits the wait/ok pair.
+     */
+    #[test]
+    fn pass1_recoverable_closed_mapper_emits_canonical_unlock_rows() {
+        let (_state_tmp, paths, _tmp, _config_path, pass_path) = add_test_setup();
+        // Crucially: /dev/mapper/braid-disk2 is NOT listed, so ensure_luks_open
+        // in Pass 1 actually issues the cryptsetup open (rather than seeing an
+        // already-existing mapper and short-circuiting).
+        let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
+        // disk_in_pool: true so the post-BtrfsDeviceAdd probe_pool returns
+        // disk1+disk2, letting save_membership and balance proceed cleanly.
+        // The pre-add classify_braid_disk_fsid uses the AddPlan's `pool`
+        // field (which we hand-build to contain only disk1), not the runner,
+        // so identity is BraidLabeledRecoverable regardless.
+        let runner = UnlockingAddRunner {
+            inner: AddTestRunner {
+                disk_in_pool: true,
+                fail_device_add: false,
+                no_btrfs_superblock: false,
+            },
+        };
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+
+        let config = crate::config::Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let by_id_disk2 = ByIdPath("/dev/disk/by-id/virtio-disk2".into());
+        let mut pool_membership = membership::PoolMembership::empty();
+        pool_membership.disks.insert(
+            "disk1".into(),
+            membership::DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
+        );
+        let pool = PoolState {
+            mounted: true,
+            devices: vec![PoolDevice {
+                mapper: MapperName("braid-disk1".into()),
+                luks_uuid: LuksUuid("11111111-1111-1111-1111-111111111111".into()),
+                devid: 1,
+                underlying: "/dev/vdb".into(),
+            }],
+            missing_count: 0,
+            missing_devids: vec![],
+            total_devices: 1,
+            fsid: Some(POOL_FSID.into()),
+            null_underlying: vec![],
+        };
+        let plan = AddPlan {
+            notes: vec![],
+            // Steps non-empty so execute() does not no-op early.
+            steps: vec![Step {
+                risk: "irreversible",
+                description: "stub".into(),
+                commands: vec![],
+            }],
+            config,
+            parsed: vec![("disk2".into(), by_id_disk2.clone())],
+            names: vec!["disk2".into()],
+            by_ids: vec![by_id_disk2.clone()],
+            probed: vec![ConfigDisk {
+                name: "disk2".into(),
+                by_id_path: by_id_disk2,
+                state: ConfigDiskState::PresentLuks {
+                    uuid: LuksUuid("22222222-2222-2222-2222-222222222222".into()),
+                    mapper_open: false,
+                },
+            }],
+            pool,
+            pool_membership,
+        };
+
+        let captured = crate::status_tag::testing::capture_with_color(false, || {
+            let result = plan.execute(
+                &runner,
+                &fs,
+                &AddParams {
+                    config_path: Path::new("/dev/null"),
+                    disk_specs: &[],
+                    dry_run: false,
+                    yes: true,
+                    passphrase_stdin: false,
+                    passphrase_file: Some(pass_path.as_path()),
+                    enroll_key_file: None,
+                    progress: ProgressOutput::Off,
+                    paths: &paths,
+                    sleep_inhibitor: &inhibitor,
+                    passphrase_reader: &crate::luks::RealTty,
+                },
+            );
+            // The recoverable add must succeed end-to-end -- if it does not,
+            // the [wait]/[ok] rows we are pinning are still in the captured
+            // buffer (they fire in Pass 1, before any later step could fail),
+            // but a non-Ok result indicates an unexpected mock gap.
+            assert!(result.is_ok(), "recoverable add should succeed: {result:?}");
+        });
+
+        let wait = "[wait] disk disk2: unlocking...";
+        let ok = "[ok]   disk disk2: unlocked";
+        assert!(captured.contains(wait), "missing wait row: {captured:?}");
+        assert!(captured.contains(ok), "missing ok row: {captured:?}");
+        assert!(
+            captured.find(wait) < captured.find(ok),
+            "wait must precede ok, got: {captured:?}"
         );
     }
 

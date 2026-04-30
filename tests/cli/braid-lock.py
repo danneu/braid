@@ -67,6 +67,23 @@ with subtest("Test 1: happy path — mounted pool locks cleanly"):
     assert "[ok]   disk longdisk3: locked" in live_stderr_lines, (
         f"expected exact long-name disk row, got: {live_stderr!r}"
     )
+    # Principle 13: a [wait] row precedes every blocking subprocess.
+    unmount_wait = "[wait] pool: unmounting /mnt/storage..."
+    unmounted_ok = "[ok]   pool: unmounted /mnt/storage"
+    assert unmount_wait in live_stderr_lines, (
+        f"expected pool unmount wait row, got: {live_stderr!r}"
+    )
+    assert live_stderr.find(unmount_wait) < live_stderr.find(unmounted_ok), (
+        f"unmount wait must precede unmount ok, got: {live_stderr!r}"
+    )
+    lock_wait = "[wait] disk longdisk3: locking..."
+    locked_ok = "[ok]   disk longdisk3: locked"
+    assert lock_wait in live_stderr_lines, (
+        f"expected per-disk lock wait row, got: {live_stderr!r}"
+    )
+    assert live_stderr.find(lock_wait) < live_stderr.find(locked_ok), (
+        f"lock wait must precede lock ok, got: {live_stderr!r}"
+    )
     assert "\x1b[" not in live_stderr, (
         f"lock stderr must be plain without a TTY, got: {live_stderr!r}"
     )

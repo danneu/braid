@@ -9,7 +9,9 @@ use crate::preflight;
 use crate::preview::{self, NoteLevel, PerDiskStyle, Preview, PreviewCompleteness, PreviewNote};
 use crate::probe::{self, Filesystem};
 use crate::state_paths::StatePaths;
-use crate::status_tag::{CredentialKind, color_enabled_for_stderr, emit_credential_wait_line};
+use crate::status_tag::{
+    CredentialKind, StatusTag, color_enabled_for_stderr, emit_credential_wait_line, status_line,
+};
 use crate::types::{ByIdPath, ConfigDiskState};
 use std::io::Read;
 use std::os::unix::fs::OpenOptionsExt;
@@ -148,6 +150,7 @@ fn plan_enrollment<R: CommandRunner>(
     passphrase: &str,
     mode: EnrollmentPlanMode,
 ) -> Result<Vec<DiskEnrollAction>, EnrollKeyFileError> {
+    let color_enabled = color_enabled_for_stderr();
     let (first_name, first_by_id) = &candidates[0];
     let first_target = CredentialVerifyTarget {
         name: first_name.clone(),
@@ -157,7 +160,7 @@ fn plan_enrollment<R: CommandRunner>(
         runner,
         std::slice::from_ref(&first_target),
         Credential::Passphrase(passphrase),
-        color_enabled_for_stderr(),
+        color_enabled,
         |line| eprint!("{line}"),
     ) {
         Ok(()) => {}
@@ -182,17 +185,33 @@ fn plan_enrollment<R: CommandRunner>(
             // and must NOT be silently treated as "not enrolled" -- doing so
             // would let the flow proceed to slot preflight on a device that
             // may not even be readable.
-            emit_credential_wait_line(CredentialKind::KeyFile, color_enabled_for_stderr(), name);
+            emit_credential_wait_line(CredentialKind::KeyFile, color_enabled, name);
             match luks::verify_key_file(runner, &by_id.0, key_file_path)? {
                 VerifyOutcome::Authenticated => {
-                    eprintln!("ok: {} -- keyfile already enrolled", name);
+                    eprint!(
+                        "{}",
+                        status_line(
+                            StatusTag::Ok,
+                            color_enabled,
+                            &format!("keyfile: already enrolled on {name}"),
+                        )
+                    );
                     plan.push(DiskEnrollAction::AlreadyEnrolled {
                         name: name.clone(),
                         by_id: by_id.clone(),
                     });
                     continue;
                 }
-                VerifyOutcome::Rejected => {}
+                VerifyOutcome::Rejected => {
+                    eprint!(
+                        "{}",
+                        status_line(
+                            StatusTag::Skip,
+                            color_enabled,
+                            &format!("keyfile: not yet enrolled on {name}"),
+                        )
+                    );
+                }
             }
         }
 
@@ -214,7 +233,7 @@ fn plan_enrollment<R: CommandRunner>(
                 runner,
                 std::slice::from_ref(&target),
                 Credential::Passphrase(passphrase),
-                color_enabled_for_stderr(),
+                color_enabled,
                 |line| eprint!("{line}"),
             ) {
                 Ok(()) => {}
@@ -250,6 +269,7 @@ fn apply_enrollment<R: CommandRunner>(
     key_file_path: &Path,
     paths: &StatePaths,
 ) -> Result<(), EnrollKeyFileError> {
+    let color_enabled = color_enabled_for_stderr();
     let backup_dir = paths.luks_headers_dir();
     let mut enrolled = 0u32;
     let mut already = 0u32;
@@ -260,8 +280,23 @@ fn apply_enrollment<R: CommandRunner>(
                 already += 1;
             }
             DiskEnrollAction::NeedsEnroll { name, by_id } => {
+                eprint!(
+                    "{}",
+                    status_line(
+                        StatusTag::Wait,
+                        color_enabled,
+                        &format!("disk {name}: enrolling keyfile in slot 1..."),
+                    )
+                );
                 luks::enroll_key_file(runner, &by_id.0, passphrase, key_file_path)?;
-                eprintln!("ok: {} -- keyfile enrolled in slot 1", name);
+                eprint!(
+                    "{}",
+                    status_line(
+                        StatusTag::Ok,
+                        color_enabled,
+                        &format!("disk {name}: keyfile enrolled in slot 1"),
+                    )
+                );
 
                 let mn = mapper_name(name);
                 let backup_path =
@@ -544,10 +579,20 @@ pub fn plan_enroll<R: CommandRunner, F: Filesystem + ?Sized>(
     };
 
     let steps = if dry_run && !generate {
+        let color_enabled = color_enabled_for_stderr();
         let mut needs_enroll: Vec<EnrollmentCandidate> = Vec::with_capacity(candidates.len());
         for (name, by_id) in &candidates {
+            emit_credential_wait_line(CredentialKind::KeyFile, color_enabled, name);
             match luks::verify_key_file(runner, &by_id.0, key_file_path) {
                 Ok(VerifyOutcome::Authenticated) => {
+                    eprint!(
+                        "{}",
+                        status_line(
+                            StatusTag::Ok,
+                            color_enabled,
+                            &format!("keyfile: already enrolled on {name}"),
+                        )
+                    );
                     notes.push(PreviewNote::PerDisk {
                         name: name.clone(),
                         level: NoteLevel::Skip,
@@ -555,6 +600,14 @@ pub fn plan_enroll<R: CommandRunner, F: Filesystem + ?Sized>(
                     });
                 }
                 Ok(VerifyOutcome::Rejected) => {
+                    eprint!(
+                        "{}",
+                        status_line(
+                            StatusTag::Skip,
+                            color_enabled,
+                            &format!("keyfile: not yet enrolled on {name}"),
+                        )
+                    );
                     needs_enroll.push((name.clone(), by_id.clone()));
                 }
                 Err(e) => {

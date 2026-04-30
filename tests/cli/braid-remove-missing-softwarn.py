@@ -165,6 +165,24 @@ with subtest("real-run: warn appears on stderr with the canonical [warn] prefix"
     assert (
         "warning:" not in err2
     ), f"real-run stderr must not carry the legacy 'warning:' prefix; got:\n{err2}"
+    # Principle 13: a [wait] row precedes the btrfs device remove and the
+    # post-remove RAID1 soft-balance restore, each closed by an [ok] row.
+    rm_wait = f"[wait] pool: removing missing devid {missing_devid}..."
+    rm_ok = f"[ok]   pool: missing devid {missing_devid} removed"
+    assert rm_wait in err2 and rm_ok in err2, (
+        f"expected remove-missing wait/ok pair, got: {err2!r}"
+    )
+    assert err2.find(rm_wait) < err2.find(rm_ok), (
+        f"remove-missing wait must precede ok, got: {err2!r}"
+    )
+    restore_wait = "[wait] pool: restoring RAID1 redundancy..."
+    restore_ok = "[ok]   pool: RAID1 redundancy restored"
+    assert restore_wait in err2 and restore_ok in err2, (
+        f"expected RAID1 restore wait/ok pair, got: {err2!r}"
+    )
+    assert err2.find(restore_wait) < err2.find(restore_ok), (
+        f"restore wait must precede restore ok, got: {err2!r}"
+    )
     assert "\x1b[" not in err2, f"real-run stderr must be plain without a TTY; got:\n{err2}"
 
 with subtest("real-run actually removed the missing device"):

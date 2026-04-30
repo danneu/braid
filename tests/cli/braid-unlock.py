@@ -77,12 +77,19 @@ with subtest("Test 1: happy path — all locked, unlock opens everything"):
         f"expected probe stderr rows, got: {probe_err!r}"
     )
     wait_line = "[wait] passphrase: checking against disk1...\n"
+    accepted_line = "[ok]   passphrase: accepted by disk1\n"
     unlocked_line = "[ok]   disk disk1: unlocked\n"
     assert wait_line in probe_err, (
         f"expected credential verification wait line, got: {probe_err!r}"
     )
-    assert probe_err.find(wait_line) < probe_err.find(unlocked_line), (
-        f"wait line must precede first unlocked row, got: {probe_err!r}"
+    assert accepted_line in probe_err, (
+        f"expected passphrase accepted row, got: {probe_err!r}"
+    )
+    assert probe_err.find(wait_line) < probe_err.find(accepted_line), (
+        f"passphrase wait must precede accepted row, got: {probe_err!r}"
+    )
+    assert probe_err.find(accepted_line) < probe_err.find(unlocked_line), (
+        f"passphrase accepted row must precede first unlocked row, got: {probe_err!r}"
     )
     unlocking_wait = "[wait] disk disk1: unlocking...\n"
     mounting_wait = "[wait] pool: mounting /mnt/storage...\n"

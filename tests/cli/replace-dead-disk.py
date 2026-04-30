@@ -99,8 +99,30 @@ with subtest("Kill disk2: simulate drive failure"):
     assert "missing" in fi_show.lower(), f"Expected missing device:\n{fi_show}"
 
 with subtest("Replace dead disk2 with disk4 (auto-detect)"):
-    result = machine.succeed(replace_cmd("disk2", "disk4"))
+    result = machine.succeed(
+        f"{replace_cmd('disk2', 'disk4')} >/tmp/repl-dead.out 2>/tmp/repl-dead.err"
+    )
     print(f"braid replace output:\n{result}")
+    repl_err = machine.succeed("cat /tmp/repl-dead.err")
+    # Principle 13: missing-replace path emits the rebuild [wait] and the
+    # post-replace RAID1 redundancy restore [wait]/[ok] pair from
+    # pool::maybe_restore_raid1.
+    rebuild_wait = "[wait] pool: rebuilding missing devid"
+    repl_ok = "[ok]   pool: replace complete"
+    assert rebuild_wait in repl_err, (
+        f"expected rebuild missing wait row, got: {repl_err!r}"
+    )
+    assert repl_err.find(rebuild_wait) < repl_err.find(repl_ok), (
+        f"rebuild wait must precede replace ok, got: {repl_err!r}"
+    )
+    restore_wait = "[wait] pool: restoring RAID1 redundancy..."
+    restore_ok = "[ok]   pool: RAID1 redundancy restored"
+    assert restore_wait in repl_err and restore_ok in repl_err, (
+        f"expected RAID1 restore wait/ok pair after missing-replace, got: {repl_err!r}"
+    )
+    assert repl_err.find(restore_wait) < repl_err.find(restore_ok), (
+        f"restore wait must precede restore ok, got: {repl_err!r}"
+    )
 
 with subtest("Pool healthy after dead replace: disk2 gone, disk4 present"):
     fi_show = machine.succeed("btrfs fi show /mnt/storage")

@@ -12,6 +12,7 @@ use crate::preview::{self, PerDiskStyle, Preview, PreviewCompleteness, PreviewNo
 use crate::probe::{Filesystem, ProbeError, probe_pool};
 use crate::progress::{self, ProgressOutput};
 use crate::state_paths::StatePaths;
+use crate::status_tag::{StatusTag, color_enabled_for_stderr, status_line};
 use crate::types::MountPoint;
 use std::path::Path;
 
@@ -186,9 +187,14 @@ impl RemoveMissingPlan {
             .map_err(|e| RemoveMissingError::Validation(e.to_string()))?;
 
         // Execute
-        eprintln!(
-            "Removing missing device (devid {}) from pool...",
-            resolved_devid
+        let color_enabled = color_enabled_for_stderr();
+        eprint!(
+            "{}",
+            status_line(
+                StatusTag::Wait,
+                color_enabled,
+                &format!("pool: removing missing devid {resolved_devid}..."),
+            )
         );
         pool_remove_device_using(
             runner,
@@ -198,6 +204,14 @@ impl RemoveMissingPlan {
             params.sleeper,
             &progress::StderrSink,
         )?;
+        eprint!(
+            "{}",
+            status_line(
+                StatusTag::Ok,
+                color_enabled,
+                &format!("pool: missing devid {resolved_devid} removed"),
+            )
+        );
 
         // Membership committed by btrfs device remove. Persist before the
         // post-remove soft balance; the journal still covers maintenance,

@@ -57,7 +57,18 @@ with subtest("Test 1: add disk2 with --enroll"):
         f"printf '%s\\n' {pq} | "
         f"BRAID_LUKS_OPTS='{luks_opts}' "
         f"braid add disk2=/dev/disk/by-id/virtio-disk2 --passphrase-stdin --yes "
-        f"--enroll /tmp"
+        f"--enroll /tmp >/tmp/add-enroll.out 2>/tmp/add-enroll.err"
+    )
+    add_err = machine.succeed("cat /tmp/add-enroll.err")
+    # Principle 13: the in-add keyfile enroll path runs cryptsetup luksAddKey
+    # (Argon2). A [wait] precedes it; an [ok] closes it.
+    enroll_wait = "[wait] disk disk2: enrolling keyfile in slot 1..."
+    enroll_ok = "[ok]   disk disk2: keyfile enrolled in slot 1"
+    assert enroll_wait in add_err and enroll_ok in add_err, (
+        f"expected enroll wait/ok pair, got: {add_err!r}"
+    )
+    assert add_err.find(enroll_wait) < add_err.find(enroll_ok), (
+        f"enroll wait must precede enroll ok, got: {add_err!r}"
     )
 
     # Verify slot 1 is occupied on the new disk

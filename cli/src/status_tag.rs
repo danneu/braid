@@ -63,6 +63,16 @@ pub fn status_line(tag: StatusTag, color_enabled: bool, body: &str) -> String {
     )
 }
 
+pub fn emit_status(line: &str) {
+    #[cfg(test)]
+    {
+        if testing::capture_line(line) {
+            return;
+        }
+    }
+    eprint!("{line}");
+}
+
 pub fn credential_wait_line(kind: CredentialKind, color_enabled: bool, name: &str) -> String {
     status_line(
         StatusTag::Wait,
@@ -72,7 +82,15 @@ pub fn credential_wait_line(kind: CredentialKind, color_enabled: bool, name: &st
 }
 
 pub fn emit_credential_wait_line(kind: CredentialKind, color_enabled: bool, name: &str) {
-    eprint!("{}", credential_wait_line(kind, color_enabled, name));
+    emit_status(&credential_wait_line(kind, color_enabled, name));
+}
+
+pub fn credential_ok_line(kind: CredentialKind, color_enabled: bool, name: &str) -> String {
+    status_line(
+        StatusTag::Ok,
+        color_enabled,
+        &format!("{}: accepted by {name}", kind.label()),
+    )
 }
 
 pub fn should_color_status_tags(is_terminal: bool, no_color_active: bool) -> bool {
@@ -86,6 +104,11 @@ pub fn no_color_active_from_env(value: Option<&std::ffi::OsStr>) -> bool {
 }
 
 pub fn color_enabled_for_stdout() -> bool {
+    #[cfg(test)]
+    if let Some(enabled) = testing::color_override() {
+        return enabled;
+    }
+
     should_color_status_tags(
         std::io::stdout().is_terminal(),
         no_color_active_from_env(std::env::var_os("NO_COLOR").as_deref()),
@@ -93,10 +116,66 @@ pub fn color_enabled_for_stdout() -> bool {
 }
 
 pub fn color_enabled_for_stderr() -> bool {
+    #[cfg(test)]
+    if let Some(enabled) = testing::color_override() {
+        return enabled;
+    }
+
     should_color_status_tags(
         std::io::stderr().is_terminal(),
         no_color_active_from_env(std::env::var_os("NO_COLOR").as_deref()),
     )
+}
+
+#[cfg(test)]
+pub mod testing {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static CAPTURED: RefCell<Option<String>> = const { RefCell::new(None) };
+        static COLOR_OVERRIDE: RefCell<Option<bool>> = const { RefCell::new(None) };
+    }
+
+    pub fn capture_with<F: FnOnce()>(f: F) -> String {
+        capture_with_color_override(None, f)
+    }
+
+    pub fn capture_with_color<F: FnOnce()>(color_enabled: bool, f: F) -> String {
+        capture_with_color_override(Some(color_enabled), f)
+    }
+
+    fn capture_with_color_override<F: FnOnce()>(color_enabled: Option<bool>, f: F) -> String {
+        struct ResetCapture;
+
+        impl Drop for ResetCapture {
+            fn drop(&mut self) {
+                CAPTURED.with(|captured| *captured.borrow_mut() = None);
+                COLOR_OVERRIDE.with(|color| *color.borrow_mut() = None);
+            }
+        }
+
+        CAPTURED.with(|captured| *captured.borrow_mut() = Some(String::new()));
+        COLOR_OVERRIDE.with(|color| *color.borrow_mut() = color_enabled);
+        let _reset = ResetCapture;
+        f();
+        CAPTURED.with(|captured| captured.borrow_mut().take().unwrap_or_default())
+    }
+
+    pub(super) fn color_override() -> Option<bool> {
+        COLOR_OVERRIDE.with(|color| *color.borrow())
+    }
+
+    pub(super) fn capture_line(line: &str) -> bool {
+        CAPTURED.with(|captured| {
+            let mut captured = captured.borrow_mut();
+            if let Some(buf) = captured.as_mut() {
+                buf.push_str(line);
+                true
+            } else {
+                false
+            }
+        })
+    }
 }
 
 #[cfg(test)]
@@ -221,11 +300,12 @@ mod tests {
         }
     }
 
-    /* Intent: credential verification wait rows use the shared status-line
+    /* Intent: credential verification rows use the shared status-line
      * renderer and fixed wording for both credential kinds.
      * Why it exists: every command that validates a passphrase or keyfile
      * should fill the silent cryptsetup delay with byte-identical rows.
-     * Scenario: passphrase and keyfile wait lines render in plain mode.
+     * Scenario: passphrase and keyfile wait/ok lines render in plain
+     * and colored modes.
      */
     #[test]
     fn credential_wait_line_formats_known_credentials() {
@@ -237,6 +317,59 @@ mod tests {
             credential_wait_line(CredentialKind::KeyFile, false, "disk1"),
             "[wait] keyfile: checking against disk1...\n"
         );
+        assert_eq!(
+            credential_ok_line(CredentialKind::Passphrase, false, "disk1"),
+            "[ok]   passphrase: accepted by disk1\n"
+        );
+        assert_eq!(
+            credential_ok_line(CredentialKind::KeyFile, false, "disk1"),
+            "[ok]   keyfile: accepted by disk1\n"
+        );
+        assert_eq!(
+            strip_ansi(&credential_wait_line(
+                CredentialKind::Passphrase,
+                true,
+                "disk1"
+            )),
+            "[wait] passphrase: checking against disk1...\n"
+        );
+        assert_eq!(
+            strip_ansi(&credential_ok_line(CredentialKind::KeyFile, true, "disk1")),
+            "[ok]   keyfile: accepted by disk1\n"
+        );
+    }
+
+    /* Intent: unit tests can capture status rows without redirecting
+     * process-wide stderr.
+     * Why it exists: stderr fd redirection races under parallel cargo test;
+     * a thread-local seam lets row-emission tests stay deterministic.
+     * Scenario: a captured emit_status call returns the rendered line.
+     */
+    #[test]
+    fn testing_capture_with_captures_emit_status() {
+        let output = testing::capture_with(|| {
+            emit_status(&status_line(StatusTag::Wait, false, "pool: balancing..."));
+        });
+        assert_eq!(output, "[wait] pool: balancing...\n");
+    }
+
+    /* Intent: command tests can force deterministic plain status rows
+     * without mutating process-wide color environment.
+     * Why it exists: Rust tests run in parallel; changing NO_COLOR or
+     * redirecting stderr would create cross-test races.
+     * Scenario: a status row emitted through the production stderr color
+     * detector is captured with color disabled by the test harness.
+     */
+    #[test]
+    fn testing_capture_with_color_overrides_stderr_color() {
+        let output = testing::capture_with_color(false, || {
+            emit_status(&status_line(
+                StatusTag::Wait,
+                color_enabled_for_stderr(),
+                "pool: balancing...",
+            ));
+        });
+        assert_eq!(output, "[wait] pool: balancing...\n");
     }
 
     /* Intent: gate color on both TTY detection and NO_COLOR state.

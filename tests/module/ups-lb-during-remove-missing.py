@@ -328,7 +328,7 @@ with subtest("braid recover completes cleanly"):
     # The M1 fix logs this when the post-mutation soft balance replays.
     # This message appears regardless of whether the umount paused or
     # cancelled the original balance.
-    assert "Replaying post-remove-missing RAID1 soft balance" in recover_out, (
+    assert "replaying post-remove-missing RAID1 soft balance" in recover_out, (
         f"recover did not replay the post-remove-missing soft balance "
         f"-- the M1 remediation may have regressed.\n{recover_out}"
     )

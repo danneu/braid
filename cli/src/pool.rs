@@ -4,6 +4,7 @@ use crate::progress::{
     self, ProgressOutput, run_device_remove_with_progress, run_replace_with_progress,
     run_with_progress,
 };
+use crate::status_tag::{StatusTag, color_enabled_for_stderr, emit_status, status_line};
 use crate::types::MountPoint;
 
 #[derive(Debug, thiserror::Error)]
@@ -171,9 +172,24 @@ pub fn maybe_restore_raid1<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     let pool_after = probe_pool(runner, fs, mount_point)
         .map_err(|e| PoolError::Failed(format!("post-operation pool probe failed: {e}")))?;
     if pool_after.missing_count == 0 && pool_after.devices.len() >= 2 {
-        eprintln!("Restoring RAID1 redundancy (soft balance)...");
+        let color_enabled = color_enabled_for_stderr();
+        eprint!(
+            "{}",
+            status_line(
+                StatusTag::Wait,
+                color_enabled,
+                "pool: restoring RAID1 redundancy...",
+            )
+        );
         pool_balance_raid1_soft(runner, mount_point, progress)?;
-        eprintln!("Soft balance complete.");
+        eprint!(
+            "{}",
+            status_line(
+                StatusTag::Ok,
+                color_enabled,
+                "pool: RAID1 redundancy restored",
+            )
+        );
     }
     Ok(())
 }
@@ -308,30 +324,78 @@ pub fn evict_present_device<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         return Ok(());
     }
 
+    let color_enabled = color_enabled_for_stderr();
     let remaining = pool.devices.len() - 1;
     if remaining == 1 {
-        eprintln!("Converting pool from RAID1 to single profile...");
+        eprint!(
+            "{}",
+            status_line(
+                StatusTag::Wait,
+                color_enabled,
+                "pool: balancing RAID1 to single profile...",
+            )
+        );
         pool_balance_single(runner, mount_point, progress)?;
+        eprint!(
+            "{}",
+            status_line(
+                StatusTag::Ok,
+                color_enabled,
+                "pool: balanced to single profile",
+            )
+        );
     }
 
-    eprintln!("Removing {} from pool (data will migrate)...", mapper);
+    eprint!(
+        "{}",
+        status_line(
+            StatusTag::Wait,
+            color_enabled,
+            &format!("pool: removing {mapper}..."),
+        )
+    );
     pool_remove_device(runner, &device_path, mount_point, progress)?;
+    eprint!(
+        "{}",
+        status_line(
+            StatusTag::Ok,
+            color_enabled,
+            &format!("pool: {mapper} removed"),
+        )
+    );
 
     // Best-effort LUKS close — warn on failure, don't fail the command.
+    let close_label = mapper.strip_prefix("braid-").unwrap_or(mapper);
+    emit_status(&status_line(
+        StatusTag::Wait,
+        color_enabled,
+        &format!("disk {close_label}: locking..."),
+    ));
     let result = runner.run(&CmdRequest::CryptsetupClose {
         mapper: mapper.to_owned(),
     });
     match result {
-        Ok(r) if r.exit_status != 0 => {
-            eprintln!(
-                "Warning: failed to close LUKS mapper {} (exit {})",
-                mapper, r.exit_status
-            );
+        Ok(r) if r.exit_status == 0 => {
+            emit_status(&status_line(
+                StatusTag::Ok,
+                color_enabled,
+                &format!("disk {close_label}: locked"),
+            ));
+        }
+        Ok(r) => {
+            emit_status(&status_line(
+                StatusTag::Warn,
+                color_enabled,
+                &format!("disk {close_label}: lock failed (exit {})", r.exit_status),
+            ));
         }
         Err(e) => {
-            eprintln!("Warning: failed to close LUKS mapper {}: {}", mapper, e);
+            emit_status(&status_line(
+                StatusTag::Warn,
+                color_enabled,
+                &format!("disk {close_label}: lock failed ({e})"),
+            ));
         }
-        _ => {}
     }
 
     Ok(())
@@ -924,6 +988,102 @@ mod tests {
         assert!(
             err.contains("target device is too small"),
             "error should include stderr: {err}"
+        );
+    }
+
+    /// Custom runner for evict_present_device tests. Mocks probe_pool against
+    /// a fixed 3-disk pool layout, the BtrfsDeviceRemove call, and the trailing
+    /// CryptsetupClose with a configurable exit status so the close-failure
+    /// branch is observable.
+    #[derive(Clone)]
+    struct EvictRunner {
+        close_exit: i32,
+    }
+    impl CommandRunner for EvictRunner {
+        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
+            match request {
+                CmdRequest::BtrfsFilesystemShow { .. } => {
+                    let mut lines =
+                        String::from("Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n");
+                    lines.push_str("\tTotal devices 3 FS bytes used 16.17MiB\n");
+                    for i in 1..=3 {
+                        lines.push_str(&format!(
+                            "\tdevid    {i} size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk{i}\n"
+                        ));
+                    }
+                    Ok(RawCommandOutput {
+                        cmd: String::new(),
+                        stdout: lines,
+                        stderr: String::new(),
+                        exit_status: 0,
+                    })
+                }
+                CmdRequest::CryptsetupStatus { mapper } => Ok(RawCommandOutput {
+                    cmd: String::new(),
+                    stdout: format!(
+                        "{mapper} is active and is in use.\n  type:    LUKS2\n  device:  /dev/sd{mapper}\n  mode:    read/write\n"
+                    ),
+                    stderr: String::new(),
+                    exit_status: 0,
+                }),
+                CmdRequest::CryptsetupLuksUuid { .. } => Ok(RawCommandOutput {
+                    cmd: String::new(),
+                    stdout: "11111111-1111-1111-1111-111111111111\n".to_owned(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                }),
+                CmdRequest::BtrfsDeviceRemove { .. } => Ok(ok_raw()),
+                CmdRequest::CryptsetupClose { .. } => Ok(RawCommandOutput {
+                    cmd: String::new(),
+                    stdout: String::new(),
+                    stderr: if self.close_exit == 0 {
+                        String::new()
+                    } else {
+                        "device is busy".into()
+                    },
+                    exit_status: self.close_exit,
+                }),
+                _ => Err(CmdError::MissingMock),
+            }
+        }
+
+        fn run_with_stdin(
+            &self,
+            request: &CmdRequest,
+            _stdin: &[u8],
+        ) -> Result<RawCommandOutput, CmdError> {
+            self.run(request)
+        }
+    }
+
+    /* Intent: pool::evict_present_device's trailing best-effort LUKS close
+     * closes its [wait] row with [warn] when cryptsetup returns non-zero.
+     * Why it exists: Principle 13 forbids dangling [wait] rows; a best-effort
+     * close that exits the command 0 must still announce the failure on the
+     * same subject so the wait window is closed for the operator.
+     * Scenario: a 3-disk pool evicts one mapper; pool_remove_device succeeds
+     * but cryptsetup close returns busy.
+     */
+    #[test]
+    fn evict_present_device_close_failure_emits_warn_row() {
+        let runner = EvictRunner { close_exit: 5 };
+        let captured = crate::status_tag::testing::capture_with_color(false, || {
+            let result = evict_present_device(
+                &runner,
+                &RestoreFs,
+                "braid-disk2",
+                &mp(),
+                ProgressOutput::Off,
+            );
+            assert!(result.is_ok(), "evict should still return Ok: {result:?}");
+        });
+        let wait = "[wait] disk disk2: locking...";
+        let warn = "[warn] disk disk2: lock failed (exit 5)";
+        assert!(captured.contains(wait), "missing wait row: {captured:?}");
+        assert!(captured.contains(warn), "missing warn row: {captured:?}");
+        assert!(
+            captured.find(wait) < captured.find(warn),
+            "wait must precede warn, got: {captured:?}"
         );
     }
 }

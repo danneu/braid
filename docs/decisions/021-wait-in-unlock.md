@@ -1,18 +1,15 @@
 ---
 intent: Capture why `braid unlock` and the shared mount helpers
-  announce every blocking step with a `[wait]` row, why the rule is
-  not yet a project-wide principle, and which commands are bound by
-  this ADR today. Read before changing unlock UX or the mount
-  helpers.
+  announce every blocking step with a `[wait]` row, and why that
+  unlock-scoped rule was promoted to project-wide Principle 13. Read
+  before changing unlock UX or the mount helpers.
 ---
 
 # Wait rows in unlock and shared mount helpers
 
-Status: Active
+Status: Superseded by [Principle 13](../principles.md#13-announce-blocking-work)
 
-> Principles:
-> - (none yet -- promote to a principle once the rest of the
->   interactive commands comply)
+> Principle: [13. Announce blocking work](../principles.md#13-announce-blocking-work)
 
 ## Context
 
@@ -87,55 +84,11 @@ individually updated.
   This is desirable: `recover`'s mount tail is exactly the same
   blocking work as `unlock`'s.
 
-## Path to promotion
+## Promotion outcome
 
-This ADR is intentionally narrow. Once every interactive command
-listed below emits a `[wait]` row before its blocking work, promote
-the rule to a numbered principle in `docs/principles.md`, mark this
-ADR `Superseded` (pointing at the new principle), and update
-`docs/index.md`'s "Twelve canonical invariants" wording.
-
-Commands that still have un-announced blocking steps:
-
-- **`braid add`** (`cli/src/add.rs`)
-  - `luks_format()` (cryptsetup luksFormat -- ~10s+ per disk for
-    Argon2); currently emits only `eprintln!("LUKS formatted:")`
-    after the fact.
-  - `pool_balance_raid1()` (btrfs balance to RAID1 -- potentially
-    hours); currently emits only `eprintln!("Balancing to RAID1...")`.
-    The progress module output is fine for live updates but the
-    leading `[wait]` is missing.
-
-- **`braid replace`** (`cli/src/replace.rs`)
-  - `luks_format()` for the new disk.
-  - `btrfs replace start` itself -- can run hours.
-  - Soft balance after replacing a missing device.
-
-- **`braid remove`** (`cli/src/remove.rs`)
-  - Pre-remove RAID1 -> single balance (when shrinking from 2 to 1).
-  - `btrfs device remove` itself.
-
-- **`braid remove-missing`** (`cli/src/remove_missing.rs`)
-  - Optional soft balance after clearing the last missing device.
-
-- **`braid recover`** (`cli/src/recover.rs`) -- the parts NOT covered
-  by the shared mount helpers:
-  - Resume paused balance.
-  - Replay RAID1 soft balance.
-
-- **`braid lock`** (`cli/src/lock.rs`)
-  - `umount` (can briefly block on fd closure / inhibitors).
-  - `cryptsetup close` retry loop -- emits `[warn]` on busy retry but
-    no leading `[wait]` for the close attempt itself.
-
-- **`braid enroll`** (`cli/src/enroll_key_file.rs`)
-  - Already emits `[wait]` for credential verify (good).
-  - The actual `cryptsetup luksAddKey` (slot-1 keyfile enrollment)
-    runs Argon2 again and is currently un-announced.
-
-When a command is brought into compliance, strike its bullet from
-this list in the same change. When the list is empty, do the
-promotion.
+Promoted to Principle 13 once `add`, `replace`, `remove`,
+`remove-missing`, `recover`'s replay tail and self-mount remount
+cycle, `lock`, and `enroll` were brought into compliance.
 
 ## See
 

@@ -184,10 +184,25 @@ with subtest("braid recover completes cleanly"):
         f"braid recover panicked:\n{recover_out}"
     )
     # The M1 fix logs this when the post-Add soft balance replays.
-    assert "Replaying post-add RAID1 soft balance" in recover_out, (
+    assert "replaying post-add RAID1 soft balance" in recover_out, (
         f"recover did not replay the post-add soft balance -- the M1 "
         f"remediation may have regressed.\n{recover_out}"
     )
+    # Soft pin for the paused-balance resume rows. Whether btrfs persists
+    # a paused balance after the LB shutdown depends on timing -- if the
+    # balance completed (or failed to write a clean paused state) before
+    # the kernel umount, recover sees an idle balance and only the soft
+    # balance replay below fires. If both rows do appear, they must be
+    # ordered correctly per Principle 13.
+    resume_wait = "[wait] pool: resuming paused balance left by interrupted add..."
+    resume_ok = "[ok]   pool: balance resume complete"
+    if resume_ok in recover_out:
+        assert resume_wait in recover_out, (
+            f"resume ok appears without preceding wait:\n{recover_out}"
+        )
+        assert recover_out.find(resume_wait) < recover_out.find(resume_ok), (
+            f"paused-balance wait must precede ok:\n{recover_out}"
+        )
 
 # --- Phase 5: post-recover state assertions. ---
 

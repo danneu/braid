@@ -75,7 +75,20 @@ with subtest("Pre-lock: all three mappers exist"):
     machine.succeed("test -e /dev/mapper/braid-orphan")
 
 with subtest("braid lock closes membership mappers and orphan"):
-    machine.succeed("braid lock")
+    machine.succeed("braid lock >/tmp/lock-orphan.out 2>/tmp/lock-orphan.err")
+    lock_err = machine.succeed("cat /tmp/lock-orphan.err")
+    # Principle 13: the orphan-mapper close path emits its own [wait] row
+    # before cryptsetup close, closed by the existing [ok] orphan row.
+    # Both rows use the user-friendly disk_name (mapper name stripped of
+    # the braid- prefix) so subject pairing is consistent.
+    orphan_wait = "[wait] disk orphan: locking (orphan)..."
+    orphan_ok = "[ok]   disk orphan: locked (orphan)"
+    assert orphan_wait in lock_err, (
+        f"expected orphan locking wait row, got: {lock_err!r}"
+    )
+    assert lock_err.find(orphan_wait) < lock_err.find(orphan_ok), (
+        f"orphan wait must precede orphan ok, got: {lock_err!r}"
+    )
 
     # Pool unmounted
     machine.fail("mountpoint -q /mnt/storage")

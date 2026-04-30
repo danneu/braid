@@ -223,6 +223,15 @@ with subtest("braid recover completes cleanly"):
         f"recover did not emit 'replace completed' guidance.\n"
         f"Output:\n{recover_out}"
     )
+    kernel_wait = "[wait] pool: waiting for kernel dev_replace to finish..."
+    kernel_ok = "[ok]   pool: kernel dev_replace finished"
+    if kernel_ok in recover_out:
+        assert kernel_wait in recover_out, (
+            f"kernel dev_replace ok row appeared without wait row:\n{recover_out}"
+        )
+        assert recover_out.find(kernel_wait) < recover_out.find(kernel_ok), (
+            f"kernel dev_replace wait must precede ok:\n{recover_out}"
+        )
 
 # --- Phase 5: assert the post-recover state matches expectations. ---
 

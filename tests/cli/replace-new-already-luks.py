@@ -92,8 +92,21 @@ with subtest("Pre-format disk4 as LUKS (simulating crash recovery)"):
     machine.fail("test -e /dev/mapper/braid-disk4")
 
 with subtest("Replace disk2 with pre-formatted disk4"):
-    result = machine.succeed(replace_cmd("disk2", "disk4"))
+    result = machine.succeed(
+        f"{replace_cmd('disk2', 'disk4')} >/tmp/repl-luks.out 2>/tmp/repl-luks.err"
+    )
     print(f"braid replace output:\n{result}")
+    repl_err = machine.succeed("cat /tmp/repl-luks.err")
+    # Principle 13: the PresentLuks-with-closed-mapper arm must emit a
+    # [wait] disk X: unlocking... row before ensure_luks_open.
+    open_wait = "[wait] disk disk4: unlocking..."
+    open_ok = "[ok]   disk disk4: unlocked"
+    assert open_wait in repl_err and open_ok in repl_err, (
+        f"expected PresentLuks unlocking wait/ok pair, got: {repl_err!r}"
+    )
+    assert repl_err.find(open_wait) < repl_err.find(open_ok), (
+        f"unlocking wait must precede unlocked ok, got: {repl_err!r}"
+    )
 
 with subtest("Pool healthy after replace with pre-formatted disk"):
     fi_show = machine.succeed("btrfs fi show /mnt/storage")

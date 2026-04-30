@@ -1,6 +1,6 @@
 use crate::cmd::CommandRunner;
 use crate::luks::{self, VerifyOutcome};
-use crate::status_tag::{CredentialKind, credential_wait_line};
+use crate::status_tag::{CredentialKind, credential_ok_line, credential_wait_line};
 use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,7 +50,10 @@ pub fn verify_credential_for_targets<R: CommandRunner>(
         };
 
         match outcome {
-            Ok(VerifyOutcome::Authenticated) => {}
+            Ok(VerifyOutcome::Authenticated) => {
+                let ok_line = credential_ok_line(kind, color_enabled, &target.name);
+                emit(&ok_line);
+            }
             Ok(VerifyOutcome::Rejected) => {
                 return Err(CredentialVerifyError::Rejected {
                     target: target.clone(),
@@ -103,15 +106,19 @@ mod tests {
         ]
     }
 
-    fn expected_waits(
+    /// Expected emit sequence when every target authenticates: per
+    /// target, a wait line followed by an ok line.
+    fn expected_wait_ok_pairs(
         targets: &[CredentialVerifyTarget],
         kind: CredentialKind,
         color_enabled: bool,
     ) -> Vec<String> {
-        targets
-            .iter()
-            .map(|target| credential_wait_line(kind, color_enabled, &target.name))
-            .collect()
+        let mut out = Vec::with_capacity(targets.len() * 2);
+        for target in targets {
+            out.push(credential_wait_line(kind, color_enabled, &target.name));
+            out.push(credential_ok_line(kind, color_enabled, &target.name));
+        }
+        out
     }
 
     fn passphrase_runner(
@@ -205,7 +212,10 @@ mod tests {
                         )
                         .expect("all targets should authenticate");
 
-                        assert_eq!(emits, expected_waits(&targets, case.kind(), color_enabled));
+                        assert_eq!(
+                            emits,
+                            expected_wait_ok_pairs(&targets, case.kind(), color_enabled)
+                        );
                         assert_eq!(runner.requests(), requests);
                     },
                 );
@@ -237,7 +247,13 @@ mod tests {
                         err,
                         CredentialVerifyError::Rejected { target } if target == targets[1]
                     ));
-                    assert_eq!(emits, expected_waits(&targets[..2], case.kind(), false));
+                    // First target authenticates -> wait+ok pair; second target
+                    // rejects -> wait line only (no terminal ok). The rejected
+                    // wait is closed by the caller's error propagation per
+                    // Principle 13.
+                    let mut expected = expected_wait_ok_pairs(&targets[..1], case.kind(), false);
+                    expected.push(credential_wait_line(case.kind(), false, &targets[1].name));
+                    assert_eq!(emits, expected);
                     assert_eq!(runner.requests(), requests[..2]);
                 },
             );
@@ -268,7 +284,12 @@ mod tests {
                         err,
                         CredentialVerifyError::Luks { target, .. } if target == targets[1]
                     ));
-                    assert_eq!(emits, expected_waits(&targets[..2], case.kind(), false));
+                    // First target authenticates -> wait+ok; second target
+                    // returns Luks error -> wait only. The Luks wait closes
+                    // via the caller's error path.
+                    let mut expected = expected_wait_ok_pairs(&targets[..1], case.kind(), false);
+                    expected.push(credential_wait_line(case.kind(), false, &targets[1].name));
+                    assert_eq!(emits, expected);
                     assert_eq!(runner.requests(), requests[..2]);
                 },
             );

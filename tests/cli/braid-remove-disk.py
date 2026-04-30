@@ -135,7 +135,42 @@ with subtest("Data intact after graceful remove"):
 # With --yes, the interactive redundancy confirmation is bypassed.
 
 with subtest("Redundancy-reducing remove with --yes succeeds"):
-    machine.succeed(remove_cmd("disk2"))
+    machine.succeed(
+        f"{remove_cmd('disk2')} >/tmp/rm2.out 2>/tmp/rm2.err"
+    )
+    # Principle 13: 2->1 remove triggers pool_balance_single (RAID1 -> single)
+    # and pool_remove_device. Pin the [wait]/[ok] rows.
+    rm2_err = machine.succeed("cat /tmp/rm2.err")
+    bal_wait = "[wait] pool: balancing RAID1 to single profile..."
+    bal_ok = "[ok]   pool: balanced to single profile"
+    assert bal_wait in rm2_err and bal_ok in rm2_err, (
+        f"expected RAID1->single balance wait/ok pair, got: {rm2_err!r}"
+    )
+    assert rm2_err.find(bal_wait) < rm2_err.find(bal_ok), (
+        f"balance wait must precede balance ok, got: {rm2_err!r}"
+    )
+    rm_wait = "[wait] pool: removing braid-disk2..."
+    rm_ok = "[ok]   pool: braid-disk2 removed"
+    assert rm_wait in rm2_err and rm_ok in rm2_err, (
+        f"expected device-remove wait/ok pair, got: {rm2_err!r}"
+    )
+    assert rm2_err.find(rm_wait) < rm2_err.find(rm_ok), (
+        f"remove wait must precede remove ok, got: {rm2_err!r}"
+    )
+    # Principle 13: pool::evict_present_device closes the LUKS mapper after
+    # the device-remove succeeds. Pin the [wait]/[ok] pair on the disk-name
+    # body (mapper prefix stripped) for cross-command consistency with lock.
+    close_wait = "[wait] disk disk2: locking..."
+    close_ok = "[ok]   disk disk2: locked"
+    assert close_wait in rm2_err and close_ok in rm2_err, (
+        f"expected trailing LUKS close wait/ok pair, got: {rm2_err!r}"
+    )
+    assert rm2_err.find(close_wait) < rm2_err.find(close_ok), (
+        f"close wait must precede close ok, got: {rm2_err!r}"
+    )
+    assert rm2_err.find(rm_ok) < rm2_err.find(close_wait), (
+        f"trailing close must follow device-remove ok, got: {rm2_err!r}"
+    )
 
 with subtest("Pool has 1 device with single profile after redundancy removal"):
     # btrfs RAID1 requires ≥2 devices, so removing the second-to-last device

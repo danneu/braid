@@ -34,6 +34,10 @@
           size = 1024;
           driveConfig.deviceExtraOpts.serial = "disk4";
         }
+        {
+          size = 1024;
+          driveConfig.deviceExtraOpts.serial = "disk5";
+        }
       ];
 
       environment.systemPackages = [

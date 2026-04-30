@@ -11,6 +11,7 @@ use crate::probe::{self, Filesystem, ProbeError};
 use crate::progress::ProgressOutput;
 use crate::state_paths::StatePaths;
 use crate::status::{BalanceReport, get_balance_report};
+use crate::status_tag::{StatusTag, color_enabled_for_stderr, emit_status, status_line};
 use crate::types::{ByIdPath, MountPoint, PoolState};
 use thiserror::Error;
 
@@ -223,6 +224,8 @@ impl RecoverPlan {
             union,
         } = self;
 
+        let color_enabled = color_enabled_for_stderr();
+
         // Recover-specific gate: resolve a credential whenever we have
         // an initial mount plan (i.e. the pool is not already mounted).
         // This is EAGER on purpose -- even if the initial plan's
@@ -327,7 +330,7 @@ impl RecoverPlan {
         // EBUSY. The bug only manifests on the mount session that triggered
         // the kernel resume, which is one we just opened ourselves.
         if just_mounted {
-            wait_for_kernel_replace_to_finish(runner, params.config.mount_point());
+            wait_for_kernel_replace_to_finish(runner, params.config.mount_point(), color_enabled);
             // We mounted, so open_plan was Some, so credential was eagerly resolved
             // above (recover always reads the passphrase when not already mounted).
             let cred = credential
@@ -631,6 +634,7 @@ fn replay_post_mutation<R: CommandRunner + Sync>(
     pool: &PoolState,
     progress: ProgressOutput,
 ) -> Result<(), RecoverError> {
+    let color_enabled = color_enabled_for_stderr();
     if let journal::OpKind::Replace { new_name, .. } = op {
         let new_mn = config::mapper_name(new_name);
         if let Some(dev) = pool.devices.iter().find(|d| d.mapper == new_mn) {
@@ -648,23 +652,51 @@ fn replay_post_mutation<R: CommandRunner + Sync>(
         | journal::OpKind::RemoveMissing { .. }
         | journal::OpKind::Replace { .. } => {
             if let BalanceReport::Paused { .. } = get_balance_report(runner, mount_point) {
-                eprintln!(
-                    "Resuming paused balance left by interrupted {}...",
-                    journal_op_label_for_op(op)
+                eprint!(
+                    "{}",
+                    status_line(
+                        StatusTag::Wait,
+                        color_enabled,
+                        &format!(
+                            "pool: resuming paused balance left by interrupted {}...",
+                            journal_op_label_for_op(op)
+                        ),
+                    )
                 );
                 crate::pool::pool_balance_resume(runner, mount_point, progress)
                     .map_err(|e| RecoverError::Failed(format!("recover balance resume: {e}")))?;
-                eprintln!("Balance resume complete.");
+                eprint!(
+                    "{}",
+                    status_line(
+                        StatusTag::Ok,
+                        color_enabled,
+                        "pool: balance resume complete",
+                    )
+                );
             }
 
             if pool.devices.len() >= 2 {
-                eprintln!(
-                    "Replaying post-{} RAID1 soft balance (skip already-RAID1 chunks)...",
-                    journal_op_label_for_op(op)
+                eprint!(
+                    "{}",
+                    status_line(
+                        StatusTag::Wait,
+                        color_enabled,
+                        &format!(
+                            "pool: replaying post-{} RAID1 soft balance (skip already-RAID1 chunks)...",
+                            journal_op_label_for_op(op)
+                        ),
+                    )
                 );
                 crate::pool::pool_balance_raid1_soft(runner, mount_point, progress)
                     .map_err(|e| RecoverError::Failed(format!("recover balance replay: {e}")))?;
-                eprintln!("Balance replay complete.");
+                eprint!(
+                    "{}",
+                    status_line(
+                        StatusTag::Ok,
+                        color_enabled,
+                        "pool: RAID1 soft balance replay complete",
+                    )
+                );
             }
         }
         journal::OpKind::Remove { .. } => {
@@ -705,24 +737,64 @@ fn journal_op_label_for_op(op: &journal::OpKind) -> &'static str {
 /// Best-effort: if the status command fails for any reason, we return early
 /// rather than blocking forever — relock_and_remount and probe_pool will catch
 /// any remaining staleness as a clear test failure rather than a hang.
-fn wait_for_kernel_replace_to_finish<R: CommandRunner>(runner: &R, mount_point: &MountPoint) {
+fn wait_for_kernel_replace_to_finish<R: CommandRunner>(
+    runner: &R,
+    mount_point: &MountPoint,
+    color_enabled: bool,
+) {
     let mut last_pct: Option<f64> = None;
+    let mut wait_emitted = false;
     loop {
         let raw = match runner.run(&CmdRequest::BtrfsReplaceStatus {
             mount_point: mount_point.clone(),
         }) {
             Ok(r) => r,
-            Err(_) => return,
+            Err(_) => {
+                if wait_emitted {
+                    emit_status(&status_line(
+                        StatusTag::Warn,
+                        color_enabled,
+                        "pool: kernel dev_replace status check failed -- proceeding",
+                    ));
+                }
+                return;
+            }
         };
         let parsed = match parse_btrfs_replace_status(&raw) {
             Ok(p) => p,
-            Err(_) => return,
+            Err(_) => {
+                if wait_emitted {
+                    emit_status(&status_line(
+                        StatusTag::Warn,
+                        color_enabled,
+                        "pool: kernel dev_replace status check failed -- proceeding",
+                    ));
+                }
+                return;
+            }
         };
         match parsed.state {
-            ReplaceState::Finished | ReplaceState::None => return,
+            ReplaceState::Finished | ReplaceState::None => {
+                if wait_emitted {
+                    emit_status(&status_line(
+                        StatusTag::Ok,
+                        color_enabled,
+                        "pool: kernel dev_replace finished",
+                    ));
+                }
+                return;
+            }
             ReplaceState::Running { pct } => {
+                if !wait_emitted {
+                    emit_status(&status_line(
+                        StatusTag::Wait,
+                        color_enabled,
+                        "pool: waiting for kernel dev_replace to finish...",
+                    ));
+                    wait_emitted = true;
+                }
                 if last_pct != Some(pct) {
-                    eprintln!("  waiting for kernel to finish resumed dev_replace... {pct:.1}%");
+                    eprintln!("  ... {pct:.1}%");
                     last_pct = Some(pct);
                 }
             }
@@ -752,10 +824,19 @@ fn relock_and_remount<R: CommandRunner, F: Filesystem + ?Sized>(
     allow_degraded: bool,
     credential: &OpenCredential,
 ) -> Result<(), RecoverError> {
+    let color_enabled = color_enabled_for_stderr();
     let mount_point = config.mount_point();
 
     // 1. Umount. The kernel waits for in-flight operations (including the
     //    dev_replace resume worker) to drain before releasing the mount.
+    eprint!(
+        "{}",
+        status_line(
+            StatusTag::Wait,
+            color_enabled,
+            &format!("pool: unmounting {mount_point} (recover remount cycle)..."),
+        )
+    );
     let umount = runner
         .run(&CmdRequest::Umount {
             mount_point: mount_point.clone(),
@@ -769,6 +850,14 @@ fn relock_and_remount<R: CommandRunner, F: Filesystem + ?Sized>(
             umount.stderr.trim()
         )));
     }
+    eprint!(
+        "{}",
+        status_line(
+            StatusTag::Ok,
+            color_enabled,
+            &format!("pool: unmounted {mount_point} (recover remount cycle)"),
+        )
+    );
 
     // 2. Drop cached btrfs_fs_devices. Without this, the kernel may
     //    re-attach the next mount to a still-cached structure that retains
@@ -811,6 +900,14 @@ fn relock_and_remount<R: CommandRunner, F: Filesystem + ?Sized>(
         if !fs.exists(&mapper_path) {
             continue;
         }
+        eprint!(
+            "{}",
+            status_line(
+                StatusTag::Wait,
+                color_enabled,
+                &format!("disk {name}: locking..."),
+            )
+        );
         let close = runner
             .run(&CmdRequest::CryptsetupClose {
                 mapper: mn.0.clone(),
@@ -829,6 +926,14 @@ fn relock_and_remount<R: CommandRunner, F: Filesystem + ?Sized>(
                 close.stderr.trim()
             )));
         }
+        eprint!(
+            "{}",
+            status_line(
+                StatusTag::Ok,
+                color_enabled,
+                &format!("disk {name}: locked"),
+            )
+        );
     }
 
     // 4. Re-open LUKS and mount via the standard helper. With the dm
@@ -937,13 +1042,14 @@ fn union_memberships(journal: &Journal) -> PoolMembership {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cmd::{CmdRequest, MockRunner, RawCommandOutput};
+    use crate::cmd::{CmdError, CmdRequest, CommandRunner, MockRunner, RawCommandOutput};
     use crate::journal::{self, OpKind};
     use crate::mount::MountError;
     use crate::preview::NoteLevel;
     use crate::probe::Filesystem;
     use crate::types::{ByIdPath, MountPoint};
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, VecDeque};
+    use std::sync::Mutex;
 
     struct MockFs {
         paths: Vec<String>,
@@ -1178,6 +1284,47 @@ mod tests {
         ok_raw(cmd, "")
     }
 
+    enum ReplaceStatusItem {
+        Output(RawCommandOutput),
+        Error(&'static str),
+    }
+
+    struct ReplaceStatusSequenceRunner {
+        items: Mutex<VecDeque<ReplaceStatusItem>>,
+    }
+
+    impl ReplaceStatusSequenceRunner {
+        fn new(items: Vec<ReplaceStatusItem>) -> Self {
+            Self {
+                items: Mutex::new(VecDeque::from(items)),
+            }
+        }
+    }
+
+    impl CommandRunner for ReplaceStatusSequenceRunner {
+        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
+            assert!(
+                matches!(request, CmdRequest::BtrfsReplaceStatus { .. }),
+                "unexpected request: {request:?}"
+            );
+            match self.items.lock().unwrap().pop_front() {
+                Some(ReplaceStatusItem::Output(output)) => Ok(output),
+                Some(ReplaceStatusItem::Error(message)) => Err(CmdError::Failed(message.into())),
+                None => Err(CmdError::MissingMock),
+            }
+        }
+
+        fn run_with_stdin(
+            &self,
+            request: &CmdRequest,
+            _stdin: &[u8],
+        ) -> Result<RawCommandOutput, CmdError> {
+            Err(CmdError::Failed(format!(
+                "unexpected stdin request: {request:?}"
+            )))
+        }
+    }
+
     fn err_raw(cmd: &str, exit_code: i32, stderr: &str) -> RawCommandOutput {
         RawCommandOutput {
             cmd: cmd.to_owned(),
@@ -1185,6 +1332,64 @@ mod tests {
             stderr: stderr.to_owned(),
             exit_status: exit_code,
         }
+    }
+
+    #[test]
+    fn wait_for_kernel_replace_emits_canonical_rows_on_running_then_finished() {
+        // Intent: a real wait on kernel-resumed dev_replace is announced and closed.
+        // Why it exists: percentage progress only appears when the percentage changes;
+        // a slow worker still needs an upfront canonical wait row.
+        // Scenario: recover observes one running poll, then a finished poll.
+        let runner = ReplaceStatusSequenceRunner::new(vec![
+            ReplaceStatusItem::Output(ok_raw(
+                "btrfs replace status -1 /mnt/storage",
+                "5.0% done, 0 write errs, 0 uncorr. read errs\n",
+            )),
+            ReplaceStatusItem::Output(ok_raw(
+                "btrfs replace status -1 /mnt/storage",
+                "Started on 27.Feb 10:30:00, finished on 27.Feb 10:35:00, 0 write errs, 0 uncorr. read errs\n",
+            )),
+        ]);
+        let mount_point = MountPoint("/mnt/storage".into());
+        let captured = crate::status_tag::testing::capture_with(|| {
+            wait_for_kernel_replace_to_finish(&runner, &mount_point, false);
+        });
+        let wait = "[wait] pool: waiting for kernel dev_replace to finish...";
+        let ok = "[ok]   pool: kernel dev_replace finished";
+        assert!(captured.contains(wait), "missing wait row: {captured:?}");
+        assert!(captured.contains(ok), "missing ok row: {captured:?}");
+        assert!(
+            captured.find(wait) < captured.find(ok),
+            "wait must precede ok, got: {captured:?}"
+        );
+    }
+
+    #[test]
+    fn wait_for_kernel_replace_emits_warn_on_status_error_after_wait() {
+        // Intent: status-poll failure after an observed wait closes the row with [warn].
+        // Why it exists: recover continues on this best-effort barrier, so a
+        // warning row is the only terminal row for the announced wait window.
+        // Scenario: recover observes a running dev_replace, then the next
+        // status subprocess fails.
+        let runner = ReplaceStatusSequenceRunner::new(vec![
+            ReplaceStatusItem::Output(ok_raw(
+                "btrfs replace status -1 /mnt/storage",
+                "5.0% done, 0 write errs, 0 uncorr. read errs\n",
+            )),
+            ReplaceStatusItem::Error("status failed"),
+        ]);
+        let mount_point = MountPoint("/mnt/storage".into());
+        let captured = crate::status_tag::testing::capture_with(|| {
+            wait_for_kernel_replace_to_finish(&runner, &mount_point, false);
+        });
+        let wait = "[wait] pool: waiting for kernel dev_replace to finish...";
+        let warn = "[warn] pool: kernel dev_replace status check failed -- proceeding";
+        assert!(captured.contains(wait), "missing wait row: {captured:?}");
+        assert!(captured.contains(warn), "missing warn row: {captured:?}");
+        assert!(
+            captured.find(wait) < captured.find(warn),
+            "wait must precede warn, got: {captured:?}"
+        );
     }
 
     fn mountpoint_ok() -> (CmdRequest, RawCommandOutput) {

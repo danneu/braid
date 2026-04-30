@@ -37,6 +37,14 @@ def close_all():
         machine.execute(f"cryptsetup close braid-{k} 2>/dev/null || true")
 
 
+def assert_ordered_pair(text, first, second, context):
+    assert first in text, f"missing {first!r} for {context}; got: {text!r}"
+    assert second in text, f"missing {second!r} for {context}; got: {text!r}"
+    assert text.find(first) < text.find(second), (
+        f"{first!r} must precede {second!r} for {context}; got: {text!r}"
+    )
+
+
 # --- Setup: Create 2-disk RAID1 pool ---
 
 with subtest("Setup: create 2-disk pool"):
@@ -48,6 +56,25 @@ with subtest("Setup: create 2-disk pool"):
 with subtest("Generate random keyfile"):
     machine.succeed("dd if=/dev/urandom of=/tmp/braid.key bs=4096 count=1 iflag=fullblock")
     machine.succeed("chmod 400 /tmp/braid.key")
+
+# --- Test 1a: Dry-run before enrollment announces keyfile probes ---
+
+with subtest("Test 1a: dry-run before enrollment announces keyfile probes"):
+    machine.succeed("braid enroll /tmp --dry-run >/tmp/t1a.out 2>/tmp/t1a.err")
+    t1a_out = machine.succeed("cat /tmp/t1a.out")
+    t1a_err = machine.succeed("cat /tmp/t1a.err")
+    for name in ("disk1", "disk2"):
+        assert_ordered_pair(
+            t1a_err,
+            f"[wait] keyfile: checking against {name}...",
+            f"[skip] keyfile: not yet enrolled on {name}",
+            f"dry-run not-yet-enrolled probe for {name}",
+        )
+        expected_step = "enroll keyfile"
+        expected_device = f"/dev/disk/by-id/virtio-{name}"
+        assert expected_step in t1a_out and expected_device in t1a_out, (
+            f"expected dry-run enroll step for {name}, got: {t1a_out!r}"
+        )
 
 # --- Test 1: Enroll keyfile into both disks ---
 
@@ -68,14 +95,24 @@ with subtest("Test 1: enroll keyfile into all pool disks"):
     assert "[wait] passphrase: checking against disk1..." in t1_err, (
         f"expected passphrase verification wait line on stderr, got: {t1_err!r}"
     )
+    assert_ordered_pair(
+        t1_err,
+        "[wait] passphrase: checking against disk1...",
+        "[ok]   passphrase: accepted by disk1",
+        "initial passphrase verification",
+    )
     for name in ("disk1", "disk2"):
         marker = f"[wait] keyfile: checking against {name}..."
+        skip_marker = f"[skip] keyfile: not yet enrolled on {name}"
         enroll_marker = f"enroll: {name} -- will add keyfile to slot 1"
-        assert marker in t1_err, (
-            f"expected keyfile verification wait line {marker!r}, got: {t1_err!r}"
+        assert_ordered_pair(
+            t1_err,
+            marker,
+            skip_marker,
+            f"real-run not-yet-enrolled probe for {name}",
         )
-        assert t1_err.find(marker) < t1_err.find(enroll_marker), (
-            f"keyfile wait line must precede enroll row for {name}, got: {t1_err!r}"
+        assert t1_err.find(skip_marker) < t1_err.find(enroll_marker), (
+            f"keyfile skip line must precede enroll row for {name}, got: {t1_err!r}"
         )
     assert "enroll: disk1 -- will add keyfile to slot 1" in t1_err, (
         f"expected exact 'enroll: disk1 --' line on stderr, got: {t1_err!r}"
@@ -83,18 +120,33 @@ with subtest("Test 1: enroll keyfile into all pool disks"):
     assert "enroll: disk2 -- will add keyfile to slot 1" in t1_err, (
         f"expected exact 'enroll: disk2 --' line on stderr, got: {t1_err!r}"
     )
+    # Principle 13: a [wait] row precedes the cryptsetup luksAddKey call
+    # (Argon2 derivation), closed by a paired [ok] success row.
+    for name in ("disk1", "disk2"):
+        enrolling_wait = f"[wait] disk {name}: enrolling keyfile in slot 1..."
+        enrolled_ok = f"[ok]   disk {name}: keyfile enrolled in slot 1"
+        assert enrolling_wait in t1_err, (
+            f"expected enrolling wait line for {name}, got: {t1_err!r}"
+        )
+        assert enrolled_ok in t1_err, (
+            f"expected enrolled ok line for {name}, got: {t1_err!r}"
+        )
+        assert t1_err.find(enrolling_wait) < t1_err.find(enrolled_ok), (
+            f"enrolling wait must precede enrolled ok for {name}, got: {t1_err!r}"
+        )
 
     # Verify slot 1 is occupied on both disks
     for dev in ["virtio-disk1", "virtio-disk2"]:
         dump = machine.succeed(f"cryptsetup luksDump --dump-json-metadata /dev/disk/by-id/{dev}")
         assert '"1"' in dump, f"slot 1 not found in luksDump for {dev}: {dump}"
 
-# --- Test 1b: --dry-run reflects already-enrolled state, stderr is empty ---
+# --- Test 1b: --dry-run reflects already-enrolled state ---
 #
 # Intent: verify `braid enroll --dry-run` renders a faithful preview
 # on a pool whose keyfile is already enrolled -- both disks appear as
-# per-disk Skip notes (`keyfile already enrolled`), no enroll/header-
-# backup steps are emitted, and stderr stays empty.
+# per-disk Skip notes (`keyfile already enrolled`), no enroll/header
+# backup steps are emitted, and blocking keyfile probes are announced
+# on stderr per Principle 13.
 #
 # Why it exists: dry-run probes enrollment state pre-passphrase via
 # the passphrase-free `verify_key_file` call (`cryptsetup open
@@ -103,17 +155,23 @@ with subtest("Test 1: enroll keyfile into all pool disks"):
 # real run skipped via `plan_enrollment`'s `AlreadyEnrolled` branch
 # -- contradicting decision-012's "intent CLI" promise that dry-run
 # is a faithful preview. This subtest pins both the per-disk Skip
-# wording and the empty-stderr contract; a regression that hoists
-# the probe into the real-run path would also surface here because
-# the credential-wait line would leak to stderr.
+# wording and the canonical stderr probe rows.
 #
 # Scenario: 2-disk pool, both disks present and LUKS-formatted,
 # keyfile already enrolled from Test 1.
-with subtest("Test 1b: --dry-run reflects already-enrolled state, stderr empty"):
+with subtest("Test 1b: --dry-run reflects already-enrolled state"):
     machine.succeed("braid enroll /tmp --dry-run >/tmp/enroll.out 2>/tmp/enroll.err")
     out = machine.succeed("cat /tmp/enroll.out")
     err = machine.succeed("cat /tmp/enroll.err")
-    assert err == "", f"unexpected stderr on successful --dry-run: {err!r}"
+    expected_err = (
+        "[wait] keyfile: checking against disk1...\n"
+        "[ok]   keyfile: already enrolled on disk1\n"
+        "[wait] keyfile: checking against disk2...\n"
+        "[ok]   keyfile: already enrolled on disk2\n"
+    )
+    assert err == expected_err, (
+        f"expected only canonical dry-run probe rows on stderr, got: {err!r}"
+    )
     assert "enroll keyfile" not in out, (
         f"expected no enroll step on already-enrolled pool, got: {out!r}"
     )
@@ -152,18 +210,16 @@ with subtest("Test 3: re-enroll is idempotent"):
         f">/tmp/t3.out 2>/tmp/t3.err"
     )
 
-    # Behavioral wording lock: in the idempotent re-enroll path,
-    # `plan_enrollment` hits the `AlreadyEnrolled` branch and emits
-    # the exact `ok: <name> -- keyfile already enrolled` line per
-    # disk. Regressions in that branch's wording would only be
-    # caught by pinning the exact string.
+    # Principle 13: in the idempotent re-enroll path, the keyfile probe
+    # wait row is closed by a canonical [ok] row per disk.
     t3_err = machine.succeed("cat /tmp/t3.err")
-    assert "ok: disk1 -- keyfile already enrolled" in t3_err, (
-        f"expected exact 'ok: disk1 -- keyfile already enrolled' on stderr, got: {t3_err!r}"
-    )
-    assert "ok: disk2 -- keyfile already enrolled" in t3_err, (
-        f"expected exact 'ok: disk2 -- keyfile already enrolled' on stderr, got: {t3_err!r}"
-    )
+    for name in ("disk1", "disk2"):
+        assert_ordered_pair(
+            t3_err,
+            f"[wait] keyfile: checking against {name}...",
+            f"[ok]   keyfile: already enrolled on {name}",
+            f"idempotent re-enroll for {name}",
+        )
 
 # --- Test 4: Passphrase still works after keyfile enrollment ---
 
@@ -180,21 +236,18 @@ with subtest("Test 4: passphrase still works"):
 # --- Test 4b: Wrong passphrase does not leak post-passphrase status lines ---
 #
 # Intent: verify a real-run `braid enroll` with a wrong passphrase
-# fails before emitting any `ok: <disk> -- keyfile already enrolled`
-# or `enroll: <disk> -- will add keyfile to slot 1` line.
+# fails before emitting any keyfile already-enrolled or
+# `enroll: <disk> -- will add keyfile to slot 1` line.
 #
 # Why it exists: those status lines are emitted by `plan_enrollment`
-# only after `verify_first_candidate_passphrase` succeeds. The
-# `Preview` migration scoped these lines out of notes (they stay as
-# direct `eprintln!`s inside `plan_enrollment`), and a regression
-# that hoisted them into pre-passphrase planning would cause them
-# to appear before the wrong-passphrase error -- misleading the
-# user into thinking their enrollment partially succeeded. This
-# subtest pins the no-leak behavior.
+# only after passphrase verification succeeds. A regression that hoisted
+# them into pre-passphrase planning would cause them to appear before the
+# wrong-passphrase error -- misleading the user into thinking their
+# enrollment partially succeeded. This subtest pins the no-leak behavior.
 #
 # Scenario: pool has keyfile enrolled on both disks (from Test 1);
 # user fat-fingers the passphrase on a subsequent `braid enroll` run.
-with subtest("Test 4b: wrong passphrase does not leak ok:/enroll: status lines"):
+with subtest("Test 4b: wrong passphrase does not leak post-passphrase rows"):
     wrongpass = "wrongpassphrase"
     wpq = shlex.quote(wrongpass)
     # The NixOS test driver wraps commands with `set -euo pipefail`, so
@@ -221,6 +274,9 @@ with subtest("Test 4b: wrong passphrase does not leak ok:/enroll: status lines")
             f"enroll: status line leaked before wrong-passphrase error: {line!r}\n"
             f"full stderr: {err!r}"
         )
+    assert "keyfile: already enrolled" not in err, (
+        f"already-enrolled row leaked before wrong-passphrase error: {err!r}"
+    )
 
 # --- Test 4c: Real-run success path renders `skip:` plain on stderr ---
 #
@@ -228,11 +284,11 @@ with subtest("Test 4b: wrong passphrase does not leak ok:/enroll: status lines")
 # at least one pool member absent, the accumulated skip note
 # renders on stderr in the plain `skip: <name> not present`
 # wording -- pre-passphrase, before the surviving candidate's
-# `ok:` / `enroll:` status lines.
+# canonical already-enrolled / `enroll:` status lines.
 #
 # Why it exists: the migration's "success-path real-run" coverage
-# otherwise only asserts `enroll:` (Test 1) and `ok:` (Test 3)
-# wording; the exact plain `skip:` wording on a *successful* run
+# otherwise only asserts `enroll:` (Test 1) and canonical [ok]
+# wording (Test 3); the exact plain `skip:` wording on a *successful* run
 # has no behavioral anchor. Only the no-candidates failure path in
 # `braid-enroll-generate.py` asserts plain skip wording today, and
 # a regression that reworded the success-path skip render (or
@@ -267,14 +323,15 @@ with subtest("Test 4c: real-run success path renders plain `skip:` on stderr"):
     assert "skip: disk3 not present" in t4c_err, (
         f"expected plain 'skip: disk3 not present' on stderr, got: {t4c_err!r}"
     )
-    # Sanity: surviving real members were still classified post-
-    # passphrase as AlreadyEnrolled (they hold the keyfile from Test 1).
-    assert "ok: disk1 -- keyfile already enrolled" in t4c_err, (
-        f"expected ok: disk1 -- keyfile already enrolled, got: {t4c_err!r}"
-    )
-    assert "ok: disk2 -- keyfile already enrolled" in t4c_err, (
-        f"expected ok: disk2 -- keyfile already enrolled, got: {t4c_err!r}"
-    )
+    # Sanity: surviving real members were still classified post-passphrase
+    # as AlreadyEnrolled (they hold the keyfile from Test 1).
+    for name in ("disk1", "disk2"):
+        assert_ordered_pair(
+            t4c_err,
+            f"[wait] keyfile: checking against {name}...",
+            f"[ok]   keyfile: already enrolled on {name}",
+            f"absent-disk mixed real-run for {name}",
+        )
 
     # Restore the real pool.json before Test 5 runs.
     machine.succeed("mv /tmp/pool.bak.json /var/lib/braid/pool.json")
@@ -283,9 +340,9 @@ with subtest("Test 4c: real-run success path renders plain `skip:` on stderr"):
 #
 # Intent: verify that when a real-run `braid enroll` succeeds with
 # one pool member in the PresentNotLuks probe state, the
-# accumulated skip note renders plain on stderr with the exact
-# wording `skip: <name> not LUKS-formatted`, pre-passphrase, and
-# the surviving candidates' `ok:` status lines follow.
+# accumulated skip note renders plain on stderr with the exact wording
+# `skip: <name> not LUKS-formatted`, pre-passphrase, and the surviving
+# candidates' canonical already-enrolled rows follow.
 #
 # Why it exists: Test 4c pins the plain-skip success-path wording
 # for the Absent branch (`not present`); Test 5 in
@@ -324,14 +381,20 @@ with subtest("Test 4d: dry-run + real-run success path render `skip: not LUKS-fo
         "mv /tmp/pool.json /var/lib/braid/pool.json"
     )
 
-    # Phase A: dry-run -- bracketed skip on stdout, stderr empty.
+    # Phase A: dry-run -- bracketed skip on stdout, canonical probe rows on stderr.
     machine.succeed(
         "braid enroll /tmp --dry-run >/tmp/t4d.out 2>/tmp/t4d.err"
     )
     t4d_out = machine.succeed("cat /tmp/t4d.out")
     t4d_err = machine.succeed("cat /tmp/t4d.err")
-    assert t4d_err == "", (
-        f"successful --dry-run must leave stderr empty, got: {t4d_err!r}"
+    expected_t4d_err = (
+        "[wait] keyfile: checking against disk1...\n"
+        "[ok]   keyfile: already enrolled on disk1\n"
+        "[wait] keyfile: checking against disk2...\n"
+        "[ok]   keyfile: already enrolled on disk2\n"
+    )
+    assert t4d_err == expected_t4d_err, (
+        f"expected only canonical dry-run probe rows on stderr, got: {t4d_err!r}"
     )
     assert "[skip] disk disk3: not LUKS-formatted\n" in t4d_out, (
         f"expected bracketed non-LUKS skip on stdout, got: {t4d_out!r}"
@@ -351,12 +414,13 @@ with subtest("Test 4d: dry-run + real-run success path render `skip: not LUKS-fo
     assert "skip: disk3 not LUKS-formatted" in t4d_rerr, (
         f"expected plain 'skip: disk3 not LUKS-formatted' on stderr, got: {t4d_rerr!r}"
     )
-    assert "ok: disk1 -- keyfile already enrolled" in t4d_rerr, (
-        f"expected ok: disk1 line on stderr, got: {t4d_rerr!r}"
-    )
-    assert "ok: disk2 -- keyfile already enrolled" in t4d_rerr, (
-        f"expected ok: disk2 line on stderr, got: {t4d_rerr!r}"
-    )
+    for name in ("disk1", "disk2"):
+        assert_ordered_pair(
+            t4d_rerr,
+            f"[wait] keyfile: checking against {name}...",
+            f"[ok]   keyfile: already enrolled on {name}",
+            f"not-LUKS mixed real-run for {name}",
+        )
 
     # Restore real pool.json and clean up the synthetic device.
     machine.succeed("mv /tmp/pool.bak2.json /var/lib/braid/pool.json")

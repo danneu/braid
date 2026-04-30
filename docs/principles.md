@@ -60,6 +60,52 @@ Mount options, LUKS flags, and scrub scheduling are chosen for HDD NAS deploymen
 
 Pool-mutating commands (`unlock`, `add`, `recover`) acquire an exclusive **non-blocking** `flock` on `/run/braid-pool.lock` for their duration. braid does not queue pool operations: a concurrent attempt (e.g. `braid-auto-unlock` at boot racing a manual `braid-pool.target` start) fails fast with `braid: another braid operation is already in progress` and the user must retry once the active operation completes. Mutual exclusion is enforced at the critical section itself, not via systemd unit topology. Under the held lock, `unlock` re-checks whether the pool is already mounted and exits cleanly if a prior winner mounted it sequentially; `add` and `recover` do not fast-exit because they legitimately operate on mounted pools.
 
+## 13. Announce blocking work
+
+Every interactive command emits a `[wait]` row before any subprocess
+that can stall the terminal long enough for the user to wonder
+whether the CLI has hung. The bound categories:
+
+- cryptsetup Argon2 operations (`luksFormat`, `luksOpen`,
+  `luksAddKey`, `--test-passphrase`);
+- `cryptsetup close` (single attempt or busy-retry loop);
+- btrfs `balance`, `replace`, and `device remove` (potentially hours);
+- `mount` and `umount` (kernel can drain in-flight I/O / replace
+  workers / inhibitors).
+
+A `[wait]` row is closed by one of:
+
+- the same command's paired success row (`[ok]   {same subject}: ...`)
+  on the success path,
+- a same-subject `[fail]` row on a known failure path (e.g.
+  `lock.rs`'s umount failure),
+- a same-subject `[warn]` row on a non-fatal best-effort failure
+  (e.g. `pool::evict_present_device`'s trailing LUKS close, or
+  `wait_for_kernel_replace_to_finish`'s status-poll error — the
+  command continues despite the failure, and the warn row tells
+  the user the wait window is closed without success),
+- a same-subject `[skip]` row on a successful negative or no-op
+  probe (e.g. `braid enroll`'s pre-mutation keyfile probe finding
+  the keyfile not yet enrolled — the work the wait announced
+  completed, the answer is "no work yet"),
+- or the command's normal error output (`MountError` / `LuksError` /
+  `PoolError` propagation) on uncaught error paths.
+
+A `[wait]` followed by none of these closers (i.e., success, fail,
+warn, skip, or non-zero exit) is a documentation bug.
+
+Fast bookkeeping that completes well under a second
+(`mkfs.btrfs` on a fresh disk, `btrfs device add`,
+`btrfs filesystem resize`, `btrfs device scan`,
+`btrfs device scan --forget`, `cryptsetup luksHeaderBackup`,
+`cryptsetup status`, `blkid`, JSON parses, journal writes,
+`pool.json` saves, sysfs reads) does not warrant a row.
+
+Rendering uses `status_tag::status_line(StatusTag::Wait, ...)`
+against `color_enabled_for_stderr()` so plain stderr captures
+contain unwrapped `[wait]` bytes and TTY output picks up the gray
+ANSI tag. [Why →](decisions/021-wait-in-unlock.md)
+
 ---
 
 Implementation workflow and conventions are in [AGENTS.md](../AGENTS.md).

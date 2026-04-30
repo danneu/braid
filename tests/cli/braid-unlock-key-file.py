@@ -64,12 +64,19 @@ with subtest("Test 1: correct keyfile unlocks"):
     )
     err = machine.succeed("cat /tmp/kfu.err")
     wait_line = "[wait] keyfile: checking against disk1...\n"
+    accepted_line = "[ok]   keyfile: accepted by disk1\n"
     unlocked_line = "[ok]   disk disk1: unlocked\n"
     assert wait_line in err, (
         f"expected keyfile verification wait line, got: {err!r}"
     )
-    assert err.find(wait_line) < err.find(unlocked_line), (
-        f"wait line must precede first unlocked row, got: {err!r}"
+    assert accepted_line in err, (
+        f"expected keyfile accepted row, got: {err!r}"
+    )
+    assert err.find(wait_line) < err.find(accepted_line), (
+        f"keyfile wait must precede accepted row, got: {err!r}"
+    )
+    assert err.find(accepted_line) < err.find(unlocked_line), (
+        f"keyfile accepted row must precede first unlocked row, got: {err!r}"
     )
     unlocking_wait = "[wait] disk disk1: unlocking...\n"
     mounting_wait = "[wait] pool: mounting /mnt/storage...\n"

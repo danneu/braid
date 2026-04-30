@@ -254,6 +254,13 @@ impl LockPlan {
         let mut umount_error: Option<LockError> = None;
         let mut first_mapper_error: Option<LockError> = None;
         if self.pool_was_mounted {
+            eprint!(
+                "{}",
+                line(
+                    StatusTag::Wait,
+                    &format!("pool: unmounting {mount_point}..."),
+                )
+            );
             let umount_result = runner.run(&CmdRequest::Umount {
                 mount_point: mount_point.clone(),
             })?;
@@ -327,6 +334,10 @@ impl LockPlan {
             let mapper_path = format!("/dev/mapper/{}", mn.0);
 
             if fs.exists(&mapper_path) {
+                eprint!(
+                    "{}",
+                    line(StatusTag::Wait, &format!("disk {name}: locking..."))
+                );
                 match close_mapper_with_retry(runner, sleeper, &mn.0, color_enabled) {
                     Ok(()) => {
                         eprint!("{}", line(StatusTag::Ok, &format!("disk {name}: locked")));
@@ -371,6 +382,13 @@ impl LockPlan {
                 line(
                     StatusTag::Warn,
                     &format!("orphaned mapper {entry} (not in pool.json -- likely a prior crash)")
+                )
+            );
+            eprint!(
+                "{}",
+                line(
+                    StatusTag::Wait,
+                    &format!("disk {disk_name}: locking (orphan)..."),
                 )
             );
             match close_mapper_with_retry(runner, sleeper, entry, color_enabled) {

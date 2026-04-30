@@ -109,7 +109,9 @@ See the [command reference](manual/commands/) for full usage of each command.
 
 ## Preview with --dry-run
 
-Every mutating command (`add`, `remove`, `remove-missing`, `replace`, `unlock`, `lock`, `recover`, `enroll`) takes `--dry-run`. A successful dry-run prints one complete preview to stdout -- warnings that qualify the preview are part of it, and stderr stays empty. Real runs may still print confirmations, progress, and failures to stderr.
+Every mutating command (`add`, `remove`, `remove-missing`, `replace`, `unlock`, `lock`, `recover`, `enroll`) takes `--dry-run`. A successful dry-run prints one complete preview to stdout -- warnings that qualify the preview are part of it. Real runs may still print confirmations, progress, and failures to stderr.
+
+`--dry-run` may also emit canonical `[wait]`/`[ok]`/`[skip]` status rows to stderr around any blocking probe that runs during preview generation -- for example, `braid enroll --dry-run` runs a passphrase-free `cryptsetup open --test-passphrase --key-file` against each disk to detect already-enrolled state, and announces that Argon2-bounded probe per Principle 13 ("announce blocking work"). These rows do not count as preview output -- the structured preview still lives entirely on stdout, and stderr is otherwise quiet on success.
 
 ```sh
 sudo braid add toshiba=/dev/disk/by-id/ata-Toshiba_MN07_XXXX --dry-run

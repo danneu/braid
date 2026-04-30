@@ -19,7 +19,7 @@ use crate::preview::{self, PerDiskStyle, Preview, PreviewCompleteness, PreviewNo
 use crate::probe::{Filesystem, ProbeError, probe_config_disk, probe_pool};
 use crate::progress::ProgressOutput;
 use crate::state_paths::StatePaths;
-use crate::status_tag::color_enabled_for_stderr;
+use crate::status_tag::{StatusTag, color_enabled_for_stderr, emit_status, status_line};
 use crate::types::*;
 use std::path::Path;
 
@@ -112,6 +112,7 @@ impl ReplacePlan {
         fs: &F,
         params: &ReplaceParams<'_>,
     ) -> Result<(), ReplaceError> {
+        let color_enabled = color_enabled_for_stderr();
         let ReplacePlan {
             notes,
             steps: _,
@@ -231,7 +232,7 @@ impl ReplacePlan {
                 runner,
                 &credential_targets,
                 Credential::Passphrase(&passphrase),
-                color_enabled_for_stderr(),
+                color_enabled,
                 |line| emit_replace_stderr(line),
             ) {
                 Ok(()) => {}
@@ -302,25 +303,85 @@ impl ReplacePlan {
                 let mut luks_opts = luks_opts_from_env();
                 luks_opts.push("--label".into());
                 luks_opts.push(format!("braid-{new_name}"));
+                eprint!(
+                    "{}",
+                    status_line(
+                        StatusTag::Wait,
+                        color_enabled,
+                        &format!("disk {new_name}: formatting LUKS..."),
+                    )
+                );
                 luks_format(runner, &new_by_id.0, &passphrase, &luks_opts)?;
-                eprintln!("LUKS formatted: {}", new_by_id);
+                eprint!(
+                    "{}",
+                    status_line(
+                        StatusTag::Ok,
+                        color_enabled,
+                        &format!("disk {new_name}: LUKS formatted"),
+                    )
+                );
 
                 if let Some(kf) = params.enroll_key_file {
+                    eprint!(
+                        "{}",
+                        status_line(
+                            StatusTag::Wait,
+                            color_enabled,
+                            &format!("disk {new_name}: enrolling keyfile in slot 1..."),
+                        )
+                    );
                     crate::luks::enroll_key_file(runner, &new_by_id.0, &passphrase, kf)?;
-                    eprintln!("Keyfile enrolled in slot 1: {}", new_by_id);
+                    eprint!(
+                        "{}",
+                        status_line(
+                            StatusTag::Ok,
+                            color_enabled,
+                            &format!("disk {new_name}: keyfile enrolled in slot 1"),
+                        )
+                    );
                 }
 
                 let backup_path =
                     backup_luks_header(runner, &new_by_id.0, &new_mn.0, params.paths)?;
                 eprintln!("LUKS header backed up: {}", backup_path.display());
 
+                eprint!(
+                    "{}",
+                    status_line(
+                        StatusTag::Wait,
+                        color_enabled,
+                        &format!("disk {new_name}: unlocking..."),
+                    )
+                );
                 ensure_luks_open(runner, fs, &new_name, &new_by_id, &passphrase)?;
-                eprintln!("LUKS opened: {} -> {}", new_by_id, new_mn);
+                eprint!(
+                    "{}",
+                    status_line(
+                        StatusTag::Ok,
+                        color_enabled,
+                        &format!("disk {new_name}: unlocked"),
+                    )
+                );
             }
             ConfigDiskState::PresentLuks { mapper_open, .. } => {
                 if !mapper_open {
+                    eprint!(
+                        "{}",
+                        status_line(
+                            StatusTag::Wait,
+                            color_enabled,
+                            &format!("disk {new_name}: unlocking..."),
+                        )
+                    );
                     ensure_luks_open(runner, fs, &new_name, &new_by_id, &passphrase)?;
-                    eprintln!("LUKS opened: {} -> {}", new_by_id, new_mn);
+                    eprint!(
+                        "{}",
+                        status_line(
+                            StatusTag::Ok,
+                            color_enabled,
+                            &format!("disk {new_name}: unlocked"),
+                        )
+                    );
                 } else if !pool.devices.iter().any(|d| d.mapper == new_mn) {
                     eprintln!(
                         "note: LUKS mapper is already open but device is not yet in pool. Completing replace."
@@ -354,13 +415,24 @@ impl ReplacePlan {
         // devid here so the shared spine below runs once.
         let devid = match &replace_source {
             ReplaceSource::Live { devid, .. } => {
-                eprintln!("Replacing device (devid {devid}) with {}...", new_mn);
+                eprint!(
+                    "{}",
+                    status_line(
+                        StatusTag::Wait,
+                        color_enabled,
+                        &format!("pool: replacing devid {devid} with {new_mn}..."),
+                    )
+                );
                 *devid
             }
             ReplaceSource::Missing { devid } => {
-                eprintln!(
-                    "Rebuilding missing device (devid {devid}) onto {}...",
-                    new_mn
+                eprint!(
+                    "{}",
+                    status_line(
+                        StatusTag::Wait,
+                        color_enabled,
+                        &format!("pool: rebuilding missing devid {devid} onto {new_mn}..."),
+                    )
                 );
                 *devid
             }
@@ -373,7 +445,10 @@ impl ReplacePlan {
             config.mount_point(),
             params.progress,
         )?;
-        eprintln!("Replace complete.");
+        eprint!(
+            "{}",
+            status_line(StatusTag::Ok, color_enabled, "pool: replace complete")
+        );
 
         // Membership committed by btrfs replace. Enrich with kernel-assigned
         // devid + observed luks_uuid from a fresh probe, then persist before
@@ -393,21 +468,39 @@ impl ReplacePlan {
         // bound to the backing disk until `braid lock` or reboot. Missing has
         // no old mapper to close.
         if let ReplaceSource::Live { mapper, .. } = &replace_source {
+            let old_label = mapper.0.strip_prefix("braid-").unwrap_or(&mapper.0);
+            emit_status(&status_line(
+                StatusTag::Wait,
+                color_enabled,
+                &format!("disk {old_label}: locking..."),
+            ));
             let close_result = runner.run(&CmdRequest::CryptsetupClose {
                 mapper: mapper.0.clone(),
             });
             match close_result {
-                Ok(r) if r.exit_status != 0 => {
-                    eprintln!(
-                        "Warning: failed to close LUKS mapper {} (exit {})",
-                        mapper, r.exit_status
-                    );
-                }
-                Err(e) => eprintln!("Warning: failed to close LUKS mapper {}: {}", mapper, e),
-                _ => {
+                Ok(r) if r.exit_status == 0 => {
+                    emit_status(&status_line(
+                        StatusTag::Ok,
+                        color_enabled,
+                        &format!("disk {old_label}: locked"),
+                    ));
                     eprintln!(
                         "Old device closed. If repurposing the physical disk, wipe it separately."
                     );
+                }
+                Ok(r) => {
+                    emit_status(&status_line(
+                        StatusTag::Warn,
+                        color_enabled,
+                        &format!("disk {old_label}: lock failed (exit {})", r.exit_status),
+                    ));
+                }
+                Err(e) => {
+                    emit_status(&status_line(
+                        StatusTag::Warn,
+                        color_enabled,
+                        &format!("disk {old_label}: lock failed ({e})"),
+                    ));
                 }
             }
         }
@@ -2531,6 +2624,185 @@ mod tests {
             disk3.luks_uuid.is_some() && disk3.devid.is_some() && disk3.added_at.is_some(),
             "new disk must carry enriched metadata (luks_uuid, devid, added_at) \
              from the post-replace probe: {disk3:?}"
+        );
+    }
+
+    /// Runner for a live replace where every step succeeds except the
+    /// best-effort `cryptsetup close` of the old mapper, which returns
+    /// non-zero. Mirrors `ResizeFailingLoggingRunner` so the rest of the
+    /// flow reaches the close site.
+    struct CloseFailingReplaceRunner {
+        replace_done: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl CmdRunner2 for CloseFailingReplaceRunner {
+        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
+            match request {
+                CmdRequest::BtrfsFilesystemShow { mount_point } => {
+                    let show = if self.replace_done.load(std::sync::atomic::Ordering::Relaxed) {
+                        "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\tTotal devices 2 FS bytes used 16.17MiB\n\tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk3\n"
+                    } else {
+                        "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\tTotal devices 2 FS bytes used 16.17MiB\n\tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk2\n"
+                    };
+                    Ok(mock_ok(
+                        &format!("btrfs filesystem show {mount_point}"),
+                        show,
+                    ))
+                }
+                CmdRequest::CryptsetupStatus { mapper } => {
+                    let dev = match mapper.as_str() {
+                        "braid-disk1" => "/dev/vdb",
+                        "braid-disk2" => "/dev/vdc",
+                        "braid-disk3" => "/dev/vdd",
+                        _ => "/dev/vdz",
+                    };
+                    Ok(mock_ok(
+                        &format!("cryptsetup status {mapper}"),
+                        &format!(
+                            "{mapper} is active and is in use.\n  type:    LUKS2\n  device:  {dev}\n  mode:    read/write\n"
+                        ),
+                    ))
+                }
+                CmdRequest::CryptsetupLuksUuid { device } => {
+                    let uuid = match device.as_str() {
+                        "/dev/vdb" | "/dev/disk/by-id/virtio-disk1" => {
+                            "11111111-1111-1111-1111-111111111111"
+                        }
+                        "/dev/vdc" | "/dev/disk/by-id/virtio-disk2" => {
+                            "22222222-2222-2222-2222-222222222222"
+                        }
+                        "/dev/vdd" | "/dev/disk/by-id/virtio-disk3" => {
+                            "33333333-3333-3333-3333-333333333333"
+                        }
+                        _ => "99999999-9999-9999-9999-999999999999",
+                    };
+                    Ok(mock_ok(
+                        &format!("cryptsetup luksUUID {device}"),
+                        &format!("{uuid}\n"),
+                    ))
+                }
+                CmdRequest::CryptsetupLuksDumpText { device } => Ok(mock_ok(
+                    &format!("cryptsetup luksDump {device}"),
+                    "LUKS header information\nVersion:       \t2\n",
+                )),
+                CmdRequest::BtrfsBalanceStatus { .. } => Ok(mock_ok(
+                    "btrfs balance status",
+                    "No balance found on '/mnt/storage'\n",
+                )),
+                CmdRequest::BtrfsDeviceStatsJson { .. } => {
+                    Ok(mock_ok("btrfs device stats", r#"{"device-stats": []}"#))
+                }
+                CmdRequest::BtrfsReplaceStart { .. } => {
+                    self.replace_done
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                    Ok(mock_ok("btrfs replace start", ""))
+                }
+                CmdRequest::CryptsetupClose { mapper } if mapper == "braid-disk2" => {
+                    Ok(RawCommandOutput {
+                        cmd: "cryptsetup close".into(),
+                        stdout: String::new(),
+                        stderr: "device is busy".into(),
+                        exit_status: 5,
+                    })
+                }
+                CmdRequest::CryptsetupClose { .. } => Ok(mock_ok("cryptsetup close", "")),
+                CmdRequest::BtrfsFilesystemResize { .. } => {
+                    Ok(mock_ok("btrfs filesystem resize", ""))
+                }
+                CmdRequest::CryptsetupTestPassphrase { device } => Ok(mock_ok(
+                    &format!("cryptsetup open --test-passphrase {device}"),
+                    "",
+                )),
+                _ => Err(CmdError::MissingMock),
+            }
+        }
+
+        fn run_with_stdin(
+            &self,
+            request: &CmdRequest,
+            _stdin: &[u8],
+        ) -> Result<RawCommandOutput, CmdError> {
+            self.run(request)
+        }
+    }
+
+    /* Intent: live-replace's best-effort close of the old mapper closes its
+     * [wait] row with [warn] when cryptsetup returns non-zero exit.
+     * Why it exists: Principle 13 forbids dangling [wait] rows; a best-effort
+     * close that exits the command 0 must still announce the failure on the
+     * same subject so the wait window is closed for the operator.
+     * Scenario: live replace of disk2 -> disk3 succeeds end-to-end except the
+     * trailing cryptsetup close of the old mapper, which returns busy.
+     */
+    #[test]
+    fn live_replace_old_close_failure_emits_warn_row() {
+        let state_tmp = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(state_tmp.path().into());
+        let mut m = PoolMembership::empty();
+        m.disks.insert(
+            "disk1".into(),
+            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
+        );
+        m.disks.insert(
+            "disk2".into(),
+            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk2".into())),
+        );
+        membership::save_membership(&m, &paths).unwrap();
+
+        let config_tmp = tempfile::tempdir().unwrap();
+        let config_path = config_tmp.path().join("config.json");
+        std::fs::write(
+            &config_path,
+            serde_json::to_vec(&serde_json::json!({ "mount_point": "/mnt/storage" })).unwrap(),
+        )
+        .unwrap();
+
+        let pass_path = config_tmp.path().join("passphrase");
+        std::fs::write(&pass_path, b"test-passphrase\n").unwrap();
+
+        let fs = ReplaceMockFs(vec![
+            "/dev/disk/by-id/virtio-disk3".into(),
+            "/dev/mapper/braid-disk3".into(),
+        ]);
+
+        let replace_done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let runner = CloseFailingReplaceRunner {
+            replace_done: replace_done.clone(),
+        };
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+
+        let captured = crate::status_tag::testing::capture_with_color(false, || {
+            let result = cmd_replace(
+                &runner,
+                &fs,
+                &ReplaceParams {
+                    config_path: &config_path,
+                    old_name: "disk2",
+                    new_name: "disk3=/dev/disk/by-id/virtio-disk3",
+                    missing_id: None,
+                    dry_run: false,
+                    yes: true,
+                    passphrase_stdin: false,
+                    passphrase_file: Some(pass_path.as_path()),
+                    enroll_key_file: None,
+                    progress: crate::progress::ProgressOutput::Off,
+                    paths: &paths,
+                    sleep_inhibitor: &inhibitor,
+                },
+            );
+            assert!(
+                result.is_ok(),
+                "best-effort close failure must not fail the replace command, got: {result:?}"
+            );
+        });
+
+        let wait = "[wait] disk disk2: locking...";
+        let warn = "[warn] disk disk2: lock failed (exit 5)";
+        assert!(captured.contains(wait), "missing wait row: {captured:?}");
+        assert!(captured.contains(warn), "missing warn row: {captured:?}");
+        assert!(
+            captured.find(wait) < captured.find(warn),
+            "wait must precede warn, got: {captured:?}"
         );
     }
 
