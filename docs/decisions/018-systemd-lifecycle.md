@@ -125,9 +125,10 @@ The wrapper (`braid-wrapper.sh`) bridges CLI operations and systemd state. This 
 
 **On `lock`:**
 1. Wrapper stops `braid-scrub.timer`, `braid-scrub-resume-trigger.service`, then `braid-scrub.service` (timer first prevents re-trigger; trigger before service prevents the trigger from queuing a fresh start of the service being stopped; service last cancels in-flight scrub).
-2. CLI unmounts pool + closes LUKS.
-3. Wrapper checks mount is gone.
-4. `systemctl stop braid-online.service`.
+2. Wrapper iterates `systemctl show -P BoundBy braid-online.service` and stops each remaining bound consumer (samba, nfs, future). The scrub units already handled in step 1 are skipped. This mirrors the cascade systemd performs on shutdown for user-initiated `braid lock`.
+3. CLI unmounts pool + closes LUKS.
+4. Wrapper checks mount is gone.
+5. `systemctl stop braid-online.service`.
 
 **On system shutdown:**
 1. systemd stops `braid-online.service` (if active).
@@ -172,7 +173,7 @@ Services that depend on the pool being mounted use one of three patterns:
 
 **Infrequent periodic services** (scrub): The timer, scrub service, and resume trigger use `BindsTo` + `After` on `braid-online.service`; the timer and trigger are `wantedBy` the online unit. The timer's active lifecycle matches the pool's online period. `Persistent=true` handles catch-up for overdue fires. Unlike the monitor timer (which fires every 5 minutes and can afford missed runs), the monthly scrub timer cannot wait until next month if it misses -- lifecycle binding ensures it fires on the next unlock. The scrub service and resume trigger also get `ConditionPathIsMountPoint` as defense-in-depth. For manual lock, the wrapper stops the timer, resume trigger, and scrub service before the CLI runs (see above).
 
-**Long-running services holding open files** (samba, nfs): Must additionally use `After=braid-online.service` + `BindsTo=braid-online.service`. This ensures systemd stops them *before* `braid lock` runs `ExecStop`, preventing unmount failures from busy filesystems.
+**Long-running services holding open files** (samba, nfs): Must additionally use `After=braid-online.service` + `BindsTo=braid-online.service`. This ensures systemd stops them *before* `braid lock` runs `ExecStop`, preventing unmount failures from busy filesystems. The wrapper iterates `BoundBy braid-online.service` and stops these consumers before invoking `braid lock`, mirroring the cascade systemd performs on shutdown for user-initiated lock.
 
 ## Key design constraints
 

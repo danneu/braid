@@ -63,6 +63,42 @@ case "$subcmd" in
     ;;
 esac
 
+# Pre-stop pool consumers (samba, nfs, future) declared via
+# BindsTo=braid-online.service. systemd exposes the inverse as the BoundBy=
+# read-only property, making this single-source-of-truth: a new consumer
+# only needs the BindsTo declaration, no wrapper edit. Without this, a
+# direct user-initiated `braid lock` would hit EBUSY on umount because
+# the BindsTo cascade only fires when systemd itself drives the stop.
+#
+# The scrub block above is left in place because it encodes
+# timer->trigger->service ordering to prevent re-trigger races that don't
+# apply to long-running consumers. We skip the three scrub units here to
+# avoid cosmetic re-stop noise.
+#
+# Error reporting differs from the scrub block: the scrub block suppresses
+# errors because units may not exist (autoScrub disabled). Here we trust
+# BoundBy -- anything systemd reports as bound exists, so a non-zero exit
+# is a real failure the user should see. We still attempt the lock; the
+# consumer may have been mid-deactivation and umount may still succeed.
+case "$subcmd" in
+  lock)
+    if ! $skip_fixup; then
+      bound_by=$(@systemctlBin@ show -P BoundBy braid-online.service 2>/dev/null || true)
+      for unit in $bound_by; do
+        case "$unit" in
+          braid-scrub.timer|braid-scrub.service|braid-scrub-resume-trigger.service)
+            continue ;;
+        esac
+        ec=0
+        @systemctlBin@ stop "$unit" || ec=$?
+        if [ "$ec" -ne 0 ]; then
+          echo "braid: WARNING: failed to stop $unit (exit $ec) -- continuing; umount may fail" >&2
+        fi
+      done
+    fi
+    ;;
+esac
+
 # 9>&-: drop the pool-lock fd in the forked child before exec, so braid
 # (and any descendant it spawns -- notably the long-lived systemd-inhibit
 # subprocess in cli/src/inhibit.rs, which is in its own pgroup and can
