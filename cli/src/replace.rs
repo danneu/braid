@@ -1,12 +1,15 @@
 use crate::cmd::{CmdRequest, CommandRunner, Step};
 use crate::config::{Config, config_read, mapper_name, name_from_mapper};
 use crate::confirm;
+use crate::credential_verify::{
+    Credential, CredentialVerifyError, CredentialVerifyTarget, verify_credential_for_targets,
+};
 use crate::inhibit::AcquireSleepInhibitor;
 use crate::journal;
 use crate::luks::{
-    VerifyOutcome, backup_luks_header, ensure_luks_open, format_keyfile_asymmetry_warning,
+    backup_luks_header, ensure_luks_open, format_keyfile_asymmetry_warning,
     format_keyfile_enrollment_probe_failure, luks_format, luks_opts_from_env,
-    probe_pool_keyfile_enrollment, read_passphrase, verify_passphrase,
+    probe_pool_keyfile_enrollment, read_passphrase,
 };
 use crate::membership::{self, PoolMembership};
 use crate::parse::parse_btrfs_device_stats;
@@ -16,7 +19,7 @@ use crate::preview::{self, PerDiskStyle, Preview, PreviewCompleteness, PreviewNo
 use crate::probe::{Filesystem, ProbeError, probe_config_disk, probe_pool};
 use crate::progress::ProgressOutput;
 use crate::state_paths::StatePaths;
-use crate::status_tag::{CredentialKind, color_enabled_for_stderr, credential_wait_line};
+use crate::status_tag::color_enabled_for_stderr;
 use crate::types::*;
 use std::path::Path;
 
@@ -185,53 +188,69 @@ impl ReplacePlan {
             )));
         }
 
-        if matches!(new_probed.state, ConfigDiskState::PresentNotLuks)
-            && let Some(existing) = pool.devices.first()
+        let retained_members: Vec<_> = match &replace_source {
+            ReplaceSource::Live { .. } => pool
+                .devices
+                .iter()
+                .filter(|device| device.mapper != old_mn)
+                .collect(),
+            ReplaceSource::Missing { .. } => pool.devices.iter().collect(),
+        };
+        let anchor_members: Vec<_> = if matches!(&replace_source, ReplaceSource::Live { .. })
+            && retained_members.is_empty()
         {
-            let status_raw = runner.run(&crate::cmd::CmdRequest::CryptsetupStatus {
-                mapper: existing.mapper.0.clone(),
-            })?;
-            let status = crate::parse::parse_cryptsetup_status(&status_raw)?;
-            if let Some(underlying) = status.device {
-                let display_name =
-                    name_from_mapper(&existing.mapper.0).unwrap_or(existing.mapper.0.as_str());
-                emit_replace_stderr(&credential_wait_line(
-                    CredentialKind::Passphrase,
-                    color_enabled_for_stderr(),
-                    display_name,
-                ));
-                match verify_passphrase(runner, &underlying, &passphrase)? {
-                    VerifyOutcome::Authenticated => {}
-                    VerifyOutcome::Rejected => {
-                        return Err(ReplaceError::Validation(
-                            "passphrase does not match existing pool member".into(),
-                        ));
-                    }
-                }
-            }
+            pool.devices
+                .iter()
+                .filter(|device| device.mapper == old_mn)
+                .collect()
+        } else {
+            retained_members
+        };
+        let mut credential_targets: Vec<CredentialVerifyTarget> = anchor_members
+            .into_iter()
+            .map(|device| CredentialVerifyTarget {
+                name: name_from_mapper(&device.mapper.0)
+                    .unwrap_or(device.mapper.0.as_str())
+                    .to_owned(),
+                device: device.underlying.clone(),
+            })
+            .collect();
+        let new_disk_target = match &new_probed.state {
+            ConfigDiskState::PresentLuks { .. } => Some(CredentialVerifyTarget {
+                name: new_name.clone(),
+                device: new_by_id.0.clone(),
+            }),
+            ConfigDiskState::Absent | ConfigDiskState::PresentNotLuks => None,
+        };
+        if let Some(target) = &new_disk_target {
+            credential_targets.push(target.clone());
         }
 
-        // Reversible check: for an already-formatted but closed LUKS disk,
-        // verify the passphrase against the new disk's own LUKS header before
-        // committing the journal. Without this, ensure_luks_open below would be
-        // the first thing to notice a wrong passphrase -- and by then the
-        // journal is already written and the user is forced into braid recover
-        // mode for what is conceptually a preflight failure (see decision 019).
-        if let ConfigDiskState::PresentLuks {
-            mapper_open: false, ..
-        } = new_probed.state
-        {
-            emit_replace_stderr(&credential_wait_line(
-                CredentialKind::Passphrase,
+        if !credential_targets.is_empty() {
+            match verify_credential_for_targets(
+                runner,
+                &credential_targets,
+                Credential::Passphrase(&passphrase),
                 color_enabled_for_stderr(),
-                &new_name,
-            ));
-            match verify_passphrase(runner, &new_by_id.0, &passphrase)? {
-                VerifyOutcome::Authenticated => {}
-                VerifyOutcome::Rejected => {
-                    return Err(ReplaceError::Validation(format!(
-                        "passphrase rejected by new disk '{new_name}' ({new_by_id})"
-                    )));
+                |line| emit_replace_stderr(line),
+            ) {
+                Ok(()) => {}
+                Err(CredentialVerifyError::Rejected { target }) => {
+                    let is_new_disk = new_disk_target.as_ref() == Some(&target);
+                    return Err(ReplaceError::Validation(if is_new_disk {
+                        format!(
+                            "passphrase rejected by new disk '{}' ({})",
+                            target.name, target.device
+                        )
+                    } else {
+                        format!(
+                            "passphrase does not match existing pool member '{}'",
+                            target.name
+                        )
+                    }));
+                }
+                Err(CredentialVerifyError::Luks { source, .. }) => {
+                    return Err(ReplaceError::Luks(source));
                 }
             }
         }
@@ -2015,6 +2034,10 @@ mod tests {
                     stderr: "ERROR: target device is too small".into(),
                     exit_status: 1,
                 }),
+                CmdRequest::CryptsetupTestPassphrase { device } => Ok(mock_ok(
+                    &format!("cryptsetup open --test-passphrase {device}"),
+                    "",
+                )),
                 _ => Err(CmdError::MissingMock),
             }
         }
@@ -2364,6 +2387,10 @@ mod tests {
                     stderr: "ERROR: unable to resize".into(),
                     exit_status: 1,
                 }),
+                CmdRequest::CryptsetupTestPassphrase { device } => Ok(mock_ok(
+                    &format!("cryptsetup open --test-passphrase {device}"),
+                    "",
+                )),
                 _ => Err(CmdError::MissingMock),
             }
         }
@@ -2876,7 +2903,10 @@ mod tests {
                             exit_status: 2,
                         })
                     } else {
-                        Err(CmdError::MissingMock)
+                        Ok(mock_ok(
+                            &format!("cryptsetup luksOpen --test-passphrase {device}"),
+                            "",
+                        ))
                     }
                 }
                 CmdRequest::BtrfsBalanceStatus { .. } => Ok(mock_ok(
@@ -2978,9 +3008,8 @@ mod tests {
     }
 
     /// Recording wrapper around FailingReplaceRunner that logs every
-    /// CmdRequest before dispatching. Used by the mapper_open: true
-    /// negative-coverage test to assert CryptsetupTestPassphrase and
-    /// CryptsetupLuksOpen against the new disk are never issued.
+    /// CmdRequest before dispatching. Used by the mapper_open: true test to
+    /// assert the new disk is verified but not opened again.
     struct RecordingReplaceRunner {
         inner: FailingReplaceRunner,
         log: std::sync::Arc<std::sync::Mutex<Vec<CmdRequest>>>,
@@ -3013,24 +3042,20 @@ mod tests {
 
     #[test]
     // Intent: when the new disk is PresentLuks { mapper_open: true },
-    //   cmd_replace must not issue CryptsetupTestPassphrase or
+    //   cmd_replace verifies its slot 0 but must not issue a second
     //   CryptsetupLuksOpen against that disk's by_id.
     //
-    // Why it exists: the pre-journal passphrase check added for the
-    //   closed-LUKS branch targets only mapper_open: false. A future
-    //   refactor that accidentally broadens it to all PresentLuks -- or
-    //   re-adds a post-journal ensure_luks_open on the already-open path --
-    //   would surface an unnecessary credential demand or second open.
-    //   This test pins the no-op shape of the open-mapper branch by
-    //   inspecting a recorded call log directly, so the assertion is
-    //   insensitive to error-plumbing refactors.
+    // Why it exists: already-open LUKS candidates enter post-operation
+    //   membership, so their slot 0 must be verified before the journal.
+    //   The already-open path still must not run ensure_luks_open and bind
+    //   the mapper a second time.
     //
     // Scenario: a previous replace/add opened /dev/mapper/braid-disk3 but
     //   never added it to the pool (e.g. crash). Operator retries
     //   `braid replace --old disk2 --new disk3=...`; the command picks up
     //   the already-open mapper and proceeds to btrfs replace start without
     //   a second LUKS interaction on the new disk.
-    fn mapper_open_true_does_not_verify_or_open_new_disk_luks() {
+    fn mapper_open_true_verifies_but_does_not_open_new_disk_luks() {
         let state_tmp = tempfile::tempdir().unwrap();
         let paths = StatePaths::custom(state_tmp.path().into());
         let mut m = PoolMembership::empty();
@@ -3109,8 +3134,8 @@ mod tests {
             .filter(|r| matches!(r, CmdRequest::CryptsetupTestPassphrase { device } if device == new_by_id))
             .count();
         assert_eq!(
-            test_passphrase_calls, 0,
-            "mapper_open: true must not trigger CryptsetupTestPassphrase on the new disk"
+            test_passphrase_calls, 1,
+            "mapper_open: true must verify CryptsetupTestPassphrase on the new disk exactly once"
         );
 
         let open_calls = log
@@ -3223,6 +3248,10 @@ mod tests {
                 CmdRequest::BtrfsBalanceRaid1Soft { .. } => {
                     Ok(mock_ok("btrfs balance raid1 soft", ""))
                 }
+                CmdRequest::CryptsetupTestPassphrase { device } => Ok(mock_ok(
+                    &format!("cryptsetup open --test-passphrase {device}"),
+                    "",
+                )),
                 _ => Err(CmdError::MissingMock),
             }
         }
@@ -3465,6 +3494,10 @@ mod tests {
                     stderr: "ERROR: error during balancing".into(),
                     exit_status: 1,
                 }),
+                CmdRequest::CryptsetupTestPassphrase { device } => Ok(mock_ok(
+                    &format!("cryptsetup open --test-passphrase {device}"),
+                    "",
+                )),
                 _ => Err(CmdError::MissingMock),
             }
         }

@@ -5,6 +5,7 @@ pub mod browse;
 pub mod cmd;
 pub mod config;
 pub mod confirm;
+pub mod credential_verify;
 pub mod discover;
 pub mod doctor;
 pub mod enroll_key_file;

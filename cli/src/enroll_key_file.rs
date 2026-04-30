@@ -1,5 +1,8 @@
 use crate::cmd::{CmdRequest, CommandRunner, Step};
 use crate::config::mapper_name;
+use crate::credential_verify::{
+    Credential, CredentialVerifyError, CredentialVerifyTarget, verify_credential_for_targets,
+};
 use crate::luks::{self, KEYFILE_SIZE, KeySlotState, LUKS_SLOT_KEYFILE, LuksError, VerifyOutcome};
 use crate::membership::PoolMembership;
 use crate::preflight;
@@ -109,31 +112,6 @@ fn discover_enrollment_candidates<R: CommandRunner, F: Filesystem + ?Sized>(
     (notes, Ok(candidates))
 }
 
-/// Verify the supplied passphrase against the first candidate disk.
-/// Single source of truth for the "fail fast on wrong passphrase" preflight
-/// shared by both planning modes. Wrong passphrase here would cause every
-/// downstream `luksAddKey` to fail, so we surface it once up front rather
-/// than partway through enrollment.
-fn verify_first_candidate_passphrase<R: CommandRunner>(
-    runner: &R,
-    candidates: &[EnrollmentCandidate],
-    passphrase: &str,
-) -> Result<(), EnrollKeyFileError> {
-    let (first_name, first_by_id) = &candidates[0];
-    emit_credential_wait_line(
-        CredentialKind::Passphrase,
-        color_enabled_for_stderr(),
-        first_name,
-    );
-    match luks::verify_passphrase(runner, &first_by_id.0, passphrase)? {
-        VerifyOutcome::Authenticated => Ok(()),
-        VerifyOutcome::Rejected => Err(EnrollKeyFileError::Validation(format!(
-            "wrong passphrase (verified against {})",
-            first_name
-        ))),
-    }
-}
-
 /// Slot-1 preflight: refuse to enroll if slot 1 is already occupied by
 /// an unknown key. Same remediation regardless of mode.
 fn check_slot_one_available<R: CommandRunner>(
@@ -170,7 +148,29 @@ fn plan_enrollment<R: CommandRunner>(
     passphrase: &str,
     mode: EnrollmentPlanMode,
 ) -> Result<Vec<DiskEnrollAction>, EnrollKeyFileError> {
-    verify_first_candidate_passphrase(runner, candidates, passphrase)?;
+    let (first_name, first_by_id) = &candidates[0];
+    let first_target = CredentialVerifyTarget {
+        name: first_name.clone(),
+        device: first_by_id.0.clone(),
+    };
+    match verify_credential_for_targets(
+        runner,
+        std::slice::from_ref(&first_target),
+        Credential::Passphrase(passphrase),
+        color_enabled_for_stderr(),
+        |line| eprint!("{line}"),
+    ) {
+        Ok(()) => {}
+        Err(CredentialVerifyError::Rejected { target }) => {
+            return Err(EnrollKeyFileError::Validation(format!(
+                "wrong passphrase (verified against {})",
+                target.name
+            )));
+        }
+        Err(CredentialVerifyError::Luks { source, .. }) => {
+            return Err(EnrollKeyFileError::Luks(source));
+        }
+    }
 
     let mut plan = Vec::new();
     for (i, (name, by_id)) in candidates.iter().enumerate() {
@@ -206,14 +206,26 @@ fn plan_enrollment<R: CommandRunner>(
         // this loop never reaches the verify (every iter takes the `continue`
         // above).
         if i > 0 {
-            emit_credential_wait_line(CredentialKind::Passphrase, color_enabled_for_stderr(), name);
-            match luks::verify_passphrase(runner, &by_id.0, passphrase)? {
-                VerifyOutcome::Authenticated => {}
-                VerifyOutcome::Rejected => {
+            let target = CredentialVerifyTarget {
+                name: name.clone(),
+                device: by_id.0.clone(),
+            };
+            match verify_credential_for_targets(
+                runner,
+                std::slice::from_ref(&target),
+                Credential::Passphrase(passphrase),
+                color_enabled_for_stderr(),
+                |line| eprint!("{line}"),
+            ) {
+                Ok(()) => {}
+                Err(CredentialVerifyError::Rejected { target }) => {
                     return Err(EnrollKeyFileError::Validation(format!(
                         "wrong passphrase on {}",
-                        name
+                        target.name
                     )));
+                }
+                Err(CredentialVerifyError::Luks { source, .. }) => {
+                    return Err(EnrollKeyFileError::Luks(source));
                 }
             }
         }
@@ -1393,6 +1405,80 @@ mod tests {
                 by_id: by_id(d2),
             }
         );
+    }
+
+    /*
+     * Intent: in `GenerateNew` mode, the first candidate's passphrase
+     *   preflight runs exactly once.
+     * Why it exists: `plan_enrollment` verifies disk1 before the loop and
+     *   verifies later disks inside the loop. A regression that drops the
+     *   `i > 0` guard would verify disk1 twice; MockRunner mocks are
+     *   reusable, so the duplicate call only shows up in the request log.
+     * Scenario: 2-disk pool, new keyfile generation, both disks need
+     *   enrollment and both slot-1 checks are empty.
+     */
+    #[test]
+    fn plan_generate_new_does_not_repeat_first_candidate_passphrase_verify() {
+        let d1 = "/dev/disk/by-id/d1";
+        let d2 = "/dev/disk/by-id/d2";
+        let kf = "/mnt/usb/braid.key";
+        let pass = "testpass";
+
+        let (tp1_req, tp1_stdin, tp1_out) = test_passphrase_ok(d1, pass);
+        let (tp2_req, tp2_stdin, tp2_out) = test_passphrase_ok(d2, pass);
+        let (ld1_req, ld1_out) = luks_dump_slot1_empty(d1);
+        let (ld2_req, ld2_out) = luks_dump_slot1_empty(d2);
+
+        let runner = MockRunner::default()
+            .with_output_stdin(tp1_req, tp1_stdin, tp1_out)
+            .with_output_stdin(tp2_req, tp2_stdin, tp2_out)
+            .with_output(ld1_req, ld1_out)
+            .with_output(ld2_req, ld2_out);
+
+        let candidates = vec![
+            ("disk1".to_owned(), by_id(d1)),
+            ("disk2".to_owned(), by_id(d2)),
+        ];
+
+        let plan = plan_enrollment(
+            &runner,
+            &candidates,
+            Path::new(kf),
+            pass,
+            EnrollmentPlanMode::GenerateNew,
+        )
+        .expect("generate-new planning should succeed");
+
+        assert_eq!(
+            plan,
+            vec![
+                DiskEnrollAction::NeedsEnroll {
+                    name: "disk1".to_owned(),
+                    by_id: by_id(d1),
+                },
+                DiskEnrollAction::NeedsEnroll {
+                    name: "disk2".to_owned(),
+                    by_id: by_id(d2),
+                },
+            ]
+        );
+        for device in [d1, d2] {
+            let count = runner
+                .requests()
+                .iter()
+                .filter(|request| {
+                    matches!(
+                        request,
+                        CmdRequest::CryptsetupTestPassphrase { device: requested }
+                            if requested == device
+                    )
+                })
+                .count();
+            assert_eq!(
+                count, 1,
+                "expected exactly one passphrase verify for {device}"
+            );
+        }
     }
 
     /*

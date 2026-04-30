@@ -947,10 +947,21 @@ impl CommandRunner for RealRunner {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone)]
 pub struct MockRunner {
     outputs: std::collections::HashMap<String, RawCommandOutput>,
     stdin_expectations: std::collections::HashMap<String, Vec<u8>>,
+    requests: std::sync::Arc<std::sync::Mutex<Vec<CmdRequest>>>,
+}
+
+impl Default for MockRunner {
+    fn default() -> Self {
+        Self {
+            outputs: std::collections::HashMap::new(),
+            stdin_expectations: std::collections::HashMap::new(),
+            requests: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        }
+    }
 }
 
 impl MockRunner {
@@ -969,6 +980,13 @@ impl MockRunner {
         self.outputs.insert(key.clone(), output);
         self.stdin_expectations.insert(key, expected_stdin);
         self
+    }
+
+    pub fn requests(&self) -> Vec<CmdRequest> {
+        self.requests
+            .lock()
+            .expect("mock runner request log poisoned")
+            .clone()
     }
 
     /// Test helper: stub `cryptsetup luksDump <device>` (text form) to
@@ -1062,6 +1080,10 @@ impl MockRunner {
 
 impl CommandRunner for MockRunner {
     fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
+        self.requests
+            .lock()
+            .expect("mock runner request log poisoned")
+            .push(request.clone());
         let output = self
             .outputs
             .get(&format!("{request:?}"))
@@ -1086,6 +1108,10 @@ impl CommandRunner for MockRunner {
         stdin: &[u8],
     ) -> Result<RawCommandOutput, CmdError> {
         let key = format!("{request:?}");
+        self.requests
+            .lock()
+            .expect("mock runner request log poisoned")
+            .push(request.clone());
         if let Some(expected) = self.stdin_expectations.get(&key) {
             assert_eq!(stdin, expected.as_slice(), "stdin mismatch for {key}");
         }
@@ -1112,6 +1138,71 @@ mod tests {
 
         let out = mock.run(&req).expect("mock should have output");
         assert_eq!(out.exit_status, 0);
+    }
+
+    #[test]
+    fn mock_runner_requests_records_run_and_run_with_stdin_in_order() {
+        let req1 = CmdRequest::LsblkJson;
+        let req2 = CmdRequest::CryptsetupTestPassphrase {
+            device: "/dev/x".to_owned(),
+        };
+        let mock = MockRunner::default()
+            .with_output(
+                req1.clone(),
+                RawCommandOutput {
+                    cmd: "lsblk --json".to_owned(),
+                    stdout: "{\"blockdevices\":[]}".to_owned(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                },
+            )
+            .with_output_stdin(
+                req2.clone(),
+                b"secret".to_vec(),
+                RawCommandOutput {
+                    cmd: "cryptsetup open --test-passphrase /dev/x".to_owned(),
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                },
+            );
+
+        mock.run(&req1).expect("seeded run mock");
+        mock.run_with_stdin(&req2, b"secret")
+            .expect("seeded run_with_stdin mock");
+
+        assert_eq!(mock.requests(), vec![req1, req2]);
+    }
+
+    #[test]
+    fn mock_runner_requests_records_missing_mock_calls_too() {
+        let req = CmdRequest::BtrfsDeviceScanAll;
+        let mock = MockRunner::default();
+
+        let err = mock.run(&req).expect_err("missing mock should error");
+
+        assert!(matches!(err, CmdError::MissingMock));
+        assert_eq!(mock.requests(), vec![req]);
+    }
+
+    #[test]
+    #[should_panic(expected = "stdin mismatch")]
+    fn mock_runner_run_with_stdin_panics_on_stdin_mismatch_unchanged() {
+        let req = CmdRequest::CryptsetupTestPassphrase {
+            device: "/dev/x".to_owned(),
+        };
+        let mock = MockRunner::default().with_output_stdin(
+            req.clone(),
+            b"secret".to_vec(),
+            RawCommandOutput {
+                cmd: "cryptsetup open --test-passphrase /dev/x".to_owned(),
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_status: 0,
+            },
+        );
+
+        let _ = mock.run_with_stdin(&req, b"wrong");
     }
 
     #[test]

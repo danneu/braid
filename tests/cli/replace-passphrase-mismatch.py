@@ -74,8 +74,8 @@ with subtest("Replace with wrong passphrase fails"):
     )
     print(f"Wrong passphrase output (exit {status}):\n{output}")
     assert status != 0, f"Expected failure, got exit 0: {output}"
-    wait_line = "[wait] passphrase: checking against disk1..."
-    error_marker = "passphrase does not match existing pool member"
+    wait_line = "[wait] passphrase: checking against disk2..."
+    error_marker = "passphrase does not match existing pool member 'disk2'"
     assert wait_line in output, (
         f"Expected passphrase wait line before mismatch error:\n{output}"
     )

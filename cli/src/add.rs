@@ -2,12 +2,15 @@ use crate::alert;
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, Step};
 use crate::config::{Config, config_read, mapper_name, name_from_mapper};
 use crate::confirm;
+use crate::credential_verify::{
+    Credential, CredentialVerifyError, CredentialVerifyTarget, verify_credential_for_targets,
+};
 use crate::inhibit::AcquireSleepInhibitor;
 use crate::journal;
 use crate::luks::{
-    PassphraseReader, VerifyOutcome, backup_luks_header, ensure_luks_open,
-    format_keyfile_asymmetry_warning, format_keyfile_enrollment_probe_failure, luks_format,
-    luks_opts_from_env, probe_pool_keyfile_enrollment, read_passphrase_with, verify_passphrase,
+    PassphraseReader, backup_luks_header, ensure_luks_open, format_keyfile_asymmetry_warning,
+    format_keyfile_enrollment_probe_failure, luks_format, luks_opts_from_env,
+    probe_pool_keyfile_enrollment, read_passphrase_with,
 };
 use crate::membership::{self, PoolMembership};
 use crate::parse::btrfs_filesystem_show::{DeviceBtrfsProbe, classify_btrfs_probe};
@@ -20,7 +23,7 @@ use crate::preview::{self, PerDiskStyle, Preview, PreviewCompleteness, PreviewNo
 use crate::probe::{Filesystem, ProbeError, probe_config_disk, probe_pool};
 use crate::progress::ProgressOutput;
 use crate::state_paths::StatePaths;
-use crate::status_tag::{CredentialKind, color_enabled_for_stderr, emit_credential_wait_line};
+use crate::status_tag::color_enabled_for_stderr;
 use crate::types::*;
 use std::path::Path;
 
@@ -415,28 +418,57 @@ impl AddPlan {
             params.passphrase_reader,
         )?;
 
-        // Verify passphrase against existing pool member (once)
-        if any_needs_format && let Some(existing) = self.pool.devices.first() {
-            let status_raw = runner.run(&crate::cmd::CmdRequest::CryptsetupStatus {
-                mapper: existing.mapper.0.clone(),
-            })?;
-            let status = crate::parse::parse_cryptsetup_status(&status_raw)?;
-            if let Some(underlying) = status.device {
-                let display_name =
-                    name_from_mapper(&existing.mapper.0).unwrap_or(existing.mapper.0.as_str());
-                emit_credential_wait_line(
-                    CredentialKind::Passphrase,
-                    color_enabled_for_stderr(),
-                    display_name,
-                );
-                match verify_passphrase(runner, &underlying, &passphrase)? {
-                    VerifyOutcome::Authenticated => {}
-                    VerifyOutcome::Rejected => {
-                        return Err(AddError::Validation(
-                                "passphrase does not match existing pool member. All disks must use the same passphrase."
-                                    .into(),
-                            ));
-                    }
+        let pool_target_count = self.pool.devices.len();
+        let mut credential_targets: Vec<CredentialVerifyTarget> = self
+            .pool
+            .devices
+            .iter()
+            .map(|device| CredentialVerifyTarget {
+                name: name_from_mapper(&device.mapper.0)
+                    .unwrap_or(device.mapper.0.as_str())
+                    .to_owned(),
+                device: device.underlying.clone(),
+            })
+            .collect();
+        credential_targets.extend(self.probed.iter().enumerate().filter_map(|(i, probed)| {
+            match &probed.state {
+                ConfigDiskState::PresentLuks { .. } => Some(CredentialVerifyTarget {
+                    name: self.names[i].clone(),
+                    device: self.by_ids[i].0.clone(),
+                }),
+                ConfigDiskState::Absent | ConfigDiskState::PresentNotLuks => None,
+            }
+        }));
+
+        if !credential_targets.is_empty() {
+            match verify_credential_for_targets(
+                runner,
+                &credential_targets,
+                Credential::Passphrase(&passphrase),
+                color_enabled_for_stderr(),
+                |line| eprint!("{line}"),
+            ) {
+                Ok(()) => {}
+                Err(CredentialVerifyError::Rejected { target }) => {
+                    let target_idx = credential_targets
+                        .iter()
+                        .position(|t| t == &target)
+                        .expect("rejected target should come from target list");
+                    return Err(AddError::Validation(if target_idx < pool_target_count {
+                        format!(
+                            "passphrase does not match existing pool member '{}'. \
+                             All disks must use the same passphrase.",
+                            target.name
+                        )
+                    } else {
+                        format!(
+                            "passphrase rejected by candidate disk '{}' ({})",
+                            target.name, target.device
+                        )
+                    }));
+                }
+                Err(CredentialVerifyError::Luks { source, .. }) => {
+                    return Err(AddError::Luks(source));
                 }
             }
         }
@@ -2196,6 +2228,10 @@ mod tests {
                         Ok(mock_ok("btrfs device add", ""))
                     }
                 }
+                CmdRequest::CryptsetupTestPassphrase { device } => Ok(mock_ok(
+                    &format!("cryptsetup open --test-passphrase {device}"),
+                    "",
+                )),
                 _ => Err(CmdError::MissingMock),
             }
         }

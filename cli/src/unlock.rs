@@ -392,10 +392,17 @@ mod tests {
                     "Device is not a valid LUKS device.",
                 ),
             )
-            // 4. verify passphrase against first unlockable disk
+            // 4. verify passphrase against every unlockable disk
             .with_output_stdin(
                 CmdRequest::CryptsetupTestPassphrase {
                     device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw("cryptsetup open --test-passphrase"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
                 },
                 b"testpass".to_vec(),
                 ok_raw("cryptsetup open --test-passphrase"),
@@ -531,10 +538,17 @@ mod tests {
                     "Device is not a valid LUKS device.",
                 ),
             )
-            // verify passphrase
+            // verify passphrase against every unlockable disk
             .with_output_stdin(
                 CmdRequest::CryptsetupTestPassphrase {
                     device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw("cryptsetup open --test-passphrase"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
                 },
                 b"testpass".to_vec(),
                 ok_raw("cryptsetup open --test-passphrase"),
@@ -672,13 +686,30 @@ mod tests {
                     exit_status: 0,
                 },
             )
-            // verify passphrase against disk1 → success
+            // verify passphrase against disk1 -> success, disk2 -> rejected
             .with_output_stdin(
                 CmdRequest::CryptsetupTestPassphrase {
                     device: "/dev/disk/by-id/virtio-disk1".into(),
                 },
                 b"testpass".to_vec(),
                 ok_raw("cryptsetup open --test-passphrase"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                },
+                b"testpass".to_vec(),
+                err_raw(
+                    "cryptsetup open --test-passphrase",
+                    2,
+                    "No key available with this passphrase.",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupIsLuks {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                },
+                ok_raw("cryptsetup isLuks"),
             )
             // open disk1 → success
             .with_output_stdin(
@@ -736,8 +767,8 @@ mod tests {
             "error should name the failing disk, got: {msg}"
         );
         assert!(
-            msg.contains("disk1"),
-            "error should name the verification disk, got: {msg}"
+            !msg.contains("disk1"),
+            "preflight rejection should not report disk1 as the verification disk, got: {msg}"
         );
         assert!(
             !msg.contains("Wrong passphrase?"),
@@ -809,10 +840,24 @@ mod tests {
                     exit_status: 0,
                 },
             )
-            // verify passphrase
+            // verify passphrase against every planned disk
             .with_output_stdin(
                 CmdRequest::CryptsetupTestPassphrase {
                     device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw("cryptsetup open --test-passphrase"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw("cryptsetup open --test-passphrase"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/disk/by-id/virtio-disk3".into(),
                 },
                 b"testpass".to_vec(),
                 ok_raw("cryptsetup open --test-passphrase"),
@@ -1306,10 +1351,24 @@ mod tests {
                     exit_status: 0,
                 },
             )
-            // verify passphrase
+            // verify passphrase against every planned disk
             .with_output_stdin(
                 CmdRequest::CryptsetupTestPassphrase {
                     device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw("cryptsetup open --test-passphrase"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw("cryptsetup open --test-passphrase"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/disk/by-id/virtio-disk3".into(),
                 },
                 b"testpass".to_vec(),
                 ok_raw("cryptsetup open --test-passphrase"),

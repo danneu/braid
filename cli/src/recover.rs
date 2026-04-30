@@ -1439,10 +1439,17 @@ mod tests {
                     "22222222-2222-2222-2222-222222222222",
                 ),
             )
-            // mount helper: verify passphrase against first disk
+            // mount helper: verify passphrase against every unlockable disk
             .with_output_stdin(
                 CmdRequest::CryptsetupTestPassphrase {
                     device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw_empty("cryptsetup open --test-passphrase"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
                 },
                 b"testpass".to_vec(),
                 ok_raw_empty("cryptsetup open --test-passphrase"),
@@ -1737,7 +1744,7 @@ mod tests {
             // 4. cycle re-plan: probe disk1, disk2 LUKS UUIDs (same mocks reused).
             //    NOW mapper_open=false because the close hooks removed the mapper
             //    paths from the StatefulMockFs.
-            // 5. cycle execute: verify passphrase against disk1, then open both.
+            // 5. cycle execute: verify passphrase against both disks, then open both.
             //    This is the LOAD-BEARING assertion: if the credential was not
             //    eagerly resolved before the initial mount, this stdin-bearing
             //    mock would never be called and the test would error with
@@ -1745,6 +1752,13 @@ mod tests {
             .with_output_stdin(
                 CmdRequest::CryptsetupTestPassphrase {
                     device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw_empty("cryptsetup open --test-passphrase"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
                 },
                 b"testpass".to_vec(),
                 ok_raw_empty("cryptsetup open --test-passphrase"),
@@ -1922,6 +1936,13 @@ mod tests {
                 ok_raw_empty("cryptsetup open --test-passphrase"),
             )
             .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw_empty("cryptsetup open --test-passphrase"),
+            )
+            .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-disk1".into(),
                     mapper: "braid-disk1".into(),
@@ -2053,6 +2074,13 @@ mod tests {
             .with_output_stdin(
                 CmdRequest::CryptsetupTestPassphrase {
                     device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw_empty("cryptsetup open --test-passphrase"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
                 },
                 b"testpass".to_vec(),
                 ok_raw_empty("cryptsetup open --test-passphrase"),

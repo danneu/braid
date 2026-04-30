@@ -1,12 +1,13 @@
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, Step};
 use crate::config::{Config, mapper_name};
-use crate::luks::{self, LuksError, VerifyOutcome};
+use crate::credential_verify::{
+    Credential, CredentialVerifyError, CredentialVerifyTarget, verify_credential_for_targets,
+};
+use crate::luks::{self, LuksError};
 use crate::membership::PoolMembership;
 use crate::preview::{self, NoteLevel, PerDiskStyle, PreviewNote};
 use crate::probe::{self, Filesystem, ProbeError};
-use crate::status_tag::{
-    CredentialKind, StatusTag, color_enabled_for_stderr, emit_credential_wait_line, status_line,
-};
+use crate::status_tag::{StatusTag, color_enabled_for_stderr, status_line};
 use crate::types::{ByIdPath, ConfigDiskState, MountPoint};
 use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
@@ -482,10 +483,20 @@ fn explain_open_failure(
     }
 }
 
-/// Verify a passphrase against the first to-unlock disk and then open every
+fn credential_verify_targets(to_unlock: &[(String, ByIdPath)]) -> Vec<CredentialVerifyTarget> {
+    to_unlock
+        .iter()
+        .map(|(name, by_id)| CredentialVerifyTarget {
+            name: name.clone(),
+            device: by_id.0.clone(),
+        })
+        .collect()
+}
+
+/// Verify a passphrase against every to-unlock disk and then open every
 /// to-unlock disk with it. Called from the `OpenCredential::Passphrase`
-/// arm of `execute_unlock_and_mount`. Mirrors the structure of the `KeyFile`
-/// arm: `explain_open_failure` handles header-state classification for both
+/// arm of `execute_unlock_and_mount`. Mirrors `open_disks_with_key_file`:
+/// `explain_open_failure` handles header-state classification for both
 /// verification and per-disk open failures.
 fn open_disks_with_passphrase<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
@@ -494,39 +505,43 @@ fn open_disks_with_passphrase<R: CommandRunner, F: Filesystem + ?Sized>(
     passphrase: &str,
     color_enabled: bool,
 ) -> Result<(), MountError> {
-    let (ref first_name, ref first_by_id) = to_unlock[0];
-    emit_credential_wait_line(CredentialKind::Passphrase, color_enabled, first_name);
-    let outcome = match luks::verify_passphrase(runner, &first_by_id.0, passphrase) {
-        Ok(o) => o,
-        Err(e @ LuksError::OpenFailed { .. }) => {
-            // A non-auth verify failure (e.g. EBUSY, ENODEV, generic EINVAL)
-            // must still route through header diagnosis so a wiped or damaged
-            // header surfaces the restore/repair guidance instead of the
-            // cryptsetup "generic failure" string.
-            let original_summary = format!("verify failed on '{first_name}': {e}");
-            let header_state = luks::probe_luks_header(runner, &first_by_id.0);
+    let targets = credential_verify_targets(to_unlock);
+    match verify_credential_for_targets(
+        runner,
+        &targets,
+        Credential::Passphrase(passphrase),
+        color_enabled,
+        |line| eprint!("{line}"),
+    ) {
+        Ok(()) => {}
+        Err(CredentialVerifyError::Rejected { target }) => {
+            let original_summary = format!("passphrase rejected on '{}'", target.name);
+            let ok_fallback =
+                MountError::Failed(format!("wrong passphrase (rejected by {})", target.name));
+            let header_state = luks::probe_luks_header(runner, &target.device);
             return Err(explain_open_failure(
-                first_name,
-                &first_by_id.0,
+                &target.name,
+                &target.device,
+                header_state,
+                &original_summary,
+                ok_fallback,
+            ));
+        }
+        Err(CredentialVerifyError::Luks {
+            target,
+            source: e @ LuksError::OpenFailed { .. },
+        }) => {
+            let original_summary = format!("verify failed on '{}': {e}", target.name);
+            let header_state = luks::probe_luks_header(runner, &target.device);
+            return Err(explain_open_failure(
+                &target.name,
+                &target.device,
                 header_state,
                 &original_summary,
                 MountError::Luks(e),
             ));
         }
-        Err(e) => return Err(e.into()),
-    };
-    if outcome == VerifyOutcome::Rejected {
-        let original_summary = format!("passphrase rejected on '{first_name}'");
-        let ok_fallback =
-            MountError::Failed(format!("wrong passphrase (verified against {first_name})"));
-        let header_state = luks::probe_luks_header(runner, &first_by_id.0);
-        return Err(explain_open_failure(
-            first_name,
-            &first_by_id.0,
-            header_state,
-            &original_summary,
-            ok_fallback,
-        ));
+        Err(CredentialVerifyError::Luks { source, .. }) => return Err(MountError::Luks(source)),
     }
 
     for (name, by_id) in to_unlock {
@@ -540,14 +555,104 @@ fn open_disks_with_passphrase<R: CommandRunner, F: Filesystem + ?Sized>(
                     ..
                 } => (
                     format!(
-                        "cryptsetup open rejected on '{name}' despite verified passphrase on '{first_name}' -- {hint} ({stderr})"
+                        "cryptsetup open rejected on '{name}' after all planned-disk passphrase verification -- {hint} ({stderr})"
                     ),
                     MountError::Failed(format!(
-                        "failed to open disk '{}': passphrase was verified \
-                         against '{}' but rejected here -- {} ({}). \
-                         If the passphrase is correct, the single-passphrase \
-                         invariant may be violated by external LUKS manipulation",
-                        name, first_name, hint, stderr
+                        "cryptsetup open rejected on '{name}' even though the passphrase was just \
+                         verified against every planned disk. The credential likely changed between \
+                         preflight and open (race or external LUKS manipulation)."
+                    )),
+                ),
+                _ => {
+                    let summary = format!("cryptsetup open failed on '{name}': {e}");
+                    (summary, MountError::Luks(e))
+                }
+            };
+            return Err(explain_open_failure(
+                name,
+                &by_id.0,
+                header_state,
+                &original_summary,
+                ok_fallback,
+            ));
+        }
+        eprint!(
+            "{}",
+            status_line(
+                StatusTag::Ok,
+                color_enabled,
+                &format!("disk {name}: unlocked")
+            )
+        );
+    }
+
+    Ok(())
+}
+
+fn open_disks_with_key_file<R: CommandRunner, F: Filesystem + ?Sized>(
+    runner: &R,
+    fs: &F,
+    to_unlock: &[(String, ByIdPath)],
+    key_file_path: &Path,
+    color_enabled: bool,
+) -> Result<(), MountError> {
+    let targets = credential_verify_targets(to_unlock);
+    match verify_credential_for_targets(
+        runner,
+        &targets,
+        Credential::KeyFile(key_file_path),
+        color_enabled,
+        |line| eprint!("{line}"),
+    ) {
+        Ok(()) => {}
+        Err(CredentialVerifyError::Rejected { target }) => {
+            let original_summary = format!("keyfile rejected on '{}'", target.name);
+            let ok_fallback =
+                MountError::Failed(format!("wrong keyfile (rejected by {})", target.name));
+            let header_state = luks::probe_luks_header(runner, &target.device);
+            return Err(explain_open_failure(
+                &target.name,
+                &target.device,
+                header_state,
+                &original_summary,
+                ok_fallback,
+            ));
+        }
+        Err(CredentialVerifyError::Luks {
+            target,
+            source: e @ LuksError::OpenFailed { .. },
+        }) => {
+            let original_summary = format!("verify failed on '{}': {e}", target.name);
+            let header_state = luks::probe_luks_header(runner, &target.device);
+            return Err(explain_open_failure(
+                &target.name,
+                &target.device,
+                header_state,
+                &original_summary,
+                MountError::Luks(e),
+            ));
+        }
+        Err(CredentialVerifyError::Luks { source, .. }) => return Err(MountError::Luks(source)),
+    }
+
+    for (name, by_id) in to_unlock {
+        if let Err(e) = luks::ensure_luks_open_with_key_file(runner, fs, name, by_id, key_file_path)
+        {
+            let header_state = luks::probe_luks_header(runner, &by_id.0);
+            let (original_summary, ok_fallback) = match &e {
+                LuksError::OpenFailed {
+                    exit_code: 2,
+                    hint,
+                    stderr,
+                    ..
+                } => (
+                    format!(
+                        "cryptsetup open rejected on '{name}' after all planned-disk keyfile verification -- {hint} ({stderr})"
+                    ),
+                    MountError::Failed(format!(
+                        "cryptsetup open rejected on '{name}' even though the keyfile was just \
+                         verified against every planned disk. The credential likely changed between \
+                         preflight and open (race or external LUKS manipulation)."
                     )),
                 ),
                 _ => {
@@ -637,84 +742,7 @@ pub fn execute_unlock_and_mount<R: CommandRunner, F: Filesystem + ?Sized>(
     match credential {
         OpenCredential::KeyFile(kf) => {
             let kf = kf.as_path();
-            let (ref first_name, ref first_by_id) = plan.to_unlock[0];
-            emit_credential_wait_line(CredentialKind::KeyFile, color_enabled, first_name);
-            let outcome = match luks::verify_key_file(runner, &first_by_id.0, kf) {
-                Ok(o) => o,
-                Err(e @ LuksError::OpenFailed { .. }) => {
-                    // Same non-auth routing as the passphrase arm: a
-                    // wiped/damaged header on the first disk must
-                    // still surface restore/repair guidance rather
-                    // than a raw cryptsetup hint.
-                    let original_summary = format!("verify failed on '{first_name}': {e}");
-                    let header_state = luks::probe_luks_header(runner, &first_by_id.0);
-                    return Err(explain_open_failure(
-                        first_name,
-                        &first_by_id.0,
-                        header_state,
-                        &original_summary,
-                        MountError::Luks(e),
-                    ));
-                }
-                Err(e) => return Err(e.into()),
-            };
-            if outcome == VerifyOutcome::Rejected {
-                let original_summary = format!("keyfile rejected on '{first_name}'");
-                let ok_fallback =
-                    MountError::Failed(format!("wrong keyfile (verified against {first_name})"));
-                let header_state = luks::probe_luks_header(runner, &first_by_id.0);
-                return Err(explain_open_failure(
-                    first_name,
-                    &first_by_id.0,
-                    header_state,
-                    &original_summary,
-                    ok_fallback,
-                ));
-            }
-
-            for (name, by_id) in &plan.to_unlock {
-                if let Err(e) = luks::ensure_luks_open_with_key_file(runner, fs, name, by_id, kf) {
-                    let header_state = luks::probe_luks_header(runner, &by_id.0);
-                    let (original_summary, ok_fallback) = match &e {
-                        LuksError::OpenFailed {
-                            exit_code: 2,
-                            hint,
-                            stderr,
-                            ..
-                        } => (
-                            format!(
-                                "cryptsetup open rejected on '{name}' despite verified keyfile on '{first_name}' -- {hint} ({stderr})"
-                            ),
-                            MountError::Failed(format!(
-                                "failed to open disk '{}': keyfile was verified against \
-                                 '{}' but rejected here -- {} ({}). \
-                                 If the keyfile is correct, the single-passphrase \
-                                 invariant may be violated by external LUKS manipulation",
-                                name, first_name, hint, stderr
-                            )),
-                        ),
-                        _ => {
-                            let summary = format!("cryptsetup open failed on '{name}': {e}");
-                            (summary, MountError::Luks(e))
-                        }
-                    };
-                    return Err(explain_open_failure(
-                        name,
-                        &by_id.0,
-                        header_state,
-                        &original_summary,
-                        ok_fallback,
-                    ));
-                }
-                eprint!(
-                    "{}",
-                    status_line(
-                        StatusTag::Ok,
-                        color_enabled,
-                        &format!("disk {name}: unlocked")
-                    )
-                );
-            }
+            open_disks_with_key_file(runner, fs, &plan.to_unlock, kf, color_enabled)?;
         }
         OpenCredential::Passphrase(pp) => {
             open_disks_with_passphrase(runner, fs, &plan.to_unlock, pp.as_str(), color_enabled)?;
@@ -1085,6 +1113,13 @@ mod tests {
                 ok_raw("cryptsetup open --test-passphrase"),
             )
             .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw("cryptsetup open --test-passphrase"),
+            )
+            .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-disk1".into(),
                     mapper: "braid-disk1".into(),
@@ -1169,6 +1204,13 @@ mod tests {
                 ok_raw("cryptsetup open --test-passphrase"),
             )
             .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw("cryptsetup open --test-passphrase"),
+            )
+            .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-disk1".into(),
                     mapper: "braid-disk1".into(),
@@ -1247,6 +1289,13 @@ mod tests {
             .with_output_stdin(
                 CmdRequest::CryptsetupTestPassphrase {
                     device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw("cryptsetup open --test-passphrase"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
                 },
                 b"testpass".to_vec(),
                 ok_raw("cryptsetup open --test-passphrase"),
@@ -1625,6 +1674,23 @@ mod tests {
                 ok_raw("cryptsetup open --test-passphrase"),
             )
             .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                },
+                b"testpass".to_vec(),
+                err_raw(
+                    "cryptsetup open --test-passphrase",
+                    2,
+                    "No key available with this passphrase.",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupIsLuks {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                },
+                ok_raw("cryptsetup isLuks"),
+            )
+            .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-disk1".into(),
                     mapper: "braid-disk1".into(),
@@ -1662,8 +1728,8 @@ mod tests {
             "error should name the failing disk, got: {msg}"
         );
         assert!(
-            msg.contains("disk1"),
-            "error should name the verification disk, got: {msg}"
+            !msg.contains("disk1"),
+            "preflight rejection should not report disk1 as the verification disk: {msg}"
         );
     }
 
@@ -2313,6 +2379,13 @@ pool already mounted at /mnt/storage
                 ok_raw("cryptsetup open --test-passphrase"),
             )
             .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw("cryptsetup open --test-passphrase"),
+            )
+            .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-disk1".into(),
                     mapper: "braid-disk1".into(),
@@ -2403,6 +2476,13 @@ pool already mounted at /mnt/storage
             .with_output(
                 CmdRequest::CryptsetupTestKeyFile {
                     device: "/dev/disk/by-id/virtio-disk1".into(),
+                    key_file_path: kf.path().display().to_string(),
+                },
+                ok_raw("cryptsetup open --test-passphrase"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupTestKeyFile {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
                     key_file_path: kf.path().display().to_string(),
                 },
                 ok_raw("cryptsetup open --test-passphrase"),
@@ -2695,6 +2775,20 @@ pool already mounted at /mnt/storage
             .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk1")
             .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk2")
             .with_mappers_closed(&["braid-disk1", "braid-disk2"])
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw("cryptsetup open --test-passphrase"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw("cryptsetup open --test-passphrase"),
+            )
     }
 
     fn two_disk_fs() -> MockFs {
@@ -2866,8 +2960,8 @@ pool already mounted at /mnt/storage
 
         let msg = result.expect_err("expected failure").to_string();
         assert!(
-            msg.contains("wrong passphrase (verified against"),
-            "intact header must preserve existing wrong-passphrase message: {msg}"
+            msg.contains("wrong passphrase (rejected by disk1)"),
+            "intact header must preserve wrong-passphrase message: {msg}"
         );
         assert!(
             !msg.contains("header unreadable"),
@@ -2949,10 +3043,6 @@ pool already mounted at /mnt/storage
         let msg = result.expect_err("expected failure").to_string();
         assert!(msg.contains("disk2"), "missing failing disk: {msg}");
         assert!(
-            msg.contains("disk1"),
-            "missing verification disk in original summary: {msg}"
-        );
-        assert!(
             msg.contains("diagnosis could not be completed"),
             "missing 'diagnosis could not be completed': {msg}"
         );
@@ -2994,6 +3084,13 @@ pool already mounted at /mnt/storage
             },
             ok_raw("cryptsetup open --test-passphrase"),
         );
+        let (tk2_req, tk2_out) = (
+            CmdRequest::CryptsetupTestKeyFile {
+                device: "/dev/disk/by-id/virtio-disk2".into(),
+                key_file_path: kf_path.clone(),
+            },
+            ok_raw("cryptsetup open --test-passphrase"),
+        );
         let (open1_req, open1_out) = (
             CmdRequest::CryptsetupLuksOpenKeyFile {
                 device: "/dev/disk/by-id/virtio-disk1".into(),
@@ -3014,6 +3111,7 @@ pool already mounted at /mnt/storage
 
         let runner = base_two_disk_runner()
             .with_output(tk_req, tk_out)
+            .with_output(tk2_req, tk2_out)
             .with_output(open1_req, open1_out)
             .with_output(open2_req, open2_out)
             .with_output(is_req, is_out);
