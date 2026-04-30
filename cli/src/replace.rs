@@ -305,17 +305,17 @@ impl ReplacePlan {
                 luks_format(runner, &new_by_id.0, &passphrase, &luks_opts)?;
                 eprintln!("LUKS formatted: {}", new_by_id);
 
+                if let Some(kf) = params.enroll_key_file {
+                    crate::luks::enroll_key_file(runner, &new_by_id.0, &passphrase, kf)?;
+                    eprintln!("Keyfile enrolled in slot 1: {}", new_by_id);
+                }
+
                 let backup_path =
                     backup_luks_header(runner, &new_by_id.0, &new_mn.0, params.paths)?;
                 eprintln!("LUKS header backed up: {}", backup_path.display());
 
                 ensure_luks_open(runner, fs, &new_name, &new_by_id, &passphrase)?;
                 eprintln!("LUKS opened: {} -> {}", new_by_id, new_mn);
-
-                if let Some(kf) = params.enroll_key_file {
-                    crate::luks::enroll_key_file(runner, &new_by_id.0, &passphrase, kf)?;
-                    eprintln!("Keyfile enrolled in slot 1: {}", new_by_id);
-                }
             }
             ConfigDiskState::PresentLuks { mapper_open, .. } => {
                 if !mapper_open {
@@ -876,6 +876,16 @@ fn compile_replace_steps(input: &ReplaceStepsInput<'_>) -> Result<Vec<Step>, Rep
                     extra_opts,
                 }],
             });
+            if let Some(kf) = input.enroll_key_file {
+                steps.push(Step {
+                    risk: "safe",
+                    description: format!("enroll keyfile -> LUKS slot 1 on {}", input.new_by_id),
+                    commands: vec![CmdRequest::CryptsetupLuksAddKeyFile {
+                        device: input.new_by_id.0.clone(),
+                        key_file_path: kf.display().to_string(),
+                    }],
+                });
+            }
             let backup_path = input
                 .paths
                 .luks_headers_dir()
@@ -896,16 +906,6 @@ fn compile_replace_steps(input: &ReplaceStepsInput<'_>) -> Result<Vec<Step>, Rep
                     mapper: new_mn.0.clone(),
                 }],
             });
-            if let Some(kf) = input.enroll_key_file {
-                steps.push(Step {
-                    risk: "safe",
-                    description: format!("enroll keyfile -> LUKS slot 1 on {}", input.new_by_id),
-                    commands: vec![CmdRequest::CryptsetupLuksAddKeyFile {
-                        device: input.new_by_id.0.clone(),
-                        key_file_path: kf.display().to_string(),
-                    }],
-                });
-            }
         }
         ConfigDiskState::PresentLuks { mapper_open, .. } => {
             if !mapper_open {
@@ -2729,8 +2729,10 @@ mod tests {
         let output = Step::render_dry_run(&steps);
         let lines: Vec<&str> = output.lines().collect();
 
-        // Steps: LUKS format, header backup, LUKS open, keyfile enroll,
+        // Steps: LUKS format, keyfile enroll, header backup, LUKS open,
         //        replace start, close old, resize = 7 steps x 2 lines each = 14
+        // Header backup runs after the final keyslot mutation so the backup
+        // captures slot 1; ordering invariant is format < addKey < backup < open.
         assert_eq!(lines.len(), 14, "expected 14 lines, got:\n{output}");
 
         // LUKS format
@@ -2738,18 +2740,18 @@ mod tests {
         assert!(lines[1].contains("$ cryptsetup luksFormat"));
         assert!(lines[1].contains("--label braid-disk3"));
 
+        // Keyfile enrollment (runs before backup so slot 1 lands in the backup)
+        assert!(lines[2].contains("enroll keyfile"));
+        assert!(lines[3].contains("$ cryptsetup luksAddKey"));
+        assert!(lines[3].contains("/mnt/usb/braid.key"));
+
         // Header backup
-        assert!(lines[2].contains("LUKS header backup"));
-        assert!(lines[3].contains("$ cryptsetup luksHeaderBackup"));
+        assert!(lines[4].contains("LUKS header backup"));
+        assert!(lines[5].contains("$ cryptsetup luksHeaderBackup"));
 
         // LUKS open
-        assert!(lines[4].contains("LUKS open"));
-        assert!(lines[5].contains("$ cryptsetup open --type luks"));
-
-        // Keyfile enrollment
-        assert!(lines[6].contains("enroll keyfile"));
-        assert!(lines[7].contains("$ cryptsetup luksAddKey"));
-        assert!(lines[7].contains("/mnt/usb/braid.key"));
+        assert!(lines[6].contains("LUKS open"));
+        assert!(lines[7].contains("$ cryptsetup open --type luks"));
 
         // Replace start
         assert!(lines[8].contains("[long       ]"));
@@ -3397,6 +3399,219 @@ mod tests {
         assert_eq!(
             close_calls, 0,
             "missing path has no old LUKS mapper to close -- CryptsetupClose must not be issued"
+        );
+    }
+
+    /// Runner for the keyfile-ordering regression test. Stubs every probe
+    /// command needed to reach `ReplacePlan::execute` for a missing-path
+    /// replace where the new disk is `PresentNotLuks` and `--enroll-key-file`
+    /// is set, then succeeds at `LuksFormat`, `LuksAddKeyFile`, and
+    /// `LuksHeaderBackup` (writing the backup file like `MockRunner` does)
+    /// so execution proceeds to `LuksOpen`. `LuksOpen` is left unmocked so
+    /// it returns `MissingMock`, aborting cleanly with the full LUKS
+    /// request log intact for ordering assertions.
+    struct KeyfileOrderingReplaceRunner {
+        log: std::sync::Arc<std::sync::Mutex<Vec<CmdRequest>>>,
+    }
+
+    impl CmdRunner2 for KeyfileOrderingReplaceRunner {
+        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
+            self.log.lock().unwrap().push(request.clone());
+            match request {
+                CmdRequest::BtrfsFilesystemShow { mount_point } => Ok(mock_ok(
+                    &format!("btrfs filesystem show {mount_point}"),
+                    "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\
+                     \tTotal devices 2 FS bytes used 16.17MiB\n\
+                     \tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\
+                     \t*** Some devices missing\n",
+                )),
+                CmdRequest::CryptsetupStatus { mapper } => {
+                    let dev = match mapper.as_str() {
+                        "braid-disk1" => "/dev/vdb",
+                        _ => return Err(CmdError::MissingMock),
+                    };
+                    Ok(mock_ok(
+                        &format!("cryptsetup status {mapper}"),
+                        &format!(
+                            "{mapper} is active and is in use.\n  type:    LUKS2\n  device:  {dev}\n  mode:    read/write\n"
+                        ),
+                    ))
+                }
+                CmdRequest::CryptsetupLuksUuid { device } => match device.as_str() {
+                    "/dev/vdb" | "/dev/disk/by-id/virtio-disk1" => Ok(mock_ok(
+                        &format!("cryptsetup luksUUID {device}"),
+                        "11111111-1111-1111-1111-111111111111\n",
+                    )),
+                    "/dev/disk/by-id/virtio-disk3" => Ok(RawCommandOutput {
+                        cmd: format!("cryptsetup luksUUID {device}"),
+                        stdout: String::new(),
+                        stderr: "Device is not a valid LUKS device.\n".into(),
+                        exit_status: 1,
+                    }),
+                    _ => Err(CmdError::MissingMock),
+                },
+                CmdRequest::BtrfsBalanceStatus { .. } => Ok(mock_ok(
+                    "btrfs balance status",
+                    "No balance found on '/mnt/storage'\n",
+                )),
+                CmdRequest::BtrfsDeviceUsageRaw { .. } => Ok(mock_ok(
+                    "btrfs device usage --raw",
+                    "/dev/mapper/braid-disk1, ID: 1\n\
+                     \tDevice size:           520093696\n\
+                     \tDevice slack:                  0\n\
+                     \tData,RAID1:            469762048\n\
+                     \tUnallocated:            50331648\n\n\
+                     <missing disk>, ID: 2\n\
+                     \tDevice size:                  0\n\
+                     \tDevice slack:                  0\n\
+                     \tData,RAID1:            469762048\n\
+                     \tUnallocated:                  0\n\n",
+                )),
+                CmdRequest::CryptsetupTestPassphrase { device } => Ok(mock_ok(
+                    &format!("cryptsetup open --test-passphrase {device}"),
+                    "",
+                )),
+                CmdRequest::CryptsetupLuksFormat { device, .. } => {
+                    Ok(mock_ok(&format!("cryptsetup luksFormat {device}"), ""))
+                }
+                CmdRequest::CryptsetupLuksAddKeyFile { device, .. } => {
+                    Ok(mock_ok(&format!("cryptsetup luksAddKey {device}"), ""))
+                }
+                CmdRequest::CryptsetupLuksHeaderBackup {
+                    device,
+                    backup_path,
+                } => {
+                    // Match MockRunner's behavior: write the backup file so
+                    // `backup_luks_header_to`'s rename step succeeds and we
+                    // proceed past the backup step to `ensure_luks_open`.
+                    if let Some(parent) = std::path::Path::new(backup_path.as_str()).parent() {
+                        std::fs::create_dir_all(parent)
+                            .map_err(|e| CmdError::Failed(format!("mock: create_dir_all: {e}")))?;
+                    }
+                    std::fs::write(backup_path, b"")
+                        .map_err(|e| CmdError::Failed(format!("mock: write backup: {e}")))?;
+                    Ok(mock_ok(
+                        &format!("cryptsetup luksHeaderBackup {device}"),
+                        "",
+                    ))
+                }
+                _ => Err(CmdError::MissingMock),
+            }
+        }
+
+        fn run_with_stdin(
+            &self,
+            request: &CmdRequest,
+            _stdin: &[u8],
+        ) -> Result<RawCommandOutput, CmdError> {
+            self.run(request)
+        }
+    }
+
+    /*
+     * Intent: cmd_replace with `--enroll-key-file` against a fresh
+     *   (PresentNotLuks) new disk emits LUKS commands in the order
+     *   LuksFormat -> LuksAddKeyFile -> LuksHeaderBackup -> LuksOpen
+     *   in the real execute path.
+     *
+     * Why it exists: `ReplacePlan::execute` discards the precompiled
+     *   `steps` and re-implements the LUKS init sequence inline, so a
+     *   reorder-only fix to `compile_replace_steps` would not protect
+     *   the production path. Pinning the chain at the real-execute layer
+     *   also covers the "no backup before open" guarantee that keeps the
+     *   no-backup window narrow if `LuksAddKeyFile` ever fails between
+     *   `LuksFormat` and `LuksHeaderBackup`. The dry-run preview path is
+     *   pinned by `dry_run_render_fresh_disk_live_replace_with_keyfile`.
+     *
+     * Scenario: 2-disk pool with disk2 missing. Operator runs
+     *   `braid replace --old disk2 --missing-id 2 --new disk3=...
+     *   --enroll-key-file=/tmp/braid.key`. The recording runner makes
+     *   header backup succeed (so we proceed past it) and falls through
+     *   to MissingMock at LuksOpen, leaving the full LUKS request log
+     *   for ordering assertions.
+     */
+    #[test]
+    fn cmd_replace_with_keyfile_orders_format_addkey_backup_open() {
+        let state_tmp = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(state_tmp.path().into());
+        let mut m = PoolMembership::empty();
+        m.disks.insert(
+            "disk1".into(),
+            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
+        );
+        let mut disk2 = DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk2".into()));
+        disk2.devid = Some(2);
+        m.disks.insert("disk2".into(), disk2);
+        membership::save_membership(&m, &paths).unwrap();
+
+        let config_tmp = tempfile::tempdir().unwrap();
+        let config_path = config_tmp.path().join("config.json");
+        std::fs::write(
+            &config_path,
+            serde_json::to_vec(&serde_json::json!({ "mount_point": "/mnt/storage" })).unwrap(),
+        )
+        .unwrap();
+
+        let pass_path = config_tmp.path().join("passphrase");
+        std::fs::write(&pass_path, b"test-passphrase\n").unwrap();
+
+        let kf_dir = tempfile::tempdir().unwrap();
+        let kf_path = kf_dir.path().join("braid.key");
+
+        // Only disk3's by_id exists; the mapper /dev/mapper/braid-disk3 is
+        // absent so `ensure_luks_open` proceeds to issue `LuksOpen`.
+        let fs = ReplaceMockFs(vec!["/dev/disk/by-id/virtio-disk3".into()]);
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let runner = KeyfileOrderingReplaceRunner { log: log.clone() };
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+
+        let result = cmd_replace(
+            &runner,
+            &fs,
+            &ReplaceParams {
+                config_path: &config_path,
+                old_name: "disk2",
+                new_name: "disk3=/dev/disk/by-id/virtio-disk3",
+                missing_id: Some(2),
+                dry_run: false,
+                yes: true,
+                passphrase_stdin: false,
+                passphrase_file: Some(pass_path.as_path()),
+                enroll_key_file: Some(kf_path.as_path()),
+                progress: crate::progress::ProgressOutput::Off,
+                paths: &paths,
+                sleep_inhibitor: &inhibitor,
+            },
+        );
+
+        assert!(
+            result.is_err(),
+            "cmd_replace must abort at the unmocked LuksOpen request, got: {result:?}"
+        );
+
+        let log = log.lock().unwrap();
+        let position = |label: &str, pred: fn(&CmdRequest) -> bool| -> usize {
+            log.iter()
+                .position(pred)
+                .unwrap_or_else(|| panic!("{label} not found in log: {log:?}"))
+        };
+        let format = position("LuksFormat", |r| {
+            matches!(r, CmdRequest::CryptsetupLuksFormat { .. })
+        });
+        let addkey = position("LuksAddKeyFile", |r| {
+            matches!(r, CmdRequest::CryptsetupLuksAddKeyFile { .. })
+        });
+        let backup = position("LuksHeaderBackup", |r| {
+            matches!(r, CmdRequest::CryptsetupLuksHeaderBackup { .. })
+        });
+        let open = position("LuksOpen", |r| {
+            matches!(r, CmdRequest::CryptsetupLuksOpen { .. })
+        });
+
+        assert!(
+            format < addkey && addkey < backup && backup < open,
+            "expected order LuksFormat({format}) < LuksAddKeyFile({addkey}) < \
+             LuksHeaderBackup({backup}) < LuksOpen({open}); log = {log:?}"
         );
     }
 

@@ -66,6 +66,21 @@ with subtest("Test 1: add disk2 with --enroll"):
     )
     assert '"1"' in dump, f"slot 1 not found in luksDump for disk2: {dump}"
 
+    # Regression: the on-disk header backup must capture slot 1 too.
+    # A previous version backed up the header BEFORE running luksAddKey,
+    # so the resulting `.luksheader` only contained slot 0. Restoring such
+    # a backup would silently wipe keyfile-based unlock. Verify the backup
+    # file produced during `braid add --enroll` contains slot 1 by
+    # dumping it the same way we dump the live header above.
+    backup_dump = machine.succeed(
+        "cryptsetup luksDump --dump-json-metadata "
+        "/var/lib/braid/luks-headers/braid-disk2.luksheader"
+    )
+    assert '"1"' in backup_dump, (
+        "slot 1 not found in header backup for disk2 -- "
+        f"backup was taken before luksAddKey: {backup_dump}"
+    )
+
 # --- Test 2: Unlock with keyfile (only disk2 has it) ---
 
 with subtest("Test 2: keyfile can open disk2"):

@@ -584,17 +584,17 @@ impl AddPlan {
             luks_format(runner, &by_id.0, &passphrase, &luks_opts)?;
             eprintln!("LUKS formatted: {}", by_id);
 
+            if let Some(kf) = params.enroll_key_file {
+                crate::luks::enroll_key_file(runner, &by_id.0, &passphrase, kf)?;
+                eprintln!("Keyfile enrolled in slot 1: {}", by_id);
+            }
+
             let backup_path = backup_luks_header(runner, &by_id.0, &mn.0, params.paths)?;
             eprintln!("LUKS header backed up: {}", backup_path.display());
 
             ensure_luks_open(runner, fs, name, by_id, &passphrase)?;
             luks_guard.track(mn.0.clone());
             eprintln!("LUKS opened: {} → {}", by_id, mn);
-
-            if let Some(kf) = params.enroll_key_file {
-                crate::luks::enroll_key_file(runner, &by_id.0, &passphrase, kf)?;
-                eprintln!("Keyfile enrolled in slot 1: {}", by_id);
-            }
 
             needs_pool_add.push(i);
         }
@@ -1002,6 +1002,16 @@ fn compile_add_steps_multi<R: CommandRunner>(
                         extra_opts,
                     }],
                 });
+                if let Some(kf) = input.enroll_key_file {
+                    steps.push(Step {
+                        risk: "safe",
+                        description: format!("enroll keyfile → LUKS slot 1 on {}", by_id),
+                        commands: vec![CmdRequest::CryptsetupLuksAddKeyFile {
+                            device: by_id.0.clone(),
+                            key_file_path: kf.display().to_string(),
+                        }],
+                    });
+                }
                 let backup_path = input
                     .paths
                     .luks_headers_dir()
@@ -1022,16 +1032,6 @@ fn compile_add_steps_multi<R: CommandRunner>(
                         mapper: mn.0.clone(),
                     }],
                 });
-                if let Some(kf) = input.enroll_key_file {
-                    steps.push(Step {
-                        risk: "safe",
-                        description: format!("enroll keyfile → LUKS slot 1 on {}", by_id),
-                        commands: vec![CmdRequest::CryptsetupLuksAddKeyFile {
-                            device: by_id.0.clone(),
-                            key_file_path: kf.display().to_string(),
-                        }],
-                    });
-                }
                 needs_pool_add += 1;
             }
             ConfigDiskState::PresentLuks { mapper_open, .. } => {
@@ -3293,6 +3293,73 @@ mod tests {
     }
 
     #[test]
+    /*
+     * Intent: with `--enroll-key-file`, the dry-run preview emits the LUKS
+     *   init steps in the order LuksFormat -> LuksAddKeyFile ->
+     *   LuksHeaderBackup -> LuksOpen for a fresh (PresentNotLuks) disk.
+     *
+     * Why: a previous version backed up the header before enrolling the
+     *   keyfile, so the resulting `.luksheader` did not contain slot 1 and
+     *   restoring it would silently wipe keyfile-based unlock. This test
+     *   pins the post-fix ordering at the dry-run layer; the real-execute
+     *   layer is pinned by `cmd_add_with_keyfile_orders_format_addkey_backup_open`.
+     *   Substring `find` is used (rather than indexed `lines[N]` checks)
+     *   so the assertion survives unrelated future inserts in the step list.
+     *
+     * Scenario: bootstrap `braid add disk1=... --enroll-key-file=/mnt/kf`.
+     */
+    fn dry_run_render_fresh_disk_with_keyfile_orders_backup_after_addkey() {
+        let runner = MockRunner::default();
+        let probed = vec![ConfigDisk {
+            name: "disk1".to_owned(),
+            by_id_path: ByIdPath("/dev/disk/by-id/disk1".to_owned()),
+            state: ConfigDiskState::PresentNotLuks,
+        }];
+        let pool = pool_unmounted();
+        let kf = std::path::Path::new("/mnt/usb/braid.key");
+
+        let steps = compile_add_steps_multi(
+            &runner,
+            &AddStepsInput {
+                names: &["disk1"],
+                by_ids: &[&ByIdPath("/dev/disk/by-id/disk1".into())],
+                probed: &probed,
+                pool: &pool,
+                mount_point: &MountPoint("/mnt/storage".into()),
+                paths: &test_paths().1,
+                enroll_key_file: Some(kf),
+            },
+        )
+        .unwrap();
+        let output = Step::render_dry_run(&steps);
+        let lines: Vec<&str> = output.lines().collect();
+
+        let find = |needle: &str| -> usize {
+            lines
+                .iter()
+                .position(|line| line.contains(needle))
+                .unwrap_or_else(|| panic!("missing line containing {needle:?}; got:\n{output}"))
+        };
+        let format = find("$ cryptsetup luksFormat");
+        let addkey = find("$ cryptsetup luksAddKey");
+        let backup = find("$ cryptsetup luksHeaderBackup");
+        let open = find("$ cryptsetup open --type luks");
+
+        assert!(
+            format < addkey && addkey < backup && backup < open,
+            "expected luksFormat({format}) < luksAddKey({addkey}) < \
+             luksHeaderBackup({backup}) < luksOpen({open}); got:\n{output}"
+        );
+        // Sanity: the addKey line must reference the keyfile path so a
+        // future change that drops --enroll-key-file plumbing fails here too.
+        assert!(
+            lines[addkey].contains("/mnt/usb/braid.key"),
+            "luksAddKey line must mention the keyfile path; got: {}",
+            lines[addkey]
+        );
+    }
+
+    #[test]
     // Intent: dry-run for adding to existing pool shows device add + balance commands.
     // Why: verifies the pool-mounted path includes balance to RAID1.
     // Scenario: adding a fresh disk to a 1-disk pool (pool already mounted).
@@ -3373,6 +3440,14 @@ mod tests {
     struct AddRecordingRunner {
         log: CmdLog,
         stdin_log: StdinLog,
+        /// When true, `CryptsetupLuksHeaderBackup` returns success and writes
+        /// the backup file (matching `MockRunner`'s behavior). Default `false`
+        /// preserves the historical "fail at backup so cmd_add aborts" abort
+        /// scaffolding for the bootstrap-confirm tests. The keyfile-ordering
+        /// test below sets this to `true` so execution continues past the
+        /// backup and reaches the `CryptsetupLuksOpen` request, which is
+        /// where the test deliberately aborts via `MissingMock`.
+        backup_succeeds: bool,
     }
 
     impl AddRecordingRunner {
@@ -3380,7 +3455,12 @@ mod tests {
             Self {
                 log: Arc::new(Mutex::new(Vec::new())),
                 stdin_log: Arc::new(Mutex::new(Vec::new())),
+                backup_succeeds: false,
             }
+        }
+        fn with_backup_success(mut self) -> Self {
+            self.backup_succeeds = true;
+            self
         }
         fn log(&self) -> std::sync::MutexGuard<'_, Vec<CmdRequest>> {
             self.log.lock().unwrap()
@@ -3457,16 +3537,44 @@ mod tests {
                     stderr: String::new(),
                     exit_status: 0,
                 }),
-                CmdRequest::CryptsetupLuksHeaderBackup { device, .. } => {
-                    // Forced failure so cmd_add aborts cleanly after
-                    // luks_format runs. Lets tests assert on what ran
-                    // without stubbing the full mkfs/mount chain.
-                    Ok(RawCommandOutput {
-                        cmd: format!("cryptsetup luksHeaderBackup {device}"),
-                        stdout: String::new(),
-                        stderr: "mock: header backup forced to fail".into(),
-                        exit_status: 1,
-                    })
+                CmdRequest::CryptsetupLuksAddKeyFile { device, .. } => Ok(RawCommandOutput {
+                    cmd: format!("cryptsetup luksAddKey {device}"),
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    exit_status: 0,
+                }),
+                CmdRequest::CryptsetupLuksHeaderBackup {
+                    device,
+                    backup_path,
+                } => {
+                    if self.backup_succeeds {
+                        // Match MockRunner's behavior: create the backup file
+                        // so `backup_luks_header_to`'s rename step succeeds.
+                        if let Some(parent) = std::path::Path::new(backup_path.as_str()).parent() {
+                            std::fs::create_dir_all(parent).map_err(|e| {
+                                CmdError::Failed(format!("mock: create_dir_all: {e}"))
+                            })?;
+                        }
+                        std::fs::write(backup_path, b"")
+                            .map_err(|e| CmdError::Failed(format!("mock: write backup: {e}")))?;
+                        Ok(RawCommandOutput {
+                            cmd: format!("cryptsetup luksHeaderBackup {device}"),
+                            stdout: String::new(),
+                            stderr: String::new(),
+                            exit_status: 0,
+                        })
+                    } else {
+                        // Forced failure so cmd_add aborts cleanly after
+                        // luks_format runs. Lets bootstrap-confirm tests
+                        // assert on what ran without stubbing the full
+                        // mkfs/mount chain.
+                        Ok(RawCommandOutput {
+                            cmd: format!("cryptsetup luksHeaderBackup {device}"),
+                            stdout: String::new(),
+                            stderr: "mock: header backup forced to fail".into(),
+                            exit_status: 1,
+                        })
+                    }
                 }
                 CmdRequest::BtrfsBalanceStatus { .. } => Ok(RawCommandOutput {
                     cmd: "btrfs balance status".into(),
@@ -3644,6 +3752,82 @@ mod tests {
             "luks_format must receive the confirmed passphrase as stdin"
         );
         assert_eq!(tty.remaining(), 0, "both prompts must have been read");
+    }
+
+    /*
+     * Intent: cmd_add with --enroll-key-file emits LUKS commands in the
+     *   order LuksFormat -> LuksAddKeyFile -> LuksHeaderBackup -> LuksOpen
+     *   when executing against a fresh (PresentNotLuks) disk.
+     *
+     * Why it exists: a previous version backed up the LUKS header
+     *   immediately after luksFormat and only then ran luksAddKey. The
+     *   resulting backup file did not contain slot 1, so restoring that
+     *   backup wiped the keyfile slot -- breaking auto-unlock without
+     *   the operator noticing until next boot. This test pins the full
+     *   "format then addKey then backup then open" sequence so a future
+     *   reorder that widens the no-backup window (open before backup) or
+     *   re-introduces the missing-slot-1 backup (backup before addKey)
+     *   fails immediately.
+     *
+     *   The dry-run preview path is pinned separately by
+     *   `dry_run_render_fresh_disk_with_keyfile_orders_backup_after_addkey`;
+     *   this test pins the real execute path that `ReplacePlan::execute`
+     *   and `AddPlan::execute` reimplement inline.
+     *
+     * Scenario: bootstrap `braid add disk1=... --enroll-key-file=/tmp/kf`.
+     *   The recording runner makes header backup succeed (so we proceed
+     *   past it) and falls through to MissingMock at LuksOpen, which
+     *   aborts cleanly while leaving the full request log behind.
+     */
+    #[test]
+    fn cmd_add_with_keyfile_orders_format_addkey_backup_open() {
+        let (_state_tmp, paths, _tmp, config_path) = confirm_test_setup();
+        let fs = AddOfflineMockFs(vec!["/dev/disk/by-id/virtio-disk1".into()]);
+        let runner = AddRecordingRunner::new(false).with_backup_success();
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let tty = ScriptedPassphraseReader::new(["ok", "ok"]);
+        let kf_dir = tempfile::tempdir().unwrap();
+        let kf_path = kf_dir.path().join("braid.key");
+
+        let result = cmd_add(
+            &runner,
+            &fs,
+            &AddParams {
+                config_path: &config_path,
+                disk_specs: &["disk1=/dev/disk/by-id/virtio-disk1".into()],
+                dry_run: false,
+                yes: true,
+                passphrase_stdin: false,
+                passphrase_file: None,
+                enroll_key_file: Some(&kf_path),
+                progress: ProgressOutput::Off,
+                paths: &paths,
+                sleep_inhibitor: &inhibitor,
+                passphrase_reader: &tty,
+            },
+        );
+
+        assert!(
+            result.is_err(),
+            "cmd_add must abort at the unmocked LuksOpen request"
+        );
+
+        let log = runner.log();
+        let position = |pred: fn(&CmdRequest) -> bool| -> usize {
+            log.iter()
+                .position(pred)
+                .unwrap_or_else(|| panic!("expected request not found in log: {log:?}"))
+        };
+        let format = position(|r| matches!(r, CmdRequest::CryptsetupLuksFormat { .. }));
+        let addkey = position(|r| matches!(r, CmdRequest::CryptsetupLuksAddKeyFile { .. }));
+        let backup = position(|r| matches!(r, CmdRequest::CryptsetupLuksHeaderBackup { .. }));
+        let open = position(|r| matches!(r, CmdRequest::CryptsetupLuksOpen { .. }));
+
+        assert!(
+            format < addkey && addkey < backup && backup < open,
+            "expected order LuksFormat({format}) < LuksAddKeyFile({addkey}) < \
+             LuksHeaderBackup({backup}) < LuksOpen({open}); log = {log:?}"
+        );
     }
 
     /*
