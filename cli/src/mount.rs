@@ -545,6 +545,14 @@ fn open_disks_with_passphrase<R: CommandRunner, F: Filesystem + ?Sized>(
     }
 
     for (name, by_id) in to_unlock {
+        eprint!(
+            "{}",
+            status_line(
+                StatusTag::Wait,
+                color_enabled,
+                &format!("disk {name}: unlocking..."),
+            )
+        );
         if let Err(e) = luks::ensure_luks_open(runner, fs, name, by_id, passphrase) {
             let header_state = luks::probe_luks_header(runner, &by_id.0);
             let (original_summary, ok_fallback) = match &e {
@@ -636,6 +644,14 @@ fn open_disks_with_key_file<R: CommandRunner, F: Filesystem + ?Sized>(
     }
 
     for (name, by_id) in to_unlock {
+        eprint!(
+            "{}",
+            status_line(
+                StatusTag::Wait,
+                color_enabled,
+                &format!("disk {name}: unlocking..."),
+            )
+        );
         if let Err(e) = luks::ensure_luks_open_with_key_file(runner, fs, name, by_id, key_file_path)
         {
             let header_state = luks::probe_luks_header(runner, &by_id.0);
@@ -763,6 +779,15 @@ fn scan_and_mount<R: CommandRunner, F: Filesystem + ?Sized>(
     color_enabled: bool,
 ) -> Result<bool, MountError> {
     let mount_point = config.mount_point();
+
+    eprint!(
+        "{}",
+        status_line(
+            StatusTag::Wait,
+            color_enabled,
+            &format!("pool: mounting {mount_point}..."),
+        )
+    );
 
     let scan = runner.run(&CmdRequest::BtrfsDeviceScanAll)?;
     if scan.exit_status != 0 {

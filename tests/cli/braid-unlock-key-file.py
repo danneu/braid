@@ -71,6 +71,21 @@ with subtest("Test 1: correct keyfile unlocks"):
     assert err.find(wait_line) < err.find(unlocked_line), (
         f"wait line must precede first unlocked row, got: {err!r}"
     )
+    unlocking_wait = "[wait] disk disk1: unlocking...\n"
+    mounting_wait = "[wait] pool: mounting /mnt/storage...\n"
+    mounted_line = "[ok]   pool: mounted /mnt/storage\n"
+    assert unlocking_wait in err, (
+        f"per-disk unlocking wait row missing, got: {err!r}"
+    )
+    assert err.find(unlocking_wait) < err.find(unlocked_line), (
+        f"unlocking wait must precede unlocked row, got: {err!r}"
+    )
+    assert mounting_wait in err, (
+        f"pool mounting wait row missing, got: {err!r}"
+    )
+    assert err.find(mounting_wait) < err.find(mounted_line), (
+        f"mounting wait must precede mounted row, got: {err!r}"
+    )
     machine.succeed("mountpoint -q /mnt/storage")
     content = machine.succeed("cat /mnt/storage/test.txt").strip()
     assert content == "keyfile unlock test", f"Expected 'keyfile unlock test', got '{content}'"

@@ -49,6 +49,7 @@ Architecture decision records. Each has a status: `Draft`, `Active`, `Superseded
 - [decisions/018-systemd-lifecycle.md](decisions/018-systemd-lifecycle.md) — Thin systemd layer for unlock/mount entry points; CLI owns LUKS and btrfs operations.
 - [decisions/019-inhibit-sleep.md](decisions/019-inhibit-sleep.md) — When braid should hold a systemd sleep inhibitor: only for the non-interruptible mutation window, not during prompts or reversible preflight.
 - [decisions/020-ups-integration.md](decisions/020-ups-integration.md) — **Active.** Opinionated `braid.ups.*` wrapper over nixpkgs' `power.ups`: standalone USB single-host; guarantees orderly shutdown for ordinary operation + preflight reject on battery + live UPS state in `braid ups status`/TUI; mid-mutation power loss is a supported recovery case proven by the per-mutation `ups-lb-during-*` VM matrix; alert-model integration deferred to a future ADR.
+- [decisions/021-wait-in-unlock.md](decisions/021-wait-in-unlock.md) — **Active.** `braid unlock` (and `braid recover`'s shared mount tail) emit a `[wait]` row before per-disk LUKS open and before the mount phase; project-wide promotion to a principle deferred until other interactive commands comply.
 
 ## tool-behavior/
 

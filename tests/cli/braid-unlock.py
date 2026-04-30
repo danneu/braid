@@ -84,6 +84,21 @@ with subtest("Test 1: happy path — all locked, unlock opens everything"):
     assert probe_err.find(wait_line) < probe_err.find(unlocked_line), (
         f"wait line must precede first unlocked row, got: {probe_err!r}"
     )
+    unlocking_wait = "[wait] disk disk1: unlocking...\n"
+    mounting_wait = "[wait] pool: mounting /mnt/storage...\n"
+    mounted_line = "[ok]   pool: mounted /mnt/storage\n"
+    assert unlocking_wait in probe_err, (
+        f"per-disk unlocking wait row missing, got: {probe_err!r}"
+    )
+    assert probe_err.find(unlocking_wait) < probe_err.find(unlocked_line), (
+        f"unlocking wait must precede unlocked row, got: {probe_err!r}"
+    )
+    assert mounting_wait in probe_err, (
+        f"pool mounting wait row missing, got: {probe_err!r}"
+    )
+    assert probe_err.find(mounting_wait) < probe_err.find(mounted_line), (
+        f"mounting wait must precede mounted row, got: {probe_err!r}"
+    )
     assert "\x1b[" not in probe_err, (
         f"unlock stderr must be plain without a TTY, got: {probe_err!r}"
     )
