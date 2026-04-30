@@ -48,7 +48,7 @@ The old architecture used a structural code boundary — `luksFormat` was litera
 4. **Disk name immutability**: mutating commands validate names against recorded disk identity and reject name rename/reassignment. Operators must use explicit `replace` or `remove`+`add` workflows instead of renaming.
 5. **Journal-protected mutations**: mutating commands write `pending-op.json` before the first irreversible step; it is cleared only after the full operation (including follow-up work like soft balance) succeeds. On any error exit, the journal persists to enable `braid recover`.
 
-`--dry-run` reads the LUKS label without side effects. Full identity verification (FSID comparison) requires opening the mapper, so dry-run defers this to execution time when the mapper is closed.
+`--dry-run` performs side-effect-free, passphrase-free LUKS probes only -- LUKS label reads, and the keyfile credential test used by `braid enroll` (`cryptsetup open --test-passphrase --key-file`, which evaluates a credential without activating the device). Checks that require a passphrase or an open mapper -- e.g. full identity verification (FSID comparison) -- are deferred to execution time when the mapper is closed.
 
 ### Replace safety constraints
 

@@ -497,12 +497,25 @@ fn validate_key_file_path(key_file_path: &Path, generate: bool) -> Result<(), En
 /// skip notes land on `EnrollPlan.notes` when discovery produces at
 /// least one candidate, or on `EnrollPlanReport.notes` when the
 /// planner bails (e.g. no candidates, mid-loop probe error).
+///
+/// Dry-run keyfile probe: when `dry_run && !generate`, after discovery
+/// each candidate's keyfile state is probed via the passphrase-free
+/// `luks::verify_key_file` call. Authenticated candidates are dropped
+/// from the step list and surface as `PerDisk` Skip notes
+/// (`keyfile already enrolled`) so the preview reflects which disks
+/// the real run would silently skip via `plan_enrollment`'s
+/// `AlreadyEnrolled` branch. Real-run path (`dry_run = false`) leaves
+/// every discovered candidate in the step list and defers
+/// classification to `plan_enrollment` at execute time -- the dry-run
+/// probe is a preview-fidelity boost only and is never authoritative
+/// for mutations.
 pub fn plan_enroll<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
     membership: &PoolMembership,
     key_file_path: &Path,
     generate: bool,
+    dry_run: bool,
     paths: &StatePaths,
 ) -> EnrollPlanReport {
     if let Err(msg) = preflight::check_no_pending_operation(paths) {
@@ -519,24 +532,52 @@ pub fn plan_enroll<R: CommandRunner, F: Filesystem + ?Sized>(
         };
     }
 
-    let (notes, discovery) = discover_enrollment_candidates(runner, fs, membership);
-    match discovery {
-        Ok(candidates) => {
-            let steps = compile_enroll_steps(&candidates, key_file_path, generate, paths);
-            EnrollPlanReport {
-                notes: Vec::new(),
-                result: Ok(EnrollPlan {
-                    notes,
-                    steps,
-                    candidates,
-                    generate,
-                }),
+    let (mut notes, discovery) = discover_enrollment_candidates(runner, fs, membership);
+    let candidates = match discovery {
+        Ok(c) => c,
+        Err(e) => {
+            return EnrollPlanReport {
+                notes,
+                result: Err(e),
+            };
+        }
+    };
+
+    let steps = if dry_run && !generate {
+        let mut needs_enroll: Vec<EnrollmentCandidate> = Vec::with_capacity(candidates.len());
+        for (name, by_id) in &candidates {
+            match luks::verify_key_file(runner, &by_id.0, key_file_path) {
+                Ok(VerifyOutcome::Authenticated) => {
+                    notes.push(PreviewNote::PerDisk {
+                        name: name.clone(),
+                        level: NoteLevel::Skip,
+                        message: "keyfile already enrolled".into(),
+                    });
+                }
+                Ok(VerifyOutcome::Rejected) => {
+                    needs_enroll.push((name.clone(), by_id.clone()));
+                }
+                Err(e) => {
+                    return EnrollPlanReport {
+                        notes,
+                        result: Err(e.into()),
+                    };
+                }
             }
         }
-        Err(e) => EnrollPlanReport {
+        compile_enroll_steps(&needs_enroll, key_file_path, generate, paths)
+    } else {
+        compile_enroll_steps(&candidates, key_file_path, generate, paths)
+    };
+
+    EnrollPlanReport {
+        notes: Vec::new(),
+        result: Ok(EnrollPlan {
             notes,
-            result: Err(e),
-        },
+            steps,
+            candidates,
+            generate,
+        }),
     }
 }
 
@@ -551,6 +592,7 @@ pub fn cmd_enroll_key_file<R: CommandRunner, F: Filesystem + ?Sized>(
         params.membership,
         params.key_file_path,
         params.generate,
+        params.dry_run,
         params.paths,
     );
     let plan = match report.result {
@@ -805,7 +847,7 @@ mod tests {
         let (tmp, paths) = test_paths();
         let kf = tmp.path().join("braid.key");
 
-        let report = plan_enroll(&runner, &fs, &membership, &kf, true, &paths);
+        let report = plan_enroll(&runner, &fs, &membership, &kf, true, false, &paths);
         assert!(
             report.notes.is_empty(),
             "report.notes should be empty on success"
@@ -844,7 +886,7 @@ mod tests {
         let (tmp, paths) = test_paths();
         let kf = tmp.path().join("braid.key");
 
-        let report = plan_enroll(&runner, &fs, &membership, &kf, true, &paths);
+        let report = plan_enroll(&runner, &fs, &membership, &kf, true, false, &paths);
         assert!(
             report.notes.is_empty(),
             "report.notes should be empty on success"
@@ -893,7 +935,7 @@ mod tests {
         let (tmp, paths) = test_paths();
         let kf = tmp.path().join("braid.key");
 
-        let report = plan_enroll(&runner, &fs, &membership, &kf, true, &paths);
+        let report = plan_enroll(&runner, &fs, &membership, &kf, true, false, &paths);
         assert!(report.notes.is_empty());
         let plan = report.result.expect("plan_enroll should succeed");
         assert_eq!(plan.candidates.len(), 1);
@@ -935,7 +977,7 @@ mod tests {
         let (tmp, paths) = test_paths();
         let kf = tmp.path().join("braid.key");
 
-        let report = plan_enroll(&runner, &fs, &membership, &kf, true, &paths);
+        let report = plan_enroll(&runner, &fs, &membership, &kf, true, false, &paths);
         let err = report.result.expect_err("expected no-candidates error");
         assert!(
             err.to_string().contains("no present LUKS disks found"),
@@ -979,7 +1021,7 @@ mod tests {
         let (tmp, paths) = test_paths();
         let kf = tmp.path().join("braid.key");
 
-        let report = plan_enroll(&runner, &fs, &membership, &kf, true, &paths);
+        let report = plan_enroll(&runner, &fs, &membership, &kf, true, false, &paths);
         let err = report.result.expect_err("expected no-candidates error");
         assert!(
             err.to_string().contains("no present LUKS disks found"),
@@ -1027,7 +1069,7 @@ mod tests {
         let (tmp, paths) = test_paths();
         let kf = tmp.path().join("braid.key");
 
-        let plan = plan_enroll(&runner, &fs, &membership, &kf, true, &paths)
+        let plan = plan_enroll(&runner, &fs, &membership, &kf, true, false, &paths)
             .result
             .expect("plan_enroll should succeed");
 
@@ -1040,6 +1082,324 @@ mod tests {
         let rendered_stderr =
             preview::render_notes_for_stderr(&plan.notes, EnrollPlan::STDERR_STYLE);
         assert_eq!(rendered_stderr, "skip: disk1 not present\n");
+    }
+
+    // ---- plan_enroll dry-run probe tests ----
+
+    /// Helper: write a real keyfile under a tempdir so `validate_key_file_path`
+    /// (non-generate branch) sees an existing regular file. Returns the
+    /// keyfile's display path so it lines up with the implementation's
+    /// `key_file_path.display().to_string()` inside `CryptsetupTestKeyFile`.
+    fn make_existing_keyfile(tmp: &tempfile::TempDir) -> (std::path::PathBuf, String) {
+        let kf = tmp.path().join("braid.key");
+        std::fs::write(&kf, b"keyfile-data").unwrap();
+        let kf_str = kf.display().to_string();
+        (kf, kf_str)
+    }
+
+    /// Helper: full discovery setup for a 2-disk pool of present LUKS disks
+    /// reachable through `probe_config_disk` -- luksUUID, luksDump-text
+    /// gateway, and an inactive mapper.
+    fn discovery_two_disks(d1: &str, d2: &str) -> MockRunner {
+        let (req1, out1) = luks_uuid_ok(d1);
+        let (req2, out2) = luks_uuid_ok(d2);
+        MockRunner::default()
+            .with_output(req1, out1)
+            .with_output(req2, out2)
+            .with_luks_dump_text_luks2_for(&[d1, d2])
+            .with_mappers_closed(&["braid-disk1", "braid-disk2"])
+    }
+
+    /*
+     * Intent: dry-run with one already-enrolled disk and one unenrolled
+     *   disk emits a Skip note + zero steps for the enrolled disk and
+     *   the enroll+backup step pair for the unenrolled one.
+     * Why it exists: the core preview-fidelity fix. Before this change,
+     *   the dry-run preview listed every candidate as `NeedsEnroll` even
+     *   though the real run silently skipped already-enrolled disks via
+     *   `plan_enrollment`'s `AlreadyEnrolled` branch. The assertion
+     *   below pins both halves: the Skip note is present for disk1 and
+     *   neither the `enroll keyfile` step nor the header-backup step
+     *   appears for it.
+     * Scenario: 2-disk pool, disk1 already has the keyfile in slot 1
+     *   (e.g. partial earlier run), disk2 is freshly initialized.
+     */
+    #[test]
+    fn dry_run_skips_already_enrolled_disks() {
+        let d1 = "/dev/disk/by-id/d1";
+        let d2 = "/dev/disk/by-id/d2";
+
+        let (tmp, paths) = test_paths();
+        let (kf, kf_str) = make_existing_keyfile(&tmp);
+
+        let (tkf1_req, tkf1_out) = test_keyfile_ok(d1, &kf_str);
+        let (tkf2_req, tkf2_out) = test_keyfile_fail(d2, &kf_str);
+        let runner = discovery_two_disks(d1, d2)
+            .with_output(tkf1_req, tkf1_out)
+            .with_output(tkf2_req, tkf2_out);
+        let fs = MockFs::new(&[d1, d2]);
+        let membership = make_membership(&[("disk1", d1), ("disk2", d2)]);
+
+        let plan = plan_enroll(&runner, &fs, &membership, &kf, false, true, &paths)
+            .result
+            .expect("plan_enroll should succeed");
+
+        assert!(
+            plan.notes.iter().any(|n| matches!(
+                n,
+                PreviewNote::PerDisk { name, level, message }
+                    if name == "disk1"
+                        && matches!(level, NoteLevel::Skip)
+                        && message == "keyfile already enrolled"
+            )),
+            "expected disk1 Skip note for already-enrolled keyfile, got notes: {:?}",
+            plan.notes
+        );
+        assert!(
+            plan.notes
+                .iter()
+                .all(|n| !matches!(n, PreviewNote::PerDisk { name, .. } if name == "disk2")),
+            "disk2 must not appear as a per-disk note; got: {:?}",
+            plan.notes
+        );
+
+        let rendered = plan.preview().render();
+        assert!(
+            !rendered.contains("on /dev/disk/by-id/d1"),
+            "preview must not list an enroll step for disk1 (already enrolled). Render: {rendered}"
+        );
+        assert!(
+            rendered.contains("enroll keyfile → LUKS slot 1 on /dev/disk/by-id/d2"),
+            "preview must include enroll step for disk2. Render: {rendered}"
+        );
+        assert!(
+            rendered.contains("LUKS header backup → "),
+            "preview must include header-backup step for disk2. Render: {rendered}"
+        );
+        assert!(
+            rendered.contains("[skip] disk disk1: keyfile already enrolled\n"),
+            "preview must include disk1 Skip note in bracketed style. Render: {rendered}"
+        );
+    }
+
+    /*
+     * Intent: when every candidate is already enrolled, the dry-run
+     *   preview emits zero step lines and surfaces the canonical
+     *   `nothing to do.\n` footer alongside one Skip note per disk.
+     * Why it exists: the idempotent re-enroll case is the headline
+     *   user-visible benefit of the fix. Before this change, running
+     *   `--dry-run` on a fully-enrolled pool listed both disks as
+     *   `NeedsEnroll`, contradicting the actual no-op real run.
+     * Scenario: 2-disk pool whose keyfile is already in slot 1 on both
+     *   disks (e.g. user re-runs `braid enroll` after a successful
+     *   first run).
+     */
+    #[test]
+    fn dry_run_all_already_enrolled_emits_zero_steps() {
+        let d1 = "/dev/disk/by-id/d1";
+        let d2 = "/dev/disk/by-id/d2";
+
+        let (tmp, paths) = test_paths();
+        let (kf, kf_str) = make_existing_keyfile(&tmp);
+
+        let (tkf1_req, tkf1_out) = test_keyfile_ok(d1, &kf_str);
+        let (tkf2_req, tkf2_out) = test_keyfile_ok(d2, &kf_str);
+        let runner = discovery_two_disks(d1, d2)
+            .with_output(tkf1_req, tkf1_out)
+            .with_output(tkf2_req, tkf2_out);
+        let fs = MockFs::new(&[d1, d2]);
+        let membership = make_membership(&[("disk1", d1), ("disk2", d2)]);
+
+        let plan = plan_enroll(&runner, &fs, &membership, &kf, false, true, &paths)
+            .result
+            .expect("plan_enroll should succeed");
+
+        assert!(
+            plan.steps.is_empty(),
+            "no enroll steps when every disk is already enrolled, got: {:?}",
+            plan.steps
+        );
+
+        let rendered = plan.preview().render();
+        let expected = "[skip] disk disk1: keyfile already enrolled\n\
+                        [skip] disk disk2: keyfile already enrolled\n\
+                        nothing to do.\n";
+        assert_eq!(
+            rendered, expected,
+            "full preview must equal exact byte-string"
+        );
+    }
+
+    /*
+     * Intent: dry-run with `--generate` skips the keyfile probe entirely
+     *   and emits the same enroll+backup step set as today.
+     * Why it exists: with `--generate`, the keyfile does not yet exist
+     *   on disk, so probing it would always fail. Hoisting the dry-run
+     *   probe without the `!generate` gate would make `--generate
+     *   --dry-run` error with `Failed to open key file`. The mock
+     *   omits any `CryptsetupTestKeyFile` response and the test asserts
+     *   on `runner.requests()` so a regression that drops the gate
+     *   surfaces both as the wrong assertion shape AND as a runtime
+     *   `MissingMock` from MockRunner.
+     * Scenario: user runs `braid enroll /mnt/usb --generate --dry-run`
+     *   on a fresh USB stick before committing to the real run.
+     */
+    #[test]
+    fn dry_run_with_generate_skips_probe() {
+        let d1 = "/dev/disk/by-id/d1";
+        let d2 = "/dev/disk/by-id/d2";
+
+        let runner = discovery_two_disks(d1, d2);
+        let fs = MockFs::new(&[d1, d2]);
+        let membership = make_membership(&[("disk1", d1), ("disk2", d2)]);
+
+        let (tmp, paths) = test_paths();
+        let kf = tmp.path().join("braid.key");
+
+        let _plan = plan_enroll(&runner, &fs, &membership, &kf, true, true, &paths)
+            .result
+            .expect("plan_enroll should succeed in --generate dry-run mode");
+
+        let probe_count = runner
+            .requests()
+            .iter()
+            .filter(|r| matches!(r, CmdRequest::CryptsetupTestKeyFile { .. }))
+            .count();
+        assert_eq!(
+            probe_count, 0,
+            "--generate dry-run must not probe the (nonexistent) keyfile"
+        );
+    }
+
+    /*
+     * Intent: a non-Rejected probe error in the dry-run loop short-circuits
+     *   `plan_enroll` with the error AND preserves any
+     *   `keyfile already enrolled` Skip notes accumulated for earlier
+     *   candidates that did probe successfully.
+     * Why it exists: the dry-run probe is a `for` loop -- if a later
+     *   candidate fails, naive error propagation would drop the
+     *   already-pushed Skip notes from earlier iterations, giving
+     *   users a confusing error context that hides the fact that
+     *   disk1 was already enrolled. Without an explicit assertion on
+     *   `report.notes`, an implementation that returns
+     *   `EnrollPlanReport { notes: Vec::new(), result: Err(_) }` on
+     *   probe error would silently pass.
+     * Scenario: 2-disk pool, disk1 has the keyfile already, disk2's
+     *   backing device is busy (stale dm-crypt mapper holding it
+     *   open), so the probe exits 5.
+     */
+    #[test]
+    fn dry_run_probe_error_propagates() {
+        let d1 = "/dev/disk/by-id/d1";
+        let d2 = "/dev/disk/by-id/d2";
+
+        let (tmp, paths) = test_paths();
+        let (kf, kf_str) = make_existing_keyfile(&tmp);
+
+        let (tkf1_req, tkf1_out) = test_keyfile_ok(d1, &kf_str);
+        let tkf2_busy_req = CmdRequest::CryptsetupTestKeyFile {
+            device: d2.to_owned(),
+            key_file_path: kf_str.clone(),
+        };
+        let tkf2_busy_out = err_raw(
+            "cryptsetup open --test-passphrase --key-file",
+            5,
+            "Device /dev/dm-0 already exists.",
+        );
+        let runner = discovery_two_disks(d1, d2)
+            .with_output(tkf1_req, tkf1_out)
+            .with_output(tkf2_busy_req, tkf2_busy_out);
+        let fs = MockFs::new(&[d1, d2]);
+        let membership = make_membership(&[("disk1", d1), ("disk2", d2)]);
+
+        let report = plan_enroll(&runner, &fs, &membership, &kf, false, true, &paths);
+        let err = report
+            .result
+            .expect_err("probe error must propagate as Err");
+
+        match err {
+            EnrollKeyFileError::Luks(LuksError::OpenFailed { exit_code, .. }) => {
+                assert_eq!(exit_code, 5, "expected exit 5, got: {exit_code}");
+            }
+            other => panic!(
+                "expected EnrollKeyFileError::Luks(LuksError::OpenFailed {{ exit_code: 5, .. }}), got: {other:?}"
+            ),
+        }
+
+        assert!(
+            report.notes.iter().any(|n| matches!(
+                n,
+                PreviewNote::PerDisk { name, level, message }
+                    if name == "disk1"
+                        && matches!(level, NoteLevel::Skip)
+                        && message == "keyfile already enrolled"
+            )),
+            "disk1's accumulated Skip note must survive probe error on disk2; got: {:?}",
+            report.notes
+        );
+    }
+
+    /*
+     * Intent: real-run path (`dry_run = false`) does not probe the
+     *   keyfile during planning. Verified end-to-end by invoking
+     *   `cmd_enroll_key_file` with a wrong passphrase in
+     *   `passphrase_file`, then asserting the error surfaces as
+     *   wrong-passphrase AND that no `CryptsetupTestKeyFile` was
+     *   recorded by MockRunner.
+     * Why it exists: a regression that drops the `dry_run` gate would
+     *   hoist the dry-run probe into every real-run `plan_enroll`,
+     *   re-ordering operations and changing real-run stderr (probe
+     *   errors before the passphrase prompt, double-emission of `ok:`
+     *   lines). The two assertions defend independently: even if
+     *   `runner.requests()` semantics ever changed, omitting the
+     *   `CryptsetupTestKeyFile` mock means an accidental probe would
+     *   surface as a `MissingMock` error rather than the intended
+     *   wrong-passphrase validation error.
+     * Scenario: user runs `braid enroll /tmp` with a passphrase file
+     *   containing the wrong passphrase against a fresh 2-disk pool.
+     */
+    #[test]
+    fn real_run_does_not_probe_before_passphrase() {
+        let d1 = "/dev/disk/by-id/d1";
+        let d2 = "/dev/disk/by-id/d2";
+        let pass = "wrongpass";
+
+        let (tmp, paths) = test_paths();
+        let (kf, _kf_str) = make_existing_keyfile(&tmp);
+        let pass_file = tmp.path().join("passphrase");
+        std::fs::write(&pass_file, format!("{pass}\n")).unwrap();
+
+        let (tp_req, tp_stdin, tp_out) = test_passphrase_fail(d1, pass);
+        let runner = discovery_two_disks(d1, d2).with_output_stdin(tp_req, tp_stdin, tp_out);
+        let fs = MockFs::new(&[d1, d2]);
+        let membership = make_membership(&[("disk1", d1), ("disk2", d2)]);
+
+        let params = EnrollKeyFileParams {
+            membership: &membership,
+            key_file_path: &kf,
+            generate: false,
+            passphrase_stdin: false,
+            passphrase_file: Some(pass_file.as_path()),
+            dry_run: false,
+            paths: &paths,
+        };
+        let err =
+            cmd_enroll_key_file(&runner, &fs, &params).expect_err("wrong passphrase must surface");
+
+        assert!(
+            matches!(err, EnrollKeyFileError::Validation(ref msg) if msg.contains("wrong passphrase")),
+            "expected wrong-passphrase validation error, got: {err:?}"
+        );
+
+        let probe_count = runner
+            .requests()
+            .iter()
+            .filter(|r| matches!(r, CmdRequest::CryptsetupTestKeyFile { .. }))
+            .count();
+        assert_eq!(
+            probe_count, 0,
+            "real-run plan_enroll must not issue the keyfile probe before the passphrase verify"
+        );
     }
 
     // ---- plan_enrollment tests ----

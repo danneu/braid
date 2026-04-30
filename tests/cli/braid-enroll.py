@@ -89,30 +89,43 @@ with subtest("Test 1: enroll keyfile into all pool disks"):
         dump = machine.succeed(f"cryptsetup luksDump --dump-json-metadata /dev/disk/by-id/{dev}")
         assert '"1"' in dump, f"slot 1 not found in luksDump for {dev}: {dump}"
 
-# --- Test 1b: --dry-run writes preview to stdout, stderr is empty ---
+# --- Test 1b: --dry-run reflects already-enrolled state, stderr is empty ---
 #
-# Intent: verify `braid enroll --dry-run` renders exactly one Preview
-# to stdout and leaves stderr empty on the success path -- the
-# project-wide rule introduced in the `Preview`-migration plan.
+# Intent: verify `braid enroll --dry-run` renders a faithful preview
+# on a pool whose keyfile is already enrolled -- both disks appear as
+# per-disk Skip notes (`keyfile already enrolled`), no enroll/header-
+# backup steps are emitted, and stderr stays empty.
 #
-# Why it exists: the dry-run migration moved pre-passphrase discovery
-# notes (`skip: X not present`, `skip: X not LUKS-formatted`) off
-# stderr into the Preview on stdout. A regression that leaks those
-# notes back to stderr would silently break the "successful dry-run
-# = empty stderr" contract. This subtest runs while all pool members
-# are present LUKS disks, so the Preview is steps-only and stderr
-# must be empty byte-for-byte.
+# Why it exists: dry-run probes enrollment state pre-passphrase via
+# the passphrase-free `verify_key_file` call (`cryptsetup open
+# --test-passphrase --key-file`). Without this, dry-run silently
+# overstated the work for the idempotent re-enroll case while the
+# real run skipped via `plan_enrollment`'s `AlreadyEnrolled` branch
+# -- contradicting decision-012's "intent CLI" promise that dry-run
+# is a faithful preview. This subtest pins both the per-disk Skip
+# wording and the empty-stderr contract; a regression that hoists
+# the probe into the real-run path would also surface here because
+# the credential-wait line would leak to stderr.
 #
 # Scenario: 2-disk pool, both disks present and LUKS-formatted,
-# keyfile already enrolled from Test 1 (dry-run does not depend on
-# slot 1 state -- planner classification is post-passphrase and
-# bypassed in dry-run).
-with subtest("Test 1b: --dry-run writes preview to stdout, stderr empty"):
+# keyfile already enrolled from Test 1.
+with subtest("Test 1b: --dry-run reflects already-enrolled state, stderr empty"):
     machine.succeed("braid enroll /tmp --dry-run >/tmp/enroll.out 2>/tmp/enroll.err")
     out = machine.succeed("cat /tmp/enroll.out")
     err = machine.succeed("cat /tmp/enroll.err")
     assert err == "", f"unexpected stderr on successful --dry-run: {err!r}"
-    assert "enroll keyfile" in out, f"expected enroll step in stdout, got: {out!r}"
+    assert "enroll keyfile" not in out, (
+        f"expected no enroll step on already-enrolled pool, got: {out!r}"
+    )
+    assert "[skip] disk disk1: keyfile already enrolled" in out, (
+        f"expected disk1 skip note in preview, got: {out!r}"
+    )
+    assert "[skip] disk disk2: keyfile already enrolled" in out, (
+        f"expected disk2 skip note in preview, got: {out!r}"
+    )
+    assert "nothing to do." in out, (
+        f"expected 'nothing to do.' footer when both disks already enrolled, got: {out!r}"
+    )
 
 # --- Test 2: Lock, then unlock with keyfile ---
 
