@@ -128,11 +128,11 @@ The wrapper (`braid-wrapper.sh`) bridges CLI operations and systemd state. This 
 2. Wrapper iterates `systemctl show -P BoundBy braid-online.service` and stops each remaining bound consumer (samba, nfs, future). The scrub units already handled in step 1 are skipped. This mirrors the cascade systemd performs on shutdown for user-initiated `braid lock`.
 3. CLI unmounts pool + closes LUKS.
 4. Wrapper checks mount is gone.
-5. `systemctl stop braid-online.service`.
+5. For user-initiated `braid lock`, wrapper runs `systemctl stop braid-online.service` synchronously so the command returns only after the lifecycle owner is inactive. `braid-online.service` sets `BRAID_SYSTEMD_EXECSTOP=1` on its `ExecStop=braid lock` reentry, and the wrapper skips this recursive stop in that path to avoid deadlock.
 
 **On system shutdown:**
 1. systemd stops `braid-online.service` (if active).
-2. `ExecStop = braid lock` runs — unmounts and closes LUKS.
+2. `ExecStop = braid lock` runs with `BRAID_SYSTEMD_EXECSTOP=1` -- unmounts and closes LUKS.
 3. Drives are safe to power off.
 
 ## Unlock path mutual exclusion

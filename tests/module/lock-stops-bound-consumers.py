@@ -95,9 +95,10 @@ with subtest("cycle 2: systemctl stop braid-online.service unmounts via ExecStop
     # Exercises ExecStop reentry through the wrapper's BoundBy loop:
     # systemd's BindsTo cascade deactivates the consumer first, then
     # ExecStop=braid lock runs the wrapper, whose loop sees the consumer
-    # already inactive (no-op stop). The wrapper's post-CLI
-    # `systemctl stop --no-block braid-online.service` must not deadlock
-    # against the in-progress stop we initiated here.
+    # already inactive (no-op stop). The wrapper sees
+    # BRAID_SYSTEMD_EXECSTOP=1 from braid-online's ExecStop and skips its
+    # own recursive braid-online stop, avoiding a deadlock against the
+    # in-progress stop we initiated here.
     machine.succeed("systemctl stop braid-online.service")
     machine.fail("systemctl is-active {}".format(CONSUMER))
     machine.fail("mountpoint -q /mnt/storage")

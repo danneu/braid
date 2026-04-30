@@ -28,6 +28,11 @@ for arg in "$@"; do
   esac
 done
 
+in_systemd_execstop=false
+case "${BRAID_SYSTEMD_EXECSTOP:-}" in
+  1|true|yes) in_systemd_execstop=true ;;
+esac
+
 # Pool-mutating commands (unlock, add, recover) acquire an exclusive
 # non-blocking flock on /run/braid-pool.lock. braid does not queue pool
 # operations: a concurrent attempt fails fast with a clear message and
@@ -129,12 +134,9 @@ if [ "$ret" -eq 0 ] && ! $skip_fixup; then
       ;;
     lock)
       if ! @mountpointBin@ -q "@mountPointPath@" 2>/dev/null; then
-        # --no-block: when braid-online.service's ExecStop runs `braid lock`,
-        # the wrapper would call `systemctl stop braid-online.service` again.
-        # A synchronous stop here deadlocks — systemd waits for ExecStop to
-        # exit, but the wrapper is waiting for the stop to complete.  --no-block
-        # queues the stop and returns immediately, breaking the cycle.
-        @systemctlBin@ stop --no-block braid-online.service 2>/dev/null || true
+        if ! $in_systemd_execstop; then
+          @systemctlBin@ stop braid-online.service 2>/dev/null || true
+        fi
       fi
       ;;
   esac

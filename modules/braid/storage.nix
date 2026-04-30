@@ -114,7 +114,9 @@ in
 
     # Lifecycle owner: "pool is online."
     # ExecStart=/bin/true — the service's purpose is state ownership, not work.
-    # ExecStop=braid lock — unmounts and closes LUKS on shutdown or manual stop.
+    # ExecStop=braid lock -- unmounts and closes LUKS on shutdown or manual stop.
+    # The environment marker lets the wrapper skip its own recursive
+    # braid-online stop when reentered from this ExecStop.
     # Only activated by the wrapper on successful unlock/add (mountpoint -q check).
     systemd.services.braid-online = {
       description = "Braid storage pool online";
@@ -128,7 +130,7 @@ in
         Type = "oneshot";
         RemainAfterExit = true;
         ExecStart = "${pkgs.coreutils}/bin/true";
-        ExecStop = "${braidWrapped}/bin/braid lock";
+        ExecStop = "${pkgs.coreutils}/bin/env BRAID_SYSTEMD_EXECSTOP=1 ${braidWrapped}/bin/braid lock";
         # Raise the stop timeout from the 90s default so a slow braid lock
         # isn't SIGKILL'd mid-operation.
         TimeoutStopSec = "5min";

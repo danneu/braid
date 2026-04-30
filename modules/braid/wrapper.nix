@@ -3,9 +3,9 @@
 # Replaces makeWrapper with a shell script that:
 # 1. Puts tool packages on PATH
 # 2. Runs the unwrapped braid binary
-# 3. On success of mount-producing commands (unlock, add), sets
+# 3. On success of mount-producing commands (unlock, add, recover), sets
 #    root:<storageGroup> 2770 on the mount point and activates braid-online
-# 4. On success of lock, deactivates braid-online
+# 4. On success of user-initiated lock, deactivates braid-online synchronously
 {
   cfg,
   pkgs,
