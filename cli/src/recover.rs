@@ -478,6 +478,28 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         notes.push(event.to_preview_note());
     }
 
+    let cycle_reopen_names: Vec<String> = report
+        .events
+        .iter()
+        .filter_map(|e| match e {
+            mount::ProbeEvent::DiskAvailable { name }
+            | mount::ProbeEvent::DiskAlreadyOpen { name } => Some(name.clone()),
+            _ => None,
+        })
+        .collect();
+    let cycle_close_names: Vec<String> = union
+        .disks
+        .keys()
+        .filter(|name| {
+            if cycle_reopen_names.contains(name) {
+                return true;
+            }
+            let mapper_path = format!("/dev/mapper/{}", config::mapper_name(name).0);
+            fs.exists(&mapper_path)
+        })
+        .cloned()
+        .collect();
+
     let open_plan = match report.result {
         Ok(op) => op,
         Err(e) => {
@@ -533,6 +555,113 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         }
     }
 
+    if matches!(journal.op, journal::OpKind::Replace { .. }) && open_plan.is_some() {
+        steps.push(Step {
+            risk: "long",
+            description: "wait for kernel dev_replace to finish (skipped if no running replace)"
+                .into(),
+            commands: vec![],
+        });
+    }
+
+    if let Some(initial_open_plan) = &open_plan {
+        let mount_point = params.config.mount_point();
+        steps.push(Step {
+            risk: "safe",
+            description: format!("unmount {mount_point} (recover remount cycle)"),
+            commands: vec![CmdRequest::Umount {
+                mount_point: mount_point.clone(),
+            }],
+        });
+
+        let forget_devs: Vec<String> = cycle_close_names
+            .iter()
+            .map(|name| format!("/dev/mapper/{}", config::mapper_name(name).0))
+            .collect();
+        if !forget_devs.is_empty() {
+            steps.push(Step {
+                risk: "safe",
+                description: "btrfs device scan --forget (recover remount cycle)".into(),
+                commands: vec![CmdRequest::BtrfsDeviceScanForget {
+                    devices: forget_devs,
+                }],
+            });
+        }
+
+        for name in &cycle_close_names {
+            let mn = config::mapper_name(name);
+            steps.push(Step {
+                risk: "safe",
+                description: format!("close LUKS mapper {} (recover remount cycle)", mn),
+                commands: vec![CmdRequest::CryptsetupClose {
+                    mapper: mn.0.clone(),
+                }],
+            });
+        }
+
+        for name in &cycle_reopen_names {
+            let member = match union.disks.get(name) {
+                Some(member) => member,
+                None => {
+                    return RecoverPlanReport {
+                        notes,
+                        result: Err(RecoverError::Failed(format!(
+                            "recover remount cycle preview: disk '{name}' missing from membership union"
+                        ))),
+                    };
+                }
+            };
+            let mn = config::mapper_name(name);
+            steps.push(Step {
+                risk: "safe",
+                description: format!(
+                    "LUKS open {} → {} (recover remount cycle)",
+                    member.by_id, mn,
+                ),
+                commands: vec![CmdRequest::CryptsetupLuksOpen {
+                    device: member.by_id.0.clone(),
+                    mapper: mn.0.clone(),
+                }],
+            });
+        }
+
+        steps.push(Step {
+            risk: "safe",
+            description: "btrfs device scan (recover remount cycle)".into(),
+            commands: vec![CmdRequest::BtrfsDeviceScanAll],
+        });
+
+        let Some(first_reopen_name) = cycle_reopen_names.first() else {
+            return RecoverPlanReport {
+                notes,
+                result: Err(RecoverError::Failed(
+                    "recover remount cycle preview: no disks available to reopen".into(),
+                )),
+            };
+        };
+        let mount_device = format!("/dev/mapper/{}", config::mapper_name(first_reopen_name).0);
+        if initial_open_plan.any_missing_member {
+            steps.push(Step {
+                risk: "safe",
+                description: format!("mount → {mount_point} (recover remount cycle, degraded)"),
+                commands: vec![CmdRequest::MountWithOptions {
+                    device: mount_device,
+                    mount_point: mount_point.clone(),
+                    options: vec!["degraded".to_owned()],
+                }],
+            });
+        } else {
+            steps.push(Step {
+                risk: "safe",
+                description: format!("mount → {mount_point} (recover remount cycle)"),
+                commands: vec![CmdRequest::Mount {
+                    device: mount_device,
+                    mount_point: mount_point.clone(),
+                }],
+            });
+        }
+    }
+
     // State recovery steps are always shown (recover writes pool.json
     // even when mounted).
     steps.push(Step {
@@ -543,6 +672,48 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         ),
         commands: vec![],
     });
+
+    match &journal.op {
+        journal::OpKind::Replace { new_name, .. } => {
+            steps.push(Step {
+                risk: "safe",
+                description: format!(
+                    "btrfs filesystem resize <devid>:max {} \
+                     (skipped if replacement did not commit; devid for '{}' resolved post-mount)",
+                    params.config.mount_point(),
+                    new_name,
+                ),
+                commands: vec![],
+            });
+        }
+        journal::OpKind::Add { .. } | journal::OpKind::RemoveMissing { .. } => {}
+        journal::OpKind::Remove { .. } => {}
+    }
+
+    match &journal.op {
+        journal::OpKind::Add { .. }
+        | journal::OpKind::RemoveMissing { .. }
+        | journal::OpKind::Replace { .. } => {
+            let mount_point = params.config.mount_point();
+            steps.push(Step {
+                risk: "long",
+                description: format!(
+                    "btrfs balance resume {mount_point} (skipped if no paused balance)"
+                ),
+                commands: vec![],
+            });
+            steps.push(Step {
+                risk: "long",
+                description: format!(
+                    "btrfs balance -dconvert=raid1,soft -mconvert=raid1,soft {mount_point} \
+                     (skipped if pool has <2 devices)"
+                ),
+                commands: vec![],
+            });
+        }
+        journal::OpKind::Remove { .. } => {}
+    }
+
     steps.push(Step {
         risk: "safe",
         description: format!(
@@ -1535,6 +1706,33 @@ mod tests {
                 name: "disk2".to_owned(),
             },
             pre_membership: pre,
+            target_membership: PoolMembership {
+                disks: target_disks,
+            },
+        }
+    }
+
+    fn remove_missing_journal() -> journal::Journal {
+        let mut pre_disks = BTreeMap::new();
+        pre_disks.insert(
+            "disk1".to_owned(),
+            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
+        );
+        pre_disks.insert(
+            "disk2".to_owned(),
+            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk2".into())),
+        );
+
+        let mut target_disks = BTreeMap::new();
+        target_disks.insert(
+            "disk1".to_owned(),
+            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
+        );
+
+        journal::Journal {
+            started_at: "2026-01-01T00:00:00Z".into(),
+            op: OpKind::RemoveMissing { devid: 2 },
+            pre_membership: PoolMembership { disks: pre_disks },
             target_membership: PoolMembership {
                 disks: target_disks,
             },
@@ -4366,6 +4564,619 @@ mod tests {
         assert!(
             !rendered.contains("nothing to do."),
             "stepful preview must not emit the `nothing to do.` fallback, got: {rendered:?}",
+        );
+    }
+
+    fn render_recover_dry_run(
+        journal: journal::Journal,
+        fs_paths: &[&str],
+        runner: MockRunner,
+        allow_degraded: bool,
+    ) -> String {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let fs = MockFs::new(fs_paths);
+        journal::write_journal(&paths, &journal).unwrap();
+
+        let params = RecoverParams {
+            config: &config,
+            paths: &paths,
+            passphrase_stdin: false,
+            passphrase_file: None,
+            allow_degraded,
+            dry_run: true,
+            progress: ProgressOutput::Off,
+        };
+
+        plan_recover(&runner, &fs, &params)
+            .result
+            .expect("plan_recover should render a dry-run preview")
+            .preview()
+            .render()
+    }
+
+    fn closed_two_disk_dry_run_runner() -> MockRunner {
+        let (mp_req, mp_out) = mountpoint_fail();
+        MockRunner::default()
+            .with_output(mp_req, mp_out)
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/virtio-disk1",
+                    "11111111-1111-1111-1111-111111111111",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/virtio-disk2",
+                    "22222222-2222-2222-2222-222222222222",
+                ),
+            )
+            .with_luks_dump_text_luks2_for(&[
+                "/dev/disk/by-id/virtio-disk1",
+                "/dev/disk/by-id/virtio-disk2",
+            ])
+            .with_mappers_closed(&["braid-disk1", "braid-disk2"])
+    }
+
+    fn closed_disk1_dry_run_runner() -> MockRunner {
+        let (mp_req, mp_out) = mountpoint_fail();
+        MockRunner::default()
+            .with_output(mp_req, mp_out)
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/virtio-disk1",
+                    "11111111-1111-1111-1111-111111111111",
+                ),
+            )
+            .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk1")
+            .with_mapper_closed("braid-disk1")
+    }
+
+    fn closed_replace_dry_run_runner() -> MockRunner {
+        let (mp_req, mp_out) = mountpoint_fail();
+        MockRunner::default()
+            .with_output(mp_req, mp_out)
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/virtio-disk1",
+                    "11111111-1111-1111-1111-111111111111",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-new".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/virtio-new",
+                    "33333333-3333-3333-3333-333333333333",
+                ),
+            )
+            .with_luks_dump_text_luks2_for(&[
+                "/dev/disk/by-id/virtio-disk1",
+                "/dev/disk/by-id/virtio-new",
+            ])
+            .with_mappers_closed(&["braid-disk1", "braid-new"])
+    }
+
+    /* Intent
+     * Verify a not-mounted recover dry-run previews the full remount cycle.
+     *
+     * Why it exists
+     * Execution unmounts, forgets btrfs scan state, closes mappers, reopens
+     * LUKS, scans, and remounts before probing the recovered pool. The
+     * dry-run preview must not hide that offline window.
+     *
+     * Scenario
+     * Interrupted add with disk1 and disk2 present, disk3 absent, and
+     * --allow-degraded supplied so the initial mount plan succeeds.
+     */
+    #[test]
+    fn plan_recover_dry_run_includes_remount_cycle_when_not_mounted() {
+        let rendered = render_recover_dry_run(
+            two_disk_journal(),
+            &[
+                "/dev/disk/by-id/virtio-disk1",
+                "/dev/disk/by-id/virtio-disk2",
+            ],
+            closed_two_disk_dry_run_runner(),
+            true,
+        );
+
+        assert!(
+            rendered.contains("unmount /mnt/storage (recover remount cycle)"),
+            "missing cycle unmount step: {rendered:?}",
+        );
+        assert!(
+            rendered.contains(
+                "$ btrfs device scan --forget /dev/mapper/braid-disk1 /dev/mapper/braid-disk2"
+            ),
+            "missing pool-scoped scan --forget command: {rendered:?}",
+        );
+        assert!(
+            rendered.contains("close LUKS mapper braid-disk1 (recover remount cycle)")
+                && rendered.contains("close LUKS mapper braid-disk2 (recover remount cycle)"),
+            "missing cycle close steps: {rendered:?}",
+        );
+        assert!(
+            rendered.contains(
+                "LUKS open /dev/disk/by-id/virtio-disk1 → braid-disk1 (recover remount cycle)"
+            ) && rendered.contains(
+                "LUKS open /dev/disk/by-id/virtio-disk2 → braid-disk2 (recover remount cycle)"
+            ),
+            "missing cycle reopen steps: {rendered:?}",
+        );
+        assert!(
+            rendered.contains("mount → /mnt/storage (recover remount cycle, degraded)"),
+            "missing degraded cycle mount step: {rendered:?}",
+        );
+    }
+
+    /* Intent
+     * Verify an already-mounted recover dry-run does not preview the remount
+     * cycle.
+     *
+     * Why it exists
+     * Execution only runs relock_and_remount when recover just mounted the
+     * pool. Showing the cycle for an already-mounted pool would overstate
+     * the work and incorrectly warn about an offline window.
+     *
+     * Scenario
+     * Interrupted add with the pool already mounted; dry-run reconciliation
+     * probes the live pool and then renders only state recovery and replay
+     * placeholders.
+     */
+    #[test]
+    fn plan_recover_dry_run_omits_remount_cycle_when_already_mounted() {
+        let (mp_req, mp_out) = mountpoint_ok();
+        let runner = MockRunner::default()
+            .with_output(mp_req, mp_out)
+            .with_output(
+                CmdRequest::BtrfsFilesystemShow {
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                btrfs_show_two_disks(),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-disk1".into(),
+                },
+                cryptsetup_status_active("braid-disk1", "/dev/vda"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vda".into(),
+                },
+                cryptsetup_uuid_ok("/dev/vda", "11111111-1111-1111-1111-111111111111"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-disk2".into(),
+                },
+                cryptsetup_status_active("braid-disk2", "/dev/vdb"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vdb".into(),
+                },
+                cryptsetup_uuid_ok("/dev/vdb", "22222222-2222-2222-2222-222222222222"),
+            );
+
+        let rendered = render_recover_dry_run(two_disk_journal(), &[], runner, false);
+
+        assert!(
+            !rendered.contains("recover remount cycle"),
+            "already-mounted preview must not show the remount cycle: {rendered:?}",
+        );
+    }
+
+    /* Intent
+     * Verify replace dry-run previews the kernel dev_replace wait only when
+     * recover needs to mount the pool.
+     *
+     * Why it exists
+     * Interrupted replace can resume kernel dev_replace work on remount and
+     * block recover before the relock cycle. Operators need that long-running
+     * possibility in the dry-run output.
+     *
+     * Scenario
+     * Replace journal where disk1 and new are present, old is absent, and
+     * recover will mount degraded before rebuilding pool.json.
+     */
+    #[test]
+    fn plan_recover_dry_run_replace_not_mounted_includes_dev_replace_wait() {
+        let rendered = render_recover_dry_run(
+            replace_journal(),
+            &["/dev/disk/by-id/virtio-disk1", "/dev/disk/by-id/virtio-new"],
+            closed_replace_dry_run_runner(),
+            true,
+        );
+
+        assert!(
+            rendered
+                .contains("wait for kernel dev_replace to finish (skipped if no running replace)"),
+            "replace preview should include the dev_replace wait: {rendered:?}",
+        );
+        assert!(
+            !rendered.contains("$ btrfs replace status"),
+            "conditional wait placeholder must not render a command: {rendered:?}",
+        );
+    }
+
+    /* Intent
+     * Verify non-replace dry-run does not preview the kernel dev_replace wait.
+     *
+     * Why it exists
+     * Add, remove, and remove-missing do not have interrupted kernel
+     * dev_replace work that auto-resumes on mount. Showing the wait outside
+     * replace would make dry-run noisier and less accurate.
+     *
+     * Scenario
+     * Interrupted add with a not-mounted degraded open plan.
+     */
+    #[test]
+    fn plan_recover_dry_run_add_not_mounted_omits_dev_replace_wait() {
+        let rendered = render_recover_dry_run(
+            two_disk_journal(),
+            &[
+                "/dev/disk/by-id/virtio-disk1",
+                "/dev/disk/by-id/virtio-disk2",
+            ],
+            closed_two_disk_dry_run_runner(),
+            true,
+        );
+
+        assert!(
+            !rendered.contains("dev_replace"),
+            "add preview must not include replace-only wait rows: {rendered:?}",
+        );
+    }
+
+    /* Intent
+     * Verify the remount cycle close set includes an existing mapper even
+     * when that disk will not be reopened by the cycle.
+     *
+     * Why it exists
+     * Execution closes every union mapper path that exists, not only disks
+     * that probe as healthy. A dry-run based only on reopen names would miss
+     * damaged or absent disks whose mapper is still live.
+     *
+     * Scenario
+     * Interrupted add where disk3's by-id path is absent but
+     * /dev/mapper/braid-disk3 exists at recover planning time.
+     */
+    #[test]
+    fn plan_recover_dry_run_cycle_close_set_includes_absent_open_mapper() {
+        let rendered = render_recover_dry_run(
+            two_disk_journal(),
+            &[
+                "/dev/disk/by-id/virtio-disk1",
+                "/dev/disk/by-id/virtio-disk2",
+                "/dev/mapper/braid-disk3",
+            ],
+            closed_two_disk_dry_run_runner(),
+            true,
+        );
+
+        assert!(
+            rendered.contains(
+                "$ btrfs device scan --forget /dev/mapper/braid-disk1 /dev/mapper/braid-disk2 /dev/mapper/braid-disk3"
+            ),
+            "scan --forget should include absent-but-open disk3 mapper: {rendered:?}",
+        );
+        assert!(
+            rendered.contains("close LUKS mapper braid-disk3 (recover remount cycle)"),
+            "close set should include disk3 mapper: {rendered:?}",
+        );
+        assert!(
+            !rendered.contains("LUKS open /dev/disk/by-id/virtio-disk3"),
+            "reopen set should not include absent disk3: {rendered:?}",
+        );
+    }
+
+    /* Intent
+     * Verify the remount cycle reopen set excludes a by-id-present disk with
+     * damaged LUKS metadata, even when its mapper path exists.
+     *
+     * Why it exists
+     * The cycle reopen set must come from healthy probe events, not from
+     * by-id path existence. A regression back to `fs.exists(by_id)` would
+     * incorrectly preview reopening a disk whose LUKS header cannot be used.
+     *
+     * Scenario
+     * Interrupted add where disk3's by-id path and mapper path both exist,
+     * but `cryptsetup luksUUID` fails, `isLuks` succeeds, and `luksDump`
+     * fails, producing a damaged-header probe event.
+     */
+    #[test]
+    fn plan_recover_dry_run_cycle_reopen_set_excludes_damaged_header_disk() {
+        let runner = closed_two_disk_dry_run_runner()
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk3".into(),
+                },
+                err_raw("cryptsetup luksUUID", 1, "LUKS metadata corrupted"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupIsLuks {
+                    device: "/dev/disk/by-id/virtio-disk3".into(),
+                },
+                ok_raw_empty("cryptsetup isLuks"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksDumpText {
+                    device: "/dev/disk/by-id/virtio-disk3".into(),
+                },
+                err_raw("cryptsetup luksDump", 1, "LUKS2 metadata corrupted"),
+            );
+
+        let rendered = render_recover_dry_run(
+            two_disk_journal(),
+            &[
+                "/dev/disk/by-id/virtio-disk1",
+                "/dev/disk/by-id/virtio-disk2",
+                "/dev/disk/by-id/virtio-disk3",
+                "/dev/mapper/braid-disk3",
+            ],
+            runner,
+            true,
+        );
+
+        assert!(
+            rendered.contains("[skip] disk disk3: LUKS header metadata damaged"),
+            "test setup should classify disk3 as damaged, got: {rendered:?}",
+        );
+        assert!(
+            rendered.contains("close LUKS mapper braid-disk3 (recover remount cycle)"),
+            "close set should include damaged disk3 mapper: {rendered:?}",
+        );
+        assert!(
+            !rendered.contains(
+                "LUKS open /dev/disk/by-id/virtio-disk3 → braid-disk3 (recover remount cycle)"
+            ),
+            "reopen set should not include damaged disk3: {rendered:?}",
+        );
+    }
+
+    /* Intent
+     * Verify the cycle mount command uses the cycle's first reopen disk, not
+     * the initial open plan's mount device.
+     *
+     * Why it exists
+     * Mixed open/closed states can make the initial plan mount from the first
+     * closed disk while the post-close cycle reopens from the first healthy
+     * union disk. Dry-run must mirror the re-planned cycle device.
+     *
+     * Scenario
+     * disk1 mapper is already open, disk2 is closed, disk3 is absent. The
+     * initial mount uses braid-disk2, while the cycle mount uses braid-disk1.
+     */
+    #[test]
+    fn plan_recover_dry_run_cycle_mount_uses_first_reopen_not_initial_mount_device() {
+        let (mp_req, mp_out) = mountpoint_fail();
+        let runner = MockRunner::default()
+            .with_output(mp_req, mp_out)
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/virtio-disk1",
+                    "11111111-1111-1111-1111-111111111111",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/virtio-disk2",
+                    "22222222-2222-2222-2222-222222222222",
+                ),
+            )
+            .with_luks_dump_text_luks2_for(&[
+                "/dev/disk/by-id/virtio-disk1",
+                "/dev/disk/by-id/virtio-disk2",
+            ])
+            .with_mapper_open(
+                "braid-disk1",
+                "/dev/vda",
+                "11111111-1111-1111-1111-111111111111",
+            )
+            .with_mapper_closed("braid-disk2");
+
+        let rendered = render_recover_dry_run(
+            two_disk_journal(),
+            &[
+                "/dev/disk/by-id/virtio-disk1",
+                "/dev/disk/by-id/virtio-disk2",
+                "/dev/mapper/braid-disk1",
+            ],
+            runner,
+            true,
+        );
+
+        let initial = "$ mount -o 'noatime,skip_balance,subvolid=5,degraded' /dev/mapper/braid-disk2 /mnt/storage";
+        let cycle = "$ mount -o 'noatime,skip_balance,subvolid=5,degraded' /dev/mapper/braid-disk1 /mnt/storage";
+        let initial_pos = rendered
+            .find(initial)
+            .unwrap_or_else(|| panic!("initial mount should use braid-disk2: {rendered:?}"));
+        let cycle_pos = rendered
+            .find(cycle)
+            .unwrap_or_else(|| panic!("cycle mount should use braid-disk1: {rendered:?}"));
+        assert!(
+            initial_pos < cycle_pos,
+            "initial mount should precede cycle mount: {rendered:?}",
+        );
+    }
+
+    /* Intent
+     * Verify add dry-run previews post-mutation balance replay as conditional
+     * placeholders without command lines.
+     *
+     * Why it exists
+     * Execution only resumes a paused balance when a post-mount probe finds
+     * one, and only runs the soft RAID1 replay when the live pool has at
+     * least two devices. Dry-run must describe the conditional work without
+     * promising command argv rows.
+     *
+     * Scenario
+     * Interrupted add with a not-mounted degraded open plan.
+     */
+    #[test]
+    fn plan_recover_dry_run_add_post_mutation_placeholders_have_no_commands() {
+        let rendered = render_recover_dry_run(
+            two_disk_journal(),
+            &[
+                "/dev/disk/by-id/virtio-disk1",
+                "/dev/disk/by-id/virtio-disk2",
+            ],
+            closed_two_disk_dry_run_runner(),
+            true,
+        );
+
+        let write_pos = rendered
+            .find("write recovered pool.json")
+            .unwrap_or_else(|| panic!("missing write step: {rendered:?}"));
+        let resume_pos = rendered
+            .find("btrfs balance resume /mnt/storage (skipped if no paused balance)")
+            .unwrap_or_else(|| panic!("missing balance resume placeholder: {rendered:?}"));
+        let soft_pos = rendered
+            .find("btrfs balance -dconvert=raid1,soft -mconvert=raid1,soft /mnt/storage (skipped if pool has <2 devices)")
+            .unwrap_or_else(|| panic!("missing soft balance placeholder: {rendered:?}"));
+        let clear_pos = rendered
+            .find("clear pending-op.json")
+            .unwrap_or_else(|| panic!("missing clear step: {rendered:?}"));
+
+        assert!(
+            write_pos < resume_pos && resume_pos < soft_pos && soft_pos < clear_pos,
+            "post-mutation placeholders must sit between write and clear: {rendered:?}",
+        );
+        assert!(
+            !rendered.contains("$ btrfs balance resume")
+                && !rendered.contains("$ btrfs balance start --enqueue -dconvert=raid1,soft"),
+            "conditional placeholders must not render btrfs balance commands: {rendered:?}",
+        );
+    }
+
+    /* Intent
+     * Verify replace dry-run previews post-mutation resize and balance
+     * replay as conditional placeholders without command lines.
+     *
+     * Why it exists
+     * Execution resolves the replacement disk devid from the post-mount live
+     * pool, skips resize if replacement did not commit, and conditionally
+     * resumes or replays balance work based on post-mount probes. Dry-run
+     * cannot know that runtime state yet.
+     *
+     * Scenario
+     * Interrupted replace where disk1 and new are present and old is absent.
+     */
+    #[test]
+    fn plan_recover_dry_run_replace_replay_placeholders_have_no_commands() {
+        let rendered = render_recover_dry_run(
+            replace_journal(),
+            &["/dev/disk/by-id/virtio-disk1", "/dev/disk/by-id/virtio-new"],
+            closed_replace_dry_run_runner(),
+            true,
+        );
+
+        assert!(
+            rendered.contains(
+                "btrfs filesystem resize <devid>:max /mnt/storage (skipped if replacement did not commit; devid for 'new' resolved post-mount)"
+            ),
+            "replace preview should include the resize replay placeholder: {rendered:?}",
+        );
+        assert!(
+            !rendered.contains("$ btrfs filesystem resize"),
+            "conditional resize placeholder must not render a command: {rendered:?}",
+        );
+        assert!(
+            rendered.contains("btrfs balance resume /mnt/storage (skipped if no paused balance)")
+                && rendered.contains(
+                    "btrfs balance -dconvert=raid1,soft -mconvert=raid1,soft /mnt/storage (skipped if pool has <2 devices)"
+                ),
+            "replace preview should include balance replay placeholders: {rendered:?}",
+        );
+        assert!(
+            !rendered.contains("$ btrfs balance resume")
+                && !rendered.contains("$ btrfs balance start --enqueue -dconvert=raid1,soft"),
+            "conditional balance placeholders must not render commands: {rendered:?}",
+        );
+    }
+
+    /* Intent
+     * Verify remove-missing dry-run previews the balance replay placeholders.
+     *
+     * Why it exists
+     * Remove-missing can leave paused or incomplete post-mutation balancing
+     * just like add and replace. The preview needs to name that follow-up
+     * work.
+     *
+     * Scenario
+     * Interrupted remove-missing with disk1 present, disk2 missing, and
+     * --allow-degraded supplied.
+     */
+    #[test]
+    fn plan_recover_dry_run_remove_missing_post_mutation_placeholders_are_shown() {
+        let rendered = render_recover_dry_run(
+            remove_missing_journal(),
+            &["/dev/disk/by-id/virtio-disk1"],
+            closed_disk1_dry_run_runner(),
+            true,
+        );
+
+        assert!(
+            rendered.contains("btrfs balance resume /mnt/storage (skipped if no paused balance)")
+                && rendered.contains(
+                    "btrfs balance -dconvert=raid1,soft -mconvert=raid1,soft /mnt/storage (skipped if pool has <2 devices)"
+                ),
+            "remove-missing preview should include balance replay placeholders: {rendered:?}",
+        );
+        assert!(
+            !rendered.contains("btrfs filesystem resize <devid>:max"),
+            "remove-missing preview must not include replace resize: {rendered:?}",
+        );
+    }
+
+    /* Intent
+     * Verify remove dry-run omits all post-mutation replay placeholders.
+     *
+     * Why it exists
+     * Remove is intentionally recovered by rerunning braid remove rather than
+     * resuming an ambiguous paused balance. The dry-run preview must preserve
+     * that distinction.
+     *
+     * Scenario
+     * Interrupted remove with disk1 present, disk2 missing, and
+     * --allow-degraded supplied.
+     */
+    #[test]
+    fn plan_recover_dry_run_remove_post_mutation_replay_rows_omitted() {
+        let rendered = render_recover_dry_run(
+            interrupted_remove_journal(None),
+            &["/dev/disk/by-id/virtio-disk1"],
+            closed_disk1_dry_run_runner(),
+            true,
+        );
+
+        assert!(
+            !rendered.contains("btrfs balance resume")
+                && !rendered.contains("-dconvert=raid1,soft")
+                && !rendered.contains("btrfs filesystem resize <devid>:max"),
+            "remove preview should omit replay placeholders: {rendered:?}",
         );
     }
 
