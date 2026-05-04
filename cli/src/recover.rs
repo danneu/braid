@@ -177,7 +177,7 @@ pub struct RecoverPlanReport {
 pub fn format_recover_entry(journal: &Journal) -> String {
     format!(
         "Recovering from interrupted {:?} operation (started {})...",
-        journal_op_label(journal),
+        journal_op_label(&journal.op),
         journal.started_at
     )
 }
@@ -888,7 +888,7 @@ fn replay_post_mutation<R: CommandRunner + Sync>(
                         color_enabled,
                         &format!(
                             "pool: resuming paused balance left by interrupted {}...",
-                            journal_op_label_for_op(op)
+                            journal_op_label(op)
                         ),
                     )
                 );
@@ -912,7 +912,7 @@ fn replay_post_mutation<R: CommandRunner + Sync>(
                         color_enabled,
                         &format!(
                             "pool: replaying post-{} RAID1 soft balance (skip already-RAID1 chunks)...",
-                            journal_op_label_for_op(op)
+                            journal_op_label(op)
                         ),
                     )
                 );
@@ -946,9 +946,7 @@ fn replay_post_mutation<R: CommandRunner + Sync>(
     Ok(())
 }
 
-/// `journal_op_label` works on the whole `Journal`; this thin wrapper is the
-/// version `replay_post_mutation` needs (it already has the `OpKind`).
-fn journal_op_label_for_op(op: &journal::OpKind) -> &'static str {
+fn journal_op_label(op: &journal::OpKind) -> &'static str {
     match op {
         journal::OpKind::Add { .. } => "add",
         journal::OpKind::Remove { .. } => "remove",
@@ -1203,15 +1201,6 @@ fn relock_and_remount<R: CommandRunner, F: Filesystem + ?Sized>(
         .map_err(|e| RecoverError::Failed(format!("recover remount cycle: re-mount: {e}")))?;
 
     Ok(())
-}
-
-fn journal_op_label(journal: &Journal) -> &'static str {
-    match &journal.op {
-        journal::OpKind::Add { .. } => "add",
-        journal::OpKind::Remove { .. } => "remove",
-        journal::OpKind::RemoveMissing { .. } => "remove-missing",
-        journal::OpKind::Replace { .. } => "replace",
-    }
 }
 
 /// Compare recovered membership against pre/target to produce a one-sentence guidance message.
