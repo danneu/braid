@@ -44,9 +44,11 @@ enum Commands {
     /// Check if pool is idle (no scrub or btrfs exclusive operation): exit 0 = idle, exit 1 = busy or probe failure, exit 2 = setup error
     Idle,
     /// Internal: invoked by `braid-scrub.service` ExecStop during lock/shutdown
-    /// to cancel an in-flight scrub. Probes scrub state via the typed parser
-    /// and only issues `btrfs scrub cancel` when state is `Running`; silent
-    /// no-op for terminal non-running states. Hidden from `braid --help`.
+    /// to cancel an in-flight scrub. Calls `btrfs scrub cancel` directly; the
+    /// cancel ioctl is the kernel-authoritative test for whether a scrub is
+    /// running. Exit 0 means a scrub was running and is now cancelled; exit 2
+    /// means ENOTCONN/no scrub was running and is benign. Real failures
+    /// propagate. Hidden from `braid --help`.
     #[command(hide = true)]
     ScrubCancel(ScrubCancelArgs),
     /// Internal: invoked by `braid-scrub-resume-trigger.service` to decide
