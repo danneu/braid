@@ -68,13 +68,7 @@ fn cmd_ack_impl<R: CommandRunner, F: Filesystem + ?Sized>(
     let new_acked = snapshot_current(&device_stats, &alert_missing_devids);
     save_acked_stats(&new_acked, paths)?;
 
-    // 6. Remove smartd alert flag + alert latch (+ any corrupt sidecar)
-    alert::remove_smartd_alert_flag(paths)?;
-    alert::remove_alert_latch(paths)?;
-    alert::remove_alert_latch_corrupt(paths)?;
-
-    // 7. Stop beeper (best-effort)
-    stop_beeper();
+    cleanup_alert_files_and_beeper(paths, stop_beeper)?;
 
     // 8. Print confirmation using latch count
     if latch_count > 0 {
@@ -140,11 +134,30 @@ fn ack_offline(
         save_acked_stats(&acked, paths)?;
     }
 
+    cleanup_alert_files_and_beeper(paths, stop_beeper)?;
+    println!("acknowledged current alerts");
+    Ok(())
+}
+
+/// Cleanup of all alert-side files plus the beeper unit, used by both the
+/// mounted and offline branches of `cmd_ack_impl`.
+///
+/// Each `remove_*` call is NotFound-tolerant, so a missing file is not an
+/// error. A real I/O error on any `remove_*` short-circuits via `?`:
+/// subsequent removals and the `stop_beeper` invocation are skipped, and the
+/// error is propagated.
+///
+/// The `stop_beeper` parameter is the injected `&dyn Fn()` from
+/// `cmd_ack_impl`; callers must forward their own hook so tests can record
+/// beeper invocations.
+fn cleanup_alert_files_and_beeper(
+    paths: &StatePaths,
+    stop_beeper: &dyn Fn(),
+) -> Result<(), std::io::Error> {
+    alert::remove_smartd_alert_flag(paths)?;
     alert::remove_alert_latch(paths)?;
     alert::remove_alert_latch_corrupt(paths)?;
-    alert::remove_smartd_alert_flag(paths)?;
     stop_beeper();
-    println!("acknowledged current alerts");
     Ok(())
 }
 
