@@ -694,17 +694,21 @@ fn main() {
             }
             let runner = RealRunner;
             match braid_cli::discover::discover_pool_members(&runner) {
-                Ok(members) => {
-                    if members.is_empty() {
+                Ok(outcome) => {
+                    for warning in &outcome.warnings {
+                        eprintln!("warning: {warning}");
+                    }
+                    if outcome.members.is_empty() {
                         eprintln!("no braid-labeled LUKS devices found");
                         std::process::exit(1);
                     }
-                    for (name, by_id) in &members {
+                    for (name, by_id) in &outcome.members {
                         eprintln!("  {} = {}", name, by_id);
                     }
                     if args.write {
                         let m = braid_cli::membership::PoolMembership {
-                            disks: members
+                            disks: outcome
+                                .members
                                 .into_iter()
                                 .map(|(name, by_id)| {
                                     (name, braid_cli::membership::DiskMember::from_by_id(by_id))

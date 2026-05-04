@@ -1,8 +1,9 @@
 use crate::cmd::{CmdRequest, CommandRunner};
-use crate::parse::{parse_cryptsetup_luks_label, parse_cryptsetup_luks_version};
+use crate::parse::{ParseError, parse_cryptsetup_luks_label, parse_cryptsetup_luks_version};
 use crate::types::ByIdPath;
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
+use std::fmt;
 use std::path::Path;
 
 #[derive(Debug, thiserror::Error)]
@@ -21,11 +22,66 @@ pub enum DiscoverError {
     },
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum DiscoverWarning {
+    LuksDumpFailed {
+        path: String,
+        exit_code: i32,
+        stderr: String,
+    },
+    LuksDumpUnparseable {
+        path: String,
+        detail: String,
+    },
+    UnsupportedLuksVersion {
+        path: String,
+        version: u32,
+    },
+    CannotCanonicalize {
+        path: String,
+        detail: String,
+    },
+}
+
+impl fmt::Display for DiscoverWarning {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DiscoverWarning::LuksDumpFailed {
+                path,
+                exit_code,
+                stderr,
+            } => write!(
+                f,
+                "skipping {path}: luksDump failed (exit {exit_code}) -- {}",
+                stderr.trim()
+            ),
+            DiscoverWarning::LuksDumpUnparseable { path, detail } => {
+                write!(
+                    f,
+                    "skipping {path}: luksDump output unparseable -- {detail}"
+                )
+            }
+            DiscoverWarning::UnsupportedLuksVersion { path, version } => {
+                write!(f, "skipping {path}: LUKS{version} (braid requires LUKS2)")
+            }
+            DiscoverWarning::CannotCanonicalize { path, detail } => {
+                write!(f, "skipping {path}: cannot canonicalize -- {detail}")
+            }
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct DiscoverOutcome {
+    pub members: BTreeMap<String, ByIdPath>,
+    pub warnings: Vec<DiscoverWarning>,
+}
+
 /// Scan /dev/disk/by-id/ for LUKS devices with braid-<name> labels.
-/// Returns a map of discovered pool members: name -> by_id path.
+/// Returns discovered pool members and per-device warnings.
 pub fn discover_pool_members<R: CommandRunner>(
     runner: &R,
-) -> Result<BTreeMap<String, ByIdPath>, DiscoverError> {
+) -> Result<DiscoverOutcome, DiscoverError> {
     discover_from_dir(
         runner,
         &crate::recover::RealByIdResolver,
@@ -51,11 +107,14 @@ fn discover_from_dir<R: CommandRunner>(
     runner: &R,
     resolver: &dyn crate::recover::ByIdResolver,
     by_id_dir: &Path,
-) -> Result<BTreeMap<String, ByIdPath>, DiscoverError> {
+) -> Result<DiscoverOutcome, DiscoverError> {
     let entries = match std::fs::read_dir(by_id_dir) {
         Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(BTreeMap::new());
+            return Ok(DiscoverOutcome {
+                members: BTreeMap::new(),
+                warnings: Vec::new(),
+            });
         }
         Err(e) => return Err(DiscoverError::ReadDir(e)),
     };
@@ -65,6 +124,7 @@ fn discover_from_dir<R: CommandRunner>(
     // tie-break without re-extracting the basename or recomputing the priority
     // class for the stored entry.
     let mut members: BTreeMap<String, (u8, String, ByIdPath, String)> = BTreeMap::new();
+    let mut warnings = Vec::new();
 
     for entry in entries.flatten() {
         let name = entry.file_name();
@@ -97,10 +157,29 @@ fn discover_from_dir<R: CommandRunner>(
 
         let version = match parse_cryptsetup_luks_version(&dump_raw) {
             Ok(out) => out.version,
-            Err(_) => continue,
+            Err(ParseError::CommandFailed {
+                exit_code, stderr, ..
+            }) => {
+                warnings.push(DiscoverWarning::LuksDumpFailed {
+                    path: path_str.clone(),
+                    exit_code,
+                    stderr,
+                });
+                continue;
+            }
+            Err(e) => {
+                warnings.push(DiscoverWarning::LuksDumpUnparseable {
+                    path: path_str.clone(),
+                    detail: e.to_string(),
+                });
+                continue;
+            }
         };
         if version != 2 {
-            eprintln!("warning: skipping {path_str}: LUKS{version} (braid requires LUKS2)");
+            warnings.push(DiscoverWarning::UnsupportedLuksVersion {
+                path: path_str.clone(),
+                version,
+            });
             continue;
         }
 
@@ -116,7 +195,10 @@ fn discover_from_dir<R: CommandRunner>(
             let canonical = match resolver.canonicalize(&path_str) {
                 Ok(c) => c,
                 Err(e) => {
-                    eprintln!("warning: skipping {path_str}: cannot canonicalize: {e}");
+                    warnings.push(DiscoverWarning::CannotCanonicalize {
+                        path: path_str.clone(),
+                        detail: e.to_string(),
+                    });
                     continue;
                 }
             };
@@ -152,10 +234,13 @@ fn discover_from_dir<R: CommandRunner>(
         }
     }
 
-    Ok(members
-        .into_iter()
-        .map(|(name, (_, _, by_id, _))| (name, by_id))
-        .collect())
+    Ok(DiscoverOutcome {
+        members: members
+            .into_iter()
+            .map(|(name, (_, _, by_id, _))| (name, by_id))
+            .collect(),
+        warnings,
+    })
 }
 
 /// Priority for /dev/disk/by-id/ symlink prefixes. Lower = more preferred.
@@ -221,6 +306,7 @@ mod tests {
     struct LabelMap {
         labels: HashMap<String, String>,
         versions: HashMap<String, u32>,
+        dump_responses: HashMap<String, RawCommandOutput>,
         calls: Mutex<Vec<(String, String)>>,
     }
 
@@ -232,6 +318,7 @@ mod tests {
                     .map(|(path, label)| (path.to_string(), label.to_string()))
                     .collect(),
                 versions: HashMap::new(),
+                dump_responses: HashMap::new(),
                 calls: Mutex::new(Vec::new()),
             }
         }
@@ -240,6 +327,14 @@ mod tests {
         /// to 2 (LUKS2) for any path not explicitly set.
         fn with_version(mut self, path: &str, version: u32) -> Self {
             self.versions.insert(path.to_string(), version);
+            self
+        }
+
+        /// Override the entire luksDump response for a path. Used to inject
+        /// realistic failure modes (non-zero exit + stderr) or unparseable
+        /// stdout. Takes precedence over the synthesized default.
+        fn with_dump_response(mut self, path: &str, response: RawCommandOutput) -> Self {
+            self.dump_responses.insert(path.to_string(), response);
             self
         }
 
@@ -267,7 +362,9 @@ mod tests {
                         .lock()
                         .unwrap()
                         .push(("luksDump".into(), device.clone()));
-                    if let Some(label) = self.labels.get(device.as_str()) {
+                    if let Some(response) = self.dump_responses.get(device.as_str()) {
+                        Ok(response.clone())
+                    } else if let Some(label) = self.labels.get(device.as_str()) {
                         let version = self.versions.get(device.as_str()).copied().unwrap_or(2);
                         Ok(mock_output(
                             "cryptsetup",
@@ -436,8 +533,13 @@ mod tests {
 
         // Only the LUKS device is in the label map; the USB stick is unknown.
         let runner = LabelMap::new(&[(&luks_path, "braid-sda")]);
-        let _members =
+        let outcome =
             discover_from_dir(&runner, &crate::recover::RealByIdResolver, dir.path()).unwrap();
+        assert!(
+            outcome.warnings.is_empty(),
+            "unexpected warnings: {:?}",
+            outcome.warnings
+        );
 
         let luks_dump_calls: Vec<_> = runner
             .calls()
@@ -450,6 +552,101 @@ mod tests {
             "luksDump was called for a non-LUKS device: {:?}",
             luks_dump_calls,
         );
+    }
+
+    #[test]
+    fn discover_warns_when_labeled_disk_fails_luksdump() {
+        /*
+         * Intent: a braid-labeled disk whose luksDump command reports a
+         *   device/header failure is surfaced as a structured warning.
+         * Why it exists: discover used to silently drop the device, leaving
+         *   recovery users with only the misleading "no labeled disks" summary
+         *   when the broken device was the only candidate.
+         * Scenario: one healthy disk and one present-but-broken disk are both
+         *   visible under /dev/disk/by-id during pool recovery.
+         */
+        let dir = tempfile::tempdir().unwrap();
+        let modern_target = create_target(dir.path(), "fake-sda");
+        let broken_target = create_target(dir.path(), "fake-sdb");
+        let modern_path = create_by_id_symlink(dir.path(), "ata-MODERN_DISK", &modern_target);
+        let broken_path = create_by_id_symlink(dir.path(), "ata-BROKEN_DISK", &broken_target);
+        let runner = LabelMap::new(&[
+            (&modern_path, "braid-modern"),
+            (&broken_path, "braid-broken"),
+        ])
+        .with_dump_response(
+            &broken_path,
+            RawCommandOutput {
+                cmd: "cryptsetup".into(),
+                stdout: String::new(),
+                stderr: "Device /dev/foo is not a valid LUKS device.\n".into(),
+                exit_status: 1,
+            },
+        );
+
+        let outcome =
+            discover_from_dir(&runner, &crate::recover::RealByIdResolver, dir.path()).unwrap();
+
+        assert_eq!(outcome.members.len(), 1);
+        assert!(
+            outcome.members.contains_key("modern"),
+            "modern disk should be discovered: {:?}",
+            outcome.members
+        );
+        assert_eq!(outcome.warnings.len(), 1);
+        let warning = &outcome.warnings[0];
+        assert!(matches!(
+            warning,
+            DiscoverWarning::LuksDumpFailed { exit_code: 1, .. }
+        ));
+        let DiscoverWarning::LuksDumpFailed { path, stderr, .. } = warning else {
+            unreachable!();
+        };
+        assert!(path.ends_with("ata-BROKEN_DISK"), "path was {path}");
+        assert!(
+            stderr.contains("not a valid LUKS device"),
+            "stderr was {stderr:?}"
+        );
+    }
+
+    #[test]
+    fn discover_warns_on_unparseable_luksdump_output() {
+        /*
+         * Intent: a successful luksDump command whose output does not match
+         *   braid's parser contract is reported separately from command
+         *   failure.
+         * Why it exists: parser drift and cryptsetup rejecting a header point
+         *   to different fixes, so discover must not collapse them into one
+         *   warning kind.
+         * Scenario: cryptsetup exits successfully but omits the Version field
+         *   that discover requires to enforce the LUKS2-only invariant.
+         */
+        let dir = tempfile::tempdir().unwrap();
+        let target = create_target(dir.path(), "fake-sda");
+        let path = create_by_id_symlink(dir.path(), "ata-ODD_DISK", &target);
+        let runner = LabelMap::new(&[(&path, "braid-odd")]).with_dump_response(
+            &path,
+            RawCommandOutput {
+                cmd: "cryptsetup".into(),
+                stdout: "LUKS header information\nUUID: foo\n".into(),
+                stderr: String::new(),
+                exit_status: 0,
+            },
+        );
+
+        let outcome =
+            discover_from_dir(&runner, &crate::recover::RealByIdResolver, dir.path()).unwrap();
+
+        assert!(outcome.members.is_empty());
+        assert_eq!(outcome.warnings.len(), 1);
+        let DiscoverWarning::LuksDumpUnparseable { path, detail } = &outcome.warnings[0] else {
+            panic!(
+                "expected LuksDumpUnparseable, got {:?}",
+                outcome.warnings[0]
+            );
+        };
+        assert!(path.ends_with("ata-ODD_DISK"), "path was {path}");
+        assert!(detail.contains("Version"), "detail was {detail}");
     }
 
     #[test]
@@ -493,8 +690,14 @@ mod tests {
         let ata_path = create_by_id_symlink(dir.path(), "ata-SEAGATE_ST500", &target);
         let wwn_path = create_by_id_symlink(dir.path(), "wwn-0x50014ee606704442", &target);
         let runner = LabelMap::new(&[(&ata_path, "braid-sda"), (&wwn_path, "braid-sda")]);
-        let members =
+        let outcome =
             discover_from_dir(&runner, &crate::recover::RealByIdResolver, dir.path()).unwrap();
+        assert!(
+            outcome.warnings.is_empty(),
+            "unexpected warnings: {:?}",
+            outcome.warnings
+        );
+        let members = &outcome.members;
         assert_eq!(members.len(), 1);
         assert!(
             members["sda"].0.ends_with("wwn-0x50014ee606704442"),
@@ -520,8 +723,14 @@ mod tests {
         let ata_z = create_by_id_symlink(dir.path(), "ata-ZZZZZ_DISK", &target);
         let ata_a = create_by_id_symlink(dir.path(), "ata-AAAAA_DISK", &target);
         let runner = LabelMap::new(&[(&ata_z, "braid-sda"), (&ata_a, "braid-sda")]);
-        let members =
+        let outcome =
             discover_from_dir(&runner, &crate::recover::RealByIdResolver, dir.path()).unwrap();
+        assert!(
+            outcome.warnings.is_empty(),
+            "unexpected warnings: {:?}",
+            outcome.warnings
+        );
+        let members = &outcome.members;
         assert_eq!(members.len(), 1);
         assert!(
             members["sda"].0.ends_with("ata-AAAAA_DISK"),
@@ -554,8 +763,9 @@ mod tests {
         let luks2_path = create_by_id_symlink(dir.path(), "ata-MODERN_DISK", &luks2_target);
         let runner = LabelMap::new(&[(&luks1_path, "braid-legacy"), (&luks2_path, "braid-modern")])
             .with_version(&luks1_path, 1);
-        let members =
+        let outcome =
             discover_from_dir(&runner, &crate::recover::RealByIdResolver, dir.path()).unwrap();
+        let members = &outcome.members;
         assert_eq!(
             members.len(),
             1,
@@ -569,6 +779,12 @@ mod tests {
             !members.contains_key("legacy"),
             "legacy (LUKS1) disk should be skipped: {members:?}"
         );
+        assert_eq!(outcome.warnings.len(), 1);
+        assert!(matches!(
+            &outcome.warnings[0],
+            DiscoverWarning::UnsupportedLuksVersion { path, version: 1 }
+                if path.ends_with("ata-LEGACY_DISK")
+        ));
     }
 
     #[test]
@@ -595,8 +811,14 @@ mod tests {
             (&ata_beta, "braid-beta"),
             (&wwn_beta, "braid-beta"),
         ]);
-        let members =
+        let outcome =
             discover_from_dir(&runner, &crate::recover::RealByIdResolver, dir.path()).unwrap();
+        assert!(
+            outcome.warnings.is_empty(),
+            "unexpected warnings: {:?}",
+            outcome.warnings
+        );
+        let members = &outcome.members;
         assert_eq!(members.len(), 2);
         assert!(
             members["alpha"].0.ends_with("wwn-0x0001"),
@@ -667,8 +889,9 @@ mod tests {
         let valid = create_by_id_symlink(dir.path(), "wwn-VALID", &target);
         let runner = LabelMap::new(&[(&dangling, "braid-foo"), (&valid, "braid-foo")]);
 
-        let members =
+        let outcome =
             discover_from_dir(&runner, &crate::recover::RealByIdResolver, dir.path()).unwrap();
+        let members = &outcome.members;
 
         assert_eq!(members.len(), 1, "expected only the canonicalizable entry");
         assert!(
@@ -676,6 +899,12 @@ mod tests {
             "expected the valid symlink to win, got: {}",
             members["foo"].0
         );
+        assert_eq!(outcome.warnings.len(), 1);
+        assert!(matches!(
+            &outcome.warnings[0],
+            DiscoverWarning::CannotCanonicalize { path, .. }
+                if path.ends_with("ata-DANGLING")
+        ));
     }
 
     #[test]
