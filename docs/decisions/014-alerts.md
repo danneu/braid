@@ -96,6 +96,17 @@ The alert latch is an append/refresh log of all unacked causes from all sources.
 
 This preserves "latched until ack" even when the on-disk state is unreadable: the operator sees a loud `ComputationError`, the bad bytes are preserved for forensics, and ack always succeeds.
 
+### Offline ack policy
+
+`braid ack` works with the pool locked, but its persistence layer has an asymmetry by cause type:
+
+- `MissingDevice { devid }` -- offline ack reads the latch and applies `missing_acked = true` to that devid in `acked-stats.json` (insert-or-update; existing `device_stats` baselines are preserved). The next mounted monitor cycle suppresses the cause, and `reconcile_acked_stats` self-heals `missing_acked` back to `false` if the device returns.
+- `BtrfsDeviceErrors { devid }` -- offline ack refuses with an actionable error ("cannot ack btrfs device errors while pool is offline -- unlock the pool first"). The counter baseline that suppresses re-firing is the *current* output of `btrfs device stats`, which requires a mounted pool. Refusing the *whole* ack (not partial-acking other causes) avoids leaving the operator in an "I acked but it still says ALERT" state.
+- `SmartdAlert` -- offline ack removes the smartd flag file (the authoritative trigger source); no `acked-stats.json` write is needed.
+- `ComputationError` -- offline ack removes the latch; the cause re-fires on the next monitor cycle only if the underlying computation still fails.
+
+Coupled to the asymmetry: offline ack only loads `acked-stats.json` when at least one `MissingDevice` cause is latched, so an unrelated corrupt `acked-stats.json` cannot block an offline ack of a pure `SmartdAlert` or `ComputationError` latch. When `acked-stats.json` *is* loaded (a `MissingDevice` cause is being applied), the fail-closed `load_acked_stats_fallible` is used so corrupt files are propagated as I/O errors rather than silently overwritten -- matching the policy in `drop_ghost_acked_for_devids`.
+
 ### Acked-stats hygiene across pool membership changes
 
 btrfs allocates new devids as `last_devid + 1` (kernel: `fs/btrfs/volumes.c`, `find_next_devid`), so a `remove`-then-`add` sequence reuses the removed devid only when that devid was the current maximum at remove time. Removing a non-max devid leaves a permanent gap. A stale acked-stats entry for a reused devid would otherwise carry the previous holder's `device_stats` baseline (suppressing health alerts until counters exceed the ghost) or its `missing_acked = true` flag (suppressing missing-device alerts) onto the fresh disk.

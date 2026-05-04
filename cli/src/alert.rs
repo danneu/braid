@@ -214,12 +214,29 @@ pub fn snapshot_current(
     AckedStats(map)
 }
 
+/// Mark a devid as missing-acked in acked-stats. Inserts an entry with
+/// default device_stats if the devid is absent, preserves any existing
+/// device_stats baseline if the devid is already present.
+///
+/// Used by offline `braid ack` to apply latched `MissingDevice` causes
+/// without access to live `btrfs device stats` output.
+pub fn mark_missing_acked(acked: &mut AckedStats, devid: u64) {
+    acked
+        .0
+        .entry(devid.to_string())
+        .and_modify(|d| d.missing_acked = true)
+        .or_insert(AckedDisk {
+            missing_acked: true,
+            device_stats: AckedDeviceCounters::default(),
+        });
+}
+
 /// Drop the acked entry for `devid`. Returns true if an entry was removed.
 pub fn drop_acked_devid(acked: &mut AckedStats, devid: u64) -> bool {
     acked.0.remove(&devid.to_string()).is_some()
 }
 
-fn load_acked_stats_fallible(paths: &StatePaths) -> Result<AckedStats, std::io::Error> {
+pub fn load_acked_stats_fallible(paths: &StatePaths) -> Result<AckedStats, std::io::Error> {
     let path = paths.acked_stats_json();
     let contents = match std::fs::read_to_string(&path) {
         Ok(c) => c,

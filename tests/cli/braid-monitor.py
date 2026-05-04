@@ -128,7 +128,20 @@ with subtest("Corrupt latch (mounted): monitor surfaces and quarantines"):
     machine.fail("test -f /var/lib/braid/alert-latch.json")
     machine.fail("test -f /var/lib/braid/alert-latch.json.corrupt")
 
-with subtest("Btrfs alert latched after pool offline"):
+# Intent: An offline `braid ack` of a latched MissingDevice cause persists
+#   missing_acked=true into acked-stats.json so the alert does not re-fire
+#   on the next monitor cycle after the pool is remounted.
+# Why it exists: Without this, ack_offline only deleted the latch and
+#   smartd flag, never updating acked-stats. The next monitor cycle saw the
+#   device still missing, no missing_acked entry, and re-latched the same
+#   MissingDevice cause -- making the operator hear the beeper again right
+#   after they thought they had silenced it. The cycle "lock -> ack ->
+#   unlock -> mount -> monitor exit 0" is the regression gate; checking
+#   only "ack succeeds and latch is gone" is not enough because the next
+#   monitor invocation against an unchanged baseline would silently re-fire.
+# Scenario: pool is degraded with devid 2 missing; user locks the pool,
+#   acks offline, then re-opens the surviving disks and remounts.
+with subtest("MissingDevice alert acked offline does not re-fire on remount"):
     # Pool is still degraded. Remove acked state to re-trigger alert.
     machine.succeed("rm -f /var/lib/braid/acked-stats.json")
     rc = machine.succeed("set +e; braid monitor; echo $?").strip().splitlines()[-1]
@@ -141,9 +154,84 @@ with subtest("Btrfs alert latched after pool offline"):
     # Status should still show the latched alert
     output = machine.succeed("braid status")
     assert "ALERT" in output, f"Expected ALERT in offline status, got: {output}"
-    # Offline ack should succeed
+    # Offline ack should succeed and persist missing_acked into acked-stats
     machine.succeed("braid ack")
     machine.fail("test -f /var/lib/braid/alert-latch.json")
+    machine.succeed("test -f /var/lib/braid/acked-stats.json")
+    acked = json.loads(machine.succeed("cat /var/lib/braid/acked-stats.json"))
+    has_missing_acked = any(v.get("missing_acked", False) for v in acked.values())
+    assert has_missing_acked, (
+        f"Expected missing_acked=true after offline ack, got: {acked}"
+    )
+    # Re-unlock surviving disks and remount degraded; monitor must NOT re-fire.
+    machine.succeed(
+        f"echo -n '{passphrase}' | cryptsetup open --type luks --key-file=- /dev/disk/by-id/virtio-disk1 braid-disk1"
+    )
+    machine.succeed(
+        f"echo -n '{passphrase}' | cryptsetup open --type luks --key-file=- /dev/disk/by-id/virtio-disk3 braid-disk3"
+    )
+    machine.succeed("mount -o degraded /dev/mapper/braid-disk1 /mnt/storage")
+    rc = machine.succeed("set +e; braid monitor; echo $?").strip().splitlines()[-1]
+    assert rc == "0", (
+        f"Expected monitor exit 0 after offline ack + remount (no re-fire), got {rc}"
+    )
+    machine.fail("test -f /var/lib/braid/alert-latch.json")
+
+# Intent: Offline `braid ack` refuses with a non-zero exit when the latch
+#   contains any BtrfsDeviceErrors cause -- even when mixed with a
+#   MissingDevice cause that would otherwise be acceptable. The latch and
+#   acked-stats.json must both be untouched (all-or-nothing atomicity).
+# Why it exists: BtrfsDeviceErrors silencing requires a counter baseline
+#   captured from live `btrfs device stats` output, which is impossible
+#   with the pool locked. A buggy partial-apply that marked
+#   missing_acked=true before checking for BtrfsDeviceErrors would leave
+#   the user in an inconsistent state ("I acked but it still says ALERT").
+#   Starting from acked-stats.json absent makes a partial-apply visible:
+#   the file would appear.
+# Scenario: a hand-crafted latch fixture simulates a pool that had btrfs
+#   device errors plus a missing device. The pool is locked. `braid ack`
+#   must refuse and tell the operator to unlock first.
+with subtest("Offline ack refused on mixed BtrfsDeviceErrors + MissingDevice latch"):
+    # Lock the pool again (extended subtest above left it mounted).
+    machine.succeed("umount /mnt/storage")
+    machine.succeed("cryptsetup close braid-disk1")
+    machine.succeed("cryptsetup close braid-disk3")
+    # Reset acked-stats so partial-apply would be visible.
+    machine.succeed("rm -f /var/lib/braid/acked-stats.json")
+    # Hand-write a full AlertState fixture (load_alert_latch deserializes
+    # AlertState, not a bare AlertCause -- a bare cause object would
+    # exercise the corrupt-latch path instead of the refusal path).
+    latch_fixture = json.dumps(
+        {
+            "active": True,
+            "causes": [
+                {"type": "btrfs_device_errors", "devid": 1},
+                {"type": "missing_device", "devid": 2},
+            ],
+        }
+    )
+    machine.succeed(
+        f"printf '%s' '{latch_fixture}' > /var/lib/braid/alert-latch.json"
+    )
+    # Run ack; expect failure with the actionable error message.
+    ack_result = machine.execute("braid ack 2>&1")
+    ack_exit = ack_result[0]
+    ack_stderr = ack_result[1]
+    assert ack_exit != 0, (
+        f"Expected non-zero exit on mixed-cause refusal, got {ack_exit}"
+    )
+    assert "unlock the pool first" in ack_stderr, (
+        f"Expected 'unlock the pool first' in stderr, got: {ack_stderr}"
+    )
+    # Latch byte-identical to the fixture (refusal must not delete or rewrite).
+    on_disk = machine.succeed("cat /var/lib/braid/alert-latch.json").rstrip("\n")
+    assert on_disk == latch_fixture, (
+        f"Expected latch bytes preserved, got: {on_disk!r}"
+    )
+    # acked-stats still absent (no partial application).
+    machine.fail("test -f /var/lib/braid/acked-stats.json")
+    # Clean up the fixture so the next subtest starts from a known state.
+    machine.succeed("rm -f /var/lib/braid/alert-latch.json")
 
 # Intent: A corrupt latch must be ack-able even with the pool offline.
 # Why it exists: If `latch_count = 0` is set on parse failure (the naive
