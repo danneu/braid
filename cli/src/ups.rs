@@ -42,15 +42,15 @@ pub fn cmd_ups_status<R: CommandRunner>(
 ) -> Result<(), UpsError> {
     let config = config_read(config_path)?;
     let Some(ups_cfg) = config.ups() else {
-        return print_not_enabled(json, None);
+        return print_not_enabled(json);
     };
     if !ups_cfg.enable {
-        return print_not_enabled(json, Some("disabled"));
+        return print_not_enabled(json);
     }
     render_live(runner, ups_cfg, json)
 }
 
-fn print_not_enabled(json: bool, _reason: Option<&str>) -> Result<(), UpsError> {
+fn print_not_enabled(json: bool) -> Result<(), UpsError> {
     if json {
         let payload = JsonReport::NotEnabled {
             error: "ups_not_enabled",
