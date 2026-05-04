@@ -8,11 +8,12 @@ use crate::parse::btrfs_filesystem_show::{DeviceBtrfsProbe, classify_btrfs_probe
 use crate::parse::{ReplaceState, parse_btrfs_replace_status};
 use crate::preview::{self, PerDiskStyle, Preview, PreviewCompleteness, PreviewNote};
 use crate::probe::{self, Filesystem, ProbeError};
-use crate::progress::ProgressOutput;
+use crate::progress::{self, ProgressOutput, Sleeper};
 use crate::state_paths::StatePaths;
 use crate::status::{BalanceReport, get_balance_report};
 use crate::status_tag::{StatusTag, color_enabled_for_stderr, emit_status, status_line};
 use crate::types::{ByIdPath, MountPoint, PoolState};
+use std::time::Duration;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -337,7 +338,12 @@ impl RecoverPlan {
         // Remove / RemoveMissing -- none of which trigger the kernel
         // dev_replace resume bug -- and skipping the cycle is sound.
         if just_mounted {
-            wait_for_kernel_replace_to_finish(runner, params.config.mount_point(), color_enabled);
+            wait_for_kernel_replace_to_finish(
+                runner,
+                params.config.mount_point(),
+                &progress::RealSleeper,
+                color_enabled,
+            );
             // We mounted, so open_plan was Some, so credential was eagerly resolved
             // above (recover always reads the passphrase when not already mounted).
             let cred = credential
@@ -951,6 +957,9 @@ fn journal_op_label_for_op(op: &journal::OpKind) -> &'static str {
     }
 }
 
+const REPLACE_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(200);
+const REPLACE_WAIT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
+
 /// Block until any kernel-resumed btrfs dev_replace on `mount_point` finishes.
 ///
 /// `btrfs_resume_dev_replace_async` runs as an unrelated kthread and is NOT
@@ -963,9 +972,12 @@ fn journal_op_label_for_op(op: &journal::OpKind) -> &'static str {
 fn wait_for_kernel_replace_to_finish<R: CommandRunner>(
     runner: &R,
     mount_point: &MountPoint,
+    sleeper: &dyn Sleeper,
     color_enabled: bool,
 ) {
     let mut last_pct: Option<f64> = None;
+    let mut total_elapsed = Duration::ZERO;
+    let mut since_last_emit = Duration::ZERO;
     let mut wait_emitted = false;
     loop {
         let raw = match runner.run(&CmdRequest::BtrfsReplaceStatus {
@@ -1014,15 +1026,26 @@ fn wait_for_kernel_replace_to_finish<R: CommandRunner>(
                         color_enabled,
                         "pool: waiting for kernel dev_replace to finish...",
                     ));
+                    emit_status(&format!("  ... {pct:.1}%\n"));
                     wait_emitted = true;
-                }
-                if last_pct != Some(pct) {
-                    eprintln!("  ... {pct:.1}%");
                     last_pct = Some(pct);
+                    since_last_emit = Duration::ZERO;
+                } else if last_pct != Some(pct) {
+                    emit_status(&format!("  ... {pct:.1}%\n"));
+                    last_pct = Some(pct);
+                    since_last_emit = Duration::ZERO;
+                } else if since_last_emit >= REPLACE_WAIT_HEARTBEAT_INTERVAL {
+                    emit_status(&format!(
+                        "  ... {pct:.1}% ({}s elapsed)\n",
+                        total_elapsed.as_secs()
+                    ));
+                    since_last_emit = Duration::ZERO;
                 }
             }
         }
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        sleeper.sleep(REPLACE_WAIT_POLL_INTERVAL);
+        total_elapsed += REPLACE_WAIT_POLL_INTERVAL;
+        since_last_emit += REPLACE_WAIT_POLL_INTERVAL;
     }
 }
 
@@ -1557,12 +1580,22 @@ mod tests {
         }
     }
 
+    fn running_runs(n: usize, pct: &str) -> Vec<ReplaceStatusItem> {
+        let cmd = "btrfs replace status -1 /mnt/storage";
+        let body = format!("{pct} done, 0 write errs, 0 uncorr. read errs\n");
+        (0..n)
+            .map(|_| ReplaceStatusItem::Output(ok_raw(cmd, &body)))
+            .collect()
+    }
+
     #[test]
     fn wait_for_kernel_replace_emits_canonical_rows_on_running_then_finished() {
-        // Intent: a real wait on kernel-resumed dev_replace is announced and closed.
-        // Why it exists: percentage progress only appears when the percentage changes;
-        // a slow worker still needs an upfront canonical wait row.
-        // Scenario: recover observes one running poll, then a finished poll.
+        /*
+        Intent: a real wait on kernel-resumed dev_replace is announced and closed.
+        Why it exists: percentage progress only appears when the percentage changes; a
+        slow worker still needs an upfront canonical wait row.
+        Scenario: recover observes one running poll, then a finished poll.
+        */
         let runner = ReplaceStatusSequenceRunner::new(vec![
             ReplaceStatusItem::Output(ok_raw(
                 "btrfs replace status -1 /mnt/storage",
@@ -1575,25 +1608,27 @@ mod tests {
         ]);
         let mount_point = MountPoint("/mnt/storage".into());
         let captured = crate::status_tag::testing::capture_with(|| {
-            wait_for_kernel_replace_to_finish(&runner, &mount_point, false);
+            wait_for_kernel_replace_to_finish(&runner, &mount_point, &progress::NoopSleeper, false);
         });
-        let wait = "[wait] pool: waiting for kernel dev_replace to finish...";
-        let ok = "[ok]   pool: kernel dev_replace finished";
-        assert!(captured.contains(wait), "missing wait row: {captured:?}");
-        assert!(captured.contains(ok), "missing ok row: {captured:?}");
-        assert!(
-            captured.find(wait) < captured.find(ok),
-            "wait must precede ok, got: {captured:?}"
+        assert_eq!(
+            captured.lines().collect::<Vec<_>>(),
+            vec![
+                "[wait] pool: waiting for kernel dev_replace to finish...",
+                "  ... 5.0%",
+                "[ok]   pool: kernel dev_replace finished",
+            ],
         );
     }
 
     #[test]
     fn wait_for_kernel_replace_emits_warn_on_status_error_after_wait() {
-        // Intent: status-poll failure after an observed wait closes the row with [warn].
-        // Why it exists: recover continues on this best-effort barrier, so a
-        // warning row is the only terminal row for the announced wait window.
-        // Scenario: recover observes a running dev_replace, then the next
-        // status subprocess fails.
+        /*
+        Intent: status-poll failure after an observed wait closes the row with [warn].
+        Why it exists: recover continues on this best-effort barrier, so a warning
+        row is the only terminal row for the announced wait window.
+        Scenario: recover observes a running dev_replace, then the next status
+        subprocess fails.
+        */
         let runner = ReplaceStatusSequenceRunner::new(vec![
             ReplaceStatusItem::Output(ok_raw(
                 "btrfs replace status -1 /mnt/storage",
@@ -1603,15 +1638,110 @@ mod tests {
         ]);
         let mount_point = MountPoint("/mnt/storage".into());
         let captured = crate::status_tag::testing::capture_with(|| {
-            wait_for_kernel_replace_to_finish(&runner, &mount_point, false);
+            wait_for_kernel_replace_to_finish(&runner, &mount_point, &progress::NoopSleeper, false);
         });
-        let wait = "[wait] pool: waiting for kernel dev_replace to finish...";
-        let warn = "[warn] pool: kernel dev_replace status check failed -- proceeding";
-        assert!(captured.contains(wait), "missing wait row: {captured:?}");
-        assert!(captured.contains(warn), "missing warn row: {captured:?}");
-        assert!(
-            captured.find(wait) < captured.find(warn),
-            "wait must precede warn, got: {captured:?}"
+        assert_eq!(
+            captured.lines().collect::<Vec<_>>(),
+            vec![
+                "[wait] pool: waiting for kernel dev_replace to finish...",
+                "  ... 5.0%",
+                "[warn] pool: kernel dev_replace status check failed -- proceeding",
+            ],
+        );
+    }
+
+    #[test]
+    fn wait_for_kernel_replace_emits_cumulative_heartbeats_when_pct_unchanged() {
+        /*
+        Intent: when the kernel-reported pct stalls, the wait loop emits heartbeat
+        lines at the configured cadence with cumulative elapsed seconds.
+        Why it exists: operator confidence depends on seeing monotonically advancing
+        time during a stall; a stuck suffix would hide whether the wait loop is
+        still looping.
+        Scenario: recover observes 320 unchanged running polls, then a finished
+        poll under a noop sleeper.
+        */
+        let mut items = running_runs(320, "50.0%");
+        items.push(ReplaceStatusItem::Output(ok_raw(
+            "btrfs replace status -1 /mnt/storage",
+            "Started on 27.Feb 10:30:00, finished on 27.Feb 10:35:00, 0 write errs, 0 uncorr. read errs\n",
+        )));
+        let runner = ReplaceStatusSequenceRunner::new(items);
+        let mount_point = MountPoint("/mnt/storage".into());
+        let captured = crate::status_tag::testing::capture_with(|| {
+            wait_for_kernel_replace_to_finish(&runner, &mount_point, &progress::NoopSleeper, false);
+        });
+        assert_eq!(
+            captured.lines().collect::<Vec<_>>(),
+            vec![
+                "[wait] pool: waiting for kernel dev_replace to finish...",
+                "  ... 50.0%",
+                "  ... 50.0% (30s elapsed)",
+                "  ... 50.0% (60s elapsed)",
+                "[ok]   pool: kernel dev_replace finished",
+            ],
+        );
+    }
+
+    #[test]
+    fn wait_for_kernel_replace_does_not_emit_heartbeat_below_threshold() {
+        /*
+        Intent: when pct stays unchanged for fewer iterations than the heartbeat
+        threshold requires, no heartbeat line is emitted.
+        Why it exists: bounding silence is useful only if the threshold is honored;
+        heartbeats that fire too often would spam stderr.
+        Scenario: recover observes 100 unchanged running polls, then a finished poll
+        under a noop sleeper.
+        */
+        let mut items = running_runs(100, "50.0%");
+        items.push(ReplaceStatusItem::Output(ok_raw(
+            "btrfs replace status -1 /mnt/storage",
+            "Started on 27.Feb 10:30:00, finished on 27.Feb 10:35:00, 0 write errs, 0 uncorr. read errs\n",
+        )));
+        let runner = ReplaceStatusSequenceRunner::new(items);
+        let mount_point = MountPoint("/mnt/storage".into());
+        let captured = crate::status_tag::testing::capture_with(|| {
+            wait_for_kernel_replace_to_finish(&runner, &mount_point, &progress::NoopSleeper, false);
+        });
+        assert_eq!(
+            captured.lines().collect::<Vec<_>>(),
+            vec![
+                "[wait] pool: waiting for kernel dev_replace to finish...",
+                "  ... 50.0%",
+                "[ok]   pool: kernel dev_replace finished",
+            ],
+        );
+    }
+
+    #[test]
+    fn wait_for_kernel_replace_resets_heartbeat_clock_on_pct_change() {
+        /*
+        Intent: a pct change emits an unsuffixed progress line and resets the
+        heartbeat clock.
+        Why it exists: without the reset, a stalled-then-progressing replace could
+        emit a stale heartbeat one poll after real progress.
+        Scenario: recover observes 149 polls at 50.0%, two polls at 50.5%, then a
+        finished poll under a noop sleeper.
+        */
+        let mut items = running_runs(149, "50.0%");
+        items.extend(running_runs(2, "50.5%"));
+        items.push(ReplaceStatusItem::Output(ok_raw(
+            "btrfs replace status -1 /mnt/storage",
+            "Started on 27.Feb 10:30:00, finished on 27.Feb 10:35:00, 0 write errs, 0 uncorr. read errs\n",
+        )));
+        let runner = ReplaceStatusSequenceRunner::new(items);
+        let mount_point = MountPoint("/mnt/storage".into());
+        let captured = crate::status_tag::testing::capture_with(|| {
+            wait_for_kernel_replace_to_finish(&runner, &mount_point, &progress::NoopSleeper, false);
+        });
+        assert_eq!(
+            captured.lines().collect::<Vec<_>>(),
+            vec![
+                "[wait] pool: waiting for kernel dev_replace to finish...",
+                "  ... 50.0%",
+                "  ... 50.5%",
+                "[ok]   pool: kernel dev_replace finished",
+            ],
         );
     }
 
