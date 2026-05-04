@@ -145,8 +145,35 @@ fn stop_beeper() {
     let result = std::process::Command::new("systemctl")
         .args(["stop", "braid-alert.service"])
         .output();
-    if let Err(e) = result {
-        eprintln!("Warning: could not stop braid-alert.service: {e}");
+    match result {
+        Err(e) => {
+            eprintln!("warning: could not stop braid-alert.service: {e}");
+        }
+        Ok(output) => {
+            if let Some(msg) = format_systemctl_stop_failure(&output) {
+                eprintln!("{msg}");
+            }
+        }
+    }
+}
+
+fn format_systemctl_stop_failure(output: &std::process::Output) -> Option<String> {
+    if output.status.success() {
+        return None;
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = stderr.trim();
+    if stderr.is_empty() {
+        Some(format!(
+            "warning: systemctl stop braid-alert.service: {}",
+            output.status
+        ))
+    } else {
+        Some(format!(
+            "warning: systemctl stop braid-alert.service: {}: {stderr}",
+            output.status
+        ))
     }
 }
 
@@ -180,6 +207,10 @@ mod tests {
     };
     use crate::cmd::{CmdError, MockRunner, RawCommandOutput};
     use std::collections::BTreeMap;
+    #[cfg(unix)]
+    use std::os::unix::process::ExitStatusExt;
+    #[cfg(unix)]
+    use std::process::{ExitStatus, Output};
 
     /// Mountinfo where /mnt/storage is held by ext4 -> probe_pool returns
     /// ProbeError::NotBtrfs, which jumps to ack_offline. The runner is
@@ -718,5 +749,57 @@ mod tests {
         assert!(!paths.alert_latch_json().exists());
         let after_bytes = std::fs::read(paths.acked_stats_json()).unwrap();
         assert_eq!(after_bytes, original_bytes);
+    }
+
+    /*
+     * Intent: Non-zero `systemctl stop braid-alert.service` exits produce a
+     * stderr warning that includes both the process status and systemctl's
+     * own diagnostic.
+     * Why it exists: `Command::output()` returns Ok(Output) for non-zero
+     * exits. Without explicitly checking status, `braid ack` can silently
+     * leave the beeper running after a cleanup failure.
+     * Scenario: braid-alert.service is not loaded in the VM, so systemctl
+     * exits 5 and explains that the unit could not be stopped.
+     */
+    #[cfg(unix)]
+    #[test]
+    fn format_systemctl_stop_failure_warns_on_nonzero_exit_with_stderr() {
+        let output = Output {
+            status: ExitStatus::from_raw(5 << 8),
+            stdout: Vec::new(),
+            stderr: b"Failed to stop braid-alert.service: Unit not loaded.\n".to_vec(),
+        };
+
+        let msg = format_systemctl_stop_failure(&output)
+            .expect("non-zero systemctl exit must produce a warning");
+
+        assert!(
+            msg.contains("exit status: 5"),
+            "warning must include status display, got: {msg}"
+        );
+        assert!(
+            msg.contains("Failed to stop braid-alert.service: Unit not loaded."),
+            "warning must include trimmed stderr, got: {msg}"
+        );
+    }
+
+    /*
+     * Intent: Successful `systemctl stop braid-alert.service` exits do not
+     * produce a warning.
+     * Why it exists: The cleanup is best-effort; a healthy stop should keep
+     * `braid ack` output focused on the ack confirmation.
+     * Scenario: braid-alert.service exists and systemd accepts the stop
+     * request with exit status 0.
+     */
+    #[cfg(unix)]
+    #[test]
+    fn format_systemctl_stop_failure_silent_on_zero_exit() {
+        let output = Output {
+            status: ExitStatus::from_raw(0),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        };
+
+        assert_eq!(format_systemctl_stop_failure(&output), None);
     }
 }

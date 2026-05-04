@@ -50,7 +50,16 @@ with subtest("After smartd alert: status shows SMART warning"):
     assert "SMART" in output, f"Expected SMART cause, got: {output}"
 
 with subtest("Ack clears smartd alert"):
-    machine.succeed("braid ack")
+    status, _stdout = machine.execute("braid ack >/tmp/ack.out 2>/tmp/ack.err")
+    assert status == 0, f"braid ack exited {status}"
+    stdout = machine.succeed("cat /tmp/ack.out")
+    stderr = machine.succeed("cat /tmp/ack.err")
+    assert "acknowledged" in stdout, f"missing ack confirmation on stdout: {stdout!r}"
+    assert "warning: systemctl stop braid-alert.service" in stderr, (
+        f"expected stop_beeper warning on stderr (braid-alert.service is not "
+        f"installed in this test, so systemctl stop is documented to fail), "
+        f"got: {stderr!r}"
+    )
     # Flag file should be removed
     machine.fail("test -f /var/lib/braid/smartd-alert")
 
