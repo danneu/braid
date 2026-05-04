@@ -191,7 +191,7 @@ catchup.shutdown()
 
 # === cancel node: safe cancellation during lock ===
 
-with subtest("cancel: lock succeeds while scrub holds mount busy"):
+with subtest("cancel: unlock and wait for fake scrub active"):
     cancel.wait_for_unit("multi-user.target", timeout=120)
 
     # Seed old stamp so Persistent fires the fake scrub immediately on unlock.
@@ -207,6 +207,21 @@ with subtest("cancel: lock succeeds while scrub holds mount busy"):
         "systemctl is-active {}".format(SERVICE)
     )
 
+with subtest("cancel: btrfs upstream contract -- `btrfs scrub cancel` on no-scrub mount exits 2 (ENOTCONN)"):
+    # Pin btrfs-progs's documented ENOTCONN exit code, which braid's typed
+    # scrub_cancel dispatch (cli/src/scrub_cancel.rs) depends on. The fake
+    # scrub service is up but never issued `btrfs scrub start`, so the kernel
+    # has no scrub -- the ioctl returns ENOTCONN deterministically. If a
+    # future nixpkgs bump ever changes this exit code, this subtest fails
+    # before braid's typed dispatch can silently misclassify.
+    # Source: reference/btrfs-progs/cmds/scrub.c:1794-1812.
+    rc, out = cancel.execute("btrfs scrub cancel /mnt/storage")
+    assert rc == 2, (
+        "expected btrfs scrub cancel to exit 2 (ENOTCONN) on a no-scrub "
+        f"mount, got rc={rc} (output: {out!r})"
+    )
+
+with subtest("cancel: lock succeeds while scrub holds mount busy"):
     # Lock while scrub service is actively holding the mount.
     # The wrapper must stop the timer and service before CLI attempts unmount.
     cancel.succeed("braid lock")
@@ -214,13 +229,11 @@ with subtest("cancel: lock succeeds while scrub holds mount busy"):
     cancel.fail("test -e /dev/mapper/braid-disk1")
     cancel.fail("test -e /dev/mapper/braid-disk2")
 
-with subtest("cancel: ExecStop succeeded (no false-fail in Never state)"):
-    # The fake scrub never ran `btrfs scrub start`, so scrub state is `Never`.
-    # The old shell hook would unconditionally call `btrfs scrub cancel`, which
-    # exits non-zero with "not running" and marks the service as `failed`. The
-    # new typed handler matches `ScrubState::Never` and exits 0 cleanly. This
-    # subtest is the failure-layer guard for that bug — it must FAIL on the
-    # old grep pipeline and PASS on the new `braid scrub-cancel`.
+with subtest("cancel: ExecStop succeeded (idle cancel is benign)"):
+    # The fake scrub never ran `btrfs scrub start`, so raw `btrfs scrub cancel`
+    # returns ENOTCONN / exit 2. `braid scrub-cancel` maps that idle-cancel
+    # result to success, so ExecStop must not mark the unit failed. This
+    # subtest is the failure-layer guard for the old false-fail bug.
     result = show(cancel, SERVICE, "Result")
     assert result == "success", f"braid-scrub.service ExecStop failed: Result={result}"
 
