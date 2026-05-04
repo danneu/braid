@@ -8,22 +8,18 @@ Test conventions and NixOS VM test framework reference for braid. The short thre
 
 ## Conventions
 
-### Preamble: literal `/* ... */` form
+### Preamble: literal `//` line-comment form
 
-Every test's preamble is a literal `/* ... */` block comment, not `//` line comments. Many existing tests use `//` -- those are grandfathered, not the standard. Do not copy that style for new tests.
+Every test's preamble is a contiguous block of `//` line comments directly above the test item.
 
 ```rust
-/*
- * Intent: one-line statement of the behavior verified.
- * Why it exists: the regression risk this protects against, ideally with
- *   reference to the incident or commit that prompted it.
- * Scenario: the concrete real-world sequence the test models.
- */
+// Intent: one-line statement of the behavior verified.
+// Why it exists: the regression risk this protects against, ideally with
+//   reference to the incident or commit that prompted it.
+// Scenario: the concrete real-world sequence the test models.
 #[test]
 fn the_test() { ... }
 ```
-
-Reference example to model on: `lock_retries_busy_close_then_succeeds` in `cli/src/lock.rs`.
 
 ### New VM tests must register in `flake.nix`
 

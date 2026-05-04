@@ -149,13 +149,13 @@ For the LUKS header backup workflow and the messaging invariant for `doctor`/`st
 
 ## Test Conventions
 
-Every individual test starts with a `/* ... */` block comment with three labeled sections:
+Every individual test starts with a `//` line-comment preamble with three labeled sections:
 
 1. **Intent** — what behavior this test verifies (or tries to verify)
 2. **Why it exists** — what risk/regression this protects against
 3. **Scenario** — the real-world user/system story this models, especially the concrete bug or incident that inspired the test
 
-For the literal block-comment form, the flake.nix `checks` registration rule for new VM tests, and NixOS VM test framework gotchas, see [`docs/testing.md`](docs/testing.md).
+For the literal preamble form, the flake.nix `checks` registration rule for new VM tests, and NixOS VM test framework gotchas, see [`docs/testing.md`](docs/testing.md).
 
 ## Development Approach: TDD with NixOS VM Tests
 
