@@ -351,6 +351,7 @@ impl RecoverPlan {
         let pool = probe::probe_pool(runner, fs, mount_point)?;
 
         // 4. Build new membership from live pool state
+        let prior = membership::load_membership(params.paths).ok();
         let mut recovered = PoolMembership::empty();
         for dev in &pool.devices {
             let Some(name) = config::name_from_mapper(&dev.mapper.0) else {
@@ -369,11 +370,25 @@ impl RecoverPlan {
             }
             // Resolve by_id from the live device's identity, not from the journal.
             let by_id = resolve_by_id_for_underlying(by_id_resolver, &dev.underlying)?;
+            // Source priority for added_at: current pool.json (mid-op enrich may
+            // already have stamped new disks), then journal union, then fresh
+            // stamp from enrich_from_pool_state for genuine bootstrap recovery.
+            let added_at = prior
+                .as_ref()
+                .and_then(|p| p.disks.get(name))
+                .and_then(|m| m.added_at.clone())
+                .or_else(|| union.disks.get(name).and_then(|m| m.added_at.clone()));
             recovered.disks.insert(
                 name.to_owned(),
-                DiskMember::enriched(by_id, dev.luks_uuid.clone(), dev.devid),
+                DiskMember {
+                    by_id,
+                    luks_uuid: None,
+                    devid: None,
+                    added_at,
+                },
             );
         }
+        membership::enrich_from_pool_state(&pool, &mut recovered);
 
         // 5. Report what changed
         let pre_names: std::collections::BTreeSet<_> =
@@ -1430,6 +1445,15 @@ mod tests {
         )
     }
 
+    fn btrfs_show_one_disk() -> RawCommandOutput {
+        ok_raw(
+            "btrfs filesystem show /mnt/storage",
+            "Label: none  uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
+             \tTotal devices 1 FS bytes used 1.00GiB\n\
+             \tdevid    1 size 10.00GiB used 2.00GiB path /dev/mapper/braid-disk1\n",
+        )
+    }
+
     fn cryptsetup_status_active(mapper: &str, device: &str) -> RawCommandOutput {
         ok_raw(
             &format!("cryptsetup status {mapper}"),
@@ -1448,6 +1472,73 @@ mod tests {
             &format!("cryptsetup luksUUID {device}"),
             &format!("{uuid}\n"),
         )
+    }
+
+    const POOL_JSON_ADDED_AT: &str = "2024-06-15T12:34:56Z";
+    const JOURNAL_ADDED_AT: &str = "2023-08-30T10:00:00Z";
+    const LEGACY_JOURNAL_ADDED_AT: &str = "2023-01-01T00:00:00Z";
+
+    fn disk_member(by_id: &str, added_at: Option<&str>) -> DiskMember {
+        DiskMember {
+            by_id: ByIdPath(by_id.to_owned()),
+            luks_uuid: None,
+            devid: None,
+            added_at: added_at.map(str::to_owned),
+        }
+    }
+
+    fn already_mounted_one_disk_runner() -> MockRunner {
+        let (mp_req, mp_out) = mountpoint_ok();
+        MockRunner::default()
+            .with_output(mp_req, mp_out)
+            .with_output(
+                CmdRequest::BtrfsFilesystemShow {
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                btrfs_show_one_disk(),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-disk1".into(),
+                },
+                cryptsetup_status_active("braid-disk1", "/dev/vda"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vda".into(),
+                },
+                cryptsetup_uuid_ok("/dev/vda", "11111111-1111-1111-1111-111111111111"),
+            )
+    }
+
+    fn interrupted_remove_journal(disk1_added_at: Option<&str>) -> journal::Journal {
+        let mut pre_disks = BTreeMap::new();
+        pre_disks.insert(
+            "disk1".to_owned(),
+            disk_member("/dev/disk/by-id/virtio-disk1", disk1_added_at),
+        );
+        pre_disks.insert(
+            "disk2".to_owned(),
+            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk2".into())),
+        );
+        let pre = PoolMembership { disks: pre_disks };
+
+        let mut target_disks = BTreeMap::new();
+        target_disks.insert(
+            "disk1".to_owned(),
+            disk_member("/dev/disk/by-id/virtio-disk1", disk1_added_at),
+        );
+
+        journal::Journal {
+            started_at: "2026-01-01T00:00:00Z".into(),
+            op: OpKind::Remove {
+                name: "disk2".to_owned(),
+            },
+            pre_membership: pre,
+            target_membership: PoolMembership {
+                disks: target_disks,
+            },
+        }
     }
 
     /// Two-disk journal for interrupted add: pre has disk1+disk2, target has disk1+disk2+disk3.
@@ -2445,6 +2536,306 @@ mod tests {
             !paths.pending_op_json().exists(),
             "journal should be cleared"
         );
+    }
+
+    /*
+     * Intent: verify recover preserves an existing member's `added_at` from
+     * current pool.json before consulting the journal.
+     * Why it exists: recover used to rebuild every member with a fresh
+     * timestamp, erasing the historical first-added value on every run.
+     * Scenario: pool.json and the journal both know disk1, but disagree on
+     * `added_at`; the live pool contains disk1, so recovered pool.json must
+     * keep the current pool.json value.
+     */
+    #[test]
+    fn recover_preserves_added_at_from_current_pool_json() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let fs = MockFs::new(&[]);
+
+        let mut current = PoolMembership::empty();
+        current.disks.insert(
+            "disk1".to_owned(),
+            disk_member("/dev/disk/by-id/old-disk1", Some(POOL_JSON_ADDED_AT)),
+        );
+        membership::save_membership(&current, &paths).unwrap();
+
+        let journal = interrupted_remove_journal(Some(LEGACY_JOURNAL_ADDED_AT));
+        journal::write_journal(&paths, &journal).unwrap();
+
+        let runner = already_mounted_one_disk_runner();
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1")]);
+        let result = cmd_recover(
+            &runner,
+            &fs,
+            &resolver,
+            &RecoverParams {
+                config: &config,
+                paths: &paths,
+                passphrase_stdin: false,
+                passphrase_file: None,
+                allow_degraded: false,
+                dry_run: false,
+                progress: ProgressOutput::Off,
+            },
+        );
+
+        result.expect("recover should succeed");
+
+        let recovered = membership::load_membership(&paths).unwrap();
+        assert_eq!(
+            recovered.disks["disk1"].added_at.as_deref(),
+            Some(POOL_JSON_ADDED_AT)
+        );
+    }
+
+    /*
+     * Intent: verify recover falls back to the journal's `added_at` when
+     * current pool.json is absent.
+     * Why it exists: recovery mode can be entered after pool.json was not
+     * durably written, but pending-op.json still carries the pre-operation
+     * membership snapshot that preserves historical timestamps.
+     * Scenario: no pool.json exists; the journal's pre-membership has disk1
+     * with a known `added_at`; the live pool contains disk1.
+     */
+    #[test]
+    fn recover_preserves_added_at_from_journal_when_pool_json_absent() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let fs = MockFs::new(&[]);
+
+        let mut pre_disks = BTreeMap::new();
+        pre_disks.insert(
+            "disk1".to_owned(),
+            DiskMember {
+                by_id: ByIdPath("/dev/disk/by-id/virtio-disk1".into()),
+                luks_uuid: None,
+                devid: None,
+                added_at: Some(JOURNAL_ADDED_AT.into()),
+            },
+        );
+        pre_disks.insert(
+            "disk2".to_owned(),
+            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk2".into())),
+        );
+        let pre = PoolMembership { disks: pre_disks };
+        let mut target_disks = BTreeMap::new();
+        target_disks.insert(
+            "disk1".to_owned(),
+            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk1".into())),
+        );
+        let journal = journal::Journal {
+            started_at: "2026-01-01T00:00:00Z".into(),
+            op: OpKind::Remove {
+                name: "disk2".to_owned(),
+            },
+            pre_membership: pre,
+            target_membership: PoolMembership {
+                disks: target_disks,
+            },
+        };
+        journal::write_journal(&paths, &journal).unwrap();
+
+        let runner = already_mounted_one_disk_runner();
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1")]);
+        let result = cmd_recover(
+            &runner,
+            &fs,
+            &resolver,
+            &RecoverParams {
+                config: &config,
+                paths: &paths,
+                passphrase_stdin: false,
+                passphrase_file: None,
+                allow_degraded: false,
+                dry_run: false,
+                progress: ProgressOutput::Off,
+            },
+        );
+
+        result.expect("recover should succeed");
+
+        let recovered = membership::load_membership(&paths).unwrap();
+        assert_eq!(
+            recovered.disks["disk1"].added_at.as_deref(),
+            Some(JOURNAL_ADDED_AT)
+        );
+    }
+
+    /*
+     * Intent: verify recover stamps a fresh `added_at` only when neither
+     * current pool.json nor the journal has a prior timestamp.
+     * Why it exists: true bootstrap recovery still needs an added timestamp
+     * after the live pool exists; preserving timestamps must not leave the
+     * new member permanently unstamped.
+     * Scenario: first-ever add reached a mounted one-disk pool, but no
+     * pool.json exists and the bootstrap journal has no `added_at`.
+     */
+    #[test]
+    fn recover_stamps_fresh_added_at_when_no_prior_record() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let fs = MockFs::new(&[]);
+
+        let journal = bootstrap_journal();
+        journal::write_journal(&paths, &journal).unwrap();
+
+        let runner = already_mounted_one_disk_runner();
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1")]);
+        let result = cmd_recover(
+            &runner,
+            &fs,
+            &resolver,
+            &RecoverParams {
+                config: &config,
+                paths: &paths,
+                passphrase_stdin: false,
+                passphrase_file: None,
+                allow_degraded: false,
+                dry_run: false,
+                progress: ProgressOutput::Off,
+            },
+        );
+
+        result.expect("recover should succeed");
+
+        let recovered = membership::load_membership(&paths).unwrap();
+        let added_at = recovered.disks["disk1"]
+            .added_at
+            .as_deref()
+            .expect("recover should stamp added_at");
+        time::OffsetDateTime::parse(
+            added_at,
+            &time::format_description::well_known::Iso8601::DEFAULT,
+        )
+        .expect("fresh added_at should parse as ISO-8601");
+        assert_ne!(added_at, POOL_JSON_ADDED_AT);
+        assert_ne!(added_at, JOURNAL_ADDED_AT);
+    }
+
+    /*
+     * Intent: verify recover applies `added_at` preservation per disk during
+     * a partially committed add.
+     * Why it exists: a mid-add crash can leave existing members with
+     * historical timestamps while the newly added live member has no prior
+     * record; recover must preserve one and stamp the other.
+     * Scenario: pool.json has only disk1 with a historical `added_at`; the
+     * journal target and live pool include disk2 from the in-flight add.
+     */
+    #[test]
+    fn recover_carries_partial_added_at_for_mid_add_crash() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let fs = MockFs::new(&[]);
+
+        let mut current = PoolMembership::empty();
+        current.disks.insert(
+            "disk1".to_owned(),
+            disk_member("/dev/disk/by-id/virtio-disk1", Some(POOL_JSON_ADDED_AT)),
+        );
+        membership::save_membership(&current, &paths).unwrap();
+
+        let mut pre_disks = BTreeMap::new();
+        pre_disks.insert(
+            "disk1".to_owned(),
+            disk_member("/dev/disk/by-id/virtio-disk1", Some(POOL_JSON_ADDED_AT)),
+        );
+        let pre = PoolMembership { disks: pre_disks };
+
+        let mut target_disks = pre.disks.clone();
+        target_disks.insert(
+            "disk2".to_owned(),
+            DiskMember::from_by_id(ByIdPath("/dev/disk/by-id/virtio-disk2".into())),
+        );
+        let target = PoolMembership {
+            disks: target_disks,
+        };
+
+        let mut add_disks = BTreeMap::new();
+        add_disks.insert(
+            "disk2".to_owned(),
+            ByIdPath("/dev/disk/by-id/virtio-disk2".into()),
+        );
+        let journal = journal::Journal {
+            started_at: "2026-01-01T00:00:00Z".into(),
+            op: OpKind::Add { disks: add_disks },
+            pre_membership: pre,
+            target_membership: target,
+        };
+        journal::write_journal(&paths, &journal).unwrap();
+
+        let (mp_req, mp_out) = mountpoint_ok();
+        let runner = MockRunner::default()
+            .with_output(mp_req, mp_out)
+            .with_output(
+                CmdRequest::BtrfsFilesystemShow {
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                btrfs_show_two_disks(),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-disk1".into(),
+                },
+                cryptsetup_status_active("braid-disk1", "/dev/vda"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vda".into(),
+                },
+                cryptsetup_uuid_ok("/dev/vda", "11111111-1111-1111-1111-111111111111"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: "braid-disk2".into(),
+                },
+                cryptsetup_status_active("braid-disk2", "/dev/vdb"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vdb".into(),
+                },
+                cryptsetup_uuid_ok("/dev/vdb", "22222222-2222-2222-2222-222222222222"),
+            )
+            .with_output(
+                CmdRequest::BtrfsBalanceRaid1Soft {
+                    mount_point: MountPoint("/mnt/storage".into()),
+                },
+                ok_raw_empty("btrfs balance start"),
+            );
+
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
+        let result = cmd_recover(
+            &runner,
+            &fs,
+            &resolver,
+            &RecoverParams {
+                config: &config,
+                paths: &paths,
+                passphrase_stdin: false,
+                passphrase_file: None,
+                allow_degraded: false,
+                dry_run: false,
+                progress: ProgressOutput::Off,
+            },
+        );
+
+        result.expect("recover should succeed");
+
+        let recovered = membership::load_membership(&paths).unwrap();
+        assert_eq!(
+            recovered.disks["disk1"].added_at.as_deref(),
+            Some(POOL_JSON_ADDED_AT)
+        );
+        let disk2_added_at = recovered.disks["disk2"]
+            .added_at
+            .as_deref()
+            .expect("new disk should be stamped");
+        assert_ne!(disk2_added_at, POOL_JSON_ADDED_AT);
     }
 
     /// Bootstrap journal: pre_membership is empty, target has one disk.

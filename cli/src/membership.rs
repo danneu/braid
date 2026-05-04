@@ -73,16 +73,6 @@ impl DiskMember {
             added_at: None,
         }
     }
-
-    /// Fully enriched — used after disk operations succeed.
-    pub fn enriched(by_id: ByIdPath, luks_uuid: LuksUuid, devid: u64) -> Self {
-        DiskMember {
-            by_id,
-            luks_uuid: Some(luks_uuid),
-            devid: Some(devid),
-            added_at: Some(now_iso()),
-        }
-    }
 }
 
 /// Load authoritative pool membership from disk.

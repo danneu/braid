@@ -27,7 +27,7 @@ Move disk membership to a CLI-owned runtime state file. The NixOS module provide
   }
 }
 ```
-The `luks_uuid`, `devid`, and `added_at` fields are populated after the btrfs membership change commits. `unlock` enriches them on each mount via `refresh_pool_metadata`. They replace the former `disk-map.json` advisory file.
+The `luks_uuid`, `devid`, and `added_at` fields are populated after the btrfs membership change commits. `unlock` and `recover` keep `luks_uuid`/`devid` in sync with the live pool via `refresh_pool_metadata` / `enrich_from_pool_state`. `added_at` is historical state -- once set on a member, it is preserved across all subsequent writes (`unlock`, `recover`, `replace`, `add`, etc.). They replace the former `disk-map.json` advisory file.
 
 **`/etc/braid/config.json`** — machine config (no disk information):
 ```json
@@ -62,7 +62,7 @@ When `pending-op.json` exists, braid enters recovery mode. All commands except `
 ### Recovery
 
 Recovery is always explicit, never implicit:
-- `braid recover` opens LUKS devices and mounts the pool if needed (using the union of pre/target membership from the journal), then rebuilds `pool.json` from the live btrfs pool. This is the only path out of recovery mode (journal present). It probes actual pool topology, not LUKS labels. Each member's `by_id` is resolved at recovery time by walking `/dev/disk/by-id/` and matching the symlink whose canonical target equals the live device's backing kernel path — `by_id` is never copied from the journal snapshot, which can be stale if hardware enumeration changed since the mutation started. If no by-id symlink resolves to a live pool member, recovery hard-fails with an actionable remediation message rather than persisting a guess.
+- `braid recover` opens LUKS devices and mounts the pool if needed (using the union of pre/target membership from the journal), then rebuilds `pool.json` from the live btrfs pool. This is the only path out of recovery mode (journal present). It probes actual pool topology, not LUKS labels. Each member's `by_id` is resolved at recovery time by walking `/dev/disk/by-id/` and matching the symlink whose canonical target equals the live device's backing kernel path — `by_id` is never copied from the journal snapshot, which can be stale if hardware enumeration changed since the mutation started. If no by-id symlink resolves to a live pool member, recovery hard-fails with an actionable remediation message rather than persisting a guess. When rebuilding `pool.json`, recover preserves each member's `added_at` from the current `pool.json` if present, else from the journal's pre/target membership snapshot; only members with no prior timestamp get a fresh `now_iso()` stamp via `enrich_from_pool_state`. `by_id`, `luks_uuid`, and `devid` remain live-derived.
 - `braid discover` scans `/dev/disk/by-id/*` for LUKS devices with `braid-*` labels. Displays what it finds. With `--write`, persists to `pool.json`. This is for initial setup recovery (lost pool.json), not for crash recovery.
 - The normal path to create `pool.json` is `braid add`.
 
