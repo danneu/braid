@@ -39,7 +39,7 @@ no active alerts
 4. Removes the smartd alert flag if present.
 5. Stops `braid-alert.service` (the beeper), best-effort.
 
-If the pool is offline but alerts exist (e.g., a latched smartd alert), ack still clears the latch and flag without snapshotting device stats.
+If the pool is offline but alerts exist (e.g., a latched smartd alert), ack still clears the latch and flag without snapshotting device stats. Offline means there is no mount at the configured mount point. If that path is occupied by a non-btrfs filesystem, `braid ack` returns a probe error naming the fstype and preserves `alert-latch.json`, `smartd-alert`, and `acked-stats.json`.
 
 ## Flags
 
@@ -49,6 +49,7 @@ None.
 
 - If the pool is not mounted and no alerts are latched, ack refuses with "pool is not mounted -- nothing to acknowledge"
 - If the pool is mounted but healthy with no latch entries, no smartd alert flag, and no corrupt latch, ack is a no-op and does not mutate `acked-stats.json`
+- If the configured mount point is mounted as something other than btrfs, ack refuses with the fstype mismatch and does not clear or rewrite alert state
 
 ## Related commands
 

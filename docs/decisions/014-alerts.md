@@ -1,3 +1,7 @@
+---
+intent: Document braid's first-class alert model, alert latching, acknowledgment state, and monitor/ack behavior. Read before modifying alert computation, monitor, status, TUI alert display, or ack semantics.
+---
+
 # First-Class Alerts for Disk Health
 
 Status: Active
@@ -92,13 +96,15 @@ The alert latch is an append/refresh log of all unacked causes from all sources.
 
 - `cmd_monitor` is the only path that mutates the latch. On read/parse failure it quarantines the bad bytes by renaming `alert-latch.json` to `alert-latch.json.corrupt`, then writes a fresh latch containing a loud `ComputationError` cause whose `detail` names the failure. The corruption signal is folded into a single `ComputationError` (not appended as a second cause), because `merge_into_latch` collapses every `ComputationError` into one slot via `same_cause_key` — appending two would silently drop one.
 - `cmd_status` is the read-only surface: `resolve_alert_state` surfaces a corrupt latch as a `ComputationError` cause but never moves the file (status must not mutate state).
-- `cmd_ack` treats a corrupt latch as an active alert for gating purposes — otherwise `ack_offline` would refuse with `PoolNotMounted` and the user would have no way to clear a corrupt file with the pool offline. ack always cleans up both `alert-latch.json` and the `.corrupt` sidecar.
+- `cmd_ack` treats a corrupt latch as an active alert for gating purposes — otherwise a genuinely unmounted ack would refuse with `PoolNotMounted` and the user would have no way to clear a corrupt file with the pool offline. Mounted ack and genuinely unmounted ack clean up both `alert-latch.json` and the `.corrupt` sidecar. A foreign fstype at the configured mount point is a probe error, not offline ack, and preserves the unreadable latch bytes.
 
-This preserves "latched until ack" even when the on-disk state is unreadable: the operator sees a loud `ComputationError`, the bad bytes are preserved for forensics, and ack always succeeds.
+This preserves "latched until ack" even when the on-disk state is unreadable: the operator sees a loud `ComputationError`, the bad bytes are preserved for forensics until an ack path that can safely clean them up, and ack succeeds for mounted or genuinely unmounted pools.
 
 ### Offline ack policy
 
-`braid ack` works with the pool locked, but its persistence layer has an asymmetry by cause type:
+`braid ack` works with the pool locked, but only when the pool is genuinely unmounted: `/proc/self/mountinfo` has no entry for the configured mount point. If the configured mount point is occupied by a non-btrfs filesystem, `cmd_ack` returns `ProbeError::NotBtrfs`; it must not clear `alert-latch.json`, remove `smartd-alert`, create or rewrite `acked-stats.json`, stop the beeper, or quarantine corrupt latch bytes.
+
+For genuine offline ack, the persistence layer has an asymmetry by cause type:
 
 - `MissingDevice { devid }` -- offline ack reads the latch and applies `missing_acked = true` to that devid in `acked-stats.json` (insert-or-update; existing `device_stats` baselines are preserved). The next mounted monitor cycle suppresses the cause, and `reconcile_acked_stats` self-heals `missing_acked` back to `false` if the device returns.
 - `BtrfsDeviceErrors { devid }` -- offline ack refuses with an actionable error ("cannot ack btrfs device errors while pool is offline -- unlock the pool first"). The counter baseline that suppresses re-firing is the *current* output of `btrfs device stats`, which requires a mounted pool. Refusing the *whole* ack (not partial-acking other causes) avoids leaving the operator in an "I acked but it still says ALERT" state.

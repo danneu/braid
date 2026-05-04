@@ -14,6 +14,16 @@ pub fn cmd_ack<R: CommandRunner, F: Filesystem + ?Sized>(
     mount_point: &MountPoint,
     paths: &StatePaths,
 ) -> Result<(), AckError> {
+    cmd_ack_impl(runner, fs, mount_point, paths, &stop_beeper)
+}
+
+fn cmd_ack_impl<R: CommandRunner, F: Filesystem + ?Sized>(
+    runner: &R,
+    fs: &F,
+    mount_point: &MountPoint,
+    paths: &StatePaths,
+    stop_beeper: &dyn Fn(),
+) -> Result<(), AckError> {
     // 1. Read latch (authoritative alert state). An unreadable latch counts
     //    as an active alert for gating so the user can clear a corrupt file
     //    even with the pool offline. The parsed AlertState is carried into
@@ -22,7 +32,7 @@ pub fn cmd_ack<R: CommandRunner, F: Filesystem + ?Sized>(
         Ok(Some(s)) => (Some(s), false),
         Ok(None) => (None, false),
         Err(e) => {
-            eprintln!("warning: alert latch unreadable -- acknowledging anyway: {e}");
+            eprintln!("warning: alert latch unreadable -- treating as active for ack gating: {e}");
             (None, true)
         }
     };
@@ -31,14 +41,11 @@ pub fn cmd_ack<R: CommandRunner, F: Filesystem + ?Sized>(
     // 2. Check if pool is mounted
     let pool = match probe_pool(runner, fs, mount_point) {
         Ok(p) => p,
-        Err(ProbeError::NotBtrfs { .. }) => {
-            return ack_offline(latch_state, latch_corrupt, paths);
-        }
         Err(e) => return Err(AckError::Probe(e)),
     };
 
     if !pool.mounted {
-        return ack_offline(latch_state, latch_corrupt, paths);
+        return ack_offline(latch_state, latch_corrupt, paths, stop_beeper);
     }
 
     let smartd_active = alert::smartd_alert_active(paths);
@@ -83,6 +90,7 @@ fn ack_offline(
     latch_state: Option<AlertState>,
     latch_corrupt: bool,
     paths: &StatePaths,
+    stop_beeper: &dyn Fn(),
 ) -> Result<(), AckError> {
     let smartd_active = alert::smartd_alert_active(paths);
     let latch_count = latch_state.as_ref().map(|s| s.causes.len()).unwrap_or(0);
@@ -213,8 +221,7 @@ mod tests {
     use std::process::{ExitStatus, Output};
 
     /// Mountinfo where /mnt/storage is held by ext4 -> probe_pool returns
-    /// ProbeError::NotBtrfs, which jumps to ack_offline. The runner is
-    /// never called on this path.
+    /// ProbeError::NotBtrfs. The runner is never called on this path.
     const MOUNTINFO_EXT4: &str =
         "36 35 0:32 / /mnt/storage rw,noatime shared:1 - ext4 /dev/sda1 rw\n";
     const MOUNTINFO_BTRFS: &str =
@@ -247,6 +254,24 @@ mod tests {
         fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
             assert_eq!(path, "/proc/self/mountinfo");
             Ok(MOUNTINFO_EXT4.to_owned())
+        }
+        fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
+            Ok(vec![])
+        }
+    }
+
+    struct NotMountedFs;
+
+    impl Filesystem for NotMountedFs {
+        fn exists(&self, _path: &str) -> bool {
+            false
+        }
+        fn is_block_device(&self, _path: &str) -> bool {
+            false
+        }
+        fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
+            assert_eq!(path, "/proc/self/mountinfo");
+            Ok(String::new())
         }
         fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
             Ok(vec![])
@@ -501,6 +526,166 @@ mod tests {
     }
 
     /*
+     * Intent: cmd_ack must surface ProbeError::NotBtrfs to the caller and
+     * leave latched alert state intact when an alert is already on disk.
+     * Why it exists: Prior behavior silently deleted the latch + smartd flag,
+     * mutated acked-stats for any latched MissingDevice cause, and printed
+     * "acknowledged current alerts" for a state that is not actually offline.
+     * Pins the regression guard for the with-alerts case.
+     * Scenario: operator left an ext4 partition mounted at /mnt/storage. A
+     * pre-existing alert latch and smartd flag are on disk. Running
+     * `braid ack` must error out without touching alert-latch.json,
+     * smartd-alert, or acked-stats.json.
+     */
+    #[test]
+    fn cmd_ack_with_foreign_fstype_and_alerts_returns_probe_error_and_preserves_state() {
+        let (_dir, paths) = fresh_paths();
+        write_latch(&paths, vec![AlertCause::MissingDevice { devid: 2 }]);
+        let original_latch_bytes = std::fs::read(paths.alert_latch_json()).unwrap();
+        std::fs::write(paths.smartd_alert(), b"").unwrap();
+
+        let err = cmd_ack(&PanicRunner, &Ext4Fs, &mp(), &paths)
+            .expect_err("must refuse -- mount is not btrfs");
+
+        match &err {
+            AckError::Probe(ProbeError::NotBtrfs { fstype, .. }) => {
+                assert_eq!(fstype.as_str(), "ext4");
+            }
+            other => panic!("expected AckError::Probe(NotBtrfs), got: {other:?}"),
+        }
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not btrfs") && msg.contains("ext4"),
+            "user-visible message must name fstype, got: {msg}"
+        );
+
+        assert_eq!(
+            std::fs::read(paths.alert_latch_json()).unwrap(),
+            original_latch_bytes,
+            "latch bytes must be preserved"
+        );
+        assert!(
+            paths.smartd_alert().exists(),
+            "smartd flag must be preserved"
+        );
+        assert!(
+            !paths.acked_stats_json().exists(),
+            "acked-stats must not be created from a NotBtrfs path"
+        );
+    }
+
+    /*
+     * Intent: With no pre-existing alerts, NotBtrfs must surface the real
+     * condition rather than AckError::PoolNotMounted.
+     * Why it exists: Prior behavior returned "pool is not mounted -- nothing
+     * to acknowledge", a lie. Pins the no-alert branch so it cannot regress
+     * independently of the with-alerts branch.
+     * Scenario: clean state directory, but the mount target holds ext4.
+     * `braid ack` must report the fstype, not claim the pool is unmounted,
+     * and must not create any alert files.
+     */
+    #[test]
+    fn cmd_ack_with_foreign_fstype_and_no_alerts_returns_probe_error() {
+        let (_dir, paths) = fresh_paths();
+
+        let err = cmd_ack(&PanicRunner, &Ext4Fs, &mp(), &paths)
+            .expect_err("must refuse -- mount is not btrfs");
+
+        match &err {
+            AckError::Probe(ProbeError::NotBtrfs { fstype, .. }) => {
+                assert_eq!(fstype.as_str(), "ext4");
+            }
+            other => panic!("expected AckError::Probe(NotBtrfs), got: {other:?}"),
+        }
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not btrfs") && msg.contains("ext4"),
+            "user-visible message must name fstype, got: {msg}"
+        );
+
+        assert!(!paths.alert_latch_json().exists(), "no latch should appear");
+        assert!(
+            !paths.smartd_alert().exists(),
+            "no smartd flag should appear"
+        );
+        assert!(
+            !paths.acked_stats_json().exists(),
+            "no acked-stats should appear"
+        );
+    }
+
+    /*
+     * Intent: A corrupt alert-latch.json plus a foreign fstype still surfaces
+     * ProbeError::NotBtrfs and preserves the unreadable latch bytes.
+     * Why it exists: cmd_ack reads the latch before probing the pool. The
+     * corrupt latch must count as active for gating, but a non-btrfs mount
+     * target is not a genuine offline pool, so ack must not clean up the
+     * corrupt latch on this path.
+     * Scenario: alert-latch.json contains garbage bytes, and an ext4
+     * filesystem is mounted at /mnt/storage. `braid ack` must report the
+     * fstype mismatch and leave the corrupt file available for later ack
+     * after the mount is fixed.
+     */
+    #[test]
+    fn cmd_ack_with_foreign_fstype_and_corrupt_latch_preserves_latch_bytes() {
+        let (_dir, paths) = fresh_paths();
+        std::fs::write(paths.alert_latch_json(), b"not json").unwrap();
+        let original_latch_bytes = std::fs::read(paths.alert_latch_json()).unwrap();
+
+        let err = cmd_ack(&PanicRunner, &Ext4Fs, &mp(), &paths)
+            .expect_err("must refuse -- mount is not btrfs");
+
+        assert!(
+            matches!(err, AckError::Probe(ProbeError::NotBtrfs { .. })),
+            "expected AckError::Probe(NotBtrfs), got: {err:?}"
+        );
+        assert_eq!(
+            std::fs::read(paths.alert_latch_json()).unwrap(),
+            original_latch_bytes,
+            "corrupt latch bytes must be preserved on NotBtrfs"
+        );
+        assert!(
+            !paths.alert_latch_corrupt().exists(),
+            "NotBtrfs must not quarantine or clean up the latch"
+        );
+        assert!(
+            !paths.acked_stats_json().exists(),
+            "no acked-stats should appear"
+        );
+    }
+
+    /*
+     * Intent: The NotBtrfs error path must not invoke the beeper hook.
+     * Why it exists: Prior behavior routed NotBtrfs through ack_offline,
+     * whose success path stops the beeper. The public cmd_ack tests above
+     * pin the user-visible error and state preservation; this hook-only test
+     * pins the side-effect boundary.
+     * Scenario: mount target holds ext4 and a latch exists. The
+     * implementation returns Probe(NotBtrfs) before reaching any ack_offline
+     * cleanup.
+     */
+    #[test]
+    fn cmd_ack_impl_with_foreign_fstype_does_not_invoke_beeper() {
+        let (_dir, paths) = fresh_paths();
+        write_latch(&paths, vec![AlertCause::MissingDevice { devid: 2 }]);
+        let beeper_calls = std::cell::Cell::new(0u32);
+        let beeper = || beeper_calls.set(beeper_calls.get() + 1);
+
+        let err = cmd_ack_impl(&PanicRunner, &Ext4Fs, &mp(), &paths, &beeper)
+            .expect_err("must refuse -- mount is not btrfs");
+
+        assert!(
+            matches!(err, AckError::Probe(ProbeError::NotBtrfs { .. })),
+            "expected AckError::Probe(NotBtrfs), got: {err:?}"
+        );
+        assert_eq!(
+            beeper_calls.get(),
+            0,
+            "stop_beeper must not be called on NotBtrfs"
+        );
+    }
+
+    /*
      * Intent: Offline ack of a latched MissingDevice cause writes
      * missing_acked=true for that devid into acked-stats.json and removes
      * the latch.
@@ -519,8 +704,15 @@ mod tests {
     fn ack_offline_with_missing_device_cause_marks_missing_acked() {
         let (_dir, paths) = fresh_paths();
         write_latch(&paths, vec![AlertCause::MissingDevice { devid: 2 }]);
+        let beeper_calls = std::cell::Cell::new(0u32);
+        let beeper = || beeper_calls.set(beeper_calls.get() + 1);
 
-        cmd_ack(&PanicRunner, &Ext4Fs, &mp(), &paths).unwrap();
+        cmd_ack_impl(&PanicRunner, &NotMountedFs, &mp(), &paths, &beeper).unwrap();
+        assert_eq!(
+            beeper_calls.get(),
+            1,
+            "stop_beeper must fire once on offline-ack success"
+        );
 
         let acked = load_acked_stats(&paths);
         let entry = acked.0.get("2").expect("devid 2 entry must be present");
@@ -557,7 +749,7 @@ mod tests {
         let original_latch_bytes = std::fs::read(paths.alert_latch_json()).unwrap();
         assert!(!paths.acked_stats_json().exists());
 
-        let result = cmd_ack(&PanicRunner, &Ext4Fs, &mp(), &paths);
+        let result = cmd_ack(&PanicRunner, &NotMountedFs, &mp(), &paths);
         assert!(
             matches!(result, Err(AckError::OfflineBtrfsErrorsRefused)),
             "expected OfflineBtrfsErrorsRefused, got {result:?}"
@@ -603,7 +795,7 @@ mod tests {
 
         write_latch(&paths, vec![AlertCause::MissingDevice { devid: 1 }]);
 
-        cmd_ack(&PanicRunner, &Ext4Fs, &mp(), &paths).unwrap();
+        cmd_ack(&PanicRunner, &NotMountedFs, &mp(), &paths).unwrap();
 
         let acked = load_acked_stats(&paths);
         let entry = acked.0.get("1").unwrap();
@@ -634,7 +826,7 @@ mod tests {
         let (_dir, paths) = fresh_paths();
         std::fs::write(paths.alert_latch_json(), b"not json").unwrap();
 
-        cmd_ack(&PanicRunner, &Ext4Fs, &mp(), &paths).unwrap();
+        cmd_ack(&PanicRunner, &NotMountedFs, &mp(), &paths).unwrap();
 
         assert!(!paths.alert_latch_json().exists());
         assert!(!paths.alert_latch_corrupt().exists());
@@ -668,7 +860,7 @@ mod tests {
 
         write_latch(&paths, vec![AlertCause::MissingDevice { devid: 1 }]);
 
-        let result = cmd_ack(&PanicRunner, &Ext4Fs, &mp(), &paths);
+        let result = cmd_ack(&PanicRunner, &NotMountedFs, &mp(), &paths);
         assert!(
             matches!(result, Err(AckError::Io(_))),
             "expected AckError::Io, got {result:?}"
@@ -706,7 +898,7 @@ mod tests {
         write_latch(&paths, vec![AlertCause::SmartdAlert]);
         std::fs::write(paths.smartd_alert(), b"").unwrap();
 
-        cmd_ack(&PanicRunner, &Ext4Fs, &mp(), &paths).unwrap();
+        cmd_ack(&PanicRunner, &NotMountedFs, &mp(), &paths).unwrap();
 
         assert!(!paths.smartd_alert().exists());
         assert!(!paths.alert_latch_json().exists());
@@ -744,7 +936,7 @@ mod tests {
             }],
         );
 
-        cmd_ack(&PanicRunner, &Ext4Fs, &mp(), &paths).unwrap();
+        cmd_ack(&PanicRunner, &NotMountedFs, &mp(), &paths).unwrap();
 
         assert!(!paths.alert_latch_json().exists());
         let after_bytes = std::fs::read(paths.acked_stats_json()).unwrap();
