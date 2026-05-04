@@ -127,42 +127,22 @@ pub fn compute_alert_state(
     }
 }
 
+// Counter reset detection: if current < acked, the kernel has zeroed the
+// stats (e.g. across a remount), so treat the acked baseline as 0 and alert
+// on any nonzero current. Otherwise alert only when current exceeds the acked
+// baseline.
+fn exceeds_acked(current: u64, acked: u64) -> bool {
+    current > if current < acked { 0 } else { acked }
+}
+
 fn has_new_errors(current: &DeviceErrorStats, acked: Option<&AckedDeviceCounters>) -> bool {
     let zero = AckedDeviceCounters::default();
-    let acked = acked.unwrap_or(&zero);
-
-    // Counter reset detection: if current < acked, treat acked as 0
-    let effective_read = if current.read_io_errs < acked.read_io_errs {
-        0
-    } else {
-        acked.read_io_errs
-    };
-    let effective_write = if current.write_io_errs < acked.write_io_errs {
-        0
-    } else {
-        acked.write_io_errs
-    };
-    let effective_flush = if current.flush_io_errs < acked.flush_io_errs {
-        0
-    } else {
-        acked.flush_io_errs
-    };
-    let effective_corruption = if current.corruption_errs < acked.corruption_errs {
-        0
-    } else {
-        acked.corruption_errs
-    };
-    let effective_generation = if current.generation_errs < acked.generation_errs {
-        0
-    } else {
-        acked.generation_errs
-    };
-
-    current.read_io_errs > effective_read
-        || current.write_io_errs > effective_write
-        || current.flush_io_errs > effective_flush
-        || current.corruption_errs > effective_corruption
-        || current.generation_errs > effective_generation
+    let a = acked.unwrap_or(&zero);
+    exceeds_acked(current.read_io_errs, a.read_io_errs)
+        || exceeds_acked(current.write_io_errs, a.write_io_errs)
+        || exceeds_acked(current.flush_io_errs, a.flush_io_errs)
+        || exceeds_acked(current.corruption_errs, a.corruption_errs)
+        || exceeds_acked(current.generation_errs, a.generation_errs)
 }
 
 // ---------------------------------------------------------------------------
